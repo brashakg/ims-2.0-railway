@@ -253,8 +253,8 @@ export function CatalogManagerPage({
   const page = Number.isFinite(pageRaw) && pageRaw > 0 ? pageRaw : 1;
 
   // Sort + filters + rows per page: the address is the state.
-  // This device's remembered size: state, so choosing a size (50 included,
-  // which the address leaves out as the default) is what the page reads.
+  // This device's remembered size: state, read only when the address has
+  // no rows (an old link, a plain /catalog) -- and then written into it.
   const [rowsMemory, setRowsMemory] = useState(storedRows);
   const filtersKey = JSON.stringify(readFilters(searchParams, rowsMemory, segment, isAdmin));
   const filters: CatalogFilters = useMemo(() => JSON.parse(filtersKey), [filtersKey]);
@@ -276,6 +276,20 @@ export function CatalogManagerPage({
     },
     [setSearchParams]
   );
+
+  // The address ALWAYS carries rows per page (50 too): a page number then
+  // means the same rows on every device, in every tab and shared link.
+  useEffect(() => {
+    if (searchParams.get('rows') === String(pageSize)) return;
+    setSearchParams(
+      (prev) => {
+        const sp = new URLSearchParams(prev);
+        sp.set('rows', String(pageSize));
+        return sp;
+      },
+      { replace: true }
+    );
+  }, [searchParams, pageSize, setSearchParams]);
 
   const [items, setItems] = useState<CatalogDrawerItem[]>([]);
   const [total, setTotal] = useState(0);
@@ -357,6 +371,19 @@ export function CatalogManagerPage({
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
+    // A page past the end (a shared link, or a bulk archive that emptied the
+    // last page) goes to the last page that has rows -- never a dead end.
+    let pastEnd = false;
+    const show = (next: CatalogDrawerItem[], n: number) => {
+      const last = Math.max(1, Math.ceil(n / pageSize));
+      if (next.length === 0 && page > last) {
+        pastEnd = true;
+        setPage(last);
+        return;
+      }
+      setItems(next);
+      setTotal(n);
+    };
     try {
       if (segment === 'catalog') {
         const res = await productApi.getProducts({
@@ -366,8 +393,10 @@ export function CatalogManagerPage({
           limit: pageSize,
         });
         const docs = (res?.products || []) as Array<Record<string, unknown>>;
-        setItems(docs.map((doc) => ({ kind: 'spine' as const, doc })));
-        setTotal(Number(res?.total_count ?? res?.total ?? docs.length));
+        show(
+          docs.map((doc) => ({ kind: 'spine' as const, doc })),
+          Number(res?.total_count ?? res?.total ?? docs.length)
+        );
       } else {
         const res = await catalogProductsApi.list({
           needs_review: true,
@@ -381,17 +410,20 @@ export function CatalogManagerPage({
           limit: pageSize,
         });
         const docs = (res?.products || []) as unknown as Array<Record<string, unknown>>;
-        setItems(docs.map((doc) => ({ kind: 'imported' as const, doc })));
-        setTotal(Number(res?.total ?? docs.length));
+        show(
+          docs.map((doc) => ({ kind: 'imported' as const, doc })),
+          Number(res?.total ?? docs.length)
+        );
       }
     } catch (e: unknown) {
       setItems([]);
       setTotal(0);
       setError(e instanceof Error ? e.message : 'Could not load the catalog.');
     } finally {
-      setLoading(false);
+      // Past the end: still loading -- the last page's load takes over.
+      if (!pastEnd) setLoading(false);
     }
-  }, [segment, filters, photo, page, pageSize]);
+  }, [segment, filters, photo, page, pageSize, setPage]);
 
   useEffect(() => {
     void load();
@@ -1095,38 +1127,43 @@ export function CatalogManagerPage({
               </tbody>
             </table>
           </div>
-          <div className="flex flex-wrap items-end justify-between gap-3">
-            <span className="pb-2 text-xs text-gray-500">Times shown in India time (IST)</span>
-            <div className="flex flex-wrap items-end gap-3">
-              <Pagination
-                currentPage={page}
-                totalItems={total}
-                pageSize={pageSize}
-                onPageChange={setPage}
-              />
-              <label className="flex items-center gap-2 pb-1 text-sm text-gray-700">
-                Rows per page
-                <select
-                  value={pageSize}
-                  onChange={(e) => {
-                    const rows = Number(e.target.value);
-                    rememberRows(rows);
-                    setRowsMemory(rows);
-                    setFilters({ ...filters, rows });
-                  }}
-                  className="input-field w-20"
-                  aria-label="Rows per page"
-                >
-                  {PAGE_SIZES.map((n) => (
-                    <option key={n} value={n}>
-                      {n}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-          </div>
         </>
+      )}
+
+      {/* Pages + Rows per page: whenever the list has rows to page through,
+          so no page is ever a dead end. */}
+      {!error && total > 0 && (
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <span className="pb-2 text-xs text-gray-500">Times shown in India time (IST)</span>
+          <div className="flex flex-wrap items-end gap-3">
+            <Pagination
+              currentPage={page}
+              totalItems={total}
+              pageSize={pageSize}
+              onPageChange={setPage}
+            />
+            <label className="flex items-center gap-2 pb-1 text-sm text-gray-700">
+              Rows per page
+              <select
+                value={pageSize}
+                onChange={(e) => {
+                  const rows = Number(e.target.value);
+                  rememberRows(rows);
+                  setRowsMemory(rows);
+                  setFilters({ ...filters, rows });
+                }}
+                className="input-field w-20"
+                aria-label="Rows per page"
+              >
+                {PAGE_SIZES.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        </div>
       )}
 
       {/* Selection bar — catalog: flag / archive / restore (light grey) */}

@@ -51,10 +51,10 @@ describe('the address round-trip', () => {
     expect(readFilters(writeFilters(f, new URLSearchParams()))).toEqual(f);
   });
 
-  it('keeps the other keys (page, focus) and leaves defaults out', () => {
+  it('keeps the other keys (page, focus); defaults left out, rows always in', () => {
     const f = readFilters(sp(''));
     const out = writeFilters({ ...f, brand: 'Oakley' }, sp('page=3&focus=P1'));
-    expect(out.toString()).toBe('page=3&focus=P1&brand=Oakley');
+    expect(out.toString()).toBe('page=3&focus=P1&brand=Oakley&rows=50');
   });
 
   it('unknown values fall back safely', () => {
@@ -207,13 +207,13 @@ describe('panel round', () => {
   it('Last edited stays in the address before any day is picked', () => {
     const f = { ...readFilters(sp('')), date_on: 'edited' as const };
     const out = writeFilters(f, sp(''));
-    expect(out.toString()).toBe('date_on=edited');
+    expect(out.toString()).toBe('date_on=edited&rows=50');
     const next = readFilters(writeFilters({ ...readFilters(out), from: '2026-10-01' }, out));
     expect(toProductParams(next)).toMatchObject({ date_on: 'edited', date_from: '2026-10-01' });
     // No day yet: nothing is sent, no chip, and Date added stays a plain address.
     expect(toProductParams(readFilters(out)).date_on).toBeUndefined();
     expect(activeChips(readFilters(out), { added: [], edited: [] })).toEqual([]);
-    expect(writeFilters(readFilters(sp('')), sp('')).toString()).toBe('');
+    expect(writeFilters(readFilters(sp('')), sp('')).toString()).toBe('rows=50');
   });
 
   it('the Needs review list keeps only the filters it applies', () => {
@@ -275,5 +275,33 @@ describe('panel round: chips, Archived, the review queue order', () => {
       'name_asc'
     );
     expect(queueSort({ ids: [], index: 0, filters: { address: 'sort=bogus' } })).toBe('newest');
+  });
+});
+
+describe('round 4: rows in every address, a chip removes only its own filter', () => {
+  it('the address always carries rows per page, 50 too', () => {
+    expect(writeFilters(readFilters(sp(''), 200), sp('page=3')).toString()).toBe('page=3&rows=200');
+    expect(writeFilters(readFilters(sp('rows=50'), 200), sp('page=3')).get('rows')).toBe('50');
+    expect(writeFilters(readFilters(sp(''), null), sp('')).get('rows')).toBe('50');
+  });
+
+  it("each chip's X removes its own filter and leaves every other one", () => {
+    const f = readFilters(
+      sp(
+        'q=ray&category=SUNGLASS&brand=Carrera&frame_color=Black&lens_colour=Grey&gender=Men' +
+          '&shape=Round&frame_type=Full+Rim&frame_material=Acetate&added_by=u1&edited_by=none' +
+          '&date_on=edited&from=2026-10-01&to=2026-10-12&flag=any&photo=missing&inactive=1' +
+          '&sort=name_asc&rows=100'
+      )
+    );
+    const chips = activeChips(f, { added: [], edited: [] });
+    expect(chips).toHaveLength(15);
+    for (const chip of chips) {
+      const out = removeChip(f, chip.key);
+      const left = activeChips(out, { added: [], edited: [] }).map((c) => c.key);
+      expect(left).toEqual(chips.map((c) => c.key).filter((k) => k !== chip.key));
+      expect([out.sort, out.rows]).toEqual(['name_asc', 100]);
+    }
+    expect(removeChip(f, 'brand')).toEqual({ ...f, brand: '' });
   });
 });

@@ -50,6 +50,7 @@ import {
 } from '../../components/online-store/OnlineStoreSyncBanner';
 // Import DIRECT from the modules (not the services/api barrel — TS2614).
 import {
+  catalogBulkApi,
   catalogProductsApi,
   type CatalogProductDoc,
   type PromoteDryRunResult,
@@ -230,6 +231,8 @@ export function CatalogProductDrawer({
   const canPush = hasRole(['SUPERADMIN', 'ADMIN']);
   // The add / edit door's roles (catalogRoutes /catalog/add).
   const canEdit = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']);
+  // The restore door's roles (POST /catalog/products/bulk-restore): admins.
+  const canRestore = hasRole(['SUPERADMIN', 'ADMIN']);
 
   // Local copy of the doc so a review-form save can refresh it in place.
   const [doc, setDoc] = useState<Record<string, unknown>>(item.doc);
@@ -313,6 +316,10 @@ export function CatalogProductDrawer({
 
   const needsReview = Boolean(doc.needs_review);
   const inactive = doc.is_active === false;
+  // Archived (deleted): only THE restore door brings it back -- as it was
+  // before the archive, never re-published. Switched off with no archive
+  // ("Not for POS") is an ordinary switch.
+  const archived = Boolean(doc.deleted_at);
 
   const seedForm = useCallback((d: Record<string, unknown>) => {
     const attrs = (d.attributes || {}) as Record<string, unknown>;
@@ -475,17 +482,27 @@ export function CatalogProductDrawer({
     if (!id || archiving) return;
     setArchiving(true);
     try {
-      await catalogProductsApi.update(id, { is_active: !inactive });
+      let note = '';
+      if (archived) {
+        const row = (await catalogBulkApi.restore([id])).results[0];
+        if (row?.status !== 'done') throw new Error(row?.reason || 'Could not restore the product.');
+        note = row.note || '';
+      } else {
+        // Restore an inactive one (true), archive an active one (false). The
+        // old `!inactive` sent the opposite, so neither button did anything.
+        await catalogProductsApi.update(id, { is_active: inactive });
+      }
       const fresh = await catalogProductsApi.get(id);
       setDoc(fresh as unknown as Record<string, unknown>);
       onUpdated?.(fresh);
-      toast.success(inactive ? 'Restored to the review queue.' : 'Archived — not for POS.');
+      if (note) toast.warning(`Restored. ${note}`);
+      else toast.success(inactive ? 'Restored to the review queue.' : 'Archived — not for POS.');
     } catch (e: unknown) {
       toast.error(e instanceof Error && e.message ? e.message : 'Could not update the product.');
     } finally {
       setArchiving(false);
     }
-  }, [id, archiving, inactive, onUpdated, toast]);
+  }, [id, archiving, archived, inactive, onUpdated, toast]);
 
   // ---- "Edit everything" → the FULL cataloguing page (?review=<id>) --------
   // The parent (Catalog Manager) stashes the whole grid page as the queue;
@@ -945,24 +962,26 @@ export function CatalogProductDrawer({
                   )}
                   Approve for POS
                 </button>
-                <button
-                  type="button"
-                  onClick={() => void handleArchiveToggle()}
-                  disabled={archiving}
-                  className="ml-auto flex items-center gap-1.5 rounded-lg px-2.5 py-2 text-xs text-gray-500 hover:bg-gray-100"
-                  title={
-                    inactive
-                      ? 'Return this item to the review queue'
-                      : 'Not for POS — hide it from the active queue'
-                  }
-                >
-                  {inactive ? (
-                    <ArchiveRestore className="w-3.5 h-3.5" />
-                  ) : (
-                    <Archive className="w-3.5 h-3.5" />
-                  )}
-                  {inactive ? 'Restore' : 'Archive'}
-                </button>
+                {(!archived || canRestore) && (
+                  <button
+                    type="button"
+                    onClick={() => void handleArchiveToggle()}
+                    disabled={archiving}
+                    className="ml-auto flex items-center gap-1.5 rounded-lg px-2.5 py-2 text-xs text-gray-500 hover:bg-gray-100"
+                    title={
+                      inactive
+                        ? 'Return this item to the review queue'
+                        : 'Not for POS — hide it from the active queue'
+                    }
+                  >
+                    {inactive ? (
+                      <ArchiveRestore className="w-3.5 h-3.5" />
+                    ) : (
+                      <Archive className="w-3.5 h-3.5" />
+                    )}
+                    {inactive ? 'Restore' : 'Archive'}
+                  </button>
+                )}
               </div>
             </div>
           )}

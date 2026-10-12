@@ -169,7 +169,9 @@ export function readFilters(
 }
 
 /** Write the filters into the address, keeping every other key (page,
- *  focus). Defaults are left out so a plain /catalog stays plain. */
+ *  focus). Defaults are left out, except rows per page: the address ALWAYS
+ *  carries it (50 too), so a page number means the same rows on every
+ *  device and in every shared link. */
 export function writeFilters(
   f: CatalogFilters,
   prev: URLSearchParams,
@@ -190,7 +192,7 @@ export function writeFilters(
   put('flag', f.flag, false);
   put('photo', f.photo, false);
   put('inactive', f.inactive, false);
-  put('rows', f.rows, f.rows === DEFAULT_PAGE_SIZE);
+  put('rows', f.rows, false);
   return sp;
 }
 

@@ -329,7 +329,7 @@ describe('rows per page back to the default', () => {
     );
     expect((screen.getByLabelText('Rows per page') as HTMLSelectElement).value).toBe('50');
     expect(window.localStorage.getItem('ims.catalog.rowsPerPage')).toBe('50');
-    expect(where().get('rows')).toBeNull(); // 50 is the default: a plain address
+    expect(where().get('rows')).toBe('50'); // the address always carries rows
   });
 });
 
@@ -465,5 +465,114 @@ describe('the Needs review queue keeps its newest-first order', () => {
     expect(reviewList.mock.calls.at(-1)?.[0]).toMatchObject({ sort: 'newest' });
     expect((await screen.findByTestId('result-line')).textContent).toContain('newest first');
     expect((screen.getByLabelText('Sort by') as HTMLSelectElement).value).toBe('newest');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round 4: rows in every address, no page past the end, the review queue's
+// positions follow rows per page
+// ---------------------------------------------------------------------------
+
+describe('a page number means the same rows on every device', () => {
+  it('a plain address gets the rows this page shows', async () => {
+    renderAt('?page=3');
+    await waitFor(() => expect(where().get('rows')).toBe('50'));
+    expect(where().get('page')).toBe('3');
+    expect(getProducts.mock.calls.at(-1)?.[0]).toMatchObject({ skip: 100, limit: 50 });
+  });
+
+  it("a device's remembered size is written into the address", async () => {
+    window.localStorage.setItem('ims.catalog.rowsPerPage', '200');
+    renderAt('');
+    await waitFor(() => expect(where().get('rows')).toBe('200'));
+  });
+
+  it("a shared link's rows win over this device's remembered size", async () => {
+    window.localStorage.setItem('ims.catalog.rowsPerPage', '200');
+    renderAt('?page=3&rows=50');
+    await screen.findByTestId('catalog-table');
+    expect(getProducts.mock.calls.at(-1)?.[0]).toMatchObject({ skip: 100, limit: 50 });
+    expect(where().get('rows')).toBe('50');
+  });
+});
+
+describe('a page past the end is never a dead end', () => {
+  const sixty = async ({ skip }: { skip: number }) =>
+    skip < 60 ? { products: [ROW], total: 1, total_count: 60 } : { products: [], total: 0, total_count: 60 };
+
+  it('goes to the last page that has rows', async () => {
+    getProducts.mockImplementation(sixty);
+    renderAt('?page=5&rows=50');
+    await waitFor(() => expect(where().get('page')).toBe('2'));
+    await screen.findByTestId('catalog-table');
+    expect(getProducts.mock.calls.at(-1)?.[0]).toMatchObject({ skip: 50, limit: 50 });
+    expect(screen.queryByText('No products found')).toBeNull();
+    expect(screen.getByLabelText('Rows per page')).toBeTruthy();
+    expect(screen.getByTestId('result-line').textContent).toBe(
+      '60 of 481 products, recently edited first'
+    );
+  });
+
+  it('after a bulk archive empties the last page, goes to the new last page', async () => {
+    let total = 26;
+    getProducts.mockImplementation(async ({ skip }: { skip: number }) =>
+      skip < total
+        ? { products: [ROW], total: 1, total_count: total }
+        : { products: [], total: 0, total_count: total }
+    );
+    const archive = catalogBulkApi.archive as unknown as ReturnType<typeof vi.fn>;
+    archive.mockReset();
+    archive.mockImplementation(async (ids: string[], apply: boolean) => {
+      if (apply) total = 25;
+      return {
+        applied: apply,
+        results: ids.map((id) => ({ product_id: id, status: apply ? 'done' : 'ready' })),
+      };
+    });
+    renderAt('?page=2&rows=25');
+    await screen.findByTestId('catalog-table');
+    fireEvent.click(screen.getByLabelText('Select Carrera 8035 Black'));
+    fireEvent.click(within(await screen.findByTestId('selection-bar')).getByText('Delete (archive)'));
+    fireEvent.click(await screen.findByRole('button', { name: /Delete \(archive\) 1 product/ }));
+    await waitFor(() => expect(where().get('page')).toBeNull());
+    await waitFor(() =>
+      expect(getProducts.mock.calls.at(-1)?.[0]).toMatchObject({ skip: 0, limit: 25 })
+    );
+    expect(await screen.findByTestId('catalog-table')).toBeTruthy();
+  });
+
+  it('the pages and Rows per page stay whenever the list has rows to page through', async () => {
+    getProducts.mockResolvedValue({ products: [], total: 0, total_count: 5 });
+    renderAt('');
+    expect(await screen.findByLabelText('Rows per page')).toBeTruthy();
+  });
+});
+
+describe('the Needs review queue follows rows per page', () => {
+  it('asks for that many rows and keeps their place for the editor', async () => {
+    reviewList.mockReset();
+    reviewList.mockResolvedValue({
+      products: [
+        { id: 'IMP-1', sku: 'IMP-1', title: 'Imported one', needs_review: true },
+        { id: 'IMP-2', sku: 'IMP-2', title: 'Imported two', needs_review: true },
+      ],
+      total: 120,
+    });
+    window.sessionStorage.clear();
+    render(
+      <MemoryRouter initialEntries={['/catalog/review?rows=25&page=2']}>
+        <Routes>
+          <Route path="/catalog/review" element={<CatalogManagerPage segment="review" />} />
+          <Route path="/catalog/add" element={<output data-testid="editor" />} />
+        </Routes>
+      </MemoryRouter>
+    );
+    await waitFor(() => expect(readReviewQueue()?.ids).toEqual(['IMP-1', 'IMP-2']));
+    expect(reviewList.mock.calls.at(-1)?.[0]).toMatchObject({ page: 2, limit: 25 });
+    expect(readReviewQueue()?.offset).toBe(25);
+    // The row's Edit opens the editor with the queue at that row: item 27 of 120.
+    fireEvent.click(screen.getAllByRole('button', { name: /Edit/ })[1]);
+    await screen.findByTestId('editor');
+    expect([readReviewQueue()?.index, readReviewQueue()?.offset]).toEqual([1, 25]);
   });
 });
