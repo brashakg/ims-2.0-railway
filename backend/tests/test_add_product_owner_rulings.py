@@ -1238,21 +1238,22 @@ def test_b_a_main_made_lens_rekeys_on_the_sub_brand_its_form_shows(door, row, ed
 
 
 def test_b_a_contact_lens_model_name_edit_rekeys_it(door):
-    """A contact lens's form shows Model Name only; the door's model_no copy of
-    the flat model never outranks it. Renaming Oasys -> Oasys Max through the
-    Edit form (model = the loaded model_no copy) re-keys, renames and moves the
-    model column, and a later price save keeps all three."""
+    """A contact lens's form shows Model Name only, and the door stores no
+    model_no copy of it. Renaming Oasys -> Oasys Max through the Edit form
+    re-keys, renames and moves the model column, even when the request still
+    carries the old flat model; a later price save (model = the Model Name,
+    as the form sends it) keeps all three."""
     first = door(_form_post("CL", _FIT))
     pid = first["product_id"]
     stored = door.repo.find_by_id(pid)["attributes"]
-    assert stored["model_no"] == "Oasys"  # the door's hidden copy
+    assert "model_no" not in stored  # no hidden copy
     edited = dict(stored, model_name="Oasys Max")
-    _put(pid, brand="Acuvue", model=stored["model_no"], attributes=edited, mrp=1100.0)
+    _put(pid, brand="Acuvue", model="Oasys", attributes=edited, mrp=1100.0)
     after = door.repo.find_by_id(pid)
     key = pm.compute_identity_key(*pm.identity_parts(dict(_FIT, model_name="Oasys Max"), "CL"))
     assert (after["identity_key"], after["model"], after["sku"]) == (key, "Oasys Max", first["sku"])
     assert after["name"].startswith("Acuvue Oasys Max Contact Lenses")
-    _put(pid, brand="Acuvue", model=stored["model_no"], attributes=dict(after["attributes"]), mrp=1200.0)
+    _put(pid, brand="Acuvue", model="Oasys Max", attributes=dict(after["attributes"]), mrp=1200.0)
     again = door.repo.find_by_id(pid)
     assert (again["identity_key"], again["model"], again["name"]) == (key, "Oasys Max", after["name"])
     door(_form_post("CL", _FIT))  # free again
@@ -1265,11 +1266,13 @@ def test_b_a_contact_lens_model_name_edit_rekeys_it(door):
 
 def test_b_a_lens_made_with_mains_payload_rekeys_on_its_sub_brand(door):
     """The panel's steps: main's form payload (model 'Crizal') through the
-    create door, then the Edit form's PUT with the sub-brand Varilux."""
+    create door (which stores it as the Sub Brand the form shows, no hidden
+    model_no copy), then the Edit form's PUT with the sub-brand Varilux."""
     first = door(prod_router.ProductCreate(category="LS", brand="Essilor", model="Crizal",
                                            attributes=dict(_CRIZAL), mrp=1000.0, offer_price=900.0))
     stored = door.repo.find_by_id(first["product_id"])
-    assert (stored["identity_key"], stored["attributes"]["model_no"]) == ("essilor|crizal|hc|156", "Crizal")
+    assert stored["identity_key"] == "essilor|crizal|hc|156"
+    assert not {"model_no", "model_name"} & set(stored["attributes"])
     _put(first["product_id"], brand="Essilor", model="Crizal",
          attributes=dict(stored["attributes"], subbrand="Varilux"), mrp=1100.0)
     after = door.repo.find_by_id(first["product_id"])
@@ -1277,9 +1280,12 @@ def test_b_a_lens_made_with_mains_payload_rekeys_on_its_sub_brand(door):
         "essilor|varilux|hc|156", "Varilux", "Essilor Varilux Lenses")
     door(_form_post("LS", _CRIZAL))  # a new Crizal saves
     assert _dup(door, _form_post("LS", dict(_CRIZAL, subbrand="Varilux")))["product_id"] == first["product_id"]
-    # A clone of that old lens carries its hidden copy; the sub-brand typed in
-    # the clone names the new lens's model column and name, not the copy.
-    clone = door(_form_post("LS", dict(stored["attributes"], subbrand="Kodak", index="1.67")))
+    # A clone of a main-era lens carries its hidden copy; the sub-brand typed
+    # in the clone names the new lens's model column and name, not the copy,
+    # and the door stores no copy.
+    clone = door(_form_post("LS", dict(stored["attributes"], model_no="Crizal", model_name="Crizal",
+                                       subbrand="Kodak", index="1.67")))
+    assert not {"model_no", "model_name"} & set(door.repo.find_by_id(clone["product_id"])["attributes"])
     assert (clone["model"], clone["name"], clone["identity_key"]) == (
         "Kodak", "Essilor Kodak Lenses", "essilor|kodak|hc|167")
 
@@ -1471,3 +1477,40 @@ def test_d_the_edit_form_saves_a_price_on_a_lens_with_an_old_bad_value(door, bad
     _put("P-JUNK", attributes=dict(_FIT))
     assert door.repo.find_by_id("P-JUNK")["identity_key"] == pm.compute_identity_key(
         *pm.identity_parts(_FIT, "CL"))
+
+
+# ---------------------------------------------------------------------------
+# E: panel round 15 -- a model lands in the field its category's form shows
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("category,brand,model,sku,name,field", [
+    ("CL", "Acuvue", "Oasys", "CL-ACUVUE-OASYS", "Acuvue Oasys Contact Lenses", "model_name"),
+    ("ACC", "BV", "Cloth", "ACC-BV-CLOTH", "Bv Cloth Accessory", "model_name"),
+    ("SMTWT", "Apple", "Series 9", "SMTWT-APPLE-SERIES9", "Apple Series 9 Smartwatch", "model_name"),
+    ("LS", "Essilor", "Crizal", "LS-ESSILOR-CRIZAL", "Essilor Crizal Lenses", "subbrand"),
+])
+def test_e_a_price_list_model_lands_in_the_field_the_form_shows(
+        door, monkeypatch, category, brand, model, sku, name, field):
+    """The vendor price-list import (POST /catalog-import/commit) puts the
+    Model column in attributes.model_no. A category with no Model No field
+    stores it where its form shows the model, never as a hidden copy, so the
+    SKU, the model column, the name and the duplicate key all read it, and the
+    same row committed twice is a duplicate, never a numbered twin."""
+    from api.routers import catalog_import as cir
+    from api.services import catalog_import as ci
+
+    monkeypatch.setattr(cir, "_get_db", lambda: door.db)
+    monkeypatch.setattr(cir, "get_product_repository", lambda: door.repo)
+    row = {"brand": brand, "model": model, "category": category, "mrp": "900"}
+    payload = ci.map_row_to_product(row, ci.guess_column_map(list(row)))
+    assert payload["attributes"]["model_no"] == model  # what the import sends
+    commit = cir.ImportCommitRow(action="CREATE", payload=payload)
+    out = _run(cir.commit_import(cir.ImportCommitRequest(vendor_id="V1", rows=[commit, commit]), _ADMIN))
+    assert out["created"] == 1 and "already exists" in out["errors"][0]["error"], out
+    p = door.repo.find_by_id(out["created_products"][0]["product_id"])
+    assert (p["sku"], p["model"], p["name"]) == (sku, model, name)
+    assert p["identity_key"] == pm.compute_identity_key(brand, model)
+    assert p["attributes"][field] == model
+    assert not ({"model_no", "model_name"} - {field}) & set(p["attributes"])
+

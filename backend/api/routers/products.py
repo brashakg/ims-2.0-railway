@@ -400,8 +400,9 @@ def _canonical_door_payload(
         "tags": product.tags,
         "weight": product.weight,
         # Flat identity columns -- normalise_door_payload folds these into the
-        # registry's attribute keys (brand->brand_name, model->model_no,
-        # color->colour_code) so the required-field gate sees them.
+        # registry's attribute keys (brand->brand_name, model->the model field
+        # the category's form shows, color->colour_code) so the required-field
+        # gate sees them.
         "brand": product.brand,
         "model": product.model,
         "color": product.color,

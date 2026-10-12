@@ -1041,12 +1041,12 @@ _MODEL_KEYS = ("model_no", "model_name")
 
 def _shown_attributes(attributes: Dict[str, Any], category: Any) -> Dict[str, Any]:
     """`attributes` less a model_no / model_name its category has no field
-    for. The create door folds a flat `model` into both
-    (normalise_door_payload), and main's form sent a lens's sub-brand (or
-    'STD') as that model: every Optical Lens on prod holds a model_no no form
-    shows or clears, and a contact lens a model_no copy of its Model Name. Such
-    a copy never outranks the field the form edits. An unknown category keeps
-    them all."""
+    for. main's create door folded a flat `model` into both, and main's form
+    sent a lens's sub-brand (or 'STD') as that model: every Optical Lens on
+    prod holds a model_no no form shows or clears, and a contact lens a
+    model_no copy of its Model Name. Such a copy never outranks the field the
+    form edits (and the door no longer writes one: normalise_door_payload).
+    An unknown category keeps them all."""
     attrs = attributes or {}
     spec = category_spec(category)
     if spec is None:
@@ -2449,7 +2449,6 @@ VALID_DOOR_SOURCES = frozenset({"FORM", "BULK", "CATALOG", "MASTER", "IMPORT", "
 # already set in attributes (attributes win -- they are the explicit source).
 _DOOR_IDENTITY_ALIASES = {
     "brand": "brand_name",
-    "model": "model_no",
     "color": "colour_code",
     "colour": "colour_code",
     "size": "size",
@@ -2471,14 +2470,20 @@ def normalise_door_payload(payload: Dict[str, Any], *, source: str) -> Dict[str,
         val = p.get(top_key)
         if val is not None and not (isinstance(val, str) and not val.strip()):
             attrs.setdefault(attr_key, val)
-    # A flat top-level `model` fills BOTH model_no AND model_name (mirrors the
-    # read-side _overlay_attributes). Several categories key identity on
-    # model_name (CONTACT_LENS, COLORED_CONTACT_LENS, SMARTWATCH, ...), so without
-    # this a flat FORM/BULK create supplying only `model` would be 422'd for a
-    # "missing model_name" the status stamp would otherwise have read fine.
-    _model = p.get("model")
-    if _model is not None and not (isinstance(_model, str) and not _model.strip()):
-        attrs.setdefault("model_name", _model)
+    # The model lands in the field its category's form shows: Model No and/or
+    # Model Name (a frame shows both: both, as before), else an Optical Lens's
+    # Sub Brand. A flat `model` (the PO 'new item' line) or a model_no /
+    # model_name the form has no field for (a price-list import, a clone of a
+    # main-era row) moves there, so the door stores no hidden copy and the SKU,
+    # the name and the duplicate key read what was typed (_shown_attributes).
+    spec = category_spec(p.get("category"))
+    fields = spec.required + spec.optional if spec else _MODEL_KEYS
+    copies = [attrs.pop(k) for k in _MODEL_KEYS if k not in fields and k in attrs]
+    model = next((v for v in (*copies, p.get("model")) if not _is_blank(v)), None)
+    shown = [k for k in _MODEL_KEYS if k in fields] or [k for k in ("subbrand",) if k in fields]
+    for k in shown if model is not None else ():
+        if _is_blank(attrs.get(k)):
+            attrs[k] = model
     p["attributes"] = attrs
     p["_source"] = source if source in VALID_DOOR_SOURCES else "FORM"
     return p
