@@ -7,7 +7,7 @@ Handles product creation, SKU generation, and Shopify sync.
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from pydantic import BaseModel, Field, field_validator
-from typing import Optional, Dict, Any, List, Union
+from typing import Optional, Dict, Any, List, Tuple, Union
 from datetime import datetime, timezone
 from enum import Enum
 import logging
@@ -1803,6 +1803,19 @@ def _guard_catalog_pricing(product: "ProductCreateInput") -> tuple:
     return gst_rate, hsn_code
 
 
+def _catalog_pm_error(err: "_pm.ProductMasterError", product) -> Tuple[int, str]:
+    """(status, detail) the catalog doors (single create and import) give a
+    registry breach: their historical 400 "Missing required field: X" only
+    when X really is missing; anything else (a contact-lens power that is not
+    a number) in its own words, with its own status."""
+    missing = _pm.missing_required_fields(
+        product.category.value, dict(product.attributes or {})
+    )
+    if err.status == 422 and err.field in missing and err.field != "category":
+        return 400, f"Missing required field: {err.field}"
+    return err.status, err.message
+
+
 @router.post("/products")
 async def create_catalog_product(
     product: ProductCreateInput, current_user: dict = Depends(get_current_user)
@@ -1828,10 +1841,6 @@ async def create_catalog_product(
     from ..dependencies import get_product_repository
 
     product_id = f"prod_{uuid.uuid4().hex[:12]}"
-    sku = _pm.mint_unique_sku(
-        product.category.value, product.attributes,
-        product_repo=get_product_repository(), db=_get_db(),
-    )
     title = generate_product_title(product.category, product.attributes)
 
     # PRODUCTS-CONVERGENCE step-10: validate through the canonical registry AND
@@ -1846,6 +1855,10 @@ async def create_catalog_product(
     # to keep the native catalog_products doc (storefront/Shopify shape) below
     # unchanged.
     try:
+        sku = _pm.mint_unique_sku(
+            product.category.value, product.attributes,
+            product_repo=get_product_repository(), db=_get_db(),
+        )
         _spine = _pm.build_canonical_product(
             {
                 "category": product.category.value,
@@ -1866,13 +1879,11 @@ async def create_catalog_product(
             source="CATALOG",
         )
     except _pm.ProductMasterError as err:
-        # Preserve the catalog door's historical 400 "Missing required field"
-        # contract for a missing-attr breach; surface other breaches verbatim.
-        if err.status == 422 and err.field and err.field != "category":
-            raise HTTPException(
-                status_code=400, detail=f"Missing required field: {err.field}"
-            ) from err
-        raise HTTPException(status_code=err.status, detail=err.message) from err
+        # The catalog door's historical 400 "Missing required field" for a
+        # field that IS missing; any other breach (a power that is not a
+        # number, a bad GTIN) in its own words, with its own status.
+        status, detail = _catalog_pm_error(err, product)
+        raise HTTPException(status_code=status, detail=detail) from err
     # Share the catalog id + sku so the catalog doc and the spine are ONE product.
     _spine["product_id"] = product_id
     _spine["id"] = product_id
@@ -3044,14 +3055,7 @@ async def import_products(
                     source="CATALOG",
                 )
             except _pm.ProductMasterError as req_exc:
-                detail = (
-                    f"Missing required field: {req_exc.field}"
-                    if req_exc.status == 422
-                    and req_exc.field
-                    and req_exc.field != "category"
-                    else req_exc.message
-                )
-                errors.append({"index": i, "error": detail})
+                errors.append({"index": i, "error": _catalog_pm_error(req_exc, product)[1]})
                 continue
 
             # Same pricing guards as the single-create path: block offer > MRP

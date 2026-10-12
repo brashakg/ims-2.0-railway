@@ -1091,3 +1091,48 @@ def test_b_guard_an_edit_that_touches_no_identity_leaves_a_bad_old_power_alone(d
     _put("P-JUNK", mrp=1100.0)
     after = door.repo.find_by_id("P-JUNK")
     assert (after["mrp"], after["identity_key"]) == (1100.0, "acuvue|oasys|junk")
+
+
+# ---------------------------------------------------------------------------
+# C: the catalog doors name a power that is not a number, never a 500
+# ---------------------------------------------------------------------------
+
+
+_CAT_CL = {"brand_name": "Acuvue", "model_name": "Oasys", "expiry_date": "2027-01-31"}
+
+
+def test_c_catalog_create_refuses_a_power_that_is_not_a_number(client, auth_headers):
+    cat.CATALOG_PRODUCTS.clear()
+    resp = client.post(
+        "/api/v1/catalog/products",
+        json={"category": "CL", "attributes": dict(_CAT_CL, power="abc"),
+              "pricing": {"mrp": 900, "discount_category": "MASS"}},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 422, resp.text
+    assert "power is not a number" in resp.json()["detail"]
+    # A power that IS missing keeps the door's historical 400.
+    resp = client.post(
+        "/api/v1/catalog/products",
+        json={"category": "CL", "attributes": dict(_CAT_CL),
+              "pricing": {"mrp": 900, "discount_category": "MASS"}},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"] == "Missing required field: power"
+
+
+def test_c_catalog_import_says_power_is_not_a_number(client, auth_headers):
+    cat.CATALOG_PRODUCTS.clear()
+    resp = client.post(
+        "/api/v1/catalog/products/import",
+        json=[{"category": "CL", "attributes": dict(_CAT_CL, power="abc"),
+               "pricing": {"mrp": 900, "discount_category": "MASS"}},
+              {"category": "CL", "attributes": dict(_CAT_CL),
+               "pricing": {"mrp": 900, "discount_category": "MASS"}}],
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    errors = {e["index"]: e["error"] for e in resp.json()["errors"]}
+    assert "power is not a number" in errors[0] and "Missing" not in errors[0]
+    assert errors[1] == "Missing required field: power"
