@@ -85,6 +85,9 @@ export interface CatalogProductListParams {
   photo?: PhotoFilter;
   page?: number;
   limit?: number;
+  /** The Catalog page's Sort by (same keys as GET /products). Given, the
+   *  rows also carry who added / last edited them, read from their spine. */
+  sort?: string;
 }
 
 // Partial update for PUT /catalog/products/{id} (the review mini-form's save
@@ -247,5 +250,81 @@ export const catalogProductsApi = {
       );
     }
     return response.data as PromoteResult;
+  },
+};
+
+// ---------------------------------------------------------------------------
+// The Catalog page's bulk doors + catalogue flags (owner 2026-10-12).
+// ---------------------------------------------------------------------------
+
+/** One product's answer from a bulk door. */
+export interface BulkRowResult {
+  product_id: string;
+  /** 'ready' on a dry run; 'done' / 'refused' (+ reason) when applied.
+   *  Flags also answer 'already' (that flag is already open on it). */
+  status: 'ready' | 'done' | 'refused' | 'already';
+  reason?: string;
+  name?: string;
+  /** Archive dry run: units still physically at the shops. */
+  in_stock_units?: number;
+  /** Archive dry run: live on the website (archiving takes it down). */
+  live_online?: boolean;
+}
+
+/** A flag as stored on the product (spine) doc. */
+export interface ProductFlag {
+  flag_id: string;
+  type: string;
+  note?: string;
+  by?: string;
+  by_name?: string;
+  at?: string;
+  status: 'open' | 'fixed';
+  fixed_by?: string | null;
+  fixed_at?: string | null;
+  task_id?: string | null;
+}
+
+export const catalogBulkApi = {
+  /** Delete (archive) -- the same soft delete as the single Delete. Admins
+   *  only. `apply: false` is the dry run the confirm dialog reads. */
+  archive: async (productIds: string[], apply: boolean) => {
+    const response = await api.post('/catalog/products/bulk-archive', {
+      product_ids: productIds,
+      apply,
+    });
+    return response.data as { applied: boolean; results: BulkRowResult[] };
+  },
+
+  /** Restore archived products: active again, NOT re-published online. */
+  restore: async (productIds: string[]) => {
+    const response = await api.post('/catalog/products/bulk-restore', {
+      product_ids: productIds,
+      apply: true,
+    });
+    return response.data as { applied: boolean; results: BulkRowResult[] };
+  },
+
+  /** Flag products as needing work (ADMIN / SUPERADMIN / STORE_MANAGER).
+   *  One task per person who added them. */
+  flag: async (productIds: string[], type: string, note: string) => {
+    const response = await api.post('/catalog/flags', {
+      product_ids: productIds,
+      type,
+      note: note || undefined,
+    });
+    return response.data as {
+      results: BulkRowResult[];
+      tasks: Array<{ task_id: string | null; assigned_to: string | null; product_count: number }>;
+    };
+  },
+
+  /** Mark fixed (the product edit page). */
+  fixFlags: async (productId: string, flagIds: string[]) => {
+    const response = await api.post('/catalog/flags/fix', {
+      product_id: productId,
+      flag_ids: flagIds,
+    });
+    return response.data as { product_id: string; flags: ProductFlag[] };
   },
 };
