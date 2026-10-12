@@ -1285,8 +1285,10 @@ def test_a_cancel_that_read_the_order_before_an_accept_is_refused(monkeypatch):
     """The other order of events: the accept holds the order first, so a
     cancel working from the order it read before that is refused (reload, and
     the receipt shows) instead of cancelling under the delivery."""
-    def accept_holds_the_order(repo):
-        v._hold_order_open_for_receipt(repo, {"po_id": "PO1"})
+    def accept_holds_the_order(repo):  # a receipt that puts a unit in stock
+        v._hold_order_open_for_receipt(
+            repo, {"po_id": "PO1", "items": [{"product_id": "P1", "accepted_qty": 1}]}
+        )
 
     repo = _wire_racing(monkeypatch, _po(status="SENT"), accept_holds_the_order)
     with pytest.raises(HTTPException) as e:
