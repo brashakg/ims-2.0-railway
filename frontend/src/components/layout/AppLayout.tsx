@@ -4,8 +4,8 @@
 // Pages render inside <Outlet /> within the Shell's page-body.
 // ============================================================================
 
-import { Navigate, Outlet, useLocation } from 'react-router-dom';
-import { useEffect, useMemo } from 'react';
+import { Navigate, Outlet, createRoutesFromChildren, matchRoutes, useLocation } from 'react-router-dom';
+import { isValidElement, useEffect, useMemo, type ComponentProps } from 'react';
 import { Eye } from 'lucide-react';
 import { Shell, type Crumb } from '../shell';
 import { useAppearance } from '../../context/AppearanceContext';
@@ -15,6 +15,8 @@ import { ForcePasswordChange } from '../../pages/auth/ForcePasswordChange';
 import { IdleLogoutWatcher } from '../auth/IdleLogoutWatcher';
 import { UpdateAvailableBanner } from '../common/UpdateAvailableBanner';
 import { hasNoActiveStore, isMultiStoreCapable } from '../../utils/storeAccess';
+import { ProtectedRoute, gateAllows } from './ProtectedRoute';
+import { appRoutes } from '../../routes/appRoutes';
 
 // Keep labels consistent with the Rail labels so the crumb matches the active item.
 const SEGMENT_LABELS: Record<string, string> = {
@@ -77,7 +79,26 @@ const SEGMENT_LABELS: Record<string, string> = {
   shopify: 'Shopify Sync',
 };
 
-function pathToCrumbs(pathname: string): Crumb[] {
+// The screens App.tsx mounts under this layout, as route objects.
+const APP_ROUTES = createRoutesFromChildren(appRoutes);
+
+/** May this user open `path`? Every ProtectedRoute on the branch the router
+ *  would match must let them in (gateAllows, the gate ProtectedRoute itself
+ *  runs); a path with no screen opens nothing. */
+export function canOpenPath(auth: Parameters<typeof gateAllows>[0], path: string): boolean {
+  const branch = matchRoutes(APP_ROUTES, path);
+  return !!branch && branch.every(({ route }) => {
+    const el = route.element;
+    return !isValidElement<ComponentProps<typeof ProtectedRoute>>(el)
+      || el.type !== ProtectedRoute
+      || gateAllows(auth, el.props, path);
+  });
+}
+
+/** A parent crumb is a link only when `canOpen` says this user can open it,
+ *  so a counter role on /inventory/lookup never gets an 'Inventory' button
+ *  that lands on /unauthorized; otherwise it is plain text. */
+export function pathToCrumbs(pathname: string, canOpen: (path: string) => boolean): Crumb[] {
   const parts = pathname.split('/').filter(Boolean);
   if (parts.length === 0) return [{ label: 'Hub' }];
   const crumbs: Crumb[] = [];
@@ -88,7 +109,7 @@ function pathToCrumbs(pathname: string): Crumb[] {
     const capitalized = label.charAt(0).toUpperCase() + label.slice(1);
     crumbs.push({
       label: capitalized,
-      to: i < parts.length - 1 ? acc : undefined,
+      to: i < parts.length - 1 && canOpen(acc) ? acc : undefined,
     });
   });
   return crumbs;
@@ -97,9 +118,13 @@ function pathToCrumbs(pathname: string): Crumb[] {
 export function AppLayout() {
   const location = useLocation();
   const { brand } = useAppearance();
-  const { isReadOnly, user } = useAuth();
+  const auth = useAuth();
+  const { isReadOnly, user } = auth;
 
-  const crumbs = useMemo(() => pathToCrumbs(location.pathname), [location.pathname]);
+  const crumbs = useMemo(
+    () => pathToCrumbs(location.pathname, (path) => canOpenPath(auth, path)),
+    [location.pathname, auth],
+  );
 
   // Load the editable HSN->GST master once per session so the POS preview +
   // invoice reflect the same (SUPERADMIN-edited) rates the backend bills from.
