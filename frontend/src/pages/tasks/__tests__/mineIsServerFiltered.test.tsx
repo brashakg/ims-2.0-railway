@@ -26,7 +26,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 const OWNER = 'USR-ME';
-const auth = vi.hoisted(() => ({ roles: ['SALES_STAFF'] as string[] }));
+const auth = vi.hoisted(() => ({ roles: ['SALES_STAFF'] as string[], id: 'USR-ME' }));
 
 vi.mock('../../../services/api', () => ({
   tasksApi: {
@@ -38,7 +38,7 @@ vi.mock('../../../services/api', () => ({
   },
 }));
 vi.mock('../../../context/AuthContext', () => ({
-  useAuth: () => ({ user: { id: OWNER, activeStoreId: 'BV-PUN-01', roles: auth.roles } }),
+  useAuth: () => ({ user: { id: auth.id, activeStoreId: 'BV-PUN-01', roles: auth.roles } }),
 }));
 vi.mock('../../../context/ToastContext', () => ({
   useToast: () => ({ success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() }),
@@ -75,6 +75,7 @@ function renderMine() {
 
 beforeEach(() => {
   auth.roles = ['SALES_STAFF'];
+  auth.id = OWNER;
   getTasks.mockClear();
   // A stand-in for backend/api/routers/tasks.py::list_tasks: below manager the
   // server sees only your tasks and your role's; a manager sees the shop.
@@ -84,7 +85,7 @@ beforeEach(() => {
     const manager = auth.roles.includes('STORE_MANAGER');
     const matched = STORE.filter(
       (t) =>
-        (manager || t.assigned_to === OWNER || auth.roles.includes(t.assigned_to)) &&
+        (manager || t.assigned_to === auth.id || auth.roles.includes(t.assigned_to)) &&
         (!params.assigned_to || t.assigned_to === params.assigned_to),
     );
     return { tasks: matched.slice(skip, skip + limit), total: matched.length };
@@ -129,6 +130,31 @@ describe('Mine is filtered on the server', () => {
     await waitFor(() =>
       expect(screen.getByText(/5 match/)).toBeInTheDocument(),
     );
+  });
+
+  it("the next person on a shared tablet never sees the last person's cached list", async () => {
+    // One QueryClient for the life of the page with a 5-minute staleTime (as
+    // App.tsx keeps it), and a sign-out that does not reload the page.
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: 5 * 60 * 1000 } },
+    });
+    const view = (scope: 'mine' | 'team') => (
+      <QueryClientProvider client={qc}>
+        <TasksSplitView scope={scope} emptyLine="Nothing here." />
+      </QueryClientProvider>
+    );
+    auth.roles = ['STORE_MANAGER'];
+    auth.id = 'USR-MGR';
+    const first = render(view('team'));
+    expect((await screen.findAllByText('Task 0')).length).toBeGreaterThan(0);
+    first.unmount();
+
+    auth.roles = ['SALES_STAFF'];
+    auth.id = OWNER;
+    render(view('mine'));
+    expect(await screen.findByText('Till short by Rs 4,200')).toBeInTheDocument();
+    expect(screen.queryByText('Task 0')).not.toBeInTheDocument();
+    expect(getTasks).toHaveBeenCalledTimes(2);
   });
 
   it('never asks for a date window - task queues are exempt from the 30-day horizon', async () => {
