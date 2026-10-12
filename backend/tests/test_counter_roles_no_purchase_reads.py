@@ -1266,6 +1266,17 @@ class _CashDb:
         return _RecsColl(rows if name == "vendor_payments" else [])
 
 
+_PAID_POS = 6543.21
+
+
+class _PaidPoDb:
+    """Paid purchase orders only: the cash-flow paid-PO total's one source."""
+
+    def get_collection(self, name):
+        rows = [{"_id": None, "total": _PAID_POS}]
+        return _RecsColl(rows if name == "purchase_orders" else [])
+
+
 def _vendor_payments_admits(monkeypatch, role):
     monkeypatch.setattr(receivables_mod, "_get_db", lambda: None)
     try:
@@ -1469,6 +1480,12 @@ def _supplier_payment_answers(monkeypatch, role):
     body = asyncio.run(
         cash_flow_mod.get_cash_flow(period="month", store_id=None, current_user=user)
     )
+    # The paid-PO total, alone in its own db: in a key, or folded into
+    # `outflows` (which would hand it back as outflows - expense_outflow).
+    monkeypatch.setattr(cash_flow_mod, "_get_db", lambda: _PaidPoDb())
+    paid_pos = asyncio.run(
+        cash_flow_mod.get_cash_flow(period="month", store_id=None, current_user=user)
+    )
     try:
         rebates_router._require(user, "read rebates")
         rebates = True
@@ -1483,6 +1500,7 @@ def _supplier_payment_answers(monkeypatch, role):
     return {
         **bills,
         "cash-flow total": "vendor_payment_outflow" in body,
+        "cash-flow paid POs": "purchase_outflow" in paid_pos or paid_pos["outflows"] != 0,
         "vendor-payments": _vendor_payments_admits(monkeypatch, role),
         "vendor rebates": rebates,
         "owner-dashboard payables": _admits(
