@@ -382,13 +382,15 @@ def _explicit_name(product: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def build_product_name(product: Dict[str, Any]) -> str:
+def build_product_name(product: Dict[str, Any], detail: str = "") -> str:
     """Deterministic display name for a product-like dict.
 
-    "{Brand} {Model} {Shape} {Gender} {Category-word} - {Colour}", title-cased,
-    single-spaced, <= MAX_NAME_LEN. Missing pieces drop out. An explicit name /
-    title on the doc (or attributes.name for a SERVICE) is honoured verbatim
-    (cleaned + clamped) rather than rebuilt.
+    "{Brand} {Model} {Shape} {Gender} {Category-word} {Detail} - {Colour}",
+    title-cased, single-spaced, <= MAX_NAME_LEN. Missing pieces drop out.
+    `detail` is what the create door says tells this product from its model's
+    others (a contact lens's power and fit, product_master._cl_parts). An
+    explicit name / title on the doc (or attributes.name for a SERVICE) is
+    honoured verbatim (cleaned + clamped) rather than rebuilt.
     """
     if not isinstance(product, dict):
         return ""
@@ -418,7 +420,7 @@ def build_product_name(product: Dict[str, Any]) -> str:
         seen.add(low)
         identity.append(piece)
 
-    core_parts = identity + [p for p in (gender, category_word) if p]
+    core_parts = identity + [p for p in (gender, category_word, detail) if p]
     core = " ".join(core_parts).strip()
 
     if colour and core:

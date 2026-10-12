@@ -1047,49 +1047,71 @@ def _derive_brand_model_color_size(
 
 
 _CONTACT_LENSES = ("CONTACT_LENS", "COLORED_CONTACT_LENS")
-# A contact lens's power fields as the form records them: (label, key).
-_CL_POWER_FIELDS = (("", "power"), ("C", "cl_cyl"), ("X", "cl_axis"), ("A", "cl_add"))
-# A power as people write it: a sign (ASCII, the Unicode minus or a dash pasted
+# A number as people write it: a sign (ASCII, the Unicode minus or a dash pasted
 # from Word/PDF, or +), up to 3 digits, a '.' or ',' decimal part, an optional
 # D/DS; PL or PLANO is 0. Digits are bounded, so an exponent or a 400-digit
 # number never reaches the arithmetic.
 _CL_POWER_RE = re.compile(r"([-+\u2212\u2013\u2014]?)\s*(\d{1,3})?(?:[.,](\d{1,3}))?\s*(?:DS?)?")
+# The fit of a contact lens, after its power: (SKU label, name label, key).
+_CL_FIT_FIELDS = (("BC", "BC", "base_curve"), ("DIA", "DIA", "diameter"), ("PK", "Pack of", "pack"))
 
 
-def _cl_power(attributes: Dict[str, Any]) -> Optional[str]:
-    """A contact lens's power as one identity part (owner 2026-09-28: CL power
-    is its own item): SPH, then C cylinder, X axis, A add, e.g.
-    M125/CM075/X180. A sign is a letter ('-' separates SKU parts): -1.25 is
-    M125, +1.25 and 1.25 are P125, 0 is PL (plano); in hundredths, so -1.25
-    is never -12.50 (M1250). A zero cylinder or add is none. Anything that is
-    not a power is refused (422 naming the field): text kept as typed lost
-    its sign in the SKU and the key, so -1.25D was the duplicate of +1.25D."""
-    out = []
-    for label, key in _CL_POWER_FIELDS:
-        raw = str(attributes.get(key) if attributes.get(key) is not None else "").strip()
-        if not raw:
-            continue
-        m = _CL_POWER_RE.fullmatch(raw.upper())
-        if raw.upper() in ("PL", "PLANO"):
-            d = Decimal(0)
-        elif m and (m.group(2) or m.group(3)):
-            d = Decimal("%s.%s" % (m.group(2) or "0", m.group(3) or "0"))
-            d = d if m.group(1) in ("", "+") else -d
-        else:
-            raise ProductMasterError(
-                f"{key} '{raw[:20]}' is not a number (write it like -1.25).",
-                status=422,
-                field=key,
-            )
-        if key == "cl_axis":
-            out.append("X%d" % int(abs(d)))
-        elif d == 0:
-            if key == "power":
-                out.append("PL")
-        else:
-            hundredths = int((abs(d) * 100).to_integral_value())
-            out.append("%s%s%03d" % (label, "M" if d < 0 else "P", hundredths))
-    return "/".join(out) or None
+def _cl_number(attributes: Dict[str, Any], key: str) -> Optional[Decimal]:
+    """One contact-lens number as typed (_CL_POWER_RE), None when blank.
+    Anything that is not a number is refused (422 naming the field): text kept
+    as typed lost its sign in the SKU and the key, so -1.25D was the duplicate
+    of +1.25D."""
+    raw = str(attributes.get(key) if attributes.get(key) is not None else "").strip()
+    if not raw:
+        return None
+    if raw.upper() in ("PL", "PLANO"):
+        return Decimal(0)
+    m = _CL_POWER_RE.fullmatch(raw.upper())
+    if not (m and (m.group(2) or m.group(3))):
+        example = "8.6" if key in ("base_curve", "diameter", "pack") else "-1.25"
+        raise ProductMasterError(
+            f"{key} is not a number: '{raw[:20]}' (write it like {example}).",
+            status=422,
+            field=key,
+        )
+    d = Decimal("%s.%s" % (m.group(2) or "0", m.group(3) or "0"))
+    return d if m.group(1) in ("", "+") else -d
+
+
+def _cl_parts(attributes: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """What tells one contact lens of a model from another, as (SKU part, name
+    part) pairs -- owner 2026-09-28: each power is its own stock item, with
+    power, base curve, diameter and pack in its name and SKU. SPH, C cylinder,
+    X axis, A add, then BC, DIA, PK: -1.25/-0.75x180 BC 8.6 DIA 14.2 in 6s is
+    M125/CM075/X180/BC86/DIA142/PK6 in the SKU and '-1.25 -0.75 x180 BC 8.6
+    DIA 14.2 Pack of 6' in the name. A sign is a letter ('-' separates SKU
+    parts): -1.25 is M125, +1.25 and 1.25 are P125, 0 is PL (plano); in
+    hundredths, so -1.25 is never -12.50 (M1250). A zero (or blank) cylinder,
+    add, base curve, diameter or pack is none, and so is an axis with no
+    cylinder: an axis means nothing without one. Fit numbers are written in
+    their shortest form (_plain_number), so 8.60 and 8.6 are one lens."""
+    a = attributes or {}
+    sph, cyl, axis, add = (_cl_number(a, k) for k in ("power", "cl_cyl", "cl_axis", "cl_add"))
+    fit = [(s, n, _cl_number(a, k)) for s, n, k in _CL_FIT_FIELDS]
+
+    def signed(label: str, d: Decimal) -> str:
+        hundredths = int((abs(d) * 100).to_integral_value())
+        return "%s%s%03d" % (label, "M" if d < 0 else "P", hundredths)
+
+    out: List[Tuple[str, str]] = []
+    if sph is not None:
+        out.append(("PL", "Plano") if sph == 0 else (signed("", sph), format(sph, "+.2f")))
+    if cyl:
+        out.append((signed("C", cyl), format(cyl, "+.2f")))
+        if axis is not None:
+            out.append(("X%d" % int(abs(axis)), "x%d" % int(abs(axis))))
+    if add:
+        out.append((signed("A", add), "ADD " + format(add, "+.2f")))
+    for sku_label, name_label, d in fit:
+        if d:
+            num = _plain_number(str(abs(d)))
+            out.append((sku_label + num, "%s %s" % (name_label, num)))
+    return out
 
 
 def identity_parts(
@@ -1108,8 +1130,9 @@ def identity_parts(
     old form's filler model 'STD' (a lens with no sub-brand, stored in
     model_no/model_name) is no model, so an old row and the same lens entered
     today get one key. A contact lens (`category`) is told apart by its power
-    in the size's place (_cl_power): a second power of a model is a new
-    product, the same power twice is one."""
+    and fit in the size's place (_cl_parts): a second power, base curve,
+    diameter or pack of a model is a new product, the same lens twice is
+    one."""
     ids = _derive_brand_model_color_size(attributes)
     a = attributes or {}
     model, colour = ids["model"], ids["color"] or a.get("coating")
@@ -1119,7 +1142,7 @@ def identity_parts(
         model, colour = colour, None
     size = ids["size"] or a.get("lens_size") or a.get("index")
     if resolve_category(category) in _CONTACT_LENSES:
-        size = _cl_power(a)
+        size = "/".join(sku for sku, _ in _cl_parts(a)) or None
     return (ids["brand"], model, colour, size)
 
 
@@ -1706,7 +1729,11 @@ def normalise_payload(
     # explicit door-supplied name (via extra_fields, e.g. a SERVICE's name)
     # is NEVER overwritten -- needs_name() only fires on a blank.
     if needs_name(doc):
-        minted = build_product_name(doc)
+        # A contact lens is named by the parts its SKU and key read (owner
+        # 2026-09-28: power, base curve, diameter and pack in the name too).
+        minted = build_product_name(doc, detail=" ".join(
+            name for _, name in _cl_parts(attributes)
+        ) if canonical in _CONTACT_LENSES else "")
         if minted:
             doc["name"] = minted
     # --- Phase 0: stamp the catalog-done chokepoint on the spine ---

@@ -898,3 +898,73 @@ def test_the_draft_po_roles_are_the_po_create_gate():
                and r["path"] == "/api/v1/vendors/purchase-orders")
     assert set(row["allowed"]) | {"SUPERADMIN"} == screen
     assert "CATALOG_MANAGER" not in screen
+
+
+# ---------------------------------------------------------------------------
+# Owner 2026-09-28: a contact lens's power AND fit (base curve, diameter,
+# pack) make it its own item -- in the key, the SKU and the name.
+# ---------------------------------------------------------------------------
+
+
+_FIT = dict(_OASYS, base_curve="8.4", diameter="14.0", pack="6")
+
+
+def test_cl_pack_base_curve_and_diameter_are_each_their_own_item(door):
+    """6-pack vs 30-pack, BC 8.4 vs 8.8, DIA 14.0 vs 14.2 of one power are
+    different products (no 409), each under the SKU its Review previewed."""
+    first = door(_form_post("CL", _FIT))
+    assert first["sku"] == "CL-ACUVUE-OASYS-M125/BC84/DIA14/PK6"
+    for other in ({"pack": "30"}, {"base_curve": "8.8"}, {"diameter": "14.2"},
+                  {"pack": ""}, {"base_curve": ""}):
+        attrs = dict(_FIT, **other)
+        created = door(_form_post("CL", attrs))
+        assert created["sku"] == _preview("CL", attrs), other
+        assert created["identity_key"] != first["identity_key"], other
+
+
+def test_cl_the_same_fit_typed_twice_is_one_lens(door):
+    """Spaces, a trailing zero, a comma or a '+' do not make a second lens."""
+    first = door(_form_post("CL", _FIT))
+    for spelt in ({"base_curve": " 8.40 "}, {"base_curve": "8,4"}, {"diameter": "14"},
+                  {"diameter": "+14.00"}, {"pack": "6.0"}, {"pack": " 6"}):
+        attrs = dict(_FIT, **spelt)
+        assert _preview("CL", attrs) == first["sku"], spelt
+        assert _dup(door, _form_post("CL", attrs))["sku"] == first["sku"], spelt
+    # A colour contact lens too.
+    hazel = dict(_FIT, colour_name="Hazel")
+    door(_form_post("CCL", hazel))
+    door(_form_post("CCL", dict(hazel, pack="30")))
+    _dup(door, _form_post("CCL", dict(hazel, base_curve="8.40")))
+
+
+def test_cl_the_name_says_the_power_and_fit(door):
+    created = door(_form_post("CL", dict(_FIT, cl_cyl="-0.75", cl_axis="180")))
+    assert created["name"] == "Acuvue Oasys Contact Lenses -1.25 -0.75 x180 BC 8.4 DIA 14 Pack of 6"
+    assert door(_form_post("CL", dict(_OASYS, power="0")))["name"] == "Acuvue Oasys Contact Lenses Plano"
+
+
+def test_cl_a_fit_that_is_not_a_number_is_a_422_naming_it(door):
+    from fastapi import HTTPException
+
+    for key in ("base_curve", "diameter", "pack"):
+        with pytest.raises(pm.ProductMasterError) as exc:
+            pm.build_sku("CL", dict(_FIT, **{key: "8.6mm"}))
+        assert (exc.value.status, exc.value.field) == (422, key)
+        assert f"{key} is not a number" in exc.value.message
+    with pytest.raises(HTTPException) as save:
+        door(_form_post("CL", dict(_FIT, pack="six")))
+    assert save.value.status_code == 422
+
+
+def test_cl_an_axis_with_no_cylinder_is_no_part_of_the_lens(door):
+    """An axis means nothing without a cylinder: a spherical lens with a
+    leftover axis (cylinder 0 or blank) is the spherical lens, one product."""
+    first = door(_form_post("CL", _OASYS))
+    for leftover in ({"cl_axis": "180"}, {"cl_cyl": "0", "cl_axis": "90"},
+                     {"cl_cyl": "-0.00", "cl_axis": "180"}, {"cl_cyl": "", "cl_axis": "45"}):
+        attrs = dict(_OASYS, **leftover)
+        assert _preview("CL", attrs) == first["sku"] == "CL-ACUVUE-OASYS-M125", leftover
+        assert _dup(door, _form_post("CL", attrs))["sku"] == first["sku"], leftover
+    # ... with a cylinder the axis still tells two lenses apart.
+    toric = door(_form_post("CL", dict(_OASYS, cl_cyl="-0.75", cl_axis="180")))
+    assert toric["sku"] == "CL-ACUVUE-OASYS-M125/CM075/X180"
