@@ -1400,6 +1400,23 @@ def minted_name(doc: Dict[str, Any]) -> str:
     return build_product_name({**doc, "name": None, "attributes": attrs}, detail=detail)
 
 
+def name_was_minted(doc: Dict[str, Any]) -> bool:
+    """The stored name is one a create door minted for this doc, never a typed
+    one: today's (minted_name) or main's, made before a contact lens's power
+    and fit joined the name, reading the attributes as stored. Every contact
+    lens on prod carries main's."""
+    doc = doc or {}
+    name = doc.get("name")
+    if not name:
+        return False
+    if name == build_product_name({**doc, "name": None}):
+        return True
+    try:
+        return name == minted_name(doc)
+    except ProductMasterError:
+        return False
+
+
 def rekey_on_edit(
     current: Dict[str, Any], patch: Dict[str, Any], product_repo=None
 ) -> None:
@@ -1457,13 +1474,8 @@ def rekey_on_edit(
     if other is not None and other.get("product_id") != current.get("product_id"):
         raise _duplicate_error(other)
     patch["identity_key"] = new
-    if "name" not in patch and current.get("name"):
-        try:
-            was_minted = current["name"] == minted_name(current)
-        except ProductMasterError:
-            was_minted = False
-        if was_minted:
-            patch["name"] = minted_name(merged) or current["name"]
+    if "name" not in patch and name_was_minted(current):
+        patch["name"] = minted_name(merged) or current["name"]
 
 
 # Sibling cap for the live "similar products" strip (dup-detect Phase 2). The

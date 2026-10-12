@@ -1480,7 +1480,8 @@ def test_d_the_edit_form_saves_a_price_on_a_lens_with_an_old_bad_value(door, bad
 
 
 # ---------------------------------------------------------------------------
-# E: panel round 15 -- a model lands in the field its category's form shows
+# E: panel round 15 -- a model lands in the field its category's form shows;
+# an edit renames a contact lens main named
 # ---------------------------------------------------------------------------
 
 
@@ -1514,3 +1515,27 @@ def test_e_a_price_list_model_lands_in_the_field_the_form_shows(
     assert p["attributes"][field] == model
     assert not ({"model_no", "model_name"} - {field}) & set(p["attributes"])
 
+
+def test_e_an_edit_renames_a_contact_lens_main_named(door):
+    """Every contact lens on prod was named by main's door, before the power
+    and fit joined the name. An identity edit renames it as one named today,
+    so the Hazel Brown entered again never shares a name with the lens that is
+    now Ocean Blue. A typed name still stays (test_d_guard_a_typed_name_...)."""
+    attrs = {"brand_name": "Bausch Lomb", "model_name": "Lacelle", "colour_name": "Hazel Brown",
+             "power": "-2.00", "expiry_date": "2027-01-31"}
+    door.repo.collection.insert_one({
+        "product_id": "P-CCL", "sku": "CCLBAUSCHLOMBLACELLEHAZELBROWN",
+        "category": "COLORED_CONTACT_LENS", "is_active": True,
+        "brand": "Bausch Lomb", "model": "Lacelle", "color": "Hazel Brown",
+        "name": "Bausch Lomb Lacelle Colour Contact Lenses - Hazel Brown",
+        "identity_key": "bauschlomb|lacelle|hazelbrown", "mrp": 1000.0, "offer_price": 900.0,
+        "attributes": dict(attrs, model_no="Lacelle"),  # main's door copied the model
+    })
+    edited = dict(attrs, model_no="Lacelle", colour_name="Ocean Blue")
+    _put("P-CCL", brand="Bausch Lomb", model="Lacelle", attributes=edited, mrp=1100.0)
+    after = door.repo.find_by_id("P-CCL")
+    assert (after["identity_key"], after["color"], after["name"]) == (
+        "bauschlomb|lacelle|oceanblue|m200", "Ocean Blue",
+        "Bausch Lomb Lacelle Colour Contact Lenses -2.00 - Ocean Blue")
+    again = door(_form_post("CCL", attrs))
+    assert again["name"] == "Bausch Lomb Lacelle Colour Contact Lenses -2.00 - Hazel Brown"
