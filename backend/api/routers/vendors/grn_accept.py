@@ -22,6 +22,7 @@ from ._shared import (
     require_roles,
     router,
 )
+from ...services.cost_mask import RECEIVING_MANAGERS
 from .gst import _promote_cost_from_rate
 from .numbering import (
     _cumulative_received_by_product,
@@ -107,7 +108,14 @@ async def _accept_grn_impl(grn_id: str, current_user: dict) -> dict:
     if not can_access_store_scoped(grn.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="GRN not found")
 
-    return _put_on_shelf(grn_repo, grn_id, grn, current_user)
+    # A line beyond what the PO ordered waits for the store manager: a
+    # receiving manager's "Add to stock" is that decision ("they really did
+    # send them"), the same people as 'Not received' (owner 2026-09-28,
+    # receiving is managers only). Anyone else's press shelves the rest of
+    # the receipt and leaves those lines held for them -- the release's cap.
+    roles = set(current_user.get("roles") or [])
+    decides = "SUPERADMIN" in roles or bool(roles & set(RECEIVING_MANAGERS))
+    return _put_on_shelf(grn_repo, grn_id, grn, current_user, order_cap=not decides)
 
 
 def held_receipts(product_id: str) -> List[dict]:
@@ -385,8 +393,9 @@ def _put_on_shelf(
     """THE one path that puts a receipt's accepted units on the shelf. "Add to
     stock" (after its store-scope check), express receive and the catalogue
     release (release_held_receipts) all run it. `order_cap` (the catalogue
-    release only -- a manager's "Add to stock" is a person deciding) holds any
-    line that would take its product past what the PO ordered."""
+    release, and "Add to stock" pressed by anyone but a receiving manager -- a
+    manager's press is a person deciding) holds any line that would take its
+    product past what the PO ordered."""
     stock_repo = get_stock_repository()
     po_repo = get_purchase_order_repository()
 

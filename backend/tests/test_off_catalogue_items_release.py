@@ -4736,3 +4736,38 @@ def test_merge_a_discarded_draft_reads_discontinued_and_its_revival_reads_new(wo
         spine["provisional"] is True and not spine.get("deleted_at") and discontinued(spine) is False,
         f"merge: a revived draft still reads discontinued ({spine.get('deleted_at')})",
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 8: the review of rounds 6-7 after merging main
+# ---------------------------------------------------------------------------
+
+
+def test_r8_only_a_receiving_manager_decides_the_units_beyond_the_order(world):
+    # The store manager's task asks him whether the vendor sent the extra units
+    # ('Not received' / 'Add to stock'). An accountant's "Add to stock" is not
+    # that answer: it shelves the rest of the receipt and leaves the line held.
+    po, boss, carrera, grn1, grn2 = _mixed_held_receipt(world)
+    world.finish_draft(boss, offer=2790)
+    gid = grn2["grn_id"]
+    assert len(world.units(boss)) == 2
+    _seed_user(world, ACCOUNTANT)
+    _run(vd.accept_grn(gid, ACCOUNTANT))
+    held = world.grn(gid)
+    status, received = _po_received(world, po)
+    finding(
+        len(world.units(boss)) == 2
+        and held["status"] == "PARTIALLY_ACCEPTED"
+        and [ln["reason"] for ln in held["unresolved_lines"]] == ["over_order"]
+        and received[boss] == 2
+        and len(_mgr_tasks(world, gid)) == 1,
+        f"An accountant's 'Add to stock' put {len(world.units(boss))} Boss on the shelf "
+        f"against an order of 2 ({held['status']}, PO reads {received[boss]}, "
+        f"{len(_mgr_tasks(world, gid))} store-manager task(s) open)",
+    )
+    # The store manager's own press is his answer: the vendor really sent them.
+    _run(vd.accept_grn(gid, MANAGER))
+    assert len(world.units(boss)) == 4
+    assert world.grn(gid)["status"] == "ACCEPTED"
+    assert _mgr_tasks(world, gid) == []
+
