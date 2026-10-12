@@ -956,7 +956,11 @@ def timeline(monkeypatch):
     db.get_collection("vendor_bills").insert_one(
         {"doc_type": "PURCHASE_INVOICE", "po_id": "PO1", "grn_id": "G1",
          "bill_id": "B1", "invoice_number": "INV-9", "status": "PARTIAL",
-         "total": 5250, "created_at": "2026-09-06T10:00:00"})
+         "total": 5250, "total_amount": 5250, "created_at": "2026-09-06T10:00:00"})
+    # Part-paid: a bill's status is struck from its ledger rows on read
+    # (round 4 P1), so the payment that makes it PARTIAL is in the ledger.
+    db.get_collection("vendor_payments").insert_one(
+        {"vendor_id": "V1", "bill_id": "B1", "amount": 1000, "payment_date": "2026-09-07"})
     monkeypatch.setattr(v, "get_purchase_order_repository", lambda: _PORepo())
     monkeypatch.setattr(v, "get_grn_repository", lambda: _GRNRepo())
     monkeypatch.setattr(v, "_get_db", lambda: db)
