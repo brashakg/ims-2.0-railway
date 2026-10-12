@@ -59,6 +59,11 @@ PURCHASE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
 # the item, quantity and reason only (mask_vendor_return / mask_debit_note).
 # Their read gates ARE this tuple.
 RETURN_READERS = (*PURCHASE_ROLES, "WORKSHOP_STAFF")
+# The receiving managers: the purchase roles without the accountant. Receiving
+# decisions that are managers only (owner 2026-09-28) gate on this tuple --
+# today 'Not received' for a held receipt's units beyond its order (the shop's
+# store manager's decision, 2026-09-29). Defined ONCE, here, like the others.
+RECEIVING_MANAGERS = tuple(r for r in PURCHASE_ROLES if r != "ACCOUNTANT")
 # context -> the roles it admits on top of COST_VISIBLE_ROLES.
 _CONTEXT_ROLES = {
     "purchase": set(PURCHASE_ROLES),

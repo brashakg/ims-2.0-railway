@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from ._core import ACCOUNTS, PURCHASE, RETURN_READERS
+from ._core import ACCOUNTS, PURCHASE, RECEIVING, RETURN_READERS
 
 ROWS: List[Dict[str, object]] = [
     # --- /api/v1/vendor-portal ---
@@ -244,7 +244,7 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn/{grn_id}/drop-over-order",
-        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": RECEIVING,
     },
     {
         "method": "POST",

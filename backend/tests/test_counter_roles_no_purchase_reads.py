@@ -1794,7 +1794,11 @@ import importlib  # noqa: E402
 import pkgutil  # noqa: E402
 import textwrap  # noqa: E402
 
-_GATE_CONSTANTS = (AP_ROLES, PURCHASE_ROLES, _RETURN_READERS)
+from api.services.cost_mask import RECEIVING_MANAGERS  # noqa: E402
+
+# RECEIVING_MANAGERS (PR #1171): the managers-only receiving decisions -- the
+# over-order 'Not received' route -- gate on it, never on a spelled-out list.
+_GATE_CONSTANTS = (AP_ROLES, PURCHASE_ROLES, _RETURN_READERS, RECEIVING_MANAGERS)
 _MONEY_ROUTERS = (
     "vendors", "finance", "purchase_invoices", "purchase_recon",
     "rtv_debit_notes", "vendor_returns", "vendor_rma", "vendor_rebates",
@@ -1845,3 +1849,16 @@ def test_every_money_router_gate_is_a_cost_mask_constant():
                 wrong.append(f"{mod.__name__}:{line}")
     assert found >= 70, found  # the scan reads the routers, not nothing
     assert not wrong, wrong
+
+
+def test_receiving_managers_are_the_purchase_roles_less_the_accountant(app):
+    # Receiving is managers only (owner 2026-09-28): the gate, its rbac row and
+    # the constant are one object/list, so they cannot drift apart.
+    from api.routers.vendors import grn_void
+    from api.services.rbac_policy._core import RECEIVING
+    from api.services.rbac_policy.rows_vendors import ROWS as VENDOR_ROWS
+
+    assert set(RECEIVING_MANAGERS) == set(PURCHASE_ROLES) - {"ACCOUNTANT"}
+    assert grn_void._DROP_ROLES is RECEIVING_MANAGERS
+    (row,) = [r for r in VENDOR_ROWS if r["path"].endswith("/drop-over-order")]
+    assert row["allowed"] is RECEIVING

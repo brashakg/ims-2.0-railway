@@ -16,6 +16,7 @@ from ._shared import (
     router,
 )
 from .grn import _require_receipt_number
+from ...services.cost_mask import RECEIVING_MANAGERS
 from .grn_accept_lock import (
     _GRN_TERMINAL_ACCEPT_STATUSES,
     _GRN_WRITE_ERROR,
@@ -395,7 +396,9 @@ async def escalate_grn(
 
 # The receiving MANAGERS (owner 2026-09-28: receiving is managers only) -- and
 # the over-order task is the shop's store manager's (2026-09-29).
-_DROP_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER")
+# cost_mask.RECEIVING_MANAGERS: one constant, so the money-router gate scan
+# (test_counter_roles_no_purchase_reads section 20) and the rbac row read it.
+_DROP_ROLES = RECEIVING_MANAGERS
 
 
 @router.post("/grn/{grn_id}/drop-over-order")
