@@ -1000,3 +1000,17 @@ def test_escalate_is_store_scoped(monkeypatch):
                                              current_user=_user(active="STORE-B")))
     assert e.value.status_code == 404
     assert grn_repo.docs[gid]["status"] == "PENDING"
+
+
+def test_a_one_unit_over_delivery_is_flagged(monkeypatch):
+    """R1 at its edge: P1 ordered 5, untouched; a receipt of 6 is accepted
+    and raises exactly one over-delivery task for the 1 extra unit."""
+    po = _po(_line("P1", "Frame X", 5), _line("P3", "Vogue", 1))
+    _grn_repo, _po_repo, stock, tasks = _wire(monkeypatch, po=po)
+    gid = _create("normal", _items("P1", 6), _user())["grn_id"]
+    assert _accept(gid)["grn_status"] == "ACCEPTED"
+    assert len([u for u in stock.units if u["product_id"] == "P1"]) == 6
+    [task] = _over_tasks(tasks)
+    assert task["title"] == "Over-delivery on PO-2601-1"
+    assert "Frame X: 1 more than ordered (6 received, 5 ordered)" in task["description"]
+
