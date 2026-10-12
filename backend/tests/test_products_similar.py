@@ -379,17 +379,33 @@ def test_endpoint_requires_auth(client):
     assert resp.status_code == 401
 
 
-def test_endpoint_returns_shape_for_any_authenticated_role(client, staff_headers):
+def test_endpoint_returns_shape_for_any_authenticated_role(client, staff_headers, monkeypatch):
+    """Over a connected (mongomock) database, as CI's mongo:7.0 is: a local run
+    with no Mongo takes the fail-soft path and never reaches this shape. The
+    form reads identity_fields (useSimilarProducts): the typed fields that
+    decide the answer, here a frame's brand, model, colour and eye size."""
+    import mongomock
+
+    import database.connection as conn
+
+    class _Conn:
+        is_connected = True
+        db = mongomock.MongoClient().db
+
+    monkeypatch.setattr(conn, "get_db", lambda: _Conn())
     resp = client.get(
         "/api/v1/products/similar",
-        params={"category": "FRAME", "brand": "NoSuchBrand", "model_no": "NOPE-1"},
+        params={"category": "FRAME", "brand_name": "NoSuchBrand", "model_no": "NOPE-1"},
         headers=staff_headers,
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert set(body.keys()) == {"exact_match", "siblings", "model_colour_count"}
-    assert body["exact_match"] is None
-    assert body["siblings"] == []
+    assert body == {
+        "exact_match": None,
+        "siblings": [],
+        "model_colour_count": 0,
+        "identity_fields": ["brand_name", "colour_code", "lens_size", "model_no"],
+    }
 
 
 def test_endpoint_literal_path_wins_over_product_id_catchall(client, staff_headers):
