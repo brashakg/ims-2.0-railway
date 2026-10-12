@@ -8,6 +8,8 @@ import type { User, AuthState, LoginCredentials, LoginResponse, UserRole } from 
 import { authApi } from '../services/api';
 import { usePOSStore } from '../stores/posStore';
 import { permissionToCapability, isUngrantableCapability } from '../utils/capabilities';
+import { userSeesAllStores } from '../utils/storeAccess';
+import { USER_SHOPS_SYNCED_EVENT } from '../services/api/client';
 
 // ============================================================================
 // Types
@@ -130,6 +132,21 @@ interface AuthProviderProps {
 export function AuthProvider({ children }: AuthProviderProps) {
   const [state, dispatch] = useReducer(authReducer, initialState);
 
+  // A token refresh re-reads the login's shops from the new token
+  // (services/api/client syncCachedUserShops): follow it on screen at once.
+  useEffect(() => {
+    const follow = () => {
+      try {
+        const raw = localStorage.getItem('ims_user');
+        if (raw) dispatch({ type: 'UPDATE_USER', payload: JSON.parse(raw) as User });
+      } catch {
+        /* a malformed cache changes nothing */
+      }
+    };
+    window.addEventListener(USER_SHOPS_SYNCED_EVENT, follow);
+    return () => window.removeEventListener(USER_SHOPS_SYNCED_EVENT, follow);
+  }, []);
+
   // Check for existing token on mount
   useEffect(() => {
     const initializeAuth = async () => {
@@ -170,9 +187,9 @@ export function AuthProvider({ children }: AuthProviderProps) {
               const cached = JSON.parse(userJson) as User;
               const cachedStoreId = cached?.activeStoreId;
               if (cachedStoreId) {
-                const hasCrossStoreAccess = (profile.roles || []).some(r =>
-                  r === 'SUPERADMIN' || r === 'ADMIN' || r === 'AREA_MANAGER',
-                );
+                // The server's reach (switch-store, validate_store_access):
+                // only ADMIN / SUPERADMIN reach a shop they were not given.
+                const hasCrossStoreAccess = userSeesAllStores(profile.roles);
                 const isAssigned = (profile.storeIds || []).includes(cachedStoreId);
                 if (hasCrossStoreAccess || isAssigned) {
                   profile.activeStoreId = cachedStoreId;
@@ -318,9 +335,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     const profile = await authApi.getProfile();
     const current = state.user;
     if (current?.activeStoreId) {
-      const hasCrossStoreAccess = (profile.roles || []).some(r =>
-        r === 'SUPERADMIN' || r === 'ADMIN' || r === 'AREA_MANAGER',
-      );
+      const hasCrossStoreAccess = userSeesAllStores(profile.roles);
       const isAssigned = (profile.storeIds || []).includes(current.activeStoreId);
       if (hasCrossStoreAccess || isAssigned) {
         profile.activeStoreId = current.activeStoreId;
@@ -355,12 +370,10 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
   // Set active store
   const setActiveStore = (storeId: string) => {
-    if (
-      !(
-        state.user?.storeIds.includes(storeId) ||
-        hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER'])
-      )
-    ) {
+    // The server's switch-store rule: an assigned shop, or any shop for
+    // ADMIN / SUPERADMIN. Anything else would leave an optimistic shop on
+    // screen that every read then answers with a 403.
+    if (!(state.user?.storeIds?.includes(storeId) || userSeesAllStores(state.user?.roles))) {
       return;
     }
 
