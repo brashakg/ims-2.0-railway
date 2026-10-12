@@ -121,8 +121,26 @@ describe('DuplicateProductModal', () => {
     renderModal({
       info: { ...INFO, category: 'FRAME', is_active: false, catalog_status: 'DRAFT', discarded_draft: true },
     });
-    expect(screen.getByText(/A discarded draft, ordered before as frame/)).toBeInTheDocument();
+    expect(screen.getByText(/A discarded draft, ordered before as Frame/)).toBeInTheDocument();
     expect(screen.queryByText(/Inactive \(archived\)/)).toBeNull();
+  });
+
+  // One-rule review: it is in neither the catalogue nor the stock list, so a
+  // variant of it or "Open the existing product" lead nowhere (the hint offers
+  // no link for it either). The way on is back, to choose its kind -- named as
+  // the picker names it.
+  it('a discarded draft of another kind offers only the way back', () => {
+    const { onAddVariant, onOpenExisting, onClose } = renderModal({
+      info: { ...INFO, category: 'WATCH', is_active: false, catalog_status: 'DRAFT', discarded_draft: true },
+    });
+    expect(screen.getByText(/ordered before as Wrist Watch — choose Wrist Watch/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /new colour\/size/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Open the existing product/ })).toBeNull();
+    fireEvent.keyDown(window, { key: 'Enter' });
+    expect(onAddVariant).not.toHaveBeenCalled();
+    expect(onOpenExisting).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: /Go back and choose Wrist Watch/ })).toBeInTheDocument();
   });
 
   it('busy disables the actions and suppresses the Enter shortcut', () => {

@@ -22,6 +22,7 @@ import { useEffect, useRef } from 'react';
 import { CopyPlus, ExternalLink, Undo2, ImageOff, AlertTriangle } from 'lucide-react';
 import type { DuplicateProductInfo } from '../../services/api/products';
 import { resolveApiAssetUrl } from '../../services/api/client';
+import { CANONICAL_TO_PICKER, CATEGORIES } from '../../domain/catalog/productAdd/categoryFields';
 
 export interface DuplicateProductModalProps {
   /** The 409 `existing` payload. */
@@ -43,6 +44,17 @@ function rupees(v: number | null | undefined): string {
     : `₹${Number(v).toLocaleString('en-IN')}`;
 }
 
+/** A category as the picker names it ('Wrist Watch', 'Clock'), so the popup,
+ *  the hint and the category tiles say one thing. */
+function pickerName(category: unknown): string {
+  const raw = String(category || '').toUpperCase();
+  const code = CANONICAL_TO_PICKER[raw] || raw;
+  return (
+    CATEGORIES.find((c) => c.code === code)?.name ||
+    (raw ? raw.toLowerCase().replace(/_/g, ' ') : 'another category')
+  );
+}
+
 /** Small active/draft/inactive status note for the existing row. */
 function statusNote(info: DuplicateProductInfo): { text: string; tone: 'ok' | 'warn' } {
   if (info.provisional) {
@@ -54,7 +66,7 @@ function statusNote(info: DuplicateProductInfo): { text: string; tone: 'ok' | 'w
   if (info.discarded_draft) {
     // Same kind of product: the server already brought it back (provisional
     // above). Another kind: say how to bring it back, never a dead "archived".
-    const kind = String(info.category || 'another category').toLowerCase().replace(/_/g, ' ');
+    const kind = pickerName(info.category);
     return {
       text: `A discarded draft, ordered before as ${kind} — choose ${kind} as the category to bring it back`,
       tone: 'warn',
@@ -78,7 +90,11 @@ export function DuplicateProductModal({
   // Audit C3: a manager's typed-in draft is not "a product to add a variant
   // to" -- it is THE product, waiting to be finished. Lead there.
   const finishDraft = Boolean(info.provisional);
-  const onPrimary = finishDraft ? onOpenExisting : onAddVariant;
+  // A discarded draft typed as another kind: neither a variant of it nor the
+  // stock list (it is in neither) -- the only way on is back, to choose its
+  // kind (the hint offers no link for it either).
+  const discardedOther = Boolean(info.discarded_draft) && !finishDraft;
+  const onPrimary = discardedOther ? onClose : finishDraft ? onOpenExisting : onAddVariant;
 
   // Keyboard contract: Enter = default action (add variant), Esc = go back.
   // Bound on window so it works no matter where focus sits; the parent form's
@@ -186,6 +202,20 @@ export function DuplicateProductModal({
           </div>
 
           {/* Actions */}
+          {discardedOther ? (
+            <div className="mt-4">
+              <button
+                ref={primaryRef}
+                type="button"
+                onClick={onClose}
+                className="btn-primary w-full flex items-center justify-center gap-2"
+              >
+                <Undo2 className="w-4 h-4" />
+                Go back and choose {pickerName(info.category)}
+                <kbd className="qa-kbd ml-1">Enter</kbd>
+              </button>
+            </div>
+          ) : (
           <div className="mt-4 space-y-2">
             <button
               ref={primaryRef}
@@ -220,6 +250,7 @@ export function DuplicateProductModal({
               Go back <kbd className="qa-kbd ml-1">Esc</kbd>
             </button>
           </div>
+          )}
         </div>
       </div>
     </div>
