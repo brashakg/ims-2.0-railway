@@ -248,8 +248,8 @@ def release_held_receipts(product_id: str) -> List[dict]:
     shop's store manager to void or accept -- a person decides, not the
     cataloguer's save. The receipt's lines within the order still go on the
     shelf."""
-    grn_repo = get_grn_repository()
     try:
+        grn_repo = get_grn_repository()
         held = held_receipts(product_id)
     except Exception as exc:  # noqa: BLE001
         logger.error("[VENDOR] held-receipt lookup for %s failed: %s", product_id, exc)

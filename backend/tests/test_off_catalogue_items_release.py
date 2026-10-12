@@ -5175,3 +5175,15 @@ def test_r8_a_draft_ordered_again_at_a_new_mrp_shows_it_in_the_catalogue(world):
         f"M15: revived at MRP 3290, the spine reads {world.product(draft_id)['mrp']}, "
         f"the catalogue {(twin.get('pricing') or {}).get('mrp')}",
     )
+
+
+def test_merge_a_release_that_cannot_reach_the_receipts_never_undoes_the_save(monkeypatch):
+    # Merging main (#1169's test world has no receipts collection): the
+    # release is fail-soft by contract -- the catalogue save stands and the
+    # units wait for 'Add to stock' -- so a receipts store it cannot reach
+    # answers 'nothing released', never an error out of PUT /products.
+    def unreachable():
+        raise AttributeError("no 'grns' on this connection")
+
+    monkeypatch.setattr(_grn_accept, "get_grn_repository", unreachable)
+    assert _grn_accept.release_held_receipts("P-ANY") == []
