@@ -83,9 +83,10 @@ def bill_fy(bill_date, received=None) -> Optional[int]:
 def bill_key(number, bill_date, received=None) -> Optional[str]:
     """A bill's identity under GST rule 46 -- its financial year and its folded
     number ('2026-27|GOINV9007'); the bare folded number when no year can be
-    read. None when the bill has no number. The receipts' unique index keys on
-    it (grns.vendor_invoice_no_norm), and the bills' with the typed dealer
-    appended (vendor_bills.bill_number_key)."""
+    read. None when the bill has no number. With the seller (vendor_id) it is
+    the key of both atomic twins of the same-bill rule: the receipts'
+    uniq_std_vendor_invoice_store (grns.vendor_invoice_no_norm) and the bills'
+    uniq_vendor_bill_number_key (vendor_bills.bill_number_key)."""
     norm = normalize_invoice_no(number)
     if not norm:
         return None
@@ -93,22 +94,20 @@ def bill_key(number, bill_date, received=None) -> Optional[str]:
     return f"{fy}-{str(fy + 1)[-2:]}|{norm}" if fy is not None else norm
 
 
-def same_bill(mine: dict, theirs: dict, find_vendor) -> bool:
+def same_bill(mine: dict, theirs: dict) -> bool:
     """THE same-bill rule of every door that records a supplier's bill: the
     receiving door (vendors.grn._find_duplicate_receipt) and both bill doors
-    (the line-detail purchase invoice and the header-only vendor bill). Each
-    side is {"no", "fy", "po_id", "vendor_id", "dealer_name"}. Two are one bill
-    when the case/punctuation-folded numbers match and
+    (purchase_invoices.find_duplicate_bill, for the line-detail purchase
+    invoice and the header-only vendor bill). Each side is {"no", "fy",
+    "po_id", "vendor_id"}. Two are one bill when the case/punctuation-folded
+    numbers match and
       * they name the same purchase order (one order's delivery under one
         number, whatever the dates read -- a receipt stamped with the day it
         arrived must not slip into the next year at midnight on 31 March), or
-      * they fall in the same financial year (GST rule 46: serials restart
-        each year; an unknown year matches any) AND come from the same seller:
-        the same supplier record when both name one, else a typed dealer's
-        name folded against the other's typed name or its supplier's trade /
-        legal name (find_vendor(vendor_id) -> the supplier row). Two suppliers
-        on file are compared by record only: two GSTINs trading under one name
-        are two sellers with two serials."""
+      * they come from the same seller -- the same supplier record (a walk-in
+        dealer is added as one, owner 2026-10-12) -- in the same financial
+        year (GST rule 46: serials restart each year; an unknown year matches
+        any). Two suppliers on file are two sellers with two serials."""
     norm = normalize_invoice_no(mine.get("no"))
     if not norm or normalize_invoice_no(theirs.get("no")) != norm:
         return False
@@ -117,20 +116,7 @@ def same_bill(mine: dict, theirs: dict, find_vendor) -> bool:
     fy, their_fy = mine.get("fy"), theirs.get("fy")
     if fy is not None and their_fy is not None and fy != their_fy:
         return False
-    vid, their_vid = mine.get("vendor_id"), theirs.get("vendor_id")
-    if vid and their_vid:
-        return vid == their_vid
-
-    def names(vendor_id, typed) -> set:
-        try:
-            v = (find_vendor(vendor_id) if vendor_id else None) or {}
-        except Exception:  # noqa: BLE001 - fail-soft: the typed name still counts
-            v = {}
-        out = {normalize_invoice_no(n) for n in (v.get("trade_name"), v.get("legal_name"), typed)}
-        out.discard("")
-        return out
-
-    return bool(names(vid, mine.get("dealer_name")) & names(their_vid, theirs.get("dealer_name")))
+    return bool(mine.get("vendor_id")) and mine.get("vendor_id") == theirs.get("vendor_id")
 
 
 def _f(v) -> float:

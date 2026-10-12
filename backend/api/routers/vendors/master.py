@@ -8,6 +8,7 @@ from ._shared import (
     Query,
     _VENDOR_ROLES,
     _get_db,
+    _normalize_invoice_no,
     datetime,
     derive_vendor_state,
     get_audit_repository,
@@ -86,6 +87,29 @@ async def create_vendor(
                 raise HTTPException(
                     status_code=400, detail="Vendor with this GSTIN already exists"
                 )
+        else:
+            # A supplier with no GSTIN is known by its name alone. A second
+            # record under a name already on file (a walk-in dealer quick-added
+            # at receiving, owner 2026-10-12, who was on the list) made one
+            # seller two -- each half's bill numbers checked only against
+            # itself, so one bill could be booked twice.
+            # ponytail: scans every vendor; index a folded name if the list
+            # ever grows to thousands.
+            def names(v) -> set:
+                trade = _normalize_invoice_no(v.get("trade_name"))
+                return {trade, _normalize_invoice_no(v.get("legal_name"))} - {""}
+
+            mine = names(vendor.model_dump())
+            for v in vendor_repo.find_many({}, limit=10_000) or []:
+                if mine & names(v):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"A supplier named '{v.get('trade_name') or v.get('legal_name')}' "
+                            "is already on file - pick it from the supplier list (add "
+                            "the town to the name if this is a different dealer)."
+                        ),
+                    )
 
         state_code, state_name = derive_vendor_state(vendor.gstin, vendor.state)
         vendor_repo.create(

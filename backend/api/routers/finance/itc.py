@@ -91,11 +91,15 @@ class Gstr2bRow(BaseModel):
     invoice_no: Optional[str] = None
     taxable: Optional[float] = 0
     tax: Optional[float] = 0
+    # YYYY-MM-DD as on the portal row: its financial year keys the bill.
+    invoice_date: Optional[str] = None
 
 
 class Gstr2bReconcileBody(BaseModel):
     rows: List[Gstr2bRow] = Field(default_factory=list)
     as_of: Optional[str] = None
+    # The 2B's return period, YYYY-MM: the bills compared are that period's.
+    period: Optional[str] = None
 
 
 def _book_rows_from_db(db) -> List[dict]:
@@ -106,7 +110,11 @@ def _book_rows_from_db(db) -> List[dict]:
     17(5)-blocked one -- is neither "matched (claim)" nor "ITC at risk", and
     when its supplier filed it, it is its own "booked, no credit claimed"
     line that answers that 2B row (never "not booked - book then claim").
-    A draft / cancelled bill is not booked, so it answers nothing."""
+    A draft / cancelled bill is not booked, so it answers nothing.
+
+    Each bill reaches the reconciler under the GSTIN it was booked with (both
+    bill doors stamp vendor_gstin; none for an unregistered supplier); only a
+    legacy bill without that field reads its supplier's GSTIN on file."""
     gstin_by_vendor: Dict[str, str] = {}
     try:
         for v in db.get_collection("vendors").find(
@@ -123,7 +131,11 @@ def _book_rows_from_db(db) -> List[dict]:
             rows.append(
                 {
                     "claims_credit": _itc_eligible_bill(b),
-                    "gstin": gstin_by_vendor.get(b.get("vendor_id")),
+                    "gstin": (
+                        b.get("vendor_gstin")
+                        if "vendor_gstin" in b
+                        else gstin_by_vendor.get(b.get("vendor_id"))
+                    ),
                     "invoice_no": b.get("bill_number"),
                     "taxable": b.get("taxable_amount"),
                     "tax": b.get("tax_amount"),
@@ -150,9 +162,11 @@ async def gstr2b_reconcile(
     rows = [r.model_dump() for r in body.rows]
     db = _get_db()
     if db is None:
-        return itc_reconcile.reconcile_gstr2b([], rows, as_of_iso=body.as_of)
+        return itc_reconcile.reconcile_gstr2b(
+            [], rows, as_of_iso=body.as_of, period=body.period
+        )
     return itc_reconcile.reconcile_gstr2b(
-        _book_rows_from_db(db), rows, as_of_iso=body.as_of
+        _book_rows_from_db(db), rows, as_of_iso=body.as_of, period=body.period
     )
 
 
@@ -209,7 +223,9 @@ async def itc_export_csv(
     rows = [r.model_dump() for r in body.rows]
     db = _get_db()
     book_rows = _book_rows_from_db(db) if db is not None else []
-    recon = itc_reconcile.reconcile_gstr2b(book_rows, rows, as_of_iso=body.as_of)
+    recon = itc_reconcile.reconcile_gstr2b(
+        book_rows, rows, as_of_iso=body.as_of, period=body.period
+    )
     bucket_rows = recon.get(bucket) or []
     headers = _ITC_CSV_HEADERS[bucket]
 

@@ -136,14 +136,36 @@ def mask_cost_list(docs: List[dict], user: dict, context: str = "default") -> Li
 _RECEIPT_LINE_COST_FIELDS = _ALL_MASKED | {"unit_price"}
 
 
+# What a goods receipt shows outside the purchase roles -- the barcode trace
+# is open to every signed-in role: when and where it came in, what and how
+# many. Never who sold it or for which order, the bill number, the bill photo
+# (file id / hash) or the accept lock (owner ruling 2026-10-12). Allow-lists,
+# so a field added later stays hidden until someone lists it here.
+_RECEIPT_KEYS = (
+    "grn_id", "grn_number", "grn_subtype", "store_id", "status",
+    "received_at", "accepted_at", "created_at",
+    "total_received", "total_accepted", "total_rejected",
+)
+_RECEIPT_ITEM_KEYS = (
+    "product_id", "product_name", "sku", "received_qty", "accepted_qty",
+    "rejected_qty", "batch_code", "lot_number", "expiry_date", "location_code",
+)
+
+
 def mask_receipt(grn: dict, user: dict) -> dict:
-    """The one cost rule on a goods receipt: unless the caller may see cost,
-    a copy of the receipt without its cost fields and without the price paid
-    on each of its lines. Never edits `grn` (see mask_cost). Every read that
-    returns a receipt -- GET /vendors/grn, GET /vendors/grn/{id}, the barcode
-    trace -- goes through this."""
+    """The one rule on a goods receipt. The purchase roles read who sold it,
+    the bill and the bill photo; anyone else only _RECEIPT_KEYS /
+    _RECEIPT_ITEM_KEYS. Unless the caller may see cost, a copy also without
+    its cost fields and without the price paid on each of its lines. Never
+    edits `grn` (see mask_cost). Every read that returns a receipt -- GET
+    /vendors/grn, GET /vendors/grn/{id}, the barcode trace -- goes through
+    this."""
     if not isinstance(grn, dict) or can_see_cost(user):
         return grn
+    if not can_see_cost(user, "purchase"):
+        out = _pick(grn, _RECEIPT_KEYS)
+        out["items"] = [_pick(it, _RECEIPT_ITEM_KEYS) for it in grn.get("items") or []]
+        return out
     out = mask_cost(grn, user)
     out["items"] = [
         {k: v for k, v in it.items() if k not in _RECEIPT_LINE_COST_FIELDS}

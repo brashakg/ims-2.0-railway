@@ -19,7 +19,7 @@ from ._shared import (
     require_roles,
     router,
 )
-from .gst import _promote_cost_from_rate
+from .gst import WALK_IN_COST_SOURCE, _promote_cost_from_rate
 from .numbering import (
     _cumulative_received_by_product,
     _grn_barcode,
@@ -382,17 +382,26 @@ def _accept_grn_claimed(
                 line_cost = po_unit_price.get(product_id, 0.0)
             cost_fields = {}
             if line_cost and line_cost > 0:
+                # A walk-in buy's price is labelled as one (and, as that
+                # source, is the product's cost from now on -- the latest price
+                # paid wins); a PO receipt's is the PO price.
+                source = (
+                    WALK_IN_COST_SOURCE
+                    if grn.get("grn_subtype") == GRN_SUBTYPE_NO_PO
+                    else "GRN_PO"
+                )
                 cost_fields = {
                     "unit_cost": round(line_cost, 2),
                     "cost_price": round(line_cost, 2),
-                    "cost_source": "GRN_PO",
+                    "cost_source": source,
                 }
                 # Hub Phase 2 hero: receiving the goods is where the real cost
                 # is confirmed. Same shared promote the PO create path uses --
-                # fills only a MISSING cost, then atomically restamps so a DRAFT
-                # whose only gap was cost_price becomes ACTIVE right here.
+                # fills a MISSING cost (or one its source outranks), then
+                # atomically restamps so a DRAFT whose only gap was cost_price
+                # becomes ACTIVE right here.
                 _promote_cost_from_rate(
-                    product_id, prod, line_cost, "GRN_PO", product_repo
+                    product_id, prod, line_cost, source, product_repo
                 )
 
             # Hub Phase 2: only mint sellable AVAILABLE stock for a CATALOG-

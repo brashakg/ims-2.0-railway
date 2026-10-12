@@ -4,8 +4,9 @@ Owner audit row C7: the only way to put a cash purchase from a local dealer on
 the shelf is to call it a "Delivery Challan" on the older receiving screen. It
 asks for no price and no bill photo, the units land with no cost at all, and
 accounts get no task. Owner ruling D14 (2026-09-29): a "Bought without PO"
-receipt -- supplier or walk-in dealer name, items, quantities, each item's
-cost, the bill number/date if there is one, the bill photo, expiry -- that puts
+receipt -- the supplier (a walk-in dealer not on the list is quick-added as
+one, owner 2026-10-12), items, quantities, each item's cost, the bill
+number/date if there is one, the bill photo, expiry -- that puts
 the units on the shelf through the SAME receive/accept door as a PO receipt,
 and books NO input tax credit: GSTR-3B and the ITC register never count it.
 The receipt shows in the receipts list and on Movements labelled "Bought
@@ -14,20 +15,22 @@ shared receiving gate, which #1165 narrows for every kind of receipt at once.)
 
 THE CONTRACT THESE TESTS PIN:
   * POST /vendors/grn with grn_subtype "NO_PO": no po_id; vendor_id (a supplier
-    on file) OR dealer_name (typed walk-in dealer); vendor_invoice_no /
+    on file -- a typed dealer name alone is refused); vendor_invoice_no /
     vendor_invoice_date optional; every line carries unit_price > 0 (the cost);
     expiry_date per line as on any receipt; the bill photo
     (attachment_file_id) is required, by the same document gate as a PO
-    receipt. Stored as grn_subtype "NO_PO" (+ dealer_name). A cost typed on a
-    PO receipt's line is dropped: that receipt is costed at the order's price.
+    receipt. Stored as grn_subtype "NO_PO". A cost typed on a PO receipt's
+    line is dropped: that receipt is costed at the order's price.
   * POST /vendors/grn/{id}/accept is the ONE minting door: units are
-    source_type GRN, carry the line's unit_price as unit_cost/cost_price and
-    the line's expiry; accounts get a "book the bill" task.
+    source_type GRN, carry the line's unit_price as unit_cost/cost_price
+    (cost_source GRN_WALKIN, which becomes the product's cost: the latest
+    price paid wins) and the line's expiry; accounts get a "book the bill"
+    task.
   * A bill booked against it -- line-detail purchase-invoice door OR the
     header-only AP bill door -- is stored itc_eligible False whatever the client
     sent, so the ITC register, /gst/summary and GSTR-3B Table 4 never count it.
   * GET /vendors/grn?grn_subtype=NO_PO lists only these receipts, naming the
-    dealer; the Movements ledger labels them "Bought without PO".
+    supplier; the Movements ledger labels them "Bought without PO".
 
 Engine: mongomock behind the real repositories (CI installs it, #1168).
 No emoji (Windows cp1252).
@@ -72,6 +75,7 @@ ENTITY = "ENT-NOPO"
 SHOP_GSTIN = "20AABCB1234C1ZS"  # Jharkhand (20), valid checksum
 DEALER = "V-DEALER"
 DEALER_GSTIN = "20AACCD5678E1ZX"  # same state -> CGST+SGST on the bill
+SHARMA = "V-SHARMA"  # a walk-in dealer quick-added as a supplier: no GSTIN
 FRAME = "P-FR-NOPO"
 LENS = "P-CL-NOPO"
 MONTH = "2026-09"
@@ -202,6 +206,18 @@ def world(monkeypatch):
             "state": "Jharkhand",
             "state_code": "20",
             "credit_days": 0,
+            "is_active": True,
+        }
+    )
+    db.vendors.insert_one(
+        {
+            "vendor_id": SHARMA,
+            "legal_name": "Sharma Optical",
+            "trade_name": "Sharma Optical",
+            "gstin": None,
+            "gstin_status": "UNREGISTERED",
+            "state": "Jharkhand",
+            "state_code": "20",
             "is_active": True,
         }
     )
@@ -382,18 +398,55 @@ def test_c7_no_po_receipt_needs_the_bill_photo(world):
     assert world["db"].grns.count_documents({}) == 0
 
 
-def test_c7_walk_in_dealer_by_name_and_someone_must_be_named(world):
+def test_c7_a_typed_dealer_name_is_no_seller(world):
+    """Owner ruling 2026-10-12: a walk-in dealer not on file is quick-added as
+    a supplier; a receipt naming a typed dealer only (round 4's dealer_name)
+    is refused -- its bill had no supplier to book under and its 2B row no
+    GSTIN to answer. The supplier picked is the seller."""
     http = world["as_"](MANAGER)
-    by_name = _no_po_body(world, vendor_id=None, dealer_name="Sharma Optical, Bank More")
-    res = http.post("/vendors/grn", json=by_name)
+    for nobody in (
+        _no_po_body(world, vendor_id=None, dealer_name="Sharma Optical, Bank More"),
+        _no_po_body(world, vendor_id=None),
+    ):
+        res = http.post("/vendors/grn", json=nobody)
+        assert res.status_code == 422, res.text
+        assert "added as a supplier" in res.text
+    assert world["db"].grns.count_documents({}) == 0
+    res = http.post("/vendors/grn", json=_walk_in_body(world))
     assert res.status_code == 201, res.text
     grn = world["db"].grns.find_one({"grn_id": res.json()["grn_id"]}, {"_id": 0})
-    assert grn["dealer_name"] == "Sharma Optical, Bank More"
-    assert not grn.get("vendor_id")
+    assert grn["vendor_id"] == SHARMA and "dealer_name" not in grn
 
-    nobody = _no_po_body(world, vendor_id=None)
-    res = http.post("/vendors/grn", json=nobody)
-    assert res.status_code == 422, res.text
+
+def test_c7_a_dealer_on_file_is_not_added_twice(world):
+    """The quick-add goes through the one vendor create door, which refuses a
+    second unregistered supplier under a name already on file (folded, trade
+    or legal) -- one seller as two records had each record's bill numbers
+    checked only against itself. A GSTIN makes a registration of its own."""
+    http = world["as_"](MANAGER)
+
+    def add(name, gstin=None):
+        return http.post(
+            "/vendors",
+            json={
+                "legal_name": name,
+                "trade_name": name,
+                "gstin_status": "REGISTERED" if gstin else "UNREGISTERED",
+                "gstin": gstin,
+                "address": "",
+                "city": "Dhanbad",
+                "state": "20",
+                "mobile": "9800000000",
+            },
+        )
+
+    for twin in ("Bank More Optical", "bank more optical traders", "SHARMA  OPTICAL."):
+        res = add(twin)
+        assert res.status_code == 400, (twin, res.text)
+        assert "already on file" in res.text
+    assert add("Sharma Optical Pune").status_code == 201
+    assert add("Bank More Optical", gstin="20AABCB9999C1ZO").status_code == 201
+    assert world["db"].vendors.count_documents({}) == 4
 
 
 def test_c7_every_line_must_carry_its_cost(world):
@@ -430,14 +483,15 @@ def test_c7_a_cost_must_be_a_real_price(world):
 
 
 def _walk_in_body(world, **over):
-    """The panel's probe body: a walk-in dealer by name only, no vendor_id."""
-    return _no_po_body(world, vendor_id=None, dealer_name="Sharma Optical", **over)
+    """A walk-in dealer's cash bill: the dealer quick-added as a supplier (no
+    GSTIN)."""
+    return _no_po_body(world, **{"vendor_id": SHARMA, **over})
 
 
 def test_c7_the_same_walk_in_bill_cannot_go_on_the_shelf_twice(world):
-    """Panel probe: the identical dealer-only body posted twice (a retried
-    post after a lost response) gave 201 + 201, and accepting both minted 10
-    units for a 5-unit bill -- the vendor-keyed guard has no vendor to key on."""
+    """Panel probe: the identical walk-in body posted twice (a retried post
+    after a lost response) gave 201 + 201, and accepting both minted 10 units
+    for a 5-unit bill."""
     http = world["as_"](MANAGER)
     body = _walk_in_body(world)
     first = http.post("/vendors/grn", json=body)
@@ -453,9 +507,8 @@ def test_c7_the_same_walk_in_bill_cannot_go_on_the_shelf_twice(world):
 def test_c7_a_new_photo_of_the_same_dealer_bill_is_still_the_same_bill(world):
     http = world["as_"](MANAGER)
     assert http.post("/vendors/grn", json=_walk_in_body(world)).status_code == 201
-    # Same dealer typed differently, same bill number, a fresh upload.
-    twin = _no_po_body(world, vendor_id=None, dealer_name="sharma  optical.")
-    assert http.post("/vendors/grn", json=twin).status_code == 409
+    # Same dealer, same bill number, a fresh upload.
+    assert http.post("/vendors/grn", json=_walk_in_body(world)).status_code == 409
     # A different bill from the same dealer is a different purchase.
     other = _walk_in_body(world, vendor_invoice_no="CASH-78")
     assert http.post("/vendors/grn", json=other).status_code == 201
@@ -537,8 +590,8 @@ def test_c7_the_startup_index_copies_equal_the_schema(world):
 def test_c7_the_same_bill_photo_uploaded_again_is_the_same_bill(world):
     """Panel probe: a dealer's cash bill with NO number, posted again after a
     page reload with the same image uploaded again (a new file id): 201, 201
-    -- the guard compared file ids only, and the dealer + number check has no
-    number to go on. The upload door's sha256 is the bill's identity."""
+    -- the guard compared file ids only, and the supplier + number check has
+    no number to go on. The upload door's sha256 is the bill's identity."""
     http = world["as_"](MANAGER)
 
     def upload():
@@ -559,25 +612,6 @@ def test_c7_the_same_bill_photo_uploaded_again_is_the_same_bill(world):
     assert world["db"].grns.count_documents({}) == 1
 
 
-def test_c7_a_supplier_picked_or_typed_by_name_is_the_same_seller(world):
-    """Panel probe: receipt 1 picked the supplier from the list, receipt 2
-    typed the same supplier's name; same bill number, fresh photos: 201, 201
-    in either order -- 10 units on the shelf for a 5-unit bill."""
-    http = world["as_"](MANAGER)
-    assert http.post("/vendors/grn", json=_no_po_body(world)).status_code == 201
-    typed = _no_po_body(world, vendor_id=None, dealer_name="Bank More Optical")
-    assert http.post("/vendors/grn", json=typed).status_code == 409
-    # The other order, with the legal name typed.
-    typed = _no_po_body(world, vendor_id=None, dealer_name="bank more optical traders", vendor_invoice_no="CASH-88")
-    assert http.post("/vendors/grn", json=typed).status_code == 201
-    picked = _no_po_body(world, vendor_invoice_no="CASH-88")
-    assert http.post("/vendors/grn", json=picked).status_code == 409
-    # Another dealer's bill that happens to carry the same number is another purchase.
-    other = _no_po_body(world, vendor_id=None, dealer_name="Sharma Optical")
-    assert http.post("/vendors/grn", json=other).status_code == 201
-    assert world["db"].grns.count_documents({}) == 3
-
-
 SHOP_B = "BV-NOPO-02"
 MANAGER_B = {**MANAGER, "user_id": "u-mgr-b", "store_ids": [SHOP_B], "active_store_id": SHOP_B}
 
@@ -590,29 +624,19 @@ def _at_shop_b(world, **over):
 
 def test_c7_one_dealer_bill_is_one_receipt_in_every_shop(world):
     """Panel probe (round 3 fixed it inside one shop only): shop A receives
-    bill CASH-77 from supplier V-DEALER picked from the list; shop B posts the
-    same bill with the seller typed as 'Bank More Optical' (V-DEALER's trade
-    name) -> 201, while picked it was 409. Typed at A then picked at B was 201
-    too. One rule, every shop: the same seller however named, the same bill."""
+    bill CASH-77 from a supplier; shop B posting the same bill was 201. One
+    rule, every shop: the same supplier's bill is one receipt."""
     world["db"].stores.insert_one({"store_id": SHOP_B, "store_name": "BV No-PO Shop B", "store_type": "RETAIL", "entity_id": ENTITY, "is_active": True})
-    a, b = world["as_"](MANAGER), world["as_"]
-    assert a.post("/vendors/grn", json=_no_po_body(world)).status_code == 201
-    typed = _at_shop_b(world, vendor_id=None, dealer_name="Bank More Optical")
-    res = b(MANAGER_B).post("/vendors/grn", json=typed)
-    assert res.status_code == 409, res.text
-    assert res.json()["detail"]["code"] == "GRN_DUPLICATE"
-    picked = _at_shop_b(world)
-    assert b(MANAGER_B).post("/vendors/grn", json=picked).status_code == 409
-    # The other order: typed at A, picked at B.
-    typed_a = _no_po_body(world, vendor_id=None, dealer_name="bank more optical traders", vendor_invoice_no="CASH-88")
-    assert world["as_"](MANAGER).post("/vendors/grn", json=typed_a).status_code == 201
-    picked_b = _at_shop_b(world, vendor_invoice_no="CASH-88")
-    assert world["as_"](MANAGER_B).post("/vendors/grn", json=picked_b).status_code == 409
+    for seller in (DEALER, SHARMA):
+        assert world["as_"](MANAGER).post("/vendors/grn", json=_no_po_body(world, vendor_id=seller)).status_code == 201
+        res = world["as_"](MANAGER_B).post("/vendors/grn", json=_at_shop_b(world, vendor_id=seller))
+        assert res.status_code == 409, res.text
+        assert res.json()["detail"]["code"] == "GRN_DUPLICATE"
     assert world["db"].grns.count_documents({}) == 2
 
 
 def test_c7_a_bill_number_is_one_bill_per_financial_year(world):
-    """Panel probe: dealer 'Sharma Optical', bill '1' dated 2025-09-01 -> 201;
+    """Panel probe: walk-in dealer 'Sharma Optical', bill '1' dated 2025-09-01 -> 201;
     the same dealer's bill '1' a year on -> 409, though invoice serials
     restart every 1 April (GST rule 46). Inside one year it is the same bill."""
     http = world["as_"](MANAGER)
@@ -701,7 +725,7 @@ def test_c7_a_slipped_bill_year_is_refused_not_a_new_bill(world):
     for slipped in ("14/09/2026", "2027-09-14", "0202-09-14", "2062-09-14"):
         here = world["as_"](MANAGER).post("/vendors/grn", json=_walk_in_body(world, vendor_invoice_no="5", vendor_invoice_date=slipped))
         assert here.status_code == 422, (slipped, here.text)
-        body_b = _at_shop_b(world, vendor_id=None, dealer_name="Sharma Optical", vendor_invoice_no="5", vendor_invoice_date=slipped)
+        body_b = _at_shop_b(world, vendor_id=SHARMA, vendor_invoice_no="5", vendor_invoice_date=slipped)
         there = world["as_"](MANAGER_B).post("/vendors/grn", json=body_b)
         assert there.status_code == 422, (slipped, there.text)
     assert "start of GST" in here.text
@@ -728,9 +752,9 @@ def test_c7_a_voided_receipt_frees_its_bill(world):
 
 def test_c7_the_seller_named_must_be_a_real_one(world):
     """Panel probes: vendor_id 'NO-SUCH-VENDOR' -> 201 (the receipts list
-    showed no supplier and the bill could never be booked); dealer_name '...'
-    -> 201, and again with a new photo -> 201 (the seller key folded to
-    nothing). A line where nothing arrived is no purchase either."""
+    showed no supplier and the bill could never be booked); a typed
+    dealer_name '...' alone -> 201, and again with a new photo -> 201. A line
+    where nothing arrived is no purchase either."""
     http = world["as_"](MANAGER)
     ghost = http.post("/vendors/grn", json=_no_po_body(world, vendor_id="NO-SUCH-VENDOR"))
     assert ghost.status_code == 422, ghost.text
@@ -794,8 +818,8 @@ def _handler_gate(method, path):
 
 def test_c7_a_long_walk_in_history_never_hides_a_recent_bill(world):
     """Panel probe: the guard read the shop's first 500 walk-in receipts with
-    no sort -- the OLDEST -- so past 500 the same dealer + bill number posted
-    twice gave 201, 201."""
+    no sort -- the OLDEST -- so past 500 the same supplier + bill number
+    posted twice gave 201, 201."""
     world["db"].grns.insert_many(
         [
             {
@@ -803,7 +827,7 @@ def test_c7_a_long_walk_in_history_never_hides_a_recent_bill(world):
                 "grn_subtype": "NO_PO",
                 "store_id": STORE,
                 "status": "ACCEPTED",
-                "dealer_name": f"Old Dealer {n}",
+                "vendor_id": SHARMA,
                 "vendor_invoice_no": f"OLD-{n}",
                 "vendor_invoice_no_norm": f"OLD{n}",
                 "created_at": "2026-04-01T10:00:00",
@@ -864,6 +888,30 @@ def test_c7_accept_puts_units_on_the_shelf_at_what_was_paid(world):
     assert [u.get("cost_price") for u in frames] == [3100.0, 3100.0]
     assert [u.get("unit_cost") for u in lenses] == [420.0] * 3
     assert {u.get("expiry_date") for u in lenses} == {"2027-08-31"}
+    # Labelled as what it is (owner 2026-10-12): a walk-in price, not a PO's.
+    assert {u.get("cost_source") for u in units} == {"GRN_WALKIN"}
+
+
+def test_c7_the_latest_price_paid_is_the_product_cost(world):
+    """Owner ruling 2026-10-12: a walk-in buy's price updates the product's
+    cost price -- the LATEST PRICE PAID WINS -- through the same
+    cost-at-acceptance promote as a PO receipt, labelled GRN_WALKIN. It used
+    to fill only a missing cost (the catalogue's 3000 stood) and called
+    itself GRN_PO."""
+    db = world["db"]
+
+    def cost(pid):
+        prod = db.products.find_one({"product_id": pid})
+        return prod["cost_price"], prod.get("cost_source")
+
+    db.products.update_one({"product_id": LENS}, {"$set": {"cost_source": "GRN_PO"}})
+    _on_the_shelf(world)
+    assert cost(FRAME) == (3100.0, "GRN_WALKIN")
+    assert cost(LENS) == (420.0, "GRN_WALKIN")  # over a PO receipt's cost too
+    items = _no_po_body(world)["items"]
+    items[0]["unit_price"] = 3050.0
+    _on_the_shelf(world, vendor_invoice_no="CASH-78", items=items)
+    assert cost(FRAME) == (3050.0, "GRN_WALKIN")
 
 
 def test_c7_accept_sends_the_bill_to_accounts(world):
@@ -1138,39 +1186,86 @@ def test_c7_a_bill_on_the_shelf_books_under_its_own_number(world):
 
 
 def test_c7_two_walk_in_dealers_bill_one_are_two_bills(world):
-    """Panel probe: 'Sharma Optical' bill 1 and 'Gupta Optical' bill 1 are two
-    bills to the receipt rule; a typed dealer has no supplier record, so the
-    accountant books both under one picked supplier -- and the second was
-    refused 409. A walk-in dealer's bill is that dealer's, whichever supplier
-    stands in for them; the dealer is kept on the bill."""
+    """'Sharma Optical' bill 1 and 'Gupta Optical' bill 1 are two bills: each
+    dealer is its own supplier (quick-added at receiving), and each bill books
+    under the supplier its receipt names -- on either bill door."""
     _bill_index(world)
-    sharma = _on_the_shelf(world, vendor_id=None, dealer_name="Sharma Optical", vendor_invoice_no="1")
-    gupta = _on_the_shelf(world, vendor_id=None, dealer_name="Gupta Optical", vendor_invoice_no="1")
-    _line_bill(sharma, "1", "2026-09-14")
-    _header_bill(gupta, "1", "2026-09-14")
-    bills = {b["dealer_name"]: b for b in world["db"].vendor_bills.find({}, {"_id": 0})}
-    assert set(bills) == {"Sharma Optical", "Gupta Optical"}
-    assert {b["vendor_id"] for b in bills.values()} == {DEALER}
+    world["db"].vendors.insert_one({**world["db"].vendors.find_one({"vendor_id": SHARMA}, {"_id": 0}), "vendor_id": "V-GUPTA", "legal_name": "Gupta Optical", "trade_name": "Gupta Optical"})
+    sharma = _on_the_shelf(world, vendor_id=SHARMA, vendor_invoice_no="1")
+    gupta = _on_the_shelf(world, vendor_id="V-GUPTA", vendor_invoice_no="1")
+    _line_bill(sharma, "1", "2026-09-14", vendor=SHARMA)
+    _header_bill(gupta, "1", "2026-09-14", vendor="V-GUPTA")
+    bills = {b["vendor_id"]: b for b in world["db"].vendor_bills.find({}, {"_id": 0})}
+    assert set(bills) == {SHARMA, "V-GUPTA"}
+    assert {b["bill_number_key"] for b in bills.values()} == {"2026-27|1"}
+
+
+def test_c7_a_walk_in_bill_is_booked_once_under_its_supplier(world, monkeypatch):
+    """Panel probes 1 and 2 (round 5): supplier V-DEALER's INV-9 was billed;
+    a walk-in receipt from the same dealer with the number left blank then
+    booked INV-9 again under a stand-in supplier (accepted), and one dealer's
+    bill '1' booked under two stand-ins (a double payable of Rs 6510). The
+    seller is the receipt's supplier: its bill books under that supplier
+    only (any other is a vendor mismatch), and the same-bill rule reads that
+    supplier's bills by number and year on both bill doors -- refused by the
+    rule itself (index dropped), and by the index when the rule is raced."""
+    from fastapi import HTTPException
+
+    def refused(book):
+        with pytest.raises(HTTPException) as exc:
+            book()
+        return exc.value
+
+    # Probe 1: the supplier's own INV-9, then its walk-in receipt, no number.
+    po_bill = _on_the_shelf(world, vendor_invoice_no="INV-9")
+    _line_bill(po_bill, "INV-9", "2026-09-14")
+    walk_in = _on_the_shelf(world, vendor_invoice_no=None)
+    for book in (
+        lambda: _line_bill(walk_in, "INV-9", "2026-09-14"),
+        lambda: _header_bill(walk_in, "inv/9", "2026-09-14"),
+    ):
+        err = refused(book)
+        assert err.status_code == 409 and "already recorded" in str(err.detail), err.detail
+    for book in (
+        lambda: _line_bill(walk_in, "INV-9", "2026-09-14", vendor=SHARMA),
+        lambda: _header_bill(walk_in, "INV-9", "2026-09-14", vendor=SHARMA),
+    ):
+        err = refused(book)
+        assert err.status_code == 409 and err.detail["code"] == "grn_vendor_mismatch", err.detail
+    # Probe 2: one dealer's bill '1' on two receipts (the second unnumbered).
+    first = _on_the_shelf(world, vendor_id=SHARMA, vendor_invoice_no="1")
+    second = _on_the_shelf(world, vendor_id=SHARMA, vendor_invoice_no=None)
+    _header_bill(first, "1", "2026-09-14", vendor=SHARMA)
+    err = refused(lambda: _line_bill(second, "1", "2026-09-20", vendor=SHARMA))
+    assert err.status_code == 409, err.detail
+    assert world["db"].vendor_bills.count_documents({}) == 2
+    # Raced (the look-up misses the rival booking): the atomic twin refuses
+    # the same supplier's key on either door, as the same 409.
+    _bill_index(world)
+    monkeypatch.setattr(pi, "find_duplicate_bill", lambda *a, **k: None)
+    for book in (
+        lambda: _line_bill(second, "1", "2026-09-20", vendor=SHARMA),
+        lambda: _header_bill(second, "1", "2026-09-20", vendor=SHARMA),
+    ):
+        err = refused(book)
+        assert err.status_code == 409 and "already recorded" in str(err.detail), err.detail
+    assert world["db"].vendor_bills.count_documents({}) == 2
 
 
 def test_c7_the_same_bill_rule_is_one_function():
     """The rule's cases, through the one implementation every door calls."""
     from api.services.purchase_invoice_engine import same_bill
 
-    vendors = {"V1": {"trade_name": "Bank More Optical", "legal_name": "Bank More Optical Traders"}}
-    find = vendors.get
+    def bill(no="INV-9", fy=2026, po=None, vid="V1"):
+        return {"no": no, "fy": fy, "po_id": po, "vendor_id": vid}
 
-    def bill(no="INV-9", fy=2026, po=None, vid="V1", dealer=None):
-        return {"no": no, "fy": fy, "po_id": po, "vendor_id": vid, "dealer_name": dealer}
-
-    assert same_bill(bill(), bill(no="inv/9"), find)
-    assert not same_bill(bill(), bill(fy=2025), find)
-    assert same_bill(bill(fy=None), bill(fy=2025), find)  # an unknown year matches
-    assert same_bill(bill(po="PO-B", fy=2025), bill(po="PO-B", fy=2026), find)
-    assert not same_bill(bill(), bill(vid="V2"), find)
-    assert same_bill(bill(), bill(vid=None, dealer="bank more optical traders"), find)
-    assert not same_bill(bill(vid=None, dealer="Sharma Optical"), bill(vid=None, dealer="Gupta Optical"), find)
-    assert not same_bill(bill(no=""), bill(no=""), find)
+    assert same_bill(bill(), bill(no="inv/9"))
+    assert not same_bill(bill(), bill(fy=2025))
+    assert same_bill(bill(fy=None), bill(fy=2025))  # an unknown year matches
+    assert same_bill(bill(po="PO-B", fy=2025), bill(po="PO-B", fy=2026))
+    assert not same_bill(bill(), bill(vid="V2"))
+    assert not same_bill(bill(vid=None), bill(vid=None))  # no seller, no match
+    assert not same_bill(bill(no=""), bill(no=""))
 
 
 def test_d14_naming_a_challan_too_cannot_smuggle_the_credit_back(world):
@@ -1255,6 +1350,10 @@ def test_c7_the_bill_draft_carries_the_price_paid(world):
     db = world["db"]
     _seed_receipt(db, grn_id="GRN-NOPO-0201", subtype="NO_PO", items=_walk_in_lines())
     draft = _run(pi.draft_invoice_from_grn("GRN-NOPO-0201", current_user=ACCOUNTANT))
+    # The booking form's supplier is the receipt's (owner 2026-10-12): the
+    # draft carries it, so the form opens filled (round 5: vendor_id None
+    # opened a locked, empty supplier box and Book stopped there).
+    assert draft["vendor_id"] == DEALER
     assert {ln["product_id"]: ln["unit_price"] for ln in draft["lines"]} == {
         FRAME: 3100.0,
         LENS: 420.0,
@@ -1291,23 +1390,17 @@ def test_c7_the_bill_is_held_to_the_price_paid(world):
 def test_c7_receipts_list_finds_and_names_bought_without_po(world):
     db = world["db"]
     _seed_receipt(db, grn_id="GRN-STD-0005", subtype="STANDARD", po_id="PO-5")
-    _seed_receipt(
-        db,
-        grn_id="GRN-NOPO-0006",
-        subtype="NO_PO",
-        vendor_id=None,
-        dealer_name="Sharma Optical, Bank More",
-    )
+    _seed_receipt(db, grn_id="GRN-NOPO-0006", subtype="NO_PO", vendor_id=SHARMA)
     res = world["as_"](MANAGER).get("/vendors/grn", params={"grn_subtype": "NO_PO"})
     assert res.status_code == 200, res.text
     rows = res.json()["grns"]
     assert [r["grn_id"] for r in rows] == ["GRN-NOPO-0006"]
-    assert rows[0]["vendor_name"] == "Sharma Optical, Bank More"
+    assert rows[0]["vendor_name"] == "Sharma Optical"
 
 
 def test_c7_counter_staff_never_read_what_was_paid(world):
-    """Panel probe: a no-PO receipt stores the cost per line and the dealer's
-    name, and both GRN reads were open to any logged-in user -- SALES_STAFF
+    """Panel probe: a no-PO receipt stores the cost per line and the dealer,
+    and both GRN reads were open to any logged-in user -- SALES_STAFF
     and CASHIER read unit_price [3100, 420] and 'Sharma Optical'. The reads
     are the purchase roles' (the same gate as #1161), store-scoped."""
     http = world["as_"](MANAGER)
@@ -1354,8 +1447,8 @@ def test_c7_what_was_paid_has_one_visibility_rule(world):
 
 
 def _walk_in_on_the_shelf(world):
-    """The panel's walk-in body (dealer typed by name) received and accepted;
-    returns the receipt id and one minted frame unit's barcode."""
+    """A walk-in dealer's bill received and accepted; returns the receipt id
+    and one minted frame unit's barcode."""
     http = world["as_"](MANAGER)
     created = http.post("/vendors/grn", json=_walk_in_body(world))
     assert created.status_code == 201, created.text
@@ -1372,11 +1465,34 @@ def test_c7_the_barcode_trace_shows_no_counter_what_was_paid(world):
     cost); what was paid goes through the one cost rule (cost_mask): the
     unit's cost through its "product" context (#1161: the managers read a
     product's per-unit cost, the counter never), each receipt line's price
-    paid through mask_receipt."""
+    paid through mask_receipt.
+
+    Owner ruling 2026-10-12: nor does a counter role read who sold it, the
+    bill number, the bill photo's file id / hash or the accept lock there
+    (SALES_STAFF read 'V-SHARMA', 'CASH-77' and the photo's sha256); the
+    managers and accounts still do, and the managers never what was paid."""
     from api.services.cost_mask import can_see_cost
 
     grn_id, barcode = _walk_in_on_the_shelf(world)
     url = f"/inventory/barcode/{barcode}/trace"
+    world["db"].grns.update_one({"grn_id": grn_id}, {"$set": {"accept_lock_token": "tok-1", "accept_lock_by": "u-mgr"}})
+    stored = world["db"].grns.find_one({"grn_id": grn_id})
+    secrets = (SHARMA, "CASH-77", "CASH77", stored["attachment_file_id"], stored["attachment_sha256"], "tok-1")
+    hidden = {"vendor_id", "vendor_name", "po_id", "po_number", "vendor_invoice_no", "vendor_invoice_no_norm", "attachment_file_id", "attachment_sha256", "attachment_filename", "accept_lock_token", "accept_lock_by"}
+    for role in ("SALES_STAFF", "CASHIER", "OPTOMETRIST", "WORKSHOP_STAFF", "CATALOG_MANAGER"):
+        counter = {"user_id": "u-counter", "roles": [role], "store_ids": [STORE], "active_store_id": STORE}
+        res = world["as_"](counter).get(url)
+        receipt = res.json()["purchase"][0]
+        assert receipt["grn_id"] == grn_id and receipt["grn_subtype"] == "NO_PO", (role, receipt)
+        assert [it["accepted_qty"] for it in receipt["items"]] == [2, 3], (role, receipt)
+        assert not hidden & set(receipt), (role, sorted(hidden & set(receipt)))
+        assert not [x for x in secrets if x in res.text], (role, res.text)
+    for role in ("STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT", "ADMIN"):
+        user = {"user_id": "u-buyer", "roles": [role], "store_ids": [STORE], "active_store_id": STORE}
+        receipt = world["as_"](user).get(url).json()["purchase"][0]
+        assert (receipt["vendor_id"], receipt["vendor_invoice_no"]) == (SHARMA, "CASH-77"), role
+        assert receipt["attachment_file_id"] == stored["attachment_file_id"], role
+        assert receipt["accept_lock_token"] == "tok-1", role
     for role in ("SALES_STAFF", "CASHIER", "OPTOMETRIST", "WORKSHOP_STAFF", "STORE_MANAGER", "AREA_MANAGER"):
         counter = {"user_id": "u-counter", "roles": [role], "store_ids": [STORE], "active_store_id": STORE}
         res = world["as_"](counter).get(url)
@@ -1422,3 +1538,178 @@ def test_c7_movements_label_bought_without_po(world):
     assert set(by_ref) == {"GRN-STD-0007", "GRN-NOPO-0008"}
     assert "Bought without PO" in by_ref["GRN-NOPO-0008"]["detail"]
     assert "Bought without PO" not in by_ref["GRN-STD-0007"]["detail"]
+
+
+def test_c7_the_barcode_trace_is_every_signed_in_roles(client):
+    """Decided rule (a): the trace is open to every signed-in role -- the
+    counter's barcode look-up (#1181) reads it, through the real RBAC
+    middleware (this file's own app has none). Narrowing its policy row to
+    the purchase roles 403'd every counter role with every other test green."""
+    import jwt
+    from datetime import timedelta
+
+    from api.routers import auth as auth_mod
+    from api.services import rbac_policy
+
+    template = "/api/v1/inventory/barcode/{barcode}/trace"
+    for role in rbac_policy.ALL_ROLES:
+        assert rbac_policy.check_access("GET", template, [role]), role
+    for role in ("SALES_STAFF", "CASHIER", "OPTOMETRIST", "WORKSHOP_STAFF"):
+        token = jwt.encode(
+            {
+                "sub": "u-trace",
+                "user_id": "u-trace",
+                "username": "trace",
+                "roles": [role],
+                "store_ids": [STORE],
+                "active_store_id": STORE,
+                "exp": datetime.utcnow() + timedelta(hours=1),
+            },
+            auth_mod.SECRET_KEY,
+            algorithm=auth_mod.ALGORITHM,
+        )
+        res = client.get(
+            "/api/v1/inventory/barcode/BV-NO-SUCH-UNIT/trace",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert res.status_code == 200, (role, res.text)
+        assert res.json()["barcode"] == "BV-NO-SUCH-UNIT"
+
+
+def _return_of(world, return_id, stock_id):
+    """A vendor return whose unit `stock_id` went back (rtv_vendor_id linked,
+    as POST /vendor-returns links a quarantined unit)."""
+    db = world["db"]
+    db.stock_units.update_one({"stock_id": stock_id}, {"$set": {"status": "QUARANTINED", "rtv_vendor_id": return_id}})
+    unit = db.stock_units.find_one({"stock_id": stock_id})
+    return {"return_id": return_id, "vendor_id": DEALER, "store_id": STORE}, unit["product_id"]
+
+
+def test_r5_a_walk_in_return_reverses_no_credit(world):
+    """Owner ruling 2026-10-12: a vendor return of goods bought without a PO
+    carries NO GST reversal -- their bill claimed no credit (D14), so the
+    debit note reversing Input CGST / SGST credited a ledger never debited.
+    It carries the amount only, and asks the one credit rule
+    (org_validation.itc_claimable) per line, from the receipt the returned
+    unit came in on. A PO receipt's unit still reverses its credit."""
+    from api.services.rtv_debit_note import DebitNoteEngine, tally_build_debit_note_xml
+
+    db = world["db"]
+    walk_in = _on_the_shelf(world)  # V-DEALER is registered: only the receipt says "no credit"
+    _seed_receipt(db, grn_id="GRN-STD-0501", subtype="STANDARD", po_id="PO-501")
+    db.stock_units.insert_one({"stock_id": "SU-PO-1", "product_id": LENS, "source_type": "GRN", "source_id": "GRN-STD-0501", "store_id": STORE})
+    frame_unit = db.stock_units.find_one({"source_id": walk_in, "product_id": FRAME})["stock_id"]
+    vendor = db.vendors.find_one({"vendor_id": DEALER}, {"_id": 0})
+    seller = {"entity_id": ENTITY, "name": "BV Test Optical Pvt Ltd", "gstin": SHOP_GSTIN, "state_code": "20"}
+
+    def note(rtv, lines):
+        res = DebitNoteEngine(db).issue(rtv, vendor, actor="u-acct", seller=seller, lines=lines)
+        assert res["ok"], res
+        return res["debit_note"]
+
+    rtv, pid = _return_of(world, "VR-WALKIN", frame_unit)
+    walked = note(rtv, [{"product_id": pid, "product_name": "Acme Aviator", "quantity": 1, "unit_price": 3100.0}])
+    assert walked["totals"]["tax_paise"] == 0
+    assert walked["totals"]["grand_total_paise"] == walked["totals"]["taxable_paise"] == 310000
+    assert "Input CGST" not in tally_build_debit_note_xml(walked)
+
+    rtv, pid = _return_of(world, "VR-PO", "SU-PO-1")
+    po = note(rtv, [{"product_id": pid, "product_name": "Acme Daily", "quantity": 1, "unit_price": 400.0}])
+    assert po["totals"]["tax_paise"] == 4800  # 12% of Rs 400, reversed
+    assert "Input CGST" in tally_build_debit_note_xml(po)
+
+    # One return of both: each line by its own receipt.
+    db.stock_units.update_many({"stock_id": {"$in": [frame_unit, "SU-PO-1"]}}, {"$set": {"rtv_vendor_id": "VR-MIXED"}})
+    mixed = note(
+        {"return_id": "VR-MIXED", "vendor_id": DEALER, "store_id": STORE},
+        [
+            {"product_id": FRAME, "product_name": "Acme Aviator", "quantity": 1, "unit_price": 3100.0},
+            {"product_id": LENS, "product_name": "Acme Daily", "quantity": 1, "unit_price": 400.0},
+        ],
+    )
+    assert [ln["tax_paise"] for ln in mixed["lines"]] == [0, 4800]
+
+
+def _booked(db, bill_id, number, date, *, vendor=DEALER, gstin=DEALER_GSTIN, tax=310.0, credit=True):
+    """A booked bill as both bill doors store it."""
+    db.vendor_bills.insert_one(
+        {
+            "bill_id": bill_id,
+            "vendor_id": vendor,
+            "vendor_gstin": gstin,
+            "bill_number": number,
+            "bill_date": date,
+            "taxable_amount": 6200.0,
+            "tax_amount": tax,
+            "itc_eligible": credit,
+            "status": "OUTSTANDING",
+        }
+    )
+
+
+def _reconcile(rows, period=None):
+    body = fin_itc.Gstr2bReconcileBody(rows=[fin_itc.Gstr2bRow(**r) for r in rows], period=period)
+    return _run(fin_itc.gstr2b_reconcile(body, current_user=ADMIN))
+
+
+def test_c7_a_number_reused_next_year_never_answers_last_years_2b_row(world):
+    """Panel probe (round 5, problem 3): V-DEALER's INV-10 dated 2025-09-01
+    and INV-10 dated 2026-09-01 (Rs 310 credit each) against September 2026's
+    2B row INV-10 (Rs 310): matched=2, safe to claim 620 against the portal's
+    310. Last year's PO bill INV-9 (credit) and this year's walk-in INV-9 (no
+    credit) against one 2B row INV-9: reported both "safe to claim Rs 310" and
+    "booked, no credit". A bill is keyed by its financial year, the 2B row by
+    its own date's (else its return period's), and one row answers one bill;
+    a bill of an earlier period not in this 2B is not this return's risk."""
+    db = world["db"]
+    _booked(db, "B-10-OLD", "INV-10", "2025-09-01")
+    _booked(db, "B-10-NEW", "INV-10", "2026-09-01")
+    row = {"gstin": DEALER_GSTIN, "invoice_no": "INV-10", "taxable": 6200.0, "tax": 310.0}
+    for rows, period in (([row], "2026-09"), ([{**row, "invoice_date": "2026-09-01"}], None)):
+        out = _reconcile(rows, period)
+        assert [m["bill_id"] for m in out["matched"]] == ["B-10-NEW"], (period, out)
+        assert out["summary"]["itc_safe_to_claim"] == 310.0, out["summary"]
+    assert _reconcile([row], "2026-09")["only_in_books"] == []  # last year's: its own 2B
+    # No year on either side: still one row, one bill.
+    assert _reconcile([row])["summary"]["matched"] == 1
+    # Filed late: September 2026's 2B carries last year's INV-10 by its own date.
+    late = _reconcile([{**row, "invoice_date": "2025-09-01"}], "2026-09")
+    assert [m["bill_id"] for m in late["matched"]] == ["B-10-OLD"], late
+    assert [b["bill_id"] for b in late["only_in_books"]] == ["B-10-NEW"]
+
+    _booked(db, "B-9-PO", "INV-9", "2025-09-01")
+    _booked(db, "B-9-WALKIN", "INV-9", "2026-09-14", credit=False)
+    out = _reconcile([{**row, "invoice_no": "INV-9"}], "2026-09")
+    assert [b["bill_id"] for b in out["booked_no_credit"]] == ["B-9-WALKIN"], out
+    assert out["matched"] == [] and out["summary"]["itc_safe_to_claim"] == 0.0, out
+    assert out["only_in_2b"] == []
+    assert [b["bill_id"] for b in out["only_in_books"]] == ["B-10-NEW"]  # this period's, not filed
+
+
+def test_c7_a_walk_in_bill_answers_only_its_own_2b_row(world):
+    """Panel probe (round 5, problem 4): a walk-in bill '1' (Rs 310, no
+    credit) booked under a stand-in supplier took that supplier's GSTIN, and
+    the no-credit branch marked the supplier's OWN 2B row '1' (Rs 1200, not
+    booked) as seen without comparing tax -- the Rs 1200 credit vanished from
+    'In 2B, not booked - book then claim'. A bill reaches the reconciler
+    under the GSTIN it was booked with (its own supplier's, or none), and a
+    no-credit bill answers a 2B row only when the tax agrees."""
+    db = world["db"]
+    sharma = _on_the_shelf(world, vendor_id=SHARMA, vendor_invoice_no="1")
+    _line_bill(sharma, "1", "2026-09-14", vendor=SHARMA)
+    assert db.vendor_bills.find_one({"vendor_id": SHARMA})["vendor_gstin"] is None
+    theirs = {"gstin": DEALER_GSTIN, "invoice_no": "1", "taxable": 24000.0, "tax": 1200.0}
+    out = _reconcile([theirs], "2026-09")
+    assert [(r["gstin"], r["tax"]) for r in out["only_in_2b"]] == [(DEALER_GSTIN, 1200.0)]
+    assert out["booked_no_credit"] == []
+    # Sharma registers later: the bill was booked with no GSTIN and stays so.
+    db.vendors.update_one({"vendor_id": SHARMA}, {"$set": {"gstin": "20AABCB9999C1ZO"}})
+    out = _reconcile([{**theirs, "gstin": "20AABCB9999C1ZO", "tax": 310.0}], "2026-09")
+    assert out["booked_no_credit"] == [] and len(out["only_in_2b"]) == 1
+    # A registered dealer's walk-in bill (no credit) and its 2B row: the tax decides.
+    walk_in = _on_the_shelf(world, vendor_invoice_no="1")
+    _line_bill(walk_in, "1", "2026-09-14")
+    out = _reconcile([theirs], "2026-09")
+    assert out["booked_no_credit"] == [] and [r["tax"] for r in out["only_in_2b"]] == [1200.0]
+    out = _reconcile([{**theirs, "taxable": 6200.0, "tax": 310.0}], "2026-09")
+    assert [b["invoice_no"] for b in out["booked_no_credit"]] == ["1"] and out["only_in_2b"] == []

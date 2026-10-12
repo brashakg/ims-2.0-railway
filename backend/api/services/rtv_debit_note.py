@@ -249,6 +249,10 @@ def _norm_line(line: Dict[str, Any], is_inter_state: bool) -> Dict[str, Any]:
         gst_rate = float(line.get("gst_rate") or line.get("tax_rate") or 0.0)
     except (TypeError, ValueError):
         gst_rate = 0.0
+    # Goods whose bill claimed no input credit (DebitNoteEngine.issue marks
+    # them by the one credit rule) have none to reverse: the amount only.
+    if line.get("claims_credit") is False:
+        gst_rate = 0.0
     tax = _split_line_tax(taxable_paise, gst_rate, is_inter_state)
     return {
         "sku": line.get("sku") or line.get("product_id"),
@@ -829,6 +833,35 @@ class DebitNoteEngine:
             out.append(ln)
         return out, None
 
+    def _receipts_of(self, rtv_doc: Dict[str, Any]) -> Dict[Any, Any]:
+        """{product_id: the goods receipt the returned units came in on} --
+        key None for every line when the RTV names its receipt (an RMA's
+        grn_id), else read off the units linked to the return (rtv_vendor_id).
+        Fail-soft {}: the supplier's GSTIN alone then decides.
+
+        ponytail: one receipt per product (the first linked unit's); a return
+        mixing one product's walk-in and PO units would need a line per unit."""
+        if self._db is None:
+            return {}
+        try:
+            grns = self._db.get_collection("grns")
+            if rtv_doc.get("grn_id"):
+                return {None: grns.find_one({"grn_id": rtv_doc["grn_id"]}, {"_id": 0})}
+            if not rtv_doc.get("return_id"):
+                return {}
+            out: Dict[Any, Any] = {}
+            for u in self._db.get_collection("stock_units").find(
+                {"rtv_vendor_id": rtv_doc["return_id"], "source_type": "GRN"},
+                {"_id": 0, "product_id": 1, "source_id": 1},
+            ):
+                if u.get("product_id") not in out:
+                    out[u.get("product_id")] = grns.find_one(
+                        {"grn_id": u.get("source_id")}, {"_id": 0}
+                    )
+            return out
+        except Exception:  # noqa: BLE001
+            return {}
+
     def issue(
         self,
         rtv_doc: Dict[str, Any],
@@ -877,6 +910,18 @@ class DebitNoteEngine:
         enriched, gst_err = self._enrich_lines_gst(src_lines)
         if gst_err:
             return {"ok": False, "http": 422, "error": gst_err}
+
+        # The note reverses the credit the returned goods' bill claimed -- and
+        # a bill that claimed none (a "Bought without PO" walk-in buy, D14, or
+        # an unregistered supplier's) has none to reverse (owner 2026-10-12):
+        # those lines carry the amount only. THE credit rule decides, per line,
+        # from the receipt the returned units came in on.
+        from .org_validation import itc_claimable
+
+        receipt_of = self._receipts_of(rtv_doc)
+        for ln in enriched:
+            receipt = receipt_of.get(ln.get("product_id"), receipt_of.get(None))
+            ln["claims_credit"] = itc_claimable((vendor or {}).get("gstin"), receipt=receipt)
 
         entity_id = rtv_doc.get("entity_id") or (seller or {}).get("entity_id")
         serial = next_debit_note_number(self._db, entity_id)

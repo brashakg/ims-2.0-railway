@@ -290,8 +290,8 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
     # impl. A legitimately split delivery arrives with DIFFERENT invoice
     # numbers per shipment and passes untouched. ONE rule for every kind of
     # receipt and every shop (vendors.grn._find_duplicate_receipt): the same
-    # seller -- picked or typed -- and bill number in the same financial
-    # year, or (bought without PO, D14) the same bill photo by content hash.
+    # supplier and bill number in the same financial year, or (bought without
+    # PO, D14) the same bill photo by content hash.
     photo_sha = None if is_dc else (_attachment_meta or {}).get("sha256")
     if not is_dc:
         dup = _find_duplicate_receipt(grn_repo, grn, vendor_id, photo_sha=photo_sha)
@@ -378,8 +378,6 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
         "po_number": po.get("po_number") if po else None,
         "vendor_id": vendor_id,
         "vendor_name": po.get("vendor_name") if po else None,
-        # D14: the walk-in dealer of a "Bought without PO" receipt, by name.
-        "dealer_name": grn.dealer_name,
         "store_id": store_id,
         "vendor_invoice_no": grn.vendor_invoice_no,
         # The bill's identity -- financial year + folded number -- for the

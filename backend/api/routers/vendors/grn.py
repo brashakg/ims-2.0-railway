@@ -25,7 +25,6 @@ from ._shared import (
     datetime,
     get_file_store,
     get_grn_repository,
-    get_vendor_repository,
     hashlib,
     io,
     logger,
@@ -244,10 +243,6 @@ def _enrich_grn_names(grns: list) -> None:
             vid = g.get("vendor_id")
             if vid and not g.get("vendor_name") and str(vid) in vmap:
                 g["vendor_name"] = vmap[str(vid)]
-            # D14: a walk-in dealer bought from without a PO has no supplier
-            # record -- the name typed at receipt is the name.
-            if not g.get("vendor_name") and g.get("dealer_name"):
-                g["vendor_name"] = g["dealer_name"]
     except Exception:  # noqa: BLE001
         pass
 
@@ -393,10 +388,10 @@ def _find_duplicate_receipt(grn_repo, grn, vendor_id, photo_sha=None, exclude_gr
         the sha256, which every receipt keeps), or
       * the same bill under THE same-bill rule (purchase_invoice_engine.
         same_bill, which both bill doors use too): the same purchase order's
-        number, or the same seller's number in the same financial year.
+        number, or the same supplier's number in the same financial year.
     A VOIDed receipt frees its bill (the sanctioned correction path). The
-    atomic twins: uniq_std_vendor_invoice_store (keyed on bill_key) and
-    uniq_nopo_bill_hash. Fail-soft on a vendor read.
+    atomic twins: uniq_std_vendor_invoice_store (supplier + bill_key + shop)
+    and uniq_nopo_bill_hash.
 
     ponytail: candidates are the newest 500 receipts carrying this bill
     number (either key shape), plus the PO's and the supplier's receipts for
@@ -444,16 +439,11 @@ def _find_duplicate_receipt(grn_repo, grn, vendor_id, photo_sha=None, exclude_gr
         for r in rows:
             candidates.setdefault(r.get("grn_id"), r)
 
-    def find_vendor(vid):
-        repo = get_vendor_repository()
-        return repo.find_by_id(vid) if repo is not None else None
-
     mine = {
         "no": norm,
         "fy": bill_fy(grn.vendor_invoice_date, now),
         "po_id": grn.po_id,
         "vendor_id": vendor_id,
-        "dealer_name": grn.dealer_name,
     }
     for r in candidates.values():
         theirs = {
@@ -461,9 +451,8 @@ def _find_duplicate_receipt(grn_repo, grn, vendor_id, photo_sha=None, exclude_gr
             "fy": bill_fy(r.get("vendor_invoice_date"), r.get("created_at")),
             "po_id": r.get("po_id"),
             "vendor_id": r.get("vendor_id"),
-            "dealer_name": r.get("dealer_name"),
         }
-        if live(r) and same_bill(mine, theirs, find_vendor):
+        if live(r) and same_bill(mine, theirs):
             return r
     return None
 

@@ -96,8 +96,9 @@ BILL_KIND_SERVICES = "SERVICES"
 NO_RECEIPT_WAY_OUT = (
     "If the goods were bought without a purchase order (a local or walk-in "
     "dealer, a cash bill), ask the shop's store manager to receive them on the "
-    "Goods Receipt screen with 'Bought without PO' ticked (the dealer, each "
-    "item's cost and a photo of the bill), then bill against that receipt - "
+    "Goods Receipt screen with 'Bought without PO' ticked (the dealer - added "
+    "as a supplier if new -, each item's cost and a photo of the bill), then "
+    "bill against that receipt under that supplier - "
     "it claims no GST input credit. Goods a supplier delivered on a delivery "
     "challan are logged there as a Delivery Challan instead."
 )

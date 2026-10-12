@@ -699,56 +699,20 @@ def _release_grn_units(db, grn, claim, invoice_id):
         )
 
 
-def bill_dealer(receipt) -> Optional[str]:
-    """The walk-in dealer a bill is from: the name typed on its "Bought without
-    PO" receipt when that receipt picked no supplier (D14) -- the supplier the
-    bill is then booked under only stands in for the dealer, so the dealer is
-    the seller. None for every other bill."""
-    if (
-        receipt
-        and receipt.get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO
-        and not receipt.get("vendor_id")
-    ):
-        return receipt.get("dealer_name") or None
-    return None
-
-
-def bill_number_key(number, bill_date, dealer=None) -> Optional[str]:
-    """What vendor_bills.bill_number_key stores: the bill's financial year and
-    folded number (pinv.bill_key), plus the folded dealer for a walk-in buy --
-    the key of the uniq_vendor_bill_number_key index, the atomic twin of
-    find_duplicate_bill. None when the bill has no number."""
-    key = pinv.bill_key(number, bill_date)
-    if key and dealer:
-        key = f"{key}|{pinv.normalize_invoice_no(dealer)}"
-    return key
-
-
-def find_duplicate_bill(db, vendor_id, number, bill_date, po_id=None, dealer=None):
+def find_duplicate_bill(db, vendor_id, number, bill_date, po_id=None):
     """The bill of this supplier already recorded as the same bill under THE
     same-bill rule (pinv.same_bill -- the receiving door's rule too): the same
-    PO's number, or the same seller's number in the same financial year. Both
-    bill doors call it, so a bill whose receipt went on the shelf can be booked
-    under its real number. Raises on a DB error (the callers fail soft).
+    PO's number, or the same supplier's number in the same financial year.
+    Both bill doors call it; its atomic twin is uniq_vendor_bill_number_key
+    (vendor_id + pinv.bill_key, which both doors store as bill_number_key).
+    Raises on a DB error (the callers fail soft).
 
-    ponytail: a linear scan over one supplier's bills (a walk-in dealer's are
-    under the supplier that stands in for them); index bill_number_key here if
-    a supplier ever holds thousands."""
+    ponytail: a linear scan over one supplier's bills; index bill_number_key
+    here if a supplier ever holds thousands."""
     target = pinv.normalize_invoice_no(number)
     if not target or db is None:
         return None
-    mine = {
-        "no": target,
-        "fy": pinv.bill_fy(bill_date),
-        "po_id": po_id,
-        "vendor_id": None if dealer else vendor_id,
-        "dealer_name": dealer,
-    }
-    vendors = db.get_collection("vendors")
-
-    def find_vendor(vid):
-        return vendors.find_one({"vendor_id": vid}, {"_id": 0})
-
+    mine = {"no": target, "fy": pinv.bill_fy(bill_date), "po_id": po_id, "vendor_id": vendor_id}
     rows = db.get_collection("vendor_bills").find(
         {"vendor_id": vendor_id},
         {
@@ -759,20 +723,16 @@ def find_duplicate_bill(db, vendor_id, number, bill_date, po_id=None, dealer=Non
             "invoice_date": 1,
             "po_id": 1,
             "vendor_id": 1,
-            "dealer_name": 1,
         },
     )
     for r in rows:
-        if pinv.normalize_invoice_no(r.get("bill_number")) != target:
-            continue
         theirs = {
             "no": r.get("bill_number"),
             "fy": pinv.bill_fy(r.get("bill_date") or r.get("invoice_date")),
             "po_id": r.get("po_id"),
-            "vendor_id": None if r.get("dealer_name") else r.get("vendor_id"),
-            "dealer_name": r.get("dealer_name"),
+            "vendor_id": r.get("vendor_id"),
         }
-        if pinv.same_bill(mine, theirs, find_vendor):
+        if pinv.same_bill(mine, theirs):
             return r
     return None
 
@@ -1739,7 +1699,7 @@ async def create_purchase_invoice(
     #
     # A genuine no-order purchase (goods bought over the counter, no PO) has a
     # way out the UI can actually WALK: the Goods Receipt screen's "Bought
-    # without PO" mode (dealer, cost per line, bill photo), whose receipt is
+    # without PO" mode (supplier, cost per line, bill photo), whose receipt is
     # linkable from every billing door and claims no input credit (D14). A
     # supplier's delivery on a challan keeps the Delivery-Challan mode.
     if not body.grn_id and not body.linked_dc_ids:
@@ -1780,10 +1740,8 @@ async def create_purchase_invoice(
     # pinv.same_bill), the one the receiving door and the header bill door
     # use. A double entry would double the payable AND double-count the ITC;
     # a bill number the supplier reuses in a new financial year (GST rule 46)
-    # is a new bill, and a walk-in dealer's bill is that dealer's, whichever
-    # supplier stands in for them -- else goods on the shelf held a bill that
-    # could not be booked under its real number.
-    dealer = bill_dealer(grn_doc)
+    # is a new bill -- else goods on the shelf held a bill that could not be
+    # booked under its real number.
     if db is not None:
         try:
             dup = find_duplicate_bill(
@@ -1792,7 +1750,6 @@ async def create_purchase_invoice(
                 body.invoice_number,
                 body.invoice_date,
                 po_id=body.po_id,
-                dealer=dealer,
             )
             if dup:
                 recorded = dup.get("bill_number")
@@ -1928,13 +1885,9 @@ async def create_purchase_invoice(
         "invoice_number": body.invoice_number,
         "bill_date": body.invoice_date,
         "invoice_date": body.invoice_date,
-        # The walk-in dealer this bill is from (D14) and the bill's identity
-        # for the uniq_vendor_bill_number_key index (the same-bill rule's
-        # atomic twin).
-        "dealer_name": dealer,
-        "bill_number_key": bill_number_key(
-            body.invoice_number, body.invoice_date, dealer
-        ),
+        # The bill's identity for the uniq_vendor_bill_number_key index (the
+        # same-bill rule's atomic twin).
+        "bill_number_key": pinv.bill_key(body.invoice_number, body.invoice_date),
         "due_date": due_date,
         "credit_days": credit_days,
         "po_id": body.po_id,

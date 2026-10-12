@@ -5,7 +5,6 @@ from ._shared import (
     Field,
     List,
     Optional,
-    _normalize_invoice_no,
     ap_engine,
     field_validator,
     model_validator,
@@ -269,8 +268,9 @@ class GRNItemCreate(BaseModel):
 GRN_SUBTYPE_STANDARD = "STANDARD"
 GRN_SUBTYPE_DC = "DELIVERY_CHALLAN"
 # D14 (owner 2026-09-29): goods bought from a local / walk-in dealer with no
-# PO. Supplier on file OR the dealer's name, a cost on every line, the bill
-# photo (same mandatory-document gate as STANDARD), bill number/date if any.
+# PO. The supplier on file (a dealer not on the list is quick-added as one,
+# owner 2026-10-12), a cost on every line, the bill photo (same
+# mandatory-document gate as STANDARD), bill number/date if any.
 # Its bill books no input tax credit (org_validation.itc_claimable).
 GRN_SUBTYPE_NO_PO = ap_engine.GRN_SUBTYPE_NO_PO
 _GRN_SUBTYPES = (GRN_SUBTYPE_STANDARD, GRN_SUBTYPE_DC, GRN_SUBTYPE_NO_PO)
@@ -294,10 +294,9 @@ class GRNCreate(BaseModel):
     grn_subtype: str = GRN_SUBTYPE_STANDARD
     dc_number: Optional[str] = None
     dc_date: Optional[str] = None
-    # F9: the vendor a no-PO DC is for (a STANDARD GRN derives this from the PO).
+    # F9: the vendor a no-PO DC or a "Bought without PO" receipt is from (a
+    # STANDARD GRN derives this from the PO).
     vendor_id: Optional[str] = None
-    # D14: a walk-in dealer with no supplier record, by name (NO_PO only).
-    dealer_name: Optional[str] = Field(None, max_length=120)
     # F-S3: mandatory goods-receipt document. The ops user (Superadmin/Admin/
     # Store Manager) physically receiving the stock MUST attach the vendor
     # invoice/challan image or PDF BEFORE the GRN can be created -- so the
@@ -336,13 +335,12 @@ class GRNCreate(BaseModel):
                   contract -- a standard GRN is always against a PO + invoice).
         DELIVERY_CHALLAN: dc_number + dc_date are required; po_id +
                   vendor_invoice_no are optional (they come later).
-        NO_PO (D14): no po_id; a supplier (vendor_id) or a dealer_name; a
-                  cost on every line. The bill number/date stay optional.
+        NO_PO (D14): no po_id; the supplier (vendor_id); a cost on every
+                  line. The bill number/date stay optional.
         """
         if self.grn_subtype != GRN_SUBTYPE_NO_PO:
             # A PO receipt is costed at the order's agreed price; a cost typed
             # on its lines is not the receiver's to set (accept would prefer it).
-            self.dealer_name = None
             for it in self.items:
                 it.unit_price = None
         if self.grn_subtype == GRN_SUBTYPE_DC:
@@ -356,17 +354,15 @@ class GRNCreate(BaseModel):
                     "Goods bought without a PO name no purchase order - "
                     "receive goods that have an order against that order"
                 )
-            # A name is letters or digits: '...' folds to nothing, so it named
-            # nobody -- and gave the same-bill guard no seller to key on.
-            self.dealer_name = (
-                self.dealer_name.strip()
-                if _normalize_invoice_no(self.dealer_name)
-                else None
-            )
-            if not ((self.vendor_id or "").strip() or self.dealer_name):
+            # Owner ruling 2026-10-12: the seller is always a supplier on
+            # file -- a walk-in dealer not on the list is quick-added as one
+            # (name, phone, city / state, GSTIN if any) before the receipt.
+            # A typed name named a seller the bill doors and the GSTR-2B
+            # reconcile could not identify.
+            if not (self.vendor_id or "").strip():
                 raise ValueError(
-                    "Pick the supplier, or type the dealer's name, the goods "
-                    "were bought from"
+                    "Pick the supplier the goods were bought from - a dealer "
+                    "not on the list is added as a supplier first"
                 )
             # Nothing arrived on a line means it is not a purchase: an all-zero
             # receipt accepted nothing and sent accounts a bill to book that

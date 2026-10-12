@@ -886,9 +886,10 @@ INDEXES = {
         },
         # P0-1 (launch gate): STANDARD twin of the DC index -- two live
         # (non-VOID) STANDARD receipts must never share one vendor invoice
-        # number per vendor + store. Keys on the folded number the create
-        # path stamps (vendor_invoice_no_norm); legacy rows without the
-        # field stay un-indexed (fail-soft, like the DC index). $in in the
+        # per vendor + store. Keys on the bill's identity the create path
+        # stamps (vendor_invoice_no_norm = purchase_invoice_engine.bill_key:
+        # financial year + folded number); legacy rows without the field
+        # stay un-indexed (fail-soft, like the DC index). $in in the
         # partial filter needs Mongo 8.0+ (prod 8.3; eod_tally precedent).
         {
             "keys": [
@@ -907,9 +908,9 @@ INDEXES = {
         # D14: one live "Bought without PO" receipt per bill photo per shop,
         # keyed on the photo's sha256 -- a double-pressed post re-sends the
         # same file, a retry after a reload uploads the same bytes under a new
-        # file id, and a walk-in dealer has no vendor_id for the index above
-        # to key on. The atomic twin of vendors.grn._find_duplicate_no_po_grn.
-        # A VOID frees it.
+        # file id, and an unnumbered bill gives the index above nothing to
+        # key on. The atomic twin of the photo half of
+        # vendors.grn._find_duplicate_receipt. A VOID frees it.
         {
             "keys": [("store_id", 1), ("attachment_sha256", 1)],
             "unique": True,
@@ -2263,7 +2264,7 @@ COLLECTIONS.update({
             {"keys": [("bill_id", 1)], "unique": True, "sparse": True},
             {"keys": [("vendor_id", 1), ("bill_number", 1)]},
             # The same-bill rule's atomic twin (connection.ensure_indexes
-            # builds the same): year + folded number (+ walk-in dealer).
+            # builds the same): supplier + financial year + folded number.
             {
                 "keys": [("vendor_id", 1), ("bill_number_key", 1)],
                 "unique": True,

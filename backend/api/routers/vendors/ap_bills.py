@@ -298,11 +298,10 @@ async def create_vendor_bill(
     # find_duplicate_bill -> purchase_invoice_engine.same_bill), the one the
     # receiving door and the line-detail invoice door use. A double entry
     # would double the outstanding payable and the ledger's payment row; a
-    # number the supplier reuses in a new financial year, or another walk-in
-    # dealer's bill under the same stand-in supplier, is a new bill.
-    from ..purchase_invoices import bill_dealer, bill_number_key, find_duplicate_bill
+    # number the supplier reuses in a new financial year is a new bill.
+    from ..purchase_invoices import find_duplicate_bill
+    from ...services.purchase_invoice_engine import bill_key
 
-    dealer = bill_dealer(linked)
     if db_early is not None:
         try:
             dup = find_duplicate_bill(
@@ -311,7 +310,6 @@ async def create_vendor_bill(
                 bill.bill_number,
                 bill.bill_date,
                 po_id=bill.po_id,
-                dealer=dealer,
             )
             if dup:
                 raise HTTPException(
@@ -358,11 +356,9 @@ async def create_vendor_bill(
         or (vendor or {}).get("legal_name"),
         "bill_number": bill.bill_number,
         "bill_date": bill.bill_date,
-        # The walk-in dealer this bill is from (D14) and the bill's identity
-        # for the uniq_vendor_bill_number_key index (the same-bill rule's
-        # atomic twin, shared with the line-detail invoice door).
-        "dealer_name": dealer,
-        "bill_number_key": bill_number_key(bill.bill_number, bill.bill_date, dealer),
+        # The bill's identity for the uniq_vendor_bill_number_key index (the
+        # same-bill rule's atomic twin, shared with the line-detail door).
+        "bill_number_key": bill_key(bill.bill_number, bill.bill_date),
         "due_date": due_date,
         "credit_days": credit_days,
         "vendor_gstin": supplier_gstin,

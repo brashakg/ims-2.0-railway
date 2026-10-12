@@ -794,9 +794,11 @@ class DatabaseConnection:
         # P0-1 (launch gate): the STANDARD twin of the DC index above. A
         # vendor invoice number identifies one delivery + one bill, so two
         # live (non-VOID) STANDARD receipts must never share it per vendor +
-        # store. Keys on the case/punctuation-FOLDED number the create path
-        # stamps (vendor_invoice_no_norm), so 'GO-INV-9007' vs 'GO-INV/9007'
-        # collide; legacy rows without the field are simply not indexed
+        # store. Keys on the bill's identity the create path stamps
+        # (vendor_invoice_no_norm = purchase_invoice_engine.bill_key: its
+        # financial year + the case/punctuation-FOLDED number), so
+        # 'GO-INV-9007' vs 'GO-INV/9007' collide within a year; legacy rows
+        # (a bare folded number) or rows without the field are simply not indexed
         # (same fail-soft posture as the DC index). $in on status keeps a
         # VOIDed receipt out of the index so the sanctioned void-then-recreate
         # correction path still works ($in in partialFilterExpression needs
@@ -815,9 +817,9 @@ class DatabaseConnection:
         )
         # D14: one live "Bought without PO" receipt per bill photo per shop,
         # keyed on the photo's sha256 (the same bytes uploaded again are the
-        # same bill) -- the atomic backstop for a walk-in dealer, who has no
-        # vendor_id for the index above (schemas.py uniq_nopo_bill_hash). New
-        # subtype, so no existing rows can block the build.
+        # same bill, numbered or not) -- the atomic twin of the photo half of
+        # vendors.grn._find_duplicate_receipt (schemas.py uniq_nopo_bill_hash).
+        # New subtype, so no existing rows can block the build.
         _idx(
             "grns",
             [("store_id", 1), ("attachment_sha256", 1)],
@@ -841,9 +843,9 @@ class DatabaseConnection:
         # check-then-insert on both bill doors races; this UNIQUE index makes
         # the insert loser a DuplicateKeyError -> 409. Keyed on what every new
         # bill stores as bill_number_key: the bill's financial year + folded
-        # number (+ the typed dealer of a walk-in buy), so a supplier's serial
-        # reused in a new year (GST rule 46) and two walk-in dealers' bill '1'
-        # under one stand-in supplier are two bills. PARTIAL to rows carrying
+        # number (purchase_invoice_engine.bill_key) per supplier, so a
+        # supplier's serial reused in a new year (GST rule 46) is a new bill.
+        # PARTIAL to rows carrying
         # the key: legacy bills (no key) are never indexed -- the app-level
         # rule still reads them.
         #
