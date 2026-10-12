@@ -114,4 +114,21 @@ describe('Design Queue Publish toast', () => {
     });
     await waitFor(() => expect(imagesApi.list).toHaveBeenCalledTimes(2));
   });
+
+  it('re-reads the board after a LIVE press that cleared the record and has no id', async () => {
+    // The press took IMS's failed copy off and cleared the row's record: the
+    // result carries no Shopify id, and the Synced chip + counts must re-read.
+    const t = await press({
+      mode: 'LIVE',
+      entity: 'image',
+      action: 'update',
+      ok: false,
+      shopify_id: null,
+      error:
+        'Shopify could not fetch this photo from its web address, so it is not on the website. ' +
+        'IMS took the failed copy off the listing.',
+    });
+    expect(t.kind).toBe('warning');
+    await waitFor(() => expect(imagesApi.list).toHaveBeenCalledTimes(2));
+  });
 });

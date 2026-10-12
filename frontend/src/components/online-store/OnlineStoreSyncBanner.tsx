@@ -331,14 +331,17 @@ export function formatPushResult(label: string, r: PushResult): string {
 // ----------------------------------------------------------------------------
 // formatPhotoPublish — the Design Queue's Publish toast in plain words. A LIVE
 // press says what happened to the photo on the website (backend push_image:
-// create = sent, update = swapped, noop = already there, never a raw id); a
-// refusal is the backend's own plain sentence. A dry-run keeps the SIMULATED
-// line above.
+// create = sent, update = swapped, noop = already there and READY, processing
+// = there but Shopify is still finishing it, dedupe = IMS's extra copy taken
+// down; never a raw id); a refusal is the backend's own plain sentence. A
+// dry-run keeps the SIMULATED line above.
 // ----------------------------------------------------------------------------
 const PHOTO_OUTCOME: Record<string, string> = {
   create: 'sent to the website.',
   update: 'the new photo is on the website and the old one was taken down.',
   noop: 'already on the website, so nothing was sent.',
+  processing: 'sent to the website - Shopify is still processing it.',
+  dedupe: 'two copies were on the website - IMS took the extra one down.',
 };
 
 export function formatPhotoPublish(label: string, r: PushResult): string {

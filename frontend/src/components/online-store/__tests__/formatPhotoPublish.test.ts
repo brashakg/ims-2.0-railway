@@ -25,6 +25,15 @@ describe('formatPhotoPublish', () => {
     expect(formatPhotoPublish(label, live({ action: 'noop' }))).toBe(
       'Image "Aviator Gold": already on the website, so nothing was sent.',
     );
+    expect(formatPhotoPublish(label, live({ action: 'dedupe' }))).toBe(
+      'Image "Aviator Gold": two copies were on the website - IMS took the extra one down.',
+    );
+  });
+
+  it('never says a photo Shopify is still processing is already on the website', () => {
+    const msg = formatPhotoPublish(label, live({ action: 'processing' }));
+    expect(msg).toBe('Image "Aviator Gold": sent to the website - Shopify is still processing it.');
+    expect(msg).not.toContain('already');
   });
 
   it("shows the backend's own sentence when the press did not finish", () => {
