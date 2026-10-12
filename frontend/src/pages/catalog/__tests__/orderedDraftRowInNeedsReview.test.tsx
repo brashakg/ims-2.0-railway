@@ -37,6 +37,8 @@ const SPINE = {
   is_active: false,
   catalog_status: 'DRAFT',
   mrp: 2990,
+  // The server's one rule (product_master.is_ordered_draft), stamped.
+  ordered_draft: true,
 };
 vi.mock('../../../services/api/products', () => ({
   productApi: {
@@ -53,6 +55,7 @@ const ORDERED = {
   category: 'FRAME',
   needs_review: true,
   spine_product_id: 'P-SPINE',
+  ordered_draft: true,
   mrp: 2990,
   attributes: { brand_name: 'Boss', model_no: 'BOSS 1700', colour_code: 'C2', lens_size: '52' },
 };
@@ -153,5 +156,38 @@ describe('an ordered draft in Needs review', () => {
     expect(within(row).getByText(/Ordered — finish it/)).toBeInTheDocument();
     expect(within(row).queryByText(/Inactive/)).toBeNull();
     expect(row.className).not.toMatch(/opacity-60/);
+  });
+
+  // Round 9 (6+7): a product finished before the mark was cleared still
+  // carries provisional:true; the server's rule says finished, and the screen
+  // reads only that -- POS-ready, Clone and Order stock offered.
+  it('a finished product still marked provisional reads POS-ready, row and drawer', async () => {
+    const FINISHED = {
+      ...SPINE,
+      product_id: 'P-DONE',
+      is_active: true,
+      catalog_status: 'ACTIVE',
+      offer_price: 2790,
+      ordered_draft: false,
+    };
+    const user = userEvent.setup();
+    const { productApi } = await import('../../../services/api/products');
+    (productApi.getProducts as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      products: [FINISHED],
+      total: 1,
+    });
+    render(
+      <MemoryRouter initialEntries={['/catalog']}>
+        <CatalogManagerPage segment="catalog" />
+      </MemoryRouter>,
+    );
+    const row = (await screen.findByText('Boss BOSS 1700')).closest('tr') as HTMLElement;
+    expect(within(row).getByText(/POS-ready/)).toBeInTheDocument();
+    expect(within(row).queryByText(/Ordered — finish it/)).toBeNull();
+    await user.click(within(row).getByText('Boss BOSS 1700'));
+    const drawer = await screen.findByRole('dialog', { name: 'Boss BOSS 1700' });
+    expect(within(drawer).getByText(/POS-ready/)).toBeInTheDocument();
+    expect(within(drawer).getByRole('button', { name: /Clone/ })).toBeInTheDocument();
+    expect(within(drawer).getByRole('button', { name: /Order stock/ })).toBeInTheDocument();
   });
 });

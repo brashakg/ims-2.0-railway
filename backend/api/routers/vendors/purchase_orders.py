@@ -149,7 +149,7 @@ def _refuse_items_we_already_have(items, product_repo) -> dict:
                         "discarded_as": spec.display if spec else found.get("category"),
                     }
                 )
-            elif found.get("is_active") is False and not found.get("provisional"):
+            elif found.get("is_active") is False and not _pm.is_ordered_draft(found):
                 # Deleted or switched off: "use it?" would order stock of a
                 # product nobody can sell. A person switches it back on first.
                 switched_off.append({"line": idx, "existing": err.conflict})

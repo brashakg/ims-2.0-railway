@@ -824,9 +824,12 @@ def stamp_online_state(db, products: List[Dict[str, Any]]) -> List[Dict[str, Any
 
 
 def _in_catalog(doc: Dict[str, Any]) -> bool:
-    """The online catalog population: active (a missing flag is active) and
-    not an import still awaiting review."""
-    return doc.get("is_active") is not False and doc.get("needs_review") is not True
+    """The online catalog population over a stamped copy
+    (product_master.stamp_ordered_drafts): active (a missing flag is active)
+    and not in Needs review."""
+    from .product_master import in_needs_review
+
+    return doc.get("is_active") is not False and not in_needs_review(doc)
 
 
 def catalog_counts(db) -> Dict[str, int]:
@@ -839,7 +842,8 @@ def catalog_counts(db) -> Dict[str, int]:
       pending      -- every dirty row, population or not: it is what the
                       "push all pending" sweep walks, and the number must
                       agree with the Online Store screen's pending count
-      needs_review -- imports awaiting review (the review queue's total)
+      needs_review -- the Needs-review queue's total: ordered drafts and
+                      imports awaiting review (product_master.in_needs_review)
 
     ponytail: one Python pass over the catalog (~80 rows); aggregate in Mongo
     if it ever passes a few thousand. Fail-soft: zeros on any failure."""
@@ -856,13 +860,14 @@ def catalog_counts(db) -> Dict[str, int]:
     if prods is None:
         return out
     try:
-        from .product_master import resolve_category
+        from .product_master import in_needs_review, resolve_category, stamp_ordered_drafts
 
-        for doc in prods.find({}, {"_id": 0}):
+        docs = stamp_ordered_drafts(list(prods.find({}, {"_id": 0})), _coll(db, "products"))
+        for doc in docs:
             state = product_online_state(doc)
             if state["queued"]:
                 out["pending"] += 1
-            if doc.get("needs_review") is True:
+            if in_needs_review(doc):
                 out["needs_review"] += 1
             if not _in_catalog(doc):
                 continue

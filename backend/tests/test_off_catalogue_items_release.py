@@ -4182,21 +4182,6 @@ def test_r6_below_manager_a_task_you_raised_or_handed_on_is_yours(world, field):
     )
 
 
-def test_r6_a_copy_still_reading_ordered_is_guarded_as_a_draft(world):
-    # The discard guard knows an ordered draft by its catalogue copy too
-    # (needs_review + spine_product_id): a spine that lost its provisional
-    # flag -- edited outside the door -- is still guarded while its order is open.
-    _seed_user(world, ADMIN)
-    po = world.raise_po([{"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200}])
-    draft_id = po["items"][0]["product_id"]
-    world.db.products.update_one({"product_id": draft_id}, {"$set": {"provisional": False}})
-    refused = _delete_refusal(world, draft_id)
-    finding(
-        refused is not None and refused.status_code == 409 and po["po_number"] in str(refused.detail),
-        f"An ordered draft known by its copy was discarded with its order open ({refused})",
-    )
-
-
 def test_r6_a_finished_item_a_receipt_still_holds_is_never_deleted(world):
     # Finished, the Boss is no draft -- but receipt 2 still holds 2 of it
     # beyond the order: deleting it would strand those units behind a deleted
@@ -5395,4 +5380,179 @@ def test_r9_not_received_records_what_its_kept_hold_really_holds(world, monkeypa
     finding(
         kept["held_qty"] == 1 and received[boss] == 3,
         f"'Not received' kept {kept}; the order reads {received[boss]} Boss received with 3 on the shelf",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Round 9, problems 6+7: ONE rule answers 'is this an ordered draft waiting
+# for cataloguing' (product_master.is_ordered_draft: marked provisional AND
+# not finished), read by every reader -- whatever the copy carries.
+# ---------------------------------------------------------------------------
+
+
+def _main_shaped(world, draft_id):
+    """Main never stamped the copy's ordered-draft marks, nor cleared
+    `provisional` on the finishing save."""
+    world.db.catalog_products.update_one(
+        {"spine_product_id": draft_id},
+        {"$unset": {"needs_review": "", "spine_product_id": ""}},
+    )
+    return world.db.catalog_products.find_one({"sku": world.product(draft_id)["sku"]})
+
+
+def _every_reader(world, draft_id, twin_id):
+    """What each reader of the question answers for this product."""
+    spine = world.product(draft_id)
+    listed = _run(
+        _products.list_products(
+            category=None, brand=None, search=None, tag=None, created_by=None,
+            store_id=f"S-r9-{next(_R9_SEQ)}", skip=0, limit=50, is_active="all",
+            photo=None, current_user=CATALOGUER,
+        )
+    )
+    row = next(p for p in listed["products"] if p["product_id"] == draft_id)
+    review = [p for p in _run(_catalog.list_catalog_products(
+        category=None, brand=None, search=None, is_active="all", needs_review=True,
+        source=None, ordered_draft=None, photo=None, limit=250, page=1,
+        current_user=CATALOGUER,
+    ))["products"]]
+    try:
+        _run(_catalog.update_catalog_product(
+            twin_id, _catalog.ProductUpdateInput(offer_price=2790), CATALOGUER
+        ))
+        refused = False
+    except HTTPException as exc:
+        refused = exc.status_code == 409 and "product editor" in str(exc.detail)
+    return {
+        "list_row": row["ordered_draft"],
+        "product_get": _run(_products.get_product(draft_id, CATALOGUER))["ordered_draft"],
+        "copy_get": _run(_catalog.get_catalog_product(twin_id, CATALOGUER))["product"]["ordered_draft"],
+        "in_review": [p["sku"] for p in review] == [spine["sku"], "BVI-NEWER"]
+        and review[0]["ordered_draft"] is True
+        and review[0]["spine_product_id"] == draft_id,
+        "review_count": _online.catalog_counts(world.db)["needs_review"],
+        "popup": _pm.existing_product_summary(spine)["provisional"],
+        "import_review_refuses": refused,
+    }
+
+
+import itertools as _itertools  # noqa: E402
+
+_R9_SEQ = _itertools.count()
+
+
+def _newer_import(world):
+    """An import awaiting review, NEWER than any draft: newest-first alone
+    would put it on top of Needs review."""
+    world.db.seed(
+        "catalog_products",
+        [{"id": "bvi-newer", "sku": "BVI-NEWER", "category": "FRAME", "needs_review": True,
+          "is_active": False, "created_at": "2099-01-01T00:00:00"}],
+    )
+
+
+def test_r9_a_finished_row_still_marked_provisional_reads_pos_ready_everywhere(world):
+    # The panel's legacy row: finished before the finishing save cleared the
+    # mark -- ACTIVE, on sale, provisional:true; its copy carries no mark.
+    po = world.raise_po(
+        [{"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200}]
+    )
+    draft_id = po["items"][0]["product_id"]
+    world.finish_draft(draft_id, offer=2790)
+    world.db.products.update_one(
+        {"product_id": draft_id}, {"$set": {"provisional": True, "is_active": True}}
+    )
+    twin = _main_shaped(world, draft_id)
+    _newer_import(world)
+    assert world.product(draft_id)["catalog_status"] == "ACTIVE"
+    want = {
+        "list_row": False, "product_get": False, "copy_get": False,
+        "in_review": False, "review_count": 1, "popup": False,
+        "import_review_refuses": False,
+    }
+    seen = _every_reader(world, draft_id, twin["id"])
+    finding(seen == want, f"R9-6: a finished product still marked provisional reads as an ordered draft: {seen}")
+    # A copy still carrying the ordered-draft marks of a finished product is
+    # not an import awaiting review either.
+    world.db.catalog_products.update_one(
+        {"id": twin["id"]}, {"$set": {"needs_review": True, "spine_product_id": draft_id}}
+    )
+    seen = _every_reader(world, draft_id, twin["id"])
+    finding(seen == want, f"R9-6: a finished product's stale-marked copy reads as in review: {seen}")
+    # DELETE treats it as the finished product it is: no draft discard mark.
+    _seed_user(world, ADMIN)
+    _run(_catalog.delete_catalog_product(twin["id"], ADMIN))
+    finding(
+        not world.product(draft_id).get("discarded_draft"),
+        "R9-6: deleting a finished product stamped it a discarded draft",
+    )
+
+
+def test_r9_a_draft_whose_copy_predates_the_marks_is_a_draft_everywhere(world):
+    # A draft typed before this deploy: provisional, DRAFT, its copy unmarked.
+    po = world.raise_po(
+        [{"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200}]
+    )
+    draft_id = po["items"][0]["product_id"]
+    twin = _main_shaped(world, draft_id)
+    _newer_import(world)
+    assert twin is not None and not twin.get("spine_product_id")
+    seen = _every_reader(world, draft_id, twin["id"])
+    finding(
+        seen == {
+            "list_row": True, "product_get": True, "copy_get": True,
+            "in_review": True, "review_count": 2, "popup": True,
+            "import_review_refuses": True,
+        },
+        f"R9-7: an ordered draft whose copy predates the marks is not one everywhere: {seen}",
+    )
+    assert not world.product(draft_id).get("offer_price")
+
+
+def test_r9_the_po_doors_read_a_finished_marked_row_as_finished(world):
+    # The order doors ask the same question. A row finished while switched off
+    # before the mark was cleared is a switched-off product, not a draft to
+    # order again; and a finished row is checked for gaps at send like any
+    # product (only a real ordered draft skips that check, ruling 13).
+    po = world.raise_po(
+        [{"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200}]
+    )
+    boss = po["items"][0]["product_id"]
+    world.finish_draft(boss, offer=2790)
+    world.db.products.update_one(
+        {"product_id": boss}, {"$set": {"provisional": True, "is_active": False}}
+    )
+    try:
+        _run(vd.create_po(
+            vd.POCreate(vendor_id=VENDOR, delivery_store_id=STORE, items=[
+                vd.POItemCreate(new_product=dict(BOSS_TYPED), quantity=1, unit_price=1200)
+            ]),
+            MANAGER,
+        ))
+        code = None
+    except HTTPException as exc:
+        code = (exc.detail or {}).get("code") if isinstance(exc.detail, dict) else exc.detail
+    finding(
+        code == "SWITCHED_OFF_IN_CATALOGUE",
+        f"R9-6: ordering a finished, switched-off product again answered {code}",
+    )
+
+    world.db.products.update_one(
+        {"product_id": boss}, {"$set": {"is_active": True}, "$unset": {"offer_price": ""}}
+    )
+    assert _pm.gaps_before_cost(world.product(boss)), "the probe needs a real gap"
+    out = _run(vd.create_po(
+        vd.POCreate(vendor_id=VENDOR, delivery_store_id=STORE, items=[
+            vd.POItemCreate(product_id=boss, product_name="Boss BOSS 1700", sku=world.product(boss)["sku"], quantity=1, unit_price=1200)
+        ]),
+        MANAGER,
+    ))
+    try:
+        _run(vd.send_po(out["po_id"], MANAGER))
+        refused = None
+    except HTTPException as exc:
+        refused = exc
+    finding(
+        refused is not None and refused.status_code == 400,
+        f"R9-6: a finished product with a gap was sent as if it were an ordered draft ({refused})",
     )

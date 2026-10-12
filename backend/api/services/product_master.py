@@ -1185,10 +1185,11 @@ def existing_product_summary(existing: Dict[str, Any]) -> Dict[str, Any]:
         "offer_price": existing.get("offer_price"),
         "is_active": existing.get("is_active"),
         "catalog_status": existing.get("catalog_status"),
-        # Ordered before it was catalogued: the popup leads the cataloguer to
-        # FINISH this draft (its held stock goes on the shelf when he does),
-        # not to add a second product or read it as archived.
-        "provisional": bool(existing.get("provisional")),
+        # Ordered before it was catalogued and not finished (is_ordered_draft):
+        # the popup leads the cataloguer to FINISH this draft (its held stock
+        # goes on the shelf when he does), not to add a second product or
+        # read it as archived. A finished row still marked reads finished.
+        "provisional": is_ordered_draft(existing),
         # A draft an admin discarded: typed again as the SAME kind of product
         # it comes back (revive_discarded_draft); the popup says so (R1-64).
         "discarded_draft": revivable_discarded_draft(existing),
@@ -1973,10 +1974,11 @@ def _build_pim_doc(
             "sku": parent.get("sku"),
         }
         doc["ecom"]["locally_modified"] = False
-    if spine.get("provisional"):
+    if is_ordered_draft(spine):
         # Ordered before it was catalogued (ruling 13): the cataloguer's work.
-        # It sits in the Needs-review queue (count, badge and list all read
-        # needs_review; the catalog population excludes it) until it is
+        # It sits in the Needs-review queue (count, badge and list read
+        # is_ordered_draft via in_needs_review; the catalog population
+        # excludes it) until it is
         # finished, and names its spine so the queue opens the spine editor --
         # it already HAS a billing row, so the import "approve" path does not
         # apply. mirror_update_to_catalog_twin clears the flag when it is
@@ -3618,6 +3620,60 @@ def effective_catalog_status(doc: Dict[str, Any]) -> str:
         return CATALOG_STATUS_ACTIVE
     normalised = str(raw).strip().upper()
     return normalised if normalised == CATALOG_STATUS_ACTIVE else CATALOG_STATUS_DRAFT
+
+
+def is_ordered_draft(spine: Optional[Dict[str, Any]]) -> bool:
+    """THE answer to 'is this an item ordered on a PO before it was
+    catalogued, still waiting for the cataloguer' (audit C1): marked at the PO
+    door (`provisional`) AND not finished (its catalogue status is not
+    ACTIVE). A row finished before the finishing save cleared the mark (main
+    never cleared it) is finished: POS-ready, never 'Ordered - finish it'.
+    Every reader asks this -- the catalogue chips and drawer (via the
+    `ordered_draft` the server stamps), Needs review's list / count / badge
+    (stamp_ordered_drafts), the import review's refusal, DELETE's discard
+    rule, the Add-product popup and the PO doors."""
+    return bool((spine or {}).get("provisional")) and (
+        effective_catalog_status(spine or {}) != CATALOG_STATUS_ACTIVE
+    )
+
+
+def stamp_ordered_drafts(copies: List[Dict[str, Any]], products_coll) -> List[Dict[str, Any]]:
+    """Stamp each catalogue copy with `ordered_draft` -- is_ordered_draft of
+    the product it copies -- and, on one, that product's id
+    (`spine_product_id`: a copy made before PR #1171 never carried it). One
+    read of the provisional products; a copy names its product by the
+    product's id (its own spine_product_id, or a shared legacy id), its
+    pim_product_id (a door-made copy's id) or its sku. Mutates and returns
+    `copies`; a read error raises (no queue answers from half the data)."""
+    drafts: Dict[str, str] = {}
+    if products_coll is not None:
+        for spine in products_coll.find({"provisional": True}):
+            if is_ordered_draft(spine):
+                for key in (spine.get("product_id"), spine.get("pim_product_id"), spine.get("sku")):
+                    if key:
+                        drafts[str(key)] = spine.get("product_id")
+    for doc in copies:
+        spine_id = next(
+            (
+                drafts[str(k)]
+                for k in (doc.get("spine_product_id"), doc.get("id"), doc.get("sku"))
+                if k and str(k) in drafts
+            ),
+            None,
+        )
+        doc["ordered_draft"] = spine_id is not None
+        if spine_id:
+            doc["spine_product_id"] = spine_id
+    return copies
+
+
+def in_needs_review(doc: Dict[str, Any]) -> bool:
+    """The Needs-review queue (its list, count and badge) over a stamped copy
+    (stamp_ordered_drafts): an ordered draft, or an import awaiting review. A
+    copy still marked for review whose product is finished is in neither."""
+    return bool(doc.get("ordered_draft")) or (
+        bool(doc.get("needs_review")) and not doc.get("spine_product_id")
+    )
 
 
 def assert_draft_floor(doc: Dict[str, Any]) -> None:

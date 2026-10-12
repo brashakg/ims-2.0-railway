@@ -40,6 +40,9 @@ export interface CatalogProductDoc {
   /** Set on the catalogue twin of an item a manager ordered on a PO before it
    *  was catalogued: it is finished in the product editor (this spine id). */
   spine_product_id?: string | null;
+  /** Server-computed (product_master.is_ordered_draft): ordered on a PO
+   *  before it was catalogued and not finished yet. Never re-derive it. */
+  ordered_draft?: boolean;
   pos_ready?: boolean | null;
   promoted_at?: string | null;
   promoted_by?: string | null;

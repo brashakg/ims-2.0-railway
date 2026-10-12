@@ -157,17 +157,13 @@ export function docOffer(doc: Record<string, unknown>): number | null {
 }
 
 /** An item a manager ordered before it was catalogued, not finished yet (audit
- *  C1), whichever doc the drawer holds: the product itself is `provisional`
- *  until it is finished (product_master: set at the PO door, cleared by the
- *  finishing save), and its catalogue copy names that product
- *  (spine_product_id) and carries needs_review for exactly as long -- the
- *  product door sets and clears both (product_master._build_pim_doc /
- *  mirror_update_to_catalog_twin). Not on sale, whatever the doc lacks. The
- *  server's twin of the copy's half is catalog._refuse_ordered_draft. */
+ *  C1), whichever doc the drawer holds (the product or its catalogue copy).
+ *  The server answers it with its one rule (product_master.is_ordered_draft:
+ *  marked at the PO door AND not finished) and stamps `ordered_draft` on every
+ *  doc it hands the catalogue; never re-derived here from `provisional`, which
+ *  a product finished before the mark was cleared still carries. */
 export function isOrderedDraft(doc: Record<string, unknown>): boolean {
-  return (
-    Boolean(doc.provisional) || (Boolean(doc.spine_product_id) && Boolean(doc.needs_review))
-  );
+  return doc.ordered_draft === true;
 }
 
 // ---------------------------------------------------------------------------

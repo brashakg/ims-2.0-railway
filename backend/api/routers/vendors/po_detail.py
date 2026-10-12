@@ -320,7 +320,7 @@ async def send_po(
                 # send on its (inevitable) gaps would put the obstacle back at
                 # the front of the flow. The strictness now lives at the INVOICE
                 # (ruling 15), which refuses to settle an incomplete product.
-                if prod.get("provisional"):
+                if _pm.is_ordered_draft(prod):
                     continue
                 gaps = _pm.gaps_before_cost(prod)
                 if gaps:

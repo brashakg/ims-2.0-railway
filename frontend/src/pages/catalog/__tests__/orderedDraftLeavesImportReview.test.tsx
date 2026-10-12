@@ -60,6 +60,7 @@ const DOCS: Record<string, Record<string, unknown>> = {
     category: 'FRAME',
     needs_review: true,
     spine_product_id: 'P-SPINE',
+    ordered_draft: true,
     attributes: { brand_name: 'Boss', model_no: 'BOSS 1700', colour_code: 'C2' },
   },
   'CAT-IMPORT': {

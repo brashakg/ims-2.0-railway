@@ -1472,13 +1472,30 @@ def _spine_product_id(repo, catalog_doc: Optional[Dict]) -> Optional[str]:
     return (spine or {}).get("product_id")
 
 
+def _products_coll():
+    """The `products` (spine) collection, or None when it cannot be reached --
+    then no spine is known, and no catalogue door can write one either (their
+    spine syncs go through the same store, fail-soft)."""
+    from ..dependencies import get_product_repository
+
+    try:
+        return getattr(get_product_repository(), "collection", None)
+    except Exception:  # noqa: BLE001
+        logger.warning("[CATALOG] products store unreachable", exc_info=True)
+        return None
+
+
 def _refuse_ordered_draft(doc: Optional[Dict]) -> None:
     """An item a manager ordered on a PO before it was catalogued (audit C1)
     already HAS its billing row. It is finished in the product editor
     (PUT /products/{id}) -- the save that restamps it and puts the units its
     receipts hold on the shelf. The import review's save / approve would write
-    around that door, so they refuse it and say where to go."""
-    if (doc or {}).get("spine_product_id") and (doc or {}).get("needs_review"):
+    around that door, so they refuse it and say where to go. The one rule
+    (product_master.is_ordered_draft) decides, read on a copy of the doc so
+    nothing stamped here is ever saved."""
+    probe = dict(doc or {})
+    _pm.stamp_ordered_drafts([probe], _products_coll())
+    if probe["ordered_draft"]:
         raise HTTPException(
             status_code=409,
             detail=(
@@ -1774,29 +1791,28 @@ async def list_catalog_products(
             or search_lower in p.get("sku", "").lower()
             or search_lower in str(p.get("attributes", {})).lower()
         ]
+    # Needs review = an ordered draft (product_master.is_ordered_draft, read off
+    # its product) or an import awaiting review: the one rule the count and
+    # the badge read too (online_catalog.catalog_counts).
+    _pm.stamp_ordered_drafts(products, _products_coll())
     if needs_review is not None:
-        products = [
-            p for p in products if bool(p.get("needs_review", False)) == needs_review
-        ]
+        products = [p for p in products if _pm.in_needs_review(p) == needs_review]
     if source:
         products = [p for p in products if p.get("source") == source]
     if ordered_draft is not None:
-        products = [
-            p for p in products if bool(p.get("spine_product_id")) == ordered_draft
-        ]
+        products = [p for p in products if p["ordered_draft"] == ordered_draft]
     # 'all' = no active filter; otherwise the legacy boolean equality match.
     if is_active != "all":
         active_bool = is_active in ("true", "True")
         products = [p for p in products if p.get("is_active") == active_bool]
 
     # Sort by created date (imported docs coalesce to migrated_at). In the
-    # Needs-review list ONLY, a row with a spine is a manager's typed-in draft
-    # (audit C1): stock is, or soon will be, waiting on it, so it leads. A
-    # finished one keeps its spine_product_id, so everywhere else it sorts by
-    # date like any product.
+    # Needs-review list ONLY, an ordered draft (audit C1) leads: stock is, or
+    # soon will be, waiting on it. Everywhere else it sorts by date like any
+    # product.
     if needs_review is True:
         products.sort(
-            key=lambda p: (bool(p.get("spine_product_id")), _catalog_sort_key(p)),
+            key=lambda p: (p["ordered_draft"], _catalog_sort_key(p)),
             reverse=True,
         )
     else:
@@ -1827,7 +1843,9 @@ async def get_catalog_product(
         raise HTTPException(status_code=404, detail="Product not found")
 
     # F35: the one product-cost rule, as on the list and /products.
-    product = mask_cost(product, current_user, "product")
+    product = dict(mask_cost(product, current_user, "product"))
+    # The drawer's 'Ordered - finish it' reads the one rule, as the list does.
+    _pm.stamp_ordered_drafts([product], _products_coll())
     return {"product": product}
 
 
@@ -2916,9 +2934,7 @@ async def delete_catalog_product(
     # The refusal names, per blocker, only an action the server allows. If the
     # orders cannot be read, refuse -- fail loudly.
     spine_doc = _pr.find_by_id(_spine_id) if (_pr is not None and _spine_id) else None
-    is_draft = bool((spine_doc or {}).get("provisional")) or bool(
-        product.get("spine_product_id") and product.get("needs_review")
-    )
+    is_draft = _pm.is_ordered_draft(spine_doc)
     if is_draft:
         from .vendors.grn_accept import draft_discard_blockers
 

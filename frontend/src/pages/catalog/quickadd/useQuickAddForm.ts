@@ -1279,7 +1279,7 @@ export function useQuickAddForm() {
           // and an ordered draft finished -- in the standard editor.
           removeFromReviewQueue(reviewId);
           toast.info(
-            doc.spine_product_id
+            doc.ordered_draft
               ? 'This item was ordered before it was catalogued — finish it here; its held stock goes on the shelf when you save.'
               : 'This item is already approved — opening the standard editor.'
           );

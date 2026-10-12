@@ -923,7 +923,7 @@ async def list_products(
     access to."""
     from ..services.cache import cache
     from ..services.online_catalog import stamp_online_state
-    from ..services.product_master import resolve_category
+    from ..services.product_master import is_ordered_draft, resolve_category
 
     # Direct-call safety: several unit suites invoke this handler as a plain
     # function WITHOUT the newer kwargs, so `created_by` arrives as its
@@ -948,6 +948,10 @@ async def list_products(
         except Exception:  # noqa: BLE001 - a listing must never fail on this
             live_db = None
         stamp_online_state(live_db, result.get("products") or [])
+        # The catalogue's 'Ordered - finish it' reads the one rule, never the
+        # raw mark (a row finished before the mark was cleared is finished).
+        for p in result.get("products") or []:
+            p["ordered_draft"] = is_ordered_draft(p)
         return result
 
     # Cataloguer-attribution posture (panel finding 4): attribution is a
@@ -3383,6 +3387,9 @@ async def get_product(product_id: str, current_user: dict = Depends(get_current_
                 imgs = product.get("images")
                 if isinstance(imgs, list) and imgs and isinstance(imgs[0], str):
                     product["image_url"] = imgs[0]
+            # As list_products: the drawer's 'Ordered - finish it' reads the
+            # one rule (product_master.is_ordered_draft).
+            product["ordered_draft"] = _pm.is_ordered_draft(product)
             return mask_cost(product, current_user, "product")
         raise HTTPException(status_code=404, detail="Product not found")
 
