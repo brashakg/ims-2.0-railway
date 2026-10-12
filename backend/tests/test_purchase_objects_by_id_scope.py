@@ -4,9 +4,8 @@ missing one gets, never a body naming the other shop or its money.
 Owner ruling (F63): ADMIN / SUPERADMIN see every shop; every other role sees
 only its own shop, even when the request is edited -- a dropped or changed
 store_id, or another shop's object typed by id. The one shop rule for one
-object is dependencies.can_access_store_scoped (purchase_invoices.
-_bill_in_scope_or_404 / _grn_in_scope_or_404); the one supplier-ledger row
-rule is ap_engine.supplier_ledger_rows.
+object is dependencies.in_reach_or_404 (over can_access_store_scoped); the
+one supplier-ledger row rule is ap_engine.supplier_ledger_rows.
 
 Review round 1 findings covered here:
   #15  purchase-invoice side: a Pune accountant drafted, previewed and booked
@@ -16,6 +15,9 @@ Review round 1 findings covered here:
        and any accountant could tick another shop's note.
   #21  vendor return, goods receipt, PO variance dismissal and approval
        request read (or written) by id across shops.
+  panel (2026-10-13): escalating another shop's goods receipt answered 200
+       and wrote ESCALATED over its accepted status; an accepted receipt
+       could be escalated at all.
 
 World: Dhanbad (BV-DHN-01, company E-BV) and Pune (WO-PUN-01, company E-WO);
 one supplier V-BOTH serves both. The caller is a Pune accountant / manager
@@ -71,8 +73,9 @@ ADMIN_AT_PUNE = _user("ADMIN")
 
 
 class _Repo:
-    """find_by_id over one mongomock collection (the repository surface the
-    routers call), plus `.collection` for the PO dismissal's guarded write."""
+    """find_by_id / update over one mongomock collection (the repository
+    surface the routers call), plus `.collection` for the PO dismissal's
+    guarded write."""
 
     def __init__(self, coll, key):
         self.collection = coll
@@ -83,6 +86,9 @@ class _Repo:
 
     def find_by_po(self, po_id):
         return list(self.collection.find({"po_id": po_id}, {"_id": 0}))
+
+    def update(self, _id, fields):
+        return self.collection.update_one({self._key: _id}, {"$set": fields}).matched_count > 0
 
 
 def _grn(grn_id, store, **over):
@@ -446,6 +452,42 @@ class TestOtherShopsObjectsById:
         assert _same_404(other, ghost) == ("GRN not found",) * 2
         own = cli.get("/api/v1/vendors/grn/GRN-P1")
         assert own.status_code == 200 and own.json()["grn_id"] == "GRN-P1"
+
+    @pytest.mark.parametrize("user", [PUNE_ACCOUNTANT, PUNE_MANAGER], ids=lambda u: u["roles"][0])
+    def test_escalating_dhanbads_goods_receipt_is_the_missing_receipts_404(self, world, user):
+        cli = world.as_(user)
+        other = cli.post("/api/v1/vendors/grn/GRN-D1/escalate", params={"note": "box damaged"})
+        ghost = cli.post("/api/v1/vendors/grn/GRN-NOPE/escalate", params={"note": "box damaged"})
+        assert _same_404(other, ghost) == ("GRN not found",) * 2
+        assert world.db["grns"].find_one({"grn_id": "GRN-D1"})["status"] == "ACCEPTED"
+
+    def test_a_receipt_that_went_into_stock_is_never_escalated(self, world, monkeypatch):
+        """Even its own shop's, even an admin: ESCALATED is a status accept
+        refuses, so it would strand the stock behind a receipt no one can
+        accept again. An accepted receipt is refused; so is a PENDING one an
+        interrupted accept already minted units for. A PENDING receipt with
+        nothing in stock is escalated."""
+        monkeypatch.setattr(vendors, "get_stock_repository", lambda: _Repo(world.db["stock_units"], "unit_id"))
+        world.db["grns"].insert_many([
+            _grn("GRN-P2", PUN, status="PENDING"),
+            _grn("GRN-P3", PUN, status="PENDING"),
+        ])
+        world.db["stock_units"].insert_one(
+            {"unit_id": "U1", "source_type": "GRN", "source_id": "GRN-P3", "product_id": "P1"})
+        url = "/api/v1/vendors/grn/{}/escalate"
+        for user, grn_id, code in (
+            (PUNE_MANAGER, "GRN-P1", 400),
+            (ADMIN_AT_PUNE, "GRN-D1", 400),
+            (PUNE_MANAGER, "GRN-P3", 409),
+        ):
+            r = world.as_(user).post(url.format(grn_id), params={"note": "x"})
+            assert r.status_code == code, (grn_id, r.text)
+        assert world.db["grns"].find_one({"grn_id": "GRN-P1"})["status"] == "ACCEPTED"
+        assert world.db["grns"].find_one({"grn_id": "GRN-D1"})["status"] == "ACCEPTED"
+        assert world.db["grns"].find_one({"grn_id": "GRN-P3"})["status"] == "PENDING"
+        r = world.as_(PUNE_MANAGER).post(url.format("GRN-P2"), params={"note": "x"})
+        assert r.status_code == 200, r.text
+        assert world.db["grns"].find_one({"grn_id": "GRN-P2"})["status"] == "ESCALATED"
 
     _DISMISS = {"product_id": "P1", "reason": "supplier short-closed the line"}
 

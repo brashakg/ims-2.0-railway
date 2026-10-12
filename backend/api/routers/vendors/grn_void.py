@@ -10,6 +10,7 @@ from ._shared import (
     get_audit_repository,
     get_grn_repository,
     get_stock_repository,
+    in_reach_or_404,
     logger,
     require_roles,
     router,
@@ -266,14 +267,43 @@ async def escalate_grn(
     note: str = Query(...),
     current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
 ):
-    """Escalate GRN to HQ for review"""
+    """Escalate a goods receipt that has NOT gone into stock to HQ for review.
+
+    Store-scoped like void / accept / GET (F63): another shop's receipt is the
+    same 404 a missing one gets (in_reach_or_404). PENDING with nothing minted
+    only, as void: ESCALATED is a status accept refuses, so escalating a
+    receipt that holds stock would strand its units behind a receipt that can
+    never be accepted again and that every reader of ACCEPTED receipts (the PO
+    receipt math) no longer counts. Accepted stock is corrected via a vendor
+    return; an interrupted accept is finished by accepting again."""
     grn_repo = get_grn_repository()
 
     if grn_repo is not None:
-        grn = grn_repo.find_by_id(grn_id)
-        if not grn:
-            raise HTTPException(status_code=404, detail="GRN not found")
-
+        grn = in_reach_or_404(grn_repo.find_by_id(grn_id), current_user, "GRN not found")
+        if grn.get("status") != "PENDING":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Only a PENDING GRN can be escalated. This one is "
+                    f"{grn.get('status')} -- accepted stock must be corrected via a "
+                    "vendor return."
+                ),
+            )
+        stock_repo = get_stock_repository()
+        if stock_repo is not None and _grn_already_minted(
+            stock_repo, {"source_type": "GRN", "source_id": grn_id}
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This goods receipt has already put units into stock -- an "
+                    "earlier acceptance was interrupted. Accept it again to "
+                    "finish receiving; it cannot be escalated."
+                ),
+            )
+        # ponytail: read-then-write, no accept claim -- an accept that starts
+        # between the checks and this write loses its terminal flip. Take the
+        # claim as void does if escalate ever gets a screen (it has none today).
         grn_repo.update(
             grn_id,
             {
