@@ -69,6 +69,7 @@ from ..dependencies import (
     get_purchase_order_repository,
     get_grn_repository,
     get_audit_repository,
+    get_product_repository,
     validate_store_access,
 )
 from ..services import ap_engine
@@ -962,6 +963,10 @@ def _apply_valuation_trueup(db, invoice_doc, computed, config) -> Optional[list]
             if pid is None or new_cost is None:
                 continue
             try:
+                current = products.find_one({"product_id": pid})
+            except Exception:  # noqa: BLE001 - the pre-image never blocks the cost
+                current = None
+            try:
                 products.update_one(
                     {"product_id": pid},
                     {
@@ -993,6 +998,20 @@ def _apply_valuation_trueup(db, invoice_doc, computed, config) -> Optional[list]
                 )
             except Exception:
                 pass  # never roll back the products write on a catalog miss
+            # Rulings 11/12: the bill brings the cost, so it may be a draft's
+            # last gap. It finishes the product through the editor's own path
+            # (restamp, mirror, close the asks, release the held units) -- no
+            # second finish path. Fail-soft: the booking stands.
+            if current:
+                try:
+                    from .vendors.grn_accept import catalogue_write_done
+
+                    catalogue_write_done(
+                        pid, current, {"cost_price": new_cost},
+                        product_repo=get_product_repository(),
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.warning("[PI] finishing %s after the bill's cost failed", pid, exc_info=True)
         return applied or None
     except Exception:
         return None
@@ -1400,7 +1419,7 @@ def _assert_products_catalogued(lines, found) -> None:
         # the product ends up WITH a cost precisely because the bill booked.
         # (list comprehension, not a set: the refusal message must keep
         # compute_catalog_status's field order.)
-        gaps = [g for g in _pm.compute_catalog_status(prod)[1] if g != "cost_price"]
+        gaps = _pm.gaps_before_cost(prod)
         if gaps:
             blocked.append(
                 {
@@ -1514,7 +1533,16 @@ async def request_cataloguing(
     only exit is a developer is a wall.
     """
     db = _get_db()
-    items = _ask_items(db, body.product_ids)
+    # Only what still waits on the catalogue manager is asked: an item whose
+    # one gap is the cost waits on the bill itself (rulings 11/12), and a task
+    # for it would stay open until it escalated for nothing.
+    items = [i for i in _ask_items(db, body.product_ids) if i["missing"]]
+    if not items:
+        return {
+            "requested": [],
+            "asked": None,
+            "message": "Nothing on these items is left to catalogue - book the bill",
+        }
     store_id = _shop_for_the_ask(db, body, current_user, items)
     try:
         told, to_cataloguers = ask_catalogue_managers(db, store_id, items, body.note)
@@ -1556,7 +1584,8 @@ def _ask_items(db, product_ids) -> list:
                 )
             except Exception:  # noqa: BLE001
                 prod = None
-        gaps = _pm.compute_catalog_status(prod)[1] if prod else []
+        # Cost is never asked of the catalogue manager: the bill brings it.
+        gaps = _pm.gaps_before_cost(prod) if prod else []
         items.append(
             {
                 "product_id": pid,
@@ -1581,11 +1610,7 @@ def ask_catalogue_managers(db, store_id, items, note=None) -> Tuple[int, bool]:
     managers -- False: the admins were told, nobody holds the job)."""
     from .vendors.grn_accept import tell_catalogue_managers
 
-    lines = [
-        f"- {i['product']}: needs "
-        + (", ".join(i["missing"]) if i["missing"] else "review")
-        for i in items
-    ]
+    lines = [f"- {i['product']}: needs " + ", ".join(i["missing"]) for i in items]
     return tell_catalogue_managers(
         db,
         store_id,

@@ -3591,43 +3591,23 @@ async def update_product(
                     product_id,
                     exc_info=True,
                 )
-            # Hub Phase 0: apply the catalog-done restamp as a GUARDED single-doc
-            # write -- NOT folded into the blind $set above. Auto-promotes a DRAFT
-            # the edit just completed (e.g. cost_price / CL power filled in ->
-            # catalog_status ACTIVE). The guard (find_one_and_update keyed on
-            # catalog_status=DRAFT) means a concurrent edit that already promoted
-            # the row is not clobbered, and a row that reads ACTIVE (incl. a
-            # legacy row with no catalog_status) is left untouched -- never
-            # demoted, never re-judged (forward-only, DECISION A).
-            status_fields = _pm.apply_restamp_atomic(
+            # Hub Phase 0 + products convergence + audit C1, through THE path
+            # every door that writes a product takes
+            # (grn_accept.catalogue_write_done): the catalog-done restamp as a
+            # GUARDED single-doc write -- NOT folded into the blind $set above;
+            # auto-promotes a DRAFT the edit just completed, never demotes,
+            # forward-only (DECISION A) -- then the ONE mirror onto the
+            # catalog_products twin (do not re-inline it here; a finished
+            # provisional draft turns active on its twin too and leaves Needs
+            # review), the asks for cataloguing that wait on nothing any more
+            # close, and an edit that leaves the product catalogue-complete
+            # puts the units receipts were holding for it on the shelf (the
+            # same accept path "Add to stock" runs). Fail-soft: the save stands.
+            from .vendors.grn_accept import catalogue_write_done
+
+            status_fields, released = catalogue_write_done(
                 product_id, existing, update_data, product_repo=repo
             )
-            # Products-convergence: mirror the edit onto the catalog_products
-            # twin so the storefront/PIM does not silently diverge from the
-            # billing spine. THE ONE rule lives in
-            # product_master.mirror_update_to_catalog_twin (which fields, both
-            # price spellings, what queues, pim-key-then-spine-key twin
-            # resolution, no upsert) -- this route used to carry its own copy,
-            # which drifted from the /products/master door's (PR #1029
-            # follow-up). Do not re-inline it here. Fail-soft: a mirror error
-            # never breaks the product save.
-            try:
-                from ..dependencies import get_db as _gdb
-
-                _pm.mirror_update_to_catalog_twin(
-                    product_id=product_id,
-                    current=existing,
-                    # status_fields: a finished provisional draft turns active
-                    # on its twin too, and leaves the Needs-review queue.
-                    patch={**update_data, **status_fields},
-                    db=_gdb(),
-                )
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "[PRODUCTS] catalog mirror on update skipped for %s",
-                    product_id,
-                    exc_info=True,
-                )
             # Sync audit gap #2 (owner, 2026-09-06): is_active off -> take the
             # twin OFF Shopify; back on -> queue it for the next live sync.
             # The ONE rule lives in services/online_delist (same call as the
@@ -3648,20 +3628,6 @@ async def update_product(
             # so the resolver sees the post-update tags/category/brand + status.
             merged = {**existing, **update_data, **status_fields}
             _refresh_collections_after_product(merged)
-            # Audit C1: an edit that leaves the product catalogue-complete puts
-            # the units receipts were holding for it on the shelf -- the same
-            # accept path "Add to stock" runs (grn_accept.release_held_receipts).
-            released = 0
-            if not _pm.compute_catalog_status(merged)[1]:
-                from .vendors.grn_accept import release_held_receipts
-
-                released = sum(
-                    int(r.get("units_added") or 0)
-                    for r in release_held_receipts(product_id)
-                )
-                from .vendors.grn_accept import close_catalogue_asks
-
-                close_catalogue_asks(product_id, "The item is catalogued.")
             return {
                 "message": "Product updated",
                 "product_id": product_id,

@@ -47,54 +47,22 @@ def _promote_cost_from_rate(
             return False
     try:
         product_repo.update(product_id, {"cost_price": cost, "cost_source": source})
-        fields = _pm.apply_restamp_atomic(
-            product_id, prod, {"cost_price": cost}, product_repo=product_repo
-        )
     except Exception as exc:  # noqa: BLE001 - a cost promote never blocks the PO/GRN
         logger.warning("[VENDOR] cost promote skipped for %s: %s", product_id, exc)
         return False
-    # The product editor's rule (products.update_product): a write that leaves
-    # the product catalogue-complete releases what receipts hold for it --
-    # ordered or not (panel P5).
-    if not _pm.compute_catalog_status({**prod, "cost_price": cost, **fields})[1]:
-        _finished_by_the_promote(
-            product_id, prod, {"cost_price": cost, **fields}, deferred_releases
+    # The product editor's path (grn_accept.catalogue_write_done): restamp,
+    # mirror, close the asks, and -- the cost being its last gap -- release
+    # what receipts hold for it, ordered or not (panel P5).
+    try:
+        from .grn_accept import catalogue_write_done
+
+        catalogue_write_done(
+            product_id, prod, {"cost_price": cost}, product_repo=product_repo,
+            deferred_releases=deferred_releases,
         )
+    except Exception:  # noqa: BLE001
+        logger.warning("[VENDOR] finishing after cost promote failed for %s", product_id, exc_info=True)
     return True
-
-
-def _finished_by_the_promote(product_id, prod, patch, deferred_releases=None) -> None:
-    """The cost left the product catalogue-complete (an ordered draft's or a
-    catalogue draft's last gap, say): it is finished here, not in the product
-    editor, so do what the editor's save does -- its catalogue
-    copy leaves Needs review (the one mirror rule) and the units receipts hold
-    for it go on the shelf (the one release). Fail-soft: the cost stands."""
-    try:
-        from api.dependencies import get_db
-
-        _pm.mirror_update_to_catalog_twin(
-            product_id=product_id, current=prod, patch=patch, db=get_db()
-        )
-    except Exception:  # noqa: BLE001
-        logger.warning("[VENDOR] twin mirror after cost promote failed for %s", product_id, exc_info=True)
-    try:
-        from .grn_accept import close_catalogue_asks
-
-        close_catalogue_asks(product_id, "The item is catalogued.")
-    except Exception:  # noqa: BLE001
-        logger.warning("[VENDOR] closing asks after cost promote failed for %s", product_id, exc_info=True)
-    if deferred_releases is not None:
-        # Inside a receipt's accept (its claim held): releasing now would try
-        # to claim that very receipt and count it as busy against the order.
-        # The accept releases once its own claim is handed back.
-        deferred_releases.append(product_id)
-        return
-    try:
-        from .grn_accept import release_held_receipts
-
-        release_held_receipts(product_id)
-    except Exception:  # noqa: BLE001
-        logger.warning("[VENDOR] release after cost promote failed for %s", product_id, exc_info=True)
 
 
 def _po_gst_parties(vendor, store_doc) -> dict:

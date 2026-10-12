@@ -571,7 +571,7 @@ export const purchaseInvoicesApi = {
     });
     return res.data as {
       requested: Array<{ product_id: string; product: string; missing: string[] }>;
-      asked: 'CATALOG_MANAGER' | 'ADMIN';
+      asked: 'CATALOG_MANAGER' | 'ADMIN' | null;
       message: string;
     };
   },

@@ -321,7 +321,7 @@ async def send_po(
                 # (ruling 15), which refuses to settle an incomplete product.
                 if prod.get("provisional"):
                     continue
-                gaps = set(_pm.compute_catalog_status(prod)[1]) - {"cost_price"}
+                gaps = _pm.gaps_before_cost(prod)
                 if gaps:
                     blocked.append({"product_id": pid, "missing": sorted(gaps)})
             if blocked:

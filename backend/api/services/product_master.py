@@ -3494,6 +3494,14 @@ def missing_required_fields(category: Any, attributes: Dict[str, Any]) -> List[s
     return [fld for fld in spec.required if _is_blank(attrs.get(fld))]
 
 
+def gaps_before_cost(doc: Dict[str, Any]) -> List[str]:
+    """The catalogue gaps a purchase waits on: every gap but cost_price, which
+    the purchase itself brings (rulings 11-13 -- the PO rate, the receipt, the
+    vendor bill write it). THE one rule for the bill's booking gate, send_po
+    and the asks for cataloguing; compute_catalog_status's order is kept."""
+    return [g for g in compute_catalog_status(doc)[1] if g != "cost_price"]
+
+
 def compute_catalog_status(doc: Dict[str, Any]) -> tuple:
     """THE catalog-done chokepoint (write-side stamp).
 

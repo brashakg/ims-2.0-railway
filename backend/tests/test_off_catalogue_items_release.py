@@ -54,6 +54,7 @@ from api.routers import products as _products  # noqa: E402
 from api.routers import tasks as _tasks  # noqa: E402
 from api.routers import vendors as vd  # noqa: E402
 from api.services import online_catalog as _online  # noqa: E402
+from api.services import product_master as _pm  # noqa: E402
 from strict_fakes import StrictDB  # noqa: E402
 
 STORE = "BV-DHN-02"
@@ -3824,15 +3825,19 @@ def test_r6_already_in_the_catalogue_is_asked_before_the_eye_size(world):
 
 
 def test_r6_a_bills_ask_closes_when_the_cost_fill_finishes_the_item(world):
-    # The ask closes however the item is finished -- here by the PO's cost
-    # fill, its last gap, not the product editor.
+    # Round 9: cost is never a gap an ask waits on (the bill brings it). An
+    # item whose only gap is its cost is not asked of anyone -- a task for it
+    # would escalate for nothing -- and the cost fill then finishes it.
     from api.routers import purchase_invoices as _pi
 
     po = world.raise_po([{"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 0}])
     draft_id = po["items"][0]["product_id"]
     world.finish_draft(draft_id, offer=2790)  # cost is still missing
-    _run(_pi.request_cataloguing(_pi.CataloguingRequest(product_ids=[draft_id]), ACCOUNTANT))
-    assert _asks(world)
+    out = _run(_pi.request_cataloguing(_pi.CataloguingRequest(product_ids=[draft_id]), ACCOUNTANT))
+    finding(
+        not _asks(world) and out["asked"] is None and out["requested"] == [],
+        f"An item missing only its cost was asked of the catalogue manager ({out}, {_asks(world)})",
+    )
     world.raise_po(
         [
             {
@@ -5270,3 +5275,46 @@ def test_r9_a_bills_ask_with_no_catalogue_manager_goes_to_the_admins_and_says_so
     world.db.tasks.delete_many({"product_ids": draft_id})
     out = _run(_pi.request_cataloguing(_pi.CataloguingRequest(product_ids=[draft_id]), ACCOUNTANT))
     assert out["asked"] == "CATALOG_MANAGER" and "catalogue manager" in out["message"], out
+
+
+def test_r9_the_bills_cost_finishes_the_draft_as_the_editor_does(world, monkeypatch):
+    # The panel's probe: an item typed on an order at no rate, asked of the
+    # catalogue manager by the bill's accountant, finished by them in every
+    # field but the cost -- which the bill brings (rulings 11/12). The ask
+    # closes with the cataloguer's save; the bill's cost then finishes the
+    # draft through the editor's own path: catalog status, Needs review, the
+    # held units on the shelf; and nothing escalates a day later.
+    from api.routers import purchase_invoices as _pi
+
+    _seed_user(world, ADMIN)
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=0)
+    _run(_pi.request_cataloguing(_pi.CataloguingRequest(product_ids=[draft_id]), ACCOUNTANT))
+    (ask,) = _asks(world)
+    assert "Cost" not in ask["description"], ask["description"]
+    world.finish_draft(draft_id, offer=2790)
+    assert _pm.compute_catalog_status(world.product(draft_id))[1] == ["cost_price"]
+    finding(not _asks(world), f"The ask outlived the cataloguer's work; the cost is the bill's ({_asks(world)})")
+    _pi._apply_valuation_trueup(
+        world.db,
+        {"invoice_id": "PI-R9", "grn_id": grn["grn_id"]},
+        {"lines": [{"product_id": draft_id, "qty": 2, "unit_price": 1200}]},
+        {"valuation_method": "MOVING_AVERAGE"},
+    )
+    prod = world.product(draft_id)
+    twin = _twin_of(world, draft_id)
+    finding(
+        prod["cost_price"] == 1200
+        and prod["catalog_status"] == "ACTIVE"
+        and prod["provisional"] is False
+        and not twin.get("needs_review")
+        and len(world.units(draft_id)) == 2
+        and world.grn(grn["grn_id"])["status"] == "ACCEPTED",
+        f"The bill's cost left the draft half-finished: {prod.get('catalog_status')}, "
+        f"provisional={prod.get('provisional')}, needs_review={twin.get('needs_review')}, "
+        f"{len(world.units(draft_id))} of 2 on the shelf, receipt {world.grn(grn['grn_id'])['status']}",
+    )
+    _escalate_after(world, monkeypatch, "endpoint", hours=25)
+    finding(
+        not _open_tasks(world),
+        f"Work already done escalated: {[(t.get('assigned_to'), t.get('title')) for t in _open_tasks(world)]}",
+    )

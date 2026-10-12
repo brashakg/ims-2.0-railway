@@ -1168,14 +1168,54 @@ def close_catalogue_asks(product_id: str, note: str) -> None:
 
 def asks_still_waiting(db, product_ids) -> List[str]:
     """The products an ask for cataloguing still waits on: those that exist,
-    were not discarded, and are not catalogue-complete yet."""
+    were not discarded, and still miss something the catalogue manager owes
+    -- never the cost, which the bill brings (_pm.gaps_before_cost)."""
     products = db.get_collection("products")
     waiting = []
     for pid in product_ids:
         prod = products.find_one({"product_id": pid}) or {}
-        if prod and not prod.get("discarded_draft") and _pm.compute_catalog_status(prod)[1]:
+        if prod and not prod.get("discarded_draft") and _pm.gaps_before_cost(prod):
             waiting.append(pid)
     return waiting
+
+
+def catalogue_write_done(
+    product_id: str, current: dict, patch: dict, *, product_repo, deferred_releases=None
+) -> Tuple[dict, int]:
+    """THE path after a write to a product, whichever door made it: the
+    product editor's save (PUT /products/{id}), the cost an order's or a
+    receipt's rate promotes (gst._promote_cost_from_rate), the cost a vendor
+    bill writes (purchase_invoices._apply_valuation_trueup). One path, so no
+    door finishes a product without the rest:
+
+      * the catalog status is restamped (a DRAFT the write completed turns
+        ACTIVE, an ordered draft stops being one -- _pm.apply_restamp_atomic);
+      * its catalogue copy mirrors the write (the one mirror rule; a finished
+        ordered draft leaves Needs review);
+      * the asks for cataloguing that wait on nothing any more close (cost is
+        never a gap for them);
+      * once the product is catalogue-complete, the units receipts hold for it
+        go on the shelf (the one release) -- deferred inside a receipt's
+        accept, whose own claim is held.
+
+    Answers (the status fields written, the units released). Fail-soft: the
+    write stands."""
+    fields = _pm.apply_restamp_atomic(product_id, current, patch, product_repo=product_repo)
+    try:
+        from api.dependencies import get_db
+
+        _pm.mirror_update_to_catalog_twin(
+            product_id=product_id, current=current, patch={**patch, **fields}, db=get_db()
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("[CATALOGUE] catalog mirror after a write skipped for %s", product_id, exc_info=True)
+    close_catalogue_asks(product_id, "The item is catalogued.")
+    if _pm.compute_catalog_status({**(current or {}), **patch, **fields})[1]:
+        return fields, 0
+    if deferred_releases is not None:
+        deferred_releases.append(product_id)
+        return fields, 0
+    return fields, sum(int(r.get("units_added") or 0) for r in release_held_receipts(product_id))
 
 
 def _sync_catalogue_tasks(grn_id, grn, unresolved_lines, grn_status, product_repo):
