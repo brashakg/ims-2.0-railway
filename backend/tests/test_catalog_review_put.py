@@ -892,6 +892,28 @@ def test_promote_folds_the_twins_old_spelling(env):
     assert "GTIN" not in twin_attrs and twin_attrs["gtin"] == _GTIN
 
 
+def test_a_junk_upc_with_no_upc_box_never_blocks_a_save_or_an_approve(env):
+    """Round 9 item 3 (probes P1 / P6). A WATCH has no 'UPC (mfr)' box, so a
+    stored upc 'NA' 422'd every review-editor save that sent it back and every
+    Approve. It is dropped (and logged) instead -- on the twin, on the spine."""
+    doc = _bvi_doc(doc_id="clx0rvwatch1", sku="RVWT1", category="WATCH")
+    doc["attributes"]["upc"] = "NA"
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+    _put(doc["id"], {"attributes": {**doc["attributes"], "colour_code": "RED"}})
+    assert "upc" not in catalog_mod.CATALOG_PRODUCTS[doc["id"]]["attributes"]
+    # Approve of a twin nobody has saved since the junk landed.
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]]["attributes"]["upc"] = "NA"
+    _promote(doc["id"])
+    assert "upc" not in env["repo"].find_by_id(doc["id"])["attributes"]
+    # A FRAME shows the box: there the junk is still refused, so it gets fixed.
+    frame = _bvi_doc(doc_id="clx0rvframe1", sku="RVFR1")
+    frame["attributes"]["upc"] = "NA"
+    catalog_mod.CATALOG_PRODUCTS[frame["id"]] = frame
+    with pytest.raises(HTTPException) as exc:
+        _promote(frame["id"])
+    assert exc.value.status_code == 422
+
+
 def test_catalog_create_door_refuses_a_gtin_another_product_holds(gtin_env):
     """POST /catalog/products is a create door too: one holder per GTIN."""
     gtin_env.create({"product_id": "spine-other", "sku": "OTHER-1",

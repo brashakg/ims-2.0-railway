@@ -1315,8 +1315,35 @@ def find_similar_products(
         return empty
 
 
+def _drop_boxless_junk(attrs: Dict[str, Any], category: Any) -> Dict[str, Any]:
+    """`attrs` (mutated, returned) without a junk manufacturer barcode the
+    category's form has NO box for: dropped and logged, never a 422. gtin
+    always has one (Manage Barcode edits it on any product); upc only where the
+    form shows 'UPC (mfr)' (FRAME, SUNGLASS, SMARTGLASSES). A WATCH holding
+    upc 'NA' 422'd every Quick Add save and every Approve with nothing on
+    screen to fix -- the same treatment the fold gives a junk 'GTIN' key."""
+    spec = category_spec(category)
+    fields = (spec.required + spec.optional) if spec else ()
+    for key in MANUFACTURER_BARCODE_ATTRIBUTES:
+        if key == "gtin" or key in fields or key not in attrs:
+            continue
+        raw = attrs[key]
+        if sanitise_gtin(raw) or not normalise_candidate(raw):
+            continue
+        logger.warning(
+            "[PM] dropping invalid %s (no %s box on %s): reason=%s value=%.60r",
+            key,
+            key.upper(),
+            category,
+            classify_gtin(raw),
+            raw,
+        )
+        del attrs[key]
+    return attrs
+
+
 def _guard_gtin_attribute(
-    attributes: Dict[str, Any], *, strict: bool
+    attributes: Dict[str, Any], *, strict: bool, category: Any
 ) -> Dict[str, Any]:
     """Validate `attributes['gtin']` -- the PUBLIC barcode -- at the create door.
 
@@ -1354,9 +1381,10 @@ def _guard_gtin_attribute(
     logged in BOTH modes, never a 422. No screen shows a 'GTIN' key (the GTIN
     box and Manage Barcode read 'gtin'), yet Quick Add sends every stored key
     back, so a 422 on an old stored 'GTIN' left the product unsaveable with
-    nothing on screen to fix.
+    nothing on screen to fix. For the same reason a junk upc in a `category`
+    whose form has no UPC box is dropped, never refused (_drop_boxless_junk).
     """
-    attrs = fold_barcode_spellings(attributes)
+    attrs = _drop_boxless_junk(fold_barcode_spellings(attributes), category)
     for key in MANUFACTURER_BARCODE_ATTRIBUTES:
         if key not in attrs:
             continue
@@ -1476,6 +1504,7 @@ def merge_attributes_edit(
     patch: Dict[str, Any],
     product_repo,
     this_product_id: Optional[str],
+    category: Any,
 ) -> Tuple[Dict[str, Any], bool]:
     """(the attributes a partial edit stores, whether that write sets the gtin).
     THE merge for both attribute edit doors (the spine PUT, the catalogue review
@@ -1485,9 +1514,12 @@ def merge_attributes_edit(
     gtin is WRITTEN when the edit sent it or the fold made or changed it, and a
     written gtin passes the one-holder check: a folded 'GTIN' another product
     holds 409s exactly as a typed one does. The caller then runs the barcode
-    projections (twin gtin, spine attributes.gtin, legacy barcode) on it."""
+    projections (twin gtin, spine attributes.gtin, legacy barcode) on it. A
+    stored junk upc the `category` has no box for leaves storage here
+    (_drop_boxless_junk): the guard dropping it from the patch alone would let
+    the stored copy back in."""
     stored = stored or {}
-    merged = fold_barcode_spellings({**stored, **patch})
+    merged = _drop_boxless_junk(fold_barcode_spellings({**stored, **patch}), category)
     written = "gtin" in patch or (merged.get("gtin") or "") != (
         stored.get("gtin") or ""
     )
@@ -1609,7 +1641,7 @@ def normalise_payload(
     # A bad public GTIN is worse than none -- reject it here, before it can be
     # persisted and pushed to Shopify / the Shopping feeds. See the helper.
     attributes = _guard_gtin_attribute(
-        attributes, strict=not (as_draft or force_draft)
+        attributes, strict=not (as_draft or force_draft), category=canonical
     )
 
     # discount_category: forced for HA/SERVICES, else an explicit value wins

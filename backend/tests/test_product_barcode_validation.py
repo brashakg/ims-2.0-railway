@@ -979,20 +979,20 @@ class TestBarcodeKeysInAnyLetterCase:
         from api.services.product_master import ProductMasterError, _guard_gtin_attribute
 
         for attrs in ({"gtin": _VALID_A, "GTIN": _VALID_B}, {"GTIN": _VALID_B, "gtin": _VALID_A}):
-            assert _guard_gtin_attribute(attrs, strict=True) == {"gtin": _VALID_A}
-        assert _guard_gtin_attribute({"Upc": " 0360-0029-1452"}, strict=True) == {"upc": _UPC_A}
+            assert _guard_gtin_attribute(attrs, strict=True, category="FRAME") == {"gtin": _VALID_A}
+        assert _guard_gtin_attribute({"Upc": " 0360-0029-1452"}, strict=True, category="FRAME") == {"upc": _UPC_A}
         # Both modes drop a junk code under another spelling.
         for strict in (True, False):
             assert _guard_gtin_attribute(
-                {"GTIN": _INTERNAL, "frame_material": "TR90"}, strict=strict
+                {"GTIN": _INTERNAL, "frame_material": "TR90"}, strict=strict, category="FRAME"
             ) == {"frame_material": "TR90"}
         # The exact key wins, in either order: the other spelling is never read.
         for exact in (_VALID_A, ""):
             for attrs in ({"GTIN": _INTERNAL, "gtin": exact}, {"gtin": exact, "GTIN": _INTERNAL}):
-                assert _guard_gtin_attribute(attrs, strict=True) == {"gtin": exact}
+                assert _guard_gtin_attribute(attrs, strict=True, category="FRAME") == {"gtin": exact}
         # The exact key itself is still refused when junk (the GTIN box shows it).
         with pytest.raises(ProductMasterError) as ei:
-            _guard_gtin_attribute({"GTIN": _VALID_A, "gtin": _INTERNAL}, strict=True)
+            _guard_gtin_attribute({"GTIN": _VALID_A, "gtin": _INTERNAL}, strict=True, category="FRAME")
         assert getattr(ei.value, "status", None) == 422
 
     def test_the_metafields_carry_only_a_publishable_gtin(self):
@@ -1021,8 +1021,52 @@ class TestBarcodeKeysInAnyLetterCase:
         from api.services.product_master import _guard_gtin_attribute
 
         junk_first = {"GTIN": _INTERNAL, "Gtin": _VALID_A}
-        assert _guard_gtin_attribute(junk_first, strict=True) == {"gtin": _VALID_A}
+        assert _guard_gtin_attribute(junk_first, strict=True, category="FRAME") == {"gtin": _VALID_A}
         assert mf(junk_first) == [("gtin", _VALID_A)]
         assert build_removed_metafields({"attributes": {"GTIN": _INTERNAL, "Gtin": ""}}) == [
             {"namespace": "ims", "key": "gtin"}
         ]
+
+
+class TestAJunkUpcWhereTheFormHasNoUpcBox:
+    """Round 9 item 3. Only FRAME, SUNGLASS and SMARTGLASSES show 'UPC (mfr)'.
+    A WATCH holding upc 'NA' got 422 "'NA' is not a valid UPC" on every Quick
+    Add save (it sends every stored key back) with nothing on screen to fix.
+    Where there is no box the junk code is dropped and logged, never a 422."""
+
+    def test_the_guard_refuses_junk_only_where_there_is_a_upc_box(self):
+        from api.services.product_master import ProductMasterError, _guard_gtin_attribute
+
+        for category in ("WATCH", "WT", "CONTACT_LENS", None):
+            assert _guard_gtin_attribute(
+                {"upc": "NA", "dial_color": "Blue"}, strict=True, category=category
+            ) == {"dial_color": "Blue"}, category
+            # A real UPC is still kept (sanitised) wherever it is held.
+            assert _guard_gtin_attribute(
+                {"upc": " 0360-0029-1452"}, strict=True, category=category
+            ) == {"upc": _UPC_A}, category
+        for category in ("FRAME", "SG", "SMTFR"):
+            with pytest.raises(ProductMasterError) as ei:
+                _guard_gtin_attribute({"upc": "NA"}, strict=True, category=category)
+            assert ei.value.status == 422, category
+        # The gtin keeps its strict check in every category (Manage Barcode).
+        with pytest.raises(ProductMasterError):
+            _guard_gtin_attribute({"gtin": "NA"}, strict=True, category="WATCH")
+
+    def test_a_quick_add_save_of_a_watch_drops_its_stored_junk_upc(self, mock_db):
+        from api.routers.products import create_product, ProductCreate
+
+        body = ProductCreate(
+            sku="WT-NA", category="WATCH", brand="Titan", model="M-WT-NA",
+            color="Black", mrp=1000.0, offer_price=900.0,
+        )
+        pid = asyncio.run(create_product(body, _ADMIN))["product_id"]
+        mock_db["products"].update_one(
+            {"product_id": pid}, {"$set": {"attributes.upc": "NA"}}
+        )
+        sent = dict(mock_db["products"].find_one({"product_id": pid})["attributes"])
+        sent["dial_color"] = "Blue"
+        _update(pid, attributes=sent)  # every stored key back, as Quick Add does
+        attrs = mock_db["products"].find_one({"product_id": pid})["attributes"]
+        assert attrs["dial_color"] == "Blue"
+        assert "upc" not in attrs

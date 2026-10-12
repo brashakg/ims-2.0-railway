@@ -3442,9 +3442,12 @@ async def update_product(
             # this write, so Remove removes it; a gtin the fold makes passes
             # the one-holder check like a sent one.
             try:
-                _patch = _pm._guard_gtin_attribute(_patch, strict=True)
+                _category = update_data.get("category") or existing.get("category")
+                _patch = _pm._guard_gtin_attribute(
+                    _patch, strict=True, category=_category
+                )
                 update_data["attributes"], _gtin_written = _pm.merge_attributes_edit(
-                    existing.get("attributes"), _patch, repo, product_id
+                    existing.get("attributes"), _patch, repo, product_id, _category
                 )
             except _pm.ProductMasterError as err:
                 raise HTTPException(

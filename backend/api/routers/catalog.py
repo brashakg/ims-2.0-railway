@@ -2152,7 +2152,9 @@ async def update_catalog_product(
             # The review editor's 'GTIN (mfr)' / 'UPC (mfr)' boxes are the
             # manufacturer barcodes that reach Shopify and Google: the same
             # strict guard and one-holder rule as the spine doors.
-            _typed = _pm._guard_gtin_attribute(_typed, strict=True)
+            _typed = _pm._guard_gtin_attribute(
+                _typed, strict=True, category=existing.get("category")
+            )
             product.attributes = _typed
             # Another stored spelling of a barcode key folds on and goes; a
             # gtin the fold makes is checked like a sent one, and written.
@@ -2163,6 +2165,7 @@ async def update_catalog_product(
                 _gtin_repo,
                 # A spineless twin (an import) is its own holder: its id.
                 _spine_product_id(_gtin_repo, existing) or existing.get("id"),
+                existing.get("category"),
             )
             merged_attrs = _pm.enforce_dictionary_values(
                 existing.get("category"), merged_attrs, db=_get_db()
