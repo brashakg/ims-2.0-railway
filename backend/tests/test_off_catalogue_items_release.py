@@ -5068,3 +5068,25 @@ def test_r8_a_claim_that_is_not_this_orders_item_never_holds_the_release(world, 
         f"shelf, receipt {world.grn(held['grn_id'])['status']}",
     )
 
+
+def test_r8_the_auto_escalate_answer_counts_a_merge_as_a_merge(world, monkeypatch):
+    # R1-50: two catalogue managers' tasks for one receipt breach together; the
+    # second closes into the first's escalated twin. The answer said "2
+    # escalated" for 1 escalated + 1 closed.
+    _seed_user(world, ADMIN)
+    _seed_user(world, dict(CATALOGUER, user_id="u-cat-2", username="catalog.two"))
+    world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    real = vd.datetime
+
+    class _Later(real):
+        @classmethod
+        def now(cls, tz=None):
+            return real.now(tz) + vd.timedelta(hours=25)
+
+    monkeypatch.setattr(_tasks, "datetime", _Later)
+    body = _run(_tasks.auto_escalate_overdue_tasks(store_id=None, current_user=ADMIN))
+    stored = sorted(t.get("status") for t in world.db.tasks.find({"category": "Catalogue"}))
+    finding(
+        stored == ["COMPLETED", "ESCALATED"] and body["escalated"] == 1 and body.get("merged") == 1,
+        f"R1-50: stored {stored}, the answer reads {body}",
+    )

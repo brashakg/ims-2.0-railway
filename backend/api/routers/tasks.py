@@ -1506,16 +1506,25 @@ async def auto_escalate_overdue_tasks(
         truncated = True
 
     escalated_count = 0
+    merged_count = 0
     for task, reason in breached:
         # Resolve the next owner up the role ladder + reassign + notify.
         await _escalate_reassign_notify(repo, task, reason=reason, by="system", now=now)
-        escalated_count += 1
+        # The person above already held its twin: it was closed into that one
+        # (merge_into_twin) -- counted as such, never as an escalation (R1-50).
+        after = repo.find_by_id(task.get("task_id")) or {}
+        if canon_status(after.get("status")) == "COMPLETED":
+            merged_count += 1
+        else:
+            escalated_count += 1
 
     return {
         "escalated": escalated_count,
+        "merged": merged_count,
         "scanned": scanned,
         "truncated": truncated,
-        "message": f"Auto-escalated {escalated_count} overdue tasks",
+        "message": f"Auto-escalated {escalated_count} overdue tasks"
+        + (f"; {merged_count} closed into the one already above them" if merged_count else ""),
     }
 
 
