@@ -26,6 +26,7 @@ from ._shared import (
     validate_store_access,
 )
 from ...services.cost_mask import mask_cost_list
+from ...services.gtin import fold_barcode_spellings
 from ...services.item_events import on_hand_match
 from ...utils.ist import ist_date_str_from_stored
 from .helpers import (
@@ -429,7 +430,9 @@ def _ledger_row(
     mrp = float(product.get("mrp", 0) or 0)
     offer_price = float(product.get("offer_price", mrp) or mrp)
     attrs = product.get("attributes")
-    gtin = (attrs.get("gtin") if isinstance(attrs, dict) else None) or ""
+    # Read through THE fold the push reads (variant_barcode, ims.gtin), so a
+    # legacy 'GTIN' key shows here -- and can be removed -- as the code IMS sends.
+    gtin = (fold_barcode_spellings(attrs).get("gtin") if isinstance(attrs, dict) else None) or ""
     return {
         "id": pid,
         "product_id": pid,

@@ -610,6 +610,17 @@ class TestGtinAttributeOnTheEditDoor:
         assert row["gtin"] == _VALID_A
         assert row["barcode"] == ""
 
+    def test_the_row_reads_a_gtin_key_in_any_spelling_like_the_push(self):
+        """A legacy 'GTIN' key is the code the push sends (variant_barcode reads
+        it through gtin.fold_barcode_spellings). Read by the exact key only,
+        Manage Barcode opened empty and offered no Remove for it."""
+        from api.routers.inventory.stock import _ledger_row
+        from api.services.shopify_push.product_input import variant_barcode
+
+        spine = {"product_id": "P1", "attributes": {"GTIN": _VALID_A}}
+        row = _ledger_row(spine, 1, 0, {}, "BV-TEST-01")
+        assert row["gtin"] == variant_barcode(spine, None) == _VALID_A
+
     @pytest.mark.parametrize("attrs", [["FRAME"], "FRAME", 7])
     def test_a_product_whose_attributes_are_not_a_dict_keeps_the_ledger_up(
         self, attrs
