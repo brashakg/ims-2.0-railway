@@ -887,3 +887,46 @@ def test_a_priced_line_keeps_its_price_at_approval(client, returns_db):
     assert r.status_code == 200, r.text
     stored = returns_db.vendor_returns.find_one({"return_id": rid})
     assert stored["items"][0]["unit_price"] == 100.0 and stored["total_value"] == 100.0
+
+
+# The approval prices a line by the create door's own rule (one type): a crore
+# at most, never NaN / Infinity -- either would be stored and then break every
+# read of the Vendor Returns list. Raw JSON, since NaN / Infinity are not JSON
+# a client library will write.
+_BAD_PRICES = ("20000000", "NaN", "Infinity", "-1")
+
+
+@pytest.mark.parametrize("bad", _BAD_PRICES)
+def test_both_return_doors_refuse_a_price_outside_the_one_rule(client, returns_db, bad):
+    h = {**_headers("STORE_MANAGER"), "Content-Type": "application/json"}
+    rid = _workshop_return(client)
+    r = client.patch(
+        f"/api/v1/vendor-returns/{rid}/status",
+        content=f'{{"status": "approved", "unit_prices": [{bad}]}}',
+        headers=h,
+    )
+    assert r.status_code == 422, (bad, r.text)
+    body = json.dumps(_return_body(unit_price=0.0)).replace("0.0", bad)
+    r = client.post("/api/v1/vendor-returns", content=body, headers=h)
+    assert r.status_code == 422, (bad, r.text)
+    stored = returns_db.vendor_returns.find_one({"return_id": rid})
+    assert stored["status"] == "created" and stored["items"][0]["unit_price"] is None
+    # The list still loads for the buyers.
+    r = client.get("/api/v1/vendor-returns", headers=h)
+    assert r.status_code == 200 and r.json()["total"] == 1, r.text
+
+
+def test_the_top_price_is_taken_at_both_doors(client, returns_db):
+    h = _headers("STORE_MANAGER")
+    rid = _workshop_return(client)  # 2 pieces
+    r = client.patch(
+        f"/api/v1/vendor-returns/{rid}/status",
+        json={"status": "approved", "unit_prices": [10_000_000]},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    assert returns_db.vendor_returns.find_one({"return_id": rid})["total_value"] == 20_000_000
+    r = client.post(
+        "/api/v1/vendor-returns", json=_return_body(unit_price=10_000_000), headers=h
+    )
+    assert r.status_code == 201, r.text

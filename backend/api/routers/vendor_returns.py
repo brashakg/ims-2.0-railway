@@ -6,7 +6,7 @@ Vendor returns, debit notes, and credit note management
 
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
-from typing import List, Optional, Literal
+from typing import Annotated, List, Optional, Literal
 from datetime import datetime
 import uuid
 from .auth import require_roles
@@ -43,6 +43,12 @@ router = APIRouter()
 # ============================================================================
 
 
+# What was paid per piece -- ONE rule for the create door and the approval
+# that prices a line the workshop logged: 0 to 1 crore, a real number (NaN /
+# Infinity would be stored and then break every read of the return).
+UnitPricePaid = Annotated[float, Field(ge=0, le=10_000_000, allow_inf_nan=False)]
+
+
 class ReturnItemCreate(BaseModel):
     product_id: str
     product_name: str
@@ -52,7 +58,7 @@ class ReturnItemCreate(BaseModel):
     reason: str  # defective, wrong_item, expired, damaged_in_transit, quality_issue, not_as_ordered, other
     # What was paid per piece. A purchase role must give it; anyone else (the
     # workshop) is never shown a price, so one they send is not taken.
-    unit_price: Optional[float] = Field(None, ge=0, le=10_000_000)
+    unit_price: Optional[UnitPricePaid] = None
 
 
 class VendorReturnCreate(BaseModel):
@@ -80,7 +86,7 @@ class VendorReturnStatusUpdate(BaseModel):
     # Approving a return logged without prices (workshop staff, owner ruling
     # 2026-10-12): the price paid per piece, one per item in the return's order.
     # Only a line with no price takes one; a priced line keeps its own.
-    unit_prices: Optional[List[Optional[float]]] = None
+    unit_prices: Optional[List[Optional[UnitPricePaid]]] = None
 
 
 # ============================================================================
@@ -162,9 +168,7 @@ def _price_unpriced_lines(items, unit_prices) -> Optional[list]:
     if not unpriced:
         return None
     given = list(unit_prices or [])
-    if len(given) != len(items) or any(
-        given[i] is None or given[i] < 0 for i in unpriced
-    ):
+    if len(given) != len(items) or any(given[i] is None for i in unpriced):
         raise HTTPException(
             status_code=422,
             detail="Enter the price paid for every item before approving this return.",
@@ -173,6 +177,14 @@ def _price_unpriced_lines(items, unit_prices) -> Optional[list]:
         {**it, "unit_price": float(given[i])} if i in unpriced else dict(it)
         for i, it in enumerate(items)
     ]
+
+
+def _return_total(items) -> Optional[float]:
+    """The return's value: quantity x price paid over its lines; unknown
+    (None, never 0) while a line is unpriced."""
+    if any(it.get("unit_price") is None for it in items):
+        return None
+    return sum(float(it.get("quantity") or 0) * it["unit_price"] for it in items)
 
 
 # ============================================================================
@@ -262,12 +274,16 @@ async def create_vendor_return(
         collection = db.get_collection("vendor_returns")
         return_id = generate_return_id()
 
-        # Calculate total value: unknown (None, never 0) while a line is unpriced.
-        total_value = (
-            None
-            if None in prices
-            else sum(i.quantity * p for i, p in zip(return_data.items, prices))
-        )
+        items = [
+            {
+                "product_id": item.product_id,
+                "product_name": item.product_name,
+                "quantity": item.quantity,
+                "reason": item.reason,
+                "unit_price": price,
+            }
+            for item, price in zip(return_data.items, prices)
+        ]
 
         # Create return document
         return_doc = {
@@ -275,19 +291,10 @@ async def create_vendor_return(
             "vendor_id": return_data.vendor_id,
             "vendor_name": return_data.vendor_name,
             "store_id": return_data.store_id,
-            "items": [
-                {
-                    "product_id": item.product_id,
-                    "product_name": item.product_name,
-                    "quantity": item.quantity,
-                    "reason": item.reason,
-                    "unit_price": price,
-                }
-                for item, price in zip(return_data.items, prices)
-            ],
+            "items": items,
             "return_type": return_data.return_type,
             "status": "created",
-            "total_value": total_value,
+            "total_value": _return_total(items),
             "credit_note_number": None,
             "credit_note_amount": None,
             "notes": return_data.notes or "",
@@ -432,9 +439,7 @@ async def update_return_status(
 
         if priced_items is not None:
             update_dict["items"] = priced_items
-            update_dict["total_value"] = sum(
-                float(it.get("quantity") or 0) * it["unit_price"] for it in priced_items
-            )
+            update_dict["total_value"] = _return_total(priced_items)
 
         # Add status to history
         status_history = return_doc.get("status_history", [])
