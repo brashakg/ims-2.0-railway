@@ -29,6 +29,7 @@ from .numbering import (
     _grn_stock_audit,
     compute_po_receipt_state,
 )
+from .grn import _require_receipt_number
 from .grn_accept_lock import (
     _GRN_ACCEPT_LOCK_STALE_SECONDS,
     _GRN_MINT_DUPLICATE,
@@ -388,6 +389,11 @@ def _put_on_shelf(
     line that would take its product past what the PO ordered."""
     stock_repo = get_stock_repository()
     po_repo = get_purchase_order_repository()
+
+    # A receipt still on its PENDING/<id> placeholder has no number yet: a
+    # stranded one (its request died) is numbered here, a fresh one is refused
+    # until its own request has numbered it (audit F28).
+    grn = _require_receipt_number(grn_repo, grn)
 
     # PENDING is the normal first accept. PARTIALLY_ACCEPTED is re-accept after a
     # "Catalog now" -- some lines were held last time because their product was

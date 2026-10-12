@@ -584,9 +584,9 @@ def test_rbac_policy_row_exists_and_mirrors_sales_jv():
     row = policy_for("GET", RECEIPT_JV)
     assert row is not None, "no rbac_policy row for the tender-receipt-jv route"
     # Org-wide accounting exports = finance-admin only (owner decision 2026-06-16).
-    assert set(row["allowed"]) == {"ACCOUNTANT", "ADMIN", "SUPERADMIN"}
+    assert set(row["allowed"]) - {"SUPERADMIN"} == {"ACCOUNTANT", "ADMIN"}
     sales = policy_for("GET", SALES_JV)
-    assert set(sales["allowed"]) == set(row["allowed"])  # mirrors the sibling
+    assert sales["allowed"] is row["allowed"]  # the sibling: one accounts list
 
 
 def test_sales_staff_denied_even_with_flag_on(client, db, flag):

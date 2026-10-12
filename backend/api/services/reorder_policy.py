@@ -13,6 +13,13 @@ Semantics (single source of truth for every consumer):
                               once the backfill script (scripts/
                               backfill_reorder_quantity_minus1.py) or the
                               create door has stamped the field.
+  - discontinued()         -> DISABLED whatever the quantity: a
+                              discontinued (soft-deleted) product is never
+                              suggested for reorder, even while units of it
+                              are still on a shelf (audit F48). A PROVISIONAL
+                              product (ruling 13: bought before it was
+                              catalogued) is inactive too but NOT discontinued
+                              -- until it is switched on or deleted.
 
 Consumers (each guards with auto_reorder_disabled()):
   - api/routers/inventory.py      /inventory/alerts restock suggestions
@@ -32,16 +39,50 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 
 
+# Every product field discontinued() reads. A reader that projects products
+# asks for all of these, or the rule judges a doc missing half its facts.
+DISCONTINUED_FIELDS = ("is_active", "provisional", "switched_on_at", "deleted_at")
+
+
+def discontinued(product: Any) -> bool:
+    """THE discontinued rule: inactive (is_active False), unless it is a
+    provisional buy nobody has switched on or deleted yet.
+
+    The PO door (product_master, ruling 13) stamps a buy-first-catalogue-later
+    product `provisional` and inactive, and finishing its catalogue does not
+    switch it on, so a frame bought on a PO, catalogued and received is still
+    inactive and must not read 'Discontinued'. `provisional` is never
+    cleared, so the two facts that end 'new' are read instead: switched_on_at
+    (ProductRepository.update stamps it whenever a door writes is_active True;
+    every spine door writes through it) and deleted_at (the catalog DELETE
+    stamps it on the spine). catalog_status is NOT one of them: the
+    catalogue restamp moves it without switching anything on.
+    ponytail: a provisional product never switched on whose is_active False is
+    merely re-sent still reads new (nothing tells that write from an edit
+    that left the toggle alone); deleting it is what retires it."""
+    if not isinstance(product, dict) or product.get("is_active") is not False:
+        return False
+    still_new = (
+        bool(product.get("provisional"))
+        and not product.get("switched_on_at")
+        and not product.get("deleted_at")
+    )
+    return not still_new
+
+
 def auto_reorder_disabled(product: Any) -> bool:
     """True when the product has EXPLICITLY disabled auto-reorder
     (reorder_quantity present and <= 0, e.g. the -1 default the create door
-    stamps). A missing/None/garbage value returns False (legacy behaviour)
-    so pre-backfill docs keep working until they are stamped.
+    stamps) or is discontinued (discontinued()). A missing/None/garbage
+    quantity returns False (legacy behaviour) so pre-backfill docs keep
+    working until they are stamped.
 
     Accepts a `products` spine doc (top-level reorder_quantity) or a
     `catalog_products` doc (inventory.reorder_quantity)."""
     if not isinstance(product, dict):
         return False
+    if discontinued(product):
+        return True
     rq = product.get("reorder_quantity")
     if rq is None:
         inv = product.get("inventory")

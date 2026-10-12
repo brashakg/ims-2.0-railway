@@ -2914,6 +2914,9 @@ def revive_discarded_draft(
         {
             "provisional": True,
             "is_active": False,
+            # No longer deleted: a revived draft is a new buy again, not a
+            # discontinued product (reorder_policy.discontinued reads this).
+            "deleted_at": None,
             "discarded_draft": False,
             "revived_at": now,
             "revived_by": actor,

@@ -783,7 +783,7 @@ export const vendorsApi = {
   },
 
   // PO lifecycle timeline (backend PR #869): chronological owner-vocabulary
-  // events (Ordered / Sent / Box received / On shelf / Bill settled) plus the
+  // events (Ordered / Sent / Box received / On shelf / Bill booked) plus the
   // raw linked GRNs + purchase invoices. 404s on cross-store access.
   getPOTimeline: async (poId: string) => {
     const response = await api.get(`/vendors/purchase-orders/${poId}/timeline`);
@@ -817,11 +817,6 @@ export const vendorsApi = {
     return response.data as CreatedPurchaseOrder;
   },
 
-  // Procurement Phase 2C: most-recent agreed purchase price per product for a
-  // vendor, from PO history -- lets the PO composer pre-fill "last paid Rs X on
-  // <date>" instead of the buyer guessing. Store-scoped + fail-soft on the
-  // server: no history / DB trouble yields an empty `costs` map. Batch every
-  // line's product_id into ONE call.
   // The tax head each vendor's purchase carries at a shop, decided on the
   // server (shop_gstin + classify_supply). true = IGST, false = CGST + SGST,
   // null = cannot tell. Fail-soft: {} -> every card says "cannot tell".
@@ -839,6 +834,11 @@ export const vendorsApi = {
     }
   },
 
+  // Procurement Phase 2C: most-recent agreed purchase price per product for a
+  // vendor, from PO history -- lets the PO composer pre-fill "last paid Rs X on
+  // <date>" instead of the buyer guessing. Store-scoped + fail-soft on the
+  // server: no history / DB trouble yields an empty `costs` map. Batch every
+  // line's product_id into ONE call.
   getLastCost: async (
     vendorId: string,
     productIds: string[],
@@ -850,15 +850,13 @@ export const vendorsApi = {
   }> => {
     const ids = productIds.filter(Boolean);
     if (!vendorId || ids.length === 0) return { costs: {} };
-    try {
-      const response = await api.get('/vendors/last-cost', {
-        params: { vendor_id: vendorId, product_ids: ids.join(',') },
-      });
-      return response.data ?? { costs: {} };
-    } catch {
-      // Read-only convenience lookup -- never block PO creation on it.
-      return { costs: {} };
-    }
+    // A failure rejects: the PO composer (the only caller) keeps the
+    // catalogue cost and asks again later -- swallowing it here made a
+    // network error look like "never paid" and the form never asked again.
+    const response = await api.get('/vendors/last-cost', {
+      params: { vendor_id: vendorId, product_ids: ids.join(',') },
+    });
+    return response.data ?? { costs: {} };
   },
 
   sendPurchaseOrder: async (poId: string) => {
