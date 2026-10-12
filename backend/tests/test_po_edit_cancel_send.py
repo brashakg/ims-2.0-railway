@@ -1238,7 +1238,9 @@ def test_a_rejected_delivery_accepted_during_a_cancel_leaves_it_cancelled(monkey
     def manager_cancels(_repo):
         _run(v.cancel_po("PO1", "vendor sent the wrong model", _user(roles=("ADMIN",))))
 
-    repo = _wire_racing(monkeypatch, _po(status="SENT"), manager_cancels, at=3)
+    # Read 2 is the write-back's: an all-rejected receipt mints nothing, so the
+    # order hold (which reads it too) is skipped.
+    repo = _wire_racing(monkeypatch, _po(status="SENT"), manager_cancels, at=2)
     grn = _grn(qty=0, po_id="PO1", store_id="S1")
     grn_repo = _AcceptedGrnRepo(grn)
     monkeypatch.setattr(v, "get_grn_repository", lambda: grn_repo)
