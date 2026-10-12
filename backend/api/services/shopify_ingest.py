@@ -1170,22 +1170,12 @@ def _book_historical_refund_credit_notes(
         refund_id = str(refund.get("id") or "").strip()
         if not refund_id:
             return "skipped"
-        ref = f"SHOPIFY-HIST-REFUND-{refund_id}"
+        ref = shopify_refund._hist_refund_ref(refund_id)
 
-        # Idempotency: skip if a credit note for this ref OR a returns doc for this
-        # refund id already exists (re-run of the import, or a webhook handled it).
-        try:
-            if ledger.find_one({"ref": ref}) is not None:
-                return "duplicate"
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            if returns_coll is not None and (
-                returns_coll.find_one({"shopify_refund_id": refund_id}) is not None
-            ):
-                return "duplicate"
-        except Exception:  # noqa: BLE001
-            pass
+        # Idempotency: the ONE "is this refund booked" rule (a re-run of the
+        # import, a webhook, the status sweep or a queued review row booked it).
+        if shopify_refund._refund_already_processed(db, refund_id):
+            return "duplicate"
 
         # Build return lines: ALL order lines for a whole-order full-refund reversal,
         # else the refund's own refund_line_items (reusing the live refund mapper).

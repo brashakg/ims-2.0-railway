@@ -2938,3 +2938,22 @@ def test_a_booking_that_cannot_be_written_raises_the_blocked_task(swept, monkeyp
     assert "Never add these units by hand" in task["description"]
     monkeypatch.setattr(returns_router, "_orders_coll", lambda: real)
     assert _retry(ret)["restock_applied"] is True and _units(swept) == [("stk-1", "AVAILABLE")]
+
+
+def test_the_sweep_never_rebooks_a_refund_the_history_import_booked(swept):
+    """The history import booked refund 700901 (its ledger row, ref
+    SHOPIFY-HIST-REFUND-700901) and its returns stamp never landed (written
+    after the row, errors swallowed). The sweep re-fed the refund: a PENDING
+    review row that looked new, and its confirm wrote a second credit note --
+    two GSTR-1 CDNR reversals for one refund. The ledger ref is the import's
+    own booking marker, so the one 'is this refund booked' rule reads it."""
+    oid, rid = 60230, "700901"
+    _book(swept, oid)
+    _set(swept, oid, historical=True, import_source="shopify_order_history", status="DELIVERED")
+    swept["ledger"].insert_one({"ref": f"SHOPIFY-HIST-REFUND-{rid}", "shopify_refund_id": rid,
+                                "historical": True, "settlement": "EXTERNAL"})
+    swept["state"]["orders"] = [_pulled(oid, financial_status="refunded", fulfillment_status="fulfilled",
+                                        refunds=[_refund(int(rid), oid, restock_type="return")])]
+    swept["run"]()
+    assert swept["review"].find_one({"shopify_refund_id": rid}) is None
+    assert swept["ledger"].count_documents({}) == 1 and swept["returns"].count_documents({}) == 0

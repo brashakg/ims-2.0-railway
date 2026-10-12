@@ -235,11 +235,19 @@ def _find_ims_order(db, shopify_order_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _hist_refund_ref(refund_id: str) -> str:
+    """The ledger ref our Shopify order-history import books a refund's credit
+    note under (shopify_ingest): its own booking marker."""
+    return f"SHOPIFY-HIST-REFUND-{refund_id}"
+
+
 def _refund_already_processed(db, refund_id: str) -> bool:
-    """Idempotency guard on the Shopify refund id -- a re-delivered webhook must
-    not double-credit or double-restock. True when a prior `returns` credit-note
-    doc OR a prior review-queue row (ANY status EXCEPT UNMATCHED) already carries
-    this refund id.
+    """THE "is this refund booked" rule -- the webhook, the status sweep and the
+    order-history import all ask it, so a re-delivered webhook or a re-fed
+    refund never double-credits or double-restocks. True when a prior `returns`
+    credit-note doc, the history import's ledger row (its ref, written before its
+    returns stamp, which may not land) OR a prior review-queue row (ANY status
+    EXCEPT UNMATCHED) already carries this refund id.
 
     An UNMATCHED review row is DELIBERATELY not treated as processed: it means
     the refund arrived before its order was ingested, so once the order exists a
@@ -253,6 +261,12 @@ def _refund_already_processed(db, refund_id: str) -> bool:
         if returns_coll is not None and returns_coll.find_one(
             {"shopify_refund_id": refund_id}
         ):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        ledger = db.get_collection("credit_note_ledger")
+        if ledger is not None and ledger.find_one({"ref": _hist_refund_ref(refund_id)}):
             return True
     except Exception:  # noqa: BLE001
         pass
