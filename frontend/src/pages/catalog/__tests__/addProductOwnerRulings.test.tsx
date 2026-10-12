@@ -98,9 +98,19 @@ vi.mock('../../../services/api/inventory', async (importOriginal) => ({
 vi.mock('../../../services/api/productTemplates', () => ({
   productTemplatesApi: { list: vi.fn(async () => ({ templates: [] })) },
 }));
+// An imported price-list row waiting for review (/catalog/add?review=C-IMP).
+const getCatalogDoc = vi.fn(async () => ({
+  id: 'C-IMP', sku: 'SG-RAYBAN-RB4165-601', category: 'SUNGLASS', pos_ready: false,
+  attributes: { brand_name: 'Ray-Ban', model_no: 'RB4165', colour_code: '601' },
+  pricing: { mrp: 7890 },
+}));
 vi.mock('../../../services/api/catalog', () => ({
   CatalogRequestError: class CatalogRequestError extends Error { status = 0; },
-  catalogProductsApi: {},
+  catalogProductsApi: {
+    get: (...a: unknown[]) => getCatalogDoc(...a),
+    list: vi.fn(async () => ({ products: [] })),
+    promoteDryRun: vi.fn(async () => ({ ok: true, gaps: [] })),
+  },
 }));
 // The page's strip is a stand-in chip that takes the page's own pick path; the
 // real strip (for the chip's size) is imported unmocked further down.
@@ -288,6 +298,21 @@ describe('F13 / D5 - the SKU is previewed before saving', () => {
     const payload = createProduct.mock.calls[0][0] as Record<string, unknown>;
     expect(payload.model).toBe('');
     expect(payload.attributes).toEqual(attrs);
+  });
+
+  it.each([
+    ['Edit', '/catalog/add?edit=P-SRC', /Save changes/],
+    ['import review', '/catalog/add?review=C-IMP', /Save & Approve/],
+  ])('%s keeps the stored SKU: no preview is asked for or shown', async (_door, url, saveButton) => {
+    // An edit never moves a SKU (owner: readable SKUs for new products only),
+    // so a preview of a new one would contradict the edit banner.
+    renderPage(url);
+    await screen.findByRole('button', { name: saveButton });
+    fill(screen.getByLabelText(/^Colour Code/), '602');
+    await new Promise((r) => setTimeout(r, 450)); // past the preview's 300ms wait
+    expect(previewSku).not.toHaveBeenCalled();
+    const card = screen.getByRole('heading', { name: 'Review' }).closest('.card') as HTMLElement;
+    expect(within(card).queryByText('SKU')).toBeNull();
   });
 
   it("a SKU another product has is shown as the save mints it: with a number added", async () => {
