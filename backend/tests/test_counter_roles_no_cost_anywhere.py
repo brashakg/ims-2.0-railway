@@ -685,6 +685,30 @@ def test_buyers_still_price_the_return(client, returns_db, role):
     assert stored["items"][0]["unit_price"] == COST and stored["total_value"] == COST
 
 
+# Who must price at the create door, and whose price it keeps, is cost_mask's
+# "purchase" rule, the one every return read answers: narrow it there and the
+# dropped role logs unpriced like workshop staff, while a role the rule kept
+# still must price. A written-out role set at the door keeps pricing for it.
+def test_narrowing_the_purchase_rule_moves_the_return_create_door(
+    client, returns_db, monkeypatch
+):
+    from api.services import cost_mask
+
+    monkeypatch.setitem(
+        cost_mask._CONTEXT_ROLES,
+        "purchase",
+        cost_mask._CONTEXT_ROLES["purchase"] - {"STORE_MANAGER"},
+    )
+    h = _headers("STORE_MANAGER")
+    for body in (_return_body(), _return_body(unit_price=COST)):
+        r = client.post("/api/v1/vendor-returns", json=body, headers=h)
+        assert r.status_code == 201, r.text
+        stored = returns_db.vendor_returns.find_one({"return_id": r.json()["return_id"]})
+        assert stored["items"][0]["unit_price"] is None and stored["total_value"] is None
+    r = client.post("/api/v1/vendor-returns", json=_return_body(), headers=_headers("AREA_MANAGER"))
+    assert r.status_code == 422, r.text
+
+
 @pytest.mark.parametrize("role", COUNTER_ROLES[:4])
 def test_other_counter_roles_still_cannot_log_a_return(client, returns_db, role):
     r = client.post("/api/v1/vendor-returns", json=_return_body(), headers=_headers(role))
