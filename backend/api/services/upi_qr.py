@@ -21,7 +21,7 @@ Two responsibilities in one module:
 
 Store VPA lookup:
   The store's UPI Virtual Payment Address lives on the `stores` collection
-  under the `upi_vpa` field (set via Store Setup -> UPI VPA field).  When
+  under the `upi_vpa` field (set in Organization, the store's UPI VPA).  When
   the field is absent the endpoint returns 400 with a clear message telling
   the operator which store config to fill in.
 
