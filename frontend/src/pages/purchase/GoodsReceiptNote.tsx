@@ -14,6 +14,7 @@ import clsx from 'clsx';
 import { vendorsApi } from '../../services/api';
 import { grnCockpitApi, type UploadDocResult } from '../../services/api/grnCockpit';
 import { istDayString } from '../../utils/datetime';
+import { SupplierFormModal } from './SupplierFormModal';
 import { productApi } from '../../services/api/products';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -177,11 +178,12 @@ export function GoodsReceiptNote() {
     Array<{ product_id: string; name?: string; product_name?: string; sku?: string; hsn_code?: string }>
   >([]);
   const [dcSearching, setDcSearching] = useState(false);
-  // D14 — "Bought without PO": a cash buy from a local dealer. The supplier on
-  // file or the dealer's name, each line's cost, the bill photo, the bill
-  // number/date if any. Posts a NO_PO receipt; its bill claims no GST credit.
+  // D14 — "Bought without PO": a cash buy from a local dealer. The supplier
+  // (a dealer not on the list is quick-added as one, owner 2026-10-12), each
+  // line's cost, the bill photo, the bill number/date if any. Posts a NO_PO
+  // receipt; its bill books under that supplier and claims no GST credit.
   const [isNoPo, setIsNoPo] = useState(false);
-  const [dealerName, setDealerName] = useState('');
+  const [addingDealer, setAddingDealer] = useState(false);
   // Today in IST (toISOString is the UTC day -- yesterday before 05:30 IST).
   // Reset whenever the mode is ticked, or the next walk-in receipt carried the
   // previous bill's date into its receipt and, later, its bill draft.
@@ -273,7 +275,7 @@ export function GoodsReceiptNote() {
   const noPoDc = isDcMode && !poNumber;
   // Either way of receiving with no PO types its lines in from the catalogue.
   const typedLines = noPoDc || isNoPo;
-  const noPoSeller = !!dcVendorId || !!dealerName.trim();
+  const noPoSeller = !!dcVendorId;
 
   // Load the vendor list the first time DC mode is switched on. Fail-soft with
   // a visible error state — with no vendors the no-PO path cannot post, and a
@@ -416,7 +418,7 @@ export function GoodsReceiptNote() {
         done: hasSource,
         active: !hasSource,
         t: isNoPo
-          ? 'Name the dealer & attach the bill'
+          ? 'Pick the supplier & attach the bill'
           : isDcMode && !poNumber
             ? 'Pick the vendor (DC, no PO)'
             : 'Match PO & vendor invoice',
@@ -425,7 +427,7 @@ export function GoodsReceiptNote() {
           (hasSource
             ? 'Receiving without a PO'
             : isNoPo
-              ? 'Name the supplier or the dealer'
+              ? 'Pick the supplier, or add the dealer'
               : 'Pick the order being received'),
       },
       {
@@ -470,7 +472,7 @@ export function GoodsReceiptNote() {
       return;
     }
     if (isNoPo && !noPoSeller) {
-      toast.error("Pick the supplier, or type the dealer's name");
+      toast.error('Pick the supplier the goods were bought from, or add the dealer as one');
       return;
     }
     if (receivedItems.length === 0) {
@@ -528,8 +530,7 @@ export function GoodsReceiptNote() {
         dc_date: isDcMode ? dcDate : undefined,
         // No-PO DC: the vendor comes from the picker (a PO-backed receipt
         // derives it from the PO server-side).
-        vendor_id: noPoDc || (isNoPo && dcVendorId) ? dcVendorId : undefined,
-        dealer_name: isNoPo && !dcVendorId ? dealerName.trim() : undefined,
+        vendor_id: noPoDc || isNoPo ? dcVendorId : undefined,
         vendor_invoice_no: vendorInvoiceNo || undefined,
         // The date printed on the supplier's bill (its financial year decides
         // whether the number is a new bill); a challan's invoice comes later.
@@ -593,7 +594,6 @@ export function GoodsReceiptNote() {
       setDiscrepancies('');
       setIsDcMode(false);
       setIsNoPo(false);
-      setDealerName('');
       setBillPhoto(null);
       setBillDate(istToday());
       setDcNumber('');
@@ -758,7 +758,7 @@ export function GoodsReceiptNote() {
           {/* PO selection */}
           <div className="card">
             <div className="card-head">
-              <h3>{isNoPo ? 'Supplier or dealer & bill' : 'Select purchase order'}</h3>
+              <h3>{isNoPo ? 'Supplier & bill' : 'Select purchase order'}</h3>
               <span className="meta">
                 {isDcMode
                   ? 'DC · invoice arrives later'
@@ -809,7 +809,6 @@ export function GoodsReceiptNote() {
                     setPoNumber('');
                     setReceivedItems([]);
                     setDcVendorId('');
-                    setDealerName('');
                     setBillPhoto(null);
                     setBillDate(istToday());
                     setDcQuery('');
@@ -820,34 +819,30 @@ export function GoodsReceiptNote() {
               </label>
               {isNoPo && (
                 <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4 mb-4">
-                  <div>
-                    <label className="block text-xs font-medium mb-1" style={{ color: 'var(--ink-4)' }}>
-                      Supplier (if on file)
-                    </label>
-                    <select
-                      value={dcVendorId}
-                      onChange={(e) => setDcVendorId(e.target.value)}
-                      className="input w-full"
+                  <div className="tablet:col-span-2">
+                    <label
+                      htmlFor="no-po-supplier"
+                      className="block text-xs font-medium mb-1"
+                      style={{ color: 'var(--ink-4)' }}
                     >
-                      <option value="">Select the vendor…</option>
-                      {dcVendors.map((v) => (
-                        <option key={v.vendor_id} value={v.vendor_id}>{v.name}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium mb-1" style={{ color: 'var(--ink-4)' }}>
-                      …or the dealer's name
+                      Supplier (the dealer)
                     </label>
-                    <input
-                      type="text"
-                      value={dealerName}
-                      disabled={!!dcVendorId}
-                      onChange={(e) => setDealerName(e.target.value)}
-                      placeholder="e.g. Sharma Optical, Bank More"
-                      maxLength={120}
-                      className="input w-full"
-                    />
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <select
+                        id="no-po-supplier"
+                        value={dcVendorId}
+                        onChange={(e) => setDcVendorId(e.target.value)}
+                        className="input flex-1"
+                      >
+                        <option value="">Select the vendor…</option>
+                        {dcVendors.map((v) => (
+                          <option key={v.vendor_id} value={v.vendor_id}>{v.name}</option>
+                        ))}
+                      </select>
+                      <button type="button" className="btn sm" onClick={() => setAddingDealer(true)}>
+                        Not on the list? Add the dealer
+                      </button>
+                    </div>
                   </div>
                   <div>
                     <label className="block text-xs font-medium mb-1" style={{ color: 'var(--ink-4)' }}>
@@ -897,11 +892,22 @@ export function GoodsReceiptNote() {
                     </span>
                     {dcVendorsFailed && (
                       <p className="text-xs mt-1" style={{ color: 'var(--err)' }}>
-                        Could not load the vendor list — type the dealer's name instead.
+                        Could not load the vendor list — try again in a moment.
                       </p>
                     )}
                   </div>
                 </div>
+              )}
+              {addingDealer && (
+                <SupplierFormModal
+                  quick
+                  onClose={() => setAddingDealer(false)}
+                  onCreated={(dealer) => {
+                    setDcVendors((list) => [...list, { vendor_id: dealer.id, name: dealer.name }]);
+                    setDcVendorId(dealer.id);
+                    setAddingDealer(false);
+                  }}
+                />
               )}
               {isDcMode && (
                 <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4 mb-4">

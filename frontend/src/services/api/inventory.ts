@@ -887,12 +887,11 @@ export const vendorsApi = {
     vendor_invoice_no?: string;
     vendor_invoice_date?: string;
     // F9 — Delivery-Challan subtype + fields. D14 — NO_PO: bought from a local
-    // dealer without a PO (supplier or dealer_name, a cost per line, bill photo).
+    // dealer without a PO (the dealer as a supplier, a cost per line, bill photo).
     grn_subtype?: 'STANDARD' | 'DELIVERY_CHALLAN' | 'NO_PO';
     dc_number?: string;
     dc_date?: string;
     vendor_id?: string;
-    dealer_name?: string;
     attachment_file_id?: string;
     attachment_filename?: string;
     attachment_mime?: string;

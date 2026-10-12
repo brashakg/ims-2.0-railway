@@ -5,6 +5,8 @@
 // "Delivery Challan": no price per item, and the History tab then reads
 // "Against Unknown PO". Ruling D14: a plain "Bought without PO" receipt with
 // the dealer, each item's cost and the bill photo, labelled as such in the list.
+// Owner 2026-10-12: the dealer is a supplier -- picked, or quick-added here
+// through the one vendor create door (name, phone, city / state, GSTIN if any).
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
@@ -22,6 +24,7 @@ const api = vi.hoisted(() => ({
   getVendors: vi.fn(),
   createGRN: vi.fn(),
   acceptGRN: vi.fn(),
+  createVendor: vi.fn(),
 }));
 
 const products = vi.hoisted(() => ({ getProducts: vi.fn() }));
@@ -40,6 +43,12 @@ vi.mock('../../../components/print/storeIdentity', () => ({
 }));
 // The labels dialog (#1164) has its own suite.
 vi.mock('../../../components/labels/UnitLabelsModal', () => ({ UnitLabelsModal: () => null }));
+// The quick-add form reads the GST state names.
+vi.mock('../../../services/api/entities', () => ({
+  entitiesApi: {
+    meta: vi.fn().mockResolvedValue({ state_codes: [{ code: '20', name: 'Jharkhand' }], entity_types: [] }),
+  },
+}));
 
 import { GoodsReceiptNote } from '../GoodsReceiptNote';
 
@@ -55,6 +64,7 @@ beforeEach(() => {
   });
   api.createGRN.mockResolvedValue({ grn_id: 'NOPO-NEW-1' });
   api.acceptGRN.mockResolvedValue({ units_added: 2 });
+  api.createVendor.mockResolvedValue({ vendor_id: 'V-SHARMA' });
   cockpit.uploadDoc.mockResolvedValue({
     file_id: 'F-BILL-1',
     filename: 'cash-memo.png',
@@ -72,8 +82,8 @@ describe('C7 / D14 - bought without a PO', () => {
           grn_subtype: 'NO_PO',
           po_id: null,
           po_number: null,
-          dealer_name: 'Sharma Optical, Bank More',
-          vendor_name: 'Sharma Optical, Bank More',
+          vendor_id: 'V-SHARMA',
+          vendor_name: 'Sharma Optical',
           status: 'ACCEPTED',
           created_at: '2026-09-14T11:00:00',
           items: [
@@ -86,7 +96,7 @@ describe('C7 / D14 - bought without a PO', () => {
     await waitFor(() => expect(api.getGRNs).toHaveBeenCalled());
     fireEvent.click(await screen.findByRole('button', { name: /History/ }));
 
-    expect(await screen.findByText(/Bought without PO/i)).toBeInTheDocument();
+    expect(await screen.findByText('Bought without PO · Sharma Optical')).toBeInTheDocument();
     expect(screen.queryByText(/Unknown PO/i)).not.toBeInTheDocument();
   });
 
@@ -170,7 +180,75 @@ describe('C7 / D14 - bought without a PO', () => {
     expect(screen.queryByText(/PO precedes GRN/)).not.toBeInTheDocument();
     expect(screen.queryByText('Pick the order being received')).not.toBeInTheDocument();
     expect(screen.getByText('No PO · no GST credit claimed')).toBeInTheDocument();
-    expect(screen.getByText('Name the supplier or the dealer')).toBeInTheDocument();
+    expect(screen.getByText('Pick the supplier, or add the dealer')).toBeInTheDocument();
+    // The typed dealer name of round 4 is gone: the seller is a supplier.
+    expect(screen.queryByPlaceholderText(/Sharma Optical/)).not.toBeInTheDocument();
+  });
+});
+
+describe('a walk-in dealer is a supplier (owner 2026-10-12)', () => {
+  async function typeOneLine() {
+    fireEvent.change(screen.getByPlaceholderText(/Search a product to add/i), { target: { value: 'frame' } });
+    fireEvent.click(await screen.findByText('Acme Aviator'));
+    fireEvent.change(screen.getByLabelText('Quantity on line 1'), { target: { value: '2' } });
+    fireEvent.change(screen.getByLabelText(/Cost on line 1/i), { target: { value: '3100' } });
+    fireEvent.click(screen.getByLabelText(/Tally line 1/));
+    const photo = new File(['memo'], 'cash-memo.png', { type: 'image/png' });
+    fireEvent.change(screen.getByLabelText(/Bill photo/i), { target: { files: [photo] } });
+    await screen.findByText(/Attached: cash-memo.png/);
+  }
+
+  it('no supplier picked: Post is refused on the client and nothing reaches the server', async () => {
+    render(<GoodsReceiptNote />);
+    await waitFor(() => expect(api.getGRNs).toHaveBeenCalled());
+    fireEvent.click(screen.getByLabelText(/Bought without (a )?PO/i, { selector: 'input' }));
+    await waitFor(() => expect(api.getVendors).toHaveBeenCalled());
+    await typeOneLine();
+    expect(screen.getByRole('button', { name: /Post GRN/i })).toBeDisabled();
+    expect(api.createGRN).not.toHaveBeenCalled();
+  });
+
+  it('a dealer not on the list is added in the small form, picked, and the receipt names it', async () => {
+    render(<GoodsReceiptNote />);
+    await waitFor(() => expect(api.getGRNs).toHaveBeenCalled());
+    fireEvent.click(screen.getByLabelText(/Bought without (a )?PO/i, { selector: 'input' }));
+    await waitFor(() => expect(api.getVendors).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByRole('button', { name: /Add the dealer/i }));
+    await screen.findByText('Add the dealer as a supplier');
+    // The small form: name, phone, city, state / GSTIN -- no terms, code or email.
+    expect(screen.queryByLabelText(/Supplier Code/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Email/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Payment Terms/i)).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/Dealer's name/i), { target: { value: 'Sharma Optical' } });
+    fireEvent.change(screen.getByLabelText(/Phone/i), { target: { value: '9800000000' } });
+    fireEvent.change(screen.getByLabelText(/City/i), { target: { value: 'Dhanbad' } });
+    await screen.findByRole('option', { name: '20 Jharkhand' });
+    fireEvent.change(screen.getByLabelText(/State \(unregistered vendor\)/i), { target: { value: '20' } });
+    fireEvent.click(screen.getByRole('button', { name: /Save Supplier/i }));
+
+    await waitFor(() => expect(api.createVendor).toHaveBeenCalledTimes(1));
+    const vendor = api.createVendor.mock.calls[0][0];
+    expect(vendor).toMatchObject({
+      legal_name: 'Sharma Optical',
+      trade_name: 'Sharma Optical',
+      gstin_status: 'UNREGISTERED',
+      gstin: null,
+      mobile: '9800000000',
+      city: 'Dhanbad',
+      state: '20',
+      credit_days: 0, // a cash bill
+    });
+    await waitFor(() => expect(screen.queryByText('Add the dealer as a supplier')).not.toBeInTheDocument());
+    expect((screen.getByLabelText(/Supplier \(the dealer\)/i) as HTMLSelectElement).value).toBe('V-SHARMA');
+
+    await typeOneLine();
+    fireEvent.click(screen.getByRole('button', { name: /Post GRN/i }));
+    await waitFor(() => expect(api.createGRN).toHaveBeenCalledTimes(1));
+    const body = api.createGRN.mock.calls[0][0];
+    expect(body.grn_subtype).toBe('NO_PO');
+    expect(body.vendor_id).toBe('V-SHARMA');
+    expect(body).not.toHaveProperty('dealer_name');
   });
 });
 
