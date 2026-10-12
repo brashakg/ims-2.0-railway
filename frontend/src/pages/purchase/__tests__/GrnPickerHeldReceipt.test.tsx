@@ -47,4 +47,28 @@ describe('the receipt picker', () => {
     expect(screen.queryByRole('button', { name: /Invoice/ })).toBeNull();
     expect(screen.queryByRole('button', { name: /Ask for cataloguing/ })).toBeNull();
   });
+
+  // R1-56: held for the catalogue is the case where a second ask would
+  // duplicate each catalogue manager's named task.
+  it('a receipt held for the catalogue says so, with no Invoice and no second ask', async () => {
+    getGRNs.mockImplementation(async (p: { status?: string }) =>
+      p?.status === 'PARTIALLY_ACCEPTED'
+        ? {
+            grns: [
+              {
+                grn_id: 'g-cat',
+                grn_number: 'RCPT/BV-DHN-02/26-27/0032',
+                status: 'PARTIALLY_ACCEPTED',
+                total_accepted: 1,
+                unresolved_lines: [{ product_id: 'p-boss', accepted_qty: 2, reason: 'incomplete_catalog' }],
+              },
+            ],
+          }
+        : { grns: [] },
+    );
+    render(<GrnPickerModal onClose={() => {}} onPick={async () => {}} />);
+    expect(await screen.findByText(/Held: 1 line\(s\) waiting to be catalogued/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Invoice/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Ask for cataloguing/ })).toBeNull();
+  });
 });

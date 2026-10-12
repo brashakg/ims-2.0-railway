@@ -4894,3 +4894,177 @@ def test_r8_the_script_finds_an_old_ask_the_ladder_already_handed_on(world, monk
         old["status"] == "COMPLETED" and asked == [CATALOGUER["user_id"]],
         f"An escalated old ask stayed {old['status']} with {old['assigned_to']}; asked {asked}",
     )
+
+
+def test_r8_a_catalogue_manager_or_accountant_lists_only_their_own_tasks(world):
+    # R1-43 / R1-54: neither is a task manager (tasks._TASK_MANAGER_ROLES).
+    # The shop holds a task of each AND the store manager's: each sees its
+    # own, never the whole shop's -- with the shop named and without.
+    world.db.seed(
+        "tasks",
+        [
+            {"task_id": f"T-{who}", "title": f"{who}'s task", "store_id": STORE, "status": "OPEN",
+             "priority": "P2", "assigned_to": uid, "created_by": "u-admin"}
+            for who, uid in (
+                ("MGR", MANAGER["user_id"]),
+                ("CAT", CATALOGUER["user_id"]),
+                ("ACC", ACCOUNTANT["user_id"]),
+            )
+        ],
+    )
+
+    def listed(user, store_id):
+        out = _run(
+            _tasks.list_tasks(
+                status="OPEN", priority=None, assigned_to=None, task_type=None,
+                store_id=store_id, skip=0, limit=50, current_user=user,
+            )
+        )
+        return sorted(t.get("task_id") for t in out["tasks"])
+
+    seen = {
+        (u["roles"][0], s): listed(u, s) for u in (CATALOGUER, ACCOUNTANT) for s in (STORE, None)
+    }
+    finding(
+        all(v == ["T-CAT"] for (r, _), v in seen.items() if r == CATALOGUER["roles"][0])
+        and all(v == ["T-ACC"] for (r, _), v in seen.items() if r == "ACCOUNTANT"),
+        f"R1-43/R1-54: below manager, the task lists read {seen}",
+    )
+    assert listed(MANAGER, STORE) == ["T-ACC", "T-CAT", "T-MGR"]
+
+
+def test_r8_a_held_receipt_whose_shelved_unit_was_sold_is_never_voided(world):
+    # R1-15: the void counts every unit the receipt put on the shelf by its
+    # origin, whatever happened to it since -- a sold unit still blocks it.
+    carrera = world.catalogue_frame("Carrera", "CA 8895", "807", "54", mrp=6990, offer=6490, cost=3155.76)
+    po = world.raise_po(
+        [
+            {"new_product": dict(BOSS_TYPED), "quantity": 1, "unit_price": 1200},
+            {"product_id": carrera["product_id"], "product_name": "Carrera CA 8895 807",
+             "sku": carrera["sku"], "quantity": 1, "unit_price": 3200},
+        ]
+    )
+    grn = _receive(world, po, [1, 1], "JOT/26-27/0851")
+    assert world.grn(grn["grn_id"])["status"] == "PARTIALLY_ACCEPTED"
+    world.db.stock_units.update_many({"product_id": carrera["product_id"]}, {"$set": {"status": "SOLD"}})
+    try:
+        _run(vd.void_grn(grn["grn_id"], MANAGER))
+        refused = None
+    except HTTPException as exc:
+        refused = exc
+    finding(
+        refused is not None and refused.status_code == 409
+        and world.grn(grn["grn_id"])["status"] == "PARTIALLY_ACCEPTED",
+        f"R1-15: a receipt behind a sold unit was voided ({refused})",
+    )
+
+
+def test_r8_a_sized_accessory_is_never_matched_to_a_frame_keyed_before_eye_size(world):
+    # R2-19 (b): the legacy-key lookup (_keyed_before_eye_size) is for an
+    # eye-size item. An accessory's size is its own: a Carrera CA 8895 807
+    # case typed with size 54 is not the 54 frame keyed before eye size.
+    frame = _pre_deploy_frame(world, lens_size="54")
+    case = {**CARRERA_TYPED, "category": "ACCESSORIES", "mrp": 990}
+    refused = _refused_po(world, [{"new_product": case, "quantity": 1, "unit_price": 400}])
+    matched = (getattr(refused, "detail", None) or {}).get("matches") or []
+    finding(
+        not any((m.get("existing") or {}).get("product_id") == frame["product_id"] for m in matched),
+        f"R2-19: a sized accessory was matched to the legacy frame ({getattr(refused, 'detail', None)})",
+    )
+
+
+def test_r8_a_receipts_tasks_sit_in_the_receiving_shop_and_reach_only_its_store_manager(world):
+    # R1-57: a catalogue manager works for the entity, a store manager for his
+    # shop. The cataloguer's first store here is another shop: his task still
+    # sits in the receiving shop, which is his too. The other shop's store
+    # manager is never handed this shop's receipt.
+    world.db.stores.update_one({"store_id": STORE}, {"$set": {"entity_id": "E-BV"}})
+    world.db.seed("stores", [{"store_id": "BV-HQ", "entity_id": "E-BV", "is_active": True}])
+    world.db.users.update_one(
+        {"user_id": CATALOGUER["user_id"]}, {"$set": {"store_ids": ["BV-HQ", STORE]}}
+    )
+    _seed_user(world, dict(MANAGER, user_id="u-mgr-hq", username="mgr.hq", store_ids=["BV-HQ"]))
+    po, grn1, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    (cat_task,) = [t for t in _open_tasks(world) if t.get("category") == "Catalogue"]
+    grn2, _ = _receive_again(world, po, "JOT/26-27/0861-DUP")
+    world.finish_draft(draft_id, offer=2790)
+    over = sorted(
+        (t.get("assigned_to"), t.get("store_id"))
+        for t in _open_tasks(world)
+        if t.get("grn_id") == grn2["grn_id"]
+    )
+    finding(
+        cat_task.get("store_id") == STORE and over == [(MANAGER["user_id"], STORE)],
+        f"R1-57: the cataloguer's task sits in {cat_task.get('store_id')}; "
+        f"the over-order tasks went to {over}",
+    )
+
+
+def _pending_receipt(world, po, qtys, invoice_no):
+    """A receipt saved but not yet accepted, for the lines in `qtys`."""
+    return _run(
+        vd.create_grn(
+            vd.GRNCreate(
+                po_id=po["po_id"],
+                vendor_invoice_no=invoice_no,
+                vendor_invoice_date="2026-09-28",
+                items=[
+                    vd.GRNItemCreate(
+                        product_id=pid, received_qty=q, accepted_qty=q, rejected_qty=0, tallied=True
+                    )
+                    for pid, q in qtys.items()
+                ],
+                attachment_file_id="F-RECEIPT-PHOTO",
+                attachment_filename="bill.jpg",
+                attachment_mime="image/jpeg",
+            ),
+            MANAGER,
+        )
+    )
+
+
+@pytest.mark.parametrize("claim", ["another_order", "another_item", "stale"])
+def test_r8_a_claim_that_is_not_this_orders_item_never_holds_the_release(world, claim):
+    # R1-26: the release counts another receipt's LIVE claim as busy only when
+    # it is the same order AND the same item. A claim on another order's
+    # receipt, on a receipt of this order for another item, or a claim gone
+    # stale, never holds the finished item's units.
+    from datetime import datetime, timedelta
+
+    from api.routers.vendors.grn_accept_lock import _GRN_ACCEPT_LOCK_STALE_SECONDS
+
+    carrera = world.catalogue_frame("Carrera", "CA 8895", "807", "54", mrp=6990, offer=6490, cost=3155.76)
+    po = world.raise_po(
+        [
+            {"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200},
+            {"product_id": carrera["product_id"], "product_name": "Carrera CA 8895 807",
+             "sku": carrera["sku"], "quantity": 1, "unit_price": 3200},
+        ]
+    )
+    boss = po["items"][0]["product_id"]
+    held, _ = _receive_some(world, po, {boss: 2}, "JOT/26-27/0871")
+    assert world.grn(held["grn_id"])["status"] == "PARTIALLY_ACCEPTED"
+    when = datetime.now()
+    if claim == "another_order":
+        draft = world.product(boss)
+        po2 = world.raise_po(
+            [{"product_id": boss, "product_name": "Boss BOSS 1700 C2", "sku": draft["sku"],
+              "quantity": 1, "unit_price": 1200}]
+        )
+        other = _pending_receipt(world, po2, {boss: 1}, "JOT/26-27/0872")
+    elif claim == "another_item":
+        other = _pending_receipt(world, po, {carrera["product_id"]: 1}, "JOT/26-27/0873")
+    else:
+        other = _pending_receipt(world, po, {boss: 1}, "JOT/26-27/0874")
+        when -= timedelta(seconds=_GRN_ACCEPT_LOCK_STALE_SECONDS + 60)
+    world.db.grns.update_one(
+        {"grn_id": other["grn_id"]},
+        {"$set": {"accept_lock_at": when.isoformat(), "accept_lock_token": "T-OTHER"}},
+    )
+    world.finish_draft(boss, offer=2790)
+    finding(
+        len(world.units(boss)) == 2 and world.grn(held["grn_id"])["status"] == "ACCEPTED",
+        f"R1-26 ({claim}): the release held the finished item: {len(world.units(boss))} on the "
+        f"shelf, receipt {world.grn(held['grn_id'])['status']}",
+    )
+
