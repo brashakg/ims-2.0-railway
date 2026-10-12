@@ -137,8 +137,9 @@ function withoutDebitNoteMoney(dn: DebitNote): DebitNote {
 export function VendorReturns() {
   const toast = useToast();
   const { user } = useAuth();
-  const activeStoreId = user?.activeStoreId || ''; // a new return is raised here
-  const { storeId: listScope, showShopOf } = usePurchaseShop(); // audit F63: lists read the one Purchase scope
+  // audit F63: lists read the one Purchase scope; a new return is raised at
+  // the caller's own shop.
+  const { storeId: listScope, ownStoreId, showShopOf } = usePurchaseShop();
   // Supplier money is PAYABLES_ROLES' alone: everyone else reads the returns
   // (items, quantities, reasons, status) without what the supplier owes on them
   // or what a line is priced at, and RECORDING that money -- issuing the credit,
@@ -243,7 +244,7 @@ export function VendorReturns() {
       await api.post('/vendor-returns/', {
         vendor_id: selectedVendor,
         vendor_name: vendor?.legal_name || selectedVendor,
-        store_id: activeStoreId,
+        store_id: ownStoreId ?? '',
         // A line's price is sent only by an accounts role (the server refuses
         // one from anyone else, R2 + R3); a blank price is left for later.
         items: items.map(({ unit_price, ...i }) => ({
@@ -265,10 +266,7 @@ export function VendorReturns() {
 
       // Refresh the list -- an admin viewing another shop is shown the shop
       // the return was raised at (the list reloads with it), so it never vanishes.
-      if (listScope && activeStoreId && listScope !== activeStoreId) {
-        showShopOf(activeStoreId);
-        return;
-      }
+      if (showShopOf(ownStoreId)) return;
       const refreshResp = await api.get('/vendor-returns/', {
         params: { store_id: listScope, limit: 100 },
       });

@@ -14,6 +14,7 @@ import type { ReactNode } from 'react';
 import { AlertTriangle } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import type { User } from '../../types';
+import { userSeesAllStores } from '../../utils/storeAccess';
 
 /** The server's words (api.dependencies.NO_SHOP_DETAIL), kept identical. */
 export const NO_SHOP_MESSAGE = 'No shop is assigned to this login. Ask an admin to assign one.';
@@ -35,7 +36,7 @@ type ShopHolder = Partial<Pick<User, 'roles' | 'activeStoreId' | 'storeIds'>>;
  *  NOT shopless -- the server reads its first own shop for it. */
 export function hasNoShop(user: ShopHolder | null | undefined): boolean {
   if (!user) return false;
-  if ((user.roles || []).some((r) => r === 'ADMIN' || r === 'SUPERADMIN')) return false;
+  if (userSeesAllStores(user.roles)) return false;
   if (user.activeStoreId) return false;
   return !(user.storeIds || []).some((s) => typeof s === 'string' && s.length > 0);
 }

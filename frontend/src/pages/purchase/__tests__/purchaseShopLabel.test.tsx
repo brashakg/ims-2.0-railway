@@ -122,6 +122,27 @@ describe('the Purchase header names the shop a non-admin reads', () => {
     expect(await screen.findByRole('button', { name: button })).toBeInTheDocument();
   });
 
+  // The server holds an AREA_MANAGER to his own shops (resolve_store_scope),
+  // so the one 'sees every shop' rule (utils/storeAccess userSeesAllStores)
+  // gives him no picker: an 'All stores' choice over lists the server keeps
+  // to his shop would be a lie, and with no shop he must read the message,
+  // not a tab of refusals (round 4, item 7).
+  it('an area manager reads his own shop, with no picker', async () => {
+    roles = ['AREA_MANAGER'];
+    activeStoreId = 'BV-DHN-01';
+    open();
+    await waitFor(() => expect(label()?.textContent).toBe('Shop: Dhanbad'));
+    expect(screen.queryByLabelText('Purchase shop')).toBeNull();
+  });
+
+  it('an area manager with no shop reads the message, not a tab', async () => {
+    roles = ['AREA_MANAGER'];
+    activeStoreId = undefined;
+    open();
+    expect(await screen.findByText(/No shop is assigned to this login/)).toBeInTheDocument();
+    expect(screen.queryByText('report')).toBeNull();
+  });
+
   it('an admin with no shop still opens the tab on all stores', async () => {
     roles = ['ADMIN'];
     activeStoreId = undefined;

@@ -18,25 +18,31 @@ import { create } from 'zustand';
 import { useAuth } from '../../context/AuthContext';
 import { useStores } from '../../hooks/usePOSQueries';
 import { NO_SHOP_LABEL, NO_SHOP_SCOPE } from '../../components/common/NoShopNotice';
+import { userSeesAllStores } from '../../utils/storeAccess';
 
 const useChosenShop = create<{ shop: string; setShop: (shop: string) => void }>((set) => ({
   shop: '',
   setShop: (shop) => set({ shop }),
 }));
 
-/** `storeId` is what a Purchase list read sends as ?store_id: the admin's
- *  pick (undefined = all stores), else the caller's own shop. A new order or
- *  return is raised at `ownStoreId` (the server's rule); `showShopOf` then
- *  points an admin's list at that shop if it is showing another, so what was
+/** `storeId` is what a Purchase or Finance read sends as ?store_id: the
+ *  admin's pick (undefined = all stores, the default), else the caller's own
+ *  shop. Who picks is the one 'sees every shop' rule (utils/storeAccess
+ *  userSeesAllStores: ADMIN / SUPERADMIN -- never an AREA_MANAGER, whom the
+ *  server holds to his own shops). A new order or return is raised at
+ *  `ownStoreId` (the server's rule); `showShopOf` then points an admin's list
+ *  at that shop if it is showing another -- true when it did -- so what was
  *  just raised never vanishes from view. */
 export function usePurchaseShop() {
   const { user } = useAuth();
   const { shop, setShop } = useChosenShop();
-  const canPick = !!user?.roles?.some((r) => r === 'ADMIN' || r === 'SUPERADMIN');
+  const canPick = userSeesAllStores(user?.roles);
   const ownStoreId = user?.activeStoreId || undefined;
   const storeId = canPick ? shop || undefined : ownStoreId;
-  const showShopOf = (raisedAt: string | undefined) => {
-    if (canPick && shop && raisedAt && shop !== raisedAt) setShop(raisedAt);
+  const showShopOf = (raisedAt: string | undefined): boolean => {
+    const move = canPick && !!shop && !!raisedAt && shop !== raisedAt;
+    if (move) setShop(raisedAt as string);
+    return move;
   };
   return { storeId, ownStoreId, canPick, shop, setShop, showShopOf };
 }
