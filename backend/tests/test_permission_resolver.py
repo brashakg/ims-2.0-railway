@@ -172,3 +172,22 @@ def test_grantable_for_sales_cashier_limited_to_own_reach():
     assert "finance:write" not in g
     # never an ungrantable
     assert "jarvis:read" not in g
+
+
+# ---------------------------------------------------------------------------
+# A carved-out key still answers an override stored on the key it came from.
+# ---------------------------------------------------------------------------
+
+def test_a_stored_vendor_returns_write_override_still_answers_the_create_door():
+    # POST /vendor-returns was vendor-returns:write until the 2026-10-12
+    # carve-out (vendor-returns:create, so workshop staff can log a return):
+    # a deny or grant stored on write before or after must keep answering it.
+    from api.services.capabilities import capability_for
+
+    cap = capability_for("POST", "/api/v1/vendor-returns")
+    assert cap == "vendor-returns:create"
+    assert A(True, cap, {"deny": {"vendor-returns:write": True}}, None) is False
+    assert A(False, cap, {"grant": {"vendor-returns:write": True}}, None) is True
+    assert A(True, cap, {"deny": {"vendor-returns:create": True}}, None) is False
+    # A create deny alone leaves approve / ship / credit (write) to the role.
+    assert A(True, "vendor-returns:write", {"deny": {"vendor-returns:create": True}}, None) is True

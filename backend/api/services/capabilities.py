@@ -137,11 +137,21 @@ def capability_for(method: str, path: str) -> Optional[str]:
     # 2026-10-12 lets WORKSHOP_STAFF log one (unpriced); on the generic
     # vendor-returns:write key they would join the approve / ship / credit
     # union the grant guard reasons from. A 'vendors' module deny still covers
-    # it (MODULE_EXTRA_DENY_CAPABILITIES).
+    # it (MODULE_EXTRA_DENY_CAPABILITIES), and a stored per-user deny or grant
+    # of vendor-returns:write still answers it (PARENT_CAPABILITY).
     if method.upper() == "POST" and tmpl.rstrip("/") == "/api/v1/vendor-returns":
         return "vendor-returns:create"
     verb = "read" if method.upper() in _READ_METHODS else "write"
     return f"{mod}:{verb}"
+
+
+# A curated key carved out of its module's generic key for the ROLE layer only.
+# The route was the parent key before the carve-out, so a per-user deny or
+# grant stored on the parent must keep answering it (permission_resolver):
+# else a user denied vendor-returns:write could log returns again.
+PARENT_CAPABILITY: Dict[str, str] = {
+    "vendor-returns:create": "vendor-returns:write",
+}
 
 
 def _build_universe() -> (
