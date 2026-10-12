@@ -2175,11 +2175,12 @@ async def get_similar_products(
     (council rule) -- so what this reports as an exact match is exactly what
     the create door would 409.
 
-    Shape: {"exact_match": {summary}|null, "siblings": [summary, ...] (cap 12),
-    "model_colour_count": N}. FAIL-SOFT: any DB trouble returns the empty
+    Shape: {"exact_match": {summary}|null, "eye_size_needed": [size, ...],
+    "siblings": [summary, ...] (cap 12), "model_colour_count": N}. FAIL-SOFT: any DB trouble returns the empty
     shape with 200 -- the FE strip simply doesn't render; never a 5xx.
     """
-    empty = {"exact_match": None, "siblings": [], "model_colour_count": 0}
+    # The service's own empty answer: one shape, whatever the DB says.
+    empty = {"exact_match": None, "eye_size_needed": [], "siblings": [], "model_colour_count": 0}
     try:
         from database.connection import get_db
 

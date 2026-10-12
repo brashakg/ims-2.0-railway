@@ -1247,8 +1247,11 @@ def find_similar_products(
     FAIL-SOFT: any DB trouble returns the empty shape -- the strip simply does
     not render; it must never block or 5xx the Add-Product flow.
     """
+    # ONE shape for every answer, the empty one included (the hint reads
+    # eye_size_needed whatever the lookup found).
     empty: Dict[str, Any] = {
         "exact_match": None,
+        "eye_size_needed": [],
         "siblings": [],
         "model_colour_count": 0,
     }
