@@ -1293,7 +1293,7 @@ def test_a_parcels_first_reconciles_overlapping_keep_the_newer(swept, monkeypatc
     shopify_fulfillment.reconcile_fulfillment(swept["db"], _fulfilment(
         oid, 1, tracking_number="AWB-Y", updated_at=_T("01:30"), created_at=_T("01:00")))
     doc = _doc(swept, oid)
-    assert doc[shopify_fulfillment.PARCEL_AWBS] == [{"id": "f1", "awb": "AWB-Y"}]
+    assert doc[shopify_fulfillment.PARCEL_AWBS] == [{"id": "f1", "awb": "AWB-Y", "live": True}]
     assert doc[shopify_fulfillment.FULFILLMENT_CLOCKS]["f1"] == datetime(2026, 9, 6, 1, 30)
 
 
@@ -3108,3 +3108,81 @@ def test_a_redriven_refund_is_the_same_return(swept, monkeypatch, historical):
         assert swept["db"]["tasks"].find_one({"task_id": blocked[0]["task_id"]})["status"] == "COMPLETED"
     else:
         assert _units(swept) == [("stk-1", "AVAILABLE")]
+
+
+def test_a_stale_body_of_a_cancelled_parcel_never_retakes_the_display(swept, monkeypatch):
+    """Two workers. B reads the order to apply F1's own 01:00 in-transit body;
+    A then applies F1's cancel (02:05) in full; B writes. The takeover of a
+    cancelled display matched any live body, F1's own stale one too: the
+    order showed F1 in transit at 01:00 for a cancelled parcel, and the sweep
+    never re-fed F1 (its clock already held the cancel). A parcel's stale
+    body never writes: the takeover asks its own clock, as its entry does."""
+    oid = 60244
+    _book(swept, oid)
+    _reconcile(swept, oid, 1, "AWB-1", "success", _T("00:40"))
+    b_read = copy.deepcopy(_doc(swept, oid))
+    f1 = _fulfilment(oid, 1, tracking_number="AWB-1", status="cancelled",
+                     created_at=_T("00:40"), updated_at=_T("02:05"))
+    shopify_fulfillment.reconcile_fulfillment(swept["db"], copy.deepcopy(f1), topic="fulfillments/update")
+    real_find = shopify_fulfillment._find_ims_order
+    monkeypatch.setattr(shopify_fulfillment, "_find_ims_order", lambda db, sid: copy.deepcopy(b_read))
+    shopify_fulfillment.reconcile_fulfillment(swept["db"], {**copy.deepcopy(f1), "status": "success",
+                                                            "shipment_status": "in_transit",
+                                                            "updated_at": _T("01:00")},
+                                              topic="fulfillments/update")
+    monkeypatch.setattr(shopify_fulfillment, "_find_ims_order", real_find)
+    swept["state"]["orders"] = [_pulled(oid, fulfillment_status=None, updated_at=LATER, fulfillments=[f1])]
+    for i in range(2):
+        doc = _doc(swept, oid)
+        assert doc.get("shipment_status") != "in_transit", i
+        assert doc[shopify_fulfillment.FULFILLMENT_WATERMARK] == datetime(2026, 9, 6, 2, 5), i
+        assert shopify_fulfillment.tracked_awbs(doc) == [], i
+        swept["run"]()
+
+
+def test_a_live_parcel_takes_over_a_cancelled_one_whatever_the_order_body_said(swept):
+    """Probe C plus Shopify's own orders/updated for the cancel, drained
+    between F1's cancel and F2's late create. Its body says 'fulfilled' and
+    is not stale, so the mapper wrote FULFILLED over the order's
+    fulfillment_status: the takeover, which read 'the shown parcel is
+    cancelled' from that field, never matched F2, and the order showed the
+    dead AWB-1 for good. Only the parcel list says a parcel is cancelled."""
+    oid = 60245
+    _book(swept, oid)
+    f1 = _fulfilment(oid, 1, tracking_number="AWB-1", status="cancelled",
+                     created_at=_T("00:40"), updated_at=_T("02:05"))
+    f2 = _fulfilment(oid, 2, tracking_number="AWB-2", status="success", shipment_status="delivered",
+                     created_at=_T("00:50"), updated_at=_T("01:00"))
+    _reconcile(swept, oid, 1, "AWB-1", "success", _T("00:40"))
+    shopify_fulfillment.reconcile_fulfillment(swept["db"], copy.deepcopy(f1), topic="fulfillments/update")
+    body = _pulled(oid, fulfillment_status="fulfilled", updated_at=LATER, fulfillments=[f1, f2])
+    swept["real_map"](copy.deepcopy(body), swept["db"], topic="orders/updated")
+    assert _doc(swept, oid)["fulfillment_status"] == "FULFILLED", "the mapper's write"
+    shopify_fulfillment.reconcile_fulfillment(swept["db"], {**copy.deepcopy(f2), "shipment_status": None,
+                                                            "updated_at": _T("00:50")},
+                                              topic="fulfillments/create")
+    shopify_fulfillment.reconcile_fulfillment(swept["db"], copy.deepcopy(f2), topic="fulfillments/update")
+    swept["state"]["orders"] = [body]
+    for i in range(3):
+        doc = _doc(swept, oid)
+        assert (doc["status"], doc["shopify_fulfillment_id"], doc["awb"], doc["shipment_status"]) == (
+            "DELIVERED", "2", "AWB-2", "delivered"), i
+        assert shopify_fulfillment.tracked_awbs(doc) == ["AWB-2"], i
+        swept["run"]()
+
+
+def test_an_older_live_parcel_takes_over_a_cancelled_pre_clock_stamp(swept):
+    """Before the clocks the old reconcile stamped F2, and Shopify cancelled
+    it. F1 (an older id, still on its way) is the first event since: no
+    watermark, no parcel list, and F1 never outranks the stamp. The list
+    starts with the stamp's parcel (cancelled: the order's own
+    fulfillment_status, the only state it has) before the takeover asks it,
+    so F1 takes the tracking fields over the dead AWB-2."""
+    oid = 60246
+    _book(swept, oid)
+    _set(swept, oid, **{**_PRE_CLOCK_F1, "shopify_fulfillment_id": "2", "awb": "AWB-2",
+                        "tracking_number": "AWB-2", "fulfillment_status": "CANCELLED"})
+    _reconcile(swept, oid, 1, "AWB-1", "success", _T("01:00"))
+    doc = _doc(swept, oid)
+    assert (doc["shopify_fulfillment_id"], doc["awb"]) == ("1", "AWB-1")
+    assert shopify_fulfillment.tracked_awbs(doc) == ["AWB-1"]
