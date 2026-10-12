@@ -47,6 +47,7 @@ from .grn_accept_lock import (
     _received_on,
     _release_grn_accept_claim,
     _stock_create_raises_on_duplicate,
+    refuse_beyond_order_below_manager,
 )
 
 
@@ -112,8 +113,11 @@ async def _accept_grn_impl(grn_id: str, current_user: dict) -> dict:
     # A line beyond what the PO ordered waits for the store manager: a
     # receiving manager's "Add to stock" is that decision ("they really did
     # send them"), the same people as 'Not received' (owner 2026-09-28,
-    # receiving is managers only). Anyone else's press shelves the rest of
-    # the receipt and leaves those lines held for them -- the release's cap.
+    # receiving is managers only). Anyone else is refused on a receipt
+    # already holding such a line; on one the cap only now finds over its
+    # order (a fresh count, or a hold the release just set), their press
+    # shelves the rest and leaves those lines held for them -- the cap.
+    refuse_beyond_order_below_manager(grn, current_user, "Nothing was added to stock.")
     return _put_on_shelf(
         grn_repo, grn_id, grn, current_user, order_cap=not is_receiving_manager(current_user)
     )

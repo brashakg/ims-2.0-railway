@@ -233,9 +233,10 @@ describe('Receive Goods - a receipt held for cataloguing (audit C1)', () => {
     confirmSpy.mockRestore();
   });
 
-  // Panel round 7: receiving is managers only -- the server refuses 'Not
-  // received' to an accountant (403), so the screen does not offer it and
-  // says who does it (the 09-28 ruling: the blocked page says who can).
+  // Panel round 7 / round 9: receiving is managers only -- the server refuses
+  // 'Not received', 'Add to stock' and 'Void' on a receipt held beyond its
+  // order to an accountant (403), so the screen offers none of them and says
+  // who decides (the 09-28 ruling: the blocked page says who can).
   it('below manager, a receipt held beyond its order names the store manager instead', async () => {
     authState.roles = ['ACCOUNTANT'];
     getGRNsMock.mockImplementation(async (params: { status?: string }) =>
@@ -254,9 +255,17 @@ describe('Receive Goods - a receipt held for cataloguing (audit C1)', () => {
     );
     const row = await heldRow();
     expect(within(row).queryByRole('button', { name: /not received/i })).toBeNull();
-    expect(within(row).getByText(/the store manager marks the extra units not received/i)).toBeTruthy();
-    // Voiding it is the same answer, refused below manager (403): not offered.
+    expect(within(row).getByText(/the store manager decides the extra units/i)).toBeTruthy();
+    // 'Add to stock' and voiding it are the same decision, refused below
+    // manager (403): not offered.
+    expect(within(row).queryByRole('button', { name: /add to stock/i })).toBeNull();
     expect(within(row).queryByRole('button', { name: /void/i })).toBeNull();
+  });
+
+  it('below manager, a receipt held only for the catalogue still offers "Add to stock"', async () => {
+    authState.roles = ['ACCOUNTANT'];
+    const row = await heldRow();
+    expect(within(row).getByRole('button', { name: /add to stock/i })).toBeTruthy();
   });
 
   it('a receipt held only for the catalogue offers no "Not received"', async () => {

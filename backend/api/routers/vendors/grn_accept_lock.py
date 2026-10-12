@@ -1,6 +1,7 @@
 """GRN accept concurrency: claim, heartbeat, guarded writes, unit mint."""
 
 from ._shared import HTTPException, Optional, datetime, logger, timedelta, uuid
+from ...services.cost_mask import is_receiving_manager
 
 
 # ---------------------------------------------------------------------------
@@ -447,6 +448,25 @@ def _grn_accept_heartbeat_tick(grn_repo, grn_id: str, token, state: dict) -> Non
             ),
         )
     state["confirmed_at"] = now
+
+
+def refuse_beyond_order_below_manager(grn: dict, current_user: dict, nothing_done: str) -> None:
+    """A receipt holding units beyond its order (an unresolved line with
+    reason over_order) waits for the store manager: 'Not received', 'Add to
+    stock' and 'Void' each answer whether the vendor really sent them, so
+    each is the receiving managers' (owner 2026-09-28, receiving is managers
+    only; cost_mask.RECEIVING_MANAGERS). Anyone else is refused (403)."""
+    if is_receiving_manager(current_user):
+        return
+    if any((ln or {}).get("reason") == "over_order" for ln in (grn or {}).get("unresolved_lines") or []):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "This receipt holds units beyond what its order asked for: "
+                "the store manager decides them (Receive Goods > 'Not "
+                f"received' or 'Add to stock'). {nothing_done}"
+            ),
+        )
 
 
 def _received_on(grn: dict, **more) -> dict:

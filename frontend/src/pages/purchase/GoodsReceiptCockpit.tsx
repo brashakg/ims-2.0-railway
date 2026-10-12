@@ -127,16 +127,18 @@ interface InboxPO {
 // Main page
 // ============================================================================
 
-// The server's grn_void._DROP_ROLES (SUPERADMIN passes every role gate).
-const DROP_OVER_ORDER_ROLES: string[] = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'];
+// The server's cost_mask.RECEIVING_MANAGERS (SUPERADMIN passes every role gate).
+const RECEIVING_MANAGER_ROLES: string[] = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'];
 
 export function GoodsReceiptCockpit() {
   const { user } = useAuth();
   const toast = useToast();
   const storeId = user?.activeStoreId || '';
-  // 'Not received' is the receiving managers' (owner 2026-09-28; the server's
-  // drop-over-order roles): anyone else is told who presses it.
-  const canDropOverOrder = (user?.roles || []).some((r) => DROP_OVER_ORDER_ROLES.includes(r));
+  // Units beyond the order are the receiving managers' to decide (owner
+  // 2026-09-28): 'Not received', 'Add to stock' and 'Void' on such a receipt
+  // are refused to anyone else (grn_accept_lock.refuse_beyond_order_below_manager),
+  // who is told who decides instead.
+  const decidesOverOrder = (user?.roles || []).some((r) => RECEIVING_MANAGER_ROLES.includes(r));
   // W1.4 / OS-006: receiving books stock at the active store. An ONLINE store
   // holds no stock — warn up front (backend rejects the GRN with 400 too).
   const onlineStore = useIsOnlineStore(storeId);
@@ -1377,27 +1379,29 @@ export function GoodsReceiptCockpit() {
                             <span className="text-gray-500"> · {g.items?.length ?? 0} line(s)</span>
                           </div>
                           <div className="flex items-center gap-2">
-                            <button
-                              type="button"
-                              onClick={() => acceptPendingGrn(g.grn_id, g.grn_number)}
-                              disabled={grnActionBusy === g.grn_id}
-                              className="btn-primary !py-1 !px-3 text-xs flex items-center gap-1.5 disabled:opacity-50"
-                            >
-                              {grnActionBusy === g.grn_id ? (
-                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                              ) : (
-                                <CheckCircle2 className="w-3.5 h-3.5" />
-                              )}
-                              Add to stock
-                            </button>
+                            {g.overOrder && !decidesOverOrder ? (
+                              <span className="text-xs text-gray-500">
+                                The store manager decides the extra units: not received, or add to stock
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => acceptPendingGrn(g.grn_id, g.grn_number)}
+                                disabled={grnActionBusy === g.grn_id}
+                                className="btn-primary !py-1 !px-3 text-xs flex items-center gap-1.5 disabled:opacity-50"
+                              >
+                                {grnActionBusy === g.grn_id ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <CheckCircle2 className="w-3.5 h-3.5" />
+                                )}
+                                Add to stock
+                              </button>
+                            )}
                             {/* A held receipt can be a second receipt of the same box: the
                                 store manager voids it here. The server refuses the void if
                                 the receipt put anything on the shelf. */}
-                            {g.overOrder && !canDropOverOrder ? (
-                              <span className="text-xs text-gray-500">
-                                The store manager marks the extra units not received
-                              </span>
-                            ) : g.overOrder ? (
+                            {g.overOrder && decidesOverOrder ? (
                               <button
                                 type="button"
                                 onClick={() => dropOverOrder(g.grn_id, g.grn_number)}
@@ -1411,7 +1415,7 @@ export function GoodsReceiptCockpit() {
                             {/* Voiding a receipt held beyond its order answers the same
                                 question as 'Not received': the server refuses it below
                                 manager (403), so it is not offered. */}
-                            {g.overOrder && !canDropOverOrder ? null : (
+                            {g.overOrder && !decidesOverOrder ? null : (
                               <button
                                 type="button"
                                 onClick={() => voidPendingGrn(g.grn_id, g.grn_number)}

@@ -4747,13 +4747,15 @@ def test_merge_a_discarded_draft_reads_discontinued_and_its_revival_reads_new(wo
 def test_r8_only_a_receiving_manager_decides_the_units_beyond_the_order(world):
     # The store manager's task asks him whether the vendor sent the extra units
     # ('Not received' / 'Add to stock'). An accountant's "Add to stock" is not
-    # that answer: it shelves the rest of the receipt and leaves the line held.
+    # that answer (round 9: refused, as 'Not received' and 'Void' are).
     po, boss, carrera, grn1, grn2 = _mixed_held_receipt(world)
     world.finish_draft(boss, offer=2790)
     gid = grn2["grn_id"]
     assert len(world.units(boss)) == 2
     _seed_user(world, ACCOUNTANT)
-    _run(vd.accept_grn(gid, ACCOUNTANT))
+    with pytest.raises(HTTPException) as refused:
+        _run(vd.accept_grn(gid, ACCOUNTANT))
+    assert refused.value.status_code == 403 and "Add to stock" in refused.value.detail
     held = world.grn(gid)
     status, received = _po_received(world, po)
     finding(
