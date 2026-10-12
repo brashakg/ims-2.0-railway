@@ -333,8 +333,7 @@ class BaseRepository(ABC, Generic[T]):
         matches P357BK1* but not RAY-P357BK1. In the repository's
         WORD_SEARCH_FIELDS it may instead start ANY word of the field ("optix"
         finds "Air Optix", "ban" finds "Ray-Ban"), and "ray" still never finds
-        "Spray" or "Gray"; the field-start hits come first, so a wider rule
-        never pushes an exact SKU or a scanned barcode down the list.
+        "Spray" or "Gray". Unranked; a caller that ranks uses find_ranked.
 
         Args:
             text: Search text (one or more whitespace-separated tokens)
@@ -348,30 +347,34 @@ class BaseRepository(ABC, Generic[T]):
         """
         try:
             query = self._search_query(text, fields, filter)
-            head_q = self._search_query(text, fields, filter, word_fields=())
-            if head_q == query:
-                return self.find_many(query, skip=skip, limit=limit)
-            return self.find_ranked(query, head_q, skip=skip, limit=limit)
+            return self.find_many(query, skip=skip, limit=limit)
         except Exception as e:
             print(f"Error searching {self.entity_name}s: {e}")
             return []
 
     def find_ranked(
-        self, query: Dict, first: Dict, skip: int = 0, limit: int = 100
+        self, query: Dict, tiers: List[Dict], skip: int = 0, limit: int = 100
     ) -> List[Dict]:
-        """One page of `query`'s hits, those also matching `first` ranked
-        first. Both halves sit inside `query`, so paging through returns every
-        hit exactly once and count(query) is the true total. limit=0 = all.
-        The one head-then-rest split: a ranked search calls this."""
-        head_q = {"$and": [query, first]}
-        head = self.find_many(head_q, skip=skip, limit=limit)
-        if limit and len(head) >= limit:
-            return head
-        return head + self.find_many(
-            {"$and": [query, {"$nor": [first]}]},
-            skip=max(0, skip - self.count(head_q)),
-            limit=limit - len(head) if limit else 0,
-        )
+        """One page of `query`'s hits ranked by tier: those matching tiers[0]
+        first, then those matching tiers[1] and not tiers[0], ..., then the
+        rest, each part in storage order. Every part sits inside `query` and
+        excludes the earlier tiers, so paging through returns every hit
+        exactly once and count(query) is the true total. limit=0 = all. The
+        one ranked search: the till and the purchase-order box both call it."""
+        page: List[Dict] = []
+        for i in range(len(tiers) + 1):
+            part = {"$and": [query, *tiers[i:i + 1]]}
+            if i:
+                part["$and"].append({"$nor": tiers[:i]})
+            got = self.find_many(
+                part, skip=skip, limit=limit - len(page) if limit else 0
+            )
+            page += got
+            if limit and len(page) >= limit:
+                break
+            # Paged past this whole part: skip what is left in the next one.
+            skip = max(0, skip - self.count(part)) if skip and not got else 0
+        return page
 
     def search_count(self, text: str, fields: List[str], filter: Dict = None) -> int:
         """Count of documents the SAME search() query would match (pre-slice),
@@ -399,7 +402,7 @@ class BaseRepository(ABC, Generic[T]):
         """Build the tokenized search query search() executes. Shared with
         search_count so the list and its total can never drift. word_fields
         defaults to the repository's WORD_SEARCH_FIELDS; () = from the start
-        only (search()'s first-ranked hits)."""
+        only."""
         tokens = [t for t in (text or "").split() if t]
         if not tokens:
             # Empty query -> apply only the caller's filter (match-all

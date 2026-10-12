@@ -4,8 +4,8 @@ Every typed word must START A WORD of a product's brand, model, minted name,
 model_name or subbrand (the field start, or after a space, hyphen, slash, dot
 or underscore), so "Air Optix", "Acuvue Oasys" and "Ray Ban Aviator" are
 found while "ray" still never finds "Spray Cleaner" or "Gunmetal Gray". Codes
-(SKU, variant, barcode) keep matching from their start, and a field-start hit
-still comes first. Driven through GET /api/v1/products?search= (the till's
+(SKU, variant, barcode) keep matching from their start, and what main's rule
+found still comes first, in main's order. Driven through GET /api/v1/products?search= (the till's
 product query; the counter lookup runs the same search_products) over
 mongomock, and once over the fallback mock DB that local no-Mongo mode runs on.
 
@@ -163,9 +163,9 @@ def test_codes_still_match_from_their_start(catalogue):
                          ids=["till", "purchase-order"])
 @pytest.mark.parametrize("field", ["sku", "barcode"])
 def test_an_exact_code_still_comes_first(db, field, params):
-    # The purchase-order box (match=anywhere) ranks the same way: only a
-    # field-start hit goes ahead of the rest, as on main, so a page of one
-    # (or the box's 20) never drops the exact code for an earlier word hit.
+    # The purchase-order box (match=anywhere) ranks the same way: main's
+    # results go ahead of the new word hits, so a page of one (or the box's
+    # 20) never drops the exact code for an earlier word hit.
     code = "RB3025"
     db.products.insert_many([
         # Inserted FIRST, found only by word start ("RB3025" is its 2nd word).
@@ -244,11 +244,10 @@ def _door(db, pid, category, **attrs):
 
 @pytest.mark.parametrize(
     "q, want",
-    # "aviator": SG-MODEL's model_name STARTS with it, so it ranks first;
-    # SG-SHAPE has it only as a word of its title. "ban" starts neither
-    # field, so for "Ray Ban Aviator" both are word hits, in stored order.
+    # Main's rule found none of these, so every hit is a new word hit, in
+    # stored order -- even SG-MODEL, whose model_name STARTS with "aviator".
     [("Ray Ban Aviator", ["SG-SHAPE", "SG-MODEL"]),
-     ("aviator", ["SG-MODEL", "SG-SHAPE"]),
+     ("aviator", ["SG-SHAPE", "SG-MODEL"]),
      ("Ray Ban Aviator Classic", ["SG-MODEL"]),
      ("Acuvue Oasys", ["CL-SUB"]), ("acuvue", ["CL-SUB"])],
 )
@@ -329,6 +328,69 @@ def test_a_title_word_finds_a_product_after_what_main_found(db):
     # unchanged, and the new title-word hit after it.
     assert _main_ids(db, "matte") == ["SG-AVI"]
     assert _ids(db, "matte") == (["SG-AVI", "SG-MBK"], 2)
+
+
+@pytest.fixture
+def mixed(db):
+    # The round-6 panel's probes: door-made rows stored BEFORE the legacy
+    # rows main found, so only the ranking can keep main's results first.
+    _door(db, "D-RB1", "SUNGLASS", brand_name="Ray-Ban", model_no="RB3025",
+          colour_code="001", frame_color="Gold", shape="Aviator")
+    _door(db, "D-CL1", "CONTACT_LENS", brand_name="Alcon", subbrand="Air Optix",
+          model_name="Plus HydraGlyde")
+    _door(db, "D-CL2", "CONTACT_LENS", brand_name="Johnson & Johnson",
+          subbrand="Acuvue", model_name="Oasys 1-Day")
+    db.products.insert_many([
+        _p("L-AVI", "Ray-Ban", "Aviator Classic", "SG-RB-0001",
+           name="Ray-Ban RB3025 001/58 Aviator Large Metal Gold"),
+        _p("L-RB2", "Ray-Ban", "RB3025", "RB3025-001-58"),
+        _p("L-SKU", "Lenskart", "Air", "AIR-0001"),
+        _p("L-SPR", "Zeiss", "Spray Cleaner", "AC-ZS-0001"),
+        _p("L-SPA", "Ray-Ban", "RB 3025", "SG RB 3025"),
+        _p("L-VAV", "Vogue", "VO Aviator 4085", "FR-VO-4085"),
+    ])
+    return db
+
+
+_BOX = {"match": "anywhere"}
+
+
+@pytest.mark.parametrize(
+    "q, params, main, now",
+    # main = what origin/main lists, written out by hand: at the till, every
+    # word STARTS brand / model / sku / variant / barcode; the box lists
+    # those, then main's wide hits (a model number inside 'RB 3025', a word
+    # inside 'VO Aviator 4085'). The new rule's hits come after, stored order.
+    [("AIR", {}, ["L-SKU"], ["L-SKU", "D-CL1"]),
+     ("AIR", _BOX, ["L-SKU"], ["L-SKU", "D-CL1"]),
+     ("AC", {}, ["L-SPR"], ["L-SPR", "D-CL2"]),
+     ("aviator", {}, ["L-AVI"], ["L-AVI", "D-RB1", "L-VAV"]),
+     ("aviator", _BOX, ["L-AVI", "L-VAV"], ["L-AVI", "L-VAV", "D-RB1"]),
+     ("ray ban aviator", _BOX, ["L-AVI"], ["L-AVI", "D-RB1"]),
+     ("RB3025", {}, ["D-RB1", "L-RB2"], ["D-RB1", "L-RB2", "L-AVI"]),
+     ("RB3025", _BOX, ["D-RB1", "L-RB2", "L-SPA"],
+      ["D-RB1", "L-RB2", "L-SPA", "L-AVI"])],
+    ids=["AIR-till", "AIR-box", "AC-till", "aviator-till", "aviator-box",
+         "ray-ban-aviator-box", "RB3025-till", "RB3025-box"],
+)
+def test_mains_results_come_first_in_mains_order(mixed, q, params, main, now):
+    assert now[:len(main)] == main
+    assert _ids(mixed, q, **params) == (now, len(now))
+    # A page of one is main's first result, never a new word hit.
+    assert _ids(mixed, q, limit=1, **params) == (main[:1], len(now))
+
+
+def test_the_box_keeps_mains_only_hit_on_its_20_rows(db):
+    # 22 door-made frames whose model_name 'Clubmaster Classic' the till's
+    # word rule finds, stored before the one product main's box found.
+    for i in range(22):
+        _door(db, f"D-CM{i:02d}", "SUNGLASS", brand_name="Ray-Ban",
+              model_no="RB3016", colour_code=f"{i:03d}",
+              model_name="Clubmaster Classic")
+    db.products.insert_one(_p("L-VOG", "Vogue", "VO2787 Classic", "FR-VO-2787"))
+    ids, total = _ids(db, "classic", match="anywhere", limit=20)
+    assert (ids[0], len(ids), total) == ("L-VOG", 20, 23)
+    assert _ids(db, "classic", match="anywhere", limit=1) == (["L-VOG"], 23)
 
 
 def test_other_searches_keep_matching_from_the_field_start(db):

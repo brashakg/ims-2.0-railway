@@ -88,6 +88,9 @@ class ProductRepository(BaseRepository):
         "brand", "model", "name", "attributes.model_name", "attributes.subbrand",
     )
     SEARCH_FIELDS = WORD_SEARCH_FIELDS + ("sku", "variant", "barcode")
+    # Main's till rule before 2026-10-08: every word STARTS one of these.
+    # What it finds is listed first, in main's order (search_products).
+    LEGACY_SEARCH_FIELDS = ("brand", "model", "sku", "variant", "barcode")
 
     # THE WIDE RULE, opt-in (`anywhere=True`; the purchase-order product box,
     # audit F21). NAME fields match ANYWHERE and ignore spaces/hyphens: the
@@ -258,13 +261,14 @@ class ProductRepository(BaseRepository):
             filter["created_by"] = created_by
         return filter
 
-    def _product_search_query(self, text: str, extra: Dict) -> Dict:
+    def _product_search_query(self, text: str, extra: Dict, till: bool = True) -> Dict:
         """The WIDE product search query -- shared by the list and its count
         so the two can never drift. Each word's $or holds the till's own
         clause for it, so it is a superset of the till's rule (outside a query
-        of nothing but hyphens, which lists nothing). ponytail: unanchored
-        regex scans the collection; fine at catalogue size, a text index if it
-        ever is not."""
+        of nothing but hyphens, which lists nothing); till=False leaves that
+        clause out, which is main's wide rule (the box's second tier).
+        ponytail: unanchored regex scans the collection; fine at catalogue
+        size, a text index if it ever is not."""
         clauses = []
         for tok in (text or "").split():
             letters = [c for c in tok if c != "-"]
@@ -278,7 +282,8 @@ class ProductRepository(BaseRepository):
             }
             ors = [{f: code} for f in self.CODE_SEARCH_FIELDS]
             ors += [{f: name} for f in self.NAME_SEARCH_FIELDS]
-            ors.append(self._search_token(tok, self.SEARCH_FIELDS))
+            if till:
+                ors.append(self._search_token(tok, self.SEARCH_FIELDS))
             clauses.append({"$or": ors})
         if not clauses:
             # Nothing but hyphens and spaces ('--'): nothing to look for, so
@@ -300,22 +305,26 @@ class ProductRepository(BaseRepository):
         anywhere: bool = False,
     ) -> List[Dict]:
         extra = self._search_extra_filter(category, is_active, created_by)
-        if not anywhere:
-            return self.search(
-                query, list(self.SEARCH_FIELDS), extra, skip=skip, limit=limit
-            )
-        # What the till's rule finds from a field's START comes FIRST (an
-        # exact SKU, a scan, the brand), then the rest -- so no result limit
-        # can push it off the list behind, say, thirty 'Gunmetal Gray' frames
-        # for 'ray', or behind a model 'Aviator RB3025' for the SKU 'RB3025'.
-        # Both halves sit INSIDE the wide query, so the list is exactly what
-        # count_search_products counts -- even where the till's rule finds
-        # more ('  ' is everything to the till, nothing to the wide rule).
-        wide_q = self._product_search_query(query, extra)
-        start_q = self._search_query(
-            query, list(self.SEARCH_FIELDS), extra, word_fields=()
+        # Main's results come FIRST, in main's order, then what the new rule
+        # adds -- so no page (the till's 24, the box's 20, a page of one) ever
+        # loses a result main listed: an exact SKU, a scan, a 'Ray-Ban' behind
+        # thirty 'Gunmetal Gray' frames for 'ray', or a model behind a title
+        # word. Tier 1 is main's till rule; the box's tier 2 is main's wide
+        # rule (main listed its till hits, then its wide ones). Every tier
+        # sits inside the query, so the list is what count_search_products
+        # counts ('  ' is everything to the till, nothing to the wide rule).
+        main_till = self._search_query(
+            query, list(self.LEGACY_SEARCH_FIELDS), extra, word_fields=()
         )
-        return self.find_ranked(wide_q, start_q, skip=skip, limit=limit)
+        if not anywhere:
+            till_q = self._search_query(query, list(self.SEARCH_FIELDS), extra)
+            return self.find_ranked(till_q, [main_till], skip=skip, limit=limit)
+        return self.find_ranked(
+            self._product_search_query(query, extra),
+            [main_till, self._product_search_query(query, extra, till=False)],
+            skip=skip,
+            limit=limit,
+        )
 
     def count_search_products(
         self,

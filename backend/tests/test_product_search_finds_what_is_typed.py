@@ -342,12 +342,23 @@ LEGACY_FIELDS = ["brand", "model", "sku", "variant", "barcode"]
     "q",
     ["ray", "Ray-Ban", "RB", "carrera CA", "SG-", "oak", "2000", "8895", "black", "blue"],
 )
-def test_the_till_search_is_untouched(repo, q):
+def test_the_till_lists_mains_results_first_in_mains_order(repo, q):
     """No `match`: POS, goods receipt, command palette, Returns, QuickShare.
-    The till's rule exactly -- same rows, same order, same total."""
-    legacy = repo.search(q, LEGACY_FIELDS, {"is_active": True})
-    assert repo.search_products(q) == legacy, q
-    assert repo.count_search_products(q) == len(legacy), q
+    Main's till rule, written out here by hand (every word STARTS brand,
+    model, sku, variant or barcode), leads the list: same rows, same order;
+    a page of one is its first; the total counts the whole list."""
+    import re
+
+    words = [
+        {"$or": [{f: {"$regex": "^" + re.escape(w), "$options": "i"}}
+                 for f in LEGACY_FIELDS]}
+        for w in q.split()
+    ]
+    main = repo.find_many({"$and": words + [{"is_active": True}]})
+    hits = repo.search_products(q)
+    assert hits[: len(main)] == main, q
+    assert repo.search_products(q, limit=1) == (main or hits)[:1], q
+    assert repo.count_search_products(q) == len(hits), q
 
 
 def test_the_till_does_not_get_the_wide_matches(repo):
