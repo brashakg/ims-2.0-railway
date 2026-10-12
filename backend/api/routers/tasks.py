@@ -922,6 +922,11 @@ async def complete_task(
     )
 
     if result:
+        # A catalogue-flag task: completing it fixes its flags (the one rule
+        # in services/catalog_flags; fail-soft, the completion stands).
+        from ..services.catalog_flags import on_task_completed
+
+        on_task_completed(task, current_user)
         return {"task_id": task_id, "status": "COMPLETED", "message": "Task completed"}
 
     raise HTTPException(status_code=500, detail="Failed to complete task")

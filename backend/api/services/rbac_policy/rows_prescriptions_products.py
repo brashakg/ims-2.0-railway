@@ -266,6 +266,13 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/products/cataloguers",
         "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER", "CATALOG_MANAGER"],
     },
+    # The Catalog page's filter options + open-flag counts (owner 2026-10-12):
+    # carries the same roster (Added by / Last edited by), so the same ladder.
+    {
+        "method": "GET",
+        "path": "/api/v1/products/facets",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER", "CATALOG_MANAGER"],
+    },
     # Cataloguing performance scorecard (attribution phase 2): per-user volume,
     # approvals, corrections received, QC error rate. Same manager ladder.
     {

@@ -26,8 +26,15 @@ from ..services.file_store import (
 # Imported at module level so the edit endpoint below (and its test) resolve the
 # editor through THIS module -- tests monkeypatch `get_image_editor` here.
 from ..services.image_editor import get_image_editor, EditSpec
+from ..services import catalog_list as _catalog_list
+from ..services.catalog_flags import FLAG_TYPES as _FLAG_TYPES
 
 router = APIRouter()
+
+# The Catalog page's Flags filter: any open flag, open flags on MY entries,
+# one flag type, or the archived (deleted) products -- admins only.
+_FLAG_FILTER_PATTERN = "^(any|mine|archived|" + "|".join(_FLAG_TYPES) + ")$"
+_ARCHIVE_VIEW_ROLES = {"ADMIN", "SUPERADMIN"}
 
 logger = logging.getLogger("ims.products")
 
@@ -875,6 +882,28 @@ async def list_products(
             "online (LIVE / QUEUED / OFF / BLOCKED), computed here."
         ),
     ),
+    # ---- The Catalog page's sort + filters (owner 2026-10-12). ALL optional:
+    # a caller sending none of them gets exactly the legacy list below. Any
+    # one of them routes through services/catalog_list (one query for the
+    # page AND its count, sorted on the server across the whole result).
+    sort: Optional[str] = Query(None, pattern=_catalog_list.SORT_PATTERN),
+    frame_color: Optional[str] = Query(None, max_length=80),
+    lens_colour: Optional[str] = Query(None, max_length=80),
+    gender: Optional[str] = Query(None, max_length=80),
+    shape: Optional[str] = Query(None, max_length=80),
+    frame_type: Optional[str] = Query(None, max_length=80),
+    frame_material: Optional[str] = Query(None, max_length=80),
+    updated_by: Optional[str] = Query(
+        None, max_length=80, description="Last edited by this user_id; 'none' = never edited."
+    ),
+    date_on: Optional[str] = Query(None, pattern="^(added|edited)$"),
+    date_from: Optional[str] = Query(
+        None, pattern=_catalog_list.DATE_PATTERN, description="India day, included."
+    ),
+    date_to: Optional[str] = Query(
+        None, pattern=_catalog_list.DATE_PATTERN, description="India day, included."
+    ),
+    flag: Optional[str] = Query(None, pattern=_FLAG_FILTER_PATTERN),
     current_user: dict = Depends(get_current_user),
 ):
     """List active catalog products with optional search / brand / category
@@ -896,6 +925,47 @@ async def list_products(
     if not isinstance(photo, str):
         photo = None
     anywhere = match == "anywhere"
+
+    # The Catalog page's sort + filters (same direct-call safety: a Query
+    # default object or a blank string is "absent").
+    def _opt(v):
+        return v.strip() if isinstance(v, str) and v.strip() else None
+
+    new = {
+        "sort": _opt(sort),
+        "updated_by": _opt(updated_by),
+        "date_on": _opt(date_on),
+        "date_from": _opt(date_from),
+        "date_to": _opt(date_to),
+        "flag": _opt(flag),
+        "attributes": {
+            k: _opt(v)
+            for k, v in (
+                ("frame_color", frame_color),
+                ("lens_colour", lens_colour),
+                ("gender", gender),
+                ("shape", shape),
+                ("frame_type", frame_type),
+                ("frame_material", frame_material),
+            )
+            if _opt(v)
+        },
+    }
+    use_catalog_list = any(new.values())
+    if new["flag"] == "archived" and not (
+        set(current_user.get("roles") or []) & _ARCHIVE_VIEW_ROLES
+    ):
+        raise HTTPException(
+            status_code=403, detail="Only an admin can see archived products"
+        )
+    if new["flag"] == "mine":
+        # "Flagged on my entries" depends on who asks: part of the cache key.
+        new["me"] = current_user.get("user_id")
+    if use_catalog_list:
+        try:
+            _catalog_list.ist_day_bounds(new["date_from"], new["date_to"])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
 
     def _stamped(result: Dict[str, Any]) -> Dict[str, Any]:
         # Photo / online truth is stamped on EVERY response, cache hit or
@@ -921,7 +991,7 @@ async def list_products(
         set(current_user.get("roles") or [])
         & ({"SUPERADMIN"} | set(_CATALOGUER_VIEW_ROLES))
     )
-    if created_by and not can_see_attribution:
+    if (created_by or new["updated_by"]) and not can_see_attribution:
         raise HTTPException(
             status_code=403,
             detail="Your role does not have access to the cataloguer filter",
@@ -950,6 +1020,13 @@ async def list_products(
         f"products:{active_store}:{category}:{brand}:{search}:{tag}:{skip}:{limit}"
         f":{is_active}:{created_by}:{_tier}:{photo}:{anywhere}:{_cost_tier}"
     )
+    if use_catalog_list:
+        # EVERY catalog-list parameter is in the key (lesson of #1161 / #1170:
+        # two different filters or sorts must never share a cached page) --
+        # the whole dict, so a parameter added later cannot be forgotten.
+        import json as _json
+
+        cache_key += ":cl:" + _json.dumps(new, sort_keys=True)
     cached = cache.get(cache_key)
     if cached is not None:
         return _stamped(cached)
@@ -982,7 +1059,38 @@ async def list_products(
             filtered_active = is_active == "true"
             default_active = filtered_active
 
-        if search:
+        if use_catalog_list:
+            # ONE query for the page and its count. The search box keeps the
+            # till's own word rule (or the wide one with match=anywhere) --
+            # reused, never changed.
+            query = _catalog_list.list_query(
+                category=category,
+                brand=brand,
+                is_active=filtered_active,
+                created_by=created_by,
+                updated_by=new["updated_by"],
+                attributes=new["attributes"],
+                date_on=new["date_on"],
+                date_from=new["date_from"],
+                date_to=new["date_to"],
+                flag=new["flag"],
+                me=current_user.get("user_id"),
+            )
+            if search:
+                query = (
+                    repo._product_search_query(search, query)
+                    if anywhere
+                    else repo._search_query(search, list(repo.SEARCH_FIELDS), query)
+                )
+            products = _catalog_list.page(
+                repo.collection, query, new["sort"] or "edited", _skip, _limit
+            )
+            total_count = repo.count(query)
+            if can_see_attribution:
+                from ..dependencies import get_db as _people_db
+
+                _catalog_list.stamp_people(_people_db(), products)
+        elif search:
             products = repo.search_products(
                 search,
                 category,
@@ -1071,7 +1179,9 @@ async def list_products(
 
         # Attribution stripping for non-manager callers (panel finding 4):
         # covers the newly stamped names AND the pre-existing raw created_by
-        # user_id, so the roster stays non-derivable from this endpoint.
+        # user_id, so the roster stays non-derivable from this endpoint. The
+        # catalogue flags (notes for the cataloguers) go with them: the till
+        # and the other counter screens get the rows exactly as before.
         if not can_see_attribution:
             for p in products:
                 for _f in (
@@ -1079,6 +1189,7 @@ async def list_products(
                     "created_by_name",
                     "updated_by",
                     "updated_by_name",
+                    "flags",
                 ):
                     p.pop(_f, None)
         products = mask_cost_list(products, current_user, "product")
@@ -2317,6 +2428,32 @@ _CATALOGUER_VIEW_ROLES = (
     "STORE_MANAGER",
     "CATALOG_MANAGER",
 )
+
+
+@router.get("/facets")
+async def catalog_facets(
+    is_active: Optional[str] = Query(None, pattern="^(true|all)$"),
+    current_user: dict = Depends(require_roles(*_CATALOGUER_VIEW_ROLES)),
+):
+    """The Catalog page's filter options: each filter's distinct values with
+    counts ('Black (179)'), the people who added / last edited products (full
+    names from users) and the open-flag counts for the red banner, counted
+    over the rows the list shows with no other filter (services/catalog_list).
+    `is_active=all` = Include inactive. The archived count is admins only.
+    Manager ladder, like /products/cataloguers (the roster is a manager
+    surface)."""
+    repo = get_product_repository()
+    if repo is None:
+        return {"total": 0}
+    from ..dependencies import get_db as _facets_db
+
+    return _catalog_list.facets(
+        _facets_db(),
+        repo.collection,
+        include_inactive=is_active == "all",
+        me=current_user.get("user_id") or "",
+        is_admin=bool(set(current_user.get("roles") or []) & _ARCHIVE_VIEW_ROLES),
+    )
 
 
 @router.get("/cataloguers")

@@ -266,6 +266,32 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/catalog/products/{product_id}",
         "allowed": ["ADMIN", "SUPERADMIN"],
     },
+    # The Catalog page's bulk Delete (archive) and Restore (owner 2026-10-12):
+    # the same soft delete as the DELETE door above, admins only.
+    {
+        "method": "POST",
+        "path": "/api/v1/catalog/products/bulk-archive",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/catalog/products/bulk-restore",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
+    # Catalogue flags ("needs work"). Raising one is its OWN capability
+    # (catalog:flag, see capabilities.capability_for): STORE_MANAGER may flag
+    # but must never gain the catalog write grant. Marking fixed is the
+    # cataloguers' (the product edit page's roles).
+    {
+        "method": "POST",
+        "path": "/api/v1/catalog/flags",
+        "allowed": ["ADMIN", "STORE_MANAGER", "SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/catalog/flags/fix",
+        "allowed": ["ADMIN", "CATALOG_MANAGER", "SUPERADMIN"],
+    },
     {
         "method": "GET",
         "path": "/api/v1/catalog/products/{product_id}",

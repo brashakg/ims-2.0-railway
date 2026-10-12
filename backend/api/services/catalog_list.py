@@ -1,0 +1,286 @@
+"""The Catalog page's list rules: sort, filters, filter options, and who added
+or edited each product (owner 2026-10-12, mockup artboard Main).
+
+ONE place for each rule, read by the list (GET /products) AND its filter
+options (GET /products/facets), so a count beside an option is the number of
+rows that option shows:
+
+  * SORTS            -- the server sorts the WHOLE filtered result, then pages
+                        it, with product_id as the tiebreak: page 2 never
+                        repeats or skips a row of page 1.
+  * same_value       -- an option matches its rows trimmed and
+                        case-insensitive (' Black ' == 'black'); the user's
+                        text is regex-escaped.
+  * ist_day_bounds   -- From / To are INDIA days, both included: a product
+                        added at 00:10 IST belongs to that IST day.
+  * list_query       -- every filter, AND-ed; archived (deleted) products only
+                        under the admins' Flags: Archived option.
+  * stamp_people     -- the full name of who added / last edited a product,
+                        from users, falling back to the name stored on it.
+
+Every parameter is OPTIONAL; a caller that sends none of them gets the list
+exactly as before (the legacy paths in products.list_products).
+"""
+
+from __future__ import annotations
+
+import re
+from collections import Counter, defaultdict
+from datetime import date, timedelta
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+from ..utils.ist import ist_day_start_utc
+from .name_resolver import user_name_map
+
+# key -> (sort expression, direction). "edited": a product never edited counts
+# by its created_at (owner ruling 2026-10-12: Recently edited is the default).
+_NAME = {
+    "$toLower": {
+        "$ifNull": ["$name", {"$ifNull": ["$title", {"$ifNull": ["$model", ""]}]}]
+    }
+}
+SORTS: Dict[str, Tuple[Any, int]] = {
+    "edited": ({"$ifNull": ["$updated_at", "$created_at"]}, -1),
+    "newest": ("$created_at", -1),
+    "oldest": ("$created_at", 1),
+    "name_asc": (_NAME, 1),
+    "name_desc": (_NAME, -1),
+    "brand_asc": ({"$toLower": {"$ifNull": ["$brand", ""]}}, 1),
+    "mrp_desc": ("$mrp", -1),
+    "mrp_asc": ("$mrp", 1),
+}
+SORT_PATTERN = "^(" + "|".join(SORTS) + ")$"
+
+# Filter parameter -> the snake_case attribute it reads. 125 rows also carry
+# camelCase copies, but no row is camelCase-only (prod census 2026-10-12).
+ATTRIBUTE_FILTERS: Dict[str, str] = {
+    "frame_color": "attributes.frame_color",
+    "lens_colour": "attributes.lens_colour",
+    "gender": "attributes.gender",
+    "shape": "attributes.shape",
+    "frame_type": "attributes.frame_type",
+    "frame_material": "attributes.frame_material",
+}
+
+DATE_PATTERN = r"^\d{4}-\d{2}-\d{2}$"
+NEVER_EDITED = "none"
+ARCHIVED = {"deleted_at": {"$nin": [None, ""]}}
+NOT_ARCHIVED = {"deleted_at": None}
+
+
+def open_flag(type_: Optional[str] = None) -> Dict[str, Any]:
+    """Products with an OPEN flag (of `type_` when given)."""
+    cond: Dict[str, Any] = {"status": "open"}
+    if type_:
+        cond["type"] = type_
+    return {"flags": {"$elemMatch": cond}}
+
+
+def same_value(text: str) -> Dict[str, Any]:
+    """The stored value equals `text`, trimmed and case-insensitive."""
+    return {"$regex": r"^\s*" + re.escape(text.strip()) + r"\s*$", "$options": "i"}
+
+
+def ist_day_bounds(
+    date_from: Optional[str], date_to: Optional[str]
+) -> Tuple[Optional[Any], Optional[Any]]:
+    """(>= bound, < bound) in the stored UTC frame for India days From..To,
+    both days included. Raises ValueError for a bad date or From after To."""
+    d_from = date.fromisoformat(date_from) if date_from else None
+    d_to = date.fromisoformat(date_to) if date_to else None
+    if d_from and d_to and d_from > d_to:
+        raise ValueError("The From date is after the To date.")
+    return (
+        ist_day_start_utc(d_from) if d_from else None,
+        ist_day_start_utc(d_to + timedelta(days=1)) if d_to else None,
+    )
+
+
+def _range(gte, lt) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    if gte is not None:
+        out["$gte"] = gte
+    if lt is not None:
+        out["$lt"] = lt
+    return out
+
+
+def list_query(
+    *,
+    category: Optional[str] = None,
+    brand: Optional[str] = None,
+    is_active: Optional[bool] = True,
+    created_by: Optional[str] = None,
+    updated_by: Optional[str] = None,
+    attributes: Optional[Dict[str, str]] = None,
+    date_on: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    flag: Optional[str] = None,
+    me: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Every chosen filter, AND-ed. `flag`: 'any' (an open flag), 'mine' (an
+    open flag on a product `me` added), a flag type, or 'archived' (the
+    deleted products -- the only place they show; the caller checks the
+    role). Raises ValueError for a bad date range."""
+    clauses: List[Dict[str, Any]] = []
+    if flag == "archived":
+        clauses.append(ARCHIVED)
+    else:
+        clauses.append(NOT_ARCHIVED)
+        if is_active is not None:
+            clauses.append({"is_active": is_active})
+    if category:
+        clauses.append({"category": category})
+    if brand:
+        clauses.append({"brand": same_value(brand)})
+    if created_by:
+        clauses.append({"created_by": created_by})
+    if updated_by == NEVER_EDITED:
+        clauses.append({"updated_by": {"$in": [None, ""]}})
+    elif updated_by:
+        clauses.append({"updated_by": updated_by})
+    for param, value in (attributes or {}).items():
+        if value and param in ATTRIBUTE_FILTERS:
+            clauses.append({ATTRIBUTE_FILTERS[param]: same_value(value)})
+    if date_from or date_to:
+        rng = _range(*ist_day_bounds(date_from, date_to))
+        if date_on == "edited":
+            # Same instant as the Recently edited sort: never edited -> added.
+            clauses.append(
+                {"$or": [{"updated_at": rng}, {"updated_at": None, "created_at": rng}]}
+            )
+        else:
+            clauses.append({"created_at": rng})
+    if flag == "any":
+        clauses.append(open_flag())
+    elif flag == "mine":
+        clauses += [open_flag(), {"created_by": me or "-"}]
+    elif flag and flag != "archived":
+        clauses.append(open_flag(flag))
+    return {"$and": clauses}
+
+
+def page(collection, query: Dict[str, Any], sort: str, skip: int, limit: int) -> List[Dict]:
+    """One page of `query` in `sort` order, sorted on the server across the
+    whole result; product_id breaks ties so pages never overlap or skip."""
+    expr, direction = SORTS[sort]
+    pipeline: List[Dict[str, Any]] = [
+        {"$match": query},
+        {"$addFields": {"_sort_key": expr}},
+        {"$sort": {"_sort_key": direction, "product_id": 1}},
+    ]
+    if skip:
+        pipeline.append({"$skip": int(skip)})
+    if limit:
+        pipeline.append({"$limit": int(limit)})
+    pipeline.append({"$project": {"_sort_key": 0}})
+    out = []
+    for doc in collection.aggregate(pipeline):
+        if "_id" in doc and not isinstance(doc["_id"], str):
+            doc["_id"] = str(doc["_id"])
+        out.append(doc)
+    return out
+
+
+def stamp_people(db, docs: Iterable[Dict[str, Any]]) -> None:
+    """THE name of who added (created_by) and who last edited (updated_by)
+    each product, in place on created_by_name / updated_by_name: the live
+    users name first, the name stored on the product second. One users read
+    for the whole batch."""
+    rows = [d for d in docs if isinstance(d, dict)]
+    names = user_name_map(
+        db, [d.get(f) for d in rows for f in ("created_by", "updated_by")]
+    )
+    for d in rows:
+        for f in ("created_by", "updated_by"):
+            uid = d.get(f)
+            if uid:
+                d[f + "_name"] = names.get(str(uid)) or d.get(f + "_name") or None
+
+
+def _value_options(values: Iterable[Any]) -> List[Dict[str, Any]]:
+    """Distinct values with counts, grouped the way same_value matches them;
+    each option shows its most common spelling."""
+    counts: Counter = Counter()
+    spellings: Dict[str, Counter] = defaultdict(Counter)
+    for v in values:
+        if not isinstance(v, str) or not v.strip():
+            continue
+        key = v.strip().lower()
+        counts[key] += 1
+        spellings[key][v.strip()] += 1
+    opts = [
+        {"value": spellings[k].most_common(1)[0][0], "count": n} for k, n in counts.items()
+    ]
+    return sorted(opts, key=lambda o: (-o["count"], o["value"].lower()))
+
+
+def facets(db, collection, *, include_inactive: bool, me: str, is_admin: bool) -> Dict:
+    """The filter options for the current catalogue: distinct values with
+    counts. Counted over exactly the rows the list shows with no other filter
+    (not archived; active only unless Include inactive), so picking 'Black
+    (179)' alone lists 179 products.
+
+    ponytail: one projected read counted in Python -- fine to tens of
+    thousands of rows; a $facet pipeline if the catalogue ever outgrows it."""
+    scope: Dict[str, Any] = dict(NOT_ARCHIVED)
+    if not include_inactive:
+        scope["is_active"] = True
+    proj = {
+        "_id": 0,
+        "brand": 1,
+        "attributes": 1,
+        "created_by": 1,
+        "created_by_name": 1,
+        "updated_by": 1,
+        "updated_by_name": 1,
+        "flags": 1,
+    }
+    rows = list(collection.find(scope, proj))
+    stamp_people(db, rows)
+
+    out: Dict[str, Any] = {"total": len(rows), "brand": _value_options(r.get("brand") for r in rows)}
+    for param, path in ATTRIBUTE_FILTERS.items():
+        key = path.split(".", 1)[1]
+        out[param] = _value_options((r.get("attributes") or {}).get(key) for r in rows)
+
+    def _people(field: str) -> List[Dict[str, Any]]:
+        counts: Counter = Counter()
+        label: Dict[str, str] = {}
+        for r in rows:
+            uid = r.get(field)
+            if uid:
+                counts[uid] += 1
+                label[uid] = r.get(field + "_name") or str(uid)
+        return sorted(
+            ({"value": u, "label": label[u], "count": n} for u, n in counts.items()),
+            key=lambda o: (-o["count"], o["label"].lower()),
+        )
+
+    out["created_by"] = _people("created_by")
+    edited = _people("updated_by")
+    never = sum(1 for r in rows if not r.get("updated_by"))
+    out["updated_by"] = edited + (
+        [{"value": NEVER_EDITED, "label": "Never edited", "count": never}] if never else []
+    )
+
+    open_any = 0
+    mine = 0
+    by_type: Counter = Counter()
+    for r in rows:
+        open_types = {
+            f.get("type")
+            for f in (r.get("flags") or [])
+            if isinstance(f, dict) and f.get("status") == "open"
+        }
+        if open_types:
+            open_any += 1
+            if me and r.get("created_by") == me:
+                mine += 1
+            for t in open_types:
+                by_type[t] += 1
+    out["flags"] = {"open": open_any, "mine": mine, "by_type": dict(by_type)}
+    if is_admin:
+        out["flags"]["archived"] = collection.count_documents(ARCHIVED)
+    return out
