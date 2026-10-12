@@ -2406,6 +2406,7 @@ async def update_catalog_product(
     # the write matched no spine. A category change is the one case where the
     # PUT moves hsn / gst without naming them (re-derived above): it travels.
     # Fail-soft: a spine-sync error never breaks the catalog save.
+    _pr = _spine_id = None
     try:
         from ..dependencies import get_product_repository
 
@@ -2429,19 +2430,20 @@ async def update_catalog_product(
             _patch = {k: v for k, v in _patch.items() if v is not None}
             if _patch:
                 _pr.update(_spine_id, _patch)
-            if gtin_written:
-                # Spine and twin hold ONE GTIN (Manage Barcode and the stock
-                # page read the spine's). Its own write, so a legacy spine
-                # whose attributes are not a dict cannot sink the price sync.
-                _pr.update(
-                    _spine_id,
-                    {"attributes.gtin": (existing.get("attributes") or {}).get("gtin") or ""},
-                )
-                _pm.drop_legacy_spine_barcode(_pr, _spine_id)
     except Exception:  # noqa: BLE001
         logger.warning(
             "[CATALOG] spine sync on update skipped for %s", product_id, exc_info=True
         )
+    if gtin_written and _pr is not None and _spine_id:
+        # Spine and twin hold ONE GTIN (Manage Barcode and the stock page read
+        # the spine's). NOT fail-soft: a spine that silently kept its old code
+        # -- or lost both -- is worse than a save that says so.
+        try:
+            _pm.write_spine_gtin(
+                _pr, _spine_id, (existing.get("attributes") or {}).get("gtin") or ""
+            )
+        except _pm.ProductMasterError as err:
+            raise HTTPException(status_code=err.status, detail=err.message) from err
 
     # Sync audit gap #2 (owner, 2026-09-06): is_active off -> take it OFF
     # Shopify; back on -> queue it for the next press / live sync. The ONE

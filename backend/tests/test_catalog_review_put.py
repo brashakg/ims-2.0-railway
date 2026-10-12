@@ -797,6 +797,46 @@ def test_review_editor_remove_drops_the_spines_legacy_barcode(gtin_env):
     assert gtin_env.find_by_barcode(_UPC) is None
 
 
+@pytest.mark.parametrize("attrs", [None, ["x"]])
+def test_review_editor_gives_a_spine_with_no_attributes_dict_its_gtin(gtin_env, attrs):
+    """Round 9 item 1. A legacy spine whose attributes is null or a list cannot
+    take a $set on attributes.gtin (Mongo refuses it, BaseRepository.update
+    answers False), and the legacy barcode was dropped anyway: the spine lost
+    BOTH codes. It gets the dict in the same write; the barcode goes after."""
+    gtin_env.collection.update_one(
+        {"product_id": "spine-g1"}, {"$set": {"attributes": attrs, "barcode": _UPC}}
+    )
+    _put("twin-g1", {"attributes": {"gtin": _GTIN}})
+    spine = gtin_env.find_by_id("spine-g1")
+    assert spine["attributes"] == {"gtin": _GTIN}
+    assert "barcode" not in spine
+
+
+def test_review_editor_keeps_the_legacy_barcode_when_the_spine_write_fails(
+    gtin_env, monkeypatch
+):
+    """An unconfirmed spine gtin write never drops the legacy barcode, and the
+    save says so (503, plain words) instead of passing as done."""
+    gtin_env.collection.update_one(
+        {"product_id": "spine-g1"}, {"$set": {"barcode": _UPC}}
+    )
+    real_update = gtin_env.update
+
+    def _refuse_gtin(pid, data):
+        if any(k.startswith("attributes") for k in data):
+            return False
+        return real_update(pid, data)
+
+    monkeypatch.setattr(gtin_env, "update", _refuse_gtin)
+    with pytest.raises(HTTPException) as exc:
+        _put("twin-g1", {"attributes": {"gtin": _GTIN}})
+    assert exc.value.status_code == 503
+    assert "save again" in exc.value.detail
+    spine = gtin_env.find_by_id("spine-g1")
+    assert spine["barcode"] == _UPC
+    assert "gtin" not in spine["attributes"]
+
+
 @pytest.mark.parametrize("typed", ["", None])
 def test_review_editor_takes_an_old_spelling_out_of_twin_and_spine(gtin_env, typed):
     """Twin and spine hold the code under the old spelling 'GTIN'. A Remove

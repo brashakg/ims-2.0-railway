@@ -1419,6 +1419,29 @@ def drop_legacy_spine_barcode(product_repo, product_id: Any) -> None:
     coll.update_one({"product_id": product_id}, {"$unset": unset})
 
 
+def write_spine_gtin(product_repo, product_id: Any, gtin: str) -> None:
+    """Write the spine's ONE manufacturer barcode (attributes.gtin), then drop
+    its legacy products.barcode -- ONLY once the gtin write is confirmed, or
+    the spine would lose both codes. A spine whose attributes is not a dict
+    (null, a list) cannot take a $set on attributes.gtin -- Mongo refuses it
+    and BaseRepository.update answers False -- so it gets the dict {gtin} in
+    the same write. ProductMasterError 503 when the write is not confirmed:
+    the legacy barcode then stays where it was."""
+    current = product_repo.find_by_id(product_id) or {}
+    if isinstance(current.get("attributes"), dict):
+        patch: Dict[str, Any] = {"attributes.gtin": gtin}
+    else:
+        patch = {"attributes": {"gtin": gtin}}
+    if not product_repo.update(product_id, patch):
+        raise ProductMasterError(
+            "The catalogue copy was saved, but the billing product's barcode "
+            "could not be updated. Please save again.",
+            status=503,
+            field="gtin",
+        )
+    drop_legacy_spine_barcode(product_repo, product_id)
+
+
 def assert_gtin_free(code: Any, product_repo, this_product_id: Optional[str]) -> None:
     """409 when ANOTHER product already holds this manufacturer barcode.
 
