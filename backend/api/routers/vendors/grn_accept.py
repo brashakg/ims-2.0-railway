@@ -291,7 +291,7 @@ def _way_out_of(grn) -> str:
     )
 
 
-def _flag_over_delivery(po, grn, received_by_product) -> None:
+def _flag_over_delivery(po_repo, po_id, grn, counted) -> None:
     """Owner ruling 2026-10-08: a delivery that runs over what the order asks
     for is ACCEPTED into stock and FLAGGED, never refused. Each product on
     this receipt now received beyond its ordered quantity raises one task --
@@ -300,7 +300,38 @@ def _flag_over_delivery(po, grn, received_by_product) -> None:
     purchase role; owner ruling D17 sends a receipt problem to the shop's
     store manager by name). The receipt's own discrepancy task at logging
     compares only that receipt with the order, so a second delivery of a
-    fully received line went unflagged. Fail-soft: never undoes the receipt."""
+    fully received line went unflagged.
+
+    `counted` is the (order, count) the write-back read, whether or not its
+    write landed -- the flag needs the count, never the write. When the count
+    could not be read there, it is read again here; when it still cannot be,
+    a task says the check did not run, so the flag is never lost silently.
+    Fail-soft: never undoes the receipt."""
+    mine = {
+        line.get("product_id")
+        for line in grn.get("items") or []
+        if _qty(line.get("accepted_qty"))
+    }
+    if not mine:
+        return
+    try:
+        if counted is None:
+            po = _order_or_503(po_repo, po_id)
+            if not po or po.get("status") == "CANCELLED":
+                return
+            counted = (po, _received_by_product(po))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[VENDOR] over-delivery count unreadable: %s", exc)
+        po_ref = _po_ref(grn.get("po_number"), po_id)
+        _raise_over_delivery_task(
+            grn,
+            f"Over-delivery check needed on {po_ref}",
+            f"Goods receipt {grn.get('grn_number')} put units into stock, but "
+            f"what {po_ref} has received could not be read to compare it with "
+            "the order. Check whether this delivery ran over what was ordered.",
+        )
+        return
+    po, received_by_product = counted
     try:
         ordered: dict = {}
         names: dict = {}
@@ -308,11 +339,6 @@ def _flag_over_delivery(po, grn, received_by_product) -> None:
             pid = it.get("product_id")
             ordered[pid] = ordered.get(pid, 0) + _qty(it.get("quantity"))
             names.setdefault(pid, it.get("product_name") or it.get("sku") or pid)
-        mine = {
-            line.get("product_id")
-            for line in grn.get("items") or []
-            if _qty(line.get("accepted_qty"))
-        }
         extra = []
         for pid in sorted(mine, key=str):
             got, want = _qty(received_by_product.get(pid)), ordered.get(pid, 0)
@@ -323,19 +349,35 @@ def _flag_over_delivery(po, grn, received_by_product) -> None:
                 )
         if not extra:
             return
+        po_ref = _po_ref(po.get("po_number"), po.get("po_id"))
+        _raise_over_delivery_task(
+            grn,
+            f"Over-delivery on {po_ref}",
+            f"Goods receipt {grn.get('grn_number')} put more into stock than "
+            f"{po_ref} ordered - " + "; ".join(extra) + ". The extra units are "
+            "in stock. Agree them with the vendor (keep and bill, or return).",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[VENDOR] over-delivery flag skipped: %s", exc)
+
+
+def _po_ref(po_number, po_id) -> str:
+    from ...services.purchase_numbering import po_label
+
+    return po_label(po_number, po_id)
+
+
+def _raise_over_delivery_task(grn, title: str, description: str) -> None:
+    """The one task an over-delivery (or a check that could not run) raises,
+    for the shop's store manager; deduped per receipt. Fail-soft."""
+    try:
         from ...dependencies import get_task_repository
-        from ...services.purchase_numbering import po_label
         from ...services.task_triggers import create_system_task
 
-        po_ref = po_label(po.get("po_number"), po.get("po_id"))
         create_system_task(
             get_task_repository(),
-            title=f"Over-delivery on {po_ref}",
-            description=(
-                f"Goods receipt {grn.get('grn_number')} put more into stock than "
-                f"{po_ref} ordered - " + "; ".join(extra) + ". The extra units are "
-                "in stock. Agree them with the vendor (keep and bill, or return)."
-            ),
+            title=title,
+            description=description,
             priority="P2",
             category="Purchase",
             store_id=grn.get("store_id"),
@@ -748,12 +790,14 @@ def _accept_grn_claimed(
     # only depends on the order as it now stands.
     po_status = None
     if po_repo is not None and po_id:
+        counted = None  # (order, count) last read: all the over-delivery flag needs
         try:
             for _attempt in range(3):
                 po = po_repo.find_by_id(po_id)
                 if not po or po.get("status") == "CANCELLED":
                     break  # a withdrawn order stays withdrawn
                 received_by_product = _received_by_product(po)
+                counted = (po, received_by_product)
                 # Each line's received qty + residual status (drives the
                 # receiving cockpit's "open POs" / "pending not-received" panels).
                 updated_items = [dict(it) for it in po.get("items") or []]
@@ -773,7 +817,6 @@ def _accept_grn_claimed(
                     },
                 ):
                     po_status = state
-                    _flag_over_delivery(po, grn, received_by_product)
                     break
             else:
                 logger.warning(
@@ -795,6 +838,8 @@ def _accept_grn_claimed(
                     po_status = "PARTIALLY_RECEIVED"
             except Exception:  # noqa: BLE001
                 pass
+        # A lost compare-and-set or a failed count must not drop the flag.
+        _flag_over_delivery(po_repo, po_id, grn, counted)
 
     return {
         "message": (

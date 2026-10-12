@@ -787,6 +787,45 @@ def test_two_accepts_in_flight_on_an_untouched_line_both_mint(monkeypatch):
     assert len(_over_tasks(tasks)) == 1
 
 
+@pytest.mark.parametrize("fault", ["count_once", "count_always", "write_lost"])
+def test_an_over_delivery_is_flagged_when_the_order_write_back_fails(monkeypatch, fault):
+    """R1: the flag needs the count, never the write-back. P1 ordered 2,
+    untouched; A (2) is accepted, then B (2) while the write-back fails:
+    its count read raises once (the flag reads it again), raises every time
+    (a task says the check did not run), or its compare-and-set loses all
+    three tries. B is accepted, 4 P1 are in stock, and one task is raised."""
+    from api.routers.vendors import grn_accept
+
+    po = _po(_line("P1", "Frame X", 2), _line("P3", "Vogue", 1))
+    grn_repo, po_repo, stock, tasks = _wire(monkeypatch, po=po)
+    a = _create("normal", _items("P1", 2), _user(), inv="INV-A")["grn_id"]
+    b = _create("normal", _items("P1", 2), _user(), inv="INV-B")["grn_id"]
+    assert _accept(a)["grn_status"] == "ACCEPTED"
+
+    real_count, real_cas = grn_accept._received_by_product, po_repo.update_if
+    fails = {"left": 1 if fault == "count_once" else 99}
+
+    def count(po, **kw):
+        if not kw and fault != "write_lost" and fails["left"]:
+            fails["left"] -= 1
+            raise HTTPException(status_code=503, detail="receipts unreadable")
+        return real_count(po, **kw)
+
+    monkeypatch.setattr(grn_accept, "_received_by_product", count)
+    if fault == "write_lost":
+        po_repo.update_if = lambda pid, exp, patch: (
+            False if "items" in patch else real_cas(pid, exp, patch))
+    assert _accept(b)["grn_status"] == "ACCEPTED"
+    assert len([u for u in stock.units if u["product_id"] == "P1"]) == 4
+    [task] = _over_tasks(tasks)
+    assert task["source_ref"] == f"grn_over:{b}"
+    assert task["assigned_to"] == "store_manager@STORE-A"
+    if fault == "count_always":
+        assert task["title"] == "Over-delivery check needed on PO-2601-1"
+    else:
+        assert "Frame X: 2 more than ordered (4 received, 2 ordered)" in task["description"]
+
+
 def _p2_live_four(monkeypatch, qa, qb):
     """P2 ordered 5, 1 cancelled: 4 live. Receipts A and B logged."""
     po = _po(_line("P1", "Frame X", 5), _line("P2", "Ray-Ban", 4, ordered_qty=4, cancelled_qty=1))
