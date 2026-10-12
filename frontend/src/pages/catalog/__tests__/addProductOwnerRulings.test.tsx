@@ -371,6 +371,36 @@ describe('F69 - the same-model chip', () => {
     });
   });
 
+  it("a sibling's level 0 is a real level: copied as 0 and saved as 0", async () => {
+    // Settled (main #1179): 0 alerts when the shop sells out; only -1 or no
+    // level is 'not set'.
+    getProduct.mockResolvedValueOnce({ ...SOURCE_PRODUCT, reorder_levels: { S1: 0 } });
+    const user = userEvent.setup();
+    renderPage();
+    await sunglass(user);
+    await user.click(screen.getByRole('button', { name: 'same model chip' }));
+    await screen.findByRole('button', { name: /Save variant/ });
+    expect(reorderInput().value).toBe('0');
+    expect(reviewRow('Reorder level')).toHaveTextContent('0');
+    expect(reviewRow('Reorder level')).not.toHaveTextContent('not set');
+    await user.click(screen.getByRole('button', { name: /Save variant/ }));
+    await waitFor(() => expect(setShopLevel).toHaveBeenCalledWith('P-NEW', 'S1', 0));
+  });
+
+  it.each([[{}], [{ S2: 4 }], [undefined]])(
+    "a sibling with no level at this shop (%o) copies as not set",
+    async (levels) => {
+      getProduct.mockResolvedValueOnce({ ...SOURCE_PRODUCT, reorder_levels: levels });
+      const user = userEvent.setup();
+      renderPage();
+      await sunglass(user);
+      await user.click(screen.getByRole('button', { name: 'same model chip' }));
+      await screen.findByRole('button', { name: /Save variant/ });
+      expect(reorderInput().value).toBe('');
+      expect(reviewRow('Reorder level')).toHaveTextContent('not set');
+    },
+  );
+
   it.each([[-1], ['-1'], ['abc'], [2.5]])(
     "a sibling's level %s is not a level: shown as not set, never as a number",
     async (level) => {
