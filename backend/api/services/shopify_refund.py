@@ -1442,6 +1442,8 @@ _FULFILMENT_CONTEXT_KEYS = (
     "items",
     # The SOLD-unit cap's exemption (_cap_restock_to_sold_units).
     "historical",
+    # The order staff can look up: _stock_in_task names it on every door.
+    "order_number",
 )
 
 

@@ -2957,3 +2957,17 @@ def test_the_sweep_never_rebooks_a_refund_the_history_import_booked(swept):
     swept["run"]()
     assert swept["review"].find_one({"shopify_refund_id": rid}) is None
     assert swept["ledger"].count_documents({}) == 1 and swept["returns"].count_documents({}) == 0
+
+
+@pytest.mark.parametrize("door", ["goods_back", "confirm"])
+def test_the_stock_in_task_names_the_order_staff_can_look_up(swept, monkeypatch, door):
+    """Goods back rebuilt the order with no order_number, so its stock-in task
+    -- the only stock path for a historical frame -- was titled with the
+    internal UUID while the confirm's read 'Order ONL-...'. One title rule."""
+    oid, rid = 60231 + (door == "confirm"), 700431 + (door == "confirm")
+    row = _historical_refund(swept, monkeypatch, oid, rid, status="DELIVERED")
+    (_goods_back if door == "goods_back" else _confirm)(row)
+    doc = _doc(swept, oid)
+    [task] = _stock_in(swept, oid)
+    assert task["title"].startswith(f"Order {doc['order_number']}:") and doc["order_number"]
+    assert doc["order_id"] not in task["title"] + task["description"]
