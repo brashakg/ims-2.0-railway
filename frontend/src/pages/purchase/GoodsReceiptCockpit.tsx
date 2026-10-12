@@ -1408,15 +1408,20 @@ export function GoodsReceiptCockpit() {
                                 Not received
                               </button>
                             ) : null}
-                            <button
-                              type="button"
-                              onClick={() => voidPendingGrn(g.grn_id, g.grn_number)}
-                              disabled={grnActionBusy === g.grn_id}
-                              className="btn-secondary !py-1 !px-3 text-xs flex items-center gap-1.5 disabled:opacity-50"
-                            >
-                              <X className="w-3.5 h-3.5" />
-                              Void (duplicate)
-                            </button>
+                            {/* Voiding a receipt held beyond its order answers the same
+                                question as 'Not received': the server refuses it below
+                                manager (403), so it is not offered. */}
+                            {g.overOrder && !canDropOverOrder ? null : (
+                              <button
+                                type="button"
+                                onClick={() => voidPendingGrn(g.grn_id, g.grn_number)}
+                                disabled={grnActionBusy === g.grn_id}
+                                className="btn-secondary !py-1 !px-3 text-xs flex items-center gap-1.5 disabled:opacity-50"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                                Void (duplicate)
+                              </button>
+                            )}
                           </div>
                         </div>
                       ))}

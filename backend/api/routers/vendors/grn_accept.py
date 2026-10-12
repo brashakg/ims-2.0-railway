@@ -22,7 +22,7 @@ from ._shared import (
     require_roles,
     router,
 )
-from ...services.cost_mask import RECEIVING_MANAGERS
+from ...services.cost_mask import is_receiving_manager
 from .gst import _promote_cost_from_rate
 from .numbering import (
     _cumulative_received_by_product,
@@ -113,9 +113,9 @@ async def _accept_grn_impl(grn_id: str, current_user: dict) -> dict:
     # send them"), the same people as 'Not received' (owner 2026-09-28,
     # receiving is managers only). Anyone else's press shelves the rest of
     # the receipt and leaves those lines held for them -- the release's cap.
-    roles = set(current_user.get("roles") or [])
-    decides = "SUPERADMIN" in roles or bool(roles & set(RECEIVING_MANAGERS))
-    return _put_on_shelf(grn_repo, grn_id, grn, current_user, order_cap=not decides)
+    return _put_on_shelf(
+        grn_repo, grn_id, grn, current_user, order_cap=not is_receiving_manager(current_user)
+    )
 
 
 def held_receipts(product_id: str) -> List[dict]:

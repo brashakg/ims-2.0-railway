@@ -255,6 +255,8 @@ describe('Receive Goods - a receipt held for cataloguing (audit C1)', () => {
     const row = await heldRow();
     expect(within(row).queryByRole('button', { name: /not received/i })).toBeNull();
     expect(within(row).getByText(/the store manager marks the extra units not received/i)).toBeTruthy();
+    // Voiding it is the same answer, refused below manager (403): not offered.
+    expect(within(row).queryByRole('button', { name: /void/i })).toBeNull();
   });
 
   it('a receipt held only for the catalogue offers no "Not received"', async () => {

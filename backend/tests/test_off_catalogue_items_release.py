@@ -4832,3 +4832,32 @@ def test_r8_a_draft_finished_by_a_failed_accept_still_releases_its_sibling(world
         f"A failed accept lost the release: {statuses}, {len(world.units(draft_id))} units, "
         f"{len(catalogue)} catalogue task(s) open",
     )
+
+
+def test_r8_only_a_receiving_manager_voids_a_receipt_held_beyond_its_order(world):
+    # Voiding a receipt that holds units beyond its order is 'Not received'
+    # for all of them: the store manager's answer, not the accountant's.
+    po, grn1, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    grn2, _ = _receive_again(world, po, "JOT/26-27/0841-DUP")
+    world.finish_draft(draft_id, offer=2790)
+    gid = grn2["grn_id"]
+    assert [ln["reason"] for ln in world.grn(gid)["unresolved_lines"]] == ["over_order"]
+    _seed_user(world, ACCOUNTANT)
+    try:
+        _run(vd.void_grn(gid, ACCOUNTANT))
+        refused = None
+    except HTTPException as exc:
+        refused = exc
+    finding(
+        refused is not None
+        and refused.status_code == 403
+        and world.grn(gid)["status"] == "PARTIALLY_ACCEPTED"
+        and len(_mgr_tasks(world, gid)) == 1,
+        f"An accountant voided a receipt held beyond its order ({refused}; now "
+        f"{world.grn(gid)['status']}, {len(_mgr_tasks(world, gid))} store-manager task(s) open)",
+    )
+    assert "Not received" in refused.detail
+    # The claim was handed back: the store manager's void goes through.
+    out = _run(vd.void_grn(gid, MANAGER))
+    assert out["grn_status"] == "VOID" and _mgr_tasks(world, gid) == []
+

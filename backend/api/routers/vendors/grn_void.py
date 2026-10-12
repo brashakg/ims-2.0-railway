@@ -16,7 +16,7 @@ from ._shared import (
     router,
 )
 from .grn import _require_receipt_number
-from ...services.cost_mask import RECEIVING_MANAGERS
+from ...services.cost_mask import RECEIVING_MANAGERS, is_receiving_manager
 from .grn_accept_lock import (
     _GRN_TERMINAL_ACCEPT_STATUSES,
     _GRN_WRITE_ERROR,
@@ -172,6 +172,29 @@ async def void_grn(
         )
 
     try:
+        # A receipt holding units beyond its order waits for the store manager
+        # ('Not received' / 'Add to stock'): voiding it answers that question
+        # too, so it is the receiving managers' as 'Not received' is. Read
+        # under the claim -- the catalogue release can hold a line beyond the
+        # order after the read above.
+        now = grn_repo.find_by_id(grn_id)
+        if not now:
+            raise HTTPException(
+                status_code=503,
+                detail="Could not read this goods receipt again -- try again. Nothing was voided.",
+            )
+        if not is_receiving_manager(current_user) and any(
+            (ln or {}).get("reason") == "over_order" for ln in now.get("unresolved_lines") or []
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "This receipt holds units beyond what its order asked for: "
+                    "the store manager decides them (Receive Goods > 'Not "
+                    "received'). Nothing was voided."
+                ),
+            )
+
         # STOCK GATE. FAILS CLOSED: if we cannot establish that this receipt put
         # nothing on the shelf, we do not void it. Read UNDER the claim, so no
         # accept can be minting while we look.

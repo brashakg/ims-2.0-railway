@@ -62,8 +62,16 @@ RETURN_READERS = (*PURCHASE_ROLES, "WORKSHOP_STAFF")
 # The receiving managers: the purchase roles without the accountant. Receiving
 # decisions that are managers only (owner 2026-09-28) gate on this tuple --
 # today 'Not received' for a held receipt's units beyond its order (the shop's
-# store manager's decision, 2026-09-29). Defined ONCE, here, like the others.
+# store manager's decision, 2026-09-29), and 'Add to stock' or 'Void' on a
+# receipt holding such units (is_receiving_manager). Defined ONCE, here.
 RECEIVING_MANAGERS = tuple(r for r in PURCHASE_ROLES if r != "ACCOUNTANT")
+
+
+def is_receiving_manager(user: dict) -> bool:
+    """The caller holds a RECEIVING_MANAGERS role, read as require_roles reads
+    a gate (any of the user's roles; SUPERADMIN passes)."""
+    roles = set((user or {}).get("roles") or [])
+    return "SUPERADMIN" in roles or bool(roles & set(RECEIVING_MANAGERS))
 # context -> the roles it admits on top of COST_VISIBLE_ROLES.
 _CONTEXT_ROLES = {
     "purchase": set(PURCHASE_ROLES),
