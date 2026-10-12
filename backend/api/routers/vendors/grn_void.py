@@ -516,7 +516,12 @@ async def drop_over_order(
                 to_shelve += take
                 if take:
                     still_over.append(
-                        {"product_id": pid, "accepted_qty": on_line + take, "reason": "over_order"}
+                        {
+                            "product_id": pid,
+                            "accepted_qty": on_line + take,
+                            "held_qty": take,
+                            "reason": "over_order",
+                        }
                     )
                 items.append(
                     {

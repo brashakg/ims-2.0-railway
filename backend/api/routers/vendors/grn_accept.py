@@ -30,6 +30,7 @@ from .numbering import (
     _grn_barcode,
     _grn_stock_audit,
     compute_po_receipt_state,
+    held_units,
 )
 from .grn import _require_receipt_number
 from .grn_accept_lock import (
@@ -363,7 +364,7 @@ def _hand_to_store_manager(db, grn_id: str, grn: dict, over: List[dict], product
     for o in over:
         prod = product_repo.find_by_id(o["product_id"]) if product_repo else None
         item = (
-            f"{_held_item_label(prod, o['product_id'])}: {o['accepted_qty']} held, "
+            f"{_held_item_label(prod, o['product_id'])}: {held_units(o)} held, "
             f"PO ordered {o['ordered']}, {o['on_shelf']} already received on it"
             + (
                 "; another receipt of this order was going into stock at that moment"
@@ -645,21 +646,6 @@ def _accept_grn_claimed(
             if accepted_qty <= 0 or not product_id:
                 continue
 
-            # Hub Phase 2 ghost-stock gate: only mint against a product that
-            # exists on the `products` spine. An uncatalogued line is HELD (no
-            # ghost stock) for "Catalog now". Fail-soft: when no product repo is
-            # available we cannot verify, so we mint exactly as before.
-            prod = product_repo.find_by_id(product_id) if product_repo else None
-            if product_repo is not None and prod is None:
-                unresolved_lines.append(
-                    {
-                        "product_id": product_id,
-                        "accepted_qty": accepted_qty,
-                        "reason": "not_catalogued",
-                    }
-                )
-                continue
-
             # Idempotency guard keyed on the GRN LINE (grn_line_index), not just
             # the product: a GRN may legitimately carry two lines for the SAME
             # product (e.g. different location_code). A product-only key let line
@@ -701,6 +687,20 @@ def _accept_grn_claimed(
             if already >= accepted_qty:
                 continue
             to_mint = accepted_qty - already
+            # Every hold below records what it really holds back -- the line's
+            # units not yet received, by origin (numbering.held_units) -- never
+            # the line's accepted_qty: a release that died part-way through a
+            # line left some of its units on the shelf.
+            held = {"product_id": product_id, "accepted_qty": accepted_qty, "held_qty": to_mint}
+
+            # Hub Phase 2 ghost-stock gate: only mint against a product that
+            # exists on the `products` spine. An uncatalogued line is HELD (no
+            # ghost stock) for "Catalog now". Fail-soft: when no product repo is
+            # available we cannot verify, so we mint exactly as before.
+            prod = product_repo.find_by_id(product_id) if product_repo else None
+            if product_repo is not None and prod is None:
+                unresolved_lines.append({**held, "reason": "not_catalogued"})
+                continue
 
             location_code = item.get("location_code") or "DEFAULT"
             # Provisional receipt cost from the PO line (Phase 2 valuation).
@@ -740,13 +740,7 @@ def _accept_grn_claimed(
                 if cost_fields:
                     merged_for_status["cost_price"] = cost_fields["cost_price"]
                 if _pm.compute_catalog_status(merged_for_status)[1]:
-                    unresolved_lines.append(
-                        {
-                            "product_id": product_id,
-                            "accepted_qty": accepted_qty,
-                            "reason": "incomplete_catalog",
-                        }
-                    )
+                    unresolved_lines.append({**held, "reason": "incomplete_catalog"})
                     continue
 
             if ordered is not None:
@@ -754,14 +748,7 @@ def _accept_grn_claimed(
                     grn_repo, stock_repo, grn_id, po_id, product_id, to_mint, ordered
                 )
                 if over:
-                    unresolved_lines.append(
-                        {
-                            "product_id": product_id,
-                            "accepted_qty": accepted_qty,
-                            "reason": "over_order",
-                            **over,
-                        }
-                    )
+                    unresolved_lines.append({**held, "reason": "over_order", **over})
                     continue
 
             # P2 (optical batch/expiry): stamp the supplier batch + expiry on
@@ -1269,7 +1256,7 @@ def _sync_catalogue_tasks(grn_id, grn, unresolved_lines, grn_status, product_rep
 
         def _line(ln):
             prod = product_repo.find_by_id(ln["product_id"]) if product_repo else None
-            return f"{_held_item_label(prod, ln['product_id'])} x{ln.get('accepted_qty')}"
+            return f"{_held_item_label(prod, ln['product_id'])} x{held_units(ln)}"
 
         items = "; ".join(_line(ln) for ln in unresolved_lines)
         n = len(unresolved_lines)

@@ -5318,3 +5318,81 @@ def test_r9_the_bills_cost_finishes_the_draft_as_the_editor_does(world, monkeypa
         not _open_tasks(world),
         f"Work already done escalated: {[(t.get('assigned_to'), t.get('title')) for t in _open_tasks(world)]}",
     )
+
+
+def test_r9_a_release_that_died_part_way_counts_only_what_is_really_held(world, monkeypatch):
+    # The panel's partial-release probe: an order of Boss x2, receipt 1 holds
+    # 2 for the catalogue, receipt 2 (a second count) holds 1. On the first
+    # catalogue save receipt 1's second unit does not insert, so 1 of its 2
+    # reaches the shelf and receipt 2 shelves 1. On the next save receipt 1's
+    # last unit is beyond the order. Every reader then counts what the
+    # receipt really holds (1), never the line's accepted 2.
+    from api.routers.vendors import grn_accept as _ga
+
+    po = world.raise_po([{"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200}])
+    boss = po["items"][0]["product_id"]
+    grn1, _ = _receive_some(world, po, {boss: 2}, "JOT/26-27/0991")
+    grn2, _ = _receive_some(world, po, {boss: 1}, "JOT/26-27/0991-DUP")
+    real = _ga._grn_mint_unit
+    failed = []
+
+    def _second_unit_lost(stock_repo, doc, raises):
+        if doc.get("grn_id") == grn1["grn_id"] and doc.get("line_unit_seq") == 1 and not failed:
+            failed.append(doc)
+            return None
+        return real(stock_repo, doc, raises)
+
+    monkeypatch.setattr(_ga, "_grn_mint_unit", _second_unit_lost)
+    world.finish_draft(boss, offer=2790)
+    assert failed and len(world.units(boss)) == 2
+    monkeypatch.setattr(_ga, "_grn_mint_unit", real)
+    world.finish_draft(boss, offer=2790)  # the next save retries receipt 1
+
+    (held,) = world.grn(grn1["grn_id"])["unresolved_lines"]
+    status, received = _po_received(world, po)
+    tl = _run(vd.get_po_timeline(po["po_id"], MANAGER))
+    shelf = [e["detail"] for e in tl["events"] if e.get("kind") == "on_shelf" and e.get("ref") == grn1["grn_number"]]
+    (task,) = _mgr_tasks(world, grn1["grn_id"])
+    finding(
+        held["reason"] == "over_order" and held["held_qty"] == 1,
+        f"Receipt 1 records its hold as {held}",
+    )
+    finding(
+        len(world.units(boss)) == 2 and received[boss] == 2 and status == "RECEIVED",
+        f"2 units of the order are on the shelf, yet the PO reads {received[boss]} received ({status})",
+    )
+    finding(shelf == ["1 units accepted into stock; 1 still held"], f"Receipt 1's timeline reads {shelf}")
+    finding("1 held, PO ordered 2" in task["description"], f"The store manager is told: {task['description']}")
+    # The stock movements ledger counts receipt 1's shelved unit, not 0 or 2.
+    from api.routers.inventory import movements as _mv
+
+    got = {}
+    for e in _mv._collect_received_events(world.db, STORE, "2020-01-01T00:00:00", boss):
+        got[e["ref_id"]] = got.get(e["ref_id"], 0) + e["qty"]
+    finding(
+        got == {grn1["grn_id"]: 1, grn2["grn_id"]: 1},
+        f"The movements ledger reads {got}",
+    )
+
+
+def test_r9_not_received_records_what_its_kept_hold_really_holds(world, monkeypatch):
+    # 'Not received' keeps line 0's unit within the order (1 of its 2 already
+    # on the shelf) and hands it to the shelf. Should that shelving fail, the
+    # hold it wrote says 1 held -- the order still counts line 0's shelved
+    # unit as received.
+    from api.routers.vendors import grn_accept as _ga
+
+    po, boss, grn1, gid = _two_boss_lines_beyond_the_order(world, 4)
+
+    def _shelf_down(*a, **k):
+        raise RuntimeError("stock store down")
+
+    monkeypatch.setattr(_ga, "_put_on_shelf", _shelf_down)
+    out = _run(vd.drop_over_order(gid, MANAGER))
+    assert out["dropped_units"] == 1
+    (kept,) = world.grn(gid)["unresolved_lines"]
+    status, received = _po_received(world, po)
+    finding(
+        kept["held_qty"] == 1 and received[boss] == 3,
+        f"'Not received' kept {kept}; the order reads {received[boss]} Boss received with 3 on the shelf",
+    )

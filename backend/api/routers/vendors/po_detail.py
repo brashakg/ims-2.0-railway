@@ -18,6 +18,7 @@ from ._shared import (
     router,
 )
 from ...services.cost_mask import can_see_cost
+from .numbering import held_units
 
 
 def _stamp_event_actors(events: list) -> None:
@@ -137,7 +138,7 @@ async def get_po_timeline(
                 # the chip's "Box received") has accepted_at too, and often
                 # 0 units minted (audit C1 -- one rule with PurchaseStatusChip).
                 held = sum(
-                    int(ln.get("accepted_qty") or 0)
+                    held_units(ln)
                     for ln in (g.get("unresolved_lines") or [])
                     if isinstance(ln, dict)
                 )

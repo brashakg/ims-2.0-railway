@@ -20,6 +20,7 @@ from .helpers import (
     _get_db,
 )
 from ...services.purchase_numbering import po_label
+from ..vendors.numbering import held_units
 
 # ============================================================================
 # STOCK MOVEMENTS LEDGER (Movements tab)
@@ -65,8 +66,8 @@ def _collect_received_events(
     """RECEIVED events from accepted GRNs (qty = accepted units, positive).
 
     A PARTIALLY_ACCEPTED receipt has minted its resolved lines already; only
-    the lines held for cataloguing (its `unresolved_lines`) are not on the
-    shelf yet, so only those are left out.
+    what its `unresolved_lines` really hold back (numbering.held_units -- a
+    held line's units already received are on the shelf) is left out.
 
     grns.created_at is a BSON datetime: grn_repo.create() overwrites the
     router's ISO string in BaseRepository._add_timestamps. Mongo never compares
@@ -109,14 +110,13 @@ def _collect_received_events(
         ref = grn.get("grn_number") or grn.get("grn_id") or ""
         po_number = grn.get("po_number")
         detail = f"GRN {ref}" + (f" against {po_label(po_number)}" if po_number else "")
-        held = {
-            u.get("product_id")
-            for u in grn.get("unresolved_lines") or []
-            if isinstance(u, dict)
-        }
+        held: Dict = {}
+        for u in grn.get("unresolved_lines") or []:
+            if isinstance(u, dict):
+                held[u.get("product_id")] = held.get(u.get("product_id"), 0) + held_units(u)
         for idx, item in enumerate(grn.get("items") or []):
             pid = item.get("product_id")
-            if not pid or (product_id and pid != product_id) or pid in held:
+            if not pid or (product_id and pid != product_id):
                 continue
             # accepted_qty drives the ledger; received_qty is ONLY a fallback
             # for legacy lines missing the field. An explicit accepted_qty=0
@@ -128,6 +128,10 @@ def _collect_received_events(
                 qty = int(raw_qty or 0)
             except (TypeError, ValueError):
                 qty = 0
+            # What the receipt still holds of this product is not on the shelf.
+            kept_back = min(max(qty, 0), held.get(pid, 0))
+            held[pid] = held.get(pid, 0) - kept_back
+            qty -= kept_back
             if qty <= 0:
                 continue
             events.append(
