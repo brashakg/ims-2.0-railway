@@ -1517,7 +1517,9 @@ def _supplier_payment_answers(monkeypatch, role):
 
     bills = _bill_money_answers(monkeypatch, role)
     monkeypatch.setattr(cash_flow_mod, "_get_db", lambda: _CashDb())
-    user = {"roles": [role]}
+    # A login that holds a shop: a non-admin with none is refused the org-wide
+    # bank statements before any role question (R4, finance._require_org_finance).
+    user = {"roles": [role], "store_ids": ["S1"], "active_store_id": "S1"}
     body = asyncio.run(
         cash_flow_mod.get_cash_flow(period="month", store_id=None, current_user=user)
     )
@@ -1585,10 +1587,12 @@ def test_narrowing_the_accounts_set_moves_every_supplier_payment_read(monkeypatc
 # Every route whose handler-wide gate is the accounts rule, read off the code:
 # a require_roles on the AP_ROLES object itself (vendor AP, purchase invoices /
 # recon, TDS -- section 20), a first-level _require_finance_admin (finance
-# owner reads, ITC, Tally, GST), /finance/vendor-payments' can_see_cost
+# owner reads, ITC) or _require_org_finance (its org-wide views: Tally, the
+# GST reconciliation / cross-check, bank statements -- the same accounts gate
+# plus R4's no-shop refusal), /finance/vendor-payments' can_see_cost
 # refusal, and vendor_rebates' _require.
 _ACCOUNTS_GATE = re.compile(
-    r"^    _require_finance_admin\(current_user\)"
+    r"^    _require_(?:finance_admin|org_finance)\(current_user\)"
     r'|^    if not can_see_cost\(current_user, "payables"\)'
     r'|^    _require\(current_user, "',
     re.M,

@@ -42,7 +42,12 @@ from fastapi import (
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from ..auth import get_current_user
-from ...dependencies import is_no_shop_scope, resolve_store_scope, validate_store_access
+from ...dependencies import (
+    NO_SHOP_DETAIL,
+    is_no_shop_scope,
+    resolve_store_scope,
+    validate_store_access,
+)
 from ...services import ap_engine, cashflow, itc_reconcile, cash_register, csv_safe
 from ...services.stores_util import is_online_store
 from ...services import survival_cashflow
@@ -657,6 +662,23 @@ def _require_finance_admin(current_user: dict) -> None:
         raise HTTPException(
             status_code=403, detail="Owner financials require ADMIN / ACCOUNTANT"
         )
+
+
+def _require_org_finance(current_user: dict) -> None:
+    """THE gate of an ORG-WIDE finance view -- one that reads every shop and
+    applies no shop rule (the Tally sales JV and B2B invoices, the per-entity
+    GST reconciliation, the GST cross-check and its sign-off, bank
+    statements): the accounts roles (_require_finance_admin), and a login
+    that holds a shop. A non-admin login with NO shop sees no shop (owner
+    ruling 2026-10-12, R4): an org-wide view has no empty, one-shop form to
+    hand it -- a blank JV or reconciliation would read as a nil period -- so
+    it is refused in the owner's words, as GSTR-3B is (reports/gstr3b.
+    _return_shop), named shop or not. ADMIN / SUPERADMIN are never refused.
+    A shop-holding accountant keeps the org-wide view (an owner question,
+    like R8's org-wide TDS / rebates / scorecard)."""
+    _require_finance_admin(current_user)
+    if is_no_shop_scope(resolve_store_scope(None, current_user)):
+        raise HTTPException(status_code=403, detail=NO_SHOP_DETAIL)
 
 
 def _iso_now() -> str:

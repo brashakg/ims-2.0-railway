@@ -125,6 +125,7 @@ from ._shared import (  # noqa: F401
     _HQ_STORE_ROLES,
     _scope_store,
     _require_finance_admin,
+    _require_org_finance,
     _iso_now,
     _store_name_map,
     _je_cal_day,

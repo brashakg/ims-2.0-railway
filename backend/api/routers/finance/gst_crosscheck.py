@@ -19,7 +19,7 @@ from ._shared import (
     _get_db,
     _iso_now,
     _order_is_interstate,
-    _require_finance_admin,
+    _require_org_finance,
     _store_maps,
     _store_state_map,
     gst_reconciliation,
@@ -42,7 +42,7 @@ async def get_gst_reconciliation(
     # Org-wide, entity-grouped GST reconciliation is a filing/accounting view --
     # finance-admin only (owner decision 2026-06-16), so a single-store
     # STORE_MANAGER/AREA_MANAGER cannot read every entity's GST position.
-    _require_finance_admin(current_user)
+    _require_org_finance(current_user)
     db = _get_db()
     now = now_ist()
     m = month or now.month
@@ -411,7 +411,7 @@ async def get_gst_cross_check(
     books (orders / payments / Tally / purchase-side ITC), side by side, with
     per-rate breakup, CDNR + deemed-supply detail, and mismatch flags. A review
     aid only -- it changes no figure and locks no period."""
-    _require_finance_admin(current_user)
+    _require_org_finance(current_user)
     db = _get_db()
 
     now = now_ist()
@@ -442,7 +442,7 @@ async def gst_cross_check_signoff(
     Idempotent upsert keyed on (year, month, entity_id). Audit-logged. This is a
     review marker only -- it does NOT lock the accounting period (that is the
     separate /period-lock action) and changes no GST figure."""
-    _require_finance_admin(current_user)
+    _require_org_finance(current_user)
     db = _get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
