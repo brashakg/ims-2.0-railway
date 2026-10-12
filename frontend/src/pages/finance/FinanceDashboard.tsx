@@ -22,6 +22,7 @@ import type {
   VendorPaymentData,
 } from './financeTypes';
 import { financeApi } from '../../services/api/finance';
+import { NoShopNotice, hasNoShop } from '../../components/common/NoShopNotice';
 
 // ---- Mappers: real finance.py responses -> dashboard panel types ----------
 // The backend returns aggregate/summary shapes; the panels expect these
@@ -410,6 +411,22 @@ export default function FinanceDashboard() {
   // toast-only no-ops (no write path on /finance/*). They've been removed rather
   // than fake success. Budget planning lives in the dedicated Budgets module
   // (/budgets) and vendor payments in the Cash Flow vendor ledger.
+
+  // R4 (owner ruling 2026-10-12): a non-admin login with no shop sees no
+  // shop. Say so, and why, instead of a dashboard of empty panels.
+  if (hasNoShop(user)) {
+    return (
+      <div className="inv-body">
+        <div className="inv-head">
+          <div>
+            <div className="eyebrow mb-1.5">Finance &amp; Accounting</div>
+            <h1>The books, in real time.</h1>
+          </div>
+        </div>
+        <NoShopNotice />
+      </div>
+    );
+  }
 
   // Loading state
   if (isLoading) {

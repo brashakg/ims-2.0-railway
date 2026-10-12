@@ -24,6 +24,7 @@ from .ap_bills import (
     _rejected_goods_hold,
 )
 from ._shared import can_access_store_scoped
+from ...dependencies import NO_SHOP_DETAIL, is_no_shop_scope
 
 # The answer for a named bill that is not there for the caller -- the words
 # purchase_invoices._bill_in_scope_or_404 uses, so another shop's bill and a
@@ -146,7 +147,12 @@ def _money_shop(
         receipt only an admin reaches) the shop asked for (?store_id or the
         body's store_id);
       * else a non-admin's own active shop;
-      * else (ADMIN / SUPERADMIN, or a login with no shop, naming none) the
+      * else a non-admin login with NO shop (resolve_store_scope's
+        NO_SHOP_SCOPE): REFUSED, 403 NO_SHOP_DETAIL, before anything is
+        written (owner ruling 2026-10-12, R4: it holds no shop, so it records
+        no shop's money -- never under the reserved id, never under the
+        supplier's shop);
+      * else (ADMIN / SUPERADMIN naming none) the
         supplier's shop by its bills -- _shop_by_the_suppliers_bills, the
         ledger's own legacy rule -- worked out now and stamped. Never the
         admin's topbar shop: that is where HE sits, not the supplier. If the
@@ -204,6 +210,8 @@ def _money_shop(
             )
         return shop
     shop = asked or resolve_store_scope(None, current_user)
+    if is_no_shop_scope(shop):
+        raise HTTPException(status_code=403, detail=NO_SHOP_DETAIL)
     if shop:
         return shop
     return _shop_by_the_suppliers_bills(db, vendor_id, money or {})

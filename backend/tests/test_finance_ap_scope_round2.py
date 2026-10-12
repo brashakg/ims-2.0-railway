@@ -476,10 +476,13 @@ def test_a_post_dated_cheque_is_paid_on_its_day_and_not_before(world):
     assert report["totals"]["paid"] == pytest.approx(PUNE_GROSS_OCT + 500.0)
 
 
+# The org view is ADMIN / SUPERADMIN's. An ACCOUNTANT with no shop used to
+# read it too; it holds no shop, so it reads none (owner ruling 2026-10-12,
+# R4) -- test_r4_a_login_with_no_shop_pays_out_nothing_on_cash_flow below.
 @pytest.mark.parametrize(
     "user",
-    [ADMIN, _user("ACCOUNTANT")],
-    ids=["ADMIN", "ACCOUNTANT with no shop"],
+    [ADMIN, SUPERADMIN],
+    ids=["ADMIN", "SUPERADMIN"],
 )
 def test_the_cash_flow_org_view_pays_out_the_ledgers_cash(world, user):
     """/finance/cash-flow's org view: October's supplier cash -- not the
@@ -490,6 +493,12 @@ def test_the_cash_flow_org_view_pays_out_the_ledgers_cash(world, user):
     assert body["outflows"] == pytest.approx(
         body["expense_outflow"] + body["purchase_outflow"] + ALL_CASH_OCT
     )
+
+
+def test_r4_a_login_with_no_shop_pays_out_nothing_on_cash_flow(world):
+    body = world.ok("/finance/cash-flow", _user("ACCOUNTANT"))
+    assert body["vendor_payment_outflow"] == 0
+    assert body["outflows"] == 0
 
 
 # ============================================================================

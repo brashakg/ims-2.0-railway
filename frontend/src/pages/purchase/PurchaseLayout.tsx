@@ -27,6 +27,7 @@ import { useIsOnlineStore } from '../../hooks/useIsOnlineStore';
 import { useAuth } from '../../context/AuthContext';
 import { NewOrdersDeliverTo, PurchaseShopLabel, PurchaseShopPicker } from './purchaseShop';
 import { APPROVE_ROLES } from './invoices/shared';
+import { NoShopNotice, hasNoShop } from '../../components/common/NoShopNotice';
 
 const SECTIONS = [
   { path: '/purchase/orders', label: 'Purchase Orders', icon: FileText },
@@ -49,7 +50,12 @@ export function PurchaseLayout() {
   const onlineStore = useIsOnlineStore();
   const { pathname } = useLocation();
   const navigate = useNavigate();
-  const { hasRole } = useAuth();
+  const { hasRole, user } = useAuth();
+  // R4 (owner ruling 2026-10-12): a non-admin login with no shop sees no shop
+  // -- every Purchase list is empty on the server -- so the sections are not
+  // mounted and the screen says why instead (NoShopNotice). No create button
+  // either: there is no shop to raise an order or a supplier for.
+  const noShop = hasNoShop(user);
 
   // Warm the sibling section chunks once the browser is idle, so the FIRST
   // click on any tab renders without the lazy-chunk download spinner (owner
@@ -72,8 +78,9 @@ export function PurchaseLayout() {
   }, []);
 
   // Sections whose primary create action lives in the header.
-  const headerAction =
-    pathname === '/purchase/orders'
+  const headerAction = noShop
+    ? null
+    : pathname === '/purchase/orders'
       ? 'New PO'
       : pathname === '/purchase/suppliers'
         ? 'New supplier'
@@ -155,7 +162,7 @@ export function PurchaseLayout() {
         </nav>
       </div>
 
-      <Outlet />
+      {noShop ? <NoShopNotice /> : <Outlet />}
     </div>
   );
 }

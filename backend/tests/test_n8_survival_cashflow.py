@@ -211,6 +211,11 @@ def routed(db, monkeypatch):
     return db
 
 
+# R4 (owner ruling 2026-10-12): a non-admin login with NO shop sees NO shop,
+# so this storeless accountant's survival view is empty (no shop's income,
+# expenses or supplier bills -- test_r4_a_storeless_accountant_reads_no_shops_survival).
+# The ORG view the route tests below read is ADMIN / SUPERADMIN's (_admin):
+# the same every-shop figures this accountant used to be handed.
 def _accountant(uid="ACC1"):
     return {
         "user_id": uid,
@@ -494,7 +499,7 @@ def test_essential_heads_override_replaces_seed_list():
 def test_dedicated_route_end_to_end_numbers(routed):
     _seed_standard(routed)
     out = asyncio.run(
-        fin.get_survival_cashflow(store_id=None, current_user=_accountant())
+        fin.get_survival_cashflow(store_id=None, current_user=_admin())
     )
     sv = out["survival"]
     assert out["month"] == "2026-06"
@@ -516,7 +521,7 @@ def test_dedicated_route_shows_shortfall_when_income_collapses(routed):
     _seed_standard(routed)
     routed["orders"].docs.clear()  # zero revenue month
     out = asyncio.run(
-        fin.get_survival_cashflow(store_id=None, current_user=_accountant())
+        fin.get_survival_cashflow(store_id=None, current_user=_admin())
     )
     sv = out["survival"]
     assert sv["projected_income_paise"] == 0
@@ -580,12 +585,34 @@ def test_e2_policy_override_flows_through_the_route(routed, monkeypatch):
         ]
     )
     sv = asyncio.run(
-        fin.get_survival_cashflow(store_id=None, current_user=_accountant())
+        fin.get_survival_cashflow(store_id=None, current_user=_admin())
     )["survival"]
     assert sv["fixed_costs_paise"] == 100000  # software now essential
     assert sv["deferrable_expenses_paise"] == 200000  # rent now deferrable
     assert sv["must_pay_ap_paise"] == 50000  # ACME due-soon -> must pay
     assert sv["deferrable_ap_paise"] == 70000  # same due date, not critical
+
+
+def test_r4_a_storeless_accountant_reads_no_shops_survival(routed):
+    """R4: the same seeded month the admin reads as Rent 50k / AP 10k+5k /
+    120k projected is NOTHING for an accountant with no shop -- not every
+    shop's figures (resolve_store_scope used to hand it None = all shops)."""
+    _seed_standard(routed)
+    org = asyncio.run(
+        fin.get_survival_cashflow(store_id=None, current_user=_admin())
+    )["survival"]
+    assert org["min_pay_total_paise"] == 6000000  # the world is not empty
+    sv = asyncio.run(
+        fin.get_survival_cashflow(store_id=None, current_user=_accountant())
+    )["survival"]
+    assert sv["fixed_costs_paise"] == 0
+    assert sv["deferrable_expenses_paise"] == 0
+    assert sv["must_pay_ap_paise"] == 0 and sv["deferrable_ap_paise"] == 0
+    assert sv["projected_income_paise"] == 0
+    assert sv["essential_detail"] == [] and sv["deferrable_detail"] == []
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(fin.get_survival_cashflow(store_id="BV-1", current_user=_accountant()))
+    assert exc.value.status_code == 403
 
 
 def test_dedicated_route_403_for_store_manager_and_sales(routed):
@@ -625,7 +652,7 @@ def test_budget_mode_survival_returns_real_data_not_dead_skeleton(routed):
     _seed_standard(routed)
     out = asyncio.run(
         fin.get_budget(
-            mode="survival", month=None, year=None, current_user=_accountant()
+            mode="survival", month=None, year=None, current_user=_admin()
         )
     )
     assert "no_budget_set" not in out
@@ -790,7 +817,7 @@ def test_route_pro_rated_consistent_inverts_income_projection(routed):
     60k that was actually booked -- a true like-for-like vs MTD expenses."""
     _seed_standard(routed)
     sv = asyncio.run(
-        fin.get_survival_cashflow(store_id=None, current_user=_accountant())
+        fin.get_survival_cashflow(store_id=None, current_user=_admin())
     )["survival"]
     assert sv["projected_income_paise"] == 12000000  # full-month
     pc = sv["pro_rated_consistent"]
@@ -822,7 +849,7 @@ def test_budget_mode_survival_flags_historical_period_mismatch(routed):
     survival block is stamped with its real as-of date + an explicit note."""
     _seed_standard(routed)
     out = asyncio.run(
-        fin.get_budget(mode="survival", month=3, year=2026, current_user=_accountant())
+        fin.get_budget(mode="survival", month=3, year=2026, current_user=_admin())
     )
     # Envelope still carries the requested historical period for the skeleton.
     assert out["month"] == 3 and out["year"] == 2026

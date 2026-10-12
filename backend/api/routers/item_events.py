@@ -32,9 +32,11 @@ from pydantic import BaseModel, Field
 
 from .auth import get_current_user, require_roles
 from ..dependencies import (
+    NO_SHOP_DETAIL,
     can_access_store_scoped,
     get_audit_repository,  # noqa: F401  (kept for monkeypatch parity in tests)
     get_stock_repository,
+    is_no_shop_scope,
     resolve_store_scope,
     validate_store_access,
 )
@@ -499,6 +501,11 @@ async def replenishment(
     if db is None:
         return {"items": [], "total": 0}
     resolved_store = resolve_store_scope(store_id, current_user)
+    if is_no_shop_scope(resolved_store):
+        # Owner ruling 2026-10-12 (R4): a login with no shop has no shelf to
+        # count. Refused with the reason -- never the GLOBAL targets against
+        # an empty shelf, which reads as 'order every cell in full'.
+        raise HTTPException(status_code=403, detail=NO_SHOP_DETAIL)
     if not resolved_store:
         raise HTTPException(status_code=422, detail="store_id is required for replenishment")
     g = (grid or "").strip().upper()

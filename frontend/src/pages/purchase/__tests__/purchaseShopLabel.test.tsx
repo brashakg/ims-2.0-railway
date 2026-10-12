@@ -89,7 +89,10 @@ describe('the Purchase header names the shop a non-admin reads', () => {
     roles = ['ACCOUNTANT'];
     activeStoreId = undefined;
     open();
-    await screen.findByText('report');
+    // R4 (owner ruling 2026-10-12): it is told why instead of shown a section
+    // the server answers empty (components/common/NoShopNotice).
+    expect(await screen.findByText(/No shop is assigned to this login/)).toBeInTheDocument();
+    expect(screen.queryByText('report')).toBeNull();
     expect(label()).toBeNull();
   });
 });

@@ -31,8 +31,10 @@ vi.mock('../../../services/api/finance', () => ({
 }));
 
 vi.mock('../../../context/AuthContext', () => ({
-  // A store manager with no active shop: the org view of /cash-flow.
-  useAuth: () => ({ user: { user_id: 'u-sm', roles: ['STORE_MANAGER'] } }),
+  // A store manager (the /cash-flow body, flag included, is the mock's). He
+  // holds a shop: a login with NO shop now gets the R4 notice instead of the
+  // dashboard (owner ruling 2026-10-12; components/common/NoShopNotice).
+  useAuth: () => ({ user: { user_id: 'u-sm', roles: ['STORE_MANAGER'], activeStoreId: 'ZZ-SOLO' } }),
 }));
 
 vi.mock('../../../context/ToastContext', () => ({

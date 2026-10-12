@@ -42,7 +42,7 @@ from fastapi import (
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from ..auth import get_current_user
-from ...dependencies import validate_store_access
+from ...dependencies import is_no_shop_scope, resolve_store_scope, validate_store_access
 from ...services import ap_engine, cashflow, itc_reconcile, cash_register, csv_safe
 from ...services.stores_util import is_online_store
 from ...services import survival_cashflow
@@ -617,15 +617,28 @@ def _scope_store(store_id, current_user):
 
     - explicit store_id -> validate_store_access (403 if a store-scoped role asks
       for ANOTHER store; admins / area-managers pass through).
-    - omitted -> all stores (None) for HQ roles, but the caller's OWN active store
-      for store-scoped roles -- so a store-level role can never read an all-stores
-      or other-store financial aggregate (revenue / P&L / receivables).
+    - omitted -> all stores (None) for HQ roles, but the caller's OWN shop for
+      store-scoped roles (resolve_store_scope: its active shop, else its first
+      own shop) -- so a store-level role can never read an all-stores or
+      other-store financial aggregate (revenue / P&L / receivables / journal
+      entries).
+    - a non-admin login with NO shop at all (no active shop, no store_ids; an
+      AREA_MANAGER too) -> api.dependencies.NO_SHOP_SCOPE (owner ruling
+      2026-10-12, R4): a reserved id no order, expense or voucher carries, so
+      every caller's ``if store_id: match["store_id"] = store_id`` matches
+      nothing. It used to be None here -- every shop's revenue, P&L and
+      journal entries (HQ vouchers too) -- while naming a shop was a 403. A
+      WRITE that takes its shop from here refuses NO_SHOP_SCOPE itself
+      (journal_entries.create_journal_entry).
     """
     if store_id:
         return validate_store_access(store_id, current_user)
+    own = resolve_store_scope(None, current_user)
+    if is_no_shop_scope(own):
+        return own
     if set(current_user.get("roles") or []) & _HQ_STORE_ROLES:
         return None
-    return current_user.get("active_store_id")
+    return own
 
 
 # -- Promoted here by the Wave 5 package split ---------------------------

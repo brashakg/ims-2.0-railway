@@ -70,11 +70,29 @@ def get_db():
     return None
 
 
+# Owner ruling 2026-10-12 (R4): a login that is not ADMIN / SUPERADMIN and has
+# NO shop assigned sees NO shop until an admin assigns one -- never every shop
+# ("Control over Convenience"). resolve_store_scope hands such a login this
+# reserved id instead of None: every caller filters with
+# ``if scope: flt["store_id"] = scope`` and None there means EVERY shop, while
+# this id is truthy and no store document ever carries it, so the same line
+# matches nothing -- an empty list, never a crash and never all shops.
+NO_SHOP_SCOPE = "__no_shop_assigned__"
+NO_SHOP_DETAIL = "No shop is assigned to this login. Ask an admin to assign one."
+
+
+def is_no_shop_scope(scope) -> bool:
+    """True when ``scope`` is the reserved no-shop scope (R4) -- for a caller
+    that must refuse to WRITE money or stock into it rather than list nothing."""
+    return scope == NO_SHOP_SCOPE
+
+
 def validate_store_access(store_id: str, current_user: dict) -> str:
     """
     Validate that the current user has access to the requested store.
     Returns the validated store_id (or user's active_store_id if none provided).
-    Raises HTTPException(403) if user doesn't have access.
+    Raises HTTPException(403) if user doesn't have access -- worded
+    NO_SHOP_DETAIL when the login holds no shop at all (R4).
     """
     from fastapi import HTTPException
 
@@ -99,6 +117,9 @@ def validate_store_access(store_id: str, current_user: dict) -> str:
     active = current_user.get("active_store_id")
     if active:
         user_store_ids.add(active)
+    if not any(isinstance(s, str) and s for s in user_store_ids):
+        # R4: a login with no shop holds none to ask for -- say so plainly.
+        raise HTTPException(status_code=403, detail=NO_SHOP_DETAIL)
     if store_id not in user_store_ids:
         raise HTTPException(status_code=403, detail=f"No access to store {store_id}")
     return store_id
@@ -148,16 +169,32 @@ def resolve_store_scope(store_id, current_user: dict):
     - omitted -> None (all stores) for SUPERADMIN/ADMIN; the caller's OWN active
       store for every other role (AREA_MANAGER + store-level), so a store-scoped
       role can never read an all-stores or other-store list by omitting the param.
+      A token with no active store but its own store_ids (a multi-store
+      AREA_MANAGER) resolves to its first own store -- the one login makes
+      active (auth.login: ``user_store_ids[0]``) -- so it keeps its own reach
+      and never reads every shop.
+    - a non-admin with NO shop at all (no active store, no store_ids) ->
+      NO_SHOP_SCOPE (owner ruling 2026-10-12, R4): a reserved id that matches
+      no document, so its lists come back EMPTY. It used to be None, i.e. every
+      shop -- while can_access_store_scoped already gave the same login
+      nothing. An explicit store_id from such a login is a 403 (NO_SHOP_DETAIL).
 
     Callers use the returned value as the store filter: ``s = resolve_store_scope(
-    store_id, user); if s: filter["store_id"] = s`` (None => no filter => all).
+    store_id, user); if s: filter["store_id"] = s`` (None => no filter => all;
+    only ADMIN / SUPERADMIN ever get None).
     """
     if store_id:
         return validate_store_access(store_id, current_user)
     roles = set(current_user.get("roles") or [])
     if "SUPERADMIN" in roles or "ADMIN" in roles:
         return None
-    return current_user.get("active_store_id")
+    active = current_user.get("active_store_id")
+    if active:
+        return active
+    for own in current_user.get("store_ids") or []:
+        if isinstance(own, str) and own:
+            return own
+    return NO_SHOP_SCOPE
 
 
 def filter_docs_by_store(docs, current_user: dict, store_key: str = "store_id"):

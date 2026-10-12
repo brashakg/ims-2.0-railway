@@ -356,7 +356,10 @@ def test_r3_2_a_supplier_that_never_billed_stays_unstamped(world, kind):
     assert _stored(world, kind, made)["store_id"] is None
 
 
-@pytest.mark.parametrize("user", [ADMIN_DHN, SUPER_NONE, ACCT_NONE], ids=["admin", "superadmin", "accountant-no-shop"])
+# A non-admin login with NO shop is not here any more (owner ruling 2026-10-12,
+# R4): it holds no shop, so it records no shop's money -- see
+# test_r4_a_login_with_no_shop_records_no_supplier_money below.
+@pytest.mark.parametrize("user", [ADMIN_DHN, SUPER_NONE], ids=["admin", "superadmin"])
 @pytest.mark.parametrize(
     "vendor,on,shop",
     [
@@ -372,9 +375,7 @@ def test_r3_2_a_supplier_that_never_billed_stays_unstamped(world, kind):
 def test_r3_2_the_stamp_is_the_ledgers_own_rule_at_write_time(world, user, vendor, on, shop):
     """The shop stamped is exactly where supplier_rows would have placed the
     same row unstamped at the moment it was written -- so no figure changes
-    on the day it is recorded, only later bills can no longer move it. A
-    non-admin with no shop (resolve_store_scope gives none) is placed the
-    same way."""
+    on the day it is recorded, only later bills can no longer move it."""
     made = _ok(world.post(f"/vendors/{vendor}/payments", user, _money("payments", 10.0, on)), 201)
     assert made["store_id"] == shop
     stored = _stored(world, "payments", made)
@@ -383,6 +384,25 @@ def test_r3_2_the_stamp_is_the_ledgers_own_rule_at_write_time(world, user, vendo
     unstamped = dict(stored, store_id=None)
     placed = [s for s in (DHN, PUN) if ap_engine.supplier_rows(bills, [unstamped], [], s)[1]]
     assert placed == ([shop] if shop else [])
+
+
+@pytest.mark.parametrize("kind", list(_KINDS))
+def test_r4_a_login_with_no_shop_records_no_supplier_money(world, kind):
+    """A non-admin login with no shop (no active shop, no store_ids) sees no
+    shop (R4), so on-account money from it is refused with the reason --
+    never filed under a shop it does not hold, never under the reserved
+    no-shop id (api.dependencies.NO_SHOP_SCOPE, which resolve_store_scope now
+    hands it and _money_shop used to STAMP: the row then sat under all stores
+    but under no single shop, so the shops no longer added up to the whole)
+    -- and nothing is written. (Before R4 it was stamped with the supplier's
+    shop by its bills, as an admin's is.)"""
+    from api.dependencies import NO_SHOP_DETAIL
+
+    before = world.snapshot()
+    resp = world.post(f"/vendors/{V_BOTH}/{kind}", ACCT_NONE, _money(kind, 10.0, "2026-09-25"))
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"] == NO_SHOP_DETAIL
+    assert world.snapshot() == before
 
 
 def test_r3_2_a_non_admin_and_a_named_shop_are_unchanged(world):

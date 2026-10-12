@@ -300,10 +300,20 @@ def test_admins_keep_every_suppliers_balance(finance, role):
     assert rows[VA]["total_debit_notes"] == 200.0
 
 
-def test_an_accountant_with_no_shop_keeps_every_suppliers_balance(finance):
+def test_an_accountant_with_no_shop_reads_no_suppliers_balance(finance):
+    """R4 (owner ruling 2026-10-12): a non-admin login with NO shop sees NO
+    shop until an admin assigns one. It used to be handed every supplier's
+    balance (resolve_store_scope gave it None = every shop); now the supplier
+    rows carry no shop's money, and naming a shop says why it is refused."""
+    from api.dependencies import NO_SHOP_DETAIL
+
     resp = finance("/vendor-payments", _user("ACCOUNTANT"))
     assert resp.status_code == 200, resp.text
-    assert {r["vendor_id"]: r["balance"] for r in resp.json()} == OWED
+    assert {r["vendor_id"]: r["balance"] for r in resp.json()} == dict.fromkeys(OWED, 0.0)
+    assert all(r["total_billed"] == 0.0 and r["total_paid"] == 0.0 for r in resp.json())
+    asked = finance("/vendor-payments", _user("ACCOUNTANT"), store_id=DHN)
+    assert asked.status_code == 403, asked.text
+    assert asked.json()["detail"] == NO_SHOP_DETAIL
 
 
 @pytest.mark.parametrize("asked", [None, PUN])
@@ -329,20 +339,18 @@ def test_a_pune_accountant_cannot_ask_for_dhanbad(finance):
 
 @pytest.mark.parametrize("role", MANAGERS)
 def test_a_manager_with_no_shop_gets_no_supplier_payments_in_cash_flow(finance, role):
-    """The org view (no active shop) is the only view that ever folded supplier
-    payments in. A manager gets it WITHOUT them: no key, not inside outflows /
-    net_cash_flow, a flag instead of a figure."""
+    """A manager with no shop used to get the org view (every shop's rent),
+    minus the supplier payments. R4 (owner ruling 2026-10-12): a login with
+    NO shop sees NO shop -- no shop's cash at all, and still no supplier
+    payments: no key, not inside outflows / net_cash_flow."""
     resp = finance("/cash-flow", _user(role))
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert "vendor_payment_outflow" not in body, body
-    assert body.get("vendor_payments_restricted") is True, body
-    assert body["expense_outflow"] == RENT
-    # The trap: the figure must not ride inside the totals either.
-    assert body["outflows"] == pytest.approx(body["expense_outflow"] + body["purchase_outflow"])
-    assert body["net_cash_flow"] == pytest.approx(body["inflows"] - body["outflows"])
+    assert (body["inflows"], body["expense_outflow"], body["outflows"]) == (0, 0, 0), body
+    assert body["net_cash_flow"] == 0, body
     assert PAID_THIS_MONTH not in _numbers(body), body
-    assert RENT + PAID_THIS_MONTH not in _numbers(body), body
+    assert RENT not in _numbers(body), body
 
 
 @pytest.mark.parametrize("role", MANAGERS)
@@ -355,12 +363,24 @@ def test_a_managers_shop_view_carries_no_supplier_payments(finance, role):
     assert body["outflows"] == RENT
 
 
-@pytest.mark.parametrize("role", ["ADMIN", "SUPERADMIN", "ACCOUNTANT"])
+# An ACCOUNTANT with no shop is not here any more (owner ruling 2026-10-12,
+# R4): it holds no shop, so it gets no org view -- see the next test.
+@pytest.mark.parametrize("role", ["ADMIN", "SUPERADMIN"])
 def test_the_accounts_roles_keep_supplier_payments_on_the_org_view(finance, role):
     body = finance("/cash-flow", _user(role)).json()
     assert body["vendor_payment_outflow"] == PAID_THIS_MONTH
     assert body["outflows"] == pytest.approx(RENT + PAID_THIS_MONTH)
     assert "vendor_payments_restricted" not in body
+
+
+def test_an_accountant_with_no_shop_reads_no_shops_cash_flow(finance):
+    """R4: no shop's rent, no supplier's payments -- the accounts role still
+    gets the key (it may see the figure), and the figure is nothing."""
+    body = finance("/cash-flow", _user("ACCOUNTANT")).json()
+    assert (body["vendor_payment_outflow"], body["outflows"], body["inflows"]) == (0, 0, 0), body
+    # the same accountant holding Dhanbad reads Dhanbad's rent
+    own = finance("/cash-flow", _user("ACCOUNTANT", DHN, (DHN,))).json()
+    assert own["outflows"] == RENT
 
 
 def test_an_admins_shop_view_still_folds_no_hq_payments_in(finance):

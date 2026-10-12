@@ -12,6 +12,7 @@ from fastapi import Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from ..auth import get_current_user
+from ...dependencies import NO_SHOP_DETAIL, is_no_shop_scope
 from ...services import je_service
 from ._shared import (
     _get_db,
@@ -136,6 +137,11 @@ async def create_journal_entry(
     )
     db = _get_db()
     store_id = _scope_store(body.store_id, current_user)
+    if is_no_shop_scope(store_id):
+        # Owner ruling 2026-10-12 (R4): a login with no shop writes no
+        # voucher -- never under the reserved no-shop id, never as an HQ
+        # voucher it could not read back -- until an admin assigns a shop.
+        raise HTTPException(status_code=403, detail=NO_SHOP_DETAIL)
     entry_date = _je_parse_entry_date(body.entry_date, current_user)
     # Gate 1: a closed period rejects a draft at creation.
     check_period_locked(db, entry_date.date())

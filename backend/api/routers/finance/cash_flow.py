@@ -42,6 +42,13 @@ async def get_cash_flow(
     active_store = validate_store_access(store_id, current_user) or current_user.get(
         "active_store_id"
     )
+    if not active_store:
+        # No shop asked and none active: the one shop rule decides. ADMIN /
+        # SUPERADMIN keep the org view (None); any other login reads its first
+        # own shop, or -- holding none (owner ruling 2026-10-12, R4) -- the
+        # reserved NO_SHOP_SCOPE, which matches no order, expense or PO, so it
+        # reads zero, never every shop's cash.
+        active_store = resolve_store_scope(None, current_user)
 
     # Inflows (from orders) -- scoped to the active store. created_at is a BSON
     # datetime; an .isoformat() string bound never matched, so inflow always

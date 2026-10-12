@@ -11,6 +11,7 @@
 import { create } from 'zustand';
 import { useAuth } from '../../context/AuthContext';
 import { useStores } from '../../hooks/usePOSQueries';
+import { NO_SHOP_LABEL, NO_SHOP_SCOPE } from '../../components/common/NoShopNotice';
 
 const useChosenShop = create<{ shop: string; setShop: (shop: string) => void }>((set) => ({
   shop: '',
@@ -53,9 +54,12 @@ function OwnShop({ storeId }: { storeId: string }) {
   );
 }
 
-/** A shop's name from the store list; its id until the list arrives. */
+/** A shop's name from the store list; its id until the list arrives. The
+ *  server's reserved no-shop id (a login with no shop, owner ruling
+ *  2026-10-12, R4) is never a shop: it reads 'No shop assigned', not the id. */
 export function PurchaseShopName({ storeId }: { storeId: string }) {
   const { data } = useStores();
+  if (storeId === NO_SHOP_SCOPE) return <>{NO_SHOP_LABEL}</>;
   const row = ((Array.isArray(data) ? data : []) as StoreRow[]).find((s) => s.store_id === storeId);
   return <>{row ? storeName(row) : storeId}</>;
 }
