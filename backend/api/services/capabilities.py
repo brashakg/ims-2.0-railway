@@ -133,6 +133,13 @@ def capability_for(method: str, path: str) -> Optional[str]:
     # in the module deny.
     if mod == "online-store" and tmpl.endswith("/clear-rx-hold"):
         return "online-store:rx-clear"
+    # Curated finer capability: LOGGING a vendor return. Owner ruling
+    # 2026-10-12 lets WORKSHOP_STAFF log one (unpriced); on the generic
+    # vendor-returns:write key they would join the approve / ship / credit
+    # union the grant guard reasons from. A 'vendors' module deny still covers
+    # it (MODULE_EXTRA_DENY_CAPABILITIES).
+    if method.upper() == "POST" and tmpl.rstrip("/") == "/api/v1/vendor-returns":
+        return "vendor-returns:create"
     verb = "read" if method.upper() in _READ_METHODS else "write"
     return f"{mod}:{verb}"
 
@@ -259,6 +266,7 @@ MODULE_TO_CAPABILITY_MODULES: Dict[str, List[str]] = {
 # (the rbac capability-union gotcha concerns POLICY rows, not this map).
 MODULE_EXTRA_DENY_CAPABILITIES: Dict[str, List[str]] = {
     "online-store": ["online-store:rx-clear"],
+    "vendor-returns": ["vendor-returns:create"],
 }
 
 

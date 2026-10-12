@@ -882,29 +882,38 @@ def test_grn_detail_is_store_scoped(monkeypatch):
 # The route's own `_dep` is called for every role: comparing the row with a
 # module constant stayed green when a route was switched onto the READERS
 # tuple, and that gate is the last line once a per-user capability grant lets
-# a request past the middleware.
+# a request past the middleware. Logging a return is the readers' (owner
+# ruling 2026-10-12: WORKSHOP_STAFF logs it, unpriced -- its own capability key,
+# test_counter_roles_no_cost_anywhere); every other write is the writers'.
 @pytest.mark.parametrize(
-    "method,path,template",
+    "method,path,template,gate",
     [
-        ("POST", "/api/v1/vendor-returns", "/api/v1/vendor-returns"),
-        ("POST", "/api/v1/vendor-returns/", "/api/v1/vendor-returns/"),
+        ("POST", "/api/v1/vendor-returns", "/api/v1/vendor-returns", _RETURN_READERS),
+        ("POST", "/api/v1/vendor-returns/", "/api/v1/vendor-returns/", _RETURN_READERS),
         (
             "PATCH",
             "/api/v1/vendor-returns/VR1/status",
             "/api/v1/vendor-returns/{return_id}/status",
+            _RETURN_WRITERS,
         ),
-        ("POST", "/api/v1/rtv-debit-notes/issue", "/api/v1/rtv-debit-notes/issue"),
+        (
+            "POST",
+            "/api/v1/rtv-debit-notes/issue",
+            "/api/v1/rtv-debit-notes/issue",
+            _RETURN_WRITERS,
+        ),
         (
             "GET",
             "/api/v1/rtv-debit-notes/DN-1/tally",
             "/api/v1/rtv-debit-notes/{debit_note_id}/tally",
+            _RETURN_WRITERS,
         ),
     ],
 )
-def test_vendor_return_write_rows_equal_the_code_gate(app, method, path, template):
+def test_vendor_return_write_rows_equal_the_code_gate(app, method, path, template, gate):
     row = rbac.policy_for(method, path)
     assert row["path"] == template
-    assert set(row["allowed"]) - {"SUPERADMIN"} == set(_RETURN_WRITERS)
+    assert set(row["allowed"]) - {"SUPERADMIN"} == set(gate)
     for role in rbac.ALL_ROLES:
         want = role == "SUPERADMIN" or role in row["allowed"]
         assert _route_allows(app, template, role, method) is want, role

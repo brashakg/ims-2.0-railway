@@ -225,6 +225,10 @@ def _split_line_tax(taxable_paise: int, gst_rate: float, is_inter_state: bool) -
     return {"cgst_paise": cgst, "sgst_paise": sgst, "igst_paise": 0, "tax_paise": tax_paise}
 
 
+# Where a line's rate can come from, in _norm_line's order.
+_LINE_RATE_KEYS = ("rate_paise", "unit_cost_paise", "unit_cost", "rate", "unit_price")
+
+
 def _norm_line(line: Dict[str, Any], is_inter_state: bool) -> Dict[str, Any]:
     """Normalize one input line into a paise-exact debit-note line. ``rate_paise``
     is authoritative when present (integer paise); else the rupee ``unit_cost`` /
@@ -874,6 +878,21 @@ class DebitNoteEngine:
         # rate + HSN (the source RTV docs don't persist them). Fail loud on a
         # taxable line whose GST is unresolvable rather than emit a 0% tax doc.
         src_lines = lines if lines else (rtv_doc.get("lines") or rtv_doc.get("items") or [])
+        # A return workshop staff logged carries no price (owner ruling
+        # 2026-10-12). A tax document at Rs 0 for it would be wrong money, so
+        # refuse it -- never read a missing price as zero.
+        if any(
+            isinstance(ln, dict) and all(ln.get(k) is None for k in _LINE_RATE_KEYS)
+            for ln in src_lines
+        ):
+            return {
+                "ok": False,
+                "http": 422,
+                "error": "line_without_price",
+                "message": "An item on this return has no price paid yet, so no "
+                "debit note was issued. Approve the return first and enter the "
+                "price paid for each item.",
+            }
         enriched, gst_err = self._enrich_lines_gst(src_lines)
         if gst_err:
             return {"ok": False, "http": 422, "error": gst_err}
