@@ -1093,6 +1093,34 @@ def test_b_guard_an_edit_that_touches_no_identity_leaves_a_bad_old_power_alone(d
     assert (after["mrp"], after["identity_key"]) == (1100.0, "acuvue|oasys|junk")
 
 
+@pytest.mark.parametrize("category,attrs,edit,key,column,word", [
+    ("LS", _CRIZAL, {"subbrand": "Varilux"}, "essilor|varilux|hc|156", "model", "Varilux"),
+    ("CCL", dict(_OASYS, colour_name="Hazel Brown"), {"colour_name": "Ocean Blue"},
+     "acuvue|oasys|oceanblue|m125", "color", "Ocean Blue"),
+])
+def test_b_a_sub_brand_or_colour_name_edit_rekeys_it(door, category, attrs, edit, key, column, word):
+    """The create door copies a lens's sub-brand into the flat model column
+    and a colour lens's colour name into the flat colour column. The key read
+    those copies over the attributes, so an Edit-form save of Crizal ->
+    Varilux (Hazel Brown -> Ocean Blue) kept the old key: a new Crizal was
+    refused against the product that now says Varilux, and a second Varilux
+    saved. The attributes decide; the copies and a minted name follow."""
+    first = door(_form_post(category, attrs))
+    old_word = attrs.get("subbrand") or attrs.get("colour_name")
+    assert old_word in first["name"]
+    edited = dict(attrs, **edit)
+    # The Edit form's PUT: brand, the model when the category has one, the
+    # whole attributes bag (no hidden model_no for a lens), a price.
+    model = edited.get("model_no") or edited.get("model_name")
+    _put(first["product_id"], brand=edited["brand_name"], attributes=edited, mrp=1100.0,
+         **({"model": model} if model else {}))
+    after = door.repo.find_by_id(first["product_id"])
+    assert (after["identity_key"], after[column], after["sku"]) == (key, word, first["sku"])
+    assert word in after["name"] and old_word not in after["name"]
+    assert door(_form_post(category, attrs))["identity_key"] == first["identity_key"]  # free again
+    assert _dup(door, _form_post(category, edited))["product_id"] == first["product_id"]
+
+
 # ---------------------------------------------------------------------------
 # C: the catalog doors name a power that is not a number, never a 500
 # ---------------------------------------------------------------------------
@@ -1188,28 +1216,38 @@ def test_d_colour_twins_and_packs_never_share_a_name_title_or_handle():
 
 
 @pytest.mark.parametrize("category,flat,attrs", [
-    # flat colour '601', attributes colour name only
-    ("SUNGLASS", {"color": "601"},
-     {"brand_name": "Ray-Ban", "model_no": "RB4165", "colour_name": "Black"}),
-    # flat model 'OASYS-1D', attributes model name only
+    # main's Edit form changed a colour lens's colour name, and a lens's
+    # sub-brand, and left the flat copies the create door had made of them
+    ("COLORED_CONTACT_LENS", {"model": "Oasys", "color": "Hazel Brown"},
+     dict(_OASYS, colour_name="Ocean Blue")),
+    ("OPTICAL_LENS", {"model": "Crizal"}, dict(_CRIZAL, subbrand="Varilux")),
+    # a contact lens whose flat model is not its model name
     ("CONTACT_LENS", {"model": "OASYS-1D"}, dict(_OASYS)),
+    # a legacy row with no identity in its attributes: the flat columns are it
+    ("SUNGLASS", {"brand": "Ray-Ban", "model": "RB4165", "color": "601"}, {}),
 ])
 def test_d_the_key_rebuild_reads_a_row_as_the_edit_and_create_doors_do(door, category, flat, attrs):
-    """A row whose flat columns and attributes disagree: the rebuild writes the
-    key the edit door (identity_key_of) and the FORM create door compute, so
-    the same product entered again is the 409, never a silent duplicate."""
+    """A row whose flat columns and attributes disagree: the attributes are
+    what the product is (the flat columns are copies of them, which an edit
+    on main left behind), a flat column fills only a slot they leave empty.
+    The rebuild writes the key the edit door (identity_key_of) and the FORM
+    create door compute, so the product entered again is the 409."""
     from scripts import migrate_identity_key_tighten as mig
 
     row = {"product_id": "P-OLD", "sku": "P-OLD", "category": category, "is_active": True,
-           "brand": attrs["brand_name"], "identity_key": "stale", "mrp": 1000.0,
+           "brand": attrs.get("brand_name"), "identity_key": "stale", "mrp": 1000.0,
            "offer_price": 900.0, "attributes": dict(attrs), **flat}
     door.repo.collection.insert_one(dict(row))
     mig.run(door.repo.collection, apply=True)
-    assert door.repo.find_by_id("P-OLD")["identity_key"] == pm.identity_key_of(row)
-    again = prod_router.ProductCreate(
-        category=category, brand=attrs["brand_name"],
-        model=flat.get("model") or attrs.get("model_no") or attrs.get("model_name"),
-        color=flat.get("color"), attributes=dict(attrs), mrp=1000.0, offer_price=900.0)
+    key = door.repo.find_by_id("P-OLD")["identity_key"]
+    assert key == pm.identity_key_of(row)
+    if attrs:
+        assert key == pm.compute_identity_key(*pm.identity_parts(attrs, category))
+        again = _form_post(category, attrs)
+    else:
+        assert key == "rayban|rb4165|601"
+        again = prod_router.ProductCreate(category=category, attributes={}, mrp=1000.0,
+                                          offer_price=900.0, **flat)
     assert _dup(door, again)["product_id"] == "P-OLD"
 
 

@@ -125,6 +125,7 @@ import BuyDeskPage from '../BuyDeskPage';
 import { useSimilarProducts } from '../useSimilarProducts';
 import { NAV_GROUPS } from '../../../components/shell/navConfig';
 import { PURCHASE_ROLES } from '../../purchase/purchaseRoles';
+import { productToFormValues } from '../../../domain/catalog/productAdd';
 
 const renderPage = (url = '/catalog/add') =>
   render(
@@ -296,6 +297,22 @@ describe('F13 / D5 - the SKU is previewed before saving', () => {
     expect(value.className).not.toMatch(/(^|\s)truncate(\s|$)/);
     expect(value.className).toMatch(/(^|\s)break-all(\s|$)/);
     expect(reviewRow('SKU').className).toMatch(/(^|\s)col-span-full(\s|$)/);
+  });
+});
+
+describe('the Edit form loads what the product is', () => {
+  it("an Optical Lens gets no hidden model_no from its sub-brand's stored copy", () => {
+    const lens = {
+      brand: 'Essilor', model: 'Crizal',
+      attributes: { brand_name: 'Essilor', subbrand: 'Crizal', index: '1.56', coating: 'HC' },
+    };
+    for (const category of ['OPTICAL_LENS', 'LS']) {
+      const { attributes } = productToFormValues({ ...lens, category });
+      expect(attributes).toEqual(lens.attributes);
+    }
+    // Guard: an older frame doc with only the flat model still loads it.
+    const frame = productToFormValues({ category: 'FRAME', brand: 'Ray-Ban', model: 'RB5154', attributes: {} });
+    expect(frame.attributes).toEqual({ brand_name: 'Ray-Ban', model_no: 'RB5154' });
   });
 });
 

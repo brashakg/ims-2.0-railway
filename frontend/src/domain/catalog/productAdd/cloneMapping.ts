@@ -1,5 +1,6 @@
 import type { ProductFormValues } from './formModel';
 import { resolveHsnGst } from './formModel';
+import { CANONICAL_TO_PICKER } from './categoryFields';
 
 // ============================================================================
 // Clone support (Phase C): map a persisted product doc back into the Quick Add
@@ -74,8 +75,12 @@ export function productToFormValues(product: ProductDoc): ProductFormValues {
   // Backfill brand/model from the top-level fields when the attributes dict
   // didn't carry them (older docs). The form maps brand_name/model_no back to
   // top-level brand/model on save, so this keeps the round-trip lossless.
+  // An Optical Lens has no model field: its stored model is a copy of its
+  // sub-brand (product_master._derive_brand_model_color_size), and a hidden
+  // model_no would outrank a Sub Brand edit in the server's duplicate key.
   if (!attributes.brand_name && product.brand) attributes.brand_name = str(product.brand);
-  if (!attributes.model_no && !attributes.model_name && product.model) {
+  const isLens = (CANONICAL_TO_PICKER[category] || category) === 'LS';
+  if (!isLens && !attributes.model_no && !attributes.model_name && product.model) {
     attributes.model_no = str(product.model);
   }
 

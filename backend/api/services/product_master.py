@@ -1299,14 +1299,35 @@ def _duplicate_error(existing: Dict[str, Any]) -> "ProductMasterError":
     return err
 
 
+def _identity_attributes(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """A stored row's attributes as the identity reads them: the attributes
+    first, and a flat brand/model/color/size column only for a slot its
+    attributes leave empty (a legacy row). The flat columns are copies the
+    create door derived from the attributes (_derive_brand_model_color_size),
+    so a copy left behind by an edit (a lens's sub-brand, a colour name) never
+    outranks the attribute it came from."""
+    doc = doc or {}
+    attrs: Dict[str, Any] = dict(doc.get("attributes") or {})
+    ids = _derive_brand_model_color_size(attrs)
+    for slot, key in (
+        ("brand", "brand_name"),
+        ("model", "model_no"),
+        ("color", "colour_code"),
+        ("size", "size"),
+    ):
+        flat = doc.get(slot) or (doc.get("colour") if slot == "color" else None)
+        if _is_blank(ids[slot]) and not _is_blank(flat):
+            attrs[key] = flat
+    return attrs
+
+
 def identity_key_of(doc: Dict[str, Any]) -> Optional[str]:
     """THE duplicate key a stored product has, by the create rule: identity_parts
-    over its attributes, a legacy row's flat brand/model/color/size filling the
-    gaps (_overlay_attributes; the FORM door folds them the same way,
-    normalise_door_payload). The edit door and the key rebuild
+    over its attributes, a legacy row's flat columns filling only an empty
+    slot (_identity_attributes). The edit door and the key rebuild
     (scripts/migrate_identity_key_tighten.py) both read a row through here."""
     return compute_identity_key(
-        *identity_parts(_overlay_attributes(doc), (doc or {}).get("category"))
+        *identity_parts(_identity_attributes(doc), (doc or {}).get("category"))
     )
 
 
@@ -1336,9 +1357,19 @@ def rekey_on_edit(
     the Edit form re-sends the whole attributes bag with a price change, so
     the key and the name stay as stored. An edit that blanks the brand or
     model keeps the stored key (ponytail: no $unset door, a unique sparse
-    index refuses two null keys)."""
+    index refuses two null keys). The flat brand/model/color/size columns
+    are copies of the attributes (_derive_brand_model_color_size): an edit
+    that changes the attribute a column comes from re-derives that column, so
+    the minted name and the model column say Varilux after a Crizal ->
+    Varilux sub-brand edit."""
     if not any(k in patch for k in ("attributes", "brand", "model", "color", "size", "category")):
         return
+    if "attributes" in patch:
+        was = _derive_brand_model_color_size(current.get("attributes") or {})
+        now = _derive_brand_model_color_size(patch.get("attributes") or {})
+        for slot, val in now.items():
+            if not _is_blank(val) and val != was[slot]:
+                patch[slot] = val
     merged = {**current, **patch}
     try:
         old = identity_key_of(current)
@@ -1347,7 +1378,7 @@ def rekey_on_edit(
     try:
         new = identity_key_of(merged)
     except ProductMasterError:
-        after, before = _overlay_attributes(merged), _overlay_attributes(current)
+        after, before = _identity_attributes(merged), _identity_attributes(current)
         # A value this edit typed is still the 422 naming it.
         identity_parts({k: v for k, v in after.items() if v != before.get(k)}, merged.get("category"))
         # ponytail: the bad value is the stored one, untouched, so the key
