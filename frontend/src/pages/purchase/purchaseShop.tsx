@@ -37,7 +37,9 @@ export function usePurchaseShop() {
   const { user } = useAuth();
   const { shop, setShop } = useChosenShop();
   const canPick = userSeesAllStores(user?.roles);
-  const ownStoreId = user?.activeStoreId || undefined;
+  // The server's own-shop rule (resolve_store_scope): the active shop, else a
+  // non-admin's first own shop -- the one every screen names as 'your shop'.
+  const ownStoreId = user?.activeStoreId || (canPick ? undefined : (user?.storeIds || []).find((s) => !!s));
   const storeId = canPick ? shop || undefined : ownStoreId;
   const showShopOf = (raisedAt: string | undefined): boolean => {
     const move = canPick && !!shop && !!raisedAt && shop !== raisedAt;

@@ -7,8 +7,8 @@ import { useAuth } from '../../context/AuthContext';
 import { PAYABLES_ROLES } from '../../components/common/CostCell';
 import type { GSTSummaryData } from './financeTypes';
 import { formatCurrency } from './financeUtils';
-import { PurchaseShopName } from '../purchase/purchaseShop';
-import { userSeesAllStores } from '../../utils/storeAccess';
+import { PurchaseShopName, usePurchaseShop } from '../purchase/purchaseShop';
+import { NO_SHOP_LABEL } from '../../components/common/NoShopNotice';
 
 interface GSTPanelProps {
   gstSummary: GSTSummaryData | null;
@@ -26,9 +26,9 @@ const INPUT_TAX_NOTE =
 export default function GSTPanel({ gstSummary }: GSTPanelProps) {
   const { user } = useAuth();
   const canSeeInputTax = (user?.roles || []).some((r) => PAYABLES_ROLES.includes(r));
-  const isAdmin = userSeesAllStores(user?.roles);
-  // The shop the server scopes a non-admin to: its active shop, else its first.
-  const ownShop = user?.activeStoreId || (user?.storeIds || []).find((s) => !!s);
+  // THE Purchase / Finance shop scope: who sees every shop, and the shop the
+  // server scopes anyone else to.
+  const { canPick: isAdmin, ownStoreId: ownShop } = usePurchaseShop();
   if (!gstSummary) return null;
 
   return (
@@ -42,11 +42,11 @@ export default function GSTPanel({ gstSummary }: GSTPanelProps) {
           accounts roles') reads the same shop scope (round 4). */}
       <div className="flex items-center gap-2 text-xs text-gray-500">
         <span className="inline-flex items-center rounded-full bg-gray-100 text-gray-600 border border-gray-200 px-2 py-0.5 font-medium">
-          {isAdmin || !ownShop ? (
+          {isAdmin ? (
             <>All shops · current month</>
           ) : (
             <>
-              Your shop: <PurchaseShopName storeId={ownShop} /> · current month
+              Your shop: {ownShop ? <PurchaseShopName storeId={ownShop} /> : NO_SHOP_LABEL} · current month
             </>
           )}
         </span>
