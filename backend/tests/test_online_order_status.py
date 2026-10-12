@@ -2971,3 +2971,42 @@ def test_the_stock_in_task_names_the_order_staff_can_look_up(swept, monkeypatch,
     [task] = _stock_in(swept, oid)
     assert task["title"].startswith(f"Order {doc['order_number']}:") and doc["order_number"]
     assert doc["order_id"] not in task["title"] + task["description"]
+
+
+@pytest.mark.parametrize("lost", ["stamp", "task_insert"])
+def test_a_lost_reply_on_the_conflict_claim_never_blocks_the_order(swept, monkeypatch, lost):
+    """Ruling 2's one task. The conflict claim (the order's marker, then)
+    committed and its reply was lost: the marker was held with no task, every
+    later fact on the order failed for good -- payment_status stayed PAID -- and
+    the counter return door then refunded an order Shopify had refunded in
+    full. The task's own id is the claim now: a lost reply (on the order's
+    stamp, or on the task insert itself) leaves one task and the facts flow."""
+    from fastapi import HTTPException
+
+    oid = 60233 + (lost == "task_insert")
+    _claim_unit(swept, _book(swept, oid))
+    _set(swept, oid, status="DELIVERED", fulfillment_status="FULFILLED")
+    coll, method = ((swept["orders"], "update_one") if lost == "stamp"
+                    else (swept["db"]["tasks"], "insert_one"))
+    real, hit = getattr(coll, method), []
+
+    def commits_then_raises(*a, **kw):
+        out = real(*a, **kw)
+        if not hit and (lost == "task_insert" or "status_conflict_at" in (a[1].get("$set") or {})):
+            hit.append(1)
+            raise RuntimeError("socket timeout after the commit")
+        return out
+
+    monkeypatch.setattr(coll, method, commits_then_raises)
+    body = _pulled(oid, financial_status="refunded", fulfillment_status="fulfilled")
+    swept["real_map"](copy.deepcopy(body), swept["db"], webhook_id=f"u-{oid}", topic="orders/updated")
+    swept["state"]["orders"] = [body]
+    for _ in range(3):
+        swept["run"]()
+    doc = _doc(swept, oid)
+    assert hit and (doc["status"], doc["payment_status"]) == ("DELIVERED", "REFUNDED")
+    assert _tasks(swept, oid, "online_status_conflict") == 1
+    with pytest.raises(HTTPException) as refused:
+        _counter_return(swept, oid)
+    assert refused.value.status_code == 400
+    assert "Shopify already refunded this order in full" in refused.value.detail

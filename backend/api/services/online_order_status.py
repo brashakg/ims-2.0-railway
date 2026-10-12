@@ -27,8 +27,8 @@ to a concurrent staff move (read again, decide again).
 
 from __future__ import annotations
 
+import hashlib
 import logging
-import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
@@ -216,43 +216,26 @@ def _raise_rx_task(db, order: Dict[str, Any], source: str) -> None:
 
 
 def _raise_conflict_task(db, order: Dict[str, Any], fact: str, source: str) -> bool:
-    """ONE task per order, forever (ruling 2): the order doc's
-    status_conflict_at marker is claimed atomically first, so a replay, the
-    hourly sweep, a remap or a closed task never raise a second one. True:
-    the task is raised (now, or already by the event that holds the marker);
-    False: no task yet. Never raises."""
+    """ONE task per order, forever (ruling 2). The task's id is the order's
+    own (_conflict_task_id), so its insert IS the claim: a replay, the hourly
+    sweep, a remap, a racing event, a retry after a lost reply or a closed
+    task all hit the duplicate key and raise no second one. A failed insert
+    holds nothing, so the next event or the sweep raises it -- there is no
+    marker a lost reply could leave held with no task (which blocked every
+    later fact on the order for good). status_conflict_at / _fact record the
+    conflict on the order once the task exists. True: the task exists;
+    False: not yet. Never raises."""
     oid = order.get("order_id")
     if not oid:
         return True
-    try:
-        orders = db.get_collection("orders")
-        claim = orders.update_one(
-            {"order_id": oid, "status_conflict_at": None},
-            {"$set": {
-                "status_conflict_at": datetime.now(timezone.utc).replace(tzinfo=None),
-                "status_conflict_fact": fact,
-            }},
-        )
-        if not getattr(claim, "modified_count", 0):
-            # Held by another event: raised only once its task has landed.
-            # Trusted before that, this event wrote its marks (the sweep then
-            # never fed it again) while the holder's insert could still fail
-            # and release the marker -- no task at all. Unlanded, this event
-            # stays unmarked and the next one, or the sweep, raises the task.
-            # ponytail: a holder that dies between its claim and its insert
-            # leaves the marker with no task, and every later event fails
-            # (the sweep reports it each hour); a lease on the marker if so.
-            return db.get_collection("tasks").find_one(
-                {"task_type": "online_status_conflict", "order_id": oid}) is not None
-    except Exception:  # noqa: BLE001
-        logger.warning("[%s] status-conflict marker claim failed for order=%s", source, oid,
-                       exc_info=True)
-        return False
+    task_id = _conflict_task_id(oid)
     ref = order.get("order_number") or oid
     verb = _VERB.get(fact, str(fact).lower())
     try:
         db.get_collection("tasks").insert_one({
-            "task_id": f"TSK-{uuid.uuid4().hex[:10].upper()}",
+            "_id": task_id,
+            "task_id": task_id,
+            "task_number": task_id,
             "task_type": "online_status_conflict",
             "title": (
                 f"Shopify {verb} order {ref}, which IMS shows DELIVERED - decide: "
@@ -285,27 +268,33 @@ def _raise_conflict_task(db, order: Dict[str, Any], fact: str, source: str) -> b
             "created_at": datetime.now(timezone.utc).isoformat(),
             "created_by": f"system:{source}",
         })
-        return True
-    except Exception:  # noqa: BLE001 -- release the marker so the next event retries
-        logger.warning("[%s] status-conflict task insert failed for order=%s", source, oid,
-                       exc_info=True)
-        # An error does not say the insert did not land (a reply lost after
-        # the commit; a standalone mongod retries no write): the order's one
-        # conflict task is read back first. Released after a landed insert,
-        # the next event claimed the marker again and raised a second task.
+    except Exception:  # noqa: BLE001
+        # The duplicate key (raised already), or an error that does not say
+        # the insert did not land (a reply lost after the commit; a standalone
+        # mongod retries no write): read it back. Unread or absent: the next
+        # event or the sweep inserts it again.
         try:
-            if db.get_collection("tasks").find_one(
-                    {"task_type": "online_status_conflict", "order_id": oid}) is not None:
-                return True
+            if db.get_collection("tasks").find_one({"_id": task_id}) is None:
+                logger.warning("[%s] status-conflict task insert failed for order=%s",
+                               source, oid, exc_info=True)
+                return False
         except Exception:  # noqa: BLE001
-            # ponytail: an unread task releases (a second task only on two
-            # misses in a row), as the stock-in task's read-back does.
-            logger.debug("[%s] status-conflict task read-back failed", source, exc_info=True)
-        try:
-            db.get_collection("orders").update_one(
-                {"order_id": oid},
-                {"$unset": {"status_conflict_at": "", "status_conflict_fact": ""}},
-            )
-        except Exception:  # noqa: BLE001
-            logger.debug("[%s] status-conflict marker release failed", source, exc_info=True)
-        return False
+            return False
+    try:
+        db.get_collection("orders").update_one(
+            {"order_id": oid, "status_conflict_at": None},
+            {"$set": {
+                "status_conflict_at": datetime.now(timezone.utc).replace(tzinfo=None),
+                "status_conflict_fact": fact,
+            }},
+        )
+    except Exception:  # noqa: BLE001 -- a record only; the task is the claim
+        logger.debug("[%s] status-conflict stamp failed for order=%s", source, oid, exc_info=True)
+    return True
+
+
+def _conflict_task_id(order_id: str) -> str:
+    """The order's one conflict task id (TSK-<10 hex>, like every task id),
+    the same on every door, so the tasks _id makes its insert happen once."""
+    return "TSK-" + hashlib.sha256(f"online_status_conflict:{order_id}".encode()).hexdigest()[:10].upper()
+
