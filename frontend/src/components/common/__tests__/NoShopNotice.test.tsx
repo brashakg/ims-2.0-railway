@@ -27,6 +27,8 @@ vi.mock('../../../context/ToastContext', () => ({
   useToast: () => ({ success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() }),
 }));
 vi.mock('../../../hooks/useIsOnlineStore', () => ({ useIsOnlineStore: () => false }));
+// The Finance dashboard's Shop picker / shop names read the store list (react-query).
+vi.mock('../../../hooks/usePOSQueries', () => ({ useStores: () => ({ data: [] }) }));
 vi.mock('../../../services/api/finance', () => ({
   financeApi: {
     getRevenue: vi.fn(),

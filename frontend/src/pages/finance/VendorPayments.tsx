@@ -2,11 +2,8 @@
 // IMS 2.0 - Vendor Payments Tab
 // ============================================================================
 
-import { useEffect, useState } from 'react';
 import clsx from 'clsx';
-import { useAuth } from '../../context/AuthContext';
-import { storeApi } from '../../services/api/stores';
-import { normalizeStore } from '../../utils/storeAccess';
+import { PurchaseShopName, usePurchaseShop } from '../purchase/purchaseShop';
 import type { VendorPaymentData } from './financeTypes';
 import { formatCurrency } from './financeUtils';
 
@@ -34,41 +31,16 @@ export function SupplierStatusBadge({ vendor }: { vendor: VendorPaymentData }) {
   );
 }
 
-/** Which shop the supplier figures cover. The Finance dashboard reads every
- *  panel -- these too -- for the shop picked at the top of the screen
- *  (user.activeStoreId, sent as ?store_id); with no shop picked the server
- *  answers every shop. Named from the store list, its id until that arrives. */
+/** Which shop the supplier figures cover: the dashboard's one shop scope
+ *  (usePurchaseShop -- every shop for an admin until he picks one, else the
+ *  caller's own shop), named by the one shop-name rule (PurchaseShopName). */
 export function SupplierFiguresShop() {
-  const { user } = useAuth();
-  const storeId = user?.activeStoreId || '';
-  // The name found for a shop id; a stale answer for another id is ignored.
-  const [named, setNamed] = useState<{ id: string; name: string } | null>(null);
-  const name = named?.id === storeId ? named.name : '';
-  useEffect(() => {
-    if (!storeId) return;
-    let cancelled = false;
-    storeApi
-      .getStores()
-      .then((res: unknown) => {
-        const body = res as { stores?: unknown } | unknown[] | null;
-        const list = Array.isArray(body) ? body : Array.isArray(body?.stores) ? body.stores : [];
-        const row = (list as Record<string, unknown>[])
-          .map((s) => normalizeStore(s))
-          .find((s) => s?.id === storeId);
-        if (!cancelled && row) setNamed({ id: storeId, name: row.name });
-      })
-      .catch(() => {
-        /* the id stands in for the name */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [storeId]);
+  const { storeId } = usePurchaseShop();
   return (
     <p className="text-xs text-slate-600 mt-1">
       {storeId ? (
         <>
-          Shop: <span className="font-medium text-gray-900">{name || storeId}</span>
+          Shop: <span className="font-medium text-gray-900"><PurchaseShopName storeId={storeId} /></span>
         </>
       ) : (
         'All shops'

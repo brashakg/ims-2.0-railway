@@ -50,6 +50,8 @@ vi.mock('../../../context/AuthContext', () => ({
 vi.mock('../../../context/ToastContext', () => ({
   useToast: () => ({ success: vi.fn(), error: vi.fn(), info: vi.fn() }),
 }));
+// The dashboard's Shop picker / shop names read the store list (react-query).
+vi.mock('../../../hooks/usePOSQueries', () => ({ useStores: () => ({ data: [] }) }));
 vi.mock('../../reports/GSTR3BPage', () => ({ GSTR3BPage: () => <div>GSTR-3B PAGE</div> }));
 vi.mock('../../reports/GSTR1Page', () => ({ GSTR1Page: () => <div>GSTR-1 PAGE</div> }));
 

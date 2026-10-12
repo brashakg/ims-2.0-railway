@@ -23,6 +23,7 @@ import type {
 } from './financeTypes';
 import { financeApi } from '../../services/api/finance';
 import { NoShopNotice, hasNoShop } from '../../components/common/NoShopNotice';
+import { PurchaseShopLabel, PurchaseShopPicker, usePurchaseShop } from '../purchase/purchaseShop';
 
 // ---- Mappers: real finance.py responses -> dashboard panel types ----------
 // The backend returns aggregate/summary shapes; the panels expect these
@@ -174,6 +175,11 @@ import JournalEntriesPanel from './JournalEntriesPanel';
 export default function FinanceDashboard() {
   const { user } = useAuth();
   const toast = useToast();
+  // The one shop scope of the Purchase and Finance screens (audit F63, owner
+  // ruling 2026-09-28 'admins see all stores'): an admin reads EVERY shop
+  // until he narrows it with the Shop picker in the header -- never his
+  // topbar (often HQ) shop -- and everyone else reads their own shop.
+  const { storeId } = usePurchaseShop();
 
   // OWNER DECISION 2026-08-13: the store-by-store profit table is ADMIN /
   // SUPERADMIN only, because every row carries that store's monthly wage bill
@@ -242,13 +248,12 @@ export default function FinanceDashboard() {
     // hand it organisation data.
     if (hasNoShop(user)) return;
     loadFinanceData();
-    // user?.activeStoreId is load-bearing — without it the topbar store-switch
-    // updates AuthContext but the finance data stays pinned to the old store.
-  }, [activeTab, dateFrom, dateTo, selectedYear, user?.activeStoreId]);
+    // storeId is load-bearing -- without it a shop pick (an admin's picker,
+    // anyone else's topbar store) leaves the figures on the old shop.
+  }, [activeTab, dateFrom, dateTo, selectedYear, storeId]);
 
   const loadFinanceData = async () => {
     setIsLoading(true);
-    const storeId = user?.activeStoreId;
     try {
       // Real finance.py endpoints, fetched in parallel. Each section
       // fail-soft independently so one slow/empty endpoint doesn't blank
@@ -398,7 +403,7 @@ export default function FinanceDashboard() {
       const blob = await financeApi.downloadTallySalesJv({
         from_date: dateFrom,
         to_date: dateTo,
-        store_id: user?.activeStoreId,
+        store_id: storeId,
       });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -454,7 +459,9 @@ export default function FinanceDashboard() {
           <h1>The books, in real time.</h1>
           <div className="hint">Revenue, P&amp;L, GST collected / payable, outstanding aging, cash flow, period lock after month-end. Tally export on sync.</div>
         </div>
-        <div>
+        <div className="flex flex-wrap items-center gap-3">
+          <PurchaseShopPicker />
+          <PurchaseShopLabel />
           <button className="btn-secondary" onClick={handleTallyExport}>Export to Tally</button>
         </div>
       </div>

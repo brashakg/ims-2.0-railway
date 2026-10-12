@@ -2,10 +2,11 @@
 // IMS 2.0 - Finance dashboard: supplier figures follow the dashboard's shop,
 // and one status rule reads a supplier's balance (review r1 #12 #37 #38)
 // ============================================================================
-// Every other Finance panel reads the shop picked at the top of the screen
-// (?store_id=activeStoreId). The supplier figures -- the Vendor Payments tab
-// and the Outstanding tab's payment schedule -- used to ask for every shop
-// with nothing on screen saying so, next to one shop's receivables.
+// Every Finance panel reads ONE shop scope -- the Purchase screens' (usePurchase
+// Shop): an admin reads EVERY shop until he picks one in the header's Shop
+// picker (owner ruling 2026-09-28 'admins see all stores'; round 4 P3: his
+// topbar HQ shop used to narrow Vendor Payments to 'Shop: HQ, Rs 0 owed'),
+// anyone else his own shop. The supplier figures say which.
 //
 // The balance is the supplier ledger's closing balance: below zero we paid
 // ahead (an advance), zero is settled. Outstanding used to badge both
@@ -15,7 +16,7 @@
 // Drives the REAL FinanceDashboard with the api modules mocked.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, renderHook, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 vi.mock('../../../services/api/finance', () => ({
@@ -35,8 +36,14 @@ vi.mock('../../../services/api/finance', () => ({
   },
 }));
 
-vi.mock('../../../services/api/stores', () => ({
-  storeApi: { getStores: vi.fn() },
+// The one shop-name rule (purchaseShop.PurchaseShopName) reads the store list.
+vi.mock('../../../hooks/usePOSQueries', () => ({
+  useStores: () => ({
+    data: [
+      { store_id: 'BV-DHN-01', store_name: 'Better Vision Dhanbad' },
+      { store_id: 'WO-PUN-01', store_name: 'WizOpt Pune' },
+    ],
+  }),
 }));
 
 let roles: string[] = ['ADMIN'];
@@ -51,11 +58,16 @@ vi.mock('../../../context/ToastContext', () => ({
 
 import FinanceDashboard from '../FinanceDashboard';
 import { financeApi } from '../../../services/api/finance';
-import { storeApi } from '../../../services/api/stores';
 import { NO_SHOP_MESSAGE } from '../../../components/common/NoShopNotice';
+import { usePurchaseShop } from '../../purchase/purchaseShop';
 
 const api = financeApi as unknown as Record<string, ReturnType<typeof vi.fn>>;
-const getStores = storeApi.getStores as unknown as ReturnType<typeof vi.fn>;
+
+/** Clears the admin's shop pick (the shared Purchase / Finance filter). */
+function clearPick() {
+  const { result } = renderHook(() => usePurchaseShop());
+  act(() => result.current.setShop(''));
+}
 
 // /finance/vendor-payments rows (the ledger's closing balance per supplier).
 const SUPPLIERS = [
@@ -77,12 +89,6 @@ function primeApi() {
   api.getPnlByStore.mockResolvedValue({ stores: [] });
   api.getPnlByCategory.mockResolvedValue({ categories: [] });
   api.getGstReconciliation.mockResolvedValue({ entities: [] });
-  getStores.mockResolvedValue({
-    stores: [
-      { store_id: 'BV-DHN-01', store_name: 'Better Vision Dhanbad' },
-      { store_id: 'WO-PUN-01', store_name: 'WizOpt Pune' },
-    ],
-  });
 }
 
 async function openTab(name: RegExp) {
@@ -102,38 +108,48 @@ function statusOf(vendor: string): string {
 describe('Finance dashboard - supplier figures follow the dashboard shop', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    clearPick();
     roles = ['ADMIN'];
-    activeStoreId = 'BV-DHN-01';
+    activeStoreId = 'BV-HQ-01';
     primeApi();
   });
 
-  it.each([['ADMIN'], ['ACCOUNTANT']])(
-    '%s: asks for the shop every other panel reads, and says which shop it is',
+  // Round 4 P3: an admin whose topbar shop is HQ read 'Shop: HQ' and Rs 0
+  // owed; the every-shop figure was nowhere on the screen.
+  it.each([['ADMIN'], ['SUPERADMIN']])(
+    '%s: every shop by default, never his topbar shop, and says so',
     async (role) => {
       roles = [role];
       await openTab(/outstanding/i);
-      expect(api.getVendorPayments).toHaveBeenCalledWith('BV-DHN-01');
-      expect(api.getOutstanding).toHaveBeenCalledWith({ store_id: 'BV-DHN-01' });
+      expect(api.getVendorPayments).toHaveBeenCalledWith(undefined);
+      expect(api.getOutstanding).toHaveBeenCalledWith({ store_id: undefined });
+      expect(api.getRevenue).toHaveBeenCalledWith({ period: 'month', store_id: undefined });
       const head = (await screen.findByText(/vendor payment schedule/i)).parentElement as HTMLElement;
-      expect(await within(head).findByText('Better Vision Dhanbad')).toBeInTheDocument();
-      expect(within(head).getByText(/^Shop:/)).toBeInTheDocument();
+      expect(within(head).getByText('All shops')).toBeInTheDocument();
+      expect(screen.getByLabelText('Purchase shop')).toHaveValue('');
     },
   );
 
-  it('Vendor Payments tab names the same shop', async () => {
+  it('an admin narrows every panel to one shop with the Shop picker', async () => {
     await openTab(/vendor payments/i);
-    expect(api.getVendorPayments).toHaveBeenCalledWith('BV-DHN-01');
-    expect(await screen.findByText('Better Vision Dhanbad')).toBeInTheDocument();
+    vi.clearAllMocks();
+    primeApi();
+    await userEvent.setup().selectOptions(screen.getByLabelText('Purchase shop'), 'WO-PUN-01');
+    await waitFor(() => expect(api.getVendorPayments).toHaveBeenCalledWith('WO-PUN-01'));
+    expect(api.getPnl).toHaveBeenCalledWith(expect.objectContaining({ store_id: 'WO-PUN-01' }));
+    expect(await screen.findByText('WizOpt Pune', { selector: 'span' })).toBeInTheDocument();
   });
 
-  it('no shop picked: every shop is asked for and labelled as such', async () => {
-    activeStoreId = '';
-    await openTab(/vendor payments/i);
-    // No shop sent (getVendorPayments drops an empty id): every shop.
-    expect(api.getVendorPayments).toHaveBeenCalled();
-    expect(api.getVendorPayments.mock.calls.every(([sid]) => !sid)).toBe(true);
-    expect(await screen.findByText('All shops')).toBeInTheDocument();
-    expect(screen.queryByText(/^Shop:/)).toBeNull();
+  it('an accountant reads his own shop, with no picker, and is told which', async () => {
+    roles = ['ACCOUNTANT'];
+    activeStoreId = 'BV-DHN-01';
+    await openTab(/outstanding/i);
+    expect(api.getVendorPayments).toHaveBeenCalledWith('BV-DHN-01');
+    expect(api.getOutstanding).toHaveBeenCalledWith({ store_id: 'BV-DHN-01' });
+    const head = (await screen.findByText(/vendor payment schedule/i)).parentElement as HTMLElement;
+    expect(within(head).getByText('Better Vision Dhanbad')).toBeInTheDocument();
+    expect(within(head).getByText(/^Shop:/)).toBeInTheDocument();
+    expect(screen.queryByLabelText('Purchase shop')).toBeNull();
   });
 
   // Owner ruling 2026-10-12 (R4): the server gives a non-admin login with no
@@ -152,16 +168,18 @@ describe('Finance dashboard - supplier figures follow the dashboard shop', () =>
   });
 
   it('a shop missing from the store list is named by its id', async () => {
+    roles = ['ACCOUNTANT'];
     activeStoreId = 'BV-NEW-09';
-    await openTab(/vendor payments/i);
-    await waitFor(() => expect(getStores).toHaveBeenCalled());
-    expect(await screen.findByText('BV-NEW-09')).toBeInTheDocument();
+    await openTab(/outstanding/i);
+    const head = (await screen.findByText(/vendor payment schedule/i)).parentElement as HTMLElement;
+    expect(await within(head).findByText('BV-NEW-09')).toBeInTheDocument();
   });
 });
 
 describe('Finance dashboard - one status rule for a supplier balance', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    clearPick();
     roles = ['ADMIN'];
     activeStoreId = 'BV-DHN-01';
     primeApi();
