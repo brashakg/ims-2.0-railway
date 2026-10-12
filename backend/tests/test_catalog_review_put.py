@@ -837,6 +837,28 @@ def test_review_editor_keeps_the_legacy_barcode_when_the_spine_write_fails(
     assert "gtin" not in spine["attributes"]
 
 
+def test_a_spine_gtin_write_that_changes_nothing_is_no_failure(gtin_env, monkeypatch):
+    """Round 9. BaseRepository.update answers modified_count > 0: re-saving the
+    gtin the spine already holds, in the same millisecond as the price sync
+    just before it (BSON keeps ms), changed nothing and 503'd a save that
+    worked. Frozen clock = the same millisecond."""
+    import database.repositories.base_repository as base_repo
+
+    _put("twin-g1", {"attributes": {"gtin": _GTIN}})
+    gtin_env.collection.update_one({"product_id": "spine-g1"}, {"$set": {"barcode": _UPC}})
+
+    class _SameMs(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 10, 1, 12, 0, 0)
+
+    monkeypatch.setattr(base_repo, "datetime", _SameMs)
+    _put("twin-g1", {"attributes": {"gtin": _GTIN}, "pricing": {"mrp": 5200.0}})
+    spine = gtin_env.find_by_id("spine-g1")
+    assert spine["attributes"]["gtin"] == _GTIN and spine["mrp"] == 5200.0
+    assert "barcode" not in spine
+
+
 @pytest.mark.parametrize("typed", ["", None])
 def test_review_editor_takes_an_old_spelling_out_of_twin_and_spine(gtin_env, typed):
     """Twin and spine hold the code under the old spelling 'GTIN'. A Remove
