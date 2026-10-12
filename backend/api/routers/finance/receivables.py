@@ -10,6 +10,7 @@ from ...utils.ist import now_ist_naive
 from typing import Optional
 from fastapi import Depends, HTTPException
 from ..auth import get_current_user
+from ...dependencies import resolve_store_scope
 from ...services import ap_engine
 from ...services.cost_mask import can_see_cost
 from ._shared import (
@@ -17,7 +18,6 @@ from ._shared import (
     _REAL_ORDER_STATUS_FILTER,
     _get_db,
     _order_total,
-    _scope_store,
     router,
 )
 
@@ -105,7 +105,7 @@ async def get_outstanding(
     over 30 days as overdue even when the customer is within their NET-60
     terms. Real overdue = days past the due_date.
     """
-    store_id = _scope_store(store_id, current_user)
+    store_id = resolve_store_scope(store_id, current_user)
     db = _get_db()
     if db is None:
         return []
@@ -210,7 +210,6 @@ async def get_vendor_payments(
     # asked for: ADMIN / SUPERADMIN read every shop and may narrow with
     # ?store_id; every other login keeps its OWN shop -- dropping store_id
     # gives its active shop, never every shop, and naming another 403s.
-    from ...dependencies import resolve_store_scope
     from .cash_flow import _ap_rows
 
     scope = resolve_store_scope(store_id, current_user)

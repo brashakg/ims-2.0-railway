@@ -1662,7 +1662,7 @@ class TestCrossStoreListIDOR:
 class TestFinanceCrossStoreIDOR:
     """BUG-062 direct-dict tail: live QA proved a Pune store manager read Bokaro's
     revenue / P&L (incl. COGS) / receivables (with customer PII) via the finance
-    aggregation endpoints, which trusted ?store_id directly. _scope_store now 403s
+    aggregation endpoints, which trusted ?store_id directly. resolve_store_scope now 403s
     a store-scoped role asking for another store; admins keep cross-store/all.
     """
 

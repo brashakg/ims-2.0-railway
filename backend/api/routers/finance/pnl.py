@@ -16,6 +16,7 @@ from ...services.salary_visibility import (
     is_salary_admin,
     normalise_expense_category,
 )
+from ...dependencies import resolve_store_scope
 from ...services import je_service
 from ._shared import (
     _DISCOUNT_EXPR,
@@ -27,7 +28,6 @@ from ._shared import (
     _get_db,
     _je_cal_day,
     _payroll_cost,
-    _scope_store,
     compute_cogs_with_flag,
     router,
 )
@@ -39,7 +39,7 @@ async def get_revenue(
     store_id: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
 ):
-    store_id = _scope_store(store_id, current_user)
+    store_id = resolve_store_scope(store_id, current_user)
     db = _get_db()
     if db is None:
         return {
@@ -205,7 +205,7 @@ async def get_pnl(
     to_date: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
 ):
-    store_id = _scope_store(store_id, current_user)
+    store_id = resolve_store_scope(store_id, current_user)
     db = _get_db()
     if db is None:
         return {

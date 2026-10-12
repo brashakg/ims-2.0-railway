@@ -609,43 +609,6 @@ def _payroll_by_store(db, from_date, to_date) -> dict:
     return out
 
 
-# === Store scoping ===
-# (this sat under a "Revenue Tracking" banner while /revenue was the next
-# route in the file; the gate is used by most finance aggregations.)
-
-
-_HQ_STORE_ROLES = {"SUPERADMIN", "ADMIN", "AREA_MANAGER"}
-
-
-def _scope_store(store_id, current_user):
-    """Resolve + authorise the store filter for a finance aggregation (BUG-062).
-
-    - explicit store_id -> validate_store_access (403 if a store-scoped role asks
-      for ANOTHER store; admins / area-managers pass through).
-    - omitted -> all stores (None) for HQ roles, but the caller's OWN shop for
-      store-scoped roles (resolve_store_scope: its active shop, else its first
-      own shop) -- so a store-level role can never read an all-stores or
-      other-store financial aggregate (revenue / P&L / receivables / journal
-      entries).
-    - a non-admin login with NO shop at all (no active shop, no store_ids; an
-      AREA_MANAGER too) -> api.dependencies.NO_SHOP_SCOPE (owner ruling
-      2026-10-12, R4): a reserved id no order, expense or voucher carries, so
-      every caller's ``if store_id: match["store_id"] = store_id`` matches
-      nothing. It used to be None here -- every shop's revenue, P&L and
-      journal entries (HQ vouchers too) -- while naming a shop was a 403. A
-      WRITE that takes its shop from here refuses NO_SHOP_SCOPE itself
-      (journal_entries.create_journal_entry).
-    """
-    if store_id:
-        return validate_store_access(store_id, current_user)
-    own = resolve_store_scope(None, current_user)
-    if is_no_shop_scope(own):
-        return own
-    if set(current_user.get("roles") or []) & _HQ_STORE_ROLES:
-        return None
-    return own
-
-
 # -- Promoted here by the Wave 5 package split ---------------------------
 # Each of these is called from a sub-module that registers its routes
 # EARLIER than the sub-module the helper used to sit in, so it cannot stay

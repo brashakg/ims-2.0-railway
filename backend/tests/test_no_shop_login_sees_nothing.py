@@ -72,7 +72,7 @@ from api.dependencies import (  # noqa: E402
 from api.routers import finance as finance_pkg  # noqa: E402
 from api.routers import item_events as item_events_mod  # noqa: E402
 from api.routers import purchase_invoices as pinv_mod  # noqa: E402
-from api.routers.finance._shared import _scope_store as finance_scope  # noqa: E402
+from api.routers.finance import _shared as finance_shared  # noqa: E402
 from api.routers import vendor_returns as vret_mod  # noqa: E402
 from api.routers import vendors as vendors_pkg  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
@@ -513,28 +513,37 @@ def test_an_area_manager_with_no_active_shop_keeps_its_own_shops_only(world):
 # ============================================================================
 
 
-@pytest.mark.parametrize("role", NON_ADMIN_ROLES)
-def test_the_finance_scope_gives_a_storeless_login_no_shop(role):
-    """finance/_shared._scope_store -- revenue, P&L, receivables, journal
-    entries -- used to give such a login None (every shop); an AREA_MANAGER
-    with no shop too (it is an HQ role there, but it holds nothing)."""
-    assert finance_scope(None, _user(role)) == NO_SHOP_SCOPE
-    with pytest.raises(HTTPException) as ei:
-        finance_scope(DHN, _user(role))
-    assert (ei.value.status_code, ei.value.detail) == (403, NO_SHOP_DETAIL)
+def test_the_finance_reads_have_no_second_shop_rule():
+    """Round 4 P4: finance/_shared._scope_store was a second copy of the shop
+    rule (revenue, P&L, receivables, journal entries) that made an
+    AREA_MANAGER head office -- every shop. They ask resolve_store_scope now;
+    the copy and its HQ role list are gone, and no finance module may bring
+    either back."""
+    import pathlib
+
+    assert not hasattr(finance_shared, "_scope_store")
+    assert not hasattr(finance_shared, "_HQ_STORE_ROLES")
+    pkg = pathlib.Path(finance_shared.__file__).parent
+    copies = [f.name for f in pkg.glob("*.py") if "_scope_store(" in f.read_text(encoding="utf-8")]
+    assert copies == [], copies
 
 
-def test_the_finance_scope_keeps_each_login_holding_a_shop_to_its_own_reach():
-    assert finance_scope(None, ADMIN) is None
-    assert finance_scope(None, SUPERADMIN) is None
-    assert finance_scope(PUN, ADMIN) == PUN
-    # an area manager holding shops keeps the org view this helper gives it
-    assert finance_scope(None, AREA_TWO) is None
-    assert finance_scope(None, _user("AREA_MANAGER", DHN, (DHN,))) is None
-    assert finance_scope(None, ACCT_PUN) == PUN
-    # a shop login whose token lost its active shop reads its OWN shop (it
-    # used to read None: every shop)
-    assert finance_scope(None, _user("STORE_MANAGER", None, (DHN,))) == DHN
+def test_an_area_manager_reads_his_own_shop_on_revenue_pnl_receivables_and_journals(world):
+    """Round 4 P4, the probe: an AREA_MANAGER holding Dhanbad read Pune's
+    revenue on /finance/pnl and /finance/revenue and Pune's receivable on
+    /finance/outstanding (he was an HQ role there). The one rule gives him his
+    own shop, and naming Pune is a 403."""
+    area_dhn = _user("AREA_MANAGER", DHN, (DHN,))
+    month = {"from_date": "2026-10-01", "to_date": "2026-10-31"}
+    dhn_rev = world.ok("/finance/pnl", ADMIN, store_id=DHN, **month)["revenue"]
+    assert world.ok("/finance/pnl", area_dhn, **month)["revenue"] == dhn_rev == 2000.0
+    assert world.ok("/finance/revenue", area_dhn, period="month")["total_revenue"] == 2000.0
+    due = {i["order_id"] for i in world.ok("/finance/outstanding", area_dhn)["items"]}
+    assert due == {"O-DHN-DUE"}
+    ids = {j["je_id"] for j in world.ok("/finance/journal-entries", area_dhn)["journal_entries"]}
+    assert "JE-DHN" in ids and not ids & {"JE-PUN", "JE-HQ"}
+    for path in ("/finance/pnl", "/finance/revenue", "/finance/outstanding", "/finance/journal-entries"):
+        assert world.get(path, area_dhn, store_id=PUN).status_code == 403, path
 
 
 def test_the_storeless_accountant_reads_no_shops_revenue_pnl_or_receivables(world):

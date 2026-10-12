@@ -134,7 +134,7 @@ def test_the_role_gate_still_comes_first(world, role):
 # Every finance handler on the accounts gate either applies a shop rule or
 # is an org-wide view on the one gate that refuses a login with no shop.
 _SHOP_RULE = re.compile(
-    r"resolve_store_scope|_scope_store|_survival_scope|validate_store_access|_money_shop"
+    r"resolve_store_scope|_survival_scope|validate_store_access|_money_shop"
 )
 
 

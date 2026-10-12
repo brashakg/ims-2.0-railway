@@ -12,13 +12,12 @@ from fastapi import Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from ..auth import get_current_user
-from ...dependencies import NO_SHOP_DETAIL, is_no_shop_scope
+from ...dependencies import NO_SHOP_DETAIL, is_no_shop_scope, resolve_store_scope
 from ...services import je_service
 from ._shared import (
     _get_db,
     _je_cal_day,
     _parse_range_dt,
-    _scope_store,
     check_period_locked,
     router,
 )
@@ -136,7 +135,7 @@ async def create_journal_entry(
         current_user, _JE_MAKER_ROLES, "Journal entries require ACCOUNTANT / ADMIN"
     )
     db = _get_db()
-    store_id = _scope_store(body.store_id, current_user)
+    store_id = resolve_store_scope(body.store_id, current_user)
     if is_no_shop_scope(store_id):
         # Owner ruling 2026-10-12 (R4): a login with no shop writes no
         # voucher -- never under the reserved no-shop id, never as an HQ
@@ -168,7 +167,7 @@ async def list_journal_entries(
 ):
     """List journal vouchers, store-scoped for store-level roles."""
     db = _get_db()
-    store_id = _scope_store(store_id, current_user)
+    store_id = resolve_store_scope(store_id, current_user)
     rows = je_service.list_jes(
         db, store_id=store_id, status=status, maker_id=maker_id, limit=200
     )
@@ -187,7 +186,7 @@ async def get_journal_entry(
         raise HTTPException(status_code=404, detail="Journal entry not found")
     # Store-scope read: a store-level role cannot read another store's JE.
     if je.get("store_id"):
-        _scope_store(je.get("store_id"), current_user)
+        resolve_store_scope(je.get("store_id"), current_user)
     else:
         # Store-LESS (HQ/entity-level) voucher: skipping the guard here let any
         # store-scoped finance role read HQ vouchers by id (adversarial P3).
@@ -372,7 +371,7 @@ async def get_tally_journal_jv(
     """POSTED journal vouchers as Tally ``<JOURNALVOUCHER>`` import XML. DRAFT /
     SUBMITTED / APPROVED JEs are never exported."""
     db = _get_db()
-    store_id = _scope_store(store_id, current_user)
+    store_id = resolve_store_scope(store_id, current_user)
     from_dt = _parse_range_dt(from_date)
     to_dt = _parse_range_dt(to_date, end=True)
     rows = je_service.list_jes(
