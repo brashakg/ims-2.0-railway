@@ -31,8 +31,12 @@ class VendorRepository(BaseRepository):
             query.update(filter)
         return self.find_many(query, sort=[("trade_name", 1)])
     
-    def search_vendors(self, query: str) -> List[Dict]:
-        return self.search(query, ["legal_name", "trade_name", "gstin", "vendor_code"])
+    def search_vendors(
+        self,
+        query: str,
+        fields=("legal_name", "trade_name", "gstin", "vendor_code"),
+    ) -> List[Dict]:
+        return self.search(query, list(fields))
     
     # What we owe a vendor is the supplier ledger (services/ap_engine.build_ledger);
     # the old current_balance counter here had no writer and no reader (F56).

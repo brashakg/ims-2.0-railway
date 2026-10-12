@@ -152,13 +152,6 @@ async def get_stock(
         include_attribution=can_see_attribution,
         shelf_cost=_shelf_cost(stock_repo, product_repo, active_store),
     )
-    # The count of units with no cost goes with the cost: one rule, the same
-    # context that masks the cost fields below.
-    from ...services.cost_mask import can_see_cost
-
-    if not can_see_cost(current_user, "product"):
-        for row in items:
-            row.pop("uncosted_units", None)
     return {"items": mask_cost_list(items, current_user, "product"), "total": len(items)}
 
 
@@ -481,6 +474,9 @@ def _ledger_row(
         "model": model,
         "category": product.get("category", ""),
         "mrp": mrp,
+        # Per-unit cost (the Reorder dashboard's PO estimate and PO rate);
+        # get_stock strips it outside cost_mask's "product" context.
+        "cost_price": product.get("cost_price"),
         "offerPrice": offer_price,
         "offer_price": offer_price,
         "stock": on_hand,

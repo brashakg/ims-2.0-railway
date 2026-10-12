@@ -12,7 +12,6 @@ from ._shared import (
     can_access_store_scoped,
     datetime,
     get_audit_repository,
-    get_current_user,
     get_file_store,
     get_grn_repository,
     get_purchase_order_repository,
@@ -567,8 +566,12 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
 
 
 @router.get("/grn/{grn_id}")
-async def get_grn(grn_id: str, current_user: dict = Depends(get_current_user)):
-    """Get GRN details"""
+async def get_grn(
+    grn_id: str, current_user: dict = Depends(require_roles(*_VENDOR_ROLES))
+):
+    """Get GRN details. F60: receiving roles only (supplier bill number / date,
+    bill-scan id), and only for the caller's stores -- another store's GRN reads
+    as 404, exactly as its /document does."""
     grn_repo = get_grn_repository()
 
     if grn_repo is None:

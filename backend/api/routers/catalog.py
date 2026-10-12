@@ -1765,9 +1765,9 @@ async def list_catalog_products(
     start = (page - 1) * limit
     end = start + limit
 
-    # F35: strip cost/margin for roles that may not see it (CATALOG_MANAGER sees
-    # cost only on the edit form, not this operational list -> default context).
-    page_products = mask_cost_list(products[start:end], current_user)
+    # F35: per-unit cost answers to the one product-cost rule (services/
+    # cost_mask "product": the managers see it, counter roles never).
+    page_products = mask_cost_list(products[start:end], current_user, "product")
     return {
         "products": page_products,
         "total": total,

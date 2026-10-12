@@ -3,13 +3,14 @@
 from ._shared import (
     Depends,
     Query,
+    _VENDOR_ROLES,
     _get_db,
     datetime,
-    get_current_user,
     get_vendor_repository,
     ist_date_str,
     logger,
     now_ist,
+    require_roles,
     resolve_store_scope,
     router,
     timedelta,
@@ -126,7 +127,7 @@ async def vendor_performance(
         le=24,
         description="Number of rolling months to include in the score window.",
     ),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
 ):
     """Return a performance score for the vendor over the last `months` months (INV-13).
 
@@ -147,9 +148,9 @@ async def vendor_performance(
 
     # MTD spend is independent of GRN history -- compute it up front so even a
     # vendor with no GRNs in the window still reports what we've billed this
-    # month. What a supplier billed us is supplier money (owner ruling
-    # 2026-10-01): the accounts roles alone get the key, and for anyone else
-    # the bills are not even read.
+    # month. What a supplier billed us is supplier money (owner rulings
+    # 2026-09-29 / 2026-10-01): the one payables rule's -- the accounts roles
+    # alone get the key, and for anyone else the bills are not even read.
     bills = (
         {"mtd_spend": _vendor_mtd_spend(db, vendor_id, current_user)}
         if can_see_cost(current_user, "payables")
@@ -313,7 +314,7 @@ async def vendor_purchase_history(
         le=36,
         description="Rolling-months window for the purchase-history report.",
     ),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
 ):
     """Return purchase-history analytics for one vendor (INV-13).
 

@@ -16,12 +16,13 @@ its own. Its helpers are PURE: each returns a copy without the supplier money
 and never mutates what it was given; an accounts caller gets the input back
 unchanged.
 
-What this module does NOT do: hide the price paid per piece or the supplier
-from the workshop on a vendor return / debit note (owner ruling 2026-09-29).
-That is the cost rule's, and its projections (cost_mask.mask_vendor_return /
-mask_debit_note) arrive with #1161 -- not on this branch. Where both apply,
-these helpers run on top, so either rule alone hides the money from a role it
-excludes. The PO timeline's bill masking is NOT here either: it is the
+What this module does NOT do: project a vendor return (cost_mask.
+mask_vendor_return is THE projection: items, quantities and reasons only for
+anyone outside the accounts roles -- owner ruling 2026-10-12, R3) or hide the
+supplier's identity on a debit note from a non-purchase role (cost_mask.
+mask_debit_note, owner ruling 2026-09-29; debit_note_for_reader below
+composes it with this module's money strip, the one projection the debit-note
+reads use). The PO timeline's bill masking is NOT here either: it is the
 inline can_see_cost(user, "payables") check in routers/vendors/po_detail
 (#1161's text, one implementation).
 
@@ -33,7 +34,7 @@ from typing import Any, Callable, Optional
 
 from fastapi import HTTPException
 
-from .cost_mask import AP_ROLES, can_see_cost  # noqa: F401  (AP_ROLES re-exported)
+from .cost_mask import AP_ROLES, can_see_cost, mask_debit_note  # noqa: F401  (AP_ROLES re-exported)
 
 
 def can_see_payables(user: Optional[dict]) -> bool:
@@ -90,10 +91,20 @@ def strip_debit_note_money(doc: Any, user: Optional[dict]) -> Any:
     return _without(doc, _DEBIT_NOTE_MONEY.__contains__)
 
 
-# --- Return lines (vendor returns + RMAs) ------------------------------------
-# Owner ruling 2026-10-12: on a vendor return or an RMA anyone outside the
+def debit_note_for_reader(doc: Any, user: Optional[dict]) -> Any:
+    """THE projection of one debit note for its reader (rtv_debit_notes list
+    and detail): the cost rule's supplier-identity allow-list for a
+    non-purchase role (cost_mask.mask_debit_note: the workshop reads items and
+    quantities) and, for every non-accounts role, no amounts (the 2026-10-01
+    supplier-money ruling). Two disjoint rules, one call."""
+    return strip_debit_note_money(mask_debit_note(doc, user), user)
+
+
+# --- Return lines (RMAs) -------------------------------------------------------
+# Owner ruling 2026-10-12 (R3): on a vendor return or an RMA anyone outside the
 # accounts roles reads the items, quantities and reasons only -- no unit price,
-# no line value, no rate. (The per-unit cost a manager sees on stock and POs
+# no line value, no rate. (A vendor return gets that from its one projection,
+# cost_mask.mask_vendor_return; an RMA from strip_rma_credit below.) (The per-unit cost a manager sees on stock and POs
 # follows the cost rule, cost_mask; on a return it is the basis of the
 # supplier's credit, so it is supplier money here.) Every key the code reads a
 # return line's price from -- the routers' own (vendor_returns unit_price,
@@ -104,23 +115,6 @@ _RETURN_LINE_PRICE = frozenset({
     "unit_price", "unit_cost", "unit_cost_paise", "rate", "rate_paise",
     "line_expected_paise",
 })
-
-
-# --- Vendor return (routers/vendor_returns) ---------------------------------
-# The credit the supplier owes us for the returned goods: total_value is the
-# credit-note amount once credit_issued (vendor_returns PATCH copies it), and
-# the credit-note number is that credit's reference; plus every line's price.
-_VENDOR_RETURN_CREDIT = frozenset({
-    "total_value", "credit_note_amount", "credit_note_number",
-}) | _RETURN_LINE_PRICE
-
-
-def strip_vendor_return_credit(doc: Any, user: Optional[dict]) -> Any:
-    """A vendor return (or a response holding returns) without the supplier
-    credit, unless the caller is an accounts role."""
-    if can_see_payables(user):
-        return doc
-    return _without(doc, _VENDOR_RETURN_CREDIT.__contains__)
 
 
 # --- Vendor RMA (routers/vendor_rma) ----------------------------------------

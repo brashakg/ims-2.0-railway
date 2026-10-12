@@ -281,8 +281,11 @@ def test_one_rule_is_the_cost_mask_payables_context(role):
 
 
 def test_no_caller_sees_nothing():
+    from api.services.cost_mask import mask_vendor_return
+
     assert pm.can_see_payables(None) is False
-    assert pm.strip_vendor_return_credit({"total_value": 5.0}, None) == {}
+    assert "total_value" not in mask_vendor_return({"total_value": 5.0}, None)
+    assert pm.strip_rma_credit({"expected_credit_paise": 5}, None) == {}
 
 
 def test_strips_never_mutate_what_they_were_given():

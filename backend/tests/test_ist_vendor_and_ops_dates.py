@@ -307,7 +307,7 @@ def _performance(grns, months=6, bills=None, now=FROZEN_NOW):
     ):
         # mtd_spend is supplier money: the accounts roles alone get it (owner
         # ruling 2026-10-01). An ADMIN reads every shop's bills (these carry
-        # none); an accountant with no shop is refused (R3).
+        # none); an accountant with no shop reads no shop's -- Rs 0 (R4).
         return asyncio.run(
             vendors_mod.vendor_performance(
                 vendor_id=VENDOR, months=months, current_user={"roles": ["ADMIN"]}

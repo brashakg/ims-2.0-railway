@@ -852,17 +852,21 @@ def test_http_one_accountant_cannot_raise_approve_and_spend_their_own_rtv(two):
 
 
 # ============================================================================
-# R3.1  The one rule's strips carry the line prices
+# R3.1  The one rule's projections carry the line prices
 # ============================================================================
+# A vendor return's one projection is cost_mask.mask_vendor_return (on the
+# payables rule since 2026-10-12, R3); an RMA's is payables_mask.strip_rma_credit.
 
 
 @pytest.mark.parametrize("role", NON_ACCOUNTS)
 def test_strips_drop_every_return_line_price(role):
+    from api.services.cost_mask import mask_vendor_return
+
     ret = {"return_id": "VR", "items": [{"product_id": "P", "product_name": "L",
                                          "quantity": 2, "reason": "defective",
                                          "unit_price": 10.0, "unit_cost": 9.0,
                                          "rate": 10.0, "rate_paise": 1000}]}
-    out = pm.strip_vendor_return_credit(ret, _user(role))
+    out = mask_vendor_return(ret, _user(role))
     assert out["items"] == [{"product_id": "P", "product_name": "L",
                              "quantity": 2, "reason": "defective"}]
     rma_doc = {"rma_id": "R", "lines": [{"product_id": "P", "product_name": "L",
@@ -876,8 +880,10 @@ def test_strips_drop_every_return_line_price(role):
 
 @pytest.mark.parametrize("role", RECORDERS)
 def test_strips_keep_line_prices_for_accounts(role):
+    from api.services.cost_mask import mask_vendor_return
+
     ret = {"items": [{"unit_price": 10.0}]}
-    assert pm.strip_vendor_return_credit(ret, _user(role)) is ret
+    assert mask_vendor_return(ret, _user(role)) is ret
     doc = {"lines": [{"unit_cost_paise": 1000}]}
     assert pm.strip_rma_credit(doc, _user(role)) is doc
 
