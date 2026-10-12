@@ -1461,6 +1461,11 @@ def _spine_product_id(repo, catalog_doc: Optional[Dict]) -> Optional[str]:
     off-sale marker is the spine's is_active (online_stock_writeback lists
     an inactive spine at 0) -- the next stock pass put the size straight
     back on sale. None when there is no spine (a BVI-only twin)."""
+    return (_spine_doc(repo, catalog_doc) or {}).get("product_id")
+
+
+def _spine_doc(repo, catalog_doc: Optional[Dict]) -> Optional[Dict]:
+    """The spine doc _spine_product_id resolves (id, then sku), or None."""
     if repo is None or not catalog_doc:
         return None
     spine = None
@@ -1468,7 +1473,31 @@ def _spine_product_id(repo, catalog_doc: Optional[Dict]) -> Optional[str]:
         spine = repo.find_by_id(catalog_doc["id"])
     if spine is None and catalog_doc.get("sku"):
         spine = repo.find_by_sku(catalog_doc["sku"])
-    return (spine or {}).get("product_id")
+    return spine
+
+
+def _spine_gtin_behind(catalog_doc: Dict) -> bool:
+    """True when the twin holds a publishable gtin its spine's attributes.gtin
+    does not: a save whose spine write 503'd after the twin landed (the review
+    editor's retry then 409s, reloads and sends no gtin, so nothing else would
+    ever write it). Only toward a valid twin code: a blank or junk twin gtin
+    never blanks or replaces the spine's. The code passes the one-holder check
+    before it is written, as a typed one does."""
+    attrs = catalog_doc.get("attributes")
+    twin_gtin = attrs.get("gtin") if isinstance(attrs, dict) else None
+    if not _pm.sanitise_gtin(twin_gtin):
+        return False
+    from ..dependencies import get_product_repository
+
+    repo = get_product_repository()
+    spine = _spine_doc(repo, catalog_doc)
+    if spine is None or _pm.spine_holds_gtin(spine, twin_gtin):
+        return False
+    try:
+        _pm.assert_gtin_free(twin_gtin, repo, spine.get("product_id"))
+    except _pm.ProductMasterError as err:
+        raise HTTPException(status_code=err.status, detail=err.message) from err
+    return True
 
 
 def _next_sku_counter(prefix: str, db=None) -> int:
@@ -2202,6 +2231,11 @@ async def update_catalog_product(
             existing["model"] = str(
                 merged_attrs.get("model_no") or merged_attrs.get("model_name") or ""
             ).strip()
+
+    # Any save -- this one may carry no gtin at all -- brings a spine left
+    # behind by a failed spine write back in line with its twin (round 9).
+    if not gtin_written:
+        gtin_written = _spine_gtin_behind(existing)
 
     # Explicit operator name wins over the best-effort title regen for THIS
     # save (hence applied AFTER the attributes block; per-save only -- the

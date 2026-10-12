@@ -859,6 +859,48 @@ def test_a_spine_gtin_write_that_changes_nothing_is_no_failure(gtin_env, monkeyp
     assert "barcode" not in spine
 
 
+@pytest.mark.parametrize(
+    "later", [{"attributes": {"colour_code": "RED"}}, {"pricing": {"mrp": 5200.0}}]
+)
+def test_the_next_save_repairs_a_spine_a_failed_gtin_write_left_behind(
+    gtin_env, monkeypatch, later
+):
+    """Round 9. The twin saves (new gtin, new updated_at) BEFORE the spine
+    write; when that 503s, the review editor's retry 409s on its old
+    updated_at, reloads, and its diff-only payload no longer carries the gtin.
+    So no later save wrote it: the push sent the code while the till and
+    Manage Barcode saw none, for good. Any later save now repairs it."""
+    real_update = gtin_env.update
+    refuse = {"on": True}
+
+    def _refuse_gtin(pid, data):
+        if refuse["on"] and any(k.startswith("attributes") for k in data):
+            return False
+        return real_update(pid, data)
+
+    monkeypatch.setattr(gtin_env, "update", _refuse_gtin)
+    with pytest.raises(HTTPException) as exc:
+        _put("twin-g1", {"attributes": {"gtin": _GTIN}})
+    assert exc.value.status_code == 503
+    assert catalog_mod.CATALOG_PRODUCTS["twin-g1"]["gtin"] == _GTIN
+    refuse["on"] = False
+    _put("twin-g1", later)
+    assert gtin_env.find_by_id("spine-g1")["attributes"]["gtin"] == _GTIN
+
+
+def test_a_blank_or_junk_twin_gtin_never_reaches_the_spine(gtin_env):
+    """The repair runs only toward a publishable twin code: a twin with no gtin
+    never blanks the spine's, and a stored junk one is never copied over."""
+    gtin_env.collection.update_one(
+        {"product_id": "spine-g1"}, {"$set": {"attributes.gtin": _UPC}}
+    )
+    _put("twin-g1", {"attributes": {"colour_code": "RED"}})
+    assert gtin_env.find_by_id("spine-g1")["attributes"]["gtin"] == _UPC
+    catalog_mod.CATALOG_PRODUCTS["twin-g1"]["attributes"]["gtin"] = "2000000000015"
+    _put("twin-g1", {"pricing": {"mrp": 5200.0}})
+    assert gtin_env.find_by_id("spine-g1")["attributes"]["gtin"] == _UPC
+
+
 @pytest.mark.parametrize("typed", ["", None])
 def test_review_editor_takes_an_old_spelling_out_of_twin_and_spine(gtin_env, typed):
     """Twin and spine hold the code under the old spelling 'GTIN'. A Remove

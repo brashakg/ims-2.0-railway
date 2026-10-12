@@ -1447,7 +1447,7 @@ def drop_legacy_spine_barcode(product_repo, product_id: Any) -> None:
     coll.update_one({"product_id": product_id}, {"$unset": unset})
 
 
-def _spine_holds_gtin(spine: Optional[Dict[str, Any]], gtin: Any) -> bool:
+def spine_holds_gtin(spine: Optional[Dict[str, Any]], gtin: Any) -> bool:
     """True when the spine's attributes.gtin -- the key write_spine_gtin writes
     and the till reads -- is exactly `gtin`."""
     attrs = (spine or {}).get("attributes")
@@ -1470,7 +1470,7 @@ def write_spine_gtin(product_repo, product_id: Any, gtin: str) -> None:
         patch: Dict[str, Any] = {"attributes.gtin": gtin}
     else:
         patch = {"attributes": {"gtin": gtin}}
-    if not product_repo.update(product_id, patch) and not _spine_holds_gtin(
+    if not product_repo.update(product_id, patch) and not spine_holds_gtin(
         product_repo.find_by_id(product_id), gtin
     ):
         raise ProductMasterError(
