@@ -62,6 +62,11 @@ from test_shopify_media_title_sync import (  # noqa: E402
 )
 from test_shopify_live_sync import world  # noqa: E402,F401 -- fixture
 from test_catalog_review_put import _bvi_doc, _put, env  # noqa: E402,F401
+from test_cataloguing_scorecard_qc import (  # noqa: E402
+    FakeDB as _QcDB,
+    _product as _qc_product,
+    _run_generate as _qc_generate,
+)
 from api.routers import catalog as catalog_mod  # noqa: E402
 
 FRONT, ANGLED, SIDE = (
@@ -169,6 +174,63 @@ def test_a_live_products_reorder_is_one_reorder_call_and_nothing_is_reuploaded(
     assert _apply_moves([_m(1), _m(2), _m(3)], moves) == [_m(3), _m(1), _m(2)]
     assert res.photos["reordered"] is True
     assert res.photos["attached"] == 0 and res.photos["deleted"] == 0
+
+
+def test_one_save_that_adds_removes_and_reorders_reaches_shopify_in_the_new_order(
+    db, gates, monkeypatch  # noqa: F811
+):
+    """One save of the add / edit page: a NEW photo uploaded and moved to
+    photo 1, the angled shot removed, the front shot moved last. Shopify shows
+    [front, angled, side] = [M/1, M/2, M/3]. The press attaches only the new
+    photo, deletes only M/2, then ONE reorder puts the new photo first: the
+    attach appends it LAST, so without the reorder the website would lead
+    with the side shot while IMS shows the new photo as photo 1."""
+    new = "https://cdn.example.com/rb-new.jpg"
+    _seed_pushed(db)
+    ecom = dict(
+        _twin(db)["ecom"],
+        shopify_product_id=GID,
+        media_map=[
+            {"url": FRONT, "id": _m(1)},
+            {"url": ANGLED, "id": _m(2)},
+            {"url": SIDE, "id": _m(3)},
+        ],
+    )
+    db["catalog_products"].update_one(
+        {"id": "P1"}, {"$set": {"images": [FRONT, ANGLED, SIDE], "ecom": ecom}}
+    )
+    repo = _spine_repo()
+    repo.update("P1", {"images": [FRONT, ANGLED, SIDE]})
+
+    _edit_spine(db, monkeypatch, repo=repo, images=[new, SIDE, FRONT])
+
+    doc = copy.deepcopy(_twin(db))
+    assert doc["images"] == [new, SIDE, FRONT]
+    fake = _Shopify(_nodes(1, 2, 3))
+    monkeypatch.setattr(shopify_push, "_graphql", fake)
+
+    res = _run(shopify_push.push_product(db, doc, []))
+
+    assert res.ok is True
+    assert _media_ops(fake) == [
+        "imsProductCreateMedia", "imsProductDeleteMedia", "imsProductReorderMedia"
+    ], _media_ops(fake)
+    (att,) = fake.calls_of("imsProductCreateMedia")
+    assert [m["originalSource"] for m in att["variables"]["media"]] == [new]
+    (dele,) = fake.calls_of("imsProductDeleteMedia")
+    assert dele["variables"]["mediaIds"] == [_m(2)]
+    (re,) = fake.calls_of("imsProductReorderMedia")
+    # On Shopify after the attach and the delete: [M/1, M/3, M/100 (new)].
+    assert _apply_moves([_m(1), _m(3), _m(100)], re["variables"]["moves"]) == [
+        _m(100), _m(3), _m(1)
+    ]
+    assert res.photos["attached"] == 1 and res.photos["deleted"] == 1
+    assert res.photos["reordered"] is True and res.photos["on_shopify"] == 3
+    assert _twin(db)["ecom"]["media_map"] == [
+        {"url": new, "id": _m(100)},
+        {"url": SIDE, "id": _m(3)},
+        {"url": FRONT, "id": _m(1)},
+    ]
 
 
 def test_a_stale_singular_image_url_never_outranks_photo_1(db, gates, monkeypatch):  # noqa: F811
@@ -294,3 +356,21 @@ def test_the_stock_screen_catalogue_pdf_and_duplicate_popup_show_photo_1():
     (row,) = catalogue_pdf.build_product_rows([_LEGACY])
     assert row["image"] == SIDE
     assert pm.existing_product_summary(_LEGACY)["image_url"] == SIDE
+
+
+def test_the_cataloguing_scorecard_sample_shows_photo_1(monkeypatch):
+    """Cataloguing Scorecard > QC sample (generate_qc_samples): the sample's
+    photo is photo 1, never a stale stored image_url."""
+    db = _QcDB(
+        products=[
+            _qc_product(
+                "P9", "u-a", name="asha", created_days_ago=1,
+                images=[SIDE, FRONT], image_url=FRONT,
+            )
+        ]
+    )
+
+    _qc_generate(monkeypatch, db, per_user=1)
+
+    (item,) = db.get_collection("qc_samples").docs
+    assert item["image_url"] == SIDE
