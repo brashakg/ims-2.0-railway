@@ -762,6 +762,10 @@ _MOVED = (
     # R2 + R3: a return's price is the accounts roles' to write.
     ("PUT", "/api/v1/vendor-returns/{return_id}/prices"),
     ("PUT", "/api/v1/vendor-rma/{rma_id}/prices"),
+    # R1 (2026-10-12): the accounts roles approve 'rtv' (supplier credit)
+    # requests, so the decide gate admits ACCOUNTANT.
+    ("POST", "/api/v1/approvals/requests/{request_id}/approve"),
+    ("POST", "/api/v1/approvals/requests/{request_id}/reject"),
 )
 
 

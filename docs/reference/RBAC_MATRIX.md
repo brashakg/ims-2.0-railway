@@ -268,6 +268,23 @@ are the exact current gate (SUPERADMIN always implied).
 | `GET` | `/api/v1/analytics-v2/staff-leaderboard` | AUTH |  |
 | `GET` | `/api/v1/analytics-v2/vendor-margins` | SUPERADMIN |  |
 
+### `/api/v1/approvals`
+
+| Method | Path | Allowed | S |
+|---|---|---|---|
+| `POST` | `/api/v1/approvals/requests` | AUTH |  |
+| `GET` | `/api/v1/approvals/requests/inbox` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
+| `GET` | `/api/v1/approvals/requests/mine` | AUTH |  |
+| `GET` | `/api/v1/approvals/requests/{request_id}` | AUTH |  |
+| `POST` | `/api/v1/approvals/requests/{request_id}/approve` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
+| `POST` | `/api/v1/approvals/requests/{request_id}/reject` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
+| `POST` | `/api/v1/approvals/requests/{request_id}/consume` | AUTH |  |
+
+ACCOUNTANT is on the inbox and on approve / reject for `rtv` (supplier credit)
+requests only -- owner ruling 2026-10-12; the engine refuses an ACCOUNTANT any
+other action type, and an `rtv` request is the accounts roles' alone (a
+manager gets 404).
+
 ### `/api/v1/audit`
 
 | Method | Path | Allowed | S |
