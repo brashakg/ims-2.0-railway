@@ -1093,6 +1093,26 @@ def test_b_guard_an_edit_that_touches_no_identity_leaves_a_bad_old_power_alone(d
     assert (after["mrp"], after["identity_key"]) == (1100.0, "acuvue|oasys|junk")
 
 
+def test_b_guard_an_edit_form_price_save_leaves_a_stale_key_alone(door):
+    """A main-era frame (compact SKU, a key with no eye size) and the same
+    frame entered after the deploy but before the key rebuild (no 409: the
+    stale key differs). The Edit form re-sends brand, model and the whole
+    attributes bag with a price change: that is no identity edit, so it saves
+    and the key stays as stored -- never a 409 against the newer row."""
+    door.repo.collection.insert_one({
+        "product_id": "P-MAIN", "sku": "FRCARRERACA8895807", "category": "FRAME",
+        "is_active": True, "brand": "Carrera", "model": "CA8895", "color": "807",
+        "identity_key": "carrera|ca8895|807", "name": "Carrera CA8895 Eyeglasses",
+        "mrp": 1000.0, "offer_price": 900.0, "attributes": dict(_CARRERA),
+    })
+    newer = door(_form_post("FR", _CARRERA))
+    assert newer["identity_key"] == "carrera|ca8895|807|54"
+    _put("P-MAIN", brand="Carrera", model="CA8895", attributes=dict(_CARRERA), mrp=1200.0)
+    after = door.repo.find_by_id("P-MAIN")
+    assert (after["mrp"], after["identity_key"], after["name"]) == (
+        1200.0, "carrera|ca8895|807", "Carrera CA8895 Eyeglasses")
+
+
 @pytest.mark.parametrize("category,attrs,edit,key,column,word", [
     ("LS", _CRIZAL, {"subbrand": "Varilux"}, "essilor|varilux|hc|156", "model", "Varilux"),
     ("CCL", dict(_OASYS, colour_name="Hazel Brown"), {"colour_name": "Ocean Blue"},
