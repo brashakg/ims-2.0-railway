@@ -242,6 +242,7 @@ def test_r2_1_bill_as_of_owes_today_and_notes_the_post_dated_money():
     got = ap_engine.bill_as_of(bill, pays, notes)
     assert got == {
         "outstanding": 4300.0,
+        "status": "PARTIAL",
         "post_dated_money": 4300.0,
         "post_dated_until": "2026-11-15",
         "post_dated": False,
@@ -555,17 +556,66 @@ def test_r2_1_on_the_cheques_day_it_moves_into_the_balance(world, monkeypatch):
 
 
 def test_r2_1_the_bills_list_owes_what_the_ledger_owes_with_the_cheque_noted(world):
-    """The stored status counts every recorded payment (a written cheque must
-    not be offered for payment again); `outstanding` is the ledger's as-of
-    figure, so the bills list and the ledger owe the same today."""
+    """The stored pair counts every recorded payment and is never served: the
+    bills list strikes status and outstanding on the ledger's as-of day, so
+    the bills list and the ledger owe the same today (round 4 P1)."""
     _record_post_dated(world)
     assert world.db["vendor_bills"].find_one({"bill_id": "PD1"})["status"] == "PAID"
     pd1 = next(b for b in _ok(world.get(f"/vendors/{V_PDC}/bills", ADMIN))["bills"] if b["bill_id"] == "PD1")
-    assert pd1["status"] == "PAID"
+    assert pd1["status"] == "OUTSTANDING", "P1: a stored PAID the ledger disagrees with was served"
     assert pd1["outstanding"] == pytest.approx(5000.0), "#1: the bills list says Rs 0 while the ledger owes 5000"
     assert pd1["post_dated_money"] == pytest.approx(5300.0)
     assert pd1["post_dated_until"] == "2026-11-15"
     assert pd1["outstanding"] == pytest.approx(_closing(world, ADMIN, vendor=V_PDC))
+
+
+def test_p1_a_bill_a_post_dated_cheque_covers_is_paid_only_on_the_cheques_day(world, monkeypatch):
+    """Round 4 P1, the probe: a Rs 2,000 Dhanbad bill with Rs 500 paid, then a
+    Rs 1,500 cheque dated 25 Oct. The Purchase Invoices list showed a green
+    PAID (outstanding 0) while AP aging and the Purchases report owed 1,500.
+    Now the list, its status filter, the detail, the bills list and the PO
+    timeline all read PARTIAL / 1,500 until the cheque's day, PAID / 0 on it."""
+    from api.routers.vendors import po_detail
+    from database.repositories.vendor_repository import PurchaseOrderRepository
+
+    world.db["vendor_bills"].insert_one(
+        _bill("B-D", V_BOTH, DHN, "2026-09-28", 2000.0, po_id="PO-D", doc_type="PURCHASE_INVOICE")
+    )
+    for amount, day, mode in ((500.0, "2026-09-30", "BANK"), (1500.0, "2026-10-25", "CHEQUE")):
+        _ok(world.post(f"/vendors/{V_BOTH}/payments", ACCT_DHN, {
+            "amount": amount, "payment_date": day, "bill_id": "B-D", "mode": mode,
+        }), 201)
+    world.db["purchase_orders"].insert_one({"po_id": "PO-D", "vendor_id": V_BOTH, "delivery_store_id": DHN})
+    monkeypatch.setattr(
+        po_detail, "get_purchase_order_repository", lambda: PurchaseOrderRepository(world.db["purchase_orders"])
+    )
+    world._app.include_router(pi_mod.router, prefix="/pi")
+
+    def b_d(rows):
+        r = next(r for r in rows if r["bill_id"] == "B-D")
+        return (r["status"], r["outstanding"]) if "outstanding" in r else r["status"]
+
+    def seen():
+        return {
+            "list": b_d(_ok(world.get("/pi", ACCT_DHN))["purchase_invoices"]),
+            "detail": b_d([_ok(world.get("/pi/B-D", ACCT_DHN))]),
+            "bills": b_d(_ok(world.get(f"/vendors/{V_BOTH}/bills", ACCT_DHN))["bills"]),
+            "timeline": b_d(_ok(world.get("/vendors/purchase-orders/PO-D/timeline", ACCT_DHN))["invoices"]),
+        }
+
+    def filtered(status):
+        return [r["bill_id"] for r in _ok(world.get("/pi", ACCT_DHN, status=status))["purchase_invoices"]]
+
+    assert seen() == {"list": ("PARTIAL", 1500.0), "detail": ("PARTIAL", 1500.0),
+                      "bills": ("PARTIAL", 1500.0), "timeline": "PARTIAL"}
+    # AP aging owes the same 1,500 on B-D (plus Dhanbad's other bill, 1,000).
+    aging = {v["vendor_id"]: v["net_payable"] for v in _ok(world.get("/vendors/ap-aging", ACCT_DHN))["vendors"]}
+    assert aging[V_BOTH] == pytest.approx(2500.0)
+    assert "B-D" in filtered("PARTIAL") and "B-D" not in filtered("PAID")
+
+    monkeypatch.setattr(ap_engine, "now_ist_naive", lambda: datetime.fromisoformat("2026-10-25T12:00:00"))
+    assert seen() == {"list": ("PAID", 0.0), "detail": ("PAID", 0.0), "bills": ("PAID", 0.0), "timeline": "PAID"}
+    assert "B-D" in filtered("PAID") and "B-D" not in filtered("PARTIAL")
 
 
 # ----------------------------------------------------------------------------

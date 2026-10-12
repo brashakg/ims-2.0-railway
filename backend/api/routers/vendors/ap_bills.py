@@ -132,13 +132,14 @@ def _recompute_bill_status(db, bill_id: Optional[str]) -> None:
     outstanding from its allocated payments + debit notes. Fail-soft.
 
     The STORED pair counts every RECORDED payment and note, a post-dated
-    cheque included: it answers 'is anything left to settle on this bill once
-    what is recorded clears', so a bill a cheque has already been written for
-    is not offered for payment again, and it is never stale -- nothing has to
-    rewrite it on the cheque's day. What is owed TODAY is the supplier
-    ledger's as-of figure (ap_engine.supplier_ledger_rows: a post-dated cheque
-    is not paid until its day); GET /vendors/{id}/bills answers it per bill as
-    `outstanding`, with the post-dated money noted (ap_engine.bill_as_of)."""
+    cheque included ('what is left once what is recorded clears'), so it is
+    never stale -- nothing has to rewrite it on the cheque's day. It is NEVER
+    served: every reader that hands a bill to a screen (the Purchase Invoices
+    list and detail, /vendors/{id}/bills, the PO timeline) restrikes status and
+    outstanding on today through purchase_invoices.stamp_bills_as_of
+    (ap_engine.bill_as_of) -- the supplier ledger's as-of rule, so a bill a
+    post-dated cheque covers reads PARTIAL / OUTSTANDING until the cheque's
+    day, as AP aging, the Purchases report and Cash Flow count it."""
     if db is None or not bill_id:
         return
     try:
@@ -156,16 +157,9 @@ def _recompute_bill_status(db, bill_id: Optional[str]) -> None:
             )
         )
         out = ap_engine.bill_outstanding(bill, payments, debit_notes)
-        total = float(bill.get("total_amount") or 0)
-        if out <= 0.01:
-            status = "PAID"
-        elif out < total:
-            status = "PARTIAL"
-        else:
-            status = "OUTSTANDING"
         db.get_collection("vendor_bills").update_one(
             {"bill_id": bill_id},
-            {"$set": {"outstanding": out, "status": status}},
+            {"$set": {"outstanding": out, "status": ap_engine.bill_status(bill, out)}},
         )
     except Exception:
         pass
@@ -543,9 +537,9 @@ async def list_vendor_bills(
     db = _get_db()
     if db is None:
         return {"bills": [], "total": 0}
+    from ..purchase_invoices import stamp_bills_as_of
+
     flt: dict = {"vendor_id": vendor_id}
-    if status:
-        flt["status"] = status
     # The one Purchase shop scope (F63), as the purchase-invoice list applies
     # it: a supplier who serves two shops must not hand a Pune login Dhanbad's
     # bill ids to open. Admins see every shop (or the one asked for).
@@ -554,20 +548,13 @@ async def list_vendor_bills(
         flt["store_id"] = scope
     try:
         bills = list(db.get_collection("vendor_bills").find(flt, {"_id": 0}))
-        ids = [b.get("bill_id") for b in bills if b.get("bill_id")]
-        money = [
-            list(db.get_collection(coll).find({"bill_id": {"$in": ids}}, {"_id": 0}))
-            for coll in ("vendor_payments", "vendor_debit_notes")
-        ]
     except Exception:
-        bills, money = [], [[], []]
-    # Outstanding on the supplier ledger's as-of rule (today): a post-dated
-    # cheque is not paid until its day, so it is noted (post_dated_money /
-    # post_dated_until) instead of counted -- this list and the ledger owe the
-    # same. `status` stays the stored one, which counts every recorded payment
-    # (see _recompute_bill_status): a bill a cheque is written for reads PAID.
-    for b in bills:
-        b.update(ap_engine.bill_as_of(b, *money))
+        bills = []
+    # Status and outstanding on the supplier ledger's as-of rule (today): a
+    # post-dated cheque is not paid until its day, so it is noted
+    # (post_dated_money / post_dated_until) instead of counted -- this list and
+    # the ledger owe the same. The status filter reads that same status.
+    bills = [b for b in stamp_bills_as_of(db, bills) if not status or b["status"] == status]
     bills.sort(key=lambda b: b.get("bill_date") or "", reverse=True)
     return {"bills": bills, "total": len(bills)}
 

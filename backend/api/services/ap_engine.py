@@ -499,6 +499,14 @@ def bill_outstanding(
     return round(max(_bill_balance(bill, payments, debit_notes), 0.0), 2)
 
 
+def bill_status(bill: dict, outstanding: float) -> str:
+    """THE status of a bill from what is left on it: PAID (nothing left),
+    PARTIAL (part of its total), OUTSTANDING (all of it)."""
+    if outstanding <= 0.01:
+        return "PAID"
+    return "PARTIAL" if outstanding < _f(bill.get("total_amount")) else "OUTSTANDING"
+
+
 def _bill_balance(bill: dict, payments: List[dict], debit_notes: List[dict]) -> float:
     """bill_outstanding before the floor: negative = money allocated to the
     bill beyond its total (an over-payment the ledger still counts)."""
@@ -879,6 +887,8 @@ def bill_as_of(
     outstanding     -- what is owed on it on the as-of day: its total less the
                        money naming it dated on or before that day (floored at
                        0) -- the figure the supplier ledger and AP aging count.
+    status          -- bill_status of that figure: a bill a post-dated cheque
+                       covers is PAID only once the cheque's day arrives.
     post_dated_money-- money naming it dated after that day (a post-dated
                        cheque): recorded, not yet counted.
     post_dated_until-- the latest such day, else None.
@@ -891,8 +901,10 @@ def bill_as_of(
     )
     (pays, notes), (later_pays, later_notes) = split_as_of(mine, as_of)
     later = later_pays + later_notes
+    owed = bill_outstanding(bill, pays, notes)
     return {
-        "outstanding": bill_outstanding(bill, pays, notes),
+        "outstanding": owed,
+        "status": bill_status(bill, owed),
         "post_dated_money": round(
             sum(_payment_gross(p) for p in later_pays) + sum(_f(d.get("amount")) for d in later_notes),
             2,

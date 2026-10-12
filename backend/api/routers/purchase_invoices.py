@@ -2471,8 +2471,6 @@ async def list_purchase_invoices(
     flt: dict = {"source_transfer_id": None}
     if vendor_id:
         flt["vendor_id"] = vendor_id
-    if status:
-        flt["status"] = status
     if unmatched is True:
         flt["po_id"] = None
         flt["grn_id"] = None
@@ -2484,12 +2482,35 @@ async def list_purchase_invoices(
         rows = list(db.get_collection("vendor_bills").find(flt, {"_id": 0}))
     except Exception:
         rows = []
+    # The status filter reads the as-of status the rows are shown with.
+    rows = [r for r in stamp_bills_as_of(db, rows) if not status or r["status"] == status]
     rows.sort(
         key=lambda r: r.get("invoice_date") or r.get("bill_date") or "", reverse=True
     )
     _stamp_bill_actor_names(db, rows)
     _stamp_receipt_numbers(db, rows)
     return {"purchase_invoices": rows, "total": len(rows)}
+
+
+def stamp_bills_as_of(db, bills: list) -> list:
+    """THE as-of rule on every bill handed to a screen: status and outstanding
+    struck on today by ap_engine.bill_as_of, as the supplier ledger, AP aging,
+    the Purchases report and Cash Flow strike them -- money dated after today
+    (a post-dated cheque) is noted (post_dated_money / post_dated_until), not
+    counted, so the bill reads PAID only once the cheque's day arrives. The
+    stored pair (vendors.ap_bills._recompute_bill_status) counts every
+    recorded payment and is never served. Returns `bills`, stamped in place."""
+    ids = [b.get("bill_id") for b in bills if b.get("bill_id")]
+    try:
+        money = [
+            list(db.get_collection(coll).find({"bill_id": {"$in": ids}}, {"_id": 0}))
+            for coll in ("vendor_payments", "vendor_debit_notes")
+        ]
+    except Exception:
+        money = [[], []]
+    for b in bills:
+        b.update(ap_engine.bill_as_of(b, *money))
+    return bills
 
 
 def _stamp_receipt_numbers(db, rows) -> None:
@@ -3429,5 +3450,6 @@ async def get_purchase_invoice(
     if not doc:
         raise HTTPException(status_code=404, detail="Purchase invoice not found")
     _bill_in_scope_or_404(doc, current_user)
+    stamp_bills_as_of(db, [doc])
     _stamp_bill_actor_names(db, [doc])
     return doc

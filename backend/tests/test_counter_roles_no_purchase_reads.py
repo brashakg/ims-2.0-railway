@@ -1424,8 +1424,9 @@ class _Cursor(list):
 
 
 class _BillDb:
-    """One purchase bill (PAID unless given) on PO1, dated this month; every
-    other collection is empty."""
+    """One purchase bill (PAID unless given) on PO1, dated this month; a PAID
+    bill carries the payment that paid it (a bill's status is struck from its
+    ledger rows on read, round 4 P1); every other collection is empty."""
 
     def __init__(self, status="PAID"):
         self.status = status
@@ -1433,14 +1434,19 @@ class _BillDb:
     def get_collection(self, name):
         from api.routers.vendors._shared import now_ist
 
+        day = now_ist().strftime("%Y-%m-01")
         bill = {
             "doc_type": "PURCHASE_INVOICE", "po_id": "PO1", "vendor_id": "V1",
             "bill_id": "B1", "invoice_number": "INV-9", "status": self.status,
             "total": _BILL_TOTAL, "total_amount": _MTD_TOTAL,
-            "bill_date": now_ist().strftime("%Y-%m-01"),
+            "bill_date": day,
             "created_at": "2026-06-06T10:00:00",
         }
-        rows = [bill] if name == "vendor_bills" else []
+        paid = {"vendor_id": "V1", "bill_id": "B1", "amount": _MTD_TOTAL, "payment_date": day}
+        rows = {
+            "vendor_bills": [bill],
+            "vendor_payments": [paid] if self.status == "PAID" else [],
+        }.get(name, [])
         return types.SimpleNamespace(find=lambda *_a, **_k: _Cursor(rows))
 
 
