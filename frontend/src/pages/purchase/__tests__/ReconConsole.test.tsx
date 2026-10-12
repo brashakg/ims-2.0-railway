@@ -514,3 +514,18 @@ describe('the expanded Tax cell', () => {
     expect(label.parentElement?.textContent).not.toContain('Tax head not set');
   });
 });
+
+describe('the GRN reference names no screen the accountant cannot open', () => {
+  it('a receipt-linked bill shows its GRN as text, never a link to /purchase/grn', async () => {
+    // Receiving is managers only (owner ruling 2026-09-28): /purchase/grn
+    // answers the ACCOUNTANT -- this console's main user -- with
+    // /unauthorized, so the reference is plain text.
+    const bill = inv({ purchase_invoice_id: 'pi-grn-1', vendor_invoice_no: 'INV-GRN-1', po_id: 'po-7', grn_id: 'grn-7', grn_number: 'RCPT 0007' } as never);
+    listMock.mockResolvedValue({ purchase_invoices: [bill], total: 1 });
+    renderConsole();
+    const row = (await screen.findByText('INV-GRN-1')).closest('tr') as HTMLElement;
+    expect(within(row).getByText('GRN RCPT 0007')).toBeInTheDocument();
+    expect(within(row).getByText('GRN RCPT 0007').closest('a')).toBeNull();
+    expect(document.querySelector('a[href="/purchase/grn"]')).toBeNull();
+  });
+});

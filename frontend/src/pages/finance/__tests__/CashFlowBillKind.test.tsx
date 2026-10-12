@@ -206,9 +206,9 @@ describe('the goods/services declaration on the Record-Bill form', () => {
     const hint = await screen.findByText(/No unbilled goods receipts/);
     expect(hint).toHaveTextContent(/Bought without PO/);
     expect(hint).not.toHaveTextContent(/Log them as a Delivery Challan/);
-    // A dealer typed by name has no supplier to pick on this form, so its
-    // receipt never lists here: the hint names the two doors that reach it.
-    expect(hint).toHaveTextContent(/typed by\s+name/);
-    expect(hint).toHaveTextContent(/Create from GRN/);
+    // The dealer is a supplier (owner 2026-10-12): its receipt lists here
+    // under it, so the hint sends nobody to a screen that cannot book it.
+    expect(hint).toHaveTextContent(/adding it as a supplier/);
+    expect(hint).not.toHaveTextContent(/typed by\s+name/);
   });
 });

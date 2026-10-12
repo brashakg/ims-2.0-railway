@@ -39,6 +39,8 @@ describe('receiving is the managers only, on both sides', () => {
       const block = routes.match(new RegExp(`path="${route}"[\\s\\S]*?allowedRoles=\\{([^}]*)\\}`));
       expect(block?.[1], route).toBe('[...RECEIVING_MANAGER_ROLES]');
     }
-    expect(src('../PurchaseTable.tsx')).toMatch(/canReceive = hasRole\(\[\.\.\.RECEIVING_MANAGER_ROLES\]\)/);
+    // The whole statement: `hasRole([...RECEIVING_MANAGER_ROLES]) || hasRole(['ACCOUNTANT'])`
+    // handed the accountant a Receive button that lands on /unauthorized.
+    expect(src('../PurchaseTable.tsx')).toMatch(/^\s*const canReceive = hasRole\(\[\.\.\.RECEIVING_MANAGER_ROLES\]\);$/m);
   });
 });
