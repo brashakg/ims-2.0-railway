@@ -65,7 +65,10 @@ const BRANDS = [
 const createProduct = vi.fn(async () => ({ product_id: 'P-NEW', sku: 'SG-RAYBAN-RB4165-601' }));
 const updateProduct = vi.fn(async () => ({}));
 const getProduct = vi.fn(async () => SOURCE_PRODUCT as Record<string, unknown>);
-const previewSku = vi.fn(async () => ({ category: 'SUNGLASS', sku: 'SG-RAYBAN-RB4165-601' }));
+const previewSku = vi.fn(
+  async (): Promise<{ category: string; sku: string; taken?: boolean }> =>
+    ({ category: 'SUNGLASS', sku: 'SG-RAYBAN-RB4165-601' }),
+);
 // The server's push-gate verdict per brand (shopify_push.product_push_refusal).
 // A stand-in for the server: the form must show whatever it answers.
 const gateVerdict = (brand: string) =>
@@ -284,6 +287,19 @@ describe('F13 / D5 - the SKU is previewed before saving', () => {
     const payload = createProduct.mock.calls[0][0] as Record<string, unknown>;
     expect(payload.model).toBe('');
     expect(payload.attributes).toEqual(attrs);
+  });
+
+  it("a SKU another product has is shown as the save mints it: with a number added", async () => {
+    // An edit moves a product's identity but never its SKU, so the identity it
+    // left can be added again while its SKU is taken (sku-preview `taken`).
+    previewSku.mockResolvedValue({ category: 'SUNGLASS', sku: 'SG-RAYBAN-RB4165-601', taken: true });
+    const user = userEvent.setup();
+    renderPage();
+    await sunglass(user);
+    expect(
+      await screen.findByText('SG-RAYBAN-RB4165-601-<number> (SG-RAYBAN-RB4165-601 is in use)'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('SG-RAYBAN-RB4165-601')).not.toBeInTheDocument();
   });
 
   it('a long SKU is shown whole: its row spans the Review grid and wraps', async () => {

@@ -302,7 +302,9 @@ export function useQuickAddForm() {
   // server's one minter (POST /products/sku-preview, product_master.build_sku,
   // the function the save mints with) as soon as anything is typed -- every
   // category, Optical Lens (no model) included. Never built here. Edit/review
-  // keep their existing SKU.
+  // keep their existing SKU. A SKU another product has (an edit moves a
+  // product's identity but never its SKU) is shown as the save mints it: with
+  // a number added to the end.
   const [skuPreview, setSkuPreview] = useState('');
   useEffect(() => {
     if (editMode || !selectedCategory ||
@@ -314,7 +316,9 @@ export function useQuickAddForm() {
     const t = window.setTimeout(() => {
       productApi
         .previewSku(selectedCategory, attributes)
-        .then((r) => { if (alive) setSkuPreview(r?.sku || ''); })
+        .then((r) => {
+          if (alive) setSkuPreview(!r?.sku ? '' : r.taken ? `${r.sku}-<number> (${r.sku} is in use)` : r.sku);
+        })
         .catch(() => { if (alive) setSkuPreview(''); });
     }, 300);
     return () => { alive = false; window.clearTimeout(t); };

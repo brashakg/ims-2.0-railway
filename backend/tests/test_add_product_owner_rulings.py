@@ -83,6 +83,9 @@ def door(monkeypatch):
     repo = ProductRepository(StrictCollection("products"))
     monkeypatch.setattr(prod_router, "get_product_repository", lambda: repo)
     monkeypatch.setattr(deps, "get_db", lambda: db)
+    # The SKU preview asks the door's own products whether a SKU is taken.
+    monkeypatch.setattr(pm_router, "get_product_repository", lambda: repo)
+    monkeypatch.setattr(pm_router, "get_db", lambda: db)
     monkeypatch.setattr(deps, "get_audit_repository", lambda: None)
     monkeypatch.setattr(pm, "mirror_enabled", lambda: False)
 
@@ -458,11 +461,11 @@ def _form_post(category, attrs):
     )
 
 
-def _preview(category, attrs):
+def _preview(category, attrs, field="sku"):
     return asyncio.run(pm_router.sku_preview(
         pm_router.SkuPreviewRequest(category=category, attributes=dict(attrs)),
         current_user=_ADMIN,
-    ))["sku"]
+    ))[field]
 
 
 @pytest.mark.parametrize("category", pm.canonical_categories())
@@ -761,6 +764,24 @@ def test_cl_key_rebuild_skips_a_row_whose_power_is_not_a_number(door):
     assert (stats["unreadable"], stats["rewritten"], stats["collisions"]) == (1, 1, 0)
     assert door.repo.find_by_id("P-OK")["identity_key"] == "acuvue|oasys||m125"
     assert door.repo.find_by_id("P-JUNK")["identity_key"] == "acuvue|oasys|P-JUNK"
+
+
+def test_f13_a_freed_identity_previews_the_sku_it_saves(door):
+    """An edit moves a product's key but never its SKU, so the identity it
+    left (Carrera CA9000 C01 52, edited to C02) can be added again while its
+    SKU is still that product's. The preview asks the save's own question
+    (sku_taken): it says the SKU is in use, and the save numbers it; a SKU no
+    one has is previewed as not taken and saved exactly."""
+    c01 = {"brand_name": "Carrera", "model_no": "CA9000", "colour_code": "C01", "lens_size": "52"}
+    first = door(_form_post("FR", c01))
+    assert (first["sku"], _preview("FR", c01, "taken")) == ("FR-CARRERA-CA9000-C01-52", True)
+    _put(first["product_id"], attributes=dict(c01, colour_code="C02"))
+    assert _preview("FR", c01) == first["sku"] and _preview("FR", c01, "taken") is True
+    again = door(_form_post("FR", c01))
+    assert again["sku"].startswith(first["sku"] + "-")
+    c03 = dict(c01, colour_code="C03")
+    assert _preview("FR", c03, "taken") is False
+    assert door(_form_post("FR", c03))["sku"] == _preview("FR", c03) == "FR-CARRERA-CA9000-C03-52"
 
 
 def test_f13_guard_a_clash_still_gets_a_unique_sku(door):

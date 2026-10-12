@@ -425,13 +425,14 @@ export const productApi = {
 
   // The SKU a NEW product will get, from the server's one minter
   // (product_master.build_sku) -- the form shows it before saving and never
-  // builds a SKU itself. A clash on save adds a number to the end.
+  // builds a SKU itself. `taken`: another product already has it, so the save
+  // adds a number to the end (product_master.sku_taken, the save's question).
   previewSku: async (
     category: string,
     attributes: Record<string, string>
-  ): Promise<{ category: string | null; sku: string }> => {
+  ): Promise<{ category: string | null; sku: string; taken?: boolean }> => {
     const response = await api.post('/products/sku-preview', { category, attributes });
-    return response.data as { category: string | null; sku: string };
+    return response.data as { category: string | null; sku: string; taken?: boolean };
   },
 
   getBrands: async (category?: string) => {

@@ -699,6 +699,23 @@ def catalog_sku_taken(sku: Any, db=None) -> bool:
     return _catalog_sku_taken(sku, db=db)
 
 
+def sku_taken(sku: Any, product_repo=None, db=None) -> bool:
+    """True when a product already has `sku`: in the products spine (via
+    product_repo.find_by_sku; a read error counts as taken) or as a
+    catalog_products sku (_catalog_sku_taken). THE question mint_unique_sku
+    asks of the SKU it builds, and the one POST /products/sku-preview asks,
+    so the Review never shows a SKU the save then numbers (an edit moves a
+    product's identity but never its SKU, so the identity it left can be
+    added again while its SKU is taken)."""
+    if product_repo is not None:
+        try:
+            if product_repo.find_by_sku(sku) is not None:
+                return True
+        except Exception:  # noqa: BLE001 - fail toward minting a suffixed SKU
+            return True
+    return _catalog_sku_taken(sku, db=db)
+
+
 def mint_unique_sku(
     category: Any, attributes: Dict[str, Any], product_repo=None, db=None
 ) -> str:
@@ -719,13 +736,7 @@ def mint_unique_sku(
     base = build_sku(category, attributes, db=db)
     if product_repo is None and db is None:
         return base
-    spine_taken = False
-    if product_repo is not None:
-        try:
-            spine_taken = product_repo.find_by_sku(base) is not None
-        except Exception:  # noqa: BLE001 - fail toward minting a suffixed SKU
-            spine_taken = True
-    if not spine_taken and not _catalog_sku_taken(base, db=db):
+    if not sku_taken(base, product_repo, db):
         return base
     spec = category_spec(category)
     prefix = spec.prefix if spec else "XX"

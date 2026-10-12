@@ -153,12 +153,15 @@ async def sku_preview(
 ):
     """The SKU a new product will get (product_master.build_sku, the one minter:
     CATEGORY-BRAND-MODEL-COLOUR-SIZE). The Add-product form shows this before
-    saving. Does NOT allocate a collision counter (preview is read-only)."""
+    saving. `taken`: another product has it (pm.sku_taken, the question the
+    save asks), so the save adds a number to the end. Does NOT allocate that
+    number (preview is read-only)."""
     try:
         sku = pm.build_sku(body.category, body.attributes)
     except pm.ProductMasterError as err:
         _raise(err)
-    return {"category": pm.resolve_category(body.category), "sku": sku}
+    taken = pm.sku_taken(sku, get_product_repository(), get_db())
+    return {"category": pm.resolve_category(body.category), "sku": sku, "taken": taken}
 
 
 # ---------------------------------------------------------------------------
