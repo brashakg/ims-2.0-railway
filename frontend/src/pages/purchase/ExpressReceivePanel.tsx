@@ -47,6 +47,7 @@ import { UnitLabelsModal } from '../../components/labels/UnitLabelsModal';
 // ---- Two-step fallback contract (cockpit opens its classic form with this) --
 
 export interface TwoStepPrefillLine {
+  po_item_id?: string;
   product_id: string;
   product_name: string;
   sku: string | null;
@@ -71,6 +72,7 @@ export interface TwoStepPrefill {
 // ---- Local line state --------------------------------------------------------
 
 interface PanelLine {
+  po_item_id?: string;
   product_id: string;
   product_name: string;
   sku: string | null;
@@ -195,6 +197,7 @@ export function ExpressReceivePanel({
     po.lines
       .filter((l) => l.pending_qty > 0)
       .map((l) => ({
+        po_item_id: l.po_item_id,
         product_id: l.product_id ?? '',
         product_name: l.product_name ?? l.product_id ?? '',
         sku: l.sku,
@@ -257,6 +260,7 @@ export function ExpressReceivePanel({
     vendorInvoiceNo: invoiceNo,
     upload,
     lines: ls.map((l) => ({
+      po_item_id: l.po_item_id,
       product_id: l.product_id,
       product_name: l.product_name,
       sku: l.sku,
@@ -311,6 +315,7 @@ export function ExpressReceivePanel({
 
   const handleConfirm = async () => {
     const items: ExpressReceiveItemInput[] = includedLines.map((l) => ({
+      po_item_id: l.po_item_id,
       product_id: l.product_id,
       received_qty: l.received_qty,
       accepted_qty: l.received_qty - l.rejected_qty,

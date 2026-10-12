@@ -330,11 +330,14 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
         if over:
             raise HTTPException(
                 status_code=400,
+                # What is known: the order has a cancelled line for the
+                # product -- never that these units were the cancelled ones.
                 detail=(
-                    "This order no longer has room for what you entered: "
+                    "This order has a cancelled line for "
                     + ", ".join(over)
-                    + ". Those units were cancelled on the order, so they "
-                    "cannot go into stock - mark them rejected."
+                    + ", so extra units cannot be told apart from the "
+                    "cancelled ones. Mark the extra rejected, or receive it "
+                    "on a new order."
                 ),
             )
 

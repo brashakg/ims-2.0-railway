@@ -81,6 +81,7 @@ vi.mock('../ExpressReceivePanel', () => ({
           upload: { file_id: 'f1', filename: 'inv.pdf', mime: 'application/pdf' },
           lines: [
             {
+              po_item_id: '0',
               product_id: 'prod-a',
               product_name: 'Ray-Ban RX5154',
               sku: 'RB5154',
@@ -93,6 +94,7 @@ vi.mock('../ExpressReceivePanel', () => ({
               unit_price: 3200,
             },
             {
+              po_item_id: '3',
               product_id: 'prod-b',
               product_name: 'Crizal Rock 1.5',
               sku: 'CRZ-15',
@@ -215,8 +217,9 @@ describe('GoodsReceiptCockpit two-step receive - ruling 14 (the tally)', () => {
       expect(item.tallied).toBe(true);
     }
     // ...and the tick must not have quietly rewritten what arrived.
-    expect(payload.items[0]).toMatchObject({ product_id: 'prod-a', received_qty: 8, rejected_qty: 0 });
-    expect(payload.items[1]).toMatchObject({ product_id: 'prod-b', received_qty: 20, rejected_qty: 2 });
+    // Each item names its order line (the server holds an extra to it).
+    expect(payload.items[0]).toMatchObject({ po_item_id: '0', product_id: 'prod-a', received_qty: 8, rejected_qty: 0 });
+    expect(payload.items[1]).toMatchObject({ po_item_id: '3', product_id: 'prod-b', received_qty: 20, rejected_qty: 2 });
   });
 
   it("F26: after receiving, the labels dialog lists THIS receipt's units - no fake success", async () => {

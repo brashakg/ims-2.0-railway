@@ -339,10 +339,12 @@ export function GoodsReceiptNote() {
   const onSelectPO = (poId: string) => {
     setPoNumber(poId);
     const po = pos.find((p) => p.po_id === poId || p.po_number === poId);
-    const lines = (po?.items || []).map((it) => {
+    const lines = (po?.items || []).map((it, index) => {
       const qty = it.quantity ?? it.qty ?? it.ordered_qty ?? 0;
       return {
-        po_item_id: it.po_item_id || it.id || it.product_id,
+        // The line's position on the order: the receipt names its line, so
+        // an extra on an untouched line is accepted and flagged, not refused.
+        po_item_id: String(index),
         product_id: it.product_id,
         product_name: it.product_name || it.name || it.product_id,
         sku: it.sku,

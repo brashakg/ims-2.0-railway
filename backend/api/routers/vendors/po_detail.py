@@ -454,14 +454,29 @@ def _qty(v) -> int:
         return 0
 
 
+def _cut(item: dict) -> bool:
+    """A line the order has withdrawn units of (cancelled outright or in part)."""
+    return item.get("line_status") == "CANCELLED" or bool(_qty(item.get("cancelled_qty")))
+
+
 def _cancelled_products(po: dict) -> set:
-    """The products the order has withdrawn units of (a line cancelled outright
-    or in part)."""
-    return {
-        it.get("product_id")
-        for it in po.get("items") or []
-        if it.get("line_status") == "CANCELLED" or _qty(it.get("cancelled_qty"))
-    }
+    """The products the order has withdrawn units of."""
+    return {it.get("product_id") for it in po.get("items") or [] if _cut(it)}
+
+
+def _line_named(items: list, line: dict):
+    """The position of the order line a receipt line names, or None. The
+    receive screens send each line's position on the order as `po_item_id`;
+    a sent order's lines never move (only a DRAFT is edited, and a draft takes
+    no receipt). Only a line of the receipt line's own product counts, so an
+    older screen that sent the product id names no line."""
+    try:
+        i = int(str(line.get("po_item_id")))
+    except (TypeError, ValueError):
+        return None
+    if 0 <= i < len(items) and items[i].get("product_id") == line.get("product_id"):
+        return i
+    return None
 
 
 def puts_nothing_in_stock(lines) -> bool:
@@ -495,29 +510,60 @@ def beyond_open_quantity(po: dict, lines, received_of) -> list:
     runs over an untouched line is accepted and flagged, never refused (owner
     ruling 2026-10-08). A receipt line is held by its `accepted_qty` -- the
     units that would go INTO STOCK -- so cancelled units that arrived and are
-    rejected refuse nothing. `received_of()` returns the units already
-    received per product; it is only called when the receipt touches a
-    product the order has cancelled units of, so an ordinary receipt never
-    depends on it. Create and accept both call this."""
+    rejected refuse nothing.
+
+    Receipts are counted per product, and one product can sit on several
+    lines (a contact-lens order: one line per power). A receipt line that
+    names an untouched line of it (_line_named) is that line's: units beyond
+    that line's quantity are its over-delivery -- accepted and flagged -- and
+    the rest take room like any other unit. A receipt line that names a line
+    with a cancel is held to that line's live quantity. Units that name no
+    line cannot be told apart from the cancelled ones, so they are held too:
+    the held units, what already arrived and the named units that fit their
+    lines must fit the live quantity (owner ruling (a) wins when the lines
+    cannot be told apart).
+
+    `received_of()` returns the units already received per product; it is
+    only called when the receipt holds units of a product the order has
+    cancelled units of, so an ordinary receipt never depends on it. Create
+    and accept both call this."""
+    items = po.get("items") or []
     live: dict = {}
-    cancelled = _cancelled_products(po)
     names: dict = {}
-    for it in po.get("items") or []:
+    for it in items:
         pid = it.get("product_id")
         names.setdefault(pid, it.get("product_name") or it.get("sku") or pid)
         live[pid] = live.get(pid, 0) + _qty(it.get("quantity"))
-    coming: dict = {}
+    cancelled = _cancelled_products(po)
+    held: dict = {}
+    named: dict = {}
     for line in lines or []:
-        pid = line.get("product_id")
-        coming[pid] = coming.get(pid, 0) + _qty(line.get("accepted_qty"))
-    touched = {pid for pid, qty in coming.items() if qty and pid in cancelled}
+        pid, qty = line.get("product_id"), _qty(line.get("accepted_qty"))
+        i = _line_named(items, line)
+        if i is None:
+            held[pid] = held.get(pid, 0) + qty
+        else:
+            named[i] = named.get(i, 0) + qty
+    fits: dict = {}
+    beyond: set = set()  # more named to a cut line than it still orders
+    for i, qty in named.items():
+        pid, room = items[i].get("product_id"), _qty(items[i].get("quantity"))
+        if _cut(items[i]):
+            held[pid] = held.get(pid, 0) + qty
+            if qty > room:
+                beyond.add(pid)
+        else:
+            fits[pid] = fits.get(pid, 0) + min(qty, room)
+    touched = {pid for pid, qty in held.items() if qty and pid in cancelled}
     if not touched:
         return []
     already_received = received_of()
     return [
         str(names[pid])
         for pid in touched
-        if _qty(already_received.get(pid)) + coming[pid] > live.get(pid, 0)
+        if pid in beyond
+        or _qty(already_received.get(pid)) + held[pid] + fits.get(pid, 0)
+        > live.get(pid, 0)
     ]
 
 

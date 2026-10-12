@@ -52,8 +52,8 @@ def test_cockpit_open_pos_residuals_and_pending_cataloged(monkeypatch):
         {
             "po_id": "PO1", "po_number": "PO-1", "vendor_id": "V1", "status": "SENT",
             "items": [
-                {"product_id": "P1", "product_name": "Frame A", "sku": "FA", "ordered_qty": 5, "received_qty": 2},
                 {"product_id": "P2", "product_name": "Frame B", "sku": "FB", "ordered_qty": 3, "received_qty": 3},
+                {"product_id": "P1", "product_name": "Frame A", "sku": "FA", "ordered_qty": 5, "received_qty": 2},
             ],
         },
         {
@@ -80,6 +80,9 @@ def test_cockpit_open_pos_residuals_and_pending_cataloged(monkeypatch):
     assert res["open_pos"][0]["po_id"] == "PO1"
     lines = res["open_pos"][0]["lines"]
     assert len(lines) == 1 and lines[0]["product_id"] == "P1" and lines[0]["pending_qty"] == 3
+    # The line's position on the order, which a receipt line sends back so
+    # the receipt names its line (po_detail._line_named).
+    assert lines[0]["po_item_id"] == "1"
 
     # pending_not_received: P1 residual = 3 (PO1 only; PO2's P1 line fully received).
     pnr = {r["product_id"]: r for r in res["pending_not_received"]}

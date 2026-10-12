@@ -1014,3 +1014,64 @@ def test_a_one_unit_over_delivery_is_flagged(monkeypatch):
     assert task["title"] == "Over-delivery on PO-2601-1"
     assert "Frame X: 1 more than ordered (6 received, 5 ordered)" in task["description"]
 
+
+def _cl_order():
+    """One contact-lens product on several power lines: -1.00 x2, -2.00 x2,
+    -3.00 cancelled outright, and an untouched frame line (index 3)."""
+    po = _po(_line("CL1", "Acuvue", 2, description="SPH -1.00"),
+             _line("CL1", "Acuvue", 2, description="SPH -2.00"))
+    po["items"] += [
+        _line("CL1", "Acuvue", 0, ordered_qty=2, cancelled_qty=2,
+              line_status="CANCELLED", description="SPH -3.00"),
+        _line("P1", "Frame X", 1),
+    ]
+    return po
+
+
+def _cl(qty, line=None):
+    row = {"product_id": "CL1", "received_qty": qty, "accepted_qty": qty, "rejected_qty": 0}
+    if line is not None:
+        row["po_item_id"] = line
+    return row
+
+
+@pytest.mark.parametrize("lines", [
+    [_cl(5)],                    # names no line (the panel's CL1 probe)
+    [_cl(5, line="CL1")],        # an older screen: the product id names no line
+    [_cl(4, line="1"), _cl(1, line="2")],  # one unit names the cancelled line
+    [_cl(5, line="3")],          # a line of another product names nothing
+    [_cl(2, line="0"), _cl(3)],  # the 2 named fit their line and take its room
+], ids=["unnamed", "product-id", "cancelled-line", "other-product", "named-fit"])
+def test_an_extra_that_cannot_be_told_from_the_cancelled_units_is_refused(monkeypatch, lines):
+    """4 of CL1 live, 2 cancelled (the -3.00 line). 5 accepted that cannot all
+    be put on an untouched line is refused -- owner ruling (a) wins when the
+    lines cannot be told apart -- and the refusal says only what is known:
+    the order has a cancelled line for the product."""
+    grn_repo, _po_repo, stock, _t = _wire(monkeypatch, po=_cl_order())
+    with pytest.raises(HTTPException) as e:
+        _create("normal", lines, _user())
+    assert e.value.status_code == 400
+    assert e.value.detail == (
+        "This order has a cancelled line for Acuvue, so extra units cannot be "
+        "told apart from the cancelled ones. Mark the extra rejected, or "
+        "receive it on a new order.")
+    assert grn_repo.docs == {} and stock.units == []
+
+
+@pytest.mark.parametrize("lines", [
+    [_cl(2, line="0"), _cl(3, line="1")],
+    [_cl(3, line="1"), _cl(2)],  # the 2 unnamed fit the -1.00 line's room
+], ids=["all-named", "extra-named"])
+def test_an_extra_on_a_named_untouched_line_is_accepted_and_flagged(monkeypatch, lines):
+    """Ruling (b) per line: the receipt names its lines (the receive screens
+    send each line's position) -- 3 on -2.00, which ordered 2. The one extra
+    is on a line with no cancel, so it is accepted and flagged, never refused
+    -- at create and at accept. Only the named units that fit their line take
+    room, so 2 more that name no line still fit beside them."""
+    grn_repo, _po_repo, stock, tasks = _wire(monkeypatch, po=_cl_order())
+    gid = _create("normal", lines, _user())["grn_id"]
+    assert _accept(gid)["grn_status"] == "ACCEPTED"
+    assert len([u for u in stock.units if u["product_id"] == "CL1"]) == 5
+    [task] = _over_tasks(tasks)
+    assert "Acuvue: 1 more than ordered (5 received, 4 ordered)" in task["description"]
+

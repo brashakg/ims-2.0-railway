@@ -71,6 +71,7 @@ const PO: CockpitOpenPO = {
   expected_date: '2026-07-06',
   lines: [
     {
+      po_item_id: '0',
       product_id: 'prod-a',
       product_name: 'Ray-Ban RX5154',
       sku: 'RB5154',
@@ -81,6 +82,7 @@ const PO: CockpitOpenPO = {
       tax_rate: 18,
     },
     {
+      po_item_id: '1',
       product_id: 'prod-b',
       product_name: 'Crizal Rock 1.5',
       sku: 'CRZ-15',
@@ -221,13 +223,17 @@ describe('ExpressReceivePanel — clean box goes express', () => {
         vendor_invoice_no: 'JJ/26/07/001',
         attachment_file_id: 'file-1',
         items: [
+          // Each line names its order line, so an extra on an untouched line
+          // is accepted and flagged, never refused.
           expect.objectContaining({
+            po_item_id: '0',
             product_id: 'prod-a',
             received_qty: 6,
             accepted_qty: 6,
             rejected_qty: 0,
           }),
           expect.objectContaining({
+            po_item_id: '1',
             product_id: 'prod-b',
             received_qty: 20,
             accepted_qty: 20,
@@ -298,6 +304,7 @@ describe('ExpressReceivePanel — non-clean edits flip to the two-step path', ()
     // accepted = received - rejected on the edited line
     expect(prefill.lines[0]).toEqual(
       expect.objectContaining({
+        po_item_id: '0',
         product_id: 'prod-a',
         received_qty: 6,
         accepted_qty: 5,

@@ -67,7 +67,7 @@ async def goods_receipt_cockpit(
         for po in po_repo.find_many(flt, limit=500) or []:
             header_recv = po.get("received_qty_by_product") or {}
             open_lines: list = []
-            for it in po.get("items") or []:
+            for idx, it in enumerate(po.get("items") or []):
                 pid = it.get("product_id")
                 ordered = it.get("ordered_qty", it.get("quantity", 0)) or 0
                 recv = it.get("received_qty")
@@ -80,6 +80,10 @@ async def goods_receipt_cockpit(
                     residual = ordered - recv
                     open_lines.append(
                         {
+                            # The line's position on the order: a receipt
+                            # line sends it back so the receipt names its
+                            # line (po_detail._line_named).
+                            "po_item_id": str(idx),
                             "product_id": pid,
                             "product_name": it.get("product_name"),
                             "sku": it.get("sku"),

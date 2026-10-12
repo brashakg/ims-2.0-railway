@@ -179,3 +179,33 @@ describe('no-PO Delivery-Challan receiving', () => {
     expect(screen.getByRole('button', { name: /Post GRN/i })).not.toBeDisabled();
   });
 });
+
+describe('PO-backed receiving', () => {
+  it('names each order line by its position, so a lens order with one line per power is told apart', async () => {
+    api.getPurchaseOrders.mockResolvedValue({
+      purchase_orders: [
+        {
+          po_id: 'PO-1',
+          po_number: 'PO-2601-1',
+          status: 'SENT',
+          items: [
+            { product_id: 'CL1', product_name: 'Acuvue', quantity: 2 },
+            { product_id: 'CL1', product_name: 'Acuvue', quantity: 2 },
+          ],
+        },
+      ],
+    });
+    render(<GoodsReceiptNote />);
+    await waitFor(() => expect(screen.getByText('PO-2601-1')).toBeInTheDocument());
+    fireEvent.change(screen.getByDisplayValue('Select a PO…'), { target: { value: 'PO-1' } });
+    fireEvent.click(screen.getByLabelText(/Tally line 1/));
+    fireEvent.click(screen.getByLabelText(/Tally line 2/));
+    fireEvent.click(screen.getByRole('button', { name: /Post GRN/i }));
+
+    await waitFor(() => expect(api.createGRN).toHaveBeenCalledTimes(1));
+    expect(api.createGRN.mock.calls[0][0].items).toEqual([
+      expect.objectContaining({ po_item_id: '0', product_id: 'CL1' }),
+      expect.objectContaining({ po_item_id: '1', product_id: 'CL1' }),
+    ]);
+  });
+});

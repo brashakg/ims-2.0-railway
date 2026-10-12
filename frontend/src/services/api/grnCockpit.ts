@@ -9,6 +9,8 @@ import api from './client';
 // ---- Cockpit payload types -------------------------------------------------
 
 export interface CockpitOpenPOLine {
+  /** The line's position on the order; a receipt line sends it back. */
+  po_item_id?: string;
   product_id: string | null;
   product_name: string | null;
   sku: string | null;

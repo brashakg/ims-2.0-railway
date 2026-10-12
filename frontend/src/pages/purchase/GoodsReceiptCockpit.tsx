@@ -469,6 +469,7 @@ export function GoodsReceiptCockpit() {
     setNotes('');
     setReceiveLines(
       prefill.lines.map((l) => ({
+        po_item_id: l.po_item_id,
         product_id: l.product_id,
         product_name: l.product_name,
         sku: l.sku,
@@ -596,6 +597,7 @@ export function GoodsReceiptCockpit() {
     const items: GRNItemInput[] = receiveLines
       .filter((l) => l.received_qty > 0)
       .map((l) => ({
+        po_item_id: l.po_item_id,
         product_id: l.product_id,
         received_qty: l.received_qty,
         accepted_qty: l.accepted_qty,
