@@ -284,7 +284,7 @@ async def raise_rma(
 async def get_rma(
     rma_id: str, current_user: dict = Depends(require_roles(*_VENDOR_RMA_ROLES))
 ):
-    """Get a single RMA. Store-IDOR guarded (cross-store -> 403)."""
+    """Get a single RMA. Another shop's is the 404 a missing one gets."""
     eng = _engine()
     doc = in_reach_or_404(eng.get(rma_id), current_user, "RMA not found")
     return strip_rma_credit(_with_rupees(doc), current_user)
