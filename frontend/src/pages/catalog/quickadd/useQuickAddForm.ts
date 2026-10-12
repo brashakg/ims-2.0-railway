@@ -38,6 +38,7 @@ import {
   formValuesToCatalogUpdate,
   hsnImpliesCategoryRate,
   loadCategoryRegistry,
+  modelFields,
   overlayChangedFormValues,
   productToFormValues,
   productToVariantFormValues,
@@ -706,9 +707,11 @@ export function useQuickAddForm() {
           startNextVariant();
         } else if (saveAndNew) {
           resetForm(true);
-          // Keep focus flowing: back to the top, cursor in Model No (F68).
+          // Keep focus flowing: back to the top, cursor in the model field
+          // the category's form shows (F68: Model No, else Model Name, else
+          // an Optical Lens's Sub Brand).
           window.scrollTo({ top: 0, behavior: 'smooth' });
-          focusAttrField(document.getElementById('qa-field-model_no') ? 'model_no' : 'model_name');
+          focusAttrField(modelFields(values.category)[0] ?? null);
         } else {
           navigate('/inventory');
         }

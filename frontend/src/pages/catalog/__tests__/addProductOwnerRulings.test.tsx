@@ -10,7 +10,8 @@
 //        and the create payload carries no sync choice.
 // F13/D5 the new product's readable SKU is PREVIEWED before saving, and the
 //        preview comes from the server (the minting function), never a copy.
-// F68    after Save + New the cursor is in Model No and the reorder level stays.
+// F68    after Save + New the cursor is in the model field the form shows (Model
+//        No, else Model Name) and the reorder level stays.
 // F69    the same-model chip keeps the typed colour and weight (never flagged
 //        as copied), copies the rest of the weight + this shop's reorder level
 //        -- only for a role whose save writes a level, a catalogue manager's
@@ -343,6 +344,46 @@ describe('F68 - Save + New keeps you typing', () => {
     await waitFor(() => expect(screen.getByLabelText(/^Model No/)).toHaveFocus());
     expect(reorderInput().value).toBe('2');
     expect(setShopLevel).toHaveBeenCalledWith('P-NEW', 'S1', 2);
+  });
+
+  it.each([
+    ['Contact Lens', 'Acuvue', { Power: '-1.25', 'Expiry Date': '2027-01-31' }],
+    ['Colour Contact Lens', 'Acuvue', { 'Lens Colour': 'Hazel', Power: '-1.25', 'Expiry Date': '2027-01-31' }],
+    ['Accessories', 'Ray-Ban', {}],
+    ['Smart Watch', 'Apple', { 'Colour Code': 'BLK' }],
+  ])('a %s (Model Name, no Model No) lands the cursor in Model Name', async (tile, brand, more) => {
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByText(tile));
+    expect(screen.queryByLabelText(/^Model No/)).toBeNull();
+    fill(screen.getByLabelText(/^Brand Name/), brand);
+    fill(screen.getByLabelText(/^Model Name/), 'Oasys');
+    Object.entries(more).forEach(([label, v]) => fill(screen.getByLabelText(new RegExp(`^${label}`)), v));
+    fill(screen.getByLabelText(/^MRP/), '1000');
+    await user.click(screen.getByRole('button', { name: /Save \+ New/ }));
+    await waitFor(() => expect(createProduct).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByLabelText(/^Model Name/)).toHaveFocus());
+  });
+});
+
+describe("the model is the field the form shows, never main's hidden copy", () => {
+  it('Edit of a contact lens reviews and saves its Model Name, not the model_no copy', async () => {
+    // main's door copied the model into model_no; the Model Name was renamed since.
+    getProduct.mockResolvedValueOnce({
+      product_id: 'P-CL', sku: 'CLACUVUEOASYS', category: 'CL', brand: 'Acuvue', model: 'Oasys',
+      attributes: {
+        brand_name: 'Acuvue', model_no: 'Oasys', model_name: 'Oasys Max',
+        power: '-1.25', expiry_date: '2027-01-31',
+      },
+      mrp: 1000, offer_price: 900, hsn_code: '900410', gst_rate: 18, images: [],
+    });
+    const user = userEvent.setup();
+    renderPage('/catalog/add?edit=P-CL');
+    const save = await screen.findByRole('button', { name: /Save changes/ });
+    await waitFor(() => expect(within(reviewRow('Model')).getByText('Oasys Max')).toBeInTheDocument());
+    await user.click(save);
+    await waitFor(() => expect(updateProduct).toHaveBeenCalledTimes(1));
+    expect((updateProduct.mock.calls[0] as unknown[])[1]).toMatchObject({ model: 'Oasys Max' });
   });
 });
 

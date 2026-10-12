@@ -4,7 +4,7 @@
 // MOVED verbatim out of QuickAddPage.tsx (Wave 3 file diet).
 
 import { Sparkles } from 'lucide-react';
-import { categoryName, fieldLabelFor } from '../productAddShared';
+import { categoryName, fieldLabelFor, modelOf } from '../productAddShared';
 import { ReviewRow } from './parts';
 import type { QuickAddForm } from './useQuickAddForm';
 
@@ -31,10 +31,7 @@ export function ReviewCard({ form }: { form: QuickAddForm }) {
           {!editMode && <ReviewRow label="SKU" value={skuPreview || '—'} wide />}
           <ReviewRow label="Category" value={categoryName(selectedCategory) || '—'} />
           <ReviewRow label="Brand" value={attributes.brand_name || '—'} />
-          <ReviewRow
-            label="Model"
-            value={attributes.model_no || attributes.model_name || '—'}
-          />
+          <ReviewRow label="Model" value={modelOf(selectedCategory, attributes) || '—'} />
           {/* Remaining filled category attributes (parity with the Guided
               wizard's review, which listed every filled attribute), named
               by the registry label the form itself uses -- never a raw key

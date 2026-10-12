@@ -4,7 +4,7 @@
 
 import type { CreateProductPayload } from '../../../services/api/products';
 import { resolveGstRate, resolveHsn } from '../../../constants/gstRuntime';
-import { getCategoryFields, registryRequiredFields } from './categoryFields';
+import { getCategoryFields, modelOf, registryRequiredFields } from './categoryFields';
 
 // Number coercion shared by the CL/LS field mapping. Returns undefined for
 // blank / non-numeric so the backend treats the field as absent.
@@ -152,9 +152,9 @@ export function buildProductPayload(values: ProductFormValues): CreateProductPay
   const { category, attributes } = values;
 
   // ProductCreate requires top-level brand/model. The dynamic form collects
-  // these under category-specific attribute names (brand_name, model_no /
-  // model_name); map them here, and nothing else: a category with no model
-  // (Optical Lens) sends a blank one and the server's one rule
+  // these under category-specific attribute names; the model is the one the
+  // category's form shows (modelOf: never a hidden model_no copy). Nothing
+  // else: an Optical Lens with no sub-brand sends a blank one and the server's one rule
   // (product_master.identity_parts: the sub-brand, coating and index) names
   // it for the SKU (which the Review preview calls too), the model column,
   // the display name and the duplicate guard. SKU is NOT a form field: the backend mints the
@@ -163,7 +163,7 @@ export function buildProductPayload(values: ProductFormValues): CreateProductPay
   // imported SKU under attributes.sku). We no longer fabricate a Date.now() SKU
   // — that ugly client SKU used to override the backend's clean one.
   const brand = String(attributes.brand_name || attributes.brand || '').trim();
-  const model = String(attributes.model_no || attributes.model_name || '').trim();
+  const model = modelOf(category, attributes);
   const suppliedSku = String(attributes.sku || '').trim();
 
   // Contact lenses: map CL attribute fields onto the top-level CL identity
