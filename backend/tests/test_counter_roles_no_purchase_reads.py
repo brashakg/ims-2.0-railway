@@ -1201,12 +1201,30 @@ def test_frontend_cost_cell_is_the_product_context():
 
 
 # Every frontend check on supplier payments (Finance dashboard tab + schedule,
-# booking a supplier bill, approving a match exception) reads the one list.
+# booking a supplier bill, approving a match exception, the GST input tax,
+# the debit-note work on Vendor Returns, an 'rtv' approval's amount) reads the
+# one list -- a typed-out copy of the accounts set drifts the next time it
+# changes (panel 2026-10-13).
 _PAYABLES_SCREENS = (
     "pages/finance/FinanceDashboard.tsx",
     "components/purchase/POLifecycleDrawer.tsx",
     "pages/purchase/invoices/shared.ts",
     "pages/purchase/ReconConsole.tsx",
+    "pages/finance/GSTPanel.tsx",
+    "components/reports/GSTR3BReport.tsx",
+    "pages/purchase/VendorReturns.tsx",
+    "components/approvals/ApprovalRequestCard.tsx",
+    "components/approvals/PINApproveModal.tsx",
+    "pages/approvals/MyRequestsPage.tsx",
+)
+# The Purchase screens that read the same list through invoices/shared.ts's
+# APPROVE_ROLES (= PAYABLES_ROLES, pinned by shared.ts above).
+_APPROVE_SCREENS = (
+    "pages/purchase/PurchaseLayout.tsx",
+    "pages/purchase/SuppliersSection.tsx",
+    "routes/purchaseRoutes.tsx",
+    "pages/purchase/invoices/ExceptionsPanel.tsx",
+    "pages/purchase/invoices/InvoiceDetailDrawer.tsx",
 )
 
 
@@ -1218,6 +1236,9 @@ def test_frontend_payables_roles_are_the_payables_context():
     want = {r for r in rbac.ALL_ROLES if can_see_cost({"roles": [r]}, "payables")}
     assert set(re.findall(r"'([A-Z_]+)'", m.group(1))) == want
     _assert_screens_read("PAYABLES_ROLES", _PAYABLES_SCREENS)
+    with open(os.path.join(_FRONTEND_SRC, "pages/purchase/invoices/shared.ts"), encoding="utf-8") as fh:
+        assert re.search(r"\bAPPROVE_ROLES\b[^=]*=\s*PAYABLES_ROLES\s*;", fh.read())
+    _assert_screens_read("APPROVE_ROLES", _APPROVE_SCREENS)
 
 
 # ---------------------------------------------------------------------------
