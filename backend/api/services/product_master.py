@@ -1124,7 +1124,10 @@ def identity_parts(
     its coating and index stand in (Crizal 1.56 HC and Crizal 1.67 HC are two
     products; the same Crizal 1.56 HC twice is one). A frame's eye size
     (lens_size) is its size: 52 and 54 are two products (owner 2026-09-28,
-    each eye size is its own variant). A lens with no sub-brand
+    each eye size is its own variant). Each is read only for its own kind
+    (`category`): the form keeps a typed field when its category is switched,
+    and a Sunglass's leftover Lens Size 54 must never stand in for a lens's
+    index, nor a lens's index or coating for a frame's. A lens with no sub-brand
     is the brand's own line: its coating takes the model's place, so Hoya HC
     1.56 saved twice is still one product and the SKU mints no filler. The
     old form's filler model 'STD' (a lens with no sub-brand, stored in
@@ -1135,13 +1138,15 @@ def identity_parts(
     one."""
     ids = _derive_brand_model_color_size(attributes)
     a = attributes or {}
-    model, colour = ids["model"], ids["color"] or a.get("coating")
+    kind = resolve_category(category)
+    lens = kind == "OPTICAL_LENS"
+    model, colour = ids["model"], ids["color"] or (a.get("coating") if lens else None)
     if not ids["color"] and str(model or "").strip().upper() == "STD":
         model = a.get("subbrand")
     if not model and not ids["color"]:
         model, colour = colour, None
-    size = ids["size"] or a.get("lens_size") or a.get("index")
-    if resolve_category(category) in _CONTACT_LENSES:
+    size = ids["size"] or a.get("index" if lens else "lens_size")
+    if kind in _CONTACT_LENSES:
         size = "/".join(sku for sku, _ in _cl_parts(a)) or None
     return (ids["brand"], model, colour, size)
 

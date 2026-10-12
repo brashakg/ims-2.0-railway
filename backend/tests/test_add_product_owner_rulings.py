@@ -1136,3 +1136,24 @@ def test_c_catalog_import_says_power_is_not_a_number(client, auth_headers):
     errors = {e["index"]: e["error"] for e in resp.json()["errors"]}
     assert "power is not a number" in errors[0] and "Missing" not in errors[0]
     assert errors[1] == "Missing required field: power"
+
+
+# ---------------------------------------------------------------------------
+# D: panel round 2 -- one key rule for a stored row, a name that says what the
+# product is, an edit that leaves a bad stored value alone, a lens's own size
+# ---------------------------------------------------------------------------
+
+
+def test_d_an_optical_lens_never_takes_a_leftover_eye_size(door):
+    """Switching the form from Sunglass to Optical Lens keeps the typed Lens
+    Size. The lens's size is its index, so the preview, the SKU and the key
+    read 1.67, and 1.56 and 1.67 are two lenses, not a false 409."""
+    stale = dict(_CRIZAL, index="1.67", lens_size="54")
+    assert _preview("LS", stale) == "LS-ESSILOR-CRIZAL-HC-1.67"
+    saved = door(_form_post("LS", stale))
+    assert (saved["sku"], saved["identity_key"]) == ("LS-ESSILOR-CRIZAL-HC-1.67", "essilor|crizal|hc|167")
+    door(_form_post("LS", dict(stale, index="1.56")))
+    # ... and a frame (a draft with no colour yet) never takes a leftover
+    # lens index or coating.
+    frame = {"brand_name": "Carrera", "model_no": "CA8895", "index": "1.67", "coating": "HC"}
+    assert pm.build_sku("SG", frame) == "SG-CARRERA-CA8895"
