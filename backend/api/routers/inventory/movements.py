@@ -1,5 +1,6 @@
 """Stock movements ledger (Movements tab) and its per-source collectors."""
 
+from ...dependencies import store_in_view
 from ._shared import (
     Depends,
     Dict,
@@ -452,7 +453,7 @@ async def get_stock_movements(
     active store see all stores). Sorted newest-first; paged via skip/limit
     over the merged in-window ledger; `sources` reports per-source health.
     """
-    active_store = validate_store_access(store_id, current_user)
+    active_store = store_in_view(store_id, current_user)
 
     if movement_type:
         movement_type = movement_type.strip().upper()

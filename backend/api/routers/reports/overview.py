@@ -10,6 +10,7 @@ from ...utils.ist import (
     ist_today,
 )
 from ..auth import get_current_user, require_roles
+from ...dependencies import store_in_view
 from ...dependencies import (
     get_order_repository,
     get_stock_repository,
@@ -50,7 +51,7 @@ async def dashboard_stats(
     current_user: dict = Depends(get_current_user),
 ):
     """Get dashboard statistics for a store - fetched from database"""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
+    active_store = store_in_view(store_id, current_user) or "store-001"
 
     order_repo = get_order_repository()
     stock_repo = get_stock_repository()
@@ -163,7 +164,7 @@ async def inventory_report(
     current_user: dict = Depends(get_current_user),
 ):
     """Get inventory report for a store - fetched from database"""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
+    active_store = store_in_view(store_id, current_user) or "store-001"
     stock_repo = get_stock_repository()
 
     if stock_repo is not None:
@@ -220,7 +221,7 @@ async def sales_summary(
     """Sales summary + daily trend + category breakdown for the
     requested window. Single endpoint that the frontend Reports page
     reads off the same response."""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     order_repo = get_order_repository()
     empty = {
         "summary": {
@@ -263,7 +264,7 @@ async def daily_sales(
     current_user: dict = Depends(get_current_user),
 ):
     """Daily sales for the last N days (chart data)."""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     order_repo = get_order_repository()
     if order_repo is None:
         return {"data": []}
@@ -291,7 +292,7 @@ async def sales_by_salesperson(
     current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
     """Get sales grouped by salesperson (management report; store-scoped)."""
-    active_store = validate_store_access(store_id, current_user)
+    active_store = store_in_view(store_id, current_user)
     order_repo = get_order_repository()
 
     if order_repo is None:
@@ -355,7 +356,7 @@ async def sales_by_category(
     current_user: dict = Depends(get_current_user),
 ):
     """Sales grouped by product category for the requested window."""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     order_repo = get_order_repository()
     if order_repo is None:
         return {"data": []}

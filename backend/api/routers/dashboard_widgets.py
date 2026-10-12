@@ -16,6 +16,7 @@ from datetime import datetime
 
 from ..utils.ist import ist_day_start_utc, ist_today, now_ist
 from .auth import get_current_user, require_roles
+from ..dependencies import store_in_view
 from ..dependencies import validate_store_access
 from ..services.reorder_policy import low_stock_rows, out_of_stock_count
 
@@ -268,7 +269,7 @@ async def inventory_stock_count_status(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(get_current_user),
 ):
-    store = validate_store_access(store_id, current_user)
+    store = store_in_view(store_id, current_user)
     products = _coll("products")
     # Sold out by the one on-hand rule, not products.stock_quantity.
     total, oos = out_of_stock_count(products, _coll("stock_units"), store_id=store)

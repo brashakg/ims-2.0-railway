@@ -17,6 +17,7 @@ from .auth import get_current_user
 from ..dependencies import (
     get_stock_repository,
     can_access_store_scoped,
+    no_shop_scope_for,
     user_store_scope,
     validate_store_access,
 )
@@ -951,6 +952,12 @@ async def list_transfers(
         ]
     if priority:
         transfers = [t for t in transfers if t.get("priority") == priority]
+
+    # R4 (owner ruling 2026-10-12): a non-admin login with NO shop -- an
+    # AREA_MANAGER too, HQ below -- sees no shop's transfers (naming one is a
+    # 403); it used to read every shop's.
+    if no_shop_scope_for(store_id or from_location_id or to_location_id, current_user):
+        transfers = []
 
     # Filter by store access for non-superadmin users
     user_roles = current_user.get("roles", [])

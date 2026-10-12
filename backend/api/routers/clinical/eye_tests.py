@@ -12,6 +12,7 @@ from ...utils.ist import ist_today
 import uuid
 from ..auth import get_current_user, require_roles
 from ..prescriptions import require_rx_read
+from ...dependencies import store_in_view
 from ...dependencies import (
     get_eye_test_queue_repository,
     get_eye_test_repository,
@@ -107,7 +108,7 @@ async def get_tests(
     lookup never blocks the list.
     """
     # BUG-062: 403 a store-scoped caller asking for another store's tests.
-    store_id = validate_store_access(store_id, current_user)
+    store_id = store_in_view(store_id, current_user)
     test_repo = get_eye_test_repository()
 
     if test_repo is not None:

@@ -10,6 +10,7 @@ from fastapi import Depends, Query
 from typing import Optional
 from datetime import date, datetime
 from ..auth import get_current_user
+from ...dependencies import store_in_view
 from ...dependencies import get_db, get_workshop_repository, validate_store_access
 from ._shared import logger, router
 from .helpers import _stamp_job_actor_names, job_to_frontend
@@ -41,7 +42,7 @@ async def get_pending_jobs(
 ):
     """Get pending workshop jobs"""
     repo = get_workshop_repository()
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
 
     if repo is not None:
         jobs = repo.find_pending(active_store)
@@ -59,7 +60,7 @@ async def get_overdue_jobs(
 ):
     """Get overdue workshop jobs"""
     repo = get_workshop_repository()
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
 
     if repo is not None:
         jobs = repo.find_overdue(active_store)
@@ -77,7 +78,7 @@ async def get_ready_jobs(
 ):
     """Get jobs ready for delivery"""
     repo = get_workshop_repository()
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
 
     if repo is not None:
         jobs = repo.find_ready(active_store)
@@ -95,7 +96,7 @@ async def get_technician_workload(
 ):
     """Get technician workload summary"""
     repo = get_workshop_repository()
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
 
     if repo and active_store:
         workload = repo.get_technician_workload(active_store)
@@ -138,7 +139,7 @@ async def get_dashboard_kpis(
     Fail-soft: repo absent → returns zeros with null turnaround, never raises.
     """
     repo = get_workshop_repository()
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
 
     empty = {
         "pending": 0,

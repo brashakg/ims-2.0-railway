@@ -11,6 +11,7 @@ from typing import Optional
 from datetime import datetime
 import uuid
 from ..auth import get_current_user, require_roles
+from ...dependencies import store_in_view
 from ...dependencies import (
     get_db,
     get_workshop_repository,
@@ -78,7 +79,7 @@ async def list_jobs(
 ):
     """List workshop jobs with filters"""
     repo = get_workshop_repository()
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
 
     if repo is not None:
         filter_dict = {}

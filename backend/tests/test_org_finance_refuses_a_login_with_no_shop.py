@@ -32,7 +32,11 @@ from api.routers.auth import get_current_user  # noqa: E402
 from api.routers.finance import bank_statement, gst_crosscheck, tally  # noqa: E402
 
 DHN, PUN = "BV-DHN-01", "WO-PUN-01"
-TODAY = datetime.utcnow().strftime("%Y-%m-%d")
+from tests.ist_business_day import business_day  # noqa: E402
+
+# The IST business day the JV window is asked for (orders are stamped with
+# datetime.utcnow(), the stored frame).
+TODAY = business_day()
 
 
 def _user(role, shops=()):

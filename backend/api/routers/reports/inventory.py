@@ -4,6 +4,7 @@ from fastapi import Depends, Query
 from typing import Any, Dict, Optional
 from datetime import date
 from ..auth import get_current_user, require_roles
+from ...dependencies import store_in_view
 from ...dependencies import (
     get_stock_repository,
     get_product_repository,
@@ -288,7 +289,7 @@ async def eye_test_report(
     as the Test-History page).  Returns each test record for the FE plus
     an aggregation by optometrist and a grand total.
     """
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     test_repo = get_eye_test_repository()
     if test_repo is None:
         return {"data": [], "by_optometrist": [], "total": 0}

@@ -197,6 +197,54 @@ def resolve_store_scope(store_id, current_user: dict):
     return NO_SHOP_SCOPE
 
 
+def store_in_view(store_id, current_user: dict, *, writing: bool = False):
+    """The shop a store-level screen reads (or writes) -- THE validate-or-active
+    rule the reports, HR, payroll, tasks, workshop, expenses, inventory and
+    clinical routes share, once ~60 hand-written copies of
+    ``validate_store_access(store_id, user) or user.get("active_store_id")``.
+
+    - an explicit store_id: validate_store_access (403 outside the caller's
+      shops; NO_SHOP_DETAIL for a login with none);
+    - none named: the caller's active shop -- an ADMIN / SUPERADMIN's too (his
+      topbar shop; None = every shop when he has none). This is where it
+      differs from resolve_store_scope, which gives an admin every shop (the
+      Purchase / Finance org view with a shop filter);
+    - a non-admin with no active shop: its first own shop, and with NO shop at
+      all the reserved NO_SHOP_SCOPE (owner ruling 2026-10-12, R4) -- a filter
+      no document matches, so its lists come back EMPTY. The copies returned
+      None there: every shop's jobs, expenses, tasks and reports.
+      ``writing=True`` refuses that login instead (403 NO_SHOP_DETAIL): a
+      write never stamps the reserved id onto a record.
+    """
+    from fastapi import HTTPException
+
+    shop = validate_store_access(store_id, current_user)
+    if shop:
+        return shop
+    roles = set(current_user.get("roles") or [])
+    if "SUPERADMIN" in roles or "ADMIN" in roles:
+        return None
+    own = resolve_store_scope(None, current_user)
+    if writing and is_no_shop_scope(own):
+        raise HTTPException(status_code=403, detail=NO_SHOP_DETAIL)
+    return own
+
+
+def no_shop_scope_for(store_id, current_user: dict):
+    """R4 for a list whose own shop rule lets a role read past its shops (an
+    AREA_MANAGER is HQ on customer returns and stock transfers): the reserved
+    NO_SHOP_SCOPE when the caller is a non-admin login with NO shop -- and a
+    403 NO_SHOP_DETAIL if it named a shop -- else None, and the route's own
+    rule applies to a login that holds a shop."""
+    from fastapi import HTTPException
+
+    if not is_no_shop_scope(resolve_store_scope(None, current_user)):
+        return None
+    if store_id:
+        raise HTTPException(status_code=403, detail=NO_SHOP_DETAIL)
+    return NO_SHOP_SCOPE
+
+
 def filter_docs_by_store(docs, current_user: dict, store_key: str = "store_id"):
     """Filter a list of store-stamped docs to those the caller may read.
 

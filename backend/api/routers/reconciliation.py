@@ -27,6 +27,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from .auth import get_current_user
+from ..dependencies import store_in_view
 from ..dependencies import validate_store_access
 from ..services import tender_reconciliation as tr
 from ..services.tender_routing import IMS_DEFAULT_LEDGERS, canonicalize_tender
@@ -157,7 +158,7 @@ async def get_reconciliation_by_mode(
     store. READS order.payments[] -- nothing is written. Store-scoped for
     non-HQ roles."""
     db = _get_db()
-    scoped = validate_store_access(store_id, current_user)
+    scoped = store_in_view(store_id, current_user)
     if not scoped:
         raise HTTPException(status_code=403, detail="not permitted for this store")
     start, end = _ist_day_window(date)

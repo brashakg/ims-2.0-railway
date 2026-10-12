@@ -9,6 +9,7 @@ from ...utils.ist import (
 )
 from calendar import monthrange
 from ..auth import require_roles
+from ...dependencies import store_in_view
 from ...dependencies import (
     validate_store_access,
 )
@@ -737,7 +738,7 @@ async def gstr1_report(
     current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
     """GSTR-1 report (IMS internal shape). See _compute_gstr1 for details."""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
+    active_store = store_in_view(store_id, current_user) or "store-001"
     return _compute_gstr1(month, active_store)
 
 
@@ -765,7 +766,7 @@ async def gstr1_gstn_json(
     """
     from ...services.gstn_export import to_gstr1_json
 
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
+    active_store = store_in_view(store_id, current_user) or "store-001"
     period = _normalise_period(month, year)
     data = _compute_gstr1(period, active_store)
     try:

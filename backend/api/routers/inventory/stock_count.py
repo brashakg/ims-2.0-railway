@@ -1,5 +1,6 @@
 """Stock count sessions: list, start, and the countable-scope helpers."""
 
+from ...dependencies import store_in_view
 from ._shared import (
     Any,
     Depends,
@@ -41,7 +42,7 @@ async def list_stock_counts(
     current_user: dict = Depends(get_current_user),
 ):
     """List stock count sessions for the store"""
-    active_store = validate_store_access(store_id, current_user)
+    active_store = store_in_view(store_id, current_user)
     db = _get_db()
 
     if db is not None:

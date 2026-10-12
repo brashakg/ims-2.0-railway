@@ -9,6 +9,7 @@ from ...utils.ist import (
     ist_today,
 )
 from ..auth import get_current_user, require_roles
+from ...dependencies import store_in_view
 from ...dependencies import (
     get_order_repository,
     get_stock_repository,
@@ -42,7 +43,7 @@ async def staff_ranking(
     current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
     """Staff performance ranking (sales, orders, avg bill); store-scoped."""
-    active_store = validate_store_access(store_id, current_user)
+    active_store = store_in_view(store_id, current_user)
     order_repo = get_order_repository()
 
     if order_repo is None:
@@ -130,7 +131,7 @@ async def pending_workshop_jobs(
     from database.repositories.workshop_repository import WorkshopJobRepository  # lazy
     from ...dependencies import get_db as _get_db
 
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     db = _get_db()
     if db is None or not getattr(db, "is_connected", True):
         return {
@@ -284,9 +285,7 @@ async def workshop_productivity(
     """
     from database.repositories.workshop_repository import WorkshopJobRepository  # lazy
 
-    active_store = validate_store_access(store_id, current_user) or current_user.get(
-        "active_store_id"
-    )
+    active_store = store_in_view(store_id, current_user)
 
     # Window: default to the last 30 days ending today (IST business date).
     end_d = to_date or ist_today()

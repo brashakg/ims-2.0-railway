@@ -1,5 +1,6 @@
 """Inventory intelligence: transfer recommendations + staff accountability."""
 
+from ...dependencies import store_in_view
 from ._shared import (
     BaseModel,
     Depends,
@@ -47,7 +48,7 @@ async def transfer_recommendations(
     from ...services.inventory_intel import recommend_transfers
 
     stock_repo = get_stock_repository()
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     if stock_repo is None or not active_store:
         return {"recommendations": [], "store_id": active_store}
 
@@ -202,7 +203,7 @@ async def list_accountability(
     db = _get_db()
     if db is None:
         return {"custodians": []}
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     q = {"store_id": active_store} if active_store else {}
     try:
         items = list(db.get_collection("stock_accountability").find(q, {"_id": 0}))
@@ -224,7 +225,7 @@ async def accountability_shrinkage(
     db = _get_db()
     if db is None:
         return {"rows": []}
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
     # A count that has been WRITTEN OFF is not off the hook: it is the one
     # whose loss was confirmed. Querying "completed" alone dropped every count
