@@ -141,8 +141,12 @@ EMPTY = {"exact_match": None, "siblings": [], "model_colour_count": 0}
 
 
 def _similar(coll, category="FRAME", brand="Ray-Ban", model="RB-2140", colour=None, size=None):
-    """The lookup as the form asks it: the category and the typed attributes."""
-    attrs = {"brand_name": brand, "model_no": model, "colour_code": colour, "size": size}
+    """The lookup as the form asks it: the category and the typed attributes.
+    The model goes in both model fields, as _spine_doc stores it: a category's
+    form shows one of them (Accessories: Model Name), and the identity reads
+    only the one it shows (product_master._shown_attributes)."""
+    attrs = {"brand_name": brand, "model_no": model, "model_name": model,
+             "colour_code": colour, "size": size}
     return pm.find_similar_products(coll, category=category, attributes=attrs)
 
 

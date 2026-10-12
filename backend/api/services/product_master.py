@@ -1025,13 +1025,33 @@ def set_twin_tags(doc: Dict[str, Any], tags: Any) -> List[str]:
     return clean
 
 
-def _derive_brand_model_color_size(
-    attributes: Dict[str, Any],
-) -> Dict[str, Optional[str]]:
-    """Map category attribute keys onto the spine identity columns. A
-    category with no model (Optical Lens) names its sub-brand in the model's
-    place, so the model column and the display name say Crizal."""
+_MODEL_KEYS = ("model_no", "model_name")
+
+
+def _shown_attributes(attributes: Dict[str, Any], category: Any) -> Dict[str, Any]:
+    """`attributes` less a model_no / model_name its category has no field
+    for. The create door folds a flat `model` into both
+    (normalise_door_payload), and main's form sent a lens's sub-brand (or
+    'STD') as that model: every Optical Lens on prod holds a model_no no form
+    shows or clears, and a contact lens a model_no copy of its Model Name. Such
+    a copy never outranks the field the form edits. An unknown category keeps
+    them all."""
     attrs = attributes or {}
+    spec = category_spec(category)
+    if spec is None:
+        return attrs
+    hidden = [k for k in _MODEL_KEYS if k not in spec.required + spec.optional]
+    return {k: v for k, v in attrs.items() if k not in hidden}
+
+
+def _derive_brand_model_color_size(
+    attributes: Dict[str, Any], category: Any = None
+) -> Dict[str, Optional[str]]:
+    """Map category attribute keys onto the spine identity columns, read as
+    the category's form shows them (_shown_attributes). A category with no
+    model (Optical Lens) names its sub-brand in the model's place, so the
+    model column and the display name say Crizal."""
+    attrs = _shown_attributes(attributes, category)
     return {
         "brand": attrs.get("brand_name") or attrs.get("brand"),
         "model": attrs.get("model_no")
@@ -1129,20 +1149,19 @@ def identity_parts(
     and a Sunglass's leftover Lens Size 54 must never stand in for a lens's
     index, nor a lens's index or coating for a frame's. A lens with no sub-brand
     is the brand's own line: its coating takes the model's place, so Hoya HC
-    1.56 saved twice is still one product and the SKU mints no filler. The
-    old form's filler model 'STD' (a lens with no sub-brand, stored in
-    model_no/model_name) is no model, so an old row and the same lens entered
-    today get one key. A contact lens (`category`) is told apart by its power
-    and fit in the size's place (_cl_parts): a second power, base curve,
-    diameter or pack of a model is a new product, the same lens twice is
-    one."""
-    ids = _derive_brand_model_color_size(attributes)
+    1.56 saved twice is still one product and the SKU mints no filler. A
+    lens's model_no/model_name (main's filler 'STD', or its sub-brand copied
+    there) is no field of the lens form, so it is never read
+    (_shown_attributes): an old row and the same lens entered today get one
+    key, and a sub-brand edit re-keys either. A contact lens (`category`) is
+    told apart by its power and fit in the size's place (_cl_parts): a second
+    power, base curve, diameter or pack of a model is a new product, the same
+    lens twice is one."""
+    ids = _derive_brand_model_color_size(attributes, category)
     a = attributes or {}
     kind = resolve_category(category)
     lens = kind == "OPTICAL_LENS"
     model, colour = ids["model"], ids["color"] or (a.get("coating") if lens else None)
-    if not ids["color"] and str(model or "").strip().upper() == "STD":
-        model = a.get("subbrand")
     if not model and not ids["color"]:
         model, colour = colour, None
     size = ids["size"] or a.get("index" if lens else "lens_size")
@@ -1305,18 +1324,22 @@ def _identity_attributes(doc: Dict[str, Any]) -> Dict[str, Any]:
     attributes leave empty (a legacy row). The flat columns are copies the
     create door derived from the attributes (_derive_brand_model_color_size),
     so a copy left behind by an edit (a lens's sub-brand, a colour name) never
-    outranks the attribute it came from."""
+    outranks the attribute it came from. A flat model fills the model field
+    the category's form shows; a lens has none (its flat model is a copy of
+    main's hidden model_no), so it fills nothing."""
     doc = doc or {}
+    category = doc.get("category")
     attrs: Dict[str, Any] = dict(doc.get("attributes") or {})
-    ids = _derive_brand_model_color_size(attrs)
+    ids = _derive_brand_model_color_size(attrs, category)
+    shown = _shown_attributes(dict.fromkeys(_MODEL_KEYS, True), category)
     for slot, key in (
         ("brand", "brand_name"),
-        ("model", "model_no"),
+        ("model", next(iter(shown), None)),
         ("color", "colour_code"),
         ("size", "size"),
     ):
         flat = doc.get(slot) or (doc.get("colour") if slot == "color" else None)
-        if _is_blank(ids[slot]) and not _is_blank(flat):
+        if key and _is_blank(ids[slot]) and not _is_blank(flat):
             attrs[key] = flat
     return attrs
 
@@ -1339,7 +1362,9 @@ def minted_name(doc: Dict[str, Any]) -> str:
     detail = ""
     if resolve_category(doc.get("category")) in _CONTACT_LENSES:
         detail = " ".join(name for _, name in _cl_parts(doc.get("attributes") or {}))
-    return build_product_name({**doc, "name": None}, detail=detail)
+    # The name reads the model the form shows, never a hidden copy (_shown_attributes).
+    attrs = _shown_attributes(doc.get("attributes") or {}, doc.get("category"))
+    return build_product_name({**doc, "name": None, "attributes": attrs}, detail=detail)
 
 
 def rekey_on_edit(
@@ -1359,16 +1384,21 @@ def rekey_on_edit(
     model keeps the stored key (ponytail: no $unset door, a unique sparse
     index refuses two null keys). The flat brand/model/color/size columns
     are copies of the attributes (_derive_brand_model_color_size): an edit
-    that changes the attribute a column comes from re-derives that column, so
+    that moves the attribute a column comes from re-derives that column, so
     the minted name and the model column say Varilux after a Crizal ->
-    Varilux sub-brand edit."""
+    Varilux sub-brand edit. A flat value the request carries otherwise wins (a
+    brand edit), unless it only echoes a hidden copy (_shown_attributes): the
+    Edit form loads a lens's stored model_no Crizal and sends it back as the
+    model with every save, which must never move the column off Varilux."""
     if not any(k in patch for k in ("attributes", "brand", "model", "color", "size", "category")):
         return
     if "attributes" in patch:
-        was = _derive_brand_model_color_size(current.get("attributes") or {})
-        now = _derive_brand_model_color_size(patch.get("attributes") or {})
-        for slot, val in now.items():
-            if not _is_blank(val) and val != was[slot]:
+        category = patch.get("category") or current.get("category")
+        attrs = patch["attributes"] or {}
+        was = _derive_brand_model_color_size(current.get("attributes") or {}, category)
+        echo = _derive_brand_model_color_size(attrs)  # hidden copies read too
+        for slot, val in _derive_brand_model_color_size(attrs, category).items():
+            if not _is_blank(val) and (val != was[slot] or patch.get(slot, val) == echo[slot] != val):
                 patch[slot] = val
     merged = {**current, **patch}
     try:
@@ -1753,7 +1783,7 @@ def normalise_payload(
             canonical, attributes, product_repo=product_repo, db=db
         )
 
-    ids = _derive_brand_model_color_size(attributes)
+    ids = _derive_brand_model_color_size(attributes, canonical)
 
     doc: Dict[str, Any] = {
         "sku": resolved_sku,

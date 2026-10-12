@@ -643,11 +643,12 @@ def test_f13_an_old_std_lens_row_is_the_lens_entered_today(door):
     # A lens re-catalogued from that old row (clone) mints today's SKU.
     assert pm.build_sku("LS", dict(hoya, model_no="STD")) == "LS-HOYA-HC-1.56"
     # ... and its sub-brand, if it has one, still names it.
-    assert pm.identity_parts(dict(hoya, model_no="STD", subbrand="Nulux"))[1] == "Nulux"
-    # Guard: only a lens's filler. A coloured product's model is its model.
-    key = pm.compute_identity_key(*pm.identity_parts(
-        {"brand_name": "Acme", "model_no": "STD", "colour_code": "01"}))
-    assert key == "acme|std|01"
+    assert pm.identity_parts(dict(hoya, model_no="STD", subbrand="Nulux"), "LS")[1] == "Nulux"
+    # Guard: only a lens's filler. A product whose form has a model field keeps it.
+    for category, colour in (("FR", {"colour_code": "01"}), ("ACC", {})):
+        key = pm.compute_identity_key(*pm.identity_parts(
+            {"brand_name": "Acme", "model_no": "STD", "model_name": "STD", **colour}, category))
+        assert key == "acme|std|" + colour.get("colour_code", ""), category
 
 
 _OASYS = {"brand_name": "Acuvue", "model_name": "Oasys", "power": "-1.25",
@@ -1139,6 +1140,95 @@ def test_b_a_sub_brand_or_colour_name_edit_rekeys_it(door, category, attrs, edit
     assert word in after["name"] and old_word not in after["name"]
     assert door(_form_post(category, attrs))["identity_key"] == first["identity_key"]  # free again
     assert _dup(door, _form_post(category, edited))["product_id"] == first["product_id"]
+
+
+_HOYA = {"brand_name": "Hoya", "index": "1.56", "coating": "HC"}
+
+
+def _main_lens(product_id, attrs, model, name):
+    """An Optical Lens as main's form left it: main sent model = model_no ||
+    model_name || subbrand || 'STD' and the door folded that into
+    attributes.model_no AND model_name -- a copy no lens form shows or
+    clears -- and derived the model column and the name from it."""
+    return {"product_id": product_id, "sku": product_id, "category": "OPTICAL_LENS",
+            "is_active": True, "brand": attrs["brand_name"], "model": model, "name": name,
+            "identity_key": "stale", "mrp": 1000.0, "offer_price": 900.0,
+            "attributes": dict(attrs, model_no=model, model_name=model)}
+
+
+@pytest.mark.parametrize("row,edit,key,word,old_word", [
+    (_main_lens("P-CRIZAL", _CRIZAL, "Crizal", "Essilor Crizal Lenses"),
+     {"subbrand": "Varilux"}, "essilor|varilux|hc|156", "Varilux", "Crizal"),
+    (_main_lens("P-STD", _HOYA, "STD", "Hoya Std Lenses"),
+     {"subbrand": "Nulux"}, "hoya|nulux|hc|156", "Nulux", "Std"),
+])
+def test_b_a_main_made_lens_rekeys_on_the_sub_brand_its_form_shows(door, row, edit, key, word, old_word):
+    """Every Optical Lens on prod holds main's hidden model copy (Crizal, or
+    'STD' with no sub-brand). It never outranks the sub-brand the form edits:
+    an Edit-form save (model = the loaded model_no, the whole stored bag)
+    re-keys and renames the lens and moves its model column, a later price
+    save moves nothing back, the old lens is free and the new one is the 409."""
+    door.repo.collection.insert_one(dict(row))
+    pid = row["product_id"]
+    edited = dict(row["attributes"], **edit)
+    _put(pid, brand=row["brand"], model=row["model"], attributes=edited, mrp=1100.0)
+    after = door.repo.find_by_id(pid)
+    assert (after["identity_key"], after["model"], after["sku"]) == (key, word, pid)
+    assert word in after["name"] and old_word not in after["name"]
+    _put(pid, brand=row["brand"], model=row["model"], attributes=dict(after["attributes"]), mrp=1200.0)
+    again = door.repo.find_by_id(pid)
+    assert (again["identity_key"], again["model"], again["name"]) == (key, word, after["name"])
+    old = {k: v for k, v in row["attributes"].items() if k not in ("model_no", "model_name")}
+    door(_form_post("LS", old))  # free again
+    clean = {k: v for k, v in edited.items() if k not in ("model_no", "model_name")}
+    assert _dup(door, _form_post("LS", clean))["product_id"] == pid
+
+
+def test_b_a_contact_lens_model_name_edit_rekeys_it(door):
+    """A contact lens's form shows Model Name only; the door's model_no copy of
+    the flat model never outranks it. Renaming Oasys -> Oasys Max through the
+    Edit form (model = the loaded model_no copy) re-keys, renames and moves the
+    model column, and a later price save keeps all three."""
+    first = door(_form_post("CL", _FIT))
+    pid = first["product_id"]
+    stored = door.repo.find_by_id(pid)["attributes"]
+    assert stored["model_no"] == "Oasys"  # the door's hidden copy
+    edited = dict(stored, model_name="Oasys Max")
+    _put(pid, brand="Acuvue", model=stored["model_no"], attributes=edited, mrp=1100.0)
+    after = door.repo.find_by_id(pid)
+    key = pm.compute_identity_key(*pm.identity_parts(dict(_FIT, model_name="Oasys Max"), "CL"))
+    assert (after["identity_key"], after["model"], after["sku"]) == (key, "Oasys Max", first["sku"])
+    assert after["name"].startswith("Acuvue Oasys Max Contact Lenses")
+    _put(pid, brand="Acuvue", model=stored["model_no"], attributes=dict(after["attributes"]), mrp=1200.0)
+    again = door.repo.find_by_id(pid)
+    assert (again["identity_key"], again["model"], again["name"]) == (key, "Oasys Max", after["name"])
+    door(_form_post("CL", _FIT))  # free again
+    assert _dup(door, _form_post("CL", dict(_FIT, model_name="Oasys Max")))["product_id"] == pid
+    # A legacy row with no model in its attributes: the flat model is its Model Name.
+    legacy = {"category": "CONTACT_LENS", "brand": "Acuvue", "model": "Oasys",
+              "attributes": {k: v for k, v in _FIT.items() if k != "model_name"}}
+    assert pm.identity_key_of(legacy) == pm.compute_identity_key(*pm.identity_parts(_FIT, "CL"))
+
+
+def test_b_a_lens_made_with_mains_payload_rekeys_on_its_sub_brand(door):
+    """The panel's steps: main's form payload (model 'Crizal') through the
+    create door, then the Edit form's PUT with the sub-brand Varilux."""
+    first = door(prod_router.ProductCreate(category="LS", brand="Essilor", model="Crizal",
+                                           attributes=dict(_CRIZAL), mrp=1000.0, offer_price=900.0))
+    stored = door.repo.find_by_id(first["product_id"])
+    assert (stored["identity_key"], stored["attributes"]["model_no"]) == ("essilor|crizal|hc|156", "Crizal")
+    _put(first["product_id"], brand="Essilor", model="Crizal",
+         attributes=dict(stored["attributes"], subbrand="Varilux"), mrp=1100.0)
+    after = door.repo.find_by_id(first["product_id"])
+    assert (after["identity_key"], after["model"], after["name"]) == (
+        "essilor|varilux|hc|156", "Varilux", "Essilor Varilux Lenses")
+    door(_form_post("LS", _CRIZAL))  # a new Crizal saves
+    assert _dup(door, _form_post("LS", dict(_CRIZAL, subbrand="Varilux")))["product_id"] == first["product_id"]
+    # A clone of that old lens carries its hidden copy; the sub-brand typed in
+    # the clone names the new lens's model column and name, not the copy.
+    clone = door(_form_post("LS", dict(stored["attributes"], subbrand="Kodak", index="1.67")))
+    assert (clone["model"], clone["name"], clone["identity_key"]) == (
+        "Kodak", "Essilor Kodak Lenses", "essilor|kodak|hc|167")
 
 
 # ---------------------------------------------------------------------------
