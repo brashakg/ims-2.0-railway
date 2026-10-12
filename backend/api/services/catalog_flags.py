@@ -10,8 +10,10 @@ cataloguer presses Mark fixed on the edit page.
 
 THE ONE RULE linking a flag task to its flags: the task is open exactly while
 one of its flags is open. Marking the last flag fixed completes the task
-(fix_flags -> _settle), and completing the task from the Tasks screen fixes
-its flags (on_task_completed). There is no second copy of either half.
+(fix_flags -> _settle); closing the task from the Tasks screen closes its
+open flags (on_task_closed): completed -> fixed, cancelled -> withdrawn, so a
+product never stays flagged with no live task and can be flagged again.
+There is no second copy of either half.
 
 Flags never block anything: a flagged product keeps selling at the till and
 stays online (owner ruling). Writing a flag is not a catalogue edit either --
@@ -75,7 +77,11 @@ def _now() -> datetime:
 
 
 def _actor_name(actor: Dict[str, Any]) -> str:
-    return actor.get("full_name") or actor.get("username") or actor.get("user_id") or ""
+    """The flagger's name through THE users name helper: the request's
+    current_user is the token payload, which has no full_name."""
+    from .name_resolver import actor_name
+
+    return actor_name(_deps().get_db(), actor)
 
 
 def _product_label(doc: Dict[str, Any]) -> str:
@@ -103,15 +109,23 @@ def _assignee(created_by: Optional[str]) -> Optional[str]:
 
 
 def raise_flags(
-    product_ids: List[str], flag_type: str, note: Optional[str], actor: Dict[str, Any]
+    product_ids: List[str],
+    flag_type: str,
+    note: Optional[str],
+    actor: Dict[str, Any],
+    *,
+    apply: bool = True,
 ) -> Dict[str, Any]:
     """Flag each product; one task per person. Per-product results:
     done / already (that type is already open on it) / refused (+ reason).
+    `tasks` names each person (assigned_to + assigned_to_name) and how many
+    products they get. apply=False is the Flag dialog's preview: the same
+    rule (_assignee), nothing written ('done' reads 'would be flagged').
     Raises ValueError for a bad type or a missing note."""
     if flag_type not in FLAG_TYPES:
         raise ValueError("Unknown flag type.")
     note = (note or "").strip()[:NOTE_MAX]
-    if flag_type in NOTE_REQUIRED and not note:
+    if apply and flag_type in NOTE_REQUIRED and not note:
         raise ValueError("Write a note for 'Something else'.")
     coll = _products()
     if coll is None:
@@ -138,10 +152,27 @@ def raise_flags(
         groups.setdefault(_assignee(doc.get("created_by")), []).append(doc)
         results.append({"product_id": pid, "status": "done"})
 
+    from .name_resolver import user_name_map
+
+    deps = _deps()
+    names = user_name_map(deps.get_db(), [a for a in groups if a])
+    if not apply:
+        return {
+            "results": results,
+            "tasks": [
+                {
+                    "task_id": None,
+                    "assigned_to": a,
+                    "assigned_to_name": names.get(str(a)) if a else None,
+                    "product_count": len(docs),
+                }
+                for a, docs in groups.items()
+            ],
+        }
+
     label = FLAG_TYPES[flag_type]
     by_name = _actor_name(actor)
     tasks: List[Dict[str, Any]] = []
-    deps = _deps()
     task_repo = deps.get_task_repository()
     from .task_triggers import create_system_task
 
@@ -199,21 +230,32 @@ def raise_flags(
                     }
                 },
             )
-        tasks.append({"task_id": task_id, "assigned_to": assignee, "product_count": n})
+        tasks.append(
+            {
+                "task_id": task_id,
+                "assigned_to": assignee,
+                "assigned_to_name": names.get(str(assignee)) if assignee else None,
+                "product_count": n,
+            }
+        )
 
     if groups:
         _bust_list_cache()
     return {"results": results, "tasks": tasks}
 
 
-def _fix(coll, doc: Dict[str, Any], wanted, actor: Dict[str, Any]) -> List[str]:
-    """Mark the open flags on `doc` that `wanted(flag)` picks as fixed. Returns
-    the task ids they carried. Writes the flags list only (not an edit)."""
+def _fix(
+    coll, doc: Dict[str, Any], wanted, actor: Dict[str, Any], status: str = "fixed"
+) -> List[str]:
+    """Close the open flags on `doc` that `wanted(flag)` picks: `status`
+    'fixed' (Mark fixed, a completed task) or 'withdrawn' (a cancelled task).
+    Returns the task ids they carried. Writes the flags list only (not an
+    edit)."""
     flags = [dict(f) for f in doc.get("flags") or [] if isinstance(f, dict)]
     touched: List[str] = []
     for f in flags:
         if f.get("status") == "open" and wanted(f):
-            f.update(status="fixed", fixed_by=actor.get("user_id"), fixed_at=_now())
+            f.update(status=status, fixed_by=actor.get("user_id"), fixed_at=_now())
             touched.append(f.get("task_id"))
     if touched:
         coll.update_one({"product_id": doc.get("product_id")}, {"$set": {"flags": flags}})
@@ -260,23 +302,28 @@ def fix_flags(product_id: str, flag_ids: List[str], actor: Dict[str, Any]) -> Di
     return {"product_id": product_id, "flags": fresh.get("flags") or []}
 
 
-def on_task_completed(task: Dict[str, Any], actor: Dict[str, Any]) -> int:
-    """THE RULE, task side: completing a flag task from the Tasks screen fixes
-    every flag it raised. Returns how many products changed. Never raises."""
+def on_task_closed(task: Dict[str, Any], actor: Dict[str, Any], status: str) -> int:
+    """THE RULE, task side: closing a flag task from the Tasks screen closes
+    every flag it raised that is still open -- COMPLETED marks them fixed,
+    CANCELLED withdraws them (the product can be flagged again). Returns how
+    many products changed. Never raises."""
     try:
         if ((task or {}).get("payload") or {}).get("kind") != TASK_KIND:
             return 0
+        flag_status = {"COMPLETED": "fixed", "CANCELLED": "withdrawn"}.get(
+            str(status or "").upper()
+        )
         tid = task.get("task_id")
         coll = _products()
-        if not tid or coll is None:
+        if not tid or coll is None or flag_status is None:
             return 0
         changed = 0
         for doc in list(coll.find({"flags": {"$elemMatch": {"task_id": tid, "status": "open"}}})):
-            if _fix(coll, doc, lambda f: f.get("task_id") == tid, actor):
+            if _fix(coll, doc, lambda f: f.get("task_id") == tid, actor, flag_status):
                 changed += 1
         if changed:
             _bust_list_cache()
         return changed
-    except Exception:  # noqa: BLE001 -- the task completion stands
-        logger.warning("[FLAGS] fixing flags of a completed task failed", exc_info=True)
+    except Exception:  # noqa: BLE001 -- the task's close stands
+        logger.warning("[FLAGS] closing flags of a closed task failed", exc_info=True)
         return 0

@@ -865,6 +865,12 @@ async def update_task(
     if update_data:
         update_data["updated_at"] = datetime.now()
         if repo.update(task_id, update_data):
+            if update_data.get("status") == "CANCELLED":
+                # A catalogue-flag task: cancelling it withdraws its open flags
+                # (services/catalog_flags, the one rule; fail-soft).
+                from ..services.catalog_flags import on_task_closed
+
+                on_task_closed(existing, current_user, "CANCELLED")
             return {"task_id": task_id, "message": "Task updated"}
 
     return {"task_id": task_id, "message": "No changes made"}
@@ -924,9 +930,9 @@ async def complete_task(
     if result:
         # A catalogue-flag task: completing it fixes its flags (the one rule
         # in services/catalog_flags; fail-soft, the completion stands).
-        from ..services.catalog_flags import on_task_completed
+        from ..services.catalog_flags import on_task_closed
 
-        on_task_completed(task, current_user)
+        on_task_closed(task, current_user, "COMPLETED")
         return {"task_id": task_id, "status": "COMPLETED", "message": "Task completed"}
 
     raise HTTPException(status_code=500, detail="Failed to complete task")

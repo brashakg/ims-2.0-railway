@@ -58,13 +58,16 @@ from database.repositories.user_repository import UserRepository  # noqa: E402
 GID = "gid://shopify/Product/777"
 
 
-def _user(uid, *roles, name=None):
-    return {"user_id": uid, "username": uid, "full_name": name or uid, "roles": list(roles)}
+def _user(uid, *roles):
+    """The shape a real request's current_user has: the access token's payload
+    (auth.py login / store switch) -- user_id, username, roles. NO full_name:
+    a display name must come from users."""
+    return {"user_id": uid, "username": uid.replace("u-", ""), "roles": list(roles)}
 
 
-ADMIN = _user("u-admin", "ADMIN", name="Avinash")
-STORE_MGR = _user("u-sm", "STORE_MANAGER", name="Ravi")
-CAT_MGR = _user("u-mansi", "CATALOG_MANAGER", name="Mansi Kumari")
+ADMIN = _user("u-admin", "ADMIN")
+STORE_MGR = _user("u-sm", "STORE_MANAGER")
+CAT_MGR = _user("u-mansi", "CATALOG_MANAGER")
 
 
 class _Conn:
@@ -78,11 +81,21 @@ class _Conn:
 
 
 class _DelistSpy:
+    """push_product_delist without the network: records the call, then does
+    what the LIVE take-down does on success -- THE real write-back
+    (_writeback_product with status DRAFT: ecom.status DRAFT and the
+    take-down marker ecom.taken_down_at), so the restore tests read the
+    state a real archive leaves behind."""
+
     def __init__(self):
         self.calls = []
 
     async def __call__(self, db, product):
+        from api.services.shopify_push.writeback import _writeback_product
+
         self.calls.append(copy.deepcopy(product))
+        gid = (product.get("ecom") or {}).get("shopify_product_id")
+        _writeback_product(db, product.get("id"), gid, status="DRAFT")
         return shopify_push.PushResult(
             mode=shopify_push.MODE_LIVE, entity="product", action="delist",
             target_id=product.get("id"), ok=True,
@@ -107,6 +120,10 @@ def env(monkeypatch):
     monkeypatch.setenv("IMS_SHOPIFY_WRITES", "")
     db = mongomock.MongoClient().db
     db.users.insert_many([
+        {"user_id": "u-admin", "username": "admin", "full_name": "Avinash Kumar", "roles": ["ADMIN"],
+         "is_active": True},
+        {"user_id": "u-sm", "username": "sm", "full_name": "Ravi Sinha", "roles": ["STORE_MANAGER"],
+         "is_active": True},
         {"user_id": "u-mansi", "full_name": "Mansi Kumari", "roles": ["CATALOG_MANAGER"], "is_active": True},
         {"user_id": "u-akshay", "full_name": "Akshay Ovhal", "roles": ["CATALOG_MANAGER"], "is_active": True},
         {"user_id": "u-left", "full_name": "Left Us", "roles": ["CATALOG_MANAGER"], "is_active": False},
@@ -120,7 +137,8 @@ def env(monkeypatch):
     db.catalog_products.insert_many([
         {"id": "T-P1", "sku": "SKU-P1", "title": "Frame P1", "is_active": True,
          "images": ["https://cdn.example.com/p1.jpg"],
-         "ecom": {"status": "PUBLISHED", "shopify_product_id": GID, "locally_modified": False}},
+         "ecom": {"status": "PUBLISHED", "shopify_product_id": GID, "locally_modified": False,
+                  "shopify_inventory_item_id": "gid://shopify/InventoryItem/701"}},
         {"id": "T-P2", "sku": "SKU-P2", "title": "Frame P2", "is_active": True,
          "ecom": {"status": "DRAFT", "locally_modified": False}},
     ])
@@ -142,6 +160,16 @@ def env(monkeypatch):
     monkeypatch.setattr(catalog_mod, "_catalog_coll", lambda: db.catalog_products)
     spy = _DelistSpy()
     monkeypatch.setattr(shopify_push, "push_product_delist", spy)
+    variant_calls = []
+
+    async def _variant_spy(db_, twin):
+        variant_calls.append(twin.get("id"))
+        return shopify_push.PushResult(
+            mode=shopify_push.MODE_LIVE, entity="product", action="delist",
+            target_id=twin.get("id"), ok=True,
+        )
+
+    monkeypatch.setattr(shopify_push, "_delist_variant_row", _variant_spy)
 
     class _NoCache:
         TTL_MEDIUM = 0
@@ -170,7 +198,7 @@ def env(monkeypatch):
         who["user"] = user
         return client.request(method, path, **kw)
 
-    return {"db": db, "call": call, "spy": spy}
+    return {"db": db, "call": call, "spy": spy, "variant_calls": variant_calls}
 
 
 def _flags(db, pid):
@@ -233,7 +261,9 @@ def test_one_task_per_person_per_flag_action(env):
     assert set(by_person) == {"u-mansi", "u-akshay"}
     mansi = by_person["u-mansi"]
     assert mansi["title"] == "Needs photo redo: 2 products to fix"
-    assert "Note from Avinash: Front photo is 3rd" in mansi["description"]
+    # The flagger's FULL name from users, never the token's username.
+    assert "Note from Avinash Kumar: Front photo is 3rd" in mansi["description"]
+    assert mansi["created_by_name"] == "Avinash Kumar"
     assert [link["to"] for link in mansi["links"]] == [
         "/catalog/add?edit=P1", "/catalog/add?edit=P2"]
     assert mansi["store_id"] is None and mansi["status"] == "OPEN"
@@ -242,7 +272,7 @@ def test_one_task_per_person_per_flag_action(env):
         (flag,) = _flags(env["db"], pid)
         assert flag["status"] == "open" and flag["type"] == "photo_redo"
         assert flag["task_id"] == by_person[person]["task_id"]
-        assert flag["by"] == "u-admin" and flag["by_name"] == "Avinash"
+        assert flag["by"] == "u-admin" and flag["by_name"] == "Avinash Kumar"
     # A second action is a second task, even for the same person.
     _flag(env, STORE_MGR, ["P1"], type_="price_check", note="")
     assert env["db"].tasks.count_documents({"assigned_to": "u-mansi"}) == 2
@@ -466,3 +496,205 @@ def test_raising_a_flag_is_its_own_capability():
     assert capability_for("POST", "/api/v1/catalog/flags") == "catalog:flag"
     assert _CAP_ROLE_HINT["catalog:flag"] == {"ADMIN", "STORE_MANAGER", "SUPERADMIN"}
     assert capability_for("POST", "/api/v1/catalog/flags/fix") == "catalog:write"
+
+
+# ---------------------------------------------------------------------------
+# Panel round: the rules the earlier tests could not tell apart
+# ---------------------------------------------------------------------------
+
+
+def _restore(env, ids, user=ADMIN):
+    return env["call"](user, "POST", "/api/v1/catalog/products/bulk-restore",
+                       json={"product_ids": ids, "apply": True})
+
+
+def _add_size_of_p1(env):
+    """P5: a SIZE VARIANT of P1 (owns no listing; rides T-P1's live listing
+    through its catalog_variants row)."""
+    db = env["db"]
+    db.products.insert_one(_spine("P5", "u-mansi"))
+    db.catalog_products.insert_one(
+        {"id": "T-P5", "sku": "SKU-P5", "title": "Frame P1 size 52", "is_active": True,
+         "ecom": {"variant_of": {"product_id": "P1", "twin_id": "T-P1", "sku": "SKU-P1"},
+                  "locally_modified": False}})
+    db.catalog_variants.insert_one(
+        {"sku": "SKU-P5", "parent_product_id": "T-P1",
+         "shopify_variant_id": "gid://shopify/ProductVariant/55",
+         "shopify_inventory_item_id": "gid://shopify/InventoryItem/755"})
+
+
+def _off_sale_online(env, sku):
+    """THE quantity rule's off-sale set (an inactive spine lists 0 online)."""
+    from api.services.online_stock_writeback import _sku_to_pid
+
+    return sku in _sku_to_pid(_Conn(env["db"]), [sku])[1]
+
+
+def test_restore_keeps_the_take_down_marker_so_no_sync_relists_it(env):
+    from api.services.shopify_live_sync import select_dirty_products
+
+    _archive(env, ["P1"])
+    twin = env["db"].catalog_products.find_one({"id": "T-P1"})
+    assert twin["ecom"]["status"] == "DRAFT" and twin["ecom"]["taken_down_at"]
+    _restore(env, ["P1"])
+    twin = env["db"].catalog_products.find_one({"id": "T-P1"})
+    assert twin["ecom"]["taken_down_at"], "restore must keep the take-down marker"
+    assert twin["ecom"]["status"] == "DRAFT"
+    # Someone edits it afterwards: the 01:00 / 09:00 sync still leaves it off.
+    env["db"].catalog_products.update_one({"id": "T-P1"}, {"$set": {"ecom.locally_modified": True}})
+    dirty, skipped = select_dirty_products(env["db"])
+    assert [d["id"] for d in dirty] == [] and skipped == 1
+
+
+def test_restoring_a_size_on_a_live_listing_keeps_it_off_sale(env):
+    _add_size_of_p1(env)
+    _archive(env, ["P5", "P2"])
+    assert env["variant_calls"] == ["T-P5"]  # the size, never the parent listing
+    assert _off_sale_online(env, "SKU-P5")
+    rows = {r["product_id"]: r for r in _restore(env, ["P5", "P2"]).json()["results"]}
+    size = rows["P5"]
+    assert size["status"] == "done" and size["switched_on"] is False
+    assert "live on the website" in size["note"]
+    spine = env["db"].products.find_one({"product_id": "P5"})
+    assert spine["deleted_at"] is None and spine["is_active"] is False
+    assert _off_sale_online(env, "SKU-P5"), "a restore never puts a size back on sale online"
+    # A product on no live listing comes back switched on.
+    assert rows["P2"]["switched_on"] is True and "note" not in rows["P2"]
+    assert env["db"].products.find_one({"product_id": "P2"})["is_active"] is True
+
+
+def test_a_failed_website_check_restores_switched_off(env, monkeypatch):
+    from api.services.shopify_push import inventory
+
+    _archive(env, ["P2"])
+
+    def _dead(*a, **k):
+        raise RuntimeError("catalog_products unavailable")
+
+    monkeypatch.setattr(inventory, "skus_on_live_listings", _dead)
+    row = _restore(env, ["P2"]).json()["results"][0]
+    assert row["switched_on"] is False and "could not be checked" in row["note"]
+    assert env["db"].products.find_one({"product_id": "P2"})["is_active"] is False
+
+
+def test_the_dry_run_calls_a_failed_take_down_and_a_size_live(env):
+    _add_size_of_p1(env)
+    # An earlier take-down of P1 failed: Shopify still shows it.
+    env["db"].catalog_products.update_one(
+        {"id": "T-P1"}, {"$set": {"ecom.online_state": "DELIST_FAILED"}})
+    rows = {r["product_id"]: r for r in _archive(env, ["P1", "P5", "P2"], apply=False).json()["results"]}
+    assert rows["P1"]["live_online"] is True
+    assert rows["P5"]["live_online"] is True  # its parent's listing is live
+    assert rows["P2"]["live_online"] is False
+
+
+def test_a_dead_website_read_never_says_nothing_is_live(env, monkeypatch):
+    from api.services.shopify_push import inventory
+
+    def _dead(*a, **k):
+        raise RuntimeError("catalog_products unavailable")
+
+    monkeypatch.setattr(inventory, "skus_on_live_listings", _dead)
+    res = _archive(env, ["P1"], apply=False)
+    assert res.status_code == 503
+    assert "Could not check the website" in res.json()["detail"]
+
+
+def _rows(user, **kw):
+    params = {
+        "category": None, "brand": None, "search": None, "match": None, "tag": None,
+        "created_by": None, "store_id": None, "skip": 0, "limit": 50, "is_active": None,
+        "photo": None, "sort": None, "frame_color": None, "lens_colour": None, "gender": None,
+        "shape": None, "frame_type": None, "frame_material": None, "updated_by": None,
+        "date_on": None, "date_from": None, "date_to": None, "flag": None,
+        "current_user": user,
+    }
+    params.update(kw)
+    out = asyncio.run(products_mod.list_products(**params))["products"]
+    return {p["product_id"]: p for p in out}
+
+
+def test_archive_and_restore_do_not_move_the_last_edit(env):
+    # P3 was last edited by Akshay on 1 Sep, before edited_at existed (the
+    # edit is on updated_at); P2 was never edited.
+    db = env["db"]
+    db.products.update_one({"product_id": "P3"}, {"$set": {
+        "updated_by": "u-akshay", "updated_by_name": "akshay",
+        "updated_at": datetime(2026, 9, 1, 6, 0)}})
+    _archive(env, ["P3", "P2"])
+    _restore(env, ["P3", "P2"])
+    rows = _rows(ADMIN, sort="edited", is_active="true")
+    assert rows["P3"]["last_edited_at"] == datetime(2026, 9, 1, 6, 0)
+    assert rows["P3"]["updated_by_name"] == "Akshay Ovhal"
+    assert rows["P2"]["last_edited_at"] == datetime(2026, 10, 1, 6, 0)  # its add date
+    today = datetime.now().strftime("%Y-%m-%d")
+    assert _list(ADMIN, sort="edited", is_active="true", date_on="edited",
+                 date_from=today, date_to=today) == []
+    assert _list(ADMIN, sort="edited", is_active="true", updated_by="none",
+                 date_on="edited", date_from=today, date_to=today) == []
+
+
+def test_an_archived_product_is_never_flagged(env):
+    _archive(env, ["P2"])
+    res = _flag(env, ADMIN, ["P2"])
+    assert res.json()["results"] == [{"product_id": "P2", "status": "refused", "reason": "Archived"}]
+    assert res.json()["tasks"] == [] and _flags(env["db"], "P2") == []
+    assert env["db"].tasks.count_documents({}) == 0
+
+
+def test_cancelling_a_flag_task_withdraws_its_flags(env):
+    _flag(env, ADMIN, ["P1"])
+    (task,) = list(env["db"].tasks.find({}))
+    res = env["call"](ADMIN, "PATCH", f"/api/v1/tasks/{task['task_id']}", json={"status": "CANCELLED"})
+    assert res.status_code == 200, res.text
+    assert env["db"].tasks.find_one({"task_id": task["task_id"]})["status"] == "CANCELLED"
+    assert [f["status"] for f in _flags(env["db"], "P1")] == ["withdrawn"]
+    # Nothing is left flagged with no live task, and it can be flagged again.
+    again = _flag(env, ADMIN, ["P1"]).json()
+    assert [r["status"] for r in again["results"]] == ["done"] and len(again["tasks"]) == 1
+    assert env["db"].tasks.count_documents({"status": "OPEN"}) == 1
+
+
+def _task_shape(tasks):
+    return sorted((t["assigned_to"], t["assigned_to_name"], t["product_count"]) for t in tasks)
+
+
+def test_the_flag_preview_is_the_same_rule_as_the_flag(env):
+    # P4's adder has left: the server sends it to an active catalogue manager.
+    body = {"product_ids": ["P4", "P1", "P3"], "type": "price_check", "note": "", "apply": False}
+    preview = env["call"](ADMIN, "POST", "/api/v1/catalog/flags", json=body).json()
+    assert env["db"].tasks.count_documents({}) == 0 and _flags(env["db"], "P4") == []
+    assert all(t["assigned_to"] != "u-left" for t in preview["tasks"])
+    real = env["call"](ADMIN, "POST", "/api/v1/catalog/flags", json=dict(body, apply=True)).json()
+    assert _task_shape(preview["tasks"]) == _task_shape(real["tasks"])
+    assert {t["assigned_to_name"] for t in real["tasks"]} <= {"Mansi Kumari", "Akshay Ovhal"}
+    assert sum(t["product_count"] for t in real["tasks"]) == 3
+
+
+def test_imported_rows_sort_on_the_dates_their_column_shows(env):
+    db = env["db"]
+    for pid, day in (("QA", 10), ("QB", 2), ("QC", 6)):
+        db.products.insert_one(_spine(pid, "u-mansi", created_at=datetime(2026, 10, day, 6, 0),
+                                      updated_at=datetime(2026, 10, day, 6, 0)))
+        db.catalog_products.insert_one({"id": f"T-{pid}", "sku": f"SKU-{pid}",
+                                        "title": f"Frame {pid}", "is_active": True})
+    db.catalog_products.delete_many({"id": {"$in": ["T-P1", "T-P2"]}})
+    rows = _imported(ADMIN, "newest")
+    assert [r["id"] for r in rows] == ["T-QA", "T-QC", "T-QB"]
+    assert [r["created_at"].day for r in rows] == [10, 6, 2]
+    assert [r["id"] for r in _imported(ADMIN, "oldest")] == ["T-QB", "T-QC", "T-QA"]
+    # Recently edited: QB, edited by a person on 11 Oct, comes first.
+    db.products.update_one({"product_id": "QB"}, {"$set": {
+        "updated_by": "u-akshay", "edited_at": datetime(2026, 10, 11, 6, 0)}})
+    rows = _imported(ADMIN, "edited")
+    assert [r["id"] for r in rows] == ["T-QB", "T-QA", "T-QC"]
+    assert rows[0]["last_edited_at"] == datetime(2026, 10, 11, 6, 0)
+
+
+def test_imported_rows_with_equal_keys_come_in_id_order(env):
+    db = env["db"]
+    db.catalog_products.delete_many({})
+    for tid in ("T-Z3", "T-Z1", "T-Z2"):  # stored out of id order, one title, no spine
+        db.catalog_products.insert_one({"id": tid, "sku": tid, "title": "Same", "is_active": True})
+    for sort in ("name_asc", "name_desc", "newest", "edited"):
+        assert [r["id"] for r in _imported(ADMIN, sort)] == ["T-Z1", "T-Z2", "T-Z3"], sort

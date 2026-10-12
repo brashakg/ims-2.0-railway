@@ -23,7 +23,6 @@ from ..services.online_catalog import (
     product_online_state,
     reconcile_store_barcodes,
     online_mapping_available,
-    stamp_online_state,
 )
 from ..services import stock_allocation
 from ..services.pricing_caps import evaluate_offer_price, CATEGORY_DISCOUNT_CAPS
@@ -1681,21 +1680,24 @@ def _twin_mrp(p: Dict) -> float:
         return 0.0
 
 
-# The imported (review) segment's Sort by, over the twin's own fields: the
-# same eight choices as services/catalog_list.SORTS. "Edited" falls back to
-# the add date exactly as there.
+# The imported (review) segment's Sort by: the same eight choices as
+# services/catalog_list.SORTS. Each key reads (twin, its spine's facts): the
+# dates are the SPINE's -- the very values the Added column shows on the same
+# row (_spine_facts) -- never the twin's own, which carry no dates in prod.
+# "edited" is the spine's last_edited_at (catalog_list.LAST_EDITED_AT). A row
+# with no spine has no dates: '-' in the column, '' here.
 _IMPORTED_SORTS = {
-    "edited": (lambda p: _iso(p.get("updated_at")) or _catalog_sort_key(p), True),
-    "newest": (_catalog_sort_key, True),
-    "oldest": (_catalog_sort_key, False),
-    "name_asc": (lambda p: str(p.get("title") or "").lower(), False),
-    "name_desc": (lambda p: str(p.get("title") or "").lower(), True),
+    "edited": (lambda p, s: _iso(s.get("last_edited_at")), True),
+    "newest": (lambda p, s: _iso(s.get("created_at")), True),
+    "oldest": (lambda p, s: _iso(s.get("created_at")), False),
+    "name_asc": (lambda p, s: str(p.get("title") or "").lower(), False),
+    "name_desc": (lambda p, s: str(p.get("title") or "").lower(), True),
     "brand_asc": (
-        lambda p: str((p.get("attributes") or {}).get("brand_name") or "").lower(),
+        lambda p, s: str((p.get("attributes") or {}).get("brand_name") or "").lower(),
         False,
     ),
-    "mrp_desc": (_twin_mrp, True),
-    "mrp_asc": (_twin_mrp, False),
+    "mrp_desc": (lambda p, s: _twin_mrp(p), True),
+    "mrp_asc": (lambda p, s: _twin_mrp(p), False),
 }
 
 _ATTRIBUTION_FIELDS = (
@@ -1705,33 +1707,42 @@ _ATTRIBUTION_FIELDS = (
     "updated_by",
     "updated_by_name",
     "updated_at",
+    "last_edited_at",
 )
 
 
-def _stamp_spine_attribution(docs: List[Dict]) -> None:
-    """THE added / edited facts of an imported row: twins carry none, so they
-    are read from the row's spine (pim_product_id / product_id, then sku) --
-    one batched read -- and the names from users (catalog_list.stamp_people).
-    A row with no spine gets nothing, and the page shows '-' honestly."""
-    from ..dependencies import get_db, get_product_repository
+def _spine_facts(docs: List[Dict]) -> List[Dict]:
+    """THE added / edited facts of each imported row (same order), read from
+    its spine (pim_product_id / product_id, then sku) in one batched read,
+    with the spine's last_edited_at computed by catalog_list.LAST_EDITED_AT.
+    {} for a row with no spine (or when the read fails): the page shows '-'
+    honestly, and the sort reads the same nothing."""
+    from ..dependencies import get_product_repository
 
     repo = get_product_repository()
     if repo is None or not docs:
-        return
+        return [{} for _ in docs]
     ids = [d.get("id") for d in docs if d.get("id")]
     skus = [d.get("sku") for d in docs if d.get("sku")]
     by_key: Dict[str, Dict] = {}
     by_sku: Dict[str, Dict] = {}
+    proj: Dict[str, Any] = {"_id": 0, "product_id": 1, "pim_product_id": 1, "sku": 1}
+    proj.update({f: 1 for f in _ATTRIBUTION_FIELDS})
+    proj["last_edited_at"] = _catalog_list.LAST_EDITED_AT
     try:
-        for s in repo.collection.find(
-            {
-                "$or": [
-                    {"pim_product_id": {"$in": ids}},
-                    {"product_id": {"$in": ids}},
-                    {"sku": {"$in": skus}},
-                ]
-            },
-            {"_id": 0, "product_id": 1, "pim_product_id": 1, "sku": 1, **{f: 1 for f in _ATTRIBUTION_FIELDS}},
+        for s in repo.collection.aggregate(
+            [
+                {
+                    "$match": {
+                        "$or": [
+                            {"pim_product_id": {"$in": ids}},
+                            {"product_id": {"$in": ids}},
+                            {"sku": {"$in": skus}},
+                        ]
+                    }
+                },
+                {"$project": proj},
+            ]
         ):
             for k in (s.get("pim_product_id"), s.get("product_id")):
                 if k:
@@ -1740,11 +1751,21 @@ def _stamp_spine_attribution(docs: List[Dict]) -> None:
                 by_sku.setdefault(str(s["sku"]), s)
     except Exception:  # noqa: BLE001 -- the column just shows '-'
         logger.warning("[CATALOG] spine attribution read failed", exc_info=True)
-        return
-    for d in docs:
-        spine = by_key.get(str(d.get("id") or "")) or by_sku.get(str(d.get("sku") or ""))
+        return [{} for _ in docs]
+    return [
+        by_key.get(str(d.get("id") or "")) or by_sku.get(str(d.get("sku") or "")) or {}
+        for d in docs
+    ]
+
+
+def _stamp_spine_attribution(docs: List[Dict], facts: List[Dict]) -> None:
+    """Put each row's spine facts (_spine_facts, same order) on it, in place,
+    and the names from users (catalog_list.stamp_people)."""
+    from ..dependencies import get_db
+
+    for d, spine in zip(docs, facts):
         for f in _ATTRIBUTION_FIELDS:
-            d[f] = (spine or {}).get(f)
+            d[f] = spine.get(f)
     _catalog_list.stamp_people(get_db(), docs)
 
 
@@ -1851,12 +1872,18 @@ async def list_catalog_products(
         active_bool = is_active in ("true", "True")
         products = [p for p in products if p.get("is_active") == active_bool]
 
+    facts: List[Dict] = []
     if sort:
         # The whole filtered list, then the page; the id breaks ties (a stable
-        # sort keeps the id order among equal keys) so pages never overlap.
+        # sort keeps the id order among equal keys, reversed or not) so pages
+        # never overlap. The dates are the spine's, as the column shows them.
         key, reverse = _IMPORTED_SORTS[sort]
-        products.sort(key=lambda p: str(p.get("id") or ""))
-        products.sort(key=key, reverse=reverse)
+        rows = sorted(
+            zip(products, _spine_facts(products)), key=lambda t: str(t[0].get("id") or "")
+        )
+        rows.sort(key=lambda t: key(*t), reverse=reverse)
+        products = [p for p, _ in rows]
+        facts = [f for _, f in rows]
     else:
         # Sort by created date (imported docs coalesce to migrated_at)
         products.sort(key=_catalog_sort_key, reverse=True)
@@ -1876,7 +1903,7 @@ async def list_catalog_products(
         ):
             # Copies: in no-Mongo mode the rows ARE the in-memory store.
             page_products = [dict(p) for p in page_products]
-            _stamp_spine_attribution(page_products)
+            _stamp_spine_attribution(page_products, facts[start:end])
     return {
         "products": page_products,
         "total": total,
@@ -2511,6 +2538,13 @@ async def update_catalog_product(
                 _patch["is_active"] = existing.get("is_active")
             _patch = {k: v for k, v in _patch.items() if v is not None}
             if _patch:
+                # A person's change to the product: the spine records who and
+                # when (catalog_list.edit_stamp; the Catalog page reads it).
+                _patch.update(
+                    _catalog_list.edit_stamp(
+                        current_user.get("user_id"), current_user.get("username")
+                    )
+                )
                 _pr.update(_spine_id, _patch)
     except Exception:  # noqa: BLE001
         logger.warning(
@@ -2965,6 +2999,8 @@ async def _archive_product(
         _pr = get_product_repository()
         spine_id = spine_id or _spine_product_id(_pr, product)
         if _pr is not None and spine_id:
+            # Not a catalogue edit either: no updated_by, so the last edit
+            # stays where it was (ProductRepository.update).
             _pr.update(
                 spine_id,
                 {
@@ -2990,22 +3026,64 @@ async def _archive_product(
         await _delist.delist_if_live(_get_db(), product, reason="deleted", actor=actor)
 
 
-def _restore_product(product: Optional[Dict], spine_id: str, actor: Dict) -> None:
-    """Undo _archive_product: active again in the catalogue and at the till,
-    deleted_at / deleted_by cleared, an audit row written. NOT re-published
+RESTORED_SWITCHED_OFF = (
+    "Back in the catalogue switched off: it is on a listing that is live on "
+    "the website, so switching it on puts it back on sale there."
+)
+RESTORED_UNCHECKED = (
+    "Back in the catalogue switched off: the website could not be checked, "
+    "so it was not switched on."
+)
+
+
+def _live_skus(skus: List[str]) -> Optional[set]:
+    """THE "is this SKU's listing live on the website" reader
+    (shopify_push.inventory.skus_on_live_listings: a size is judged by its
+    PARENT's listing, a failed take-down is still live) for the archive and
+    restore doors. None when the read failed: unknown, never "nothing is
+    live"."""
+    from ..services.shopify_push.inventory import skus_on_live_listings
+
+    keys = [k for k in skus if k]
+    if not keys:
+        return set()
+    try:
+        return skus_on_live_listings(_get_db(), keys, strict=True)
+    except Exception:  # noqa: BLE001
+        logger.warning("[CATALOG] live-listing read failed", exc_info=True)
+        return None
+
+
+def _restore_product(
+    product: Optional[Dict], spine: Dict, actor: Dict, *, on_website: Optional[bool]
+) -> Optional[str]:
+    """Undo _archive_product: deleted_at / deleted_by cleared, active again
+    in the catalogue and at the till, an audit row written. NOT re-published
     online (owner 2026-10-12: a first publish stays a human press) -- the
-    twin is saved clean and no republish is queued."""
+    twin is saved clean and no republish is queued, and the take-down marker
+    (ecom.taken_down_at) stays. One case cannot be both: a product whose SKU
+    is on a listing live on the website (a size whose parent listing is up,
+    or a take-down that failed). Its is_active is the only thing keeping it
+    off sale there (online_stock_writeback lists an inactive spine at 0), so
+    it comes back SWITCHED OFF and the returned note says why; `on_website`
+    None (the read failed) does the same. Not a catalogue edit."""
+    spine_id = spine.get("product_id")
+    active = on_website is False
     if product is not None:
         product.pop("_id", None)
-        product["is_active"] = True
+        product["is_active"] = active
         product["deleted_at"] = None
         product["deleted_by"] = None
         _save_catalog_product(product, mark_dirty=False)
-    from ..dependencies import get_audit_repository, get_product_repository
+    from ..dependencies import get_audit_repository, get_db, get_product_repository
+    from ..services.name_resolver import actor_name
 
     _pr = get_product_repository()
     if _pr is not None:
-        _pr.update(spine_id, {"is_active": True, "deleted_at": None, "deleted_by": None})
+        _pr.update(
+            spine_id,
+            {"is_active": active, "deleted_at": None, "deleted_by": None},
+        )
     try:
         audit_repo = get_audit_repository()
         if audit_repo is not None:
@@ -3014,9 +3092,10 @@ def _restore_product(product: Optional[Dict], spine_id: str, actor: Dict) -> Non
                     "action": "product.restored",
                     "actor": actor.get("user_id"),
                     "user_id": actor.get("user_id"),
-                    "actor_name": actor.get("full_name") or actor.get("username"),
+                    "actor_name": actor_name(get_db(), actor),
                     "entity_type": "product",
                     "entity_id": spine_id,
+                    "switched_on": active,
                     "timestamp": datetime.now(timezone.utc),
                     "ts": datetime.now(timezone.utc).isoformat(),
                     "source": "catalog_bulk_restore",
@@ -3024,6 +3103,9 @@ def _restore_product(product: Optional[Dict], spine_id: str, actor: Dict) -> Non
             )
     except Exception:  # noqa: BLE001
         logger.warning("[CATALOG] restore audit row skipped for %s", spine_id, exc_info=True)
+    if active:
+        return None
+    return RESTORED_SWITCHED_OFF if on_website else RESTORED_UNCHECKED
 
 
 class BulkProductIds(BaseModel):
@@ -3072,10 +3154,15 @@ async def bulk_archive_products(
         raise HTTPException(status_code=503, detail="The catalogue is not reachable")
     ids = list(dict.fromkeys(p for p in body.product_ids if p))
     spines = {p: repo.find_by_id(p) for p in ids}
+    live_skus = _live_skus([s.get("sku") for s in spines.values() if s])
+    if live_skus is None and not body.apply:
+        # The dialog must never say "none of them is live" on a dead read.
+        raise HTTPException(
+            status_code=503,
+            detail="Could not check the website right now. Try again in a minute.",
+        )
     live = {
-        d["product_id"]
-        for d in stamp_online_state(_get_db(), [dict(s) for s in spines.values() if s])
-        if d.get("online") == "LIVE"
+        pid for pid, s in spines.items() if s and live_skus and s.get("sku") in live_skus
     }
     stock = _in_stock_units(ids)
     db = _get_db()
@@ -3119,9 +3206,14 @@ async def bulk_restore_products(
     if repo is None:
         raise HTTPException(status_code=503, detail="The catalogue is not reachable")
     db = _get_db()
+    ids = list(dict.fromkeys(p for p in body.product_ids if p))
+    spines = {p: repo.find_by_id(p) for p in ids}
+    live_skus = (
+        _live_skus([s.get("sku") for s in spines.values() if s]) if body.apply else set()
+    )
     results = []
-    for pid in dict.fromkeys(p for p in body.product_ids if p):
-        spine = repo.find_by_id(pid)
+    for pid in ids:
+        spine = spines[pid]
         if spine is None:
             results.append({"product_id": pid, "status": "refused", "reason": "Product not found"})
         elif not spine.get("deleted_at"):
@@ -3130,8 +3222,20 @@ async def bulk_restore_products(
             results.append({"product_id": pid, "status": "ready"})
         else:
             twin = _delist._resolve_twin(_delist._raw_db(db), spine)
-            _restore_product(twin, pid, current_user)
-            results.append({"product_id": pid, "status": "done"})
+            note = _restore_product(
+                twin,
+                spine,
+                current_user,
+                on_website=None if live_skus is None else spine.get("sku") in live_skus,
+            )
+            row: Dict[str, Any] = {
+                "product_id": pid,
+                "status": "done",
+                "switched_on": note is None,
+            }
+            if note:
+                row["note"] = note
+            results.append(row)
     if body.apply:
         _bust_products_cache()
     return {"applied": body.apply, "results": results}
@@ -3155,6 +3259,8 @@ class RaiseFlagsRequest(BaseModel):
     product_ids: List[str] = Field(..., min_length=1, max_length=200)
     type: str
     note: Optional[str] = Field(default=None, max_length=500)
+    # False = the Flag dialog's preview: who would get the tasks, nothing written.
+    apply: bool = True
 
 
 class FixFlagsRequest(BaseModel):
@@ -3169,9 +3275,12 @@ async def raise_catalog_flags(
 ):
     """Flag products as needing work. ADMIN / SUPERADMIN / STORE_MANAGER only
     (its own capability, catalog:flag). One task per person who added the
-    products. Flags never block the till or the website."""
+    products. Flags never block the till or the website. apply=false is the
+    dialog's preview of who gets the tasks (the same rule, nothing written)."""
     try:
-        return _flags.raise_flags(body.product_ids, body.type, body.note, current_user)
+        return _flags.raise_flags(
+            body.product_ids, body.type, body.note, current_user, apply=body.apply
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
