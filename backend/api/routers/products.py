@@ -1855,6 +1855,10 @@ async def bulk_price_update(
                         "offer_price": _round_money(new_offer),
                         "price_updated_at": datetime.utcnow(),
                         "price_updated_by": current_user.get("user_id"),
+                        # A price change by a person IS a catalogue edit.
+                        **_catalog_list.edit_stamp(
+                            current_user.get("user_id"), current_user.get("username")
+                        ),
                     },
                 )
                 row["applied"] = bool(ok)
@@ -1992,6 +1996,10 @@ async def bulk_offer_update(
                         "offer_price": _round_money(new_offer),
                         "price_updated_at": datetime.utcnow(),
                         "price_updated_by": current_user.get("user_id"),
+                        # A price change by a person IS a catalogue edit.
+                        **_catalog_list.edit_stamp(
+                            current_user.get("user_id"), current_user.get("username")
+                        ),
                     },
                 )
                 row["applied"] = bool(ok)
@@ -3624,16 +3632,17 @@ async def update_product(
         if "tags" in update_data:
             update_data["tags"] = _pm.normalise_tags(update_data["tags"])
 
-        update_data["updated_by"] = current_user.get("user_id")
-        # Cataloguer attribution: the editor's display name rides next to the id
-        # (JWT already carries the username). ALWAYS written when updated_by is
-        # written -- falling back to the raw id -- so a stale previous editor's
-        # name can never survive next to a new editor's id. Creation
-        # attribution is immutable: ProductUpdate has no created_by* fields and
-        # the None-strip above cannot introduce them, so created_by /
+        # Cataloguer attribution: THE edit stamp (catalog_list.edit_stamp) --
+        # who (id + display name, the JWT's username, falling back to the raw
+        # id so a stale previous editor's name can never survive next to a
+        # new editor's id) and when (edited_at). Creation attribution is
+        # immutable: ProductUpdate has no created_by* fields and the
+        # None-strip above cannot introduce them, so created_by /
         # created_by_name are never rewritten here.
-        update_data["updated_by_name"] = current_user.get("username") or current_user.get(
-            "user_id"
+        update_data.update(
+            _catalog_list.edit_stamp(
+                current_user.get("user_id"), current_user.get("username")
+            )
         )
 
         if repo.update(product_id, update_data):
@@ -3650,7 +3659,7 @@ async def update_product(
                 _changed_keys = [
                     k
                     for k in update_data.keys()
-                    if k not in ("updated_by", "updated_by_name")
+                    if k not in ("updated_by", "updated_by_name", "edited_at")
                 ]
                 if _changed_keys:
                     from ..dependencies import (

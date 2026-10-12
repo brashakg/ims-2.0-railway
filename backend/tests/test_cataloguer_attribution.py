@@ -298,6 +298,8 @@ class TestUpdateStampsAttribution:
         )
         assert updated["updated_by"] == "u-editor"
         assert updated["updated_by_name"] == "editor"
+        # THE edit moment rides with the editor (catalog_list.edit_stamp).
+        assert updated["edited_at"] is not None
         # creation attribution untouched
         assert updated["created_by"] == "u-creator"
         assert updated["created_by_name"] == "creator"
@@ -361,6 +363,7 @@ class TestUpdateStampsAttribution:
         stored = repo.docs["pid-1"]
         assert stored["updated_by"] == "u-editor"
         assert stored["updated_by_name"] == "editor"
+        assert stored["edited_at"] is not None  # THE edit moment, with the editor
         assert stored["created_by"] == "u-creator"
         assert stored["created_by_name"] == "creator"
 

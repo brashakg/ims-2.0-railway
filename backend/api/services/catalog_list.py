@@ -13,6 +13,10 @@ rows that option shows:
                         text is regex-escaped.
   * ist_day_bounds   -- From / To are INDIA days, both included: a product
                         added at 00:10 IST belongs to that IST day.
+  * LAST_EDITED_AT   -- THE moment of a product's last catalogue edit, read
+                        by the Recently edited sort, the Last edited range
+                        and the Added column (as last_edited_at); written
+                        only through edit_stamp, with who made it.
   * list_query       -- every filter, AND-ed; archived (deleted) products only
                         under the admins' Flags: Archived option.
   * stamp_people     -- the full name of who added / last edited a product,
@@ -26,21 +30,48 @@ from __future__ import annotations
 
 import re
 from collections import Counter, defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from ..utils.ist import ist_day_start_utc
 from .name_resolver import user_name_map
 
-# key -> (sort expression, direction). "edited": a product never edited counts
-# by its created_at (owner ruling 2026-10-12: Recently edited is the default).
+# THE last edit of a product. WHO is updated_by; WHEN is edited_at, which
+# only edit_stamp writes, in the same write as updated_by. updated_at is NOT
+# it: every repo.update moves it (archive, restore, a PO cost, a drawer price
+# mirror) without saying who, so pairing it with updated_by named the last
+# editor for a write they never made. A product edited before edited_at
+# existed counts by its updated_at, which ProductRepository.update freezes
+# into edited_at before any later write that is not an edit can move it; a
+# product never edited counts by its created_at (owner ruling 2026-10-12:
+# Recently edited is the default sort).
+LAST_EDITED_AT: Dict[str, Any] = {
+    "$cond": [
+        {"$gt": [{"$ifNull": ["$updated_by", ""]}, ""]},
+        {"$ifNull": ["$edited_at", "$updated_at"]},
+        "$created_at",
+    ]
+}
+
+
+def edit_stamp(user_id: Optional[str], name: Optional[str]) -> Dict[str, Any]:
+    """The fields EVERY catalogue edit door writes with its change: who
+    (id + display name) and when. Nothing else writes edited_at."""
+    return {
+        "updated_by": user_id,
+        "updated_by_name": name or user_id,
+        "edited_at": datetime.now(timezone.utc),
+    }
+
+
+# key -> (sort expression, direction).
 _NAME = {
     "$toLower": {
         "$ifNull": ["$name", {"$ifNull": ["$title", {"$ifNull": ["$model", ""]}]}]
     }
 }
 SORTS: Dict[str, Tuple[Any, int]] = {
-    "edited": ({"$ifNull": ["$updated_at", "$created_at"]}, -1),
+    "edited": (LAST_EDITED_AT, -1),
     "newest": ("$created_at", -1),
     "oldest": ("$created_at", 1),
     "name_asc": (_NAME, 1),
@@ -81,18 +112,35 @@ def same_value(text: str) -> Dict[str, Any]:
     return {"$regex": r"^\s*" + re.escape(text.strip()) + r"\s*$", "$options": "i"}
 
 
+def _day(text: Optional[str]) -> Optional[date]:
+    try:
+        return date.fromisoformat(text) if text else None
+    except ValueError:
+        raise ValueError(f"{text} is not a real date.") from None
+
+
+def _ist_start(day: date, plus_days: int = 0) -> Optional[Any]:
+    """IST midnight of `day` (+ days) in the stored UTC frame. None past
+    either end of the calendar (From 0001-01-01, To 9999-12-31): that bound
+    is beyond every stored moment, so there is no bound."""
+    try:
+        return ist_day_start_utc(day + timedelta(days=plus_days))
+    except OverflowError:
+        return None
+
+
 def ist_day_bounds(
     date_from: Optional[str], date_to: Optional[str]
 ) -> Tuple[Optional[Any], Optional[Any]]:
     """(>= bound, < bound) in the stored UTC frame for India days From..To,
-    both days included. Raises ValueError for a bad date or From after To."""
-    d_from = date.fromisoformat(date_from) if date_from else None
-    d_to = date.fromisoformat(date_to) if date_to else None
+    both days included. Raises ValueError, in plain words, for a date that
+    does not exist or From after To."""
+    d_from, d_to = _day(date_from), _day(date_to)
     if d_from and d_to and d_from > d_to:
         raise ValueError("The From date is after the To date.")
     return (
-        ist_day_start_utc(d_from) if d_from else None,
-        ist_day_start_utc(d_to + timedelta(days=1)) if d_to else None,
+        _ist_start(d_from) if d_from else None,
+        _ist_start(d_to, 1) if d_to else None,
     )
 
 
@@ -144,14 +192,18 @@ def list_query(
         if value and param in ATTRIBUTE_FILTERS:
             clauses.append({ATTRIBUTE_FILTERS[param]: same_value(value)})
     if date_from or date_to:
-        rng = _range(*ist_day_bounds(date_from, date_to))
+        gte, lt = ist_day_bounds(date_from, date_to)
         if date_on == "edited":
-            # Same instant as the Recently edited sort: never edited -> added.
-            clauses.append(
-                {"$or": [{"updated_at": rng}, {"updated_at": None, "created_at": rng}]}
-            )
-        else:
-            clauses.append({"created_at": rng})
+            # THE last-edit moment, the Recently edited sort's own expression.
+            # The >= bound is always a date (year 1 when From is not chosen),
+            # so a row whose moment is missing or not a date never matches --
+            # exactly as a stored-field range would treat it.
+            cond = [{"$gte": [LAST_EDITED_AT, gte or datetime(1, 1, 1)]}]
+            if lt is not None:
+                cond.append({"$lt": [LAST_EDITED_AT, lt]})
+            clauses.append({"$expr": {"$and": cond}})
+        elif gte is not None or lt is not None:
+            clauses.append({"created_at": _range(gte, lt)})
     if flag == "any":
         clauses.append(open_flag())
     elif flag == "mine":
@@ -163,11 +215,12 @@ def list_query(
 
 def page(collection, query: Dict[str, Any], sort: str, skip: int, limit: int) -> List[Dict]:
     """One page of `query` in `sort` order, sorted on the server across the
-    whole result; product_id breaks ties so pages never overlap or skip."""
+    whole result; product_id breaks ties so pages never overlap or skip.
+    Each row carries last_edited_at (LAST_EDITED_AT) for the Added column."""
     expr, direction = SORTS[sort]
     pipeline: List[Dict[str, Any]] = [
         {"$match": query},
-        {"$addFields": {"_sort_key": expr}},
+        {"$addFields": {"_sort_key": expr, "last_edited_at": LAST_EDITED_AT}},
         {"$sort": {"_sort_key": direction, "product_id": 1}},
     ]
     if skip:

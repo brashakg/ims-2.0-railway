@@ -518,3 +518,64 @@ def test_no_new_parameter_keeps_the_legacy_default_path(db):
     # Legacy default path: inactive AND archived rows included, insertion order.
     assert sorted(_ids(out)) == ["P01", "P02", "P03", "P04", "P05", "P06", "P07"]
     assert out["total_count"] == 7
+
+
+# ---------------------------------------------------------------------------
+# Panel round: what the earlier tests could not tell apart
+# ---------------------------------------------------------------------------
+
+
+def test_with_a_search_the_count_counts_the_searched_list(db):
+    # 'carr' finds P01 only among the 5 active rows: the count must be 1, not
+    # the 5 the filters alone match, or '1 of 5' and the page count lie.
+    out = _list(sort="name_asc", is_active="true", search="carr", limit=1)
+    assert _ids(out) == ["P01"] and out["total_count"] == 1
+    out = _list(sort="name_asc", is_active="true", search="9208", gender="men")
+    assert _ids(out) == ["P03"] and out["total_count"] == 1
+
+
+def test_the_search_box_keeps_the_tills_rule_not_the_wide_one(db):
+    # P03's frame colour is 'Gold'. The till's word rule searches brand /
+    # model / sku / variant / barcode word starts: 'old' finds nothing. The
+    # wide rule (match=anywhere) reads colours anywhere and finds P03.
+    out = _list(sort="name_asc", is_active="true", search="old")
+    assert _ids(out) == [] and out["total_count"] == 0
+    out = _list(sort="name_asc", is_active="true", search="old", match="anywhere")
+    assert _ids(out) == ["P03"] and out["total_count"] == 1
+
+
+@pytest.mark.parametrize("date_on", ["added", "edited"])
+@pytest.mark.parametrize("bounds", [{"date_to": "9999-12-31"}, {"date_from": "0001-01-01"},
+                                    {"date_from": "0001-01-01", "date_to": "9999-12-31"}])
+def test_the_ends_of_the_calendar_mean_no_bound(db, date_on, bounds):
+    out = _list(sort="name_asc", is_active="true", date_on=date_on, **bounds)
+    assert sorted(_ids(out)) == ["P01", "P02", "P03", "P04", "P07"]
+
+
+@pytest.mark.parametrize("day", ["2026-02-30", "2026-04-31", "0000-01-01"])
+def test_a_day_that_does_not_exist_is_refused_in_plain_words(db, day):
+    with pytest.raises(HTTPException) as exc:
+        _list(sort="edited", date_from=day)
+    assert exc.value.status_code == 400
+    assert exc.value.detail == f"{day} is not a real date."
+
+
+def test_last_edited_is_one_rule_a_write_that_is_not_an_edit_moves_nothing(db, cache):
+    repo = ProductRepository(db["products"])
+    # Writes that are NOT catalogue edits (a PO cost, a drawer mirror, the
+    # archive door): BaseRepository.update moves updated_at to now.
+    repo.update("P04", {"cost_price": 1200})  # never edited
+    repo.update("P02", {"cost_price": 4000})  # edited by Akshay, 12 Oct 11:30 IST
+    rows = {p["product_id"]: p for p in _list(sort="edited", is_active="true")["products"]}
+    assert rows["P04"]["last_edited_at"] == utc(2026, 10, 10, 10, 35)  # its add moment
+    assert rows["P02"]["last_edited_at"] == utc(2026, 10, 12, 6, 0)
+    assert _ids(_list(sort="edited", is_active="true")) == EXPECTED_ORDER["edited"]
+    # The 'Never edited' chip and a 'Last edited' day agree with the column.
+    out = _list(sort="name_asc", is_active="true", updated_by="none", date_on="edited",
+                date_from="2026-10-10", date_to="2026-10-10")
+    assert _ids(out) == ["P04"]
+    # A real edit (THE stamp) moves it, and names who made it.
+    repo.update("P03", catalog_list.edit_stamp("u-mansi", "mansi"))
+    cache.store.clear()  # (an edit door busts the list cache)
+    rows = _list(sort="edited", is_active="true")["products"]
+    assert rows[0]["product_id"] == "P03" and rows[0]["updated_by_name"] == "Mansi Kumari"
