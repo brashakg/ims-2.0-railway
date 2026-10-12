@@ -36,7 +36,7 @@ function failureMessage(
   switch (status) {
     case 423:
       if (error === 'pin_not_set')
-        return 'You have not set an approval PIN yet. Set one in Settings → Approval Workflows.';
+        return 'You have not set an approval PIN yet. Set one under "Your Approval PIN" at the foot of the Approvals page.';
       return retryAfterMin != null
         ? `PIN locked — too many attempts. Try again in ${retryAfterMin} minute${retryAfterMin === 1 ? '' : 's'}.`
         : 'PIN locked — too many failed attempts. Try again later.';

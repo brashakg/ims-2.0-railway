@@ -11,13 +11,26 @@ never logged, never echoed, never persisted in plaintext.
 
 Roles (mirrors rbac_policy POLICY):
   - create request / consume / my-requests / get  : any AUTHENTICATED maker
-  - inbox                                          : approver + ACCOUNTANT (read-only)
-  - approve / reject                               : _APPROVER_ROLES (+ SUPERADMIN)
+  - inbox                                          : approver + ACCOUNTANT
+  - approve / reject                               : _DECIDE_ROLES (+ SUPERADMIN)
 
 Supplier money (owner ruling 2026-10-01): an 'rtv' request's amount is the
 supplier credit recorded on a vendor RMA, so every read here (inbox, mine,
 get, the consume result) drops it for anyone outside the accounts roles
 (services/payables_mask.strip_approval_money). Other action types keep theirs.
+
+'rtv' approvals are the accounts roles' (owner ruling 2026-10-12, R1): the
+engine routes one to ADMIN / SUPERADMIN / ACCOUNTANT at every amount tier
+(services/approvals.may_approve, the payables rule). A store or area manager
+neither finds one in the inbox, nor opens, approves, rejects or spends one by
+id -- each answers 404, as for a missing request (its own maker still reads it
+under "mine" / by id, amount-free). The ACCOUNTANT approves 'rtv' only; every
+other action type refuses them (insufficient_tier), as before. Whoever raised
+an 'rtv' cannot approve it ('rtv' is maker-checker): a second accounts person
+does.
+
+Spending by id (/consume) follows the rule GET applies (_request_in_reach):
+its maker or consumer, else a caller whose shops it is in.
 """
 
 from __future__ import annotations
@@ -29,17 +42,24 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .auth import get_current_user, require_roles
-from ..dependencies import user_store_scope
-from ..services.approvals import ApprovalEngine
-from ..services.payables_mask import strip_approval_money
+from ..dependencies import user_store_scope, validate_store_access
+from ..services.approvals import ApprovalEngine, may_approve
+from ..services.cost_mask import AP_ROLES
+from ..services.payables_mask import SUPPLIER_MONEY_ACTIONS, strip_approval_money
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# Roles that may approve / reject a request (business approvers). ACCOUNTANT is
-# inbox-read-only (can see pending) but not a business approver here.
+# Roles that may approve / reject a request (business approvers). ACCOUNTANT
+# reads the inbox and approves supplier-money ('rtv') requests only (R1,
+# _DECIDE_ROLES below); it is not a business approver of any other type.
 _APPROVER_ROLES = ("SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER")
 _INBOX_ROLES = ("SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
+# The approve / reject route gate: the business approvers plus the accounts
+# roles (cost_mask.AP_ROLES), who approve supplier-money ('rtv') requests (R1).
+# The gate only lets them reach the engine; ApprovalEngine.approve / reject
+# decide per action type (an ACCOUNTANT on a refund -> insufficient_tier).
+_DECIDE_ROLES = (*_APPROVER_ROLES, *(r for r in AP_ROLES if r not in _APPROVER_ROLES))
 
 
 def _get_db():
@@ -185,15 +205,30 @@ async def get_inbox(
     current_user: Dict[str, Any] = Depends(require_roles(*_INBOX_ROLES)),
 ):
     """Approver inbox. Defaults to REQUESTED; pass status=ALL for history.
-    STORE/AREA managers are store-scoped; ADMIN/SUPERADMIN see every store."""
+    STORE/AREA managers are store-scoped; ADMIN/SUPERADMIN see every store.
+    An explicit ?store_id must be one of the caller's shops (the one shop
+    rule, validate_store_access), never another shop's queue. Each row
+    carries ``can_approve``: whether approve / reject would pass this caller's
+    role, maker-checker and shop gates (ApprovalEngine.can_act), so a screen
+    offers the buttons only where they work."""
     eng = _engine()
+    if store_id:
+        validate_store_access(store_id, current_user)
     scoped = [store_id] if store_id else _store_ids(current_user)
+    roles = _roles(current_user)
     rows = eng.list_inbox(
-        approver_roles=_roles(current_user),
+        approver_roles=roles,
         store_ids=scoped,
         status=status or "REQUESTED",
         limit=200,
     )
+    for row in rows:
+        row["can_approve"] = eng.can_act(
+            row,
+            approver_user_id=current_user.get("user_id"),
+            approver_roles=roles,
+            approver_store_ids=_store_ids(current_user),
+        )
     _resolve_names(rows)
     rows = [strip_approval_money(r, current_user) for r in rows]
     return {"requests": rows, "total": len(rows)}
@@ -213,10 +248,13 @@ async def get_my_requests(
 def _request_in_reach(eng: ApprovalEngine, doc: Dict[str, Any], user: Dict[str, Any]) -> bool:
     """The caller may open this request: its maker or consumer, or by the
     engine's shop rule over the caller's shops (their store_ids plus the
-    active shop, dependencies.user_store_scope)."""
+    active shop, dependencies.user_store_scope). A supplier-money ('rtv')
+    request is further opened only by a role that may approve it (R1)."""
     uid = user.get("user_id")
     if uid and uid in (doc.get("requested_by"), doc.get("consumed_by")):
         return True
+    if doc.get("action_type") in SUPPLIER_MONEY_ACTIONS and not may_approve(doc, _roles(user)):
+        return False
     _cross, stores = user_store_scope(user)
     # The engine's one shop rule, reused rather than copied.
     # pylint: disable-next=protected-access
@@ -237,7 +275,9 @@ async def get_request(
     _store_scope_ok, the one approve / reject / the inbox apply: HQ every
     shop, a shop-less request org-wide, else one of the caller's shops).
     Anyone else gets the same 404 a missing request gets -- never another
-    shop's amount, context or reviewer by typing its id."""
+    shop's amount, context or reviewer by typing its id. An 'rtv' request
+    answers the same 404 to anyone who may not approve one (R1) unless it is
+    their own."""
     eng = _engine()
     doc = eng.get(request_id)
     if not doc or not _request_in_reach(eng, doc, current_user):
@@ -259,10 +299,11 @@ async def get_request(
 async def approve_request(
     request_id: str,
     body: PinAction,
-    current_user: Dict[str, Any] = Depends(require_roles(*_APPROVER_ROLES)),
+    current_user: Dict[str, Any] = Depends(require_roles(*_DECIDE_ROLES)),
 ):
     """Approve a request with the approver's PIN. The state transition + token
-    mint are a single atomic op inside the engine."""
+    mint are a single atomic op inside the engine. An 'rtv' request is the
+    accounts roles' at any tier (R1); a manager gets 404 for one."""
     res = _engine().approve(
         request_id,
         approver_user_id=current_user.get("user_id"),
@@ -277,9 +318,9 @@ async def approve_request(
 async def reject_request(
     request_id: str,
     body: RejectAction,
-    current_user: Dict[str, Any] = Depends(require_roles(*_APPROVER_ROLES)),
+    current_user: Dict[str, Any] = Depends(require_roles(*_DECIDE_ROLES)),
 ):
-    """Reject a request with the approver's PIN."""
+    """Reject a request with the approver's PIN. Same routing as approve."""
     res = _engine().reject(
         request_id,
         approver_user_id=current_user.get("user_id"),
@@ -298,13 +339,26 @@ async def consume_request(
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
     """Spend an APPROVED approval exactly once (maker or approver). The single-
-    use guard is atomic inside the engine."""
-    res = _engine().consume_approval(
+    use guard is atomic inside the engine. An 'rtv' approval is spent only by
+    a role that may approve one (R1); anyone else gets 404, the approval
+    untouched.
+
+    Shop scope: the request must be one the caller may open by id
+    (_request_in_reach, the rule GET applies -- its maker or consumer, else
+    the engine's shop rule over the caller's shops). Anyone else gets the 404
+    a missing request gets here, and the approval is left unspent: a request
+    id alone never spends another shop's approval."""
+    eng = _engine()
+    doc = eng.get(request_id)
+    if doc is not None and not _request_in_reach(eng, doc, current_user):
+        raise HTTPException(status_code=404, detail="not_found")
+    res = eng.consume_approval(
         consumed_by=current_user.get("user_id"),
         action_type=body.action_type,
         request_id=request_id,
         approval_token=body.approval_token,
         amount=body.amount,
+        consumer_roles=_roles(current_user),
     )
     if res.get("ok"):
         return {**res, "request": strip_approval_money(res.get("request"), current_user)}

@@ -491,9 +491,12 @@ class TestApprovalRequestsById:
             ("pun", PUN, "u-maker-pun"),
             ("org", None, "u-maker-hq"),
         ):
-            res = eng.request(action_type="rtv", requested_by=maker,
+            # A refund, not an 'rtv': this is the shop rule on GET, and an
+            # 'rtv' is the accounts roles' alone (owner ruling 2026-10-12,
+            # tests/test_rtv_approvals_accounts.py), so a manager opens none.
+            res = eng.request(action_type="refund", requested_by=maker,
                               requested_by_roles=["STORE_MANAGER"], store_id=store,
-                              amount=1500.0, context={"rma_id": f"RMA-{key}"})
+                              amount=1500.0, context={"order_id": f"ORD-{key}"})
             assert res.get("ok"), res
             out[key] = res["request_id"]
         return out
@@ -504,7 +507,7 @@ class TestApprovalRequestsById:
         other = cli.get(f"/api/v1/approvals/requests/{ids['dhn']}")
         ghost = cli.get("/api/v1/approvals/requests/REQ-NOPE")
         assert _same_404(other, ghost) == ("Request not found",) * 2
-        assert "RMA-dhn" not in other.text
+        assert "ORD-dhn" not in other.text
 
     def test_own_shop_shopless_own_request_and_admin_still_read(self, world):
         ids = self._requests(world)

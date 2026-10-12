@@ -98,8 +98,16 @@ export function remainingLabel(expiresAt: string | null, now: Date): string | nu
 // Card
 // ----------------------------------------------------------------------------
 
+/** An inbox row: the server stamps ``can_approve`` -- whether approve / reject
+ *  would pass this reader's role, maker-checker and shop gates (the engine's
+ *  own checks). A Return-to-Vendor request is the accounts roles' alone (owner
+ *  ruling 2026-10-12), and an accountant reads the other types without acting
+ *  on them, so the buttons show only where they work. Absent = not stated
+ *  (an older answer): the buttons show, as before. */
+export type InboxRequest = ApprovalRequest & { can_approve?: boolean };
+
 interface Props {
-  request: ApprovalRequest;
+  request: InboxRequest;
   /** Show Approve / Reject actions (pending inbox only). */
   showActions?: boolean;
   onApprove?: (request: ApprovalRequest) => void;
@@ -202,7 +210,7 @@ export function ApprovalRequestCard({
         </p>
       )}
 
-      {showActions && isRequested && (
+      {showActions && isRequested && request.can_approve !== false && (
         <div className="mt-3 flex items-center justify-end gap-2">
           <button
             type="button"
