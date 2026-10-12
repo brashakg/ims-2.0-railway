@@ -35,6 +35,7 @@ from api.routers import dashboard_widgets as widgets_mod  # noqa: E402
 from api.routers import tasks as tasks_mod  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
 from api.routers.reports import router as reports_router  # noqa: E402
+from api.services.file_store import InMemoryFileStore  # noqa: E402
 from database.repositories.task_repository import TaskRepository  # noqa: E402
 
 S1, S2, S3 = "BV-S1", "BV-S2", "BV-S3"
@@ -95,6 +96,10 @@ TASKS = (
     ]
 )
 ALL = {t["task_id"] for t in TASKS}
+ASSIGNEES = sorted({t["assigned_to"] for t in TASKS if t["assigned_to"]})
+# The colleague's task carries a real file, so a 404 on its /file route can
+# only come from the visibility door, never from "No file attached".
+PEER_FILE = b"the colleague's private scan"
 S1_IDS = {t["task_id"] for t in TASKS if t["store_id"] == S1}
 S2_IDS = {t["task_id"] for t in TASKS if t["store_id"] == S2}
 OVERDUE = {t["task_id"] for t in TASKS if t["status"] in ("OPEN", "IN_PROGRESS") and t["due_at"] < datetime.now()}
@@ -118,6 +123,12 @@ ROLES = STAFF_ROLES + ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"]
 def world(monkeypatch):
     db = mongomock.MongoClient().db
     db.tasks.insert_many([dict(t) for t in TASKS])
+    files = InMemoryFileStore()
+    fid = files.put(content=PEER_FILE, filename="scan.pdf", mime_type="application/pdf",
+                    metadata={"kind": "task_attachment", "uploaded_by": "u-mgr", "store_id": S1})
+    db.tasks.update_one({"task_id": "P-PEER"}, {"$set": {"attachment": {
+        "file_id": fid, "filename": "scan.pdf", "mime_type": "application/pdf"}}})
+    monkeypatch.setattr(tasks_mod, "get_file_store", lambda: files)
     repo = TaskRepository(db.tasks)
     monkeypatch.setattr(tasks_mod, "get_task_repository", lambda: repo)
     monkeypatch.setattr(tasks_mod, "get_user_repository", lambda: None)
@@ -161,6 +172,19 @@ def test_list_shows_only_what_the_role_may_see(world, role):
     r = as_role(role).get("/api/v1/tasks")
     assert _ids(r) == expected(role)
     assert r.json()["total"] == len(expected(role))
+
+
+@pytest.mark.parametrize("role", ROLES)
+def test_an_assignee_filter_never_widens_the_list(world, role):
+    """?assigned_to= only narrows: a staff member asking for a colleague's
+    tasks gets nothing, a manager gets that person's tasks at their shop."""
+    as_role, _ = world
+    c = as_role(role)
+    for who in ASSIGNEES:
+        r = c.get("/api/v1/tasks", params={"assigned_to": who})
+        want = expected(role) & {t["task_id"] for t in TASKS if t["assigned_to"] == who}
+        assert _ids(r) == want, who
+        assert r.json()["total"] == len(want), who
 
 
 @pytest.mark.parametrize("role", ROLES)
@@ -243,7 +267,11 @@ def test_no_task_route_acts_on_a_colleagues_task(world, role):
     for method, url, kw in calls:
         r = getattr(c, method)(url, **kw)
         assert r.status_code == 404, f"{method.upper()} {url} -> {r.status_code}"
+        assert PEER_FILE not in r.content, f"{method.upper()} {url} leaked the file"
     assert db.tasks.find_one({"task_id": other}) == before
+    # The file is really there: the shop's manager downloads it.
+    r = as_role("STORE_MANAGER").get(f"/api/v1/tasks/{other}/file")
+    assert r.status_code == 200 and r.content == PEER_FILE, r.status_code
 
 
 @pytest.mark.parametrize("role", STAFF_ROLES)
