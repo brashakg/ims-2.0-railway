@@ -648,6 +648,11 @@ _OLD_STUCK = (
     "The new photo is on the website, but IMS could not take the old one "
     "down. Press Publish again in a minute."
 )
+_FAILED_STUCK = (
+    "Shopify could not fetch an earlier version of this photo and IMS could "
+    "not take that failed copy off the website listing, so it changed "
+    "nothing. Press Publish again in a minute."
+)
 _NOT_RECORDED = (
     "IMS could not save where this photo is on the website listing. Press "
     "Publish again in a minute; IMS looks for the photo on the listing first."
@@ -760,12 +765,15 @@ async def push_image(db, image: Dict[str, Any]) -> PushResult:
          on the listing twice; another row's unanswered send is not one.
       3. A replaced photo: the new one goes up first; the old one comes down
          only once a read shows the new one READY, and only when IMS uploaded
-         it -- one found by file name stays, and the press says so once the
+         it -- every media Shopify answered this row's sends of another url
+         with (the recorded one and an earlier edit never recorded) comes
+         down; one found by file name stays, and the press says so once the
          new one is READY. The row records the new media only then.
-      4. IMS's copy of this photo that Shopify could not fetch (answered
-         FAILED, or failed later) is taken off first by the next press, so
-         failed copies never pile up; when no other copy of the photo is up,
-         that press says so and sends nothing (the address may be bad).
+      4. Every media Shopify answered this row's sends with that it could not
+         fetch (answered FAILED, or failed later), from this url or an
+         earlier one, is taken off first by the next press, so failed copies
+         never pile up; when it was this photo and no other copy of it is
+         up, that press says so and sends nothing (the address may be bad).
       5. When IMS cannot tell -- the read fails, two copies look alike, an
          unnamed media is still processing, another row's unanswered send
          carries the same file name, the attach got no answer -- it changes
@@ -875,7 +883,6 @@ async def push_image(db, image: Dict[str, Any]) -> PushResult:
         sent_url = image.get("shopify_image_sent")
         # Media IMS uploaded for this row -> the url it uploaded it from.
         uploaded = _answered(image)
-        rec_src = uploaded.get(existing_gid) if existing_gid else None
         try:
             elsewhere, flying = _recorded_elsewhere(db, image)
         except Exception as exc:  # noqa: BLE001
@@ -915,17 +922,21 @@ async def push_image(db, image: Dict[str, Any]) -> PushResult:
                 + _CHECK_ADDRESS,
             )
 
-        # IMS's copies of this photo Shopify could not fetch (answered FAILED
-        # or failed later) come off first, so failed copies never pile up.
+        # Every media IMS uploaded for this row that Shopify could not fetch
+        # (answered FAILED or failed later), from this url or an earlier edit,
+        # comes off first, so failed copies never pile up.
         failed = [
             i
             for i, n in by_id.items()
-            if _status(n) == "FAILED" and uploaded.get(i) == want and i not in elsewhere
+            if _status(n) == "FAILED" and i in uploaded and i not in elsewhere
         ]
+        this_failed = any(uploaded[i] == want for i in failed)
         if failed:
             err = await _take_off(failed)
             if err:
                 logger.warning("[SHOPIFY_PUSH] failed copy not taken off %s: %s", failed, err)
+                if not this_failed:
+                    return _done(False, action, _FAILED_STUCK)
                 return _not_fetched(
                     False,
                     existing_gid in by_id
@@ -934,7 +945,7 @@ async def push_image(db, image: Dict[str, Any]) -> PushResult:
                 )
             if existing_gid in failed:
                 _writeback_image(db, image, None)
-                existing_gid = rec_src = None
+                existing_gid = None
 
         def _is_copy(n: Dict[str, Any]) -> bool:
             # One media, one owner: another record's media is never this
@@ -974,20 +985,31 @@ async def push_image(db, image: Dict[str, Any]) -> PushResult:
             for c in copies
         )
         sent = None
-        # The row's media, still on the listing, not a copy of this photo, no
-        # other record's: it comes down when IMS uploaded it (old), else it
-        # stays (kept). A failed one shows nothing, so it is never "kept up".
-        prev = (
+        # The old photo: every media on the listing IMS uploaded for this row
+        # from another url (the recorded one, and any earlier edit sent but
+        # never recorded) and no other record owns. It comes down once the
+        # new one is READY. The row's media found by file name alone (no
+        # proof IMS uploaded it) stays (kept). A failed media shows nothing:
+        # it came off above, and is never "kept up".
+        old = [
+            i
+            for i, n in by_id.items()
+            if i in uploaded
+            and uploaded[i] != want
+            and i not in elsewhere
+            and _status(n) != "FAILED"
+        ]
+        kept = (
             existing_gid
             if existing_gid in by_id
+            and existing_gid not in uploaded
             and existing_gid not in copies
             and existing_gid not in elsewhere
+            and _status(by_id[existing_gid]) != "FAILED"
             else None
         )
-        shows = bool(prev) and _status(by_id[prev]) != "FAILED"
-        old = prev if rec_src else None
-        kept = prev if shows and not rec_src else None
-        if failed and new_gid is None:
+        shows = bool(old or kept)
+        if this_failed and new_gid is None:
             # Said, and nothing sent this press: the address may be bad.
             return _not_fetched(True, shows)
         if new_gid is None:
@@ -1039,7 +1061,7 @@ async def push_image(db, image: Dict[str, Any]) -> PushResult:
                     listing = []
             if not any(n.get("id") == new_gid and _status(n) == "READY" for n in listing):
                 return _done(False, action, _NOT_CONFIRMED, new_gid)
-        doomed = ([old] if old else []) + extra
+        doomed = old + extra
         if doomed:
             err = await _take_off(doomed)
             if err:

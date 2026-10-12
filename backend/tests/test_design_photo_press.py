@@ -18,16 +18,18 @@ through ``shopify_push.push_image`` over the mocked transport (the package's
   2. Replacing a photo swaps it: the new one goes up first, and the old one
      comes down only once a read shows the new one READY on the listing. A
      failed or unfinished upload leaves the old one up. Only a photo IMS
-     PROVABLY uploaded (Shopify answered IMS with its id) ever comes down: a
-     photo found by its file name alone -- maybe a person's own upload of the
-     same file -- stays.
+     PROVABLY uploaded (Shopify answered IMS with its id) ever comes down,
+     and every such photo of an earlier address does (an edit abandoned
+     before its swap finished too): a photo found by its file name alone --
+     maybe a person's own upload of the same file -- stays.
   3. (tests/test_image_editing.py) a re-edit gets a new file name.
   4. When IMS cannot tell -- the listing read fails, a photo is still being
      processed, two copies look alike, another row's unanswered send has the
      same file name, the attach got no answer -- it changes nothing more and
      says so in plain words. It never deletes a photo another part of IMS
      recorded. A copy Shopify could not fetch (answered FAILED, or failed
-     later) is taken off by the next press, so failed copies never pile up.
+     later), from this address or an earlier one, is taken off by the next
+     press, so failed copies never pile up.
 
 The production shape the fake keeps: ``image.url`` is null until a media is
 READY, and the CDN url carries the source file name plus ``?v=``.
@@ -1008,3 +1010,92 @@ def test_another_rows_answered_send_is_never_taken_for_this_one(monkeypatch):
     done = _press(db, "I1")
     assert (done.ok, done.action, done.shopify_id) == (True, "update", _m(101))
     assert listing.ids() == [_m(1), _m(101), _m(102)]
+
+
+# ---------------------------------------------------------------------------
+# Every media Shopify answered IMS for is IMS's, whatever url it came from:
+# once the photo's address changes, the earlier ones still come down
+# ---------------------------------------------------------------------------
+
+
+def test_an_abandoned_edit_comes_down_with_the_old_photo(monkeypatch):
+    """Photo A is up (media 50). The designer re-edits to B and presses; B is
+    still processing, so the swap is not finished and the row still records
+    50. The designer re-edits again to C before anyone presses. The next
+    press puts C up and takes down BOTH A and B: Shopify answered IMS for B,
+    so it is IMS's, and it is not the row's photo any more."""
+    C = "https://store.example.com/P1/c0ffee77.png"
+    listing = _Listing(_ready(_m(1), OWN), _ready(_m(50), A))
+    db = _world(monkeypatch, listing, shopify_image_id=_m(50), shopify_image_answers=_said((_m(50), A)))
+    db["product_images"].update_one({"image_id": "I1"}, {"$set": {"edited_url": B}})
+    listing.lands = "PROCESSING"
+    assert _press(db).error == shopify_push.media._NOT_CONFIRMED
+    assert _row(db) == (_m(50), A)
+
+    listing.ready()
+    listing.lands = "READY"
+    db["product_images"].update_one({"image_id": "I1"}, {"$set": {"edited_url": C}})
+    res = _press(db)
+    assert (res.ok, res.action, res.shopify_id) == (True, "update", _m(101))
+    assert listing.sent("productDeleteMedia") == [{"productId": P_GID, "mediaIds": [_m(50), _m(100)]}]
+    assert listing.ids() == [_m(1), _m(101)]
+    assert db[shopify_push.TOMBSTONES_COLLECTION].find_one({"media_gid": _m(100)})["url"] == B
+    assert _row(db) == (_m(101), C)
+    assert (_press(db).action, len(_mutations(listing))) == ("noop", 3)
+
+
+def test_two_copies_of_a_replaced_photo_both_come_down(monkeypatch):
+    """Two presses at the same moment left two answered copies of A (media
+    200 and 201; the row records 201). The designer re-edits to B before the
+    next press: B goes up and both copies of A come down, never one of them
+    left beside the new photo."""
+    listing = _Listing(_ready(_m(1), OWN), _ready(_m(200), A), _ready(_m(201), A))
+    db = _world(
+        monkeypatch, listing, shopify_image_id=_m(201), shopify_image_answers=_said((_m(200), A), (_m(201), A))
+    )
+    db["product_images"].update_one({"image_id": "I1"}, {"$set": {"edited_url": B}})
+    res = _press(db)
+    assert (res.ok, res.action, res.shopify_id) == (True, "update", _m(100))
+    assert listing.ids() == [_m(1), _m(100)]
+    assert _row(db) == (_m(100), B)
+    assert [_press(db).action for _ in range(2)] == ["noop", "noop"]
+    assert len(listing.sent("productDeleteMedia")) == 1
+
+
+@pytest.mark.parametrize("lands", ["READY", "PROCESSING"])
+def test_a_failed_send_of_an_earlier_address_is_taken_off_after_a_re_edit(monkeypatch, lands):
+    """Shopify answers the send of A FAILED. The designer fixes the address
+    by re-editing to B, as the press told them to. The next press takes
+    IMS's failed copy of A off first and puts B up: a failed copy shows
+    nothing, so it never holds the new photo back nor is called the old
+    photo staying up."""
+    listing = _Listing(_ready(_m(1), OWN))
+    db = _world(monkeypatch, listing)
+    listing.answer = "failed"
+    assert "could not fetch" in _press(db).error
+    listing.answer, listing.lands = "ok", lands
+    db["product_images"].update_one({"image_id": "I1"}, {"$set": {"edited_url": B}})
+
+    res = _press(db)
+    assert (res.ok, res.action, res.shopify_id, res.error) == (True, "create", _m(101), None)
+    assert listing.ids() == [_m(1), _m(101)]
+    assert db[shopify_push.TOMBSTONES_COLLECTION].find_one({"media_gid": _m(100)})["url"] == A
+    assert _row(db) == (_m(101), B)
+    listing.ready()
+    assert [_press(db).action for _ in range(2)] == ["noop", "noop"]
+    assert [v["mediaIds"] for v in listing.sent("productDeleteMedia")] == [[_m(100)]]
+
+
+def test_an_earlier_failed_copy_that_will_not_come_off_is_said_and_nothing_sent(monkeypatch):
+    listing = _Listing(_ready(_m(1), OWN))
+    db = _world(monkeypatch, listing)
+    listing.answer = "failed"
+    _press(db)
+    listing.answer, listing.delete_fails = "ok", True
+    db["product_images"].update_one({"image_id": "I1"}, {"$set": {"edited_url": B}})
+
+    stuck = _press(db)
+    assert (stuck.ok, stuck.error) == (False, shopify_push.media._FAILED_STUCK)
+    assert len(listing.sent("productCreateMedia")) == 1
+    listing.delete_fails = False
+    assert (_press(db).ok, listing.ids()) == (True, [_m(1), _m(101)])
