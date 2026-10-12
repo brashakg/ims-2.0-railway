@@ -7,9 +7,11 @@
 //   * ARM once a category and a brand are set.
 //   * Fire 400ms after the operator stops typing; every keystroke RESTARTS
 //     the timer and ABORTS the in-flight request.
-//   * Any change clears the last answer at once (a chip never names a model
-//     no longer typed); null while idle/errored/un-armed — the strip renders
-//     nothing then.
+//   * A change to a field the answer says decides it clears the answer at once
+//     (a chip never names a model no longer typed); a change to any other
+//     field keeps it (the strip never reflows the grid while still true); an
+//     answer that names no deciding fields is cleared by any change; null
+//     while idle/errored/un-armed — the strip renders nothing then.
 
 import { renderHook, act } from '@testing-library/react';
 import { vi, type Mock } from 'vitest';
@@ -155,6 +157,39 @@ describe('useSimilarProducts', () => {
       await vi.advanceTimersByTimeAsync(SIMILAR_DEBOUNCE_MS);
     });
     expect(result.current.data).toEqual(FRESH);
+  });
+
+  it('a change outside the identity keeps the strip; a change inside it clears it at once', async () => {
+    // Measured on the branch: typing in Lens Colour (or a USP) unmounted the
+    // strip under Model No and reflowed every field after it until the
+    // answer came back. The answer names what decides it (the server's rule).
+    const DECIDED: SimilarProductsResponse = {
+      ...RESPONSE,
+      identity_fields: ['brand_name', 'colour_code', 'lens_size', 'model_no'],
+    };
+    getSimilar.mockResolvedValue(DECIDED);
+    const typed = (extra: Record<string, string>) => withAttrs({ colour_code: '999', ...extra });
+    const { result, rerender } = renderSimilar(typed({}));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SIMILAR_DEBOUNCE_MS);
+    });
+    expect(result.current.data).toEqual(DECIDED);
+
+    for (const extra of [{ lens_colour: 'G' }, { lens_colour: 'G1', usp_1: 'L' }, { lens_colour: 'G1' }]) {
+      rerender({ q: typed(extra) });
+      expect(result.current.data).toEqual(DECIDED); // kept at once, while debouncing
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(SIMILAR_DEBOUNCE_MS);
+      });
+      expect(result.current.data).toEqual(DECIDED); // and after the fresh answer
+    }
+
+    rerender({ q: typed({ lens_colour: 'G1', model_no: 'RB4166' }) });
+    expect(result.current.data).toBeNull(); // another product: cleared at once
+    rerender({ q: typed({ lens_colour: 'G1', colour_code: '601' }) });
+    expect(result.current.data).toBeNull();
+    rerender({ q: typed({ lens_colour: 'G1' }) }); // back to what it answered
+    expect(result.current.data).toEqual(DECIDED);
   });
 
   it('a new category clears the answer at once', async () => {

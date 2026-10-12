@@ -1037,6 +1037,38 @@ def test_a_the_hint_exact_match_is_the_row_the_save_409s_on(
     door(_form_post(category, new))
 
 
+_RB4165 = {"brand_name": "Ray-Ban", "model_no": "RB4165", "colour_code": "999", "lens_size": "54",
+           "model_name": "Justin", "subbrand": "Icons", "lens_colour": "G15", "usp_1": "Light"}
+
+
+@pytest.mark.parametrize("category,attrs,decides", [
+    ("SG", _RB4165, {"brand_name", "model_no", "colour_code", "lens_size"}),
+    ("LS", dict(_CRIZAL, lens_type="SV"), {"brand_name", "subbrand", "coating", "index"}),
+    ("CL", _FIT, {"brand_name", "model_name", "power", "base_curve", "diameter", "pack"}),
+])
+def test_a_the_hint_says_which_fields_decide_it(
+    client, staff_headers, door, monkeypatch, category, attrs, decides
+):
+    """The answer names the fields that decide it, read off the create door's
+    rule (identity_inputs), so the form keeps the strip while only other
+    fields change. Every other field of the category is changed here and the
+    answer is the same; every deciding one is changed and the answer moves."""
+    door(_form_post(category, attrs))
+    sibling = door(_form_post(category, dict(attrs, power="-2.00") if category == "CL"
+                              else dict(attrs, index="1.67") if category == "LS"
+                              else dict(attrs, colour_code="601")))
+    hint = _hint(client, door, monkeypatch, staff_headers, category, attrs)
+    fields = set(hint["identity_fields"])
+    assert decides <= fields, fields
+    spec = pm.category_spec(category)
+    for k in set(spec.required + spec.optional) | set(attrs):
+        changed = _hint(client, door, monkeypatch, staff_headers, category, dict(attrs, **{k: "Zz9"}))
+        same = (changed["exact_match"], changed["siblings"]) == (hint["exact_match"], hint["siblings"])
+        assert same or k in fields, k  # a field that moves the answer is named
+    assert hint["exact_match"] is not None and sibling["sku"] in [x["sku"] for x in hint["siblings"]]
+    assert not fields & {"model_name", "subbrand", "lens_colour", "usp_1", "lens_type", "expiry_date"} - decides
+
+
 # ---------------------------------------------------------------------------
 # B: an identity edit re-keys the product (and is refused as a duplicate)
 # ---------------------------------------------------------------------------

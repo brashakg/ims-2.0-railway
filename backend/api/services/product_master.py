@@ -1181,6 +1181,28 @@ def identity_parts(
     return (ids["brand"], model, colour, size)
 
 
+def identity_inputs(attributes: Dict[str, Any], category: Any) -> List[str]:
+    """The attributes that decide identity_parts for these values: changing
+    any other one (a lens colour, a USP, a Model Name under a Model No) cannot
+    make it another product. Read off the rule itself -- each field the
+    category has, or that was typed, is given another value and kept when the
+    parts move (or stop reading, a number field) -- so no list of the rule's
+    inputs is kept anywhere. The Add-product strip keeps its answer while
+    only other fields change (useSimilarProducts)."""
+    a = dict(attributes or {})
+    spec = category_spec(category)
+    fields = set(a) | set(spec.required + spec.optional if spec else ())
+
+    def parts(attrs: Dict[str, Any]) -> Any:
+        try:
+            return identity_parts(attrs, category)
+        except ProductMasterError:
+            return None
+
+    now = parts(a)
+    return sorted(k for k in fields if parts({**a, k: "\x00"}) != now)
+
+
 def normalise_identity_component(value: Any) -> str:
     """THE one normaliser every identity comparison must run through.
 
@@ -1562,6 +1584,9 @@ def find_similar_products(
             "exact_match": existing_product_summary(exact_doc) if exact_doc else None,
             "siblings": siblings,
             "model_colour_count": model_colour_count,
+            # What decides this answer: the form keeps it while only other
+            # fields change, so the strip never reflows the grid needlessly.
+            "identity_fields": identity_inputs(attributes or {}, canonical),
         }
     except Exception as exc:  # noqa: BLE001 - fail-soft: hint only, never a 5xx
         logger.warning("[PM] find_similar_products failed: %s", exc)

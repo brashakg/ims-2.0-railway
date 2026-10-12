@@ -154,6 +154,10 @@ export interface SimilarProductsResponse {
   exact_match: SimilarProductSummary | null;
   siblings: SimilarProductSummary[];
   model_colour_count: number;
+  /** The typed attributes that decide this answer (the server's identity
+   *  rule, product_master.identity_inputs): a change to any other one leaves
+   *  it true. Absent = every attribute decides. */
+  identity_fields?: string[];
 }
 
 // ---------------------------------------------------------------------------
