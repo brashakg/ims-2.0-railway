@@ -266,14 +266,17 @@ def reconcile_fulfillment(
         # The order's tracking fields show the NEWEST fulfilment IMS applied:
         # an older parcel's late event states its own fact above but never
         # takes them over from a newer one (the write matches only while the
-        # stored watermark is not newer), and a cancelled / failed parcel
-        # never takes them over while another parcel is still live.
+        # stored watermark is not newer), a cancelled / failed parcel never
+        # takes them over while another parcel is still live, and a live
+        # parcel always takes them over a cancelled / failed one, whatever
+        # its watermark (the cancel's newer clock kept a delivered parcel's
+        # AWB off the screen for good; each parcel's own clock above still
+        # skips its own stale bodies).
         # An order reconciled before the clocks (no watermark, no parcel
         # list) has only its stamped fulfilment to compare with, and no clock
         # for it: Shopify's fulfilment ids increase, so this one or a newer
         # one (a larger id) takes the fields over, an older one never (the
-        # sweep re-feeds every older parcel), and a live one takes them over
-        # a cancelled / failed stamp. Its parcel list starts with the stamped
+        # sweep re-feeds every older parcel). Its parcel list starts with the stamped
         # parcel, which counts as live beside this one until it is cancelled.
         # No other clock can stand in for the stamped one's: the order's own
         # (IMS's updated_at, Shopify's) moves with this very fulfilment's
@@ -300,8 +303,7 @@ def reconcile_fulfillment(
                 if _fulfilment_rank(fulfillment_id) >= _fulfilment_rank(stamp):
                     legacy.append({FULFILLMENT_WATERMARK: None, "shopify_fulfillment_id": stamp})
                 if live:
-                    legacy.append({FULFILLMENT_WATERMARK: None,
-                                   "fulfillment_status": {"$in": ["CANCELLED", "ERROR"]}})
+                    legacy.append({"fulfillment_status": {"$in": ["CANCELLED", "ERROR"]}})
                 newer = {"$or": [{FULFILLMENT_WATERMARK: {"$lte": watermark}}, *legacy]}
             orders.update_one({**oid, **newer}, {"$set": takeover})
         clock: Dict[str, Any] = {"updated_at": datetime.now(timezone.utc).isoformat()}

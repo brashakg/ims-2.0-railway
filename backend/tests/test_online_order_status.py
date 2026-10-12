@@ -3010,3 +3010,38 @@ def test_a_lost_reply_on_the_conflict_claim_never_blocks_the_order(swept, monkey
         _counter_return(swept, oid)
     assert refused.value.status_code == 400
     assert "Shopify already refunded this order in full" in refused.value.detail
+
+
+@pytest.mark.parametrize("probe", ["A_sweep_pre_clock", "B_sweep_clocked", "C_drain_out_of_order"])
+def test_a_live_parcel_takes_the_display_over_a_newer_cancel(swept, probe):
+    """A split shipment: F1 cancelled at 02:05, F2 delivered at 01:00. The
+    takeover of a cancelled display by a live parcel held only while no
+    watermark was set, so once F1's cancel set 02:05, F2 never took the
+    tracking fields over: DELIVERED, showing the dead AWB-1 for good. A live
+    parcel always takes them over a cancelled / failed one."""
+    oid = {"A_sweep_pre_clock": 60235, "B_sweep_clocked": 60236, "C_drain_out_of_order": 60237}[probe]
+    _book(swept, oid)
+    f1 = _fulfilment(oid, 1, tracking_number="AWB-1", status="cancelled",
+                     created_at=_T("00:40"), updated_at=_T("02:05"))
+    f2 = _fulfilment(oid, 2, tracking_number="AWB-2", status="success", shipment_status="delivered",
+                     created_at=_T("00:50"), updated_at=_T("01:00"))
+    if probe == "A_sweep_pre_clock":
+        _set(swept, oid, status="SHIPPED", shopify_fulfillment_id="1", awb="AWB-1",
+             tracking_number="AWB-1", fulfillment_status="CANCELLED")
+    else:
+        _reconcile(swept, oid, 1, "AWB-1", "success", _T("00:40"))
+    if probe == "C_drain_out_of_order":
+        shopify_fulfillment.reconcile_fulfillment(swept["db"], copy.deepcopy(f1), topic="fulfillments/update")
+        shopify_fulfillment.reconcile_fulfillment(swept["db"], {**copy.deepcopy(f2), "shipment_status": None,
+                                                                "updated_at": _T("00:50")},
+                                                  topic="fulfillments/create")
+        shopify_fulfillment.reconcile_fulfillment(swept["db"], copy.deepcopy(f2), topic="fulfillments/update")
+        assert (_doc(swept, oid)["shopify_fulfillment_id"], _doc(swept, oid)["awb"]) == ("2", "AWB-2")
+    swept["state"]["orders"] = [_pulled(oid, fulfillment_status="fulfilled", updated_at=LATER,
+                                        fulfillments=[f1, f2])]
+    for i in range(2):
+        swept["run"]()
+        doc = _doc(swept, oid)
+        assert (doc["status"], doc["shopify_fulfillment_id"], doc["awb"], doc["fulfillment_status"],
+                doc["shipment_status"]) == ("DELIVERED", "2", "AWB-2", "FULFILLED", "delivered"), i
+        assert shopify_fulfillment.tracked_awbs(doc) == ["AWB-2"]
