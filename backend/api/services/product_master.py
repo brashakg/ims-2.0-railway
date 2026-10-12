@@ -59,6 +59,7 @@ from .gtin import (
     MANUFACTURER_BARCODE_ATTRIBUTES,
     classify_gtin,
     fold_barcode_spellings,
+    gtin_spellings,
     manufacturer_barcode_key,
     normalise_candidate,
     sanitise_gtin,
@@ -1449,9 +1450,14 @@ def drop_legacy_spine_barcode(product_repo, product_id: Any) -> None:
 
 def spine_holds_gtin(spine: Optional[Dict[str, Any]], gtin: Any) -> bool:
     """True when the spine's attributes.gtin -- the key write_spine_gtin writes
-    and the till reads -- is exactly `gtin`."""
+    and the till reads -- is `gtin` in any of its spellings: the till,
+    find_by_barcode and the one-holder check read a UPC-A and its 13-digit
+    form as ONE code (gtin_spellings), so this does too. A blank `gtin` (a
+    Remove) is held only by a blank."""
     attrs = (spine or {}).get("attributes")
-    return isinstance(attrs, dict) and attrs.get("gtin") == gtin
+    return isinstance(attrs, dict) and attrs.get("gtin") in (
+        gtin_spellings(gtin) or [gtin]
+    )
 
 
 def write_spine_gtin(product_repo, product_id: Any, gtin: str) -> None:

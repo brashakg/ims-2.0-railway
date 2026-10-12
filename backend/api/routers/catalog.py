@@ -1483,9 +1483,12 @@ def _spine_gtin_behind(catalog_doc: Dict) -> Optional[str]:
     sends no gtin, so nothing else would ever write it). None = nothing to
     repair. Only toward a valid twin code: a blank or junk twin gtin never
     blanks or replaces the spine's, and a twin typed with separators never
-    puts them on the spine (the till finds a code only as normalised). A code
-    another product holds is never written (one GTIN, one product) -- nor does
-    it refuse this save, which did not touch the barcode: skipped, logged."""
+    puts them on the spine (the till finds a code only as normalised), while
+    a spine holding the code in another spelling (a UPC-A and its 13-digit
+    form) already holds it (spine_holds_gtin): nothing is rewritten or
+    dropped. A code another product holds is never written (one GTIN, one
+    product) -- nor does it refuse this save, which did not touch the
+    barcode: skipped, logged."""
     attrs = catalog_doc.get("attributes")
     gtin = _pm.sanitise_gtin(attrs.get("gtin") if isinstance(attrs, dict) else None)
     if not gtin:

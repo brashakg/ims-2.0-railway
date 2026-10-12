@@ -932,6 +932,22 @@ def test_the_repair_writes_the_normalised_code_never_the_typed_one(gtin_env):
     assert _till(_GTIN) == ["spine-g1"]
 
 
+def test_the_repair_reads_a_upc_a_and_its_13_digit_form_as_one_code(gtin_env):
+    """Round 12. The repair compared exact strings, so a spine holding the
+    13-digit form of its twin's UPC-A was 'behind': a price-only save rewrote
+    the spine's spelling and dropped its legacy barcode. One code, any
+    spelling (gtin_spellings, as the till and the one-holder check read it)."""
+    gtin_env.collection.update_one(
+        {"product_id": "spine-g1"},
+        {"$set": {"attributes.gtin": "0" + _UPC, "barcode": _GTIN}},
+    )
+    catalog_mod.CATALOG_PRODUCTS["twin-g1"]["attributes"]["gtin"] = _UPC
+    _put("twin-g1", {"pricing": {"mrp": 5200.0}})
+    spine = gtin_env.find_by_id("spine-g1")
+    assert spine["attributes"]["gtin"] == "0" + _UPC
+    assert spine["barcode"] == _GTIN and spine["mrp"] == 5200.0
+
+
 @pytest.mark.parametrize("later", [{"is_active": False}, {"pricing": {"mrp": 5200.0}}])
 def test_the_repair_never_refuses_a_save_or_takes_a_code_another_product_holds(
     gtin_env, caplog, later
