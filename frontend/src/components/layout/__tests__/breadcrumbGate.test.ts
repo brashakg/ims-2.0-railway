@@ -27,7 +27,7 @@ describe('parent breadcrumbs follow the route gates', () => {
     (role) => {
       expect(crumbsFor(role, '/inventory/lookup')).toEqual([
         { label: 'Inventory', to: undefined },
-        { label: 'Lookup', to: undefined },
+        { label: 'Stock Lookup', to: undefined },
       ]);
     },
   );

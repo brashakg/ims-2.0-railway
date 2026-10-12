@@ -38,6 +38,7 @@ const SEGMENT_LABELS: Record<string, string> = {
   'contact-lens': 'Contact Lens Fitting',
   prescriptions: 'Prescriptions',
   inventory: 'Inventory',
+  lookup: 'Stock Lookup',
   replenishment: 'Replenishment',
   audit: 'Stock Audit',
   purchase: 'Purchase',
