@@ -67,8 +67,8 @@ async def get_upi_qr(
             status_code=400,
             detail=(
                 f"Store '{store_id}' does not have a UPI VPA configured. "
-                "Go to Settings -> Stores -> UPI VPA and enter the store's "
-                "Virtual Payment Address (e.g. bettervision.bok@upi)."
+                "Add the shop's UPI VPA in Organization (left menu): the "
+                "store's Virtual Payment Address (e.g. bettervision.bok@upi)."
             ),
         )
 
