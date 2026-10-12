@@ -36,6 +36,7 @@ import {
   type Task,
   type TaskStatus,
 } from './tasksQueries';
+import { canSeeTeamTasks } from './taskRoles';
 
 const PRI_VAR: Record<PCode, string> = {
   P0: 'var(--p0)',
@@ -66,17 +67,25 @@ export function TasksSplitView({ scope, emptyLine }: TasksSplitViewProps) {
   // THE FIX: the assignee filter is a SERVER filter. The old pages fetched the
   // store's first 50 tasks and narrowed them in the browser, so past 50 tasks
   // "Mine" could show none of your own work. See tasksQueries.ts.
+  //
+  // Below manager the server already returns ONLY your tasks plus the ones
+  // addressed to your role at your shop (owner ruling 2026-10-12,
+  // backend services/task_visibility.py), so "Mine" asks for exactly that and
+  // adds no assignee filter - one that would hide your role's tasks. A
+  // manager's "Mine" still narrows to tasks assigned to them by name.
+  const narrowToMe = scope === 'mine' && canSeeTeamTasks(user?.roles);
   const params = useMemo(
     () => ({
-      ...(scope === 'mine' ? { assigned_to: user?.id || '' } : {}),
+      ...(narrowToMe ? { assigned_to: user?.id || '' } : {}),
       ...(status !== 'ALL' ? { status } : {}),
       ...(priority !== 'ALL' ? { priority } : {}),
     }),
-    [scope, user?.id, status, priority],
+    [narrowToMe, user?.id, status, priority],
   );
 
-  // A "mine" query with no user id would silently become a whole-store query.
-  const ready = scope === 'team' || !!user?.id;
+  // A manager's "mine" query with no user id would silently become a
+  // whole-store query.
+  const ready = !narrowToMe || !!user?.id;
   const q = useTaskList(params, ready);
 
   const tasks = flattenTasks(q.data);
