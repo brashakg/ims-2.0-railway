@@ -42,6 +42,7 @@ from api.services import product_master as pm  # noqa: E402
 from api.services import shopify_live_sync as ls  # noqa: E402
 from api.services import shopify_push  # noqa: E402
 from api.services.shopify_push import PushResult  # noqa: E402
+from api.services.shopify_push import product as product_mod  # noqa: E402
 
 # The sibling harnesses, never copies of them.
 from test_online_push_dirty_flag import (  # noqa: E402
@@ -66,6 +67,7 @@ from test_shopify_media_title_sync import (  # noqa: E402
 )
 from test_shopify_live_sync import world  # noqa: E402,F401 -- fixture
 from test_catalog_review_put import _bvi_doc, _promote, _put, env  # noqa: E402,F401
+from test_online_store_push import patched_db  # noqa: E402,F401 -- fixture
 from test_cataloguing_scorecard_qc import (  # noqa: E402
     FakeDB as _QcDB,
     _product as _qc_product,
@@ -323,6 +325,141 @@ def test_the_scheduled_sync_carries_a_reorder_and_never_first_publishes(world, m
     assert _apply_moves([_m(1), _m(2), _m(3)], re["variables"]["moves"]) == [
         _m(3), _m(1), _m(2)
     ]
+
+
+# ===========================================================================
+# 2b. A photo step that FAILED is sent again: the product stays queued
+# ===========================================================================
+
+
+class _ReorderFails(_Shopify):
+    """The media rig, with productReorderMedia switchable to a transport error."""
+
+    def __init__(self, media_nodes):
+        super().__init__(media_nodes)
+        self.fail_reorder = True
+
+    async def __call__(self, db, query, variables):
+        if self.fail_reorder and self._op(query) == "imsProductReorderMedia":
+            self.calls.append(
+                {"op": "imsProductReorderMedia", "variables": copy.deepcopy(variables)}
+            )
+            raise RuntimeError("Shopify 503")
+        return await super().__call__(db, query, variables)
+
+
+def _live_reordered():
+    """Live on Shopify as [front, angled, side]; IMS now wants [side, front, angled]."""
+    return _product(
+        [SIDE, FRONT, ANGLED],
+        media_map=[(FRONT, _m(1)), (ANGLED, _m(2)), (SIDE, _m(3))],
+    )
+
+
+def _reorder_fails(monkeypatch):
+    fake = _ReorderFails(_nodes(1, 2, 3))
+    monkeypatch.setattr(shopify_push, "_graphql", fake)
+
+    # This pins the PHOTO side channel. These rigs hold no shops, so a live
+    # stock pass would stamp its own code on every result (that code has its
+    # own file, test_shopify_online_stock.py).
+    async def _stock_written(*_a, **_k):
+        return {"ok": True, "code": None, "error": None, "set": 1, "quantities": {}}
+
+    monkeypatch.setattr(product_mod, "sync_product_stock", _stock_written)
+    return fake
+
+
+def test_a_failed_reorder_keeps_the_live_product_queued_and_says_so(
+    db, gates, monkeypatch  # noqa: F811
+):
+    fake = _reorder_fails(monkeypatch)
+    doc = _seed(db, _live_reordered())
+
+    res = _run(shopify_push.push_product(db, doc, []))
+
+    assert _media_ops(fake) == ["imsProductReorderMedia"], _media_ops(fake)
+    assert res.photos["reordered"] is False and res.photos["error"] == "Shopify 503"
+    # The product IS live -- never a false "failed" -- but it says so...
+    assert res.ok is True
+    assert res.code == shopify_push.PHOTOS_NOT_SYNCED
+    assert res.error == shopify_push._PHOTOS_NOT_SYNCED_MSG
+    # ...and stays queued, so the next press / scheduled sync sends it again.
+    assert _twin(db)["ecom"]["locally_modified"] is True
+
+
+def test_the_next_sync_sends_the_failed_reorder_again_then_the_queue_drains(
+    world, monkeypatch  # noqa: F811
+):
+    db, audit = world
+    monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: True)
+    monkeypatch.setenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", "gid://shopify/Publication/1")
+    shopify_push._publication_id_cache.clear()
+    fake = _reorder_fails(monkeypatch)
+
+    async def _no_stock(_db):
+        return PushResult(mode="LIVE", entity="stock", action="sync", ok=True, payload={})
+
+    monkeypatch.setattr(shopify_push, "sync_stock_levels", _no_stock)
+    db.seed("catalog_products", [_live_reordered()])
+
+    run = _run(ls.sync_live_products(db, trigger="manual", actor="u-super"))
+
+    assert run["pushed_ok"] == 1 and run["failed"] == 0
+    assert run["photos_not_synced"] == 1
+    (failure,) = run["failures"]
+    assert failure["product_id"] == "P1"
+    assert failure["code"] == shopify_push.PHOTOS_NOT_SYNCED
+    assert failure["error"] == shopify_push._PHOTOS_NOT_SYNCED_MSG
+    (row,) = [r for r in audit.rows if r["entity_id"] == "P1"]
+    assert row["severity"] == "WARNING"
+    assert row["details"]["photos"]["error"] == "Shopify 503"
+    assert _twin(db)["ecom"]["locally_modified"] is True
+
+    # Shopify is back: the next run selects the product again and sends the
+    # SAME reorder; it lands and the queue drains.
+    fake.fail_reorder = False
+    run2 = _run(ls.sync_live_products(db, trigger="manual", actor="u-super"))
+
+    assert run2["selected"] == 1
+    assert run2["photos_not_synced"] == 0 and run2["failures"] == []
+    first, again = fake.calls_of("imsProductReorderMedia")
+    assert again["variables"] == first["variables"]
+    assert _apply_moves([_m(1), _m(2), _m(3)], again["variables"]["moves"]) == [
+        _m(3), _m(1), _m(2)
+    ]
+    assert _twin(db)["ecom"]["locally_modified"] is False
+    assert _run(ls.sync_live_products(db, trigger="manual", actor="u-super"))["selected"] == 0
+
+
+def test_the_push_all_press_gives_it_its_own_line_never_a_stock_line(
+    client, auth_headers, patched_db, monkeypatch  # noqa: F811
+):
+    conn, _ = patched_db
+    conn.db["catalog_products"].insert_one(_live_reordered())
+
+    async def _live_with_old_photos(db, product, variants, blocked=None):
+        return PushResult(
+            mode="LIVE", entity="product", action="update", target_id=product["id"],
+            ok=True, shopify_id=GID, code=shopify_push.PHOTOS_NOT_SYNCED,
+            error=shopify_push._PHOTOS_NOT_SYNCED_MSG,
+        )
+
+    async def _no_stock(db):
+        return PushResult(mode="LIVE", entity="stock", action="noop", ok=True)
+
+    monkeypatch.setattr(shopify_push, "push_product", _live_with_old_photos)
+    monkeypatch.setattr(shopify_push, "sync_stock_levels", _no_stock)
+
+    r = client.post(
+        "/api/v1/online-store/push/all-pending?entities=products", headers=auth_headers
+    )
+
+    assert r.status_code == 200, r.text
+    products = r.json()["summary"]["products"]
+    assert products["pushed"] == 1 and products["failed"] == 0
+    assert products["photos_not_synced"] == 1
+    assert "stock_not_written" not in products and "stock_warning" not in products
 
 
 # ===========================================================================
