@@ -5,8 +5,9 @@ backend/tests/test_purchases_this_month.py pins the screens; this pins the two
 rules they stand on, each written out by hand:
 
   1. A bill carries the shop its goods landed in (F63). Every door stamps it
-     at booking -- the receipt's shop, else the booker's -- and the backfill
-     places old bills the same way. Every Purchase tab filters on it.
+     at booking -- the receipt's shop; with no receipt the shop an ADMIN
+     picks (owner ruling 2026-10-12, R9), else the booker's own -- and the
+     backfill places old bills the same way. Every Purchase tab filters on it.
   2. What we owe is the supplier ledger (F56). AP aging nets money paid past
      a bill's total exactly like on-account money, so aging == ledger for any
      vendor, not just the audit's.
@@ -50,7 +51,8 @@ from test_purchase_invoice import _restore_router  # noqa: E402,F401
 def test_every_bill_door_stamps_the_shop_the_goods_landed_in():
     """GA was received at S1, GC at S2, GB at S1; the accountant sits at S2.
     A receipt's bill carries the RECEIPT's shop whoever books it; a services
-    bill with no receipt carries the booker's."""
+    bill with no receipt carries the shop the admin PICKS -- never his own
+    topbar shop, and none picked is refused (owner ruling 2026-10-12, R9)."""
     db, cli = _Doors()._world(active="S2")
     # F63: a shop-bound accountant at S2 cannot reach S1's receipts at all (the
     # same 404 a missing receipt gets, on either door) ...
@@ -78,15 +80,21 @@ def test_every_bill_door_stamps_the_shop_the_goods_landed_in():
     assert header.status_code == 201, header.text
     assert header.json()["store_id"] == "S1"
 
-    freight = _door(
-        cli, "V1", bill_number="FR-9", bill_date="2026-05-09", bill_kind="SERVICES",
+    # R9: the admin sits at S2 but the freight is S1's. Naming no shop is
+    # refused (it used to land on his S2); the shop he names is the bill's.
+    freight_bill = dict(
+        bill_number="FR-9", bill_date="2026-05-09", bill_kind="SERVICES",
         taxable_amount=1000, tax_amount=180, total_amount=1180,
     )
+    unpicked = _door(cli, "V1", **freight_bill)
+    assert unpicked.status_code == 422, unpicked.text
+    assert unpicked.json()["detail"]["code"] == "BILL_SHOP_REQUIRED"
+    freight = _door(cli, "V1", store_id="S1", **freight_bill)
     assert freight.status_code == 201, freight.text
-    assert freight.json()["store_id"] == "S2"
+    assert freight.json()["store_id"] == "S1"
 
     stored = {b["bill_number"]: b.get("store_id") for b in db["vendor_bills"].find()}
-    assert stored == {"A-1": "S1", "C-1": "S2", "B-9": "S1", "FR-9": "S2"}
+    assert stored == {"A-1": "S1", "C-1": "S2", "B-9": "S1", "FR-9": "S1"}
 
 
 def test_the_backfill_places_old_bills_the_way_booking_does():

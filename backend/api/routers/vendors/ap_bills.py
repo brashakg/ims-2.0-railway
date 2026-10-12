@@ -54,6 +54,11 @@ class VendorBillCreate(BaseModel):
     # handler can refuse with a stable, plain-English 422 (BILL_KIND_REQUIRED)
     # instead of a raw pydantic error, and so stored legacy rows re-read fine.
     bill_kind: Optional[str] = None
+    # The shop the bill is for (owner ruling 2026-10-12, R9). REQUIRED from
+    # ADMIN / SUPERADMIN when no goods receipt places the bill (rent,
+    # freight): never his topbar shop. A receipt's bill keeps the receipt's
+    # shop; anyone else's is their own. See purchase_invoices._bill_shop.
+    store_id: Optional[str] = None
 
     @field_validator("bill_kind", mode="before")
     @classmethod
@@ -413,16 +418,22 @@ async def create_vendor_bill(
     # _bill_recipient + the engine's classify_supply). This door used to write
     # none of them, so its credit counted in the ITC register and in no
     # GSTR-3B. Refused (422) before anything is claimed or written.
-    from ..purchase_invoices import _bill_recipient, _vendor_gstin
+    #
+    # R9: the shop is THE bill-shop rule's (purchase_invoices._bill_shop): the
+    # receipt's; with none an admin must name it (422 BILL_SHOP_REQUIRED) --
+    # it used to be his topbar shop, so a Pune rent bill keyed at HQ sat in
+    # HQ's books on HQ's GSTIN; anyone else's own shop, as before.
+    from ..purchase_invoices import _bill_shop_and_recipient, _vendor_gstin
     from ...services.purchase_invoice_engine import split_header_tax
     from ...services.org_validation import itc_claimable
 
     supplier_gstin = _vendor_gstin(db_early, vendor, vendor_id)
-    recipient = _bill_recipient(
+    bill_shop, recipient = _bill_shop_and_recipient(
         db_early,
         _receipt_store,
+        bill.store_id,
         None,
-        current_user.get("active_store_id"),
+        current_user,
         gstin_box=False,
     )
     heads = split_header_tax(
@@ -435,9 +446,10 @@ async def create_vendor_bill(
     doc = {
         "bill_id": bill_id,
         "vendor_id": vendor_id,
-        # The receipt's shop, else the booker's (the recipient's fallback too):
-        # every Purchase tab scopes on it (F63).
-        "store_id": _receipt_store or current_user.get("active_store_id"),
+        # The receipt's shop; else the admin's pick (R9), else the booker's
+        # own -- the shop the recipient was read off: every Purchase tab
+        # scopes on it (F63).
+        "store_id": bill_shop,
         "vendor_name": (vendor or {}).get("trade_name")
         or (vendor or {}).get("legal_name"),
         "bill_number": bill.bill_number,

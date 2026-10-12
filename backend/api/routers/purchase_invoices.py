@@ -138,7 +138,9 @@ class PurchaseInvoiceCreate(BaseModel):
     # The shop the form was filled at (a bill with no receipt is that shop's
     # company's). Sent by the preview AND the booking, so a shop switched in
     # another tab between the two cannot move the bill; the token's active
-    # shop only when absent. Checked by validate_store_access (403).
+    # shop only when absent -- except from ADMIN / SUPERADMIN, who must name
+    # it (owner ruling R9, _bill_shop: 422 BILL_SHOP_REQUIRED). Checked by
+    # validate_store_access (403); a receipt's bill keeps the receipt's shop.
     store_id: Optional[str] = None
     tds: float = Field(0, ge=0)
     itc_eligible: bool = True
@@ -1125,6 +1127,127 @@ def _receipt_store_id(db, grn_doc, linked_dc_ids) -> Optional[str]:
     return store_id or None
 
 
+# Owner ruling 2026-10-12 (R9): the refusal when an ADMIN / SUPERADMIN books a
+# bill no goods receipt places (rent, freight, job-work) without naming its shop.
+BILL_SHOP_REQUIRED = {
+    "code": "BILL_SHOP_REQUIRED",
+    "message": "Pick the shop this bill is for.",
+}
+
+
+def _bill_shop(db, receipt_store_id, asked_store_id, current_user: dict):
+    """THE shop a purchase bill books to -- and so whose company and GST
+    registration take it (owner ruling 2026-10-12, R9). One rule for every
+    door that books a bill: POST /purchase-invoices and its /preview, and the
+    Cash Flow '+ Bill' (POST /vendors/{id}/bills).
+
+      * a bill naming a goods receipt that has a shop: that shop. A store_id
+        naming another shop is a contradiction (422), never re-filed.
+      * no receipt (rent, freight, job-work), or a legacy receipt with no
+        shop on record:
+          - ADMIN / SUPERADMIN must name the shop (store_id): 422
+            BILL_SHOP_REQUIRED without it. Never his topbar shop -- that is
+            where he sits, not the shop the rent or freight is for: a Pune
+            rent bill booked from Dhanbad sat in Dhanbad's books on
+            Dhanbad's GSTIN.
+          - anyone else: the shop named when it is one of theirs
+            (validate_store_access: another shop is 403), else their own
+            active shop, as before.
+
+    Checked before anything is claimed or written. Returns (shop, picked):
+    `picked` is True when the shop is the admin's pick, so _bill_recipient
+    takes that shop's registration and words its refusals for a picked shop."""
+    from ..dependencies import user_store_scope
+
+    asked = (asked_store_id or "").strip() or None
+    if asked:
+        asked = validate_store_access(asked, current_user)
+    if receipt_store_id:
+        if asked and asked != receipt_store_id:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "BILL_SHOP_NOT_RECEIPT_SHOP",
+                    "message": (
+                        f"This bill's goods receipt is shop {receipt_store_id}'s, "
+                        f"so the bill is too -- not {asked}'s. Leave the shop "
+                        "as the receipt's. Nothing was recorded."
+                    ),
+                },
+            )
+        return receipt_store_id, False
+    cross_store, _ = user_store_scope(current_user)
+    if not cross_store:
+        return asked or current_user.get("active_store_id"), False
+    if not asked:
+        raise HTTPException(status_code=422, detail=dict(BILL_SHOP_REQUIRED))
+    found = True
+    if db is not None:
+        try:
+            found = bool(
+                db.get_collection("stores").find_one(
+                    {"store_id": asked}, {"_id": 0, "store_id": 1}
+                )
+            )
+        except Exception:  # noqa: BLE001 - _bill_recipient reads it again and refuses
+            found = True
+    if not found:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "BILL_SHOP_UNKNOWN",
+                "message": f"Shop {asked} is not one of our shops. Pick the shop this bill is for.",
+            },
+        )
+    return asked, True
+
+
+def _bill_shop_and_recipient(
+    db, receipt_store_id, asked_store_id, body_gstin, current_user, gstin_box=True
+):
+    """(shop, recipient) for a bill: _bill_shop's shop, and the company + GSTIN
+    that shop's bill goes to (_bill_recipient). A receipt's shop and an
+    admin's picked shop decide the registration outright; anyone else's own
+    shop is the fallback a typed GSTIN may name another company past, as
+    before."""
+    shop, picked = _bill_shop(db, receipt_store_id, asked_store_id, current_user)
+    if receipt_store_id or picked:
+        recipient = _bill_recipient(
+            db,
+            shop,
+            body_gstin,
+            None,
+            gstin_box=gstin_box,
+            current_user=current_user,
+            picked=picked,
+        )
+    else:
+        recipient = _bill_recipient(
+            db, None, body_gstin, shop, gstin_box=gstin_box, current_user=current_user
+        )
+    return shop, recipient
+
+
+def _draft_shop_and_recipient(db, receipt_store_id, current_user):
+    """(shop, recipient) a from-receipt DRAFT prefills (from-GRN, from-DCs):
+    _bill_shop_and_recipient with nothing picked yet, so the draft and the
+    booking name the same shop. A receipt with a shop: that shop and its
+    registration. A legacy receipt with no shop on record: anyone else's own
+    shop, as before -- but an ADMIN / SUPERADMIN has not picked one yet (R9),
+    so the draft names NO shop and NO recipient, and the booking form asks him
+    for the shop; its preview and Book then read the picked shop's
+    registration. The draft used to prefill his topbar shop's GSTIN, which
+    the form sent back beside the shop he picked -- refused as 'not one of our
+    GST numbers' on another company's shop -- and a SUPERADMIN with no topbar
+    shop could not open the draft at all (RECIPIENT_UNRESOLVED)."""
+    try:
+        return _bill_shop_and_recipient(db, receipt_store_id, None, None, current_user)
+    except HTTPException as exc:
+        if isinstance(exc.detail, dict) and exc.detail.get("code") == BILL_SHOP_REQUIRED["code"]:
+            return None, {"recipient_entity_id": None, "recipient_gstin": None}
+        raise
+
+
 def _draft_lines(db, receipt: dict, po: Optional[dict]) -> list:
     """A receipt's billable lines for BOTH drafts (from-GRN, from-DCs), with
     the name and HSN the receipt and its PO lack taken from the catalogue: a
@@ -1174,6 +1297,7 @@ def _bill_recipient(
     fallback_store_id=None,
     gstin_box=True,
     current_user=None,
+    picked=False,
 ) -> dict:
     """THE recipient of a purchase bill -- one resolution for every bill door
     (the booking, its preview, both drafts, the Cash Flow '+ bill'), decided on
@@ -1206,6 +1330,11 @@ def _bill_recipient(
     refusal never tells the accountant to type into a box that is not there
     (the Cash Flow '+ bill' form has none). A company master that cannot be
     read is a 503, never 'no companies'.
+
+    `picked`: receipt_store_id is not a receiving shop but the shop an ADMIN
+    picked for a bill no receipt places (R9, _bill_shop) -- the same rule (that
+    shop's company and registration; a typed GSTIN may only agree with it),
+    with refusals worded for a services bill.
     """
     gstin = (body_gstin or "").strip().upper() or None
     if db is None:
@@ -1300,7 +1429,10 @@ def _bill_recipient(
             "RECIPIENT_UNRESOLVED",
             "Cannot tell which of our companies this bill is for: "
             + (
-                f"the receiving shop {receipt_store_id} has no company set."
+                f"shop {receipt_store_id} has no company set in Organization "
+                "(left menu), then record the bill again."
+                if picked
+                else f"the receiving shop {receipt_store_id} has no company set."
                 if receipt_store_id
                 else (
                     (
@@ -1320,6 +1452,20 @@ def _bill_recipient(
     held = _registrations(entity)
     name = entity.get("name") or entity.get("entity_id")
     if gstin:
+        picked_reg = ov.shop_gstin(entity, shop) if picked else None
+        if picked and gstin != picked_reg:
+            # The admin's picked shop decides the registration (R9). Any other
+            # number -- the same company's other shop, or another company's --
+            # is refused naming the shop he picked: 'not one of our numbers,
+            # check the supplier's bill' blamed the bill for a number left in
+            # the box from another shop.
+            _refuse_recipient(
+                "RECIPIENT_GSTIN_NOT_BILL_SHOP",
+                f"{gstin} is not the GST number of shop {receipt_store_id}"
+                + (f" ({picked_reg})" if picked_reg else ", which has none")
+                + ", the shop this bill is for. Clear the Recipient GSTIN "
+                "box, or pick the shop whose GST number is on the bill.",
+            )
         if gstin not in held:
             _refuse_recipient(
                 "RECIPIENT_GSTIN_NOT_OURS",
@@ -1399,28 +1545,27 @@ def _vendor_gstin(db, vendor: Optional[dict], vendor_id: str) -> Optional[str]:
 
 
 def _bill_math(db, vendor, body, grn_doc, current_user):
-    """Everything a booking stores about tax: (supplier GSTIN, recipient,
-    computed invoice). POST / books it and POST /preview shows it through this
-    one call on the same body, so the form cannot preview one tax head, split
-    or paisa and the ledger store another (F6 / F40) -- nor another shop: the
-    shop is the form's own store_id, never whichever the token names by the
-    time Book is pressed. A receipt's shop decides a receipt's bill, so the
-    form's shop is only checked (403) when it is the one that counts."""
+    """Everything a booking stores about tax and shop: (supplier GSTIN,
+    recipient, computed invoice, shop). POST / books it and POST /preview
+    shows it through this one call on the same body, so the form cannot
+    preview one tax head, split or paisa and the ledger store another (F6 /
+    F40) -- nor another shop: the shop is _bill_shop's (the receipt's; else
+    the form's own store_id -- required from an admin (R9), never whichever
+    shop the token names by the time Book is pressed)."""
     supplier_gstin = _vendor_gstin(db, vendor, body.vendor_id)
-    receipt_store = _receipt_store_id(db, grn_doc, body.linked_dc_ids)
-    recipient = _bill_recipient(
+    shop, recipient = _bill_shop_and_recipient(
         db,
-        receipt_store,
+        _receipt_store_id(db, grn_doc, body.linked_dc_ids),
+        body.store_id,
         body.recipient_gstin,
-        None if receipt_store else validate_store_access(body.store_id, current_user),
-        current_user=current_user,
+        current_user,
     )
     computed = pinv.compute_invoice(
         [ln.model_dump() for ln in body.lines],
         supplier_gstin,
         recipient.get("recipient_gstin"),
     )
-    return supplier_gstin, recipient, computed
+    return supplier_gstin, recipient, computed, shop
 
 
 def _line_product_ids(lines) -> list:
@@ -1836,7 +1981,7 @@ async def create_purchase_invoice(
     # SUPPLIER's state under that name, the form sent it back, and reading it
     # as the buyer's state stored a Maharashtra supplier's IGST bill as
     # CGST+SGST.
-    supplier_gstin, recipient, computed = _bill_math(
+    supplier_gstin, recipient, computed, bill_shop = _bill_math(
         db, vendor, body, grn_doc, current_user
     )
 
@@ -1932,10 +2077,10 @@ async def create_purchase_invoice(
         "invoice_id": invoice_id,
         "doc_type": "PURCHASE_INVOICE",
         "vendor_id": body.vendor_id,
-        # The shop the goods landed in (else the booker's shop, the same
-        # fallback the recipient takes): every Purchase tab scopes on it (F63).
-        "store_id": _receipt_store_id(db, grn_doc, body.linked_dc_ids)
-        or current_user.get("active_store_id"),
+        # The shop the goods landed in; with no receipt the shop the admin
+        # picked (R9), else the booker's own -- the shop the recipient was
+        # read off (_bill_shop): every Purchase tab scopes on it (F63).
+        "store_id": bill_shop,
         "vendor_name": (vendor or {}).get("trade_name")
         or (vendor or {}).get("legal_name"),
         "vendor_gstin": supplier_gstin,
@@ -2245,7 +2390,7 @@ async def preview_purchase_invoice(
             _grn_in_scope_or_404(grn_doc, current_user, f"GRN {body.grn_id} not found")
     if body.linked_dc_ids:
         _dcs_in_scope_or_404(db, body.linked_dc_ids, current_user)
-    supplier_gstin, recipient, computed = _bill_math(
+    supplier_gstin, recipient, computed, _shop = _bill_math(
         db, vendor, body, grn_doc, current_user
     )
     return {
@@ -2398,8 +2543,11 @@ async def draft_invoice_from_grn(
         vendor = vendor_repo.find_by_id(vendor_id)
 
     supplier_gstin = _vendor_gstin(db, vendor, vendor_id) if vendor_id else None
-    recipient = _bill_recipient(
-        db, grn.get("store_id"), None, current_user.get("active_store_id")
+    # The booking's own shop rule (F63, R9): the receipt's shop; a legacy
+    # receipt with no shop is the booker's own -- an admin's is left for him
+    # to pick on the form (None), never his topbar shop.
+    bill_shop, recipient = _draft_shop_and_recipient(
+        db, _receipt_store_id(db, grn, None), current_user
     )
 
     raw_lines = _draft_lines(db, grn, po)
@@ -2430,9 +2578,9 @@ async def draft_invoice_from_grn(
         "grn_id": grn_id,
         "grn_number": grn.get("grn_number"),
         # The shop the bill will book to -- the booking's own rule (F63), so
-        # the form can say it on every door, the deep link included.
-        "store_id": _receipt_store_id(db, grn, None)
-        or current_user.get("active_store_id"),
+        # the form can say it on every door, the deep link included. None:
+        # an admin's legacy receipt with no shop -- the form asks him (R9).
+        "store_id": bill_shop,
         "lines": computed["lines"],
         "taxable_total": computed["taxable_total"],
         "cgst_total": computed["cgst_total"],
@@ -2505,8 +2653,10 @@ async def draft_invoice_from_dcs(
     supplier_gstin = (
         _vendor_gstin(db, vendor, resolved_vendor_id) if resolved_vendor_id else None
     )
-    recipient = _bill_recipient(
-        db, _receipt_store_id(db, None, ids), None, current_user.get("active_store_id")
+    # The booking's own shop rule (F63, R9), as the from-GRN draft: a legacy
+    # DC with no shop is the booker's own; an admin's is his to pick (None).
+    bill_shop, recipient = _draft_shop_and_recipient(
+        db, _receipt_store_id(db, None, ids), current_user
     )
 
     computed = pinv.compute_invoice(
@@ -2527,6 +2677,8 @@ async def draft_invoice_from_dcs(
         "interstate": computed["interstate"],
         "linked_dc_ids": ids,
         "dc_count": len(dc_docs),
+        # The shop the bill will book to, as the from-GRN draft names it.
+        "store_id": bill_shop,
         "lines": computed["lines"],
         "taxable_total": computed["taxable_total"],
         "cgst_total": computed["cgst_total"],

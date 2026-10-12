@@ -9,11 +9,16 @@
 // They now read the list's scope; on All stores each row names its shop, and
 // an empty picker says which shops it looked in.
 //
-// #19: the server books a manual bill to the booker's active shop (a receipt's
+// #19: the server booked a manual bill to the booker's active shop (a receipt's
 // bill to the receipt's shop), whatever shop the admin's list shows. A manual
 // bill raised while he viewed Pune went to Dhanbad and vanished from the list
-// with nothing said. The form now says where bills go, the toast names the
-// shop, and the list moves there.
+// with nothing said. The form now says where a receipt's bill goes, the toast
+// names the shop, and the list moves there.
+//
+// Owner ruling 2026-10-12 (R9): a bill no receipt places (rent, freight) is
+// the shop the admin PICKS -- required, no default, never his topbar shop
+// (the server refuses it without one: BILL_SHOP_REQUIRED). Anyone else is
+// shown, read-only, that it is their own shop's.
 //
 // Only the HTTP client is mocked, so vendorAp / vendorsApi run as in the app.
 
@@ -73,6 +78,8 @@ type Params = Record<string, unknown> | undefined;
 let grns: Record<string, unknown>[] = [];
 let dcs: Record<string, unknown>[] = [];
 let bookedStore = 'BV-DHN-01';
+// What GET /from-dcs answers (a test may give it a buyer GSTIN).
+let dcDraft: Record<string, unknown> = DRAFT;
 
 beforeEach(() => {
   cleanup();
@@ -80,6 +87,7 @@ beforeEach(() => {
   grns = [];
   dcs = [];
   bookedStore = 'BV-DHN-01';
+  dcDraft = DRAFT;
   http.get.mockImplementation(async (url: string, cfg?: { params?: Params }) => {
     const p = cfg?.params ?? {};
     if (url === '/stores') return { data: { stores: STORES } };
@@ -89,6 +97,7 @@ beforeEach(() => {
       const grn = grns.find((g) => url.endsWith(`/${g.grn_id}`));
       return { data: { ...DRAFT, store_id: grn?.store_id } };
     }
+    if (url.startsWith('/vendors/purchase-invoices/from-dcs')) return { data: dcDraft };
     if (url.startsWith('/vendors/purchase-invoices/from-')) return { data: DRAFT };
     return { data: null };
   });
@@ -236,7 +245,57 @@ describe('#17: Match DCs to Invoice reads the one Purchase shop', () => {
   });
 });
 
-async function bookManualServicesBill() {
+describe('R9: a challan with no shop on record is billed to the shop the admin picks', () => {
+  // A legacy Delivery Challan names no shop. A server on the old rule drafted
+  // the admin's topbar Dhanbad's GSTIN as the buyer; the form then made him
+  // pick the shop and sent that Dhanbad number beside his pick of Pune --
+  // refused as 'not one of WizOpt's GST numbers, check the supplier's bill'.
+  const LEGACY_DC = { ...PUNE_DC, grn_id: 'DC-OLD', dc_number: 'DC 1', store_id: undefined };
+  const DHN_GSTIN = '20AAAAA0000A1Z5';
+  // A line the form can book, so the tax preview runs.
+  const LINES = [{ product_id: 'P1', product_name: 'Frame', hsn_code: '9003', quantity: 1, unit_price: 100, gst_rate: 5 }];
+
+  async function draftFromTheOnlyChallan() {
+    openTab('');
+    await openPicker(/Match DCs to Invoice/);
+    fireEvent.click(await modal().findByRole('checkbox'));
+    fireEvent.click(modal().getByRole('button', { name: /Generate Draft Invoice/ }));
+  }
+
+  it('the form asks for the shop, starts the Recipient GSTIN box empty, and sends only the picked shop', async () => {
+    roles = ['ADMIN'];
+    dcs = [LEGACY_DC];
+    dcDraft = { ...DRAFT, lines: LINES, recipient_gstin: DHN_GSTIN, linked_dc_ids: ['DC-OLD'] };
+    bookedStore = 'WO-PUN-01';
+    await draftFromTheOnlyChallan();
+    const select = (await screen.findByLabelText('Shop this bill is for')) as HTMLSelectElement;
+    expect(select.value).toBe('');
+    expect((screen.getByPlaceholderText('GSTIN receiving the supply') as HTMLInputElement).value).toBe('');
+    await within(select).findByRole('option', { name: 'WizOpt Pune' });
+    fireEvent.change(select, { target: { value: 'WO-PUN-01' } });
+    await screen.findByText(/Intra-state supply:/);
+    const previews = posted(true) as { store_id?: string; recipient_gstin?: string; linked_dc_ids?: string[] }[];
+    expect(previews.length).toBeGreaterThan(0);
+    expect(previews.every((b) => b.store_id === 'WO-PUN-01' && b.recipient_gstin === undefined)).toBe(true);
+    fireEvent.change(screen.getByPlaceholderText(/As printed on the supplier's bill/), { target: { value: 'FW-DC-1' } });
+    fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
+    await waitFor(() => expect(posted()).toHaveLength(1));
+    const [booked] = posted() as { store_id?: string; recipient_gstin?: string; linked_dc_ids?: string[] }[];
+    expect([booked.store_id, booked.recipient_gstin, booked.linked_dc_ids]).toEqual(['WO-PUN-01', undefined, ['DC-OLD']]);
+  });
+
+  it("a challan with a shop keeps the draft's buyer GSTIN and asks for no shop", async () => {
+    roles = ['ADMIN'];
+    dcs = [PUNE_DC];
+    dcDraft = { ...DRAFT, lines: LINES, recipient_gstin: '27ZZZZZ9999Z1Z9', linked_dc_ids: ['DC-P'] };
+    await draftFromTheOnlyChallan();
+    await screen.findByText(/Bills booked here go to/);
+    expect(screen.queryByLabelText('Shop this bill is for')).toBeNull();
+    expect((screen.getByPlaceholderText('GSTIN receiving the supply') as HTMLInputElement).value).toBe('27ZZZZZ9999Z1Z9');
+  });
+});
+
+async function fillManualServicesBill() {
   await waitFor(() => expect(scopes('/vendors/purchase-invoices').length).toBeGreaterThan(0));
   fireEvent.click(screen.getByRole('button', { name: /Manual invoice/i }));
   await screen.findByText('This bill is for');
@@ -244,22 +303,60 @@ async function bookManualServicesBill() {
   fireEvent.change(screen.getByDisplayValue('Select supplier...'), { target: { value: 'V1' } });
   fireEvent.change(screen.getByPlaceholderText(/As printed on the supplier's bill/), { target: { value: 'FW-1' } });
   fireEvent.change(screen.getByPlaceholderText('Item description'), { target: { value: 'Freight' } });
+}
+
+/** Fills a manual services bill; an admin then picks `shop` (R9). */
+async function bookManualServicesBill(shop?: string) {
+  await fillManualServicesBill();
+  if (shop) fireEvent.change(screen.getByLabelText('Shop this bill is for'), { target: { value: shop } });
   await screen.findByText(/Intra-state supply:/);
 }
 
-describe("#19: a manual bill says which shop it books to", () => {
-  it('an admin viewing Pune is told bills go to his own Dhanbad; booking names it and the list moves there', async () => {
+/** The body of every POST to the booking (or, with `preview`, the preview). */
+function posted(preview = false) {
+  return http.post.mock.calls
+    .filter(([u]) => (u as string).endsWith('/preview') === preview)
+    .map(([, body]) => body as { store_id?: string });
+}
+
+describe('R9: a manual bill no receipt places is the shop the admin picks', () => {
+  it('an admin viewing Pune gets no shop by default -- never his own Dhanbad -- and Book never reaches the server', async () => {
     roles = ['ADMIN'];
     openTab('WO-PUN-01');
-    await bookManualServicesBill();
-    const line = screen.getByText(/Bills booked here go to/);
-    await waitFor(() => expect(line.textContent).toBe('Bills booked here go to Better Vision Dhanbad'));
+    await fillManualServicesBill();
+    const select = screen.getByLabelText('Shop this bill is for') as HTMLSelectElement;
+    expect(select.value).toBe('');
+    expect(select.required).toBe(true);
+    expect(select.options[select.selectedIndex].text).toBe('Pick the shop this bill is for…');
+    expect(screen.queryByText(/Bills booked here go to/)).toBeNull();
+    expect(screen.getByText('Pick the shop this bill is for to see the tax.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
+    await waitFor(() => expect(toastMock.error).toHaveBeenCalledWith('Pick the shop this bill is for'));
+    expect(posted()).toEqual([]);
+    expect(posted(true)).toEqual([]);
+  });
 
+  it('picking Pune previews and books it to Pune; the plain toast, as his list shows Pune', async () => {
+    roles = ['ADMIN'];
+    bookedStore = 'WO-PUN-01';
+    openTab('WO-PUN-01');
+    await bookManualServicesBill('WO-PUN-01');
+    expect(posted(true).every((b) => b.store_id === 'WO-PUN-01')).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
+    await waitFor(() => expect(toastMock.success).toHaveBeenCalledWith('Purchase invoice booked'));
+    expect(posted().map((b) => b.store_id)).toEqual(['WO-PUN-01']);
+  });
+
+  it('an admin viewing Pune who picks Dhanbad is told where it went, and the list moves there', async () => {
+    roles = ['ADMIN'];
+    openTab('WO-PUN-01');
+    await bookManualServicesBill('BV-DHN-01');
     const readsBefore = scopes('/vendors/purchase-invoices').length;
     fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
     await waitFor(() =>
       expect(toastMock.success).toHaveBeenCalledWith('Purchase invoice booked to Better Vision Dhanbad'),
     );
+    expect(posted().map((b) => b.store_id)).toEqual(['BV-DHN-01']);
     // The list now shows Dhanbad -- where the bill went -- and reloads only it
     // (a reload of Pune racing it could land last and hide the bill again).
     await waitFor(() => expect(screen.getByTestId('shop-now').textContent).toBe('BV-DHN-01'));
@@ -267,31 +364,27 @@ describe("#19: a manual bill says which shop it books to", () => {
     expect(new Set(scopes('/vendors/purchase-invoices').slice(readsBefore))).toEqual(new Set(['BV-DHN-01']));
   });
 
-  it('on All stores the toast names the shop, and the list stays on All stores', async () => {
+  it('on All stores the toast names the shop he picked, and the list stays on All stores', async () => {
     roles = ['ADMIN'];
+    bookedStore = 'WO-PUN-01';
     openTab('');
-    await bookManualServicesBill();
+    await bookManualServicesBill('WO-PUN-01');
     fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
     await waitFor(() =>
-      expect(toastMock.success).toHaveBeenCalledWith('Purchase invoice booked to Better Vision Dhanbad'),
+      expect(toastMock.success).toHaveBeenCalledWith('Purchase invoice booked to WizOpt Pune'),
     );
     expect(screen.getByTestId('shop-now').textContent).toBe('');
   });
 
-  it('an admin viewing his own shop gets the plain toast', async () => {
-    roles = ['ADMIN'];
-    openTab('BV-DHN-01');
-    await bookManualServicesBill();
-    fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
-    await waitFor(() => expect(toastMock.success).toHaveBeenCalledWith('Purchase invoice booked'));
-  });
-
-  it('an accountant (one shop, no picker) sees no shop line and the plain toast', async () => {
+  it('an accountant is shown his own shop, read-only, offered no choice, and gets the plain toast', async () => {
     roles = ['ACCOUNTANT'];
     openTab('');
     await bookManualServicesBill();
+    expect(screen.queryByLabelText('Shop this bill is for')).toBeNull();
     expect(screen.queryByText(/Bills booked here go to/)).toBeNull();
+    await waitFor(() => expect(screen.getByTestId('bill-shop').textContent).toBe('Shop: Better Vision Dhanbad'));
     fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
     await waitFor(() => expect(toastMock.success).toHaveBeenCalledWith('Purchase invoice booked'));
+    expect(posted().map((b) => b.store_id)).toEqual(['BV-DHN-01']);
   });
 });

@@ -30,6 +30,13 @@ export interface VendorBill {
   // Absent on legacy rows booked before the field existed.
   bill_kind?: 'GOODS' | 'SERVICES';
   notes?: string;
+  // The shop the bill is booked to. Sent by the Cash Flow Bill form only for
+  // a bill no receipt places (rent, freight), where an ADMIN / SUPERADMIN
+  // MUST name it -- the server refuses it without (BILL_SHOP_REQUIRED, owner
+  // ruling 2026-10-12 R9) and never books it to his topbar shop. A receipt's
+  // bill is the receipt's shop; anyone else's is their own. The saved bill
+  // carries the shop it was booked to.
+  store_id?: string | null;
 }
 
 // A goods receipt row (STANDARD GRN or Delivery Challan) as returned by
@@ -263,6 +270,9 @@ export interface PurchaseInvoiceCreate {
   recipient_gstin?: string;
   po_id?: string;
   grn_id?: string;
+  // The shop the bill books to: the receipt's for a receipt's bill (a
+  // different one is refused); with no receipt REQUIRED from an admin (owner
+  // ruling R9, BILL_SHOP_REQUIRED), the booker's own shop for anyone else.
   store_id?: string;
   lines: PurchaseInvoiceLine[];
   notes?: string;

@@ -638,6 +638,9 @@ class TestDuplicateVendorBill:
             # A receipt-less bill must declare its kind (goods_bill_kind gate);
             # these tests are about the duplicate-number guard, not the kind.
             "bill_kind": "SERVICES",
+            # ...nor the shop: the caller is a SUPERADMIN, who must name the shop a
+            # services bill is for (owner ruling R9) -- S1, the seeded one.
+            "store_id": "S1",
         }
 
     def test_duplicate_bill_number_is_rejected_with_409(self, monkeypatch):

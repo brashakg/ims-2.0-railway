@@ -302,7 +302,10 @@ class TestTheRecipientIsNeverGuessed:
         """P15, the other half: the from-GRN draft called the recipient rule
         without the user's shop, the booking with it. On a receipt that names
         no shop at all the booking fell back to S1 while the draft did not.
-        Both now pass the same arguments, so they name the same company."""
+        Both now go through the one bill-shop rule, so they name the same
+        company. Owner ruling 2026-10-12 (R9): for such a receipt that is the
+        shop the ADMIN picks -- the draft names none (not his topbar S1), and
+        the form's preview and its booking, sent the pick, agree."""
         db = _two_companies()
         grn = {
             "grn_id": "G0",
@@ -314,11 +317,21 @@ class TestTheRecipientIsNeverGuessed:
         cli = _app(db, roles=("ADMIN",))
         pi_router.get_grn_repository = lambda: _StubRepo(grn)
         draft = cli.get(f"{_URL}/from-grn/G0").json()
-        doc = cli.post(_URL, json=_invoice_body(grn_id="G0")).json()
-        assert draft["recipient_entity_id"] == doc["recipient_entity_id"] == "E1"
-        assert draft["recipient_gstin"] == doc["recipient_gstin"] == BUY_JH
-        assert draft["interstate"] is doc["interstate"] is True
-        assert draft["store_id"] == doc["store_id"] == "S1"
+        # Nothing assumed: no shop, no company, no GSTIN for the form to send
+        # back against the shop the admin picks.
+        assert (draft["store_id"], draft["recipient_entity_id"], draft["recipient_gstin"]) == (None, None, None)
+        unpicked = cli.post(_URL, json=_invoice_body(grn_id="G0"))
+        assert unpicked.status_code == 422, unpicked.text
+        assert unpicked.json()["detail"]["code"] == "BILL_SHOP_REQUIRED"
+        assert db.collections["vendor_bills"] == []
+        pv = cli.post(f"{_URL}/preview", json=_invoice_body(grn_id="G0", store_id="S1"))
+        assert pv.status_code == 200, pv.text
+        pv = pv.json()
+        doc = cli.post(_URL, json=_invoice_body(grn_id="G0", store_id="S1")).json()
+        assert pv["recipient_entity_id"] == doc["recipient_entity_id"] == "E1"
+        assert pv["recipient_gstin"] == doc["recipient_gstin"] == BUY_JH
+        assert pv["interstate"] is doc["interstate"] is True
+        assert doc["store_id"] == "S1"
 
     def test_a_typed_gstin_is_checked_even_when_the_company_lists_none(self):
         """P16: a company with no registrations on file cannot vouch for a
@@ -523,8 +536,10 @@ class TestEveryDoorEveryReader:
         door.dependency_overrides[get_current_user] = cli.app.dependency_overrides[get_current_user]
         r = TestClient(door).post(
             "/api/v1/vendors/V1/bills",
+            # R9: an admin names the shop a services bill is for (S1 here).
             json={"bill_number": "FR-9", "bill_date": "2026-05-09", "taxable_amount": 1000,
-                  "tax_amount": 180, "total_amount": 1180, "bill_kind": "SERVICES"},
+                  "tax_amount": 180, "total_amount": 1180, "bill_kind": "SERVICES",
+                  "store_id": "S1"},
         )
         assert r.status_code == 201, r.text
         fr9 = r.json()

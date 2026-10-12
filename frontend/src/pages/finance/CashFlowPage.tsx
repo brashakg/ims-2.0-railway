@@ -17,8 +17,8 @@ import {
   type VendorReceiptRow,
 } from '../../services/api/vendorAp';
 import { useToast } from '../../context/ToastContext';
-import { useStores } from '../../hooks/usePOSQueries';
 import { PurchaseShopName, usePurchaseShop } from '../purchase/purchaseShop';
+import { PurchaseShopField, usePurchaseShopNamer } from '../purchase/invoices/InvoiceFormDrawer';
 import { istDayString } from '../../utils/datetime';
 
 const inr = (n?: number) => `₹${Math.round(n || 0).toLocaleString('en-IN')}`;
@@ -445,7 +445,8 @@ function VendorLedgerDrawer({ vendorId, vendorName, onClose, onChanged }: { vend
 
 function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'payment' | 'debit'; vendorId: string; onClose: () => void; onSaved: () => void }) {
   const toast = useToast();
-  const shopName = useShopNamer();
+  const shopName = usePurchaseShopNamer();
+  const { canPick } = usePurchaseShop();
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState<Record<string, string | number>>({});
   // The IST business day, like every other bill door: toISOString() is the
@@ -467,8 +468,17 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
   // shop by its bills: the server places an admin's money that names no bill
   // there, never on the admin's own topbar shop, and its answer carries the
   // shop it booked -- the toast names it (bookedTo). Only an admin can pick
-  // one (MoneyShopField); anyone else's money is their own shop's, server-side.
+  // one (PurchaseShopField); anyone else's money is their own shop's, server-side.
   const [moneyShop, setMoneyShop] = useState('');
+  // The shop a BILL is for (owner ruling 2026-10-12, R9). A goods bill is its
+  // receipt's shop. A services bill (rent, freight) -- or a legacy receipt
+  // with no shop on record -- has no shop of its own: an admin must pick one
+  // (no default; the server refuses it without, and never books it to his
+  // topbar shop). Anyone else's is their own shop's, shown read-only.
+  const [billShop, setBillShop] = useState('');
+  const pickedReceipt = (receipts ?? []).find((r) => r.grn_id === receiptId);
+  const billNeedsShop = billKind === 'SERVICES' || (billKind === 'GOODS' && !!pickedReceipt && !pickedReceipt.store_id);
+  const sendBillShop = canPick && billNeedsShop;
 
   useEffect(() => {
     if (kind !== 'bill' || billKind !== 'GOODS') return;
@@ -490,18 +500,23 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
       toast.error('Pick the goods receipt this bill settles — no receipt, no goods bill');
       return;
     }
+    if (kind === 'bill' && sendBillShop && !billShop) {
+      toast.error('Pick the shop this bill is for');
+      return;
+    }
     setSaving(true);
     try {
       if (kind === 'bill') {
         const taxable = Number(f.taxable_amount) || 0;
         const tax = Number(f.tax_amount) || 0;
-        await vendorApApi.createBill(vendorId, {
+        const saved = await vendorApApi.createBill(vendorId, {
           bill_number: String(f.bill_number || ''), bill_date: String(f.bill_date || today),
           taxable_amount: taxable, tax_amount: tax, total_amount: taxable + tax, notes: String(f.notes || ''),
           bill_kind: billKind as 'GOODS' | 'SERVICES',
           grn_id: billKind === 'GOODS' ? receiptId : undefined,
+          store_id: sendBillShop ? billShop : undefined,
         });
-        toast.success('Recorded');
+        toast.success(bookedTo('Bill', saved, shopName));
       } else if (kind === 'payment') {
         const saved = await vendorApApi.createPayment(vendorId, {
           amount: Number(f.amount) || 0, payment_date: String(f.payment_date || today),
@@ -551,6 +566,17 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
               shopName={shopName}
             />
           )}
+          {billNeedsShop && (
+            <PurchaseShopField
+              required
+              value={billShop}
+              onChange={setBillShop}
+              label="Shop this bill is for"
+              emptyLabel="Pick the shop this bill is for…"
+              className="col-span-2"
+              testId="bill-shop"
+            />
+          )}
           <input className={cls} placeholder="Bill / invoice no" onChange={(e) => set('bill_number', e.target.value)} />
           <input className={cls} type="date" defaultValue={today} onChange={(e) => set('bill_date', e.target.value)} />
           <input className={cls} type="number" placeholder="Taxable amount" onChange={(e) => set('taxable_amount', e.target.value)} />
@@ -568,13 +594,27 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
           </select>
           <input className={cls} type="number" placeholder="TDS amount (optional)" onChange={(e) => set('tds_amount', e.target.value)} />
           <input className={cls} placeholder="Reference / UTR" onChange={(e) => set('reference', e.target.value)} />
-          <MoneyShopField value={moneyShop} onChange={setMoneyShop} />
+          <PurchaseShopField
+            value={moneyShop}
+            onChange={setMoneyShop}
+            label="Shop this money is for"
+            emptyLabel={'The supplier\u2019s shop (by its bills)'}
+            className="col-span-2"
+            testId="money-shop"
+          />
         </>}
         {kind === 'debit' && <>
           <input className={cls} type="number" placeholder="Amount" onChange={(e) => set('amount', e.target.value)} />
           <input className={cls} type="date" defaultValue={today} onChange={(e) => set('date', e.target.value)} />
           <input className={`${cls} col-span-2`} placeholder="Reason (e.g. rejected goods)" onChange={(e) => set('reason', e.target.value)} />
-          <MoneyShopField value={moneyShop} onChange={setMoneyShop} />
+          <PurchaseShopField
+            value={moneyShop}
+            onChange={setMoneyShop}
+            label="Shop this money is for"
+            emptyLabel={'The supplier\u2019s shop (by its bills)'}
+            className="col-span-2"
+            testId="money-shop"
+          />
         </>}
       </div>
       <div className="flex justify-end mt-2">
@@ -586,25 +626,12 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
   );
 }
 
-type ShopRow = { store_id?: string; store_name?: string; store_code?: string };
-
-/** A shop id -> its name from the store list (the PurchaseShopName rule: name,
- *  else code, else the id until the list arrives), for text that cannot hold
- *  a component -- a toast, an <option>. */
-function useShopNamer(): (storeId: string) => string {
-  const { data } = useStores();
-  const shops = (Array.isArray(data) ? data : []) as ShopRow[];
-  return (storeId) => {
-    const row = shops.find((s) => s.store_id === storeId);
-    return (row && (row.store_name || row.store_code || row.store_id)) || storeId;
-  };
-}
-
-/** The toast after a payment / debit note is saved: the shop the server
- *  booked it to (F63) -- the shop picked, the bill's, or for an admin's money
- *  that names neither the shop the server worked out -- so the admin sees
- *  where it went. Null = the server stamped no shop, and the toast says so;
- *  no store_id at all (an older server) says nothing it does not know. */
+/** The toast after a bill / payment / debit note is saved: the shop the
+ *  server booked it to (F63, R9) -- the shop picked, the receipt's or the
+ *  bill's, or for an admin's money that names neither the shop the server
+ *  worked out -- so the admin sees where it went. Null = the server stamped
+ *  no shop, and the toast says so; no store_id at all (an older server) says
+ *  nothing it does not know. */
 function bookedTo(what: string, saved: { store_id?: string | null } | null | undefined, shopName: (id: string) => string) {
   const shop = saved?.store_id;
   if (shop) return `${what} recorded for ${shopName(shop)}`;
@@ -651,44 +678,5 @@ function ReceiptPicker({ receipts, failed, value, onChange, className, shopName 
         </p>
       ) : null}
     </div>
-  );
-}
-
-/** Which shop's account a payment / debit note goes to (audit F63). An admin
- *  may pick one of the shops (the Purchase shop list); left on the default,
- *  nothing is sent and the server books it to the supplier's shop by its
- *  bills. Anyone else is told, read-only, that it is their own shop's -- the
- *  server stamps it so whatever is sent. Nothing for a login with no shop. */
-function MoneyShopField({ value, onChange }: { value: string; onChange: (shop: string) => void }) {
-  const { canPick, ownStoreId } = usePurchaseShop();
-  if (canPick) return <MoneyShopSelect value={value} onChange={onChange} />;
-  if (!ownStoreId) return null;
-  return (
-    <p className="col-span-2 text-xs text-gray-600" data-testid="money-shop">
-      Shop: <span className="font-medium text-gray-900"><PurchaseShopName storeId={ownStoreId} /></span>
-    </p>
-  );
-}
-
-function MoneyShopSelect({ value, onChange }: { value: string; onChange: (shop: string) => void }) {
-  const { data } = useStores();
-  const shops = (Array.isArray(data) ? data : []) as ShopRow[];
-  return (
-    <label className="col-span-2 flex items-center gap-2 text-xs text-gray-600">
-      Shop
-      <select
-        className="border border-gray-300 rounded px-2 py-1 text-sm flex-1 bg-white"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        aria-label="Shop this money is for"
-      >
-        <option value="">The supplier&rsquo;s shop (by its bills)</option>
-        {shops.filter((s) => s.store_id).map((s) => (
-          <option key={s.store_id} value={s.store_id}>
-            {s.store_name || s.store_code || s.store_id}
-          </option>
-        ))}
-      </select>
-    </label>
   );
 }
