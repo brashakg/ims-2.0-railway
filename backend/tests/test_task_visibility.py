@@ -105,6 +105,25 @@ S2_IDS = {t["task_id"] for t in TASKS if t["store_id"] == S2}
 OVERDUE = {t["task_id"] for t in TASKS if t["status"] in ("OPEN", "IN_PROGRESS") and t["due_at"] < datetime.now()}
 
 
+# Every single-task route, with the write it makes. ONE list for both halves of
+# the rule: on a colleague's task each route is 404 and writes nothing; on a
+# task addressed to your role each one works. So a route that adds back its
+# own role list, or skips the visibility door, goes red here.
+TASK_ROUTES = {
+    "open": ("get", "", {}, None),
+    "file": ("get", "/file", {}, None),
+    "patch notes": ("patch", "", {"json": {"notes": "on it"}}, lambda d: d.get("notes") == "on it"),
+    "patch status": ("patch", "", {"json": {"status": "IN_PROGRESS"}}, lambda d: d["status"] == "IN_PROGRESS"),
+    "put": ("put", "", {"json": {"notes": "on it"}}, lambda d: d.get("notes") == "on it"),
+    "complete": ("patch", "/complete", {"json": {"completion_notes": "done it"}}, lambda d: d["status"] == "COMPLETED"),
+    "acknowledge": ("post", "/acknowledge", {}, lambda d: d["status"] == "IN_PROGRESS"),
+    "start": ("post", "/start", {}, lambda d: d["status"] == "IN_PROGRESS"),
+    "escalate": ("post", "/escalate", {}, lambda d: d["status"] == "ESCALATED"),
+    "escalate to": ("post", "/escalate", {"params": {"escalate_to": "u-mgr"}}, lambda d: d["assigned_to"] == "u-mgr"),
+    "reassign": ("post", "/reassign", {"json": {"assigned_to": "u-mgr"}}, lambda d: d["assigned_to"] == "u-mgr"),
+}
+
+
 def expected(role: str) -> set:
     if role in STAFF_ROLES:
         mine = {f"P-{role}", f"R-{role}"}
@@ -220,6 +239,11 @@ def test_shop_filter_and_its_counts_agree(world, role):
     open_s1 = c.get("/api/v1/tasks", params={"store_id": S1, "status": "OPEN"}).json()["total"]
     busy_s1 = c.get("/api/v1/tasks", params={"store_id": S1, "status": "IN_PROGRESS"}).json()["total"]
     assert s["open"] == open_s1 + busy_s1
+    # The Hub's overdue card: the shop's overdue list, and its count, hold
+    # only this shop (a sales person's own task at BV-S3 stays out).
+    overdue = c.get("/api/v1/tasks/overdue", params={"store_id": S1})
+    assert _ids(overdue) == expected(role) & OVERDUE & S1_IDS
+    assert s["overdue"] == overdue.json()["total"]
 
 
 @pytest.mark.parametrize("role", ROLES)
@@ -253,35 +277,35 @@ def test_no_task_route_acts_on_a_colleagues_task(world, role):
     c = as_role(role)
     other = "P-PEER"
     before = db.tasks.find_one({"task_id": other})
-    calls = [
-        ("get", f"/api/v1/tasks/{other}", {}),
-        ("get", f"/api/v1/tasks/{other}/file", {}),
-        ("patch", f"/api/v1/tasks/{other}", {"json": {"notes": "x"}}),
-        ("put", f"/api/v1/tasks/{other}", {"json": {"notes": "x"}}),
-        ("patch", f"/api/v1/tasks/{other}/complete", {"json": {"completion_notes": "done"}}),
-        ("post", f"/api/v1/tasks/{other}/acknowledge", {}),
-        ("post", f"/api/v1/tasks/{other}/escalate", {}),
-        ("post", f"/api/v1/tasks/{other}/start", {}),
-        ("post", f"/api/v1/tasks/{other}/reassign", {"json": {"assigned_to": uid(role)}}),
-    ]
-    for method, url, kw in calls:
-        r = getattr(c, method)(url, **kw)
-        assert r.status_code == 404, f"{method.upper()} {url} -> {r.status_code}"
-        assert PEER_FILE not in r.content, f"{method.upper()} {url} leaked the file"
+    for name, (method, tail, kw, _) in TASK_ROUTES.items():
+        r = getattr(c, method)(f"/api/v1/tasks/{other}{tail}", **kw)
+        assert r.status_code == 404, f"{name} -> {r.status_code}"
+        assert PEER_FILE not in r.content, f"{name} leaked the file"
     assert db.tasks.find_one({"task_id": other}) == before
     # The file is really there: the shop's manager downloads it.
     r = as_role("STORE_MANAGER").get(f"/api/v1/tasks/{other}/file")
     assert r.status_code == 200 and r.content == PEER_FILE, r.status_code
 
 
-@pytest.mark.parametrize("role", STAFF_ROLES)
-def test_staff_can_work_a_task_addressed_to_their_role(world, role):
-    """A role-assigned task with no person yet is theirs to do."""
+@pytest.mark.parametrize("route", TASK_ROUTES)
+def test_staff_can_work_a_task_addressed_to_their_role(world, route):
+    """A role-assigned task with no person yet is theirs to do: seeing it is
+    being able to act on it, on every single-task route."""
     as_role, db = world
-    c = as_role(role)
-    r = c.patch(f"/api/v1/tasks/R-{role}/complete", json={"completion_notes": "done it"})
-    assert r.status_code == 200, r.text
-    assert db.tasks.find_one({"task_id": f"R-{role}"})["status"] == "COMPLETED"
+    method, tail, kw, landed = TASK_ROUTES[route]
+    peer_file = db.tasks.find_one({"task_id": "P-PEER"})["attachment"]
+    for role in STAFF_ROLES:
+        tid = f"R-{role}"
+        # Not started yet, so start / acknowledge really write; carries a file.
+        db.tasks.update_one({"task_id": tid}, {"$set": {"status": "OPEN", "attachment": peer_file}})
+        r = getattr(as_role(role), method)(f"/api/v1/tasks/{tid}{tail}", **kw)
+        assert r.status_code == 200, (role, r.status_code, r.text)
+        if landed:
+            assert landed(db.tasks.find_one({"task_id": tid})), role
+        elif route == "file":
+            assert r.content == PEER_FILE, role
+        else:
+            assert r.json()["task_id"] == tid, role
 
 
 def test_manager_sees_and_works_a_staff_members_task(world):
@@ -321,6 +345,9 @@ def test_report_task_counts_count_only_what_the_role_may_see(world, role):
     assert rep["open"] == listed("OPEN")
     assert rep["in_progress"] == listed("IN_PROGRESS")
     assert rep["completed"] == listed("COMPLETED")
+    late = c.get("/api/v1/tasks/overdue", params=params).json()["total"]
+    assert late == sum(1 for t in seen.values() if t["task_id"] in OVERDUE and (not shop or t["store_id"] == shop))
+    assert rep["overdue"] == late
     if shop:
         dash = c.get("/api/v1/reports/dashboard", params=params).json()
         assert dash["appointmentsToday"] == listed("OPEN") + listed("IN_PROGRESS")
