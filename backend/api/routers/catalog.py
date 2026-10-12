@@ -2485,15 +2485,6 @@ async def update_catalog_product(
         logger.warning(
             "[CATALOG] spine sync on update skipped for %s", product_id, exc_info=True
         )
-    if spine_gtin is not None and _pr is not None and _spine_id:
-        # Spine and twin hold ONE GTIN (Manage Barcode and the stock page read
-        # the spine's). NOT fail-soft: a spine that silently kept its old code
-        # -- or lost both -- is worse than a save that says so.
-        try:
-            _pm.write_spine_gtin(_pr, _spine_id, spine_gtin)
-        except _pm.ProductMasterError as err:
-            raise HTTPException(status_code=err.status, detail=err.message) from err
-
     # Sync audit gap #2 (owner, 2026-09-06): is_active off -> take it OFF
     # Shopify; back on -> queue it for the next press / live sync. The ONE
     # rule lives in services/online_delist; runs AFTER the save (the full-doc
@@ -2550,6 +2541,23 @@ async def update_catalog_product(
         logger.warning(
             "[CATALOG] online price recompute skipped for %s", product_id, exc_info=True
         )
+
+    # Spine and twin hold ONE GTIN (Manage Barcode and the stock page read the
+    # spine's). LAST, after the take-down, the row mirror and the online price:
+    # a 503 here leaves nothing half-done that a retry would skip (the retry's
+    # was_active is already False, so it would never delist). A gtin this save
+    # carried is NOT fail-soft -- a spine that silently kept its old code, or
+    # lost both, is worse than a save that says so. The repair of one a failed
+    # write left behind is: this save touched no barcode, and the next retries.
+    if spine_gtin is not None and _pr is not None and _spine_id:
+        try:
+            _pm.write_spine_gtin(_pr, _spine_id, spine_gtin)
+        except _pm.ProductMasterError as err:
+            if gtin_written:
+                raise HTTPException(status_code=err.status, detail=err.message) from err
+            logger.warning(
+                "[CATALOG] spine gtin repair failed for %s: %s", product_id, err.message
+            )
 
     return {
         "product": mask_cost(existing, current_user, "product"),

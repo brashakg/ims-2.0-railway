@@ -948,6 +948,46 @@ def test_the_repair_reads_a_upc_a_and_its_13_digit_form_as_one_code(gtin_env):
     assert spine["barcode"] == _GTIN and spine["mrp"] == 5200.0
 
 
+@pytest.mark.parametrize("sent", [{}, {"attributes": {"gtin": _GTIN}}])
+def test_a_failed_spine_gtin_write_never_skips_the_take_down(
+    gtin_env, monkeypatch, caplog, sent
+):
+    """Round 12. The spine gtin write ran BEFORE the take-down: when it failed,
+    the save 503'd with twin and spine already off, and the retry's was_active
+    was False, so it never delisted -- the website kept selling an item IMS had
+    switched off. The repair (this save sent no gtin) now saves and logs; a
+    gtin the save carried still 503s, but only after the take-down ran."""
+    catalog_mod.CATALOG_PRODUCTS["twin-g1"]["attributes"]["gtin"] = _GTIN
+    gtin_env.collection.update_one(
+        {"product_id": "spine-g1"}, {"$set": {"is_active": True}}
+    )
+    real_update = gtin_env.update
+
+    def _refuse_gtin(pid, data):
+        if any(k.startswith("attributes") for k in data):
+            return False
+        return real_update(pid, data)
+
+    flips = []
+
+    async def _flip(db, product, *, was_active, now_active, actor):
+        flips.append((was_active, now_active))
+
+    monkeypatch.setattr(gtin_env, "update", _refuse_gtin)
+    monkeypatch.setattr(catalog_mod._delist, "on_active_flip", _flip)
+    if sent:
+        with pytest.raises(HTTPException) as exc:
+            _put("twin-g1", {"is_active": False, **sent})
+        assert exc.value.status_code == 503
+    else:
+        with caplog.at_level("WARNING"):
+            _put("twin-g1", {"is_active": False})
+        assert "spine gtin repair failed for twin-g1" in caplog.text
+    assert flips == [(True, False)]
+    assert gtin_env.find_by_id("spine-g1")["is_active"] is False
+    assert "gtin" not in gtin_env.find_by_id("spine-g1")["attributes"]
+
+
 @pytest.mark.parametrize("later", [{"is_active": False}, {"pricing": {"mrp": 5200.0}}])
 def test_the_repair_never_refuses_a_save_or_takes_a_code_another_product_holds(
     gtin_env, caplog, later
