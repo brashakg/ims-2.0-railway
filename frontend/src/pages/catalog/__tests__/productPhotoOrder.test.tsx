@@ -240,8 +240,10 @@ describe('the photo grid', () => {
 
   it('a file dropped on a photo does not move anything', () => {
     render(<Harness initial={[A, B, C]} />);
-    fireEvent.dragOver(tiles()[0]);
-    fireEvent.drop(tiles()[0], { dataTransfer: { files: [new File(['x'], 'x.png')] } });
+    const file = { files: [new File(['x'], 'x.png')] };
+    expect(fireEvent.dragOver(tiles()[0], { dataTransfer: file })).toBe(false);
+    // A cancelled drop is what stops the browser opening the image and losing the form.
+    expect(fireEvent.drop(tiles()[0], { dataTransfer: file })).toBe(false);
     expect(shown()).toEqual([A, B, C]);
   });
 });
