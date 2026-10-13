@@ -826,6 +826,27 @@ def test_relocation_off_sends_no_move_even_to_consolidate(world, monkeypatch):
     assert order["fulfillment_hold"] is True
 
 
+def test_relocation_off_moves_no_short_split_leg(world, monkeypatch):
+    """Round 25, item 4 (pins the kill switch on Shopify's SPLIT path): RB x2
+    -> Bokaro (holds them), OA -> Ranchi (short; BV Dhanbad, Bokaro's GSTIN,
+    holds it). Relocation off: the short leg stays at Ranchi and fails loud
+    there -- no fulfillmentOrderMove is sent."""
+    db = world["db"]
+    monkeypatch.setenv("ONLINE_FULFILLMENT_FALLBACK", "off")
+    _shop(db, "BV-DHN-01", "BV Dhanbad", "20AAAAA0000A1Z5", LOC_DHN)
+    _stock(db, "BV-BOK-01", "P-RB", 2)
+    _stock(db, "BV-DHN-01", "P-OA", 1)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 2)])
+    world["shop"].fo(FO_2, LOC_RAN, lines=[(9001, 1)])
+
+    res, order = _book(world, _order(52003, lines=(("RB-1234", 2), ("OA-5", 1))))
+
+    assert world["shop"].moves() == []
+    assert order["fulfillment_route"]["moves"] == []
+    assert _sold_at(db, res["order_id"]) == ["BV-BOK-01", "BV-BOK-01"]
+    assert order["fulfillment_hold"] is True and order["stock_hold_reason"]
+
+
 def test_fallback_shop_split_with_a_mapped_shop_is_loud_not_stranded(world, monkeypatch):
     """P4: the fallback shop (no location) claims the whole order, but Shopify
     also has an FO at Bokaro -- it can't be moved to a shop with no location,
@@ -5090,6 +5111,32 @@ def test_remap_two_lines_of_one_frame_claims_the_missing_unit(world, monkeypatch
     assert sum(r["qty"] for r in after["fulfillment_breakdown"]) == 2
     assert after["fulfillment_hold"] is False
     assert db.online_stock_miss.count_documents({"order_id": oid, "resolved": False}) == 0
+
+
+def test_remap_keeps_one_held_unit_per_line_never_more(world, monkeypatch):
+    """Round 25, item 3 (pins the per-line cap, shopify_ingest kept =
+    min(have, q)): RB x1 + RB x1 claimed at Ranchi, which holds 3 RB, after
+    Shopify refused the move from Bokaro. Re-map keeps the order's two units,
+    one per line -- the first line taking both left the second line 'short'
+    and a third frame was claimed: 3 SOLD to a 2-frame order."""
+    db = world["db"]
+    _stock(db, "BV-RAN-01", "P-RB", 3)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1), (9001, 1)])
+    world["shop"].move_error = "Location does not stock the item"
+    payload = _order(62006, lines=(("RB-1234", 1), ("RB-1234", 1)))
+    res, order = _book(world, payload)
+    oid = res["order_id"]
+    assert [p["code"] for p in order["fulfillment_route"]["problems"]] == ["MOVE_FAILED"]
+    held = _units(db, oid)
+    assert len(held) == 2
+    world["shop"].move_error = None
+
+    out = _remap(world, monkeypatch, payload)
+
+    assert out["ok"] and out["result"]["status"] == "rerouted", out
+    assert _units(db, oid) == held, "exactly the two units it held"
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert sum(r["qty"] for r in after["fulfillment_breakdown"]) == 2
 
 
 def test_a_split_whose_fo_counts_differ_from_the_invoice_never_overclaims(world):
