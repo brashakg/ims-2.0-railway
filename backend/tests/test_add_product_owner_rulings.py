@@ -194,6 +194,19 @@ def test_f12_only_an_active_brand_master_row_decides():
     assert brand_website_refusal(db({**retired, **off}, on), "Ray-Ban") is None
 
 
+def test_f12_a_brand_row_with_no_website_field_stays_off_the_website():
+    """FAIL-CLOSED: a Brand Master row older than sync_to_shopify_default (or a
+    seeded/imported brand) has no such field and must never sync by accident."""
+    from api.services.online_catalog import doc_online_state
+
+    db = StrictDB()
+    db.seed("brand_masters", [{"brand_id": "b9", "name": "Oakley", "is_active": True}])
+    doc = {"brand": "Oakley", "images": ["https://cdn.example.com/p.jpg"]}
+    assert "not for the website" in sp.product_push_refusal(db, doc)
+    assert _push(db, "Oakley").mode == sp.MODE_BLOCKED
+    assert doc_online_state(db, doc)["online"] == "NOT_FOR_WEBSITE"
+
+
 def test_f12_a_brand_edit_moves_the_push(door):
     """Created as Ray-Ban (website yes), edited to Carrera (website no)."""
     photo = {"images": ["https://cdn.example.com/p.jpg"]}  # so only the brand can refuse
