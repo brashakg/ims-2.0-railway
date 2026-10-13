@@ -214,29 +214,32 @@ class TestBarcodeValidatorPure:
             assert ei.value.status_code == 409 and holder in str(ei.value.detail)
 
     @pytest.mark.parametrize(
-        "held",
+        "held, typed",
         [
-            {"attributes": {"gtin": _VALID_A}},
-            {"gtin": "0" + _VALID_A},
-            # A legacy twin with only a top-level barcode: the push still sends
-            # it as the variant barcode (product_input falls back to it).
-            {"barcode": _VALID_A},
-            {"barcode": "0" + _VALID_A},
+            ({"attributes": {"gtin": _VALID_A}}, _VALID_A),
+            ({"gtin": "0" + _VALID_A}, _VALID_A),
+            # A legacy twin with only a top-level barcode holds that code too
+            # (the push no longer sends it, but the twin still carries it):
+            # as stored, zero-padded, and a UPC-A against its 13-digit form.
+            ({"barcode": _VALID_A}, _VALID_A),
+            ({"barcode": "0" + _VALID_A}, _VALID_A),
+            ({"barcode": _UPC_A}, "0" + _UPC_A),
+            ({"barcode": "0" + _UPC_A}, _UPC_A),
         ],
     )
-    def test_a_catalogue_twin_with_no_spine_holds_its_gtin(self, held):
+    def test_a_catalogue_twin_with_no_spine_holds_its_gtin(self, held, typed):
         """POST /catalog/products/import writes only a catalog_products twin,
         and the push sends a twin's gtin as its variant barcode: the one-holder
-        rule reads twins too, in every spelling."""
+        rule reads twins too, in every spelling -- at create (None) and edit."""
         from api.routers.products import _validate_product_barcode_or_400
 
         repo = _FakeRepo([], twins=[{"id": "imp-1", "sku": "IMP-1", **held}])
         for this in (None, "p1"):
             with pytest.raises(HTTPException) as ei:
-                _validate_product_barcode_or_400(_VALID_A, repo, this)
+                _validate_product_barcode_or_400(typed, repo, this)
             assert ei.value.status_code == 409 and "IMP-1" in str(ei.value.detail)
         # The twin itself (the review editor on a spineless twin) is no clash.
-        _validate_product_barcode_or_400(_VALID_A, repo, "imp-1")
+        _validate_product_barcode_or_400(typed, repo, "imp-1")
 
     def test_a_products_own_twin_is_not_a_clash(self):
         """A spine's twin carries the same gtin; it is keyed on the spine's
