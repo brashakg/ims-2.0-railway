@@ -640,6 +640,26 @@ def test_return_of_a_typed_line_never_takes_the_scanned_lines_unit(client, till)
     assert _unit(till, "SU-A")["status"] == "SOLD"
 
 
+def test_return_of_a_scanned_line_beside_a_typed_line_restocks_its_own_unit(client, till):
+    """The typed line 1 took SU-A (first on the shelf, no unit on its line);
+    line 2 scanned SU-B. Neither unit is "another line's", so only the line's
+    OWN unit going first stops SU-A coming back in SU-B's place."""
+    from api.routers import returns as ret_mod
+
+    r = _sell(client, [_line(), _line(stock_id="SU-B")])
+    assert r.status_code in (200, 201), r.text
+    order_id = _order_id(r)
+    order = _order(till, order_id)
+    assert _unit(till, "SU-A")["order_id"] == order_id
+
+    res = ret_mod._restock_good_items(
+        [_return_line(_item_of(order, "SU-B"))], STORE, "RET-TSU7C", order_id=order_id, order=order
+    )
+    assert res["restock_stock_ids"] == ["SU-B"], res
+    assert _unit(till, "SU-B")["status"] == "AVAILABLE"
+    assert _unit(till, "SU-A")["status"] == "SOLD"  # still with the customer
+
+
 def test_return_serial_check_reads_the_scanned_lines_own_unit(client, till):
     """The serial guard compares the scanned serial with THIS line's unit, so
     the right frame coming back is not 409'd as a mismatch."""
