@@ -1444,9 +1444,9 @@ def _all_catalog_products() -> List[Dict]:
     return list(CATALOG_PRODUCTS.values())
 
 
-def _spine_product_id(repo, catalog_doc: Optional[Dict]) -> Optional[str]:
-    """The billing SPINE's product_id for a catalog twin -- the ONE resolver
-    both catalog doors' spine sync (PUT is_active / price / tier / hsn / gst,
+def _spine_of(repo, catalog_doc: Optional[Dict]) -> Optional[Dict]:
+    """The billing SPINE row of a catalog twin -- the ONE resolver both
+    catalog doors' spine sync (PUT is_active / price / tier / hsn / gst,
     DELETE is_active) key their `products` write on.
 
     A legacy / convergence twin shares the spine id. A DOOR-created twin
@@ -1461,15 +1461,19 @@ def _spine_product_id(repo, catalog_doc: Optional[Dict]) -> Optional[str]:
     product is sold from at POS, and for a size variant -- whose only
     off-sale marker is the spine's is_active (online_stock_writeback lists
     an inactive spine at 0) -- the next stock pass put the size straight
-    back on sale. None when there is no spine (a BVI-only twin)."""
+    back on sale. None when there is no spine (a BVI-only twin).
+
+    Strict reads (_pm.strict_find_many): a read error RAISES, never reads as
+    "no spine" -- BaseRepository.find_by_id prints it and answers None, and
+    DELETE would then discard an ordered draft as an ordinary product."""
     if repo is None or not catalog_doc:
         return None
-    spine = None
-    if catalog_doc.get("id"):
-        spine = repo.find_by_id(catalog_doc["id"])
-    if spine is None and catalog_doc.get("sku"):
-        spine = repo.find_by_sku(catalog_doc["sku"])
-    return (spine or {}).get("product_id")
+    for field, value in (("product_id", catalog_doc.get("id")), ("sku", catalog_doc.get("sku"))):
+        if value:
+            rows = _pm.strict_find_many(repo, {field: value})
+            if rows:
+                return rows[0]
+    return None
 
 
 def _products_coll():
@@ -2428,7 +2432,7 @@ async def update_catalog_product(
         )
 
     # Products-convergence: keep the billing SPINE in sync with this catalog edit
-    # (the spine resolved by _spine_product_id). Propagate price / tier / gst /
+    # (the spine resolved by _spine_of). Propagate price / tier / gst /
     # active so POS bills the updated values. discount_category is upper-cased to
     # match what the cap resolver expects. Keyed on what THIS PUT carried, never
     # on the merged twin: a door-created twin holds no is_active at all (71 of
@@ -2444,7 +2448,7 @@ async def update_catalog_product(
         from ..dependencies import get_product_repository
 
         _pr = get_product_repository()
-        _spine_id = _spine_product_id(_pr, existing)
+        _spine_id = (_spine_of(_pr, existing) or {}).get("product_id")
         if _pr is not None and _spine_id:
             _sent = product.pricing.model_dump(exclude_none=True) if product.pricing else {}
             _pricing = existing.get("pricing") or {}
@@ -2880,16 +2884,21 @@ async def delete_catalog_product(
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
+    # The product it copies decides everything below (a receipt holding it,
+    # whether it is an ordered draft): unreadable, nothing is deleted -- a
+    # read error never passes for "no product" (fail loudly).
     try:
         from ..dependencies import get_product_repository
 
         _pr = get_product_repository()
-        _spine_id = _spine_product_id(_pr, product)
+        spine_doc = _spine_of(_pr, product)
     except Exception:  # noqa: BLE001
-        _pr, _spine_id = None, None
-        logger.warning(
-            "[CATALOG] spine lookup on delete failed for %s", product_id, exc_info=True
+        logger.error("[CATALOG] spine lookup on delete failed for %s", product_id, exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="Could not read this item's product record, so it was not deleted. Try again.",
         )
+    _spine_id = (spine_doc or {}).get("product_id")
     # Audit C1: an item a receipt is holding units for is not discarded behind
     # that receipt's back -- its tasks, the receipt and the draft would all be
     # left pointing at a deleted product. The admin decides the units first.
@@ -2933,7 +2942,6 @@ async def delete_catalog_product(
     # deleted product, its task pointing at a Needs-review queue it has left.
     # The refusal names, per blocker, only an action the server allows. If the
     # orders cannot be read, refuse -- fail loudly.
-    spine_doc = _pr.find_by_id(_spine_id) if (_pr is not None and _spine_id) else None
     is_draft = _pm.is_ordered_draft(spine_doc)
     if is_draft:
         from .vendors.grn_accept import draft_discard_blockers

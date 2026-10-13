@@ -5556,3 +5556,43 @@ def test_r9_the_po_doors_read_a_finished_marked_row_as_finished(world):
         refused is not None and refused.status_code == 400,
         f"R9-6: a finished product with a gap was sent as if it were an ordered draft ({refused})",
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 10: the panel's round-9 findings
+# ---------------------------------------------------------------------------
+
+
+class _Unreadable(RuntimeError):
+    pass
+
+
+def _boom(*a, **k):
+    raise _Unreadable("products store down")
+
+
+@pytest.mark.parametrize("how", ["resolver_raises", "store_read_swallowed"])
+def test_r10_a_delete_whose_product_cannot_be_read_deletes_nothing(world, monkeypatch, how):
+    # The panel's probe: a held draft's copy deleted while the spine lookup
+    # errors -- by a raise, or by BaseRepository swallowing the read error into
+    # None ("no spine"). Either way nothing is deleted (503), and the held
+    # receipt, the draft and its copy stand.
+    _seed_user(world, ADMIN)
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    twin_id = _twin_of(world, draft_id)["id"]
+    if how == "resolver_raises":
+        monkeypatch.setattr(_catalog, "_spine_of", _boom)
+    else:
+        products = world.db.products
+        monkeypatch.setattr(products, "find", _boom)
+        monkeypatch.setattr(products, "find_one", _boom)
+    refused = _delete_refusal(world, draft_id)
+    monkeypatch.undo()
+    twin = world.db.catalog_products.find_one({"id": twin_id})
+    finding(
+        refused is not None and refused.status_code == 503,
+        f"R10-1: the copy of a held draft was deleted while its product could not be read ({refused})",
+    )
+    assert twin.get("is_active") is not False and not twin.get("deleted_at")
+    assert world.product(draft_id)["provisional"] is True
+    assert world.grn(grn["grn_id"])["status"] == "PARTIALLY_ACCEPTED"
