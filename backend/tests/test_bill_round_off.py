@@ -307,6 +307,36 @@ def test_superadmin_edit_persists_the_new_round_off(client, auth_headers, wired)
     assert (saved["grand_total"], saved["round_off"]) == (1201.0, 0.5)
 
 
+@pytest.mark.parametrize(
+    "price, line_pct, bill_pct, billed",
+    [(243.0, 3.5, 0.0, 235.0), (139.0, 1.5, 2.5, 133.0)],
+)
+def test_superadmin_edit_of_unchanged_lines_keeps_the_bill(
+    client, auth_headers, wired, price, line_pct, bill_pct, billed
+):
+    """The edit door prices a line with create's own line value. A copy that
+    rounded the line to paise re-billed an unchanged Rs 243 frame at 3.5% as
+    Rs 234 (the paid rupee vanished) and a Rs 139 frame at 1.5% + 2.5% bill
+    discount as Rs 134 (a paid bill turned PARTIAL)."""
+    q = _quote(client, auth_headers, [_disc_frame(price, line_pct)], bill_pct)
+    assert q.status_code == 200, q.text
+    assert q.json()["grand_total"] == billed
+    _seed_order(wired["order_repo"], cart_discount_percent=bill_pct,
+                grand_total=billed, round_off=q.json()["round_off"],
+                amount_paid=billed, payments=[{"method": "CASH", "amount": billed}])
+    r = client.put(
+        "/api/v1/orders/ord-16/superadmin-edit",
+        json={"reason": "customer name typed wrong",
+              "items": [_edit_item(unit_price=price, discount=line_pct)]},
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    saved = wired["order_repo"].find_by_id("ord-16")
+    assert (saved["grand_total"], saved["balance_due"], saved["payment_status"]) == (
+        billed, 0.0, "PAID"
+    )
+
+
 def test_correction_note_taxable_excludes_the_round_off_change():
     from api.services.order_superadmin_edit import (
         build_credit_note_doc,

@@ -87,9 +87,12 @@ def rebuild_edited_line(line: Dict[str, Any]) -> Dict[str, Any]:
     if disc_pct > 100:
         disc_pct = 100.0
 
-    gross = round(unit_price * qty, 2)
-    discount_amount = round(gross * (disc_pct / 100.0), 2)
-    item_total = round(gross - discount_amount, 2)
+    # THE till line value (create and POST /orders/quote price lines here too),
+    # never a copy: a paise-rounded copy re-billed an unchanged Rs 243 line at
+    # 3.5% as Rs 234 where create billed Rs 235 once the bill is rounded.
+    from ..routers.orders._shared import bill_line_value
+
+    discount_amount, item_total = bill_line_value(unit_price, qty, disc_pct)
 
     out: Dict[str, Any] = {
         "item_id": str(line.get("item_id") or uuid.uuid4()),
