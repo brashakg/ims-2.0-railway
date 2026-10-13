@@ -67,9 +67,13 @@ async def list_pos(
     if active_store:
         filter_dict["delivery_store_id"] = active_store
 
-    pos = po_repo.find_many(filter_dict, skip=skip, limit=limit)
+    pos = po_repo.find_many(filter_dict, skip=skip, limit=limit) or []
+    from .po_detail import closed_by_cancel  # po_detail imports this module
 
-    return {"purchase_orders": pos or [], "total": len(pos) if pos else 0}
+    for po in pos:
+        po["closed_by_cancel"] = closed_by_cancel(po)
+
+    return {"purchase_orders": pos, "total": len(pos)}
 
 
 # INV-9: Demand forecast -> nightly draft-PO suggestions

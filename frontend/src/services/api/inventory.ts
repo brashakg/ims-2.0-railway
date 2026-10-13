@@ -946,6 +946,10 @@ export const vendorsApi = {
     dc_number?: string;
     dc_date?: string;
     vendor_id?: string;
+    // F-S3: the uploaded vendor bill; a STANDARD receipt is refused without it.
+    attachment_file_id?: string;
+    attachment_filename?: string;
+    attachment_mime?: string;
     items: Array<{
       po_item_id?: string;
       product_id: string;

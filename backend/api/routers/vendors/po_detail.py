@@ -469,19 +469,24 @@ def puts_nothing_in_stock(lines) -> bool:
     return not any(_qty(line.get("accepted_qty")) for line in lines or [])
 
 
+def closed_by_cancel(po: dict) -> bool:
+    """A cancel CLOSED the order: CANCELLED, or RECEIVED because the rest was
+    cancelled. Nothing on it is due. The PO list stamps it, so the receive
+    screen offers such an order only to log a rejected delivery."""
+    status = po.get("status")
+    return status == "CANCELLED" or (
+        status == "RECEIVED" and bool(_cancelled_products(po))
+    )
+
+
 def rejected_delivery_on_closed_order(po: dict, lines) -> bool:
     """Owner ruling 2026-10-08 (c): a delivery that brought cancelled items CAN
     be logged when every cancelled item on it is rejected. Once a cancel has
-    CLOSED the order -- RECEIVED because the rest was cancelled, or CANCELLED
-    -- nothing on it is due, so such a delivery is one that puts nothing into
-    stock. It is logged (receipt, discrepancy task, the paper trail a debit
-    note needs) though the order is no longer receivable; a closed order still
-    takes no unit into stock."""
-    status = po.get("status")
-    closed_by_cancel = status == "CANCELLED" or (
-        status == "RECEIVED" and bool(_cancelled_products(po))
-    )
-    return closed_by_cancel and puts_nothing_in_stock(lines)
+    CLOSED the order nothing on it is due, so such a delivery is one that puts
+    nothing into stock. It is logged (receipt, discrepancy task, the paper
+    trail a debit note needs) though the order is no longer receivable; a
+    closed order still takes no unit into stock."""
+    return closed_by_cancel(po) and puts_nothing_in_stock(lines)
 
 
 def beyond_open_quantity(po: dict, lines, received_of) -> list:

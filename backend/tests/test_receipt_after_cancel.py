@@ -1203,3 +1203,57 @@ def test_an_over_delivery_reaching_stock_on_a_re_accept_is_flagged(monkeypatch, 
         assert "could not be read" not in text
     else:
         assert "could not be read" in text
+
+
+def test_the_po_list_marks_the_orders_a_cancel_closed(monkeypatch):
+    """Round 16 item 1. The receive screen offers an order a cancel CLOSED
+    (CANCELLED, or RECEIVED because the rest was cancelled) only under 'Log a
+    rejected delivery', and it reads that from this one stamp
+    (po_detail.closed_by_cancel) -- the same rule create holds such an
+    order's receipt to. A plain RECEIVED order and an open one are not."""
+    from database.repositories.vendor_repository import PurchaseOrderRepository
+    from strict_fakes import StrictCollection
+
+    def order(po_id, status, p2):
+        po = _po(_line("P1", "Frame X", 5), p2, status=status)
+        po["po_id"] = po_id
+        return po
+
+    cancelled_p2 = _line("P2", "Ray-Ban", 0, ordered_qty=0, cancelled_qty=3,
+                         line_status="CANCELLED")
+    repo = PurchaseOrderRepository(StrictCollection("purchase_orders", [
+        order("OPEN", "SENT", _line("P2", "Ray-Ban", 3)),
+        order("WHOLE", "CANCELLED", _line("P2", "Ray-Ban", 3)),
+        order("REST", "RECEIVED", cancelled_p2),
+        order("DONE", "RECEIVED", _line("P2", "Ray-Ban", 3, received_qty=3)),
+    ]))
+    monkeypatch.setattr(vendors_mod, "get_purchase_order_repository", lambda: repo)
+    out = asyncio.run(vendors_mod.list_pos(
+        vendor_id=None, status=None, store_id=None, skip=0, limit=50, current_user=_user()))
+    assert {p["po_id"]: p["closed_by_cancel"] for p in out["purchase_orders"]} == {
+        "OPEN": False, "WHOLE": True, "REST": True, "DONE": False}
+
+
+def test_the_grn_screen_logs_a_rejected_delivery_on_a_cancelled_order(monkeypatch):
+    """Round 16 item 1, with the receipt GoodsReceiptNote sends for an order
+    a cancel closed: only the lines that arrived, each ticked and named, every
+    unit rejected with a reason. It is saved and posted with nothing in stock
+    and a discrepancy task; the same receipt accepting one unit, or all of
+    them, is refused."""
+    po = _po(_line("P1", "Frame X", 5), _line("P2", "Ray-Ban", 3), status="CANCELLED")
+    grn_repo, po_repo, stock, tasks = _wire(monkeypatch, po=po)
+
+    def screen(accepted):
+        return [{"po_item_id": "P2", "product_id": "P2", "received_qty": 3,
+                 "accepted_qty": accepted, "rejected_qty": 3 - accepted,
+                 "rejection_reason": "order was cancelled"}]
+
+    for accepted in (1, 3):
+        with pytest.raises(HTTPException) as e:
+            _create("normal", screen(accepted), _user(), inv=f"INV-{accepted}")
+        assert e.value.status_code == 400
+    gid = _create("normal", screen(0), _user())["grn_id"]
+    assert _accept(gid)["grn_status"] == "ACCEPTED"
+    assert stock.units == [] and po_repo.po["status"] == "CANCELLED"
+    assert grn_repo.docs[gid]["total_rejected"] == 3
+    assert [t for t in tasks.created if t["title"].startswith("GRN discrepancy")]
