@@ -19,6 +19,7 @@ import { NewTaskModal } from '../../components/tasks/NewTaskModal';
 import DashboardNotifications from '../../components/notifications/DashboardNotifications';
 import OwnerDigestCard from '../../components/dashboard/OwnerDigestCard';
 import TickerCard from '../../components/hub/TickerCard';
+import { canOpenPath } from '../../components/layout/AppLayout';
 import './HubPage.css';
 
 interface HeroMeta {
@@ -99,7 +100,8 @@ interface ModuleCard {
 }
 
 export default function HubPage() {
-  const { user, hasRole, hasModuleAccess } = useAuth();
+  const auth = useAuth();
+  const { user, hasRole, hasModuleAccess } = auth;
   const navigate = useNavigate();
   const toast = useToast();
   // OS-064: under an ONLINE store (BV-ONLINE-01 / WO-ONLINE-01) the Hub must
@@ -325,15 +327,28 @@ export default function HubPage() {
 
   const modules: ModuleCard[] = [
     ...featureCards,
-    {
-      id: 'inventory',
-      to: '/inventory',
-      title: 'Inventory',
-      eyebrow: 'Stock',
-      desc: 'Live stock by SKU, lens power matrix, cycle count, non-moving flags, inter-store transfer.',
-      iconName: 'box',
-      meta: [['Browse', 'SKU + stock']],
-    },
+    // D7b: a counter role cannot open the Inventory module but can open the
+    // read-only Stock lookup - asked of the two routes' own gates, so the
+    // card never lands a SALES_STAFF / CASHIER / OPTOMETRIST on /unauthorized.
+    !canOpenPath(auth, '/inventory') && canOpenPath(auth, '/inventory/lookup')
+      ? {
+          id: 'inventory',
+          to: '/inventory/lookup',
+          title: 'Stock lookup',
+          eyebrow: 'Stock',
+          desc: 'How many at this shop, every other shop and in transit, with colours and sizes. Read-only.',
+          iconName: 'box',
+          meta: [['Search', 'Model, SKU, barcode']],
+        }
+      : {
+          id: 'inventory',
+          to: '/inventory',
+          title: 'Inventory',
+          eyebrow: 'Stock',
+          desc: 'Live stock by SKU, lens power matrix, cycle count, non-moving flags, inter-store transfer.',
+          iconName: 'box',
+          meta: [['Browse', 'SKU + stock']],
+        },
     {
       id: 'tasks',
       to: '/tasks',

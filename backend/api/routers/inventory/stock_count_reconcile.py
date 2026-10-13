@@ -18,6 +18,7 @@ from ._shared import (
 from .helpers import (
     _get_db,
 )
+from ...services.cost_mask import mask_cost
 from .stock_count import (
     _expected_lines,
     _product_costs,
@@ -48,7 +49,8 @@ async def get_stock_count(
         # has a line to write a zero against. While the session is OPEN the
         # lines carry NO system_quantity -- the count is blind until submitted.
         count_doc["expected_lines"] = _expected_lines(db, count_doc)
-        return _withhold_expected_while_open(count_doc)
+        # Values at cost: the roles that see product cost only (D7).
+        return mask_cost(_withhold_expected_while_open(count_doc), current_user, "product")
     except HTTPException:
         raise
     except Exception as e:
