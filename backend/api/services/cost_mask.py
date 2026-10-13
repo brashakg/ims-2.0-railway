@@ -224,6 +224,33 @@ def mask_vendor_return(doc: Dict, user: dict) -> Dict:
     return out
 
 
+# A vendor RMA (routers/vendor_rma) or the reply to one of its steps: the
+# return's workflow without its unit costs, expected / received credit,
+# variance, write-off or the supplier's credit notes. Each step of its history
+# keeps who, when and the new status only: the notes the steps write carry the
+# credit and the write-off in words ("credit note CN-1 for 432177 paise").
+_RMA_KEYS = (
+    "ok", "error", "rma_id", "vendor_id", "vendor_name", "store_id", "po_id",
+    "grn_id", "return_id", "status", "vendor_rma_number", "courier", "notes",
+    "fully_reconciled", "created_at", "created_by", "updated_at",
+    "closed_at", "closed_by",
+)
+_RMA_STEP_KEYS = ("status", "at", "by")
+
+
+def mask_rma(doc: Dict, user: dict) -> Dict:
+    """A vendor RMA, a step's reply or a refused step's error without anything
+    we pay, unless the caller may see what we pay."""
+    if not isinstance(doc, dict) or can_see_cost(user, "purchase"):
+        return doc
+    out = _pick(doc, _RMA_KEYS)
+    if "lines" in doc:
+        out["lines"] = [_pick(ln, _RETURN_ITEM_KEYS) for ln in doc.get("lines") or []]
+    if "status_history" in doc:
+        out["status_history"] = [_pick(s, _RMA_STEP_KEYS) for s in doc.get("status_history") or []]
+    return out
+
+
 def mask_debit_note(doc: Dict, user: dict) -> Dict:
     """An RTV debit note without rates, taxable values, tax, totals, the
     supplier's GSTIN / address / state or its bill number, unless the caller
