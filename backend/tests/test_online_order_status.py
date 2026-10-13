@@ -229,11 +229,8 @@ def test_a_delivered_order_shopify_calls_fulfilled_is_no_disagreement(swept):
     assert _doc(swept, 60016)["status"] == "DELIVERED"
 
 
-def test_a_pickup_order_shopify_fulfilled_is_delivered_at_the_counter(swept, monkeypatch):
-    """Ruling 1, the counter half: a click-and-collect order at READY that
-    Shopify marks fulfilled (picked up) is SHIPPED, and the counter's Mark
-    Delivered takes it to DELIVERED through the same claim. The door used to
-    refuse anything but READY, so nothing ever delivered it."""
+def _counter_deliver(swept, monkeypatch, doc):
+    """The counter's Mark Delivered (POST /orders/{id}/deliver) as user u1."""
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
@@ -241,13 +238,6 @@ def test_a_pickup_order_shopify_fulfilled_is_delivered_at_the_counter(swept, mon
     from api.routers import workshop as wm
     from api.routers.auth import get_current_user
     from database.repositories.order_repository import OrderRepository
-
-    _book(swept, 60017)
-    _set(swept, 60017, status="READY")
-    swept["real_map"](_pulled(60017, fulfillment_status="fulfilled"), swept["db"],
-                      webhook_id="ful-60017", topic="orders/fulfilled")
-    doc = _doc(swept, 60017)
-    assert doc["status"] == "SHIPPED"
 
     class _NoJobs:
         def find_by_id(self, _):
@@ -266,7 +256,21 @@ def test_a_pickup_order_shopify_fulfilled_is_delivered_at_the_counter(swept, mon
                 "store_ids": [doc["store_id"]], "active_store_id": doc["store_id"]}
 
     app.dependency_overrides[get_current_user] = _user
-    resp = TestClient(app).post(f"/api/v1/orders/{doc['order_id']}/deliver")
+    return TestClient(app).post(f"/api/v1/orders/{doc['order_id']}/deliver")
+
+
+def test_a_pickup_order_shopify_fulfilled_is_delivered_at_the_counter(swept, monkeypatch):
+    """Ruling 1, the counter half: a click-and-collect order at READY that
+    Shopify marks fulfilled (picked up) is SHIPPED, and the counter's Mark
+    Delivered takes it to DELIVERED through the same claim. The door used to
+    refuse anything but READY, so nothing ever delivered it."""
+    _book(swept, 60017)
+    _set(swept, 60017, status="READY")
+    swept["real_map"](_pulled(60017, fulfillment_status="fulfilled"), swept["db"],
+                      webhook_id="ful-60017", topic="orders/fulfilled")
+    doc = _doc(swept, 60017)
+    assert doc["status"] == "SHIPPED"
+    resp = _counter_deliver(swept, monkeypatch, doc)
 
     assert resp.status_code == 200, resp.text
     doc = _doc(swept, 60017)
@@ -1431,8 +1435,8 @@ def test_a_refund_on_goods_out_waits_for_a_person_even_under_auto(swept, monkeyp
     doc = _book(swept, 60140)
     _claim_unit(swept, doc)
     _set(swept, 60140, status="SHIPPED", awb="AWB60140")
-    res = shopify_refund.handle_shopify_refund(swept["db"], _refund(700340, 60140), webhook_id=None,
-                                               topic="refunds/create")
+    res = shopify_refund.handle_shopify_refund(swept["db"], _refund(700340, 60140, restock_type="return"),
+                                               webhook_id=None, topic="refunds/create")
 
     assert res["status"] == "queued"
     row = swept["review"].find_one({"shopify_refund_id": "700340"})
@@ -1536,6 +1540,7 @@ def test_a_handed_over_orders_cancel_line_is_proposed_without_a_restock(swept, r
     row = swept["review"].find_one({"shopify_refund_id": "700350"})
     assert row["status"] == "PENDING"
     assert [line["restock"] for line in row["proposed_restock"]] == [restock]
+    assert "Goods are with the courier or the customer" in row["note"], "the customer has it"
 
 
 def test_a_unit_shopify_never_fulfilled_goes_back_on_the_shelf_after_a_courier_delivery(swept):
@@ -1555,8 +1560,35 @@ def test_a_unit_shopify_never_fulfilled_goes_back_on_the_shelf_after_a_courier_d
     row = swept["review"].find_one({"shopify_refund_id": "700351"})
     assert [(line["return_qty"], line["restock"]) for line in row["proposed_restock"]] == [(1, True)]
     assert "status-conflict task" not in row["note"], "a partial refund raises none"
+    assert "never left the shelf" in row["note"]
 
     _confirm(row)
+    assert sorted(s for _, s in _units(swept)) == ["AVAILABLE", "SOLD"]
+
+
+def test_a_parcel_the_counter_marked_delivered_follows_the_courier_rule(swept, monkeypatch):
+    """Panel probe: a qty-2 line, both units SOLD; one parcel ships (AWB), the
+    counter marks the order delivered (no courier feed), then Shopify cancels
+    and refunds the unit it never fulfilled. Read off "DELIVERED by a user"
+    alone this was a counter handover: the cancel line restocked nothing, the
+    note sent staff to wait for goods that never left, and stk-2 stayed SOLD
+    for good (the retry: already restocked; the cancel door: refused)."""
+    oid = 61010
+    doc = _book(swept, oid, line_items=[{**_frame_order(oid)["line_items"][0], "quantity": 2}])
+    _claim_unit(swept, doc)
+    swept["stock_repo"].units.append({**swept["stock_repo"].units[0], "stock_id": "stk-2"})
+    shopify_fulfillment.reconcile_fulfillment(swept["db"], _fulfilment(oid, 1))
+    assert _doc(swept, oid)["status"] == "SHIPPED"
+    assert _counter_deliver(swept, monkeypatch, _doc(swept, oid)).status_code == 200
+    assert (_doc(swept, oid)["status"], _doc(swept, oid)["status_updated_by"]) == ("DELIVERED", "u1")
+    shopify_refund.handle_shopify_refund(swept["db"], _refund(710010, oid), webhook_id=None,
+                                         topic="refunds/create")
+    row = swept["review"].find_one({"shopify_refund_id": "710010"})
+    assert [(line["return_qty"], line["restock"]) for line in row["proposed_restock"]] == [(1, True)]
+    assert "never left the shelf" in row["note"] and "physically come back" not in row["note"]
+
+    res = _confirm(row)["result"]
+    assert res["restock_applied"] is True and res["restock_stock_ids"]
     assert sorted(s for _, s in _units(swept)) == ["AVAILABLE", "SOLD"]
 
 

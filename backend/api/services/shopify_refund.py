@@ -547,6 +547,32 @@ def _cap_restock_to_unreturned(
         return lines, False, True
 
 
+def _counter_handover(order: Dict[str, Any]) -> bool:
+    """A person handed the order over at the counter: DELIVERED by a user
+    (the counter door stamps its user; the courier legs stamp "system:") on
+    an order that went by NO parcel -- no AWB the courier legs track (a
+    Shiprocket booking's or a Shopify fulfilment's) and no Shopify shipment
+    status. Only then does the customer hold every unit, whatever Shopify
+    says it fulfilled. A parcel the counter marked delivered follows the
+    courier rule: a unit Shopify never fulfilled never left the shelf."""
+    from .shopify_fulfillment import tracked_awbs
+
+    by = str(order.get("status_updated_by") or "")
+    return (str(order.get("status") or "").strip().upper() == "DELIVERED"
+            and bool(by) and not by.startswith("system:")
+            and not tracked_awbs(order) and not order.get("shipment_status"))
+
+
+def _never_shipped(payload: Dict[str, Any], order: Dict[str, Any]) -> bool:
+    """Every line of this refund is a Shopify "cancel" (a quantity Shopify
+    never fulfilled) on an order not handed over at the counter: the units
+    never left the shelf, and the confirm puts them back."""
+    rows = [rl for rl in payload.get("refund_line_items") or []
+            if isinstance(rl, dict) and _f(rl.get("quantity")) > 0]
+    return bool(rows) and not _counter_handover(order) and all(
+        _norm(rl.get("restock_type")).lower() == "cancel" for rl in rows)
+
+
 def _build_return_lines(
     payload: Dict[str, Any], order: Dict[str, Any]
 ) -> List[Any]:
@@ -562,14 +588,11 @@ def _build_return_lines(
     refund_level_restock = bool(payload.get("restock", True))
     door_released = _ims_cancel_door_ran(order)
     # A Shopify "cancel" line is a quantity Shopify never fulfilled. On an
-    # order a person delivered at the counter (the counter door stamps its
-    # user; the courier legs stamp "system:"), the customer has it anyway
-    # (owner ruling 2026-09-28): the line restocks nothing, and Goods back on
-    # the review row restocks it if it comes back. After a courier delivery
-    # of other units, it never left the shelf and restocks as Shopify says.
-    by = str(order.get("status_updated_by") or "")
-    handed_over = (str(order.get("status") or "").strip().upper() == "DELIVERED"
-                   and bool(by) and not by.startswith("system:"))
+    # order handed over at the counter the customer has it anyway (owner
+    # ruling 2026-09-28): the line restocks nothing, and Goods back on the
+    # review row restocks it if it comes back. On an order that went by
+    # parcel it never left the shelf and restocks as Shopify says.
+    handed_over = _counter_handover(order)
     lines: List[Any] = []
     for rl in payload.get("refund_line_items") or []:
         if not isinstance(rl, dict):
@@ -904,6 +927,10 @@ def handle_shopify_refund(
         )
         if goods_out and not (door_cancelled or counter_returned):
             note = (
+                "Shopify cancelled units it never shipped: they never left the "
+                "shelf, and Confirm puts them back in stock (never a counter "
+                "return -- Shopify already refunded this money)."
+                if _never_shipped(payload, order) else
                 "Goods are with the courier or the customer: when they physically "
                 "come back, press Goods back here (never a counter return -- "
                 "Shopify already refunded this money)."
