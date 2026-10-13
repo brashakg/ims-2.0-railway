@@ -372,14 +372,14 @@ export const settingsApi = {
     return response.data;
   },
 
-  // Operational Rules (/settings/rules): auto_round_off + default_credit_limit
+  // Operational Rules (/settings/rules): the default credit limit
   getAdminControls: async () => {
     const response = await api.get('/settings/admin-controls');
     return response.data;
   },
 
   updateAdminControls: async (controls: {
-    operational_rules: Record<string, boolean | number>;
+    operational_rules: { default_credit_limit: number };
   }) => {
     const response = await api.put('/settings/admin-controls', controls);
     return response.data;

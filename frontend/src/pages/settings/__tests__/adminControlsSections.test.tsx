@@ -3,9 +3,8 @@
 // ============================================================================
 // Store Modules, Role Permissions and Discount Limits are gone (each duplicated
 // a rule IMS enforces elsewhere), and so is every operational rule except the
-// default credit limit (live) and round-off (left for its own job - not shown,
-// since bills are not rounded to the rupee, but its stored value is saved back
-// unchanged). Every test
+// default credit limit (live; round-off is left for its own job and the server
+// ignores it). Every test
 // drives the REAL settingsRoutes table, so the URL-to-section mapping and the
 // role gates under test are the ones the app ships. Fixtures use non-default
 // values so a page rendering its code defaults fails here.
@@ -55,7 +54,7 @@ import { SETTINGS_SECTIONS } from '../settingsSections';
 const FIND = { timeout: 20000 };
 vi.setConfig({ testTimeout: 30000 });
 
-const STORED = { operational_rules: { auto_round_off: false, default_credit_limit: 90000 } };
+const STORED = { operational_rules: { default_credit_limit: 90000 } };
 
 beforeEach(() => {
   currentRoles = [];
@@ -97,14 +96,15 @@ const REMOVED_RULES = [
 ];
 
 describe('/settings/rules: the default credit limit, nothing else', () => {
-  it.each(['SUPERADMIN', 'ADMIN'])('%s sees the stored limit, no round-off, and saves the stored round-off back', async (role) => {
+  it.each(['SUPERADMIN', 'ADMIN'])('%s sees the stored limit, no round-off, and saves the limit alone', async (role) => {
     renderRoute('/settings/rules', [role]);
     expect(await screen.findByDisplayValue('90000', undefined, FIND)).toBeInTheDocument();
+    expect(screen.getByText('= ₹90,000')).toBeInTheDocument();
     expect(await screen.findByRole('link', { name: /^Operational Rules$/ }, FIND)).toHaveAttribute('aria-current', 'page');
     // IMS does not round bills to the rupee: no toggle and no text claims it does.
     expect(screen.queryByRole('button', { name: /round-off/i })).toBeNull();
     expect(document.body.textContent).not.toMatch(/round[- ]?off|round invoice/i);
-    expect(await save()).toEqual({ operational_rules: { auto_round_off: false, default_credit_limit: 90000 } });
+    expect(await save()).toEqual({ operational_rules: { default_credit_limit: 90000 } });
   });
 
   it.each(['', '0', '-5'])('a credit limit of %j says why and is not sent', async (value) => {
@@ -118,13 +118,40 @@ describe('/settings/rules: the default credit limit, nothing else', () => {
     // a valid amount clears the message and saves
     fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '25000' } });
     expect(screen.queryByRole('alert')).toBeNull();
-    expect(await save()).toEqual({ operational_rules: { auto_round_off: false, default_credit_limit: 25000 } });
+    expect(await save()).toEqual({ operational_rules: { default_credit_limit: 25000 } });
   });
 
   it('an edited default credit limit is what is saved', async () => {
     renderRoute('/settings/rules', ['ADMIN']);
     fireEvent.change(await screen.findByDisplayValue('90000', undefined, FIND), { target: { value: '120000' } });
-    expect(await save()).toEqual({ operational_rules: { auto_round_off: false, default_credit_limit: 120000 } });
+    expect(await save()).toEqual({ operational_rules: { default_credit_limit: 120000 } });
+  });
+
+  it('a cleared box stays empty (no 0 put back), and the amount reads in Indian digits', async () => {
+    renderRoute('/settings/rules', ['ADMIN']);
+    const box = await screen.findByDisplayValue('90000', undefined, FIND);
+    fireEvent.change(box, { target: { value: '' } });
+    expect(box).toHaveValue(null); // empty, not '0' (typing after a 0 showed '0200000')
+    fireEvent.change(box, { target: { value: '150000' } });
+    expect(screen.getByText('= ₹1,50,000')).toBeInTheDocument();
+    fireEvent.change(box, { target: { value: '1500000' } });
+    expect(screen.getByText('= ₹15,00,000')).toBeInTheDocument();
+  });
+
+  it('Save stays off while the saved limit is loading, and the box shows no placeholder amount', async () => {
+    let land!: (v: unknown) => void;
+    mockGetAdminControls.mockReset().mockReturnValue(new Promise((r) => { land = r; }));
+    renderRoute('/settings/rules', ['ADMIN']);
+    const button = await screen.findByRole('button', { name: /^Save Operational Rules$/ }, FIND);
+    expect(button).toBeDisabled();
+    expect(screen.getByRole('spinbutton')).toBeDisabled();
+    expect(screen.getByRole('spinbutton')).toHaveValue(null);
+    expect(document.body.textContent).not.toMatch(/1,?50,?000/);
+    fireEvent.click(button);
+    expect(mockUpdateAdminControls).not.toHaveBeenCalled();
+    land(STORED);
+    expect(await screen.findByDisplayValue('90000')).toBeInTheDocument();
+    expect(button).not.toBeDisabled();
   });
 
   it('none of the removed rules is shown', async () => {
@@ -143,10 +170,17 @@ describe('/settings/rules: the default credit limit, nothing else', () => {
     expect(await screen.findByDisplayValue('90000', undefined, FIND)).toBeInTheDocument();
   });
 
-  it('a failed load is shown, not swallowed', async () => {
-    mockGetAdminControls.mockReset().mockRejectedValue(new Error('403'));
+  it.each([
+    ['a failed load', () => mockGetAdminControls.mockReset().mockRejectedValue(new Error('403'))],
+    ['an answer with no limit in it', () => mockGetAdminControls.mockReset().mockResolvedValue({ operational_rules: {} })],
+  ])('%s is shown, not swallowed, and nothing can be saved over the stored limit', async (_case, arrange) => {
+    arrange();
     renderRoute('/settings/rules', ['SUPERADMIN']);
     expect(await screen.findByRole('alert', undefined, FIND)).toHaveTextContent(/Could not load the saved settings/);
+    const button = screen.getByRole('button', { name: /^Save Operational Rules$/ });
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+    expect(mockUpdateAdminControls).not.toHaveBeenCalled();
   });
 });
 
