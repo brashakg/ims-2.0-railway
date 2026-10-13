@@ -2426,10 +2426,10 @@ async def get_audit_logs_summary(current_user: dict = Depends(get_current_user))
 # ============================================================================
 # Owner rulings 2026-10-08: the store-module switches, the role permission
 # matrix, the per-role discount limits and every operational rule that
-# duplicated a rule IMS already enforces elsewhere were removed. Two settings
-# remain: the chain default credit limit (live - read by the till's credit
-# check through customers.effective_credit_limit) and auto_round_off (unread;
-# the round-off job decides it).
+# duplicated a rule IMS already enforces elsewhere were removed. One setting
+# remains: the chain default credit limit (live - read by the till's credit
+# check through customers.effective_credit_limit). auto_round_off is accepted
+# on a save and ignored (the round-off job decides bill round-off).
 
 DEFAULT_CREDIT_LIMIT = 150000.0  # owner ruling 2026-10-08: Rs 1,50,000
 
@@ -2449,7 +2449,10 @@ def chain_default_credit_limit() -> float:
 
 class OperationalRules(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    auto_round_off: bool
+    # Read by nothing and never saved (the round-off job decides bill
+    # round-off). Accepted, and ignored, so a page that still sends it is not
+    # refused with a 422.
+    auto_round_off: Any = Field(default=None, exclude=True)
     # strict: a JSON true is refused, not read as 1.0 (a Rs 1 limit for all).
     default_credit_limit: float = Field(gt=0, allow_inf_nan=False, strict=True)
 
@@ -2468,13 +2471,7 @@ def _require_admin(current_user: dict) -> None:
 async def get_admin_controls(current_user: dict = Depends(get_current_user)):
     """The operational rules (SUPERADMIN/ADMIN), with the credit default in force."""
     _require_admin(current_user)
-    collection = _get_settings_collection("admin_controls")
-    doc = collection.find_one({"_id": "default"}) if collection is not None else None
-    stored = (doc or {}).get("operational_rules") or {}
-    rules = {"default_credit_limit": chain_default_credit_limit()}
-    if "auto_round_off" in stored:
-        rules["auto_round_off"] = stored["auto_round_off"]
-    return {"operational_rules": rules}
+    return {"operational_rules": {"default_credit_limit": chain_default_credit_limit()}}
 
 
 @router.put("/admin-controls")

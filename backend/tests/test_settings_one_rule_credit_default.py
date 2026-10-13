@@ -94,7 +94,16 @@ def _client(user):
 
 
 def _rules(**kw):
-    return {"operational_rules": {"auto_round_off": True, "default_credit_limit": 150000, **kw}}
+    return {"operational_rules": {"default_credit_limit": 150000, **kw}}
+
+
+def _bearer(*roles):
+    """A signed token for the REAL app, so its RBAC middleware decides."""
+    from api.routers.auth import create_access_token
+
+    token = create_access_token({"user_id": "U-1", "username": "asha", "roles": list(roles),
+                                 "store_ids": ["BV-PUN-01"], "active_store_id": "BV-PUN-01"})
+    return {"Authorization": f"Bearer {token}"}
 
 
 # ===========================================================================
@@ -111,13 +120,16 @@ class _Unreadable:
         raise RuntimeError("settings store down")
 
 
-@pytest.fixture(params=["store down", "abc", "Infinity", float("inf"), float("nan")])
+@pytest.fixture(params=["store down", "rules as a list", "abc", "Infinity", float("inf"), float("nan")])
 def unreadable_default(request, db, monkeypatch):
-    """A saved default the check cannot use: the read raises, or a non-number /
-    infinity / NaN written outside the strict PUT."""
+    """A saved default the check cannot use: the read raises, operational_rules
+    is not a mapping, or a non-number / infinity / NaN written outside the
+    strict PUT."""
     if request.param == "store down":
         for m in {settings_module, importlib.import_module("api.routers.settings")}:
             monkeypatch.setattr(m, "_get_settings_collection", lambda n: _Unreadable())
+    elif request.param == "rules as a list":
+        db["admin_controls"].insert_one({"_id": "default", "operational_rules": [{"default_credit_limit": 200000}]})
     else:
         db["admin_controls"].insert_one({"_id": "default", "operational_rules": {"default_credit_limit": request.param}})
 
@@ -143,9 +155,12 @@ def test_the_customers_own_limit_wins_over_the_default(db, own):
 
 
 def test_admin_saves_the_default_and_the_check_reads_it(db):
-    put = _client(_user("ADMIN")).put("/settings/admin-controls", json=_rules(default_credit_limit=20000))
+    admin = _client(_user("ADMIN"))
+    put = admin.put("/settings/admin-controls", json=_rules(default_credit_limit=20000))
     assert put.status_code == 200, put.text
     assert customers_module.effective_credit_limit({"customer_id": "C1"}) == 20000.0
+    # The page shows the SAVED default, so its next Save does not write 1,50,000 back.
+    assert admin.get("/settings/admin-controls").json() == {"operational_rules": {"default_credit_limit": 20000.0}}
     # ...and the customer's own limit still wins over the saved default
     assert customers_module.effective_credit_limit({"customer_id": "C1", "credit_limit": 70000}) == 70000.0
 
@@ -160,7 +175,30 @@ def test_get_shows_the_default_in_force_and_nothing_removed(db):
     })
     body = _client(_user("ADMIN")).get("/settings/admin-controls").json()
     # The stale 50000 under the old key never becomes the enforced default.
-    assert body == {"operational_rules": {"auto_round_off": False, "default_credit_limit": 150000.0}}
+    assert body == {"operational_rules": {"default_credit_limit": 150000.0}}
+
+
+def test_admin_saves_the_default_through_the_real_app(db, client):
+    """The real app (api.main): its RBAC middleware row for this route lets
+    ADMIN through, not only the handler's own check. STORE_MANAGER is refused."""
+    url = "/api/v1/settings/admin-controls"
+    r = client.put(url, json=_rules(default_credit_limit=200000), headers=_bearer("ADMIN"))
+    assert r.status_code == 200, r.text
+    assert client.get(url, headers=_bearer("ADMIN")).json() == {"operational_rules": {"default_credit_limit": 200000.0}}
+    assert customers_module.effective_credit_limit({"customer_id": "C1"}) == 200000.0
+    for method in ("get", "put"):
+        r = getattr(client, method)(url, headers=_bearer("STORE_MANAGER"), **({"json": _rules()} if method == "put" else {}))
+        assert r.status_code == 403, (method, r.text)
+    assert db["admin_controls"].find_one({"_id": "default"})["operational_rules"] == {"default_credit_limit": 200000.0}
+
+
+@pytest.mark.parametrize("sent", [True, False, None, "yes"])
+def test_round_off_is_accepted_and_ignored(db, sent):
+    # Read by nothing; the round-off job decides it. A page that still sends it
+    # is not refused, and nothing of it is saved.
+    r = _client(_user("ADMIN")).put("/settings/admin-controls", json=_rules(auto_round_off=sent, default_credit_limit=30000))
+    assert r.status_code == 200, r.text
+    assert db["admin_controls"].find_one({"_id": "default"})["operational_rules"] == {"default_credit_limit": 30000.0}
 
 
 def test_superadmin_and_admin_may_edit_the_default_store_manager_may_not(db):
@@ -181,9 +219,10 @@ def test_superadmin_and_admin_may_edit_the_default_store_manager_may_not(db):
     _rules(require_customer=True),
     _rules(default_credit_limit=0),
     _rules(default_credit_limit=-5),
-    {"operational_rules": {"auto_round_off": True, "default_credit_limit": "Infinity"}},
+    _rules(default_credit_limit="Infinity"),
     # lax pydantic reads JSON true as 1.0 - a Rs 1 limit for every customer
-    {"operational_rules": {"auto_round_off": True, "default_credit_limit": True}},
+    _rules(default_credit_limit=True),
+    {"operational_rules": {"auto_round_off": True}},  # no default credit limit
 ])
 def test_removed_settings_and_a_non_positive_default_are_refused(db, body):
     r = _client(_user("SUPERADMIN")).put("/settings/admin-controls", json=body)
@@ -200,7 +239,7 @@ def test_a_save_keeps_only_the_live_settings(db):
     assert _client(_user("ADMIN")).put("/settings/admin-controls", json=_rules(default_credit_limit=90000)).status_code == 200
     stored = db["admin_controls"].find_one({"_id": "default"})
     stored.pop("_id")
-    assert stored == {"operational_rules": {"auto_round_off": True, "default_credit_limit": 90000.0}}
+    assert stored == {"operational_rules": {"default_credit_limit": 90000.0}}
 
 
 def test_credit_summary_reports_the_limit_in_force(db, monkeypatch):
@@ -388,3 +427,13 @@ def test_the_second_doors_are_gone_from_the_app_and_the_policy(gone, kept):
     assert gone not in paths
     assert kept in paths  # the one rule stays
     assert not [row for row in POLICY if row["path"] == gone]
+
+
+def test_the_rbac_matrix_doc_says_what_the_policy_says():
+    # docs/reference/RBAC_MATRIX.md is the hand-kept copy of the policy rows.
+    doc = open(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                            "docs", "reference", "RBAC_MATRIX.md"), encoding="utf-8").read()
+    for method in ("GET", "PUT"):
+        assert f"| `{method}` | `/api/v1/settings/admin-controls` | SUPERADMIN, ADMIN |" in doc
+    for gone in ("/api/v1/admin/discounts/role-caps", "/api/v1/admin/system/settings"):
+        assert f"`{gone}`" not in doc
