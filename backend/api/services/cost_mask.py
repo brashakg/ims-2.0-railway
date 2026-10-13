@@ -108,6 +108,13 @@ _PURCHASE_PRICE_FIELDS = {
 }
 
 
+def is_cost_key(name) -> bool:
+    """True when `name` is a key this module hides as cost, margin or a figure
+    worked out from cost. For a reader that looks keys up by a caller-given
+    name (a smart-collection rule): matching on a hidden key is reading it."""
+    return name in _ALL_MASKED
+
+
 def _roles_of(user: dict) -> set:
     """Tolerant role extraction: `roles` list, else the single `activeRole`."""
     user = user or {}
