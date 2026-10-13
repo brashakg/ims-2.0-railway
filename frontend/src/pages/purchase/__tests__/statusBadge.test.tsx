@@ -25,7 +25,7 @@ describe('getStatusBadge', () => {
 
   it('renders the correct label for PARTIALLY_RECEIVED', () => {
     render(getStatusBadge('PARTIALLY_RECEIVED' as POStatus));
-    expect(screen.getByText('Partially Received')).toBeInTheDocument();
+    expect(screen.getByText('Partly received')).toBeInTheDocument();
   });
 
   it('also resolves the known DRAFT / RECEIVED / CANCELLED labels', () => {

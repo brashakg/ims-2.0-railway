@@ -95,7 +95,8 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/tasks/auto-generate",
-        "allowed": "AUTHENTICATED",
+        # Managers only (owner ruling 2026-10-13); = task_visibility.MANAGER_ROLES.
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SUPERADMIN"],
     },
     {"method": "GET", "path": "/api/v1/tasks/checklists", "allowed": "AUTHENTICATED"},
     {
@@ -103,12 +104,6 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/tasks/checklists/{checklist_type}/complete-item",
         "allowed": "AUTHENTICATED",
     },
-    {
-        "method": "GET",
-        "path": "/api/v1/tasks/completion-stats",
-        "allowed": "AUTHENTICATED",
-    },
-    {"method": "GET", "path": "/api/v1/tasks/escalations", "allowed": "AUTHENTICATED"},
     {
         "method": "GET",
         "path": "/api/v1/tasks/integrity/fake-closures",
@@ -211,7 +206,8 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/tasks/{task_id}/reassign",
-        "allowed": "AUTHENTICATED",
+        # Managers only (owner ruling 2026-10-13); = task_visibility.MANAGER_ROLES.
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SUPERADMIN"],
     },
     {
         "method": "POST",
