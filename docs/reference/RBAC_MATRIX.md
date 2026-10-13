@@ -1021,8 +1021,6 @@ are the exact current gate (SUPERADMIN always implied).
 | `POST` | `/api/v1/tasks/auto-generate` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |
 | `GET` | `/api/v1/tasks/checklists` | AUTH |  |
 | `POST` | `/api/v1/tasks/checklists/{checklist_type}/complete-item` | AUTH |  |
-| `GET` | `/api/v1/tasks/completion-stats` | AUTH |  |
-| `GET` | `/api/v1/tasks/escalations` | AUTH |  |
 | `GET` | `/api/v1/tasks/integrity/fake-closures` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
 | `GET` | `/api/v1/tasks/integrity/silent` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
 | `GET` | `/api/v1/tasks/my-tasks` | AUTH |  |
