@@ -52,9 +52,16 @@ def _part_cancelled_p2():
     return po
 
 
-def _items(pid, qty):
-    return [{"product_id": pid, "received_qty": qty, "accepted_qty": qty,
-             "rejected_qty": 0}]
+def _items(pid, qty, line=None):
+    """One receipt line; `line` names the PO line (its position, as the GRN
+    screen sends it) -- naming P2's own line must not change the hold."""
+    row = {"product_id": pid, "received_qty": qty, "accepted_qty": qty, "rejected_qty": 0}
+    if line is not None:
+        row["po_item_id"] = line
+    return [row]
+
+
+NAMED = pytest.mark.parametrize("line", [None, "1"], ids=["unnamed", "named-line-1"])
 
 
 def _normal(items, inv="INV-9"):
@@ -79,12 +86,13 @@ def _create(kind, items, user, inv="INV-9"):
 CASES = [("normal", "full"), ("normal", "part"), ("express", "full"), ("express", "part")]
 
 
+@NAMED
 @pytest.mark.parametrize("kind,cut", CASES)
-def test_a_receipt_logged_after_the_cancel_is_refused_at_create(monkeypatch, kind, cut):
+def test_a_receipt_logged_after_the_cancel_is_refused_at_create(monkeypatch, kind, cut, line):
     po = _fully_cancelled_p2() if cut == "full" else _part_cancelled_p2()
     grn_repo, _po_repo, stock, _t = _wire(monkeypatch, po=po)
     with pytest.raises(HTTPException) as e:
-        _create(kind, _items("P2", 3 if cut == "full" else 2), _user())
+        _create(kind, _items("P2", 3 if cut == "full" else 2, line), _user())
     assert e.value.status_code == 400
     assert "Ray-Ban" in e.value.detail
     assert grn_repo.docs == {} and stock.units == [], "nothing logged, nothing minted"
@@ -110,11 +118,12 @@ def test_the_one_unit_still_open_on_a_part_cancelled_line_receives(monkeypatch):
     assert e.value.status_code == 400
 
 
+@NAMED
 @pytest.mark.parametrize("cut", ["full", "part"])
-def test_a_receipt_logged_before_the_cancel_is_refused_at_accept(monkeypatch, cut):
+def test_a_receipt_logged_before_the_cancel_is_refused_at_accept(monkeypatch, cut, line):
     full = _po(_line("P1", "Frame X", 5), _line("P2", "Ray-Ban", 3))
     grn_repo, po_repo, stock, _t = _wire(monkeypatch, po=full)
-    made = _create("normal", _items("P2", 3 if cut == "full" else 2), _user())
+    made = _create("normal", _items("P2", 3 if cut == "full" else 2, line), _user())
     gid = made["grn_id"]
     # The cancel lands afterwards.
     po_repo.po.clear()
@@ -145,27 +154,28 @@ def _atomic_claims(grn_repo):
     grn_repo.find_one_and_update = types.MethodType(find_one_and_update, grn_repo)
 
 
-def _two_pending_of_two(monkeypatch, qa=2, qb=2):
+def _two_pending_of_two(monkeypatch, qa=2, qb=2, line=None):
     po = _po(_line("P1", "Frame X", 5),
              _line("P2", "Ray-Ban", 3, cancelled_qty=1, received_qty=1))
     po["status"] = "PARTIALLY_RECEIVED"
     po["received_qty_by_product"] = {"P2": 1}
     grn_repo, po_repo, stock, _t = _wire(monkeypatch, po=po)
     _atomic_claims(grn_repo)
-    a = _create("normal", _items("P2", qa), _user(), inv="INV-A")["grn_id"]
-    b = _create("normal", _items("P2", qb), _user(), inv="INV-B")["grn_id"]
+    a = _create("normal", _items("P2", qa, line), _user(), inv="INV-A")["grn_id"]
+    b = _create("normal", _items("P2", qb, line), _user(), inv="INV-B")["grn_id"]
     return grn_repo, stock, a, b
 
 
 # (2, 2): both want the whole open 2. (1, 2): A's 1 still to come is ADDED to
 # the 1 the order already holds, not compared with it -- 1 + 1 + 2 > 3.
+@NAMED
 @pytest.mark.parametrize("qa,qb", [(2, 2), (1, 2)])
-def test_two_accepts_in_flight_on_one_open_quantity_mint_once(monkeypatch, qa, qb):
+def test_two_accepts_in_flight_on_one_open_quantity_mint_once(monkeypatch, qa, qb, line):
     """2 open, two pending receipts: while A is still minting, B's accept is
     refused -- only A's units, never more than the order has room for."""
     import threading
 
-    grn_repo, stock, a, b = _two_pending_of_two(monkeypatch, qa, qb)
+    grn_repo, stock, a, b = _two_pending_of_two(monkeypatch, qa, qb, line)
     inside, release = threading.Event(), threading.Event()
     real_create = stock.create
 
@@ -197,8 +207,9 @@ def test_two_accepts_in_flight_on_one_open_quantity_mint_once(monkeypatch, qa, q
     assert len([u for u in stock.units if u["product_id"] == "P2"]) == qa
 
 
-def test_two_accepts_one_after_the_other_mint_once(monkeypatch):
-    grn_repo, stock, a, b = _two_pending_of_two(monkeypatch)
+@NAMED
+def test_two_accepts_one_after_the_other_mint_once(monkeypatch, line):
+    grn_repo, stock, a, b = _two_pending_of_two(monkeypatch, line=line)
     asyncio.run(vendors_mod.accept_grn(a, current_user=_user()))
     with pytest.raises(HTTPException) as e:
         asyncio.run(vendors_mod.accept_grn(b, current_user=_user()))
