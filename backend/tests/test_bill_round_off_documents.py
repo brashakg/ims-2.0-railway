@@ -232,3 +232,45 @@ def test_a_no_change_edit_keeps_points_earned_on_a_rounded_down_bill(
     out = regate_earn_after_edit(dict(order), user_id="sa-1")
     assert out["ok"] and out.get("clawed", 0) == 0, out
     assert patched_loyalty["accounts"].find_by_id("cust-rg")["balance_points"] == earned
+
+
+# ============================================================================
+# 4. The estimate is the bill the till makes, Round off line and all
+# ============================================================================
+
+
+@pytest.mark.parametrize(
+    "price, line_pct, bill_pct, grand, printed",
+    [
+        (1000.5, 0.0, 0.0, 1001.0, "+ Rs 0.50"),
+        (1000.49, 0.0, 0.0, 1000.0, "- Rs 0.49"),
+        # A rounded line price reached 254.49 -> Rs 254; the till bills Rs 255.
+        (265.0, 1.5, 2.5, 255.0, "+ Rs 0.50"),
+    ],
+)
+def test_estimate_total_is_the_till_quote(
+    client, auth_headers, price, line_pct, bill_pct, grand, printed
+):
+    from api.routers.estimates import EstimateCreate, EstimateItem, _price_estimate
+    from api.services.print_render import render_estimate
+    from tests.test_orders_gst_recompute import _frame_item
+
+    q = client.post(
+        "/api/v1/orders/quote",
+        json={"items": [dict(_frame_item(price), discount_percent=line_pct)],
+              "cart_discount_percent": bill_pct},
+        headers=auth_headers,
+    )
+    assert q.status_code == 200, q.text
+    totals = _price_estimate(EstimateCreate(
+        items=[EstimateItem(description="Frame", category="FRAME",
+                            offer_price=price, discount_percent=line_pct)],
+        cart_discount_percent=bill_pct,
+    ))["totals"]
+    assert (totals["grand_total"], totals["round_off"]) == (
+        q.json()["grand_total"], q.json()["round_off"]
+    ) == (grand, round(grand - (q.json()["taxable"] + q.json()["tax"]), 2))
+    html = render_estimate(entity=None, store=None, estimate_number="EST-1",
+                           estimate_date="2026-10-13", totals=totals)
+    assert "Round off</td><td class=\"num\">" + printed in html
+    assert "Estimated Total</td><td class=\"num\">Rs " + f"{grand:,.2f}" in html
