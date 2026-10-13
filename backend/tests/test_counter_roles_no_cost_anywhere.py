@@ -366,10 +366,24 @@ def test_counter_role_reads_no_cost(client, shop, role, method, path, extra):
     assert not _figures_in(body), (role, path, body)
 
 
+# Stock value AT COST (services/stock_value.COST_CONTEXT) is narrower than the
+# product's own cost: the accounts roles alone (owner ruling 2026-10-12, what we
+# pay) -- a store, area or catalogue manager reads these without the value.
+_STOCK_AT_COST = (
+    "/api/v1/reports/inventory",
+    "/api/v1/reports/inventory/summary",
+    "/api/v1/reports/stock/count",
+)
+_ACCOUNTS = ("ADMIN", "ACCOUNTANT")
+
+
 @pytest.mark.parametrize("role", MANAGERS)
 @pytest.mark.parametrize("method,path,extra", READS)
 def test_managers_still_read_the_cost(client, shop, role, method, path, extra):
     body = _get(client, role, method, path)
+    if path.split("?")[0] in _STOCK_AT_COST and role not in _ACCOUNTS:
+        assert not _cost_keys(body, extra), (role, path, _cost_keys(body, extra))
+        return
     assert _cost_keys(body, extra), (role, path, body)
 
 
