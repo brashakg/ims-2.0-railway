@@ -72,10 +72,13 @@ export async function submitPosOrder(
   // till never rounds a bill itself, and never collects against an estimate.
   try {
     await refreshBillQuote();
-  } catch {
+  } catch (err) {
+    // The server's own reason (a role that may not bill, a line it refuses),
+    // or the API client's network text -- never a guess at the connection.
+    const msg = err instanceof Error ? err.message : String(err);
     return {
       ok: false,
-      error: 'Could not get the bill total from the server. Check the connection and try again.',
+      error: 'Could not get the bill total from the server: ' + (msg || 'Network error'),
     };
   }
   if (!store.getQuotedBill()) {
@@ -95,15 +98,23 @@ export async function submitPosOrder(
   // order saved as fully OUTSTANDING with the cash physically in the drawer,
   // surfacing at day-end as an unexplained surplus. Refuse BEFORE creating
   // anything, so nothing is half-saved.
+  // The total can also drop by paise: a payment added from the till's estimate
+  // before the server's rounded total arrived. So the figures keep their paise
+  // (Math.round showed "₹0 more than the bill").
   const overTendered = -store.getBalance();
   if (overTendered > 0.01) {
+    const rs = (v: number) =>
+      '₹' +
+      v.toLocaleString('en-IN', {
+        minimumFractionDigits: Number.isInteger(v) ? 0 : 2,
+        maximumFractionDigits: 2,
+      });
     return {
       ok: false,
       error:
-        `Tendered ₹${Math.round(store.getTotalPaid()).toLocaleString('en-IN')} is ` +
-        `₹${Math.round(overTendered).toLocaleString('en-IN')} more than the bill ` +
-        `total of ₹${Math.round(store.getGrandTotal()).toLocaleString('en-IN')}. ` +
-        `If a discount was applied after the payment, re-enter the payment.`,
+        `Tendered ${rs(store.getTotalPaid())} is ${rs(overTendered)} more than the ` +
+        `bill total of ${rs(store.getGrandTotal())}. The total changed after the ` +
+        `payment was added. Remove the payment and add it again.`,
     };
   }
 

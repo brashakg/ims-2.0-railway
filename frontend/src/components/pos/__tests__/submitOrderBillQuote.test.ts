@@ -81,4 +81,35 @@ describe('Pay checks the tenders against the server-rounded bill', () => {
     expect(res.error).toMatch(/Could not get the bill total/);
     expect(mockedCreate).not.toHaveBeenCalled();
   });
+
+  it("names the server's reason when it refuses to price the bill", async () => {
+    rs265Cart(255);
+    // A role that may open the till but not bill (the API client's message).
+    mockedQuote.mockRejectedValueOnce(new Error('Your role is not permitted to create orders.'));
+    const res = await submitPosOrder(usePOSStore.getState(), 'idem-4');
+    expect(res.error).toBe(
+      'Could not get the bill total from the server: Your role is not permitted to create orders.',
+    );
+  });
+
+  it('shows the paise when a payment taken from the estimate is over the rounded bill', async () => {
+    // Cash added at the till's estimate (1000.49) before the server's Rs 1000.
+    const s = usePOSStore.getState();
+    s.resetTransaction();
+    s.addToCart({
+      product_id: 'p-frame', name: 'Frame', sku: 'S', category: 'FRAME',
+      unit_price: 1000.49, mrp: 1000.49, quantity: 1, is_optical: false,
+    } as never);
+    usePOSStore.getState().addPayment({ method: 'CASH', amount: 1000.49 } as never);
+    mockedQuote.mockResolvedValueOnce({
+      subtotal: 1000.49, taxable: 952.85, tax: 47.64, total_discount: 0,
+      grand_total: 1000, round_off: -0.49,
+    });
+    const res = await submitPosOrder(usePOSStore.getState(), 'idem-5');
+    expect(res.error).toBe(
+      'Tendered ₹1,000.49 is ₹0.49 more than the bill total of ₹1,000. ' +
+        'The total changed after the payment was added. Remove the payment and add it again.',
+    );
+    expect(mockedCreate).not.toHaveBeenCalled();
+  });
 });
