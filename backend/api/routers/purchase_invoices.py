@@ -1424,6 +1424,23 @@ def _vendor_gstin(db, vendor: Optional[dict], vendor_id: str) -> Optional[str]:
         return None
 
 
+WALK_IN_REVERSE_CHARGE = (
+    "Goods bought without a PO are not a reverse-charge purchase: the dealer "
+    "charges GST on the bill, or none if not registered. Book this bill with "
+    "reverse charge off."
+)
+
+
+def refuse_walk_in_reverse_charge(reverse_charge, receipt) -> None:
+    """A "Bought without PO" receipt's bill is never reverse charge (owner
+    2026-10-13): spectacles bought from a dealer are not a reverse-charge
+    supply. Every bill door -- this one (booking and /preview, through
+    _bill_math) and the header-only AP bill door -- refuses it here, 422, so
+    one bill has one GST outcome whichever door books it."""
+    if reverse_charge and (receipt or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO:
+        raise HTTPException(status_code=422, detail=WALK_IN_REVERSE_CHARGE)
+
+
 def _bill_math(db, vendor, body, grn_doc, current_user):
     """Everything a booking stores about tax: (supplier GSTIN, recipient,
     computed invoice). POST / books it and POST /preview shows it through this
@@ -1432,6 +1449,7 @@ def _bill_math(db, vendor, body, grn_doc, current_user):
     shop is the form's own store_id, never whichever the token names by the
     time Book is pressed. A receipt's shop decides a receipt's bill, so the
     form's shop is only checked (403) when it is the one that counts."""
+    refuse_walk_in_reverse_charge(body.reverse_charge, grn_doc)
     supplier_gstin = _vendor_gstin(db, vendor, body.vendor_id)
     receipt_store = _receipt_store_id(db, grn_doc, body.linked_dc_ids)
     recipient = _bill_recipient(
@@ -2009,10 +2027,10 @@ async def create_purchase_invoice(
         # Round 12 item 6: no valid supplier GSTIN on the invoice, no input
         # credit -- decided here, once, so the register, GSTR-3B and the
         # Cross-Check all read it from the stored flag. A bill for goods
-        # bought without a PO claims it only from a registered supplier (G2;
-        # the receipt says which it is).
+        # bought without a PO is never reverse charge (_bill_math refused it),
+        # so it claims credit only from a registered supplier (G2).
         "itc_eligible": ov.itc_claimable(
-            supplier_gstin, body.reverse_charge, body.itc_eligible, grn_doc
+            supplier_gstin, body.reverse_charge, body.itc_eligible
         ),
         "reverse_charge": bool(body.reverse_charge),
         "outstanding": total,
@@ -2255,9 +2273,7 @@ async def preview_purchase_invoice(
     )
     # The verdict AND its reason from the one rule: the form shows the reason
     # as sent, so it never explains a refusal by a rule of its own.
-    refusal = ov.itc_refusal(
-        supplier_gstin, body.reverse_charge, body.itc_eligible, grn_doc
-    )
+    refusal = ov.itc_refusal(supplier_gstin, body.reverse_charge, body.itc_eligible)
     return {
         "vendor_gstin": supplier_gstin,
         "itc_eligible": refusal is None,

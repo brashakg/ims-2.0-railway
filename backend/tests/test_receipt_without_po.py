@@ -386,23 +386,22 @@ def test_c7_only_a_no_po_receipt_takes_a_typed_cost():
 
 def test_g2_the_credit_rule_itself():
     """Owner ruling 2026-10-13 (G2, reversing D14's 'no credit on any no-PO
-    bill'): one rule for every bill door -- a walk-in bill claims credit from
-    a GST-registered supplier, never from an unregistered one (reverse charge
-    or not); an operator's own "no credit" still stands; and the rule gives
-    the reason the booking form shows."""
+    bill'): one rule for every bill door -- credit from a GST-registered
+    supplier, never from an unregistered one unless the bill is reverse
+    charge, which a walk-in bill never is (every door refuses it:
+    test_g2_a_walk_in_bill_is_never_reverse_charge_on_any_door); an
+    operator's own "no credit" still stands; and the rule gives the reason
+    the booking form shows."""
     from api.services.org_validation import itc_claimable, itc_refusal
 
     reg = DEALER_GSTIN
-    no_po, po = {"grn_subtype": "NO_PO"}, {"grn_subtype": "STANDARD"}
-    assert itc_claimable(reg, False, True, no_po) is True
-    assert itc_claimable(None, False, True, no_po) is False
-    assert itc_claimable(None, True, True, no_po) is False
-    assert itc_refusal(None, True, True, no_po) == "the supplier has no valid GSTIN"
+    assert itc_claimable(reg) is True and itc_refusal(reg) is None
+    assert itc_claimable(None) is False
+    assert itc_refusal(None) == "the supplier has no valid GSTIN"
     # A PO receipt's reverse-charge bill from an unregistered supplier claims.
-    assert itc_claimable(None, True, True, po) is True
-    assert itc_claimable(reg) is True
-    assert itc_refusal(reg, False, False, po) == "switched off"
-    assert itc_refusal(reg, False, True, no_po) is None
+    assert itc_claimable(None, True) is True
+    assert itc_refusal(reg, False, False) == "switched off"
+    assert itc_refusal(None, True, False) == "switched off"
 
 
 def test_c7_no_po_receipt_needs_the_bill_photo(world):
@@ -1186,8 +1185,8 @@ def _itc_everywhere():
 def test_g2_a_walk_in_bill_claims_credit_only_from_a_registered_dealer(world):
     """G2: the line-detail door stores a walk-in bill's credit by the one rule
     -- V-DEALER's (valid GSTIN) claims Rs 310 like its PO bill; unregistered
-    Sharma's claims none, whatever the client sent (credit on, reverse
-    charge). The register, /gst/summary and GSTR-3B Table 4 count only the
+    Sharma's claims none, whatever the client sent (credit on; reverse
+    charge is refused outright). The register, /gst/summary and GSTR-3B Table 4 count only the
     claiming bills (round-6 D14 stored every walk-in bill with no credit)."""
     db = world["db"]
     _seed_receipt(db, grn_id="GRN-STD-0001", subtype="STANDARD", po_id="PO-1")
@@ -1198,7 +1197,7 @@ def test_g2_a_walk_in_bill_claims_credit_only_from_a_registered_dealer(world):
     # The client says nothing about ITC (the body default is True).
     _run(pi.create_purchase_invoice(_invoice_body("GRN-NOPO-0002", "CASH-2"), current_user=ACCOUNTANT))
     sharma = _invoice_body("GRN-NOPO-0003", "1", vendor=SHARMA)
-    sharma.itc_eligible = sharma.reverse_charge = True
+    sharma.itc_eligible = True
     _run(pi.create_purchase_invoice(sharma, current_user=ACCOUNTANT))
 
     bills = {b["grn_id"]: b for b in db.vendor_bills.find({}, {"_id": 0})}
@@ -1287,6 +1286,40 @@ def _header_bill(grn_id, number, date, vendor=DEALER, **over):
         **over,
     )
     return _run(vd.create_vendor_bill(vendor, bill, current_user=ACCOUNTANT))
+
+
+def test_g2_a_walk_in_bill_is_never_reverse_charge_on_any_door(world):
+    """Panel probe (round 11) and owner ruling 2026-10-13: Sharma's walk-in
+    cash memo booked on the line door with reverse_charge=True was stored
+    no-credit + reverse charge, so GSTR-3B showed a reverse-charge liability
+    (CGST 155 + SGST 155) with no credit for it; the same memo on the header
+    door landed in Table 5 with no liability -- one bill, two GST outcomes.
+    Spectacles bought from a dealer are not a reverse-charge supply: every
+    door refuses it in words (registered dealer or not) and books nothing;
+    with reverse charge off it books as any walk-in bill."""
+    from fastapi import HTTPException
+
+    from api.routers.purchase_invoices import WALK_IN_REVERSE_CHARGE
+
+    db = world["db"]
+    for vendor, number in ((SHARMA, "RC-1"), (DEALER, "RC-2")):
+        grn_id = _on_the_shelf(world, vendor_id=vendor, vendor_invoice_no=number)
+        line = _invoice_body(grn_id, number, vendor=vendor)
+        line.reverse_charge = True
+        preview = pi.PurchaseInvoicePreview(vendor_id=vendor, grn_id=grn_id, lines=line.lines, reverse_charge=True)
+        doors = {
+            "line": lambda: _run(pi.create_purchase_invoice(line, current_user=ACCOUNTANT)),
+            "preview": lambda: _run(pi.preview_purchase_invoice(preview, current_user=ACCOUNTANT)),
+            "header": lambda: _header_bill(grn_id, number, "2026-09-14", vendor=vendor, reverse_charge=True),
+        }
+        for door, book in doors.items():
+            with pytest.raises(HTTPException) as refused:
+                book()
+            assert (refused.value.status_code, refused.value.detail) == (422, WALK_IN_REVERSE_CHARGE), (vendor, door)
+        assert db.vendor_bills.count_documents({}) == 0
+    line.reverse_charge = False
+    booked = _run(pi.create_purchase_invoice(line, current_user=ACCOUNTANT))
+    assert (booked["reverse_charge"], booked["itc_eligible"]) == (False, True)
 
 
 def test_c7_a_bill_on_the_shelf_books_under_its_own_number(world):

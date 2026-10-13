@@ -52,6 +52,10 @@ class VendorBillCreate(BaseModel):
     # handler can refuse with a stable, plain-English 422 (BILL_KIND_REQUIRED)
     # instead of a raw pydantic error, and so stored legacy rows re-read fine.
     bill_kind: Optional[str] = None
+    # This door books no reverse charge (the line-detail door does). Read only
+    # so a walk-in bill sent with it is refused in words, as on that door
+    # (purchase_invoices.refuse_walk_in_reverse_charge), never booked quietly.
+    reverse_charge: bool = False
 
     @field_validator("bill_kind", mode="before")
     @classmethod
@@ -286,6 +290,9 @@ async def create_vendor_bill(
         grn_repo = get_grn_repository()
         linked = grn_repo.find_by_id(bill.grn_id) if grn_repo is not None else None
         _receipt_store = (linked or {}).get("store_id")
+        from ..purchase_invoices import refuse_walk_in_reverse_charge
+
+        refuse_walk_in_reverse_charge(bill.reverse_charge, linked)
         if linked is not None and linked.get("grn_subtype") == GRN_SUBTYPE_DC:
             # 404 missing / 400 not-ACCEPTED / 409 already-matched.
             dc_docs = _load_linked_dcs(db_early, [bill.grn_id])
@@ -379,7 +386,7 @@ async def create_vendor_bill(
         # No valid supplier GSTIN, no input credit (a bill for goods bought
         # without a PO, G2, the same) -- purchase_invoices does the same on
         # its doors: one rule, org_validation.itc_claimable.
-        "itc_eligible": itc_claimable(supplier_gstin, receipt=linked),
+        "itc_eligible": itc_claimable(supplier_gstin),
         "po_id": bill.po_id,
         "grn_id": bill.grn_id,
         # A receipt-linked bill IS a goods bill whatever the caller declared;
