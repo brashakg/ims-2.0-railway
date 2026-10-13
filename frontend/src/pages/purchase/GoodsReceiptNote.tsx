@@ -763,6 +763,9 @@ export function GoodsReceiptNote() {
                       setDcQuery('');
                       setDcResults([]);
                     }
+                    // A rejected delivery on a closed order is never a DC: no
+                    // bill is due on it, so it would list as unbilled for good.
+                    if (on && rejectOnly) onSelectPO('');
                   }}
                 />
                 This is a Delivery Challan (no invoice yet)
@@ -843,7 +846,7 @@ export function GoodsReceiptNote() {
                             : ''}
                         </option>
                       ))}
-                      {pos.some((p) => p.closed_by_cancel) && (
+                      {!isDcMode && pos.some((p) => p.closed_by_cancel) && (
                         <optgroup label="Log a rejected delivery">
                           {pos.filter((p) => p.closed_by_cancel).map((p) => (
                             <option key={p.po_id} value={p.po_id}>

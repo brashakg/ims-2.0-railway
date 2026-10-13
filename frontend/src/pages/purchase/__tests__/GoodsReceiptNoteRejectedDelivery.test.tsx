@@ -53,6 +53,7 @@ const lines = [
 beforeEach(() => {
   vi.clearAllMocks();
   api.getGRNs.mockResolvedValue({ grns: [] });
+  api.getVendors.mockResolvedValue({ vendors: [] });
   api.getPurchaseOrders.mockResolvedValue({
     purchase_orders: [
       { po_id: 'PO-OPEN', po_number: 'PO-OPEN', status: 'SENT', closed_by_cancel: false, items: lines },
@@ -130,6 +131,21 @@ describe('a delivery against an order a cancel closed', () => {
     await waitFor(() => expect(api.acceptGRN).toHaveBeenCalledWith('GRN-1'));
     expect(toastMock.success).toHaveBeenCalledWith(expect.stringContaining('nothing added to stock'));
     expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('is never a Delivery Challan - no bill is due, so it would list as unbilled for good', async () => {
+    const { container } = await open();
+    const dcBox = screen.getByLabelText(/This is a Delivery Challan/);
+    fireEvent.change(screen.getByDisplayValue('Select a PO…'), { target: { value: 'PO-CXL' } });
+    expect(screen.getByLabelText('Received units on line 2')).toBeInTheDocument();
+    // Ticking the box after picking the closed order drops it.
+    fireEvent.click(dcBox);
+    expect(screen.queryByLabelText('Received units on line 2')).toBeNull();
+    expect(container.querySelector('optgroup[label="Log a rejected delivery"]')).toBeNull();
+    expect(screen.queryByRole('option', { name: /PO-CXL/ })).toBeNull();
+    expect(screen.getByRole('option', { name: 'PO-OPEN' })).toBeInTheDocument();
+    fireEvent.click(dcBox);
+    expect(container.querySelector('optgroup[label="Log a rejected delivery"]')).not.toBeNull();
   });
 
   it('with nothing counted, does not post', async () => {
