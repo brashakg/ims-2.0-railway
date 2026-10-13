@@ -2337,6 +2337,24 @@ async def update_catalog_product(
                 "Saved on the catalogue copy only: no billing product is linked "
                 "to it, so the till and Manage Barcode do not have this barcode."
             )
+        # A SIZE VARIANT's barcode reaches the website on its catalog_variants
+        # ROW (the parent's push), so it lands there too, before the twin save
+        # and NOT fail-soft -- as Manage Barcode: a size left on the old code is
+        # a failed save. Refused, the twin is not saved, so the retry (the same
+        # payload and updated_at) redoes it.
+        if _is_variant_of(existing):
+            try:
+                _pm._mirror_variant_row_update(
+                    current=existing,
+                    patch={"attributes": {"gtin": spine_gtin}},
+                    db=_get_db(),
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(
+                    status_code=503,
+                    detail="The website copy of this size could not take the "
+                    "barcode, so the catalogue copy was not saved. Please save again.",
+                ) from exc
 
     # Promote is the ONLY writer of the review/promote flags (see the stamp in
     # promote_catalog_product): strip them from the WRITE (a copy -- the
@@ -2497,27 +2515,26 @@ async def update_catalog_product(
     # the PARENT's price push (product_input._resolve_variant_pricing reads the
     # row, never this twin), and the engine recompute below finds no rows for
     # a child twin (its row's parent_product_id is the PARENT). So the drawer's
-    # mrp / gtin edit goes through the ONE row writer -- the same one the spine
-    # PUT's mirror uses -- which also re-derives the online price and queues
-    # the PARENT. Without it the edit was silently inert on the website.
-    # Fail-soft: the catalog save stands.
-    if _is_variant_of(existing):
-        _row_patch: Dict[str, Any] = {}
-        if product.pricing is not None and product.pricing.mrp is not None:
-            _row_patch["mrp"] = product.pricing.mrp
-        if spine_gtin is not None:
-            _row_patch["attributes"] = {"gtin": spine_gtin}
-        if _row_patch:
-            try:
-                _pm._mirror_variant_row_update(
-                    current=existing, patch=_row_patch, db=_get_db()
-                )
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "[CATALOG] variant row mirror skipped for %s",
-                    product_id,
-                    exc_info=True,
-                )
+    # mrp edit goes through the ONE row writer -- the same one the spine PUT's
+    # mirror uses -- which also re-derives the online price and queues the
+    # PARENT. Without it the edit was silently inert on the website. (Its
+    # barcode went to the row above, before the save.) Fail-soft: the catalog
+    # save stands.
+    if (
+        _is_variant_of(existing)
+        and product.pricing is not None
+        and product.pricing.mrp is not None
+    ):
+        try:
+            _pm._mirror_variant_row_update(
+                current=existing, patch={"mrp": product.pricing.mrp}, db=_get_db()
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "[CATALOG] variant row mirror skipped for %s",
+                product_id,
+                exc_info=True,
+            )
 
     # Online discount engine: re-derive the ONLINE storefront price after an edit
     # (MRP / brand / category changes can move the winning rule). ADDITIVE +

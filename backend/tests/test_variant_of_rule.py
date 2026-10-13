@@ -1125,6 +1125,48 @@ def test_catalog_drawer_mrp_edit_on_a_child_lands_on_its_row_and_queues_the_pare
     assert _row(db, CHILD_SKU)["gtin"] == folded
 
 
+def test_a_drawer_barcode_edit_the_size_row_refuses_is_a_503_and_save_again_lands_it(monkeypatch):
+    """As Manage Barcode: a size whose catalog_variants row (what the parent's
+    push sends) kept the old code is a failed save, never a 200. Refused
+    BEFORE the twin is saved, so the retry -- the same payload and updated_at
+    -- lands it. An mrp-only edit's row write stays fail-soft."""
+    from fastapi import HTTPException
+
+    db = _world()
+    _wire_catalog(monkeypatch, db)
+    stamp = "2026-10-01T10:00:00"
+    db["catalog_products"].update_one({"id": "tw-child"}, {"$set": {"updated_at": stamp}})
+    twin_before, row_before = _twin(db, "tw-child"), _row(db, CHILD_SKU)
+    new_gtin = "4006381333931"  # valid EAN-13, not GS1 20-29
+    real = pm._mirror_variant_row_update
+
+    def refused(**_kw):
+        raise RuntimeError("catalog_variants write refused")
+
+    def save(**fields):
+        return _run(cat.update_catalog_product(
+            "tw-child", cat.ProductUpdateInput(**fields), current_user=ADMIN
+        ))
+
+    monkeypatch.setattr(pm, "_mirror_variant_row_update", refused)
+    with pytest.raises(HTTPException) as ei:
+        save(attributes={"gtin": new_gtin}, expected_updated_at=stamp)
+    assert ei.value.status_code == 503
+    assert _twin(db, "tw-child") == twin_before, "the twin is not saved"
+    assert _row(db, CHILD_SKU) == row_before
+
+    monkeypatch.setattr(pm, "_mirror_variant_row_update", real)
+    save(attributes={"gtin": new_gtin}, expected_updated_at=stamp)
+    assert _row(db, CHILD_SKU)["gtin"] == new_gtin
+    assert _twin(db, "tw-child")["attributes"]["gtin"] == new_gtin
+    assert _twin(db, "tw-parent")["ecom"]["locally_modified"] is True
+
+    # Only a barcode is strict: an mrp edit whose row write fails still saves.
+    monkeypatch.setattr(pm, "_mirror_variant_row_update", refused)
+    save(pricing=cat.PricingPatchInput(mrp=47000.0, offer_price=47000.0))
+    assert _twin(db, "tw-child")["mrp"] == 47000.0
+
+
 def test_push_image_never_attaches_a_childs_photo_to_the_parents_listing(monkeypatch):
     """P3: push_image resolves the media target from the image's product
     twin. Invariant 1 (a child twin never carries a gid) is enforced
