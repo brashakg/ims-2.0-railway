@@ -37,6 +37,12 @@ export interface CatalogProductDoc {
   tags?: string[] | null;
   is_active?: boolean | null;
   needs_review?: boolean | null;
+  /** Set on the catalogue twin of an item a manager ordered on a PO before it
+   *  was catalogued: it is finished in the product editor (this spine id). */
+  spine_product_id?: string | null;
+  /** Server-computed (product_master.is_ordered_draft): ordered on a PO
+   *  before it was catalogued and not finished yet. Never re-derive it. */
+  ordered_draft?: boolean;
   pos_ready?: boolean | null;
   promoted_at?: string | null;
   promoted_by?: string | null;
@@ -85,6 +91,9 @@ export interface CatalogProductListParams {
   is_active?: 'true' | 'false' | 'all';
   needs_review?: boolean;
   source?: string;
+  /** false = leave out items ordered on a PO before they were catalogued
+   *  (they open in the product editor, never the import review). */
+  ordered_draft?: boolean;
   /** 'has' = a usable photo by the push predicate; 'missing' = none (the
    *  Missing-photos work list). Filtered on the server. */
   photo?: PhotoFilter;

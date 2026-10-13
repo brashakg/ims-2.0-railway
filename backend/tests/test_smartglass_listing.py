@@ -515,7 +515,6 @@ _KNOWN_FIELD_DRIFT = {
          "lens_category", "sph"},
         {"lens_type", "material"},
     ),
-    "RG": ({"bridge_width", "lens_size", "temple_length"}, set()),
     "WT": (
         {"belt_colour", "belt_size", "dial_colour", "dial_size",
          "watch_category"},
