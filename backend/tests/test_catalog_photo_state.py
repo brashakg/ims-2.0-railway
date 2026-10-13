@@ -54,6 +54,10 @@ from api.services.online_catalog import (  # noqa: E402
     stamp_online_state,
 )
 
+# These suites test the photo / queue mechanics; the brand gate (a brand Brand
+# Master keeps off the website) is section 6, which overrides this.
+pytestmark = pytest.mark.usefixtures("brand_is_for_the_website")
+
 HTTP = "https://cdn.example.com/rb2140.jpg"
 APP_UPLOAD = "/api/v1/products/image/abc123"
 ADMIN = {"user_id": "u-admin", "username": "admin", "roles": ["ADMIN"]}
@@ -94,7 +98,7 @@ def _no_public_base(monkeypatch):
 )
 def test_predicate_rejects_missing_null_blank_and_relative(doc):
     assert shopify_push.product_photo_urls(doc) == []
-    assert product_online_state(doc)["has_photo"] is False
+    assert product_online_state(doc, None)["has_photo"] is False
 
 
 @pytest.mark.parametrize(
@@ -115,7 +119,7 @@ def test_predicate_rejects_missing_null_blank_and_relative(doc):
 )
 def test_predicate_accepts_only_absolute_http_urls(doc, expected):
     assert shopify_push.product_photo_urls(doc) == expected
-    assert product_online_state(doc)["has_photo"] is True
+    assert product_online_state(doc, None)["has_photo"] is True
 
 
 def test_in_app_upload_becomes_a_photo_only_with_a_public_base(monkeypatch):
@@ -130,7 +134,7 @@ def test_in_app_upload_becomes_a_photo_only_with_a_public_base(monkeypatch):
     assert shopify_push.product_photo_urls(doc) == [
         "https://ims-api.example.com" + APP_UPLOAD
     ]
-    assert product_online_state(doc)["has_photo"] is True
+    assert product_online_state(doc, None)["has_photo"] is True
 
 
 # ===========================================================================
@@ -139,37 +143,37 @@ def test_in_app_upload_becomes_a_photo_only_with_a_public_base(monkeypatch):
 
 
 def test_online_state_live_wins_even_without_a_photo():
-    st = product_online_state({"ecom": {"shopify_product_id": "gid://shopify/Product/1"}})
-    assert st == {"has_photo": False, "online": "LIVE", "queued": False}
+    st = product_online_state({"ecom": {"shopify_product_id": "gid://shopify/Product/1"}}, None)
+    assert st == {"has_photo": False, "online": "LIVE", "queued": False, "note": None}
 
 
 def test_online_state_staged_published_is_live():
-    st = product_online_state({"image_url": HTTP, "ecom": {"status": "PUBLISHED"}})
+    st = product_online_state({"image_url": HTTP, "ecom": {"status": "PUBLISHED"}}, None)
     assert st["online"] == "LIVE"
 
 
 def test_online_state_blocked_when_no_photo_and_not_live():
-    st = product_online_state({"ecom": {"status": "DRAFT", "locally_modified": True}})
+    st = product_online_state({"ecom": {"status": "DRAFT", "locally_modified": True}}, None)
     # Queued but photo-less: the push would refuse it, so the row says BLOCKED
     # while `queued` still reports the flag for the pending count.
-    assert st == {"has_photo": False, "online": "BLOCKED", "queued": True}
+    assert st == {"has_photo": False, "online": "BLOCKED", "queued": True, "note": None}
 
 
 def test_online_state_queued_when_photo_and_dirty():
     st = product_online_state(
-        {"images": [HTTP], "ecom": {"status": "DRAFT", "locally_modified": True}}
+        {"images": [HTTP], "ecom": {"status": "DRAFT", "locally_modified": True}}, None
     )
     assert st["online"] == "QUEUED"
 
 
 def test_online_state_off_when_photo_and_clean():
-    st = product_online_state({"images": [HTTP], "ecom": {"status": "DRAFT"}})
-    assert st == {"has_photo": True, "online": "OFF", "queued": False}
+    st = product_online_state({"images": [HTTP], "ecom": {"status": "DRAFT"}}, None)
+    assert st == {"has_photo": True, "online": "OFF", "queued": False, "note": None}
 
 
 def test_online_state_never_raises_on_junk():
-    assert product_online_state(None)["online"] == "BLOCKED"  # type: ignore[arg-type]
-    assert product_online_state({"ecom": "not-a-dict"})["online"] == "BLOCKED"
+    assert product_online_state(None, None)["online"] == "BLOCKED"  # type: ignore[arg-type]
+    assert product_online_state({"ecom": "not-a-dict"}, None)["online"] == "BLOCKED"
 
 
 # ===========================================================================
@@ -255,7 +259,7 @@ def _frame_payload(sku="FR-PHOTO-001"):
 def test_build_pim_doc_projects_the_spine_photos():
     doc = pm._build_pim_doc({"pim_product_id": "PIM-1", "sku": "X", "images": [HTTP, "", None, " "]})
     assert doc["images"] == [HTTP]
-    assert product_online_state(doc)["has_photo"] is True
+    assert product_online_state(doc, None)["has_photo"] is True
     # still pure / tolerant of a spine with no images at all
     assert pm._build_pim_doc({"pim_product_id": "PIM-2"})["images"] == []
 
@@ -278,7 +282,7 @@ def test_create_door_lands_the_photo_on_the_twin_the_push_reads():
     twin = db.get_collection("catalog_products").find_one({"id": created["pim_product_id"]})
     assert twin is not None
     assert twin["images"] == [HTTP]
-    st = product_online_state(twin)
+    st = product_online_state(twin, None)
     assert st["has_photo"] is True
     assert st["online"] == "QUEUED"  # born dirty AND has a photo
 
@@ -295,7 +299,7 @@ def test_spine_photo_edit_mirrors_onto_the_twin_and_queues_it():
     twin = db.get_collection("catalog_products").find_one({"id": "P1"})
     assert twin["images"] == [HTTP]
     assert twin["ecom"]["locally_modified"] is True
-    assert product_online_state(twin)["online"] == "QUEUED"
+    assert product_online_state(twin, None)["online"] == "QUEUED"
 
 
 def test_spine_edit_without_images_leaves_the_twin_photo_alone():
@@ -374,7 +378,7 @@ def test_pending_drops_when_the_shopify_writeback_clears_the_flag_and_never_rise
     assert catalog_counts(db)["pending"] == 1
     shopify_push._writeback_product(db, "P1", "gid://shopify/Product/9", status="PUBLISHED")
     assert catalog_counts(db)["pending"] == 0
-    assert product_online_state(db["catalog_products"].find_one({"id": "P1"}))["online"] == "LIVE"
+    assert product_online_state(db["catalog_products"].find_one({"id": "P1"}), None)["online"] == "LIVE"
     shopify_push._writeback_product(db, "P1", "gid://shopify/Product/9")
     assert catalog_counts(db)["pending"] == 0
 
@@ -507,3 +511,82 @@ def test_products_list_restamps_on_a_cache_hit(monkeypatch):
     second = _products_list(monkeypatch, repo, db, store_id=store)
     s2 = {p["product_id"]: p for p in second["products"]}["S2"]
     assert (s2["has_photo"], s2["online"]) == (True, "QUEUED")
+
+
+# ===========================================================================
+# 7. ONE website verdict -- the Catalog screen asks the push's own gate
+# ===========================================================================
+# The audit probe (round 5): a Carrera twin (Brand Master keeps Carrera off the
+# website) with a photo and born dirty. The push refuses it; the Catalog screen
+# called it QUEUED ("waiting for a human to press push") and both pending
+# counts counted it -- two screens, two answers, and the chip could never
+# clear because only a successful Shopify write resets the flag.
+
+from api.services import catalog_dictionary as _cd  # noqa: E402
+from api.services.online_catalog import doc_online_state  # noqa: E402
+from api.routers import online_store_push as _push_router  # noqa: E402
+
+_REAL_BRAND_GATE = _cd.brand_website_refusal  # captured before any fixture patches it
+
+_CARRERA_TWIN = {
+    "id": "T1", "sku": "FR-CARRERA-CA8895-807-54", "brand": "Carrera", "category": "FR",
+    "is_active": True, "images": [HTTP], "attributes": {"brand_name": "Carrera"},
+    "ecom": {"status": "DRAFT", "locally_modified": True},
+}
+
+
+def _brand_db(carrera_on=False, twins=(_CARRERA_TWIN,)):
+    db = StrictDB()
+    db.seed("brand_masters", [
+        {"brand_id": "b2", "name": "Carrera", "is_active": True,
+         "sync_to_shopify_default": carrera_on},
+    ])
+    db.seed("catalog_products", [dict(t) for t in twins])
+    return db
+
+
+@pytest.fixture
+def real_brand_gate(monkeypatch):
+    monkeypatch.setattr(_cd, "brand_website_refusal", _REAL_BRAND_GATE)
+
+
+def test_a_brand_off_the_website_is_never_queued_on_any_screen(monkeypatch, real_brand_gate):
+    db = _brand_db(carrera_on=False)
+    twin = db["catalog_products"].find_one({"id": "T1"})
+    # The push refuses it ...
+    res = asyncio.run(shopify_push.push_product(db, twin, []))
+    assert res.mode == shopify_push.MODE_BLOCKED and "not for the website" in res.reason
+    # ... and so does every screen, with the same verdict.
+    st = doc_online_state(db, twin)
+    assert (st["online"], st["queued"]) == ("NOT_FOR_WEBSITE", False)
+    # The chip says why (the gate's own reason), not a fixed guess.
+    assert st["note"] == "Not for the website: " + res.reason
+    assert catalog_counts(db)["pending"] == 0
+    assert _push_router._product_counts(db)["pending"] == 0
+    monkeypatch.setattr(catalog_mod, "_get_db", lambda: db)
+    row = _catalog_list(monkeypatch, [twin])["products"][0]
+    assert row["online"] == "NOT_FOR_WEBSITE"
+    spine = [{"product_id": "S1", "sku": twin["sku"], "pim_product_id": "T1"}]
+    stamp_online_state(db, spine)
+    assert spine[0]["online"] == "NOT_FOR_WEBSITE"
+
+
+def test_ticking_the_brand_queues_it_again_everywhere(monkeypatch, real_brand_gate):
+    db = _brand_db(carrera_on=True)
+    twin = db["catalog_products"].find_one({"id": "T1"})
+    st = doc_online_state(db, twin)
+    assert (st["online"], st["queued"]) == ("QUEUED", True)
+    assert catalog_counts(db)["pending"] == 1
+    assert _push_router._product_counts(db)["pending"] == 1
+
+
+def test_a_live_listing_whose_brand_went_off_stays_live_with_a_note(real_brand_gate):
+    live = dict(_CARRERA_TWIN, ecom={"status": "PUBLISHED", "locally_modified": True,
+                                     "shopify_product_id": "gid://shopify/Product/7"})
+    db = _brand_db(carrera_on=False, twins=(live,))
+    st = doc_online_state(db, db["catalog_products"].find_one({"id": "T1"}))
+    assert st["online"] == "LIVE" and st["queued"] is False
+    assert st["note"].startswith("Price and images no longer sync")
+    assert "Carrera" in st["note"]
+    counts = catalog_counts(db)
+    assert (counts["live"], counts["pending"]) == (1, 0)

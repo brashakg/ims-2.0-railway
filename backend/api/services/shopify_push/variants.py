@@ -17,7 +17,7 @@ from ._shared import (
     PushResult,
     _blocked_result,
     _live_or_reason,
-    push_lock_reason,
+    product_push_refusal,
 )
 from .transport import _graphql, _user_errors
 from .queries import _VARIANTS_BULK_CREATE, _VARIANTS_BULK_UPDATE, _VARIANTS_PER_CALL
@@ -528,9 +528,9 @@ async def push_variant_prices(
     ProductVariantsBulkInput rows and NO network call; LIVE only behind the
     same three gates. Never raises (fail-soft PushResult contract)."""
     pid = product.get("id") or product.get("product_id")
-    # Hub Phase 5 push-lock, FIRST gate (fail-closed): a locked brand's prices
-    # must never reach Shopify either.
-    _lock = push_lock_reason(db, "product", product)
+    # FIRST gate (fail-closed): a push-locked brand's, or an off-the-website
+    # brand's (owner D6), prices must never reach Shopify either.
+    _lock = product_push_refusal(db, product)
     if _lock:
         return _blocked_result("variant-prices", pid, _lock)
 
