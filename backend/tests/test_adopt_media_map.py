@@ -412,6 +412,21 @@ def test_transport_failure_is_reported_not_fatal(db, monkeypatch):
     assert out["written"] == [] and "media_map" not in _twin(db)["ecom"]
 
 
+def test_a_malformed_media_answer_is_a_read_failure_like_the_press(db, monkeypatch):
+    """One reader of a listing's media (media._listing_media) serves this
+    runbook and the design press: an answer whose product has no media list
+    is a read failure for both, never 'the listing is empty'."""
+
+    async def no_media(db_, query, variables):
+        return {"data": {"product": {"id": variables["id"], "media": None}}}
+
+    monkeypatch.setattr(shopify_push, "_graphql", no_media)
+    _seed(db, [U1])
+    out = _run(db, apply=True)
+    assert [r["status"] for r in out["rows"]] == ["graphql_error"]
+    assert out["written"] == [] and "media_map" not in _twin(db)["ecom"]
+
+
 def test_extension_case_is_not_folded():
     """VERIFIER 2 (2026-09-06): the rule is EXACT equality with no case
     folding. _stem_ext lowers the extension (and _IMAGE_EXT is re.I), so IMS
