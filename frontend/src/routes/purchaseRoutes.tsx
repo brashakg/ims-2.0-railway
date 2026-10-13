@@ -10,9 +10,8 @@
 import { lazy } from 'react';
 import { Route, Navigate, useSearchParams } from 'react-router-dom';
 import { ProtectedRoute } from '../components/layout/ProtectedRoute';
-import type { UserRole } from '../types';
 import { APPROVE_ROLES } from '../pages/purchase/invoices/shared';
-import { RETURN_READERS } from '../pages/purchase/purchaseRoles';
+import { PURCHASE_ROLES, RETURN_READERS } from '../pages/purchase/purchaseRoles';
 import { NoShopGate } from '../components/common/NoShopNotice';
 
 const PurchaseLayout = lazy(() => import('../pages/purchase/PurchaseLayout').then(m => ({ default: m.PurchaseLayout })));
@@ -31,8 +30,7 @@ const ReconConsole = lazy(() => import('../pages/purchase/ReconConsole'));
 // one no-shop gate too (NoShopGate: a login with no shop reads why, and no
 // list is requested), as PurchaseLayout does with NoShopNotice.
 
-// The module gate for the section pages — identical to the old /purchase gate.
-const PURCHASE_ROLES: UserRole[] = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'];
+// The module gate for the section pages (PURCHASE_ROLES): who may raise a PO.
 
 // Legacy ?tab= mapper: /purchase and /purchase?tab=<x> land on the section
 // page, carrying every other query param (grn_id!) along.
