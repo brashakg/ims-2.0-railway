@@ -1,14 +1,17 @@
 // ============================================================================
 // IMS 2.0 - P0-4 (launch gate): a refused "Send PO" must never report success
 // ============================================================================
-// Launch-gate repro: DRAFT PO -> "Submit for Approval" with the server
+// Launch-gate repro: DRAFT PO -> "Send to vendor" with the server
 // REFUSING the send. The old handler swallowed the refusal in an empty catch,
 // then flipped the row to PENDING and fired toast.success('') anyway — an
 // empty green toast — so a manager believed the PO reached the vendor and the
 // goods were simply never ordered. Pinned here:
 //   * the refusal TEXT is toasted as an error,
 //   * no success toast fires,
-//   * state does NOT flip — the PO stays DRAFT with its Submit button.
+//   * state does NOT flip — the PO stays DRAFT with its Send button.
+// Owner ruling 2026-09-28 (F20): there is no approval step, so a successful
+// send says "sent to vendor" and the order reads Sent -- never "Pending
+// Approval".
 // The rejection is built by the REAL api-client transform (buildApiError),
 // never a hand-made axios shape the client would not deliver.
 
@@ -111,7 +114,7 @@ async function openDraftPO() {
   );
   expect(eyeBtn, 'view (eye) button not found on the PO row').toBeTruthy();
   fireEvent.click(eyeBtn!);
-  return screen.findByRole('button', { name: /submit for approval/i });
+  return screen.findByRole('button', { name: /send to vendor/i });
 }
 
 describe('Purchase page — refused Send PO (P0-4)', () => {
@@ -136,9 +139,9 @@ describe('Purchase page — refused Send PO (P0-4)', () => {
     );
     // The lie is dead: no green toast of any kind, empty-string included.
     expect(toastMock.success).not.toHaveBeenCalled();
-    // State did not flip: the PO is still DRAFT, so its Submit button remains.
+    // State did not flip: the PO is still DRAFT, so its Send button remains.
     expect(
-      screen.getByRole('button', { name: /submit for approval/i }),
+      screen.getByRole('button', { name: /send to vendor/i }),
     ).toBeInTheDocument();
   });
 
@@ -150,13 +153,15 @@ describe('Purchase page — refused Send PO (P0-4)', () => {
 
     await waitFor(() =>
       expect(toastMock.success).toHaveBeenCalledWith(
-        'PO-2026-0042 submitted for approval',
+        'PO-2026-0042 sent to vendor',
       ),
     );
     expect(toastMock.error).not.toHaveBeenCalled();
-    // DRAFT -> PENDING: the Submit button is gone.
+    // DRAFT -> SENT: the Send button is gone and nothing says "approval".
     expect(
-      screen.queryByRole('button', { name: /submit for approval/i }),
+      screen.queryByRole('button', { name: /send to vendor/i }),
     ).not.toBeInTheDocument();
+    expect(screen.queryByText(/approval/i)).not.toBeInTheDocument();
+    expect(screen.getAllByText('Sent').length).toBeGreaterThan(0);
   });
 });
