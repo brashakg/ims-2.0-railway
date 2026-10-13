@@ -1167,6 +1167,24 @@ def test_a_drawer_barcode_edit_the_size_row_refuses_is_a_503_and_save_again_land
     assert _twin(db, "tw-child")["mrp"] == 47000.0
 
 
+def test_a_drawer_barcode_removal_clears_the_size_rows_gtin_and_barcode(monkeypatch):
+    """Remove on a size variant in the review editor (attributes.gtin '')
+    clears its catalog_variants row -- what the parent's push sends for that
+    size -- in BOTH fields, so the removed code is never sent or held again."""
+    db = _world()
+    _wire_catalog(monkeypatch, db)
+    db["catalog_variants"].update_one({"sku": CHILD_SKU}, {"$set": {"barcode": CHILD_GTIN}})
+    db["catalog_products"].update_one({"id": "tw-child"}, {"$set": {"attributes.gtin": CHILD_GTIN}})
+
+    _run(cat.update_catalog_product(
+        "tw-child", cat.ProductUpdateInput(attributes={"gtin": ""}), current_user=ADMIN
+    ))
+
+    row = _row(db, CHILD_SKU)
+    assert (row["gtin"], row["barcode"]) == (None, None)
+    assert not _spine(db, "sp-child")["attributes"]["gtin"]
+
+
 def test_a_drawer_barcode_edit_on_a_size_with_no_row_is_a_503(monkeypatch):
     """No catalog_variants row for the size's sku means the barcode cannot
     reach the website: a failed size write (503, twin not saved), like a
