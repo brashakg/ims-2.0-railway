@@ -328,6 +328,12 @@ class TestReverseChargeBill:
         assert g["inwardSuppliesReverseCharge"]["integratedTax"] == 180.0
         assert g["itcAvailable"]["integratedTax"] == 0.0
         assert g["itcReverseCharge"]["integratedTax"] == 0.0
+        # The portal upload: 3.1(d) declares the liability (never the credit),
+        # and Table 4(A)(3) / (A)(5) claim nothing (never the liability).
+        out = to_gstr3b_json(g)
+        assert out["sup_details"]["isup_rev"]["iamt"] == 180.0
+        avl = {row["ty"]: row for row in out["itc_elg"]["itc_avl"]}
+        assert (avl["ISRC"]["iamt"], avl["OTH"]["iamt"]) == (0.0, 0.0)
 
     def test_a_supplier_with_no_gstin_may_be_reverse_charge(self):
         """The rule allows it: the buyer pays the tax and may claim it."""
