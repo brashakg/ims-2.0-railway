@@ -588,6 +588,11 @@ class TestBothDoorsEnforceTheSameRule:
             assert "Goods Receipt" in msg
             assert "store manager" in msg
             assert "Bought without PO" in msg
+            # The way to book it is a screen that works -- Create from GRN --
+            # never the old dead end of recording it on this door "under that
+            # supplier" with no receipt to link (panel, round 9).
+            assert "Create from GRN" in msg
+            assert "under that supplier" not in msg
         assert d1["message"].endswith(d2["message"].split("final. ", 1)[1])
         assert _bills(db) == []
 
