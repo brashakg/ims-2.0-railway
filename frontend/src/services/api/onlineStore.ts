@@ -1555,6 +1555,8 @@ export interface LiveSyncRun {
   publish_withheld?: number | null;
   /** Live, but at the OLD price: the price step failed (PRICE_NOT_SYNCED). Still queued. */
   price_not_synced?: number | null;
+  /** Live, but a photo step failed (PHOTOS_NOT_SYNCED): the website's photos are not IMS's, in IMS's order. Still queued. */
+  photos_not_synced?: number | null;
   /** Dirty products with NO Shopify id: never synced -- first publish is a human press. */
   awaiting_first_publish?: number | null;
   taken_down_skipped?: number | null;
@@ -1628,6 +1630,10 @@ export interface PushSweepResult {
            *  the press failed (PRICE_NOT_SYNCED). Counted in `pushed` too (a
            *  shopper can find them); they stay queued for the retry. */
           price_not_synced?: number;
+          /** Products that are live but whose photos did not all reach
+           *  Shopify in IMS order (PHOTOS_NOT_SYNCED). Counted in `pushed`
+           *  too; they stay queued for the retry. */
+          photos_not_synced?: number;
           /** Products that published but whose QUANTITIES reached no Shopify
            *  location at all (no shop mapped, two SKUs on one inventory
            *  item...). Counted in `pushed` too -- the listing is live -- but

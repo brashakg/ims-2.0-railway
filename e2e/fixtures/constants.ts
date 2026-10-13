@@ -59,6 +59,11 @@ export const SEED = {
     name: 'E2E Test Frame Colour - Havana',
     colour: 'Havana',
   },
+  // A frame with three photos: the layout gate opens its edit page so the
+  // photo grid and its Earlier / Later row are measured at every width.
+  photoFrame: {
+    productId: 'e2e-frame-photos',
+  },
 } as const;
 
 /** GST pricing modes the backend may run in. */

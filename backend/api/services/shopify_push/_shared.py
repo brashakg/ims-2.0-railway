@@ -144,6 +144,18 @@ _PRICE_NOT_SYNCED_MSG = (
     "sync retries it."
 )
 
+# ...and the same rule for its PHOTOS: the product is live, but a photo step of
+# the press (attach, delete or reorder) failed, so the website's photos are
+# not IMS's photos in IMS's order. The row stays queued so the next press or
+# scheduled sync sends the step again (a reorder-only edit has no other retry).
+PHOTOS_NOT_SYNCED = "PHOTOS_NOT_SYNCED"
+_PHOTOS_NOT_SYNCED_MSG = (
+    "Live on the website, but its photos there do not match IMS: a photo "
+    "change (a new photo, a removed photo or a new order) did not reach "
+    "Shopify. The product stays queued -- press again, or the next scheduled "
+    "sync retries it."
+)
+
 
 # ===========================================================================
 # Gating -- the single source of truth for "are we DARK or LIVE?"
