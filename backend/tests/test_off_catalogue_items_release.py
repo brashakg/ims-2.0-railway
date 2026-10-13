@@ -1561,23 +1561,36 @@ def test_c1_asking_again_after_the_ask_was_closed_asks_again(world):
 
 
 def test_an_accountant_sees_and_closes_the_task_addressed_to_accountants(world):
-    # Express receive's "Book purchase invoice" is addressed to the ACCOUNTANT
-    # title (grn_express). Below manager the list is your own -- and a task
-    # addressed to your title is yours.
+    # Express receive's "Book purchase invoice" was addressed to the
+    # ACCOUNTANT title (grn_express); a task stored so before create_system_task
+    # resolved titles to people (audit F33) still sits on prod with the title.
+    # Below manager the list is your own -- and a task addressed to your title
+    # is yours. Seeded as prod stores it: create_system_task would turn the
+    # title into the accountant's id and never test the title.
     _seed_user(world, ACCOUNTANT)
     _seed_user(world, SALES)
-    from api.services.task_triggers import create_system_task
+    from datetime import datetime
 
-    task = create_system_task(
-        _deps.get_task_repository(),
-        title="Book purchase invoice for GRN RCPT/1 (Jharkhand Optical Traders)",
-        description="Express receive completed.",
-        priority="P2",
-        category="Purchase",
-        store_id=STORE,
-        dedupe_ref="express_invoice:g-1",
-        assigned_to="ACCOUNTANT",
-    )
+    task = {
+        "task_id": "TSK-LEGACY0001",
+        "task_number": "TSK-LEGACY0001",
+        "title": "Book purchase invoice for GRN RCPT/1 (Jharkhand Optical Traders)",
+        "description": "Express receive completed.",
+        "category": "Purchase",
+        "priority": "P2",
+        "status": "OPEN",
+        "source": "SYSTEM",
+        "source_ref": "express_invoice:g-1",
+        "assigned_to": "ACCOUNTANT",
+        "assigned_by": "system",
+        "store_id": STORE,
+        "due_at": datetime.now(),
+        "created_at": datetime.now(),
+        "updated_at": datetime.now(),
+        "escalation_level": 0,
+        "history": [],
+    }
+    world.db.seed("tasks", [dict(task)])
 
     def listed(user, store_id):
         out = _run(
