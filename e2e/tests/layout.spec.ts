@@ -121,7 +121,8 @@ for (const screen of ROUTES) {
     // failure mode being replaced here. Assert we are on the real screen.
     // A URL predicate, not a RegExp built by string concatenation: a screen
     // path is a literal, and escaping one into a pattern is a bug factory.
-    await page.waitForURL((u) => u.pathname === screen.path);
+    // (A path's query string is page state, and a page may drop it once read.)
+    await page.waitForURL((u) => u.pathname === screen.path.split('?')[0]);
     await settle();
 
     // Every width is measured even after one of them fails, so a broken screen
@@ -149,6 +150,12 @@ for (const screen of ROUTES) {
         await page.locator('[data-probe-old]').waitFor({ state: 'detached' });
         await go(screen.path);
         await settle();
+        if (screen.scrollTo) {
+          await page
+            .locator(screen.scrollTo)
+            .first()
+            .evaluate((el) => el.scrollIntoView({ block: 'start', behavior: 'instant' }));
+        }
 
         const violations = await auditLayout(page);
         // A screen already broken when the gate was built is QUARANTINED, not

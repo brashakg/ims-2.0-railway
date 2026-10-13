@@ -26,6 +26,7 @@ from ._shared import (
     validate_store_access,
 )
 from ...services.cost_mask import mask_cost_list
+from ...services.product_master import main_photo
 from ...services.item_events import on_hand_match
 from ...utils.ist import ist_date_str_from_stored
 from .helpers import (
@@ -475,19 +476,10 @@ def _ledger_row(
         "created_by_name": (
             product.get("created_by_name") if include_attribution else None
         ),
-        # Owner 2026-07-05: product images on the Inventory screen. The first
-        # image as the row thumbnail + the full array for the click-to-zoom
-        # lightbox. Spine docs carry images[] (image_url is a serve-time alias).
-        "image_url": (
-            product.get("image_url")
-            or (
-                product["images"][0]
-                if isinstance(product.get("images"), list)
-                and product.get("images")
-                and isinstance(product["images"][0], str)
-                else None
-            )
-        ),
+        # Owner 2026-07-05: product images on the Inventory screen. Photo 1
+        # (the one main-photo rule) as the row thumbnail + the full array for
+        # the click-to-zoom lightbox.
+        "image_url": main_photo(product),
         "images": (
             product.get("images") if isinstance(product.get("images"), list) else []
         ),
