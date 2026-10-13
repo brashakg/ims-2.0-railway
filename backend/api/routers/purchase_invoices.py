@@ -998,15 +998,15 @@ def _apply_valuation_trueup(db, invoice_doc, computed, config) -> Optional[list]
                 store_id = (grn or {}).get("store_id")
             except Exception:
                 store_id = None
-        # G1 (owner 2026-10-13): a walk-in buy's bill that claims no input
-        # credit costs its goods at the price plus the GST it charged -- tax
-        # that cannot be claimed back is part of what the goods cost. THE
-        # place G1 is decided: the units went on the shelf at the price paid,
-        # and both bill doors true up through here (a 0% cash memo leaves the
-        # price paid).
-        if (grn or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO and (
-            invoice_doc.get("itc_eligible") is False
-        ):
+        # A walk-in buy's cost is ONE rule at receiving and at booking: the
+        # LATEST PRICE PAID (owner 2026-10-12), never the configured blend --
+        # plus, G1 (owner 2026-10-13), the GST its bill charged when that bill
+        # claims no input credit: tax that cannot be claimed back is part of
+        # what the goods cost. THE place G1 is decided: the units went on the
+        # shelf at the price paid, and both bill doors true up through here (a
+        # 0% cash memo leaves the price paid).
+        walk_in = (grn or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO
+        if walk_in and invoice_doc.get("itc_eligible") is False:
             lines = [
                 {
                     **ln,
@@ -1022,7 +1022,9 @@ def _apply_valuation_trueup(db, invoice_doc, computed, config) -> Optional[list]
             db, pids, store_id, exclude_grn_id=grn_id
         )
         updates = pmatch.valuation_trueup_for_invoice(
-            lines, product_state, config.get("valuation_method")
+            lines,
+            product_state,
+            pmatch.VALUATION_LATEST_PRICE if walk_in else config.get("valuation_method"),
         )
         if not updates:
             return None

@@ -2061,6 +2061,41 @@ def test_g1_a_walk_in_bill_booked_without_credit_costs_its_gst(world):
     assert db.products.find_one({"product_id": FRAME})["cost_price"] == 3100.0
 
 
+def test_g1_a_walk_in_bill_costs_the_latest_price_paid_never_a_blend(world):
+    """Panel probe (round 9): receiving set a walk-in product's cost to the
+    latest price paid, but booking its bill blended a moving average over that
+    just-overwritten cost and whatever was on hand -- a second walk-in at 3100
+    booked with credit off at 5% left 3177.50 (two frames from the first buy
+    still on the shelf), not 3100 + 5%. One rule at both steps: the latest
+    price paid, plus the GST of a bill claiming no credit; with credit, the
+    price before GST -- whatever else is on hand, at whatever price."""
+    db = world["db"]
+
+    def frame_cost():
+        return db.products.find_one({"product_id": FRAME})["cost_price"]
+
+    def booked(number, credit):
+        grn_id = _on_the_shelf(world, vendor_invoice_no=number)
+        body = _invoice_body(grn_id, number)
+        body.itc_eligible = credit
+        _run(pi.create_purchase_invoice(body, current_user=ACCOUNTANT))
+        return frame_cost()
+
+    assert booked("CASH-81", True) == 3100.0
+    assert booked("CASH-82", False) == 3255.0
+    assert booked("CASH-83", True) == 3100.0
+    # Five frames from an old PO delivery at Rs 2000 are on the shelf too.
+    db.stock_units.insert_many(
+        [
+            {"stock_id": f"SU-OLD-{i}", "product_id": FRAME, "store_id": STORE, "status": "AVAILABLE", "unit_cost": 2000.0, "source_id": "GRN-PO-OLD"}
+            for i in range(5)
+        ]
+    )
+    db.products.update_one({"product_id": FRAME}, {"$set": {"cost_price": 2000.0, "cost_source": "PURCHASE_INVOICE"}})
+    assert booked("CASH-84", False) == 3255.0
+    assert booked("CASH-85", True) == 3100.0
+
+
 def _three_b(world):
     from api.services.gstn_export import to_gstr3b_json
 
