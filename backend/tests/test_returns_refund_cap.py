@@ -27,8 +27,9 @@ from tests.test_returns_gst_refund import (  # noqa: E402
 _HDR = {"Authorization": f"Bearer {_staff_token(['ADMIN'])}"}
 
 
-def _ctx(monkeypatch, *, amount_paid=1_000_000.0, status="DELIVERED", qty=1):
+def _ctx(monkeypatch, *, amount_paid=1_000_000.0, status="DELIVERED", qty=1, **over):
     order = _qa_order()
+    order.update(over)
     order["status"] = status
     order["amount_paid"] = amount_paid
     order["items"][0]["quantity"] = qty
@@ -62,6 +63,18 @@ def test_reject_cancelled_order(monkeypatch):
     r = client.post("/api/v1/returns", json=_qa_payload(), headers=_HDR)
     assert r.status_code == 400, r.text
     assert "cancelled" in r.text.lower() or "status" in r.text.lower()
+
+
+def test_reject_an_order_shopify_refunded_in_full(monkeypatch):
+    """Owner ruling 2026-09-28 keeps a DELIVERED online order DELIVERED when
+    Shopify refunds it in full, so the status check lets it through. The money
+    already went back on Shopify: a counter refund would pay the customer twice
+    (and a second credit note would reverse the GST twice)."""
+    client, returns = _ctx(monkeypatch, amount_paid=2000.0, payment_status="REFUNDED")
+    r = client.post("/api/v1/returns", json=_qa_payload(), headers=_HDR)
+    assert r.status_code == 400, r.text
+    assert "Shopify already refunded" in r.text and "Goods back" in r.text
+    assert returns.count_documents({}) == 0
 
 
 def test_reject_draft_order(monkeypatch):

@@ -31,6 +31,7 @@ import logging
 
 from ..base import JarvisAgent, AgentType, AgentResponse, AgentContext
 from api.utils.ist import ist_day_start_utc, ist_today, now_ist
+from api.services.online_order_status import SALE_DONE_STATUSES
 from ..nexus_providers import (
     SyncResult,
     TallyExportError,
@@ -186,43 +187,72 @@ class NexusAgent(JarvisAgent):
 
     async def _sync_shiprocket_outbound(self) -> SyncResult:
         """
-        For each order in SHIPPED state with an AWB, pull the latest
-        tracking status from Shiprocket and update orders if changed.
+        For each order with an AWB whose status a courier DELIVERED moves
+        (the ONE transition table: online_order_status.moved_by -- an order
+        held at CONFIRMED with its parcel out is asked too, as the webhook
+        asks it), pull the latest tracking status from Shiprocket and update
+        orders if changed. A courier DELIVERED is the delivery (owner ruling
+        2026-09-28): it moves the order through the table -- asked on every
+        poll, not only on a tracking change, so a held order or a lost race
+        retries next hour.
         """
+        from api.services.online_order_status import DELIVER, apply_fact, courier_fact, moved_by
+        from api.services.shopify_fulfillment import awb_filter, tracked_awbs
+
         orders_coll = self.get_collection("orders")
         if orders_coll is None:
             return SyncResult(ok=True, provider="shiprocket", kind="pull",
                               notes="orders collection unavailable — heartbeat")
         try:
+            # Least-recently polled first (never polled sorts first): an order
+            # the courier never reports DELIVERED (an RTO, an AWB Shiprocket
+            # cannot track) stays SHIPPED, and without the rotation 50 of them
+            # would hold every slot and starve each later delivery. An order
+            # with a parcel to track by tracked_awbs' rule (awb_filter), the
+            # webhook's: a live parcel's AWB in the parcel list while the
+            # order's own awb is empty is still asked about.
             shipped_with_awb = list(orders_coll.find({
-                "status": "SHIPPED",
-                "awb": {"$exists": True, "$ne": ""},
-            }).limit(50))
+                "status": {"$in": list(moved_by(DELIVER))},
+                **awb_filter({"$gt": ""}),
+            }).sort("tracking_polled_at", 1).limit(50))
         except Exception as e:
             return SyncResult(ok=False, provider="shiprocket", kind="pull", error=str(e))
 
-        updated = 0
+        updated = delivered = 0
         for order in shipped_with_awb:
-            awb = order.get("awb")
-            r = await shiprocket_track_awb(self.db, awb)
-            if not r.ok:
-                continue
-            new_status = (r.payload or {}).get("latest_status")
-            if new_status and new_status != order.get("tracking_status"):
+            answers = []
+            # Every live parcel of a split shipment (tracked_awbs): the one
+            # the courier delivers is the delivery.
+            for awb in tracked_awbs(order):
                 try:
-                    orders_coll.update_one(
-                        {"_id": order["_id"]},
-                        {"$set": {"tracking_status": new_status,
-                                  "tracking_updated_at": datetime.now(timezone.utc).isoformat()}},
-                    )
-                    updated += 1
-                except Exception as e:
-                    logger.warning(f"[NEXUS] Order tracking update failed: {e}")
+                    r = await shiprocket_track_awb(self.db, awb)
+                except Exception as e:  # noqa: BLE001 -- one bad AWB / answer never stops the poll
+                    # An unexpected tracking JSON shape, or an AWB httpx refuses
+                    # (InvalidURL is no HTTPError), raises out of the call. Left
+                    # unstamped it would sort first and abort every run.
+                    logger.warning(f"[NEXUS] Shiprocket track failed for AWB {awb!r}: {e}")
+                    r = None
+                answers.append((r.payload or {}).get("latest_status") if r and r.ok else None)
+            now = datetime.now(timezone.utc).isoformat()
+            stamp = {"tracking_polled_at": now}  # asked, answered or not: to the back
+            new_status = next((s for s in answers if courier_fact(s) == DELIVER),
+                              next((s for s in answers if s), None))
+            if new_status and new_status != order.get("tracking_status"):
+                stamp.update(tracking_status=new_status, tracking_updated_at=now)
+            try:
+                orders_coll.update_one({"_id": order["_id"]}, {"$set": stamp})
+                updated += "tracking_status" in stamp
+            except Exception as e:
+                logger.warning(f"[NEXUS] Order tracking update failed: {e}")
+            if courier_fact(new_status) == DELIVER and apply_fact(
+                self.db, order, DELIVER, source="SHIPROCKET"
+            )["to"]:
+                delivered += 1
 
         return SyncResult(
             ok=True, provider="shiprocket", kind="pull",
             items_synced=updated,
-            notes=f"Checked {len(shipped_with_awb)} AWBs, {updated} status changes",
+            notes=f"Checked {len(shipped_with_awb)} AWBs, {updated} status changes, {delivered} delivered",
         )
 
     async def _build_tally_export(self, target_date: Optional[datetime] = None,
@@ -370,7 +400,7 @@ class NexusAgent(JarvisAgent):
             try:
                 orders = list(orders_coll.find({
                     "$or": created_or,
-                    "status": {"$in": ["COMPLETED", "DELIVERED", "PAID"]},
+                    "status": {"$in": SALE_DONE_STATUSES},
                     "store_id": sid,
                 }))
             except Exception as e:
@@ -635,7 +665,7 @@ class NexusAgent(JarvisAgent):
                     {"created_at": {"$gte": ds_dt, "$lt": de_dt}},
                     {"created_at": {"$gte": ds_dt.isoformat(), "$lt": de_dt.isoformat()}},
                 ],
-                "status": {"$in": ["COMPLETED", "DELIVERED", "PAID"]},
+                "status": {"$in": SALE_DONE_STATUSES},
             }))
         except Exception as e:
             return SyncResult(ok=False, provider="tally", kind="export", error=str(e))
@@ -1106,8 +1136,22 @@ class NexusAgent(JarvisAgent):
             logger.warning(f"[NEXUS] shopify app-uninstalled handling failed: {e}")
 
     async def _handle_shiprocket_webhook(self, payload: Dict[str, Any]):
+        """A signed Shiprocket status push. A courier DELIVERED on a known AWB
+        is the delivery: the ONE transition table (online_order_status)
+        decides. Field names are Shiprocket's documented ones (awb,
+        current_status); the hourly poll is the path that is known to work."""
+        from api.services.online_order_status import DELIVER, apply_fact, courier_fact
+        from api.services.shopify_fulfillment import awb_filter
+
         evt = payload.get("current_status") or payload.get("event") or "unknown"
         logger.info(f"[NEXUS] shiprocket webhook status={evt}")
+        awb = str(payload.get("awb") or "").strip()
+        if not awb or courier_fact(payload.get("current_status")) != DELIVER:
+            return
+        orders = self.get_collection("orders")
+        order = orders.find_one(awb_filter(awb)) if orders is not None else None
+        if order:
+            apply_fact(self.db, order, DELIVER, source="SHIPROCKET_WEBHOOK")
 
     async def run(self, query: str, context: AgentContext) -> AgentResponse:
         """On-demand: report recent sync runs."""
