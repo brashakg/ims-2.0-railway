@@ -4944,6 +4944,94 @@ def test_a_move_refused_after_a_clear_hold_on_the_wire_holds_the_order(world, mo
     assert after["fulfillment_hold"] is False and after["store_id"] == "BV-BOK-01"
 
 
+def test_a_seller_release_keeps_a_fulfillment_order_at_another_shop_held(world, monkeypatch):
+    """[LOW-MEDIUM] Round 25, item 6, probe A: Bokaro (no GSTIN) holds RB and
+    OA; Shopify put FO_1 (RB) at Bokaro and FO_2 (OA) at Pune's unmapped
+    location, which IMS did not move (Bokaro fails the seller check). Bokaro's
+    GSTIN set, clear-hold released EVERYTHING: Bokaro shipped the OA IMS
+    claimed while Pune's fulfillment order could ship it a second time,
+    from Maharashtra under Bokaro's Jharkhand invoice. The route's own hold
+    stands now, and the answer says why."""
+    from fastapi import HTTPException
+    from api.routers.orders import assert_no_active_rx_hold
+
+    db = world["db"]
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": ""}})
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+    _stock(db, "BV-BOK-01", "P-OA", 1)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1)])
+    world["shop"].fo(FO_2, LOC_PUNE_SHOPIFY, lines=[(9001, 1)])
+    res, order = _book(world, _order(61281, lines=(("RB-1234", 1), ("OA-5", 1))))
+    oid = res["order_id"]
+    codes = {p["code"]: p["message"] for p in order["fulfillment_route"]["problems"]}
+    assert set(codes) == {"FO_AT_OTHER_SHOP", "SHOP_GSTIN_MISSING"}
+    assert _sold_at(db, oid) == ["BV-BOK-01", "BV-BOK-01"]
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": "20AAAAA0000A1Z5"}})
+
+    out = _clear_hold(world, monkeypatch, oid)
+
+    assert out["released"] == ["SELLER"] and out["fulfillment_hold"] is True, out
+    assert "stays held for its fulfillment orders" in out["message"]
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert after["fulfillment_hold"] is True and after["stock_hold_reason"] == codes["FO_AT_OTHER_SHOP"]
+    with pytest.raises(HTTPException):
+        assert_no_active_rx_hold(after)
+
+
+def test_a_seller_release_after_a_refused_move_keeps_the_move_held(world, monkeypatch):
+    """[LOW-MEDIUM] Round 25, item 6, probe B (round 20's input, clear-hold
+    pressed AFTER Shopify refused the move): the failed move keeps the
+    standing seller reason (item 5b) and holds on its own route hold; the
+    release dispatched the order while FO_2 sat at Ranchi, no Re-map
+    offered. It stays held on the failed move, Re-map offered."""
+    from api.routers import online_store_orders as oso
+
+    db = world["db"]
+    _shop(db, "BV-DHN-01", "BV Dhanbad", "", LOC_DHN)
+    _stock(db, "BV-BOK-01", "P-RB", 2)
+    _stock(db, "BV-BOK-01", "P-OA", 1)
+    _stock(db, "BV-DHN-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 2)])
+    world["shop"].fo(FO_3, LOC_DHN, lines=[(9000, 1)])
+    world["shop"].fo(FO_2, LOC_RAN, lines=[(9001, 1)])
+    world["shop"].move_error = "Location does not stock the item"
+    res, order = _book(world, _order(61282, lines=(("RB-1234", 3), ("OA-5", 1))))
+    oid = res["order_id"]
+    codes = {p["code"]: p["message"] for p in order["fulfillment_route"]["problems"]}
+    assert set(codes) == {"SHOP_GSTIN_MISSING", "MOVE_FAILED"}
+    assert order["stock_hold_reason"] == codes["SHOP_GSTIN_MISSING"], "the seller reason stands"
+    assert order["fulfillment_route"]["hold_reason"] == codes["MOVE_FAILED"]
+    db.stores.update_one({"store_id": "BV-DHN-01"}, {"$set": {"gstin": "20AAAAA0000A1Z5"}})
+
+    out = _clear_hold(world, monkeypatch, oid)
+
+    assert out["released"] == ["SELLER"] and out["fulfillment_hold"] is True, out
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert after["fulfillment_hold"] is True and after["stock_hold_reason"] == codes["MOVE_FAILED"]
+    assert oso._slim_list_row(dict(after))["remap_hold"] is True
+
+
+def test_a_leg_that_left_a_shop_frees_it_for_the_next_leg(world, monkeypatch):
+    """Round 25, item 5a (pins load[s] = {} in _follow_split): Shopify split
+    RB x2 -> Bokaro (holds none: BV Dhanbad, Bokaro's GSTIN, holds 2) and
+    OA -> Ranchi (short; Bokaro holds one). Bokaro's leg moves to Dhanbad;
+    once it has left, Bokaro ships nothing and takes Ranchi's OA leg: both
+    moves sent, all 3 units claimed. Counting Bokaro's departed RB leg kept
+    it 'busy' and the OA stayed short."""
+    db = world["db"]
+    _shop(db, "BV-DHN-01", "BV Dhanbad", "20AAAAA0000A1Z5", LOC_DHN)
+    _stock(db, "BV-DHN-01", "P-RB", 2)
+    _stock(db, "BV-BOK-01", "P-OA", 1)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 2)])
+    world["shop"].fo(FO_2, LOC_RAN, lines=[(9001, 1)])
+
+    res, order = _book(world, _order(61283, lines=(("RB-1234", 2), ("OA-5", 1))))
+
+    assert sorted((v["id"], v["newLocationId"]) for v in world["shop"].moves()) == [
+        (FO_1, LOC_DHN), (FO_2, LOC_BOK)]
+    assert _sold_at(db, res["order_id"]) == ["BV-BOK-01", "BV-DHN-01", "BV-DHN-01"]
+
+
 def test_remap_counts_a_shops_own_units_only_beyond_its_own_leg(world, monkeypatch):
     """[LOW] Round 20, item 1, same-line variant: Shopify splits RB x3 --
     FO_1 Bokaro (RB 2), FO_2 Ranchi (RB 1, short). Bokaro holds only its 2,

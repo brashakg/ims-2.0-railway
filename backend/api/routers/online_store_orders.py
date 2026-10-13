@@ -795,17 +795,26 @@ async def clear_rx_hold(
             status_code=409,
             detail=f"This hold cannot be cleared yet: {bad['message']}",
         )
-    # A stock miss under the seller hold (its own marker): the release lifts
-    # only the seller part and the stock hold stands -- Re-map's own answer
-    # (its claim comes up short, so it holds again). No unit was claimed.
+    # A stock miss under the seller hold (its own marker), or the route's own
+    # hold (a fulfillment order at another shop, a failed or pending move --
+    # the seller text took the reason field): the release lifts only the
+    # seller part and that hold stands -- Re-map's own answer (it holds
+    # again). The next press releases it as any other door reads it.
     stock_left = order.get("stock_miss_reason") if seller else None
+    route_left = (order.get("fulfillment_route") or {}).get("hold_reason") if seller else None
     if seller:  # its cause is fixed: name it for what it was
         released = ["SELLER" if k == "STOCK" else k for k in released]
     _HOLD_NAMES = {"RX": "Rx hold", "STOCK": "stock hold", "SELLER": "seller (GSTIN) hold"}
     names = " and ".join(_HOLD_NAMES[k] for k in released)
+    standing = []
+    if stock_left:
+        standing.append(f"the stock hold stands: {stock_left}")
+    if route_left:
+        standing.append(f"the order stays held for its fulfillment orders: {route_left}")
+    stock_left = stock_left or route_left
     released_message = names[:1].upper() + names[1:] + (
-        f" released - the stock hold stands: {stock_left}"
-        if stock_left
+        " released - " + " ".join(standing)
+        if standing
         else " released - the order can now be fulfilled."
     )
 
