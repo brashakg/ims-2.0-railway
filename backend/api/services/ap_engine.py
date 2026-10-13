@@ -126,8 +126,18 @@ def normalize_bill_kind(value):
 # without a purchase order arrive on a "Bought without PO" receipt; a bill
 # booked against one claims input credit only from a GST-registered supplier,
 # whatever the client sent (owner 2026-10-13, G2; org_validation.itc_claimable,
-# the one credit rule, reads it).
+# the one credit rule), and is never reverse charge (purchase_invoices.
+# refuse_walk_in_reverse_charge, every bill door).
 GRN_SUBTYPE_NO_PO = "NO_PO"
+
+
+def header_bill_gst_rate(tax_amount, taxable_amount) -> Optional[float]:
+    """The GST rate a header-only bill (no lines) charged: its tax as a share
+    of its taxable value, the rate every item on it carries -- for the cost
+    true-up its door runs and the debit note returning those goods. None when
+    it states no taxable value."""
+    taxable = _f(taxable_amount)
+    return 100 * _f(tax_amount) / taxable if taxable > 0 else None
 
 
 def bill_supplier_gstin(bill: dict, gstin_on_file):

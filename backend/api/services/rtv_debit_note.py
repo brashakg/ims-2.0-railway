@@ -260,8 +260,13 @@ def _norm_line(line: Dict[str, Any], is_inter_state: bool) -> Dict[str, Any]:
     except (TypeError, ValueError):
         gst_rate = 0.0
     # Goods whose bill claimed no input credit (DebitNoteEngine.issue marks
-    # them by the one credit rule) have none to reverse: the amount only.
+    # them by the one credit rule) have none to reverse (owner 2026-10-12),
+    # yet the supplier credits back all the bill charged for them: the GST it
+    # charged is carried in the return's value, as it is in their cost (G1).
+    # Per unit, so qty x rate is the taxable value still.
     if line.get("claims_credit") is False:
+        rate_paise += _split_line_tax(rate_paise, gst_rate, False)["tax_paise"]
+        taxable_paise = qty * rate_paise
         gst_rate = 0.0
     tax = _split_line_tax(taxable_paise, gst_rate, is_inter_state)
     return {
@@ -857,7 +862,10 @@ class DebitNoteEngine:
     def _receipts_of(self, rtv_doc: Dict[str, Any]) -> Dict[Any, Any]:
         """{product_id: the goods receipt the returned units came in on} --
         key None for every line when the RTV names its receipt (an RMA's
-        grn_id), else read off the units linked to the return (rtv_vendor_id).
+        grn_id), else read off the units linked to the return (rtv_vendor_id):
+        the receipt that minted each, wherever it is now -- the grn_id the
+        mint stamps (a transfer rewrites source_type / source_id, never it),
+        else the old source fields (grn_accept_lock._receipt_unit_filters).
         Fail-soft {}.
 
         ponytail: one receipt per product (the first linked unit's); a return
@@ -872,13 +880,14 @@ class DebitNoteEngine:
                 return {}
             out: Dict[Any, Any] = {}
             for u in self._db.get_collection("stock_units").find(
-                {"rtv_vendor_id": rtv_doc["return_id"], "source_type": "GRN"},
-                {"_id": 0, "product_id": 1, "source_id": 1},
+                {"rtv_vendor_id": rtv_doc["return_id"]},
+                {"_id": 0, "product_id": 1, "grn_id": 1, "source_type": 1, "source_id": 1},
             ):
-                if u.get("product_id") not in out:
-                    out[u.get("product_id")] = grns.find_one(
-                        {"grn_id": u.get("source_id")}, {"_id": 0}
-                    )
+                minted_by = u.get("grn_id") or (
+                    u.get("source_id") if u.get("source_type") == "GRN" else None
+                )
+                if minted_by and u.get("product_id") not in out:
+                    out[u.get("product_id")] = grns.find_one({"grn_id": minted_by}, {"_id": 0})
             return out
         except Exception:  # noqa: BLE001
             return {}
@@ -925,26 +934,30 @@ class DebitNoteEngine:
         except Exception:  # noqa: BLE001
             return []
 
-    def _credit_claimed(self, receipt: Optional[Dict[str, Any]], vendor: Dict[str, Any], bills) -> bool:
+    @staticmethod
+    def _credit_claimed(vendor: Dict[str, Any], bills) -> bool:
         """Did the returned goods' bill claim input credit? The bill booked
         against their receipt answers from its STORED flag -- what the ITC
         register counted (finance.gst._itc_eligible_bill: reverse charge, the
         GSTIN on the bill, credit switched off, 17(5) blocked) -- never
         re-decided from today's supplier master. No bill booked yet: THE
-        credit rule (org_validation.itc_claimable) on the supplier and the
-        receipt, as the booking will decide it."""
+        credit rule (org_validation.itc_claimable) on the supplier, as the
+        booking will decide it."""
         from api.routers.finance.gst import _itc_eligible_bill
 
         from .org_validation import itc_claimable
 
         if bills:
             return any(_itc_eligible_bill(b) for b in bills)
-        return itc_claimable((vendor or {}).get("gstin"), receipt=receipt)
+        return itc_claimable((vendor or {}).get("gstin"))
 
     @staticmethod
     def _billed_rate(bills, product_id) -> Optional[float]:
-        """The GST rate the booked bill charged on this product (a line-detail
-        bill's line), else None (a header-only bill names no lines)."""
+        """The GST rate the booked bill charged on this product: a line-detail
+        bill's line for it, else a header-only bill's tax share (ap_engine.
+        header_bill_gst_rate); None when no bill says."""
+        from .ap_engine import header_bill_gst_rate
+
         for b in bills:
             for bl in b.get("lines") or []:
                 if isinstance(bl, dict) and bl.get("product_id") == product_id:
@@ -952,6 +965,11 @@ class DebitNoteEngine:
                         return float(bl.get("gst_rate"))
                     except (TypeError, ValueError):
                         return None
+        for b in bills:
+            if not b.get("lines"):
+                rate = header_bill_gst_rate(b.get("tax_amount"), b.get("taxable_amount"))
+                if rate is not None:
+                    return rate
         return None
 
     def issue(
@@ -1014,11 +1032,13 @@ class DebitNoteEngine:
                 "price paid for each item.",
             }
 
-        # The note reverses the credit the returned goods' bill claimed, at
-        # the rate that bill booked -- and a bill that claimed none (an
-        # unregistered supplier's walk-in buy among them, G2) has none to
-        # reverse (owner 2026-10-12): those lines carry the amount only. Per
-        # line, from the receipt the returned units came in on.
+        # The note's total is what the returned goods' bill charged for them
+        # (their price + the GST at the bill's rate) -- what the supplier
+        # credits back. It reverses the credit that bill claimed; a bill that
+        # claimed none (credit off, 17(5) blocked, an unregistered supplier's
+        # walk-in buy, G2) has none to reverse (owner 2026-10-12): its GST is
+        # carried in the value (_norm_line). Per line, from the receipt the
+        # returned units came in on.
         receipt_of = self._receipts_of(rtv_doc)
         src = []
         for raw in src_lines:
@@ -1026,10 +1046,14 @@ class DebitNoteEngine:
             pid = ln.get("product_id")
             receipt = receipt_of.get(pid, receipt_of.get(None)) or self._latest_receipt(rtv_doc, pid)
             bills = self._booked_bills(receipt)
-            ln["claims_credit"] = self._credit_claimed(receipt, vendor, bills)
+            ln["claims_credit"] = self._credit_claimed(vendor, bills)
             # The bill's booked rate -- 0% is a booked rate too (it reverses
-            # no tax), so None alone means "no line to read it from".
+            # no tax), so None alone means "no bill says". No bill yet and no
+            # credit: the supplier has no GSTIN, so charges no GST (the bill
+            # draft's 0%), whatever rate a line names -- the note is the price.
             ln["billed_gst_rate"] = self._billed_rate(bills, pid)
+            if not bills and not ln["claims_credit"]:
+                ln.update(billed_gst_rate=0.0, gst_rate=None, tax_rate=None)
             src.append(ln)
         enriched, gst_err = self._enrich_lines_gst(src)
         if gst_err:

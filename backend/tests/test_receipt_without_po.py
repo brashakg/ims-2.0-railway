@@ -48,6 +48,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import re
 import sys
 import uuid
 from datetime import datetime
@@ -1848,6 +1849,60 @@ def test_r5_a_walk_in_return_reverses_only_the_credit_its_bill_claimed(world):
         frame + [{"product_id": LENS, "product_name": "Acme Daily", "quantity": 1, "unit_price": 400.0}],
     )
     assert [ln["tax_paise"] for ln in mixed["lines"]] == [0, 2000]  # lens: HSN 900130 = 5%
+
+
+def test_r5_the_debit_note_is_what_the_bill_charged_for_the_goods(world):
+    """Panel probe (round 11), owner decision 2026-10-13: V-DEALER's walk-in
+    frame at 3100, its bill booked at 5% with credit off -- the bill charged
+    3255 and the cost became 3255 (G1), yet returning it made a debit note of
+    3100 (tax 0): the Tally voucher debited the vendor 3100 against the
+    dealer's 3255 credit note, Rs 155 hanging on the ledger. A debit note's
+    total is always what the bill charged for those units (price + its GST at
+    the bill's rate) and the voucher debits the vendor that. Credit claimed:
+    the 155 is reversed as GST. None claimed: no credit reversed, the 155 is
+    in the return's value. An unregistered dealer charged no GST: the price."""
+    from api.services.rtv_debit_note import DebitNoteEngine, tally_build_debit_note_xml
+
+    db = world["db"]
+    frame = [{"product_id": FRAME, "product_name": "Acme Aviator", "quantity": 1, "unit_price": 3100.0}]
+
+    def returned(grn_id, rid, vendor=DEALER):
+        stock_id = db.stock_units.find_one({"grn_id": grn_id, "product_id": FRAME})["stock_id"]
+        rtv, _pid = _return_of(world, rid, stock_id, vendor)
+        res = DebitNoteEngine(db).issue(rtv, db.vendors.find_one({"vendor_id": vendor}, {"_id": 0}), actor="u-acct", seller=_SELLER, lines=frame)
+        assert res["ok"], res
+        note = res["debit_note"]
+        # The voucher's first leg debits the vendor (tally_build_debit_note_xml).
+        vendor_leg = re.findall(r"<AMOUNT>(-?[\d.]+)</AMOUNT>", tally_build_debit_note_xml(note))[0]
+        return note["totals"]["grand_total_paise"], note["totals"]["tax_paise"], vendor_leg
+
+    off = _on_the_shelf(world, vendor_invoice_no="CASH-D1")
+    body = _invoice_body(off, "CASH-D1")
+    body.itc_eligible = False
+    _run(pi.create_purchase_invoice(body, current_user=ACCOUNTANT))
+    claimed = _on_the_shelf(world, vendor_invoice_no="CASH-D2")
+    _run(pi.create_purchase_invoice(_invoice_body(claimed, "CASH-D2"), current_user=ACCOUNTANT))
+    # The no-credit frame moved shop before it went back: a transfer rewrites
+    # its source, never the receipt that minted it -- still that bill's.
+    db.stock_units.update_many({"grn_id": off}, {"$set": {"source_type": "TRANSFER", "source_id": "TR-1"}})
+    assert returned(off, "VR-D1") == (325500, 0, "-3255.00")
+    assert returned(claimed, "VR-D2") == (325500, 15500, "-3255.00")
+
+    # The header-only door: the bill's tax share is its rate.
+    header = _on_the_shelf(world, vendor_invoice_no="CASH-D3")
+    _header_bill(header, "CASH-D3", "2026-09-14")
+    db.vendor_bills.update_one({"grn_id": header}, {"$set": {"itc_eligible": False}})
+    assert returned(header, "VR-D3") == (325500, 0, "-3255.00")
+
+    # Unregistered Sharma's cash memo charged no GST, on either door: the price.
+    for number, book in (("D4", _book_as_drafted), ("D5", None)):
+        memo = _on_the_shelf(world, vendor_id=SHARMA, vendor_invoice_no=number)
+        if book:
+            book(memo)
+        else:
+            memo_bill = vd.VendorBillCreate(bill_number=number, bill_date="2026-09-14", taxable_amount=7460.0, total_amount=7460.0, grn_id=memo)
+            _run(vd.create_vendor_bill(SHARMA, memo_bill, current_user=ACCOUNTANT))
+        assert returned(memo, f"VR-{number}", SHARMA) == (310000, 0, "-3100.00"), number
 
 
 _SELLER = {"entity_id": ENTITY, "name": "BV Test Optical Pvt Ltd", "gstin": SHOP_GSTIN, "state_code": "20"}

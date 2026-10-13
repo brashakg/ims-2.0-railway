@@ -458,7 +458,7 @@ async def create_vendor_bill(
         from ..purchase_invoices import _apply_valuation_trueup, _resolved_purchase_config
         from ...services.purchase_invoice_engine import lines_from_grn
 
-        share = 100 * bill.tax_amount / bill.taxable_amount if bill.taxable_amount else 0.0
+        share = ap_engine.header_bill_gst_rate(bill.tax_amount, bill.taxable_amount) or 0.0
         _apply_valuation_trueup(
             db,
             {**doc, "invoice_id": bill_id},
