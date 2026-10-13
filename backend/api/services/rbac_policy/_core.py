@@ -11,7 +11,12 @@ from __future__ import annotations
 
 from typing import List, Union
 
-from ..cost_mask import AP_ROLES, PURCHASE_ROLES, RETURN_READERS as _RETURN_READERS
+from ..cost_mask import (
+    AP_ROLES,
+    PURCHASE_ROLES,
+    RECEIVE_ROLES,
+    RETURN_READERS as _RETURN_READERS,
+)
 
 # All 11 operational roles (INVESTOR excluded - read-only via middleware, never
 # an allow-list member). SUPERADMIN is a member of every gate implicitly.
@@ -52,3 +57,6 @@ ACCOUNTS: List[str] = sorted(AP_ROLES)
 # PURCHASE / RETURN_READERS, so changing the tuple moves the row with the gate.
 PURCHASE: List[str] = sorted(PURCHASE_ROLES)
 RETURN_READERS: List[str] = sorted(_RETURN_READERS)
+# Receiving goods into stock (managers only): the same rule, from the same
+# cost_mask tuple its require_roles gates are.
+RECEIVE: List[str] = sorted(RECEIVE_ROLES)

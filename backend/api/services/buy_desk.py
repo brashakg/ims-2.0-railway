@@ -77,6 +77,7 @@ def build_row(
     on_order: int,
     velocity_per_day: Optional[float],
     lead_days: int = DEFAULT_LEAD_DAYS,
+    in_draft: int = 0,
 ) -> Dict[str, Any]:
     """Assemble one Buy Desk row (pure). `readiness` is the
     product_master.catalog_readiness() dict for this product; `online` /
@@ -98,7 +99,9 @@ def build_row(
         "ecom_state": ecom_state(product.get("online")),
         "ecom_note": product.get("online_note") or None,
         "on_hand": int(on_hand or 0),
+        # Sent to the vendor only (owner D11); drafts beside it, never netted.
         "on_order": int(on_order or 0),
+        "in_draft": int(in_draft or 0),
         # Owner decision (2026-07-04): reorder_quantity <= 0 (the new -1
         # default) disables auto-reorder -- the Buy Desk shows "-" (None)
         # instead of a suggested qty. See api/services/reorder_policy.py.
