@@ -53,13 +53,6 @@ def _coll(name: str):
     return None
 
 
-def _store(user: dict, override: Optional[str]) -> Optional[str]:
-    roles = set(user.get("roles") or [])
-    if {"SUPERADMIN", "ADMIN", "AREA_MANAGER"} & roles:
-        return override or user.get("active_store_id")
-    return user.get("active_store_id") or override
-
-
 def _month_start() -> datetime:
     """First instant of the current IST month, in the naive-UTC frame
     `created_at` is stored in. The old "%Y-%m-01" STRING never matched a
@@ -90,7 +83,7 @@ async def tasks_completion_stats(
     current_user: dict = Depends(get_current_user),
 ):
     coll = _coll("tasks")
-    sid = _store(current_user, store_id)
+    sid = store_in_view(store_id, current_user)
     if coll is None:
         return {"open": 0, "in_progress": 0, "completed": 0, "completion_rate": 0}
     base = {"store_id": sid} if sid else {}
@@ -113,7 +106,7 @@ async def tasks_escalations(
     current_user: dict = Depends(get_current_user),
 ):
     coll = _coll("tasks")
-    sid = _store(current_user, store_id)
+    sid = store_in_view(store_id, current_user)
     if coll is None:
         return {"escalations": [], "count": 0}
     q: Dict[str, Any] = {"status": "escalated"}
@@ -132,7 +125,7 @@ async def clinical_patient_queue(
     current_user: dict = Depends(get_current_user),
 ):
     coll = _coll("eye_test_queue")
-    sid = _store(current_user, store_id)
+    sid = store_in_view(store_id, current_user)
     if coll is None:
         return {"waiting": 0, "in_progress": 0, "queue": []}
     q = (
@@ -153,7 +146,7 @@ async def clinical_eye_tests(
     current_user: dict = Depends(get_current_user),
 ):
     coll = _coll("eye_tests")
-    sid = _store(current_user, store_id)
+    sid = store_in_view(store_id, current_user)
     if coll is None:
         return {"tests": [], "count": 0}
     q: Dict[str, Any] = {}
@@ -185,7 +178,7 @@ async def finance_summary_month(
     current_user: dict = Depends(require_roles(*_WIDGET_FINANCE_HR_ROLES)),
 ):
     orders = _coll("orders")
-    sid = _store(current_user, store_id)
+    sid = store_in_view(store_id, current_user)
     revenue = 0.0
     count = 0
     if orders is not None:
@@ -228,7 +221,7 @@ async def hr_summary_today(
     current_user: dict = Depends(require_roles(*_WIDGET_FINANCE_HR_ROLES)),
 ):
     users = _coll("users")
-    sid = _store(current_user, store_id)
+    sid = store_in_view(store_id, current_user)
     total = 0
     if users is not None:
         q: Dict[str, Any] = {"is_active": {"$ne": False}}
@@ -537,7 +530,7 @@ async def analytics_store_target_today(
     current_user: dict = Depends(get_current_user),
 ):
     orders = _coll("orders")
-    sid = _store(current_user, store_id)
+    sid = store_in_view(store_id, current_user)
     achieved = 0.0
     if orders is not None:
         q: Dict[str, Any] = {"created_at": {"$gte": _today_start()}}

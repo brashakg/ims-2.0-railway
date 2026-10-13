@@ -240,3 +240,63 @@ def test_the_buy_desk_is_empty_for_a_login_with_no_shop(world):
     r = world(_user("STORE_MANAGER"), "/buy-desk/rows")
     assert r.status_code == 200, r.text
     assert r.json() == {"rows": [], "total": 0, "store_id": None}
+
+
+# ============================================================================
+# The Hub widgets (panel probe 2026-10-12): /finance/summary-month and the other
+# widget reads kept their own copy of the shop rule (dashboard_widgets._store).
+# A STORE_MANAGER or ACCOUNTANT with no shop read every shop's month (Rs 2,240,
+# 2 orders), and ?store_id=WO-PUN-01 was honoured (Pune's Rs 1,120) instead of
+# the 403 every other read gives. They now ask store_in_view.
+# ============================================================================
+
+
+@pytest.fixture
+def widgets(monkeypatch):
+    from api.routers import dashboard_widgets as dw
+
+    db = mongomock.MongoClient()["no_shop_widgets"]
+    now = datetime.utcnow()
+    for sid in (DHN, PUN):
+        db["orders"].insert_one({"order_id": f"O-{sid}", "store_id": sid, "status": "DELIVERED",
+                                 "grand_total": 1120.0, "created_at": now})
+    monkeypatch.setattr(dw, "_coll", lambda name: db[name])
+    app = FastAPI()
+    app.include_router(dw.router)
+    who = {}
+
+    async def _current():
+        return dict(who["user"])
+
+    app.dependency_overrides[get_current_user] = _current
+    client = TestClient(app)
+
+    def get(user, **params):
+        who["user"] = user
+        return client.get("/finance/summary-month", params=params)
+
+    return get
+
+
+def test_the_month_widget_gives_a_login_with_no_shop_no_shop(widgets):
+    # The world is not empty: an admin with no shop reads both shops.
+    assert widgets(_user("ADMIN")).json() == {"revenue_month": 2240.0, "orders_month": 2}
+    for role in ("STORE_MANAGER", "ACCOUNTANT", "AREA_MANAGER"):
+        r = widgets(_user(role))
+        assert r.status_code == 200, (role, r.text)
+        assert r.json() == {"revenue_month": 0.0, "orders_month": 0}, role
+        named = widgets(_user(role), store_id=PUN)
+        assert named.status_code == 403, (role, named.text)
+        assert named.json()["detail"] == NO_SHOP_DETAIL
+
+
+@pytest.mark.parametrize("role", ("STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT"))
+def test_the_month_widget_keeps_a_shop_to_its_own(widgets, role):
+    """A login that holds Dhanbad reads Dhanbad's month; naming Pune is the 403
+    every other read gives (the old copy ignored it for a store manager and
+    honoured it for an area manager)."""
+    user = _user(role, [DHN])
+    assert widgets(user).json() == {"revenue_month": 1120.0, "orders_month": 1}
+    r = widgets(user, store_id=PUN)
+    assert r.status_code == 403, r.text
+    assert r.json()["detail"] == f"No access to store {PUN}"
