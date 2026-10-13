@@ -2881,12 +2881,14 @@ def test_a_release_that_errors_never_leaves_a_booking_no_door_owns(swept, monkey
     lossy = _ReleaseFails(returns_router._orders_coll(), lands)
     monkeypatch.setattr(returns_router, "_orders_coll", lambda: lossy)
     real = returns_router._reactivate_original_unit
-    monkeypatch.setattr(returns_router, "_reactivate_original_unit", lambda *a, **kw: None)
-    undo_create = _create_fails_after(monkeypatch, swept["stock_repo"], 0)
+
+    def stock_write_down(*a, **kw):
+        raise RuntimeError("stock reactivate failed: the SOLD unit stays SOLD")
+
+    monkeypatch.setattr(returns_router, "_reactivate_original_unit", stock_write_down)
     assert shopify_refund.post_from_review(swept["db"], row)["restock_applied"] is False
     assert lossy.failed and _units(swept) == [("stk-1", "SOLD")]
     monkeypatch.setattr(returns_router, "_reactivate_original_unit", real)
-    undo_create()
     line = _doc(swept, oid)["items"][0]
     assert (line.get("returned_qty"), (line.get("restocked_refunds") or {}).get(rid)) == (0, 0)
 
