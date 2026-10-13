@@ -59,12 +59,12 @@ describe('Hub Priority tasks', () => {
   it('asks for a catalogue manager’s own tasks at every shop', async () => {
     renderAs(['CATALOG_MANAGER']);
     await waitFor(() => expect(getTasks).toHaveBeenCalled());
-    expect(getTasks).toHaveBeenCalledWith({ status: 'OPEN' });
+    expect(getTasks).toHaveBeenCalledWith({ status: 'OPEN,IN_PROGRESS' });
   });
 
   it('asks for the active shop for a store manager', async () => {
     renderAs(['STORE_MANAGER']);
     await waitFor(() => expect(getTasks).toHaveBeenCalled());
-    expect(getTasks).toHaveBeenCalledWith({ store_id: 'BV-DHN-02', status: 'OPEN' });
+    expect(getTasks).toHaveBeenCalledWith({ store_id: 'BV-DHN-02', status: 'OPEN,IN_PROGRESS' });
   });
 });

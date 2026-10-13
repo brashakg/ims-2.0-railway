@@ -849,11 +849,12 @@ def test_counter_roles_never_open_list_or_cancel_a_flag_task(env, role):
     (task,) = list(env["db"].tasks.find({}))
     tid = task["task_id"]
     counter = _user("u-c", role)
+    # Not one of theirs: the one task door answers 404 (task_visibility).
     res = env["call"](counter, "PATCH", f"/api/v1/tasks/{tid}", json={"status": "CANCELLED"})
-    assert res.status_code == 403
+    assert res.status_code == 404
     assert [f["status"] for f in _flags(env["db"], "P1")] == ["open"]
     assert env["db"].tasks.find_one({"task_id": tid})["status"] == "OPEN"
-    assert env["call"](counter, "GET", f"/api/v1/tasks/{tid}").status_code == 403
+    assert env["call"](counter, "GET", f"/api/v1/tasks/{tid}").status_code == 404
     listed = env["call"](counter, "GET", "/api/v1/tasks").json()["tasks"]
     assert tid not in [t["task_id"] for t in listed]
     # The people who handle flags still see it.
@@ -868,12 +869,15 @@ def test_closing_a_flag_task_takes_the_people_who_mark_fixed(env, role):
     (task,) = list(env["db"].tasks.find({}))
     tid = task["task_id"]
     mgr = _user("u-m", role)
+    # A STORE_MANAGER raises flags, so sees the task but may not close it
+    # (403); an AREA_MANAGER does not handle flags, so it is not found (404).
+    want = 403 if role == "STORE_MANAGER" else 404
     res = env["call"](mgr, "PATCH", f"/api/v1/tasks/{tid}/complete",
                       json={"completion_notes": "done"})
-    assert res.status_code == 403
+    assert res.status_code == want
     assert [f["status"] for f in _flags(env["db"], "P1")] == ["open"]
     cancel = env["call"](mgr, "PATCH", f"/api/v1/tasks/{tid}", json={"status": "CANCELLED"})
-    assert cancel.status_code == 403
+    assert cancel.status_code == want
     assert [f["status"] for f in _flags(env["db"], "P1")] == ["open"]
 
 

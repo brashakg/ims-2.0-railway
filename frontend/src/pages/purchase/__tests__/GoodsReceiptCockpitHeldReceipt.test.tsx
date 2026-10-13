@@ -233,43 +233,10 @@ describe('Receive Goods - a receipt held for cataloguing (audit C1)', () => {
     confirmSpy.mockRestore();
   });
 
-  // Panel round 7 / round 9: receiving is managers only -- the server refuses
-  // 'Not received', 'Add to stock' and 'Void' on a receipt held beyond its
-  // order to an accountant (403), so the screen offers none of them and says
-  // who decides (the 09-28 ruling: the blocked page says who can).
-  it('below manager, a receipt held beyond its order names the store manager instead', async () => {
-    authState.roles = ['ACCOUNTANT'];
-    getGRNsMock.mockImplementation(async (params: { status?: string }) =>
-      params?.status === 'PARTIALLY_ACCEPTED'
-        ? {
-            grns: [
-              {
-                ...HELD_GRN,
-                unresolved_lines: [
-                  { product_id: 'p-boss', accepted_qty: 2, reason: 'over_order', ordered: 2, on_shelf: 2 },
-                ],
-              },
-            ],
-          }
-        : { grns: [] },
-    );
-    const row = await heldRow();
-    expect(within(row).queryByRole('button', { name: /not received/i })).toBeNull();
-    expect(within(row).getByText(/the store manager decides the extra units/i)).toBeTruthy();
-    // 'Add to stock' and voiding it are the same decision, refused below
-    // manager (403): not offered.
-    expect(within(row).queryByRole('button', { name: /add to stock/i })).toBeNull();
-    expect(within(row).queryByRole('button', { name: /void/i })).toBeNull();
-  });
-
-  it('below manager, a receipt held only for the catalogue still offers "Add to stock"', async () => {
-    authState.roles = ['ACCOUNTANT'];
-    const row = await heldRow();
-    expect(within(row).getByRole('button', { name: /add to stock/i })).toBeTruthy();
-    // Voiding it says the vendor never sent what is in the shop: receiving,
-    // managers only (403 below manager), so it is not offered.
-    expect(within(row).queryByRole('button', { name: /void/i })).toBeNull();
-  });
+  // Receiving is managers only (owner 2026-09-28): the receive route admits
+  // only RECEIVING_MANAGER_ROLES (#1165, pinned by UnauthorizedPage.test.tsx
+  // on the real purchaseRoutes), so no one below manager sees this screen -- it offers
+  // every receiving manager 'Add to stock', 'Not received' and 'Void'.
 
   it('a store manager may void a receipt held only for the catalogue', async () => {
     const row = await heldRow();

@@ -65,20 +65,11 @@ PURCHASE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
 # the item, quantity and reason only (mask_vendor_return / mask_debit_note).
 # Their read gates ARE this tuple.
 RETURN_READERS = (*PURCHASE_ROLES, "WORKSHOP_STAFF")
-# The receiving managers: the purchase roles without the accountant. Receiving
-# decisions that are managers only (owner 2026-09-28) gate on this tuple --
-# today 'Not received' for a held receipt's units beyond its order (the shop's
-# store manager's decision, 2026-09-29), 'Add to stock' on a receipt holding
-# such units, and 'Void' on any held receipt (is_receiving_manager). Defined
-# ONCE, here.
-RECEIVING_MANAGERS = tuple(r for r in PURCHASE_ROLES if r != "ACCOUNTANT")
-
-
-def is_receiving_manager(user: dict) -> bool:
-    """The caller holds a RECEIVING_MANAGERS role, read as require_roles reads
-    a gate (any of the user's roles; SUPERADMIN passes)."""
-    roles = set((user or {}).get("roles") or [])
-    return "SUPERADMIN" in roles or bool(roles & set(RECEIVING_MANAGERS))
+# Who receives goods into stock (log, accept, express-receive, void or escalate
+# a receipt; the receiving screen): owner ruling 2026-09-28, RECEIVING IS
+# MANAGERS ONLY -- the purchase roles without the accountant. The receiving
+# gates (routers/vendors/_shared._RECEIVE_ROLES) ARE this tuple.
+RECEIVE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER")
 # context -> the roles it admits on top of COST_VISIBLE_ROLES.
 _CONTEXT_ROLES = {
     "purchase": set(PURCHASE_ROLES),

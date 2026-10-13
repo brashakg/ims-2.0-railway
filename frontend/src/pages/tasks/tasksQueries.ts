@@ -29,6 +29,7 @@
 // ---------------------------------------------------------------------------
 
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { useAuth } from '../../context/AuthContext';
 import { tasksApi } from '../../services/api';
 // Direct module import, not the barrel (TS2614 trap noted in project memory).
 import { adminStoreApi } from '../../services/api/stores';
@@ -188,9 +189,19 @@ export interface TaskPage {
  * ponytail: useInfiniteQuery, not hand-rolled paging - React Query is already
  * a dependency and does the cursor bookkeeping.
  */
+/** The server answers every task read by WHO asks, from which shop (owner
+ *  ruling 2026-10-12, backend services/task_visibility.py), so the cache key
+ *  names the viewer. Without it the next person on a shared tablet is served
+ *  the last person's cached list, colleagues' tasks included. */
+function useViewer(): string {
+  const { user } = useAuth();
+  return `${user?.id ?? ''}@${user?.activeStoreId ?? ''}`;
+}
+
 export function useTaskList(params: TaskListParams, enabled = true) {
+  const viewer = useViewer();
   return useInfiniteQuery({
-    queryKey: ['tasks', 'list', params] as const,
+    queryKey: ['tasks', 'list', viewer, params] as const,
     enabled,
     initialPageParam: 0,
     queryFn: async ({ pageParam }): Promise<TaskPage> => {
@@ -215,11 +226,12 @@ export function flattenTasks(data: { pages: TaskPage[] } | undefined): Task[] {
   return data?.pages.flatMap((p) => p.tasks) ?? [];
 }
 
-/** Store-wide status counts. Store-scoped on the server, so this is only ever
- *  shown to the roles allowed to see the whole store (see taskRoles.ts). */
+/** Status counts, counted on the server by the same rule as the list, so each
+ *  count equals its list (`total` = the list with no status: all but cancelled). */
 export function useTaskSummary(storeId: string | undefined) {
+  const viewer = useViewer();
   return useQuery({
-    queryKey: ['tasks', 'summary', storeId ?? 'none'] as const,
+    queryKey: ['tasks', 'summary', viewer, storeId ?? 'none'] as const,
     queryFn: () => tasksApi.getTaskSummary(storeId),
   });
 }

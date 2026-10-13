@@ -19,10 +19,13 @@ import { PurchaseOrderComposer } from '../../components/purchase/PurchaseOrderCo
 import type {
   ComposerVendorOption,
   ComposerNewProduct,
+  ComposerLine,
 } from '../../components/purchase/PurchaseOrderComposer';
+import { mapPOtoPurchaseOrder } from './purchaseMappers';
 import { CATEGORIES } from '../../domain/catalog/productAdd';
 import type { Supplier, PurchaseOrder, POItem } from './purchaseTypes';
 import { getCategoryFields } from '../../domain/catalog/productAdd/categoryFields';
+import { editOutcomeToasts, typedInNotAddedMessage } from './typedInNotAdded';
 
 interface PickedProduct {
   productId: string;
@@ -472,8 +475,32 @@ interface PurchaseOrderFormProps {
    *  reading 'Select a vendor' sent a manager off to add a supplier). */
   suppliersLoading?: boolean;
   existingPOCount: number;
+  /** A saved DRAFT to edit (owner ruling 2026-09-28: quantity, unit cost,
+   *  add / remove lines). Same form, same pricing rule on the server; saving
+   *  hands back the server's copy through onCreated. */
+  editing?: PurchaseOrder;
   onClose: () => void;
   onCreated: (po: PurchaseOrder) => void;
+}
+
+// A saved line, back into the form. Its cost was agreed, so the last-paid
+// prefill must never overwrite it.
+function lineFromSaved(item: POItem): ComposerLine {
+  return {
+    productId: item.productId,
+    productName: item.productName,
+    sku: item.sku,
+    newProduct: null,
+    quantity: item.quantity,
+    unitCost: item.unitCost,
+    taxRate: item.taxRate,
+    hsn: item.hsn ?? null,
+    productDetail: '',
+    gstResolved: !item.gstUnresolved,
+    gstMissing: null,
+    costTouched: true,
+    lastPaid: null,
+  };
 }
 
 // Map the purchase module's Supplier down to the composer's vendor option.
@@ -485,6 +512,7 @@ export function PurchaseOrderForm({
   suppliers,
   suppliersLoading = false,
   existingPOCount,
+  editing,
   onClose,
   onCreated,
 }: PurchaseOrderFormProps) {
@@ -509,7 +537,7 @@ export function PurchaseOrderForm({
   // no GSTIN, a prefix that is not a state) is null: the composer says "cannot
   // tell" rather than showing a wrong split.
   const storeId = user?.activeStoreId ?? '';
-  const [vendorId, setVendorId] = useState('');
+  const [vendorId, setVendorId] = useState(editing?.supplierId ?? '');
   const heads = usePoGstHeads(storeId);
   const interstate: boolean | null = vendorId ? (heads[vendorId] ?? null) : null;
 
@@ -520,7 +548,7 @@ export function PurchaseOrderForm({
         <div className="flex items-center justify-between p-6 border-b border-gray-200">
           <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
             <FileText className="w-5 h-5 text-blue-600" />
-            Create Purchase Order
+            {editing ? `Edit draft ${editing.poNumber}` : 'Create Purchase Order'}
           </h2>
           <button
             onClick={close}
@@ -539,6 +567,10 @@ export function PurchaseOrderForm({
             vendorsLoading={suppliersLoading}
             interstate={interstate}
             onVendorChange={setVendorId}
+            initialVendorId={editing?.supplierId}
+            initialLines={editing?.items.map(lineFromSaved)}
+            initialExpectedDate={editing?.expectedDelivery}
+            initialNotes={editing?.notes}
             allowAddLine
             allowRemoveLine
             renderProductCell={({ line, pickProduct, clearProduct, setNewProduct }) => (
@@ -565,12 +597,11 @@ export function PurchaseOrderForm({
                 onSetNew={setNewProduct}
               />
             )}
-            submitLabel="Create as Draft"
-            submittingLabel="Creating..."
+            submitLabel={editing ? 'Save changes' : 'Create as Draft'}
+            submittingLabel={editing ? 'Saving...' : 'Creating...'}
             onCancel={close}
             onDirtyChange={trackDirty}
             onSubmit={async (payload) => {
-              const storeId = user?.activeStoreId ?? 'default';
               let items = payload.items.map((it) => ({
                 product_id: it.product_id,
                 product_name: it.product_name,
@@ -584,51 +615,78 @@ export function PurchaseOrderForm({
                     : it.new_product,
                 quantity: it.quantity,
                 unit_price: it.unit_price,
+                // An edit sends each line's stored rate and HSN back with it,
+                // so it never re-prices a line from the catalogue.
+                gst_rate: editing ? it.gst_rate : undefined,
+                hsn: editing ? it.hsn : undefined,
               }));
-              const send = () =>
+              // Audit C2, on both doors (create and the draft edit): a typed-in
+              // line that describes a product we already have is refused (409
+              // ALREADY_IN_CATALOGUE) and the server writes nothing. Ask, then
+              // resend the order with THAT product instead of a hidden twin.
+              const askingAboutExisting = async <T,>(send: () => Promise<T>): Promise<T> => {
+                try {
+                  return await send();
+                } catch (err) {
+                  if (!(err instanceof ApiError) || err.code !== 'ALREADY_IN_CATALOGUE') throw err;
+                  const matches =
+                    (err.detail as { matches?: AlreadyInCatalogueMatch[] } | undefined)?.matches ?? [];
+                  const names = matches
+                    .map(
+                      ({ existing: e }) =>
+                        `${e.name || e.sku}${e.size ? `, size ${e.size}` : ''} (SKU ${e.sku})`,
+                    )
+                    .join(', ');
+                  const typed = matches
+                    .map(({ line }) => {
+                      const np = items[line]?.new_product;
+                      return np
+                        ? [np.brand, np.model, np.colour, np.size && `size ${np.size}`].filter(Boolean).join(' ')
+                        : '';
+                    })
+                    .filter(Boolean)
+                    .join(', ');
+                  if (!window.confirm(`You typed ${typed}. Already in the catalogue: ${names}. Use it?`)) {
+                    throw new Error(
+                      `${editing ? 'Not saved' : 'Not created'}. Pick the item from the catalogue, or correct what you typed.`,
+                    );
+                  }
+                  items = items.map((it, i) => {
+                    const e = matches.find((m) => m.line === i)?.existing;
+                    return e
+                      ? { ...it, new_product: undefined, product_id: e.product_id, product_name: e.name || e.sku, sku: e.sku }
+                      : it;
+                  });
+                  return send();
+                }
+              };
+              if (editing) {
+                const saved = await askingAboutExisting(() =>
+                  vendorsApi.updatePurchaseOrder(editing.id, {
+                    vendor_id: payload.vendorId,
+                    // A PUT keeps a field it does not carry; null clears it.
+                    expected_date: payload.expectedDate || null,
+                    notes: payload.notes || null,
+                    items,
+                  }),
+                );
+                const savedPO = mapPOtoPurchaseOrder(saved);
+                onCreated(savedPO);
+                for (const t of editOutcomeToasts(editing.poNumber, savedPO.status, saved?.products_not_created)) {
+                  toast[t.kind](t.text);
+                }
+                return;
+              }
+              const storeId = user?.activeStoreId ?? 'default';
+              const resp = await askingAboutExisting(() =>
                 vendorsApi.createPurchaseOrder({
                   vendor_id: payload.vendorId,
                   delivery_store_id: storeId,
                   expected_date: payload.expectedDate || undefined,
                   notes: payload.notes || undefined,
                   items,
-                });
-              let resp: Awaited<ReturnType<typeof send>>;
-              try {
-                resp = await send();
-              } catch (err) {
-                // Audit C2: a typed-in line describes a product we already
-                // have. The server created nothing and names it; ask, then
-                // order THAT product instead of a hidden twin.
-                if (!(err instanceof ApiError) || err.code !== 'ALREADY_IN_CATALOGUE') throw err;
-                const matches =
-                  (err.detail as { matches?: AlreadyInCatalogueMatch[] } | undefined)?.matches ?? [];
-                const names = matches
-                  .map(
-                    ({ existing: e }) =>
-                      `${e.name || e.sku}${e.size ? `, size ${e.size}` : ''} (SKU ${e.sku})`,
-                  )
-                  .join(', ');
-                const typed = matches
-                  .map(({ line }) => {
-                    const np = items[line]?.new_product;
-                    return np
-                      ? [np.brand, np.model, np.colour, np.size && `size ${np.size}`].filter(Boolean).join(' ')
-                      : '';
-                  })
-                  .filter(Boolean)
-                  .join(', ');
-                if (!window.confirm(`You typed ${typed}. Already in the catalogue: ${names}. Use it?`)) {
-                  throw new Error('Not created. Pick the item from the catalogue, or correct what you typed.');
-                }
-                items = items.map((it, i) => {
-                  const e = matches.find((m) => m.line === i)?.existing;
-                  return e
-                    ? { ...it, new_product: undefined, product_id: e.product_id, product_name: e.name || e.sku, sku: e.sku }
-                    : it;
-                });
-                resp = await send();
-              }
+                }),
+              );
 
               const poItems: POItem[] = payload.items.map((it, i) => ({
                 productId: items[i].product_id ?? '',
@@ -659,6 +717,8 @@ export function PurchaseOrderForm({
 
               onCreated(newPO);
               toast.success(`Purchase Order ${newPO.poNumber} created as Draft`);
+              const notAdded = typedInNotAddedMessage(resp.products_not_created);
+              if (notAdded) toast.warning(notAdded);
               // Say what is missing rather than letting a short tax total pass
               // unnoticed -- the server is the authority on the rate, so this
               // reports what it actually stored, including the lines it taxed

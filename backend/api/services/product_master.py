@@ -3281,8 +3281,9 @@ def revive_discarded_draft(
     second row for the item can never be made -- without this the discarded
     row would block every new order of it behind a product nobody can see.
 
-    Called AFTER the order that names it is stored (create_po), so a failed
-    order never undoes an admin's discard. The catalogue copy is written
+    Called AFTER the order (or the draft edit) that names it is saved
+    (purchase_orders.create_typed_in_products), so a refused order never
+    undoes an admin's discard. The catalogue copy is written
     first: a failure there leaves the spine still discarded (the order's send
     then refuses the line, loudly), never a provisional spine whose copy is
     missing from Needs review. True when revived; False (nothing written) for

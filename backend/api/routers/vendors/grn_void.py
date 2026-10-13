@@ -5,7 +5,7 @@ from ._shared import (
     HTTPException,
     Optional,
     Query,
-    _VENDOR_ROLES,
+    _RECEIVE_ROLES,
     can_access_store_scoped,
     datetime,
     get_audit_repository,
@@ -17,17 +17,18 @@ from ._shared import (
     router,
 )
 from .grn import _require_receipt_number
-from ...services.cost_mask import RECEIVING_MANAGERS, is_receiving_manager
 from .grn_accept_lock import (
     _GRN_TERMINAL_ACCEPT_STATUSES,
     _GRN_WRITE_ERROR,
     _claim_grn_for_accept,
     _claimed_receipt,
-    _grn_already_minted,
     _guarded_grn_write,
-    _received_on,
+    _receipt_units,
     _release_grn_accept_claim,
 )
+
+
+_VOIDABLE = ("PENDING", "PARTIALLY_ACCEPTED")
 
 
 def _hand_back(grn_repo, grn_id: str, claim_token) -> None:
@@ -39,14 +40,12 @@ def _hand_back(grn_repo, grn_id: str, claim_token) -> None:
     release_finished_meanwhile(grn_repo, grn_id)
 
 
-def _reopen_po_if_nothing_received(grn_repo, grn, current_user=None) -> Optional[str]:
+def _reopen_po_if_nothing_received(grn, current_user=None) -> Optional[str]:
     """A held receipt's accept moved its PO to PARTIALLY_RECEIVED with nothing
     on the shelf. Voided -- by Void, or by 'Not received' for all it held --
     and with no other live receipt on the order and nothing counted received,
-    nothing was received: the order goes back to SENT, so it reads true and
-    can be cancelled again (cancel refuses a part-received order) -- the way
-    out for a draft whose box went back (a draft an open order still expects
-    is never discarded, catalog DELETE).
+    nothing was received: the order goes back to SENT, so it reads true --
+    never "part received" with nothing received.
 
     One GUARDED write: it lands only while the order is still part-received
     with nothing counted received, so an accept of another receipt that
@@ -63,7 +62,7 @@ def _reopen_po_if_nothing_received(grn_repo, grn, current_user=None) -> Optional
         po = po_repo.find_by_id(po_id)
         if not po or po.get("status") not in ("PARTIALLY_RECEIVED", "PARTIAL"):
             return
-        if grn_repo.find_many({"po_id": po_id, "status": {"$ne": "VOID"}}):
+        if _live_receipts(po_id):
             return
         result = po_repo.collection.update_one(
             {
@@ -78,7 +77,7 @@ def _reopen_po_if_nothing_received(grn_repo, grn, current_user=None) -> Optional
         # A receipt created meanwhile whose accept HELD its lines writes the
         # same "part received, nothing counted" the guard matches: re-check,
         # and put the order back if one appeared (it is not nothing-received).
-        if grn_repo.find_many({"po_id": po_id, "status": {"$ne": "VOID"}}):
+        if _live_receipts(po_id):
             po_repo.collection.update_one(
                 {"po_id": po_id, "status": "SENT"},
                 {"$set": {"status": po.get("status"), "updated_at": datetime.now()}},
@@ -109,22 +108,31 @@ def _reopen_po_if_nothing_received(grn_repo, grn, current_user=None) -> Optional
     return reopened
 
 
+def _live_receipts(po_id) -> list:
+    """The order's receipts that are not VOID, read fail-CLOSED
+    (po_detail._order_receipts): a read error must never read as 'nothing
+    else on the order' and reopen it."""
+    from .po_detail import _order_receipts
+
+    return [g for g in _order_receipts(po_id) if g.get("status") != "VOID"]
+
+
 @router.post("/grn/{grn_id}/void")
 async def void_grn(
-    grn_id: str, current_user: dict = Depends(require_roles(*_VENDOR_ROLES))
+    grn_id: str, current_user: dict = Depends(require_roles(*_RECEIVE_ROLES))
 ):
     """Void a goods-receipt note that never put stock on the shelf
     (duplicate/mistake cleanup).
 
-    Two gates, and the second one matters more than it looks. The status gate
-    is the bookkeeping one: an ACCEPTED GRN has minted stock_units and must be
-    corrected through a vendor return; a PENDING one normally has not, nor has
-    a PARTIALLY_ACCEPTED one whose every line was held for the catalogue (a
-    second receipt of the same box, say). But the status does NOT imply "no
-    stock": the accept flow flips the status only
-    AFTER the mint loop, so a worker killed mid-accept leaves the receipt
-    PENDING with real units already on the shelf. Voiding THAT orphans those
-    units (PO receipt math reads only the accepted lines of a live receipt) and licenses a full re-mint
+    Two gates, and the second one matters more than it looks. The status is
+    the bookkeeping gate: an ACCEPTED GRN has minted stock_units and must be
+    corrected through a vendor return, so only a PENDING or a held
+    (PARTIALLY_ACCEPTED) one may be voided. Neither status implies "no
+    stock": a held receipt minted its catalogued lines, and the accept flow
+    flips the status only AFTER the mint loop, so a worker killed mid-accept
+    leaves the receipt PENDING with real units already on the shelf. Voiding
+    THAT orphans those units (PO receipt math only sums ACCEPTED GRNs) and
+    licenses a full re-mint
     under a new grn_id -- which the per-(grn, line, unit) unique index cannot
     catch, because it keys on source_id. So voiding is refused whenever
     stock_units already holds a row for this receipt, and the operator is told
@@ -132,7 +140,7 @@ async def void_grn(
 
     Store-scoped like accept (cross-store reads as 404). The receipt row is kept
     (audit trail, numbering continuity) with status VOID -- the accept endpoint
-    refuses VOID rows, and PO receipt math never counts a VOID one.
+    refuses VOID rows, and PO receipt math only ever sums ACCEPTED GRNs.
     """
     grn_repo = get_grn_repository()
     if grn_repo is None:
@@ -143,31 +151,17 @@ async def void_grn(
         raise HTTPException(status_code=404, detail="GRN not found")
     if not can_access_store_scoped(grn.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="GRN not found")
-    # A PARTIALLY_ACCEPTED receipt whose every line was HELD (product not
-    # catalogued yet) put nothing on the shelf either -- and a second receipt of
-    # the same box is exactly that. The stock gate below is what proves "nothing
-    # on the shelf" for both; for a held receipt it must be able to look.
-    status = grn.get("status")
-    if status not in ("PENDING", "PARTIALLY_ACCEPTED"):
+    # A held receipt (PARTIALLY_ACCEPTED) is voidable too: when every line was
+    # held it put nothing in stock, and an order with no room left for it
+    # refuses its re-accept -- without a void it would wedge the receipt and
+    # every cancel on the order. The stock gate below refuses one that did.
+    if grn.get("status") not in _VOIDABLE:
         raise HTTPException(
             status_code=400,
             detail=(
-                "Only a receipt that put nothing on the shelf can be voided. This "
-                f"one is {status} -- accepted stock must be corrected via a "
+                "Only a pending or held GRN can be voided. This one is "
+                f"{grn.get('status')} -- accepted stock must be corrected via a "
                 "vendor return."
-            ),
-        )
-    # A held receipt's units are in the shop: voiding it says the vendor never
-    # sent them, which is receiving -- the receiving managers' (owner
-    # 2026-09-28), whatever it holds them for. The void's write is guarded on
-    # this status, so a PENDING receipt held meanwhile is voided by nobody.
-    if status == "PARTIALLY_ACCEPTED" and not is_receiving_manager(current_user):
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                "This receipt is holding units that arrived: whether the vendor "
-                "really sent them is the store manager's to decide in Receive "
-                "Goods ('Void', 'Not received' or 'Add to stock'). Nothing was voided."
             ),
         )
 
@@ -184,7 +178,7 @@ async def void_grn(
     # lookup, the cost backfill write and the already-minted count -- passes
     # every gate here while the accept is still about to mint. The accept then
     # puts the whole delivery onto a VOID receipt: real sellable units behind a
-    # voided doc, PO receipt math permanently short (it never counts a VOID receipt),
+    # voided doc, PO receipt math permanently short (it sums ACCEPTED GRNs only),
     # and re-accepting impossible because accept refuses a non-PENDING receipt.
     # Taking the claim closes both orderings, not just accept-then-void.
     claim_token = _claim_grn_for_accept(grn_repo, grn_id, current_user.get("user_id"))
@@ -203,7 +197,7 @@ async def void_grn(
         # nothing on the shelf, we do not void it. Read UNDER the claim, so no
         # accept can be minting while we look.
         stock_repo = get_stock_repository()
-        if stock_repo is None and status != "PENDING":
+        if stock_repo is None and grn.get("status") != "PENDING":
             raise HTTPException(
                 status_code=503,
                 detail=(
@@ -213,10 +207,11 @@ async def void_grn(
                 ),
             )
         if stock_repo is not None:
+            # Counted by ORIGIN, wherever the units are now: a transfer
+            # rewrites their source fields, and a void over moved units let
+            # the same goods be logged and received twice.
             try:
-                # By ORIGIN: a unit transferred to another shop since is still
-                # this receipt's stock.
-                already_minted = _grn_already_minted(stock_repo, _received_on(grn))
+                already_minted = _receipt_units(stock_repo, grn)
             except Exception as exc:  # noqa: BLE001
                 logger.error(
                     "[VENDOR] GRN %s: could not check for already-minted units "
@@ -232,7 +227,7 @@ async def void_grn(
                         "again in a moment."
                     ),
                 ) from exc
-            if already_minted > 0 and status != "PENDING":
+            if already_minted > 0 and grn.get("status") != "PENDING":
                 raise HTTPException(
                     status_code=409,
                     detail=(
@@ -255,99 +250,17 @@ async def void_grn(
                     ),
                 )
 
-        # TERMINAL WRITE -- guarded exactly like the accept path's, because
-        # holding the claim is NOT the same as writing under it. Each element
-        # closes a DIFFERENT measured defect; the attribution below was checked
-        # by mutation (remove one filter, see which probe reopens), because an
-        # earlier version of this comment credited the wrong filter and would
-        # have led the next reader to delete the one that is doing real work.
-        #
-        #   * status (as read above) -- carries BOTH the "no stall, two clerks" shape
-        #     and the parked-count shape. The PENDING assertion above reads the
-        #     doc fetched BEFORE the claim, and the claim itself admits
-        #     PARTIALLY_ACCEPTED, so without this filter a colleague's accept
-        #     landing in between voids a receipt that now holds stock. Measured
-        #     with the token filter REMOVED: both of those still 409 here,
-        #     because by then the doc is ACCEPTED / PARTIALLY_ACCEPTED and no
-        #     longer matches.
-        #
-        #   * accept_lock_token -- its UNIQUE job is the shape where the doc is
-        #     still PENDING when the parked void wakes up, so the status filter
-        #     cannot help: an accept takes the stale claim over, mints every
-        #     unit, and its terminal flip CANNOT be written (see
-        #     _advance_grn_terminal_status -- "the receipt stays in its previous
-        #     status"), then _finalise_grn_accept_metadata clears the token.
-        #     Doc PENDING, stock on the shelf, token gone. Measured with this
-        #     filter removed: 200 {"grn_status": "VOID"} over 24 real units.
-        #     Regression-tested by
-        #     test_a_parked_void_cannot_void_a_receipt_whose_flip_failed.
-        #
-        # And branching on the RESULT is what stops a swallowed write answering
-        # a green "GRN voided" over a doc that is still PENDING.
-        void_patch = {
-            "status": "VOID",
-            "voided_at": datetime.now().isoformat(),
-            "voided_by": current_user.get("user_id"),
-        }
-        written = _guarded_grn_write(
+        _write_under_claim(
             grn_repo,
+            grn,
+            claim_token,
             {
-                "grn_id": grn_id,
-                "status": status,
-                "accept_lock_token": claim_token,
+                "status": "VOID",
+                "voided_at": datetime.now().isoformat(),
+                "voided_by": current_user.get("user_id"),
             },
-            {"$set": void_patch},
+            "voided",
         )
-        if written is _GRN_WRITE_ERROR:
-            # Deliberately does NOT claim "nothing was voided": the write may
-            # have applied server-side and only its reply been lost, in which
-            # case the receipt IS void. The stock gate above already proved zero
-            # units, so no stock is at risk either way -- but the message must
-            # not assert an outcome we cannot see.
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    "The database did not confirm whether this goods receipt "
-                    "was voided. Refresh to see its current state before trying "
-                    "again -- no stock was affected."
-                ),
-            )
-        if written is None:
-            # Minimal mock with no atomic primitive: plain write, but still
-            # check it landed rather than assuming it did.
-            if not grn_repo.update(grn_id, void_patch):
-                raise HTTPException(
-                    status_code=503,
-                    detail=(
-                        "The goods receipt could not be voided. Refresh and try "
-                        "again; nothing was voided."
-                    ),
-                )
-        elif not written:
-            try:
-                current = grn_repo.find_by_id(grn_id)
-            except Exception:  # noqa: BLE001
-                current = None
-            status_now = (current or {}).get("status") or "unknown"
-            logger.error(
-                "[VENDOR] GRN %s: void did NOT apply -- the receipt is now %s "
-                "(it changed while this void was in flight)",
-                grn_id,
-                status_now,
-            )
-            if status_now in _GRN_TERMINAL_ACCEPT_STATUSES:
-                detail = (
-                    f"This goods receipt is now {status_now} and holds stock, "
-                    "so it cannot be voided -- accepted stock must be corrected "
-                    "via a vendor return. Refresh to see its current state."
-                )
-            else:
-                detail = (
-                    "This goods receipt changed while it was being voided (it "
-                    f"is now {status_now}), so nothing was voided. Refresh and "
-                    "check its current state before trying again."
-                )
-            raise HTTPException(status_code=409, detail=detail)
 
         # Fail-soft audit trail (same contract as the other GRN mutations).
         try:
@@ -380,7 +293,7 @@ async def void_grn(
         except Exception:  # noqa: BLE001 - a task problem never undoes the void
             pass
 
-        _reopen_po_if_nothing_received(grn_repo, grn, current_user)
+        _reopen_po_if_nothing_received(grn, current_user)
 
         return {
             "message": "GRN voided",
@@ -394,43 +307,167 @@ async def void_grn(
         _hand_back(grn_repo, grn_id, claim_token)
 
 
+def _write_under_claim(grn_repo, grn, claim_token, patch, done) -> None:
+    """The terminal write of a void or an escalation, under the claim it took;
+    `done` names it in the messages ("voided" / "escalated").
+
+    Guarded exactly like the accept path's, because holding the claim is NOT
+    the same as writing under it. Each element closes a DIFFERENT measured
+    defect; the attribution below was checked by mutation (remove one filter,
+    see which probe reopens), because an earlier version of this comment
+    credited the wrong filter and would have led the next reader to delete
+    the one that is doing real work.
+
+      * status AS READ -- carries BOTH the "no stall, two clerks" shape and
+        the parked-count shape. The caller's status test reads the doc
+        fetched BEFORE the claim, and the claim itself admits
+        PARTIALLY_ACCEPTED, so without this filter a colleague's accept
+        landing in between voids a receipt that now holds stock (a receipt
+        read PENDING must still be PENDING; one read held, held). Measured
+        with the token filter REMOVED: both of those still 409 here, because
+        by then the doc is ACCEPTED / PARTIALLY_ACCEPTED and no longer
+        matches.
+
+      * accept_lock_token -- its UNIQUE job is the shape where the doc is
+        still PENDING when the parked void wakes up, so the status filter
+        cannot help: an accept takes the stale claim over, mints every unit,
+        and its terminal flip CANNOT be written (see
+        _advance_grn_terminal_status -- "the receipt stays in its previous
+        status"), then _finalise_grn_accept_metadata clears the token. Doc
+        PENDING, stock on the shelf, token gone. Measured with this filter
+        removed: 200 {"grn_status": "VOID"} over 24 real units.
+        Regression-tested by
+        test_a_parked_void_cannot_void_a_receipt_whose_flip_failed.
+
+    And branching on the RESULT is what stops a swallowed write answering a
+    green "GRN voided" over a doc that is still PENDING."""
+    grn_id = grn.get("grn_id")
+    written = _guarded_grn_write(
+        grn_repo,
+        {
+            "grn_id": grn_id,
+            "status": grn.get("status"),  # as read: changed meanwhile -> refused
+            "accept_lock_token": claim_token,
+        },
+        {"$set": patch},
+    )
+    if written is _GRN_WRITE_ERROR:
+        # Deliberately does NOT claim "nothing was done": the write may have
+        # applied server-side and only its reply been lost. Stock is not at
+        # risk either way -- the write moves only the receipt's status.
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The database did not confirm whether this goods receipt "
+                f"was {done}. Refresh to see its current state before trying "
+                "again -- no stock was affected."
+            ),
+        )
+    if written is None:
+        # Minimal mock with no atomic primitive: plain write, but still
+        # check it landed rather than assuming it did.
+        if not grn_repo.update(grn_id, patch):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"The goods receipt could not be {done}. Refresh and try "
+                    f"again; nothing was {done}."
+                ),
+            )
+        return
+    if written:
+        return
+    try:
+        current = grn_repo.find_by_id(grn_id)
+    except Exception:  # noqa: BLE001
+        current = None
+    status_now = (current or {}).get("status") or "unknown"
+    logger.error(
+        "[VENDOR] GRN %s: the receipt was not %s -- it is now %s "
+        "(it changed while this was in flight)",
+        grn_id,
+        done,
+        status_now,
+    )
+    if status_now in _GRN_TERMINAL_ACCEPT_STATUSES:
+        detail = (
+            f"This goods receipt is now {status_now} and holds stock, "
+            f"so it cannot be {done} -- accepted stock must be corrected "
+            "via a vendor return. Refresh to see its current state."
+        )
+    else:
+        detail = (
+            f"This goods receipt changed while it was being {done} (it "
+            f"is now {status_now}), so nothing was {done}. Refresh and "
+            "check its current state before trying again."
+        )
+    raise HTTPException(status_code=409, detail=detail)
+
+
 @router.post("/grn/{grn_id}/escalate")
 async def escalate_grn(
     grn_id: str,
     note: str = Query(...),
-    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
+    current_user: dict = Depends(require_roles(*_RECEIVE_ROLES)),
 ):
-    """Escalate GRN to HQ for review"""
+    """Escalate a receipt to head office. It leaves the order's waiting list
+    (a cancel no longer waits for it); the units it put in stock still count
+    as arrived.
+
+    Only a PENDING or held receipt: an accepted one is corrected through a
+    vendor return and a void one is gone. And never while it is being
+    accepted -- escalate takes the SAME claim accept and void take. Without
+    it, escalating a receipt mid-accept dropped it from the receipts another
+    accept counts whole (the two-accepts guard), so both minted; and an
+    escalation landing between an accept's claim and its first unit put a
+    whole delivery behind an ESCALATED receipt. Store-scoped like accept and
+    void (another store's receipt reads as 404)."""
     grn_repo = get_grn_repository()
+    if grn_repo is None:
+        return {"message": "GRN escalated to HQ", "grn_id": grn_id}
 
-    if grn_repo is not None:
-        grn = grn_repo.find_by_id(grn_id)
-        if not grn:
-            raise HTTPException(status_code=404, detail="GRN not found")
-
-        grn_repo.update(
-            grn_id,
+    grn = grn_repo.find_by_id(grn_id)
+    if not grn or not can_access_store_scoped(grn.get("store_id"), current_user):
+        raise HTTPException(status_code=404, detail="GRN not found")
+    if grn.get("status") not in _VOIDABLE:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Only a pending or held goods receipt can be escalated. This "
+                f"one is {grn.get('status')}."
+            ),
+        )
+    claim_token = _claim_grn_for_accept(grn_repo, grn_id, current_user.get("user_id"))
+    if claim_token is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This goods receipt is being accepted right now, so it cannot "
+                "be escalated. Wait for that to finish, then refresh."
+            ),
+        )
+    try:
+        _write_under_claim(
+            grn_repo,
+            grn,
+            claim_token,
             {
                 "status": "ESCALATED",
                 "escalated_at": datetime.now().isoformat(),
                 "escalated_by": current_user.get("user_id"),
                 "escalation_note": note,
             },
+            "escalated",
         )
+    finally:
+        _release_grn_accept_claim(grn_repo, grn_id, claim_token)
 
     return {"message": "GRN escalated to HQ", "grn_id": grn_id}
 
 
-# The receiving MANAGERS (owner 2026-09-28: receiving is managers only) -- and
-# the over-order task is the shop's store manager's (2026-09-29).
-# cost_mask.RECEIVING_MANAGERS: one constant, so the money-router gate scan
-# (test_counter_roles_no_purchase_reads section 20) and the rbac row read it.
-_DROP_ROLES = RECEIVING_MANAGERS
-
-
 @router.post("/grn/{grn_id}/drop-over-order")
 async def drop_over_order(
-    grn_id: str, current_user: dict = Depends(require_roles(*_DROP_ROLES))
+    grn_id: str, current_user: dict = Depends(require_roles(*_RECEIVE_ROLES))
 ):
     """'Not received' for the units a receipt holds BEYOND its order (the
     catalogue release's order cap, reason over_order): the vendor did not send
@@ -440,9 +477,9 @@ async def drop_over_order(
     came.
 
     Only what is beyond the order is dropped: each such line keeps the units
-    it put on the shelf (by their origin, _received_on) plus what its order
-    still has room for (ordered less every unit the order already put on the
-    shelf, _po_units_received); the rest leaves its accepted and received
+    it put on the shelf (by their origin, _receipt_units) plus what its order
+    still has room for (ordered less what every receipt of the order put on
+    the shelf, po_detail._received_by_product); the rest leaves its accepted and received
     counts, recorded as dropped_qty. Kept units not yet on the shelf go there
     through THE one path (_put_on_shelf, order cap on) once this claim is
     handed back. Lines held for the catalogue stay held. A receipt left with
@@ -450,15 +487,16 @@ async def drop_over_order(
     The PO's received counts are refreshed, the store manager's over-order
     tasks close when nothing is beyond the order any more, and an audit row
     records who said so. Under the accept claim, so no accept runs meanwhile;
-    every read fails closed."""
+    every read fails closed. Receiving is managers only (owner 2026-09-28):
+    the route's gate."""
     from .grn_accept import (
         _complete_receipt_tasks,
-        _ordered_by_product,
-        _po_units_received,
         _put_on_shelf,
         refresh_po_received,
         release_finished_meanwhile,
     )
+    from .po_detail import _order_or_503, _qty, _received_by_product
+    from ...services.po_variance_engine import _ordered_by_product
     from ._shared import _get_db
 
     grn_repo = get_grn_repository()
@@ -508,7 +546,11 @@ async def drop_over_order(
         if not over:
             raise nothing_over
         try:
-            ordered = _ordered_by_product(po_repo, po_id)
+            po = _order_or_503(po_repo, po_id)
+            if not po:
+                raise unreadable
+            ordered = _ordered_by_product(po)
+            others = _received_by_product(po, leave_out_grn=grn_id)
             items, still_over, dropped, to_shelve, room = [], [], 0, 0, {}
             for idx, it in enumerate(grn.get("items") or []):
                 pid = it.get("product_id")
@@ -516,12 +558,15 @@ async def drop_over_order(
                 if pid not in over or accepted <= 0:
                     items.append(it)
                     continue
-                on_line = _grn_already_minted(
-                    stock_repo, _received_on(grn, product_id=pid, grn_line_index=idx)
+                on_line = _receipt_units(
+                    stock_repo, grn, product_id=pid, grn_line_index=idx
                 )
                 if pid not in room:
                     room[pid] = max(
-                        0, ordered.get(pid, 0) - _po_units_received(stock_repo, po_id, pid)
+                        0,
+                        ordered.get(pid, 0)
+                        - _qty(others.get(pid))
+                        - _receipt_units(stock_repo, grn, product_id=pid),
                     )
                 take = min(max(0, accepted - on_line), room[pid])
                 room[pid] -= take
@@ -567,22 +612,13 @@ async def drop_over_order(
         }
         if status == "VOID":
             patch.update(voided_at=patch["over_order_dropped_at"], voided_by=current_user.get("user_id"))
-        written = _guarded_grn_write(
-            grn_repo,
-            {"grn_id": grn_id, "status": "PARTIALLY_ACCEPTED", "accept_lock_token": claim_token},
-            {"$set": patch},
-        )
-        if written is None:
-            written = bool(grn_repo.update(grn_id, patch))
-        if written is not True:
-            raise HTTPException(
-                status_code=503 if written is _GRN_WRITE_ERROR else 409,
-                detail="The receipt changed while this ran. Refresh and check it before trying again.",
-            )
-        po_status = refresh_po_received(po_repo, grn_repo, po_id)
+        # Under the claim, guarded on the status read under it (the void's
+        # and the escalation's one write).
+        _write_under_claim(grn_repo, grn, claim_token, patch, "marked not received")
+        po_status = refresh_po_received(po_repo, po_id, grn_id)[0]
         if status == "VOID":
             # Voided as a void leaves it: nothing received, the order reopens.
-            po_status = _reopen_po_if_nothing_received(grn_repo, grn, current_user) or po_status
+            po_status = _reopen_po_if_nothing_received(grn, current_user) or po_status
         if not still_over:
             try:
                 _db = _get_db()

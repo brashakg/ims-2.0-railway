@@ -144,6 +144,22 @@ def compute_po_receipt_state(
     return "RECEIVED"
 
 
+def po_line_status(item: dict, received) -> str:
+    """A PO line's receiving status from what has arrived against it.
+
+    A line someone CANCELLED stays cancelled: a later receipt against another
+    line of the same order re-derives every line's status, and must not turn a
+    withdrawn line back into an 'OPEN' one that looks due.
+    """
+    if (item or {}).get("line_status") == "CANCELLED":
+        return "CANCELLED"
+    ordered = (item or {}).get("ordered_qty", (item or {}).get("quantity", 0)) or 0
+    recv = received or 0
+    if ordered and recv >= ordered:
+        return "RECEIVED"
+    return "PARTIAL" if recv > 0 else "OPEN"
+
+
 def grn_has_discrepancy(grn: dict, qty_tolerance: int = 0) -> bool:
     """True if a goods-receipt note shows a receiving variance worth a task.
 
@@ -254,56 +270,14 @@ def _grn_stock_audit(
 def held_units(entry) -> int:
     """The units an unresolved line really holds back: its `held_qty` -- the
     line's accepted units less those already received on it by origin
-    (_received_on), recorded whenever the hold is written (_put_on_shelf,
-    'Not received'). A hold written before held_qty existed held nothing yet:
-    its accepted_qty. THE one rule every reader subtracts (the order's tally,
-    the PO timeline, the tasks, the movements ledger)."""
+    (grn_accept_lock._receipt_units), recorded whenever the hold is written
+    (_put_on_shelf, 'Not received'). A hold written before held_qty existed
+    held nothing yet: its accepted_qty. THE one rule every reader of a hold
+    subtracts (the PO timeline, the tasks, the movements ledger); the order's
+    count of what arrived reads the units themselves
+    (po_detail._received_by_product)."""
     entry = entry or {}
     try:
         return max(0, int(entry.get("held_qty", entry.get("accepted_qty")) or 0))
     except (TypeError, ValueError):
         return 0
-
-
-def _cumulative_received_by_product(grn_repo, po_id: str) -> dict:
-    """Sum accepted_qty per product across every GRN for a PO that put stock on
-    the shelf: each ACCEPTED one, and each PARTIALLY_ACCEPTED one less what it
-    still really holds (held_units of its unresolved_lines) -- a held
-    receipt's other lines, and a held line's units already received, are on
-    the shelf, and the order received them (audit C1, R1-13).
-
-    This is the running on-hand-received tally used to decide whether the PO is
-    now fully or partially received. Fail-soft: any read error returns {} so the
-    caller degrades to "partial" rather than crashing the accept.
-    """
-    totals: dict = {}
-    if grn_repo is None or not po_id:
-        return totals
-    try:
-        accepted_grns = grn_repo.find_many(
-            {"po_id": po_id, "status": {"$in": ["ACCEPTED", "PARTIALLY_ACCEPTED"]}},
-            limit=1000,
-        )
-    except Exception:  # noqa: BLE001
-        return totals
-
-    def _qty(row) -> int:
-        try:
-            return int((row or {}).get("accepted_qty", 0) or 0)
-        except (TypeError, ValueError):
-            return 0
-
-    for grn in accepted_grns or []:
-        if not isinstance(grn, dict):
-            continue
-        mine: dict = {}
-        for item in grn.get("items", []) or []:
-            if isinstance(item, dict) and item.get("product_id") is not None:
-                mine[item["product_id"]] = mine.get(item["product_id"], 0) + _qty(item)
-        if grn.get("status") == "PARTIALLY_ACCEPTED":
-            for held in grn.get("unresolved_lines") or []:
-                if isinstance(held, dict) and held.get("product_id") in mine:
-                    mine[held["product_id"]] -= held_units(held)
-        for pid, qty in mine.items():
-            totals[pid] = totals.get(pid, 0) + max(0, qty)
-    return totals

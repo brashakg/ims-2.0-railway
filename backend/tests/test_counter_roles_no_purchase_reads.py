@@ -1766,16 +1766,22 @@ def test_unhiding_a_cost_field_moves_every_product_read(
 # code gate is the object its require_roles resolves to (section 20), never
 # its spelling.
 def test_every_purchase_route_row_is_the_one_list(app):
-    from api.services.rbac_policy._core import PURCHASE, RETURN_READERS
+    from api.services.cost_mask import RECEIVE_ROLES
+    from api.services.rbac_policy._core import (
+        PURCHASE,
+        RECEIVE,
+        RETURN_READERS,
+    )
 
+    lists = {
+        id(PURCHASE_ROLES): PURCHASE,
+        id(_RETURN_READERS): RETURN_READERS,
+        id(RECEIVE_ROLES): RECEIVE,
+    }
     want = {}
     for route in app.routes:
-        const = _route_gate_constant(route)
-        if const is PURCHASE_ROLES:
-            gate = PURCHASE
-        elif const is _RETURN_READERS:
-            gate = RETURN_READERS
-        else:
+        gate = lists.get(id(_route_gate_constant(route)))
+        if gate is None:
             continue
         for method in route.methods - {"HEAD", "OPTIONS"}:
             want[(method, route.path)] = gate
@@ -1787,6 +1793,9 @@ def test_every_purchase_route_row_is_the_one_list(app):
         ("GET", "/api/v1/vendor-returns/{return_id}"),
         ("GET", "/api/v1/rtv-debit-notes/{debit_note_id}/print"),
         ("POST", "/api/v1/rtv-debit-notes/issue"),
+        ("POST", "/api/v1/vendors/grn"),
+        ("POST", "/api/v1/vendors/purchase-orders"),
+        ("PUT", "/api/v1/vendors/purchase-orders/{po_id}"),
     } <= set(want)
     wrong = {
         key: rbac.policy_for(*key)["allowed"]
@@ -1796,6 +1805,7 @@ def test_every_purchase_route_row_is_the_one_list(app):
     assert not wrong, wrong
     assert PURCHASE == sorted(PURCHASE_ROLES)
     assert RETURN_READERS == sorted(_RETURN_READERS)
+    assert RECEIVE == sorted(RECEIVE_ROLES)
     assert vr_router._VENDOR_RETURN_READERS is _RETURN_READERS
 
 
@@ -1821,11 +1831,10 @@ import importlib  # noqa: E402
 import pkgutil  # noqa: E402
 import textwrap  # noqa: E402
 
-from api.services.cost_mask import RECEIVING_MANAGERS  # noqa: E402
+from api.services.cost_mask import RECEIVE_ROLES  # noqa: E402
 
-# RECEIVING_MANAGERS (PR #1171): the managers-only receiving decisions -- the
-# over-order 'Not received' route -- gate on it, never on a spelled-out list.
-_GATE_CONSTANTS = (AP_ROLES, PURCHASE_ROLES, _RETURN_READERS, RECEIVING_MANAGERS)
+# RECEIVE_ROLES: receiving is managers only (owner ruling 2026-09-28).
+_GATE_CONSTANTS = (AP_ROLES, PURCHASE_ROLES, _RETURN_READERS, RECEIVE_ROLES)
 _MONEY_ROUTERS = (
     "vendors", "finance", "purchase_invoices", "purchase_recon",
     "rtv_debit_notes", "vendor_returns", "vendor_rma", "vendor_rebates",
@@ -1882,10 +1891,10 @@ def test_receiving_managers_are_the_purchase_roles_less_the_accountant(app):
     # Receiving is managers only (owner 2026-09-28): the gate, its rbac row and
     # the constant are one object/list, so they cannot drift apart.
     from api.routers.vendors import grn_void
-    from api.services.rbac_policy._core import RECEIVING
+    from api.services.rbac_policy._core import RECEIVE
     from api.services.rbac_policy.rows_vendors import ROWS as VENDOR_ROWS
 
-    assert set(RECEIVING_MANAGERS) == set(PURCHASE_ROLES) - {"ACCOUNTANT"}
-    assert grn_void._DROP_ROLES is RECEIVING_MANAGERS
+    assert set(RECEIVE_ROLES) == set(PURCHASE_ROLES) - {"ACCOUNTANT"}
+    assert grn_void._RECEIVE_ROLES is RECEIVE_ROLES
     (row,) = [r for r in VENDOR_ROWS if r["path"].endswith("/drop-over-order")]
-    assert row["allowed"] is RECEIVING
+    assert row["allowed"] is RECEIVE

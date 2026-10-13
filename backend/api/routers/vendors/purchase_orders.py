@@ -35,25 +35,6 @@ from .models import POCreate
 from .numbering import generate_po_number
 
 
-def _typed_product_payload(it) -> dict:
-    """The product-door payload for a line typed in through "Not in the
-    catalogue?" (ruling 13): born a provisional draft."""
-    np = it.new_product
-    return {
-        "category": np.category,
-        "brand": np.brand,
-        "model": np.model,
-        "colour": np.colour,
-        "size": np.size,
-        "mrp": np.mrp,
-        # The PO rate is the PROVISIONAL cost (ruling 10); the purchase invoice
-        # corrects it to the actual one (ruling 12).
-        "cost_price": it.unit_price or None,
-        "as_draft": True,
-        "provisional": True,
-    }
-
-
 class _WithThisOrder:
     """The product store as the create loop in create_po meets it, line by
     line: the database plus the drafts this order's EARLIER typed lines will
@@ -78,22 +59,19 @@ class _WithThisOrder:
         return list(self.planned) + _pm.strict_find_many(self.repo, flt)
 
 
-def _refuse_items_we_already_have(items, product_repo) -> dict:
+def _refuse_items_we_already_have(built, product_repo) -> dict:
     """Audit C2: a typed-in line that describes a product we ALREADY have
     (active, or a draft somebody ordered earlier) never mints a hidden twin.
 
-    EVERY typed line is validated BEFORE any line is created -- against the
-    database and against the order's own earlier lines, exactly as the create
-    loop will meet them -- so a refused order leaves no draft behind (a
-    provisional draft left by a failed order sits in Needs review as
-    "ordered" when nothing was). The composer asks "already in the catalogue
-    - use it?" and resends the line with that product_id. The key is the
-    door's OWN: the canonical build with a placeholder SKU (zero writes, as
-    the catalogue promote dry-run does) stamps exactly the identity_key a
-    create would, and the answer is the door's own rule
-    (product_master.identity_conflict) -- a 409 naming the product, or a 422
-    asking a frame typed without its eye size for it (each eye size is its
-    own item, owner 09-28)."""
+    `built`: [(line index, the door's own build of the line)] for EVERY typed
+    line (price_po_lines), judged before anything is written -- against the
+    database and against the order's own earlier lines -- so a refused order
+    leaves no draft behind. The composer asks "already in the catalogue - use
+    it?" and resends the line with that product_id. The answer is the door's
+    own rule (product_master.identity_conflict): a 409 naming the product, or
+    a 422 asking a frame typed without its eye size for it (each eye size is
+    its own item, owner 09-28). Answers {line index: the discarded draft the
+    line brings back} (revive_discarded_draft, after the order is saved)."""
     if product_repo is None or not hasattr(product_repo, "find_by_identity_key"):
         return {}
     order = _WithThisOrder(product_repo)
@@ -101,23 +79,7 @@ def _refuse_items_we_already_have(items, product_repo) -> dict:
     switched_off = []
     need_size = []
     revive = {}
-    built = []
-    for idx, it in enumerate(items):
-        if it.new_product is None:
-            continue
-        try:
-            spine = _pm.build_canonical_product(
-                {**_typed_product_payload(it), "sku": "DRYRUN-PLACEHOLDER"},
-                source="FORM",
-                product_repo=product_repo,
-                db=_get_db(),
-            )
-        except _pm.ProductMasterError as err:
-            raise HTTPException(
-                status_code=err.status,
-                detail={"code": "NEW_PRODUCT_INVALID", "message": err.message, "field": err.field},
-            ) from err
-        built.append((idx, spine))
+    built = list(built)
     # Lines typed WITH a size are judged first, so a line typed without one is
     # met by every sized line of this order whatever their order on the form
     # ([sizeless, 52] and [52, sizeless] answer alike: EYE_SIZE_NEEDED).
@@ -246,9 +208,13 @@ async def list_pos(
     if active_store:
         filter_dict["delivery_store_id"] = active_store
 
-    pos = po_repo.find_many(filter_dict, skip=skip, limit=limit)
+    pos = po_repo.find_many(filter_dict, skip=skip, limit=limit) or []
+    from .po_detail import closed_by_cancel  # po_detail imports this module
 
-    return {"purchase_orders": pos or [], "total": len(pos) if pos else 0}
+    for po in pos:
+        po["closed_by_cancel"] = closed_by_cancel(po)
+
+    return {"purchase_orders": pos, "total": len(pos)}
 
 
 # INV-9: Demand forecast -> nightly draft-PO suggestions
@@ -509,11 +475,339 @@ async def create_pos_from_forecast(
         }
 
 
+def _typed_in_payload(it) -> dict:
+    """The product-door payload for a line typed in instead of picked."""
+    np = it.new_product
+    return {
+        "category": np.category,
+        "brand": np.brand,
+        "model": np.model,
+        "colour": np.colour,
+        "size": np.size,
+        "mrp": np.mrp,
+        # The PO rate is the PROVISIONAL cost (ruling 10); the purchase invoice
+        # corrects it to the actual one (ruling 12).
+        "cost_price": it.unit_price or None,
+        "as_draft": True,
+        "provisional": True,
+    }
+
+
+def _new_product_invalid(err) -> HTTPException:
+    return HTTPException(
+        status_code=err.status,
+        detail={
+            "code": "NEW_PRODUCT_INVALID",
+            "message": err.message,
+            "field": err.field,
+        },
+    )
+
+
+def price_po_lines(items, vendor, delivery_store_id, current_user):
+    """ONE path from the lines a person typed to the lines a PO stores.
+
+    Both doors that take typed lines -- create (POST) and the draft edit (PUT)
+    -- call this, so an edited order is priced and gated exactly as a new one:
+    the catalogue gate runs, typed-in new products are validated by the product
+    door and given their product_id, and GST is built per line (build_po_gst).
+    Mutates `items` (a typed-in line gets its product_id). Writes NOTHING.
+    Returns (build_po_gst result, the product docs read, the typed-in products
+    still to write) -- after the order write, hand the last to
+    po_detail.settle_typed_in_lines, then the docs to fill_cost_from_rate.
+    """
+    product_repo = get_product_repository()
+
+    # Hub Phase 2: every PO line must reference a REAL catalogued product on the
+    # `products` spine. This rejects a fabricated / placeholder id (e.g. the UI's
+    # old `new-<timestamp>` id) at PO creation, so a PO can never carry a line
+    # that GRN would later mint as ghost stock. Gated behind pm.po_catalog_gate
+    # (DARK by default) so the existing free-text Create-PO form keeps working
+    # until the Buy Desk picker ships. Fail-soft when no product repo. Checked
+    # BEFORE any typed-in product is created, so a refused order never leaves
+    # one behind; a typed-in line is given its product_id below.
+    if product_repo is not None and _po_catalog_gate_on():
+        unknown = [
+            it.product_id
+            for it in items
+            if it.new_product is None and product_repo.find_by_id(it.product_id) is None
+        ]
+        if unknown:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": (
+                        "One or more PO lines reference an unknown product. "
+                        "Catalog the product first, then add it to the PO."
+                    ),
+                    "code": "UNKNOWN_PRODUCT",
+                    "product_ids": unknown,
+                },
+            )
+
+    # Ruling 13 -- BUY FIRST, CATALOGUE LATER. Any line that carried typed-in
+    # identity instead of a product_id becomes a REAL row on the products spine,
+    # through the ONE product door, born provisional: inactive, no selling
+    # price, catalog_status DRAFT. That keeps product_id the single join key for
+    # receiving, the stock mint, the invoice and the 3-way match, instead of
+    # forking identity into a second placeholder system.
+    #
+    # Nothing is written here. Every typed-in line passes the door's own
+    # validation (build_canonical_product -> normalise_door_payload, the same
+    # core create_via_door runs, minus the write) and the door's duplicate rule
+    # (identity_conflict, _refuse_items_we_already_have) first, and a new one is given its product_id now
+    # so the stored line can carry it. The product itself is written by
+    # po_detail.settle_typed_in_lines, called only AFTER the order write: a
+    # refused order or edit -- a later line the door refuses, a colleague who
+    # sent the draft meanwhile, a lost compare-and-set -- leaves no provisional
+    # product behind, however many lines it typed in.
+    db = _get_db()
+    typed_in = []  # typed-in products still to write, each with its line
+    previews = {}  # product_id -> the doc the door built (GST reads it below)
+    claimed = {}  # identity -> (product_id, name, sku) minted in this request
+    built = []
+    for idx, it in enumerate(items):
+        if it.new_product is None:
+            continue
+        payload = _typed_in_payload(it)
+        try:
+            preview = _pm.build_canonical_product(
+                payload, source="FORM", product_repo=product_repo, db=db
+            )
+        except _pm.ProductMasterError as err:
+            raise _new_product_invalid(err) from err
+        built.append((idx, it, payload, preview))
+    # Audit C2: a line describing a product we already have is refused (409
+    # ALREADY_IN_CATALOGUE, the composer asks "use it?") through the door's
+    # own rule, never silently reused or twinned; a discarded draft typed
+    # again comes back (revive).
+    revive = _refuse_items_we_already_have(
+        [(idx, preview) for idx, _it, _payload, preview in built], product_repo
+    )
+    for idx, it, payload, preview in built:
+        np = it.new_product
+        key = preview.get("identity_key") or preview.get("sku")
+        # Two lines of one request that describe the same product share one
+        # row.
+        if key in claimed:
+            pid, name, sku = claimed[key]
+        elif idx in revive:
+            found = revive[idx]
+            pid, name, sku = found["product_id"], found.get("name"), found.get("sku")
+            claimed[key] = (pid, name, sku)
+            typed_in.append({"line": it, "product_id": pid, "revive_mrp": np.mrp})
+        else:
+            pid, name, sku = str(uuid.uuid4()), preview.get("name"), preview.get("sku")
+            claimed[key] = (pid, name, sku)
+            previews[pid] = preview
+            # The door writes exactly the SKU the stored line will carry; left
+            # to itself it would mint a second collision suffix. A minted SKU
+            # keeps the colour and size as typed ('C.01', '14.0'), which the
+            # door refuses as a SUPPLIED SKU -- that one it mints itself, and
+            # the stored line is corrected after the write.
+            if _pm.is_acceptable_sku(sku):
+                payload["sku"] = sku
+            typed_in.append(
+                {"line": it, "payload": payload, "product_id": pid,
+                 "identity_key": preview.get("identity_key")}
+            )
+        it.product_id = pid
+        it.product_name = it.product_name or name or f"{np.brand} {np.model}".strip()
+        it.sku = sku if pid in previews else (it.sku or sku)
+        it.new_product = None
+
+    # Who supplies whom decides CGST+SGST vs IGST (owner: "GST should be
+    # calculated according to interstate or intrastate as per GST norms").
+    # Read the delivery store -- with 3 entities over 4 GSTINs in 2 states,
+    # "our state" is never a constant.
+    _, store_doc = po_gst_context(delivery_store_id, None)
+
+    # Per-line GST + place-of-supply split: ONE shared computation, the same
+    # one both automatic PO doors call (see build_po_gst). Products are fetched
+    # ONCE here and handed back for the cost fill after the write.
+    products = dict(previews)
+    if product_repo is not None:
+        for it in items:
+            if it.product_id not in products:
+                products[it.product_id] = product_repo.find_by_id(it.product_id)
+    computed = build_po_gst(
+        # A typed-in line was given its product_id above (the product itself
+        # is written after the order); the spent `new_product: None` payload
+        # must not ride through **line onto the stored item.
+        [it.model_dump(exclude={"new_product"}) for it in items],
+        products.get,
+        vendor,
+        store_doc,
+    )
+
+    return computed, products, typed_in
+
+
+def create_typed_in_products(typed_in, products, current_user, po_number=None):
+    """Write the typed-in products price_po_lines held back. Call it only
+    AFTER the order that names them is saved (po_detail.settle_typed_in_lines
+    does, and repairs the stored lines from what this returns).
+
+    A line that brings a discarded draft back (price_po_lines' revive) is
+    revived here (product_master.revive_discarded_draft) -- only now, so a
+    refused order never undoes an admin's discard. A revive that fails leaves
+    the line on the order, loudly (its receipt refuses it, DISCARDED_DRAFT),
+    and its cost is not filled: a cost on the still-discarded row would
+    restamp and strand it.
+
+    Each product is written under the product_id and SKU its line already
+    carries. Returns (moved, failed):
+      moved  -- {pre-minted product_id: {product_id, sku}} for a line the
+                stored order must be pointed at: the identical product (same
+                identity key) was created by someone else meanwhile, so the
+                line names that one; or another product took the SKU, so the
+                door minted a fresh one.
+      failed -- [{product_id, product_name}] for a product the door could not
+                write at all; its line must come off the order.
+    `products` and each line are kept in step, so the cost fill that follows
+    reads the row the line really names, and never one that does not exist."""
+    if not typed_in:
+        return {}, []
+    product_repo = get_product_repository()
+    moved, failed = {}, []
+    for entry in typed_in:
+        it, pid = entry["line"], entry["product_id"]
+        if "revive_mrp" in entry:
+            try:
+                revived = _pm.revive_discarded_draft(
+                    pid,
+                    product_repo,
+                    db=_get_db(),
+                    actor=current_user.get("user_id"),
+                    mrp=entry["revive_mrp"],
+                    audit_repo=get_audit_repository(),
+                    po_number=po_number,
+                )
+            except Exception:  # noqa: BLE001 - the order stands; logged loudly below
+                revived = False
+                logger.error("[VENDOR] PO %s: revive of %s raised", po_number, pid, exc_info=True)
+            if not revived:
+                logger.error(
+                    "[VENDOR] PO %s: could not bring discarded draft %s back to "
+                    "Needs review; its receipt will be refused until it is",
+                    po_number,
+                    pid,
+                )
+            products[pid] = product_repo.find_by_id(pid) if revived else None
+            continue
+        pinned = entry["payload"]
+        attempts = [pinned]
+        if "sku" in pinned:
+            attempts.append({k: v for k, v in pinned.items() if k != "sku"})
+        created = winner = None
+        for payload in attempts:
+            try:
+                created = _pm.create_via_door(
+                    payload,
+                    source="FORM",
+                    actor=current_user.get("user_id"),
+                    actor_name=current_user.get("username"),
+                    extra_fields={"product_id": pid},
+                    product_repo=product_repo,
+                    audit_repo=get_audit_repository(),
+                    db=_get_db(),
+                )
+                break
+            except _pm.ProductMasterError as err:
+                conflict = (err.conflict or {}) if err.status == 409 else {}
+                same = entry.get("identity_key") and conflict.get(
+                    "identity_key"
+                ) == entry.get("identity_key")
+                if conflict.get("product_id") and same:
+                    winner = conflict
+                    break
+                if err.status == 409 and payload is not attempts[-1]:
+                    continue  # another product holds the SKU: let the door mint
+                logger.error(
+                    "[VENDOR] typed-in product %s (%s) was not created: %s",
+                    pid, it.product_name, err.message,
+                )
+                break
+        products.pop(pid, None)
+        if winner is not None:
+            name = winner.get("name") or it.product_name
+            moved[pid] = {
+                "product_id": winner["product_id"], "sku": winner.get("sku"),
+                "product_name": name,
+            }
+            it.product_id, it.sku, it.product_name = winner["product_id"], winner.get("sku"), name
+            if product_repo is not None:
+                products[it.product_id] = product_repo.find_by_id(it.product_id)
+        elif created is not None:
+            products[pid] = created
+            if created.get("sku") and created.get("sku") != it.sku:
+                moved[pid] = {"product_id": pid, "sku": created.get("sku")}
+                it.sku = created.get("sku")
+        else:
+            failed.append({"product_id": pid, "product_name": it.product_name})
+    return moved, failed
+
+
+def fill_cost_from_rate(po_id, po_number, items, products, current_user) -> list:
+    """Owner ruling 2026-08-26: the rate typed on the PO IS the cost, so saving
+    the PO finishes the cataloguing. Done when the lines are SAVED, not on send:
+    the buyer has agreed the price the moment the line is saved, a draft PO may
+    never be sent, and the next of 40 lines should already see the product as
+    costed. Never overwrites an existing cost.
+
+    Call it only AFTER the order write succeeded: an order or edit that was
+    refused must leave every product's cost as it was. Every cost it writes is
+    audited here -- cost feeds margin and valuation, so "who set this cost and
+    from where" must be answerable. Fail-soft: an audit failure never undoes
+    the PO write. Returns [{product_id, cost_price}] for each cost written."""
+    product_repo = get_product_repository()
+    cost_filled = []
+    for item in items:
+        prod = products.get(item.product_id)
+        if _promote_cost_from_rate(
+            item.product_id,
+            prod,
+            item.unit_price,
+            _PO_PROVISIONAL_COST_SOURCE,
+            product_repo,
+        ):
+            cost_filled.append(
+                {"product_id": item.product_id, "cost_price": round(item.unit_price, 2)}
+            )
+            # Keep the cached doc honest: two lines of one PO may carry the same
+            # product, and the second must see the cost the first just wrote
+            # (otherwise it overwrites it at its own price).
+            products[item.product_id] = {
+                **(prod or {}),
+                "cost_price": round(item.unit_price, 2),
+                "cost_source": _PO_PROVISIONAL_COST_SOURCE,
+            }
+
+    if not cost_filled:
+        return cost_filled
+    try:
+        audit = get_audit_repository()
+        if audit is not None:
+            audit.create(
+                {
+                    "action": "purchase.cost_from_po_rate",
+                    "entity_type": "purchase_order",
+                    "entity_id": po_id,
+                    "user_id": current_user.get("user_id"),
+                    "detail": {"po_number": po_number, "products": cost_filled},
+                }
+            )
+    except Exception:  # noqa: BLE001
+        pass
+    return cost_filled
+
+
+# Owner 2026-10-08: the purchase roles raise a PO -- not the catalogue manager.
 @router.post("/purchase-orders", status_code=201)
 async def create_po(
     po: POCreate, current_user: dict = Depends(require_roles(*_VENDOR_ROLES))
 ):
-    """Create a new purchase order"""
+    """Create a new purchase order (always a DRAFT)."""
     po_repo = get_purchase_order_repository()
     vendor_repo = get_vendor_repository()
 
@@ -544,116 +838,16 @@ async def create_po(
         if vendor is None:
             raise HTTPException(status_code=404, detail="Vendor not found")
 
-    product_repo = get_product_repository()
-    # Hub Phase 2: every PO line must reference a REAL catalogued product on the
-    # `products` spine. This rejects a fabricated / placeholder id (e.g. the UI's
-    # old `new-<timestamp>` id) at PO creation, so a PO can never carry a line
-    # that GRN would later mint as ghost stock. Gated behind pm.po_catalog_gate
-    # (default ON, policy_registry). Fail-soft when no product repo. Checked
-    # BEFORE any typed line is minted below, like _refuse_items_we_already_have:
-    # a refused order leaves no provisional draft behind. A typed line is given
-    # a real id (minted, or the existing product reused) by the loop below.
-    if product_repo is not None and _po_catalog_gate_on():
-        unknown = [
-            it.product_id
-            for it in po.items
-            if it.new_product is None and product_repo.find_by_id(it.product_id) is None
-        ]
-        if unknown:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "message": (
-                        "One or more PO lines reference an unknown product. "
-                        "Catalog the product first, then add it to the PO."
-                    ),
-                    "code": "UNKNOWN_PRODUCT",
-                    "product_ids": unknown,
-                },
-            )
-    # Ruling 13 -- BUY FIRST, CATALOGUE LATER. Any line that carried typed-in
-    # identity instead of a product_id becomes a REAL row on the products spine
-    # here, through the ONE product door, born provisional: inactive, no selling
-    # price, catalog_status DRAFT. That keeps product_id the single join key for
-    # receiving, the stock mint, the invoice and the 3-way match, instead of
-    # forking identity into a second placeholder system.
-    revive = _refuse_items_we_already_have(po.items, product_repo)  # audit C2
-    revive_after = []
-    for idx, it in enumerate(po.items):
-        if it.new_product is None:
-            continue
-        np = it.new_product
-        if idx in revive:
-            found = revive[idx]
-            it.product_id = found["product_id"]
-            it.product_name = it.product_name or found.get("name")
-            it.sku = it.sku or found.get("sku")
-            revive_after.append((found["product_id"], np.mrp))
-            it.new_product = None
-            continue
-        try:
-            created = _pm.create_via_door(
-                _typed_product_payload(it),
-                source="FORM",
-                actor=current_user.get("user_id"),
-                actor_name=current_user.get("username"),
-                product_repo=product_repo,
-                audit_repo=get_audit_repository(),
-                db=_get_db(),
-            )
-        except _pm.ProductMasterError as err:
-            # Past the check above this is two lines of THIS order typing the
-            # same item, or a product created a moment ago by someone else:
-            # reuse it rather than refusing the order or minting a twin.
-            if err.status == 409 and (err.conflict or {}).get("product_id"):
-                it.product_id = err.conflict["product_id"]
-                it.product_name = it.product_name or err.conflict.get("name")
-                it.sku = it.sku or err.conflict.get("sku")
-                it.new_product = None
-                continue
-            raise HTTPException(
-                status_code=err.status,
-                detail={
-                    "code": "NEW_PRODUCT_INVALID",
-                    "message": err.message,
-                    "field": err.field,
-                },
-            ) from err
-        it.product_id = created.get("product_id")
-        it.product_name = (
-            it.product_name or created.get("name") or f"{np.brand} {np.model}".strip()
-        )
-        it.sku = created.get("sku")
-        it.new_product = None
-
+    computed, products, typed_in = price_po_lines(
+        po.items,
+        vendor if vendor_repo is not None else None,
+        po.delivery_store_id,
+        current_user,
+    )
     # The number is taken only once every refusal above has passed (vendor,
     # unknown product, already in the catalogue, eye size, an invalid typed
     # line): a refused order never burns a consecutive PO number (R1-72).
     po_number = generate_po_number(po.delivery_store_id)
-
-    # Who supplies whom decides CGST+SGST vs IGST (owner: "GST should be
-    # calculated according to interstate or intrastate as per GST norms").
-    # Read the delivery store -- with 3 entities over 4 GSTINs in 2 states,
-    # "our state" is never a constant.
-    _, store_doc = po_gst_context(po.delivery_store_id, None)
-
-    # Per-line GST + place-of-supply split: ONE shared computation, the same
-    # one both automatic PO doors call (see build_po_gst). Products are fetched
-    # ONCE here and reused for the cost promote below.
-    products = {}
-    if product_repo is not None:
-        for it in po.items:
-            if it.product_id not in products:
-                products[it.product_id] = product_repo.find_by_id(it.product_id)
-    computed = build_po_gst(
-        # A typed-in new product was minted onto the spine above and its line
-        # given a real product_id; the spent `new_product: None` payload must
-        # not ride through **line onto the stored item.
-        [it.model_dump(exclude={"new_product"}) for it in po.items],
-        products.get,
-        vendor if vendor_repo is not None else None,
-        store_doc,
-    )
     stored_items = computed["items"]
     subtotal = computed["subtotal"]
     tax = computed["tax"]
@@ -663,44 +857,8 @@ async def create_po(
     interstate = computed["interstate"]
     gst_warnings = computed["warnings"]
 
-    # Owner ruling 2026-08-26: the rate typed on the PO IS the cost, so raising
-    # the PO finishes the cataloguing. Done on CREATE, not on send: the buyer
-    # has agreed the price the moment the line is saved, a draft PO may never be
-    # sent, and the next of 40 lines should already see the product as costed.
-    # Never overwrites an existing cost.
-    cost_filled = []
-    # A discarded draft this order brings back is revived only once the order
-    # is stored (below); filling its cost first would restamp the still-
-    # discarded row and strand it. Its cost is filled right after the revive.
-    reviving = {pid for pid, _ in revive_after}
-
-    def _fill_cost(item, prod):
-        if _promote_cost_from_rate(
-            item.product_id,
-            prod,
-            item.unit_price,
-            _PO_PROVISIONAL_COST_SOURCE,
-            product_repo,
-        ):
-            cost_filled.append(
-                {"product_id": item.product_id, "cost_price": round(item.unit_price, 2)}
-            )
-            # Keep the cached doc honest: two lines of one PO may carry the same
-            # product, and the second must see the cost the first just wrote
-            # (otherwise it overwrites it at its own price).
-            products[item.product_id] = {
-                **(prod or {}),
-                "cost_price": round(item.unit_price, 2),
-                "cost_source": _PO_PROVISIONAL_COST_SOURCE,
-            }
-
-    for item in po.items:
-        if item.product_id not in reviving:
-            _fill_cost(item, products.get(item.product_id))
-
-    stored = None
     if po_repo is not None:
-        stored = po_repo.create(
+        saved = po_repo.create(
             {
                 "po_id": po_id,
                 "po_number": po_number,
@@ -725,56 +883,56 @@ async def create_po(
             }
         )
 
-    # Round 5: the discarded drafts this order names come back to Needs
-    # review -- only now that the order exists, so a failed order never
-    # undoes an admin's discard.
-    if stored and revive_after:
-        audit_repo = get_audit_repository()
-        for pid, typed_mrp in revive_after:
-            try:
-                revived = _pm.revive_discarded_draft(
-                    pid,
-                    product_repo,
-                    db=_get_db(),
-                    actor=current_user.get("user_id"),
-                    mrp=typed_mrp,
-                    audit_repo=audit_repo,
-                    po_number=po_number,
-                )
-            except Exception:  # noqa: BLE001 - the order stands; logged loudly below
-                revived = False
-                logger.error("[VENDOR] PO %s: revive of %s raised", po_number, pid, exc_info=True)
-            if not revived:
-                # The receipt then refuses the line (DISCARDED_DRAFT): loud, never silent.
-                logger.error(
-                    "[VENDOR] PO %s: could not bring discarded draft %s back to "
-                    "Needs review; its receipt will be refused until it is",
-                    po_number,
-                    pid,
-                )
-                continue
-            for item in po.items:
-                if item.product_id == pid:
-                    _fill_cost(item, product_repo.find_by_id(pid))
+        # BaseRepository.create answers None on a failed insert instead of
+        # raising: say so, rather than 201 for an order that does not exist and
+        # then products and costs written for it.
+        if not saved:
+            raise HTTPException(
+                status_code=500, detail="The purchase order could not be saved."
+            )
 
-    # Audit the cost figures this PO wrote onto the product spine -- cost feeds
-    # margin and valuation, so "who set this cost and from where" must be
-    # answerable. Fail-soft: an audit failure never un-creates the PO.
-    if cost_filled:
-        try:
-            audit = get_audit_repository()
-            if audit is not None:
-                audit.create(
-                    {
-                        "action": "purchase.cost_from_po_rate",
-                        "entity_type": "purchase_order",
-                        "entity_id": po_id,
-                        "user_id": current_user.get("user_id"),
-                        "detail": {"po_number": po_number, "products": cost_filled},
-                    }
-                )
-        except Exception:  # noqa: BLE001
-            pass
+    # Only now that the order is saved: a refused order leaves no product.
+    from .po_detail import settle_typed_in_lines  # po_detail imports this module
+
+    not_created = settle_typed_in_lines(
+        po_repo, po_id, typed_in, products, current_user, po_number=po_number
+    )
+    if typed_in and po_repo is not None:
+        # Settling may have corrected or removed lines: answer with the order
+        # as stored, never the totals priced before it.
+        stored = po_repo.find_by_id(po_id) or {}
+        if stored.get("status") == "CANCELLED":
+            # 409, never 5xx: the browser client replays every 5xx POST three
+            # times, and each replay would raise (and cancel) another order.
+            names = ", ".join(n.get("product_name") or "a typed-in item" for n in not_created)
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "TYPED_IN_NOT_ADDED",
+                    "message": (
+                        f"{names} could not be added to the catalogue, so nothing "
+                        f"was left to order and {po_number} was cancelled. Try "
+                        "again in a moment."
+                    ),
+                    "po_id": po_id,
+                    "products_not_created": not_created,
+                },
+            )
+        total = stored.get("total_amount", total)
+        gst_summary = stored.get("gst_summary", gst_summary)
+        gst_warnings = [
+            {
+                "product_id": it.get("product_id"),
+                "product_name": it.get("product_name"),
+                "missing": it.get("gst_missing"),
+                "taxed": not it.get("gst_unresolved"),
+            }
+            for it in stored.get("items") or []
+            if it.get("gst_missing")
+        ]
+    cost_filled = fill_cost_from_rate(
+        po_id, po_number, po.items, products, current_user
+    )
 
     return {
         "po_id": po_id,
@@ -788,5 +946,6 @@ async def create_po(
         # buyer has to be told about.
         "gst_warnings": gst_warnings,
         "cost_filled": cost_filled,
+        "products_not_created": not_created,
         "message": "Purchase order created",
     }

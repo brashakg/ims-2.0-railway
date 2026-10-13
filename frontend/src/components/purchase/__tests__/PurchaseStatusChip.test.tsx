@@ -9,9 +9,12 @@ import { describe, it, expect } from 'vitest';
 import { PurchaseStatusChip, purchaseStatusVocab } from '../PurchaseStatusChip';
 
 describe('PurchaseStatusChip — PO statuses', () => {
-  it('maps DRAFT (pre-send) to "Ordered"', () => {
+  // Owner 2026-09-28 / D11: a draft has not gone to the vendor, so it is not
+  // "ordered" -- the drawer chip says what the modal badge and filter say.
+  it('maps DRAFT (pre-send) to "Draft", never "Ordered"', () => {
     render(<PurchaseStatusChip status="DRAFT" />);
-    expect(screen.getByText('Ordered')).toBeInTheDocument();
+    expect(screen.getByText('Draft')).toBeInTheDocument();
+    expect(screen.queryByText('Ordered')).not.toBeInTheDocument();
   });
 
   it('maps SENT and ACKNOWLEDGED to "Sent"', () => {

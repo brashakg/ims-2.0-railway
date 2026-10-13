@@ -2,8 +2,11 @@
 // IMS 2.0 - Tasks: WHO SEES WHAT. One list, one file.
 // ============================================================================
 // OWNER RULING 2026-09-03: team tasks are for managers and above only -
-// STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN. Everyone else sees ONLY the
-// tasks assigned to them.
+// STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN. Everyone else sees only
+// their own tasks (owner ruling 2026-10-12): the ones assigned to them by
+// name, the ones addressed to their role at their shop, and the ones they
+// raised themselves. The server decides that (backend
+// services/task_visibility.py); these lists only decide which screens show.
 //
 // Before this file the answer was written down THREE times, and the three
 // disagreed, which is why nobody could say who was supposed to see team tasks:
@@ -39,9 +42,11 @@ export const TEAM_TASK_ROLES: UserRole[] = [
  * Copied character-for-character off the existing `/my-work` and `/attendance`
  * gates in routes/taskRoutes.tsx - the established "every operational role"
  * list in this codebase - so a bisect can tell a permission change from a
- * file move. Plus CATALOG_MANAGER (2026-09-29): a receipt holding units for an
- * item not catalogued yet is a task assigned to the catalogue manager BY NAME,
- * and a task its own assignee cannot open is nobody's task.
+ * file move. CATALOG_MANAGER added 2026-10-13 (#1194): catalogue flag tasks,
+ * "finish cataloguing" asks and a receipt holding units for an item not
+ * catalogued yet (assigned to the catalogue manager BY NAME, 2026-09-29) are
+ * theirs, so they need Mine too -- a task its own assignee cannot open is
+ * nobody's task.
  */
 export const TASK_MODULE_ROLES: UserRole[] = [
   'SUPERADMIN',
@@ -56,8 +61,9 @@ export const TASK_MODULE_ROLES: UserRole[] = [
   'CATALOG_MANAGER',
 ];
 
-/** The runtime half of the same ruling, for nav/tab visibility. */
+/** The runtime half of the same ruling, for nav/tab visibility. Roles are
+ *  read case-insensitively, like the server's task rule (task_roles). */
 export function canSeeTeamTasks(roles: readonly string[] | undefined | null): boolean {
   if (!roles) return false;
-  return roles.some((r) => (TEAM_TASK_ROLES as readonly string[]).includes(r));
+  return roles.some((r) => (TEAM_TASK_ROLES as readonly string[]).includes(String(r).toUpperCase()));
 }

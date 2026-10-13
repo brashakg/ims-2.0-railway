@@ -23,8 +23,9 @@ vi.mock('../../../context/AuthContext', () => ({
 }));
 
 const createPO = vi.hoisted(() => vi.fn());
+const updatePO = vi.hoisted(() => vi.fn());
 vi.mock('../../../services/api', () => ({
-  vendorsApi: { createPurchaseOrder: createPO },
+  vendorsApi: { createPurchaseOrder: createPO, updatePurchaseOrder: updatePO },
   productApi: { getProducts: vi.fn().mockResolvedValue({ products: [] }) },
 }));
 vi.mock('../../../services/api/inventory', () => ({
@@ -42,6 +43,7 @@ vi.mock('../../../services/api/entities', () => ({
 }));
 
 import { PurchaseOrderForm } from '../PurchaseOrderForm';
+import { mapPOtoPurchaseOrder } from '../purchaseMappers';
 import { ApiError } from '../../../services/api/client';
 import type { Supplier } from '../purchaseTypes';
 
@@ -165,5 +167,58 @@ describe('Create PO - a typed-in item that is already in the catalogue (audit C2
     });
     expect(createPO).toHaveBeenCalledTimes(1);
     expect(onCreated).not.toHaveBeenCalled();
+  });
+});
+
+// Round 13 (main #1165's draft edit): the edit prices its lines through the
+// same server door (price_po_lines), so it answers the same 409 -- and the
+// form asks the same question before it saves anything.
+describe('Edit a draft PO - a typed-in item that is already in the catalogue (audit C2)', () => {
+  beforeEach(() => {
+    updatePO.mockReset();
+    vi.restoreAllMocks();
+  });
+
+  const draft = () =>
+    mapPOtoPurchaseOrder({
+      po_id: 'PO1', po_number: 'PO/1', vendor_id: 'v1', status: 'DRAFT',
+      items: [{ product_id: 'P-TYPED', product_name: 'Carrera CA 8895 807', sku: 'P-TYPED', quantity: 2, unit_price: 3200 }],
+    });
+
+  async function saveEdit() {
+    render(
+      <PurchaseOrderForm suppliers={[vendor]} existingPOCount={1} editing={draft()}
+        onClose={() => {}} onCreated={() => {}} />,
+    );
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+    });
+  }
+
+  it('asks "use it?" and saves the line naming the catalogued product', async () => {
+    updatePO
+      .mockRejectedValueOnce(alreadyInCatalogue())
+      .mockResolvedValueOnce({ po_id: 'PO1', status: 'DRAFT', items: [] });
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    await saveEdit();
+    await waitFor(() => expect(updatePO).toHaveBeenCalledTimes(2));
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/already in the catalogue.*size 54/i));
+    const resent = updatePO.mock.calls[1][1].items[0];
+    expect(resent.product_id).toBe('p-carrera');
+    expect(resent.new_product).toBeUndefined();
+  });
+
+  it('on "no" it saves nothing', async () => {
+    updatePO.mockRejectedValueOnce(alreadyInCatalogue());
+    vi.spyOn(window, 'confirm').mockReturnValue(false);
+    await saveEdit();
+    await waitFor(() => expect(updatePO).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(updatePO).toHaveBeenCalledTimes(1);
   });
 });

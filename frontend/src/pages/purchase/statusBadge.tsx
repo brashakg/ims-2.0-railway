@@ -5,7 +5,6 @@
 import {
   FileText,
   CheckCircle,
-  Clock,
   X as XIcon,
   Truck,
   Send,
@@ -17,17 +16,14 @@ type POStatusBadge = { label: string; color: string; icon: LucideIcon };
 
 export function getStatusBadge(status: POStatus) {
   const config: Record<string, POStatusBadge> = {
-    // Single muted semantic palette: neutral (draft), amber (pending/partial),
-    // blue (in-progress: approved/sent/acknowledged/ordered), green (received),
-    // red (cancelled). Decorative indigo/teal/purple collapse into the info blue.
+    // Single muted semantic palette: neutral (draft), amber (partial), blue
+    // (with the vendor: sent/acknowledged), green (received), red (cancelled).
+    // No approval words: the server has no approval step (owner 2026-09-28).
     DRAFT: { label: 'Draft', color: 'bg-gray-100 text-gray-700', icon: FileText },
-    PENDING: { label: 'Pending Approval', color: 'bg-amber-50 text-amber-700', icon: Clock },
-    APPROVED: { label: 'Approved', color: 'bg-blue-50 text-blue-700', icon: CheckCircle },
     SENT: { label: 'Sent', color: 'bg-blue-50 text-blue-700', icon: Send },
     ACKNOWLEDGED: { label: 'Acknowledged', color: 'bg-blue-50 text-blue-700', icon: CheckCircle },
-    ORDERED: { label: 'Ordered', color: 'bg-blue-50 text-blue-700', icon: Truck },
-    PARTIAL: { label: 'Partially Received', color: 'bg-amber-50 text-amber-700', icon: Truck },
-    PARTIALLY_RECEIVED: { label: 'Partially Received', color: 'bg-amber-50 text-amber-700', icon: Truck },
+    PARTIAL: { label: 'Partly received', color: 'bg-amber-50 text-amber-700', icon: Truck },
+    PARTIALLY_RECEIVED: { label: 'Partly received', color: 'bg-amber-50 text-amber-700', icon: Truck },
     RECEIVED: { label: 'Received', color: 'bg-green-50 text-green-700', icon: CheckCircle },
     CANCELLED: { label: 'Cancelled', color: 'bg-red-50 text-red-700', icon: XIcon },
   };

@@ -22,6 +22,7 @@ from ...dependencies import (
 from ...services.cost_mask import mask_cost
 from ...services.name_resolver import order_actor_id, order_actor_name_map
 from ...services.reorder_policy import low_stock_rows
+from ...services.task_visibility import task_counts
 from ._shared import (
     _REPORT_FINANCE_ROLES,
     _category_breakdown,
@@ -123,11 +124,8 @@ async def dashboard_stats(
     # Fetch task/appointment data
     open_tasks = 0
     if task_repo is not None:
-        task_summary = task_repo.get_task_summary(active_store)
-        if task_summary:
-            open_tasks = task_summary.get("OPEN", 0) + task_summary.get(
-                "IN_PROGRESS", 0
-            )
+        # THE task count: only the tasks the caller can see (task_visibility).
+        open_tasks = task_counts(task_repo, current_user, {"store_id": active_store})["open"]
 
     # Real today-vs-yesterday sales change (same delta math as
     # /sales/comparison + /sales/growth). null when yesterday had no sales

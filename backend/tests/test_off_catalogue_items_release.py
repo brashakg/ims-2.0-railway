@@ -1245,6 +1245,16 @@ ACCOUNTANT = {
 BOSS_1701 = dict(BOSS_TYPED, model="BOSS 1701", colour="C3")
 
 
+def _receiving_gate_refuses(handler, role) -> bool:
+    """Receiving is managers only (owner 2026-09-28): the handler's OWN
+    require_roles gate (#1165: _RECEIVE_ROLES) refuses `role` before the
+    handler runs -- the one place the rule lives."""
+    import inspect
+
+    dep = inspect.signature(handler).parameters["current_user"].default.dependency
+    return role not in inspect.getclosurevars(dep).nonlocals["allowed"]
+
+
 def _seed_user(world, user):
     world.db.seed(
         "users",
@@ -2320,7 +2330,9 @@ def test_r5_an_order_that_is_not_stored_never_revives_the_draft(world, monkeypat
         delivery_store_id=STORE,
         items=[vd.POItemCreate(new_product=dict(BOSS_TYPED), quantity=1, unit_price=1200)],
     )
-    _run(vd.create_po(body, MANAGER))
+    with pytest.raises(HTTPException) as unsaved:  # main #1165: never 201 for no order
+        _run(vd.create_po(body, MANAGER))
+    assert unsaved.value.status_code == 500
     finding(
         world.product(draft_id).get("discarded_draft") is True
         and world.product(draft_id).get("provisional") is False,
@@ -2368,21 +2380,12 @@ def test_r5_a_receipt_that_accepted_none_of_the_draft_does_not_hold_it(world):
         created["grn_number"] not in detail,
         f"R5: a receipt that accepted none of the draft blocks its discard ({detail})",
     )
-    stored = world.db.purchase_orders.find_one({"po_id": po["po_id"]})
-    if stored["status"] in ("DRAFT", "SENT", "ACKNOWLEDGED"):
-        assert "cancel" in detail.lower()
-    else:
-        # The order cannot be cancelled; the refusal never says to.
-        finding(
-            "cancel that order" not in detail and "cannot be cancelled" in detail,
-            f"R5: the refusal tells the admin to cancel an order cancel refuses ({detail})",
-        )
-        # R1-5 (owner 2026-10-08): the way out is the rest of the LINE, which a
-        # person cancels until draft #1165's door lands -- said in plain words.
-        finding(
-            "ask the purchase manager to cancel the rest of that line" in detail.lower(),
-            f"R1-5: the refusal does not say the rest of the line can be cancelled ({detail})",
-        )
+    # R1-5 (owner 2026-10-08): the way out is the rest of the LINE -- #1165's
+    # line cancel takes it on any open order, whatever already arrived.
+    finding(
+        "cancel that line" in detail.lower(),
+        f"R1-5: the refusal does not say the rest of the line can be cancelled ({detail})",
+    )
 
 
 def test_r5_the_discard_refuses_loudly_when_orders_cannot_be_read(world, monkeypatch):
@@ -2441,7 +2444,9 @@ def test_r5_a_void_never_reopens_a_cancelled_order(world):
             MANAGER,
         )
     )
-    _run(vd.cancel_po(po["po_id"], "cancelled before the box was counted", MANAGER))
+    # A cancel now waits for a logged receipt (#1165, _refuse_if_box_waiting):
+    # the order a cancel that raced the receipt leaves behind.
+    world.db.purchase_orders.update_one({"po_id": po["po_id"]}, {"$set": {"status": "CANCELLED"}})
     _run(vd.void_grn(created["grn_id"], MANAGER))
     assert world.db.purchase_orders.find_one({"po_id": po["po_id"]})["status"] == "CANCELLED"
 
@@ -2547,7 +2552,9 @@ def test_r5_a_waiting_receipt_that_accepts_none_of_the_draft_does_not_block(worl
             MANAGER,
         )
     )
-    _run(vd.cancel_po(po["po_id"], "box broken, not re-sent", MANAGER))
+    # A cancel now waits for a logged receipt (#1165, _refuse_if_box_waiting):
+    # the order a cancel that raced the receipt leaves behind.
+    world.db.purchase_orders.update_one({"po_id": po["po_id"]}, {"$set": {"status": "CANCELLED"}})
     refused = _delete_refusal(world, draft_id)
     finding(
         refused is None,
@@ -3300,7 +3307,11 @@ def _mixed_held_receipt(world):
 
 def _po_received(world, po):
     stored = world.db.purchase_orders.find_one({"po_id": po["po_id"]})
-    return stored["status"], {it["product_id"]: it.get("received_qty") for it in stored["items"]}
+    by_product = stored.get("received_qty_by_product") or {}
+    return stored["status"], {
+        it["product_id"]: by_product.get(it["product_id"], it.get("received_qty"))
+        for it in stored["items"]
+    }
 
 
 def _audit_rows(world, action):
@@ -3428,7 +3439,8 @@ def test_r6_not_received_is_for_the_receiving_managers_only():
         if isinstance(r, dict) and str(r.get("path", "")).endswith("/grn/{grn_id}/drop-over-order")
     ]
     assert len(rows) == 1 and "ACCOUNTANT" not in rows[0]["allowed"]
-    assert vd._DROP_ROLES == ("ADMIN", "AREA_MANAGER", "STORE_MANAGER")
+    assert _receiving_gate_refuses(vd.drop_over_order, "ACCOUNTANT")
+    assert vd._RECEIVE_ROLES == ("ADMIN", "AREA_MANAGER", "STORE_MANAGER")
 
 
 def test_r6_a_product_finished_during_an_accept_is_released_after_it(world, monkeypatch):
@@ -4174,10 +4186,11 @@ def test_r6_a_held_receipt_is_never_voided_unchecked(world, monkeypatch):
     assert world.grn(grn["grn_id"])["status"] == "PARTIALLY_ACCEPTED"
 
 
-@pytest.mark.parametrize("field", ["created_by", "assigned_by"])
+@pytest.mark.parametrize("field", ["assigned_by"])
 def test_r6_below_manager_a_task_you_raised_or_handed_on_is_yours(world, field):
     # Owner 2026-09-03: below store manager you see only your own tasks --
-    # the ones assigned to you, and the ones you raised or handed to someone.
+    # the ones assigned to you, and the ones you raised by hand (owner
+    # 2026-10-12, #1194: assigned_by on a task POST /tasks stamped "manual").
     _seed_user(world, SALES)
     world.db.seed(
         "tasks",
@@ -4189,6 +4202,7 @@ def test_r6_below_manager_a_task_you_raised_or_handed_on_is_yours(world, field):
                 "store_id": STORE,
                 "assigned_to": MANAGER["user_id"],
                 field: SALES["user_id"],
+                "created_via": "manual",
             }
         ],
     )
@@ -4531,8 +4545,32 @@ def test_r7_not_received_shelves_what_it_keeps_through_the_order_cap(world):
     # the one path WITH the order cap -- another receipt of the order going
     # into stock at that moment holds it for the store manager again.
     po, boss, grn1, gid = _two_boss_lines_beyond_the_order(world, 5)
+    # A third delivery of 2 being accepted right now (PENDING, live claim):
+    # counted whole, it takes the order past 5 (main's in-flight rule). The
+    # order of 5 with 3 received reads part received, as its accept wrote it.
+    world.db.purchase_orders.update_one(
+        {"po_id": po["po_id"]}, {"$set": {"status": "PARTIALLY_RECEIVED"}}
+    )
+    third = _run(
+        vd.create_grn(
+            vd.GRNCreate(
+                po_id=po["po_id"],
+                vendor_invoice_no="JOT/26-27/0901-3RD",
+                vendor_invoice_date="2026-09-28",
+                items=[
+                    vd.GRNItemCreate(
+                        product_id=boss, received_qty=2, accepted_qty=2, rejected_qty=0, tallied=True
+                    )
+                ],
+                attachment_file_id="F-RECEIPT-PHOTO",
+                attachment_filename="bill.jpg",
+                attachment_mime="image/jpeg",
+            ),
+            MANAGER,
+        )
+    )
     world.db.grns.update_one(
-        {"grn_id": grn1["grn_id"]},
+        {"grn_id": third["grn_id"]},
         {"$set": {"accept_lock_at": vd.datetime.now().isoformat(), "accept_lock_token": "GACC-other"}},
     )
     out = _run(vd.drop_over_order(gid, MANAGER))
@@ -4760,10 +4798,8 @@ def test_r8_only_a_receiving_manager_decides_the_units_beyond_the_order(world):
     world.finish_draft(boss, offer=2790)
     gid = grn2["grn_id"]
     assert len(world.units(boss)) == 2
-    _seed_user(world, ACCOUNTANT)
-    with pytest.raises(HTTPException) as refused:
-        _run(vd.accept_grn(gid, ACCOUNTANT))
-    assert refused.value.status_code == 403 and "Add to stock" in refused.value.detail
+    # Receiving is managers only: the accountant never reaches 'Add to stock'.
+    assert _receiving_gate_refuses(vd.accept_grn, "ACCOUNTANT")
     held = world.grn(gid)
     status, received = _po_received(world, po)
     finding(
@@ -4772,7 +4808,7 @@ def test_r8_only_a_receiving_manager_decides_the_units_beyond_the_order(world):
         and [ln["reason"] for ln in held["unresolved_lines"]] == ["over_order"]
         and received[boss] == 2
         and len(_mgr_tasks(world, gid)) == 1,
-        f"An accountant's 'Add to stock' put {len(world.units(boss))} Boss on the shelf "
+        f"The receipt held beyond its order put {len(world.units(boss))} Boss on the shelf "
         f"against an order of 2 ({held['status']}, PO reads {received[boss]}, "
         f"{len(_mgr_tasks(world, gid))} store-manager task(s) open)",
     )
@@ -4853,22 +4889,15 @@ def test_r8_only_a_receiving_manager_voids_a_receipt_held_beyond_its_order(world
     world.finish_draft(draft_id, offer=2790)
     gid = grn2["grn_id"]
     assert [ln["reason"] for ln in world.grn(gid)["unresolved_lines"]] == ["over_order"]
-    _seed_user(world, ACCOUNTANT)
-    try:
-        _run(vd.void_grn(gid, ACCOUNTANT))
-        refused = None
-    except HTTPException as exc:
-        refused = exc
+    # Receiving is managers only: the accountant never reaches Void.
     finding(
-        refused is not None
-        and refused.status_code == 403
+        _receiving_gate_refuses(vd.void_grn, "ACCOUNTANT")
         and world.grn(gid)["status"] == "PARTIALLY_ACCEPTED"
         and len(_mgr_tasks(world, gid)) == 1,
-        f"An accountant voided a receipt held beyond its order ({refused}; now "
+        f"An accountant may void a receipt held beyond its order (now "
         f"{world.grn(gid)['status']}, {len(_mgr_tasks(world, gid))} store-manager task(s) open)",
     )
-    assert "Not received" in refused.detail
-    # The claim was handed back: the store manager's void goes through.
+    # The store manager's void goes through.
     out = _run(vd.void_grn(gid, MANAGER))
     assert out["grn_status"] == "VOID" and _mgr_tasks(world, gid) == []
 
@@ -5633,18 +5662,11 @@ def test_r10_only_a_receiving_manager_voids_a_held_receipt(world):
     # says the boxes in the shop never came -- not the accountant's answer.
     po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
     gid = grn["grn_id"]
-    _seed_user(world, ACCOUNTANT)
-    try:
-        _run(vd.void_grn(gid, ACCOUNTANT))
-        refused = None
-    except HTTPException as exc:
-        refused = exc
     finding(
-        refused is not None
-        and refused.status_code == 403
+        _receiving_gate_refuses(vd.void_grn, "ACCOUNTANT")
         and world.grn(gid)["status"] == "PARTIALLY_ACCEPTED"
         and len(_catalogue_tasks(world, gid)) == 1,
-        f"R10-4: an accountant voided a held receipt ({refused}; now {world.grn(gid)['status']})",
+        f"R10-4: an accountant may void a held receipt (now {world.grn(gid)['status']})",
     )
     out = _run(vd.void_grn(gid, MANAGER))
     assert out["grn_status"] == "VOID" and _catalogue_tasks(world, gid) == []
@@ -5850,25 +5872,31 @@ def test_r11_every_way_out_of_a_release_that_dies_records_what_it_holds(world, m
     from pymongo.errors import DuplicateKeyError
 
     from api.routers.vendors import grn_accept as _ga
+    from api.routers.vendors import grn_accept_lock as _gl
 
     po, d_id, e_id, gid = _d_x2_and_e_x1_held(world)
     failed = []
     if exit_ != "count_read_once":
         _finished_without_a_release(world, e_id, offer=2890)
     if exit_ in ("count_read_once", "order_cap_read"):
-        real_count = _ga._grn_already_minted
+        real_count = _gl._grn_already_minted
 
         def _reads(repo, flt):
             if exit_ == "count_read_once":
                 hit = flt.get("grn_line_index") == 1 and not failed
             else:
-                hit = flt.get("product_id") == e_id and "po_id" in flt
+                # The cap's read for E's line: this receipt's own E units.
+                hit = (
+                    flt.get("product_id") == e_id
+                    and "po_id" not in flt
+                    and "grn_line_index" not in flt
+                )
             if hit:
                 failed.append(flt)
                 raise _Unreadable("socket closed")
             return real_count(repo, flt)
 
-        monkeypatch.setattr(_ga, "_grn_already_minted", _reads)
+        monkeypatch.setattr(_gl, "_grn_already_minted", _reads)
     elif exit_ == "heartbeat":
 
         def _tick(repo, grn_id, token, state):
@@ -5935,12 +5963,12 @@ def test_r11_a_save_lost_to_a_failed_accept_still_releases(world, monkeypatch):
     # The cataloguer saves E while the manager's 'Add to stock' holds the
     # receipt's claim (E's release finds it: 409, swallowed); the accept then
     # dies on E's count read. Its way out runs the release E's save lost.
-    from api.routers.vendors import grn_accept as _ga
+    from api.routers.vendors import grn_accept_lock as _gl
 
     po, d_id, e_id, gid = _d_x2_and_e_x1_held(world)
     world.finish_draft(d_id, offer=2790)
     assert _held(world, gid) == [(e_id, "incomplete_catalog", 1)]
-    real, saved = _ga._grn_already_minted, []
+    real, saved = _gl._grn_already_minted, []
 
     def _cataloguer_saves_meanwhile(repo, flt):
         if flt.get("grn_line_index") == 1 and not saved:
@@ -5948,7 +5976,7 @@ def test_r11_a_save_lost_to_a_failed_accept_still_releases(world, monkeypatch):
             raise _Unreadable("socket closed")
         return real(repo, flt)
 
-    monkeypatch.setattr(_ga, "_grn_already_minted", _cataloguer_saves_meanwhile)
+    monkeypatch.setattr(_gl, "_grn_already_minted", _cataloguer_saves_meanwhile)
     with pytest.raises(HTTPException) as died:
         _drive(vd.accept_grn(gid, MANAGER))
     assert saved and died.value.status_code == 503
@@ -5965,50 +5993,49 @@ def test_r11_a_managers_add_to_stock_never_shelves_a_duplicate_unasked(world, mo
     # (another invoice number) both held for the catalogue. Finishing the
     # draft shelves R1; R2's release cannot read its count all through that
     # save, so R2 still reads 'waiting to be catalogued'. The store manager's
-    # 'Add to stock' on R2 is not his answer to "beyond the order?" -- nobody
-    # asked it: R2 is held beyond the order, and he is asked.
-    from api.routers.vendors import grn_accept as _ga
+    # 'Add to stock' on R2 takes the units in -- owner ruling 2026-10-08 (b):
+    # an over-delivery is ACCEPTED and FLAGGED for the store manager, never
+    # refused or held (#1165, _flag_over_delivery). Never unasked: the flag
+    # names the order, the product and the extra units.
+    from api.routers.vendors import grn_accept_lock as _gl
 
     po = world.raise_po([{"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200}])
     boss = po["items"][0]["product_id"]
     r1 = _receive(world, po, [2], "JOT/26-27/1211")
     r2 = _receive(world, po, [2], "JOT/26-27/1211-DUP")
-    real = _ga._grn_already_minted
+    real = _gl._grn_already_minted
 
     def _r2_unreadable(repo, flt):
-        if "grn_line_index" in flt and {"grn_id": r2["grn_id"]} in flt.get("$or", []):
+        if "grn_line_index" in flt and flt.get("grn_id") == r2["grn_id"]:
             raise _Unreadable("socket closed")
         return real(repo, flt)
 
-    monkeypatch.setattr(_ga, "_grn_already_minted", _r2_unreadable)
+    monkeypatch.setattr(_gl, "_grn_already_minted", _r2_unreadable)
     world.finish_draft(boss, offer=2790)
-    monkeypatch.setattr(_ga, "_grn_already_minted", real)
+    monkeypatch.setattr(_gl, "_grn_already_minted", real)
     assert len(world.units(boss)) == 2 and world.grn(r1["grn_id"])["status"] == "ACCEPTED"
     assert _held(world, r2["grn_id"]) == [(boss, "incomplete_catalog", 2)]
     _run(vd.accept_grn(r2["grn_id"], MANAGER))
     status, received = _po_received(world, po)
+    flagged = [
+        t for t in _open_tasks(world) if t.get("source_ref") == f"grn_over:{r2['grn_id']}"
+    ]
     finding(
-        len(world.units(boss)) == 2
-        and _held(world, r2["grn_id"]) == [(boss, "over_order", 2)]
-        and received[boss] == 2
-        and len(_mgr_tasks(world, r2["grn_id"])) == 1,
-        f"R11-2: a manager's press put {len(world.units(boss))} Boss on the shelf against an "
-        f"order of 2 (R2 holds {_held(world, r2['grn_id'])}, PO reads {received[boss]} "
-        f"{status}, {len(_mgr_tasks(world, r2['grn_id']))} store-manager task(s))",
+        len(world.units(boss)) == 4
+        and world.grn(r2["grn_id"])["status"] == "ACCEPTED"
+        and received[boss] == 4
+        and len(flagged) == 1
+        and "2 more than ordered (4 received, 2 ordered)" in flagged[0]["description"],
+        f"R11-2: a manager's press over the order put {len(world.units(boss))} Boss on the "
+        f"shelf (PO reads {received[boss]} {status}) with {len(flagged)} over-delivery flag(s)",
     )
-    # Now asked, his press is his answer: the vendor really sent them.
-    _run(vd.accept_grn(r2["grn_id"], MANAGER))
-    assert len(world.units(boss)) == 4 and world.grn(r2["grn_id"])["status"] == "ACCEPTED"
-    assert _mgr_tasks(world, r2["grn_id"]) == []
 
 
 def test_r11_not_received_for_everything_reopens_the_order_as_a_void_does(world):
     # The panel's probe: an order for a Carrera x1; a receipt line for a
     # catalogued Boss the order never named, held beyond the order (ordered
-    # 0) by the accountant's 'Add to stock'. 'Not received' leaves the receipt
-    # VOID with nothing received: the order is SENT again and can be
-    # cancelled -- the same rule Void runs.
-    _seed_user(world, ACCOUNTANT)
+    # 0). 'Not received' leaves the receipt VOID with nothing received: the
+    # order is SENT again and can be cancelled -- the same rule Void runs.
     carrera = world.catalogue_frame("Carrera", "CA 8895", "807", "54", mrp=6990, offer=6490, cost=3155.76)
     boss = world.catalogue_frame("Boss", "BOSS 1700", "C2", "52", mrp=2990, offer=2790, cost=1200)
     po = world.raise_po(
@@ -6045,9 +6072,32 @@ def test_r11_not_received_for_everything_reopens_the_order_as_a_void_does(world)
         )
     )
     gid = created["grn_id"]
-    _run(vd.accept_grn(gid, ACCOUNTANT))
+    # Held beyond the order with nothing on the shelf -- as the catalogue
+    # release's order cap leaves a line the order never named (a manager's
+    # 'Add to stock' takes it in and flags it instead, owner 2026-10-08 (b)).
+    world.db.grns.update_one(
+        {"grn_id": gid},
+        {
+            "$set": {
+                "status": "PARTIALLY_ACCEPTED",
+                "accepted_at": vd.datetime.now().isoformat(),
+                "unresolved_lines": [
+                    {
+                        "product_id": boss["product_id"],
+                        "accepted_qty": 1,
+                        "held_qty": 1,
+                        "reason": "over_order",
+                        "ordered": 0,
+                        "on_shelf": 0,
+                    }
+                ],
+            }
+        },
+    )
+    world.db.purchase_orders.update_one(
+        {"po_id": po["po_id"]}, {"$set": {"status": "PARTIALLY_RECEIVED", "total_received_qty": 0}}
+    )
     assert _held(world, gid) == [(boss["product_id"], "over_order", 1)]
-    assert world.db.purchase_orders.find_one({"po_id": po["po_id"]})["status"] == "PARTIALLY_RECEIVED"
     out = _run(vd.drop_over_order(gid, MANAGER))
     stored = world.db.purchase_orders.find_one({"po_id": po["po_id"]})
     assert out["grn_status"] == "VOID" and world.grn(gid)["status"] == "VOID"
@@ -6060,23 +6110,18 @@ def test_r11_not_received_for_everything_reopens_the_order_as_a_void_does(world)
 
 
 def _four_line_receipt(world):
-    """Receipt R: E (typed, unfinished) x1, D (typed) x2, Vogue G x1 beyond
-    its order (an earlier receipt brought the 1 ordered) and Carrera C x1
-    within its order. The manager's 'Add to stock' shelves C and holds E and
-    D for the catalogue and G beyond the order."""
+    """Receipt R: E (typed, unfinished) x1, D (typed) x2, Vogue G (typed) x1
+    beyond its order (an earlier receipt brought the 1 ordered) and Carrera C
+    x1 within its order. The manager's 'Add to stock' shelves C and holds E,
+    D and G for the catalogue; finishing G releases the earlier receipt's G
+    and holds R's beyond the order (the release's order cap)."""
     carrera = world.catalogue_frame("Carrera", "CA 8895", "807", "54", mrp=6990, offer=6490, cost=3155.76)
-    vogue = world.catalogue_frame("Vogue", "VO 5286", "W44", "52", mrp=4990, offer=4490, cost=2100)
+    vogue_typed = dict(BOSS_TYPED, brand="Vogue", model="VO 5286", colour="W44", mrp=4990)
     po = world.raise_po(
         [
             {"new_product": dict(BOSS_1701), "quantity": 1, "unit_price": 1300},
             {"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200},
-            {
-                "product_id": vogue["product_id"],
-                "product_name": "Vogue VO 5286 W44",
-                "sku": vogue["sku"],
-                "quantity": 1,
-                "unit_price": 2200,
-            },
+            {"new_product": vogue_typed, "quantity": 1, "unit_price": 2200},
             {
                 "product_id": carrera["product_id"],
                 "product_name": "Carrera CA 8895 807",
@@ -6090,6 +6135,7 @@ def _four_line_receipt(world):
     _receive_some(world, po, {g_id: 1}, "JOT/26-27/1231")
     grn, _ = _receive_some(world, po, {e_id: 1, d_id: 2, g_id: 1, c_id: 1}, "JOT/26-27/1232")
     gid = grn["grn_id"]
+    world.finish_draft(g_id, offer=4490)
     assert _held(world, gid) == [
         (e_id, "incomplete_catalog", 1),
         (d_id, "incomplete_catalog", 2),
@@ -6335,3 +6381,109 @@ def test_merge_the_bulk_archive_never_discards_a_held_draft(world):
     assert not world.product(draft_id).get("deleted_at")
     assert world.product(draft_id)["provisional"] is True
     assert world.grn(grn["grn_id"])["status"] == "PARTIALLY_ACCEPTED"
+
+
+# ---------------------------------------------------------------------------
+# Round 13: the reconciliation with main #1165 -- one door for typed lines
+# (price_po_lines), one count of what a receipt put on the shelf
+# (_receipt_units), one reopen after a void
+# ---------------------------------------------------------------------------
+
+
+def test_merge_an_edit_typing_an_item_we_already_have_is_asked_the_same(world):
+    # #1165's draft edit prices its lines through the one door create uses
+    # (price_po_lines): a typed line describing a catalogued product answers
+    # the same 409 there, and the draft and the catalogue are left as they were.
+    existing = world.catalogue_frame(
+        "Carrera", "CA 8895", "807", "54", mrp=6990, offer=6490, cost=3155.76
+    )
+    made = _run(
+        vd.create_po(
+            vd.POCreate(
+                vendor_id=VENDOR,
+                delivery_store_id=STORE,
+                items=[vd.POItemCreate(new_product=dict(BOSS_TYPED), quantity=1, unit_price=1200)],
+            ),
+            MANAGER,
+        )
+    )
+    before = world.db.purchase_orders.find_one({"po_id": made["po_id"]})
+    line = before["items"][0]
+    body = vd.POUpdate(
+        items=[
+            vd.POItemCreate(
+                product_id=line["product_id"],
+                product_name=line["product_name"],
+                sku=line["sku"],
+                quantity=1,
+                unit_price=1200,
+            ),
+            vd.POItemCreate(new_product=dict(CARRERA_TYPED), quantity=2, unit_price=3200),
+        ]
+    )
+    with pytest.raises(HTTPException) as refused:
+        _run(vd.update_po(made["po_id"], body, MANAGER))
+    detail = refused.value.detail if isinstance(refused.value.detail, dict) else {}
+    after = world.db.purchase_orders.find_one({"po_id": made["po_id"]})
+    finding(
+        refused.value.status_code == 409
+        and detail.get("code") == "ALREADY_IN_CATALOGUE"
+        and [m["existing"]["product_id"] for m in detail.get("matches", [])]
+        == [existing["product_id"]]
+        and len(world.products_named("Carrera", "CA 8895")) == 1
+        and after["items"] == before["items"],
+        f"Merge: an edit typing a catalogued Carrera answered {refused.value.status_code} "
+        f"{detail.get('code')}; {len(world.products_named('Carrera', 'CA 8895'))} Carrera(s)",
+    )
+
+
+def test_merge_a_void_never_reopens_an_order_whose_receipts_cannot_be_read(world, monkeypatch):
+    # The reopen asks whether any other receipt is live on the order through
+    # the order's one receipt read (po_detail._order_receipts), which fails
+    # CLOSED: a read error is never "nothing else on the order".
+    from api.routers.vendors import po_detail as _pd
+
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    assert world.db.purchase_orders.find_one({"po_id": po["po_id"]})["status"] == "PARTIALLY_RECEIVED"
+
+    def _unreadable(po_id):
+        raise HTTPException(status_code=503, detail="Could not check the deliveries")
+
+    monkeypatch.setattr(_pd, "_order_receipts", _unreadable)
+    _run(vd.void_grn(grn["grn_id"], MANAGER))
+    stored = world.db.purchase_orders.find_one({"po_id": po["po_id"]})
+    finding(
+        world.grn(grn["grn_id"])["status"] == "VOID" and stored["status"] == "PARTIALLY_RECEIVED",
+        f"Merge: an unreadable receipt list reopened the order ({stored['status']})",
+    )
+
+
+def test_merge_a_revive_that_fails_never_fills_the_discarded_rows_cost(world, monkeypatch):
+    # The revive runs only after the order is saved (create_typed_in_products).
+    # When it fails, the line stays on the order, loudly, and the still-
+    # discarded row is not given the order's rate as its cost: that would
+    # restamp a row nobody can see.
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    _discard(world, draft_id, po, grn)
+    world.db.products.update_one(
+        {"product_id": draft_id}, {"$unset": {"cost_price": "", "cost_source": ""}}
+    )
+    monkeypatch.setattr(_pm, "revive_discarded_draft", lambda *a, **k: False)
+    made = _run(
+        vd.create_po(
+            vd.POCreate(
+                vendor_id=VENDOR,
+                delivery_store_id=STORE,
+                items=[vd.POItemCreate(new_product=dict(BOSS_TYPED), quantity=1, unit_price=1300)],
+            ),
+            MANAGER,
+        )
+    )
+    again = world.db.purchase_orders.find_one({"po_id": made["po_id"]})
+    spine = world.product(draft_id)
+    finding(
+        [it["product_id"] for it in again["items"]] == [draft_id]
+        and spine.get("discarded_draft") is True
+        and not spine.get("cost_price"),
+        f"Merge: a failed revive filled the discarded row's cost ({spine.get('cost_price')})",
+    )

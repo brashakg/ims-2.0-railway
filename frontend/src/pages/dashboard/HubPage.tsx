@@ -48,6 +48,9 @@ interface SopTemplate {
 
 const INR = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 });
 
+// The tasks the Hub both counts as open AND lists (GET /tasks takes a comma list).
+const OPEN_WORK = 'OPEN,IN_PROGRESS';
+
 // Priority rank for sorting (P0 = most urgent).
 const PRIORITY_RANK: Record<string, number> = { P0: 0, P1: 1, P2: 2, P3: 3, P4: 4 };
 
@@ -108,6 +111,9 @@ export default function HubPage() {
   // Display-only: no POS or billing logic changes.
   const isOnlineStoreActive = useIsOnlineStore();
   const teamTasks = canSeeTeamTasks(user?.roles);
+  // Where the Hub's task figure and list lead: a manager's count is the whole
+  // shop's, so Team; everyone else's is their own, so Mine.
+  const tasksHome = teamTasks ? '/tasks/team' : '/tasks/mine';
   const [meta, setMeta] = useState<HeroMeta>({
     salesToday: '—',
     salesDelta: '',
@@ -178,12 +184,10 @@ export default function HubPage() {
       .getTaskSummary(user?.activeStoreId)
       .then((r: any) => {
         if (cancelled) return;
-        const open = r?.open ?? r?.total_open ?? r?.counts?.open;
         const overdue = r?.overdue ?? r?.counts?.overdue ?? 0;
         const p1 = r?.p1 ?? r?.counts?.p1 ?? r?.high_priority ?? 0;
         setMeta((m) => ({
           ...m,
-          openTasks: open != null ? String(open) : '—',
           tasksDetail:
             overdue || p1
               ? `${overdue || 0} overdue · ${p1 || 0} P1`
@@ -212,6 +216,8 @@ export default function HubPage() {
     }
 
     // Priority work: top open tasks (most-urgent first) + SOP checklists.
+    // 'Open Tasks' is this SAME request's server total, so the figure and the
+    // list can never disagree: open = not started yet + started.
     setLoadingWork(true);
     Promise.allSettled([
       // Below manager the server lists only your OWN tasks (owner 09-03), so
@@ -219,8 +225,8 @@ export default function HubPage() {
       // task sits at the receipt's shop, not the one active here.
       tasksApi.getTasks(
         user?.activeStoreId && teamTasks
-          ? { store_id: user.activeStoreId, status: 'OPEN' }
-          : { status: 'OPEN' }
+          ? { store_id: user.activeStoreId, status: OPEN_WORK }
+          : { status: OPEN_WORK }
       ),
       tasksApi.getSopTemplates(
         user?.activeStoreId
@@ -232,6 +238,7 @@ export default function HubPage() {
       if (tRes.status === 'fulfilled') {
         const data: any = tRes.value;
         const list: any[] = Array.isArray(data) ? data : data?.tasks ?? [];
+        setMeta((m) => ({ ...m, openTasks: String(data?.total ?? list.length) }));
         const mapped: PriorityTask[] = list.map((t) => ({
           id: t.id ?? t.task_id ?? '',
           title: t.title ?? 'Untitled task',
@@ -352,7 +359,7 @@ export default function HubPage() {
         },
     {
       id: 'tasks',
-      to: '/tasks',
+      to: tasksHome,
       title: 'Tasks & SOPs',
       eyebrow: 'Ops',
       desc: 'P0–P4 priorities with countdown timers and auto-escalation tied to SOPs.',
@@ -493,7 +500,7 @@ export default function HubPage() {
             <span className="hub-work-title">
               <AlertTriangle size={16} /> Priority tasks
             </span>
-            <button className="hub-work-link" onClick={() => navigate('/tasks')}>
+            <button className="hub-work-link" onClick={() => navigate(tasksHome)}>
               View all <ChevronRight size={14} />
             </button>
           </div>
@@ -509,7 +516,7 @@ export default function HubPage() {
                 const due = dueLabel(t.due_at);
                 return (
                   <li key={t.id || t.title}>
-                    <button className="hub-task-row" onClick={() => navigate('/tasks')}>
+                    <button className="hub-task-row" onClick={() => navigate(tasksHome)}>
                       <span className={`hub-prio hub-prio-${t.priority.toLowerCase()}`}>
                         {t.priority}
                       </span>

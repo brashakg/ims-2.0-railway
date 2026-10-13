@@ -1,7 +1,6 @@
 """GRN accept concurrency: claim, heartbeat, guarded writes, unit mint."""
 
 from ._shared import HTTPException, Optional, datetime, logger, timedelta, uuid
-from ...services.cost_mask import is_receiving_manager
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +50,22 @@ _GRN_TERMINAL_ACCEPT_STATUSES = ("ACCEPTED", "PARTIALLY_ACCEPTED")
 # is 30x the heartbeat cadence -- far too wide to steal a live claim, and a
 # 5-minute worst case on the shop floor instead of 30.
 _GRN_ACCEPT_LOCK_STALE_SECONDS = 300
+
+
+def _accept_lock_cutoff() -> str:
+    """A claim stamped before this is DEAD (its worker was killed: a deploy, an
+    OOM). ONE rule, three readers: the claim takes such a receipt over, the
+    heartbeat of a worker whose own stamp got this old stops it before another
+    unit, and the order's count (po_detail._received_by_product) no longer
+    treats it as being accepted right now. ISO text, compared as stored."""
+    return (
+        datetime.now() - timedelta(seconds=_GRN_ACCEPT_LOCK_STALE_SECONDS)
+    ).isoformat()
+
+
+def _accept_lock_live(locked_at) -> bool:
+    """True while an accept claim stamped at `locked_at` is held by a worker."""
+    return bool(locked_at) and str(locked_at) >= _accept_lock_cutoff()
 
 # Heartbeat cadence for a long accept: re-stamp the lock at least this often, in
 # units minted or in wall-clock seconds, whichever comes first. The seconds arm
@@ -136,9 +151,7 @@ def _claim_grn_for_accept(grn_repo, grn_id: str, user_id) -> Optional[str]:
     receiving must never be blocked by an infrastructure gap -- same convention
     as is_online_store and the marketing.py claim fallback."""
     token = "GACC-" + uuid.uuid4().hex[:16]
-    stale_cutoff = (
-        datetime.now() - timedelta(seconds=_GRN_ACCEPT_LOCK_STALE_SECONDS)
-    ).isoformat()
+    stale_cutoff = _accept_lock_cutoff()
     flt = {
         "grn_id": grn_id,
         "status": {"$in": list(_GRN_ACCEPTABLE_STATUSES)},
@@ -383,9 +396,17 @@ def _grn_accept_heartbeat_tick(grn_repo, grn_id: str, token, state: dict) -> Non
     # write comes back with a DEFINITE answer, so an errored heartbeat re-arms
     # the fence on the very next unit instead of buying the worker another 25
     # units / 10 seconds of unfenced minting.
+    # Still ours AND still live: a worker that was wedged past the stale window
+    # is dead by the same rule the claim and the order's count use, so it stops
+    # here even when nobody took the receipt over -- another delivery of the
+    # order may have been accepted meanwhile, counting this one as dead.
     res = _guarded_grn_write(
         grn_repo,
-        {"grn_id": grn_id, "accept_lock_token": token},
+        {
+            "grn_id": grn_id,
+            "accept_lock_token": token,
+            "accept_lock_at": {"$gte": _accept_lock_cutoff()},
+        },
         {"$set": {"accept_lock_at": now.isoformat()}},
     )
     if res is None:
@@ -450,58 +471,6 @@ def _grn_accept_heartbeat_tick(grn_repo, grn_id: str, token, state: dict) -> Non
     state["confirmed_at"] = now
 
 
-def refuse_beyond_order_below_manager(grn: dict, current_user: dict, nothing_done: str) -> None:
-    """A receipt holding units beyond its order (an unresolved line with
-    reason over_order) waits for the store manager: 'Not received' and 'Add
-    to stock' each answer whether the vendor really sent them, so each is the
-    receiving managers' (owner 2026-09-28, receiving is managers only;
-    cost_mask.RECEIVING_MANAGERS). Anyone else is refused (403). Voiding ANY
-    held receipt is theirs too (grn_void.void_grn)."""
-    if is_receiving_manager(current_user):
-        return
-    if any((ln or {}).get("reason") == "over_order" for ln in (grn or {}).get("unresolved_lines") or []):
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                "This receipt holds units beyond what its order asked for: "
-                "the store manager decides them (Receive Goods > 'Not "
-                f"received' or 'Add to stock'). {nothing_done}"
-            ),
-        )
-
-
-def _received_on(grn: dict, **more) -> dict:
-    """THE filter for "the units receipt `grn` put on the shelf" (the per-line
-    repeat guard, the void check, the store manager's voidable flag) -- read by
-    the unit's ORIGIN, never its current source (owner 2026-10-01). A unit is
-    stamped at mint with the receipt and line it was received on (grn_id,
-    grn_number, grn_line_index, line_unit_seq, po_id) and nothing rewrites
-    those; a transfer re-homes it and rewrites source_type/source_id to the
-    transfer (transfers._rehome), so a count by source forgets that a
-    transferred unit was ever received.
-
-    A unit received before grn_id was stamped (any unit on prod at this deploy)
-    still carries the receipt's grn_number -- stamped at mint since #310 and
-    never rewritten -- so it is found whether or not it has been transferred,
-    then or at any time later. The source branch covers a unit minted before
-    grn_number was stamped and never transferred since.
-
-    Receipt numbers are not unique on prod (before #711 every BV-... shop
-    shared one minute-stamped series), so the number names a unit only when
-    it belongs to this receipt alone -- else another receipt's units would
-    block this one's void or stop its mint.
-
-    ponytail: a unit minted before #310 (2026-05-28) AND transferred since
-    matches no branch, nor does a pre-grn_id unit of a duplicated number that
-    has been transferred; backfill its grn_id if prod ever has one."""
-    grn_id = grn.get("grn_id")
-    origin = [{"grn_id": grn_id}, {"source_type": "GRN", "source_id": grn_id}]
-    number = grn.get("grn_number")
-    if number and _number_is_this_receipts_alone(number):
-        origin.append({"grn_number": number})
-    return {"$or": origin, **more}
-
-
 def _number_is_this_receipts_alone(number) -> bool:
     """True when exactly one receipt carries `number`. A read error reads
     True -- fail CLOSED: the number branch then still counts the units (at
@@ -542,6 +511,38 @@ def _grn_already_minted(stock_repo, flt: dict) -> int:
     if callable(repo_count):
         return int(repo_count(flt) or 0)
     raise RuntimeError("stock repository exposes no way to count minted units")
+
+
+def _receipt_units(stock_repo, grn: dict, **match) -> int:
+    """Units goods receipt `grn` (the receipt doc) put in stock, narrowed by
+    `match`, WHEREVER THEY ARE NOW: read by the unit's ORIGIN, never its
+    current source (owner 2026-10-01). THE one count of "units already
+    received from this receipt / line" -- the accept's per-line repeat guard
+    and its refusal advice, the void's stock gate, 'Not received' and the
+    order's count of what arrived (po_detail._received_by_product) all ask
+    it.
+
+    A stock transfer rewrites a unit's source_type and source_id
+    (transfers._rehome) but never its grn_id, which the mint stamps. A unit
+    minted before that stamp has no grn_id: it is matched by its source, or
+    -- once a transfer has rewritten that -- by the receipt's grn_number,
+    stamped at mint since #310 and never rewritten. Receipt numbers are not
+    unique on prod (before #711 every BV-... shop shared one minute-stamped
+    series), so the number names a unit only when it belongs to this receipt
+    alone. No unit fits both counts. Raises like _grn_already_minted, so
+    every caller fails closed.
+
+    ponytail: a unit minted before #310 (2026-05-28) AND transferred since
+    matches nothing, nor does a pre-grn_id unit of a duplicated number that
+    has been transferred; backfill its grn_id if prod ever has one."""
+    grn_id = grn.get("grn_id")
+    stamped = _grn_already_minted(stock_repo, {**match, "grn_id": grn_id})
+    origin = [{"source_type": "GRN", "source_id": grn_id}]
+    number = grn.get("grn_number")
+    if number and _number_is_this_receipts_alone(number):
+        origin.append({"grn_number": number})
+    legacy = {**match, "grn_id": None, "$or": origin}
+    return stamped + _grn_already_minted(stock_repo, legacy)
 
 
 def _stock_create_raises_on_duplicate(stock_repo) -> bool:
