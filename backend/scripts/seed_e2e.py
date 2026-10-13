@@ -9,7 +9,9 @@ Seeds the minimum fixed data the Playwright E2E suite asserts against:
   - Products: a 5% FRAME priced at exactly Rs 999 (the canonical GST-inclusive
               case) and an 18% SUNGLASS at Rs 1180, both with real product_ids,
               plus a frame whose name ends " - Havana" like every minted name,
-              so the till tiles the layout gate measures draw their colour line.
+              so the till tiles the layout gate measures draw their colour line,
+              and a frame with THREE photos, so the layout gate measures the
+              add / edit page's photo grid (/catalog/add?edit=e2e-frame-photos).
   - Stock   : one AVAILABLE serialized unit per product at BV-BOK-01 so the
               sale links real on-hand (orders.create only checks existence,
               but seeding stock keeps reports honest).
@@ -27,12 +29,22 @@ or with an explicit URL:
 """
 import os
 import sys
+from urllib.parse import quote
 
 # Make `database` / `api` importable whether run from repo root or backend/.
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+
+
+def _photo(fill):
+    """A 4:3 inline SVG photo: no network, no upload store, never a 404."""
+    svg = (
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 4 3'>"
+        "<rect width='4' height='3' fill='%s'/></svg>" % fill
+    )
+    return "data:image/svg+xml," + quote(svg)
 
 
 # Canonical E2E catalog (must match e2e/fixtures/constants.ts SEED).
@@ -84,6 +96,30 @@ E2E_PRODUCTS = [
         "hsn_code": "9003",
         "gst_rate": 5,
         "frame_type": "Full Rim",
+        "is_active": True,
+    },
+    {
+        # The add / edit page WITH photos: the layout gate opens it as
+        # /catalog/add?edit=e2e-frame-photos, so the photo grid and its
+        # Earlier / Later row are measured at every width. No stock.
+        "_id": "e2e-frame-photos",
+        "product_id": "e2e-frame-photos",
+        "name": "E2E Test Frame Photos",
+        "sku": "E2E-FR-PHO",
+        "category": "FR",
+        "brand": "E2E Optics",
+        "model": "FramePhotos",
+        "attributes": {
+            "brand_name": "E2E Optics",
+            "model_no": "FramePhotos",
+            "colour_code": "001",
+        },
+        "mrp": 1999,
+        "offer_price": 1999,
+        "hsn_code": "9003",
+        "gst_rate": 5,
+        "frame_type": "Full Rim",
+        "images": [_photo("silver"), _photo("tan"), _photo("slategray")],
         "is_active": True,
     },
 ]

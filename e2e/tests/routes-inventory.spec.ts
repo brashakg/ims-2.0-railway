@@ -17,7 +17,8 @@ import {
 } from '../fixtures/routes';
 
 const inventory = new Map<string, 'probed' | 'excluded'>([
-  ...ROUTES.map((r) => [r.path, 'probed'] as const),
+  // A query string is the same route in another state (see ROUTES).
+  ...ROUTES.map((r) => [r.path.split('?')[0], 'probed'] as const),
   ...EXCLUSIONS.map((e) => [e.path, 'excluded'] as const),
 ]);
 

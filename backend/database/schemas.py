@@ -184,7 +184,7 @@ PRODUCT_SCHEMA = {
         "sku_prefix": {"bsonType": "string"},       # short code (FR/SG/CL/...) for grid grouping
         "country_of_origin": {"bsonType": "string"},
         "warranty_months": {"bsonType": "int", "minimum": 0},
-        "weight_grams": {"bsonType": "double"},
+        "weight": {"bsonType": "double"},
         # Mirror-sync compensation log (PM triple-write): per-target best-effort
         # status recorded back on the Mongo spine. Never blocks the spine write.
         "sync_status": {"bsonType": "object"},

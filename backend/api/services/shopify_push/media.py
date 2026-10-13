@@ -23,7 +23,7 @@ from ._shared import (
     _live_or_reason,
     is_variant_of,
     logger,
-    push_lock_reason,
+    product_push_refusal,
 )
 from .transport import _graphql, _now
 from .queries import (
@@ -46,9 +46,12 @@ def product_photo_urls(product: Dict[str, Any]) -> List[str]:
     Shopify are both driven from THIS list, so the check and the payload can
     never disagree.
 
-    Field precedence mirrors the rest of the app (catalogue_pdf._image_url_of,
-    products.list_products' image_url alias): the singular `image_url`, then the
-    `images[]` array (strings or {url|src} dicts), then a bare `image`.
+    THE ORDER IS THE ``images[]`` ARRAY (owner 2026-10-12: "photo 1 is the
+    main photo on the website and at the till"; the product page reorders
+    it): the array (strings or {url|src} dicts) first, then the legacy
+    singular `image_url`, then a bare `image` -- the precedence of
+    product_master.main_photo, so a stale `image_url` never outranks photo 1
+    and a reorder in IMS reorders the Shopify media (sync_product_media).
 
     ONLY absolute http(s) URLs count. Shopify pulls the bytes over the internet
     from the URL we hand it; a private /uploads/... path is unfetchable, so
@@ -84,11 +87,11 @@ def product_photo_urls(product: Dict[str, Any]) -> List[str]:
         if url.lower().startswith(("http://", "https://")) and url not in out:
             out.append(url)
 
-    _add(product.get("image_url"))
     imgs = product.get("images")
     if isinstance(imgs, (list, tuple)):
         for item in imgs:
             _add(item)
+    _add(product.get("image_url"))
     _add(product.get("image"))
     return out
 
@@ -173,7 +176,8 @@ async def _attach_product_photos(
 #
 # OWNERSHIP. IMS manages ONLY the media it attached itself, recorded on the
 # twin as ``ecom.media_map = [{url: <IMS source url>, id: <MediaImage gid>}]``
-# (written on attach, pruned on delete). Media that is on Shopify but not in
+# (written on attach; a dropped photo's row stays, marked pending_delete,
+# until its delete has landed). Media that is on Shopify but not in
 # the map -- the hand-uploaded photographs on the connector-created Ray-Ban
 # Meta products, anything the design queue (push_image) attached, anything a
 # human added in the Shopify admin -- is NEVER deleted or re-attached: it is
@@ -524,7 +528,15 @@ async def sync_product_media(
         summary["on_shopify"] += summary["attached"]
         owned.extend(res.get("media_map") or [])
         if pid and res.get("media_map"):
-            _writeback_media_map(db, pid, _in_ims_order(owned, photos))
+            # A photo still waiting for its delete STAYS in the map (marked
+            # pending_delete) until productDeleteMedia lands: dropped here, a
+            # failed delete would leave it on the website as media IMS no
+            # longer owns, never deleted and still leading the listing.
+            pending = [
+                {"url": d["url"], "id": d["id"], "pending_delete": True}
+                for d in plan["delete"]
+            ]
+            _writeback_media_map(db, pid, _in_ims_order(owned, photos) + pending)
         if res.get("error"):
             summary["error"] = res["error"]
             return summary
@@ -791,13 +803,14 @@ async def push_image(db, image: Dict[str, Any]) -> PushResult:
     existing_gid = image.get("shopify_image_id")
 
     # Hub Phase 5 push-lock (defense-in-depth, FIRST gate): an image attaches to
-    # its parent product, so a push-locked brand's image must NEVER reach Shopify
-    # either. push_product is already blocked for a locked brand (so the parent is
-    # normally never on Shopify), but this closes the legacy "product was on
-    # Shopify before its brand got locked" gap. Fail-CLOSED on a real lock match.
+    # its parent product, so a push-locked (or off-the-website, owner D6) brand's
+    # image must NEVER reach Shopify either. push_product is already blocked
+    # for such a brand (so the parent is normally never on Shopify), but this
+    # closes the "product was on Shopify before its brand got locked/switched
+    # off" gap. Fail-CLOSED.
     _parent = _resolve_product_doc(db, image.get("product_id"))
     if _parent is not None:
-        _img_lock = push_lock_reason(db, "product", _parent)
+        _img_lock = product_push_refusal(db, _parent)
         if _img_lock:
             return _blocked_result("image", iid, _img_lock)
 
