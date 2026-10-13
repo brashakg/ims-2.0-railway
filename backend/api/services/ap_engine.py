@@ -118,6 +118,25 @@ def normalize_bill_kind(value):
     raise ValueError("bill_kind must be GOODS or SERVICES")
 
 
+# Owner ruling D14 (2026-09-29): goods bought from a local / walk-in dealer
+# without a purchase order arrive on a "Bought without PO" receipt (#1183).
+GRN_SUBTYPE_NO_PO = "NO_PO"
+
+
+def reverse_charge_refusal(reverse_charge, receipt) -> Optional[str]:
+    """THE rule (decided in #1183): a bill for goods bought without a purchase
+    order -- its receipt (``receipt``, the linked GRN doc) is a "Bought without
+    PO" one -- is never reverse charge. None when the bill may be booked as
+    sent, else the refusal the form shows. Every bill door asks this (POST /
+    and /preview through purchase_invoices._bill_math), so none can book one."""
+    if reverse_charge and (receipt or {}).get("grn_subtype") == GRN_SUBTYPE_NO_PO:
+        return (
+            "Goods bought without a purchase order are never reverse charge. "
+            "Turn off 'Reverse charge' on this bill to book it."
+        )
+    return None
+
+
 def _f(v) -> float:
     """Coerce anything to a float, defaulting to 0.0."""
     try:

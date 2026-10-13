@@ -551,6 +551,64 @@ class TestOtherReaders:
         assert out["gst_input_credit_carried_forward"] == 50.0
 
 
+def _receipt(db, subtype="STANDARD"):
+    """An ACCEPTED receipt G1 at S1 from V1: one frame, Rs 1000 @ 18% on its
+    PO (a "Bought without PO" receipt has none)."""
+    db["products"].insert_one({"product_id": "P1", "name": "Frame X", "hsn_code": "9003"})
+    grn = {"grn_id": "G1", "grn_number": "GRN-1", "grn_subtype": subtype, "vendor_id": "V1",
+           "store_id": "S1", "status": "ACCEPTED", "vendor_invoice_no": "MLH-7",
+           "vendor_invoice_date": "2026-05-03",
+           "items": [{"product_id": "P1", "product_name": "Frame X", "accepted_qty": 1}]}
+    if subtype != ap_engine.GRN_SUBTYPE_NO_PO:
+        grn["po_id"] = "PO1"
+    pi_router.get_grn_repository = lambda: _Repo([grn], "grn_id")
+    pi_router.get_purchase_order_repository = lambda: _Repo(
+        [{"po_id": "PO1", "vendor_id": "V1",
+          "items": [{"product_id": "P1", "hsn": "9003", "unit_price": 1000.0, "tax_rate": 18.0}]}],
+        "po_id",
+    )
+    return grn
+
+
+class TestBoughtWithoutPo:
+    """Decided in #1183: a bill for goods bought without a purchase order is
+    never reverse charge -- every bill door refuses it in plain words."""
+
+    def _body(self, **over):
+        return {"vendor_id": "V1", "invoice_number": "WALK-1", "invoice_date": "2026-05-03",
+                "grn_id": "G1", "store_id": "S1",
+                "lines": [{"description": "Frame X", "qty": 1,
+                           "unit_price": 1000, "gst_rate": 18}], **over}
+
+    def test_every_door_refuses_reverse_charge(self):
+        db, cli = _world()
+        _receipt(db, ap_engine.GRN_SUBTYPE_NO_PO)
+        for url in (_PI, f"{_PI}/preview"):
+            r = cli.post(url, json=self._body(reverse_charge=True))
+            assert r.status_code == 400, (url, r.text)
+            assert r.json()["detail"] == (
+                "Goods bought without a purchase order are never reverse charge. "
+                "Turn off 'Reverse charge' on this bill to book it."
+            )
+        assert db["vendor_bills"].count_documents({}) == 0
+
+    def test_without_reverse_charge_it_books_and_a_po_receipt_may_be_reverse_charge(self):
+        db, cli = _world()
+        _receipt(db, ap_engine.GRN_SUBTYPE_NO_PO)
+        assert cli.post(f"{_PI}/preview", json=self._body()).status_code == 200
+        db2, cli2 = _world()
+        _receipt(db2)
+        r = cli2.post(f"{_PI}/preview", json=self._body(reverse_charge=True))
+        assert (r.status_code, r.json().get("total")) == (200, 1000.0), r.text
+
+    def test_the_rule_is_one_helper(self):
+        no_po = {"grn_subtype": ap_engine.GRN_SUBTYPE_NO_PO}
+        assert ap_engine.reverse_charge_refusal(True, no_po)
+        assert ap_engine.reverse_charge_refusal(False, no_po) is None
+        assert ap_engine.reverse_charge_refusal(True, {"grn_subtype": "STANDARD"}) is None
+        assert ap_engine.reverse_charge_refusal(True, None) is None
+
+
 class TestTwoRegistrations:
     """One company, two GSTINs (Jharkhand + Maharashtra). Each registration
     files its own GSTR-3B and sets off on it alone, so one GSTIN's spare IGST

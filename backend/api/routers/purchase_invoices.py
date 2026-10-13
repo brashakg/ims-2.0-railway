@@ -1301,6 +1301,9 @@ def _bill_math(db, vendor, body, grn_doc, current_user):
     shop is the form's own store_id, never whichever the token names by the
     time Book is pressed. A receipt's shop decides a receipt's bill, so the
     form's shop is only checked (403) when it is the one that counts."""
+    refusal = ap_engine.reverse_charge_refusal(body.reverse_charge, grn_doc)
+    if refusal:
+        raise HTTPException(status_code=400, detail=refusal)
     supplier_gstin = _vendor_gstin(db, vendor, body.vendor_id)
     receipt_store = _receipt_store_id(db, grn_doc, body.linked_dc_ids)
     recipient = _bill_recipient(
