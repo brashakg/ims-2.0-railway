@@ -63,7 +63,7 @@ async def list_jobs_by_vendor(
 
     return {
         "vendor_id": vendor_id,
-        "jobs": [job_to_frontend(j) for j in jobs],
+        "jobs": [job_to_frontend(j, current_user) for j in jobs],
         "total": len(jobs),
     }
 
@@ -94,7 +94,7 @@ async def list_jobs(
             filter_dict, skip=skip, limit=limit, sort=[("created_at", -1)]
         )
         _stamp_job_actor_names(jobs)
-        jobs_formatted = [job_to_frontend(j) for j in jobs]
+        jobs_formatted = [job_to_frontend(j, current_user) for j in jobs]
         return {"jobs": jobs_formatted, "total": len(jobs_formatted)}
 
     return {"jobs": [], "total": 0}
@@ -354,7 +354,7 @@ async def get_job(job_id: str, current_user: dict = Depends(get_current_user)):
             if not can_access_store_scoped(job.get("store_id"), current_user):
                 raise HTTPException(status_code=404, detail="Workshop job not found")
             _stamp_job_actor_names([job])
-            return job_to_frontend(job)
+            return job_to_frontend(job, current_user)
         raise HTTPException(status_code=404, detail="Workshop job not found")
 
     return {"id": job_id}

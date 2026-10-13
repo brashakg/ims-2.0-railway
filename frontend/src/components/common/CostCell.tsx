@@ -23,6 +23,20 @@ export const PRODUCT_COST_ROLES: UserRole[] = [
   'CATALOG_MANAGER',
 ];
 
+/** The purchase roles: who sees what was paid and to whom (owner ruling
+ *  2026-09-29) and who moves a vendor return along (approve, ship, received).
+ *  A vendor return's own price and total are stricter -- the accounts roles'
+ *  alone, below (owner rulings 2026-10-12 R2 + R3). It IS the backend's cost_mask "purchase"
+ *  context (PURCHASE_ROLES + SUPERADMIN); a backend test
+ *  (test_counter_roles_no_cost_anywhere) holds the two sets equal. */
+export const PURCHASE_PRICE_ROLES: UserRole[] = [
+  'SUPERADMIN',
+  'ADMIN',
+  'ACCOUNTANT',
+  'AREA_MANAGER',
+  'STORE_MANAGER',
+];
+
 /** Who sees and books supplier payments -- bills, payments, balances, per
  *  vendor AND in total (owner ruling 2026-09-29): the accounts roles. It IS the
  *  backend's cost_mask "payables" context (AP_ROLES + SUPERADMIN); a backend

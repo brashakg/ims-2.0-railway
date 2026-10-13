@@ -161,7 +161,7 @@ def world(monkeypatch):
     monkeypatch.setattr(returns, "_get_db", lambda: db)
     monkeypatch.setattr(jobs_mod, "get_workshop_repository", lambda: _Repo(db["workshop_jobs"]))
     monkeypatch.setattr(jobs_mod, "_stamp_job_actor_names", lambda jobs: None)
-    monkeypatch.setattr(jobs_mod, "job_to_frontend", lambda j: j)
+    monkeypatch.setattr(jobs_mod, "job_to_frontend", lambda j, _user=None: j)
     monkeypatch.setattr(expenses, "get_expense_repository", lambda: _Repo(db["expenses"]))
     monkeypatch.setattr(expenses, "get_advance_repository", lambda: _Repo(db["advances"]))
     monkeypatch.setattr(customers, "get_customer_repository",
@@ -228,10 +228,12 @@ def test_a_login_that_holds_a_shop_keeps_its_list(world):
     sm = _user("STORE_MANAGER", [DHN])
     for path in ("/returns", "/workshop/jobs", "/expenses/pending-approval", "/customers"):
         assert _ids(world(sm, path).json()) == [DHN], path
-    # An AREA_MANAGER holding a shop keeps the HQ reach those lists give him.
+    # An AREA_MANAGER holding a shop keeps the HQ reach the returns list gives
+    # him; stock transfers are his own shops' (transfers._in_callers_stores,
+    # user_store_scope -- #1185).
     am = _user("AREA_MANAGER", [PUN])
     assert _ids(world(am, "/returns", store_id=DHN).json()) == [DHN]
-    assert _ids(world(am, "/transfers").json()) == [DHN, PUN]
+    assert _ids(world(am, "/transfers").json()) == [PUN]
 
 
 def test_the_buy_desk_is_empty_for_a_login_with_no_shop(world):

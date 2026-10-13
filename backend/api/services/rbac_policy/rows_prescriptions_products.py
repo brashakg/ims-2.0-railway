@@ -128,7 +128,10 @@ ROWS: List[Dict[str, object]] = [
     {"method": "GET", "path": "/api/v1/print/qz/cert", "allowed": "AUTHENTICATED"},
     {"method": "POST", "path": "/api/v1/print/qz/sign", "allowed": "AUTHENTICATED"},
     # Delivery-challan HTML render: POS-capable roles + ACCOUNTANT (read-only,
-    # store-scoped via validate_store_access / transfer access guard).
+    # store-scoped via validate_store_access / transfer access guard). A VALUED
+    # transfer challan (between two GST registrations) the handler prints for
+    # managers and accounts only (print_documents.may_print_challan; D7, owner
+    # 2026-10-08).
     {
         "method": "GET",
         "path": "/api/v1/print/delivery-challan/order/{order_id}",

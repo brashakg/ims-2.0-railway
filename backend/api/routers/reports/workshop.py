@@ -19,7 +19,7 @@ from ...dependencies import (
     validate_store_access,
 )
 from ...services import stock_value
-from ...services.cost_mask import can_see_cost
+from ...services.cost_mask import mask_cost
 from ...services.name_resolver import order_actor_id, order_actor_name_map
 from ._shared import (
     _REPORT_FINANCE_ROLES,
@@ -499,7 +499,6 @@ async def daily_stock_count(
     # F47: the one stock-value rule (services/stock_value); the counter reads
     # the counts but no cost figure.
     all_stock = stock_value.shelf_units(stock_repo, get_product_repository(), active_store)
-    show_cost = can_see_cost(current_user, "product")
 
     # category is on the product master, not the stock doc -> join it so the
     # per-category rows are real (FRAME etc.) instead of all under "Other".
@@ -525,19 +524,23 @@ async def daily_stock_count(
         )
         total_items += 1
         total_value += item["cost_value"]
-    if not show_cost:
-        for row in by_category.values():
-            row["total_value"] = None
 
-    return {
-        "data": list(by_category.values()),
-        "summary": {
-            "total_items": total_items,
-            "total_value": round(total_value, 2) if show_cost else None,
-            # Units with no cost add Rs 0 to total_value; said, not hidden.
-            "uncosted_units": stock_value.uncosted(all_stock) if show_cost else None,
-            "total_quantity": sum(item.get("quantity", 0) for item in all_stock),
+    # Stock value is at cost: the roles that see product cost only (D7);
+    # mask_cost drops the value keys for anyone else.
+    return mask_cost(
+        {
+            "data": list(by_category.values()),
+            "summary": {
+                "total_items": total_items,
+                "total_value": round(total_value, 2),
+                # Units with no cost add Rs 0 to total_value; said, not hidden.
+                "uncosted_units": stock_value.uncosted(all_stock),
+                "total_quantity": sum(item.get("quantity", 0) for item in all_stock),
+            },
         },
-    }
+        current_user,
+        "product",
+        extra=("total_value",),
+    )
 
 

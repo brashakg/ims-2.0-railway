@@ -287,8 +287,13 @@ export default function FinanceDashboard() {
       setBudgetRestricted(
         bud.status === 'fulfilled' && !!(bud.value as any)?.categories_partially_restricted,
       );
+      // Either flag shortens "Total outflows": a pay head withheld below
+      // ADMIN, or what was paid to suppliers (ADMIN + ACCOUNTANT only, owner
+      // ruling 2026-10-12 -- the backend leaves it out and says so).
       setCashFlowRestricted(
-        cf.status === 'fulfilled' && !!(cf.value as any)?.expenses_partially_restricted,
+        cf.status === 'fulfilled' &&
+          (!!(cf.value as any)?.expenses_partially_restricted ||
+            !!(cf.value as any)?.vendor_payments_restricted),
       );
 
       // Reflect the real period-lock state for the selected month.

@@ -99,12 +99,16 @@ async def purchase_recommendations(
     if db is None:
         return {
             "recommendations": [],
-            "summary": {
-                "total_recommendations": 0,
-                "total_suggested_units": 0,
-                "estimated_revenue_at_risk": 0.0,
-                "estimated_purchase_cost": 0.0,
-            },
+            "summary": mask_cost(
+                {
+                    "total_recommendations": 0,
+                    "total_suggested_units": 0,
+                    "estimated_revenue_at_risk": 0.0,
+                    "estimated_purchase_cost": 0.0,
+                },
+                current_user,
+                "product",
+            ),
             "params": {
                 "store_id": active_store,
                 "lookback_days": lookback_days,
@@ -168,12 +172,16 @@ async def purchase_recommendations(
         # to empty rec list, never raise.
         return {
             "recommendations": [],
-            "summary": {
-                "total_recommendations": 0,
-                "total_suggested_units": 0,
-                "estimated_revenue_at_risk": 0.0,
-                "estimated_purchase_cost": 0.0,
-            },
+            "summary": mask_cost(
+                {
+                    "total_recommendations": 0,
+                    "total_suggested_units": 0,
+                    "estimated_revenue_at_risk": 0.0,
+                    "estimated_purchase_cost": 0.0,
+                },
+                current_user,
+                "product",
+            ),
             "params": {
                 "store_id": active_store,
                 "lookback_days": lookback_days,
@@ -190,12 +198,16 @@ async def purchase_recommendations(
     if not sku_stats:
         return {
             "recommendations": [],
-            "summary": {
-                "total_recommendations": 0,
-                "total_suggested_units": 0,
-                "estimated_revenue_at_risk": 0.0,
-                "estimated_purchase_cost": 0.0,
-            },
+            "summary": mask_cost(
+                {
+                    "total_recommendations": 0,
+                    "total_suggested_units": 0,
+                    "estimated_revenue_at_risk": 0.0,
+                    "estimated_purchase_cost": 0.0,
+                },
+                current_user,
+                "product",
+            ),
             "params": {
                 "store_id": active_store,
                 "lookback_days": lookback_days,

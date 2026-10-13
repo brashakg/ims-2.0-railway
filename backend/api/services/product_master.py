@@ -1105,14 +1105,6 @@ def existing_product_summary(existing: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(attrs, dict):
         attrs = {}
 
-    def _first_image() -> Optional[str]:
-        imgs = existing.get("images")
-        if isinstance(imgs, (list, tuple)):
-            for u in imgs:
-                if isinstance(u, str) and u.strip():
-                    return u
-        return None
-
     brand = existing.get("brand") or attrs.get("brand_name")
     model = (
         existing.get("model") or attrs.get("model_no") or attrs.get("model_name")
@@ -1121,6 +1113,12 @@ def existing_product_summary(existing: Dict[str, Any]) -> Dict[str, Any]:
         attrs.get("colour_code") or attrs.get("colour_name") or existing.get("color")
     )
     size = existing.get("size") or attrs.get("lens_size") or attrs.get("size")
+    # A contact lens or reading glass is one product per power (owner
+    # 2026-09-28): the create door keeps it in attributes.power (the form also
+    # sends a contact lens's as cl_power) and mints a name without it.
+    power = attrs.get("power")
+    if power in (None, ""):
+        power = existing.get("cl_power")
     # Display name: the doc's auto-minted `name` wins (product_naming stamps it
     # at create time); legacy rows created before that fall back to "Brand
     # Model".
@@ -1141,11 +1139,12 @@ def existing_product_summary(existing: Dict[str, Any]) -> Dict[str, Any]:
         "model": model,
         "colour_code": colour,
         "size": size,
+        "power": power,
         "mrp": existing.get("mrp"),
         "offer_price": existing.get("offer_price"),
         "is_active": existing.get("is_active"),
         "catalog_status": existing.get("catalog_status"),
-        "image_url": _first_image(),
+        "image_url": main_photo(existing),
     }
 
 
@@ -1179,6 +1178,29 @@ def _duplicate_error(existing: Dict[str, Any]) -> "ProductMasterError":
 # strip is a hint, not a browser -- 12 chips is plenty; model_colour_count still
 # reports the TRUE distinct-colour total.
 SIMILAR_SIBLINGS_CAP = 12
+
+
+def model_family_query(category: Any, brand: Any, model: Any) -> Optional[Dict[str, Any]]:
+    """The filter for every row of one model -- same category, any colour or
+    size -- or None when the category or brand/model does not normalise.
+    find_similar_products lists by it; the counter stock lookup counts by it.
+
+    "brand|model|" -- the trailing | delimiter guarantees "rb21" can never
+    prefix-match "rb213". The normaliser now strips every character outside
+    [a-z0-9], so no regex metacharacter can reach the key; re.escape stays as
+    belt-and-braces against that ever changing.
+    """
+    canonical = resolve_category(category)
+    if canonical is None:
+        return None
+    b = normalise_identity_component(brand)
+    m = normalise_identity_component(model)
+    if not b or not m:
+        return None
+    return {
+        "category": canonical,
+        "identity_key": {"$regex": "^" + re.escape(f"{b}|{m}|")},
+    }
 
 
 def find_similar_products(
@@ -1229,23 +1251,9 @@ def find_similar_products(
     try:
         if products_collection is None:
             return empty
-        canonical = resolve_category(category)
-        if canonical is None:
+        sibling_query = model_family_query(category, brand, model)
+        if sibling_query is None:
             return empty
-        b = normalise_identity_component(brand)
-        m = normalise_identity_component(model)
-        if not b or not m:
-            return empty
-
-        # "brand|model|" -- the trailing | delimiter guarantees "rb21" can
-        # never prefix-match "rb213". The normaliser now strips every character
-        # outside [a-z0-9], so no regex metacharacter can reach the key;
-        # re.escape stays as belt-and-braces against that ever changing.
-        prefix = f"{b}|{m}|"
-        sibling_query = {
-            "category": canonical,
-            "identity_key": {"$regex": "^" + re.escape(prefix)},
-        }
 
         exact_key = compute_identity_key(brand, model, colour, size)
         exact_doc = (
@@ -1907,6 +1915,28 @@ def _build_pim_doc(
         }
         doc["ecom"]["locally_modified"] = False
     return doc
+
+
+def main_photo(doc: Dict[str, Any]) -> Optional[str]:
+    """THE main-photo rule (owner 2026-10-12: "photo 1 is the main photo on
+    the website and at the till"). The order of a product's photos IS its
+    ``images`` array, so the main photo is its first usable entry (a string
+    or a ``{url|src}`` dict); only a product with no ``images`` falls back to
+    the legacy singular ``image_url``, then ``image``. A stale ``image_url``
+    never outranks photo 1. Every reader that shows ONE photo for a product
+    asks here. Pure; never raises."""
+    doc = doc if isinstance(doc, dict) else {}
+    imgs = doc.get("images")
+    for item in imgs if isinstance(imgs, (list, tuple)) else ():
+        if isinstance(item, dict):
+            item = item.get("url") or item.get("src")
+        if isinstance(item, str) and item.strip():
+            return item.strip()
+    for key in ("image_url", "image"):
+        value = doc.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
 
 
 def _spine_images(spine: Dict[str, Any]) -> List[str]:

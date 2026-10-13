@@ -246,7 +246,8 @@ def store_in_view(store_id, current_user: dict, *, writing: bool = False):
 
 def no_shop_scope_for(store_id, current_user: dict):
     """R4 for a list whose own shop rule lets a role read past its shops (an
-    AREA_MANAGER is HQ on customer returns and stock transfers): the reserved
+    AREA_MANAGER is HQ on customers and customer returns, an ACCOUNTANT on
+    expenses): the reserved
     NO_SHOP_SCOPE when the caller is a non-admin login with NO shop -- and a
     403 NO_SHOP_DETAIL if it named a shop -- else None, and the route's own
     rule applies to a login that holds a shop."""

@@ -28,9 +28,12 @@ from ..services.rtv_debit_note import debit_note_issued
 _CREDIT_TRANSITIONS = frozenset({"credit_issued"})
 
 # A vendor return mints a debit/credit note -- a financial instrument against a
-# vendor. Restrict create + status changes to the same roles that manage vendors
-# / AP (the purchase roles, services/cost_mask); it was previously open to ANY
-# authenticated user (down to a cashier).
+# vendor. Restrict status changes (approve, ship, credit) to the same roles that
+# manage vendors / AP (the purchase roles, services/cost_mask); they were
+# previously open to ANY authenticated user (down to a cashier). Logging a
+# return is the readers' too: owner ruling 2026-10-12 lets WORKSHOP_STAFF log
+# the defective pair through the same door; its price is the accounts roles'
+# alone (PUT /{return_id}/prices, rulings 2026-10-12 R2 + R3).
 _VENDOR_RETURN_ROLES = PURCHASE_ROLES
 
 # F60: a return carries the unit cost of each returned piece, so READS go to the
@@ -52,9 +55,10 @@ router = APIRouter()
 # ============================================================================
 
 
-# A return line's price: bounded so garbage can't produce a bogus (or negative)
-# credit / debit-note amount.
-_LinePrice = Annotated[float, Field(ge=0, le=10_000_000)]
+# What was paid per piece -- ONE rule for the create door and the accounts'
+# pricing (PUT /{return_id}/prices): 0 to 1 crore, a real number (NaN /
+# Infinity would be stored and then break every read of the return).
+UnitPricePaid = Annotated[float, Field(ge=0, le=10_000_000, allow_inf_nan=False)]
 
 
 class ReturnItemCreate(BaseModel):
@@ -66,14 +70,14 @@ class ReturnItemCreate(BaseModel):
     reason: str  # defective, wrong_item, expired, damaged_in_transit, quality_issue, not_as_ordered, other
     # The price per piece is the basis of the supplier's credit: supplier
     # money, so the accounts roles' to write as well as to read (owner rulings
-    # 2026-10-12 R2 + R3). A manager raises the return without it; an accounts
-    # role prices it here or later (PUT /{return_id}/prices).
-    unit_price: Optional[_LinePrice] = None
+    # 2026-10-12 R2 + R3). A manager or the workshop logs the return without
+    # it; an accounts role prices it here or later (PUT /{return_id}/prices).
+    unit_price: Optional[UnitPricePaid] = None
 
 
 class ReturnPrices(BaseModel):
     # One price per piece for each of the return's items, in their order.
-    unit_prices: List[_LinePrice] = Field(..., min_length=1)
+    unit_prices: List[UnitPricePaid] = Field(..., min_length=1)
 
 
 class VendorReturnCreate(BaseModel):
@@ -172,8 +176,9 @@ def _link_stock_units_to_rtv(db, stock_ids, return_id, store_id, actor_id) -> No
 
 def _priced_total(items) -> Optional[float]:
     """A return's value -- the credit the supplier owes on it -- once EVERY
-    line carries its price; None while any line is unpriced (a manager raised
-    it and no accounts role has priced it yet). Never a partial sum."""
+    line carries its price; None while any line is unpriced (a manager or the
+    workshop logged it and no accounts role has priced it yet). Never a
+    partial sum."""
     prices = [(it.get("quantity") or 0, it.get("unit_price")) for it in items or []]
     if not prices or any(price is None for _qty, price in prices):
         return None
@@ -259,9 +264,13 @@ async def list_vendor_returns(
 @router.post("/", status_code=201)
 async def create_vendor_return(
     return_data: VendorReturnCreate,
-    current_user: dict = Depends(require_roles(*_VENDOR_RETURN_ROLES)),
+    current_user: dict = Depends(require_roles(*_VENDOR_RETURN_READERS)),
 ):
-    """Create a new vendor return (debit note). Vendor/AP roles only."""
+    """Log a vendor return (the debit note is issued later). The purchase roles
+    and WORKSHOP_STAFF (owner ruling 2026-10-12) log item, quantity and reason;
+    a line's price is the accounts roles' alone (rulings 2026-10-12 R2 + R3),
+    given here or later (PUT /{return_id}/prices). Until every line is priced
+    the return has no total."""
     db = _get_db()
     if db is None:
         raise HTTPException(status_code=500, detail="Database not available")

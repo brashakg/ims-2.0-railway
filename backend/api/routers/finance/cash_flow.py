@@ -91,45 +91,51 @@ async def get_cash_flow(
             ]
         )
     )
-    po_match = {
-        "date": {"$gte": start.isoformat()},
-        "payment_status": {"$in": PAID_STATUSES},
-    }
-    if active_store:
-        po_match["delivery_store_id"] = active_store
-    po_out = list(
-        db.get_collection("purchase_orders").aggregate(
-            [
-                {"$match": po_match},
-                {
-                    "$group": {
-                        "_id": None,
-                        "total": {
-                            "$sum": {
-                                "$ifNull": ["$total_amount", {"$ifNull": ["$total", 0]}]
-                            }
-                        },
-                    }
-                },
-            ]
+    # What was paid to suppliers -- the paid POs below AND vendor_payments --
+    # is ADMIN + ACCOUNTANT only (owner rulings 2026-09-29, 2026-10-12):
+    # services/cost_mask "payables", the one rule /finance/vendor-payments and
+    # the vendor ledger (AP_ROLES) answer. Anyone else never has either figure
+    # read, so neither is in a key nor in `outflows` / `net_cash_flow`, which
+    # would hand it straight back as
+    #     outflows - expense_outflow
+    # (the trap the payroll strip below documents); the reply says so with
+    # `vendor_payments_restricted` instead.
+    ap_reader = can_see_cost(current_user, "payables")
+    po_out = []
+    if ap_reader:
+        po_match = {
+            "date": {"$gte": start.isoformat()},
+            "payment_status": {"$in": PAID_STATUSES},
+        }
+        if active_store:
+            po_match["delivery_store_id"] = active_store
+        po_out = list(
+            db.get_collection("purchase_orders").aggregate(
+                [
+                    {"$match": po_match},
+                    {
+                        "$group": {
+                            "_id": None,
+                            "total": {
+                                "$sum": {
+                                    "$ifNull": [
+                                        "$total_amount",
+                                        {"$ifNull": ["$total", 0]},
+                                    ]
+                                }
+                            },
+                        }
+                    },
+                ]
+            )
         )
-    )
     # Real cash paid to suppliers this period: THE supplier ledger's payment
     # rows in THIS view's shop scope (_ap_rows(db, active_store)) -- every
     # payment carries the shop it was made for (ap_payments._money_shop), so a
     # shop's view counts that shop's payments and the org view all of them,
     # the very figure the owner dashboard's 'Paid to vendors' and the
     # Purchases report's `paid` read for the same shop. A no-shop login's
-    # NO_SHOP_SCOPE matches no payment: 0.
-    #
-    # Supplier payments, per vendor or in total, are ADMIN + ACCOUNTANT only
-    # (owner ruling 2026-09-29): services/cost_mask "payables", the one rule
-    # /finance/vendor-payments and the vendor ledger (AP_ROLES) answer.
-    # Anyone else never has the figure read, so it is in neither the key nor
-    # `outflows` / `net_cash_flow`, which would hand it straight back as
-    #     outflows - expense_outflow - purchase_outflow
-    # (the trap the payroll strip below documents).
-    ap_reader = can_see_cost(current_user, "payables")
+    # NO_SHOP_SCOPE matches no payment: 0. Read only for ap_reader (above).
     vendor_payment_outflow = 0.0
     if ap_reader:
         try:
@@ -195,10 +201,14 @@ async def get_cash_flow(
         "outflows": total_outflow,
         "net_cash_flow": round(total_inflow - total_outflow, 2),
         "expense_outflow": expense_outflow,
-        "purchase_outflow": purchase_outflow,
     }
     if ap_reader:
+        body["purchase_outflow"] = purchase_outflow
         body["vendor_payment_outflow"] = vendor_payment_outflow
+    else:
+        # The outflows leave what was paid to suppliers out for this reader:
+        # a flag, never a figure (as expenses_partially_restricted below).
+        body["vendor_payments_restricted"] = True
     if expenses_partially_restricted:
         # Same flag /pnl sets, and for the same reason: a short total must not
         # read as the truth. A flag, never a figure.

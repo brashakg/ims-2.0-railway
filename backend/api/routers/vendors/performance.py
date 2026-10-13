@@ -142,8 +142,10 @@ async def vendor_performance(
         le=24,
         description="Number of rolling months to include in the score window.",
     ),
-    store_id: Optional[str] = None,
     current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
+    # After current_user: callers that pass (vendor_id, months, user)
+    # positionally keep working.
+    store_id: Optional[str] = None,
 ):
     """Return a performance score for the vendor over the last `months` months (INV-13).
 

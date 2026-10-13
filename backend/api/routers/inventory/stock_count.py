@@ -26,6 +26,7 @@ from ._shared import (
 from .models import (
     StartStockCountRequest,
 )
+from ...services.cost_mask import mask_cost_list
 from .helpers import (
     _get_db,
 )
@@ -57,7 +58,9 @@ async def list_stock_counts(
             for c in counts:
                 c.pop("_id", None)
                 _withhold_expected_while_open(c)
-            return {"counts": counts}
+            # Unit cost and every variance / shrinkage / overage / write-off at
+            # cost go to the roles that see product cost only (owner ruling D7).
+            return {"counts": mask_cost_list(counts, current_user, "product")}
         except Exception as e:
             logger.warning(f"stock_count list error: {e}")
 

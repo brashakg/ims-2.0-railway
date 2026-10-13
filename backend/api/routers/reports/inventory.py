@@ -14,7 +14,7 @@ from ...dependencies import (
     validate_store_access,
 )
 from ...services import stock_value
-from ...services.cost_mask import can_see_cost
+from ...services.cost_mask import mask_cost
 from ...services.reorder_policy import low_stock_rows
 from ._shared import (
     _REPORT_FINANCE_ROLES,
@@ -58,22 +58,26 @@ async def inventory_summary(
     all_stock = stock_value.shelf_units(stock_repo, get_product_repository(), active_store)
     low_stock = low_stock_rows(get_product_repository(), stock_repo, store_id=active_store)
 
-    show_cost = can_see_cost(current_user, "product")
-    total_value = stock_value.total(all_stock) if show_cost else None
-
     out_of_stock = [s for s in all_stock if s.get("quantity", 0) <= 0]
 
-    return {
-        "summary": {
-            "total_items": len(all_stock),
-            "total_quantity": sum(s.get("quantity", 0) for s in all_stock),
-            "total_value": total_value,
-            # Units with no cost add Rs 0 to total_value; said, not hidden.
-            "uncosted_units": stock_value.uncosted(all_stock) if show_cost else None,
-            "low_stock_count": len(low_stock) if low_stock else 0,
-            "out_of_stock_count": len(out_of_stock),
-        }
-    }
+    # Stock value is at cost: the roles that see product cost only (D7);
+    # mask_cost drops both keys for anyone else.
+    return mask_cost(
+        {
+            "summary": {
+                "total_items": len(all_stock),
+                "total_quantity": sum(s.get("quantity", 0) for s in all_stock),
+                "total_value": stock_value.total(all_stock),
+                # Units with no cost add Rs 0 to total_value; said, not hidden.
+                "uncosted_units": stock_value.uncosted(all_stock),
+                "low_stock_count": len(low_stock) if low_stock else 0,
+                "out_of_stock_count": len(out_of_stock),
+            }
+        },
+        current_user,
+        "product",
+        extra=("total_value",),
+    )
 
 
 @router.get("/inventory/valuation")

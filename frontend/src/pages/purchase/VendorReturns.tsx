@@ -21,7 +21,8 @@ import { usePurchaseShop } from './purchaseShop';
 import { RowShop } from './invoices/pickers';
 import api from '../../services/api/client';
 import { rtvDebitNotesApi, type DebitNote } from '../../services/api/rtvDebitNotes';
-import { PAYABLES_ROLES } from '../../components/common/CostCell';
+import { PAYABLES_ROLES, PURCHASE_PRICE_ROLES } from '../../components/common/CostCell';
+import { errMsg } from './invoices/shared';
 
 // A return line. Its price per piece is the accounts roles' to enter and to
 // read (owner rulings 2026-10-12 R2 + R3): a manager raises the return with
@@ -154,6 +155,11 @@ export function VendorReturns() {
   // rtv_vendor_id). Without reading it, the advertised one-click linkage was dead.
   const [searchParams] = useSearchParams();
   const linkedStockId = searchParams.get('stock_id');
+  // Workshop staff log a return (item, quantity, reason) and nothing more
+  // (owner ruling 2026-10-12): moving it along -- approve, ship, received by
+  // vendor -- is the purchase roles' (the server's _VENDOR_RETURN_ROLES), and
+  // its price is the accounts roles' (canSeePayables, above).
+  const canMoveGoods = (user?.roles || []).some((r) => PURCHASE_PRICE_ROLES.includes(r));
 
   const [activeTab, setActiveTab] = useState<'active' | 'history'>('active');
   const [isLoading, setIsLoading] = useState(true);
@@ -271,8 +277,8 @@ export function VendorReturns() {
         params: { store_id: listScope, limit: 100 },
       });
       setReturns((refreshResp.data.returns || []).map(shownReturn));
-    } catch {
-      toast.error('Failed to create vendor return');
+    } catch (e) {
+      toast.error(errMsg(e, 'Failed to create vendor return'));
     }
   };
 
@@ -291,8 +297,8 @@ export function VendorReturns() {
       const updated: VendorReturn = shownReturn(resp.data.return);
       setReturns(prev => prev.map(r => r.return_id === returnId ? updated : r));
       toast.success(`Status updated to ${STATUS_LABELS[newStatus] || newStatus}`);
-    } catch {
-      toast.error('Failed to update return status');
+    } catch (e) {
+      toast.error(errMsg(e, 'Failed to update return status'));
     }
   };
 
@@ -317,8 +323,8 @@ export function VendorReturns() {
       setReturns((prev) => prev.map((r) => (r.return_id === updated.return_id ? updated : r)));
       toast.success('Prices set');
       setPricing(null);
-    } catch {
-      toast.error('Failed to set the prices');
+    } catch (e) {
+      toast.error(errMsg(e, 'Failed to set the prices'));
     } finally {
       setPricingBusy(false);
     }
@@ -336,8 +342,8 @@ export function VendorReturns() {
           ? `Debit note already issued: ${res.debit_note.debit_note_number}`
           : `Debit note ${res.debit_note.debit_note_number} issued`,
       );
-    } catch {
-      toast.error('Failed to issue debit note (ADMIN / ACCOUNTANT only)');
+    } catch (e) {
+      toast.error(errMsg(e, 'Failed to issue debit note (ADMIN / ACCOUNTANT only)'));
     } finally {
       setDnBusy(null);
     }
@@ -625,8 +631,10 @@ export function VendorReturns() {
                     </div>
                   </div>
 
-                  {/* Action Buttons */}
-                  {activeTab === 'active' && (
+                  {/* Action Buttons: approve / ship / received are the purchase
+                      roles' (the server refuses anyone else); the credit is the
+                      accounts roles' (below). */}
+                  {activeTab === 'active' && canMoveGoods && (
                     <div className="flex gap-2 pt-4 border-t border-gray-300">
                       {ret.status === 'created' && (
                         <button

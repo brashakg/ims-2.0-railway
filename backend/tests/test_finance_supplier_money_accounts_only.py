@@ -370,7 +370,9 @@ def test_a_managers_shop_view_carries_no_supplier_payments(finance, role):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert "vendor_payment_outflow" not in body, body
-    assert "vendor_payments_restricted" not in body, body  # a shop view folds none in
+    # The totals leave the shop's supplier payments out for him: a flag, never
+    # a figure.
+    assert body["vendor_payments_restricted"] is True, body
     assert body["outflows"] == RENT
 
 

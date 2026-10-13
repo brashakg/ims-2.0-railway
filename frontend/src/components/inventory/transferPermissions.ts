@@ -95,3 +95,11 @@ export const canCancel = (actor: TransferActor, t: TransferLike): boolean =>
   hasRole(actor, CANCEL_ROLES) &&
   CANCELLABLE_STATUSES.includes(norm(t.status)) &&
   isSourceSide(actor, t);
+
+// The Delivery Challan button (owner 2026-10-08: a valued challan -- a move
+// between two GST registrations -- is printed by managers and accounts only).
+// No role list here: every transfer reply carries the server's own answer
+// (can_print_challan, from print_documents.may_print_challan), and an older
+// reply without it offers nothing rather than a button that answers 403.
+export const canPrintChallan = (t: { can_print_challan?: boolean }): boolean =>
+  t.can_print_challan === true;

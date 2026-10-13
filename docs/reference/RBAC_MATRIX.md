@@ -1125,9 +1125,9 @@ manager gets 404).
 | Method | Path | Allowed | S |
 |---|---|---|---|
 | `GET` | `/api/v1/vendor-returns` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, WORKSHOP_STAFF | S |
-| `POST` | `/api/v1/vendor-returns` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
+| `POST` | `/api/v1/vendor-returns` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, WORKSHOP_STAFF |  |
 | `GET` | `/api/v1/vendor-returns/` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, WORKSHOP_STAFF | S |
-| `POST` | `/api/v1/vendor-returns/` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
+| `POST` | `/api/v1/vendor-returns/` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, WORKSHOP_STAFF |  |
 | `GET` | `/api/v1/vendor-returns/{return_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, WORKSHOP_STAFF | S |
 | `PATCH` | `/api/v1/vendor-returns/{return_id}/status` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `PUT` | `/api/v1/vendor-returns/{return_id}/prices` | ADMIN, ACCOUNTANT | S |

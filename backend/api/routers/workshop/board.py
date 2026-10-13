@@ -14,6 +14,7 @@ from ...dependencies import store_in_view
 from ...dependencies import get_db, get_workshop_repository, validate_store_access
 from ._shared import logger, router
 from .helpers import _stamp_job_actor_names, job_to_frontend
+from ...services.cost_mask import mask_cost
 
 
 # ============================================================================
@@ -47,7 +48,7 @@ async def get_pending_jobs(
     if repo is not None:
         jobs = repo.find_pending(active_store)
         _stamp_job_actor_names(jobs)
-        jobs_formatted = [job_to_frontend(j) for j in jobs]
+        jobs_formatted = [job_to_frontend(j, current_user) for j in jobs]
         return {"jobs": jobs_formatted, "total": len(jobs_formatted)}
 
     return {"jobs": [], "total": 0}
@@ -65,7 +66,7 @@ async def get_overdue_jobs(
     if repo is not None:
         jobs = repo.find_overdue(active_store)
         _stamp_job_actor_names(jobs)
-        jobs_formatted = [job_to_frontend(j) for j in jobs]
+        jobs_formatted = [job_to_frontend(j, current_user) for j in jobs]
         return {"jobs": jobs_formatted, "total": len(jobs_formatted)}
 
     return {"jobs": [], "total": 0}
@@ -83,7 +84,7 @@ async def get_ready_jobs(
     if repo is not None:
         jobs = repo.find_ready(active_store)
         _stamp_job_actor_names(jobs)
-        jobs_formatted = [job_to_frontend(j) for j in jobs]
+        jobs_formatted = [job_to_frontend(j, current_user) for j in jobs]
         return {"jobs": jobs_formatted, "total": len(jobs_formatted)}
 
     return {"jobs": [], "total": 0}
@@ -159,14 +160,14 @@ async def get_dashboard_kpis(
     }
 
     if repo is None or not active_store:
-        return empty
+        return mask_cost(empty, current_user, "product")
 
     try:
         # One pass over the store's jobs so we don't hit Mongo five times
         # for what is effectively a group-by-status.
         all_jobs = repo.find_by_store(active_store)
     except Exception:
-        return empty
+        return mask_cost(empty, current_user, "product")
 
     now = datetime.now()
     today_str = now.date().isoformat()
@@ -306,7 +307,9 @@ async def get_dashboard_kpis(
         round(100.0 * jobs_with_remake / len(all_jobs), 1) if all_jobs else 0.0
     )
 
-    return {
+    # The month's spoilage cost is priced from lens cost: the roles that see
+    # product cost only (owner ruling D7); the remake rate stays for everyone.
+    return mask_cost({
         "pending": pending,  # PENDING + IN_PROGRESS
         "in_progress": in_progress,
         "qc_failed": qc_failed,
@@ -321,4 +324,4 @@ async def get_dashboard_kpis(
         "remake_rate_pct": remake_rate_pct,
         "store_id": active_store,
         "as_of": now.isoformat(),
-    }
+    }, current_user, "product")
