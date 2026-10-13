@@ -53,6 +53,8 @@ vi.mock('../../../services/api/products', () => {
       getProduct: vi.fn(async () => DRAFT),
       createProduct: (...a: unknown[]) => createProduct(...a),
       updateProduct: vi.fn(async () => ({})),
+      getWebsiteVerdict: vi.fn(async (brand: string) => ({ brand, online: false, reason: null })),
+      previewSku: vi.fn(async () => ({ category: 'SUNGLASS', sku: 'SG-RAYBAN-RB4165-601' })),
     },
   };
 });
