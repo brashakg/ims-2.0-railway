@@ -122,20 +122,20 @@ def test_gstin_is_the_stores_own_never_the_primary():
     assert LegalHeader(BV_ENTITY, karnataka, "delivery_challan")["gstin"] == ""
 
 
-def test_a_shop_moved_to_another_company_never_prints_the_old_companys_gstin():
-    """[LOW-MEDIUM] Pune is moved to Better Vision on the Setup page (only its
-    entity_id changes) and keeps WizOpt's 27AABFW... on store.gstin. The
-    header printed Better Vision's name beside WizOpt's number, while the
-    shop's ITC and purchases book on Better Vision's MH registration
-    (org_validation.shop_gstin). The header prints THE shop's GSTIN, and a
-    GST document refuses until store.gstin is that one."""
+def test_a_shop_moved_to_another_company_prints_what_its_invoice_issues():
+    """Round 25, item 7 (one rule with the invoice door, a POS file): Pune is
+    moved to Better Vision on the Setup page and keeps WizOpt's 27AABFW...
+    on store.gstin. The tax-invoice door issues from store.gstin; the
+    challan refused it and the header printed Better Vision's MH number --
+    two answers for one shop. Both print store.gstin now (the stricter
+    shop_gstin rule waits for the owner's yes at both doors)."""
     moved = dict(WIZ_STORE_MH, entity_id="ent-bv")
 
-    assert LegalHeader(BV_ENTITY, moved, "delivery_challan")["gstin"] == "27AABCB1234M1ZA"
-    with pytest.raises(HTTPException) as exc:
-        assert_issuing_identity(moved, require_gstin=True, entity=BV_ENTITY)
-    assert exc.value.status_code == 400 and "27AABFW5678N1Z3" in exc.value.detail
-    assert_issuing_identity(dict(moved, gstin="27AABCB1234M1ZA"), require_gstin=True, entity=BV_ENTITY)
+    assert LegalHeader(BV_ENTITY, moved, "delivery_challan")["gstin"] == "27AABFW5678N1Z3"
+    assert_issuing_identity(moved, require_gstin=True, entity=BV_ENTITY)
+    no_company = dict(WIZ_STORE_MH, entity_id=None)
+    assert LegalHeader(None, no_company, "estimate")["gstin"] == "27AABFW5678N1Z3"
+    assert_issuing_identity(no_company, require_gstin=True, entity=None)
 
 
 def test_logo_read_from_nested_invoice_identity():

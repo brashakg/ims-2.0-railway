@@ -1438,7 +1438,7 @@ def _gstr1(world, monkeypatch, order, store_id):
     return gstr1_mod._compute_gstr1(ist_date_str(order["created_at"])[:7], store_id)
 
 
-def _challan(world, monkeypatch, order_id):
+def _challan(world, monkeypatch, order_id, entity=None):
     """The order's delivery challan: its HTML, or the refusal text."""
     from fastapi import HTTPException
     from api.routers import print_documents as pd
@@ -1448,7 +1448,7 @@ def _challan(world, monkeypatch, order_id):
     monkeypatch.setattr(pd, "get_order_repository", lambda: OrderRepository(db.orders))
     monkeypatch.setattr(pd, "get_customer_repository", lambda: None)
     monkeypatch.setattr(pd, "load_store", lambda sid: db.stores.find_one({"store_id": sid}, {"_id": 0}) or {})
-    monkeypatch.setattr(pd, "load_entity_for_store", lambda s: {"legal_name": "BV Retail", "gstins": [
+    monkeypatch.setattr(pd, "load_entity_for_store", lambda s: entity or {"legal_name": "BV Retail", "gstins": [
         {"gstin": "20AAAAA0000A1Z5", "state_code": "20", "is_primary": True}]})
     monkeypatch.setattr(pd, "load_overrides", lambda *a: None)
     try:
@@ -1457,6 +1457,30 @@ def _challan(world, monkeypatch, order_id):
         assert exc.status_code == 400
         return exc.detail
     return page.body.decode()
+
+
+def test_the_challan_and_the_invoice_give_a_pos_shop_one_answer(world, monkeypatch):
+    """[LOW-MEDIUM] Round 25, item 7: a POS order (no route) at BV Dhanbad,
+    whose store.gstin 20AAAAA... its company (moved to WizOpt) does not hold.
+    The tax-invoice door issued it from 20AAAAA...; the delivery challan
+    (POS roles, the Orders screen) refused it. One rule now: both issue,
+    both under 20AAAAA...."""
+    db = world["db"]
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK)
+    _res, booked = _book(world, _order(59201))
+    _shop(db, "BV-DHN-01", "BV Dhanbad", "20AAAAA0000A1Z5", LOC_DHN)
+    wizopt = {"entity_id": "ENT-WO", "legal_name": "WizOpt", "gstins": [
+        {"gstin": "20WWWWW0000W1Z5", "state_code": "20"}]}
+    db.stores.update_one({"store_id": "BV-DHN-01"}, {"$set": {"entity_id": "ENT-WO"}})
+    pos = {k: v for k, v in booked.items() if not k.startswith(("fulfillment", "shopify"))}
+    db.orders.insert_one({**pos, "order_id": "POS-59201", "store_id": "BV-DHN-01",
+                          "channel": "POS", "source": "pos", "invoice_number": None})
+
+    assert _invoice_refusal(world, monkeypatch, "POS-59201") is None
+    page = _challan(world, monkeypatch, "POS-59201", entity=wizopt)
+    assert "Delivery Challan" in page, page
+    assert "20AAAAA0000A1Z5" in page and "20WWWWW0000W1Z5" not in page
 
 
 def test_a_duplicate_delivery_mid_claim_keeps_the_move_and_writes_stock_after_the_claim(world, monkeypatch):

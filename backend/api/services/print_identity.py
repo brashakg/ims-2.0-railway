@@ -119,9 +119,9 @@ def assert_issuing_identity(
     Raises HTTPException(404) when the store could not be resolved (no name) so
     a document never prints with a blank, identity-less header. When
     require_gstin is True (a GST document), additionally raises
-    HTTPException(400) when the store carries no GSTIN of its own -- mirroring
-    the invoice door's 'store GSTIN is not configured' guard -- or one its
-    company (``entity``) does not hold.
+    HTTPException(400) when the store carries no GSTIN of its own -- the
+    invoice door's own rule ('store GSTIN is not configured',
+    orders/invoices.py), so the challan never refuses what the invoice issues.
     """
     name = ""
     if isinstance(store, dict):
@@ -135,25 +135,20 @@ def assert_issuing_identity(
             "Configure the store under Organization before printing.",
         )
     if require_gstin:
-        from .org_validation import shop_gstin
         from .print_legal import _pick
 
         # The store's OWN GSTIN (the org module stamps it for the store's
-        # state) -- the one the invoice issues from -- and it must be THE
-        # shop's GSTIN (org_validation.shop_gstin: one its company holds), the
-        # one the printed header shows: never a company's name beside a
-        # number it does not hold (a shop moved to another company).
+        # state) -- the one the invoice issues from and the header prints.
+        # ponytail: store.gstin is trusted exactly as the invoice door trusts
+        # it. The stricter rule -- it must BE org_validation.shop_gstin(entity,
+        # store), one its company holds (a shop moved to another company keeps
+        # the old company's number) -- belongs at BOTH doors at once; the
+        # invoice door is a POS file (orders/invoices.py), so it waits for the
+        # owner's yes. Routed online orders already get it (the seller check).
         gstin = _pick(store, "gstin")
         if not gstin:
             raise HTTPException(
                 status_code=400,
                 detail="Store GSTIN is not configured for this state. "
                 "A GST document cannot be issued without it.",
-            )
-        if shop_gstin(entity, store) != gstin.upper():
-            raise HTTPException(
-                status_code=400,
-                detail=f"Store GSTIN {gstin} is not a registration its company "
-                "holds for the store's state. Set the shop's GSTIN in "
-                "Organization before issuing a GST document.",
             )

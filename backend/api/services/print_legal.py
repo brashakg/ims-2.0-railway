@@ -756,7 +756,7 @@ def LegalHeader(  # noqa: N802 - intentionally mirror the JSX export name
     equivalent shape: name/legal_name/pan/cin/registered_address/website +
     gstins list). `store` is the place-of-supply outlet (from the `stores`
     collection: name/address/city/state/state_code/pincode/phone/email + its
-    own `gstin`); the GSTIN printed is org_validation.shop_gstin of the two.
+    own `gstin`, the GSTIN printed; org_validation.shop_gstin when it has none).
     `overrides` is the per-entity-per-template content override dict from
     `print_template_overrides` (see routers/print_overrides.py).
 
@@ -798,16 +798,16 @@ def LegalHeader(  # noqa: N802 - intentionally mirror the JSX export name
         part for part in store_addr_lines + [city, state_name_store, pincode] if part
     )
 
-    # ---- the seller GSTIN: THE shop's GSTIN (org_validation.shop_gstin) --
-    # store.gstin when its company holds it, else the company's registration
-    # for the shop's own state (a store linked to its entity afterwards: a
-    # transfer challan must carry the consignor's GSTIN, Rule 55), never the
-    # company's PRIMARY one, never a number the company printed beside it
-    # does not hold. A GST document prints only when this IS store.gstin,
-    # the one its invoice issued from (assert_issuing_identity(require_gstin)).
+    # ---- the seller GSTIN: the store's OWN (store.gstin) -- the one its tax
+    # invoice prints and issues from (one rule with the invoice door, see the
+    # ponytail note in print_identity.assert_issuing_identity). A store never
+    # stamped prints THE shop's GSTIN (org_validation.shop_gstin: its
+    # company's registration for the shop's own state -- a transfer challan
+    # must carry the consignor's GSTIN, Rule 55), never the company's PRIMARY.
     from .org_validation import shop_gstin
 
-    gstin = shop_gstin(entity if isinstance(entity, dict) else None, store) or ""
+    gstin = _pick(store, "gstin") or shop_gstin(
+        entity if isinstance(entity, dict) else None, store) or ""
     state_name = state_name_store
 
     # ---- logo (entity invoice identity, then per-brand default) -----------
