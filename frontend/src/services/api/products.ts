@@ -91,13 +91,6 @@ export interface CreateProductPayload {
   cost_price?: number;
   discount_category?: string;
   images?: string[];
-  shopify?: {
-    // Online-store staging flags for a new product. IMS owns Shopify writes
-    // directly; the actual push happens from the Online Store module.
-    sync_to_shopify: boolean;
-    shopify_tags?: string[];
-    publish_to_pos?: boolean;
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +103,13 @@ export interface CreateProductPayload {
 // payload as a typed DuplicateProductError — the shared axios interceptor
 // would otherwise flatten the object detail into a generic string Error.
 // ---------------------------------------------------------------------------
+/** One Brand Master row as the Add-product form needs it. */
+export interface BrandOption {
+  name: string;
+  subbrands: string[];
+  tier?: string;
+}
+
 export interface DuplicateProductInfo {
   product_id?: string | null;
   sku?: string | null;
@@ -154,6 +154,10 @@ export interface SimilarProductsResponse {
   exact_match: SimilarProductSummary | null;
   siblings: SimilarProductSummary[];
   model_colour_count: number;
+  /** The typed attributes that decide this answer (the server's identity
+   *  rule, product_master.identity_inputs): a change to any other one leaves
+   *  it true. Absent = every attribute decides. */
+  identity_fields?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -459,13 +463,32 @@ export const productApi = {
   // applicable to the category (short code like 'FR' or canonical), each with
   // its sub-brand names — drives the Brand Name select and restricts the
   // Sub Brand select per selected brand. Authenticated (not admin-gated).
-  getBrandOptions: async (
-    category?: string
-  ): Promise<{ brands: Array<{ name: string; subbrands: string[]; tier?: string }> }> => {
+  getBrandOptions: async (category?: string): Promise<{ brands: BrandOption[] }> => {
     const response = await api.get('/products/brand-options', { params: { category } });
-    return response.data as {
-      brands: Array<{ name: string; subbrands: string[]; tier?: string }>;
-    };
+    return response.data as { brands: BrandOption[] };
+  },
+
+  // Whether a product of this brand goes to the website, and why not: THE
+  // push gate's own answer (shopify_push.product_push_refusal -- a push-locked
+  // brand, or the brand's Brand Master default). The form shows it and never
+  // works it out itself.
+  getWebsiteVerdict: async (
+    brand: string
+  ): Promise<{ brand: string; online: boolean; reason: string | null }> => {
+    const response = await api.get('/products/website-verdict', { params: { brand } });
+    return response.data as { brand: string; online: boolean; reason: string | null };
+  },
+
+  // The SKU a NEW product will get, from the server's one minter
+  // (product_master.build_sku) -- the form shows it before saving and never
+  // builds a SKU itself. `taken`: another product already has it, so the save
+  // adds a number to the end (product_master.sku_taken, the save's question).
+  previewSku: async (
+    category: string,
+    attributes: Record<string, string>
+  ): Promise<{ category: string | null; sku: string; taken?: boolean }> => {
+    const response = await api.post('/products/sku-preview', { category, attributes });
+    return response.data as { category: string | null; sku: string; taken?: boolean };
   },
 
   getBrands: async (category?: string) => {
@@ -488,13 +511,9 @@ export const productApi = {
   // module (not the api barrel) — the barrel re-export fails for new methods
   // (TS2614).
   getSimilarProducts: async (
-    params: {
-      category: string;
-      brand: string;
-      model_no: string;
-      colour_code?: string;
-      size?: string;
-    },
+    // The category and the form's attributes as typed: the server keys them
+    // with the create door's own identity rule.
+    params: { category: string; [attribute: string]: string },
     signal?: AbortSignal
   ): Promise<SimilarProductsResponse> => {
     const response = await api.get('/products/similar', { params, signal });
@@ -748,7 +767,7 @@ export const adminBrandApi = {
     warranty?: number;
     description?: string;
     status?: string;
-    /** Default Shopify-sync intent stamped on new products of this brand. */
+    /** Whether this brand's products go to the website (D6; the push gate reads it live). */
     sync_to_shopify_default?: boolean;
   }) => {
     const response = await api.post('/admin/brands', data);

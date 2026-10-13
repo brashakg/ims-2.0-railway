@@ -47,6 +47,9 @@ import copy  # noqa: E402
 
 import pytest  # noqa: E402
 
+# The push mechanics for a brand that IS for the website (owner D6).
+pytestmark = pytest.mark.usefixtures("brand_is_for_the_website")
+
 from database.connection import MockCollection  # noqa: E402
 from api.services import shopify_push  # noqa: E402
 
