@@ -2,7 +2,7 @@
 // WHO SEES TEAM TASKS - one answer, checked against every role
 // ============================================================================
 // Owner ruling 2026-09-03: STORE_MANAGER, AREA_MANAGER, ADMIN and SUPERADMIN.
-// Everyone else sees only what is assigned to them.
+// Everyone else gets Mine only - their own tasks (owner ruling 2026-10-12).
 //
 // Three copies of this answer used to disagree (the /tasks route gate admitted
 // ACCOUNTANT; the TasksDashboard tab admitted only the two managers;
@@ -72,6 +72,11 @@ describe('the one team-task role list', () => {
       expect(TASK_MODULE_ROLES).toContain(role);
       expect(canSeeTeamTasks([role])).toBe(false);
     }
+  });
+
+  it('lets the catalogue manager open Mine - catalogue tasks are assigned to them', () => {
+    expect(TASK_MODULE_ROLES).toContain('CATALOG_MANAGER');
+    expect(canSeeTeamTasks(['CATALOG_MANAGER'])).toBe(false);
   });
 
   it.each(TASK_MODULE_ROLES)('shows %s exactly the sections its role allows', (role) => {

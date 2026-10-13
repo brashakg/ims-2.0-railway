@@ -2,8 +2,11 @@
 // IMS 2.0 - Tasks: WHO SEES WHAT. One list, one file.
 // ============================================================================
 // OWNER RULING 2026-09-03: team tasks are for managers and above only -
-// STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN. Everyone else sees ONLY the
-// tasks assigned to them.
+// STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN. Everyone else sees only
+// their own tasks (owner ruling 2026-10-12): the ones assigned to them by
+// name, the ones addressed to their role at their shop, and the ones they
+// raised themselves. The server decides that (backend
+// services/task_visibility.py); these lists only decide which screens show.
 //
 // Before this file the answer was written down THREE times, and the three
 // disagreed, which is why nobody could say who was supposed to see team tasks:
@@ -39,7 +42,8 @@ export const TEAM_TASK_ROLES: UserRole[] = [
  * Copied character-for-character off the existing `/my-work` and `/attendance`
  * gates in routes/taskRoutes.tsx - the established "every operational role"
  * list in this codebase - so a bisect can tell a permission change from a
- * file move.
+ * file move. CATALOG_MANAGER added 2026-10-13: catalogue flag tasks and
+ * "finish cataloguing" asks are assigned to them, so they need Mine too.
  */
 export const TASK_MODULE_ROLES: UserRole[] = [
   'SUPERADMIN',
@@ -51,6 +55,7 @@ export const TASK_MODULE_ROLES: UserRole[] = [
   'CASHIER',
   'SALES_STAFF',
   'WORKSHOP_STAFF',
+  'CATALOG_MANAGER',
 ];
 
 /** The runtime half of the same ruling, for nav/tab visibility. */
