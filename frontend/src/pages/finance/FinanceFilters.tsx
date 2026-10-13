@@ -25,7 +25,7 @@ interface FinanceFiltersProps {
   onDateToChange: (date: string) => void;
   activeTab: TabType;
   onTabChange: (tab: TabType) => void;
-  /** false hides the Vendor Payments tab (payables are ADMIN / ACCOUNTANT only). */
+  /** false hides the accounts tabs: Vendor Payments and GST (ADMIN / ACCOUNTANT only). */
   canSeePayables?: boolean;
 }
 
@@ -78,6 +78,10 @@ const TABS: { id: TabType; label: string; icon: typeof TrendingUp }[] = [
   { id: 'vendor-payments', label: 'Vendor Payments', icon: Building2 },
   { id: 'journal-entries', label: 'Journal Entries', icon: BookOpen },
 ];
+
+// Supplier payments, and GST whose payable is struck with the input credit from
+// supplier bills (owner ruling 2026-10-07, R1): the accounts roles' tabs.
+const ACCOUNTS_TABS = new Set<TabType>(['vendor-payments', 'gst']);
 
 export default function FinanceFilters({
   selectedYear,
@@ -139,7 +143,7 @@ export default function FinanceFilters({
 
       {/* Tabs */}
       <div className="flex flex-wrap gap-2 mb-6 border-b border-gray-200">
-        {TABS.filter((t) => canSeePayables || t.id !== 'vendor-payments').map(({ id, label, icon: Icon }) => (
+        {TABS.filter((t) => canSeePayables || !ACCOUNTS_TABS.has(t.id)).map(({ id, label, icon: Icon }) => (
           <button
             key={id}
             onClick={() => onTabChange(id)}

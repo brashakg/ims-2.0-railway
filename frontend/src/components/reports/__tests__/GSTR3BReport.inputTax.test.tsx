@@ -92,9 +92,6 @@ function expectNoInputTax() {
   // No input figure under any label: 2 x 61.50 = 123, 2 x 38.50 = 77.
   expect(screen.queryByText(/61\.50|38\.50/)).toBeNull();
   expect(screen.queryByText(/₹123\b|₹77\b/)).toBeNull();
-  expect(screen.getByTestId('gstr3b-input-tax-note')).toHaveTextContent(/Admin and Accountant only/);
-  // It names no figure that no screen draws: 3.1(d) is in the portal file only.
-  expect(screen.getByTestId('gstr3b-input-tax-note')).not.toHaveTextContent(/3\.1\(d\)|reverse charge/);
 }
 
 describe('GSTR-3B screen - input tax follows the accounts rule (R5)', () => {
@@ -130,7 +127,9 @@ describe('GSTR-3B screen - input tax follows the accounts rule (R5)', () => {
       expect(screen.getAllByText('Net Tax Liability').length).toBeGreaterThan(0);
       expect(screen.getByRole('button', { name: /Download GSTN JSON/i })).toBeInTheDocument();
       expect(screen.getAllByText(/61\.50/).length).toBeGreaterThan(0);
-      expect(screen.queryByTestId('gstr3b-input-tax-note')).toBeNull();
+      // No "shown to Admin and Accountant only" note: no one else reaches
+      // the page (R1, reportRoutes).
+      expect(screen.queryByText(/Admin and Accountant only/)).toBeNull();
     },
   );
 });

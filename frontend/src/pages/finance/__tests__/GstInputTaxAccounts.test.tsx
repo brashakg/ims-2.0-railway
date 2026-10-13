@@ -1,16 +1,14 @@
 // ============================================================================
-// IMS 2.0 - managers keep OUTPUT GST; input tax is the accounts roles' (R5)
+// IMS 2.0 - the GST summary and GSTR-3B are the accounts roles' (R1)
 // ============================================================================
-// Owner ruling 2026-10-12 (R5): GST INPUT tax (from supplier bills) on the GST
-// summary and GSTR-3B (Table 4 ITC, 3.1(d) RCM) and its export is the accounts
-// roles'; managers KEEP output GST. The server leaves the input keys out of a
-// manager's summary and return (finance/gst._output_side_only,
-// reports/gstr3b._output_side_only) -- it does not lock managers out. So the
-// screens must not either: a manager still gets the Finance GST tab and its
-// summary call, the GSTR-3B menu entry and the GSTR-3B page (which draws no
-// Table 4 for him: GSTR3BReport.inputTax.test). A routed test, because the
-// component tests render GSTPanel / GSTR3BReport directly and stay green
-// even when a route, a tab or a menu entry shuts a manager out.
+// Owner ruling 2026-10-07 (R1): the GST summary and the GSTR-3B report show
+// input-tax totals summed from supplier bills -- managers do NOT need them;
+// ONLY SUPERADMIN, ADMIN and ACCOUNTANT see them (PAYABLES_ROLES; the server
+// answers a manager 403 on both). So a manager gets no Finance GST tab and no
+// summary call, no GSTR-3B menu entry, and /reports/gstr3b is the app's
+// not-allowed page; GSTR-1 (sales GST only) stays his. A routed test, because
+// the component tests render GSTPanel / GSTR3BReport directly and stay green
+// whatever a route, a tab or a menu entry admits.
 
 import { Suspense } from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -96,23 +94,25 @@ function openReport(path: string, role: string) {
 const navIds = (role: string) =>
   filterVisibleGroups([role as UserRole], role as UserRole, () => true).flatMap((g) => g.items.map((i) => i.id));
 
-describe.each([['STORE_MANAGER'], ['AREA_MANAGER']])('%s: keeps output GST', (role) => {
-  it('Finance dashboard: the GST tab and its summary call; no org-wide reconciliation', async () => {
+describe.each([['STORE_MANAGER'], ['AREA_MANAGER']])('%s: no GST summary, no GSTR-3B', (role) => {
+  it('Finance dashboard: no GST tab, no summary call, no reconciliation call', async () => {
     roles = [role];
     render(<FinanceDashboard />);
     await waitFor(() => expect(api.getPnl).toHaveBeenCalled());
-    await waitFor(() => expect(api.getGstSummary).toHaveBeenCalled());
-    expect(screen.getByRole('button', { name: /gst management/i })).toBeInTheDocument();
-    // /finance/gst/reconciliation is accounts-only on the server.
     await waitFor(() => expect(api.getPnlByCategory).toHaveBeenCalled());
+    // The dashboard drew its tabs, without the GST one.
+    expect(screen.getByRole('button', { name: /revenue & p&l/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /gst management/i })).toBeNull();
+    expect(api.getGstSummary).not.toHaveBeenCalled();
     expect(api.getGstReconciliation).not.toHaveBeenCalled();
   });
 
-  it('GSTR-3B: menu entry and page (its Table 4 is left out by the server)', async () => {
-    expect(navIds(role)).toContain('gstr3b');
+  it('GSTR-3B: no menu entry, and the page is the not-allowed page', async () => {
+    expect(navIds(role)).not.toContain('gstr3b');
     expect(navIds(role)).toContain('gstr1');
     openReport('/reports/gstr3b', role);
-    expect(await screen.findByText('GSTR-3B PAGE')).toBeInTheDocument();
+    expect(await screen.findByText('UNAUTHORIZED')).toBeInTheDocument();
+    expect(screen.queryByText('GSTR-3B PAGE')).toBeNull();
   });
 
   it('GSTR-1 (sales GST only) still opens', async () => {

@@ -14,14 +14,10 @@ interface GSTPanelProps {
   gstSummary: GSTSummaryData | null;
 }
 
-/** Owner ruling 2026-10-12 (R5): GST INPUT tax -- the credit taken on supplier
- *  bills -- is for the accounts roles (PAYABLES_ROLES) only. GET
- *  /finance/gst/summary leaves the input credit and the net payable (collected
- *  minus that credit) out for anyone else, so their tiles are not drawn at all:
- *  a manager reads the sales-side (output) figures, never a 0 or a "net" that
- *  is really the gross. */
-const INPUT_TAX_NOTE =
-  'Input tax credit (from supplier bills) and net GST payable are shown to Admin and Accountant only.';
+/** GST INPUT tax -- the credit taken on supplier bills -- is the accounts
+ *  roles' (PAYABLES_ROLES): the tab is theirs alone (owner ruling 2026-10-07,
+ *  R1), and for any other reader the input-credit and net tiles are not drawn
+ *  (R5) -- never a 0 or a "net" that is really the gross. */
 
 export default function GSTPanel({ gstSummary }: GSTPanelProps) {
   const { user } = useAuth();
@@ -149,11 +145,7 @@ export default function GSTPanel({ gstSummary }: GSTPanelProps) {
                   </span>
                 </div>
               </>
-            ) : (
-              <p className="text-xs text-gray-500" data-testid="gst-input-tax-note">
-                {INPUT_TAX_NOTE}
-              </p>
-            )}
+            ) : null}
           </div>
         </div>
       </div>

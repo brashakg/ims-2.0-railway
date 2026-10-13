@@ -261,10 +261,8 @@ export default function FinanceDashboard() {
       const [rev, pnl, gst, out, cf, bud, vend] = await Promise.allSettled([
         financeApi.getRevenue({ period: 'month', store_id: storeId }),
         financeApi.getPnl({ store_id: storeId, from_date: dateFrom, to_date: dateTo }),
-        // Everyone reads the GST summary: managers keep OUTPUT GST, and the
-        // server leaves the input-tax figures out for them (owner ruling
-        // 2026-10-12, R5).
-        financeApi.getGstSummary(),
+        // Input tax from supplier bills: accounts only (R1), as the server.
+        canSeePayables ? financeApi.getGstSummary() : Promise.resolve(null),
         financeApi.getOutstanding({ store_id: storeId }),
         financeApi.getCashFlow({ period: 'month', store_id: storeId }),
         financeApi.getBudget(),
@@ -597,7 +595,7 @@ export default function FinanceDashboard() {
               )}
             </>
           )}
-          {activeTab === 'gst' && (
+          {activeTab === 'gst' && canSeePayables && (
             <>
               <GSTPanel gstSummary={gstSummary} />
               {gstRecon.length > 0 && (

@@ -1,5 +1,5 @@
 // ============================================================================
-// IMS 2.0 - Finance > GST: input tax credit is for the accounts roles (R5)
+// IMS 2.0 - Finance > GST: input tax credit is for the accounts roles (R5, R1)
 // ============================================================================
 // Owner ruling 2026-10-12: GST input tax -- the credit from supplier bills --
 // is shown only to ADMIN / SUPERADMIN / ACCOUNTANT (PAYABLES_ROLES). GET
@@ -55,9 +55,6 @@ describe('GSTPanel - input tax credit follows the accounts rule (R5)', () => {
         // The sales side stays: CGST / SGST tiles and the collected total.
         expect(screen.getAllByText('Total GST Collected').length).toBeGreaterThan(0);
         expect(screen.getAllByText(/18,000/).length).toBeGreaterThan(0);
-        expect(screen.getByTestId('gst-input-tax-note')).toHaveTextContent(
-          /Admin and Accountant only/,
-        );
         unmount();
       }
     },
@@ -73,7 +70,9 @@ describe('GSTPanel - input tax credit follows the accounts rule (R5)', () => {
       expect(screen.getByText('Total GST Payable')).toBeInTheDocument();
       expect(screen.getAllByText(/12,345/).length).toBeGreaterThan(0);
       expect(screen.getAllByText(/5,655/).length).toBeGreaterThan(0);
-      expect(screen.queryByTestId('gst-input-tax-note')).toBeNull();
+      // No "shown to Admin and Accountant only" note: the GST tab is theirs
+      // alone (R1, FinanceFilters).
+      expect(screen.queryByText(/Admin and Accountant only/)).toBeNull();
     },
   );
 });
