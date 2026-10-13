@@ -17,7 +17,7 @@ from ._shared import (
     require_roles,
     router,
 )
-from ...services.cost_mask import can_see_cost
+from ...services.cost_mask import can_see_cost, mask_purchase
 
 
 def _stamp_event_actors(events: list) -> None:
@@ -252,7 +252,7 @@ async def get_po(
     if not can_access_store_scoped(po.get("delivery_store_id"), current_user):
         raise HTTPException(status_code=404, detail="Purchase order not found")
 
-    return po
+    return mask_purchase(po, current_user)
 
 
 @router.post("/purchase-orders/{po_id}/send")
@@ -334,8 +334,49 @@ async def send_po(
                 "sent_by": current_user.get("user_id"),
             },
         )
+        _flag_unpriced_lines(po)
 
     return {"message": "PO sent to vendor", "po_id": po_id}
+
+
+def _flag_unpriced_lines(po: dict) -> None:
+    """Owner ruling 2026-10-12: a PO sent with a line whose price nobody knew
+    (no price paid to this vendor before, no catalogue cost -- create_po leaves
+    it None, never a made-up 0) is flagged for accounts as a task at the
+    delivery shop, so the price is settled before the bill. Fail-soft: a task
+    never blocks the send."""
+    names = [
+        it.get("product_name") or it.get("sku") or it.get("product_id") or "an item"
+        for it in po.get("items") or []
+        if isinstance(it, dict)
+        and not it.get("unit_price")  # None from create_po, 0.0 from a CL draft
+        and it.get("line_status") != "CANCELLED"
+    ]
+    if not names:
+        return
+    try:
+        from ...dependencies import get_task_repository
+        from ...services.task_triggers import create_system_task
+
+        ref = po.get("po_number") or po.get("po_id")
+        create_system_task(
+            get_task_repository(),
+            title=f"Price needed on purchase order {ref}",
+            description=(
+                f"Purchase order {ref} was sent with no price for: "
+                f"{', '.join(str(n) for n in names)}. Nothing was paid to this "
+                "vendor for it before and it has no catalogue cost. Agree the "
+                "price with the vendor and enter it when you book the invoice "
+                "in Purchase Invoices."
+            ),
+            priority="P2",
+            category="Purchase",
+            store_id=po.get("delivery_store_id"),
+            dedupe_ref=f"po-price:{po.get('po_id')}",
+            assigned_to="ACCOUNTANT",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[VENDOR] unpriced-PO task skipped for %s: %s", po.get("po_id"), exc)
 
 
 @router.post("/purchase-orders/{po_id}/cancel")

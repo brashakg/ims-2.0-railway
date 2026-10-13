@@ -36,6 +36,7 @@ from .grn import (
     _number_stranded_receipts,
     _receipt_numbered,
 )
+from ...services.cost_mask import mask_purchase
 from ...services.purchase_numbering import po_label
 
 
@@ -588,4 +589,4 @@ async def get_grn(
 
     _enrich_grn_names([grn])
 
-    return grn
+    return mask_purchase(grn, current_user)

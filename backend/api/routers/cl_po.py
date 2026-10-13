@@ -46,6 +46,7 @@ from ..dependencies import (
     validate_store_access,
 )
 from ..services import cl_po_generator as gen
+from ..services.cost_mask import mask_purchase
 from ..services.lens_catalog_validation import compute_available
 
 logger = logging.getLogger(__name__)
@@ -431,17 +432,22 @@ async def generate_cl_po(
     }
 
     if body.dry_run:
-        return {**base_response, "pos_created": 0, "created_pos": []}
+        return mask_purchase(
+            {**base_response, "pos_created": 0, "created_pos": []}, current_user
+        )
 
     po_repo = get_purchase_order_repository()
     if po_repo is None:
         # DB-absent fail-soft: report clearly that NOTHING was written.
-        return {
-            **base_response,
-            "pos_created": 0,
-            "created_pos": [],
-            "message": "Purchase-order storage unavailable; nothing was written",
-        }
+        return mask_purchase(
+            {
+                **base_response,
+                "pos_created": 0,
+                "created_pos": [],
+                "message": "Purchase-order storage unavailable; nothing was written",
+            },
+            current_user,
+        )
 
     created_pos: List[Dict[str, Any]] = []
     now_iso = datetime.now().isoformat()
@@ -521,4 +527,8 @@ async def generate_cl_po(
             },
         )
 
-    return {**base_response, "pos_created": len(created_pos), "created_pos": created_pos}
+    # The drafted lines' prices are what we pay: the accounts roles' only.
+    return mask_purchase(
+        {**base_response, "pos_created": len(created_pos), "created_pos": created_pos},
+        current_user,
+    )

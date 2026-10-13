@@ -19,6 +19,7 @@ from ._shared import (
     validate_store_access,
     _get_db,
 )
+from ...services.cost_mask import can_see_cost, mask_purchase
 from .gst import po_gst_context
 from .grn_accept_lock import _GRN_TERMINAL_ACCEPT_STATUSES
 
@@ -139,12 +140,17 @@ async def goods_receipt_cockpit(
             if len(pending_cataloged) >= 200:
                 break
 
-    return {
-        "vendor_id": vendor_id,
-        "open_pos": open_pos,
-        "pending_not_received": list(pending.values()),
-        "pending_cataloged": pending_cataloged,
-    }
+    # The PO line price rides each open line for the accounts roles only: a
+    # manager receives by quantity (owner ruling 2026-10-12).
+    return mask_purchase(
+        {
+            "vendor_id": vendor_id,
+            "open_pos": open_pos,
+            "pending_not_received": list(pending.values()),
+            "pending_cataloged": pending_cataloged,
+        },
+        current_user,
+    )
 
 
 @router.get("/last-cost")
@@ -155,7 +161,31 @@ async def get_last_purchase_cost(
 ):
     """The price this vendor was last really paid, per product -- so the PO /
     Buy-Desk form can pre-fill "last paid Rs X on <date>" instead of the
-    operator guessing the cost (procurement Phase 2C). THE one last-paid rule:
+    operator guessing the cost (procurement Phase 2C). The rule is
+    last_paid_prices below. A price paid is shown only to the roles that may
+    see what we pay (owner ruling 2026-10-12): anyone else gets no prices --
+    the server fills their PO lines itself.
+
+    Read-only, store-scoped, fail-soft: DB trouble or no history yields an
+    empty map (the form keeps the catalogue cost, no caption). Registered ABOVE
+    /purchase-orders/{po_id} so the literal path wins.
+
+    Shape: {"costs": {product_id: {unit_price, po_number, po_id, date}, ...}}.
+    """
+    if not can_see_cost(current_user, "purchase"):
+        return {"costs": {}}
+    wanted = {p.strip() for p in (product_ids or "").split(",") if p.strip()}
+    return {
+        "costs": last_paid_prices(
+            vendor_id,
+            wanted,
+            lambda store_id: can_access_store_scoped(store_id, current_user),
+        )
+    }
+
+
+def last_paid_prices(vendor_id, wanted, may_see_store) -> dict:
+    """THE one last-paid rule, per product in `wanted`:
 
       1. the cost at acceptance of this vendor's newest accepted goods-receipt
          line for the product, dated by that receipt's acceptance. It is READ
@@ -174,19 +204,20 @@ async def get_last_purchase_cost(
     a typo or a dropped quote over the catalogue cost, and that becomes the cost
     at acceptance.
 
-    Read-only, store-scoped, fail-soft: DB trouble or no history yields an
-    empty map (the form keeps the catalogue cost, no caption). Registered ABOVE
-    /purchase-orders/{po_id} so the literal path wins.
+    `may_see_store(store_id)` says which shops' prices count: the /last-cost
+    reader's own (never another store's negotiated cost on screen), every shop
+    when the server prices a PO line nobody is shown. Fail-soft: DB trouble or
+    no history yields {}.
 
-    Shape: {"costs": {product_id: {unit_price, po_number, po_id, date}, ...}}.
+    Returns {product_id: {unit_price, po_number, po_id, date}}.
     """
-    wanted = {p.strip() for p in (product_ids or "").split(",") if p.strip()}
+    wanted = set(wanted or ())
     if not vendor_id or not wanted:
-        return {"costs": {}}
+        return {}
 
     po_repo = get_purchase_order_repository()
     if po_repo is None:
-        return {"costs": {}}
+        return {}
 
     costs: dict = {}
 
@@ -240,7 +271,7 @@ async def get_last_purchase_cost(
             }
             # Only surface prices from stores the caller may see (cross-store
             # roles pass); never leak another store's negotiated cost.
-            if not can_access_store_scoped(grn.get("store_id"), current_user):
+            if not may_see_store(grn.get("store_id")):
                 continue
             for pid in (lines & wanted) - costs.keys():
                 unit = stock_repo.find_one(
@@ -267,7 +298,7 @@ async def get_last_purchase_cost(
             for po in pos or []:
                 if len(costs) >= len(wanted):
                     break
-                if not can_access_store_scoped(po.get("delivery_store_id"), current_user):
+                if not may_see_store(po.get("delivery_store_id")):
                     continue
                 for it in po.get("items", []) or []:
                     if not isinstance(it, dict) or it.get("line_status") == "CANCELLED":
@@ -280,9 +311,11 @@ async def get_last_purchase_cost(
                     _take(pid, it.get("unit_price"), po, po.get("sent_at"))
     except Exception as e:  # noqa: BLE001 - read-only helper, never a blocker
         logger.warning("[VENDOR] last-cost lookup failed: %s", e)
-        return {"costs": {}}
+        return {}
 
-    return {"costs": costs}
+    return costs
+
+
 
 
 @router.get("/po-gst-heads")

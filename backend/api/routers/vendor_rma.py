@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 
 from .auth import require_roles
 from ..dependencies import get_db, resolve_store_scope, validate_store_access, user_store_scope
-from ..services.cost_mask import PURCHASE_ROLES
+from ..services.cost_mask import PURCHASE_ROLES, mask_cost
 from ..services.vendor_rma import (
     VendorRMAEngine,
     RMA_REASONS,
@@ -146,6 +146,15 @@ class RMAClose(BaseModel):
 # ============================================================================
 
 
+# An RMA's unit costs and credits are what we pay: read back by the accounts
+# roles only (owner ruling 2026-10-12), anyone else gets the lines and status.
+_RMA_MONEY_KEYS = (
+    "unit_cost_paise", "line_expected_paise", "received_paise",
+    "expected_credit_paise", "received_credit_paise", "variance_paise",
+    "expected_credit_rupees", "received_credit_rupees", "variance_rupees",
+)
+
+
 def _with_rupees(doc: dict) -> dict:
     """Add rupee display fields alongside the authoritative paise integers."""
     if not doc:
@@ -155,6 +164,10 @@ def _with_rupees(doc: dict) -> dict:
     out["received_credit_rupees"] = paise_to_rupees(doc.get("received_credit_paise"))
     out["variance_rupees"] = paise_to_rupees(doc.get("variance_paise"))
     return out
+
+
+def _masked(doc: dict, user: dict) -> dict:
+    return mask_cost(_with_rupees(doc), user, "purchase", extra=_RMA_MONEY_KEYS)
 
 
 def _http_from_result(res: dict) -> HTTPException:
@@ -194,7 +207,10 @@ async def list_rmas(
         # Defensive: a store-role with no resolved store sees only its reach.
         rows = eng.list(store_ids=list(reach), vendor_id=vendor_id, status=status,
                         skip=skip, limit=limit)
-    return {"rmas": [_with_rupees(r) for r in rows], "total": len(rows)}
+    return {
+        "rmas": [_masked(r, current_user) for r in rows],
+        "total": len(rows),
+    }
 
 
 @router.post("", status_code=201)
@@ -232,7 +248,7 @@ async def raise_rma(
     )
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=res.get("error", "create failed"))
-    return res
+    return mask_cost(res, current_user, "purchase", extra=_RMA_MONEY_KEYS)
 
 
 @router.get("/{rma_id}")
@@ -245,7 +261,7 @@ async def get_rma(
     if doc is None:
         raise HTTPException(status_code=404, detail="RMA not found")
     validate_store_access(doc.get("store_id"), current_user)
-    return _with_rupees(doc)
+    return _masked(doc, current_user)
 
 
 @router.post("/{rma_id}/authorize")
@@ -268,7 +284,7 @@ async def authorize_rma(
     )
     if not res.get("ok"):
         raise _http_from_result(res)
-    return res
+    return mask_cost(res, current_user, "purchase", extra=_RMA_MONEY_KEYS)
 
 
 @router.post("/{rma_id}/dispatch")
@@ -293,7 +309,7 @@ async def dispatch_rma(
     )
     if not res.get("ok"):
         raise _http_from_result(res)
-    return res
+    return mask_cost(res, current_user, "purchase", extra=_RMA_MONEY_KEYS)
 
 
 @router.post("/{rma_id}/credit-note")
@@ -358,7 +374,7 @@ async def record_credit_note(
     )
     if not res.get("ok"):
         raise _http_from_result(res)
-    return res
+    return mask_cost(res, current_user, "purchase", extra=_RMA_MONEY_KEYS)
 
 
 @router.post("/{rma_id}/reject")
@@ -376,7 +392,7 @@ async def reject_rma(
     res = eng.reject(rma_id, actor=current_user.get("user_id"), reason=body.reason or "")
     if not res.get("ok"):
         raise _http_from_result(res)
-    return res
+    return mask_cost(res, current_user, "purchase", extra=_RMA_MONEY_KEYS)
 
 
 @router.post("/{rma_id}/close")
@@ -401,7 +417,7 @@ async def close_rma(
     )
     if not res.get("ok"):
         raise _http_from_result(res)
-    return res
+    return mask_cost(res, current_user, "purchase", extra=_RMA_MONEY_KEYS)
 
 
 # ============================================================================

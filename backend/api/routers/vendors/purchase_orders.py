@@ -25,6 +25,8 @@ from ._shared import (
     uuid,
     validate_store_access,
 )
+from ...services.cost_mask import can_see_cost, mask_purchase
+from .cockpit import last_paid_prices
 from .gst import (
     _PO_PROVISIONAL_COST_SOURCE,
     _promote_cost_from_rate,
@@ -68,7 +70,10 @@ async def list_pos(
 
     pos = po_repo.find_many(filter_dict, skip=skip, limit=limit)
 
-    return {"purchase_orders": pos or [], "total": len(pos) if pos else 0}
+    return {
+        "purchase_orders": mask_purchase(pos or [], current_user),
+        "total": len(pos) if pos else 0,
+    }
 
 
 # INV-9: Demand forecast -> nightly draft-PO suggestions
@@ -305,7 +310,7 @@ async def create_pos_from_forecast(
                             f"[INV-9] PO create failed for vendor {v_id}: {_e}"
                         )
 
-        return {
+        return mask_purchase({
             "store_id": active_store,
             "dry_run": body.dry_run,
             "horizon_days": horizon,
@@ -314,7 +319,7 @@ async def create_pos_from_forecast(
             "pos_created": len(created_pos),
             "created_pos": created_pos,
             "suggestions": suggestions,
-        }
+        }, current_user)
 
     except HTTPException:
         raise
@@ -355,6 +360,14 @@ async def create_po(
                 "delivery store for this purchase order."
             ),
         )
+
+    # Owner ruling 2026-10-12: what we pay is for the accounts roles. A manager
+    # orders by quantity -- a price he sends is not taken; the server prices
+    # every line below (last price paid, else the catalogue cost).
+    sees_prices = can_see_cost(current_user, "purchase")
+    if not sees_prices:
+        for it in po.items:
+            it.unit_price = None
 
     po_id = str(uuid.uuid4())
     po_number = generate_po_number(po.delivery_store_id)
@@ -464,6 +477,21 @@ async def create_po(
         for it in po.items:
             if it.product_id not in products:
                 products[it.product_id] = product_repo.find_by_id(it.product_id)
+
+    # A line with no price -- every manager's line, one left blank or at 0 --
+    # takes the price last paid to this vendor (the one last-paid rule, every
+    # shop: nobody is shown it here), else the catalogue cost. Neither known:
+    # the line stays unpriced (None, never a made-up 0) and sending the PO
+    # raises a task for accounts (po_detail._flag_unpriced_lines).
+    unpriced = [it for it in po.items if not it.unit_price]
+    if unpriced:
+        paid = last_paid_prices(
+            po.vendor_id, {it.product_id for it in unpriced}, lambda _store: True
+        )
+        for it in unpriced:
+            last = (paid.get(it.product_id) or {}).get("unit_price")
+            catalogue = (products.get(it.product_id) or {}).get("cost_price")
+            it.unit_price = float(last or catalogue or 0) or None
     computed = build_po_gst(
         # A typed-in new product was minted onto the spine above and its line
         # given a real product_id; the spent `new_product: None` payload must
@@ -554,17 +582,20 @@ async def create_po(
         except Exception:  # noqa: BLE001
             pass
 
-    return {
-        "po_id": po_id,
-        "po_number": po_number,
-        "total_amount": total,
-        "interstate": interstate,
-        "gst_summary": gst_summary,
-        # EVERY line whose HSN could not settle the rate -- including the ones
-        # taxed anyway off the catalogue rate. HSN is mandatory on a GST
-        # purchase document, so a taxed line with no HSN is still a problem the
-        # buyer has to be told about.
-        "gst_warnings": gst_warnings,
-        "cost_filled": cost_filled,
-        "message": "Purchase order created",
-    }
+    return mask_purchase(
+        {
+            "po_id": po_id,
+            "po_number": po_number,
+            "total_amount": total,
+            "interstate": interstate,
+            "gst_summary": gst_summary,
+            # EVERY line whose HSN could not settle the rate -- including the ones
+            # taxed anyway off the catalogue rate. HSN is mandatory on a GST
+            # purchase document, so a taxed line with no HSN is still a problem the
+            # buyer has to be told about.
+            "gst_warnings": gst_warnings,
+            "cost_filled": cost_filled,
+            "message": "Purchase order created",
+        },
+        current_user,
+    )
