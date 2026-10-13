@@ -7,7 +7,9 @@
 // useState between them and not one bookmarkable section. Both are deleted.
 //
 // Each section is now a real page with its own URL:
-//   /tasks/mine        every operational role - only what is assigned to you
+//   /tasks/mine        every operational role - your own tasks: assigned to
+//                      you, or (below manager) to your role at your shop, or
+//                      raised by you
 //   /tasks/team        managers and above (taskRoles.TEAM_TASK_ROLES)
 //   /tasks/checklists  the daily SOP checklist. URL KEPT - the Hub links it.
 //   /tasks/sops        the SOP library

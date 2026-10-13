@@ -65,6 +65,7 @@ async def barcode_lifecycle_trace(
     def _scrub_list(docs) -> list:
         return [_scrub(dict(d)) for d in (docs or []) if d]
 
+    stock_id = ""  # a failed unit lookup still lets the sales and returns run
     try:
         # 1. Stock unit
         su = db.get_collection("stock_units").find_one({"barcode": barcode})
@@ -115,11 +116,8 @@ async def barcode_lifecycle_trace(
             ).sort("created_at", 1).limit(50)
         )
         for order in orders:
-            # Every signed-in role reads this route: a sale line's
-            # cost_at_sale goes through the one cost rule.
             matching = [
-                mask_cost(dict(i), current_user, "product")
-                for i in (order.get("items") or order.get("order_items") or [])
+                i for i in (order.get("items") or order.get("order_items") or [])
                 if i.get("barcode") == barcode
                 or (stock_id and i.get("stock_id") == stock_id)
             ]
@@ -177,4 +175,7 @@ async def barcode_lifecycle_trace(
     except Exception as exc:  # noqa: BLE001
         logger.warning("[INV-12] returns lookup failed for barcode %s: %s", barcode, exc)
 
-    return result
+    # The unit's cost, a sale line's cost_at_sale, a transfer line's unit cost
+    # and the receipt's prices go to the roles that see product cost only
+    # (owner ruling D7).
+    return mask_cost(result, current_user, "product")

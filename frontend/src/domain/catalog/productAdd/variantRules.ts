@@ -1,4 +1,4 @@
-import { CATEGORY_FIELDS, getCategoryFields } from './categoryFields';
+import { CATEGORY_FIELDS, getCategoryFields, modelOf } from './categoryFields';
 import type { ProductFormValues } from './formModel';
 import type { ProductDoc } from './cloneMapping';
 import { productToFormValues, str } from './cloneMapping';
@@ -231,19 +231,12 @@ export function productToVariantFormValues(
     offerPrice: base.offerPrice,
     costPrice: base.costPrice,
     discountCategory: base.discountCategory,
-    // A new variant never inherits online flags (same rule as clone).
-    syncToShopify: false,
-    shopifyTags: [],
-    publishPOS: true,
     // Images are NEVER auto-copied — sourceImages powers the one-click button.
     images: [],
   };
 
   const locked = VARIANT_LOCKED_IDENTITY.filter((n) => attributes[n]);
-  const sourceLabel = [
-    attributes.brand_name,
-    attributes.model_no || attributes.model_name,
-  ]
+  const sourceLabel = [attributes.brand_name, modelOf(category, attributes)]
     .filter(Boolean)
     .join(' ');
 

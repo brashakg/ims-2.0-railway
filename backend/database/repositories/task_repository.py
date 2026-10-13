@@ -100,29 +100,3 @@ class TaskRepository(BaseRepository):
             "reassigned_by": reassigned_by,
             "reassigned_at": datetime.now()
         })
-    
-    # Analytics
-    def get_task_summary(self, store_id: str = None) -> Dict:
-        filter = {"store_id": store_id} if store_id else {}
-        
-        pipeline = [
-            {"$match": filter},
-            {"$group": {
-                "_id": "$status",
-                "count": {"$sum": 1}
-            }}
-        ]
-        
-        results = self.aggregate(pipeline)
-        return {r["_id"]: r["count"] for r in results}
-    
-    def get_overdue_count(self, store_id: str = None, user_id: str = None) -> int:
-        filter = {
-            "status": {"$in": ["OPEN", "IN_PROGRESS"]},
-            "due_at": {"$lt": datetime.now()}
-        }
-        if store_id:
-            filter["store_id"] = store_id
-        if user_id:
-            filter["assigned_to"] = user_id
-        return self.count(filter)

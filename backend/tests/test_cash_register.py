@@ -361,6 +361,8 @@ class TestCashRegisterEndpoints:
                 return dict(t)
 
         monkeypatch.setattr("api.dependencies.get_task_repository", lambda: _TaskRepo())
+        # The staff-to-store lookup: this store's manager, by name (F33).
+        monkeypatch.setattr("api.services.task_triggers._person_holding", lambda role, store: f"{role.lower()}@{store}")
         db = _FakeDB()
         c = _client(db)
         # No sales/expenses -> expected == opening float == 1000.
@@ -404,7 +406,7 @@ class TestCashRegisterEndpoints:
         # Manager alert above the band (owner ruling 2026-08-25): ONE SYSTEM
         # task on the store manager's worklist, deduped per (store, day).
         assert len(tasks) == 1, tasks
-        assert tasks[0]["assigned_to"] == "STORE_MANAGER"
+        assert tasks[0]["assigned_to"] == "store_manager@store-001"  # a person
         assert tasks[0]["store_id"] == "store-001"
         assert tasks[0]["source"] == "SYSTEM"
         assert tasks[0]["source_ref"].startswith("till_variance:store-001:")

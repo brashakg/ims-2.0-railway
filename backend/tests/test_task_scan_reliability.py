@@ -81,6 +81,12 @@ def _match(doc: Dict[str, Any], query: Dict[str, Any]) -> bool:
             if not any(_match(doc, clause) for clause in cond):
                 return False
             continue
+        if key == "$and":
+            # The route narrows every scan to the tasks the caller can see
+            # (task_visibility.visible wraps the candidate filter in $and).
+            if not all(_match(doc, clause) for clause in cond):
+                return False
+            continue
         value = doc.get(key)
         if isinstance(cond, dict):
             if "$in" in cond and value not in cond["$in"]:
@@ -402,10 +408,13 @@ class TestAutoEscalateScanCompleteness:
         tasks.append(_breached_task(9))
         _body, _escalated, repo = _run_auto_escalate(tasks)
 
-        skips = [c["skip"] for c in repo.calls if c["filters"].get("status")]
+        def _candidates(flt):  # the scan's own filter, inside the visibility $and
+            return (flt.get("$and") or [flt])[0].get("status")
+
+        skips = [c["skip"] for c in repo.calls if _candidates(c["filters"])]
         assert skips == [0, 500, 1000], skips
         for call in repo.calls:
-            if call["filters"].get("status"):
+            if _candidates(call["filters"]):
                 assert call["limit"] == 500
                 assert call["sort"] == [("due_at", 1), ("created_at", 1)]
 

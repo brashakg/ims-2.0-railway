@@ -98,6 +98,14 @@ class _FakePORepo:
             self.po.update(patch)
         return True
 
+    def update_if(self, pid, expected, patch):
+        """Compare-and-set, like the real repository (the accept's PO write)."""
+        from strict_fakes import matches
+
+        if not self.po or pid != self.po["po_id"] or not matches(self.po, expected):
+            return False
+        return self.update(pid, patch)
+
 
 class _FakeStockRepo:
     def __init__(self):
@@ -237,6 +245,8 @@ def _wire(monkeypatch, *, po=None, file_store=None, product_repo=None):
     import api.dependencies as deps
 
     monkeypatch.setattr(deps, "get_task_repository", lambda: task_repo)
+    # The staff-to-store lookup: the receiving store's accountant, by name (F33).
+    monkeypatch.setattr("api.services.task_triggers._person_holding", lambda role, store: f"{role.lower()}@{store}")
 
     # purchase_invoices side (invoice draft + match preview).
     monkeypatch.setattr(pi_mod, "get_grn_repository", lambda: grn_repo)
@@ -303,7 +313,7 @@ def test_express_happy_path_full_chain(monkeypatch):
     assert len(task_repo.created) == 1
     task = task_repo.created[0]
     assert task["task_id"] == res["accountant_task_id"]
-    assert task["assigned_to"] == "ACCOUNTANT"
+    assert task["assigned_to"] == "accountant@STORE-A"  # a person, not a title
     assert task["category"] == "Purchase"
     assert task["store_id"] == "STORE-A"
     assert task["source_ref"] == f"express_invoice:{res['grn_id']}"
@@ -589,16 +599,18 @@ def test_express_task_failure_never_rolls_back_receive(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
-def test_express_gated_by_vendor_roles():
-    """The endpoint's Depends closure must gate on exactly _VENDOR_ROLES (the
-    same receiving roles as create/accept GRN -- owner decision)."""
+def test_express_gated_by_receiving_roles():
+    """The endpoint's Depends closure must gate on exactly _RECEIVE_ROLES (the
+    same receiving managers as create/accept GRN -- owner ruling 2026-09-28,
+    receiving is managers only)."""
     import inspect
 
     sig = inspect.signature(vendors_mod.express_receive_grn)
     dep_fn = sig.parameters["current_user"].default.dependency
     closures = [c.cell_contents for c in (dep_fn.__closure__ or [])]
     allowed = next(c for c in closures if isinstance(c, set))
-    assert allowed == set(vendors_mod._VENDOR_ROLES)
+    assert allowed == set(vendors_mod._RECEIVE_ROLES)
+    assert "ACCOUNTANT" not in allowed
 
 
 def test_rbac_row_catalogued():
@@ -607,4 +619,4 @@ def test_rbac_row_catalogued():
     rows = [p for p in rbac.POLICY if p.get("path") == "/api/v1/vendors/grn/express"]
     assert len(rows) == 1
     assert rows[0]["method"] == "POST"
-    assert sorted(rows[0]["allowed"]) == sorted(vendors_mod._VENDOR_ROLES)
+    assert sorted(rows[0]["allowed"]) == sorted(vendors_mod._RECEIVE_ROLES)

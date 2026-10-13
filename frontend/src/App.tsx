@@ -17,28 +17,13 @@ import { AppearanceProvider } from './context/AppearanceContext';
 import { AppLayout } from './components/layout/AppLayout';
 import { ProtectedRoute } from './components/layout/ProtectedRoute';
 import { ErrorBoundary } from './components/layout/ErrorBoundary';
+import { UnauthorizedPage } from './components/layout/UnauthorizedPage';
 import { SessionExpiryWarning } from './components/common/SessionExpiryWarning';
 // SpeedInsights removed — INP overlay disrupts user experience in production
 // import { SpeedInsights } from '@vercel/speed-insights/react';
 import { Analytics } from '@vercel/analytics/react';
 
-import { dashboardRoutes } from './routes/dashboardRoutes';
-import { approvalRoutes } from './routes/approvalRoutes';
-import { posRoutes } from './routes/posRoutes';
-import { customerRoutes } from './routes/customerRoutes';
-import { onlineStoreRoutes } from './routes/onlineStoreRoutes';
-import { inventoryRoutes } from './routes/inventoryRoutes';
-import { orderRoutes } from './routes/orderRoutes';
-import { incentiveRoutes } from './routes/incentiveRoutes';
-import { clinicalRoutes } from './routes/clinicalRoutes';
-import { workshopRoutes } from './routes/workshopRoutes';
-import { purchaseRoutes } from './routes/purchaseRoutes';
-import { taskRoutes } from './routes/taskRoutes';
-import { hrRoutes } from './routes/hrRoutes';
-import { reportRoutes } from './routes/reportRoutes';
-import { settingsRoutes } from './routes/settingsRoutes';
-import { catalogRoutes } from './routes/catalogRoutes';
-import { financeRoutes } from './routes/financeRoutes';
+import { appRoutes } from './routes/appRoutes';
 
 // Public / shell pages
 const LoginPage = lazy(() => import('./pages/auth/LoginPage').then(m => ({ default: m.LoginPage })));
@@ -65,18 +50,6 @@ const queryClient = new QueryClient({
 });
 
 // Unauthorized page
-const UnauthorizedPage = () => (
-  <div className="min-h-screen flex items-center justify-center bg-gray-50">
-    <div className="text-center">
-      <h1 className="text-4xl font-bold text-gray-900 mb-2">403</h1>
-      <p className="text-gray-500 mb-4">You don't have permission to access this page.</p>
-      <a href="/dashboard" className="btn-primary">
-        Go to Dashboard
-      </a>
-    </div>
-  </div>
-);
-
 // Not Found page
 const NotFoundPage = () => (
   <div className="min-h-screen flex items-center justify-center bg-gray-50">
@@ -142,23 +115,7 @@ function App() {
                   {/* Redirect root to dashboard */}
                   <Route index element={<Navigate to="/dashboard" replace />} />
 
-                  {dashboardRoutes}
-                  {approvalRoutes}
-                  {posRoutes}
-                  {customerRoutes}
-                  {onlineStoreRoutes}
-                  {inventoryRoutes}
-                  {orderRoutes}
-                  {incentiveRoutes}
-                  {clinicalRoutes}
-                  {workshopRoutes}
-                  {purchaseRoutes}
-                  {taskRoutes}
-                  {hrRoutes}
-                  {reportRoutes}
-                  {settingsRoutes}
-                  {catalogRoutes}
-                  {financeRoutes}
+                  {appRoutes}
                 </Route>
 
                   {/* 404 */}

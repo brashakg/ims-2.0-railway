@@ -22,7 +22,7 @@ Routes:
   PUT    /{id}                   update
   DELETE /{id}                   delete
   POST   /{id}/products          add a SKU to a manual collection
-  DELETE /{id}/products/{sku}    remove a SKU
+  DELETE /{id}/products/{sku}    remove a SKU (may contain '/')
   PUT    /{id}/products/reorder  reorder the manual membership
   GET    /{id}/resolved-products evaluate SMART rules -> matching SKUs
 
@@ -492,13 +492,16 @@ async def add_collection_product(
     return {"collection": _with_id(updated)}
 
 
-@router.delete("/{collection_id}/products/{sku}")
+@router.delete("/{collection_id}/products/{sku:path}")
 async def remove_collection_product(
     collection_id: str,
     sku: str,
     current_user: dict = Depends(require_roles(*_ECOM_ROLES)),
 ) -> Dict:
-    """Remove a SKU from a manual collection's membership (idempotent)."""
+    """Remove a SKU from a manual collection's membership (idempotent).
+    `{sku:path}`: a SKU may carry '/' (legacy colour codes like 601/58, and
+    readable SKUs such as FR-X-M-1109/71); the browser's %2F is decoded before
+    routing, so a plain {sku} never matched one and it could not be removed."""
     repo = _require_repo()
     existing = repo.get_by_id(collection_id)
     if existing is None:

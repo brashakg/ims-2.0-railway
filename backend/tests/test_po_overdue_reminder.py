@@ -128,7 +128,9 @@ def _system_tasks(tasks_coll):
 # ---------------------------------------------------------------------------
 
 
-def test_overdue_by_expected_date_fires_task():
+def test_overdue_by_expected_date_fires_task(monkeypatch):
+    # The staff-to-store lookup: the delivery store's manager, by name (F33).
+    monkeypatch.setattr("api.services.task_triggers._person_holding", lambda role, store: f"{role.lower()}@{store}")
     agent, tasks_coll = _build_agent([_po()])  # expected 2 days ago
     actions = asyncio.run(agent._remind_overdue_pos())
 
@@ -144,7 +146,7 @@ def test_overdue_by_expected_date_fires_task():
     assert task["priority"] == "P2"
     assert task["category"] == "Purchase"
     assert task["store_id"] == "BV-BOK-01"
-    assert task["assigned_to"] == "STORE_MANAGER"
+    assert task["assigned_to"] == "store_manager@BV-BOK-01"  # a person
     assert task["source_ref"] == "po_overdue:PO-1:0"  # 2d overdue -> stage 0
     assert "PO-BOK01-2026-0001" in task["title"]
     assert "Essilor India" in task["title"]

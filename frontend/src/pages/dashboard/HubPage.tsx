@@ -16,9 +16,11 @@ import HandoffInboxCard from '../../components/handoffs/HandoffInboxCard';
 import { HandoffUploadModal } from '../../components/handoffs/HandoffUploadModal';
 import ClinicalHandoverCard from '../../components/handoffs/ClinicalHandoverCard';
 import { NewTaskModal } from '../../components/tasks/NewTaskModal';
+import { canSeeTeamTasks } from '../tasks/taskRoles';
 import DashboardNotifications from '../../components/notifications/DashboardNotifications';
 import OwnerDigestCard from '../../components/dashboard/OwnerDigestCard';
 import TickerCard from '../../components/hub/TickerCard';
+import { canOpenPath } from '../../components/layout/AppLayout';
 import './HubPage.css';
 
 interface HeroMeta {
@@ -45,6 +47,9 @@ interface SopTemplate {
 }
 
 const INR = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 });
+
+// The tasks the Hub both counts as open AND lists (GET /tasks takes a comma list).
+const OPEN_WORK = 'OPEN,IN_PROGRESS';
 
 // Priority rank for sorting (P0 = most urgent).
 const PRIORITY_RANK: Record<string, number> = { P0: 0, P1: 1, P2: 2, P3: 3, P4: 4 };
@@ -96,7 +101,8 @@ interface ModuleCard {
 }
 
 export default function HubPage() {
-  const { user, hasRole, hasModuleAccess } = useAuth();
+  const auth = useAuth();
+  const { user, hasRole, hasModuleAccess } = auth;
   const navigate = useNavigate();
   const toast = useToast();
   // OS-064: under an ONLINE store (BV-ONLINE-01 / WO-ONLINE-01) the Hub must
@@ -104,6 +110,9 @@ export default function HubPage() {
   // and the POS/Clinical cards are swapped for online-store surfaces below.
   // Display-only: no POS or billing logic changes.
   const isOnlineStoreActive = useIsOnlineStore();
+  // Where the Hub's task figure and list lead: a manager's count is the whole
+  // shop's, so Team; everyone else's is their own, so Mine.
+  const tasksHome = canSeeTeamTasks(user?.roles) ? '/tasks/team' : '/tasks/mine';
   const [meta, setMeta] = useState<HeroMeta>({
     salesToday: '—',
     salesDelta: '',
@@ -174,12 +183,10 @@ export default function HubPage() {
       .getTaskSummary(user?.activeStoreId)
       .then((r: any) => {
         if (cancelled) return;
-        const open = r?.open ?? r?.total_open ?? r?.counts?.open;
         const overdue = r?.overdue ?? r?.counts?.overdue ?? 0;
         const p1 = r?.p1 ?? r?.counts?.p1 ?? r?.high_priority ?? 0;
         setMeta((m) => ({
           ...m,
-          openTasks: open != null ? String(open) : '—',
           tasksDetail:
             overdue || p1
               ? `${overdue || 0} overdue · ${p1 || 0} P1`
@@ -208,12 +215,14 @@ export default function HubPage() {
     }
 
     // Priority work: top open tasks (most-urgent first) + SOP checklists.
+    // 'Open Tasks' is this SAME request's server total, so the figure and the
+    // list can never disagree: open = not started yet + started.
     setLoadingWork(true);
     Promise.allSettled([
       tasksApi.getTasks(
         user?.activeStoreId
-          ? { store_id: user.activeStoreId, status: 'OPEN' }
-          : { status: 'OPEN' }
+          ? { store_id: user.activeStoreId, status: OPEN_WORK }
+          : { status: OPEN_WORK }
       ),
       tasksApi.getSopTemplates(
         user?.activeStoreId
@@ -225,6 +234,7 @@ export default function HubPage() {
       if (tRes.status === 'fulfilled') {
         const data: any = tRes.value;
         const list: any[] = Array.isArray(data) ? data : data?.tasks ?? [];
+        setMeta((m) => ({ ...m, openTasks: String(data?.total ?? list.length) }));
         const mapped: PriorityTask[] = list.map((t) => ({
           id: t.id ?? t.task_id ?? '',
           title: t.title ?? 'Untitled task',
@@ -321,18 +331,31 @@ export default function HubPage() {
 
   const modules: ModuleCard[] = [
     ...featureCards,
-    {
-      id: 'inventory',
-      to: '/inventory',
-      title: 'Inventory',
-      eyebrow: 'Stock',
-      desc: 'Live stock by SKU, lens power matrix, cycle count, non-moving flags, inter-store transfer.',
-      iconName: 'box',
-      meta: [['Browse', 'SKU + stock']],
-    },
+    // D7b: a counter role cannot open the Inventory module but can open the
+    // read-only Stock lookup - asked of the two routes' own gates, so the
+    // card never lands a SALES_STAFF / CASHIER / OPTOMETRIST on /unauthorized.
+    !canOpenPath(auth, '/inventory') && canOpenPath(auth, '/inventory/lookup')
+      ? {
+          id: 'inventory',
+          to: '/inventory/lookup',
+          title: 'Stock lookup',
+          eyebrow: 'Stock',
+          desc: 'How many at this shop, every other shop and in transit, with colours and sizes. Read-only.',
+          iconName: 'box',
+          meta: [['Search', 'Model, SKU, barcode']],
+        }
+      : {
+          id: 'inventory',
+          to: '/inventory',
+          title: 'Inventory',
+          eyebrow: 'Stock',
+          desc: 'Live stock by SKU, lens power matrix, cycle count, non-moving flags, inter-store transfer.',
+          iconName: 'box',
+          meta: [['Browse', 'SKU + stock']],
+        },
     {
       id: 'tasks',
-      to: '/tasks',
+      to: tasksHome,
       title: 'Tasks & SOPs',
       eyebrow: 'Ops',
       desc: 'P0–P4 priorities with countdown timers and auto-escalation tied to SOPs.',
@@ -473,7 +496,7 @@ export default function HubPage() {
             <span className="hub-work-title">
               <AlertTriangle size={16} /> Priority tasks
             </span>
-            <button className="hub-work-link" onClick={() => navigate('/tasks')}>
+            <button className="hub-work-link" onClick={() => navigate(tasksHome)}>
               View all <ChevronRight size={14} />
             </button>
           </div>
@@ -489,7 +512,7 @@ export default function HubPage() {
                 const due = dueLabel(t.due_at);
                 return (
                   <li key={t.id || t.title}>
-                    <button className="hub-task-row" onClick={() => navigate('/tasks')}>
+                    <button className="hub-task-row" onClick={() => navigate(tasksHome)}>
                       <span className={`hub-prio hub-prio-${t.priority.toLowerCase()}`}>
                         {t.priority}
                       </span>

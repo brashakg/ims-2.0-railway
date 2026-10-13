@@ -9,6 +9,7 @@ from ._shared import (
     Optional,
     Query,
     _INVENTORY_ROLES,
+    _discontinued,
     _reorder_disabled,
     barcode_svc,
     get_current_user,
@@ -26,6 +27,7 @@ from .models import (
 from pydantic import StrictInt
 
 from ._shared import BaseModel, Field, _STOCK_MANAGER_ROLES
+from ...services.cost_mask import mask_cost, mask_cost_list
 from ...services.reorder_policy import (
     LEVELS_FIELD,
     MAX_LEVEL,
@@ -37,7 +39,6 @@ from .helpers import (
     _reject_stock_mint_on_online_store,
     generate_barcode,
 )
-from ...services.cost_mask import mask_cost
 
 @router.get("/low-stock")
 async def get_low_stock_alerts(
@@ -48,7 +49,8 @@ async def get_low_stock_alerts(
 
     Each item carries `auto_reorder_disabled` (per-product policy, see
     api/services/reorder_policy.py): True when the product master has
-    reorder_quantity <= 0 (the -1 "no auto-reorder" sentinel). The alert
+    reorder_quantity <= 0 (the -1 "no auto-reorder" sentinel) or the product
+    is discontinued, which `discontinued` says (reorder_policy). The alert
     list itself is UNCHANGED -- every low-stock product is still returned
     so managers see the state; the flag lets consumers (Reorder dashboard,
     Stock Replenishment suggestions) decide whether to propose a PO.
@@ -79,9 +81,27 @@ async def get_low_stock_alerts(
         except (AttributeError, TypeError, ValueError) as exc:
             logger.warning("[INVENTORY] low-stock reorder-policy join failed: %s", exc)
 
+    # Without the product master's identity every row printed "Unknown
+    # Product" (audit F48). Same join, named through the catalogue's one
+    # display-name formula, with brand and category.
+    from ...services.product_master import pim_display_name
+
     for item in items:
         pid = str(item.get("_id") or "")
-        item["auto_reorder_disabled"] = _reorder_disabled(products_by_id.get(pid, {}))
+        prod = products_by_id.get(pid, {})
+        item["auto_reorder_disabled"] = _reorder_disabled(prod)
+        # Why it is off, by the same rule (the Reorder dashboard labels it,
+        # never re-decides it): inactive, unless a provisional buy not yet
+        # switched on (reorder_policy.discontinued).
+        item["discontinued"] = _discontinued(prod)
+        item.update(
+            id=pid,
+            product_id=pid,
+            name=pim_display_name(prod) or "",
+            sku=prod.get("sku") or "",
+            brand=prod.get("brand") or "",
+            category=prod.get("category") or "",
+        )
 
     return {"items": items}
 
@@ -238,10 +258,11 @@ async def get_stock_by_barcode_short(
         product = product_repo.find_by_id(stock["product_id"])
         if product:
             product.pop("_id", None)
-            stock["product"] = mask_cost(product, current_user, "product")
+            stock["product"] = product
 
-    # The till scans through here: counter roles never receive what a unit or
-    # its product cost (owner ruling 2026-09-30). The one cost_mask rule.
+    # The till scan: the unit's cost and the joined product's cost / landed
+    # cost go to the roles that see product cost only (owner ruling
+    # 2026-10-12); the counter gets everything else it bills from.
     return mask_cost(stock, current_user, "product")
 
 
@@ -254,8 +275,10 @@ async def get_expiring_stock(
     active_store = current_user.get("active_store_id")
 
     if repo is not None:
+        # Raw units carry cost_price / unit_cost (opening stock writes both):
+        # the roles that see product cost only, as the till scans above.
         items = repo.find_expiring(active_store, days)
-        return {"items": items}
+        return {"items": mask_cost_list(items, current_user, "product")}
 
     return {"items": []}
 

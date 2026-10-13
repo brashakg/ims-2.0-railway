@@ -147,6 +147,22 @@ describe('POLifecycleDrawer — timeline rendering', () => {
   });
 });
 
+describe('POLifecycleDrawer — supplier bill without its money', () => {
+  it('a bill sent without total / status shows its number and nothing in their place', async () => {
+    // A store / area manager's timeline: the server drops the bill amount and
+    // paid status (supplier payments are the accounts roles' only).
+    getPOTimeline.mockResolvedValue(
+      makeTimeline({
+        invoices: [{ bill_id: 'B1', invoice_number: 'INV-9', created_at: '2026-06-06T10:00:00Z' }],
+      }),
+    );
+    renderDrawer();
+    expect(await screen.findByText('INV-9')).toBeInTheDocument();
+    expect(screen.queryByText('Unknown')).not.toBeInTheDocument();
+    expect(screen.queryByText(/₹/)).not.toBeInTheDocument();
+  });
+});
+
 describe('POLifecycleDrawer — next-step derivation', () => {
   it('DRAFT -> "Send to vendor" fires the parent callback', async () => {
     getPOTimeline.mockResolvedValue(makeTimeline({ status: 'DRAFT', events: [{ kind: 'ordered', label: 'Ordered', at: '2026-06-01T10:00:00Z' }] }));
@@ -178,8 +194,8 @@ describe('POLifecycleDrawer — next-step derivation', () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it('receivable status shows NO button for a non-receiving role', async () => {
-    currentRoles = ['SALES_STAFF'];
+  it.each(['SALES_STAFF', 'ACCOUNTANT'])('receivable status shows NO Receive button for %s (receiving is managers only)', async (role) => {
+    currentRoles = [role];
     getPOTimeline.mockResolvedValue(makeTimeline({ status: 'SENT' }));
     renderDrawer();
 
@@ -287,5 +303,24 @@ describe('POLifecycleDrawer — fail-soft + close behaviour', () => {
     // (the header X is "Close drawer").
     await userEvent.setup().click(screen.getByRole('button', { name: 'Close' }));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('POLifecycleDrawer - times show in IST (owner ruling: saved with zone, shown in IST)', () => {
+  it('a change saved with its zone, and an older zoneless stamp, both read as IST', async () => {
+    getPOTimeline.mockResolvedValue(
+      makeTimeline({
+        events: [
+          // 14:03 IST, saved with its zone (every edit / cancel since 2026-09-29)
+          { kind: 'cancelled', label: 'Cancelled', at: '2026-09-29T08:33:00+00:00', detail: 'Reason: vendor closed' },
+          // an older naive stamp: the server's UTC wall clock, no zone
+          { kind: 'sent', label: 'Sent', at: '2026-09-28T04:30:00' },
+        ],
+      }),
+    );
+    renderDrawer();
+    await screen.findAllByTestId('po-timeline-event');
+    expect(screen.getByText(/29 Sept? 2026, 2:03\s?pm/i)).toBeInTheDocument();
+    expect(screen.getByText(/28 Sept? 2026, 10:00\s?am/i)).toBeInTheDocument();
   });
 });

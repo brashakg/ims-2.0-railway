@@ -35,7 +35,12 @@ export const READY_DEFAULT = '#main-content :is(h1, h2, table, button, input)';
 const TILL_TILE_WITH_COLOUR = `button:has-text("${SEED.colourFrame.colour}")`;
 
 /**
- * Screens probed by tests/layout.spec.ts, in router-file order.
+ * Screens probed by tests/layout.spec.ts, in router-file order. A path may
+ * carry a query string: the same screen in another state (an edit page
+ * opened on a seeded product); the inventory guard counts it as its route.
+ * The audit measures only what is ON SCREEN, so a part far below the fold
+ * names itself in `scrollTo`: it is scrolled to the top of the view before
+ * every width is measured.
  *
  * ponytail: `ready` proves the route painted SOMETHING real, not that it
  * painted the right thing — a per-screen React Query error card also has a
@@ -44,7 +49,7 @@ const TILL_TILE_WITH_COLOUR = `button:has-text("${SEED.colourFrame.colour}")`;
  * upgrade to per-screen selectors only if a screen is ever found erroring
  * green in CI.
  */
-export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
+export const ROUTES: ReadonlyArray<{ path: string; ready?: string; scrollTo?: string }> = [
   { path: '/approvals' },
   { path: '/approvals/mine' },
   { path: '/returns/approvals' },
@@ -52,6 +57,15 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
   { path: '/catalog/review' },
   { path: '/catalog/missing-photos' },
   { path: '/catalog/add' },
+  // The same page EDITING a product with three photos: the photo grid and
+  // its Earlier / Later row, at every width. Ready = photo 3's buttons drawn;
+  // the grid sits ~3,000px below the fold at phone width, so it is scrolled
+  // into view (unscrolled, a grid broken at every width measured green).
+  {
+    path: `/catalog/add?edit=${SEED.photoFrame.productId}`,
+    ready: 'button[aria-label="Move photo 3 earlier"]',
+    scrollTo: 'ol:has(button[aria-label^="Move photo"])',
+  },
   { path: '/catalog/scorecard' },
   { path: '/catalog/quick-share' },
   { path: '/catalog/buy-desk' },
@@ -141,6 +155,7 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
   { path: '/inventory/audit' },
   { path: '/inventory/opening-stock' },
   { path: '/inventory/power-grid' },
+  { path: '/inventory/lookup' },
   { path: '/inventory/online-sync' },
   { path: '/online-store' },
   { path: '/online-store/products' },
@@ -216,9 +231,6 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string }> = [
   { path: '/settings/feature-toggles' },
   { path: '/settings/shopify-live-sync' },
   { path: '/settings/audit-logs' },
-  { path: '/settings/modules' },
-  { path: '/settings/permissions' },
-  { path: '/settings/discount-caps' },
   { path: '/settings/rules' },
   { path: '/settings/system' },
   { path: '/organization' },

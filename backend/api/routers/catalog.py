@@ -7,8 +7,8 @@ Handles product creation, SKU generation, and Shopify sync.
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from pydantic import BaseModel, Field, field_validator
-from typing import Optional, Dict, Any, List, Union
-from datetime import datetime
+from typing import Optional, Dict, Any, List, Tuple, Union
+from datetime import datetime, timezone
 from enum import Enum
 import logging
 import uuid
@@ -20,7 +20,7 @@ from api.services.cost_mask import mask_cost, mask_cost_list
 from ..services.online_catalog import (
     online_status_for_skus,
     online_summary,
-    product_online_state,
+    doc_online_state,
     reconcile_store_barcodes,
     online_mapping_available,
 )
@@ -29,6 +29,8 @@ from ..services.pricing_caps import evaluate_offer_price, CATEGORY_DISCOUNT_CAPS
 from ..services.gst_rates import gst_rate_for_category, hsn_for_category
 from ..services import product_master as _pm
 from ..services import online_delist as _delist
+from ..services import catalog_flags as _flags
+from ..services import catalog_list as _catalog_list
 from ..services.shopify_push import is_variant_of as _is_variant_of
 # THE ONLINE on-hand reader, the one the oversell-risk tile reads (panel round
 # 7, one-rule P4). The reconciliation screen compares IMS against the WEBSITE's
@@ -1452,24 +1454,89 @@ def _spine_product_id(repo, catalog_doc: Optional[Dict]) -> Optional[str]:
     A legacy / convergence twin shares the spine id. A DOOR-created twin
     (product_master.create_product: 71 of 77 live products on the 08-30
     census, and every size variant) is keyed by the spine's pim_product_id
-    -- a DIFFERENT uuid -- so the id lookup misses, and the ONE product-per-
-    SKU rule resolves it by sku: the mirror image of the spine PUT's
-    pim_product_id-first twin lookup (product_master.mirror_update_to_
-    catalog_twin). Until this, both doors' `_pr.update(<catalog id>, ...)`
+    -- a DIFFERENT uuid -- so it is found through that link (the mirror
+    image of the spine PUT's pim_product_id-first twin lookup,
+    product_master.mirror_update_to_catalog_twin), else by sku (_spine_ids,
+    THE rule). Until this, both doors' `_pr.update(<catalog id>, ...)`
     silently matched NO spine on a door-created product: the drawer's
     deactivate / the Delete button never reached the spine a soft-deleted
     product is sold from at POS, and for a size variant -- whose only
     off-sale marker is the spine's is_active (online_stock_writeback lists
     an inactive spine at 0) -- the next stock pass put the size straight
-    back on sale. None when there is no spine (a BVI-only twin)."""
+    back on sale. None when there is no spine (a BVI-only twin) or the read
+    failed (fail-soft, as every caller's spine sync is)."""
     if repo is None or not catalog_doc:
         return None
-    spine = None
-    if catalog_doc.get("id"):
-        spine = repo.find_by_id(catalog_doc["id"])
-    if spine is None and catalog_doc.get("sku"):
-        spine = repo.find_by_sku(catalog_doc["sku"])
-    return (spine or {}).get("product_id")
+    try:
+        return _spine_ids(repo, [catalog_doc])[0]
+    except Exception:  # noqa: BLE001
+        logger.warning("[CATALOG] spine lookup failed", exc_info=True)
+        return None
+
+
+def _spine_ids(repo, docs: List[Optional[Dict]]) -> List[Optional[str]]:
+    """THE twin -> spine rule (_spine_product_id's, and the review list's
+    Added column and sort through _spine_facts), batched: for each twin (same
+    order) the spine whose pim_product_id is the twin's id (the create door's
+    own link, the one every spine -> twin lookup reads first), else the spine
+    whose product_id is the twin's id (a convergence twin shares it), else
+    the spine with the twin's sku; None when none. One read; raises when it
+    fails. _twins_of is this rule read the other way."""
+    ids = [d["id"] for d in docs if d and d.get("id")]
+    skus = [d["sku"] for d in docs if d and d.get("sku")]
+    by_pim: Dict[Any, str] = {}
+    by_id: Dict[Any, str] = {}
+    by_sku: Dict[Any, str] = {}
+    if ids or skus:
+        for s in repo.collection.find(
+            {
+                "$or": [
+                    {"pim_product_id": {"$in": ids}},
+                    {"product_id": {"$in": ids}},
+                    {"sku": {"$in": skus}},
+                ]
+            },
+            {"_id": 0, "product_id": 1, "pim_product_id": 1, "sku": 1},
+        ):
+            if s.get("product_id"):
+                by_id.setdefault(s["product_id"], s["product_id"])
+                if s.get("pim_product_id"):
+                    by_pim.setdefault(s["pim_product_id"], s["product_id"])
+                if s.get("sku"):
+                    by_sku.setdefault(s["sku"], s["product_id"])
+    return [
+        (by_pim.get(d.get("id")) or by_id.get(d.get("id")) or by_sku.get(d.get("sku")))
+        if d
+        else None
+        for d in docs
+    ]
+
+
+def _twins_of(repo, spines: List[Optional[Dict]]) -> List[Optional[Dict]]:
+    """THE spine -> twin rule for the Catalog page's archive and restore:
+    _spine_ids read the other way, so the two directions can never disagree
+    -- for each spine (same order) the twin whose spine _spine_ids picks IS
+    this spine; None when no twin's is. A twin can only point at a spine
+    through the spine's pim_product_id, its product_id or its sku, so those
+    are the candidates (in that order). Two reads; raises when one fails."""
+    keys = [k for s in spines if s for k in (s.get("pim_product_id"), s.get("product_id")) if k]
+    skus = [s["sku"] for s in spines if s and s.get("sku")]
+    coll = _catalog_coll()
+    if not (keys or skus):
+        found: List[Dict] = []
+    elif coll is not None:
+        found = list(coll.find({"$or": [{"id": {"$in": keys}}, {"sku": {"$in": skus}}]}))
+    else:
+        found = [t for t in CATALOG_PRODUCTS.values() if t.get("id") in keys or t.get("sku") in skus]
+    found = [dict(t) for t in found if t.get("id")]
+    owner = dict(zip((t["id"] for t in found), _spine_ids(repo, found)))
+    out: List[Optional[Dict]] = []
+    for s in spines:
+        sid = (s or {}).get("product_id")
+        mine = [t for t in found if sid and owner[t["id"]] == sid]
+        mine.sort(key=lambda t: (t["id"] != s.get("pim_product_id"), t["id"] != sid))
+        out.append(mine[0] if mine else None)
+    return out
 
 
 def _next_sku_counter(prefix: str, db=None) -> int:
@@ -1504,29 +1571,6 @@ def _next_sku_counter(prefix: str, db=None) -> int:
     counter = SKU_COUNTERS.get(prefix, 1000)
     SKU_COUNTERS[prefix] = counter + 1
     return counter
-
-
-def generate_sku(category: ProductCategory, attributes: Dict[str, Any], db=None) -> str:
-    """Generate a unique SKU from category + attributes.
-
-    Pass `db` so the numeric counter is allocated ATOMICALLY + PERSISTENTLY
-    (see _next_sku_counter). The SKU still ends in a `find_by_sku` dedupe check
-    at the call site, so even if two products share brand/model/colour the
-    counter keeps them distinct.
-    """
-    prefix = category.value
-    counter = _next_sku_counter(prefix, db=db)
-
-    # Add brand code
-    brand = attributes.get("brand_name", "XX")[:2].upper()
-
-    # Add model/colour for uniqueness
-    model = attributes.get("model_no", attributes.get("model_name", ""))[:4].upper()
-    colour = attributes.get("colour_code", attributes.get("colour_name", ""))[
-        :3
-    ].upper()
-
-    return f"{prefix}-{brand}-{model}{colour}-{counter}"
 
 
 def generate_product_title(
@@ -1666,6 +1710,136 @@ def _catalog_sort_key(p: Dict) -> str:
     return str(v)
 
 
+def _iso(value) -> str:
+    return value.isoformat() if hasattr(value, "isoformat") else str(value or "")
+
+
+def _twin_mrp(p: Dict) -> float:
+    v = (p.get("pricing") or {}).get("mrp", p.get("mrp"))
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+# The imported (review) segment's Sort by: the same eight choices as
+# services/catalog_list.SORTS. Each key reads (twin, the row's facts): the
+# dates are the very values the Added column shows on the same row
+# (_row_facts) -- its spine's, or for an import with no spine yet its own
+# import date and its own last edit. "edited" is last_edited_at
+# (catalog_list.last_edited_at, the one rule).
+_IMPORTED_SORTS = {
+    "edited": (lambda p, s: _iso(s.get("last_edited_at")), True),
+    "newest": (lambda p, s: _iso(s.get("created_at")), True),
+    "oldest": (lambda p, s: _iso(s.get("created_at")), False),
+    "name_asc": (lambda p, s: str(p.get("title") or "").lower(), False),
+    "name_desc": (lambda p, s: str(p.get("title") or "").lower(), True),
+    "brand_asc": (
+        lambda p, s: str((p.get("attributes") or {}).get("brand_name") or "").lower(),
+        False,
+    ),
+    "mrp_desc": (lambda p, s: _twin_mrp(p), True),
+    "mrp_asc": (lambda p, s: _twin_mrp(p), False),
+}
+
+_ATTRIBUTION_FIELDS = (
+    "created_by",
+    "created_by_name",
+    "created_at",
+    "updated_by",
+    "updated_by_name",
+    "updated_at",
+    "last_edited_at",
+)
+
+
+# An imported row's "added" moment when it has no spine: the import date
+# (the 4,393 BVI docs carry migrated_at, no created_at) -- _catalog_sort_key's
+# coalesce, the legacy newest-first order.
+_TWIN_ADDED = {"$ifNull": ["$created_at", "$migrated_at"]}
+
+
+def _own_facts(docs: List[Dict]) -> Dict[str, Dict]:
+    """{twin id: its own facts} for imports with no spine yet: the import date
+    and the last edit saved on the twin itself (PUT /catalog/products/{id}
+    stamps it through catalog_list.edit_stamp), in one read. Who ADDED it is
+    never guessed from the twin. {} when the read fails."""
+    coll = _catalog_coll()
+    ids = [d.get("id") for d in docs if d.get("id")]
+    if coll is None or not ids:
+        return {}
+    proj = {
+        "_id": 0,
+        "id": 1,
+        "updated_by": 1,
+        "updated_by_name": 1,
+        "updated_at": 1,
+        "created_at": _TWIN_ADDED,
+        "last_edited_at": _catalog_list.last_edited_at(_TWIN_ADDED),
+    }
+    try:
+        return {
+            str(r["id"]): r
+            for r in coll.aggregate([{"$match": {"id": {"$in": ids}}}, {"$project": proj}])
+        }
+    except Exception:  # noqa: BLE001 -- the column just shows '-'
+        logger.warning("[CATALOG] imported-row facts read failed", exc_info=True)
+        return {}
+
+
+def _row_facts(docs: List[Dict]) -> List[Dict]:
+    """THE added / edited facts of each imported row (same order): its
+    spine's (_spine_facts) when it has one -- every edit of the row reaches
+    the spine (the twin PUT stamps it) -- else its own (_own_facts). {} when
+    neither is readable: the page shows '-' honestly, the sort reads the same
+    nothing."""
+    spine = _spine_facts(docs)
+    if spine is None:
+        return [{} for _ in docs]
+    own = _own_facts([d for d, s in zip(docs, spine) if not s])
+    return [s or own.get(str(d.get("id") or "")) or {} for d, s in zip(docs, spine)]
+
+
+def _spine_facts(docs: List[Dict]) -> Optional[List[Dict]]:
+    """The added / edited facts of each imported row's spine (same order) --
+    the spine THE rule picks (_spine_ids: the one every edit / archive /
+    restore door acts on) -- with its last_edited_at computed by
+    catalog_list.LAST_EDITED_AT. {} for a row with no spine; None when a read
+    fails (unknown, never "no spine")."""
+    from ..dependencies import get_product_repository
+
+    repo = get_product_repository()
+    if repo is None or not docs:
+        return [{} for _ in docs]
+    proj: Dict[str, Any] = {"_id": 0, "product_id": 1}
+    proj.update({f: 1 for f in _ATTRIBUTION_FIELDS})
+    proj["last_edited_at"] = _catalog_list.LAST_EDITED_AT
+    try:
+        spine_ids = _spine_ids(repo, docs)
+        found = [p for p in spine_ids if p]
+        facts = {
+            s["product_id"]: s
+            for s in repo.collection.aggregate(
+                [{"$match": {"product_id": {"$in": found}}}, {"$project": proj}]
+            )
+        } if found else {}
+    except Exception:  # noqa: BLE001 -- the column just shows '-'
+        logger.warning("[CATALOG] spine attribution read failed", exc_info=True)
+        return None
+    return [facts.get(p) or {} if p else {} for p in spine_ids]
+
+
+def _stamp_spine_attribution(docs: List[Dict], facts: List[Dict]) -> None:
+    """Put each row's facts (_row_facts, same order) on it, in place, and the
+    names from users (catalog_list.stamp_people)."""
+    from ..dependencies import get_db
+
+    for d, spine in zip(docs, facts):
+        for f in _ATTRIBUTION_FIELDS:
+            d[f] = spine.get(f)
+    _catalog_list.stamp_people(get_db(), docs)
+
+
 @router.get("/products")
 async def list_catalog_products(
     category: Optional[str] = None,
@@ -1701,6 +1875,16 @@ async def list_catalog_products(
     ),
     limit: int = Query(default=50, ge=1, le=250),
     page: int = Query(default=1, ge=1),
+    sort: Optional[str] = Query(
+        default=None,
+        pattern=_catalog_list.SORT_PATTERN,
+        description=(
+            "The Catalog page's Sort by (owner 2026-10-12). Absent = the "
+            "legacy newest-first order. Given, the rows also carry who added "
+            "/ last edited them, from their spine or, for an import with no "
+            "spine yet, its own import date and edit (manager roles)."
+        ),
+    ),
     current_user: dict = Depends(get_current_user),
 ):
     """List all products in catalog"""
@@ -1709,14 +1893,18 @@ async def list_catalog_products(
     # an unsupplied `photo` arrives as its Query default object, not None.
     if not isinstance(photo, str):
         photo = None
+    if not isinstance(sort, str) or sort not in _IMPORTED_SORTS:
+        sort = None
 
-    # Photo + online truth, ONE rule (online_catalog.product_online_state),
-    # stamped before the filters so the photo filter reads the same value the
-    # column shows.
+    # Photo + online truth, ONE rule (online_catalog.product_online_state,
+    # with THE push gate's verdict), stamped before the filters so the photo
+    # filter reads the same value the column shows.
+    db = _get_db()
     for p in products:
-        state = product_online_state(p)
+        state = doc_online_state(db, p)
         p["has_photo"] = state["has_photo"]
         p["online"] = state["online"]
+        p["online_note"] = state["note"]
     if photo:
         want = photo == "has"
         products = [p for p in products if p.get("has_photo") is want]
@@ -1758,8 +1946,21 @@ async def list_catalog_products(
         active_bool = is_active in ("true", "True")
         products = [p for p in products if p.get("is_active") == active_bool]
 
-    # Sort by created date (imported docs coalesce to migrated_at)
-    products.sort(key=_catalog_sort_key, reverse=True)
+    facts: List[Dict] = []
+    if sort:
+        # The whole filtered list, then the page; the id breaks ties (a stable
+        # sort keeps the id order among equal keys, reversed or not) so pages
+        # never overlap. The dates are the row's facts, as the column shows.
+        key, reverse = _IMPORTED_SORTS[sort]
+        rows = sorted(
+            zip(products, _row_facts(products)), key=lambda t: str(t[0].get("id") or "")
+        )
+        rows.sort(key=lambda t: key(*t), reverse=reverse)
+        products = [p for p, _ in rows]
+        facts = [f for _, f in rows]
+    else:
+        # Sort by created date (imported docs coalesce to migrated_at)
+        products.sort(key=_catalog_sort_key, reverse=True)
 
     total = len(products)
     start = (page - 1) * limit
@@ -1768,6 +1969,15 @@ async def list_catalog_products(
     # F35: per-unit cost answers to the one product-cost rule (services/
     # cost_mask "product": the managers see it, counter roles never).
     page_products = mask_cost_list(products[start:end], current_user, "product")
+    if sort:
+        from .products import _CATALOGUER_VIEW_ROLES
+
+        if set(current_user.get("roles") or []) & (
+            {"SUPERADMIN"} | set(_CATALOGUER_VIEW_ROLES)
+        ):
+            # Copies: in no-Mongo mode the rows ARE the in-memory store.
+            page_products = [dict(p) for p in page_products]
+            _stamp_spine_attribution(page_products, facts[start:end])
     return {
         "products": page_products,
         "total": total,
@@ -1824,6 +2034,19 @@ def _guard_catalog_pricing(product: "ProductCreateInput") -> tuple:
     return gst_rate, hsn_code
 
 
+def _catalog_pm_error(err: "_pm.ProductMasterError", product) -> Tuple[int, str]:
+    """(status, detail) the catalog doors (single create and import) give a
+    registry breach: their historical 400 "Missing required field: X" only
+    when X really is missing; anything else (a contact-lens power that is not
+    a number) in its own words, with its own status."""
+    missing = _pm.missing_required_fields(
+        product.category.value, dict(product.attributes or {})
+    )
+    if err.status == 422 and err.field in missing and err.field != "category":
+        return 400, f"Missing required field: {err.field}"
+    return err.status, err.message
+
+
 @router.post("/products")
 async def create_catalog_product(
     product: ProductCreateInput, current_user: dict = Depends(get_current_user)
@@ -1844,10 +2067,11 @@ async def create_catalog_product(
     # HSN/category) -- same rules the canonical /products path enforces.
     gst_rate, hsn_code = _guard_catalog_pricing(product)
 
-    # Generate SKU and title. Pass the DB so the SKU counter is allocated
-    # atomically + persistently (not the per-worker in-memory dict).
+    # SKU: the ONE readable rule (product_master.build_sku, owner D5), made
+    # unique by the same collision suffix every door uses.
+    from ..dependencies import get_product_repository
+
     product_id = f"prod_{uuid.uuid4().hex[:12]}"
-    sku = generate_sku(product.category, product.attributes, db=_get_db())
     title = generate_product_title(product.category, product.attributes)
 
     # PRODUCTS-CONVERGENCE step-10: validate through the canonical registry AND
@@ -1861,9 +2085,11 @@ async def create_catalog_product(
     # the catalog/PIM door (which legitimately holds same-identity variants) and
     # to keep the native catalog_products doc (storefront/Shopify shape) below
     # unchanged.
-    from ..dependencies import get_product_repository
-
     try:
+        sku = _pm.mint_unique_sku(
+            product.category.value, product.attributes,
+            product_repo=get_product_repository(), db=_get_db(),
+        )
         _spine = _pm.build_canonical_product(
             {
                 "category": product.category.value,
@@ -1884,13 +2110,11 @@ async def create_catalog_product(
             source="CATALOG",
         )
     except _pm.ProductMasterError as err:
-        # Preserve the catalog door's historical 400 "Missing required field"
-        # contract for a missing-attr breach; surface other breaches verbatim.
-        if err.status == 422 and err.field and err.field != "category":
-            raise HTTPException(
-                status_code=400, detail=f"Missing required field: {err.field}"
-            ) from err
-        raise HTTPException(status_code=err.status, detail=err.message) from err
+        # The catalog door's historical 400 "Missing required field" for a
+        # field that IS missing; any other breach (a power that is not a
+        # number, a bad GTIN) in its own words, with its own status.
+        status, detail = _catalog_pm_error(err, product)
+        raise HTTPException(status_code=status, detail=detail) from err
     # Share the catalog id + sku so the catalog doc and the spine are ONE product.
     _spine["product_id"] = product_id
     _spine["id"] = product_id
@@ -2080,6 +2304,23 @@ async def update_catalog_product(
     # second shallow copy preserves the original values.
     pre_edit = dict(existing)
 
+    # Only Restore brings an archived product back (catalog_list.
+    # switches_on_archived): the twin or the spine it would switch on. A
+    # spine that cannot be read is not written either (the mirror below is
+    # fail-soft too), so only the twin decides then.
+    if product.is_active is True:
+        _spine = None
+        try:
+            from ..dependencies import get_product_repository
+
+            _repo = get_product_repository()
+            _sid = _spine_product_id(_repo, existing)
+            _spine = _repo.find_by_id(_sid) if _sid else None
+        except Exception:  # noqa: BLE001
+            logger.warning("[CATALOG] spine read for the archive check skipped", exc_info=True)
+        if any(_catalog_list.switches_on_archived(d, True) for d in (existing, _spine)):
+            raise HTTPException(status_code=409, detail=_catalog_list.USE_RESTORE)
+
     # Additive optimistic concurrency (full-page review editor): the client
     # echoes the updated_at it loaded; a mismatch means another reviewer saved
     # in between, so 409 instead of silently clobbering their fixes. Compared
@@ -2259,13 +2500,14 @@ async def update_catalog_product(
 
     existing["updated_at"] = datetime.now().isoformat()
     # Per-user attribution (multiple staff catalogue in parallel): WHO made
-    # this edit, for performance tracking and mistake tracing. Same fields
-    # convention as the other routers' created_by_name; created_by is never
-    # overwritten here.
-    existing["updated_by"] = current_user.get("user_id")
-    existing["updated_by_name"] = current_user.get("full_name") or current_user.get(
-        "username"
+    # this edit and WHEN -- THE edit stamp (catalog_list.edit_stamp), the
+    # fields the review list reads for an import with no spine yet.
+    # created_by is never overwritten here.
+    _edit = _catalog_list.edit_stamp(
+        current_user.get("user_id"),
+        current_user.get("full_name") or current_user.get("username"),
     )
+    existing.update(_edit)
 
     # Promote is the ONLY writer of the review/promote flags (see the stamp in
     # promote_catalog_product): strip them from the WRITE (a copy -- the
@@ -2401,8 +2643,11 @@ async def update_catalog_product(
             if product.is_active is not None:
                 _patch["is_active"] = existing.get("is_active")
             _patch = {k: v for k, v in _patch.items() if v is not None}
-            if _patch:
-                _pr.update(_spine_id, _patch)
+            # A person's change to the product, whatever it touched: the
+            # spine records who and when (the same stamp as the twin above),
+            # so the Catalog page and the review list read ONE last edit.
+            _patch.update(_edit)
+            _pr.update(_spine_id, _patch)
     except Exception:  # noqa: BLE001
         logger.warning(
             "[CATALOG] spine sync on update skipped for %s", product_id, exc_info=True
@@ -2612,6 +2857,10 @@ async def promote_catalog_product(
     doc = _get_catalog_product(product_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Product not found")
+    # Approving puts it on sale at the till: only Restore brings an archived
+    # product back (catalog_list.switches_on_archived), dry run included.
+    if _catalog_list.switches_on_archived(doc, True):
+        raise HTTPException(status_code=409, detail=_catalog_list.USE_RESTORE)
 
     repo = get_product_repository()
     if repo is None:
@@ -2819,30 +3068,61 @@ async def delete_catalog_product(
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
-    product["is_active"] = False
-    product["deleted_at"] = datetime.now().isoformat()
-    product["deleted_by"] = current_user.get("user_id")
+    await _archive_product(product, current_user)
+    return {"message": "Product deleted successfully"}
 
-    # NOT a catalogue edit: `is_active` / deleted_at / deleted_by appear in NO
-    # pushed Shopify payload (build_product_input reads title, ecom.status /
-    # handle / seo, brand, category, description, attributes) -- queuing here
-    # would send a push that changes nothing on the storefront. Removing a live
-    # listing has its own path (shopify_push.push_product_delist).
-    _save_catalog_product(product, mark_dirty=False)
+
+async def _archive_product(
+    product: Optional[Dict], actor: Dict, *, spine_id: Optional[str] = None
+) -> None:
+    """THE archive rule (soft delete), for the single Delete door and the
+    Catalog page's bulk Delete (archive): the catalog twin and its spine go
+    is_active False with deleted_at / deleted_by, and a live listing is taken
+    down. Never a hard delete. `product` is the twin (None when the spine has
+    none); `spine_id` skips the twin -> spine lookup when the caller has it."""
+    deleted_at = datetime.now(timezone.utc).isoformat()
+    if product is not None:
+        product.pop("_id", None)  # a twin read raw from Mongo; never $set _id
+        if not product.get("deleted_at"):
+            # Restore puts it back exactly as it was (_restore_product).
+            product[ACTIVE_BEFORE_ARCHIVE] = product.get("is_active", True) is not False
+        product["is_active"] = False
+        product["deleted_at"] = deleted_at
+        product["deleted_by"] = actor.get("user_id")
+
+        # NOT a catalogue edit: `is_active` / deleted_at / deleted_by appear in
+        # NO pushed Shopify payload (build_product_input reads title,
+        # ecom.status / handle / seo, brand, category, description,
+        # attributes) -- queuing here would send a push that changes nothing
+        # on the storefront. Removing a live listing has its own path
+        # (shopify_push.push_product_delist).
+        _save_catalog_product(product, mark_dirty=False)
 
     # Products-convergence: deactivate the SPINE twin too (shared id) so a
-    # soft-deleted catalog product can't still be sold at POS. Fail-soft.
+    # soft-deleted catalog product can't still be sold at POS, and stamp it
+    # deleted there too: is_active False alone reads like a provisional buy
+    # not switched on yet (reorder_policy.discontinued). Fail-soft.
     try:
         from ..dependencies import get_product_repository
 
         _pr = get_product_repository()
-        _spine_id = _spine_product_id(_pr, product)
-        if _pr is not None and _spine_id:
-            _pr.update(_spine_id, {"is_active": False})
+        spine_id = spine_id or _spine_product_id(_pr, product)
+        if _pr is not None and spine_id:
+            _patch: Dict[str, Any] = {
+                "is_active": False,
+                "deleted_at": deleted_at,
+                "deleted_by": actor.get("user_id"),
+            }
+            _before = _pr.find_by_id(spine_id) or {}
+            if not _before.get("deleted_at"):
+                _patch[ACTIVE_BEFORE_ARCHIVE] = _before.get("is_active", True) is not False
+            # Not a catalogue edit either: no updated_by, so the last edit
+            # stays where it was (ProductRepository.update).
+            _pr.update(spine_id, _patch)
     except Exception:  # noqa: BLE001
         logger.warning(
             "[CATALOG] spine deactivate on delete skipped for %s",
-            product_id,
+            (product or {}).get("id") or spine_id,
             exc_info=True,
         )
 
@@ -2852,11 +3132,343 @@ async def delete_catalog_product(
     # AFTER the write above on purpose: the soft delete keeps the row and its
     # gid, and the full-doc $set would clobber the take-down's own ecom
     # write-back. Fail-soft: the delete stands even if Shopify says no.
-    await _delist.delist_if_live(
-        _get_db(), product, reason="deleted", actor=current_user
-    )
+    if product is not None:
+        await _delist.delist_if_live(_get_db(), product, reason="deleted", actor=actor)
+    # Every archive door: a cached Catalog / till list page must not keep
+    # listing it until the cache runs out.
+    _bust_products_cache()
 
-    return {"message": "Product deleted successfully"}
+
+# Whether the product was switched on when it was archived (archive writes
+# it, restore reads and clears it): a restore puts it back as it was.
+ACTIVE_BEFORE_ARCHIVE = "active_before_archive"
+
+RESTORED_AS_BEFORE = (
+    "Back in the catalogue switched off, as it was before it was archived."
+)
+RESTORED_SWITCHED_OFF = (
+    "Back in the catalogue switched off: it is on a listing that is live on "
+    "the website, so switching it on puts it back on sale there."
+)
+RESTORED_UNCHECKED = (
+    "Back in the catalogue switched off: the website could not be checked, "
+    "so it was not switched on."
+)
+
+
+def _live_skus(skus: List[str]) -> Optional[set]:
+    """THE "is this SKU on sale on the website" reader for the archive and
+    restore doors (shopify_push.inventory.skus_on_sale_online: its listing is
+    up -- a size judged by its PARENT's, a failed take-down still up -- even
+    where the stock writer could not address it). None when the read failed:
+    unknown, never "nothing is live"."""
+    from ..services.shopify_push.inventory import skus_on_sale_online
+
+    keys = [k for k in skus if k]
+    if not keys:
+        return set()
+    try:
+        return skus_on_sale_online(_get_db(), keys, strict=True)
+    except Exception:  # noqa: BLE001
+        logger.warning("[CATALOG] live-listing read failed", exc_info=True)
+        return None
+
+
+def _restore_product(
+    product: Optional[Dict],
+    spine: Optional[Dict],
+    actor: Dict,
+    *,
+    on_website: Optional[bool],
+) -> Optional[str]:
+    """THE way back from _archive_product (the Catalog page's Restore and the
+    Needs-review drawer's): deleted_at / deleted_by cleared, the product put
+    back EXACTLY as it was before the archive -- switched on only if it was
+    on then (a product switched off before it was archived comes back
+    switched off) -- and an audit row written. NOT re-published online
+    (owner 2026-10-12: a first publish stays a human press) -- the twin is
+    saved clean and no republish is queued, and the take-down marker
+    (ecom.taken_down_at) stays. One case cannot be both: a product whose SKU
+    is on a listing live on the website (a size whose parent listing is up,
+    or a take-down that failed). Its is_active is the only thing keeping it
+    off sale there (online_stock_writeback lists an inactive spine at 0), so
+    it comes back SWITCHED OFF and the returned note says why; `on_website`
+    None (the read failed) does the same. `spine` None: an import with no
+    spine (the twin alone). Not a catalogue edit."""
+    spine_id = (spine or {}).get("product_id")
+    # Archived before this was remembered: switched on, as restore did then.
+    was_active = (spine or product or {}).get(ACTIVE_BEFORE_ARCHIVE) is not False
+    active = was_active and on_website is False
+    if product is not None:
+        product.pop("_id", None)
+        product["is_active"] = active
+        product["deleted_at"] = None
+        product["deleted_by"] = None
+        product[ACTIVE_BEFORE_ARCHIVE] = None
+        _save_catalog_product(product, mark_dirty=False)
+    from ..dependencies import get_audit_repository, get_db, get_product_repository
+    from ..services.name_resolver import actor_name
+
+    _pr = get_product_repository()
+    if _pr is not None and spine_id:
+        _pr.update(
+            spine_id,
+            {
+                "is_active": active,
+                "deleted_at": None,
+                "deleted_by": None,
+                ACTIVE_BEFORE_ARCHIVE: None,
+            },
+        )
+    try:
+        audit_repo = get_audit_repository()
+        if audit_repo is not None:
+            audit_repo.create(
+                {
+                    "action": "product.restored",
+                    "actor": actor.get("user_id"),
+                    "user_id": actor.get("user_id"),
+                    "actor_name": actor_name(get_db(), actor),
+                    "entity_type": "product",
+                    "entity_id": spine_id or (product or {}).get("id"),
+                    "switched_on": active,
+                    "timestamp": datetime.now(timezone.utc),
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "source": "catalog_bulk_restore",
+                }
+            )
+    except Exception:  # noqa: BLE001
+        logger.warning("[CATALOG] restore audit row skipped for %s", spine_id, exc_info=True)
+    _bust_products_cache()  # as _archive_product: no cached page keeps it hidden
+    if active:
+        return None
+    if not was_active:
+        return RESTORED_AS_BEFORE
+    return RESTORED_SWITCHED_OFF if on_website else RESTORED_UNCHECKED
+
+
+def _twins_or_503(repo, spines: List[Optional[Dict]]) -> List[Optional[Dict]]:
+    """_twins_of for the bulk doors: a failed read stops the call before
+    anything is written (an archive that missed the twin would leave its
+    listing up on the website)."""
+    try:
+        return _twins_of(repo, spines)
+    except Exception:  # noqa: BLE001
+        logger.warning("[CATALOG] twin lookup for a bulk door failed", exc_info=True)
+        raise HTTPException(
+            status_code=503, detail="Could not read the catalogue right now. Try again in a minute."
+        ) from None
+
+
+class BulkProductIds(BaseModel):
+    """The Catalog page's bulk doors: at most 200 spine product ids a call.
+    `apply` False (the default) is the dry run the confirm dialog reads."""
+
+    product_ids: List[str] = Field(..., min_length=1, max_length=200)
+    apply: bool = False
+
+
+def _in_stock_units(product_ids: List[str]) -> Optional[Dict[str, int]]:
+    """Units still physically at the shops, per product (the one on-hand
+    rule, reserved units included -- they are on a shelf). None when the
+    read failed: unknown, never "no units" (as _live_skus)."""
+    from ..services.item_events import on_hand_match
+
+    if not product_ids:
+        return {}
+    db = _get_db()
+    out: Dict[str, int] = {}
+    try:
+        if db is None:
+            raise RuntimeError("the database is not reachable")
+        for unit in db["stock_units"].find(
+            {"$and": [{"product_id": {"$in": product_ids}}, on_hand_match(include_reserved=True)]},
+            {"product_id": 1},
+        ):
+            pid = unit.get("product_id")
+            out[pid] = out.get(pid, 0) + 1
+    except Exception:  # noqa: BLE001
+        logger.warning("[CATALOG] stock read for the archive dialog failed", exc_info=True)
+        return None
+    return out
+
+
+@router.post("/products/bulk-archive")
+async def bulk_archive_products(
+    body: BulkProductIds,
+    current_user: dict = Depends(require_roles("ADMIN")),
+):
+    """Delete (archive) up to 200 products from the Catalog page -- the SAME
+    soft delete as DELETE /catalog/products/{id} (_archive_product). The dry
+    run (apply=false) tells the confirm dialog which products still have
+    units at the shops and which are live on the website (they are taken
+    down). Per-product results: done / refused with the reason."""
+    from ..dependencies import get_product_repository
+
+    repo = get_product_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="The catalogue is not reachable")
+    ids = list(dict.fromkeys(p for p in body.product_ids if p))
+    spines = {p: repo.find_by_id(p) for p in ids}
+    live_skus = _live_skus([s.get("sku") for s in spines.values() if s])
+    if live_skus is None and not body.apply:
+        # The dialog must never say "none of them is live" on a dead read.
+        raise HTTPException(
+            status_code=503,
+            detail="Could not check the website right now. Try again in a minute.",
+        )
+    live = {
+        pid for pid, s in spines.items() if s and live_skus and s.get("sku") in live_skus
+    }
+    stock = _in_stock_units(ids)
+    if stock is None and not body.apply:
+        # Nor "none of them has units left at the shops" on a dead read.
+        raise HTTPException(
+            status_code=503,
+            detail="Could not check the stock at the shops right now. Try again in a minute.",
+        )
+    twins = _twins_or_503(repo, [spines[p] for p in ids]) if body.apply else [None] * len(ids)
+    results = []
+    for pid, twin in zip(ids, twins):
+        spine = spines[pid]
+        row: Dict[str, Any] = {
+            "product_id": pid,
+            "in_stock_units": None if stock is None else stock.get(pid, 0),
+            "live_online": pid in live,
+        }
+        if spine is None:
+            row.update(status="refused", reason="Product not found")
+        elif spine.get("deleted_at"):
+            row.update(status="refused", reason="Already archived")
+        elif body.apply:
+            await _archive_product(twin, current_user, spine_id=pid)
+            row["status"] = "done"
+        else:
+            row["status"] = "ready"
+        if spine is not None:
+            row["name"] = spine.get("name") or spine.get("model") or spine.get("sku")
+        results.append(row)
+    return {"applied": body.apply, "results": results}
+
+
+@router.post("/products/bulk-restore")
+async def bulk_restore_products(
+    body: BulkProductIds,
+    current_user: dict = Depends(require_roles("ADMIN")),
+):
+    """Restore archived products (_restore_product: back as they were before
+    the archive, NOT re-published online) -- the ONE way back from an
+    archive. An id is a spine product_id (Catalog page, Flags: Archived) or
+    a catalog twin id (the Needs-review drawer), with or without a spine.
+    Per-product results: done / refused with the reason."""
+    from ..dependencies import get_product_repository
+
+    repo = get_product_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="The catalogue is not reachable")
+    ids = list(dict.fromkeys(p for p in body.product_ids if p))
+
+    def _pair(pid: str):
+        spine = repo.find_by_id(pid)
+        if spine is not None:
+            return spine, None
+        twin = _get_catalog_product(pid)
+        sid = _spine_product_id(repo, twin)
+        return (repo.find_by_id(sid) if sid else None), (dict(twin) if twin else None)
+
+    pairs = {p: _pair(p) for p in ids}
+    if body.apply:  # a spine id: its twin by the same rule the drawer's twin id took
+        bare = [p for p in ids if pairs[p][0] is not None and pairs[p][1] is None]
+        for p, twin in zip(bare, _twins_or_503(repo, [pairs[p][0] for p in bare])):
+            pairs[p] = (pairs[p][0], twin)
+    live_skus = (
+        _live_skus([(s or t).get("sku") for s, t in pairs.values() if s or t])
+        if body.apply
+        else set()
+    )
+    results = []
+    for pid in ids:
+        spine, twin = pairs[pid]
+        doc = spine or twin  # the spine is the truth when there is one
+        if doc is None:
+            results.append({"product_id": pid, "status": "refused", "reason": "Product not found"})
+        elif not doc.get("deleted_at"):
+            results.append({"product_id": pid, "status": "refused", "reason": "Not archived"})
+        elif not body.apply:
+            results.append({"product_id": pid, "status": "ready"})
+        else:
+            note = _restore_product(
+                twin,
+                spine,
+                current_user,
+                on_website=None if live_skus is None else doc.get("sku") in live_skus,
+            )
+            row: Dict[str, Any] = {
+                "product_id": pid,
+                "status": "done",
+                "switched_on": note is None,
+            }
+            if note:
+                row["note"] = note
+            results.append(row)
+    return {"applied": body.apply, "results": results}
+
+
+def _bust_products_cache() -> None:
+    try:
+        from ..services.cache import cache
+
+        cache.delete_pattern("products:*")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# ============================================================================
+# CATALOGUE FLAGS ("needs work") -- services/catalog_flags
+# ============================================================================
+
+
+class RaiseFlagsRequest(BaseModel):
+    product_ids: List[str] = Field(..., min_length=1, max_length=200)
+    type: str
+    note: Optional[str] = Field(default=None, max_length=500)
+    # False = the Flag dialog's preview: who would get the tasks, nothing written.
+    apply: bool = True
+
+
+class FixFlagsRequest(BaseModel):
+    product_id: str
+    flag_ids: List[str] = Field(..., min_length=1, max_length=50)
+
+
+@router.post("/flags")
+async def raise_catalog_flags(
+    body: RaiseFlagsRequest,
+    current_user: dict = Depends(require_roles(*_flags.FLAGGER_ROLES)),
+):
+    """Flag products as needing work. ADMIN / SUPERADMIN / STORE_MANAGER only
+    (its own capability, catalog:flag). One task per person who added the
+    products. Flags never block the till or the website. apply=false is the
+    dialog's preview of who gets the tasks (the same rule, nothing written)."""
+    try:
+        return _flags.raise_flags(
+            body.product_ids, body.type, body.note, current_user, apply=body.apply
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/flags/fix")
+async def fix_catalog_flags(
+    body: FixFlagsRequest,
+    current_user: dict = Depends(require_roles(*_flags.FIXER_ROLES)),
+):
+    """Mark fixed (the product edit page). The last fixed flag of a task
+    completes that task."""
+    try:
+        return _flags.fix_flags(body.product_id, body.flag_ids, current_user)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Product not found")
 
 
 # ============================================================================
@@ -3028,6 +3640,9 @@ async def import_products(
     # Resolve the DB once so each row's SKU counter is allocated atomically +
     # persistently (the per-worker in-memory dict would collide under concurrency).
     _bulk_db = _get_db()
+    from ..dependencies import get_product_repository
+
+    _bulk_repo = get_product_repository()
 
     for i, product in enumerate(products):
         try:
@@ -3055,14 +3670,7 @@ async def import_products(
                     source="CATALOG",
                 )
             except _pm.ProductMasterError as req_exc:
-                detail = (
-                    f"Missing required field: {req_exc.field}"
-                    if req_exc.status == 422
-                    and req_exc.field
-                    and req_exc.field != "category"
-                    else req_exc.message
-                )
-                errors.append({"index": i, "error": detail})
+                errors.append({"index": i, "error": _catalog_pm_error(req_exc, product)[1]})
                 continue
 
             # Same pricing guards as the single-create path: block offer > MRP
@@ -3076,7 +3684,10 @@ async def import_products(
                 continue
 
             product_id = f"prod_{uuid.uuid4().hex[:12]}"
-            sku = generate_sku(product.category, product.attributes, db=_bulk_db)
+            sku = _pm.mint_unique_sku(
+                product.category.value, product.attributes,
+                product_repo=_bulk_repo, db=_bulk_db,
+            )
             title = generate_product_title(product.category, product.attributes)
 
             product_data = {

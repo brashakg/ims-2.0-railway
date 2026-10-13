@@ -36,6 +36,8 @@ import { inventoryApi } from '../../services/api';
 import { printDocumentsApi } from '../../services/api/printDocuments';
 import * as gates from './transferPermissions';
 import { cancelWithFreshCheck } from './transferCancelGuard';
+// Shop time: naive backend stamps are UTC (audit F53).
+import { formatDateIST, formatDateTimeIST } from '../../utils/datetime';
 
 type TransferDirection = 'outgoing' | 'incoming' | 'all';
 // Which sub-flow the details modal is showing.
@@ -79,6 +81,8 @@ interface Transfer {
   total_items: number;
   tracking_number?: string;
   courier_name?: string;
+  /** The server's answer: may this user print this transfer's challan. */
+  can_print_challan?: boolean;
 }
 
 const errMsg = (e: any): string =>
@@ -504,7 +508,7 @@ export function StockTransferManagement() {
                       </div>
                       <div className="flex items-center gap-1.5">
                         <Calendar className="w-4 h-4" />
-                        <span>{new Date(transfer.created_at).toLocaleDateString()}</span>
+                        <span>{formatDateIST(transfer.created_at)}</span>
                       </div>
                     </div>
                   </div>
@@ -552,24 +556,26 @@ export function StockTransferManagement() {
                   Transfer #{selectedTransfer.transfer_number}
                 </h2>
                 <p className="text-sm text-gray-500 mt-1">
-                  Created on {new Date(selectedTransfer.created_at).toLocaleString()}
+                  Created on {formatDateTimeIST(selectedTransfer.created_at)}
                 </p>
               </div>
               <div className="flex items-center gap-2">
-                <button
-                  onClick={async () => {
-                    try {
-                      await printDocumentsApi.openTransferChallan(selectedTransfer.id);
-                    } catch {
-                      toast.error('Could not open delivery challan');
-                    }
-                  }}
-                  className="btn-outline flex items-center gap-2 text-sm"
-                  title="Print Rule 55 Delivery Challan"
-                >
-                  <Truck className="w-4 h-4" />
-                  Delivery Challan
-                </button>
+                {gates.canPrintChallan(selectedTransfer) && (
+                  <button
+                    onClick={async () => {
+                      try {
+                        await printDocumentsApi.openTransferChallan(selectedTransfer.id);
+                      } catch (e) {
+                        toast.error(`Could not open delivery challan: ${errMsg(e)}`);
+                      }
+                    }}
+                    className="btn-outline flex items-center gap-2 text-sm"
+                    title="Print Rule 55 Delivery Challan"
+                  >
+                    <Truck className="w-4 h-4" />
+                    Delivery Challan
+                  </button>
+                )}
                 <button
                   onClick={closeDetails}
                   className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
@@ -626,7 +632,7 @@ export function StockTransferManagement() {
                     <div>
                       <p className="text-sm text-gray-600 mb-1">Received At</p>
                       <p className="font-medium text-gray-900">
-                        {new Date(selectedTransfer.received_at).toLocaleString()}
+                        {formatDateTimeIST(selectedTransfer.received_at)}
                       </p>
                     </div>
                   )}

@@ -18,6 +18,8 @@ import { inventoryApi } from '../../services/api';
 // Movements-ledger entry type comes DIRECT from the module (TS2614 barrel dodge).
 import { type StockMovementEntry } from '../../services/api/inventory';
 import { useInventoryContext } from './InventoryLayout';
+// Shop time: naive backend stamps are UTC (audit F53).
+import { formatDateIST, formatTimeIST } from '../../utils/datetime';
 
 type StockMovement = StockMovementEntry;
 
@@ -189,9 +191,9 @@ export function InventoryMovementsPage() {
                     </div>
                     <div className="text-xs text-gray-600 font-mono truncate" title={movement.ref}>{movement.ref}</div>
                     <div className="text-xs text-gray-500">
-                      {new Date(movement.at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}
+                      {formatTimeIST(movement.at)}
                       <br />
-                      {new Date(movement.at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}
+                      {formatDateIST(movement.at)}
                     </div>
                   </div>
                 );

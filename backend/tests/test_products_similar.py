@@ -140,16 +140,14 @@ def _coll_raybans():
 EMPTY = {"exact_match": None, "siblings": [], "model_colour_count": 0}
 
 
-def _similar(coll, **kw):
-    args = {
-        "category": "FRAME",
-        "brand": "Ray-Ban",
-        "model": "RB-2140",
-        "colour": None,
-        "size": None,
-    }
-    args.update(kw)
-    return pm.find_similar_products(coll, **args)
+def _similar(coll, category="FRAME", brand="Ray-Ban", model="RB-2140", colour=None, size=None):
+    """The lookup as the form asks it: the category and the typed attributes.
+    The model goes in both model fields, as _spine_doc stores it: a category's
+    form shows one of them (Accessories: Model Name), and the identity reads
+    only the one it shows (product_master._shown_attributes)."""
+    attrs = {"brand_name": brand, "model_no": model, "model_name": model,
+             "colour_code": colour, "size": size}
+    return pm.find_similar_products(coll, category=category, attributes=attrs)
 
 
 # ===========================================================================
@@ -228,17 +226,83 @@ def test_size_in_identity_when_present():
         ]
     )
     # same colour, size 52 -> exact = the 52 row; the 54 row is a sibling
-    res = pm.find_similar_products(
-        coll, category="ACC", brand="acme", model="m1", colour="blk", size="52"
-    )
+    res = _similar(coll, category="ACC", brand="acme", model="m1", colour="blk", size="52")
     assert res["exact_match"]["size"] == "52"
     assert len(res["siblings"]) == 1
     # sizeless query -> 3-part key -> no exact, both rows are siblings
-    res2 = pm.find_similar_products(
-        coll, category="ACC", brand="acme", model="m1", colour="blk"
-    )
+    res2 = _similar(coll, category="ACC", brand="acme", model="m1", colour="blk")
     assert res2["exact_match"] is None
     assert len(res2["siblings"]) == 2
+
+
+def _door_doc(category, attrs):
+    """A stored row keyed by the create door itself (normalise_payload)."""
+    doc = pm.normalise_payload(
+        category=category, attributes=dict(attrs), mrp=1000.0, offer_price=900.0,
+        sku=None, cost_price=500.0,
+    )
+    doc["product_id"] = f"P-{doc['sku']}"
+    return doc
+
+
+def test_a_contact_lens_exact_match_is_its_power():
+    """The hint keys a contact lens the way the save does (identity_parts):
+    the same lens re-entered is the exact match the save would 409, never a
+    'click to add another variant' chip; the opposite power is a sibling."""
+    oasys = {"brand_name": "Acuvue", "model_name": "Oasys", "expiry_date": "2027-01-31"}
+    coll = _FakeProductsColl([_door_doc("CL", dict(oasys, power="-1.25"))])
+
+    def similar(**power):
+        return pm.find_similar_products(
+            coll, category="CL", attributes=dict(oasys, **power),
+        )
+
+    same = similar(power="-1.25D")
+    assert same["exact_match"]["sku"] == "CL-ACUVUE-OASYS-M125"
+    assert same["siblings"] == []
+    other = similar(power="+1.25")
+    assert other["exact_match"] is None
+    assert [s["sku"] for s in other["siblings"]] == ["CL-ACUVUE-OASYS-M125"]
+
+
+def test_a_frame_exact_match_reads_its_eye_size():
+    """Each frame eye size is its own variant (owner 2026-09-28): the 54 is
+    not 'this exact colour already exists' against the 52, the 52 is."""
+    carrera = {"brand_name": "Carrera", "model_no": "CA8895", "colour_code": "807"}
+    coll = _FakeProductsColl([_door_doc("FR", dict(carrera, lens_size="52"))])
+
+    def similar(lens_size):
+        return pm.find_similar_products(
+            coll, category="FR", attributes=dict(carrera, lens_size=lens_size),
+        )
+
+    assert similar("52")["exact_match"]["sku"] == "FR-CARRERA-CA8895-807-52"
+    assert similar("54")["exact_match"] is None
+    assert [s["sku"] for s in similar("54")["siblings"]] == ["FR-CARRERA-CA8895-807-52"]
+
+
+def test_endpoint_hands_every_typed_attribute_on(client, staff_headers, monkeypatch):
+    """GET /products/similar hands the form's attributes (every parameter but
+    the category) to the lookup as typed -- the router keeps no list of what
+    the duplicate key reads and folds nothing itself."""
+    seen = {}
+
+    class _Db:
+        is_connected = True
+        db = type("M", (), {"get_collection": staticmethod(lambda name: None)})()
+
+    import database.connection as conn
+
+    monkeypatch.setattr(conn, "get_db", lambda: _Db())
+    monkeypatch.setattr(pm, "find_similar_products",
+                        lambda coll, **kw: seen.update(kw) or EMPTY)
+    params = {"brand_name": "Acuvue", "model_name": "Oasys", "colour_name": "Hazel",
+              "power": "-1.25", "cl_axis": "180", "base_curve": "8.6", "pack": "6",
+              "subbrand": "Max"}
+    resp = client.get("/api/v1/products/similar", params={"category": "CCL", **params},
+                      headers=staff_headers)
+    assert resp.status_code == 200, resp.text
+    assert seen == {"category": "CCL", "attributes": params}
 
 
 def test_category_filters_siblings():
@@ -248,7 +312,7 @@ def test_category_filters_siblings():
             _spine_doc("Acme", "M9", "RED", category="SUNGLASS"),
         ]
     )
-    res = pm.find_similar_products(coll, category="FR", brand="Acme", model="M9")
+    res = _similar(coll, category="FR", brand="Acme", model="M9")
     assert {s["colour_code"] for s in res["siblings"]} == {"BLK"}
 
 
@@ -260,7 +324,7 @@ def test_category_filters_siblings():
 def test_siblings_capped_at_12_but_count_is_true_total():
     docs = [_spine_doc("Acme", "CAP", f"C{i:02d}") for i in range(15)]
     coll = _FakeProductsColl(docs)
-    res = pm.find_similar_products(coll, category="FRAME", brand="Acme", model="CAP")
+    res = _similar(coll, brand="Acme", model="CAP")
     assert len(res["siblings"]) == 12
     assert res["model_colour_count"] == 15
 
@@ -291,15 +355,11 @@ def test_sibling_summary_shape():
 
 
 def test_db_trouble_returns_empty_shape():
-    assert pm.find_similar_products(
-        _RaisingColl(), category="FRAME", brand="A", model="M1"
-    ) == EMPTY
+    assert _similar(_RaisingColl(), brand="A", model="M1") == EMPTY
 
 
 def test_no_collection_returns_empty_shape():
-    assert pm.find_similar_products(
-        None, category="FRAME", brand="A", model="M1"
-    ) == EMPTY
+    assert _similar(None, brand="A", model="M1") == EMPTY
 
 
 def test_unknown_category_or_missing_identity_returns_empty():
@@ -319,17 +379,33 @@ def test_endpoint_requires_auth(client):
     assert resp.status_code == 401
 
 
-def test_endpoint_returns_shape_for_any_authenticated_role(client, staff_headers):
+def test_endpoint_returns_shape_for_any_authenticated_role(client, staff_headers, monkeypatch):
+    """Over a connected (mongomock) database, as CI's mongo:7.0 is: a local run
+    with no Mongo takes the fail-soft path and never reaches this shape. The
+    form reads identity_fields (useSimilarProducts): the typed fields that
+    decide the answer, here a frame's brand, model, colour and eye size."""
+    import mongomock
+
+    import database.connection as conn
+
+    class _Conn:
+        is_connected = True
+        db = mongomock.MongoClient().db
+
+    monkeypatch.setattr(conn, "get_db", lambda: _Conn())
     resp = client.get(
         "/api/v1/products/similar",
-        params={"category": "FRAME", "brand": "NoSuchBrand", "model_no": "NOPE-1"},
+        params={"category": "FRAME", "brand_name": "NoSuchBrand", "model_no": "NOPE-1"},
         headers=staff_headers,
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert set(body.keys()) == {"exact_match", "siblings", "model_colour_count"}
-    assert body["exact_match"] is None
-    assert body["siblings"] == []
+    assert body == {
+        "exact_match": None,
+        "siblings": [],
+        "model_colour_count": 0,
+        "identity_fields": ["brand_name", "colour_code", "lens_size", "model_no"],
+    }
 
 
 def test_endpoint_literal_path_wins_over_product_id_catchall(client, staff_headers):

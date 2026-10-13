@@ -43,11 +43,13 @@ const PricingOffersPage = lazy(() => import('../pages/pricing/PricingOffersPage'
 export const catalogRoutes = (
   <>
     {/* Catalog Manager — browse the spine; roles mirror the navConfig
-        'catalog' item. */}
+        'catalog' item. STORE_MANAGER opens it to flag products as needing
+        work (owner 2026-10-12); the add / edit / review doors stay the
+        catalogue roles'. */}
     <Route
       path="catalog"
       element={
-        <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']}>
+        <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'STORE_MANAGER']}>
           <CatalogIndex />
         </ProtectedRoute>
       }
@@ -70,7 +72,7 @@ export const catalogRoutes = (
     <Route
       path="catalog/missing-photos"
       element={
-        <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']}>
+        <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'STORE_MANAGER']}>
           <CatalogManagerPage photoPreset="missing" />
         </ProtectedRoute>
       }

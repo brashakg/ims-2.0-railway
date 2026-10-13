@@ -48,6 +48,7 @@ from ...services.rx_validation import (
     is_rx_required_line as _is_rx_required_line,
 )
 from ...services import cash_denominations as cash_denom
+from ...services.cost_mask import mask_cost
 
 
 def _get_db():
@@ -289,8 +290,12 @@ def _stamp_status_actor_names(orders: list) -> None:
     stamp_user_names(_get_db(), rows + hist_entries, ("created_by", "changed_by"))
 
 
-def order_to_frontend(order: dict) -> dict:
-    """Convert order dict from snake_case to camelCase for frontend"""
+def order_to_frontend(order: dict, user: Optional[dict] = None) -> dict:
+    """Convert order dict from snake_case to camelCase for frontend.
+
+    `user` is the reader: a line's cost_at_sale (and any other cost key)
+    reaches only a role services/cost_mask "product" admits (owner rulings
+    D7 / 2026-10-12). No user = nobody's cost."""
     if order is None:
         return order
 
@@ -342,7 +347,7 @@ def order_to_frontend(order: dict) -> dict:
             result["orderStatus"] = value
         elif key == "items" and isinstance(value, list):
             # Convert item fields
-            result["items"] = [item_to_frontend(item) for item in value]
+            result["items"] = [item_to_frontend(item, user) for item in value]
         elif key == "payments" and isinstance(value, list):
             # Convert payment fields
             result["payments"] = [payment_to_frontend(p) for p in value]
@@ -367,11 +372,14 @@ def order_to_frontend(order: dict) -> dict:
             # Keep other fields as-is (already camelCase or no mapping needed)
             result[key] = value
 
-    return result
+    # Whole order, at any depth: a legacy `order_items` line passes through
+    # unconverted and carries the same cost_at_sale.
+    return mask_cost(result, user, "product")
 
 
-def item_to_frontend(item: dict) -> dict:
-    """Convert order item from snake_case to camelCase"""
+def item_to_frontend(item: dict, user: Optional[dict] = None) -> dict:
+    """Convert order item from snake_case to camelCase; cost_at_sale only for
+    a reader services/cost_mask "product" admits (see order_to_frontend)."""
     if not item:
         return item
 
@@ -398,7 +406,7 @@ def item_to_frontend(item: dict) -> dict:
             result[key_map[key]] = value
         else:
             result[key] = value
-    return result
+    return mask_cost(result, user, "product")
 
 
 def payment_to_frontend(payment: dict) -> dict:
@@ -433,6 +441,10 @@ class OrderStatus(str, Enum):
     CONFIRMED = "CONFIRMED"
     PROCESSING = "PROCESSING"
     READY = "READY"
+    # Every online order Shopify fulfilled, until the courier delivers it
+    # (owner ruling 2026-09-28). GET /orders validates ?status= against this
+    # enum, so the Orders screen's Shipped filter needs it.
+    SHIPPED = "SHIPPED"
     DELIVERED = "DELIVERED"
     CANCELLED = "CANCELLED"
 
@@ -447,6 +459,10 @@ VALID_TRANSITIONS = {
     },  # READY for quick-sale (no workshop)
     "PROCESSING": {"READY", "CANCELLED"},
     "READY": {"DELIVERED", "CANCELLED"},
+    # An online order Shopify fulfilled is SHIPPED (owner ruling 2026-09-28);
+    # the counter delivers it when a person hands it over (click-and-collect)
+    # or confirms a parcel no courier feed reports delivered.
+    "SHIPPED": {"DELIVERED"},
     "DELIVERED": set(),  # Terminal
     "CANCELLED": set(),  # Terminal
 }

@@ -8,7 +8,7 @@
 // searchable product picker per line (ProductSearchSelect) and the ability to
 // add/remove lines -- both fed to the composer via props.
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { FileText, X as XIcon, Loader2, Search } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
@@ -18,9 +18,12 @@ import { PurchaseOrderComposer } from '../../components/purchase/PurchaseOrderCo
 import type {
   ComposerVendorOption,
   ComposerNewProduct,
+  ComposerLine,
 } from '../../components/purchase/PurchaseOrderComposer';
+import { mapPOtoPurchaseOrder } from './purchaseMappers';
 import { CATEGORIES } from '../../domain/catalog/productAdd';
 import type { Supplier, PurchaseOrder, POItem } from './purchaseTypes';
+import { editOutcomeToasts, typedInNotAddedMessage } from './typedInNotAdded';
 
 interface PickedProduct {
   productId: string;
@@ -219,6 +222,7 @@ function NewProductFields({
         min="0"
         step="0.01"
         value={value.mrp || ''}
+        onFocus={(e) => e.target.select()}
         onChange={(e) => set({ mrp: parseFloat(e.target.value) || 0 })}
         placeholder="MRP *"
         aria-label="New item MRP"
@@ -269,7 +273,7 @@ function ProductSearchSelect({
     setLoading(true);
     const t = setTimeout(async () => {
       try {
-        const data = await productApi.getProducts({ search: q });
+        const data = await productApi.getProducts({ search: q, match: 'anywhere' });
         if (cancelled) return;
         const rows: ProductHit[] = (data?.products || []).slice(0, 20);
         setResults(rows);
@@ -449,9 +453,36 @@ function ProductSearchSelect({
 
 interface PurchaseOrderFormProps {
   suppliers: Supplier[];
+  /** The supplier list is still on its way (audit F85: an empty dropdown
+   *  reading 'Select a vendor' sent a manager off to add a supplier). */
+  suppliersLoading?: boolean;
   existingPOCount: number;
+  /** A saved DRAFT to edit (owner ruling 2026-09-28: quantity, unit cost,
+   *  add / remove lines). Same form, same pricing rule on the server; saving
+   *  hands back the server's copy through onCreated. */
+  editing?: PurchaseOrder;
   onClose: () => void;
   onCreated: (po: PurchaseOrder) => void;
+}
+
+// A saved line, back into the form. Its cost was agreed, so the last-paid
+// prefill must never overwrite it.
+function lineFromSaved(item: POItem): ComposerLine {
+  return {
+    productId: item.productId,
+    productName: item.productName,
+    sku: item.sku,
+    newProduct: null,
+    quantity: item.quantity,
+    unitCost: item.unitCost,
+    taxRate: item.taxRate,
+    hsn: item.hsn ?? null,
+    productDetail: '',
+    gstResolved: !item.gstUnresolved,
+    gstMissing: null,
+    costTouched: true,
+    lastPaid: null,
+  };
 }
 
 // Map the purchase module's Supplier down to the composer's vendor option.
@@ -459,9 +490,26 @@ function supplierToVendor(s: Supplier): ComposerVendorOption {
   return { id: s.id, name: s.name, code: s.code };
 }
 
-export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreated }: PurchaseOrderFormProps) {
+export function PurchaseOrderForm({
+  suppliers,
+  suppliersLoading = false,
+  existingPOCount,
+  editing,
+  onClose,
+  onCreated,
+}: PurchaseOrderFormProps) {
   const toast = useToast();
   const { user } = useAuth();
+
+  // Audit F87: X / Cancel on a half-typed order asks before throwing it away.
+  const dirtyRef = useRef(false);
+  const trackDirty = useCallback((dirty: boolean) => {
+    dirtyRef.current = dirty;
+  }, []);
+  const close = () => {
+    if (dirtyRef.current && !window.confirm('Discard this order? What you have entered will be lost.')) return;
+    onClose();
+  };
 
   const vendorOptions = suppliers.map(supplierToVendor);
 
@@ -471,7 +519,7 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
   // no GSTIN, a prefix that is not a state) is null: the composer says "cannot
   // tell" rather than showing a wrong split.
   const storeId = user?.activeStoreId ?? '';
-  const [vendorId, setVendorId] = useState('');
+  const [vendorId, setVendorId] = useState(editing?.supplierId ?? '');
   const heads = usePoGstHeads(storeId);
   const interstate: boolean | null = vendorId ? (heads[vendorId] ?? null) : null;
 
@@ -482,10 +530,11 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
         <div className="flex items-center justify-between p-6 border-b border-gray-200">
           <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
             <FileText className="w-5 h-5 text-blue-600" />
-            Create Purchase Order
+            {editing ? `Edit draft ${editing.poNumber}` : 'Create Purchase Order'}
           </h2>
           <button
-            onClick={onClose}
+            onClick={close}
+            aria-label="Close"
             className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
           >
             <XIcon className="w-5 h-5 text-gray-500" />
@@ -497,8 +546,13 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
           <PurchaseOrderComposer
             mode="page"
             vendors={vendorOptions}
+            vendorsLoading={suppliersLoading}
             interstate={interstate}
             onVendorChange={setVendorId}
+            initialVendorId={editing?.supplierId}
+            initialLines={editing?.items.map(lineFromSaved)}
+            initialExpectedDate={editing?.expectedDelivery}
+            initialNotes={editing?.notes}
             allowAddLine
             allowRemoveLine
             renderProductCell={({ line, pickProduct, clearProduct, setNewProduct }) => (
@@ -525,10 +579,37 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
                 onSetNew={setNewProduct}
               />
             )}
-            submitLabel="Create as Draft"
-            submittingLabel="Creating..."
-            onCancel={onClose}
+            submitLabel={editing ? 'Save changes' : 'Create as Draft'}
+            submittingLabel={editing ? 'Saving...' : 'Creating...'}
+            onCancel={close}
+            onDirtyChange={trackDirty}
             onSubmit={async (payload) => {
+              if (editing) {
+                const saved = await vendorsApi.updatePurchaseOrder(editing.id, {
+                  vendor_id: payload.vendorId,
+                  // A PUT keeps a field it does not carry; null clears it.
+                  expected_date: payload.expectedDate || null,
+                  notes: payload.notes || null,
+                  items: payload.items.map((it) => ({
+                    product_id: it.product_id,
+                    product_name: it.product_name,
+                    sku: it.sku,
+                    new_product: it.new_product,
+                    quantity: it.quantity,
+                    unit_price: it.unit_price,
+                    // The line's stored rate and HSN go back with it, so an
+                    // edit never re-prices a line from the catalogue.
+                    gst_rate: it.gst_rate,
+                    hsn: it.hsn,
+                  })),
+                });
+                const savedPO = mapPOtoPurchaseOrder(saved);
+                onCreated(savedPO);
+                for (const t of editOutcomeToasts(editing.poNumber, savedPO.status, saved?.products_not_created)) {
+                  toast[t.kind](t.text);
+                }
+                return;
+              }
               const storeId = user?.activeStoreId ?? 'default';
               const resp = await vendorsApi.createPurchaseOrder({
                 vendor_id: payload.vendorId,
@@ -574,6 +655,8 @@ export function PurchaseOrderForm({ suppliers, existingPOCount, onClose, onCreat
 
               onCreated(newPO);
               toast.success(`Purchase Order ${newPO.poNumber} created as Draft`);
+              const notAdded = typedInNotAddedMessage(resp.products_not_created);
+              if (notAdded) toast.warning(notAdded);
               // Say what is missing rather than letting a short tax total pass
               // unnoticed -- the server is the authority on the rate, so this
               // reports what it actually stored, including the lines it taxed

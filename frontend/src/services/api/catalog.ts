@@ -52,15 +52,20 @@ export interface CatalogProductDoc {
    *  http(s) URL). Never re-derive it here: what the screen calls a photo and
    *  what the publish gate accepts must be one rule. */
   has_photo?: boolean;
-  /** Server-computed: LIVE (on Shopify) / QUEUED (waiting for a human to
-   *  press push) / OFF / BLOCKED (no usable photo — cannot go online). */
+  /** Server-computed with THE push gate: LIVE (on Shopify) / QUEUED (waiting
+   *  for a human to press push) / OFF / BLOCKED (no usable photo — cannot go
+   *  online) / NOT_FOR_WEBSITE (Brand Master keeps the brand off the website). */
   online?: OnlineState;
+  /** Server-computed: the push gate's own reason whenever it refuses the row —
+   *  a LIVE listing still sells but its price and images no longer sync; a
+   *  NOT_FOR_WEBSITE row says why (brand off / misspelt / inactive, a lock). */
+  online_note?: string | null;
   [k: string]: unknown;
 }
 
 // DELIST_FAILED: IMS retired the product (deleted / deactivated) but the
 // automatic Shopify take-down failed -- it is STILL LIVE on the storefront.
-export type OnlineState = 'LIVE' | 'QUEUED' | 'OFF' | 'BLOCKED' | 'DELIST_FAILED';
+export type OnlineState = 'LIVE' | 'QUEUED' | 'OFF' | 'BLOCKED' | 'NOT_FOR_WEBSITE' | 'DELIST_FAILED';
 export type PhotoFilter = 'has' | 'missing';
 
 export interface CatalogProductListResponse {
@@ -85,6 +90,9 @@ export interface CatalogProductListParams {
   photo?: PhotoFilter;
   page?: number;
   limit?: number;
+  /** The Catalog page's Sort by (same keys as GET /products). Given, the
+   *  rows also carry who added / last edited them, read from their spine. */
+  sort?: string;
 }
 
 // Partial update for PUT /catalog/products/{id} (the review mini-form's save
@@ -247,5 +255,93 @@ export const catalogProductsApi = {
       );
     }
     return response.data as PromoteResult;
+  },
+};
+
+// ---------------------------------------------------------------------------
+// The Catalog page's bulk doors + catalogue flags (owner 2026-10-12).
+// ---------------------------------------------------------------------------
+
+/** One product's answer from a bulk door. */
+export interface BulkRowResult {
+  product_id: string;
+  /** 'ready' on a dry run; 'done' / 'refused' (+ reason) when applied.
+   *  Flags also answer 'already' (that flag is already open on it). */
+  status: 'ready' | 'done' | 'refused' | 'already';
+  reason?: string;
+  name?: string;
+  /** Archive dry run: units still physically at the shops (null when an
+   *  applied archive could not read them; a dry run answers 503 instead). */
+  in_stock_units?: number | null;
+  /** Archive dry run: live on the website (archiving takes it down). */
+  live_online?: boolean;
+  /** Restore: false = back in the catalogue switched off (`note` says why). */
+  switched_on?: boolean;
+  note?: string;
+}
+
+/** Who gets a flag task (the server's own rule names them). */
+export interface FlagTaskTarget {
+  task_id: string | null;
+  assigned_to: string | null;
+  assigned_to_name: string | null;
+  product_count: number;
+}
+
+/** A flag as stored on the product (spine) doc. */
+export interface ProductFlag {
+  flag_id: string;
+  type: string;
+  note?: string;
+  by?: string;
+  by_name?: string;
+  at?: string;
+  /** 'withdrawn' = its task was cancelled. */
+  status: 'open' | 'fixed' | 'withdrawn';
+  fixed_by?: string | null;
+  fixed_at?: string | null;
+  task_id?: string | null;
+}
+
+export const catalogBulkApi = {
+  /** Delete (archive) -- the same soft delete as the single Delete. Admins
+   *  only. `apply: false` is the dry run the confirm dialog reads. */
+  archive: async (productIds: string[], apply: boolean) => {
+    const response = await api.post('/catalog/products/bulk-archive', {
+      product_ids: productIds,
+      apply,
+    });
+    return response.data as { applied: boolean; results: BulkRowResult[] };
+  },
+
+  /** Restore archived products: active again, NOT re-published online. */
+  restore: async (productIds: string[]) => {
+    const response = await api.post('/catalog/products/bulk-restore', {
+      product_ids: productIds,
+      apply: true,
+    });
+    return response.data as { applied: boolean; results: BulkRowResult[] };
+  },
+
+  /** Flag products as needing work (ADMIN / SUPERADMIN / STORE_MANAGER).
+   *  One task per person who added them. `apply: false` is the dialog's
+   *  preview: who would get the tasks, nothing written. */
+  flag: async (productIds: string[], type: string, note: string, apply = true) => {
+    const response = await api.post('/catalog/flags', {
+      product_ids: productIds,
+      type,
+      note: note || undefined,
+      apply,
+    });
+    return response.data as { results: BulkRowResult[]; tasks: FlagTaskTarget[] };
+  },
+
+  /** Mark fixed (the product edit page). */
+  fixFlags: async (productId: string, flagIds: string[]) => {
+    const response = await api.post('/catalog/flags/fix', {
+      product_id: productId,
+      flag_ids: flagIds,
+    });
+    return response.data as { product_id: string; flags: ProductFlag[] };
   },
 };

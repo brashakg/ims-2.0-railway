@@ -1689,9 +1689,9 @@ def test_the_fallback_still_confirms_a_clean_draft(wired):
 # the claim returns. Both windows must be covered; the earlier tests pass with
 # this defect live.
 #
-# _claim_order_for_cancel filters $nin [CANCELLED, DELIVERED], so CONFIRMED and
-# READY both stay claimable -- and deliver is immune only INCIDENTALLY, because
-# DELIVERED happens to sit in that $nin.
+# _claim_order_for_cancel claims only a status VALID_TRANSITIONS lets cancel, so
+# CONFIRMED and READY both stay claimable -- and deliver is immune only because
+# DELIVERED is not one of them.
 # =========================================================================== #
 
 

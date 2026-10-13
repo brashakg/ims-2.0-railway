@@ -1,5 +1,11 @@
 # IMS 2.0 — live plan status
 
+Updated **2026-10-13** (evening). Seven more merged 2026-10-13 (section 4v): the owner's Catalog page asks (**#1192**: recently-edited first, filters incl. who added it and a date range, rows per page, tick-select to flag or archive), photo order (**#1189**), cost hidden from counter staff everywhere incl. the 3 approved till places (**#1191**), the counter stock lookup (**#1180**), the valued inter-company challan (**#1185**), Add product follows the owner rulings (**#1174**) and the design-photo publish rebuild (**#1193**, replaces #1152). On prod (owner approved): the product identity keys were rebuilt (499 of 499, a fresh trial run finds nothing left) and the Brand Master website switch is ON for all 22 product brands (19 switched today). Still in build, none merged: #1153, #1163, #1165, #1166, #1171, #1181, #1183, #1184, #1188, own-task list #1194, what-we-pay admin/accounts only, round-off, reverse charge.
+
+Updated **2026-10-13**. Three more merged 2026-10-08 .. 10-12 (section 4u): the purchase-order form (**#1170**), counter staff locked out of supplier and purchase data (**#1161**), and the till / counter lookup finding multi-word names (**#1187**, owner-approved POS change). In build, none merged: the 2026-10-12 owner asks - Catalog page sort / filters / who added it / select to flag or archive / rows per page / date range, photo order (#1189), cost hidden from counter staff everywhere (incl. 3 approved till places), each person sees only their own tasks - and the procurement-audit PRs #1165, #1166, #1171, #1174, #1180, #1183, #1184, #1185, #1188, plus #1153, #1163, #1181. Owner rulings 2026-10-12 recorded: what we pay (purchase prices and product cost) is admin / superadmin / accounts only; PO line prices fill in from the last price paid; walk-in dealers are added as suppliers; the catalog opens recently-edited first.
+
+Updated **2026-10-08**. Four more merged 2026-10-01 .. 10-08 (section 4t): per-shop reorder levels (**#1179**), multi-location **PR 4 of 6 (#1160)**, purchase bills that match their form (**#1167**) and the stock-screens fixes (**#1169**). On prod: the July pooled stock-parity task is closed; the trial runs of the reorder-level move and the product switched-on backfill both found nothing to change, so neither was applied. Still in build, none merged: purchase-order edit/cancel #1165, purchase-order form #1170, off-catalogue items #1171, counter stock lookup #1180, unit barcodes #1166, counter-role purchase access #1161, add-product #1174, the purchases report #1184, bought-without-PO #1183, the valued challan #1185, multi-location PR 5 #1163, online order status #1153, the till records the scanned unit #1181, and the owner's 2026-10-08 answers (multi-word search, round-off, default credit limit, reverse charge, admin-controls clean-up, the #1152/#1172 rebuilds).
+
 Updated **2026-10-01**. Seven more merged 2026-09-29 .. 10-01 (section 4s): the owner-approved till stock badge (**#1173**), unit labels for the TSC TE244 (**#1164**), four Wave 6 page splits built and reviewed in the cloud (settings admin editors **#1175**, payroll **#1176**, demand forecast **#1177**, loyalty **#1178**), and two CI/tooling fixes (**#1162**, **#1168**). Still in build, none merged: the procurement-audit fixes (purchase bills #1167, purchase-order edit/cancel #1165, purchase-order form #1170, off-catalogue items #1171, per-shop reorder levels #1179, counter stock lookup #1180, unit barcodes #1166, stock screens #1169, counter-role purchase access #1161, the purchases report, bought-without-PO and the valued inter-company challan), multi-location PRs 4 and 5 (#1160, #1163) and the online order status rules (#1153). Note: Vercel's free plan hit its daily deploy limit on 2026-10-01, so #1178 is merged but reaches the live site with the next deploy.
 
 Updated **2026-09-29**. Eight more merged 2026-09-27/28 (section 4r): Wave 6 items A1, A3, A4, A6 and the clinical and workshop router packages (**#1150, #1151, #1155-#1158**), multi-location **PR 3 of 6 (#1154)**, and this file (#1149). The procurement audit (catalogue → purchase order → goods receipt → purchase invoice → stock, walked as each role on an isolated copy of the database) is **DELIVERED**: 118 confirmed findings, 3 of them blockers; the owner answered every question it raised (three multiple-choice rounds, 2026-09-28/29). Its fixes are **IN BUILD, none merged**: purchase-order edit/cancel/send, counter-role access to purchase data, stock-side bugs with real unit labels for the TSC TE244, unit barcodes without hyphens and the approved till stock badge. Also in build: multi-location PRs 4 and 5, the online order status rules, and the #1141 follow-ups.
@@ -368,6 +374,35 @@ What the five page-split waves left, measured 2026-09-27 (owner page "Wave Six")
 | **#1176** | Wave 6 B14: payroll's salary sheet, advances and payslips get their own addresses inside HR; salary stays ADMIN/SUPERADMIN only. |
 | **#1177** | Wave 6 B13: the demand forecast's three panels get their own addresses; the reorder panel is kept (different data and rule from Inventory > Reorders). |
 | **#1178** | Wave 6 B12: loyalty's overview, tiers and rewards get their own addresses; four tabs that showed no real data are removed (checked one by one first). |
+
+## 4t. Merged 2026-10-01 .. 2026-10-08 (all squash-merged to main)
+
+| PR | What it does |
+|---|---|
+| **#1179** | Reorder levels are per shop: each shop sets its own level, and an unset level means no low-stock alert (owner ruling D12). Prod trial run of the move script: 0 products, 0 shop levels - nothing to move. |
+| **#1160** | Multi-location PR 4 of 6: the nightly stock check compares each shop with its own Shopify location and raises one drift task per shop. The old pooled July task was closed on prod after a trial run. |
+| **#1167** | A booked purchase bill matches its form: IGST stays IGST, the approve buttons work, a bill made from a receipt arrives with its lines filled, and every bill counts in GSTR-3B input credit. |
+| **#1169** | Stock screens: receipts show on Movements, low stock names the product, opening stock ages from the day it was entered (owner ruling 2026-10-08), stock-count times show in IST, a refused receipt takes no number, and purchase tasks go to a named person. Prod trial run of its backfill: 0 rows - nothing to write. |
+
+## 4u. Merged 2026-10-08 .. 2026-10-12 (all squash-merged to main)
+
+| PR | What it does |
+|---|---|
+| **#1170** | The purchase-order form finds products by model number, shows the last price really paid to this supplier (accepted receipts first, never drafts), and a tapped quantity box takes the number typed. |
+| **#1161** | Counter staff (sales, cashier, optometrist, workshop) can no longer read supplier details, purchase orders, bills or what the business owes through the API; workshop sees vendor returns without prices. |
+| **#1187** | Owner-approved POS change: the till and the counter lookup find multi-word names such as Air Optix or Ray Ban Aviator; what the till found before always comes first, in the same order. The till's UPI error names the Organization screen. |
+
+## 4v. Merged 2026-10-13 (all squash-merged to main)
+
+| PR | What it does |
+|---|---|
+| **#1192** | Catalog page: sort (recently edited first by default, newest / oldest added), filters for brand, category, colour, who added it, a date range and open flags; rows per page; admins, superadmins and store managers tick products to flag them (needs revision with a note, photo redo, price check, wrong category / duplicate) or archive them; cataloguers filter by what needs redoing. |
+| **#1189** | Product photos can be put in order (drag or arrows); photo 1 is the main photo, an angle guide shows Front, Angled, Side, Back, Folded, and the website follows the order. |
+| **#1191** | Counter staff no longer see cost anywhere: stock counts, stock value, alerts, workshop remake cost and (owner-approved POS change) order lines, the till scan reply and the below-cost message. Workshop may log vendor returns; supplier-paid totals are admin and accounts only. |
+| **#1180** | A read-only stock lookup for counter staff: this shop and other shops, no cost or supplier figures. |
+| **#1185** | Transfers between two of our companies carry a valued delivery challan with both GSTINs. |
+| **#1174** | Add product follows the owner rulings: the brand default decides the website, readable SKUs, reorder level starts as not set, Save + New keeps what was typed. |
+| **#1193** | Pressing Publish on a design photo twice puts it up once; replacing a photo swaps it (simple rebuild of #1152, which is closed). |
 
 ## 5. Waiting on the owner
 

@@ -707,6 +707,9 @@ export interface CreatedPurchaseOrder {
     taxed: boolean;
   }>;
   cost_filled?: Array<{ product_id: string; cost_price: number }>;
+  /** Typed-in lines whose product could not be written after the order was
+   *  saved (taken off the order, or to be checked). */
+  products_not_created?: Array<{ product_id: string; product_name?: string | null; reason: string }>;
   message?: string;
 }
 
@@ -783,7 +786,7 @@ export const vendorsApi = {
   },
 
   // PO lifecycle timeline (backend PR #869): chronological owner-vocabulary
-  // events (Ordered / Sent / Box received / On shelf / Bill settled) plus the
+  // events (Ordered / Sent / Box received / On shelf / Bill booked) plus the
   // raw linked GRNs + purchase invoices. 404s on cross-store access.
   getPOTimeline: async (poId: string) => {
     const response = await api.get(`/vendors/purchase-orders/${poId}/timeline`);
@@ -817,11 +820,6 @@ export const vendorsApi = {
     return response.data as CreatedPurchaseOrder;
   },
 
-  // Procurement Phase 2C: most-recent agreed purchase price per product for a
-  // vendor, from PO history -- lets the PO composer pre-fill "last paid Rs X on
-  // <date>" instead of the buyer guessing. Store-scoped + fail-soft on the
-  // server: no history / DB trouble yields an empty `costs` map. Batch every
-  // line's product_id into ONE call.
   // The tax head each vendor's purchase carries at a shop, decided on the
   // server (shop_gstin + classify_supply). true = IGST, false = CGST + SGST,
   // null = cannot tell. Fail-soft: {} -> every card says "cannot tell".
@@ -839,6 +837,11 @@ export const vendorsApi = {
     }
   },
 
+  // Procurement Phase 2C: most-recent agreed purchase price per product for a
+  // vendor, from PO history -- lets the PO composer pre-fill "last paid Rs X on
+  // <date>" instead of the buyer guessing. Store-scoped + fail-soft on the
+  // server: no history / DB trouble yields an empty `costs` map. Batch every
+  // line's product_id into ONE call.
   getLastCost: async (
     vendorId: string,
     productIds: string[],
@@ -850,15 +853,13 @@ export const vendorsApi = {
   }> => {
     const ids = productIds.filter(Boolean);
     if (!vendorId || ids.length === 0) return { costs: {} };
-    try {
-      const response = await api.get('/vendors/last-cost', {
-        params: { vendor_id: vendorId, product_ids: ids.join(',') },
-      });
-      return response.data ?? { costs: {} };
-    } catch {
-      // Read-only convenience lookup -- never block PO creation on it.
-      return { costs: {} };
-    }
+    // A failure rejects: the PO composer (the only caller) keeps the
+    // catalogue cost and asks again later -- swallowing it here made a
+    // network error look like "never paid" and the form never asked again.
+    const response = await api.get('/vendors/last-cost', {
+      params: { vendor_id: vendorId, product_ids: ids.join(',') },
+    });
+    return response.data ?? { costs: {} };
   },
 
   sendPurchaseOrder: async (poId: string) => {
@@ -866,8 +867,60 @@ export const vendorsApi = {
     return response.data;
   },
 
+  // Cancel an order WITH a reason (the timeline shows it beside the person).
+  // A part-received order cancels only what is still due. Returns the updated
+  // order as `po`.
   cancelPurchaseOrder: async (poId: string, reason: string) => {
     const response = await api.post(`/vendors/purchase-orders/${poId}/cancel`, null, { params: { reason } });
+    return response.data;
+  },
+
+  // Cancel what is still due on ONE line. `productId` is the product the person
+  // saw on that line: a stale screen is refused (409), never mis-applied.
+  // Returns the updated order.
+  cancelPurchaseOrderLine: async (
+    poId: string,
+    lineIndex: number,
+    reason: string,
+    productId?: string,
+    quantity?: number,
+    updatedAt?: string,
+  ) => {
+    // What the screen showed: the order's version (exact) and the line's
+    // product and quantity. A stale screen is refused (409), never applied to
+    // whatever line now sits at that position.
+    const response = await api.post(
+      `/vendors/purchase-orders/${poId}/items/${lineIndex}/cancel`,
+      { reason, product_id: productId, quantity, updated_at: updatedAt },
+    );
+    return response.data;
+  },
+
+  // Edit a DRAFT (quantity, unit cost, add / remove lines). Same line shape as
+  // create; the server prices it by the same rule. Returns the updated order.
+  updatePurchaseOrder: async (poId: string, po: {
+    vendor_id?: string;
+    items: Array<{
+      product_id?: string;
+      product_name?: string;
+      sku?: string;
+      new_product?: {
+        category: string;
+        brand: string;
+        model: string;
+        colour: string;
+        size: string;
+        mrp: number;
+      };
+      quantity: number;
+      unit_price: number;
+      gst_rate?: number;
+      hsn?: string;
+    }>;
+    expected_date?: string | null;
+    notes?: string | null;
+  }) => {
+    const response = await api.put(`/vendors/purchase-orders/${poId}`, po);
     return response.data;
   },
 
@@ -893,6 +946,10 @@ export const vendorsApi = {
     dc_number?: string;
     dc_date?: string;
     vendor_id?: string;
+    // F-S3: the uploaded vendor bill; a STANDARD receipt is refused without it.
+    attachment_file_id?: string;
+    attachment_filename?: string;
+    attachment_mime?: string;
     items: Array<{
       po_item_id?: string;
       product_id: string;

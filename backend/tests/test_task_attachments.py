@@ -35,6 +35,7 @@ from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from api.routers import tasks as tasks_mod  # noqa: E402
+from tests.strict_fakes import matches  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
 from api.services.file_store import InMemoryFileStore, set_file_store  # noqa: E402
 
@@ -54,6 +55,11 @@ class _FakeRepo:
 
     def find_by_id(self, task_id: str) -> Optional[Dict[str, Any]]:
         return self._tasks.get(task_id)
+
+    def find_one(self, flt: dict) -> Optional[Dict[str, Any]]:
+        # The router opens a task through the visibility filter (a real Mongo
+        # filter), so evaluate it for real rather than ignoring it.
+        return next((t for t in self._tasks.values() if matches(t, flt)), None)
 
     def find_many(self, *_a, **_kw) -> List[Dict[str, Any]]:
         return list(self._tasks.values())
@@ -269,11 +275,12 @@ def test_download_cross_store_denied(fs):
     repo = _FakeRepo(
         [_task(store_id="S2", attachment={"file_id": file_id, "filename": "x.pdf"})]
     )
-    # A store-scoped caller whose reach is only S1 must not fetch an S2 task file.
+    # A store-scoped caller whose reach is only S1 must not fetch an S2 task
+    # file. A task you cannot see is "not found" (owner ruling 2026-10-12).
     app = _make_app(roles=["SALES_STAFF"], active_store="S1", store_ids=["S1"])
     with patch.object(tasks_mod, "get_task_repository", return_value=repo):
         r = TestClient(app).get("/tasks/TASK-AABBCCDD/file")
-    assert r.status_code == 403
+    assert r.status_code == 404
 
 
 # ---------------------------------------------------------------------------

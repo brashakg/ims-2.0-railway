@@ -782,7 +782,8 @@ export const workshopApi = {
       rework_count: number;
       remake_reason_code: string;
       spoilage_category: string;
-      spoilage_cost_paise: number;
+      /** At cost: absent for a role that does not see product cost (D7). */
+      spoilage_cost_paise?: number;
       message: string;
     };
   },
@@ -822,16 +823,6 @@ export const workshopApi = {
 export const adminDiscountApi = {
   getDiscountRules: async () => {
     const response = await api.get('/admin/discounts/rules');
-    return response.data;
-  },
-
-  getRoleDiscountCaps: async () => {
-    const response = await api.get('/admin/discounts/role-caps');
-    return response.data;
-  },
-
-  setRoleDiscountCap: async (role: string, maxDiscount: number) => {
-    const response = await api.post('/admin/discounts/role-caps', { role, max_discount: maxDiscount });
     return response.data;
   },
 

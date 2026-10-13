@@ -7,7 +7,7 @@ Product and Stock data access operations
 import logging
 import re
 from typing import List, NamedTuple, Optional, Dict
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 
 from api.utils.ist import ist_today
 
@@ -29,6 +29,34 @@ _LEGACY = object()
 AVAILABLE_STATUS_VALUES = ["AVAILABLE", "available", "Available"]
 
 
+def group_with_oldest_arrival(group: Dict) -> List[Dict]:
+    """``group`` as a $group stage plus ``oldest``: when the oldest unit in the
+    group arrived on the shelf, or None when that is unknown.
+
+    $min skips a unit with no created_at, so 5 legacy units beside 1 received
+    today read as arrived today on Aging and Alerts while Non-moving, judging
+    unit by unit, called the same 5 old (audit F54). Unknown age is legacy
+    stock, so old (inventory.helpers._had_the_window): one undated unit makes
+    the whole group's ``oldest`` None.
+
+    Opening stock ages from the day it was entered, like any other unit
+    (owner ruling 2026-10-08): a shop's go-live stock is 0 days old on its
+    first day, not unknown and not 180+.
+
+    THE arrival rule: Aging, Alerts and Non-moving all group through here."""
+    dated = {"$ifNull": ["$created_at", False]}
+    return [
+        {
+            "$group": {
+                **group,
+                "oldest": {"$min": "$created_at"},
+                "undated": {"$sum": {"$cond": [dated, 0, 1]}},
+            }
+        },
+        {"$addFields": {"oldest": {"$cond": [{"$gt": ["$undated", 0]}, None, "$oldest"]}}},
+    ]
+
+
 class StockReleaseResult(NamedTuple):
     """Outcome of a stock release (order cancel / DRAFT line removal).
 
@@ -45,9 +73,51 @@ class StockReleaseResult(NamedTuple):
 class ProductRepository(BaseRepository):
     """Repository for Product operations"""
 
-    # Tokenized-search fields. `barcode` is ADDITIVE (Catalog Manager scanner
-    # passthrough): it can only ADD matches for existing callers, never remove.
-    SEARCH_FIELDS = ("brand", "model", "sku", "variant", "barcode")
+    # THE TILL'S RULE (the default, and what POS, goods receipt, the command
+    # palette, Returns and QuickShare get): every whitespace token must START
+    # one of SEARCH_FIELDS -- or, in WORD_SEARCH_FIELDS, any word of it, so
+    # the till and the counter lookup find "Air Optix", "Acuvue Oasys" and
+    # "Ray Ban Aviator" (owner-approved 2026-10-08). `name` is the minted
+    # title the till card shows (it carries the shape: "Ray-Ban RB3025
+    # Aviator Sunglasses"); a SUNGLASS/FRAME's spine model is its model_no,
+    # so its model_name and a lens's subbrand ("Acuvue") are searched where
+    # they live. The codes (sku, variant, barcode) keep matching from their
+    # start; `barcode` is the Catalog Manager scanner passthrough. Not the
+    # wide rule: that crowds a 24-result strip ('ray' is inside 'Gray').
+    WORD_SEARCH_FIELDS = (
+        "brand", "model", "name", "attributes.model_name", "attributes.subbrand",
+    )
+    SEARCH_FIELDS = WORD_SEARCH_FIELDS + ("sku", "variant", "barcode")
+    # Main's till rule before 2026-10-08: every word STARTS one of these.
+    # What it finds is listed first, in main's order (search_products).
+    LEGACY_SEARCH_FIELDS = ("brand", "model", "sku", "variant", "barcode")
+
+    # THE WIDE RULE, opt-in (`anywhere=True`; the purchase-order product box,
+    # audit F21). NAME fields match ANYWHERE and ignore spaces/hyphens: the
+    # model number off a vendor's list is the END of 'CA 8895', Ray-Ban is
+    # typed 'ray ban' or 'rayban', and the colour words live under attributes
+    # (every colour key product_master stores; the watch dial is spelt both
+    # ways there). CODE fields match from their START -- a scanned barcode,
+    # a typed SKU or the manufacturer's GTIN off the box is its beginning.
+    # Each word also takes the till's own clause (_product_search_query), so
+    # the wide rule keeps every row the till finds -- the minted title, model
+    # name and sub-brand by their word starts only: 'sgray' is not inside
+    # 'Sunglasses - Gray'.
+    NAME_SEARCH_FIELDS = (
+        "brand",
+        "model",
+        "color",
+        "attributes.frame_color",
+        "attributes.temple_color",
+        "attributes.lens_colour",
+        "attributes.tint",
+        "attributes.colour_name",
+        "attributes.dial_color",
+        "attributes.dial_colour",
+        "attributes.body_colour",
+        "attributes.belt_colour",
+    )
+    CODE_SEARCH_FIELDS = ("sku", "variant", "barcode", "attributes.gtin", "gtin")
 
     @property
     def entity_name(self) -> str:
@@ -56,6 +126,30 @@ class ProductRepository(BaseRepository):
     @property
     def id_field(self) -> str:
         return "product_id"
+
+    def update(self, id: str, data: Dict) -> bool:
+        """BaseRepository.update, plus: a write that switches the product on
+        stamps `switched_on_at`. A provisional buy (ruling 13) is born
+        inactive and keeps `provisional` for good, so this stamp is how
+        reorder_policy.discontinued() tells 'not switched on yet' from
+        'switched on, sold, switched off'. Every spine door that writes
+        is_active (catalog drawer, PUT /products, /products/master) writes
+        through here."""
+        if data.get("is_active") is True:
+            data["switched_on_at"] = datetime.now(timezone.utc)
+        if "updated_by" not in data and "edited_at" not in data:
+            # NOT a catalogue edit (every edit door writes updated_by through
+            # api.services.catalog_list.edit_stamp), yet this write moves
+            # updated_at. A product last edited before edited_at existed
+            # keeps that edit's moment, so the write cannot make it read as
+            # edited now (catalog_list.LAST_EDITED_AT). One read, fail-soft.
+            try:
+                doc = self.find_by_id(id) or {}
+                if doc.get("updated_by") and not doc.get("edited_at") and doc.get("updated_at"):
+                    data["edited_at"] = doc["updated_at"]
+            except Exception:  # noqa: BLE001 -- the write itself stands
+                pass
+        return super().update(id, data)
 
     def find_by_sku(self, sku: str) -> Optional[Dict]:
         return self.find_one({"sku": sku})
@@ -179,6 +273,44 @@ class ProductRepository(BaseRepository):
             filter["created_by"] = created_by
         return filter
 
+    def _product_search_query(self, text: str, extra: Dict, till: bool = True) -> Dict:
+        """The WIDE product search query -- shared by the list and its count
+        so the two can never drift. Each word's $or holds the till's own
+        clause for it, so it is a superset of the till's rule (outside a query
+        of nothing but hyphens, which lists nothing); till=False leaves that
+        clause out, which is main's wide rule (the box's second tier).
+        ponytail: unanchored regex scans the collection; fine at catalogue
+        size, a text index if it ever is not."""
+        clauses = []
+        for tok in (text or "").split():
+            letters = [c for c in tok if c != "-"]
+            if not letters:
+                # A lone hyphen ('ray - ban') is spacing, not a word to match.
+                continue
+            name = {
+                "$regex": r"[\s\-]*".join(re.escape(c) for c in letters),
+                "$options": "i",
+            }
+            # A code still matches from its start; past main's tier
+            # (till=False) its hyphens are ignored too, so 'SGRAY' finds a
+            # readable SKU SG-RAYBAN-RB3025-001 (owner ruling 2026-09-28, D5).
+            code = {
+                "$regex": "^" + (name["$regex"] if till else re.escape(tok)),
+                "$options": "i",
+            }
+            ors = [{f: code} for f in self.CODE_SEARCH_FIELDS]
+            ors += [{f: name} for f in self.NAME_SEARCH_FIELDS]
+            if till:
+                ors.append(self._search_token(tok, self.SEARCH_FIELDS))
+            clauses.append({"$or": ors})
+        if not clauses:
+            # Nothing but hyphens and spaces ('--'): nothing to look for, so
+            # no product -- not the whole catalogue.
+            return {"_id": {"$in": []}}
+        if extra:
+            clauses.append(extra)
+        return {"$and": clauses}
+
     def search_products(
         self,
         query: str,
@@ -188,14 +320,47 @@ class ProductRepository(BaseRepository):
         created_by: Optional[str] = None,
         skip: int = 0,
         limit: int = 100,
+        anywhere: bool = False,
     ) -> List[Dict]:
-        return self.search(
-            query,
-            list(self.SEARCH_FIELDS),
-            self._search_extra_filter(category, is_active, created_by),
+        extra = self._search_extra_filter(category, is_active, created_by)
+        # Main's results come FIRST, in main's order, then what the new rule
+        # adds -- so no page (the till's 24, the box's 20, a page of one) ever
+        # loses a result main listed: an exact SKU, a scan, a 'Ray-Ban' behind
+        # thirty 'Gunmetal Gray' frames for 'ray', or a model behind a title
+        # word. Tier 1 is main's till rule; the box's tier 2 is main's wide
+        # rule (main listed its till hits, then its wide ones). Every tier
+        # sits inside search_products_filter, the query count_search_products
+        # counts ('  ' is everything to the till, nothing to the wide rule).
+        tiers = [
+            self._search_query(query, list(self.LEGACY_SEARCH_FIELDS), extra, word_fields=())
+        ]
+        if anywhere:
+            tiers.append(self._product_search_query(query, extra, till=False))
+        return self.find_ranked(
+            self.search_products_filter(
+                query, category, is_active=is_active, created_by=created_by, anywhere=anywhere
+            ),
+            tiers,
             skip=skip,
             limit=limit,
         )
+
+    def search_products_filter(
+        self,
+        query: str,
+        category: str = None,
+        *,
+        is_active: Optional[bool] = True,
+        created_by: Optional[str] = None,
+        anywhere: bool = False,
+    ) -> Dict:
+        """THE filter search_products lists and count_search_products counts --
+        one builder, so a list, its total and the counter stock lookup's total
+        (which ORs it into a wider query) can never disagree."""
+        extra = self._search_extra_filter(category, is_active, created_by)
+        if anywhere:
+            return self._product_search_query(query, extra)
+        return self._search_query(query, list(self.SEARCH_FIELDS), extra)
 
     def count_search_products(
         self,
@@ -204,11 +369,12 @@ class ProductRepository(BaseRepository):
         *,
         is_active: Optional[bool] = True,
         created_by: Optional[str] = None,
+        anywhere: bool = False,
     ) -> int:
-        return self.search_count(
-            query,
-            list(self.SEARCH_FIELDS),
-            self._search_extra_filter(category, is_active, created_by),
+        return self.count(
+            self.search_products_filter(
+                query, category, is_active=is_active, created_by=created_by, anywhere=anywhere
+            )
         )
 
     def cataloguer_stats(self) -> List[Dict]:

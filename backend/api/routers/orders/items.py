@@ -116,7 +116,7 @@ async def add_order_item(
             r in current_user.get("roles", []) for r in ("SUPERADMIN", "ADMIN")
         )
         _line_gate = _enforce_line_pricing(
-            item, product, is_admin=_is_admin, role_cap=_role_cap
+            item, product, is_admin=_is_admin, role_cap=_role_cap, user=current_user
         )
         _cap = _line_gate["cap"]
         _eff_disc = _line_gate["eff_disc"]
@@ -228,6 +228,7 @@ async def add_order_item(
                 _f(cart_discount_percent) > 0
                 or _f(order.get("cart_discount_amount")) > 0
             ),
+            user=current_user,
         )
 
         # ------------------------------------------------------------------

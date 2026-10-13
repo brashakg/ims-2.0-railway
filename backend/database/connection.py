@@ -185,6 +185,23 @@ class DatabaseConnection:
                 label = kw.get("name") or (keys if isinstance(keys, str) else str(keys))
                 failures.append("%s/%s: %s" % (coll_name, label, str(e)[:160]))
 
+        def _backstop(coll_name, keys, **kw):
+            """A UNIQUE index that guards correctness, not speed: a failed
+            build is logged as CRITICAL by name on every boot, not only in the
+            summary at the end. A safety net whose absence is invisible is
+            not a safety net. Non-fatal by design (the code above each one
+            still holds); the log line is how its absence is seen."""
+            before = len(failures)
+            _idx(coll_name, keys, **kw)
+            if len(failures) > before:
+                import logging
+
+                logging.getLogger(__name__).error(
+                    "[DB] CRITICAL: backstop index %s is NOT in place: %s",
+                    kw.get("name"),
+                    failures[-1],
+                )
+
         # Orders -- most queried collection.
         _idx("orders", "order_id", unique=True, background=True)
         _idx("orders", "store_id", background=True)
@@ -253,10 +270,11 @@ class DatabaseConnection:
         _idx("products", "identity_key", unique=True, sparse=True, background=True)
         _idx("products", "is_active", background=True)
         _idx("products", [("store_id", 1), ("category", 1)], background=True)
-        # Prefix-search indexes for the searchable fields (brand, model, sku, variant).
-        # The search() method now anchors regex patterns with ^, enabling MongoDB to
-        # use these indexes instead of full collection scans. Compound indexes on each
-        # field + is_active for the most common filter pattern.
+        # Search indexes for the searchable fields (brand, model, sku, variant).
+        # search() anchors code fields with ^ so MongoDB can use these; brand
+        # and model also match at any word start (product WORD_SEARCH_FIELDS),
+        # which scans. Compound indexes on each field + is_active for the
+        # common filter.
         _idx("products", [("brand", 1), ("is_active", 1)], background=True)
         _idx("products", [("model", 1), ("is_active", 1)], background=True)
         _idx("products", [("variant", 1), ("is_active", 1)], background=True)
@@ -357,8 +375,7 @@ class DatabaseConnection:
         # NOTE the ordinal is load-bearing: an index on (source_id,
         # grn_line_index) alone would collide on the 2nd..Nth unit of every
         # multi-quantity line and silently receive 1 unit instead of N.
-        _grn_idx_failures_before = len(failures)
-        _idx(
+        _backstop(
             "stock_units",
             [("source_id", 1), ("grn_line_index", 1), ("line_unit_seq", 1)],
             unique=True,
@@ -370,20 +387,10 @@ class DatabaseConnection:
             name="uniq_grn_line_unit_seq",
             background=True,
         )
-        if len(failures) > _grn_idx_failures_before:
-            # LOUD, not just the aggregated stdout summary at the end of this
-            # method: a safety net whose absence is invisible is not a safety
-            # net. (An IndexOptionsConflict here would mean the same key pattern
-            # was already created under a different name.) Non-fatal by design --
-            # the router's claim + fail-closed heartbeat still hold, and it also
-            # verifies this index's presence at accept time and logs an error.
-            import logging
-
-            logging.getLogger(__name__).error(
-                "[DB] CRITICAL: the GRN duplicate-unit backstop index "
-                "uniq_grn_line_unit_seq FAILED to build: %s",
-                failures[-1],
-            )
+        # (An IndexOptionsConflict on it would mean the same key pattern was
+        # already created under a different name. The router's claim +
+        # fail-closed heartbeat still hold, and grn_accept_lock also verifies
+        # this index's presence at accept time.)
 
         # Users
         _idx("users", "user_id", unique=True, background=True)
@@ -770,7 +777,10 @@ class DatabaseConnection:
         # HERE because ensure_indexes is the live startup path. FAIL-SOFT: prod
         # may hold duplicate DC rows until the dedup script runs -- _idx
         # collects the failure as a startup warning, never aborts.
-        _idx(
+        # Both grns indexes are _backstop: F28's "two identical receipts at
+        # once" relies on them, and prod may lack them (duplicates block the
+        # build), so their absence is a CRITICAL line on every boot.
+        _backstop(
             "grns",
             [("vendor_id", 1), ("dc_number", 1), ("store_id", 1)],
             unique=True,
@@ -791,7 +801,7 @@ class DatabaseConnection:
         # VOIDed receipt out of the index so the sanctioned void-then-recreate
         # correction path still works ($in in partialFilterExpression needs
         # Mongo 8.0+; prod is 8.3 and eod_tally already relies on it).
-        _idx(
+        _backstop(
             "grns",
             [("vendor_id", 1), ("vendor_invoice_no_norm", 1), ("store_id", 1)],
             unique=True,
@@ -1135,6 +1145,9 @@ class MockCollection:
             elif key == "$and":
                 # Handle $and operator
                 if not all(self._matches_filter(doc, cond) for cond in value):
+                    return False
+            elif key == "$nor":
+                if any(self._matches_filter(doc, cond) for cond in value):
                     return False
             elif isinstance(value, dict):
                 # Handle operators like $regex, $gt, $lt, etc.

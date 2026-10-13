@@ -28,9 +28,6 @@ export type SettingsTab =
   | 'policies'
   | 'refund-policy'
   | 'shopify-live-sync'
-  | 'modules'
-  | 'permissions'
-  | 'discount-caps'
   | 'rules'
   | 'system';
 

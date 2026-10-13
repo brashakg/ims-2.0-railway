@@ -228,8 +228,8 @@ export function InvoiceFormDrawer({
                   A goods bill starts from its goods receipt, so the quantities are tallied before the
                   purchase is final. Close this form and use <span className="font-semibold">Create from GRN</span> (a
                   PO-backed receipt) or <span className="font-semibold">Match DCs to Invoice</span> (Delivery
-                  Challans). Goods bought without a PO? Log them as a Delivery Challan on the
-                  Goods Receipt screen first (tick &lsquo;This is a Delivery Challan&rsquo;, pick the vendor, add what arrived).
+                  Challans). Goods bought without a PO? Ask the shop&rsquo;s store manager to log them as a Delivery
+                  Challan on the Goods Receipt screen first (tick &lsquo;This is a Delivery Challan&rsquo;, pick the vendor, add what arrived).
                 </div>
               )}
             </div>

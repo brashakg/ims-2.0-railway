@@ -212,17 +212,20 @@ def test_vendor_list_names_only_outside_purchase_roles(
 
 def test_one_vendor_name_projection():
     """The vendor list and the debit note's vendor block are one projection
-    (cost_mask.VENDOR_NAME_KEYS): the vendors router keeps no vendor-name key
-    list of its own, and the list handler asks cost_mask for the vendor."""
+    (cost_mask.VENDOR_NAME_KEYS): no module under api/ keeps a vendor-name key
+    list of its own, and the list handler asks cost_mask for the vendor. (A
+    copy that names the keys some other way is held by section 18.)"""
     import ast
-    import inspect
+    from pathlib import Path
 
     from api.routers.vendors import master
 
-    tree = ast.parse(inspect.getsource(master))
+    api_dir = Path(__file__).resolve().parents[1] / "api"
     own = [
-        n.lineno
-        for n in ast.walk(tree)
+        (path.relative_to(api_dir).as_posix(), n.lineno)
+        for path in api_dir.rglob("*.py")
+        if path.name != "cost_mask.py"
+        for n in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
         if isinstance(n, (ast.Tuple, ast.List, ast.Set))
         and {"legal_name", "trade_name"}
         <= {c.value for c in n.elts if isinstance(c, ast.Constant)}
@@ -305,8 +308,10 @@ def test_purchase_roles_still_find_a_vendor_by_gstin(client, real_vendor_repo, r
 # write them plus the Vendor Returns screen (/purchase/vendor-returns also lets
 # WORKSHOP_STAFF in: it logs defective pairs). RMAs have no screen, so only
 # their writers read them.
-_RETURN_WRITERS = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
-_RETURN_READERS = _RETURN_WRITERS + ("WORKSHOP_STAFF",)
+# cost_mask's tuples, not lists written here: the owner ruling they encode is
+# pinned once, in test_the_purchase_rule_follows_the_owner_rulings.
+from api.services.cost_mask import PURCHASE_ROLES as _RETURN_WRITERS  # noqa: E402
+from api.services.cost_mask import RETURN_READERS as _RETURN_READERS  # noqa: E402
 
 SIBLING_READS = [
     ("/api/v1/vendor-returns", "/api/v1/vendor-returns", _RETURN_READERS),
@@ -512,6 +517,7 @@ import copy  # noqa: E402
 
 from api.routers import rtv_debit_notes as dn_router  # noqa: E402
 from api.routers import vendor_returns as vr_router  # noqa: E402
+from api.services.cost_mask import can_see_cost as cost_mask_can_see  # noqa: E402
 from api.services.rtv_debit_note import build_debit_note  # noqa: E402
 
 _GSTIN = "27AAPFU0939F1ZV"
@@ -570,7 +576,9 @@ _SECRETS = (
     "rate_paise",
     "totals",
 )
-_PURCHASE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT", "SUPERADMIN")
+_PURCHASE_ROLES = tuple(
+    r for r in rbac.ALL_ROLES if cost_mask_can_see({"roles": [r]}, "purchase")
+)
 
 
 class _Coll:
@@ -644,7 +652,9 @@ def test_workshop_reads_returns_without_prices_or_supplier(client, return_docs, 
 
 
 # Equality, not a subset (as for the names-only vendor list): no hidden key
-# leaks AND no key the Vendor Returns screen reads goes missing -- status (badge
+# leaks AND no key the Vendor Returns screen reads goes missing. These two sets
+# are the SCREEN's contract, written here on purpose -- not a copy of
+# cost_mask's allow-lists (section 18 holds the routes to those) -- status (badge
 # + Active / History tabs), vendor_name (card heading), return_id (expand +
 # keys), rtv_ref_id (return -> note map, else "Issue Debit Note" 403s),
 # debit_note_id (Print), debit_note_number (the note label).
@@ -795,6 +805,28 @@ def test_buyers_and_catalog_still_read_product_cost(client, product_repo, role, 
     assert row["purchase_price"] == 3088.88
 
 
+# The no-Mongo MockCollection hands back the stored dict itself: a counter read
+# must not strip the cost off the product for the next reader (an ADMIN, and
+# orders/create.py's cost_at_sale).
+@pytest.mark.parametrize("path", PRODUCT_READS)
+def test_counter_read_leaves_the_stored_product_cost(client, monkeypatch, path):
+    from database.connection import MockCollection
+    from database.repositories.product_repository import ProductRepository
+
+    repo = ProductRepository(MockCollection("products"))
+    repo.collection.insert_one(
+        {**_PRODUCT, "_id": "P1", "pricing": {"mrp": 5000, "cost_price": 3173.37}}
+    )
+    monkeypatch.setattr(products_mod, "get_product_repository", lambda: repo)
+    monkeypatch.setattr(cache_mod, "cache", _JsonCache())
+
+    assert "cost_price" not in _product_rows(client, "CASHIER", path)[0]
+    stored = repo.find_by_id("P1")
+    assert stored["cost_price"] == 3173.37
+    assert stored["pricing"]["cost_price"] == 3173.37
+    assert _product_rows(client, "ADMIN", path)[0]["cost_price"] == 3173.37
+
+
 # ACCOUNTANT and CASHIER share the attribution tier ("staff") the key already
 # carried, so only the cost tier keeps their cached pages apart.
 @pytest.mark.parametrize(
@@ -850,29 +882,38 @@ def test_grn_detail_is_store_scoped(monkeypatch):
 # The route's own `_dep` is called for every role: comparing the row with a
 # module constant stayed green when a route was switched onto the READERS
 # tuple, and that gate is the last line once a per-user capability grant lets
-# a request past the middleware.
+# a request past the middleware. Logging a return is the readers' (owner
+# ruling 2026-10-12: WORKSHOP_STAFF logs it, unpriced -- its own capability key,
+# test_counter_roles_no_cost_anywhere); every other write is the writers'.
 @pytest.mark.parametrize(
-    "method,path,template",
+    "method,path,template,gate",
     [
-        ("POST", "/api/v1/vendor-returns", "/api/v1/vendor-returns"),
-        ("POST", "/api/v1/vendor-returns/", "/api/v1/vendor-returns/"),
+        ("POST", "/api/v1/vendor-returns", "/api/v1/vendor-returns", _RETURN_READERS),
+        ("POST", "/api/v1/vendor-returns/", "/api/v1/vendor-returns/", _RETURN_READERS),
         (
             "PATCH",
             "/api/v1/vendor-returns/VR1/status",
             "/api/v1/vendor-returns/{return_id}/status",
+            _RETURN_WRITERS,
         ),
-        ("POST", "/api/v1/rtv-debit-notes/issue", "/api/v1/rtv-debit-notes/issue"),
+        (
+            "POST",
+            "/api/v1/rtv-debit-notes/issue",
+            "/api/v1/rtv-debit-notes/issue",
+            _RETURN_WRITERS,
+        ),
         (
             "GET",
             "/api/v1/rtv-debit-notes/DN-1/tally",
             "/api/v1/rtv-debit-notes/{debit_note_id}/tally",
+            _RETURN_WRITERS,
         ),
     ],
 )
-def test_vendor_return_write_rows_equal_the_code_gate(app, method, path, template):
+def test_vendor_return_write_rows_equal_the_code_gate(app, method, path, template, gate):
     row = rbac.policy_for(method, path)
     assert row["path"] == template
-    assert set(row["allowed"]) - {"SUPERADMIN"} == set(_RETURN_WRITERS)
+    assert set(row["allowed"]) - {"SUPERADMIN"} == set(gate)
     for role in rbac.ALL_ROLES:
         want = role == "SUPERADMIN" or role in row["allowed"]
         assert _route_allows(app, template, role, method) is want, role
@@ -979,9 +1020,58 @@ def catalog_docs(monkeypatch):
     )
 
 
-def _product_cost_answers(client, role):
-    """{product route: did the body carry the per-unit cost} for one role."""
-    out = {p: "cost_price" in _product_rows(client, role, p)[0] for p in PRODUCT_READS}
+# The stock ledger (Reorder dashboard: cost x reorder qty) and the per-unit
+# reads (each unit carries the cost it was received at: ?product_id= and the
+# units / labels view) are product reads too.
+from api.routers.inventory import stock as stock_mod  # noqa: E402
+
+
+class _StockRepo:
+    collection = types.SimpleNamespace(aggregate=lambda _pipeline: [])
+
+    _UNIT = {"stock_id": "S1", "product_id": "P1", "store_id": "BV-TEST-01",
+             "status": "AVAILABLE", "unit_cost": 3173.37, "cost_price": 3173.37,
+             "cost_source": "GRN"}
+
+    def find_by_product_store(self, _pid, _store):
+        return [dict(self._UNIT)]
+
+    def find_many(self, _flt, sort=None, limit=0):
+        return [dict(self._UNIT)]
+
+
+@pytest.fixture
+def stock_docs(monkeypatch):
+    monkeypatch.setattr(stock_mod, "get_stock_repository", lambda: _StockRepo())
+    monkeypatch.setattr(stock_mod, "get_product_repository", lambda: _ProductRepo())
+    monkeypatch.setattr(stock_mod, "_get_db", lambda: None)
+
+
+STOCK_READS = ({}, {"product_id": "P1"})
+
+
+def _product_cost_rows(client, role):
+    """{product-cost read: the object its per-unit cost sits on} for one role:
+    every product read the "product" context gates, the purchase
+    recommendations (recs_db) included."""
+    out = {p: _product_rows(client, role, p)[0] for p in PRODUCT_READS}
+    for params in STOCK_READS:
+        resp = client.get(
+            "/api/v1/inventory/stock",
+            params={"store_id": "BV-TEST-01", **params},
+            headers=_headers(role),
+        )
+        assert resp.status_code == 200, (role, params, resp.text)
+        row = resp.json()["items"][0]
+        assert row["product_id"] == "P1"
+        out[f"inventory/stock {params}"] = row
+    resp = client.get(
+        "/api/v1/inventory/units",
+        params={"store_id": "BV-TEST-01", "product_id": "P1"},
+        headers=_headers(role),
+    )
+    assert resp.status_code == 200, (role, resp.text)
+    out["inventory/units"] = resp.json()["units"][0]
     for path, key in (
         ("/api/v1/catalog/products", "products"),
         ("/api/v1/catalog/products/C1", "product"),
@@ -991,8 +1081,26 @@ def _product_cost_answers(client, role):
         doc = resp.json()[key]
         doc = doc[0] if isinstance(doc, list) else doc
         assert doc["pricing"]["mrp"] == 5000
-        out[path] = "cost_price" in doc["pricing"]
+        out[path] = doc["pricing"]
+    resp = client.get(
+        "/api/v1/reports/purchase/recommendations",
+        params={"store_id": "BV-TEST-01"},
+        headers=_headers(role),
+    )
+    assert resp.status_code == 200, (role, resp.text)
+    body = resp.json()
+    assert body["recommendations"][0]["suggested_order_qty"] == 4
+    out["recommendations"] = body["recommendations"][0]
+    out["recommendations summary"] = body["summary"]
     return out
+
+
+def _product_cost_answers(client, role):
+    """{product-cost read: did it carry any cost field} for one role."""
+    return {
+        route: bool(cost_mask_mod._ALL_MASKED & set(row))
+        for route, row in _product_cost_rows(client, role).items()
+    }
 
 
 def _product_cost_roles():
@@ -1001,7 +1109,7 @@ def _product_cost_roles():
 
 @pytest.mark.parametrize("role", rbac.ALL_ROLES)
 def test_product_cost_is_one_answer_on_every_product_route(
-    client, product_repo, catalog_docs, role
+    client, product_repo, catalog_docs, stock_docs, recs_db, role
 ):
     want = role in _product_cost_roles()
     answers = _product_cost_answers(client, role)
@@ -1026,15 +1134,31 @@ _COST_CELL = os.path.join(
 )
 
 
+_FRONTEND_SRC = os.path.dirname(os.path.dirname(os.path.dirname(_COST_CELL)))
+# Every frontend check on per-unit product cost outside CostCell itself (the
+# Add/Edit-product form's cost field and margin) reads the one list.
+_PRODUCT_COST_SCREENS = ("pages/catalog/quickadd/useQuickAddForm.ts",)
+
+
+def _assert_screens_read(name, screens):
+    """Each screen imports CostCell's `name` and uses it."""
+    for rel in screens:
+        with open(os.path.join(_FRONTEND_SRC, rel), encoding="utf-8") as fh:
+            # Code only: a comment naming the list is not a use of it.
+            code = re.sub(r"/\*.*?\*/|//[^\n]*", "", fh.read(), flags=re.S)
+        assert re.search(r"import\s*\{[^}]*\b" + name + r"\b", code), rel
+        assert len(re.findall(r"\b" + name + r"\b", code)) >= 2, rel
+
+
 @pytest.mark.skipif(not os.path.exists(_COST_CELL), reason="frontend/ not shipped here")
 def test_frontend_cost_cell_is_the_product_context():
     with open(_COST_CELL, encoding="utf-8") as fh:
         m = re.search(r"PRODUCT_COST_ROLES[^=]*=\s*\[([^\]]*)\]", fh.read())
     assert m, "CostCell.tsx no longer declares PRODUCT_COST_ROLES"
     assert set(re.findall(r"'([A-Z_]+)'", m.group(1))) == _product_cost_roles()
+    _assert_screens_read("PRODUCT_COST_ROLES", _PRODUCT_COST_SCREENS)
 
 
-_FRONTEND_SRC = os.path.dirname(os.path.dirname(os.path.dirname(_COST_CELL)))
 # Every frontend check on supplier payments (Finance dashboard tab + schedule,
 # booking a supplier bill, approving a match exception) reads the one list.
 _PAYABLES_SCREENS = (
@@ -1052,12 +1176,7 @@ def test_frontend_payables_roles_are_the_payables_context():
     assert m, "CostCell.tsx no longer declares PAYABLES_ROLES"
     want = {r for r in rbac.ALL_ROLES if can_see_cost({"roles": [r]}, "payables")}
     assert set(re.findall(r"'([A-Z_]+)'", m.group(1))) == want
-    for rel in _PAYABLES_SCREENS:
-        with open(os.path.join(_FRONTEND_SRC, rel), encoding="utf-8") as fh:
-            # Code only: a comment naming the list is not a use of it.
-            code = re.sub(r"/\*.*?\*/|//[^\n]*", "", fh.read(), flags=re.S)
-        assert re.search(r"import\s*\{[^}]*\bPAYABLES_ROLES\b", code), rel
-        assert len(re.findall(r"\bPAYABLES_ROLES\b", code)) >= 2, rel
+    _assert_screens_read("PAYABLES_ROLES", _PAYABLES_SCREENS)
 
 
 # ---------------------------------------------------------------------------
@@ -1097,6 +1216,11 @@ class _RecsDb:
         return _RecsColl(
             {"orders": [_SALES], "products": [_RECS_PRODUCT], "stock_units": []}[name]
         )
+
+
+@pytest.fixture
+def recs_db(monkeypatch):
+    monkeypatch.setattr(recs_mod, "get_db", lambda: _RecsDb())
 
 
 @pytest.mark.parametrize("role", rbac.ALL_ROLES)
@@ -1140,6 +1264,17 @@ class _CashDb:
     def get_collection(self, name):
         rows = [{"_id": None, "total": _PAID_TO_VENDORS}]
         return _RecsColl(rows if name == "vendor_payments" else [])
+
+
+_PAID_POS = 6543.21
+
+
+class _PaidPoDb:
+    """Paid purchase orders only: the cash-flow paid-PO total's one source."""
+
+    def get_collection(self, name):
+        rows = [{"_id": None, "total": _PAID_POS}]
+        return _RecsColl(rows if name == "purchase_orders" else [])
 
 
 def _vendor_payments_admits(monkeypatch, role):
@@ -1223,14 +1358,132 @@ def _admits(call):
     return True
 
 
+# The purchase screens' reads of supplier-bill money: the PO drawer's bill
+# amount + paid status (/purchase-orders/{po_id}/timeline) and the vendor
+# card's month-to-date bill total (/{vendor_id}/performance). Their route gate
+# admits the store / area manager (a PO is theirs to chase); the bill money in
+# them is the payables rule's alone.
+_BILL_TOTAL = 8888.88
+_MTD_TOTAL = 6666.66
+
+
+class _Cursor(list):
+    def limit(self, _n):
+        return self
+
+    def sort(self, *_a, **_k):
+        return self
+
+
+class _BillDb:
+    """One purchase bill (PAID unless given) on PO1, dated this month; every
+    other collection is empty."""
+
+    def __init__(self, status="PAID"):
+        self.status = status
+
+    def get_collection(self, name):
+        from api.routers.vendors._shared import now_ist
+
+        bill = {
+            "doc_type": "PURCHASE_INVOICE", "po_id": "PO1", "vendor_id": "V1",
+            "bill_id": "B1", "invoice_number": "INV-9", "status": self.status,
+            "total": _BILL_TOTAL, "total_amount": _MTD_TOTAL,
+            "bill_date": now_ist().strftime("%Y-%m-01"),
+            "created_at": "2026-06-06T10:00:00",
+        }
+        rows = [bill] if name == "vendor_bills" else []
+        return types.SimpleNamespace(find=lambda *_a, **_k: _Cursor(rows))
+
+
+class _TimelinePORepo:
+    def find_by_id(self, po_id):
+        return {
+            "po_id": po_id, "po_number": "PO-1", "vendor_id": "V1",
+            "delivery_store_id": "BV-TEST-01", "status": "RECEIVED",
+        }
+
+
+def _bill_reads(monkeypatch):
+    monkeypatch.setattr(
+        vendors_mod, "get_purchase_order_repository", lambda: _TimelinePORepo()
+    )
+    monkeypatch.setattr(
+        vendors_mod,
+        "get_grn_repository",
+        lambda: types.SimpleNamespace(find_many=lambda *_a, **_k: []),
+    )
+    monkeypatch.setattr(vendors_mod, "_get_db", lambda: _BillDb())
+    monkeypatch.setattr(
+        vendors_mod,
+        "get_vendor_repository",
+        lambda: types.SimpleNamespace(find_by_id=lambda _vid: None),
+    )
+
+
+def _bill_money_answers(monkeypatch, role):
+    """{read: does `role` get the bill money} for the two purchase-screen reads,
+    handlers called directly (past their purchase-role gate)."""
+    _bill_reads(monkeypatch)
+    user = {"roles": [role], "store_ids": ["BV-TEST-01"], "active_store_id": "BV-TEST-01"}
+    tl = asyncio.run(vendors_mod.get_po_timeline("PO1", current_user=user))
+    perf = asyncio.run(vendors_mod.vendor_performance("V1", months=6, current_user=user))
+    (inv,) = tl["invoices"]
+    assert inv["invoice_number"] == "INV-9", inv  # that a bill exists stays
+    (event,) = [e for e in tl["events"] if e["kind"] == "bill_settled"]
+    return {
+        "po-timeline bill total": "total" in inv,
+        "po-timeline bill status": "status" in inv,
+        "po-timeline event status": "PAID" in event["detail"],
+        "vendor mtd spend": "mtd_spend" in perf,
+    }
+
+
+@pytest.mark.parametrize("role", ("STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT", "ADMIN"))
+def test_supplier_bill_money_on_the_purchase_screens_is_accounts_only(
+    client, monkeypatch, role
+):
+    _bill_reads(monkeypatch)
+    sees = role in AP_ROLES
+    tl = client.get("/api/v1/vendors/purchase-orders/PO1/timeline", headers=_headers(role))
+    perf = client.get("/api/v1/vendors/V1/performance", headers=_headers(role))
+    assert tl.status_code == perf.status_code == 200, (tl.text, perf.text)
+    assert "INV-9" in tl.text, tl.text
+    assert (str(_BILL_TOTAL) in tl.text) is sees, tl.text
+    assert ("PAID" in tl.text) is sees, tl.text
+    assert ("mtd_spend" in perf.json()) is sees, perf.text
+    assert (str(_MTD_TOTAL) in perf.text) is sees, perf.text
+
+
+@pytest.mark.parametrize("role", ("STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT", "ADMIN"))
+def test_the_po_timeline_never_calls_an_unpaid_bill_settled(client, monkeypatch, role):
+    # The paid status is the payables rule's; a reader denied it must not be
+    # told it either way by the event's label (it said "Bill settled" for every
+    # bill, and only the hidden "(OUTSTANDING)" corrected it).
+    _bill_reads(monkeypatch)
+    monkeypatch.setattr(vendors_mod, "_get_db", lambda: _BillDb("OUTSTANDING"))
+    tl = client.get("/api/v1/vendors/purchase-orders/PO1/timeline", headers=_headers(role))
+    assert tl.status_code == 200, tl.text
+    (event,) = [e for e in tl.json()["events"] if e["ref"] == "INV-9"]
+    assert event["label"] == "Bill booked", event
+    assert ("OUTSTANDING" in event["detail"]) is (role in AP_ROLES), event
+
+
 def _supplier_payment_answers(monkeypatch, role):
     """{read: does `role` get supplier payments} for every request-time check."""
     from api.routers.finance import bank_statement as bs
     from api.routers.finance import survival as survival_mod
 
+    bills = _bill_money_answers(monkeypatch, role)
     monkeypatch.setattr(cash_flow_mod, "_get_db", lambda: _CashDb())
     user = {"roles": [role]}
     body = asyncio.run(
+        cash_flow_mod.get_cash_flow(period="month", store_id=None, current_user=user)
+    )
+    # The paid-PO total, alone in its own db: in a key, or folded into
+    # `outflows` (which would hand it back as outflows - expense_outflow).
+    monkeypatch.setattr(cash_flow_mod, "_get_db", lambda: _PaidPoDb())
+    paid_pos = asyncio.run(
         cash_flow_mod.get_cash_flow(period="month", store_id=None, current_user=user)
     )
     try:
@@ -1245,7 +1498,9 @@ def _supplier_payment_answers(monkeypatch, role):
         monkeypatch.setattr(mod, "_get_db", _reached)
     upload = types.SimpleNamespace(filename="statement.txt")
     return {
+        **bills,
         "cash-flow total": "vendor_payment_outflow" in body,
+        "cash-flow paid POs": "purchase_outflow" in paid_pos or paid_pos["outflows"] != 0,
         "vendor-payments": _vendor_payments_admits(monkeypatch, role),
         "vendor rebates": rebates,
         "owner-dashboard payables": _admits(
@@ -1294,12 +1549,12 @@ def test_narrowing_the_accounts_set_moves_every_supplier_payment_read(monkeypatc
 
 
 # Every route whose handler-wide gate is the accounts rule, read off the code:
-# require_roles(*_AP_ROLES) (vendor AP, purchase invoices / recon, TDS), a
-# first-level _require_finance_admin (finance owner reads, ITC, Tally, GST),
-# /finance/vendor-payments' can_see_cost refusal, and vendor_rebates' _require.
+# a require_roles on the AP_ROLES object itself (vendor AP, purchase invoices /
+# recon, TDS -- section 20), a first-level _require_finance_admin (finance
+# owner reads, ITC, Tally, GST), /finance/vendor-payments' can_see_cost
+# refusal, and vendor_rebates' _require.
 _ACCOUNTS_GATE = re.compile(
-    r"require_roles\(\*_AP_ROLES\)"
-    r"|^    _require_finance_admin\(current_user\)"
+    r"^    _require_finance_admin\(current_user\)"
     r'|^    if not can_see_cost\(current_user, "payables"\)'
     r'|^    _require\(current_user, "',
     re.M,
@@ -1314,7 +1569,7 @@ def _accounts_gated_routes(app):
             src = inspect.getsource(endpoint)
         except (TypeError, OSError):
             continue
-        if _ACCOUNTS_GATE.search(src):
+        if _ACCOUNTS_GATE.search(src) or _route_gate_constant(route) is AP_ROLES:
             out |= {(m, route.path) for m in route.methods - {"HEAD", "OPTIONS"}}
     return out
 
@@ -1347,3 +1602,286 @@ def test_every_accounts_route_row_is_the_one_list(app):
     }
     assert not wrong, wrong
     assert ACCOUNTS == sorted(AP_ROLES)
+
+
+# ---------------------------------------------------------------------------
+# 18. ONE rule, followed: change cost_mask and every read changes with it
+# ---------------------------------------------------------------------------
+# A route keeping a copy of the rule -- its own role set, its own key
+# allow-list, its own vendor-by-name projection, a strip by key prefix --
+# answers exactly like cost_mask until the rule changes, so every equality test
+# above stays green while the copy drifts (panel: router copies of
+# mask_vendor_return / mask_debit_note and a _BUYER_ROLES prefix strip on
+# /products/{id} passed all of them). Each test changes the rule IN cost_mask
+# and asserts every read follows; a copy cannot.
+def _price_leaks(client, role, path):
+    resp = client.get(path, headers=_headers(role))
+    assert resp.status_code == 200, (role, path, resp.text)
+    return [s for s in _SECRETS if s in resp.text]
+
+
+def test_narrowing_the_purchase_rule_moves_every_purchase_read(
+    client, vendor_repo, return_docs, monkeypatch
+):
+    # STORE_MANAGER still passes every route gate; only the mask rule moves.
+    assert all(_price_leaks(client, "STORE_MANAGER", p) for p in RETURN_DOC_READS)
+    monkeypatch.setitem(
+        cost_mask_mod._CONTEXT_ROLES,
+        "purchase",
+        cost_mask_mod._CONTEXT_ROLES["purchase"] - {"STORE_MANAGER"},
+    )
+    for path in RETURN_DOC_READS:
+        assert not _price_leaks(client, "STORE_MANAGER", path), path
+        assert _price_leaks(client, "AREA_MANAGER", path), path
+    resp = client.get("/api/v1/vendors", headers=_headers("STORE_MANAGER"))
+    assert set(resp.json()["vendors"][0]) == _NAME_KEYS
+
+
+def test_narrowing_the_purchase_rule_moves_the_vendor_search(
+    client, real_vendor_repo, monkeypatch
+):
+    # Which keys ?search may match (the GSTIN-oracle guard, section 5) is the
+    # purchase rule too: a written-out copy of it kept matching the gstin for a
+    # role the rule had dropped, and every other test stayed green.
+    assert _search(client, "STORE_MANAGER", "27AAPFU")
+    monkeypatch.setitem(
+        cost_mask_mod._CONTEXT_ROLES,
+        "purchase",
+        cost_mask_mod._CONTEXT_ROLES["purchase"] - {"STORE_MANAGER"},
+    )
+    assert _search(client, "STORE_MANAGER", "27AAPFU") == []
+    assert _search(client, "STORE_MANAGER", "acme")
+    assert _search(client, "AREA_MANAGER", "27AAPFU")
+
+
+def _without(seq, key):
+    assert key in seq, key
+    return tuple(k for k in seq if k != key)
+
+
+def _names_only_reads(client):
+    """What WORKSHOP_STAFF reads of a return / debit note, and a cashier of a
+    vendor."""
+    def get(path, role="WORKSHOP_STAFF"):
+        resp = client.get(path, headers=_headers(role))
+        assert resp.status_code == 200, (path, resp.text)
+        return resp
+
+    returns = [
+        get("/api/v1/vendor-returns/VR1").json(),
+        get("/api/v1/vendor-returns").json()["returns"][0],
+    ]
+    notes = [
+        get("/api/v1/rtv-debit-notes/DN-1").json(),
+        get("/api/v1/rtv-debit-notes").json()["debit_notes"][0],
+    ]
+    printed = get("/api/v1/rtv-debit-notes/DN-1/print").text
+    vendor = get("/api/v1/vendors", "CASHIER").json()["vendors"][0]
+    return returns, notes, printed, vendor
+
+
+def test_the_purchase_projections_are_cost_mask_s(
+    client, vendor_repo, return_docs, monkeypatch
+):
+    # One key out of every allow-list (each a key the fixtures carry and the
+    # unchanged rule shows a names-only caller): every read must drop it.
+    returns, notes, printed, vendor = _names_only_reads(client)
+    assert all("notes" in r and "reason" in r["items"][0] for r in returns)
+    assert all("financial_year" in n and "hsn" in n["lines"][0] for n in notes)
+    assert all(n["vendor"] == {"vendor_id": "V1", "name": "Acme"} for n in notes)
+    assert "9003" in printed and {"vendor_id", "vendor_code"} <= set(vendor)
+
+    for name, keys in (
+        ("_RETURN_KEYS", ("notes",)),
+        ("_RETURN_ITEM_KEYS", ("reason",)),
+        ("_DEBIT_NOTE_KEYS", ("financial_year",)),
+        ("_DEBIT_NOTE_LINE_KEYS", ("hsn",)),
+        ("VENDOR_NAME_KEYS", ("vendor_id", "vendor_code")),
+    ):
+        narrowed = getattr(cost_mask_mod, name)
+        for key in keys:
+            narrowed = _without(narrowed, key)
+        monkeypatch.setattr(cost_mask_mod, name, narrowed)
+
+    returns, notes, printed, vendor = _names_only_reads(client)
+    assert not any("notes" in r or "reason" in r["items"][0] for r in returns), returns
+    assert not any("financial_year" in n or "hsn" in n["lines"][0] for n in notes), notes
+    assert all(n["vendor"] == {"name": "Acme"} for n in notes), notes
+    assert "9003" not in printed
+    assert not {"vendor_id", "vendor_code"} & set(vendor), vendor
+
+
+def test_narrowing_the_product_rule_moves_every_product_read(
+    client, product_repo, catalog_docs, stock_docs, recs_db, monkeypatch
+):
+    monkeypatch.setitem(
+        cost_mask_mod._CONTEXT_ROLES,
+        "product",
+        cost_mask_mod._CONTEXT_ROLES["product"] - {"STORE_MANAGER"},
+    )
+    answers = _product_cost_answers(client, "STORE_MANAGER")
+    assert not any(answers.values()), answers
+    assert all(_product_cost_answers(client, "AREA_MANAGER").values())
+    resp = client.get(
+        "/api/v1/reports/purchase/recommendations",
+        params={"store_id": "BV-TEST-01"},
+        headers=_headers("STORE_MANAGER"),
+    )
+    assert resp.status_code == 200, resp.text
+    assert "1111.11" not in resp.text and "4444.44" not in resp.text, resp.text
+
+
+def test_unhiding_a_cost_field_moves_every_product_read(
+    client, product_repo, catalog_docs, stock_docs, recs_db, monkeypatch
+):
+    # Which fields are cost is cost_mask's answer too, on every product-cost
+    # read: a route that asks can_see_cost for WHO but keeps its own list of
+    # WHICH fields (a pop of cost_price, every key starting "cost" or
+    # "purchase", cost_price added for some roles) keeps hiding the one field
+    # unhidden here, or shows another.
+    masked = cost_mask_mod._ALL_MASKED
+    shown = {
+        route: masked & set(row)
+        for route, row in _product_cost_rows(client, "ADMIN").items()
+    }
+    assert all(shown.values()), shown
+    for field in sorted(set().union(*shown.values())):
+        monkeypatch.setattr(cost_mask_mod, "_ALL_MASKED", masked - {field})
+        # /products caches its masked page; a rule change is a new page.
+        monkeypatch.setattr(cache_mod, "cache", _JsonCache())
+        rows = _product_cost_rows(client, "CASHIER")
+        seen = {route: keys & set(rows[route]) for route, keys in shown.items()}
+        assert seen == {r: k & {field} for r, k in shown.items()}, (field, seen)
+
+
+# ---------------------------------------------------------------------------
+# 19. ONE purchase list in rbac_policy: every purchase-gated row IS it
+# ---------------------------------------------------------------------------
+# The accounts rows became _core.ACCOUNTS (section 17); the purchase rows still
+# spelled the four roles, so widening cost_mask.PURCHASE_ROLES opened the
+# handler gates and the vendor-list mask while the middleware rows kept
+# refusing: two answers for one role until each row was edited by hand. Every
+# route whose code gate is a purchase tuple is read off the code here, and its
+# row must be the same object as the one list built from that tuple. The
+# code gate is the object its require_roles resolves to (section 20), never
+# its spelling.
+def test_every_purchase_route_row_is_the_one_list(app):
+    from api.services.cost_mask import RECEIVE_ROLES
+    from api.services.rbac_policy._core import (
+        PURCHASE,
+        RECEIVE,
+        RETURN_READERS,
+    )
+
+    lists = {
+        id(PURCHASE_ROLES): PURCHASE,
+        id(_RETURN_READERS): RETURN_READERS,
+        id(RECEIVE_ROLES): RECEIVE,
+    }
+    want = {}
+    for route in app.routes:
+        gate = lists.get(id(_route_gate_constant(route)))
+        if gate is None:
+            continue
+        for method in route.methods - {"HEAD", "OPTIONS"}:
+            want[(method, route.path)] = gate
+    assert {
+        ("GET", "/api/v1/vendors/{vendor_id}"),
+        ("GET", "/api/v1/vendors/purchase-orders"),
+        ("GET", "/api/v1/vendors/grn"),
+        ("GET", "/api/v1/vendor-rma/{rma_id}"),
+        ("GET", "/api/v1/vendor-returns/{return_id}"),
+        ("GET", "/api/v1/rtv-debit-notes/{debit_note_id}/print"),
+        ("POST", "/api/v1/rtv-debit-notes/issue"),
+        ("POST", "/api/v1/vendors/grn"),
+        ("POST", "/api/v1/vendors/purchase-orders"),
+        ("PUT", "/api/v1/vendors/purchase-orders/{po_id}"),
+    } <= set(want)
+    wrong = {
+        key: rbac.policy_for(*key)["allowed"]
+        for key, gate in want.items()
+        if rbac.policy_for(*key)["allowed"] is not gate
+    }
+    assert not wrong, wrong
+    assert PURCHASE == sorted(PURCHASE_ROLES)
+    assert RETURN_READERS == sorted(_RETURN_READERS)
+    assert RECEIVE == sorted(RECEIVE_ROLES)
+    assert vr_router._VENDOR_RETURN_READERS is _RETURN_READERS
+
+
+def test_the_purchase_rule_follows_the_owner_rulings():
+    # D7 / 2026-09-29: who buys, receives and pays suppliers sees what was paid
+    # and to whom; the workshop reads returns without it; the counter never.
+    assert set(PURCHASE_ROLES) == {"ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT"}
+    assert set(_RETURN_READERS) == set(PURCHASE_ROLES) | {"WORKSHOP_STAFF"}
+
+
+# ---------------------------------------------------------------------------
+# 20. No hand-written role list in the purchase / supplier-money routers
+# ---------------------------------------------------------------------------
+# Sections 17 and 19 read each route's gate off its code BY NAME, so a gate
+# written out as roles -- require_roles("ADMIN", "ACCOUNTANT") or a local
+# tuple spelling them -- dropped out of both checks and every test stayed green
+# (panel mutants: the PO timeline and a vendor's payments list). Every
+# require_roles in these routers must be require_roles(*NAME) where NAME IS one
+# of cost_mask's role constants (identity, not equality), and sections 17 / 19
+# classify a route by that object, not by its spelling.
+import ast  # noqa: E402
+import importlib  # noqa: E402
+import pkgutil  # noqa: E402
+import textwrap  # noqa: E402
+
+from api.services.cost_mask import RECEIVE_ROLES  # noqa: E402
+
+# RECEIVE_ROLES: receiving is managers only (owner ruling 2026-09-28).
+_GATE_CONSTANTS = (AP_ROLES, PURCHASE_ROLES, _RETURN_READERS, RECEIVE_ROLES)
+_MONEY_ROUTERS = (
+    "vendors", "finance", "purchase_invoices", "purchase_recon",
+    "rtv_debit_notes", "vendor_returns", "vendor_rma", "vendor_rebates",
+)
+
+
+def _role_gates(src, namespace):
+    """The object every require_roles(...) call in `src` gates on: the constant
+    NAME resolves to for require_roles(*NAME), None for anything else."""
+    for node in ast.walk(ast.parse(textwrap.dedent(src))):
+        func = getattr(node, "func", None)
+        if getattr(func, "id", getattr(func, "attr", None)) != "require_roles":
+            continue
+        (arg,) = node.args if len(node.args) == 1 and not node.keywords else (None,)
+        if isinstance(arg, ast.Starred) and isinstance(arg.value, ast.Name):
+            yield node.lineno, namespace.get(arg.value.id)
+        else:
+            yield node.lineno, None
+
+
+def _route_gate_constant(route):
+    """The cost_mask constant a route's own require_roles gates on, or None."""
+    try:
+        src = inspect.getsource(route.endpoint)
+    except (AttributeError, TypeError, OSError):
+        return None
+    for _line, gate in _role_gates(src, route.endpoint.__globals__):
+        for const in _GATE_CONSTANTS:
+            if gate is const:
+                return const
+    return None
+
+
+def _money_router_modules():
+    for name in _MONEY_ROUTERS:
+        mod = importlib.import_module(f"api.routers.{name}")
+        yield mod
+        for info in pkgutil.iter_modules(getattr(mod, "__path__", [])):
+            yield importlib.import_module(f"{mod.__name__}.{info.name}")
+
+
+def test_every_money_router_gate_is_a_cost_mask_constant():
+    found, wrong = 0, []
+    for mod in _money_router_modules():
+        for line, gate in _role_gates(inspect.getsource(mod), vars(mod)):
+            found += 1
+            if not any(gate is const for const in _GATE_CONSTANTS):
+                wrong.append(f"{mod.__name__}:{line}")
+    assert found >= 70, found  # the scan reads the routers, not nothing
+    assert not wrong, wrong
