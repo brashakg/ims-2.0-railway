@@ -347,6 +347,98 @@ def test_completing_the_task_fixes_its_flags(env):
     assert _flags(env["db"], "P2")[0]["status"] == "fixed"
 
 
+class _RaceColl:
+    """The products collection with one action slipped in right after the
+    next read: the window in which a read-then-write of the flags list
+    would lose what happened meanwhile."""
+
+    def __init__(self, coll, between):
+        self._c, self._between = coll, between
+
+    def __getattr__(self, name):
+        return getattr(self._c, name)
+
+    def find_one(self, *a, **kw):
+        doc = self._c.find_one(*a, **kw)
+        between, self._between = self._between, None
+        if between:
+            between()
+        return doc
+
+
+def _race(monkeypatch, env, between):
+    race = _RaceColl(env["db"].products, between)
+    monkeypatch.setattr(catalog_flags, "_products", lambda: race)
+
+
+def test_a_flag_raised_during_a_fix_stays_with_its_task(env, monkeypatch):
+    _flag(env, ADMIN, ["P1"])  # needs_revision, task T1
+    (t1,) = list(env["db"].tasks.find({}))
+    t2 = {}
+
+    def store_manager_flags_price():
+        t2.update(catalog_flags.raise_flags(["P1"], "price_check", "", STORE_MGR)["tasks"][0])
+
+    _race(monkeypatch, env, store_manager_flags_price)
+    assert _fix(env, "P1").status_code == 200  # Mark fixed on needs_revision
+    flags = {f["type"]: f for f in _flags(env["db"], "P1")}
+    assert flags["needs_revision"]["status"] == "fixed"
+    assert flags["price_check"]["status"] == "open"
+    assert flags["price_check"]["task_id"] == t2["task_id"]
+    tasks = {t["task_id"]: t["status"] for t in env["db"].tasks.find({})}
+    assert tasks == {t1["task_id"]: "COMPLETED", t2["task_id"]: "OPEN"}
+
+
+def test_two_fixes_at_once_never_reopen_a_finished_flag(env, monkeypatch):
+    _flag(env, ADMIN, ["P1"])
+    _flag(env, ADMIN, ["P1"], type_="price_check", note="")
+    first, second = _flags(env["db"], "P1")
+    _race(monkeypatch, env, lambda: catalog_flags.fix_flags("P1", [first["flag_id"]], CAT_MGR))
+    res = env["call"](CAT_MGR, "POST", "/api/v1/catalog/flags/fix",
+                      json={"product_id": "P1", "flag_ids": [second["flag_id"]]})
+    assert res.status_code == 200
+    assert [f["status"] for f in _flags(env["db"], "P1")] == ["fixed", "fixed"]
+    assert {t["status"] for t in env["db"].tasks.find({})} == {"COMPLETED"}
+
+
+def test_a_flag_withdrawn_during_a_fix_stays_withdrawn(env, monkeypatch):
+    _flag(env, ADMIN, ["P1"])
+    (task,) = list(env["db"].tasks.find({}))
+    _race(monkeypatch, env, lambda: catalog_flags.on_task_closed(task, ADMIN, "CANCELLED"))
+    assert _fix(env, "P1").status_code == 200
+    (flag,) = _flags(env["db"], "P1")
+    assert (flag["status"], flag["fixed_by"]) == ("withdrawn", "u-admin")
+
+
+def test_a_flag_fixed_before_its_task_existed_closes_that_task(env, monkeypatch):
+    from api.services import task_triggers
+
+    real = task_triggers.create_system_task
+
+    def fixed_first(*a, **kw):
+        (flag,) = _flags(env["db"], "P1")
+        catalog_flags.fix_flags("P1", [flag["flag_id"]], CAT_MGR)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(task_triggers, "create_system_task", fixed_first)
+    _flag(env, ADMIN, ["P1"])
+    (task,) = list(env["db"].tasks.find({}))
+    assert task["status"] == "COMPLETED"
+    assert _flags(env["db"], "P1")[0]["task_id"] == task["task_id"]
+
+
+def test_two_people_flagging_the_same_type_at_once_make_one_flag(env, monkeypatch):
+    inner = {}
+    _race(monkeypatch, env, lambda: inner.update(
+        catalog_flags.raise_flags(["P1"], "needs_revision", "", STORE_MGR)))
+    res = _flag(env, ADMIN, ["P1"])
+    assert inner["results"][0]["status"] == "done"
+    assert res.json()["results"][0]["status"] == "already" and res.json()["tasks"] == []
+    (flag,) = _flags(env["db"], "P1")
+    (task,) = list(env["db"].tasks.find({}))
+    assert flag["status"] == "open" and flag["task_id"] == task["task_id"]
+
+
 def test_cataloguers_mark_fixed_store_managers_do_not(env):
     _flag(env, ADMIN, ["P1"])
     assert _fix(env, "P1", user=STORE_MGR).status_code == 403
@@ -413,6 +505,42 @@ def test_the_single_delete_door_and_the_bulk_door_are_one_rule(env):
     spine = env["db"].products.find_one({"product_id": "P1"})
     assert spine["is_active"] is False and spine["deleted_by"] == "u-admin"
     assert len(env["spy"].calls) == 1
+
+
+def test_every_archive_and_restore_door_clears_the_cached_lists(env, monkeypatch):
+    import api.services.cache as cache_mod
+
+    seen = []
+
+    class _Spy(cache_mod.cache.__class__):
+        def delete_pattern(self, p):
+            # What the next uncached list read would see at that moment.
+            seen.append((p, bool(env["db"].products.find_one({"product_id": "P1"})["deleted_at"])))
+
+    monkeypatch.setattr(cache_mod, "cache", _Spy())
+    asyncio.run(catalog_mod.delete_catalog_product("T-P1", current_user=ADMIN))
+    assert seen == [("products:*", True)]  # the single Delete door, after the write
+    seen.clear()
+    _restore(env, ["P1"])
+    assert seen == [("products:*", False)]
+    seen.clear()
+    _archive(env, ["P1"])
+    assert seen == [("products:*", True)]
+
+
+def test_a_blank_deleted_at_is_not_archived_anywhere(env):
+    env["db"].products.update_one({"product_id": "P3"}, {"$set": {"deleted_at": ""}})
+    assert "P3" in _list(ADMIN, sort="edited", is_active="true")
+    assert "P3" not in _list(ADMIN, sort="edited", flag="archived")
+    from api.services.catalog_list import ARCHIVED, NOT_ARCHIVED
+
+    every = env["db"].products.count_documents({})
+    assert (env["db"].products.count_documents(ARCHIVED)
+            + env["db"].products.count_documents(NOT_ARCHIVED)) == every
+    _archive(env, ["P1"])
+    env["db"].products.update_one({"product_id": "P2"}, {"$unset": {"deleted_at": ""}})
+    assert env["db"].products.count_documents(ARCHIVED) == 1
+    assert env["db"].products.count_documents(NOT_ARCHIVED) == every - 1
 
 
 # ---------------------------------------------------------------------------
@@ -1009,8 +1137,8 @@ def test_an_imported_row_and_every_door_find_the_same_spine(env):
     db.catalog_products.delete_many({})
     db.products.delete_many({})
     db.products.insert_many([
-        # T-X: spine A carries T-X only as its pim_product_id; spine B has
-        # T-X's sku. THE rule (id = product_id, else sku) picks B.
+        # T-X: spine A links T-X as its pim_product_id (the create door's
+        # link); spine B only shares T-X's sku. THE rule picks A, both ways.
         _spine("A", "u-akshay", pim_product_id="T-X", sku="SKU-A"),
         _spine("B", "u-mansi", pim_product_id="other", sku="SKU-X"),
         # T-Y: a spine shares its id, another has its sku. The id wins.
@@ -1022,18 +1150,37 @@ def test_an_imported_row_and_every_door_find_the_same_spine(env):
         {"id": "T-Y", "sku": "SKU-Y", "title": "Y", "needs_review": True, "is_active": True},
     ])
     rows = {r["id"]: r for r in _imported(ADMIN, "name_asc")}
-    assert (rows["T-X"]["created_by"], rows["T-X"]["created_by_name"]) == ("u-mansi", "Mansi Kumari")
+    assert (rows["T-X"]["created_by"], rows["T-X"]["created_by_name"]) == ("u-akshay", "Akshay Ovhal")
     assert (rows["T-Y"]["created_by"], rows["T-Y"]["created_by_name"]) == ("u-akshay", "Akshay Ovhal")
     # The edit door acts on that same spine, and the column then shows its edit.
     res = env["call"](CAT_MGR, "PUT", "/api/v1/catalog/products/T-X", json={"name": "X renamed"})
     assert res.status_code == 200, res.text
-    assert db.products.find_one({"product_id": "B"})["updated_by"] == "u-mansi"
-    assert not db.products.find_one({"product_id": "A"}).get("updated_by")
+    assert db.products.find_one({"product_id": "A"})["updated_by"] == "u-mansi"
+    assert not db.products.find_one({"product_id": "B"}).get("updated_by")
     assert _imported(ADMIN, "edited")[0]["id"] == "T-X"
-    # The archive door too: archiving T-X archives B, never A.
+
+    def deleted(pid):
+        doc = db.products.find_one({"product_id": pid}) or db.catalog_products.find_one({"id": pid})
+        return bool(doc.get("deleted_at"))
+
+    # The Catalog page's archive reads the rule the other way: B has no twin
+    # (T-X's spine is A), so archiving B archives B alone ...
+    assert _archive(env, ["B"]).json()["results"][0]["status"] == "done"
+    assert (deleted("B"), deleted("T-X"), deleted("A")) == (True, False, False)
+    # ... and archiving A archives A's own twin and spine.
+    assert _archive(env, ["A"]).json()["results"][0]["status"] == "done"
+    assert (deleted("A"), deleted("T-X")) == (True, True)
+    # Restoring B brings back B alone: T-X is A's.
+    assert _restore(env, ["B"]).json()["results"][0]["status"] == "done"
+    assert (deleted("B"), deleted("A"), deleted("T-X")) == (False, True, True)
+    # The Needs-review drawer's Restore on T-X restores exactly what A's
+    # archive archived.
+    row = _restore(env, ["T-X"]).json()["results"][0]
+    assert row["status"] == "done", row
+    assert (deleted("A"), deleted("T-X")) == (False, False)
+    # The single Delete door on T-X archives A, never B.
     asyncio.run(catalog_mod.delete_catalog_product("T-X", current_user=ADMIN))
-    assert db.products.find_one({"product_id": "B"})["deleted_at"]
-    assert not db.products.find_one({"product_id": "A"}).get("deleted_at")
+    assert (deleted("A"), deleted("T-X"), deleted("B")) == (True, True, False)
 
 
 @pytest.mark.parametrize("role", ["AREA_MANAGER", "ACCOUNTANT", "STORE_MANAGER", "SALES_STAFF"])

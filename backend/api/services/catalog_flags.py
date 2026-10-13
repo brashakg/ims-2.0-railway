@@ -161,6 +161,9 @@ def raise_flags(
     action_id = uuid.uuid4().hex[:12]
     results: List[Dict[str, Any]] = []
     groups: "OrderedDict[Optional[str], List[Dict[str, Any]]]" = OrderedDict()
+    deps = _deps()
+    by_name = _actor_name(actor) if apply else ""
+    no_open_of_type = {"$not": {"$elemMatch": {"type": flag_type, "status": "open"}}}
     for pid in list(OrderedDict.fromkeys(p for p in product_ids if p))[:BULK_CAP]:
         doc = coll.find_one({"product_id": pid})
         if doc is None:
@@ -169,11 +172,28 @@ def raise_flags(
         if doc.get("deleted_at"):
             results.append({"product_id": pid, "status": "refused", "reason": "Archived"})
             continue
-        if any(
-            f.get("type") == flag_type and f.get("status") == "open"
-            for f in doc.get("flags") or []
-            if isinstance(f, dict)
-        ):
+        if apply:
+            # ONE guarded write claims the product (never read-then-write):
+            # of two people flagging the same type at once, one gets 'already'.
+            flag = {
+                "flag_id": uuid.uuid4().hex[:12],
+                "type": flag_type,
+                "note": note,
+                "by": actor.get("user_id"),
+                "by_name": by_name,
+                "at": _now(),
+                "status": "open",
+                "fixed_by": None,
+                "fixed_at": None,
+                "task_id": None,  # set below, once its task exists
+            }
+            claimed = coll.update_one(
+                {"product_id": pid, "flags": no_open_of_type}, {"$push": {"flags": flag}}
+            ).modified_count
+            doc = dict(doc, _flag_id=flag["flag_id"])
+        else:
+            claimed = coll.count_documents({"product_id": pid, "flags": no_open_of_type})
+        if not claimed:
             results.append({"product_id": pid, "status": "already"})
             continue
         groups.setdefault(_assignee(doc.get("created_by")), []).append(doc)
@@ -181,7 +201,6 @@ def raise_flags(
 
     from .name_resolver import user_name_map
 
-    deps = _deps()
     names = user_name_map(deps.get_db(), [a for a in groups if a])
     if not apply:
         return {
@@ -198,7 +217,6 @@ def raise_flags(
         }
 
     label = FLAG_TYPES[flag_type]
-    by_name = _actor_name(actor)
     tasks: List[Dict[str, Any]] = []
     task_repo = deps.get_task_repository()
     from .task_triggers import create_system_task
@@ -237,26 +255,14 @@ def raise_flags(
             },
         )
         task_id = (task or {}).get("task_id")
-        for d in docs:
-            coll.update_one(
-                {"product_id": d.get("product_id")},
-                {
-                    "$push": {
-                        "flags": {
-                            "flag_id": uuid.uuid4().hex[:12],
-                            "type": flag_type,
-                            "note": note,
-                            "by": actor.get("user_id"),
-                            "by_name": by_name,
-                            "at": _now(),
-                            "status": "open",
-                            "fixed_by": None,
-                            "fixed_at": None,
-                            "task_id": task_id,
-                        }
-                    }
-                },
-            )
+        if task_id:
+            for d in docs:  # this action's own flag only: one element, by its id
+                coll.update_one(
+                    {"product_id": d.get("product_id"), "flags.flag_id": d["_flag_id"]},
+                    {"$set": {"flags.$.task_id": task_id}},
+                )
+            # A flag Mark-fixed in the moment before its task existed.
+            _settle(coll, [task_id], actor)
         tasks.append(
             {
                 "task_id": task_id,
@@ -276,16 +282,30 @@ def _fix(
 ) -> List[str]:
     """Close the open flags on `doc` that `wanted(flag)` picks: `status`
     'fixed' (Mark fixed, a completed task) or 'withdrawn' (a cancelled task).
-    Returns the task ids they carried. Writes the flags list only (not an
-    edit)."""
-    flags = [dict(f) for f in doc.get("flags") or [] if isinstance(f, dict)]
+    Returns the task ids of the flags THIS call closed. Each flag is closed
+    by its own write on that one element, and only while it is still open
+    -- never the whole list from a stale read, so a flag raised meanwhile is
+    never wiped and one closed meanwhile is never reopened. Not an edit."""
+    now = _now()
     touched: List[str] = []
-    for f in flags:
-        if f.get("status") == "open" and wanted(f):
-            f.update(status=status, fixed_by=actor.get("user_id"), fixed_at=_now())
+    for f in doc.get("flags") or []:
+        if not (isinstance(f, dict) and f.get("status") == "open" and wanted(f)):
+            continue
+        res = coll.update_one(
+            {
+                "product_id": doc.get("product_id"),
+                "flags": {"$elemMatch": {"flag_id": f.get("flag_id"), "status": "open"}},
+            },
+            {
+                "$set": {
+                    "flags.$.status": status,
+                    "flags.$.fixed_by": actor.get("user_id"),
+                    "flags.$.fixed_at": now,
+                }
+            },
+        )
+        if res.modified_count:
             touched.append(f.get("task_id"))
-    if touched:
-        coll.update_one({"product_id": doc.get("product_id")}, {"$set": {"flags": flags}})
     return [t for t in touched if t]
 
 

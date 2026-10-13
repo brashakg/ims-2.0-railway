@@ -101,8 +101,12 @@ ATTRIBUTE_FILTERS: Dict[str, str] = {
 
 DATE_PATTERN = r"^\d{4}-\d{2}-\d{2}$"
 NEVER_EDITED = "none"
-ARCHIVED = {"deleted_at": {"$nin": [None, ""]}}
-NOT_ARCHIVED = {"deleted_at": None}
+# Archived = deleted_at holds a time. One list, so the two clauses are exact
+# opposites: a row is in exactly one ('' or missing counts as not archived,
+# as switches_on_archived's truthiness reads it).
+_NOT_DELETED = [None, ""]
+ARCHIVED = {"deleted_at": {"$nin": _NOT_DELETED}}
+NOT_ARCHIVED = {"deleted_at": {"$in": _NOT_DELETED}}
 
 USE_RESTORE = "This product is archived - use Restore"
 

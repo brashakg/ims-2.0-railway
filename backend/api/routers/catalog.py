@@ -1454,10 +1454,10 @@ def _spine_product_id(repo, catalog_doc: Optional[Dict]) -> Optional[str]:
     A legacy / convergence twin shares the spine id. A DOOR-created twin
     (product_master.create_product: 71 of 77 live products on the 08-30
     census, and every size variant) is keyed by the spine's pim_product_id
-    -- a DIFFERENT uuid -- so the id lookup misses, and the ONE product-per-
-    SKU rule resolves it by sku: the mirror image of the spine PUT's
-    pim_product_id-first twin lookup (product_master.mirror_update_to_
-    catalog_twin). Until this, both doors' `_pr.update(<catalog id>, ...)`
+    -- a DIFFERENT uuid -- so it is found through that link (the mirror
+    image of the spine PUT's pim_product_id-first twin lookup,
+    product_master.mirror_update_to_catalog_twin), else by sku (_spine_ids,
+    THE rule). Until this, both doors' `_pr.update(<catalog id>, ...)`
     silently matched NO spine on a door-created product: the drawer's
     deactivate / the Delete button never reached the spine a soft-deleted
     product is sold from at POS, and for a size variant -- whose only
@@ -1477,24 +1477,66 @@ def _spine_product_id(repo, catalog_doc: Optional[Dict]) -> Optional[str]:
 def _spine_ids(repo, docs: List[Optional[Dict]]) -> List[Optional[str]]:
     """THE twin -> spine rule (_spine_product_id's, and the review list's
     Added column and sort through _spine_facts), batched: for each twin (same
-    order) the spine whose product_id is the twin's id, else the spine with
-    the twin's sku; None when neither. One read; raises when it fails."""
+    order) the spine whose pim_product_id is the twin's id (the create door's
+    own link, the one every spine -> twin lookup reads first), else the spine
+    whose product_id is the twin's id (a convergence twin shares it), else
+    the spine with the twin's sku; None when none. One read; raises when it
+    fails. _twins_of is this rule read the other way."""
     ids = [d["id"] for d in docs if d and d.get("id")]
     skus = [d["sku"] for d in docs if d and d.get("sku")]
+    by_pim: Dict[Any, str] = {}
     by_id: Dict[Any, str] = {}
     by_sku: Dict[Any, str] = {}
     if ids or skus:
         for s in repo.collection.find(
-            {"$or": [{"product_id": {"$in": ids}}, {"sku": {"$in": skus}}]},
-            {"_id": 0, "product_id": 1, "sku": 1},
+            {
+                "$or": [
+                    {"pim_product_id": {"$in": ids}},
+                    {"product_id": {"$in": ids}},
+                    {"sku": {"$in": skus}},
+                ]
+            },
+            {"_id": 0, "product_id": 1, "pim_product_id": 1, "sku": 1},
         ):
             if s.get("product_id"):
                 by_id.setdefault(s["product_id"], s["product_id"])
+                if s.get("pim_product_id"):
+                    by_pim.setdefault(s["pim_product_id"], s["product_id"])
                 if s.get("sku"):
                     by_sku.setdefault(s["sku"], s["product_id"])
     return [
-        (by_id.get(d.get("id")) or by_sku.get(d.get("sku"))) if d else None for d in docs
+        (by_pim.get(d.get("id")) or by_id.get(d.get("id")) or by_sku.get(d.get("sku")))
+        if d
+        else None
+        for d in docs
     ]
+
+
+def _twins_of(repo, spines: List[Optional[Dict]]) -> List[Optional[Dict]]:
+    """THE spine -> twin rule for the Catalog page's archive and restore:
+    _spine_ids read the other way, so the two directions can never disagree
+    -- for each spine (same order) the twin whose spine _spine_ids picks IS
+    this spine; None when no twin's is. A twin can only point at a spine
+    through the spine's pim_product_id, its product_id or its sku, so those
+    are the candidates (in that order). Two reads; raises when one fails."""
+    keys = [k for s in spines if s for k in (s.get("pim_product_id"), s.get("product_id")) if k]
+    skus = [s["sku"] for s in spines if s and s.get("sku")]
+    coll = _catalog_coll()
+    if not (keys or skus):
+        found: List[Dict] = []
+    elif coll is not None:
+        found = list(coll.find({"$or": [{"id": {"$in": keys}}, {"sku": {"$in": skus}}]}))
+    else:
+        found = [t for t in CATALOG_PRODUCTS.values() if t.get("id") in keys or t.get("sku") in skus]
+    found = [dict(t) for t in found if t.get("id")]
+    owner = dict(zip((t["id"] for t in found), _spine_ids(repo, found)))
+    out: List[Optional[Dict]] = []
+    for s in spines:
+        sid = (s or {}).get("product_id")
+        mine = [t for t in found if sid and owner[t["id"]] == sid]
+        mine.sort(key=lambda t: (t["id"] != s.get("pim_product_id"), t["id"] != sid))
+        out.append(mine[0] if mine else None)
+    return out
 
 
 def _next_sku_counter(prefix: str, db=None) -> int:
@@ -3099,6 +3141,9 @@ async def _archive_product(
     # write-back. Fail-soft: the delete stands even if Shopify says no.
     if product is not None:
         await _delist.delist_if_live(_get_db(), product, reason="deleted", actor=actor)
+    # Every archive door: a cached Catalog / till list page must not keep
+    # listing it until the cache runs out.
+    _bust_products_cache()
 
 
 # Whether the product was switched on when it was archived (archive writes
@@ -3201,11 +3246,25 @@ def _restore_product(
             )
     except Exception:  # noqa: BLE001
         logger.warning("[CATALOG] restore audit row skipped for %s", spine_id, exc_info=True)
+    _bust_products_cache()  # as _archive_product: no cached page keeps it hidden
     if active:
         return None
     if not was_active:
         return RESTORED_AS_BEFORE
     return RESTORED_SWITCHED_OFF if on_website else RESTORED_UNCHECKED
+
+
+def _twins_or_503(repo, spines: List[Optional[Dict]]) -> List[Optional[Dict]]:
+    """_twins_of for the bulk doors: a failed read stops the call before
+    anything is written (an archive that missed the twin would leave its
+    listing up on the website)."""
+    try:
+        return _twins_of(repo, spines)
+    except Exception:  # noqa: BLE001
+        logger.warning("[CATALOG] twin lookup for a bulk door failed", exc_info=True)
+        raise HTTPException(
+            status_code=503, detail="Could not read the catalogue right now. Try again in a minute."
+        ) from None
 
 
 class BulkProductIds(BaseModel):
@@ -3275,9 +3334,9 @@ async def bulk_archive_products(
             status_code=503,
             detail="Could not check the stock at the shops right now. Try again in a minute.",
         )
-    db = _get_db()
+    twins = _twins_or_503(repo, [spines[p] for p in ids]) if body.apply else [None] * len(ids)
     results = []
-    for pid in ids:
+    for pid, twin in zip(ids, twins):
         spine = spines[pid]
         row: Dict[str, Any] = {
             "product_id": pid,
@@ -3289,7 +3348,6 @@ async def bulk_archive_products(
         elif spine.get("deleted_at"):
             row.update(status="refused", reason="Already archived")
         elif body.apply:
-            twin = _delist._resolve_twin(_delist._raw_db(db), spine)
             await _archive_product(twin, current_user, spine_id=pid)
             row["status"] = "done"
         else:
@@ -3297,8 +3355,6 @@ async def bulk_archive_products(
         if spine is not None:
             row["name"] = spine.get("name") or spine.get("model") or spine.get("sku")
         results.append(row)
-    if body.apply:
-        _bust_products_cache()
     return {"applied": body.apply, "results": results}
 
 
@@ -3317,7 +3373,6 @@ async def bulk_restore_products(
     repo = get_product_repository()
     if repo is None:
         raise HTTPException(status_code=503, detail="The catalogue is not reachable")
-    db = _get_db()
     ids = list(dict.fromkeys(p for p in body.product_ids if p))
 
     def _pair(pid: str):
@@ -3329,6 +3384,10 @@ async def bulk_restore_products(
         return (repo.find_by_id(sid) if sid else None), (dict(twin) if twin else None)
 
     pairs = {p: _pair(p) for p in ids}
+    if body.apply:  # a spine id: its twin by the same rule the drawer's twin id took
+        bare = [p for p in ids if pairs[p][0] is not None and pairs[p][1] is None]
+        for p, twin in zip(bare, _twins_or_503(repo, [pairs[p][0] for p in bare])):
+            pairs[p] = (pairs[p][0], twin)
     live_skus = (
         _live_skus([(s or t).get("sku") for s, t in pairs.values() if s or t])
         if body.apply
@@ -3345,8 +3404,6 @@ async def bulk_restore_products(
         elif not body.apply:
             results.append({"product_id": pid, "status": "ready"})
         else:
-            if twin is None:
-                twin = _delist._resolve_twin(_delist._raw_db(db), spine)
             note = _restore_product(
                 twin,
                 spine,
@@ -3361,8 +3418,6 @@ async def bulk_restore_products(
             if note:
                 row["note"] = note
             results.append(row)
-    if body.apply:
-        _bust_products_cache()
     return {"applied": body.apply, "results": results}
 
 
