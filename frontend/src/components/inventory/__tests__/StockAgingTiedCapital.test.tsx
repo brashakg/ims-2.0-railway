@@ -7,6 +7,10 @@
 // review r2 #22 fixed on the inventory value tiles only. The rule is the
 // tiles' one (InventoryLayout tileMoney): under a lakh, whole rupees; from a
 // lakh up, lakhs.
+//
+// Owner ruling 2026-10-12 (what we pay, stock at cost included, is the accounts
+// roles'): the server sends costValue to them only. Everyone else -- managers
+// included -- reads Tied capital at MRP, the figure the card always showed.
 
 import { render, screen, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -28,17 +32,18 @@ vi.mock('../../../services/api', () => ({
 
 import { StockAgingReport } from '../StockAgingReport';
 
-/** One aging row; `value` is the product's stock at cost (null = not shown cost). */
-function row(id: string, classification: 'A' | 'B' | 'C', value: number | null) {
+/** One aging row; `costValue` is the product's stock at cost (null = the
+ *  server sent no cost), `value` its selling value (quantity x MRP). */
+function row(id: string, classification: 'A' | 'B' | 'C', costValue: number | null, value = 5800) {
   return {
     id, sku: `FR-${id}`, name: `Frame ${id}`, brand: 'Test', category: 'FRAME',
-    quantity: 1, value, daysInStock: 120, salesLast30Days: 0, salesLast90Days: 0,
+    quantity: 1, value, costValue, daysInStock: 120, salesLast30Days: 0, salesLast90Days: 0,
     turnoverRate: 0, classification, ageCategory: '91-180',
   };
 }
 
 async function tiedCapital(): Promise<string> {
-  const line = await screen.findByText(/Tied capital \(at cost\)/);
+  const line = await screen.findByText(/Tied capital \(at /);
   await waitFor(() => expect(getAgingReport).toHaveBeenCalled());
   return (line.textContent ?? '').replace(/\s+/g, ' ').trim();
 }
@@ -78,9 +83,23 @@ describe('Stock aging Tied capital (review r3 #16)', () => {
     expect(cell.textContent).not.toContain('₹0');
   });
 
-  it('shows a dash, not a figure, for a login that is not shown cost', async () => {
-    products = [row('p1', 'C', null)];
+  it('a login the server sends no cost (a manager) reads Tied capital at MRP, never a cost', async () => {
+    products = [row('p1', 'C', null, 5800), row('p2', 'C', null, 1200), row('p3', 'A', null, 90000)];
     render(<StockAgingReport />);
-    await waitFor(async () => expect(await tiedCapital()).toBe('Tied capital (at cost): —'));
+    await waitFor(async () => expect(await tiedCapital()).toBe('Tied capital (at MRP): ₹7,000'));
+    expect(screen.getByText('Value (MRP)')).toBeInTheDocument();
+    expect(screen.queryByText(/at cost|Value \(cost\)|no cost/)).toBeNull();
+    const cell = screen.getByText('Frame p1').closest('tr')!;
+    expect(cell.textContent).toContain('₹5,800');
+  });
+
+  it('a cost reader sees Value (cost) per row, not the MRP', async () => {
+    products = [row('p1', 'C', 3100, 5800)];
+    render(<StockAgingReport />);
+    await waitFor(async () => expect(await tiedCapital()).toBe('Tied capital (at cost): ₹3,100'));
+    expect(screen.getByText('Value (cost)')).toBeInTheDocument();
+    const cell = screen.getByText('Frame p1').closest('tr')!;
+    expect(cell.textContent).toContain('₹3,100');
+    expect(cell.textContent).not.toContain('5,800');
   });
 });

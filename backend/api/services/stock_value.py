@@ -15,18 +15,23 @@ per-unit cost towards Rs 0 (unit_cost averages the costed units only, and is
 None when none is).
 
 Readers: the stock ledger rows (cost_value / unit_cost / uncosted_units),
-Stock aging, and the report 'stock value' figures (/reports/inventory,
-/inventory/summary, /inventory/valuation, /stock/count). Who may see it:
-cost_mask's "product" context -- the one product-cost rule, the same as each
-unit's and each product's cost (managers, accounts and the catalogue
-manager), never the counter. A figure that sums per-unit costs answers to
-the rule that shows those costs, so no reader gets two answers.
+Stock aging (costValue), and the report 'stock value' figures
+(/reports/inventory, /inventory/summary, /inventory/valuation, /stock/count).
+Who may see it: COST_CONTEXT below -- every reader asks cost_mask with it,
+never a role list of its own.
 No DB import; takes the repositories the caller already holds.
 """
 
 from typing import Dict, List, Optional
 
 from .item_events import on_hand_match
+
+# Who sees stock at cost -- per unit, per row and in total: cost_mask's
+# accounts-only default context, SUPERADMIN / ADMIN / ACCOUNTANT (owner ruling
+# 2026-10-12: what we pay, stock value at cost included, is theirs alone).
+# Managers and the counter read the selling value (offer price / MRP)
+# instead. Every reader masks or gates with THIS context.
+COST_CONTEXT = "default"
 
 
 def _f(v) -> float:

@@ -131,12 +131,15 @@ async def get_stock_aging_report(
         r["_id"]: r["last_sale"] for r in stock_repo.aggregate(last_sale_pipeline)
     }
 
-    # F47: stock is valued at what it COST (the one stock-value rule), and only
-    # for the cost readers -- the counter gets no rupee figure here.
+    # F47: stock at what it COST (the one stock-value rule) -- costValue /
+    # uncostedUnits -- for the roles that see stock at cost only
+    # (stock_value.COST_CONTEXT, the accounts roles: owner ruling 2026-10-12).
+    # Everyone else reads the selling value main always showed: `value` =
+    # quantity x MRP, and Tied Capital summed from it.
     from ...services import stock_value
     from ...services.cost_mask import can_see_cost
 
-    show_cost = can_see_cost(current_user, "product")
+    show_cost = can_see_cost(current_user, stock_value.COST_CONTEXT)
     shelf = (
         stock_value.by_product(
             stock_value.shelf_units(stock_repo, product_repo, active_store)
@@ -207,10 +210,11 @@ async def get_stock_aging_report(
         else:
             age_cat = "180+"
 
-        # A unit with no cost adds nothing to `value` but is counted, so the
+        # A unit with no cost adds nothing to costValue but is counted, so the
         # row says "N no cost" instead of reading Rs 0 (services/stock_value).
+        mrp = product.get("mrp", 0) or 0
         row_cost = shelf.get(pid) or {}
-        value = row_cost.get("cost", 0.0) if show_cost else None
+        cost_value = row_cost.get("cost", 0.0) if show_cost else None
         uncosted_units = row_cost.get("uncosted_units", 0.0) if show_cost else None
 
         if classification and cls != classification:
@@ -226,7 +230,8 @@ async def get_stock_aging_report(
                 "brand": product.get("brand", ""),
                 "category": product.get("category", ""),
                 "quantity": qty,
-                "value": value,
+                "value": round(qty * mrp, 2),
+                "costValue": cost_value,
                 "uncostedUnits": uncosted_units,
                 "daysInStock": days_in_stock,
                 "lastSaleDate": (
@@ -255,7 +260,7 @@ async def get_stock_aging_report(
     class_b = sum(1 for p in products if p["classification"] == "B")
     class_c = sum(1 for p in products if p["classification"] == "C")
     slow = [p for p in products if p["classification"] == "C"]
-    slow_value = round(sum(p["value"] for p in slow), 2) if show_cost else None
+    slow_cost = round(sum(p["costValue"] for p in slow), 2) if show_cost else None
     slow_uncosted = sum(p["uncostedUnits"] for p in slow) if show_cost else None
     known = [p["daysInStock"] for p in products if p["daysInStock"] is not None]
     avg_age = sum(known) / max(len(known), 1)
@@ -267,7 +272,8 @@ async def get_stock_aging_report(
             "classA": class_a,
             "classB": class_b,
             "classC": class_c,
-            "slowMovingValue": slow_value,
+            "slowMovingValue": round(sum(p["value"] for p in slow), 2),
+            "slowMovingCostValue": slow_cost,
             "slowMovingUncostedUnits": slow_uncosted,
             "averageAge": round(avg_age, 1),
             "oldStockCount": sum(1 for p in products if _age(p) > 90),

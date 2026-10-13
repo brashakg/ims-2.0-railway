@@ -37,6 +37,14 @@ describe('Stock Summary card', () => {
     expect(screen.getByText('3 units have no cost')).toBeInTheDocument();
   });
 
+  it('a login the server sends no cost (a manager) sees no value row at all', () => {
+    summary = { total_items: 5, total_quantity: 5 };
+    show();
+    expect(screen.queryByText(/Total Value/)).toBeNull();
+    expect(screen.queryByText(/no cost/)).toBeNull();
+    expect(screen.getByText('5 units')).toBeInTheDocument();
+  });
+
   it('says nothing when every unit has a cost', () => {
     summary = { total_items: 3, total_quantity: 3, total_value: 3000, uncosted_units: 0 };
     show();

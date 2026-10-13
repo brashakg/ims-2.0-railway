@@ -109,8 +109,9 @@ export function InventoryStockPage() {
   // Data (shared cache with the layout's stat strip).
   const stockQ = useStock(storeId || undefined, cataloguerFilter || undefined);
   const inventory = stockQ.data ?? [];
-  // Audit F47: managers + accounts see what each unit cost; the server sends
-  // cost only to them, so the column follows the data, never a role list here.
+  // Audit F47: admin + accounts see what each unit cost (owner ruling
+  // 2026-10-12); the server sends cost only to them, so the column follows the
+  // data, never a role list here.
   const showUnitCost = inventory.some((i) => i.cost_value != null);
   const isLoading = stockQ.isPending;
   const onlineStatusQ = useOnlineStatus(onlineStatusIds(inventory));

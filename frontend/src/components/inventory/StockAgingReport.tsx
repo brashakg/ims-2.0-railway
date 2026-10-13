@@ -31,9 +31,12 @@ interface AgingProduct {
   brand: string;
   category: string;
   quantity: number;
-  /** At COST (audit F47); null for a login that is not shown cost. */
-  value: number | null;
-  /** Units with no cost: they add Rs 0 to `value` and are said, not hidden. */
+  /** Quantity x MRP: the selling value, for every login (as it always was). */
+  value: number;
+  /** At COST (audit F47), sent to the roles that see stock at cost only
+   *  (admin + accounts, owner ruling 2026-10-12); null for everyone else. */
+  costValue: number | null;
+  /** Units with no cost: they add Rs 0 to costValue and are said, not hidden. */
   uncostedUnits: number;
   // null = unknown arrival date (legacy stock): old by the server's one rule
   // (audit F54), so it ages as the oldest, never as 0 days.
@@ -81,7 +84,8 @@ export function StockAgingReport() {
         brand: p.brand || '',
         category: p.category || '',
         quantity: p.quantity || 0,
-        value: p.value ?? null,
+        value: p.value || 0,
+        costValue: p.costValue ?? null,
         uncostedUnits: p.uncostedUnits || 0,
         daysInStock: p.daysInStock ?? null,
         lastSaleDate: p.lastSaleDate || undefined,
@@ -123,14 +127,14 @@ export function StockAgingReport() {
   const classACount = products.filter((p) => p.classification === 'A').length;
   const classBCount = products.filter((p) => p.classification === 'B').length;
   const classCCount = products.filter((p) => p.classification === 'C').length;
-  const slowMovingValue = products.some((p) => p.value == null)
-    ? null
-    : products
-        .filter((p) => p.classification === 'C')
-        .reduce((sum, p) => sum + (p.value ?? 0), 0);
-  const slowMovingUncosted = products
-    .filter((p) => p.classification === 'C')
-    .reduce((sum, p) => sum + p.uncostedUnits, 0);
+  // The server sends costValue to the roles that see stock at cost only, so the
+  // screen follows the data: Tied capital at cost for them, at MRP (as it
+  // always read) for everyone else -- never a role list here.
+  const atCost = products.some((p) => p.costValue != null);
+  const slowMovers = products.filter((p) => p.classification === 'C');
+  const slowMovingValue = slowMovers.reduce(
+    (sum, p) => sum + ((atCost ? p.costValue : p.value) ?? 0), 0);
+  const slowMovingUncosted = atCost ? slowMovers.reduce((sum, p) => sum + p.uncostedUnits, 0) : 0;
   // Review r3 #16: the inventory tiles' rule (InventoryLayout tileMoney) --
   // under a lakh a figure is whole rupees (Rs 4,000, never "Rs 0.0L"); from a
   // lakh up, lakhs.
@@ -182,8 +186,9 @@ export function StockAgingReport() {
       'Age Category': p.ageCategory,
       'Days In Stock': p.daysInStock ?? 'Unknown',
       Quantity: p.quantity,
-      'Value at cost (Rs)': p.value ?? '',
-      'Units with no cost': p.value == null ? '' : p.uncostedUnits,
+      'Value at MRP (Rs)': p.value,
+      'Value at cost (Rs)': p.costValue ?? '',
+      'Units with no cost': p.costValue == null ? '' : p.uncostedUnits,
       'Sales Last 30 Days': p.salesLast30Days,
       'Sales Last 90 Days': p.salesLast90Days,
       'Turnover Rate (x/yr)': p.turnoverRate.toFixed(2),
@@ -353,10 +358,9 @@ export function StockAgingReport() {
           </div>
           <div className="mt-2 pt-2 border-t border-red-200">
             <p className="text-xs text-red-700">
-              Tied capital (at cost):{' '}
-              {slowMovingValue == null ? '—' : tiedCapitalText(slowMovingValue)}
+              Tied capital ({atCost ? 'at cost' : 'at MRP'}): {tiedCapitalText(slowMovingValue)}
             </p>
-            {slowMovingValue != null && slowMovingUncosted > 0 && (
+            {slowMovingUncosted > 0 && (
               <p className="text-xs text-amber-700">
                 {slowMovingUncosted} {slowMovingUncosted === 1 ? 'unit has' : 'units have'} no cost
               </p>
@@ -443,7 +447,7 @@ export function StockAgingReport() {
                     Quantity
                   </th>
                   <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">
-                    Value (cost)
+                    {atCost ? 'Value (cost)' : 'Value (MRP)'}
                   </th>
                   <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">
                     Days in Stock
@@ -481,14 +485,14 @@ export function StockAgingReport() {
                       </td>
                       <td className="px-4 py-3 text-right text-sm text-gray-900">
                         {/* A row whose every unit has no cost is not worth Rs 0: say so. */}
-                        {product.value == null
-                          ? '—'
-                          : product.value === 0 && product.uncostedUnits > 0
+                        {product.costValue == null
+                          ? `₹${product.value.toLocaleString('en-IN')}`
+                          : product.costValue === 0 && product.uncostedUnits > 0
                             ? null
-                            : `₹${product.value.toLocaleString('en-IN')}`}
-                        {product.value != null && product.uncostedUnits > 0 && (
+                            : `₹${product.costValue.toLocaleString('en-IN')}`}
+                        {product.costValue != null && product.uncostedUnits > 0 && (
                           <span className="block text-xs text-amber-700 whitespace-nowrap">
-                            {product.value > 0 ? `+${product.uncostedUnits} ` : ''}no cost
+                            {product.costValue > 0 ? `+${product.uncostedUnits} ` : ''}no cost
                           </span>
                         )}
                       </td>

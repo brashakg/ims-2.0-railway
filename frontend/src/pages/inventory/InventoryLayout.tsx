@@ -125,20 +125,23 @@ export function InventoryLayout() {
   const onlineSummary = isOnlineStoreView ? onlineSummaryQ.data ?? null : null;
 
   const totalSKUs = inventory.length;
-  // Audit F47: the headline is what the stock COST (the server's cost_value,
-  // sent to cost readers only); what it would SELL for is its own cell. Both
-  // count the same units -- every one we hold, on the shelf or reserved for an
-  // order (stock_value's rule, unitsHeld) -- so the pair can be compared, and
-  // both captions say so. A unit nobody priced adds nothing to the cost, so
-  // the tile says how many there are rather than look complete (review #34).
+  // Audit F47 + owner ruling 2026-10-12 (what we pay, stock at cost included,
+  // is the accounts roles'): the server sends cost_value to the roles that see
+  // stock at cost only (backend stock_value.COST_CONTEXT), so the strip follows
+  // the data, never a role list of its own. For them the headline is what the
+  // stock COST and what it would SELL for is its own cell; both count the same
+  // units -- every one we hold, on the shelf or reserved for an order
+  // (stock_value's rule, unitsHeld) -- and both captions say so. A unit nobody
+  // priced adds nothing to the cost, so the tile says how many there are
+  // (review #34). Everyone else (managers, the counter) reads the selling
+  // value as the headline, beside Categories, as before.
   //
-  // Review r2 #22: neither tile has a figure until the list has LOADED -- while
-  // it loads, after it fails, or with no shop picked the rows are [] and the
-  // sums a confident Rs 0, so the tiles read a dash. Under a lakh a figure is
-  // whole rupees (Rs 4,000, never "Rs 0.0L"); from a lakh up, lakhs.
+  // Review r2 #22: no tile has a figure until the list has LOADED -- while it
+  // loads, after it fails, or with no shop picked the rows are [] and the sums
+  // a confident Rs 0, so the tile reads a dash. Under a lakh a figure is whole
+  // rupees (Rs 4,000, never "Rs 0.0L"); from a lakh up, lakhs.
   const stockLoaded = stockQ.isSuccess;
-  const costKnown =
-    stockLoaded && (inventory.length === 0 || inventory.some((i) => i.cost_value != null));
+  const atCost = inventory.some((i) => i.cost_value != null);
   const costValue = inventory.reduce((sum, item) => sum + (item.cost_value || 0), 0);
   const uncostedUnits = inventory.reduce((n, item) => n + (item.uncosted_units || 0), 0);
   const sellingValue = inventory.reduce(
@@ -380,11 +383,15 @@ export function InventoryLayout() {
           </div>
           <div>
             <div className="l">Stock value</div>
-            <div className="v">{costKnown ? tileMoney(costValue) : '—'}</div>
-            {/* The price on the order when the goods were received, before GST
-                (grn_accept stamps it on each unit) -- not the bill's price. */}
-            <div className="d">at cost: price at receipt, ex GST · shelf + reserved</div>
-            {costKnown && uncostedUnits > 0 && (
+            <div className="v">{stockLoaded ? tileMoney(atCost ? costValue : sellingValue) : '—'}</div>
+            {atCost ? (
+              /* The price on the order when the goods were received, before GST
+                 (grn_accept stamps it on each unit) -- not the bill's price. */
+              <div className="d">at cost: price at receipt, ex GST · shelf + reserved</div>
+            ) : (
+              <div className="d">at offer price (MRP if none) · shelf + reserved</div>
+            )}
+            {atCost && uncostedUnits > 0 && (
               <div className="d warn">
                 {uncostedUnits.toLocaleString('en-IN')} {uncostedUnits === 1 ? 'unit has' : 'units have'} no cost
               </div>
@@ -402,11 +409,19 @@ export function InventoryLayout() {
             <div className="v" style={{ color: onlineCount > 0 ? 'var(--ok, #059669)' : 'var(--ink)' }}>{onlineUnknown ? '—' : onlineCount}</div>
             <div className="d">{onlineUnknown ? 'could not read the website' : onlineCount > 0 ? 'listed in Shopify' : 'none synced online'}</div>
           </div>
-          <div>
-            <div className="l">Selling value</div>
-            <div className="v">{stockLoaded ? tileMoney(sellingValue) : '—'}</div>
-            <div className="d">at offer price (MRP if none) · shelf + reserved</div>
-          </div>
+          {atCost ? (
+            <div>
+              <div className="l">Selling value</div>
+              <div className="v">{tileMoney(sellingValue)}</div>
+              <div className="d">at offer price (MRP if none) · shelf + reserved</div>
+            </div>
+          ) : (
+            <div>
+              <div className="l">Categories</div>
+              <div className="v">{CATEGORIES.length}</div>
+              <div className="d">incl. lenses, frames, CL</div>
+            </div>
+          )}
           <div>
             <div className="l">View</div>
             <div className="v" style={{ fontSize: 22 }}>{activeEntry?.label ?? '—'}</div>

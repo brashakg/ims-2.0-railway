@@ -155,7 +155,7 @@ async def get_stock(
         category=category,
         created_by=created_by,
         include_attribution=can_see_attribution,
-        shelf_cost=_shelf_cost(stock_repo, product_repo, active_store),
+        shelf_cost=_shelf_cost(stock_repo, product_repo, active_store, current_user),
     )
     return {"items": mask_cost_list(items, current_user, "product"), "total": len(items)}
 
@@ -401,8 +401,8 @@ def _build_store_ledger(
             )
         )
 
-    # F47: each row's units at cost (None when no shop is in view). Who sees
-    # them is cost_mask's answer, in get_stock -- never decided here.
+    # F47: each row's units at cost (None when no shop is in view, or for a
+    # caller who does not see stock at cost -- _shelf_cost decides).
     if shelf_cost is not None:
         for row in items:
             row.update(_row_cost(shelf_cost.get(row["product_id"])))
@@ -410,15 +410,17 @@ def _build_store_ledger(
 
 
 def _shelf_cost(
-    stock_repo, product_repo, store_id: Optional[str]
+    stock_repo, product_repo, store_id: Optional[str], user: dict
 ) -> Optional[Dict[str, Dict]]:
     """F47: what the units at this shop COST, per product -- the one stock
-    value rule (services/stock_value). None when no shop is in view. Who may
-    see it is not decided here: get_stock masks the rows (cost_mask
-    "product", the one product-cost rule)."""
+    value rule (services/stock_value). None when no shop is in view, and for
+    anyone who does not see stock at cost (stock_value.COST_CONTEXT: the
+    accounts roles, owner ruling 2026-10-12) -- a manager's or the counter's
+    row carries no cost_value, unit_cost or uncosted_units at all."""
     from ...services import stock_value
+    from ...services.cost_mask import can_see_cost
 
-    if not store_id:
+    if not store_id or not can_see_cost(user, stock_value.COST_CONTEXT):
         return None
     return stock_value.by_product(
         stock_value.shelf_units(stock_repo, product_repo, store_id)

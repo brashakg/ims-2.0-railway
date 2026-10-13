@@ -16,8 +16,10 @@ Role policy (DECISIONS sec 9, owner rulings 2026-09-28 / D7 / 2026-09-29):
     cost at the shop (owner ruling 2026-10-12): an order line's cost_at_sale,
     the till scan's unit and product, a serial and its warranty lookup, a
     lens line, the below-cost and cost-floor price errors, stock counts,
-    stock value at cost, stock alerts, transfers and workshop remake cost --
-    the managers keep them, counter roles never get the key.
+    stock alerts, transfers and workshop remake cost -- the managers keep
+    them, counter roles never get the key. Stock value at cost is narrower
+    (owner ruling 2026-10-12, what we pay): the accounts roles only, asked
+    through services/stock_value.COST_CONTEXT.
   * What was paid and to whom (context="purchase"): PURCHASE_ROLES. An RTV
     debit note shows anyone else the item, quantity and reason only, and a
     vendor shows only VENDOR_NAME_KEYS (the vendor list, a debit note's vendor

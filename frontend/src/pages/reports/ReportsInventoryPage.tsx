@@ -68,14 +68,16 @@ export function ReportsInventoryPage() {
                     <span className="text-gray-500">Total Quantity:</span>
                     <span className="font-medium text-gray-900">{stockCount.summary?.total_quantity || 0} units</span>
                   </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-gray-500">Total Value (at cost):</span>
-                    <span className="font-medium text-gray-900">
-                      {stockCount.summary?.total_value == null
-                        ? '—'
-                        : `₹${(stockCount.summary.total_value / 100000).toFixed(2)}L`}
-                    </span>
-                  </div>
+                  {/* Stock at cost: sent to admin + accounts only (server
+                      cost_mask, owner ruling 2026-10-12) -- no row for anyone else. */}
+                  {stockCount.summary?.total_value != null && (
+                    <div className="flex items-center justify-between">
+                      <span className="text-gray-500">Total Value (at cost):</span>
+                      <span className="font-medium text-gray-900">
+                        ₹{(stockCount.summary.total_value / 100000).toFixed(2)}L
+                      </span>
+                    </div>
+                  )}
                   {/* Units with no cost add Rs 0 to the value: said, not hidden. */}
                   {(stockCount.summary?.uncosted_units || 0) > 0 && (
                     <p className="text-xs text-amber-700 text-right">

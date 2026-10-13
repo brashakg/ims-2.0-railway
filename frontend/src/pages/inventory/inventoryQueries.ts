@@ -93,8 +93,9 @@ export interface StockItem {
   created_by?: string | null;
   created_by_name?: string | null;
   /** Audit F47: what the units in the shop (shelf + reserved, the same units
-   *  as unitsHeld) COST, and per unit. Sent only to the cost readers
-   *  (managers + accounts); absent for the counter. unit_cost is per COSTED
+   *  as unitsHeld) COST, and per unit. Sent only to the roles that see stock
+   *  at cost (admin + accounts, owner ruling 2026-10-12); absent for managers
+   *  and the counter. unit_cost is per COSTED
    *  unit and null when no unit has a cost -- never a made-up Rs 0. */
   cost_value?: number;
   unit_cost?: number | null;

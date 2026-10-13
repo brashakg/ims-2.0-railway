@@ -37,13 +37,20 @@ Where the numbers come from today (file:line on main 381390d):
     three of them open to ANY login, so the counter reads cost today.
 
 Contract pinned (the build follows it): the stock ledger rows carry
-`cost_value` (on-hand units at cost) and `unit_cost` for the cost readers
-(managers, accounts, admins) and never for the counter; every stock-value
-report equals the same on-hand cost; aging values stock at cost.
+`cost_value` (on-hand units at cost) and `unit_cost` for the roles that see
+stock at cost and never for anyone else; every stock-value report equals the
+same on-hand cost; aging values stock at cost (costValue) beside its selling
+value.
+
+Owner ruling 2026-10-12 (what we pay, stock value at cost included, is ADMIN /
+SUPERADMIN / ACCOUNTANT only): those roles are stock_value.COST_CONTEXT, the
+accounts-only cost_mask context. Store, area and catalogue managers read the
+selling value main always showed them (the aging `value` = quantity x MRP)
+and no stock-at-cost figure -- section "Managers" below.
 
 These were strict xfails while the finding was open; the fix (one rule,
-api/services/stock_value.py, seen through cost_mask's "product" context)
-turned them into plain tests. A regression raises FindingStillOpen.
+api/services/stock_value.py, seen through stock_value.COST_CONTEXT) turned
+them into plain tests. A regression raises FindingStillOpen.
 
 Run: JWT_SECRET_KEY=test ENVIRONMENT=test python -m pytest
      backend/tests/test_stock_value_at_cost.py -q
@@ -77,6 +84,12 @@ PID = "P-CARRERA-8895"
 AT_COST = 6300.0
 COST_KEYS = ("cost_price", "cost_value", "unit_cost")
 COUNTER = ("SALES_STAFF", "SALES_CASHIER", "CASHIER")
+# Who sees stock at cost (stock_value.COST_CONTEXT) and who reads selling value.
+ACCOUNTS = ("ACCOUNTANT", "ADMIN")
+MANAGERS = ("STORE_MANAGER", "AREA_MANAGER", "CATALOG_MANAGER")
+# Every key a stock-at-cost figure travels under, on any of these reads.
+STOCK_COST_KEYS = ("cost_value", "unit_cost", "uncosted_units", "costValue",
+                   "uncostedUnits", "slowMovingCostValue", "slowMovingUncostedUnits")
 
 
 class FindingStillOpen(AssertionError):
@@ -253,8 +266,8 @@ def test_the_shelf_holds_two_units_worth_6300_at_cost(world):
 # ============================================================================
 
 
-@pytest.mark.parametrize("role", ["STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT", "ADMIN"])
-def test_f47_managers_get_the_shelf_at_cost_and_the_unit_cost(world, role):
+@pytest.mark.parametrize("role", ACCOUNTS)
+def test_f47_accounts_get_the_shelf_at_cost_and_the_unit_cost(world, role):
     row = _ledger_row(world, role)
     _open(
         row.get("cost_value") == pytest.approx(AT_COST),
@@ -286,34 +299,38 @@ def _aging(world, role):
     return resp
 
 
-def test_f47_stock_aging_tied_capital_is_at_cost(world):
-    body = _aging(world, "STORE_MANAGER").json()
+@pytest.mark.parametrize("role", ACCOUNTS)
+def test_f47_stock_aging_tied_capital_is_at_cost(world, role):
+    body = _aging(world, role).json()
     products = {p["id"]: p for p in body["products"]}
     assert products[PID]["quantity"] == 2
     assert products[PID]["classification"] == "C"  # no sale in 90 days -> slow
     _open(
-        products[PID]["value"] == pytest.approx(AT_COST),
-        f"F47: aging values the frame at {products[PID]['value']}, cost {AT_COST}",
+        products[PID]["costValue"] == pytest.approx(AT_COST),
+        f"F47: aging values the frame at {products[PID]['costValue']}, cost {AT_COST}",
     )
     _open(
-        body["summary"]["slowMovingValue"] == pytest.approx(AT_COST),
-        f"F47: Tied Capital {body['summary']['slowMovingValue']}, cost {AT_COST}",
+        body["summary"]["slowMovingCostValue"] == pytest.approx(AT_COST),
+        f"F47: Tied Capital {body['summary']['slowMovingCostValue']}, cost {AT_COST}",
     )
+    # The selling value stays beside it, labelled apart (2 x MRP 5800).
+    assert products[PID]["value"] == pytest.approx(11600.0)
 
 
-@pytest.mark.parametrize("role", COUNTER)
-def test_f47_the_counter_never_gets_aging_values(world, role):
+@pytest.mark.parametrize("role", (*COUNTER, *MANAGERS))
+def test_f47_aging_is_at_selling_value_for_everyone_else(world, role):
+    """Managers and the counter read what main always showed them -- quantity
+    x MRP, and Tied Capital summed from it -- and no cost figure at all."""
     resp = _aging(world, role)
     if resp.status_code == 403:
         return
     body = resp.json()
-    values = [p.get("value") for p in body["products"]] + [
-        (body.get("summary") or {}).get("slowMovingValue")
-    ]
-    _open(
-        all(v is None for v in values),
-        f"F47: {role} reads aging rupee values {values}",
-    )
+    row = {p["id"]: p for p in body["products"]}[PID]
+    assert row["value"] == pytest.approx(11600.0)
+    assert body["summary"]["slowMovingValue"] == pytest.approx(11600.0)
+    leaked = [k for k in STOCK_COST_KEYS
+              if row.get(k) is not None or body["summary"].get(k) is not None]
+    _open(not leaked, f"F47: {role} reads aging stock at cost {leaked}")
 
 
 # ============================================================================
@@ -502,6 +519,13 @@ def uncosted_reports(uncosted_db, monkeypatch):
     return _World(TestClient(app), app)
 
 
+def _no_cost_keys(role):
+    """The keys `role` never gets on a ledger row: the counter no cost at all;
+    a manager no stock at cost (the product's own cost_price is cost_mask
+    "product"'s, pinned in test_one_cost_answer_per_rule_on_every_stock_read)."""
+    return (*COST_KEYS, "uncosted_units") if role in COUNTER else STOCK_COST_KEYS
+
+
 def _rows_by_pid(world, role):
     resp = world.get("/inventory/stock", role)
     assert resp.status_code == 200, resp.text
@@ -509,7 +533,7 @@ def _rows_by_pid(world, role):
 
 
 def test_r1_34_a_frame_nobody_priced_has_no_unit_cost_not_rs_0(uncosted_world):
-    row = _rows_by_pid(uncosted_world, "STORE_MANAGER")["P-NOCOST"]
+    row = _rows_by_pid(uncosted_world, "ACCOUNTANT")["P-NOCOST"]
     assert row["stock"] == 2
     assert row["unit_cost"] is None, f"unit_cost {row['unit_cost']!r} for 2 unpriced units"
     assert row["uncosted_units"] == 2
@@ -519,19 +543,19 @@ def test_r1_34_a_frame_nobody_priced_has_no_unit_cost_not_rs_0(uncosted_world):
 def test_r1_34_an_unpriced_unit_does_not_halve_the_unit_cost(uncosted_world):
     """1 unit at 4000 + 1 with no price: the per-unit cost is 4000 (the costed
     unit), and the other unit is counted as having no cost -- not 2000."""
-    row = _rows_by_pid(uncosted_world, "STORE_MANAGER")["P-MIXED"]
+    row = _rows_by_pid(uncosted_world, "ACCOUNTANT")["P-MIXED"]
     assert row["cost_value"] == pytest.approx(4000.0)
     assert row["unit_cost"] == pytest.approx(4000.0)
     assert row["uncosted_units"] == 1
 
 
 def test_r1_34_the_product_cost_still_prices_a_unit_without_its_own(uncosted_world):
-    row = _rows_by_pid(uncosted_world, "STORE_MANAGER")["P-MASTER"]
+    row = _rows_by_pid(uncosted_world, "ACCOUNTANT")["P-MASTER"]
     assert row["unit_cost"] == pytest.approx(2500.0)
     assert row["uncosted_units"] == 0
 
 
-@pytest.mark.parametrize("role", ["STORE_MANAGER", "ACCOUNTANT", "ADMIN"])
+@pytest.mark.parametrize("role", ACCOUNTS)
 def test_r1_34_the_rows_add_up_to_the_one_rule_with_the_uncosted_count(
     uncosted_world, uncosted_db, role
 ):
@@ -554,10 +578,10 @@ def test_r1_34_the_rows_add_up_to_the_one_rule_with_the_uncosted_count(
     assert sum(r["uncosted_units"] for r in rows) == stock_value.uncosted(units) == 3
 
 
-@pytest.mark.parametrize("role", COUNTER)
+@pytest.mark.parametrize("role", (*COUNTER, *MANAGERS))
 def test_r1_34_the_counter_gets_no_cost_and_no_uncosted_count(uncosted_world, role):
     for pid, row in _rows_by_pid(uncosted_world, role).items():
-        leaked = [k for k in (*COST_KEYS, "uncosted_units") if k in row]
+        leaked = [k for k in _no_cost_keys(role) if k in row]
         assert not leaked, f"{role} row {pid} carries {leaked}"
 
 
@@ -566,7 +590,7 @@ def test_r1_39_stock_is_the_shelf_reserved_is_apart_and_cost_covers_both(uncoste
     only and `reserved` is counted apart (never inside stock), while its
     cost_value covers both -- so the screen shows stock as available (no
     second subtraction) and stock + reserved is what the value tiles count."""
-    row = _rows_by_pid(uncosted_world, "STORE_MANAGER")["P-HELD"]
+    row = _rows_by_pid(uncosted_world, "ACCOUNTANT")["P-HELD"]
     assert (row["stock"], row["reserved"]) == (3, 1)
     assert row["cost_value"] == pytest.approx(4000.0)  # 4 units x 1000, sold H5 not stock
     assert row["unit_cost"] == pytest.approx(1000.0)
@@ -576,10 +600,10 @@ def test_f47_stock_aging_counts_the_units_with_no_cost(uncosted_world):
     """Stock aging values at cost like the ledger: a unit with no cost adds
     nothing, and is COUNTED (per product and beside Tied capital), never a
     silent Rs 0 row."""
-    body = uncosted_world.get("/inventory/aging", "STORE_MANAGER").json()
+    body = uncosted_world.get("/inventory/aging", "ACCOUNTANT").json()
     rows = {p["id"]: p for p in body["products"]}
-    assert (rows["P-NOCOST"]["value"], rows["P-NOCOST"]["uncostedUnits"]) == (0.0, 2)
-    assert (rows["P-MIXED"]["value"], rows["P-MIXED"]["uncostedUnits"]) == (4000.0, 1)
+    assert (rows["P-NOCOST"]["costValue"], rows["P-NOCOST"]["uncostedUnits"]) == (0.0, 2)
+    assert (rows["P-MIXED"]["costValue"], rows["P-MIXED"]["uncostedUnits"]) == (4000.0, 1)
     assert rows["P-MASTER"]["uncostedUnits"] == 0
     slow = [p for p in body["products"] if p["classification"] == "C"]
     assert body["summary"]["slowMovingUncostedUnits"] == sum(
@@ -587,7 +611,7 @@ def test_f47_stock_aging_counts_the_units_with_no_cost(uncosted_world):
     ) == 3
 
 
-@pytest.mark.parametrize("role", COUNTER)
+@pytest.mark.parametrize("role", (*COUNTER, *MANAGERS))
 def test_f47_the_counter_gets_no_uncosted_count_on_aging(uncosted_world, role):
     body = uncosted_world.get("/inventory/aging", role).json()
     assert body["summary"]["slowMovingUncostedUnits"] is None
@@ -723,7 +747,7 @@ def reserved_only_world(reserved_only_db, monkeypatch):
 
 
 def test_r3_6_a_frame_held_only_as_reserved_has_its_ledger_row(reserved_only_world):
-    rows = _rows_by_pid(reserved_only_world, "STORE_MANAGER")
+    rows = _rows_by_pid(reserved_only_world, "ACCOUNTANT")
     assert "P-OLD" in rows, f"no ledger row for the reserved-only frame: {sorted(rows)}"
     row = rows["P-OLD"]
     assert (row["stock"], row["reserved"]) == (0, 1)
@@ -735,7 +759,7 @@ def test_r3_6_a_frame_held_only_as_reserved_has_its_ledger_row(reserved_only_wor
     assert "P-GONE" not in rows
 
 
-@pytest.mark.parametrize("role", ["STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT", "ADMIN"])
+@pytest.mark.parametrize("role", ACCOUNTS)
 def test_r3_6_the_cost_tile_equals_the_stock_value_report(reserved_only_world, role):
     """The tile's sum of the ledger rows == /reports/inventory totalValue: one
     'shelf + reserved at cost' figure, the reserved-only frame in both."""
@@ -750,13 +774,13 @@ def test_r3_6_the_cost_tile_equals_the_stock_value_report(reserved_only_world, r
     )
 
 
-@pytest.mark.parametrize("role", COUNTER)
+@pytest.mark.parametrize("role", (*COUNTER, *MANAGERS))
 def test_r3_6_the_counter_sees_the_reserved_row_without_cost(reserved_only_world, role):
     """The new row is masked exactly like every other: the counter sees the
     held frame (stock 0, reserved 1) and no cost figure on it."""
     row = _rows_by_pid(reserved_only_world, role)["P-OLD"]
     assert row["reserved"] == 1
-    leaked = [k for k in (*COST_KEYS, "uncosted_units") if k in row]
+    leaked = [k for k in _no_cost_keys(role) if k in row]
     assert not leaked, f"{role} reserved-only row carries {leaked}"
 
 
@@ -866,7 +890,7 @@ def test_r4_the_counter_with_no_shop_gets_no_counts_either(two_shop_reports, pat
 
 @pytest.mark.parametrize("path,params", _R3_READS)
 def test_r3_shops_and_admins_still_read_their_stock(two_shop_reports, path, params):
-    dhn = {"user_id": "u-sm", "roles": ["STORE_MANAGER"], "store_ids": [STORE], "active_store_id": STORE}
+    dhn = {"user_id": "u-ac", "roles": ["ACCOUNTANT"], "store_ids": [STORE], "active_store_id": STORE}
     assert _stock_value(two_shop_reports(path, dhn, **params).json()) == 3000.0
     # An admin with no shop asked reads every shop (admins see all shops).
     assert _stock_value(two_shop_reports(path, _shopless("ADMIN"), **params).json()) == 13000.0
@@ -926,24 +950,27 @@ def test_r4_stock_aging_gives_a_login_with_no_shop_no_shops_stock(aging_two_shop
 
 
 def test_stock_aging_values_exactly_the_units_it_counts(aging_two_shops):
-    dhn = {"user_id": "u-sm", "roles": ["STORE_MANAGER"], "store_ids": [STORE], "active_store_id": STORE}
+    dhn = {"user_id": "u-ac", "roles": ["ACCOUNTANT"], "store_ids": [STORE], "active_store_id": STORE}
     (row,) = aging_two_shops(dhn).json()["products"]
-    assert (row["quantity"], row["value"]) == (2, 8882.0)
+    assert (row["quantity"], row["costValue"]) == (2, 8882.0)
     # An admin with no shop asked reads every shop -- every unit counted is
     # every unit valued, never one unit at three units' cost.
     (row,) = aging_two_shops(_shopless("ADMIN")).json()["products"]
-    assert (row["quantity"], row["value"]) == (3, 9993.0)
+    assert (row["quantity"], row["costValue"]) == (3, 9993.0)
 
 
 # ============================================================================
-# One product-cost answer per role across the stock router (panel 2026-10-08)
+# One answer per role across the stock router (panel 2026-10-08, 2026-10-12)
 # ============================================================================
 # The ledger rows asked cost_mask "purchase" (no catalogue manager) through
 # their own gate, the per-unit rows (?product_id=) and /inventory/units the
 # accounts-only default, the catalogue's product reads "product": a store
 # manager saw unit_cost on the row and lost cost_price one click deeper, and
-# the ledger kept its own list of WHICH fields are cost. Every stock-cost read
-# now answers to cost_mask "product" -- who AND which.
+# the ledger kept its own list of WHICH fields are cost. Now two rules, each
+# asked in ONE place: a product's / a unit's own cost answers to cost_mask
+# "product" on every read; stock AT COST (the ledger's cost_value / unit_cost
+# / uncosted_units, aging's costValue) answers to stock_value.COST_CONTEXT,
+# the accounts roles (owner ruling 2026-10-12).
 
 
 def _cost_answers(world, role):
@@ -954,22 +981,27 @@ def _cost_answers(world, role):
     labels = world.get("/inventory/units", role, product_id=PID).json()["units"]
     aging = {p["id"]: p for p in _aging(world, role).json()["products"]}
     return {
-        "ledger row": bool(_ALL_MASKED & {k for k, v in row.items() if v is not None}),
-        "per-unit rows": any(_ALL_MASKED & set(u) for u in units),
-        "units": any("cost_price" in u for u in labels),
-        "aging": aging[PID]["value"] is not None,
+        "product": {
+            "ledger row": row.get("cost_price") is not None,
+            "per-unit rows": any(_ALL_MASKED & set(u) for u in units),
+            "units": any("cost_price" in u for u in labels),
+        },
+        "stock at cost": {
+            "ledger row": any(k in row for k in STOCK_COST_KEYS),
+            "aging": aging[PID]["costValue"] is not None,
+        },
     }
 
 
-@pytest.mark.parametrize(
-    "role", ["STORE_MANAGER", "AREA_MANAGER", "CATALOG_MANAGER", "ACCOUNTANT", "ADMIN", *COUNTER]
-)
-def test_one_product_cost_answer_on_every_stock_read(world, role):
+@pytest.mark.parametrize("role", [*MANAGERS, *ACCOUNTS, *COUNTER])
+def test_one_cost_answer_per_rule_on_every_stock_read(world, role):
+    from api.services import stock_value
     from api.services.cost_mask import can_see_cost
 
-    want = can_see_cost(_user(role), "product")
     answers = _cost_answers(world, role)
-    assert answers == dict.fromkeys(answers, want), (role, want, answers)
+    for rule, context in (("product", "product"), ("stock at cost", stock_value.COST_CONTEXT)):
+        want = can_see_cost(_user(role), context)
+        assert answers[rule] == dict.fromkeys(answers[rule], want), (role, rule, want, answers)
 
 
 def test_which_ledger_fields_are_cost_is_cost_mask_s(world, monkeypatch):
@@ -978,7 +1010,65 @@ def test_which_ledger_fields_are_cost_is_cost_mask_s(world, monkeypatch):
     of its own."""
     from api.services import cost_mask
 
-    monkeypatch.setattr(cost_mask, "_ALL_MASKED", cost_mask._ALL_MASKED - {"cost_value"})
+    monkeypatch.setattr(cost_mask, "_ALL_MASKED", cost_mask._ALL_MASKED - {"cost_price"})
     row = _ledger_row(world, "SALES_STAFF")
-    assert row.get("cost_value") == pytest.approx(AT_COST)
-    assert "unit_cost" not in row
+    assert row.get("cost_price") == pytest.approx(3150.0)
+    assert "unit_cost" not in row and "cost_value" not in row
+
+
+# ============================================================================
+# Managers: what we pay, stock value at cost included, is the accounts roles'
+# ============================================================================
+# Owner ruling 2026-10-12 (recorded on main: what we pay is ADMIN / SUPERADMIN /
+# ACCOUNTANT only). Panel 2026-10-12 #8: this branch had given STORE_MANAGER,
+# AREA_MANAGER and CATALOG_MANAGER three new at-cost figures through cost_mask
+# "product" -- the Inventory 'Stock value' headline (ledger cost_value), Stock
+# aging 'Tied capital (at cost)' and Reports > Inventory's Stock Summary. As a
+# STORE_MANAGER (and the other managers), no read carries a stock-at-cost key
+# or the shelf's cost (Rs 6,300; units at 3,100 and 3,200).
+
+_MANAGER_READS = (
+    ("/inventory/stock", {}),
+    ("/inventory/aging", {}),
+    *[(path, params) for path, (params, _values) in _REPORTS.items()],
+)
+
+
+def _keys(v):
+    if isinstance(v, dict):
+        for k, x in v.items():
+            yield k, x
+            yield from _keys(x)
+    elif isinstance(v, list):
+        for x in v:
+            yield from _keys(x)
+
+
+@pytest.mark.parametrize("path,params", _MANAGER_READS, ids=[p for p, _ in _MANAGER_READS])
+@pytest.mark.parametrize("role", MANAGERS)
+def test_a_manager_reads_no_stock_at_cost_anywhere(world, path, params, role):
+    resp = world.get(path, role, **params)
+    if resp.status_code == 403:  # a report outside the role's reach
+        return
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    leaked = sorted({k for k, v in _keys(body) if k in STOCK_COST_KEYS and v is not None})
+    _open(not leaked, f"{role} reads stock at cost on {path}: {leaked}")
+    if path in _REPORTS:
+        values = [v for v in _REPORTS[path][1](body) if v is not None]
+        _open(not values, f"{role} reads stock value at cost {values} on {path}")
+    for figure in ("6300", "3100", "3200"):
+        assert figure not in resp.text, (role, path, figure)
+
+
+def test_the_store_manager_probe_reads_selling_value_only(world):
+    """The panel's probe, as a STORE_MANAGER at Dhanbad: the shop is reached
+    (the reads are not simply refused) and every figure is selling value."""
+    row = _ledger_row(world, "STORE_MANAGER")
+    assert (row["stock"], row["offerPrice"]) == (2, pytest.approx(5000.0))
+    aging = _aging(world, "STORE_MANAGER").json()
+    assert aging["summary"]["slowMovingValue"] == pytest.approx(11600.0)
+    count = world.get("/reports/stock/count", "STORE_MANAGER",
+                      from_date="2026-09-01", to_date="2026-09-29").json()
+    assert count["summary"]["total_quantity"] == 2
+    assert "total_value" not in count["summary"]

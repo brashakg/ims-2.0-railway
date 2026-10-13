@@ -60,8 +60,9 @@ async def inventory_summary(
 
     out_of_stock = [s for s in all_stock if s.get("quantity", 0) <= 0]
 
-    # Stock value is at cost: the roles that see product cost only (D7);
-    # mask_cost drops both keys for anyone else.
+    # Stock value is at cost: the roles that see stock at cost only
+    # (stock_value.COST_CONTEXT, owner ruling 2026-10-12); mask_cost drops
+    # both keys for anyone else.
     return mask_cost(
         {
             "summary": {
@@ -75,7 +76,7 @@ async def inventory_summary(
             }
         },
         current_user,
-        "product",
+        stock_value.COST_CONTEXT,
         extra=("total_value",),
     )
 
@@ -89,8 +90,14 @@ async def inventory_valuation(
     active_store = resolve_store_scope(store_id, current_user)  # R4: see summary
     stock_repo = get_stock_repository()
 
+    # The values are stock at cost: the roles that see it only
+    # (stock_value.COST_CONTEXT, owner ruling 2026-10-12) -- a manager reads
+    # the quantities per category, never a value.
+    def _out(body):
+        return mask_cost(body, current_user, stock_value.COST_CONTEXT, extra=("value", "total"))
+
     if stock_repo is None:
-        return {"valuation": {"by_category": [], "total": 0}}
+        return _out({"valuation": {"by_category": [], "total": 0}})
 
     # F47: the one stock-value rule (services/stock_value).
     all_stock = stock_value.shelf_units(stock_repo, get_product_repository(), active_store)
@@ -112,13 +119,15 @@ async def inventory_valuation(
 
     total = stock_value.total(all_stock)
 
-    return {
-        "valuation": {
-            "by_category": list(by_category.values()),
-            "total": round(total, 2),
-            "uncosted_units": stock_value.uncosted(all_stock),
+    return _out(
+        {
+            "valuation": {
+                "by_category": list(by_category.values()),
+                "total": round(total, 2),
+                "uncosted_units": stock_value.uncosted(all_stock),
+            }
         }
-    }
+    )
 
 
 @router.get("/inventory/tax-code-audit")

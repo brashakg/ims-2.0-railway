@@ -204,7 +204,7 @@ async def inventory_report(
                 "categories": list(categories.values()),
             },
             current_user,
-            "product",
+            stock_value.COST_CONTEXT,
             extra=("totalValue", "value", "uncostedUnits"),
         )
 

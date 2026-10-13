@@ -7,8 +7,15 @@
 // separately and labelled.
 //
 // It used to sum (offerPrice || mrp) * stock under that label. The backend
-// (backend/tests/test_stock_value_at_cost.py) gives the manager's ledger rows
-// `cost_value`; the tile sums it, and the selling value has its own cell.
+// (backend/tests/test_stock_value_at_cost.py) gives the ledger rows
+// `cost_value` for the roles that see stock at cost; the tile sums it, and the
+// selling value has its own cell.
+//
+// Owner ruling 2026-10-12 (what we pay, stock at cost included, is ADMIN /
+// SUPERADMIN / ACCOUNTANT only): the server sends cost_value to those roles
+// alone. A manager's (and the counter's) rows carry none, so their headline is
+// the selling value, beside Categories, as it always was -- the strip follows
+// the data, never a role list.
 //
 // These were `it.fails` pins while the finding was open. The plain test first
 // proves the harness renders the strip from these rows, so they cannot pass
@@ -23,8 +30,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 vi.mock('../../../context/AuthContext', () => ({
   useAuth: () => ({
-    user: { id: 'USR-1', activeStoreId: 'BV-DHN-01', storeIds: ['BV-DHN-01'], roles: ['STORE_MANAGER'] },
-    hasRole: (roles: string[]) => roles.includes('STORE_MANAGER'),
+    user: { id: 'USR-1', activeStoreId: 'BV-DHN-01', storeIds: ['BV-DHN-01'], roles: ['ACCOUNTANT'] },
+    hasRole: (roles: string[]) => roles.includes('ACCOUNTANT'),
   }),
 }));
 vi.mock('../../../components/inventory/StockTransferModal', () => ({
@@ -35,7 +42,7 @@ vi.mock('../../../context/ToastContext', () => ({
 }));
 
 // 83 units: selling 50 x 6000 + 33 x 6061 = Rs 5.0L; cost 1,70,000 + 1,10,000
-// = Rs 2.8L (the manager's rows carry cost_value, as the backend pin requires).
+// = Rs 2.8L (an accounts login's rows carry cost_value, as the backend pin requires).
 const ROWS: Record<string, unknown>[] = [
   { id: 'p1', sku: 'FR-1', name: 'Carrera CA 8895', category: 'FRAME', brand: 'Carrera',
     mrp: 7000, offerPrice: 6000, stock: 50, reserved: 0, cost_value: 170000, unit_cost: 3400 },
@@ -106,11 +113,16 @@ describe('F47: the Inventory stock-value headline', () => {
     expect(cells.some((v) => /5\.0L/.test(v))).toBe(true);
   });
 
-  it('F47: a login the server sends no cost (the counter) sees no figure under "Stock value"', () => {
+  it('a login the server sends no cost (a manager, the counter) reads the selling value as the headline, as before', () => {
     rows = ROWS.map((r) => ({ ...r, cost_value: undefined, unit_cost: undefined }));
     try {
       renderStrip();
-      expect(statValue('Stock value')).toBe('—');
+      expect(statValue('Stock value')).toBe('₹ 5.0L');
+      expect(screen.getByText('at offer price (MRP if none) · shelf + reserved')).toBeInTheDocument();
+      expect(screen.queryByText(/at cost/)).toBeNull();
+      // No second selling cell beside it: Categories, as on main.
+      expect(screen.queryByText('Selling value')).toBeNull();
+      expect(screen.getByText('Categories')).toBeInTheDocument();
     } finally {
       rows = ROWS;
     }
@@ -184,7 +196,8 @@ describe('review r1 #34: the stock-value tile counts the units with no cost', ()
     rows = UNCOSTED.map((r) => ({ ...r, cost_value: undefined, unit_cost: undefined, uncosted_units: undefined }));
     try {
       renderStrip();
-      expect(statValue('Stock value')).toBe('—');
+      // The selling value (Rs 5,13,013), never a cost and never a count.
+      expect(statValue('Stock value')).toBe('₹ 5.1L');
       expect(screen.queryByText(/no cost/)).toBeNull();
     } finally {
       rows = ROWS;
@@ -356,24 +369,22 @@ describe('review r2 #22: the value tiles read whole rupees under a lakh, and a d
     }
   });
 
-  it('while the stock list loads, both tiles read a dash -- not Rs 0', () => {
+  it('while the stock list loads, the headline reads a dash -- not Rs 0', () => {
     stockQuery = { data: undefined, isFetching: true, isPending: true, isError: false, isSuccess: false };
     try {
       renderStrip();
       expect(statValue('Stock value')).toBe('—');
-      expect(statValue('Selling value')).toBe('—');
       expect(screen.queryByText('₹0')).toBeNull();
     } finally {
       stockQuery = null;
     }
   });
 
-  it('after the stock list fails, both tiles read a dash and the error is shown', () => {
+  it('after the stock list fails, the headline reads a dash and the error is shown', () => {
     stockQuery = { data: undefined, isFetching: false, isPending: false, isError: true, isSuccess: false };
     try {
       renderStrip();
       expect(statValue('Stock value')).toBe('—');
-      expect(statValue('Selling value')).toBe('—');
       expect(screen.getByText('Failed to load inventory. Please try again.')).toBeInTheDocument();
     } finally {
       stockQuery = null;
@@ -385,7 +396,6 @@ describe('review r2 #22: the value tiles read whole rupees under a lakh, and a d
     try {
       renderStrip();
       expect(statValue('Stock value')).toBe('₹0');
-      expect(statValue('Selling value')).toBe('₹0');
     } finally {
       rows = ROWS;
     }

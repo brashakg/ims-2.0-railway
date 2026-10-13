@@ -525,8 +525,9 @@ async def daily_stock_count(
         total_items += 1
         total_value += item["cost_value"]
 
-    # Stock value is at cost: the roles that see product cost only (D7);
-    # mask_cost drops the value keys for anyone else.
+    # Stock value is at cost: the roles that see stock at cost only
+    # (stock_value.COST_CONTEXT, owner ruling 2026-10-12); mask_cost drops the
+    # value keys for anyone else.
     return mask_cost(
         {
             "data": list(by_category.values()),
@@ -539,7 +540,7 @@ async def daily_stock_count(
             },
         },
         current_user,
-        "product",
+        stock_value.COST_CONTEXT,
         extra=("total_value",),
     )
 
