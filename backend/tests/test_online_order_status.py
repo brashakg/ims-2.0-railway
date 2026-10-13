@@ -1823,12 +1823,13 @@ def _stock_in(swept, oid):
 def _premark(monkeypatch):
     """A restock as it ran before the order-line marks (every refund confirmed
     on main): no booking, and no historical rule in the restock either, so a
-    historical frame is minted. Returns the undo."""
+    historical frame is minted -- nor multi-location PR 5's route (a frame a
+    routed order never claimed is never minted). Returns the undo."""
     real, real_restock = shopify_refund._restock_booked, returns_router._restock_good_items
     monkeypatch.setattr(shopify_refund, "_restock_booked",
                         lambda order, lines, rid, restock, **kw: restock(lines))
     monkeypatch.setattr(returns_router, "_restock_good_items", lambda *a, order=None, **kw: real_restock(
-        *a, order={**order, "historical": False} if order else order, **kw))
+        *a, order={**order, "historical": False, "fulfillment_route": None} if order else order, **kw))
 
     def undo():
         monkeypatch.setattr(shopify_refund, "_restock_booked", real)

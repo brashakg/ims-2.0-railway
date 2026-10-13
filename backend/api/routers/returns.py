@@ -2356,6 +2356,11 @@ def _restock_good_items(
         or str((order or {}).get("channel") or "").strip().upper() == "ONLINE"
         or bool((order or {}).get("shopify_order_id"))
     )
+    # Multi-location PR 5: a routed online order's units are exactly the ones
+    # its claim SOLD to it. A line the claim never covered (a stock miss, a
+    # short or empty claim) never left any shop: nothing goes back for it,
+    # never a mint (a phantom, written back to Shopify and sold at the till).
+    claimed_only = isinstance((order or {}).get("fulfillment_route"), dict)
     per_product_queue: Dict[str, List[str]] = {}
     per_product_default: Dict[str, str] = {}
     if is_redirected:
@@ -2398,6 +2403,7 @@ def _restock_good_items(
                 "quantity": 0,
                 "reactivated": 0,
                 "minted": 0,
+                "never_claimed": 0,
                 "applied": True,
                 # WHICH physical store(s) this product's units landed on (set
                 # from store_ids below).
@@ -2438,6 +2444,9 @@ def _restock_good_items(
             logger.warning("[RETURNS] stock read/write failed, unit not restocked: %s", exc)
             all_ok = False
             row["applied"] = False
+            continue
+        if not sid and claimed_only:
+            row["never_claimed"] += 1
             continue
         if unit_store and unit_store not in landed_stores:
             landed_stores.append(unit_store)

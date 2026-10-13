@@ -4084,6 +4084,38 @@ def test_a_shopify_cancel_mid_remap_leaves_one_row_per_frame(world, monkeypatch,
     assert {u["status"] for u in db.stock_units.find()} == {"AVAILABLE"}
 
 
+@pytest.mark.parametrize("short", ["one_line_missed", "nothing_claimed"])
+def test_a_cancel_restock_puts_back_only_what_the_order_claimed(world, monkeypatch, short):
+    """[LOW-MEDIUM] Round 25, item 1: Shopify assigned the whole order to
+    Bokaro, which came up short -- a stock miss on OA (Ranchi holds it, but
+    no shop holds the whole order) or on everything. A cancel with 'Restock
+    items' reactivated the claimed RB and MINTED what the claim never took:
+    a phantom frame at Bokaro, written back to Shopify and sold at the till.
+    A line the claim never covered never left a shop: nothing goes back."""
+    db = world["db"]
+    lines = (("RB-1234", 1), ("OA-5", 1)) if short == "one_line_missed" else (("RB-1234", 1),)
+    if short == "one_line_missed":
+        _stock(db, "BV-BOK-01", "P-RB", 1)
+        _stock(db, "BV-RAN-01", "P-OA", 1)
+    world["shop"].fo(FO_1, LOC_BOK)
+    payload = _order(59101 + (short == "nothing_claimed"), lines=lines)
+    res, order = _book(world, payload)
+    assert order["store_id"] == "BV-BOK-01" and order["stock_hold_reason"], order
+    assert _sold_at(db, res["order_id"]) == (["BV-BOK-01"] if short == "one_line_missed" else [])
+    _shopify_cancel(world, payload)
+    frames = _frames(db)
+
+    restocked = _refund_restock(world, monkeypatch, res["order_id"],
+                                [(_PRODUCTS[sku], q) for sku, q in lines])
+
+    assert [r["minted"] for r in restocked["restocked"]] == [0] * len(lines), restocked
+    assert [r["reactivated"] for r in restocked["restocked"]] == (
+        [1, 0] if short == "one_line_missed" else [0])
+    assert restocked["applied"] is True, "nothing left to retry: those units never left"
+    assert _frames(db) == frames
+    assert {u["status"] for u in db.stock_units.find()} <= {"AVAILABLE"}
+
+
 @pytest.mark.parametrize("cause", ["refund_mark", "part_closed", "shipped"])
 def test_a_takeover_refused_for_good_settles_the_half_claim_loudly(world, monkeypatch, cause):
     """[LOW-MEDIUM] Round 17, item 5: a crashed Re-map left 1 of 2 units
