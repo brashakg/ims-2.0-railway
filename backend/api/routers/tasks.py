@@ -73,9 +73,10 @@ VALID_STATUSES = {"OPEN", "IN_PROGRESS", "COMPLETED", "ESCALATED", "CANCELLED"}
 # Statuses from which no further lifecycle transitions are allowed.
 TERMINAL_STATUSES = {"COMPLETED", "CANCELLED"}
 
-# Cancel or reassign a task, and issue the day's SOP tasks: managers only
-# (owner ruling 2026-10-13, control over convenience). Staff start and
-# complete their own tasks. The rbac rows for /reassign and /auto-generate
+# Cancel or reassign a task (PATCH/PUT assigned_to, /reassign, /escalate with
+# a named person), and issue the day's SOP tasks: managers only (owner ruling
+# 2026-10-13, control over convenience). Staff start, complete and escalate
+# up the ladder their own tasks. The rbac rows for /reassign and /auto-generate
 # name exactly these roles.
 MANAGER_ROLES = ("STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN")
 _managers_only = require_roles(*MANAGER_ROLES)
@@ -1176,7 +1177,10 @@ async def escalate_task(
 ):
     """Manually escalate a task. If `escalate_to` is omitted, the next owner is
     resolved automatically up the role ladder (Store Manager -> Area Manager ->
-    Admin -> Superadmin) scoped to the task's store."""
+    Admin -> Superadmin) scoped to the task's store. Naming the person hands
+    the task to them -- a reassignment, so managers only, like /reassign."""
+    if escalate_to:
+        await _managers_only(current_user)
     repo = get_task_repository()
 
     if repo is None:

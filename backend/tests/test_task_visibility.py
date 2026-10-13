@@ -132,17 +132,18 @@ TASK_ROUTES = {
     "acknowledge": ("post", "/acknowledge", {}, lambda d: d["status"] == "IN_PROGRESS"),
     "start": ("post", "/start", {}, lambda d: d["status"] == "IN_PROGRESS"),
     "escalate": ("post", "/escalate", {}, lambda d: d["status"] == "ESCALATED"),
-    "escalate to": ("post", "/escalate", {"params": {"escalate_to": "u-mgr"}}, lambda d: d["assigned_to"] == "u-mgr"),
 }
 
 # Cancel and reassign: a manager's call, never staff's (owner ruling
-# 2026-10-13), even on the staff member's own task.
+# 2026-10-13), even on the staff member's own task. Escalating TO a named
+# person hands the task to them, so it is a reassignment too.
 MANAGER_ROUTES = {
     "cancel": ("patch", "", {"json": {"status": "CANCELLED"}}, lambda d: d["status"] == "CANCELLED"),
     "cancel via put": ("put", "", {"json": {"status": "cancelled"}}, lambda d: d["status"] == "CANCELLED"),
     "patch assignee": ("patch", "", {"json": {"assigned_to": "u-mgr"}}, lambda d: d["assigned_to"] == "u-mgr"),
     "put assignee": ("put", "", {"json": {"assigned_to": "u-mgr"}}, lambda d: d["assigned_to"] == "u-mgr"),
     "reassign": ("post", "/reassign", {"json": {"assigned_to": "u-mgr"}}, lambda d: d["assigned_to"] == "u-mgr"),
+    "escalate to": ("post", "/escalate", {"params": {"escalate_to": "u-mgr"}}, lambda d: d["assigned_to"] == "u-mgr"),
 }
 MANAGERS = ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"]
 
@@ -503,11 +504,11 @@ def test_only_a_manager_cancels_or_reassigns_a_task(world, route):
     as_role, db = world
     method, tail, kw, landed = MANAGER_ROUTES[route]
     for role in STAFF_ROLES:
-        tid = f"P-{role}"
-        before = db.tasks.find_one({"task_id": tid})
-        r = getattr(as_role(role), method)(f"/api/v1/tasks/{tid}{tail}", **kw)
-        assert r.status_code == 403, (role, r.status_code, r.text)
-        assert db.tasks.find_one({"task_id": tid}) == before, role
+        for tid in (f"P-{role}", f"R-{role}"):  # their own, and their role's
+            before = db.tasks.find_one({"task_id": tid})
+            r = getattr(as_role(role), method)(f"/api/v1/tasks/{tid}{tail}", **kw)
+            assert r.status_code == 403, (tid, r.status_code, r.text)
+            assert db.tasks.find_one({"task_id": tid}) == before, tid
     for i, role in enumerate(MANAGERS):
         tid = f"P-{STAFF_ROLES[i]}"  # a staff member's task at BV-S1
         r = getattr(as_role(role), method)(f"/api/v1/tasks/{tid}{tail}", **kw)
