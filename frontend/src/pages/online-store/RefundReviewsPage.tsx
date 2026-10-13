@@ -28,6 +28,7 @@ import {
   XCircle,
   User,
   Store,
+  PackageCheck,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import {
@@ -50,6 +51,13 @@ const STATUS_META: Record<string, { label: string; chip: string }> = {
 };
 
 const OPEN_STATUSES = ['PENDING', 'DISCREPANCY', 'CREDIT_FAILED', 'NO_CUSTOMER'];
+
+// An order imported from Shopify's history predates IMS stock: IMS books its
+// returned frames but never adds a stock row itself (owner 2026-10-01).
+const stockInNote = (store?: string | null) =>
+  'This order predates IMS stock, so IMS added no stock row: a task asks the store manager' +
+  (store ? ` of ${store}` : '') +
+  ' to add the frame through stock-in.';
 
 /** Neutral presentation for a status this build doesn't know (OS-062): before,
  *  an unrecognised value borrowed PENDING's amber 'Awaiting review' chip while
@@ -146,7 +154,7 @@ export default function RefundReviewsPage() {
   );
 
   const act = useCallback(
-    async (review: RefundReview, action: 'confirm' | 'reject') => {
+    async (review: RefundReview, action: 'confirm' | 'reject' | 'goods-back') => {
       setActingId(review.review_id);
       try {
         if (action === 'confirm') {
@@ -162,7 +170,11 @@ export default function RefundReviewsPage() {
             restock_applied?: boolean;
             restock_store_id?: string | null;
             restock_store_ids?: string[] | null;
+            restock_stock_ids?: string[] | null;
             return_id?: string | null;
+            stock_in_task?: string | null;
+            stock_in_store_id?: string | null;
+            historical?: boolean;
           };
           // An idempotent re-confirm returns {status:'duplicate'} with NO
           // restock_applied key. Reading that as `false` would pin the red
@@ -177,17 +189,35 @@ export default function RefundReviewsPage() {
             result.restock_store_ids && result.restock_store_ids.length > 0
               ? result.restock_store_ids.join(', ')
               : result.restock_store_id || '';
-          if (result.restock_applied) {
+          if (result.stock_in_task) {
+            toast.success(`Credit note posted. ${stockInNote(result.stock_in_store_id)}`);
+          } else if (result.restock_applied && result.restock_stock_ids?.length === 0) {
+            // Nothing to put back now: the goods are still with the customer.
+            toast.success(
+              'Credit note posted. No stock was put back - if the goods physically come back, press Goods back.',
+            );
+          } else if (result.restock_applied) {
             toast.success(
               landed
                 ? `Credit note posted. Stock put back at ${landed}.`
                 : 'Credit note posted and stock restocked.',
             );
+          } else if (result.historical) {
+            // Owner 2026-10-01: Goods back books a historical frame and a
+            // stock-in task adds it -- never "put back", never "not by hand".
+            toast.warning(
+              `Credit note posted, but the returned frames are not booked yet (${
+                result.return_id || review.review_id
+              }). When they are at the shop, press Goods back on this refund: this order ` +
+                'predates IMS stock, so that adds no stock row - it raises a task for the store ' +
+                'manager to add the frames through stock-in.',
+            );
           } else {
             const ref = result.return_id || review.review_id;
             toast.warning(
               `Credit note posted, but the returned items were NOT put back into stock (${ref}). ` +
-                'A task has been raised — add them at the receiving shop.',
+                'A task has been raised. When the goods are at the shop, press Goods back on this ' +
+                'refund - never add them by hand as well, or they are counted twice.',
             );
             setRestockGaps((prev) =>
               prev.some((g) => g.ref === ref)
@@ -201,6 +231,14 @@ export default function RefundReviewsPage() {
                   ],
             );
           }
+        } else if (action === 'goods-back') {
+          const res = await refundReviewsApi.goodsBack(review.review_id);
+          const back = (res?.result ?? {}) as { status?: string; stock_in_store_id?: string | null };
+          toast.success(
+            back.status === 'stock_in'
+              ? `Goods booked back. ${stockInNote(back.stock_in_store_id)}`
+              : 'Goods put back in stock.',
+          );
         } else {
           await refundReviewsApi.reject(review.review_id);
           toast.success('Refund review rejected.');
@@ -274,7 +312,8 @@ export default function RefundReviewsPage() {
           <p className="text-sm text-red-900 mt-1">
             The credit note posted and the customer is refunded, but the returned items could
             not be booked into any shop&apos;s stock — so they are physically with whoever
-            received them and IMS has no record of them. Add them at the receiving shop.
+            received them and IMS has no record of them. When they are at the shop, press Goods
+            back on the refund - never add them by hand as well, or they are counted twice.
           </p>
           <ul className="mt-1.5 text-xs text-red-800 list-disc pl-5">
             {restockGaps.map((g) => (
@@ -372,6 +411,11 @@ export default function RefundReviewsPage() {
             const meta = metaFor(s);
             const isOpen = OPEN_STATUSES.includes(s);
             const acting = actingId === r.review_id;
+            // The goods leg of a refund (owner ruling 2026-09-28): a person says
+            // the refunded goods physically came back, before or after the
+            // confirm. Not on a rejected / unmatched row, and once only.
+            const canGoodsBack =
+              !!r.order_id && !r.goods_back_at && (isOpen || s === 'POSTED');
             // OS-061: prefer the display name the backend resolves from the
             // stores registry; fall back to the raw code.
             const restockLabel =
@@ -469,6 +513,18 @@ export default function RefundReviewsPage() {
                     // OS-062: an unrecognised status is not "resolved" — say
                     // plainly that this build has no action for it.
                     <span className="text-xs text-gray-400">No action available</span>
+                  )}
+                  {canGoodsBack && (
+                    <button
+                      type="button"
+                      onClick={() => act(r, 'goods-back')}
+                      disabled={acting}
+                      className="btn-outline inline-flex items-center gap-1.5 text-xs disabled:opacity-60"
+                      title="The refunded items physically came back and can be sold again: put them back in stock (no money moves)"
+                    >
+                      {acting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <PackageCheck className="w-3.5 h-3.5" />}
+                      Goods back
+                    </button>
                   )}
                 </div>
               </div>
