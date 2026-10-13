@@ -501,6 +501,85 @@ def test_1_a_re_press_after_a_take_down_that_shopify_confirms_goes_back_on_the_w
     assert _baseline(db)["tracked"] is True
 
 
+def _active_sent(spy):
+    return [c for c in spy.calls_for("productUpdate(") if c["variables"]["input"].get("status") == "ACTIVE"]
+
+
+_THROTTLED = {"errors": [{"message": "Throttled", "extensions": {"code": "THROTTLED"}}]}
+
+
+def test_1_a_re_press_after_a_take_down_whose_publish_is_refused_never_sends_active(monkeypatch):
+    """Panel finding (mutant P). The same confirmed re-press, but Shopify
+    refuses publishablePublish (THROTTLED). The held-back ACTIVE must never
+    go out: the listing keeps its Online Store publication, so ACTIVE alone
+    puts it back on sale while the press says withheld and IMS says DRAFT.
+    Send the ACTIVE whatever the publish answered -> fails."""
+    db, rows, upd2 = _taken_down_with_size_l(monkeypatch)
+    spy = _Spy(_responses(**{"productUpdate(": upd2, "publishablePublish": _THROTTLED}))
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.push_product(db, _cat(db), rows))
+    assert len(spy.calls_for("publishablePublish")) == 1
+    assert _active_sent(spy) == [], "never back on sale on a refused publish"
+    assert res.ok is False and res.reason == "publish_withheld", res
+    ecom = _cat(db)["ecom"]
+    assert ecom["status"] == "DRAFT" and ecom.get("taken_down_at"), ecom
+
+
+@pytest.mark.parametrize(
+    "refuse",
+    [
+        lambda: {"data": {"productUpdate": {"product": None, "userErrors": [
+            {"field": ["status"], "message": "cannot activate"}]}}},
+        lambda: _THROTTLED,
+    ],
+    ids=["active-user-error", "active-throttled"],
+)
+def test_1_a_re_press_after_a_take_down_whose_active_is_refused_stays_draft(monkeypatch, refuse):
+    """Panel finding (`_set_active`). The confirmed re-press, the publish
+    succeeds, then Shopify refuses the held-back productUpdate ACTIVE: the
+    listing is still Draft on Shopify, so IMS must keep DRAFT and the
+    take-down marker (listing_visible stays honest, the row stays queued) and
+    the press is withheld, never ok. Count a refused ACTIVE as published ->
+    IMS writes PUBLISHED over a Draft listing -> fails."""
+    db, rows, upd2 = _taken_down_with_size_l(monkeypatch)
+
+    def update(query, variables):  # noqa: ARG001
+        return refuse() if variables["input"] == {"id": "gid://shopify/Product/111", "status": "ACTIVE"} else upd2
+
+    spy = _Spy(_responses(**{"productUpdate(": update}))
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.push_product(db, _cat(db), rows))
+    assert len(spy.calls_for("publishablePublish")) == 1 and len(_active_sent(spy)) == 1
+    assert res.ok is False and res.reason == "publish_withheld", res
+    assert "setting the listing Active failed" in res.error and "OFF the website (Draft)" in res.error, res.error
+    ecom = _cat(db)["ecom"]
+    assert ecom["status"] == "DRAFT" and ecom.get("taken_down_at"), ecom
+    assert ecom.get("locally_modified") is True, "stays queued for the retry"
+
+
+def test_1_no_variant_gid_known_is_never_confirmed_tracking(monkeypatch):
+    """Panel finding (mutant L). A listing whose gid IMS holds but no size
+    gid at all -- none stored, none in Shopify's answer, seeding minting
+    none. No tracking re-send is ever made, so nothing is confirmed: no
+    publish, the tracking code, recorded untracked. Count 'no size known' as
+    confirmed -> the listing is published with tracking never sent -> fails."""
+    db = _db(a=2, b=1, c=0)
+    row = _catalog_row("cat-1", "SP-1", gid=True, locally_modified=True)
+    row["ecom"].update(shopify_variant_id=None, shopify_inventory_item_id=None)
+    db.seed("catalog_products", [row])
+    upd = _product_body("productUpdate")
+    upd["data"]["productUpdate"]["product"]["variants"]["nodes"] = []
+    spy = _Spy(_responses(**{"productUpdate(": upd}))
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.push_product(db, _cat(db), []))
+    assert _tracking_sent(spy) == set() and spy.calls_for("publishablePublish") == []
+    assert res.stock["tracking_confirmed"] is False, res.stock
+    assert "no variant gid known -- tracking not set" in res.stock["errors"], res.stock
+    assert res.ok is False and res.code == shopify_push.STOCK_TRACKING_FAILED, res
+    assert _cat(db)["ecom"]["status"] == "DRAFT"
+    assert (_baseline(db) or {}).get("tracked") is not True
+
+
 def test_2_still_live_then_press_again_on_the_same_answer_is_still_live(monkeypatch):
     """Round-3 finding (honest-screens probe A2). Press 1: L created with an
     answer saying untracked + CONTINUE, the take-down refused, the re-send
