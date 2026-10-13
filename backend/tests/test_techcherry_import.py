@@ -102,14 +102,14 @@ class TestMappers:
         # sku falls back to name when no barcode
         assert doc["sku"] == "Generic frame"
 
-    def test_product_mapper_keeps_a_real_gtin_as_the_barcode(self):
+    def test_product_mapper_never_writes_a_barcode(self):
+        """A maker GTIN goes to attributes.gtin through the import's writer
+        (TestGtinOneHolder), never the legacy products.barcode."""
         from api.routers.techcherry_import import _map_product
-        row = {"Prod Name": "Oakley frame", "Barcode": "4006381 333931", "Sale Prc": "900"}
+        row = {"Prod Name": "Oakley frame", "Barcode": "4006381333931", "Sale Prc": "900"}
         doc = _map_product(row, "BV-PUN-01", "techcherry")
-        assert doc["barcode"] == "4006381333931"
-        # Our own in-store range (GS1 20-29) is never a manufacturer barcode.
-        row["Barcode"] = "2000000000015"
-        assert "barcode" not in _map_product(row, "BV-PUN-01", "techcherry")
+        assert "barcode" not in doc and "attributes" not in doc
+        assert doc["sku"] == "4006381333931"
 
     def test_product_mapper_skips_when_no_name_or_barcode(self):
         from api.routers.techcherry_import import _map_product
@@ -297,8 +297,10 @@ class TestEndpointAuth:
 
 
 class TestGtinOneHolder:
-    """The import is a door that writes products.barcode, so it obeys the same
-    one-holder rule (product_master.assert_gtin_free) as every other door."""
+    """The import writes a maker GTIN to attributes.gtin (write_spine_gtin, as
+    a Manage Barcode save lands), so it obeys the same one-holder rule
+    (product_master.assert_gtin_free) as every other door, and a product keeps
+    ONE maker barcode."""
 
     def _import(self, client, auth_headers, monkeypatch, rows, overwrite=True):
         import mongomock
@@ -336,12 +338,20 @@ class TestGtinOneHolder:
     def test_a_free_gtin_still_imports_and_reimports(
         self, client, auth_headers, monkeypatch
     ):
-        rows = [{"Prod Name": "Faber", "Barcode": "4006381333931"}]
-        assert self._import(client, auth_headers, monkeypatch, rows)["inserted"] == 1
+        rows = [{"Prod Name": "Faber", "Barcode": "4006381 333931"},
+                # our own in-store range (GS1 20-29) is never a maker barcode
+                {"Prod Name": "In-store", "Barcode": "2000000000015"}]
+        assert self._import(client, auth_headers, monkeypatch, rows)["inserted"] == 2
+        faber = self.db.products.find_one({"name": "Faber"})
+        # The one home, never the legacy products.barcode; a product_id keys it.
+        assert faber["attributes"] == {"gtin": "4006381333931"}
+        assert "barcode" not in faber and faber["product_id"]
+        assert "attributes" not in self.db.products.find_one({"name": "In-store"})
         # Re-importing the row that holds it updates it: not a second holder.
         again = self._import(client, auth_headers, monkeypatch, rows)
-        assert (again["updated"], again["errors"]) == (1, [])
-        assert self.db.products.count_documents({"barcode": "4006381333931"}) == 1
+        assert (again["updated"], again["errors"]) == (2, [])
+        assert self.db.products.count_documents({"attributes.gtin": "4006381333931"}) == 1
+        assert self.db.products.find_one({"name": "Faber"})["product_id"] == faber["product_id"]
 
     def test_the_holder_reimported_in_another_spelling_is_still_itself(
         self, client, auth_headers, monkeypatch
@@ -357,3 +367,79 @@ class TestGtinOneHolder:
         rows = [{"Prod Name": "RB frame", "Barcode": "036000291452"}]
         out = self._import(client, auth_headers, monkeypatch, rows)
         assert (out["updated"], out["errors"]) == (1, [])
+        # ...and its legacy barcode moves to the one home.
+        held = self.db.products.find_one({"sku": "036000291452"})
+        assert held["attributes"] == {"gtin": "036000291452"} and "barcode" not in held
+
+    @pytest.mark.parametrize(
+        "stored, cell", [("4006381333931", "4006381333931"), ("0036000291452", "036000291452")]
+    )
+    def test_a_holder_keeping_its_gtin_in_the_attribute_is_still_itself(
+        self, client, auth_headers, monkeypatch, stored, cell
+    ):
+        """The normal state after a Manage Barcode save: the code lives in
+        attributes.gtin, no legacy barcode. Its re-import is the holder, not a
+        duplicate of itself: updated with overwrite, skipped without, and the
+        stored code is left as it is (any spelling of it)."""
+        import mongomock
+
+        self.db = mongomock.MongoClient().db
+        self.db.products.insert_one(
+            {"product_id": "PX", "sku": cell, "store_id": "BV-PUN-01",
+             "attributes": {"gtin": stored}}
+        )
+        rows = [{"Prod Name": "Faber", "Barcode": cell}]
+        out = self._import(client, auth_headers, monkeypatch, rows)
+        assert (out["updated"], out["errors"]) == (1, [])
+        out = self._import(client, auth_headers, monkeypatch, rows, overwrite=False)
+        assert (out["skipped"], out["errors"]) == (1, [])
+        held = self.db.products.find_one({"product_id": "PX"})
+        assert held["attributes"] == {"gtin": stored} and held["name"] == "Faber"
+        assert self.db.products.count_documents({}) == 1
+
+    def test_the_products_own_catalogue_copy_is_no_other_holder(
+        self, client, auth_headers, monkeypatch
+    ):
+        """assert_gtin_free excludes the product the row re-imports: its own
+        catalogue twin holding the code is not another product."""
+        import mongomock
+
+        self.db = mongomock.MongoClient().db
+        self.db.products.insert_one(
+            {"product_id": "PX", "pim_product_id": "TW", "sku": "4006381333931",
+             "store_id": "BV-PUN-01"}
+        )
+        self.db.catalog_products.insert_one(
+            {"id": "TW", "gtin": "4006381333931", "attributes": {"gtin": "4006381333931"}}
+        )
+        rows = [{"Prod Name": "Faber", "Barcode": "4006381333931"}]
+        out = self._import(client, auth_headers, monkeypatch, rows)
+        assert (out["updated"], out["errors"]) == (1, [])
+        held = self.db.products.find_one({"product_id": "PX"})
+        assert held["attributes"] == {"gtin": "4006381333931"}
+
+    @pytest.mark.parametrize(
+        "holds", [{"attributes": {"gtin": "036000291452"}}, {"barcode": "036000291452"}]
+    )
+    def test_an_overwrite_never_gives_a_product_a_second_maker_barcode(
+        self, client, auth_headers, monkeypatch, holds
+    ):
+        """A product that already has a maker barcode keeps it: a file giving a
+        different one is refused in words naming both codes, nothing written."""
+        import mongomock
+
+        self.db = mongomock.MongoClient().db
+        before = {"product_id": "PX", "sku": "4006381333931", "store_id": "BV-PUN-01",
+                  "name": "Old", **holds}
+        self.db.products.insert_one(dict(before))
+        rows = [{"Prod Name": "Faber", "Barcode": "4006381333931"}]
+        out = self._import(client, auth_headers, monkeypatch, rows)
+        assert (out["updated"], len(out["errors"])) == (0, 1)
+        assert "036000291452" in out["errors"][0] and "4006381333931" in out["errors"][0]
+        after = self.db.products.find_one({"product_id": "PX"}, {"_id": 0})
+        assert after == before
+        # Without overwrite the row is only skipped, never an error, and the
+        # skip writes nothing (not even the move to the one home).
+        out = self._import(client, auth_headers, monkeypatch, rows, overwrite=False)
+        assert (out["skipped"], out["errors"]) == (1, [])
+        assert self.db.products.find_one({"product_id": "PX"}, {"_id": 0}) == before
