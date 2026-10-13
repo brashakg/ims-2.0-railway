@@ -1018,11 +1018,9 @@ are the exact current gate (SUPERADMIN always implied).
 | `GET` | `/api/v1/tasks/` | AUTH |  |
 | `POST` | `/api/v1/tasks/` | AUTH |  |
 | `POST` | `/api/v1/tasks/auto-escalate-overdue` | AUTH |  |
-| `POST` | `/api/v1/tasks/auto-generate` | AUTH |  |
+| `POST` | `/api/v1/tasks/auto-generate` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |
 | `GET` | `/api/v1/tasks/checklists` | AUTH |  |
 | `POST` | `/api/v1/tasks/checklists/{checklist_type}/complete-item` | AUTH |  |
-| `GET` | `/api/v1/tasks/completion-stats` | AUTH |  |
-| `GET` | `/api/v1/tasks/escalations` | AUTH |  |
 | `GET` | `/api/v1/tasks/integrity/fake-closures` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
 | `GET` | `/api/v1/tasks/integrity/silent` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
 | `GET` | `/api/v1/tasks/my-tasks` | AUTH |  |
@@ -1047,7 +1045,7 @@ are the exact current gate (SUPERADMIN always implied).
 | `POST` | `/api/v1/tasks/{task_id}/acknowledge` | AUTH |  |
 | `PATCH` | `/api/v1/tasks/{task_id}/complete` | AUTH |  |
 | `POST` | `/api/v1/tasks/{task_id}/escalate` | AUTH |  |
-| `POST` | `/api/v1/tasks/{task_id}/reassign` | AUTH |  |
+| `POST` | `/api/v1/tasks/{task_id}/reassign` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |
 | `POST` | `/api/v1/tasks/{task_id}/start` | AUTH |  |
 
 ### `/api/v1/transfers`

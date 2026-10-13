@@ -3288,13 +3288,13 @@ def update_product(
     clean.pop("created_by", None)
     clean.pop("created_by_name", None)
     if actor:
-        clean["updated_by"] = actor
-        # ALWAYS written alongside updated_by (raw-id fallback when the name
-        # is unresolvable) so a previous editor's stale name can never survive
+        # THE edit stamp (catalog_list.edit_stamp): who and when. The name is
+        # ALWAYS written alongside updated_by (raw-id fallback when it is
+        # unresolvable) so a previous editor's stale name can never survive
         # next to the new editor's id.
-        clean["updated_by_name"] = (
-            actor_name or resolve_actor_name(actor, db=db) or actor
-        )
+        from .catalog_list import edit_stamp
+
+        clean.update(edit_stamp(actor, actor_name or resolve_actor_name(actor, db=db)))
 
     before = {k: current.get(k) for k in clean.keys()}
 

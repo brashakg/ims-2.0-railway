@@ -52,6 +52,8 @@ import {
   variantFlaggedFormFields,
 } from '../productAddShared';
 import {
+  backToQueueAddress,
+  queueSort,
   readReviewQueue,
   writeReviewQueue,
   removeFromReviewQueue,
@@ -824,6 +826,8 @@ export function useQuickAddForm() {
         const res = await catalogProductsApi.list({
           needs_review: true,
           is_active: 'all',
+          // The queue's own order (the review list's Sort by), never a second one.
+          sort: queueSort(readReviewQueue()),
           limit: 2,
         });
         const ids = (res.products || [])
@@ -874,15 +878,13 @@ export function useQuickAddForm() {
     openReviewItem(stash.ids[at - 1]);
   }, [editMode, queuePos, confirmLeaveReviewItem, openReviewItem]);
 
-  // "Back to queue" — restore the exact review-queue position on its own
-  // address (/catalog/review?page=N&focus=<id>; ?focus re-opens the card).
+  // "Back to queue" — the review list exactly as the reviewer left it (page,
+  // Sort by, rows per page, filters) on its own address; ?focus re-opens the
+  // card (reviewQueue.backToQueueAddress).
   const handleBackToQueue = useCallback(() => {
     if (editMode?.kind !== 'catalog') return;
     if (!confirmLeaveReviewItem()) return;
-    const pg = readReviewQueue()?.filters?.page;
-    navigate(
-      `/catalog/review?${pg && pg > 1 ? `page=${pg}&` : ''}focus=${encodeURIComponent(editMode.id)}`
-    );
+    navigate(backToQueueAddress(readReviewQueue(), editMode.id));
   }, [editMode, confirmLeaveReviewItem, navigate]);
 
   // "Add photo" from the Catalog / Missing-photos list lands here as
@@ -1408,6 +1410,7 @@ export function useQuickAddForm() {
           const res = await catalogProductsApi.list({
             needs_review: true,
             is_active: 'all',
+            sort: queueSort(readReviewQueue()),
             limit: 2,
           });
           const ids = (res.products || [])

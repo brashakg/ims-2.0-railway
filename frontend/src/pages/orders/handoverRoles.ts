@@ -37,3 +37,13 @@ export const canCloseHandover = (user: {
   ]);
   return HANDOVER_ROLES.some((r) => held.has(r));
 };
+
+/**
+ * True when the counter may mark an order in `status` delivered. MUST mirror
+ * VALID_TRANSITIONS in backend/api/routers/orders/_shared.py: READY, and
+ * SHIPPED -- an online order Shopify fulfilled (owner ruling 2026-09-28),
+ * handed over at the counter (click-and-collect) or confirmed when no courier
+ * feed reports it delivered.
+ */
+export const canMarkDelivered = (status: string | null | undefined): boolean =>
+  status === 'READY' || status === 'SHIPPED';

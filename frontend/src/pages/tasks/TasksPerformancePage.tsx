@@ -1,8 +1,8 @@
 // ============================================================================
 // IMS 2.0 - /tasks/performance
 // ============================================================================
-// Store-wide task completion. Gated to TEAM_TASK_ROLES (taskRoles.ts) - it is
-// the whole store's numbers, so it follows the same ruling as Team tasks.
+// Task completion for the active shop. Gated to TEAM_TASK_ROLES (taskRoles.ts)
+// - it is the whole shop's numbers, so it follows the same ruling as Team tasks.
 //
 // The four headline counts come from GET /tasks/summary, which counts in the
 // database. They used to be derived from whatever tasks the page happened to
@@ -31,13 +31,16 @@ export function TasksPerformancePage() {
   const { user } = useAuth();
   const storeId = user?.activeStoreId;
 
+  // The totals and the ranking cover the SAME tasks: the active shop's (or,
+  // with no shop picked, everything the person can see) - never one shop's
+  // totals beside a ranking of every shop.
   const summaryQ = useTaskSummary(storeId);
-  const listQ = useTaskList({});
+  const listQ = useTaskList({ store_id: storeId });
   const tasks = flattenTasks(listQ.data);
 
   const s = summaryQ.data?.summary ?? {};
-  const total = Number(summaryQ.data?.total ?? 0)
-    || Number(s.OPEN ?? 0) + Number(s.IN_PROGRESS ?? 0) + Number(s.COMPLETED ?? 0) + Number(s.ESCALATED ?? 0);
+  // The server's total is the list's total (every task but the cancelled).
+  const total = Number(summaryQ.data?.total ?? 0);
   const completed = Number(s.COMPLETED ?? 0);
   const overdue = Number(summaryQ.data?.overdue_count ?? summaryQ.data?.overdue ?? 0);
   const completionRate = total > 0 ? (completed / total) * 100 : 0;
