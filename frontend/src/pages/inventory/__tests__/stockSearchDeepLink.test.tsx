@@ -9,7 +9,7 @@
 // its search box from the URL. This proves the FILTERING, not just the box:
 // the non-matching row must be gone.
 
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -29,10 +29,12 @@ const ITEMS: StockItem[] = [
   {
     id: 'P1', sku: 'FR-RAYB-3025-GLD', name: 'Aviator Classic', brand: 'Ray-Ban',
     category: 'FR', mrp: 12990, offerPrice: 12990, stock: 4, reserved: 0,
+    reorder_point: null, low_stock: false, // level not set: 4 left is not "low"
   },
   {
     id: 'P2', sku: 'FR-RAYB-2140-BLK', name: 'Wayfarer', brand: 'Ray-Ban',
     category: 'FR', mrp: 9990, offerPrice: 9990, stock: 6, reserved: 0,
+    reorder_point: 8, low_stock: true, // its own level is 8
   },
 ];
 
@@ -83,5 +85,19 @@ describe('the QuickAdd ?search= deep link', () => {
     renderAt('/inventory/stock');
     expect(screen.getByText('Wayfarer')).toBeInTheDocument();
     expect(screen.getByText('Aviator Classic')).toBeInTheDocument();
+  });
+});
+
+// F73 (the audit's Bokaro badge): the Low Stock badge is the server's verdict
+// against the product's OWN level (reorder_policy.is_low_stock, sent as
+// low_stock), never a fixed 5 on the screen.
+describe('the ledger Low Stock badge', () => {
+  const badge = (name: string) =>
+    within(screen.getByText(name).closest('tr') as HTMLElement).getByText(/Low Stock|In Stock|Out of Stock/);
+
+  it('follows low_stock, not the count', () => {
+    renderAt('/inventory/stock');
+    expect(badge('Aviator Classic')).toHaveTextContent('In Stock'); // 4 left, level not set
+    expect(badge('Wayfarer')).toHaveTextContent('Low Stock'); // 6 left, level 8
   });
 });

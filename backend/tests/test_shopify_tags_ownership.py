@@ -55,6 +55,10 @@ from api.services import shopify_push  # noqa: E402
 from test_catalog_review_put import _bvi_doc, _promote, _put, _user, env  # noqa: E402,F401
 from test_online_push_dirty_flag import _DB, _run  # noqa: E402
 
+# The push's other mechanics, for a brand that IS for the website (owner D6;
+# the brand rule has its own test in test_add_product_owner_rulings.py).
+pytestmark = pytest.mark.usefixtures("brand_is_for_the_website")
+
 GID = "gid://shopify/Product/900"
 HAND = "Meta Launch"  # a tag a human typed into the Shopify admin
 

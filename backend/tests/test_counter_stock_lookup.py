@@ -567,31 +567,34 @@ _CL_TARGET_UNIT = "BVCL00000001"
 
 def _seed_contact_lens_family(db, powers: int = _CL_POWERS) -> str:
     """`powers` active powers of one model, each in the create door's shape
-    (product_master.normalise_payload, built once and copied: the power only
-    in attributes.power and cl_power, the name and identity_key without it, no
-    top-level size). The one the counter scans is stored LAST, so storage
-    order puts it past both caps. Returns its product_id."""
+    (product_master.normalise_payload: the power in attributes.power and
+    cl_power, and in the name and identity_key too -- owner 2026-09-28, each
+    power is its own item, named by it -- but no top-level size). The one the
+    counter scans is stored LAST, so storage order puts it past both caps.
+    Returns its product_id."""
     from api.services.product_master import normalise_payload
 
-    door = normalise_payload(
-        category="CONTACT_LENS", mrp=1800.0, offer_price=1700.0, cost_price=900.0,
-        sku=_CL_TARGET_SKU,
-        attributes={"brand_name": "Johnson & Johnson", "model_name": "Acuvue Oasys",
-                    "power": "-0.25", "expiry_date": "2028-01-01"},
-        extra_fields={"cl_power": -0.25},
-    )
-    assert "size" not in door and "0.25" not in door["name"], "the door keeps the power apart"
+    def door(power: str) -> dict:
+        return normalise_payload(
+            category="CONTACT_LENS", mrp=1800.0, offer_price=1700.0, cost_price=900.0,
+            sku=_CL_TARGET_SKU,
+            attributes={"brand_name": "Johnson & Johnson", "model_name": "Acuvue Oasys",
+                        "power": power, "expiry_date": "2028-01-01"},
+            extra_fields={"cl_power": float(power)},
+        )
+
+    first = door("-0.25")
+    assert "size" not in first and "-0.25" in first["name"], "the door names the power"
     rows = []
     for i in range(powers):
         last = i == powers - 1
         pid = "P-CL-TARGET" if last else f"P-CL-{i:03d}"
-        power = f"-{(i + 1) * 0.25:.2f}"
+        row = door(f"-{(i + 1) * 0.25:.2f}")
         rows.append({
-            **door, "_id": pid, "product_id": pid, "cl_power": float(power),
+            **row, "_id": pid, "product_id": pid,
             "sku": _CL_TARGET_SKU if last else f"{_CL_TARGET_SKU}{i:03d}",
             "barcode": _CL_TARGET_BARCODE if last else f"{_CL_TARGET_BARCODE}{i:03d}",
-            "attributes": {**door["attributes"], "power": power,
-                           **({"gtin": _CL_TARGET_GTIN} if last else {})},
+            "attributes": {**row["attributes"], **({"gtin": _CL_TARGET_GTIN} if last else {})},
         })
     db["products"].insert_many(rows)
     db["stock_units"].insert_one(_unit("P-CL-TARGET", S2, barcode=_CL_TARGET_UNIT))
@@ -614,8 +617,8 @@ def test_d7b2_a_scanned_power_is_never_cut_from_a_big_family(call, mongo_db, lab
     # scanned to scan; only the scanned power carries it.
     assert [i["product_id"] for i in items if i.get("exact") is True] == [target], label
     assert _counts(items[0])[S2] == (1, 0), "and Bokaro's box of it is counted"
-    # Round 9: every other power, up to the 200-row family cap -- even though
-    # the door gives all of a model's powers ONE identity_key.
+    # Round 9: every other power, up to the 200-row family cap (the family is
+    # the model's 'brand|model|' key prefix, whatever power follows it).
     assert len(pids) > 200, f"scanning {label}: only {len(pids)} of the model's powers came with it"
 
 
@@ -928,10 +931,9 @@ def test_d7b4_a_frames_eye_size_is_the_create_doors(call, mongo_db):
 
 def test_d7b4_each_power_reads_its_own_power(call, mongo_db):
     # Round 9: a contact lens is one product per power (owner 2026-09-28) and
-    # the create door keeps the power in attributes.power / cl_power, minting
-    # a name, SKU and identity_key without it -- so every row of a model read
-    # 'Johnson & Johnson Acuvue Oasys Contact Lenses' with its own count and
-    # nobody could say which was -0.50. A reading glass keeps its power alike.
+    # the create door keeps the power in attributes.power / cl_power; each row
+    # reads its own power from there, never by parsing the name (which says
+    # it too now). A reading glass keeps its power alike.
     from api.services.product_master import normalise_payload
 
     _seed_contact_lens_family(mongo_db, 3)
@@ -947,7 +949,7 @@ def test_d7b4_each_power_reads_its_own_power(call, mongo_db):
     rg["product_id"] = rg["_id"] = "P-RG1"
     mongo_db["products"].insert_one(rg)
     items = _ok(call(_user("SALES_STAFF"), q="Acuvue"))["items"]
-    assert len({i["name"] for i in items}) == 1, "the name tells no power apart"
+    assert len({i["name"] for i in items}) == 3, "each power is named by it"
     assert [(i["product_id"], i.get("power")) for i in items] == [
         ("P-CL-000", "-0.25"), ("P-CL-001", "-0.50"), ("P-CL-TARGET", "-0.75"),
     ], items

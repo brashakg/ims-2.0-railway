@@ -755,10 +755,11 @@ def test_draft_floor_still_requires_category():
         )
 
 
-def test_flat_model_folds_into_both_model_no_and_model_name():
-    # The door must fill BOTH model identity keys from a flat top-level `model`
-    # (read-side overlay already does). Categories keying on model_name (CL,
-    # SMARTWATCH, ...) would otherwise 422 on a flat create.
+def test_flat_model_folds_into_the_model_fields_the_form_shows():
+    # The door fills the model field(s) the category's form shows from a flat
+    # top-level `model`: Model Name for categories keying on it (CL,
+    # SMARTWATCH, ...), which would otherwise 422 on a flat create, and never
+    # a hidden model_no copy the form cannot show or clear. A frame shows both.
     out = pm.normalise_door_payload(
         {
             "category": "CONTACT_LENS",
@@ -768,8 +769,13 @@ def test_flat_model_folds_into_both_model_no_and_model_name():
         },
         source="FORM",
     )
-    assert out["attributes"]["model_no"] == "Oasys"
     assert out["attributes"]["model_name"] == "Oasys"
+    assert "model_no" not in out["attributes"]
+    frame = pm.normalise_door_payload(
+        {"category": "FRAME", "brand": "Ray-Ban", "model": "RB2140", "attributes": {}},
+        source="FORM",
+    )
+    assert (frame["attributes"]["model_no"], frame["attributes"]["model_name"]) == ("RB2140", "RB2140")
 
 
 def test_flat_model_create_of_model_name_category_not_falsely_422():

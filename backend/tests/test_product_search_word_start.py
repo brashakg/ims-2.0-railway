@@ -286,7 +286,8 @@ def test_a_word_of_only_hyphens_starts_no_word(db, q):
 
 @pytest.mark.parametrize("q, want", [("SGRAY", ["SG-RB"]), ("sgo", ["SG-OK"])])
 def test_the_purchase_order_box_finds_a_title_word_only_from_its_start(db, q, want):
-    # "SGRAY" starts every door-made Ray-Ban sunglass SKU. The Oakley's title
+    # "SGRAY" starts every door-made Ray-Ban sunglass SKU once its hyphens
+    # are ignored (readable SKU SG-RAYBAN-..., ruling D5). The Oakley's title
     # "Oakley OO9208 Sunglasses - Gray" holds "s - Gray", which the wide
     # rule's spaces-and-hyphens-ignored match would read as "sgray"; the
     # title is searched by the till's word rule only, so main's list stands.
@@ -294,9 +295,21 @@ def test_the_purchase_order_box_finds_a_title_word_only_from_its_start(db, q, wa
           colour_code="001", frame_color="Gold")
     _door(db, "SG-OK", "SUNGLASS", brand_name="Oakley", model_no="OO9208",
           colour_code="01", frame_color="Gray")
-    assert db.products.find_one({"product_id": "SG-RB"})["sku"].startswith("SGRAY")
+    assert db.products.find_one({"product_id": "SG-RB"})["sku"].startswith("SG-RAYBAN-")
     assert db.products.find_one({"product_id": "SG-OK"})["name"].endswith("s - Gray")
     assert _ids(db, q, match="anywhere") == (want, 1)
+
+
+def test_guard_a_hyphen_free_sku_hit_never_takes_main_s_page_slot(db):
+    # Main's wide rule finds the 'Glass Gray' frame for "sgray" (a colour
+    # ignores its spaces anywhere); the readable SKU SG-RAYBAN-... is found
+    # only once its hyphens are ignored. That new hit ranks after main's,
+    # even stored first, so a page of one still shows the row main showed.
+    _door(db, "SG-RB", "SUNGLASS", brand_name="Ray-Ban", model_no="RB3025",
+          colour_code="001", frame_color="Gold")
+    _door(db, "FR-GG", "FRAME", brand_name="Vogue", model_no="VO5051",
+          colour_code="W44", frame_color="Glass Gray")
+    assert _ids(db, "sgray", match="anywhere", limit=1) == (["FR-GG"], 2)
 
 
 # Main's till rule, before 2026-10-08: each word STARTS brand, model, sku,
