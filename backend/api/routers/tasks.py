@@ -19,6 +19,7 @@ from ..dependencies import (
     get_task_repository,
     get_user_repository,
     get_db,
+    can_access_store_scoped,
     get_order_repository,
     validate_store_access,
 )
@@ -50,6 +51,7 @@ from ..services.task_visibility import (
     is_manager,
     overdue_filter,
     task_counts,
+    task_roles,
     visible,
 )
 from ..services.user_roles import VALID_ROLES
@@ -85,6 +87,33 @@ async def _managers_only(current_user: dict = Depends(get_current_user)) -> dict
             detail="Only a store manager, area manager or admin can do this.",
         )
     return current_user
+
+
+def _named_target(user_id: str, task: dict) -> dict:
+    """The person a manager hands a task to by name (POST /escalate with
+    escalate_to): a real, active colleague who works at the task's shop -- the
+    store reach every store gate uses -- so a task never lands on a leaver, a
+    stranger from another shop, or a name nobody signs in as."""
+    user_repo = get_user_repository()
+    if user_repo is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Staff records are not available right now. Try again in a minute.",
+        )
+    try:
+        target = user_repo.find_by_id(user_id)
+    except Exception:
+        target = None
+    if (
+        not target
+        or target.get("is_active", True) is False
+        or not can_access_store_scoped(task.get("store_id"), {**target, "roles": task_roles(target)})
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Pick an active colleague who works at this task's shop.",
+        )
+    return target
 
 
 def _visible_task(repo, task_id: str, current_user: dict) -> dict:
@@ -1255,7 +1284,8 @@ async def escalate_task(
     by = current_user.get("user_id")
 
     if escalate_to:
-        # Explicit target chosen by the user -- reassign ownership to them.
+        # Explicit target chosen by a manager -- reassign ownership to them.
+        target_user = _named_target(escalate_to, task)
         new_level = task.get("escalation_level", 0) + 1
         history_entry = {
             "action": "escalated",
@@ -1280,16 +1310,9 @@ async def escalate_task(
             },
         )
         # Alert the explicit target (in-app + WhatsApp).
-        user_repo = get_user_repository()
-        target_user = None
-        if user_repo is not None:
-            try:
-                target_user = user_repo.find_by_id(escalate_to)
-            except Exception:
-                target_user = None
         await notify_escalation(
             _notifications_coll(),
-            target_user or {"user_id": escalate_to},
+            target_user,
             task,
             "manual",
             now=now,

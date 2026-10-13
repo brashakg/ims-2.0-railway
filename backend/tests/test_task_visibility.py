@@ -42,6 +42,7 @@ from api.services.rbac_policy import policy_for  # noqa: E402
 from api.services.file_store import InMemoryFileStore  # noqa: E402
 from api.services.task_visibility import MANAGER_ROLES  # noqa: E402
 from database.repositories.task_repository import TaskRepository  # noqa: E402
+from database.repositories.user_repository import UserRepository  # noqa: E402
 
 S1, S2, S3 = "BV-S1", "BV-S2", "BV-S3"
 STAFF_ROLES = [
@@ -184,7 +185,14 @@ def world(monkeypatch):
     monkeypatch.setattr(tasks_mod, "get_file_store", lambda: files)
     repo = TaskRepository(db.tasks)
     monkeypatch.setattr(tasks_mod, "get_task_repository", lambda: repo)
-    monkeypatch.setattr(tasks_mod, "get_user_repository", lambda: None)
+    # The people a manager may name as a task's new owner: everyone above,
+    # plus a leaver and a colleague from another shop, who may not be named.
+    db.users.insert_many([{**u, "is_active": True} for u in USERS.values()] + [
+        {"user_id": "u-left", "roles": ["SALES_STAFF"], "store_ids": [S1], "is_active": False},
+        {"user_id": "u-s3", "roles": ["SALES_STAFF"], "store_ids": [S3], "is_active": True},
+    ])
+    users = UserRepository(db.users)
+    monkeypatch.setattr(tasks_mod, "get_user_repository", lambda: users)
     monkeypatch.setattr(tasks_mod, "get_db", lambda: None)
     for name in ("overview", "finance_ops"):
         mod = importlib.import_module(f"api.routers.reports.{name}")
@@ -587,6 +595,24 @@ def test_a_token_with_no_user_id_has_no_tasks_of_its_own(world):
         assert _ids(as_role("NO_ID").get("/api/v1/tasks/my-tasks")) == set()
     finally:
         USERS.pop("NO_ID")
+
+
+@pytest.mark.parametrize("target", ["u-nobody", "u-left", "u-s3", "STORE_MANAGER"])
+def test_a_named_escalation_lands_only_on_an_active_colleague_at_the_shop(world, target):
+    """Naming the person hands the task to them, so the name must be a real,
+    active colleague who works at the task's shop: never a made-up id, a
+    leaver, someone from another shop, or a role name. Refused, nothing written."""
+    as_role, db = world
+    for role in MANAGERS:
+        before = db.tasks.find_one({"task_id": "P-SALES_STAFF"})
+        r = as_role(role).post("/api/v1/tasks/P-SALES_STAFF/escalate", params={"escalate_to": target})
+        assert r.status_code == 400, (role, r.status_code, r.text)
+        assert "active colleague" in r.json()["detail"]
+        assert db.tasks.find_one({"task_id": "P-SALES_STAFF"}) == before, role
+    # An admin works at every shop, so a manager may name one.
+    r = as_role("STORE_MANAGER").post("/api/v1/tasks/P-SALES_STAFF/escalate", params={"escalate_to": "u-admin"})
+    assert r.status_code == 200, r.text
+    assert db.tasks.find_one({"task_id": "P-SALES_STAFF"})["assigned_to"] == "u-admin"
 
 
 @pytest.mark.parametrize("route", MANAGER_ROUTES)
