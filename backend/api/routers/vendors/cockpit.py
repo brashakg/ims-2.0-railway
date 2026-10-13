@@ -22,7 +22,7 @@ from ._shared import (
 )
 from ...services.cost_mask import can_see_cost
 from .gst import po_gst_context
-from .grn_accept_lock import _GRN_TERMINAL_ACCEPT_STATUSES
+from .grn_accept_lock import _GRN_TERMINAL_ACCEPT_STATUSES, _receipt_price_paid
 
 
 @router.get("/goods-receipt/cockpit")
@@ -162,8 +162,10 @@ async def get_last_purchase_cost(
       1. the cost at acceptance of this vendor's newest accepted goods-receipt
          line for the product, dated by that receipt's acceptance. It is READ
          BACK from the units the receipt minted (goods-receipt accept stamps
-         each one with unit_cost), never re-derived here, so the two can never
-         disagree. A line that accepted nothing minted nothing and never answers;
+         each one with unit_cost; grn_accept_lock._receipt_price_paid, which the
+         walk-in bill's cost true-up asks too), never re-derived here, so the
+         two can never disagree. A line that accepted nothing, was held or had
+         no price minted no price paid and never answers;
       2. only if there is none, the price on this vendor's newest order that was
          sent to it (sent, acknowledged, part- or fully received), dated when it
          was sent -- skipping a cancelled line, and an order whose receipts for
@@ -251,16 +253,9 @@ async def get_last_purchase_cost(
             if not can_access_store_scoped(grn.get("store_id"), current_user):
                 continue
             for pid in (lines & wanted) - costs.keys():
-                unit = stock_repo.find_one(
-                    {
-                        "source_type": "GRN",
-                        "source_id": grn.get("grn_id"),
-                        "product_id": pid,
-                        "unit_cost": {"$gt": 0},
-                    }
-                )
-                if unit:
-                    _take(pid, unit.get("unit_cost"), grn, grn.get("accepted_at"))
+                paid = _receipt_price_paid(stock_repo, grn.get("grn_id"), pid)
+                if paid:
+                    _take(pid, paid, grn, grn.get("accepted_at"))
 
         if len(costs) < len(wanted):
             pos = po_repo.find_many(

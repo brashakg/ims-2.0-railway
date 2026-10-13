@@ -2198,6 +2198,7 @@ def test_g1_a_late_walk_in_bill_never_puts_back_an_older_price(world):
     early = _on_the_shelf(world, vendor_invoice_no="CASH-E")
     db.grns.update_one({"grn_id": early}, {"$set": {"accepted_at": "2026-09-01T10:00:00"}})
     _seed_receipt(db, grn_id="GRN-PO-0920", subtype="STANDARD", po_id="PO-920", items=po_line, accepted_at="2026-09-20T10:00:00")
+    _minted(db, "GRN-PO-0920", 2000.0)
     db.products.update_one({"product_id": FRAME}, {"$set": {"cost_price": 2000.0, "cost_source": "PURCHASE_INVOICE"}})
 
     late = _invoice_body(early, "CASH-E")
@@ -2208,6 +2209,7 @@ def test_g1_a_late_walk_in_bill_never_puts_back_an_older_price(world):
     # no price for it.
     _seed_receipt(db, grn_id="GRN-PO-1001", subtype="STANDARD", po_id="PO-1001", accepted_at="2026-10-01T10:00:00", items=[{**po_line[0], "accepted_qty": 0, "rejected_qty": 2}])
     _seed_receipt(db, grn_id="GRN-PO-1002", subtype="STANDARD", po_id="PO-1002", items=po_line, status="VOID", accepted_at="2026-10-02T10:00:00")
+    _minted(db, "GRN-PO-1002", 2000.0)
     newest = _on_the_shelf(world, vendor_invoice_no="CASH-N")
     db.grns.update_one({"grn_id": newest}, {"$set": {"accepted_at": "2026-09-25T10:00:00"}})
     # Accepting it set the cost to its price; its bill, booked with credit
@@ -2217,6 +2219,55 @@ def test_g1_a_late_walk_in_bill_never_puts_back_an_older_price(world):
     off.itc_eligible = False
     _run(pi.create_purchase_invoice(off, current_user=ACCOUNTANT))
     assert frame_cost() == 3255.0
+
+
+def _minted(db, grn_id, cost, n=2):
+    """The units goods-receipt accept mints for a seeded receipt's frame line:
+    stamped with the receipt (grn_id) and, when it had a price, the cost at
+    acceptance (unit_cost)."""
+    priced = {"unit_cost": cost, "cost_price": cost} if cost else {}
+    db.stock_units.insert_many(
+        [
+            {"stock_id": f"SU-{grn_id}-{i}", "product_id": FRAME, "store_id": STORE, "status": "AVAILABLE",
+             "source_type": "GRN", "source_id": grn_id, "grn_id": grn_id, **priced}
+            for i in range(n)
+        ]
+    )
+
+
+def test_g1_a_later_receipt_that_paid_no_price_leaves_the_walk_in_the_latest(world):
+    """Panel probe (round 11): the booking true-up asked 'did a later receipt
+    ACCEPT this product' while /vendors/last-cost asks 'did a later receipt
+    MINT a unit of it at a price'. Walk-in CASH-P accepted 09-25 at 3100; a PO
+    receipt accepted 10-05 holds its frame line (catalogue incomplete, price
+    0) and one accepted 10-06 minted its frames with no price. last-cost
+    still says 3100 on 09-25 -- the walk-in is the latest price paid -- yet
+    booking its bill with credit off left the cost at 3100, not 3255: the
+    Rs 155 of GST that cannot be claimed never reached the cost. One question,
+    one helper (grn_accept_lock._receipt_price_paid)."""
+    db = world["db"]
+    walk_in = _on_the_shelf(world, vendor_invoice_no="CASH-P")
+    db.grns.update_one({"grn_id": walk_in}, {"$set": {"accepted_at": "2026-09-25T10:00:00"}})
+    unpriced = [{"product_id": FRAME, "received_qty": 2, "accepted_qty": 2, "rejected_qty": 0, "unit_price": 0}]
+    _seed_receipt(
+        db, grn_id="GRN-PO-1005", subtype="STANDARD", po_id="PO-1005", status="PARTIALLY_ACCEPTED", items=unpriced,
+        unresolved_lines=[{"product_id": FRAME, "reason": "incomplete_catalog"}], accepted_at="2026-10-05T10:00:00",
+    )
+    _seed_receipt(db, grn_id="GRN-PO-1006", subtype="STANDARD", po_id="PO-1006", items=unpriced, accepted_at="2026-10-06T10:00:00")
+    _minted(db, "GRN-PO-1006", 0)
+    # The walk-in's frames since moved shop: a transfer rewrites a unit's
+    # source, never the receipt that minted it -- still its price paid.
+    db.stock_units.update_many({"grn_id": walk_in}, {"$set": {"source_type": "TRANSFER", "source_id": "TR-1"}})
+
+    last = world["as_"](ADMIN).get("/vendors/last-cost", params={"vendor_id": DEALER, "product_ids": FRAME})
+    assert last.status_code == 200, last.text
+    paid = last.json()["costs"][FRAME]
+    assert (paid["unit_price"], paid["date"]) == (3100.0, "2026-09-25T10:00:00"), paid
+
+    off = _invoice_body(walk_in, "CASH-P")
+    off.itc_eligible = False
+    _run(pi.create_purchase_invoice(off, current_user=ACCOUNTANT))
+    assert db.products.find_one({"product_id": FRAME})["cost_price"] == 3255.0
 
 
 def _three_b(world):

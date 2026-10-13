@@ -977,22 +977,29 @@ def _product_state_for_valuation(
 
 
 def _bought_since(db, product_id, accepted_at) -> bool:
-    """Whether a receipt accepted some of this product after `accepted_at` (a
-    receipt that accepted none of it, or is voided, paid no price for it)."""
-    from .vendors.grn_accept_lock import _GRN_TERMINAL_ACCEPT_STATUSES
+    """Whether a receipt accepted after `accepted_at` paid a price for this
+    product -- the question /vendors/last-cost asks of each receipt, through
+    the same helper (grn_accept_lock._receipt_price_paid): a receipt that
+    minted no unit of it at a price (accepted none, held the line, had no
+    price) or is voided paid none."""
+    from .vendors.grn_accept_lock import (
+        _GRN_TERMINAL_ACCEPT_STATUSES,
+        _receipt_price_paid,
+    )
 
     if not accepted_at:
         return False
-    return (
-        db.get_collection("grns").find_one(
+    stock = db.get_collection("stock_units")
+    return any(
+        _receipt_price_paid(stock, g.get("grn_id"), product_id)
+        for g in db.get_collection("grns").find(
             {
                 "status": {"$in": list(_GRN_TERMINAL_ACCEPT_STATUSES)},
                 "accepted_at": {"$gt": accepted_at},
-                "items": {"$elemMatch": {"product_id": product_id, "accepted_qty": {"$gt": 0}}},
+                "items.product_id": product_id,
             },
-            {"_id": 1},
+            {"_id": 0, "grn_id": 1},
         )
-        is not None
     )
 
 
