@@ -18,6 +18,12 @@
 // do not weaken either): every kept line needs product_id + quantity >= 1 +
 // unit_cost > 0. Cost cannot be added later at receiving (accept_grn reads the
 // PO's unit price), so a zero-cost line is blocked up front.
+//
+// WHAT WE PAY (owner ruling 2026-10-12) is shown to COST_ROLES only. For
+// anyone else (`showPrices` false: area / store managers) the form is
+// quantities only -- no cost box, no last-paid caption, no totals, no price
+// lookup -- and no price is sent: the server prices each line from the last
+// price paid to this vendor, else the catalogue cost.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { AlertTriangle, FileText, Loader2, Plus, Trash2 } from 'lucide-react';
@@ -109,7 +115,8 @@ export interface ComposerSubmitPayload {
     sku?: string;
     new_product?: ComposerNewProduct;
     quantity: number;
-    unit_price: number;
+    /** Absent when the form shows no prices: the server prices the line. */
+    unit_price?: number;
     taxRate: number;
     lineTotal: number;
   }>;
@@ -121,6 +128,10 @@ export interface ComposerSubmitPayload {
 export interface PurchaseOrderComposerProps {
   mode: 'page' | 'modal';
   vendors: ComposerVendorOption[];
+  /** May this person see what we pay? hasRole(COST_ROLES) -- the caller asks,
+   *  so the composer itself stays free of the auth context. False = quantities
+   *  only (owner ruling 2026-10-12). */
+  showPrices: boolean;
   /** Is this an inter-state purchase? true -> IGST, false -> CGST + SGST,
    *  null/undefined -> we cannot tell from the GST numbers we hold, so the
    *  totals say so rather than pretending. The caller works this out from the
@@ -327,6 +338,7 @@ const blankLine = (): ComposerLine => ({
 export function PurchaseOrderComposer({
   mode,
   vendors,
+  showPrices,
   interstate = null,
   vendorsLoading = false,
   initialVendorId = '',
@@ -424,7 +436,8 @@ export function PurchaseOrderComposer({
   );
 
   useEffect(() => {
-    if (!vendorId || !prefillIds) return;
+    // No price is shown or sent without showPrices: nothing to look up.
+    if (!showPrices || !vendorId || !prefillIds) return;
     const productIds = prefillIds.split(',');
 
     let cancelled = false;
@@ -454,7 +467,7 @@ export function PurchaseOrderComposer({
       cancelled = true;
       clearTimeout(t);
     };
-  }, [prefillIds, vendorId]);
+  }, [prefillIds, vendorId, showPrices]);
 
   // When the vendor changes, the previous vendor's price no longer applies:
   // every caption goes (a typed cost must not sit under another vendor's
@@ -506,7 +519,9 @@ export function PurchaseOrderComposer({
     // typed in for something we do not stock yet (ruling 13) -- with a positive
     // qty and cost.
     const named = (l: ComposerLine) => !!l.productId || !!l.newProduct;
-    const valid = lines.filter((l) => named(l) && l.quantity >= 1 && l.unitCost > 0);
+    // Without showPrices the server prices every line: a quantity is enough.
+    const priced = (l: ComposerLine) => !showPrices || l.unitCost > 0;
+    const valid = lines.filter((l) => named(l) && l.quantity >= 1 && priced(l));
     const unpicked = lines.filter((l) => !named(l) && (l.quantity > 0 || l.unitCost > 0));
     if (unpicked.length > 0) {
       toast.error(
@@ -518,13 +533,17 @@ export function PurchaseOrderComposer({
     // both the manual form and the Buy Desk fix. Checked BEFORE the generic
     // "add a line" guard so a lone zero-cost line gets the precise, actionable
     // message rather than a vague one.
-    const zeroCost = lines.filter((l) => named(l) && l.quantity >= 1 && !(l.unitCost > 0));
+    const zeroCost = lines.filter((l) => named(l) && l.quantity >= 1 && !priced(l));
     if (zeroCost.length > 0) {
       toast.error('Every line needs a unit cost above 0 — cost cannot be added later at receiving.');
       return;
     }
     if (valid.length === 0) {
-      toast.error('Add at least one product with a quantity and unit cost');
+      toast.error(
+        showPrices
+          ? 'Add at least one product with a quantity and unit cost'
+          : 'Add at least one product with a quantity',
+      );
       return;
     }
 
@@ -543,7 +562,7 @@ export function PurchaseOrderComposer({
             ? { new_product: l.newProduct }
             : { product_id: l.productId, product_name: l.productName, sku: l.sku || 'N/A' }),
           quantity: l.quantity,
-          unit_price: l.unitCost,
+          ...(showPrices ? { unit_price: l.unitCost } : {}),
           taxRate: l.taxRate,
           lineTotal: lineTotal(l),
         })),
@@ -660,6 +679,7 @@ export function PurchaseOrderComposer({
                       aria-label={`Quantity for line ${index + 1}`}
                     />
                   </div>
+                  {showPrices ? (
                   <div className="col-span-8 tablet:col-span-3">
                     <label className="block text-xs text-gray-600 mb-1">Unit Cost ({'₹'})</label>
                     <input
@@ -693,6 +713,7 @@ export function PurchaseOrderComposer({
                       </p>
                     ) : null}
                   </div>
+                  ) : null}
                   <div className="col-span-6 tablet:col-span-3">
                     <label className="block text-xs text-gray-600 mb-1">GST</label>
                     {line.productId && !line.gstResolved ? (
@@ -712,6 +733,7 @@ export function PurchaseOrderComposer({
                       </p>
                     )}
                   </div>
+                  {showPrices ? (
                   <div className="col-span-6 tablet:col-span-3 text-right">
                     <label className="block text-xs text-gray-600 mb-1">Line Total</label>
                     <p className="text-sm font-semibold text-gray-900 py-2">
@@ -719,6 +741,7 @@ export function PurchaseOrderComposer({
                       {lineTotal(line).toLocaleString('en-IN')}
                     </p>
                   </div>
+                  ) : null}
                   <div className="col-span-12 tablet:col-span-1 flex justify-end">
                     {allowRemoveLine ? (
                       <button
@@ -740,6 +763,7 @@ export function PurchaseOrderComposer({
       </div>
 
       {/* Totals -- GST shown as it will actually be charged and filed */}
+      {showPrices ? (
       <div className="flex justify-end">
         <div className="w-72 space-y-2 p-4 bg-gray-50 rounded-lg">
           <div className="flex justify-between text-sm">
@@ -791,6 +815,12 @@ export function PurchaseOrderComposer({
           </p>
         </div>
       </div>
+      ) : (
+        <p className="text-sm text-gray-500">
+          Enter the quantities only. The price is filled in from the last price paid to this
+          vendor, and accounts check it.
+        </p>
+      )}
 
       {unresolvedGst.length > 0 ? (
         <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-50 border border-amber-200 text-sm text-amber-800">

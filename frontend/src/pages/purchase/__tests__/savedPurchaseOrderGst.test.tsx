@@ -20,7 +20,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 
 vi.mock('../../../context/AuthContext', () => ({
-  useAuth: () => ({ user: { activeStoreId: 'BV-TEST-01' } }),
+  useAuth: () => ({ user: { activeStoreId: 'BV-TEST-01' }, hasRole: () => true }),
 }));
 vi.mock('../../../components/print/storeIdentity', () => ({
   resolveStoreIdentity: vi.fn().mockResolvedValue(null),

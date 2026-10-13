@@ -11,6 +11,7 @@ import { Plus, TrendingDown, Zap, AlertTriangle, Loader2, X } from 'lucide-react
 import clsx from 'clsx';
 import { inventoryApi, vendorsApi, reportsApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
+import { COST_ROLES } from '../../components/common/CostCell';
 import { useToast } from '../../context/ToastContext';
 
 interface ReplenishmentItem {
@@ -62,7 +63,9 @@ const getStockStatusColor = (status: string) => {
 };
 
 export function StockReplenishment() {
-  const { user } = useAuth();
+  const { user, hasRole } = useAuth();
+  // Cost estimates are what we pay: COST_ROLES only (owner ruling 2026-10-12).
+  const showCost = hasRole(COST_ROLES);
   const toast = useToast();
   const [activeTab, setActiveTab] = useState<'suggestions' | 'abc-analysis' | 'dead-stock' | 'eoq'>('suggestions');
   const [selectedItems, setSelectedItems] = useState<string[]>([]);
@@ -211,10 +214,12 @@ export function StockReplenishment() {
           <p className="text-gray-500 text-sm mb-1">Dead Stock Items</p>
           <p className="text-2xl font-bold text-gray-900">{deadStock.length}</p>
         </div>
+        {showCost && (
         <div className="bg-white rounded-lg p-4">
           <p className="text-gray-500 text-sm mb-1">Est. Replenish Cost</p>
           <p className="text-2xl font-bold text-green-600">₹{(totalEstimatedCost / 100000).toFixed(1)}L</p>
         </div>
+        )}
       </div>
 
       {/* Tabs */}
@@ -307,12 +312,14 @@ export function StockReplenishment() {
                         <p className="text-gray-500 text-xs mb-1">Suggested Qty</p>
                         <p className="text-gray-900 font-semibold">{item.reorder_qty}</p>
                       </div>
+                      {showCost && (
                       <div>
                         <p className="text-gray-500 text-xs mb-1">Est. Cost</p>
                         <p className="text-green-600 font-semibold">
                           {item.estimated_cost > 0 ? `₹${(item.estimated_cost / 1000).toFixed(0)}K` : '—'}
                         </p>
                       </div>
+                      )}
                     </div>
 
                     <div className="flex items-center justify-between">
@@ -556,7 +563,8 @@ function CreatePOModal({
           product_name: i.product_name,
           sku: i.sku,
           quantity: i.reorder_qty,
-          unit_price: i.last_purchase_price,
+          // No known price -> sent blank: the server fills the last price paid.
+          unit_price: i.last_purchase_price || undefined,
         })),
         notes: 'Created from Stock Replenishment',
       });

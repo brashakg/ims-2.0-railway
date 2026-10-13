@@ -19,6 +19,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { FileText, X as XIcon } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
+import { COST_ROLES } from '../../components/common/CostCell';
 import { vendorsApi } from '../../services/api';
 import {
   PurchaseOrderComposer,
@@ -49,7 +50,7 @@ export default function BuyDeskDraftPOModal({
   onCreated: () => void;
 }) {
   const toast = useToast();
-  const { user } = useAuth();
+  const { user, hasRole } = useAuth();
 
   const [vendors, setVendors] = useState<ComposerVendorOption[]>([]);
   const [vendorsLoading, setVendorsLoading] = useState(true);
@@ -130,6 +131,8 @@ export default function BuyDeskDraftPOModal({
           <PurchaseOrderComposer
             mode="modal"
             vendors={vendors}
+            // The Buy Desk's cost box: COST_ROLES only (owner ruling 2026-10-12).
+            showPrices={hasRole(COST_ROLES)}
             vendorsLoading={vendorsLoading}
             initialVendorId={preferredVendorId}
             initialLines={initialLines}

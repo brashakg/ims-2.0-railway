@@ -14,6 +14,7 @@ import type { PurchaseOrder } from './purchaseTypes';
 import { POPrint } from '../../components/print/POPrint';
 import { POLifecycleDrawer } from '../../components/purchase/POLifecycleDrawer';
 import { useAuth } from '../../context/AuthContext';
+import { COST_ROLES } from '../../components/common/CostCell';
 import { resolveStoreIdentity, type StoreIdentity } from '../../components/print/storeIdentity';
 
 interface PurchaseOrderDetailProps {
@@ -23,7 +24,10 @@ interface PurchaseOrderDetailProps {
 }
 
 export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDetailProps) {
-  const { user } = useAuth();
+  const { user, hasRole } = useAuth();
+  // What we pay: COST_ROLES only (owner ruling 2026-10-12). A manager sees
+  // the products and quantities he ordered.
+  const showPrices = hasRole(COST_ROLES);
   const [showPrint, setShowPrint] = useState(false);
   const [showTimeline, setShowTimeline] = useState(false);
 
@@ -85,6 +89,7 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
         po={poPrintData}
         store={storeInfo}
         entity={identity?.entity ?? null}
+        showPrices={showPrices}
         onClose={() => setShowPrint(false)}
       />
     )}
@@ -174,9 +179,9 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
                     <th className="text-left py-2 px-3 text-xs font-medium text-gray-600">Product</th>
                     <th className="text-left py-2 px-3 text-xs font-medium text-gray-600">SKU</th>
                     <th className="text-right py-2 px-3 text-xs font-medium text-gray-600">Qty</th>
-                    <th className="text-right py-2 px-3 text-xs font-medium text-gray-600">Unit Cost</th>
+                    {showPrices && <th className="text-right py-2 px-3 text-xs font-medium text-gray-600">Unit Cost</th>}
                     <th className="text-right py-2 px-3 text-xs font-medium text-gray-600">Tax %</th>
-                    <th className="text-right py-2 px-3 text-xs font-medium text-gray-600">Total</th>
+                    {showPrices && <th className="text-right py-2 px-3 text-xs font-medium text-gray-600">Total</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -185,9 +190,9 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
                       <td className="py-2 px-3 text-gray-900">{item.productName}</td>
                       <td className="py-2 px-3 text-gray-600">{item.sku}</td>
                       <td className="py-2 px-3 text-right text-gray-900">{item.quantity}</td>
-                      <td className="py-2 px-3 text-right text-gray-900">{'\u20B9'}{item.unitCost.toLocaleString()}</td>
+                      {showPrices && <td className="py-2 px-3 text-right text-gray-900">{'\u20B9'}{item.unitCost.toLocaleString()}</td>}
                       <td className="py-2 px-3 text-right text-gray-600">{item.taxRate}%</td>
-                      <td className="py-2 px-3 text-right font-medium text-gray-900">{'\u20B9'}{item.total.toLocaleString()}</td>
+                      {showPrices && <td className="py-2 px-3 text-right font-medium text-gray-900">{'\u20B9'}{item.total.toLocaleString()}</td>}
                     </tr>
                   ))}
                 </tbody>
@@ -196,6 +201,7 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
           </div>
 
           {/* Totals */}
+          {showPrices && (
           <div className="flex justify-end">
             <div className="w-64 space-y-2 p-4 bg-gray-50 rounded-lg">
               <div className="flex justify-between text-sm">
@@ -234,6 +240,7 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
               </div>
             </div>
           </div>
+          )}
         </div>
 
         {/* Footer - Action Buttons */}

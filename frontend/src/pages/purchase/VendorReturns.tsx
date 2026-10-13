@@ -19,7 +19,7 @@ import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import api from '../../services/api/client';
 import { rtvDebitNotesApi, type DebitNote } from '../../services/api/rtvDebitNotes';
-import { PURCHASE_PRICE_ROLES } from '../../components/common/CostCell';
+import { COST_ROLES } from '../../components/common/CostCell';
 import { errMsg } from './invoices/shared';
 
 interface ReturnItem {
@@ -103,7 +103,7 @@ export function VendorReturns() {
   const linkedStockId = searchParams.get('stock_id');
   // Workshop staff log a return (item, quantity, reason) but never see or type
   // what was paid: a purchase role prices it (owner ruling 2026-10-12).
-  const canPrice = (user?.roles || []).some((r) => PURCHASE_PRICE_ROLES.includes(r));
+  const canPrice = (user?.roles || []).some((r) => COST_ROLES.includes(r));
 
   const [activeTab, setActiveTab] = useState<'active' | 'history'>('active');
   const [isLoading, setIsLoading] = useState(true);
@@ -762,7 +762,7 @@ export function VendorReturns() {
                 </div>
               ) : (
                 <p className="text-sm text-gray-500">
-                  The price paid is entered by the manager who approves this return.
+                  Accounts enter the price paid when they approve this return.
                 </p>
               )}
             </div>

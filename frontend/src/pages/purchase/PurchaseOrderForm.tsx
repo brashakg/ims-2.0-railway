@@ -12,6 +12,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { FileText, X as XIcon, Loader2, Search } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
+import { COST_ROLES } from '../../components/common/CostCell';
 import { vendorsApi, productApi } from '../../services/api';
 import { usePoGstHeads } from '../../hooks/usePoGstHeads';
 import { PurchaseOrderComposer } from '../../components/purchase/PurchaseOrderComposer';
@@ -244,12 +245,15 @@ function ProductSearchSelect({
   onPick,
   onClear,
   onSetNew,
+  showCost,
 }: {
   picked: { productId: string; productName: string; sku: string; detail?: string };
   newProduct?: ComposerNewProduct | null;
   onPick: (p: PickedProduct) => void;
   onClear: () => void;
   onSetNew: (np: ComposerNewProduct | null) => void;
+  /** COST_ROLES only: the product's catalogue cost chip. */
+  showCost: boolean;
 }) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<ProductHit[]>([]);
@@ -412,7 +416,7 @@ function ProductSearchSelect({
                         No HSN
                       </span>
                     ) : null}
-                    {p.hasCost ? (
+                    {!showCost ? null : p.hasCost ? (
                       <span>
                         {'₹'}
                         {p.costPrice.toLocaleString('en-IN')} cost
@@ -471,7 +475,10 @@ export function PurchaseOrderForm({
   onCreated,
 }: PurchaseOrderFormProps) {
   const toast = useToast();
-  const { user } = useAuth();
+  const { user, hasRole } = useAuth();
+  // What we pay is for COST_ROLES only (owner ruling 2026-10-12): anyone else
+  // orders by quantity and the server prices the lines.
+  const showPrices = hasRole(COST_ROLES);
 
   // Audit F87: X / Cancel on a half-typed order asks before throwing it away.
   const dirtyRef = useRef(false);
@@ -518,6 +525,7 @@ export function PurchaseOrderForm({
           <PurchaseOrderComposer
             mode="page"
             vendors={vendorOptions}
+            showPrices={showPrices}
             vendorsLoading={suppliersLoading}
             interstate={interstate}
             onVendorChange={setVendorId}
@@ -545,6 +553,7 @@ export function PurchaseOrderForm({
                 }
                 onClear={clearProduct}
                 onSetNew={setNewProduct}
+                showCost={showPrices}
               />
             )}
             submitLabel="Create as Draft"
@@ -575,7 +584,7 @@ export function PurchaseOrderForm({
                   `${it.new_product?.brand ?? ''} ${it.new_product?.model ?? ''}`.trim(),
                 sku: it.sku ?? '',
                 quantity: it.quantity,
-                unitCost: it.unit_price,
+                unitCost: it.unit_price ?? 0,
                 taxRate: it.taxRate,
                 total: it.lineTotal,
               }));

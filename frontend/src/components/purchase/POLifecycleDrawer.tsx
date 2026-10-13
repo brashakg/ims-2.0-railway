@@ -34,7 +34,7 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { vendorsApi } from '../../services/api/inventory';
 import { useAuth } from '../../context/AuthContext';
-import { PAYABLES_ROLES } from '../common/CostCell';
+import { COST_ROLES } from '../common/CostCell';
 import { PurchaseStatusChip } from './PurchaseStatusChip';
 import { RECEIVABLE_PO_STATUSES } from '../../pages/purchase/purchaseTypes';
 import type { POStatus } from '../../pages/purchase/purchaseTypes';
@@ -244,8 +244,8 @@ export function POLifecycleDrawer({ poId, poNumber, onClose, onSendToVendor }: P
     ? deriveNextStep(timeline, {
         canSend: Boolean(onSendToVendor),
         canReceive: hasRole([...RECEIVE_ROLES]),
-        // Booking a supplier bill is an accounts function (PAYABLES_ROLES).
-        canBookInvoice: hasRole(PAYABLES_ROLES),
+        // Booking a supplier bill is an accounts function (COST_ROLES).
+        canBookInvoice: hasRole(COST_ROLES),
       })
     : null;
 
