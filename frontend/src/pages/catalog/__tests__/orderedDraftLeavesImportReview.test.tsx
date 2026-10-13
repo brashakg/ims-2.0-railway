@@ -37,7 +37,8 @@ const SPINE = {
   mrp: 2990,
   images: [],
 };
-const getProduct = vi.fn(async () => SPINE);
+const getProduct = vi.fn(async (): Promise<Record<string, unknown>> => SPINE);
+const updateProduct = vi.fn(async (..._args: unknown[]) => ({}));
 vi.mock('../../../services/api/products', () => ({
   DuplicateProductError: class DuplicateProductError extends Error {},
   productApi: {
@@ -46,7 +47,7 @@ vi.mock('../../../services/api/products', () => ({
     }),
     getBrandOptions: vi.fn(async () => ({ brands: [] })),
     getProduct: (...a: unknown[]) => getProduct(...(a as [])),
-    updateProduct: vi.fn(async () => ({})),
+    updateProduct: (...a: unknown[]) => updateProduct(...a),
     previewSku: vi.fn(async () => ({ category: 'FRAME', sku: 'FR-BOSS-BOSS1700-C2-52' })),
     getWebsiteVerdict: vi.fn(async (brand: string) => ({ brand, online: true, reason: null })),
   },
@@ -112,6 +113,7 @@ const renderAt = (url: string) =>
 beforeEach(() => {
   where = '';
   getProduct.mockClear();
+  updateProduct.mockClear();
   hintSizes.length = 0;
   list.mockClear();
   window.sessionStorage.clear();
@@ -163,5 +165,58 @@ describe('an ordered draft in Needs review', () => {
     renderAt('/catalog/add?review=CAT-GONE');
     await waitFor(() => expect(list).toHaveBeenCalled());
     expect(list).toHaveBeenCalledWith(expect.objectContaining({ ordered_draft: false }));
+  });
+});
+
+// Owner decision (round 11): an ordered draft -- typed on a PO, nothing of it
+// shelved or sold -- keeps its category picker in the editor (a sunglass
+// typed under the form's default FR is put right here, the server re-derives
+// its HSN, rate and identity); only a finished product is locked, with the
+// Clone advice.
+// A brand both the frame and the sunglass pickers offer, so the save validates.
+const VOGUE = {
+  ...SPINE,
+  brand: 'Vogue',
+  model: 'VO 5286',
+  attributes: { brand_name: 'Vogue', model_no: 'VO 5286', colour_code: 'W44', lens_size: '52' },
+};
+
+describe("the editor's category picker", () => {
+  it('stays open on an ordered draft, and saving sends the category put right', async () => {
+    getProduct.mockImplementation(async () => ({ ...VOGUE, ordered_draft: true }));
+    try {
+      const user = userEvent.setup();
+      renderAt('/catalog/add?edit=P-SPINE');
+      await waitFor(() => expect(getProduct).toHaveBeenCalledWith('P-SPINE'));
+      const sunglass = await screen.findByRole('button', { name: /Sunglass/ });
+      await waitFor(() => expect(sunglass).toBeEnabled());
+      expect(screen.queryByText('locked while editing')).toBeNull();
+      expect(screen.queryByText(/Clone as new SKU/)).toBeNull();
+      await user.click(sunglass);
+      await user.click(screen.getByRole('button', { name: /Save changes/ }));
+      await waitFor(() => expect(updateProduct).toHaveBeenCalled());
+      expect(updateProduct).toHaveBeenCalledWith(
+        'P-SPINE',
+        expect.objectContaining({ category: 'SG' }),
+      );
+    } finally {
+      getProduct.mockImplementation(async () => SPINE);
+    }
+  });
+
+  it('stays locked on a finished product, with the Clone advice, and sends no category', async () => {
+    getProduct.mockImplementation(async () => VOGUE);
+    try {
+      const user = userEvent.setup();
+      renderAt('/catalog/add?edit=P-SPINE');
+      await screen.findByText('locked while editing');
+      expect(screen.getByText(/Clone as new SKU/)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Sunglass/ })).toBeDisabled();
+      await user.click(screen.getByRole('button', { name: /Save changes/ }));
+      await waitFor(() => expect(updateProduct).toHaveBeenCalled());
+      expect(updateProduct.mock.calls[0][1]).not.toHaveProperty('category');
+    } finally {
+      getProduct.mockImplementation(async () => SPINE);
+    }
   });
 });

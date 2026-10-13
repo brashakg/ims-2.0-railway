@@ -44,6 +44,8 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
   } = form;
   // "Auto-fill with AI" (description) round-trip in flight.
   const [generatingDesc, setGeneratingDesc] = useState(false);
+  // A finished product's category is locked in the editor; an ordered draft's is not.
+  const categoryLocked = editMode?.kind === 'spine' && !editMode.orderedDraft;
 
   // Field list with required flags from the canonical registry (registryReady
   // is a render dependency so the markers update when the registry arrives).
@@ -247,16 +249,17 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
     >
       {/* Category picker (locked in variant mode — a sibling variant is
           by definition the same category as its model — AND in SPINE edit
-          mode: category is identity; changing it on an ACTIVE row would
-          skip the forward-only restamp, so v1 locks it. Clone-as-new-SKU
-          is the wrong-category workaround. REVIEW mode keeps the picker
-          ENABLED — re-categorising imports is the whole point; the
-          server re-derives HSN & GST on save.) */}
+          mode of a finished product: category is identity; changing it on
+          an ACTIVE row would skip the forward-only restamp, so v1 locks it.
+          Clone-as-new-SKU is the wrong-category workaround. REVIEW mode and
+          an ORDERED DRAFT (typed on a PO, nothing of it shelved or sold)
+          keep the picker ENABLED — the server re-derives HSN & GST and the
+          identity on save.) */}
       <div className="mb-5">
         <label className="block text-xs font-medium text-gray-700 mb-2">
           Category <span className="text-red-500">*</span>
           {variantCtx && <LockChip text="locked · same as the model" />}
-          {editMode?.kind === 'spine' && <LockChip text="locked while editing" />}
+          {categoryLocked && <LockChip text="locked while editing" />}
         </label>
         {/* id + tabIndex: the "Still missing: Category" chip lands here.
             Tiles carry a floor height so a two-line name (Colour Contact
@@ -270,17 +273,14 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
             <button
               key={c.code}
               type="button"
-              disabled={
-                (Boolean(variantCtx) || editMode?.kind === 'spine') &&
-                selectedCategory !== c.code
-              }
+              disabled={(Boolean(variantCtx) || categoryLocked) && selectedCategory !== c.code}
               onClick={() => setSelectedCategory(c.code)}
               className={clsx(
                 'flex flex-col items-center justify-center gap-1 px-2 py-2 min-h-[72px] rounded-lg border text-center transition-all',
                 selectedCategory === c.code
                   ? 'border-bv bg-bv-50 ring-1 ring-bv'
                   : 'border-gray-200 hover:border-gray-300',
-                (Boolean(variantCtx) || editMode?.kind === 'spine') &&
+                (Boolean(variantCtx) || categoryLocked) &&
                   selectedCategory !== c.code &&
                   'opacity-40 cursor-not-allowed hover:border-gray-200'
               )}

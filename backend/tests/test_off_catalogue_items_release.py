@@ -6153,6 +6153,42 @@ def test_r11_a_worker_whose_claim_was_stolen_never_rewrites_the_hold(world, monk
     )
 
 
+def test_r11_an_ordered_frame_draft_is_finished_as_the_sunglass_it_is(world):
+    # A PO line typed for a sunglass under the form's default category FR
+    # becomes a FRAME draft. Finishing it in the editor as SUNGLASS re-derives
+    # what the category decides (owner decision 6): it releases as a sunglass
+    # with the sunglass HSN and rate, on the same product (no second SKU).
+    from api.services.gst_rates import GST_CATEGORY_TABLE
+
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    cur = world.product(draft_id)
+    assert cur["category"] == "FRAME"
+    body = _products.ProductUpdate(
+        category="SG",
+        brand=cur["brand"],
+        model=cur["model"],
+        attributes=dict(cur.get("attributes") or {}),
+        mrp=cur["mrp"],
+        offer_price=2790,
+        cost_price=cur.get("cost_price"),
+    )
+    _run(_products.update_product(draft_id, body, CATALOGUER))
+    now = world.product(draft_id)
+    hsn, rate = GST_CATEGORY_TABLE["SUNGLASS"]
+    finding(
+        (now["category"], now["hsn_code"], now["gst_rate"]) == ("SUNGLASS", hsn, rate),
+        f"R11-6: the finished draft reads {now['category']} HSN {now['hsn_code']} at {now['gst_rate']}%",
+    )
+    finding(
+        len(world.units(draft_id)) == 2 and world.grn(grn["grn_id"])["status"] == "ACCEPTED",
+        f"R11-6: {len(world.units(draft_id))} unit(s) released; the receipt reads "
+        f"{world.grn(grn['grn_id'])['status']}",
+    )
+    assert world.products_named("Boss", "BOSS 1700") == [now] and now["sku"] == cur["sku"]
+    twin = _twin_of(world, draft_id)
+    assert (twin["category"], twin["hsn_code"]) == ("SUNGLASS", hsn)
+
+
 def test_r11_an_accept_that_dies_after_its_last_line_holds_nothing(world, monkeypatch):
     # The release shelves D and E, then the receipt's status flip fails (a
     # stepdown): the hold says nothing is held, the PO counts both and no

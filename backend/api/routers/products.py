@@ -3426,6 +3426,19 @@ async def update_product(
         # purchasable product's price. Mirrors the service-layer update_product
         # None-strip. A field is CLEARED with its empty value ("" / []), never null.
         update_data = {k: v for k, v in update_data.items() if v is not None}
+        # A category change (the editor offers one on an ordered draft, which
+        # nothing on the shelf or sold has used yet) re-derives what the
+        # category decides at the create door (normalise_payload): the
+        # canonical category, the HSN unless the edit names one -- and so the
+        # rate (below) -- and the identity (rekey_on_edit, below).
+        if "category" in update_data:
+            update_data["category"] = (
+                _pm.resolve_category(update_data["category"]) or update_data["category"]
+            )
+            if update_data["category"] != (
+                _pm.resolve_category(existing.get("category")) or existing.get("category")
+            ):
+                update_data.setdefault("hsn_code", hsn_for_category(update_data["category"]))
         # Pre-write snapshot for the take-down / republish rule below: read
         # BEFORE repo.update (an in-memory repo hands back the live dict).
         _was_active = existing.get("is_active", True)

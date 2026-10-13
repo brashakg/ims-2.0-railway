@@ -40,4 +40,12 @@ export const existingProductPath = (
 //                    imported `catalog_products` doc (diff-only PUT
 //                    /catalog/products/{id} + promote to approve).
 //   null           — plain create (also clone / variant seeding).
-export type EditMode = { kind: 'spine' | 'catalog'; id: string; sku: string } | null;
+// orderedDraft: a spine item ordered on a PO before it was catalogued and not
+// finished yet (the server's `ordered_draft`) -- nothing of it is on the shelf
+// or sold, so its category can still be put right in the editor.
+export type EditMode = {
+  kind: 'spine' | 'catalog';
+  id: string;
+  sku: string;
+  orderedDraft?: boolean;
+} | null;

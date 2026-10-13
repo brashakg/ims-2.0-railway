@@ -640,14 +640,17 @@ export function useQuickAddForm() {
       setIsSubmitting(true);
       try {
         if (editMode?.kind === 'spine') {
-          // EDIT-IN-PLACE: one validated PUT. SKU/barcode/category are never
-          // sent — immutable through this door; the shop's reorder level
+          // EDIT-IN-PLACE: one validated PUT. SKU/barcode are never sent —
+          // immutable through this door; nor is the category, except on an
+          // ordered draft (nothing of it shelved or sold yet), where the
+          // server re-derives its HSN, rate and identity. The shop's reorder level
           // follows as its own write. An edit that makes this product another
           // one's twin (an eye size, a CL power) is the server's 409, shown as
           // the error toast below (not the create's rescue popup).
           // (Review mode never reaches handleSubmit — it has its own fork.)
           const payload = buildProductPayload(values);
           const updated = await productApi.updateProduct(editMode.id, {
+            ...(editMode.orderedDraft ? { category: payload.category } : {}),
             brand: payload.brand,
             // A category with no model (Optical Lens) leaves the stored one alone.
             model: payload.model || undefined,
@@ -1302,7 +1305,12 @@ export function useQuickAddForm() {
           setVariantCtx(null);
           setFlaggedFields(new Set());
           applyFormValues(productToFormValues(product));
-          setEditMode({ kind: 'spine', id: editId, sku: String(product.sku || '') });
+          setEditMode({
+            kind: 'spine',
+            id: editId,
+            sku: String(product.sku || ''),
+            orderedDraft: Boolean((product as { ordered_draft?: boolean }).ordered_draft),
+          });
           // THIS shop's level; not set here = blank (never another shop's,
           // never the old chain-wide reorder_point). See editLevels above.
           const levels = (product as { reorder_levels?: Record<string, unknown> }).reorder_levels;
