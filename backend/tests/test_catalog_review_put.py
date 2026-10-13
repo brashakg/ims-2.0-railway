@@ -945,6 +945,35 @@ def test_a_refused_spine_gtin_write_saves_nothing_and_save_again_lands_it(
     assert "barcode" not in spine and flips == [(True, False)]
 
 
+def test_a_failed_spine_lookup_on_a_barcode_save_saves_nothing(gtin_env, monkeypatch):
+    """Round 14. The spine lookup that keys the gtin write was fail-soft: a
+    transient error there read as 'no linked spine', so the twin took the new
+    gtin, the spine kept the old one, and the answer said no billing product
+    was linked. A barcode save now 503s with nothing saved; any other save
+    stays fail-soft."""
+    real = catalog_mod._spine_product_id
+    calls = {"n": 0}
+
+    def _second_lookup_fails(repo, doc):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("db blip")
+        return real(repo, doc)
+
+    monkeypatch.setattr(catalog_mod, "_spine_product_id", _second_lookup_fails)
+    with pytest.raises(HTTPException) as exc:
+        _put("twin-g1", {"attributes": {"gtin": _GTIN}})
+    assert exc.value.status_code == 503 and "nothing was saved" in exc.value.detail
+    assert calls["n"] == 2
+    twin = catalog_mod.CATALOG_PRODUCTS["twin-g1"]
+    assert "gtin" not in twin["attributes"] and not twin.get("gtin")
+    assert "gtin" not in gtin_env.find_by_id("spine-g1")["attributes"]
+
+    calls["n"] = 1  # a save with no attributes makes one lookup: it fails
+    res = _put("twin-g1", {"description": "x"})
+    assert res["message"] == "Product updated successfully" and calls["n"] == 2
+
+
 def test_a_twin_sharing_only_a_sku_never_writes_or_excuses_that_spine(gtin_env):
     """Round 13 (the panel's probe). A review-queue twin can share its sku
     with an UNRELATED product's spine (promote 409s on exactly that). The

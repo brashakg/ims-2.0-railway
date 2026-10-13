@@ -2321,7 +2321,15 @@ async def update_catalog_product(
 
         _pr = get_product_repository()
         _spine_id = _spine_product_id(_pr, existing)
-    except Exception:  # noqa: BLE001 -- fail-soft; a barcode save read it above
+    except Exception as exc:  # noqa: BLE001 -- fail-soft unless a barcode moves
+        if spine_gtin is not None:
+            # "Could not look" is not "no linked spine": saving the twin alone
+            # would split the two copies for good. Refused, nothing saved.
+            raise HTTPException(
+                status_code=503,
+                detail="The billing product could not be checked, so nothing "
+                "was saved. Please save again.",
+            ) from exc
         logger.warning(
             "[CATALOG] spine lookup skipped for %s", product_id, exc_info=True
         )
