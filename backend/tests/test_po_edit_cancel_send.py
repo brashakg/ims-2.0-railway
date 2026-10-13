@@ -10,8 +10,8 @@ Procurement audit findings closed here (server side):
       never touched); one line can be cancelled for its undelivered quantity.
       Every change lands on the order timeline and the audit log with the
       person, the time and the reason.
-  F61 the catalogue manager may raise a DRAFT (the Buy Desk door) -- sending,
-      editing and cancelling stay with the managers.
+  F61 (owner 2026-10-08) raising, sending, editing and cancelling stay with
+      the managers -- the catalogue manager raises no PO.
 
 Handlers are driven directly with in-memory repos (no Mongo, no HTTP), like
 test_po_store_boundary / test_po_timeline.

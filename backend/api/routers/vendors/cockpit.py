@@ -20,7 +20,6 @@ from ._shared import (
     validate_store_access,
     _get_db,
 )
-from .purchase_orders import _PO_DRAFT_ROLES
 from .gst import po_gst_context
 from .grn_accept_lock import _GRN_TERMINAL_ACCEPT_STATUSES
 
@@ -153,7 +152,7 @@ async def goods_receipt_cockpit(
 async def get_last_purchase_cost(
     vendor_id: str = Query(..., description="Vendor to look up prior prices for"),
     product_ids: str = Query(..., description="Comma-separated product_ids to price"),
-    current_user: dict = Depends(require_roles(*_PO_DRAFT_ROLES)),
+    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
 ):
     """The price this vendor was last really paid, per product -- so the PO /
     Buy-Desk form can pre-fill "last paid Rs X on <date>" instead of the

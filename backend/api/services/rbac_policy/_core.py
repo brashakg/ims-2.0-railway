@@ -13,7 +13,6 @@ from typing import List, Union
 
 from ..cost_mask import (
     AP_ROLES,
-    PO_DRAFT_ROLES,
     PURCHASE_ROLES,
     RECEIVE_ROLES,
     RETURN_READERS as _RETURN_READERS,
@@ -58,8 +57,6 @@ ACCOUNTS: List[str] = sorted(AP_ROLES)
 # PURCHASE / RETURN_READERS, so changing the tuple moves the row with the gate.
 PURCHASE: List[str] = sorted(PURCHASE_ROLES)
 RETURN_READERS: List[str] = sorted(_RETURN_READERS)
-# Receiving goods into stock (managers only) and raising a DRAFT purchase order
-# (the purchase roles + the Buy Desk's CATALOG_MANAGER): the same rule, from the
-# same cost_mask tuples their require_roles gates are.
+# Receiving goods into stock (managers only): the same rule, from the same
+# cost_mask tuple its require_roles gates are.
 RECEIVE: List[str] = sorted(RECEIVE_ROLES)
-PO_DRAFT: List[str] = sorted(PO_DRAFT_ROLES)

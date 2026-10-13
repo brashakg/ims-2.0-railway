@@ -161,15 +161,12 @@ def _create_body(store):
     )
 
 
-# The catalogue manager raises a draft for its OWN shop only (owner ruling
-# 2026-09-28), held by the same check as the store manager.
-@pytest.mark.parametrize("role", ["STORE_MANAGER", "CATALOG_MANAGER"])
-def test_create_po_other_store_403(monkeypatch, role):
+def test_create_po_other_store_403(monkeypatch):
     repo = _PORepo(None)
     monkeypatch.setattr(vendors_mod, "get_purchase_order_repository", lambda: repo)
     monkeypatch.setattr(vendors_mod, "get_vendor_repository", lambda: None)
     with pytest.raises(HTTPException) as e:
-        asyncio.run(vendors_mod.create_po(_create_body("STORE-B"), _user([role], "STORE-A")))
+        asyncio.run(vendors_mod.create_po(_create_body("STORE-B"), _user(["STORE_MANAGER"], "STORE-A")))
     assert e.value.status_code == 403
     assert repo.mutations == []
 

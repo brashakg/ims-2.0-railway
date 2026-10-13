@@ -70,11 +70,6 @@ RETURN_READERS = (*PURCHASE_ROLES, "WORKSHOP_STAFF")
 # MANAGERS ONLY -- the purchase roles without the accountant. The receiving
 # gates (routers/vendors/_shared._RECEIVE_ROLES) ARE this tuple.
 RECEIVE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER")
-# Who may raise a DRAFT purchase order (and read the last price paid for it):
-# owner ruling 2026-09-28, the purchase roles plus the CATALOG_MANAGER's Buy
-# Desk. That door only ever writes a DRAFT; sending, editing and cancelling stay
-# on PURCHASE_ROLES. The draft gate (routers/vendors/purchase_orders) IS this.
-PO_DRAFT_ROLES = (*PURCHASE_ROLES, "CATALOG_MANAGER")
 # context -> the roles it admits on top of COST_VISIBLE_ROLES.
 _CONTEXT_ROLES = {
     "purchase": set(PURCHASE_ROLES),

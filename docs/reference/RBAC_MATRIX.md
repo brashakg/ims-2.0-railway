@@ -1134,9 +1134,9 @@ are the exact current gate (SUPERADMIN always implied).
 > Receiving goods (log a delivery, accept it, express receive, void, escalate,
 > upload the receipt document, the receiving cockpit) is **managers only** --
 > store manager, area manager, admin, superadmin; NOT the accountant (owner
-> ruling 2026-09-28). The catalogue manager may raise a purchase order, which
-> is always a DRAFT (its own capability key `vendors:po-draft`); sending,
-> editing and cancelling stay with the four order roles.
+> ruling 2026-09-28). Raising, sending, editing and cancelling a purchase
+> order stay with the four order roles -- not the catalogue manager (owner
+> 2026-10-08).
 
 | Method | Path | Allowed | S |
 |---|---|---|---|
@@ -1154,9 +1154,9 @@ are the exact current gate (SUPERADMIN always implied).
 | `POST` | `/api/v1/vendors/grn/{grn_id}/escalate` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
 | `POST` | `/api/v1/vendors/grn/{grn_id}/void` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
 | `GET` | `/api/v1/vendors/goods-receipt/cockpit` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
-| `GET` | `/api/v1/vendors/last-cost` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, CATALOG_MANAGER |  |
+| `GET` | `/api/v1/vendors/last-cost` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `GET` | `/api/v1/vendors/purchase-orders` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/vendors/purchase-orders` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, CATALOG_MANAGER |  |
+| `POST` | `/api/v1/vendors/purchase-orders` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `GET` | `/api/v1/vendors/purchase-orders/{po_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `PUT` | `/api/v1/vendors/purchase-orders/{po_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `POST` | `/api/v1/vendors/purchase-orders/{po_id}/cancel` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |

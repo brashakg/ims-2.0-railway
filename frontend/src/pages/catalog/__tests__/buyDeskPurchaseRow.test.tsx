@@ -1,21 +1,23 @@
 // ============================================================================
 // IMS 2.0 - Buy Desk row "Purchase" opens a draft PO for THAT product (F61)
 // ============================================================================
-// The row button was a plain link to /purchase: it carried no product, and for
-// the catalogue manager (whose screen this is) it landed on the 403 page. Owner
-// ruling 2026-09-28: the catalogue manager raises a DRAFT here and the store
-// manager checks and sends it -- so the button opens the draft form with that
-// row already on it.
+// The row button was a plain link to /purchase that carried no product. It now
+// opens the draft form with that row already on it -- for a role that may
+// raise a PO; owner 2026-10-08: the catalogue manager raises none.
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 vi.mock('../../../context/ToastContext', () => ({
   useToast: () => ({ success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() }),
 }));
+const auth = vi.hoisted(() => ({ roles: ['STORE_MANAGER'] as string[] }));
 vi.mock('../../../context/AuthContext', () => ({
-  useAuth: () => ({ user: { activeStoreId: 'BV-DHN-02', roles: ['CATALOG_MANAGER'] } }),
+  useAuth: () => ({
+    user: { activeStoreId: 'BV-DHN-02', roles: auth.roles },
+    hasRole: (r: string | string[]) => auth.roles.some((x) => [r].flat().includes(x)),
+  }),
 }));
 vi.mock('../../../services/api', () => ({
   vendorsApi: {
@@ -54,6 +56,10 @@ vi.mock('../../../services/api/buyDesk', () => ({
 
 import BuyDeskPage from '../BuyDeskPage';
 
+beforeEach(() => {
+  auth.roles = ['STORE_MANAGER'];
+});
+
 describe('Buy Desk row Purchase (F61)', () => {
   it('opens the draft PO form with that product, not a link to /purchase', async () => {
     const { container } = render(
@@ -65,6 +71,18 @@ describe('Buy Desk row Purchase (F61)', () => {
     expect(container.querySelector('a[href="/purchase"]')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: /^purchase$/i }));
     expect(await screen.findByText(/create draft po · 1 product/i)).toBeInTheDocument();
+  });
+
+  it('gives the catalogue manager no Purchase that opens a draft (owner 2026-10-08)', async () => {
+    auth.roles = ['CATALOG_MANAGER'];
+    render(
+      <MemoryRouter>
+        <BuyDeskPage />
+      </MemoryRouter>,
+    );
+    await screen.findByText('Carrera CA8895');
+    expect(screen.queryByRole('button', { name: /^purchase$/i })).toBeNull();
+    expect(screen.queryByText(/create draft po/i)).toBeNull();
   });
 });
 

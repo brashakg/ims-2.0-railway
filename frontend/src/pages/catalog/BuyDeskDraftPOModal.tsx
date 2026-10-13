@@ -29,7 +29,6 @@ import type {
   ComposerLine,
 } from '../../components/purchase/PurchaseOrderComposer';
 import type { BuyDeskRow } from '../../services/api/buyDesk';
-import { PURCHASE_ROLES } from '../purchase/purchaseRoles';
 
 function mapVendor(v: Record<string, unknown>): ComposerVendorOption {
   const id = String(v.vendor_id ?? v._id ?? '');
@@ -159,14 +158,8 @@ export default function BuyDeskDraftPOModal({
                   unit_price: it.unit_price,
                 })),
               });
-              // The catalogue manager raises the draft; a manager checks and
-              // sends it (owner ruling 2026-09-28) -- say who acts next.
-              const sendsItself = (user?.roles ?? []).some((r) =>
-                PURCHASE_ROLES.includes(r),
-              );
               toast.success(
-                `Draft PO ${resp.po_number ?? ''} created with ${payload.items.length} line(s)` +
-                  (sendsItself ? '' : ' - the store manager checks it and sends it to the vendor.'),
+                `Draft PO ${resp.po_number ?? ''} created with ${payload.items.length} line(s)`,
               );
               onCreated();
             }}

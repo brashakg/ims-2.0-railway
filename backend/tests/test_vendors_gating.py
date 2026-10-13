@@ -140,18 +140,17 @@ class TestVendorReads:
         assert resp.status_code == 403
 
 
-class TestCatalogManagerRaisesDraftOnly:
-    """Owner ruling 2026-09-28: the catalogue manager raises a DRAFT from the
-    Buy Desk; the store manager checks and sends it. Everything that changes an
-    order after that stays with the managers."""
+class TestCatalogManagerRaisesNoPO:
+    """Owner 2026-10-08: the catalogue manager raises no purchase order (the
+    Buy Desk hides Create draft PO from them); the server gate refuses it."""
 
-    def test_catalog_manager_may_raise_a_draft(self, client):
+    def test_catalog_manager_may_not_raise_a_po(self, client):
         resp = client.post(
             "/api/v1/vendors/purchase-orders",
             json=_PO_BODY,
             headers=_headers(["CATALOG_MANAGER"]),
         )
-        assert resp.status_code != 403
+        assert resp.status_code == 403
 
 
 

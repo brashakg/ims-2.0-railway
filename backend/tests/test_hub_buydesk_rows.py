@@ -334,7 +334,9 @@ def test_on_order_is_only_what_went_to_the_vendor_drafts_show_as_in_draft(
     products = [{"product_id": "P1", "sku": "HAV-1", "catalog_status": "ACTIVE"}]
     monkeypatch.setattr(bdr, "get_product_repository", lambda: _Repo(products))
     monkeypatch.setattr(bdr, "_get_db", lambda: db)
-    monkeypatch.setattr(bdr._sp, "push_lock_reason", lambda db, entity, doc: None)
+    from api.services.shopify_push import _shared
+
+    monkeypatch.setattr(_shared, "push_lock_reason", lambda db, entity, doc: None)
 
     out = _run(bdr.buy_desk_rows(store_id=None, limit=200, skip=0, current_user=_VIEWER))
     row = out["rows"][0]

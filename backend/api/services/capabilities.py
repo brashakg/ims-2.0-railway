@@ -133,14 +133,6 @@ def capability_for(method: str, path: str) -> Optional[str]:
     # in the module deny.
     if mod == "online-store" and tmpl.endswith("/clear-rx-hold"):
         return "online-store:rx-clear"
-    # Curated finer capability: raising a DRAFT purchase order. The owner lets
-    # the CATALOG_MANAGER raise one (2026-09-28); collapsing this route into
-    # vendors:write would add that role to the union the grant guard reasons
-    # from, and a catalogue manager could then grant vendor / send / receive
-    # writes to anyone. A 'vendors' module deny (or a vendors:write deny)
-    # still covers it through PARENT_CAPABILITY.
-    if tmpl == "/api/v1/vendors/purchase-orders" and method.upper() == "POST":
-        return "vendors:po-draft"
     # Curated finer capability: LOGGING a vendor return. Owner ruling
     # 2026-10-12 lets WORKSHOP_STAFF log one (unpriced); on the generic
     # vendor-returns:write key they would join the approve / ship / credit
@@ -161,7 +153,6 @@ def capability_for(method: str, path: str) -> Optional[str]:
 # the parent), so the key needs no MODULE_EXTRA_DENY_CAPABILITIES entry.
 PARENT_CAPABILITY: Dict[str, str] = {
     "vendor-returns:create": "vendor-returns:write",
-    "vendors:po-draft": "vendors:write",
 }
 
 

@@ -1766,9 +1766,8 @@ def test_unhiding_a_cost_field_moves_every_product_read(
 # code gate is the object its require_roles resolves to (section 20), never
 # its spelling.
 def test_every_purchase_route_row_is_the_one_list(app):
-    from api.services.cost_mask import PO_DRAFT_ROLES, RECEIVE_ROLES
+    from api.services.cost_mask import RECEIVE_ROLES
     from api.services.rbac_policy._core import (
-        PO_DRAFT,
         PURCHASE,
         RECEIVE,
         RETURN_READERS,
@@ -1778,7 +1777,6 @@ def test_every_purchase_route_row_is_the_one_list(app):
         id(PURCHASE_ROLES): PURCHASE,
         id(_RETURN_READERS): RETURN_READERS,
         id(RECEIVE_ROLES): RECEIVE,
-        id(PO_DRAFT_ROLES): PO_DRAFT,
     }
     want = {}
     for route in app.routes:
@@ -1808,7 +1806,6 @@ def test_every_purchase_route_row_is_the_one_list(app):
     assert PURCHASE == sorted(PURCHASE_ROLES)
     assert RETURN_READERS == sorted(_RETURN_READERS)
     assert RECEIVE == sorted(RECEIVE_ROLES)
-    assert PO_DRAFT == sorted(PO_DRAFT_ROLES)
     assert vr_router._VENDOR_RETURN_READERS is _RETURN_READERS
 
 
@@ -1834,11 +1831,10 @@ import importlib  # noqa: E402
 import pkgutil  # noqa: E402
 import textwrap  # noqa: E402
 
-from api.services.cost_mask import PO_DRAFT_ROLES, RECEIVE_ROLES  # noqa: E402
+from api.services.cost_mask import RECEIVE_ROLES  # noqa: E402
 
 # RECEIVE_ROLES: receiving is managers only (owner ruling 2026-09-28).
-# PO_DRAFT_ROLES: the Buy Desk's CATALOG_MANAGER raises a DRAFT (same ruling).
-_GATE_CONSTANTS = (AP_ROLES, PURCHASE_ROLES, _RETURN_READERS, RECEIVE_ROLES, PO_DRAFT_ROLES)
+_GATE_CONSTANTS = (AP_ROLES, PURCHASE_ROLES, _RETURN_READERS, RECEIVE_ROLES)
 _MONEY_ROUTERS = (
     "vendors", "finance", "purchase_invoices", "purchase_recon",
     "rtv_debit_notes", "vendor_returns", "vendor_rma", "vendor_rebates",

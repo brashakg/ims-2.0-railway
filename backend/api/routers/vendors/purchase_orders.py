@@ -33,7 +33,6 @@ from .gst import (
 )
 from .models import POCreate
 from .numbering import generate_po_number
-from ...services.cost_mask import PO_DRAFT_ROLES
 
 
 # ============================================================================
@@ -623,18 +622,10 @@ def fill_cost_from_rate(po_id, po_number, items, products, current_user) -> list
     return cost_filled
 
 
-# Owner ruling 2026-09-28: the CATALOGUE MANAGER raises a DRAFT from the Buy
-# Desk and the store manager checks and sends it. This door only ever writes a
-# DRAFT, so adding the role here grants exactly "draft" -- sending, editing and
-# cancelling stay on _VENDOR_ROLES (the rbac row carves this route its own
-# capability key so the vendors:write union does not grow; see capabilities).
-# Defined once in services/cost_mask.
-_PO_DRAFT_ROLES = PO_DRAFT_ROLES
-
-
+# Owner 2026-10-08: the purchase roles raise a PO -- not the catalogue manager.
 @router.post("/purchase-orders", status_code=201)
 async def create_po(
-    po: POCreate, current_user: dict = Depends(require_roles(*_PO_DRAFT_ROLES))
+    po: POCreate, current_user: dict = Depends(require_roles(*_VENDOR_ROLES))
 ):
     """Create a new purchase order (always a DRAFT)."""
     po_repo = get_purchase_order_repository()

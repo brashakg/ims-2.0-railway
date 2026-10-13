@@ -5,10 +5,8 @@
 // honest Online Store state, on-hand + on-order stock, and a netted buy signal.
 // "Purchase" unlocks the moment a product is catalog-complete (purchasable).
 // Read-only data (GET /buy-desk/rows). A row's Purchase opens the draft PO form
-// with that product on it -- it used to be a bare link to /purchase that
-// carried no product and 403'd the catalogue manager, whose screen this is
-// (audit F61). Owner ruling 2026-09-28: the catalogue manager raises the DRAFT
-// here; the store manager checks it and sends it to the vendor.
+// with that product on it (audit F61) -- for a role that may raise a PO only
+// (owner 2026-10-08: not the catalogue manager).
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
@@ -310,7 +308,7 @@ export default function BuyDeskPage() {
                     {r.buy_signal === null ? '—' : r.buy_signal}
                   </td>
                   <td className="px-4 py-2.5 text-right">
-                    {r.purchasable ? (
+                    {r.purchasable && canDraftPO ? (
                       <button
                         type="button"
                         onClick={() => {
@@ -324,7 +322,11 @@ export default function BuyDeskPage() {
                     ) : (
                       <span
                         className="inline-flex items-center gap-1 rounded-lg bg-gray-100 px-3 py-1.5 text-xs font-medium text-gray-400"
-                        title="Finish cataloguing this product to purchase it"
+                        title={
+                          r.purchasable
+                            ? 'A store manager or the accountant raises the purchase order'
+                            : 'Finish cataloguing this product to purchase it'
+                        }
                       >
                         <ShoppingCart className="h-3.5 w-3.5" /> Purchase
                       </span>

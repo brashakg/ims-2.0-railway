@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from ._core import ACCOUNTS, PO_DRAFT, PURCHASE, RECEIVE, RETURN_READERS
+from ._core import ACCOUNTS, PURCHASE, RECEIVE, RETURN_READERS
 
 ROWS: List[Dict[str, object]] = [
     # --- /api/v1/vendor-portal ---
@@ -408,14 +408,12 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/purchase-orders",
         "allowed": PURCHASE,
     },
-    # Last-paid price lookup for the PO / Buy-Desk form (vendor roles, plus the
-    # catalogue manager whose Buy Desk draft pre-fills from it; the endpoint
-    # additionally store-scopes each PO it reads). A read: vendors:read is
-    # already open to every role, so this broadens no union.
+    # Last-paid price lookup for the PO / Buy-Desk form (vendor roles; the
+    # endpoint additionally store-scopes each PO it reads).
     {
         "method": "GET",
         "path": "/api/v1/vendors/last-cost",
-        "allowed": PO_DRAFT,
+        "allowed": PURCHASE,
     },
     # The tax head each vendor's purchase carries at a shop (the PO composer
     # and the Suppliers cards show it; same roles as the PO form itself).
@@ -424,14 +422,12 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/po-gst-heads",
         "allowed": PURCHASE,
     },
-    # Owner ruling 2026-09-28: the catalogue manager raises a DRAFT from the Buy
-    # Desk (this door only ever writes a DRAFT); the store manager checks and
-    # sends it. capabilities.capability_for carves this route its own key
-    # (vendors:po-draft) so CATALOG_MANAGER never joins the vendors:write union.
+    # Owner 2026-10-08: who may raise a PO is the purchase roles -- not the
+    # catalogue manager (the Buy Desk screen's PURCHASE_ROLES is pinned to it).
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-orders",
-        "allowed": PO_DRAFT,
+        "allowed": PURCHASE,
     },
     {
         "method": "POST",
