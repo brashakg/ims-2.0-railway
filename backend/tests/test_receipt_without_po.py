@@ -1593,46 +1593,68 @@ def test_c7_counter_staff_never_read_what_was_paid(world):
 
 
 def test_c7_what_was_paid_has_one_visibility_rule(world, monkeypatch):
-    """Panel probes (rounds 6 and 9): what was paid on a walk-in had three
-    visibility rules. As STORE_MANAGER after a walk-in at 3100 the receipt
-    reads hid each line's price (GET /vendors/grn/{id}, the list and the
-    trace's purchase section: [None, None]) while the same response's unit
-    read 3100 ("product" context) and /vendors/last-cost 3100 (no mask) --
-    the hide protected nothing. ONE context answers all of them, "purchase"
-    (what was paid and to whom): a role it admits reads the price on every
-    read, a role it does not reads it on none. Narrow that context (as the
-    owner's what-we-pay ruling does for the managers) and every read moves
-    with it -- no read is widened past it."""
-    from api.services.cost_mask import _CONTEXT_ROLES, can_see_cost
+    """Panel probes (rounds 6, 9 and 10): what was paid on a walk-in answered
+    more than one rule. Round 10, walk-in at 3100: as CATALOG_MANAGER the
+    trace gave the unit's cost None ("purchase" context) while
+    /inventory/units?grn_id= gave the same unit's cost 3100 ("product"); with
+    "purchase" narrowed for STORE_MANAGER, the same split. A unit's cost is
+    "product" on every read (the units list, the till scan, the unit by
+    barcode), and the price paid IS that cost -- the walk-in's units and
+    product are costed at it. So ONE context answers every read of it,
+    "product": a role it admits reads 3100 on each read it can open, a role it
+    does not on none; narrow it (the owner's what-we-pay ruling) and every
+    read moves together. "purchase" keeps who sold it and the bill only."""
+    from api.services.cost_mask import PURCHASE_ROLES, _CONTEXT_ROLES, can_see_cost
 
     grn_id, barcode = _walk_in_on_the_shelf(world)
 
-    def answers(user):
+    def prices(user):
+        """The frame's price paid on every read `user` can open."""
         http = world["as_"](user)
         trace = http.get(f"/inventory/barcode/{barcode}/trace").json()
-        receipts = (
-            http.get(f"/vendors/grn/{grn_id}").json(),
-            http.get("/vendors/grn", params={"grn_subtype": "NO_PO"}).json()["grns"][0],
-            trace["purchase"][0],
-        )
-        assert all(g["grn_id"] == grn_id and [it["accepted_qty"] for it in g["items"]] == [2, 3] for g in receipts), receipts
+        units = http.get("/inventory/units", params={"grn_id": grn_id}).json()["units"]
+        (on_units,) = {u.get("cost_price") for u in units if u["product_id"] == FRAME}
+        got = {
+            "trace unit": trace["stock_unit"].get("unit_cost"),
+            "trace line": trace["purchase"][0]["items"][0].get("unit_price"),
+            "receipt units": on_units,
+            "till scan": http.get(f"/inventory/barcode/{barcode}").json().get("cost_price"),
+            "unit by barcode": http.get(f"/inventory/stock/barcode/{barcode}").json().get("cost_price"),
+        }
+        receipt = http.get(f"/vendors/grn/{grn_id}")
+        if receipt.status_code == 403:  # the purchase screens' gate
+            return got
+        listed = http.get("/vendors/grn", params={"grn_subtype": "NO_PO"}).json()["grns"][0]
         last = http.get("/vendors/last-cost", params={"vendor_id": SHARMA, "product_ids": FRAME})
-        assert last.status_code == 200, last.text
-        return (
-            [[it.get("unit_price") for it in g["items"]] for g in receipts],
-            trace["stock_unit"].get("unit_cost"),
-            (last.json()["costs"].get(FRAME) or {}).get("unit_price"),
+        got.update(
+            {
+                "receipt line": receipt.json()["items"][0].get("unit_price"),
+                "receipts line": listed["items"][0].get("unit_price"),
+                "last paid": (last.json()["costs"].get(FRAME) or {}).get("unit_price"),
+                "supplier": receipt.json().get("vendor_id"),
+            }
         )
+        return got
 
-    paid = ([[3100.0, 420.0]] * 3, 3100.0, 3100.0)
-    hidden = ([[None, None]] * 3, None, None)
-    users = {role: {**MANAGER, "user_id": f"u-{role.lower()}", "roles": [role]} for role in ("STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT", "ADMIN")}
+    def expect(role, *, paid, to_whom):
+        want = dict.fromkeys(("trace unit", "trace line", "receipt units", "till scan", "unit by barcode"), 3100.0 if paid else None)
+        if role in PURCHASE_ROLES:
+            want.update(dict.fromkeys(("receipt line", "receipts line", "last paid"), 3100.0 if paid else None))
+            want["supplier"] = SHARMA if to_whom else None
+        return want
+
+    roles = ("STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT", "ADMIN", "CATALOG_MANAGER", "SALES_STAFF")
+    users = {role: {**MANAGER, "user_id": f"u-{role.lower()}", "roles": [role]} for role in roles}
     for role, user in users.items():
-        assert answers(user) == (paid if can_see_cost(user, "purchase") else hidden), role
+        sees = expect(role, paid=can_see_cost(user, "product"), to_whom=can_see_cost(user, "purchase"))
+        assert prices(user) == sees, role
+    with monkeypatch.context() as narrowed:
+        narrowed.setitem(_CONTEXT_ROLES, "product", _CONTEXT_ROLES["product"] - {"STORE_MANAGER"})
+        assert prices(users["STORE_MANAGER"]) == expect("STORE_MANAGER", paid=False, to_whom=True)
+        assert prices(users["AREA_MANAGER"]) == expect("AREA_MANAGER", paid=True, to_whom=True)
+        assert prices(users["CATALOG_MANAGER"]) == expect("CATALOG_MANAGER", paid=True, to_whom=False)
     monkeypatch.setitem(_CONTEXT_ROLES, "purchase", _CONTEXT_ROLES["purchase"] - {"STORE_MANAGER"})
-    assert answers(users["STORE_MANAGER"]) == hidden
-    assert answers(users["AREA_MANAGER"]) == paid
-    assert answers(users["ACCOUNTANT"]) == paid
+    assert prices(users["STORE_MANAGER"]) == expect("STORE_MANAGER", paid=True, to_whom=False)
 
 
 def _walk_in_on_the_shelf(world):
@@ -1652,8 +1674,8 @@ def test_c7_the_barcode_trace_shows_no_counter_what_was_paid(world):
     cost 3100 and each line's price paid [3100, 420]. The route stays open to
     every signed-in role (the sale, transfer and return history carries no
     cost); what was paid goes through the one cost rule (cost_mask): the
-    unit's cost and each receipt line's price paid through its "purchase"
-    context (mask_receipt) -- the counter never.
+    unit's cost and each receipt line's price paid through its "product"
+    context (mask_receipt for the lines) -- the counter never.
 
     Owner ruling 2026-10-12: nor does a counter role read who sold it, the
     bill number, the bill photo's file id / hash or the accept lock there
@@ -1688,7 +1710,7 @@ def test_c7_the_barcode_trace_shows_no_counter_what_was_paid(world):
         body = res.json()
         assert body["stock_unit"]["barcode"] == barcode
         assert body["purchase"][0]["grn_id"] == grn_id
-        sees_unit_cost = can_see_cost(counter, "purchase")
+        sees_unit_cost = can_see_cost(counter, "product")
         assert sees_unit_cost == role.endswith("_MANAGER"), role  # owner ruling D7
         assert bool({"unit_cost", "cost_price"} & set(body["stock_unit"])) == sees_unit_cost, (role, body)
         items = body["purchase"][0]["items"]

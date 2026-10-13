@@ -70,12 +70,9 @@ async def barcode_lifecycle_trace(
         # 1. Stock unit
         su = db.get_collection("stock_units").find_one({"barcode": barcode})
         if su:
-            # Every signed-in role reads this route: the unit's cost is what
-            # was paid for it -- the receipt's rule (mask_receipt), the
-            # "purchase" context.
-            result["stock_unit"] = cost_mask.mask_cost(
-                _scrub(dict(su)), current_user, "purchase"
-            )
+            # Its cost answers the one per-unit cost rule ("product", the
+            # mask at the end), as on every read of a unit.
+            result["stock_unit"] = _scrub(dict(su))
             stock_id = str(su.get("stock_id") or su.get("stock_unit_id") or su.get("_id") or "")
 
             # 2. Purchase / GRN origin

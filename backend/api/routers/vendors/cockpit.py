@@ -182,11 +182,11 @@ async def get_last_purchase_cost(
 
     Shape: {"costs": {product_id: {unit_price, po_number, po_id, date}, ...}}.
 
-    A price paid -- a walk-in buy's among them -- answers to the receipt's
-    rule (cost_mask.mask_receipt, the "purchase" context): a reader it hides
-    the price from gets no prices.
+    A price paid -- a walk-in buy's among them -- is cost, the one per-unit
+    cost rule (cost_mask "product", as a receipt line's price and the units it
+    minted): a reader it hides cost from gets no prices.
     """
-    if not can_see_cost(current_user, "purchase"):
+    if not can_see_cost(current_user, "product"):
         return {"costs": {}}
     wanted = {p.strip() for p in (product_ids or "").split(",") if p.strip()}
     if not vendor_id or not wanted:
