@@ -558,6 +558,11 @@ class _TaskRepo:
             return dict(self.task)
         return None
 
+    def find_one(self, filt):
+        # Every single-task route opens through the visibility filter.
+        hit = next((t for t in self.all_tasks if self._matches(t, filt)), None)
+        return dict(hit) if hit else None
+
     def update(self, tid, data):
         self.updates.append((tid, data))
         if self.task and self.task.get("task_id") == tid:
@@ -567,19 +572,9 @@ class _TaskRepo:
 
     @staticmethod
     def _matches(doc, filt):
-        for key, cond in (filt or {}).items():
-            val = doc
-            for part in key.split("."):  # a dotted path, as Mongo reads it
-                val = val.get(part) if isinstance(val, dict) else None
-            if isinstance(cond, dict) and "$in" in cond:
-                if val not in cond["$in"]:
-                    return False
-            elif isinstance(cond, dict) and "$ne" in cond:
-                if val == cond["$ne"]:
-                    return False
-            elif val != cond:
-                return False
-        return True
+        from tests.strict_fakes import matches
+
+        return matches(doc, filt)
 
     def find_many(self, filter=None, sort=None, skip=0, limit=100):
         self.find_many_calls.append({"filter": filter, "limit": limit})
@@ -616,7 +611,10 @@ def _tasks_client(monkeypatch, task, roles, store):
     return TestClient(app), repo
 
 
-def test_task_endpoints_cross_store_403(monkeypatch):
+def test_task_endpoints_cross_store_404(monkeypatch):
+    """Another shop's task does not exist for this caller: 404 on every
+    single-task route, never 403, so a task id cannot be probed (owner ruling
+    2026-10-12)."""
     client, repo = _tasks_client(
         monkeypatch, _seed_task(), ["STORE_MANAGER"], OWN_STORE
     )
@@ -632,8 +630,7 @@ def test_task_endpoints_cross_store_403(monkeypatch):
     ]
     for method, url, kw in calls:
         r = getattr(client, method)(url, **kw)
-        assert r.status_code == 403, f"{method.upper()} {url} -> {r.status_code}"
-        assert "store" in r.json()["detail"].lower()
+        assert r.status_code == 404, f"{method.upper()} {url} -> {r.status_code}"
     assert repo.updates == []
     assert repo.task["status"] == "OPEN"
 
@@ -668,10 +665,10 @@ def test_task_admin_cross_store_bypass(monkeypatch):
     assert repo.task["status"] == "COMPLETED"
 
 
-def test_task_global_no_store_allowed_for_any_caller(monkeypatch):
-    """A task with NO store_id is global (system/HQ) -> the STORE gate does not
-    block store staff. (The ASSIGNEE actor-guard is exercised separately; here
-    the caller IS the assignee so both gates pass.)"""
+def test_task_global_no_store_allowed_for_its_assignee(monkeypatch):
+    """A task with NO store_id (system/HQ) assigned to this person is theirs:
+    they open and complete it. (Owner ruling 2026-10-12: assigned to you is
+    yours, whichever shop it carries.)"""
     client, repo = _tasks_client(
         monkeypatch,
         _seed_task(store_id=None, assigned_to="u-test"),
@@ -684,11 +681,10 @@ def test_task_global_no_store_allowed_for_any_caller(monkeypatch):
     assert repo.task["status"] == "COMPLETED"
 
 
-def test_task_lifecycle_non_assignee_lowrole_403(monkeypatch):
-    """Object-level guard: a SALES_STAFF who is NOT the assignee (and not the
-    assigner/creator, nor a manager) is 403'd on EVERY mutating lifecycle
-    action -- the bug a non-owner SALES_STAFF completing a manager's task.
-    Same store, so the store gate passes; the actor gate is what blocks."""
+def test_task_lifecycle_non_assignee_lowrole_404(monkeypatch):
+    """A SALES_STAFF who is NOT the assignee (nor a manager) cannot see a
+    colleague's task at the same shop, so EVERY lifecycle action is 'not
+    found' -- the bug a non-owner SALES_STAFF completing a manager's task."""
     client, repo = _tasks_client(
         monkeypatch,
         _seed_task(store_id=OWN_STORE, assigned_to="someone-else", assigned_by="mgr-1"),
@@ -700,12 +696,14 @@ def test_task_lifecycle_non_assignee_lowrole_403(monkeypatch):
         ("post", "/api/v1/tasks/T1/start", {}),
         ("post", "/api/v1/tasks/T1/acknowledge", {}),
         ("post", "/api/v1/tasks/T1/escalate", {}),
-        ("post", "/api/v1/tasks/T1/reassign", {"json": {"assigned_to": "u9"}}),
     ]
     for method, url, kw in calls:
         r = getattr(client, method)(url, **kw)
-        assert r.status_code == 403, f"{method.upper()} {url} -> {r.status_code}"
-        assert "assignee" in r.json()["detail"].lower()
+        assert r.status_code == 404, f"{method.upper()} {url} -> {r.status_code}"
+    # Reassigning is a manager's action (owner ruling 2026-10-13): refused
+    # for the role on ANY task id, so it cannot probe one either.
+    r = client.post("/api/v1/tasks/T1/reassign", json={"assigned_to": "u9"})
+    assert r.status_code == 403, r.status_code
     # Nothing was written.
     assert repo.updates == []
     assert repo.task["status"] == "OPEN"
@@ -727,17 +725,29 @@ def test_task_complete_assignee_lowrole_ok(monkeypatch):
     assert repo.task["completed_by"] == "u-test"
 
 
-def test_task_complete_assigner_lowrole_ok(monkeypatch):
-    """The ASSIGNER/creator may act on a task they handed out (assigned_by)."""
+def test_task_handed_out_below_manager_stays_with_the_person_who_raised_it(monkeypatch):
+    """Owner question 1, decided 2026-10-13: a staff member who hands a task
+    to a colleague keeps seeing it and can follow it up. A task someone ELSE
+    handed out stays 'not found' to them."""
     client, repo = _tasks_client(
         monkeypatch,
-        _seed_task(store_id=OWN_STORE, assigned_to="someone-else", assigned_by="u-test"),
+        _seed_task(store_id=OWN_STORE, assigned_to="someone-else", assigned_by="u-test", created_via="manual"),
         ["SALES_STAFF"],
         OWN_STORE,
     )
-    r = client.post("/api/v1/tasks/T1/start")
-    assert r.status_code == 200
+    assert client.get("/api/v1/tasks/T1").status_code == 200
+    assert client.post("/api/v1/tasks/T1/start").status_code == 200
     assert repo.task["status"] == "IN_PROGRESS"
+
+    client, repo = _tasks_client(
+        monkeypatch,
+        _seed_task(store_id=OWN_STORE, assigned_to="someone-else", assigned_by="u-other"),
+        ["SALES_STAFF"],
+        OWN_STORE,
+    )
+    assert client.get("/api/v1/tasks/T1").status_code == 404
+    assert client.post("/api/v1/tasks/T1/start").status_code == 404
+    assert repo.task["status"] == "OPEN"
 
 
 def test_task_complete_manager_non_assignee_ok(monkeypatch):
@@ -820,8 +830,10 @@ def _tasks_list_client(monkeypatch, all_tasks, roles, store, store_ids=None):
 
 
 def test_list_tasks_store_manager_excludes_other_store(monkeypatch):
-    """A STORE_MANAGER's GET /tasks (no ?store_id, the Hub default) must return
-    THEIR store's task + global no-store tasks, but NOT another store's task."""
+    """A STORE_MANAGER's GET /tasks (no ?store_id, the Hub default) returns
+    THEIR store's tasks, NOT another store's -- and not a no-store task that
+    is somebody else's (owner ruling 2026-10-12: a manager sees every task of
+    their shop(s); a task of no shop is the admins' unless it is yours)."""
     own = _seed_task(task_id="T-own", store_id=OWN_STORE)
     other = _seed_task(task_id="T-other", store_id=OTHER_STORE)
     glob = _seed_task(task_id="T-glob", store_id=None)
@@ -832,9 +844,9 @@ def test_list_tasks_store_manager_excludes_other_store(monkeypatch):
     assert r.status_code == 200
     ids = {t["task_id"] for t in r.json()["tasks"]}
     assert "T-own" in ids
-    assert "T-glob" in ids  # global/no-store task is openable by anyone
+    assert "T-glob" not in ids  # no shop, assigned to someone else
     assert "T-other" not in ids  # the bug: another store's task must not show
-    assert r.json()["total"] == 2
+    assert r.json()["total"] == 1
 
 
 def test_list_tasks_area_manager_sees_full_reach(monkeypatch):

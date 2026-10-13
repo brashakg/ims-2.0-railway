@@ -4,6 +4,7 @@
 
 import { createContext, useContext, useReducer, useEffect } from 'react';
 import type { ReactNode } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import type { User, AuthState, LoginCredentials, LoginResponse, UserRole } from '../types';
 import { authApi } from '../services/api';
 import { usePOSStore } from '../stores/posStore';
@@ -129,6 +130,7 @@ interface AuthProviderProps {
 
 export function AuthProvider({ children }: AuthProviderProps) {
   const [state, dispatch] = useReducer(authReducer, initialState);
+  const queryClient = useQueryClient();
 
   // Check for existing token on mount
   useEffect(() => {
@@ -307,6 +309,11 @@ export function AuthProvider({ children }: AuthProviderProps) {
       // Clear POS state to prevent data leaking between users
       try { usePOSStore.getState().clearAllOnLogout(); } catch { /* ignore if store not ready */ }
       dispatch({ type: 'LOGOUT' });
+      // Every screen's cached server data goes too, so the next person on a
+      // shared tablet is never shown the last person's (tasks or anything
+      // else). Every sign-out path - the menu, idle, store picker, forced
+      // password change - comes through here.
+      queryClient.clear();
     }
   };
 
