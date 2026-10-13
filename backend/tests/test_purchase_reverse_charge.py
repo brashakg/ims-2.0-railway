@@ -570,6 +570,20 @@ def _receipt(db, subtype="STANDARD"):
     return grn
 
 
+class TestOneMeaningOfTotal:
+    def test_the_draft_total_is_what_the_supplier_is_owed(self):
+        """GET /from-grn's `total` means what POST / and /preview mean: what
+        the supplier is owed. The draft is not reverse charge (1180, as the
+        preview of the same form says); ticking it, the preview owes 1000."""
+        db, cli = _world()
+        _receipt(db)
+        draft = cli.get(f"{_PI}/from-grn/G1").json()
+        assert (draft["reverse_charge"], draft["taxable_total"], draft["total"]) == (False, 1000.0, 1180.0)
+        form = {"vendor_id": "V1", "grn_id": "G1", "store_id": "S1", "lines": draft["lines"]}
+        assert cli.post(f"{_PI}/preview", json=form).json()["total"] == draft["total"]
+        assert cli.post(f"{_PI}/preview", json={**form, "reverse_charge": True}).json()["total"] == 1000.0
+
+
 class TestBoughtWithoutPo:
     """Decided in #1183: a bill for goods bought without a purchase order is
     never reverse charge -- every bill door refuses it in plain words."""
