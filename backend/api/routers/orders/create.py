@@ -410,6 +410,7 @@ async def create_order(
                 _pdoc_by_pid.get(_pid),
                 is_admin=is_admin,
                 role_cap=user_discount_cap,
+                user=current_user,
             )
             _loyalty_eff = _line_gate["loyalty_eff"]
 
@@ -783,6 +784,7 @@ async def create_order(
             order_has_cart_discount=bool(
                 cart_discount_percent > 0 or cart_discount_amount > 0
             ),
+            user=current_user,
         )
 
         # Resolve delivery date — explicit date > expected_delivery_days

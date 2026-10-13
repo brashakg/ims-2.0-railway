@@ -800,7 +800,8 @@ export const workshopApi = {
       rework_count: number;
       remake_reason_code: string;
       spoilage_category: string;
-      spoilage_cost_paise: number;
+      /** At cost: absent for a role that does not see product cost (D7). */
+      spoilage_cost_paise?: number;
       message: string;
     };
   },

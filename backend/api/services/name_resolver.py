@@ -117,6 +117,16 @@ def user_name_map(db, user_ids: Iterable) -> Dict[str, str]:
 employee_name_map = user_name_map
 
 
+def actor_name(db, actor) -> str:
+    """The display name of the signed-in user. A request's current_user is
+    the access token's payload, which carries user_id / username / roles but
+    NO full_name (auth.py login and store switch) -- so users first (this
+    module's one lookup), then the username, then the id."""
+    actor = actor if isinstance(actor, dict) else {}
+    uid = actor.get("user_id")
+    return user_name_map(db, [uid]).get(str(uid)) or actor.get("username") or uid or ""
+
+
 def vendor_name_map(db, vendor_ids: Iterable) -> Dict[str, str]:
     """vendor_id -> display name (trade_name -> legal_name -> id). Fail-soft {}."""
     out: Dict[str, str] = {}

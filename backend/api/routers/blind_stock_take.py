@@ -24,6 +24,7 @@ from pymongo.errors import PyMongoError
 from .auth import get_current_user
 from ..dependencies import validate_store_access
 from ..services import blind_stock_take as svc
+from ..services.cost_mask import mask_cost
 from ..services.non_adapt import rupees_to_paise
 
 router = APIRouter(tags=["blind-stock-take"])
@@ -277,7 +278,9 @@ async def reopen_count(session_id: str, body: ReopenBody, current_user: Dict[str
         _raise(exc)
     _audit("blind_count.reopen", entity_id=session_id, actor=current_user, store_id=store_id,
            detail={"reason": body.reason})
-    return updated
+    # A store may let a counter role reopen (E2 reopen roles): cost stays with
+    # the roles that see product cost (D7).
+    return mask_cost(updated, current_user, "product")
 
 
 @router.post("/{session_id}/propose-adjustment")

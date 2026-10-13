@@ -9,6 +9,7 @@ import { Loader2, ArrowUpDown } from 'lucide-react';
 import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { PAYABLES_ROLES } from '../../components/common/CostCell';
 
 import type { TabType } from './financeTypes';
 import type {
@@ -182,6 +183,11 @@ export default function FinanceDashboard() {
   const canSeeStorePayroll = (user?.roles || []).some(
     (r) => r === 'ADMIN' || r === 'SUPERADMIN',
   );
+  // F60 (2026-09-28): per-vendor payables (GET /finance/vendor-payments) answer
+  // the accounts roles only (PAYABLES_ROLES), the same as the vendor ledger and
+  // /ap-aging. A manager gets no tab and no schedule rather than an empty list
+  // that reads as "we owe nobody".
+  const canSeePayables = (user?.roles || []).some((r) => PAYABLES_ROLES.includes(r));
 
   // Tab management
   const [activeTab, setActiveTab] = useState<TabType>('revenue-pl');
@@ -249,7 +255,7 @@ export default function FinanceDashboard() {
         financeApi.getOutstanding({ store_id: storeId }),
         financeApi.getCashFlow({ period: 'month', store_id: storeId }),
         financeApi.getBudget(),
-        financeApi.getVendorPayments(),
+        canSeePayables ? financeApi.getVendorPayments() : Promise.resolve([]),
       ]);
 
       setRevenueData(rev.status === 'fulfilled' ? mapRevenue(rev.value) : []);
@@ -268,8 +274,13 @@ export default function FinanceDashboard() {
       setBudgetRestricted(
         bud.status === 'fulfilled' && !!(bud.value as any)?.categories_partially_restricted,
       );
+      // Either flag shortens "Total outflows": a pay head withheld below
+      // ADMIN, or what was paid to suppliers (ADMIN + ACCOUNTANT only, owner
+      // ruling 2026-10-12 -- the backend leaves it out and says so).
       setCashFlowRestricted(
-        cf.status === 'fulfilled' && !!(cf.value as any)?.expenses_partially_restricted,
+        cf.status === 'fulfilled' &&
+          (!!(cf.value as any)?.expenses_partially_restricted ||
+            !!(cf.value as any)?.vendor_payments_restricted),
       );
 
       // Reflect the real period-lock state for the selected month.
@@ -437,6 +448,7 @@ export default function FinanceDashboard() {
           onDateToChange={setDateTo}
           activeTab={activeTab}
           onTabChange={setActiveTab}
+          canSeePayables={canSeePayables}
         />
 
         {/* Tab Content */}
@@ -581,7 +593,10 @@ export default function FinanceDashboard() {
             </>
           )}
           {activeTab === 'outstanding' && (
-            <OutstandingPanel outstanding={outstanding} vendorPayments={vendorPayments} />
+            <OutstandingPanel
+              outstanding={outstanding}
+              vendorPayments={canSeePayables ? vendorPayments : null}
+            />
           )}
           {activeTab === 'cash-flow' && (
             <>
@@ -615,7 +630,7 @@ export default function FinanceDashboard() {
               <BudgetPanel budgets={budgets} selectedYear={selectedYear} />
             </>
           )}
-          {activeTab === 'vendor-payments' && (
+          {activeTab === 'vendor-payments' && canSeePayables && (
             <VendorPayments vendorPayments={vendorPayments} />
           )}
           {activeTab === 'journal-entries' && <JournalEntriesPanel />}

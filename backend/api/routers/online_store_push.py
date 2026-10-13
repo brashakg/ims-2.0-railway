@@ -50,6 +50,7 @@ from agents.nexus_providers import _as_shopify_gid
 from .auth import require_roles
 from ..services import shopify_push
 from ..services import shopify_live_sync as live_sync
+from ..services.online_catalog import doc_online_state
 from ..services.stores_util import physical_stores
 # The DB / audit / doc helpers and the product-sweep core live in the
 # live-sync service so the manual sweep and the scheduled sync run ONE code
@@ -717,6 +718,10 @@ async def push_all_pending(
                 # storefront (so it is pushed), at the OLD price (so it gets
                 # its own line and stays queued -- see push_product).
                 bucket["price_not_synced"] = bucket.get("price_not_synced", 0) + 1
+            elif data.get("code") == shopify_push.PHOTOS_NOT_SYNCED:
+                # Live, but a photo step failed: its own line, still queued
+                # (same rule as the price) -- never a stock warning.
+                bucket["photos_not_synced"] = bucket.get("photos_not_synced", 0) + 1
             elif data.get("code"):
                 # ANY OTHER code on an ok push is the STOCK pass not being
                 # clean (STORE_UNMAPPED, SHOPIFY_LOCATION_*, STOCK_*). Without
@@ -892,8 +897,10 @@ async def push_all_pending(
 
 def _product_counts(db) -> Dict[str, int]:
     """staged = catalog_products carrying an `ecom` sub-doc; pushed = those whose
-    ecom has a shopify_product_id; pending = those whose ecom is dirty
-    (locally_modified). Computed in Python (portable + exact)."""
+    ecom has a shopify_product_id; pending = the rows the sweep will push --
+    online_catalog.doc_online_state's `queued` (dirty AND the push gate lets
+    it through), the same figure the Catalog screen shows. Computed in Python
+    (portable + exact)."""
     staged = pushed = pending = 0
     for doc in _all_docs(db, "catalog_products"):
         ecom = doc.get("ecom")
@@ -906,7 +913,7 @@ def _product_counts(db) -> Dict[str, int]:
         staged += 1
         if ecom.get("shopify_product_id"):
             pushed += 1
-        if ecom.get("locally_modified"):
+        if doc_online_state(db, doc)["queued"]:
             pending += 1
     return {"staged": staged, "pushed": pushed, "pending": pending}
 

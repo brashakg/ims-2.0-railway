@@ -81,6 +81,9 @@ POLL_MINUTES = 5
 # next tick within 55 minutes, never twice").
 SLOT_GRACE_MINUTES = 55
 RUNS_COLLECTION = "online_sync_runs"
+# A live listing the product gate refuses (brand off the website, or push-
+# locked): named in the run's failures, still live at its last pushed price.
+LIVE_NOT_PUSHED = "LIVE_NOT_PUSHED"
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +156,8 @@ def write_push_audit(result: Dict[str, Any], current_user: dict) -> None:
                     # The price side channel keeps its RAW vendor error the
                     # same way (PRICE_NOT_SYNCED rides `code` + `error`).
                     "variant_prices": result.get("variant_prices"),
+                    # ...and the photo side channel (PHOTOS_NOT_SYNCED).
+                    "photos": result.get("photos"),
                 },
             }
         )
@@ -237,12 +242,19 @@ async def push_product_docs(
     precomputed blocked=False so push_product does not re-scan the block
     config per product. If the block CONFIG is unreadable (verifiable=False)
     we pass blocked=None so push_product FAILS CLOSED per row (finding #18).
+    A product push_product would refuse for its BRAND (push-locked, or kept off
+    the website in Brand Master -- shopify_push.product_push_refusal) is
+    excluded the same way: counted in blocked_skipped, never a slot, so a queue
+    of off-brand products can never starve the ones behind it. It stays queued
+    and goes out once its brand is ticked. Each refused doc rides back in
+    ``refused`` with the gate's reason, so a caller can name a LIVE listing
+    that is now frozen at its last pushed price.
 
     ``max_results`` caps the rows attempted (every result counts);
     ``max_sent`` caps the rows that reached Shopify -- a photo-less REFUSAL
     never did, so it does not count against it (the press cap semantics).
 
-    Returns {results, blocked_skipped, sent, cap_reached, limit_reached}."""
+    Returns {results, blocked_skipped, refused, sent, cap_reached, limit_reached}."""
     from . import online_block
 
     skus = [d.get("sku") for d in docs if d.get("sku")]
@@ -250,6 +262,7 @@ async def push_product_docs(
     precomputed = False if block_verifiable else None
 
     results: List[Dict[str, Any]] = []
+    refused: List[Tuple[Dict, str]] = []
     blocked_skipped = 0
     sent = 0
     cap_reached = False
@@ -264,6 +277,11 @@ async def push_product_docs(
         if block_verifiable and doc.get("sku") in blocked_set:
             blocked_skipped += 1
             continue
+        refusal = shopify_push.product_push_refusal(db, doc)
+        if refusal:
+            blocked_skipped += 1
+            refused.append((doc, refusal))
+            continue
         variants = variants_for_product(db, doc)
         data = (
             await shopify_push.push_product(db, doc, variants, blocked=precomputed)
@@ -275,6 +293,7 @@ async def push_product_docs(
     return {
         "results": results,
         "blocked_skipped": blocked_skipped,
+        "refused": refused,
         "sent": sent,
         "cap_reached": cap_reached,
         "limit_reached": limit_reached,
@@ -511,6 +530,10 @@ async def sync_live_products(
     price_not_synced = sum(
         1 for r in results if r.get("code") == shopify_push.PRICE_NOT_SYNCED
     )
+    # Live, but its photos are not IMS's photos in IMS's order: same treatment.
+    photos_not_synced = sum(
+        1 for r in results if r.get("code") == shopify_push.PHOTOS_NOT_SYNCED
+    )
     failed = sum(
         1
         for r in results
@@ -530,6 +553,23 @@ async def sync_live_products(
                 "code": r.get("code"),
                 "reason": r.get("reason"),
                 "error": r.get("error"),
+            }
+        )
+
+    # LIVE BUT REFUSED: a listing already on the website whose brand was
+    # switched off in Brand Master (or push-locked) is not pushed, so it keeps
+    # selling at its last pushed price and title. Name it, never just count it;
+    # taking it down stays a human press (Online Store > Take down).
+    for doc, refusal in batch["refused"]:
+        failures.append(
+            {
+                "product_id": doc.get("id") or doc.get("product_id"),
+                "sku": doc.get("sku"),
+                "name": doc.get("name") or doc.get("title"),
+                "code": LIVE_NOT_PUSHED,
+                "reason": refusal,
+                "error": "%s -- still live on the website at its last pushed price; "
+                "take it down (Online Store > Take down) or switch the brand on" % refusal,
             }
         )
 
@@ -557,9 +597,11 @@ async def sync_live_products(
         "refused_no_photo": refused_no_photo,
         "publish_withheld": publish_withheld,
         "price_not_synced": price_not_synced,
+        "photos_not_synced": photos_not_synced,
         "awaiting_first_publish": awaiting_first_publish,
         "taken_down_skipped": taken_down_skipped,
         "blocked_skipped": batch["blocked_skipped"],
+        "live_not_pushed": len(batch["refused"]),
         "limit": limit,
         "limit_reached": batch["limit_reached"],
         "failures": failures,
@@ -579,9 +621,11 @@ async def sync_live_products(
     run.update(summary)
     logger.info(
         "[LIVE-SYNC] %s run (%s) mode=%s selected=%s ok=%s failed=%s "
-        "refused=%s withheld=%s price_not_synced=%s awaiting_first_publish=%s",
+        "refused=%s withheld=%s price_not_synced=%s photos_not_synced=%s "
+        "awaiting_first_publish=%s",
         trigger, slot, mode, len(live), pushed_ok, failed,
-        refused_no_photo, publish_withheld, price_not_synced, awaiting_first_publish,
+        refused_no_photo, publish_withheld, price_not_synced, photos_not_synced,
+        awaiting_first_publish,
     )
     return _serialise_run(run)
 
