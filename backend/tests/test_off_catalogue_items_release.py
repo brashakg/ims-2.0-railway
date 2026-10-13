@@ -5625,3 +5625,127 @@ def test_r10_only_a_receiving_manager_voids_a_held_receipt(world):
     )
     out = _run(vd.void_grn(gid, MANAGER))
     assert out["grn_status"] == "VOID" and _catalogue_tasks(world, gid) == []
+
+
+def _boss_held_beside_a_shelved_carrera(world):
+    carrera = world.catalogue_frame(
+        "Carrera", "CA 8895", "807", "54", mrp=6990, offer=6490, cost=3155.76
+    )
+    po = world.raise_po(
+        [
+            {"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200},
+            {
+                "product_id": carrera["product_id"],
+                "product_name": "Carrera CA 8895 807",
+                "sku": carrera["sku"],
+                "quantity": 1,
+                "unit_price": 3200,
+            },
+        ]
+    )
+    boss = po["items"][0]["product_id"]
+    grn, _ = _receive_some(world, po, {boss: 2, carrera["product_id"]: 1}, "JOT/26-27/1101")
+    assert world.grn(grn["grn_id"])["status"] == "PARTIALLY_ACCEPTED"
+    return po, boss, grn
+
+
+def test_r10_a_release_lost_to_a_refused_void_still_happens(world, monkeypatch):
+    # Probe (a): the manager presses Void while the cataloguer saves the Boss.
+    # The save's release finds the void's claim (409, swallowed); the void is
+    # refused (a Carrera is on the shelf). The release runs once the void
+    # hands the claim back.
+    from api.routers.vendors import grn_void as _gv
+
+    po, boss, grn = _boss_held_beside_a_shelved_carrera(world)
+    gid = grn["grn_id"]
+    real, saved = _gv.get_stock_repository, []
+
+    def cataloguer_saves_meanwhile():
+        if not saved:
+            saved.append(world.finish_draft(boss, offer=2790))
+        return real()
+
+    monkeypatch.setattr(_gv, "get_stock_repository", cataloguer_saves_meanwhile)
+    with pytest.raises(HTTPException) as refused:
+        _drive(vd.void_grn(gid, MANAGER))
+    assert saved and refused.value.status_code == 409
+    assert _pm.compute_catalog_status(world.product(boss))[1] == []
+    finding(
+        len(world.units(boss)) == 2 and world.grn(gid)["status"] == "ACCEPTED",
+        f"R10-2a: the finished Boss has {len(world.units(boss))} unit(s) on the shelf; "
+        f"the receipt reads {world.grn(gid)['status']} {world.grn(gid).get('unresolved_lines')}",
+    )
+    assert _catalogue_tasks(world, gid) == []
+
+
+def test_r10_a_release_lost_to_not_received_still_happens(world, monkeypatch):
+    # Probe (b): drafts D and E x1 each, receipt R1 and a duplicate R2; D
+    # finished. The manager presses 'Not received' on R2 while the cataloguer
+    # saves E: R1's E is held behind R2's live claim, R2's E lost the claim.
+    from api.routers.vendors import grn_void as _gv
+
+    po, d_id, e_id, r1, r2 = _d_and_e_twice(world)
+    real, saved = _gv._claimed_receipt, []
+
+    def cataloguer_saves_meanwhile(repo, grn_id, token):
+        if not saved:
+            saved.append(world.finish_draft(e_id, offer=2890))
+        return real(repo, grn_id, token)
+
+    monkeypatch.setattr(_gv, "_claimed_receipt", cataloguer_saves_meanwhile)
+    out = _drive(vd.drop_over_order(r2["grn_id"], MANAGER))
+    assert saved and out["dropped_units"] == 1
+    r1_now, r2_now = world.grn(r1["grn_id"]), world.grn(r2["grn_id"])
+    finding(
+        len(world.units(e_id)) == 1 and r1_now["status"] == "ACCEPTED",
+        f"R10-2b: the finished E has {len(world.units(e_id))} unit(s); R1 reads "
+        f"{r1_now['status']} {r1_now.get('unresolved_lines')}",
+    )
+    # R2's E is the duplicate box: held beyond the order, for the store manager.
+    finding(
+        [(ln["product_id"], ln["reason"]) for ln in r2_now["unresolved_lines"]] == [(e_id, "over_order")],
+        f"R10-2b: R2 holds {r2_now['unresolved_lines']}",
+    )
+    assert _catalogue_tasks(world, r2["grn_id"]) == []
+
+
+def test_r10_a_release_that_dies_part_way_records_what_it_holds_at_once(world, monkeypatch):
+    # The panel's probe: PO Boss x2, the receipt holds 2, the finishing save
+    # loses unit seq 1. Straight after that save -- no retry -- every reader
+    # counts the 1 unit on the shelf and the 1 still held.
+    from api.routers.inventory import movements as _mv
+    from api.routers.vendors import grn_accept as _ga
+
+    po, grn, boss = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    gid = grn["grn_id"]
+    real = _ga._grn_mint_unit
+
+    def _second_unit_lost(stock_repo, doc, raises):
+        if doc.get("line_unit_seq") == 1:
+            return None
+        return real(stock_repo, doc, raises)
+
+    monkeypatch.setattr(_ga, "_grn_mint_unit", _second_unit_lost)
+    world.finish_draft(boss, offer=2790)
+    assert len(world.units(boss)) == 1
+    (held,) = world.grn(gid)["unresolved_lines"]
+    status, received = _po_received(world, po)
+    tl = _run(vd.get_po_timeline(po["po_id"], MANAGER))
+    shelf = [e["detail"] for e in tl["events"] if e.get("kind") == "on_shelf"]
+    ledger = sum(
+        e["qty"] for e in _mv._collect_received_events(world.db, STORE, "2020-01-01T00:00:00", boss)
+    )
+    finding(held["held_qty"] == 1, f"R10-3: the hold records {held}")
+    finding(
+        received[boss] == 1 and status == "PARTIALLY_RECEIVED",
+        f"R10-3: 1 unit is on the shelf, the PO reads {received[boss]} received ({status})",
+    )
+    finding(shelf == ["1 units accepted into stock; 1 still held"], f"R10-3: the timeline reads {shelf}")
+    finding(ledger == 1, f"R10-3: the movements ledger reads {ledger}")
+    (task,) = _catalogue_tasks(world, gid)
+    assert "x1" in task["description"], task["description"]
+    # The next save (or 'Add to stock') shelves the last unit, counted once.
+    monkeypatch.setattr(_ga, "_grn_mint_unit", real)
+    world.finish_draft(boss, offer=2790)
+    assert len(world.units(boss)) == 2 and world.grn(gid)["status"] == "ACCEPTED"
+    assert _po_received(world, po) == ("RECEIVED", {boss: 2})

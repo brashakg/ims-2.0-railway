@@ -26,8 +26,16 @@ from .grn_accept_lock import (
     _guarded_grn_write,
     _received_on,
     _release_grn_accept_claim,
-    refuse_beyond_order_below_manager,
 )
+
+
+def _hand_back(grn_repo, grn_id: str, claim_token) -> None:
+    """Hand the receipt's claim back, then run the release a catalogue save
+    lost to it meanwhile (grn_accept.release_finished_meanwhile)."""
+    from .grn_accept import release_finished_meanwhile
+
+    _release_grn_accept_claim(grn_repo, grn_id, claim_token)
+    release_finished_meanwhile(grn_repo, grn_id)
 
 
 def _reopen_po_if_nothing_received(grn_repo, grn, current_user=None) -> None:
@@ -378,7 +386,7 @@ async def void_grn(
     finally:
         # VOID is terminal, so the claim is always handed back -- on the happy
         # path and on every refusal above.
-        _release_grn_accept_claim(grn_repo, grn_id, claim_token)
+        _hand_back(grn_repo, grn_id, claim_token)
 
 
 @router.post("/grn/{grn_id}/escalate")
@@ -444,6 +452,7 @@ async def drop_over_order(
         _po_units_received,
         _put_on_shelf,
         refresh_po_received,
+        release_finished_meanwhile,
     )
     from ._shared import _get_db
 
@@ -598,8 +607,10 @@ async def drop_over_order(
                 )
         except Exception:  # noqa: BLE001 - the audit never undoes the drop
             logger.warning("[VENDOR] GRN %s: drop audit failed", grn_id, exc_info=True)
-    finally:
-        _release_grn_accept_claim(grn_repo, grn_id, claim_token)
+    except BaseException:
+        _hand_back(grn_repo, grn_id, claim_token)
+        raise
+    _release_grn_accept_claim(grn_repo, grn_id, claim_token)
     out = {
         "message": f"{dropped} unit(s) held beyond the order were marked not received",
         "grn_id": grn_id,
@@ -628,4 +639,7 @@ async def drop_over_order(
                 grn_id,
                 exc_info=True,
             )
+    # After the shelving above (it runs the same check itself when it shelves):
+    # a catalogue save that lost its release to this claim is released now.
+    release_finished_meanwhile(grn_repo, grn_id)
     return out

@@ -43,6 +43,7 @@ from .grn_accept_lock import (
     _grn_accept_conflict,
     _grn_accept_heartbeat_tick,
     _grn_already_minted,
+    _guarded_grn_write,
     _grn_mint_unit,
     _grn_unit_index_present,
     _received_on,
@@ -481,24 +482,86 @@ def _put_on_shelf(
         raise
     # The receipt's cost finished a draft mid-accept (gst._finished_by_the_promote):
     # its OTHER held receipts go on the shelf now that this claim is handed back.
-    # And a line held for the catalogue whose product is complete NOW was
-    # finished while this claim was held: that save's release lost the claim
-    # to this accept (and swallowed its 409), so the release is run here, the
-    # claim handed back -- whichever of the two finishes last sees the other
-    # (R1-19, follow-ups 1 and 43).
-    product_repo = get_product_repository()
-    for ln in result.get("unresolved_lines") or []:
-        if ln.get("reason") != "incomplete_catalog" or product_repo is None:
-            continue
-        try:
-            now_prod = product_repo.find_by_id(ln.get("product_id"))
-        except Exception:  # noqa: BLE001 - the hold stands; 'Add to stock' retries
-            continue
-        if now_prod is not None and not _pm.compute_catalog_status(now_prod)[1]:
-            deferred_releases.append(ln["product_id"])
-    for pid in dict.fromkeys(deferred_releases):
-        release_held_receipts(pid)
+    release_finished_meanwhile(grn_repo, grn_id, deferred_releases)
     return result
+
+
+def release_finished_meanwhile(grn_repo, grn_id: str, also=()) -> None:
+    """Run by every holder of a receipt's claim once it is handed back -- an
+    accept (_put_on_shelf), a void, 'Not received'. A line the receipt holds
+    for the catalogue whose product is complete NOW was finished while the
+    claim was held: that save's release lost the claim (and swallowed its
+    409), so the release is run here -- whichever of the two finishes last
+    sees the other (R1-19, follow-ups 1 and 43). `also`: products the caller
+    already knows to release. Never run on a failed accept's way out: a
+    release that keeps failing would retry itself for ever. Fail-soft: the
+    hold stands, and 'Add to stock' or the next save retries it."""
+    pids = list(also)
+    try:
+        grn = grn_repo.find_by_id(grn_id) or {}
+        product_repo = get_product_repository()
+        if grn.get("status") == "PARTIALLY_ACCEPTED" and product_repo is not None:
+            for ln in grn.get("unresolved_lines") or []:
+                if ln.get("reason") != "incomplete_catalog":
+                    continue
+                now_prod = product_repo.find_by_id(ln.get("product_id"))
+                if now_prod is not None and not _pm.compute_catalog_status(now_prod)[1]:
+                    pids.append(ln["product_id"])
+    except Exception:  # noqa: BLE001
+        logger.warning("[VENDOR] GRN %s: finished-meanwhile check failed", grn_id, exc_info=True)
+    for pid in dict.fromkeys(pids):
+        release_held_receipts(pid)
+
+
+def _record_what_a_dead_accept_holds(
+    grn_repo, stock_repo, po_repo, grn, claim_token, decided, line_index, left
+) -> None:
+    """A re-accept of a HELD receipt (PARTIALLY_ACCEPTED: the catalogue
+    release, 'Add to stock') that dies part-way through line `line_index` has
+    put some of that line's units on the shelf. Before its 503 -- under its
+    claim -- the hold is rewritten to what it really holds: the lines before
+    it as this run decided them (`decided`), the dead line's units not
+    inserted (`left`), each later line's units not yet received by origin,
+    each under the hold it was in. The order's received counts are refreshed
+    and the tasks re-worded, so the order, the PO timeline, the movements
+    ledger and the tasks count what is on the shelf now, not at the last
+    accept. A PENDING receipt is left as it is: no reader counts one until
+    it is accepted again. Fail-soft: the 503 says 'accept it again' either way."""
+    if grn.get("status") != "PARTIALLY_ACCEPTED":
+        return
+    grn_id = grn.get("grn_id")
+    try:
+        was = {
+            ln.get("product_id"): ln
+            for ln in reversed(grn.get("unresolved_lines") or [])
+            if isinstance(ln, dict)
+        }
+
+        def _as_held(entry: dict) -> dict:
+            return {**(was.get(entry["product_id"]) or {"reason": "incomplete_catalog"}), **entry}
+
+        held = list(decided) + [_as_held(left)]
+        for idx, it in enumerate(grn.get("items") or []):
+            pid = it.get("product_id")
+            accepted = int(it.get("accepted_qty") or 0)
+            if idx <= line_index or accepted <= 0 or not pid:
+                continue
+            rest = accepted - _grn_already_minted(
+                stock_repo, _received_on(grn, product_id=pid, grn_line_index=idx)
+            )
+            if rest > 0:
+                held.append(_as_held({"product_id": pid, "accepted_qty": accepted, "held_qty": rest}))
+        written = _guarded_grn_write(
+            grn_repo,
+            {"grn_id": grn_id, "accept_lock_token": claim_token},
+            {"$set": {"unresolved_lines": held}},
+        )
+        if written is not True:
+            return
+        refresh_po_received(po_repo, grn_repo, grn.get("po_id"))
+        _sync_catalogue_tasks(grn_id, grn, held, "PARTIALLY_ACCEPTED", get_product_repository())
+    except Exception:  # noqa: BLE001 - never mask the accept's own error
+        logger.error("[VENDOR] GRN %s: the hold left by a dead accept was not rewritten", grn_id, exc_info=True)
 
 
 def refresh_po_received(po_repo, grn_repo, po_id) -> Optional[str]:
@@ -836,6 +899,17 @@ def _accept_grn_claimed(
                         grn_id,
                         line_index,
                         seq,
+                    )
+                    # Ordinals 0..seq-1 are on the shelf: the hold says so.
+                    _record_what_a_dead_accept_holds(
+                        grn_repo,
+                        stock_repo,
+                        po_repo,
+                        grn,
+                        claim_token,
+                        unresolved_lines,
+                        line_index,
+                        {**held, "held_qty": accepted_qty - seq},
                     )
                     raise HTTPException(
                         status_code=503,
