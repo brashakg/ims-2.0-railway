@@ -513,12 +513,19 @@ class TestGtinAttributeOnTheEditDoor:
         # ... and once the product is on Shopify the push sends the product's.
         assert _pushed_barcodes(mock_db, twin) == {"GT-OK": _VALID_A}
 
-    def test_a_size_variant_keeps_its_own_gtin_on_the_parents_push(self, mock_db, mirror_on):
+    @pytest.mark.parametrize("child_gtin", [_VALID_B, None])
+    def test_a_size_variant_keeps_its_own_gtin_on_the_parents_push(
+        self, mock_db, mirror_on, child_gtin
+    ):
         """The parent's push carries every row the create door wrote under
         it: its self row ships the PARENT's GTIN, the size variant's row its
-        own -- never the parent's (a GTIN names one trade item)."""
+        own -- never the parent's (a GTIN names one trade item), so a size
+        with none omits the barcode, on the price push and the first-publish
+        seed alike (main fell back to the parent's on every row)."""
         from api.routers.products import create_product, ProductCreate
         from api.services import product_master as pm
+        from api.services.online_catalog import variant_rows_for_product
+        from api.services.shopify_push import build_variant_seed_rows
         from database.repositories.catalog_variant_repository import (
             CatalogVariantRepository,
         )
@@ -535,7 +542,8 @@ class TestGtinAttributeOnTheEditDoor:
                 "sku": "GT-PAR-L",
                 "attributes": {
                     "brand_name": "B", "model_no": "M-GT-PAR",
-                    "colour_code": "Black", "size": "Large", "gtin": _VALID_B,
+                    "colour_code": "Black", "size": "Large",
+                    **({"gtin": child_gtin} if child_gtin else {}),
                 },
                 "mrp": 1100.0,
                 "offer_price": 1100.0,
@@ -549,10 +557,12 @@ class TestGtinAttributeOnTheEditDoor:
         )
         spine = mock_db["products"].find_one({"product_id": parent_id})
         twin = mock_db["catalog_products"].find_one({"id": spine["pim_product_id"]})
-        assert _pushed_barcodes(mock_db, twin) == {
-            "GT-PAR": _VALID_A,
-            "GT-PAR-L": _VALID_B,
-        }
+        want = {"GT-PAR": _VALID_A, "GT-PAR-L": child_gtin}
+        seed = build_variant_seed_rows(twin, variant_rows_for_product(mock_db, twin))
+        assert {
+            s["row"]["inventoryItem"]["sku"]: s["row"].get("barcode") for s in seed
+        } == want
+        assert _pushed_barcodes(mock_db, twin) == want
 
     def test_clearing_the_gtin_is_allowed(self, mock_db):
         pid = _create("GT-CLR")["product_id"]
