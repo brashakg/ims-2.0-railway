@@ -184,3 +184,47 @@ def test_capped_partial_credit_note_keeps_the_lines_taxable_value(monkeypatch):
     # The frame's own tax and taxable value; the -0.49 is neither.
     assert entry["tax"] == frame["tax_amount"]
     assert entry["taxable"] == frame["taxable_value"]
+
+
+def test_rounded_up_bill_returned_one_unit_at_a_time_refunds_what_was_paid(
+    monkeypatch,
+):
+    """The closing piece settles the round off counting the units EARLIER
+    returns brought back. 3 x Rs 333.50 = 1000.50 is billed Rs 1001 (+0.50):
+    returned a unit at a time it refunds 333.50, 333.50, then 334.00. Counting
+    only this return's units, the last piece refunded 333.50 and the customer
+    was 50 paise short of what was paid."""
+    order = _ro_order([333.5])
+    line = order["items"][0]
+    line.update(quantity=3, item_total=1000.5)
+    from api.routers.orders import _compute_per_category_gst
+
+    gst = _compute_per_category_gst(order["items"], 0)
+    order.update(tax_amount=gst["tax"], grand_total=gst["grand_total"],
+                 round_off=gst["round_off"], amount_paid=gst["grand_total"])
+    assert (order["grand_total"], order["round_off"]) == (1001.0, 0.5)
+    client, returns_coll, _ = _returns_client(monkeypatch, order)
+    for _ in range(3):
+        r = client.post("/api/v1/returns", json=_return_body([1]), headers=_hdr())
+        assert r.status_code in (200, 201), r.text
+    assert [d["net_refund"] for d in returns_coll.docs] == [333.5, 333.5, 334.0]
+
+
+def test_restocking_fee_is_kept_when_a_later_return_settles_the_round_off(
+    monkeypatch,
+):
+    """What is left of the bill is measured on what earlier returns gave back
+    BEFORE their fee. Bill 500.25 + 500.24 = 1000.49, paid Rs 1000: line 1
+    comes back with a Rs 50 restocking fee (450.25), then line 2 (499.75) --
+    Rs 950 in all, the fee kept. Measured on the net refund instead, the
+    closing return paid 549.75 and handed the Rs 50 fee back."""
+    order = _ro_order([500.25, 500.24])
+    client, returns_coll, _ = _returns_client(monkeypatch, order)
+    r1 = client.post(
+        "/api/v1/returns", json=dict(_return_body([1]), restocking_fee=50),
+        headers=_hdr(),
+    )
+    assert r1.status_code in (200, 201), r1.text
+    r2 = client.post("/api/v1/returns", json=_return_body([2]), headers=_hdr())
+    assert r2.status_code in (200, 201), r2.text
+    assert [d["net_refund"] for d in returns_coll.docs] == [450.25, 499.75]
