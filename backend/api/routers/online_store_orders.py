@@ -866,21 +866,68 @@ async def clear_rx_hold(
     # Written only on the order as read (HOLD_CAS, Re-map's own condition):
     # a Re-map or cancel landing on another worker in between (a new hold, a
     # dead order) is never released behind its back.
+    changed = HTTPException(
+        status_code=409,
+        detail="The order changed while the hold was being cleared (re-routed, "
+        "cancelled or fulfilled) -- reload it and try again.",
+    )
+    cas = {"order_id": order_id, **{k: order.get(k) for k in HOLD_CAS}}
+    # A stock miss released: its missing units are claimed FIRST, at the
+    # shops its route names (claim_the_missing) -- or the hold stands. Under
+    # Re-map's lease, which a Re-map running or stopped mid-way holds.
+    lease = None
+    if order.get("stock_miss_reason") and not stock_left:
+        from ..services.online_fulfillment_route import claim_the_missing
+
+        lease = datetime.now(timezone.utc).isoformat()
+        try:
+            took = coll.find_one_and_update(
+                {**cas, "reroute_lease_at": None}, {"$set": {"reroute_lease_at": lease}}
+            )
+        except Exception:  # noqa: BLE001
+            raise HTTPException(
+                status_code=503, detail="Could not update the order (database error)"
+            )
+        if not took:
+            if (coll.find_one({"order_id": order_id}) or {}).get("reroute_lease_at"):
+                raise HTTPException(
+                    status_code=409,
+                    detail="A Re-map of this order is running or stopped mid-way -- "
+                    "press Re-map to finish it, then clear the hold.",
+                )
+            raise changed
+        cas["reroute_lease_at"] = lease
     try:
-        written = coll.update_one(
-            {"order_id": order_id, **{k: order.get(k) for k in HOLD_CAS}},
-            {"$set": update},
-        )
-    except Exception:  # noqa: BLE001 - surface the failure, don't fake success
-        raise HTTPException(
-            status_code=503, detail="Could not update the order (database error)"
-        )
+        if lease:
+            try:
+                short, claimed_now = claim_the_missing(db, order)
+            except Exception:  # noqa: BLE001 - unreadable: not provably whole
+                raise HTTPException(
+                    status_code=503,
+                    detail="Could not read the order's stock to claim it (database error)",
+                )
+            if short:
+                raise HTTPException(
+                    status_code=409, detail=f"This stock hold cannot be cleared yet: {short}"
+                )
+            if claimed_now:
+                released_message = released_message.replace(
+                    " released - ", f" released - {claimed_now} missing unit(s) claimed; ", 1
+                )
+        try:
+            written = coll.update_one(cas, {"$set": update})
+        except Exception:  # noqa: BLE001 - surface the failure, don't fake success
+            raise HTTPException(
+                status_code=503, detail="Could not update the order (database error)"
+            )
+    finally:
+        if lease:
+            coll.update_one(
+                {"order_id": order_id, "reroute_lease_at": lease},
+                {"$unset": {"reroute_lease_at": ""}},
+            )
     if not getattr(written, "matched_count", 0):
-        raise HTTPException(
-            status_code=409,
-            detail="The order changed while the hold was being cleared (re-routed, "
-            "cancelled or fulfilled) -- reload it and try again.",
-        )
+        raise changed
 
     _write_rx_hold_audit(
         order,

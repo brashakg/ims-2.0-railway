@@ -5316,3 +5316,105 @@ def test_a_retried_move_never_retasks_a_move_a_human_closed(world, monkeypatch, 
     resent = [m["id"] for m in world["shop"].moves()[sent:]]
     assert resent == ([FO_1, FO_3] if retry == "both_resent" else [FO_3]), resent
     assert [t["status"] for t in world["tasks"].created if t["source_ref"] == ref] == ["COMPLETED"]
+
+
+# ---------------------------------------------------------------------------
+# R29 -- money panel, round 26: a stock miss is claimed when its hold clears
+# ---------------------------------------------------------------------------
+
+
+def _short_whole_order_at_bokaro(world, order_id):
+    """Bokaro holds RB x1, Ranchi OA x1, and Shopify assigns the whole
+    two-line order to Bokaro (stale Shopify stock, or a walk-in racing the
+    routing): no shop covers it, so it stays at Bokaro (ASSIGNED), 1 of 2
+    claimed, the stock miss tasked at Bokaro."""
+    db = world["db"]
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+    _stock(db, "BV-RAN-01", "P-OA", 1)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1), (9001, 1)])
+    res, order = _book(world, _order(order_id, lines=(("RB-1234", 1), ("OA-5", 1))))
+    assert order["fulfillment_route"]["reason"] == "ASSIGNED" and order["store_id"] == "BV-BOK-01"
+    assert _sold_at(db, res["order_id"]) == ["BV-BOK-01"] and order["fulfillment_hold"] is True
+    assert _open_miss_tasks(world, res["order_id"]) == ["BV-BOK-01"]
+    return res["order_id"]
+
+
+def test_clearing_a_stock_hold_claims_the_missing_unit_or_refuses(world, monkeypatch):
+    """[MEDIUM-LOW] Round 26: once a stock miss happened no door ever claimed
+    the missing unit. Re-map answered 'nothing to resend'; clear-hold said
+    'Stock hold released' and claimed nothing -- staff shipped the OA, which
+    stayed AVAILABLE in IMS (sold again at the till, offered on Shopify, a
+    return counting it never_claimed). Clear-hold now claims what is missing
+    at the shop the route names, or refuses while that shop does not hold it."""
+    db = world["db"]
+    oid = _short_whole_order_at_bokaro(world, 63001)
+
+    out = _clear_hold(world, monkeypatch, oid)
+
+    assert getattr(out, "status_code", None) == 409, out
+    assert "cannot be cleared yet" in out.detail and "1 of 2" in out.detail and "BV-BOK-01" in out.detail
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert after["fulfillment_hold"] is True and "reroute_lease_at" not in after
+    assert db.stock_units.find_one({"store_id": "BV-RAN-01"})["status"] == "AVAILABLE"
+    assert db.online_stock_miss.count_documents({"order_id": oid, "resolved": False}) == 1
+    assert _open_miss_tasks(world, oid) == ["BV-BOK-01"]
+
+    # Ranchi's OA is transferred into Bokaro and received there.
+    db.stock_units.update_one({"store_id": "BV-RAN-01"}, {"$set": {"store_id": "BV-BOK-01"}})
+
+    out = _clear_hold(world, monkeypatch, oid)
+
+    assert not isinstance(out, Exception), out.detail
+    assert out["released"] == ["STOCK"] and out["fulfillment_hold"] is False, out
+    assert "1 missing unit(s) claimed" in out["message"]
+    assert _units(db, oid) == ["U-BV-BOK-01-P-RB-0", "U-BV-RAN-01-P-OA-0"]
+    assert db.stock_units.count_documents({"status": "AVAILABLE"}) == 0
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert sum(r["qty"] for r in after["fulfillment_breakdown"]) == 2
+    assert after["fulfillment_hold"] is False and "reroute_lease_at" not in after
+    assert db.online_stock_miss.count_documents({"order_id": oid, "resolved": False}) == 0
+    assert _open_miss_tasks(world, oid) == []
+
+
+def test_clearing_a_short_split_leg_claims_it_at_the_leg_shop(world, monkeypatch):
+    """[MEDIUM-LOW] Round 26, the split: RB -> Bokaro (holds it), OA ->
+    Ranchi, and no shop holds an OA. The task is Ranchi's; once Ranchi
+    receives an OA the release claims it THERE -- the leg Shopify committed
+    to Ranchi -- never at Bokaro, the billing shop."""
+    db = world["db"]
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1)])
+    world["shop"].fo(FO_2, LOC_RAN, lines=[(9001, 1)])
+    res, order = _book(world, _order(63002, lines=(("RB-1234", 1), ("OA-5", 1))))
+    oid = res["order_id"]
+    assert order["fulfillment_route"]["split"] and _open_miss_tasks(world, oid) == ["BV-RAN-01"]
+    _stock(db, "BV-BOK-01", "P-OA", 1)  # an OA at the wrong shop is not Ranchi's
+
+    out = _clear_hold(world, monkeypatch, oid)
+
+    assert getattr(out, "status_code", None) == 409 and "BV-RAN-01" in out.detail, out
+    assert _open_miss_tasks(world, oid) == ["BV-RAN-01"]
+    _stock(db, "BV-RAN-01", "P-OA", 1)
+
+    out = _clear_hold(world, monkeypatch, oid)
+
+    assert not isinstance(out, Exception), out.detail
+    assert out["fulfillment_hold"] is False, out
+    assert _sold_at(db, oid) == ["BV-BOK-01", "BV-RAN-01"]
+    assert db.stock_units.find_one({"store_id": "BV-BOK-01", "product_id": "P-OA"})["status"] == "AVAILABLE"
+    assert db.online_stock_miss.count_documents({"order_id": oid, "resolved": False}) == 0
+
+
+def test_clear_hold_never_claims_beside_a_running_remap(world, monkeypatch):
+    """Round 26: the release's claim runs under Re-map's lease -- a Re-map
+    running (or stopped mid-way) on the order is never claimed beside."""
+    db = world["db"]
+    oid = _short_whole_order_at_bokaro(world, 63003)
+    db.stock_units.update_one({"store_id": "BV-RAN-01"}, {"$set": {"store_id": "BV-BOK-01"}})
+    db.orders.update_one({"order_id": oid}, {"$set": {"reroute_lease_at": "2026-10-13T00:00:00+00:00"}})
+
+    out = _clear_hold(world, monkeypatch, oid)
+
+    assert getattr(out, "status_code", None) == 409 and "press Re-map" in out.detail, out
+    assert _sold_at(db, oid) == ["BV-BOK-01"]
+    assert db.orders.find_one({"order_id": oid})["fulfillment_hold"] is True
