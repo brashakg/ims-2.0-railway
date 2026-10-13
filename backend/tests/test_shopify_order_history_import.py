@@ -1135,6 +1135,38 @@ def test_refund_already_booked_at_import_is_duplicate_on_webhook(wired):
     assert res["status"] == "duplicate", res
 
 
+
+def test_reimport_never_books_a_refund_a_queued_review_row_holds(wired):
+    # A live refunds/create queued 99032 for the accountant (a PENDING review
+    # row); a re-run of the import then carries that refund. The import asks
+    # the ONE "is this refund booked" rule, which reads the review row: it
+    # books no credit note of its own beside it (the confirm would answer
+    # 'duplicate', or, its RET-HIST stamp lost, write a second credit note).
+    from api.services import shopify_refund
+
+    online_order_mapper.map_shopify_order(
+        _hist_order(21032, financial="paid"),
+        wired["db"], topic="orders/create", historical=True,
+    )
+    res = shopify_refund.handle_shopify_refund(
+        wired["db"],
+        {"id": 99032, "order_id": "21032", "refund_line_items": [_refund_line()]},
+        topic="refunds/create",
+    )
+    assert res["status"] == "queued", res
+    payload = _hist_order(21032, financial="partially_refunded")
+    payload["refunds"] = [{"id": 99032, "refund_line_items": [_refund_line()]}]
+    rerun = online_order_mapper.map_shopify_order(
+        payload, wired["db"], topic="orders/create", historical=True
+    )
+    assert rerun["status"] == "duplicate"
+    assert rerun["refund_credit_notes"]["credit_notes"] == 0
+    ledger = wired["db"].get_collection("credit_note_ledger").docs
+    assert not [d for d in ledger if d.get("shopify_refund_id") == "99032"]
+    row = wired["db"].get_collection("shopify_refund_review").find_one(
+        {"shopify_refund_id": "99032"})
+    assert row["status"] == "PENDING", "the review row stays its only booking path"
+
 # ---------------------------------------------------------------------------
 # GSTR-1 invoice number: the REAL minted serial ALWAYS wins verbatim; only the
 # fallback tiers (invoice_number None -- historical imports) are 16-char-gated
