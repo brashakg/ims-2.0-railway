@@ -113,16 +113,17 @@ async def add_payment(
             )
 
         # POS-4: credit-limit (khata) guard.
-        # When a CREDIT tender is used, enforce the per-customer credit limit.
-        # A limit of 0 means unlimited. Fail-soft: if we cannot read the
-        # customer record the check is skipped (behaviour-preserving).
+        # When a CREDIT tender is used, enforce the customer's credit limit:
+        # their own, else the chain default (owner 2026-10-08,
+        # customers.effective_credit_limit). Over the limit stays BLOCKED.
+        # Fail-soft (unchanged): an error while reading skips the check.
         if payment.method == PaymentMethod.CREDIT:
             customer_id_for_limit = order.get("customer_id")
             if customer_id_for_limit and not customer_id_for_limit.startswith(
                 "walkin-"
             ):
                 try:
-                    from ..customers import _ar_outstanding
+                    from ..customers import _ar_outstanding, effective_credit_limit
 
                     customer_repo = get_customer_repository()
                     customer_doc = (
@@ -130,7 +131,7 @@ async def add_payment(
                         if customer_repo is not None
                         else None
                     )
-                    credit_limit = float((customer_doc or {}).get("credit_limit") or 0)
+                    credit_limit = effective_credit_limit(customer_doc)
                     if credit_limit > 0:
                         ar_now = _ar_outstanding(customer_id_for_limit, customer_doc)
                         if ar_now + payment.amount > credit_limit:

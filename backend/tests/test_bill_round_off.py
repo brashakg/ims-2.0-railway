@@ -403,13 +403,5 @@ def test_revised_invoice_stores_the_new_round_off(client, auth_headers, wired):
     assert (saved["grand_total"], saved["round_off"]) == (1000.0, -0.49)
 
 
-# ============================================================================
-# 5. One rule: the dead round-off settings keys are gone
-# ============================================================================
-
-
-def test_system_settings_no_longer_offer_round_off_keys(client, auth_headers):
-    r = client.get("/api/v1/admin/system/settings", headers=auth_headers)
-    assert r.status_code == 200, r.text
-    assert "round_off_enabled" not in r.json()
-    assert "round_off_paise" not in r.json()
+# The dead round-off settings keys went with the whole /admin/system/settings
+# door (#1188, pinned by test_settings_one_rule_credit_default.py).
