@@ -563,6 +563,31 @@ describe('a page past the end is never a dead end', () => {
     expect(screen.getByTestId('catalog-table')).toBeTruthy();
   });
 
+  it('a late unfiltered answer never shows under the filter chips', async () => {
+    const late: Array<(v: unknown) => void> = [];
+    const BLACK = { ...ROW, product_id: 'P2', sku: 'SG-RB-2', name: 'Ray-Ban 3025 Black' };
+    const OLD = { ...ROW, product_id: 'P9', sku: 'SG-OLD-9', name: 'Unfiltered old row' };
+    getProducts.mockImplementation((p: { frame_color?: string }) =>
+      p.frame_color === 'Black'
+        ? Promise.resolve({ products: [BLACK], total: 1, total_count: 179 })
+        : new Promise((resolve) => {
+            late.push(resolve);
+          })
+    );
+    renderAt('');
+    await screen.findByText('Black (179)');
+    fireEvent.change(screen.getByLabelText('Frame colour'), { target: { value: 'Black' } });
+    await screen.findByText('Ray-Ban 3025 Black');
+    // The older, unfiltered requests answer last.
+    expect(late.length).toBeGreaterThan(0);
+    late.forEach((resolve) => resolve({ products: [OLD], total: 1, total_count: 481 }));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.queryByText('Unfiltered old row')).toBeNull();
+    expect(screen.getByText('Ray-Ban 3025 Black')).toBeTruthy();
+    expect(within(screen.getByTestId('filter-chips')).getByText('Frame colour: Black')).toBeTruthy();
+    expect(screen.getByTestId('result-line').textContent).toMatch(/^179 of /);
+  });
+
   it('the pages and Rows per page stay whenever the list has rows to page through', async () => {
     getProducts.mockResolvedValue({ products: [], total: 0, total_count: 5 });
     renderAt('');
