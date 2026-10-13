@@ -12,7 +12,7 @@ Comprehensive settings management for all user roles.
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from fastapi.responses import Response
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime, date, timedelta
 import os
@@ -2422,64 +2422,85 @@ async def get_audit_logs_summary(current_user: dict = Depends(get_current_user))
 
 
 # ============================================================================
-# ADMIN CONTROL PANEL ENDPOINTS
+# OPERATIONAL RULES (Settings > Operational Rules, /settings/rules)
 # ============================================================================
+# Owner rulings 2026-10-08: the store-module switches, the role permission
+# matrix, the per-role discount limits and every operational rule that
+# duplicated a rule IMS already enforces elsewhere were removed. One setting
+# remains: the chain default credit limit (live - read by the till's credit
+# check through customers.effective_credit_limit). auto_round_off is accepted
+# on a save and ignored (the round-off job decides bill round-off).
+
+DEFAULT_CREDIT_LIMIT = 150000.0  # owner ruling 2026-10-08: Rs 1,50,000
+
+
+def chain_default_credit_limit() -> float:
+    """Credit limit for a customer with none of their own: the value saved on
+    Settings > Operational Rules, else Rs 1,50,000. Never raises - a missing,
+    unreadable or infinite value falls back to the ruling, never to 'unlimited'."""
+    try:
+        coll = _get_settings_collection("admin_controls")
+        doc = coll.find_one({"_id": "default"}) if coll is not None else None
+        value = float(((doc or {}).get("operational_rules") or {}).get("default_credit_limit") or 0)
+    except Exception:  # noqa: BLE001
+        value = 0.0
+    return value if 0 < value < float("inf") else DEFAULT_CREDIT_LIMIT  # NaN fails both
+
+
+class OperationalRules(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # Read by nothing and never saved (the round-off job decides bill
+    # round-off). Accepted, and ignored, so a page that still sends it is not
+    # refused with a 422.
+    auto_round_off: Any = Field(default=None, exclude=True)
+    # strict: a JSON true is refused, not read as 1.0 (a Rs 1 limit for all).
+    default_credit_limit: float = Field(gt=0, allow_inf_nan=False, strict=True)
+
+
+class AdminControls(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    operational_rules: OperationalRules
+
+
+def _require_admin(current_user: dict) -> None:
+    if not any(r in current_user.get("roles", []) for r in ("SUPERADMIN", "ADMIN")):
+        raise HTTPException(status_code=403, detail="Superadmin or admin access required")
 
 
 @router.get("/admin-controls")
 async def get_admin_controls(current_user: dict = Depends(get_current_user)):
-    """Get admin control panel settings (SUPERADMIN only)"""
-    if "SUPERADMIN" not in current_user["roles"]:
-        raise HTTPException(status_code=403, detail="Superadmin access required")
-    collection = _get_settings_collection("admin_controls")
-    if collection is not None:
-        settings = collection.find_one({"_id": "default"})
-        if settings:
-            settings.pop("_id", None)
-            return settings
-    return {
-        "store_modules": {},
-        "discount_limits": [],
-        "operational_rules": {},
-    }
+    """The operational rules (SUPERADMIN/ADMIN), with the credit default in force."""
+    _require_admin(current_user)
+    return {"operational_rules": {"default_credit_limit": chain_default_credit_limit()}}
 
 
 @router.put("/admin-controls")
 async def update_admin_controls(
-    controls: Dict, current_user: dict = Depends(get_current_user)
+    controls: AdminControls, current_user: dict = Depends(get_current_user)
 ):
-    """Update admin control panel settings (SUPERADMIN only)"""
-    if "SUPERADMIN" not in current_user["roles"]:
-        raise HTTPException(status_code=403, detail="Superadmin access required")
+    """Save the operational rules (SUPERADMIN/ADMIN). The document is replaced,
+    so values of the removed settings saved before 2026-10-08 go with it."""
+    _require_admin(current_user)
+    body = controls.model_dump()
     collection = _get_settings_collection("admin_controls")
     if collection is not None:
-        collection.update_one(
-            {"_id": "default"},
-            {"$set": controls},
-            upsert=True,
-        )
-        return {"message": "Admin controls saved successfully", "controls": controls}
-    return {"message": "Admin controls saved (no DB)", "controls": controls}
+        collection.replace_one({"_id": "default"}, body, upsert=True)
+        return {"message": "Admin controls saved successfully", "controls": body}
+    return {"message": "Admin controls saved (no DB)", "controls": body}
 
 
 # ============================================================================
 # APPROVAL WORKFLOWS ENDPOINTS
 # ============================================================================
 
+# Owner ruling 2026-09-28: a purchase order has NO approval step (drafted, then
+# sent to the vendor). The old 'Purchase Order Approval' workflow promised one no
+# code ever enforced; it is out of the defaults and hidden if an admin saved it.
+# Owner 2026-10-08: the discount and credit-sale rows duplicated the discount
+# caps and the credit-limit block.
+_RETIRED_WORKFLOW_TYPES = {"PO_APPROVAL", "DISCOUNT_APPROVAL", "CREDIT_SALE"}
+
 DEFAULT_APPROVAL_WORKFLOWS = [
-    {
-        "id": "wf-001",
-        "type": "DISCOUNT_APPROVAL",
-        "name": "Discount Approval",
-        "description": "Requires manager approval when a discount exceeds the configured threshold.",
-        "isEnabled": True,
-        "thresholdType": "PERCENTAGE",
-        "thresholdValue": 15,
-        "approverRoles": ["ADMIN", "STORE_MANAGER"],
-        "escalationTimeout": 2,
-        "notifyOnRequest": True,
-        "notifyOnApproval": True,
-    },
     {
         "id": "wf-002",
         "type": "REFUND_APPROVAL",
@@ -2494,19 +2515,6 @@ DEFAULT_APPROVAL_WORKFLOWS = [
         "notifyOnApproval": True,
     },
     {
-        "id": "wf-003",
-        "type": "PO_APPROVAL",
-        "name": "Purchase Order Approval",
-        "description": "Purchase orders exceeding the configured amount threshold require approval.",
-        "isEnabled": True,
-        "thresholdType": "AMOUNT",
-        "thresholdValue": 50000,
-        "approverRoles": ["SUPERADMIN", "ADMIN", "AREA_MANAGER"],
-        "escalationTimeout": 8,
-        "notifyOnRequest": True,
-        "notifyOnApproval": False,
-    },
-    {
         "id": "wf-004",
         "type": "STOCK_ADJUSTMENT",
         "name": "Stock Write-off Approval",
@@ -2518,19 +2526,6 @@ DEFAULT_APPROVAL_WORKFLOWS = [
         "escalationTimeout": 24,
         "notifyOnRequest": True,
         "notifyOnApproval": False,
-    },
-    {
-        "id": "wf-005",
-        "type": "CREDIT_SALE",
-        "name": "Credit Sale Approval",
-        "description": "Credit sales require manager approval before processing.",
-        "isEnabled": False,
-        "thresholdType": "AMOUNT",
-        "thresholdValue": 5000,
-        "approverRoles": ["ADMIN", "STORE_MANAGER", "ACCOUNTANT"],
-        "escalationTimeout": 1,
-        "notifyOnRequest": True,
-        "notifyOnApproval": True,
     },
 ]
 
@@ -2563,6 +2558,11 @@ async def get_approval_workflows(current_user: dict = Depends(get_current_user))
         doc = collection.find_one({"_id": "default"})
         if doc:
             doc.pop("_id", None)
+            doc["workflows"] = [
+                w
+                for w in doc.get("workflows") or []
+                if w.get("type") not in _RETIRED_WORKFLOW_TYPES
+            ]
             return doc
     return {"workflows": DEFAULT_APPROVAL_WORKFLOWS}
 
@@ -2593,8 +2593,6 @@ async def update_approval_workflows(
 
 DEFAULT_FEATURE_TOGGLES: Dict[str, bool] = {
     "pos-quick-sale": True,
-    "eye-test-module": True,
-    "workshop-module": True,
     "loyalty-points": False,
     "split-payments": True,
     "credit-billing": True,

@@ -43,9 +43,6 @@ const AgentControlPanel = lazy(() => import('../components/settings/AgentControl
 const FeatureToggles = lazy(() => import('../components/settings/FeatureToggles').then(m => ({ default: m.FeatureToggles })));
 const ShopifyLiveSyncSection = lazy(() => import('../pages/settings/SettingsShopifyLiveSync').then(m => ({ default: m.ShopifyLiveSyncSection })));
 const AuditLogSettingsPage = lazy(() => import('../pages/settings/SettingsAuditLogs').then(m => ({ default: m.AuditLogSettingsPage })));
-const StoreModulesSection = lazy(() => import('../pages/settings/SettingsAdminControls').then(m => ({ default: m.StoreModulesSection })));
-const RolePermissionsSection = lazy(() => import('../pages/settings/SettingsAdminControls').then(m => ({ default: m.RolePermissionsSection })));
-const DiscountCapsSection = lazy(() => import('../pages/settings/SettingsAdminControls').then(m => ({ default: m.DiscountCapsSection })));
 const OperationalRulesSection = lazy(() => import('../pages/settings/SettingsAdminControls').then(m => ({ default: m.OperationalRulesSection })));
 const SystemSettingsPage = lazy(() => import('../pages/settings/SettingsSystem').then(m => ({ default: m.SystemSettingsPage })));
 
@@ -97,9 +94,6 @@ const SECTION_ELEMENTS: Record<SettingsTab, React.ReactElement> = {
   'feature-toggles': <FeatureTogglesSectionPage />,
   'shopify-live-sync': <ShopifyLiveSyncSection />,
   'audit-logs': <AuditLogSettingsPage />,
-  modules: <StoreModulesSection />,
-  permissions: <RolePermissionsSection />,
-  'discount-caps': <DiscountCapsSection />,
   rules: <OperationalRulesSection />,
   system: <SystemSettingsPage />,
 };
@@ -134,7 +128,7 @@ export const settingsRoutes = (
     <Route
       path="settings"
       element={
-        <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'AREA_MANAGER', 'CATALOG_MANAGER', 'ACCOUNTANT']}>
+        <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'AREA_MANAGER', 'CATALOG_MANAGER', 'ACCOUNTANT']} namesWhoCan={false}>
           <SettingsLayout />
         </ProtectedRoute>
       }

@@ -208,7 +208,7 @@ export interface Customer {
   // PreferencesTab and written by the consent toggle via
   // updateCustomer(id, { marketing_consent }).
   marketing_consent?: boolean;
-  // POS-4: per-customer credit limit (khata). 0 = unlimited.
+  // POS-4: per-customer credit limit (khata). 0/unset = the chain default applies.
   credit_limit?: number;
   // F39: manager-approved free-form tags (e.g. "VIP", "Zeiss fan"). Feed the
   // NBA daily call list. Staff suggest; STORE_MANAGER+ approves.

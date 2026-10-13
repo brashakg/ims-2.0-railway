@@ -120,6 +120,11 @@ export interface ComposerSubmitPayload {
     /** Absent when the form shows no prices: the server prices the line. */
     unit_price?: number;
     taxRate: number;
+    /** The line's settled GST rate and HSN, for a save that must not re-price
+     *  it (an edit). Absent when the rate was not settled (taxRate is then a
+     *  placeholder 0, never a rate to pin). */
+    gst_rate?: number;
+    hsn?: string;
     lineTotal: number;
   }>;
   subtotal: number;
@@ -142,6 +147,9 @@ export interface PurchaseOrderComposerProps {
   vendorsLoading?: boolean;
   initialVendorId?: string;
   initialLines?: ComposerLine[];
+  /** Editing a saved draft: its delivery date and notes. */
+  initialExpectedDate?: string;
+  initialNotes?: string;
   /** Note shown under the vendor picker (e.g. Buy Desk's one-vendor-per-draft
    *  hint). Omit for none. */
   vendorHint?: ReactNode;
@@ -345,6 +353,8 @@ export function PurchaseOrderComposer({
   vendorsLoading = false,
   initialVendorId = '',
   initialLines,
+  initialExpectedDate = '',
+  initialNotes = '',
   vendorHint,
   renderProductCell,
   allowAddLine = false,
@@ -360,8 +370,8 @@ export function PurchaseOrderComposer({
   const toast = useToast();
 
   const [vendorId, setVendorId] = useState(initialVendorId);
-  const [expectedDate, setExpectedDate] = useState('');
-  const [notes, setNotes] = useState('');
+  const [expectedDate, setExpectedDate] = useState(initialExpectedDate);
+  const [notes, setNotes] = useState(initialNotes);
   const [lines, setLines] = useState<ComposerLine[]>(
     initialLines && initialLines.length > 0 ? initialLines : [blankLine()],
   );
@@ -566,6 +576,8 @@ export function PurchaseOrderComposer({
           quantity: l.quantity,
           ...(showPrices ? { unit_price: l.unitCost } : {}),
           taxRate: l.taxRate,
+          ...(l.gstResolved ? { gst_rate: l.taxRate } : {}),
+          ...(l.hsn ? { hsn: l.hsn } : {}),
           lineTotal: lineTotal(l),
         })),
         subtotal,

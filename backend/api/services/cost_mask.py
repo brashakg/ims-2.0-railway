@@ -61,6 +61,11 @@ PURCHASE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
 # COST_VISIBLE_ROLES a reader is shown the item, quantity and reason only
 # (mask_vendor_return / mask_debit_note). Their read gates ARE this tuple.
 RETURN_READERS = (*PURCHASE_ROLES, "WORKSHOP_STAFF")
+# Who receives goods into stock (log, accept, express-receive, void or escalate
+# a receipt; the receiving screen): owner ruling 2026-09-28, RECEIVING IS
+# MANAGERS ONLY -- the purchase roles without the accountant. The receiving
+# gates (routers/vendors/_shared._RECEIVE_ROLES) ARE this tuple.
+RECEIVE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER")
 # context -> the roles it admits on top of COST_VISIBLE_ROLES. Owner ruling
 # 2026-10-12: nobody past the accounts roles sees what we pay, so "product",
 # "purchase" and "payables" admit no one else.
@@ -105,6 +110,8 @@ _PURCHASE_PRICE_FIELDS = {
     "unit_price", "estimated_unit_price", "line_total", "line_tax",
     "cgst", "sgst", "igst", "subtotal", "tax", "tax_amount", "total_amount",
     "gst_summary", "totals", "spend", "total_spend", "mtd_spend",
+    # an edit's price changes on the order's history (po_detail.update_po)
+    "price_detail",
 }
 
 

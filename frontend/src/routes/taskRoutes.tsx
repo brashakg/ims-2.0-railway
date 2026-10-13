@@ -35,7 +35,7 @@ export const taskRoutes = (
     <Route
       path="tasks"
       element={
-        <ProtectedRoute allowedRoles={TASK_MODULE_ROLES}>
+        <ProtectedRoute allowedRoles={TASK_MODULE_ROLES} namesWhoCan={false}>
           <TasksLayout />
         </ProtectedRoute>
       }

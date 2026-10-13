@@ -6,7 +6,7 @@
 // Suppliers and Analytics sections.
 
 import { gstinStateCode } from '../../constants/gst';
-import type { POStatus, Supplier, PurchaseOrder } from './purchaseTypes';
+import type { POItem, POStatus, Supplier, PurchaseOrder } from './purchaseTypes';
 
 // ============================================================================
 // Field mapping: backend vendor doc -> frontend Supplier shape
@@ -77,15 +77,20 @@ export function mapPOtoPurchaseOrder(po: any): PurchaseOrder {
     return {
       productId: item.product_id ?? '',
       productName: item.product_name ?? '',
+      description: item.description || undefined,
       sku: item.sku ?? '',
       quantity: item.ordered_qty ?? item.quantity ?? 0,
       unitCost,
       taxRate: item.tax_rate ?? impliedRate,
+      hsn: item.hsn || undefined,
+      gstUnresolved: item.gst_unresolved === true,
       total:
         unitCost == null
           ? null
           : item.total ?? (item.quantity ?? 0) * unitCost * (1 + (item.tax_rate ?? impliedRate) / 100),
       receivedQty: item.received_qty ?? headerReceived[item.product_id ?? ''] ?? 0,
+      cancelledQty: item.cancelled_qty ?? 0,
+      lineStatus: item.line_status,
     };
   });
 
@@ -106,9 +111,11 @@ export function mapPOtoPurchaseOrder(po: any): PurchaseOrder {
     // is the one that gets filed.
     gstSummary: po.gst_summary ?? undefined,
     interstate: typeof po.interstate === 'boolean' ? po.interstate : undefined,
-    approvedBy: po.approved_by,
     receivedDate: po.received_date ?? po.received_at?.split('T')[0],
     notes: po.notes,
+    cancellationReason: po.cancellation_reason ?? undefined,
+    source: po.source ?? undefined,
+    updatedAt: po.updated_at ?? undefined,
   };
 }
 
@@ -117,4 +124,10 @@ export function mapPOtoPurchaseOrder(po: any): PurchaseOrder {
 export const PRICE_NEEDED = 'Price needed';
 export function poMoney(value: number | null): string {
   return value == null ? PRICE_NEEDED : `₹${value.toLocaleString()}`;
+}
+
+/** How a line is named on screen: its description first (a lens order has
+ *  one line per power, all one product name), else the product name. */
+export function lineLabel(item: Pick<POItem, 'description' | 'productName'>): string {
+  return item.description || item.productName;
 }
