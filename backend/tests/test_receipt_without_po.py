@@ -1955,6 +1955,22 @@ def test_c7_a_number_reused_next_year_never_answers_last_years_2b_row(world):
     assert [b["bill_id"] for b in out["only_in_books"]] == ["B-10-NEW"]  # this period's, not filed
 
 
+def test_c7_last_years_no_credit_bill_never_answers_this_years_2b_row(world):
+    """Panel mutant (round 9): the no-credit branch's look-up ran with the
+    bill's year, but nothing pinned it -- take(key, None) left every test
+    green. Last year's walk-in INV-5 booked with no credit must not answer
+    this year's 2B row INV-5: that row is a bill not yet booked."""
+    _booked(world["db"], "B-5-OLD", "INV-5", "2025-09-14", credit=False)
+    row = {"gstin": DEALER_GSTIN, "invoice_no": "INV-5", "taxable": 6200.0, "tax": 310.0}
+    for rows, period in (([row], "2026-09"), ([{**row, "invoice_date": "2026-09-01"}], None)):
+        out = _reconcile(rows, period)
+        assert out["booked_no_credit"] == [], (period, out)
+        assert [r["invoice_no"] for r in out["only_in_2b"]] == ["INV-5"], (period, out)
+    # Its own year's row it answers.
+    out = _reconcile([{**row, "invoice_date": "2025-09-14"}])
+    assert [b["bill_id"] for b in out["booked_no_credit"]] == ["B-5-OLD"], out
+
+
 def test_c7_a_walk_in_bill_answers_only_its_own_2b_row(world):
     """Panel probe (round 5, problem 4): a walk-in bill '1' (Rs 310, no
     credit) booked under a stand-in supplier took that supplier's GSTIN, and
