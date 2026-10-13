@@ -15,6 +15,7 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime
 
 from ..utils.ist import ist_day_start_utc, ist_today, now_ist
+from ..services.online_order_status import BOOKED_STATUSES
 from .auth import get_current_user, require_roles
 from ..dependencies import validate_store_access
 from ..services.reorder_policy import low_stock_rows, out_of_stock_count
@@ -77,7 +78,7 @@ def _today() -> str:
     return ist_today().isoformat()
 
 
-_COUNTED = {"CONFIRMED", "PROCESSING", "READY", "DELIVERED"}
+_COUNTED = BOOKED_STATUSES
 
 
 # ── Tasks ──────────────────────────────────────────────────────────────────

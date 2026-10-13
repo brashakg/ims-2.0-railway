@@ -3,7 +3,10 @@
 Spine docs carry an `images` ARRAY; the POS grid (and other consumers) read
 the SINGULAR `image_url` -- so images silently rendered as placeholder icons
 while the files themselves loaded fine. The list + single-product endpoints
-now stamp image_url = images[0] (never overwriting an explicit image_url).
+now stamp image_url = images[0]. Owner 2026-10-12 ("photo 1 is the main photo
+on the website and at the till"): photo 1 wins over a stored image_url too --
+the product page reorders images[], and a stale singular field must not undo
+that (product_master.main_photo, the one rule).
 """
 
 from __future__ import annotations
@@ -108,8 +111,8 @@ def test_list_stamps_first_image_as_alias(monkeypatch):
     by_id = {p["product_id"]: p for p in out["products"]}
     assert by_id["P1"]["image_url"] == "https://api.example/img/a.jpg"
     assert "image_url" not in by_id["P2"] or not by_id["P2"]["image_url"]
-    # explicit image_url is never overwritten
-    assert by_id["P3"]["image_url"] == "https://api.example/explicit.jpg"
+    # photo 1 wins over a stale stored image_url
+    assert by_id["P3"]["image_url"] == "https://api.example/other.jpg"
     assert "image_url" not in by_id["P4"] or not by_id["P4"]["image_url"]
 
 
@@ -118,4 +121,4 @@ def test_get_product_stamps_alias(monkeypatch):
     p = asyncio.run(products_mod.get_product("P1", _user()))
     assert p["image_url"] == "https://api.example/img/a.jpg"
     p3 = asyncio.run(products_mod.get_product("P3", _user()))
-    assert p3["image_url"] == "https://api.example/explicit.jpg"
+    assert p3["image_url"] == "https://api.example/other.jpg"
