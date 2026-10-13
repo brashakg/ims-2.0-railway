@@ -5749,3 +5749,34 @@ def test_r10_a_release_that_dies_part_way_records_what_it_holds_at_once(world, m
     world.finish_draft(boss, offer=2790)
     assert len(world.units(boss)) == 2 and world.grn(gid)["status"] == "ACCEPTED"
     assert _po_received(world, po) == ("RECEIVED", {boss: 2})
+
+
+def test_r10_a_bills_ask_asked_again_is_the_same_task(world):
+    # The panel's probe: one bill blocked by Boss and Carrera; the Boss is
+    # finished; the next refused Book asks for the Carrera alone. The one
+    # catalogue manager holds ONE ask, naming only what is still waiting.
+    from api.routers import purchase_invoices as _pi
+
+    po = world.raise_po(
+        [
+            {"new_product": dict(BOSS_TYPED), "quantity": 1, "unit_price": 1200},
+            {"new_product": dict(CARRERA_TYPED), "quantity": 1, "unit_price": 3200},
+        ]
+    )
+    boss, carrera = (it["product_id"] for it in po["items"])
+    _run(_pi.request_cataloguing(_pi.CataloguingRequest(product_ids=[boss, carrera]), ACCOUNTANT))
+    world.finish_draft(boss, offer=2790)
+    (ask,) = _asks(world)
+    finding(
+        ask["product_ids"] == [carrera] and "Boss" not in ask["description"],
+        f"R10-5: the ask still names the finished Boss: {ask['product_ids']} {ask['description']}",
+    )
+    _run(_pi.request_cataloguing(_pi.CataloguingRequest(product_ids=[carrera]), ACCOUNTANT))
+    asks = _asks(world)
+    finding(
+        [(t["assigned_to"], t["product_ids"]) for t in asks] == [(CATALOGUER["user_id"], [carrera])],
+        f"R10-5: the catalogue manager holds {len(asks)} asks for one bill: "
+        f"{[t['source_ref'] for t in asks]}",
+    )
+    world.finish_draft(carrera, offer=6490)
+    assert not _asks(world)

@@ -1601,21 +1601,45 @@ def _ask_items(db, product_ids) -> list:
     return items
 
 
-def ask_catalogue_managers(db, store_id, items, note=None) -> Tuple[int, bool]:
+def ask_catalogue_managers(db, store_id, items, note=None, *, reword=None) -> Tuple[int, bool]:
     """THE ask for cataloguing: the catalogue managers BY NAME, through the
     one door a held receipt uses too -- a task with no assignee is one no
     catalogue manager's list shows. request_cataloguing runs it, and so does
     scripts/raise_held_receipt_tasks.py for an ask raised before that door.
+
+    One ask per bill and person: an ask still open for this shop naming any
+    of these items is the same bill asked again (the next refused Book names
+    only what is left), so it is re-worded to everything it still waits on,
+    never a second task beside it. `reword` (grn_accept.close_catalogue_asks,
+    one of its items finished): only re-word that open ask to `items`,
+    telling nobody new.
+
     Answers (how many people now hold the task, whether they are catalogue
     managers -- False: the admins were told, nobody holds the job)."""
-    from .vendors.grn_accept import tell_catalogue_managers
+    from .vendors.grn_accept import _TASK_OPEN, asks_still_waiting, tell_catalogue_managers
 
+    ask = reword
+    if ask is None and db is not None:
+        ask = db.get_collection("tasks").find_one(
+            {
+                "category": "Catalogue",
+                "source": "SYSTEM",
+                "status": {"$in": _TASK_OPEN},
+                "ask_store_id": store_id,
+                "product_ids": {"$in": [i["product_id"] for i in items]},
+            }
+        )
+        if ask:
+            asked = {i["product_id"] for i in items}
+            more = [p for p in asks_still_waiting(db, ask.get("product_ids") or []) if p not in asked]
+            items = list(items) + [i for i in _ask_items(db, more) if i["missing"]]
+    note = note or (ask or {}).get("ask_note")
+    ids = [i["product_id"] for i in items]
     lines = [f"- {i['product']}: needs " + ", ".join(i["missing"]) for i in items]
     return tell_catalogue_managers(
         db,
         store_id,
-        dedupe="catalogue-for-bill:"
-        + ",".join(sorted(i["product_id"] for i in items)),
+        dedupe=(ask or {}).get("escalation_group") or "catalogue-for-bill:" + ",".join(sorted(ids)),
         title=f"Finish cataloguing {len(items)} item(s) - a vendor bill is waiting",
         orphan_title=(
             f"No catalogue manager for {store_id}: {len(items)} item(s) "
@@ -1623,9 +1647,10 @@ def ask_catalogue_managers(db, store_id, items, note=None) -> Tuple[int, bool]:
         ),
         # An ask: asking again once the last task was closed asks again.
         ever=False,
+        refresh_only=reword is not None,
         # Closed when the items are finished or discarded
         # (grn_accept.close_catalogue_asks).
-        extra={"product_ids": [i["product_id"] for i in items]},
+        extra={"product_ids": ids, "ask_store_id": store_id, "ask_note": note},
         description=(
             "A purchase invoice cannot be booked until these products are "
             "catalogue-complete:\n"

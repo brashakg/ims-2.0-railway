@@ -1125,13 +1125,15 @@ def _held_item_label(prod: Optional[dict], product_id: str) -> str:
 
 
 def _raise_once(
-    db, *, dedupe_ref: str, ever: bool = True, priority: str = "P2", **task
+    db, *, dedupe_ref: str, ever: bool = True, priority: str = "P2",
+    refresh_only: bool = False, **task
 ) -> bool:
     """ONE task per source_ref. `ever` (a receipt's tasks): once a person has
     closed it, a re-press of "Add to stock" or the next catalogue save never
     raises it again. Otherwise (a person ASKING, e.g. a bill's request for
     cataloguing) one only while it is still open -- create_system_task's own
-    dedupe -- so asking again after it was closed reaches the person again."""
+    dedupe -- so asking again after it was closed reaches the person again.
+    `refresh_only`: re-word the open task, raise none."""
     from ...dependencies import get_task_repository
     from ...services.task_triggers import create_system_task
 
@@ -1152,12 +1154,20 @@ def _raise_once(
                 "$set": {
                     "title": task.get("title"),
                     "description": task.get("description"),
+                    # An ask's items follow its words (close_catalogue_asks).
+                    **{
+                        k: v
+                        for k, v in (task.get("extra") or {}).items()
+                        if k == "product_ids"
+                    },
                     "updated_at": datetime.now(),
                 }
             },
         )
     except Exception:  # noqa: BLE001 - stale words never stop the task being raised
         logger.warning("[TASKS] could not refresh %s", dedupe_ref, exc_info=True)
+    if refresh_only:
+        return False
     if ever and tasks.find_one({"source_ref": dedupe_ref}):
         return True
     repo = get_task_repository()
@@ -1206,23 +1216,40 @@ def close_catalogue_asks(product_id: str, note: str) -> None:
     """Close the asks for cataloguing (a vendor bill's, purchase_invoices.
     request_cataloguing) that name `product_id` once nothing they name waits
     any more: every product on the ask is catalogue-complete, or was
-    discarded. Called when a product is finished (PUT /products/{id}) or
-    discarded (catalog DELETE). An ask carries no receipt, so the receipt's
-    own closing (_complete_receipt_tasks) never reaches it. Fail-soft."""
+    discarded. One still waiting on others names only those from now on
+    (purchase_invoices.ask_catalogue_managers, re-word only): never a
+    finished item asked for. Called when a product is finished (PUT
+    /products/{id}) or discarded (catalog DELETE). An ask carries no receipt,
+    so the receipt's own closing (_complete_receipt_tasks) never reaches it.
+    Fail-soft."""
     try:
         db = _get_db()
         if db is None or not product_id:
             return
-        for t in db.get_collection("tasks").find(
-            {
-                "category": "Catalogue",
-                "source": "SYSTEM",
-                "status": {"$in": _TASK_OPEN},
-                "product_ids": product_id,
-            }
+        reworded = set()
+        for t in list(
+            db.get_collection("tasks").find(
+                {
+                    "category": "Catalogue",
+                    "source": "SYSTEM",
+                    "status": {"$in": _TASK_OPEN},
+                    "product_ids": product_id,
+                }
+            )
         ):
-            if not asks_still_waiting(db, t.get("product_ids") or []):
+            waiting = asks_still_waiting(db, t.get("product_ids") or [])
+            if not waiting:
                 complete_tasks(db, {"task_id": t.get("task_id")}, note)
+            elif t.get("escalation_group") not in reworded:
+                from ..purchase_invoices import _ask_items, ask_catalogue_managers
+
+                reworded.add(t.get("escalation_group"))
+                ask_catalogue_managers(
+                    db,
+                    t.get("ask_store_id") or t.get("store_id"),
+                    [i for i in _ask_items(db, waiting) if i["missing"]],
+                    reword=t,
+                )
     except Exception:  # noqa: BLE001 - a task problem never undoes a save
         logger.warning("[CATALOGUE] could not close the asks naming %s", product_id, exc_info=True)
 
@@ -1356,7 +1383,7 @@ def _sync_catalogue_tasks(grn_id, grn, unresolved_lines, grn_status, product_rep
 
 def tell_catalogue_managers(
     db, store_id, *, dedupe: str, title: str, orphan_title: str, description: str,
-    extra: Optional[dict] = None, ever: bool = True,
+    extra: Optional[dict] = None, ever: bool = True, refresh_only: bool = False,
 ) -> Tuple[int, bool]:
     """THE door that tells the catalogue managers an item waits on them -- a
     receipt holding units (_sync_catalogue_tasks), a vendor bill that cannot be
@@ -1392,6 +1419,7 @@ def tell_catalogue_managers(
             db,
             dedupe_ref=f"{dedupe}:{uid or 'nobody'}",
             ever=ever,
+            refresh_only=refresh_only,
             priority="P3",
             due_at=datetime.now() + timedelta(days=1),
             title=title,
