@@ -1010,10 +1010,14 @@ def test_which_ledger_fields_are_cost_is_cost_mask_s(world, monkeypatch):
     of its own."""
     from api.services import cost_mask
 
-    monkeypatch.setattr(cost_mask, "_ALL_MASKED", cost_mask._ALL_MASKED - {"cost_price"})
-    row = _ledger_row(world, "SALES_STAFF")
-    assert row.get("cost_price") == pytest.approx(3150.0)
-    assert "unit_cost" not in row and "cost_value" not in row
+    full = cost_mask._ALL_MASKED
+    # The product's own cost ("product") and the row's stock at cost
+    # (stock_value.COST_CONTEXT) alike: WHICH keys are cost is cost_mask's.
+    for field, want in (("cost_price", 3150.0), ("cost_value", AT_COST)):
+        monkeypatch.setattr(cost_mask, "_ALL_MASKED", full - {field})
+        row = _ledger_row(world, "SALES_STAFF")
+        assert row.get(field) == pytest.approx(want), field
+        assert "unit_cost" not in row, field
 
 
 # ============================================================================

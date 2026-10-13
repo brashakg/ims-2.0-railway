@@ -155,8 +155,24 @@ async def get_stock(
         category=category,
         created_by=created_by,
         include_attribution=can_see_attribution,
-        shelf_cost=_shelf_cost(stock_repo, product_repo, active_store, current_user),
     )
+    # F47: each row's units at cost -- stock at cost, so WHO sees it is
+    # stock_value.COST_CONTEXT (the accounts roles, owner ruling 2026-10-12)
+    # and WHICH keys are cost is cost_mask's; a manager's row keeps the
+    # product's own cost_price ("product", below) and none of these.
+    from ...services import stock_value
+    from ...services.cost_mask import mask_cost
+
+    shelf = _shelf_cost(stock_repo, product_repo, active_store)
+    if shelf is not None:
+        for row in items:
+            row.update(
+                mask_cost(
+                    _row_cost(shelf.get(row["product_id"])),
+                    current_user,
+                    stock_value.COST_CONTEXT,
+                )
+            )
     return {"items": mask_cost_list(items, current_user, "product"), "total": len(items)}
 
 
@@ -238,7 +254,6 @@ def _build_store_ledger(
     category: Optional[str] = None,
     created_by: Optional[str] = None,
     include_attribution: bool = True,
-    shelf_cost: Optional[Dict[str, Dict]] = None,
 ) -> List[Dict]:
     """Per-product Stock Ledger rows for a store.
 
@@ -401,26 +416,19 @@ def _build_store_ledger(
             )
         )
 
-    # F47: each row's units at cost (None when no shop is in view, or for a
-    # caller who does not see stock at cost -- _shelf_cost decides).
-    if shelf_cost is not None:
-        for row in items:
-            row.update(_row_cost(shelf_cost.get(row["product_id"])))
     return items
 
 
 def _shelf_cost(
-    stock_repo, product_repo, store_id: Optional[str], user: dict
+    stock_repo, product_repo, store_id: Optional[str]
 ) -> Optional[Dict[str, Dict]]:
     """F47: what the units at this shop COST, per product -- the one stock
-    value rule (services/stock_value). None when no shop is in view, and for
-    anyone who does not see stock at cost (stock_value.COST_CONTEXT: the
-    accounts roles, owner ruling 2026-10-12) -- a manager's or the counter's
-    row carries no cost_value, unit_cost or uncosted_units at all."""
+    value rule (services/stock_value). None when no shop is in view. Who may
+    see it is not decided here: get_stock masks each row's cost with
+    stock_value.COST_CONTEXT."""
     from ...services import stock_value
-    from ...services.cost_mask import can_see_cost
 
-    if not store_id or not can_see_cost(user, stock_value.COST_CONTEXT):
+    if not store_id:
         return None
     return stock_value.by_product(
         stock_value.shelf_units(stock_repo, product_repo, store_id)
