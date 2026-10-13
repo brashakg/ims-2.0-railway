@@ -65,8 +65,10 @@ interface GSTR3BData {
   lateFee: number;
 }
 
+// Names only what a screen draws (panel 2026-10-12: no screen draws 3.1(d) --
+// it is inside the portal file alone).
 const INPUT_TAX_NOTE =
-  'Input tax credit (Table 4), purchases on reverse charge (3.1(d)), tax paid in cash and the GST portal file are shown to Admin and Accountant only.';
+  'Input tax credit (Table 4), tax paid in cash and the GST portal file are shown to Admin and Accountant only.';
 
 export function GSTR3BReport() {
   const toast = useToast();

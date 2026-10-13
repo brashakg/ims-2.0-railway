@@ -93,6 +93,8 @@ function expectNoInputTax() {
   expect(screen.queryByText(/61\.50|38\.50/)).toBeNull();
   expect(screen.queryByText(/₹123\b|₹77\b/)).toBeNull();
   expect(screen.getByTestId('gstr3b-input-tax-note')).toHaveTextContent(/Admin and Accountant only/);
+  // It names no figure that no screen draws: 3.1(d) is in the portal file only.
+  expect(screen.getByTestId('gstr3b-input-tax-note')).not.toHaveTextContent(/3\.1\(d\)|reverse charge/);
 }
 
 describe('GSTR-3B screen - input tax follows the accounts rule (R5)', () => {
