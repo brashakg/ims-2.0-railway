@@ -131,12 +131,19 @@ class _FakeGrnColl:
                     elif op == "$lt":
                         if cur is None or not cur < operand:
                             return False
+                    elif op == "$gte":
+                        if cur is None or not cur >= operand:
+                            return False
                     else:  # pragma: no cover - guard against silent test drift
                         raise AssertionError(f"unsupported operator {op}")
                 continue
             if self.doc.get(key) != val:
                 return False
         return True
+
+    def count_documents(self, flt):
+        # The order cap counts the order's OTHER receipts going into stock.
+        return 1 if self._matches(flt) else 0
 
     def find_one_and_update(self, flt, update):
         self.calls += 1
@@ -1789,7 +1796,8 @@ def test_accept_wedged_before_the_first_unit_mints_nothing_after_a_takeover(
                     seconds=vd._GRN_ACCEPT_LOCK_STALE_SECONDS + 100
                 )
                 voided["out"] = _run(vd.void_grn("GRN-1", _ADMIN))
-            return {"po_id": "PO-1", "items": []}
+            # The order the receipt was made against: P1 x24.
+            return {"po_id": "PO-1", "items": [{"product_id": "P1", "quantity": 24}]}
 
         def update(self, *a, **k):
             return True

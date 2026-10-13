@@ -113,15 +113,21 @@ async def _accept_grn_impl(grn_id: str, current_user: dict) -> dict:
         raise HTTPException(status_code=404, detail="GRN not found")
 
     # A line beyond what the PO ordered waits for the store manager: a
-    # receiving manager's "Add to stock" is that decision ("they really did
-    # send them"), the same people as 'Not received' (owner 2026-09-28,
-    # receiving is managers only). Anyone else is refused on a receipt
-    # already holding such a line; on one the cap only now finds over its
-    # order (a fresh count, or a hold the release just set), their press
-    # shelves the rest and leaves those lines held for them -- the cap.
+    # receiving manager's "Add to stock" on a line the receipt HOLDS beyond
+    # its order is that decision ("they really did send them"), the same
+    # people as 'Not received' (owner 2026-09-28, receiving is managers
+    # only). Anyone else is refused on a receipt already holding such a line.
+    # Any other line the cap finds over its order (a fresh count, a duplicate
+    # receipt, a hold the release just set) is held for the store manager,
+    # whoever pressed: nobody answers a question he was never asked.
     refuse_beyond_order_below_manager(grn, current_user, "Nothing was added to stock.")
     return _put_on_shelf(
-        grn_repo, grn_id, grn, current_user, order_cap=not is_receiving_manager(current_user)
+        grn_repo,
+        grn_id,
+        grn,
+        current_user,
+        order_cap=True,
+        manager_decides=is_receiving_manager(current_user),
     )
 
 
@@ -395,14 +401,19 @@ def _hand_to_store_manager(db, grn_id: str, grn: dict, over: List[dict], product
 
 
 def _put_on_shelf(
-    grn_repo, grn_id: str, grn: dict, current_user: dict, order_cap: bool = False
+    grn_repo,
+    grn_id: str,
+    grn: dict,
+    current_user: dict,
+    order_cap: bool = False,
+    manager_decides: bool = False,
 ) -> dict:
     """THE one path that puts a receipt's accepted units on the shelf. "Add to
     stock" (after its store-scope check), express receive and the catalogue
-    release (release_held_receipts) all run it. `order_cap` (the catalogue
-    release, and "Add to stock" pressed by anyone but a receiving manager -- a
-    manager's press is a person deciding) holds any line that would take its
-    product past what the PO ordered."""
+    release (release_held_receipts) all run it. `order_cap` holds any line
+    that would take its product past what the PO ordered; `manager_decides`
+    (a receiving manager's "Add to stock") exempts only the lines the receipt
+    already holds beyond its order -- the question his press answers."""
     stock_repo = get_stock_repository()
     po_repo = get_purchase_order_repository()
 
@@ -463,6 +474,7 @@ def _put_on_shelf(
             claim_token,
             claimed_at,
             order_cap=order_cap,
+            manager_decides=manager_decides,
             deferred_releases=deferred_releases,
         )
     except Exception:
@@ -627,6 +639,7 @@ def _accept_grn_claimed(
     claim_token: Optional[str] = None,
     claimed_at=None,
     order_cap: bool = False,
+    manager_decides: bool = False,
     deferred_releases: Optional[List[str]] = None,
 ) -> dict:
     """The accept body, run ONLY by the caller that won the F8 claim.
@@ -670,6 +683,13 @@ def _accept_grn_claimed(
         if order_cap and po_id and po_repo is not None
         else None
     )
+    # A receiving manager's press answers only what the receipt already holds
+    # beyond its order (its store manager's question).
+    answered = {
+        ln.get("product_id")
+        for ln in (grn.get("unresolved_lines") or [])
+        if manager_decides and (ln or {}).get("reason") == "over_order"
+    }
 
     minted_stock_ids: List[str] = []
     units_added = 0
@@ -806,7 +826,7 @@ def _accept_grn_claimed(
                     unresolved_lines.append({**held, "reason": "incomplete_catalog"})
                     continue
 
-            if ordered is not None:
+            if ordered is not None and product_id not in answered:
                 over = _over_the_order(
                     grn_repo, stock_repo, grn_id, po_id, product_id, to_mint, ordered
                 )

@@ -5780,3 +5780,79 @@ def test_r10_a_bills_ask_asked_again_is_the_same_task(world):
     )
     world.finish_draft(carrera, offer=6490)
     assert not _asks(world)
+
+
+# ---------------------------------------------------------------------------
+# Round 11: the panel's round-10 findings
+# ---------------------------------------------------------------------------
+
+
+def _d_x2_and_e_x1_held(world):
+    """One PO for the typed Boss D x2 and Boss 1701 E x1, both held on one receipt."""
+    po = world.raise_po(
+        [
+            {"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200},
+            {"new_product": dict(BOSS_1701), "quantity": 1, "unit_price": 1300},
+        ]
+    )
+    d_id, e_id = (it["product_id"] for it in po["items"])
+    grn = _receive(world, po, [2, 1], "JOT/26-27/1201")
+    assert world.grn(grn["grn_id"])["status"] == "PARTIALLY_ACCEPTED"
+    return po, d_id, e_id, grn["grn_id"]
+
+
+def _finished_without_a_release(world, pid, offer):
+    """Finished through a door that never releases (follow-up 97)."""
+    world.db.products.update_one(
+        {"product_id": pid},
+        {"$set": {"catalog_status": "ACTIVE", "offer_price": offer, "done_gaps": [], "cost_source": "PO_RATE"}},
+    )
+
+
+def _held(world, gid):
+    return [
+        (ln["product_id"], ln["reason"], ln["held_qty"])
+        for ln in world.grn(gid).get("unresolved_lines") or []
+    ]
+
+
+def test_r11_a_managers_add_to_stock_never_shelves_a_duplicate_unasked(world, monkeypatch):
+    # The panel's probe: an order of Boss x2, receipt R1 and a duplicate R2
+    # (another invoice number) both held for the catalogue. Finishing the
+    # draft shelves R1; R2's release cannot read its count all through that
+    # save, so R2 still reads 'waiting to be catalogued'. The store manager's
+    # 'Add to stock' on R2 is not his answer to "beyond the order?" -- nobody
+    # asked it: R2 is held beyond the order, and he is asked.
+    from api.routers.vendors import grn_accept as _ga
+
+    po = world.raise_po([{"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200}])
+    boss = po["items"][0]["product_id"]
+    r1 = _receive(world, po, [2], "JOT/26-27/1211")
+    r2 = _receive(world, po, [2], "JOT/26-27/1211-DUP")
+    real = _ga._grn_already_minted
+
+    def _r2_unreadable(repo, flt):
+        if "grn_line_index" in flt and {"grn_id": r2["grn_id"]} in flt.get("$or", []):
+            raise _Unreadable("socket closed")
+        return real(repo, flt)
+
+    monkeypatch.setattr(_ga, "_grn_already_minted", _r2_unreadable)
+    world.finish_draft(boss, offer=2790)
+    monkeypatch.setattr(_ga, "_grn_already_minted", real)
+    assert len(world.units(boss)) == 2 and world.grn(r1["grn_id"])["status"] == "ACCEPTED"
+    assert _held(world, r2["grn_id"]) == [(boss, "incomplete_catalog", 2)]
+    _run(vd.accept_grn(r2["grn_id"], MANAGER))
+    status, received = _po_received(world, po)
+    finding(
+        len(world.units(boss)) == 2
+        and _held(world, r2["grn_id"]) == [(boss, "over_order", 2)]
+        and received[boss] == 2
+        and len(_mgr_tasks(world, r2["grn_id"])) == 1,
+        f"R11-2: a manager's press put {len(world.units(boss))} Boss on the shelf against an "
+        f"order of 2 (R2 holds {_held(world, r2['grn_id'])}, PO reads {received[boss]} "
+        f"{status}, {len(_mgr_tasks(world, r2['grn_id']))} store-manager task(s))",
+    )
+    # Now asked, his press is his answer: the vendor really sent them.
+    _run(vd.accept_grn(r2["grn_id"], MANAGER))
+    assert len(world.units(boss)) == 4 and world.grn(r2["grn_id"])["status"] == "ACCEPTED"
+    assert _mgr_tasks(world, r2["grn_id"]) == []

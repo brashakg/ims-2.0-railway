@@ -86,6 +86,10 @@ class _FakeGRNRepo:
             return True
         return False
 
+    def count(self, flt):
+        # The order cap counts the order's other receipts going into stock.
+        return len(self.find_many(flt))
+
 
 class _FakePORepo:
     def __init__(self, po):
