@@ -1313,6 +1313,7 @@ def _post_credit_and_restock(
         _raise_restock_blocked_task(
             return_id or refund_id, order_id, billing_store, units, None, unread=unread,
             historical=None if unread == "the order" else bool(order.get("historical")),
+            order_number=order.get("order_number"), refund_id=refund_id,
         )
     else:
         try:
@@ -1343,14 +1344,18 @@ def _post_credit_and_restock(
                 order=order,
             )) or {**restock_result, "applied": True}
         except Exception as exc:  # noqa: BLE001
-            # Restock OPEN is one rule: applied=False, a task, the retry. A
-            # booking or stock write that raised leaves it open (its claims
-            # are released), so it raises the same task as an unread order.
             logger.warning(
                 "[SHOPIFY_REFUND] restock failed (recorded, not applied): %s", exc
             )
-            from ..routers.returns import _raise_restock_blocked_task
+        # Restock OPEN is one rule: applied=False, a task, the retry --
+        # whether the booking or a stock write raised (its claims are
+        # released) or _restock_good_items answered soft (a stock read or
+        # write it could not make, no stock repository, a mint that failed):
+        # AUTO never leaves a unit SOLD with nobody told. Deduped on the
+        # return: a route with no physical shop already raised its own.
+        from ..routers.returns import _raise_restock_blocked_task
 
+        if not restock_result.get("applied"):
             _raise_restock_blocked_task(
                 return_id or refund_id, order_id, billing_store,
                 [{"product_id": line.product_id, "sku": getattr(line, "sku", ""),
@@ -1358,6 +1363,7 @@ def _post_credit_and_restock(
                  for line in return_lines if line.restock],
                 None, unread="or write this order's stock records",
                 historical=bool(order.get("historical")),
+                order_number=order.get("order_number"), refund_id=refund_id,
             )
 
     # Finalize: a credit note that SHOULD have issued (gross>0) but didn't must NOT

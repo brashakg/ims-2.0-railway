@@ -63,6 +63,12 @@ _MAX_LIMIT = 500
 _CONFIRMABLE = {"PENDING", "DISCREPANCY", "CREDIT_FAILED", "NO_CUSTOMER"}
 
 
+def takes_goods_back(row: Dict[str, Any]) -> bool:
+    """A review row Goods back can act on: matched to an order, confirmable
+    or posted (the blocked-restock task offers the door by this rule)."""
+    return bool(row.get("order_id")) and str(row.get("status") or "").upper() in _CONFIRMABLE | {"POSTED"}
+
+
 # ---------------------------------------------------------------------------
 # DB helpers (fail-soft; mirror routers/online_store_orders.py)
 # ---------------------------------------------------------------------------
@@ -369,7 +375,7 @@ async def goods_back_refund_review(
         raise HTTPException(status_code=503, detail="Refund reviews unavailable (no DB)")
     row = _load_review(db, review_id, current_user)
     status = str(row.get("status") or "").upper()
-    if not row.get("order_id") or status not in _CONFIRMABLE | {"POSTED"}:
+    if not takes_goods_back(row):
         raise HTTPException(
             status_code=409,
             detail=f"A refund review in status {status or 'UNKNOWN'} cannot take goods back.",

@@ -2024,9 +2024,13 @@ def _raise_restock_blocked_task(
     processing_store_id: Optional[str] = None,
     unread: Optional[str] = None,
     historical: Optional[bool] = False,
+    order_number: Optional[str] = None,
+    refund_id: Optional[str] = None,
 ) -> None:
     """Put a BLOCKED restock in front of a human, with its real cause and ONE
-    action. `unread`: what IMS could not read just now (the order, its SOLD
+    action, naming the order staff can look up (its number) and only the
+    doors that exist: Goods back only for a Shopify refund whose review row
+    takes it (none under SHOPIFY_REFUND_AUTO). `unread`: what IMS could not read just now (the order, its SOLD
     units, its earlier returns) -- a blip, so the action is to re-run the
     restock, which reads again; None: no physical shop could be resolved.
     Never "add them by hand and re-run": the re-run puts back a unit already
@@ -2054,9 +2058,10 @@ def _raise_restock_blocked_task(
                 }
             )
         )
-        rerun = ("re-run the restock once IMS reads again - press Goods back on "
-                 "its refund in Online Store > Refund reviews, or ask the IMS admin "
-                 "to retry it")
+        rerun = ("re-run the restock once IMS reads again - "
+                 + ("press Goods back on its refund in Online Store > Refund reviews, or "
+                    if refund_id and _refund_takes_goods_back(refund_id) else "")
+                 + "ask the IMS admin to retry it")
         stock_in = ("adds no stock row: it books the return and raises one task "
                     "for the shop's store manager to add the frame(s) through "
                     "stock-in, and closes this task")
@@ -2082,11 +2087,12 @@ def _raise_restock_blocked_task(
             action = ("ask the IMS admin to set the shop that receives online "
                       "returns (ONLINE_FULFILLMENT_STORE_ID) and retry the restock "
                       "of this return")
+        ref = order_number or order_id
         create_system_task(
             get_task_repository(),
-            title=f"Return {return_id}: {len(units)} unit(s) NOT back in stock",
+            title=f"Return {return_id} (order {ref}): {len(units)} unit(s) NOT back in stock",
             description=(
-                f"The refund for return {return_id} (order {order_id}) is "
+                f"The refund for return {return_id} (order {ref}) is "
                 f"recorded, but its returned goods were NOT put back in stock: "
                 f"{cause}. Do this: {action}. {never} "
                 f"Items: {lines or 'see the return'}."
@@ -2106,6 +2112,21 @@ def _raise_restock_blocked_task(
             return_id,
             exc,
         )
+
+
+def _refund_takes_goods_back(refund_id: str) -> bool:
+    """True when Goods back (Online Store > Refund reviews) can take this
+    Shopify refund's goods: the door's own rule on its review row. No row
+    (an AUTO post), or no answer: False."""
+    try:
+        from .online_store_refund_reviews import _REVIEW_COLLECTION, takes_goods_back
+
+        db = _get_db()
+        row = (db.get_collection(_REVIEW_COLLECTION).find_one({"shopify_refund_id": str(refund_id)})
+               if db is not None else None)
+        return bool(row) and takes_goods_back(row)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _restock_good_items(
@@ -2217,7 +2238,8 @@ def _restock_good_items(
         # A log line is not a listener: file a deduped P1 task so the goods
         # surface as work in the app, not only in Railway.
         _raise_restock_blocked_task(
-            return_id, order_id, store_id, units, processing_store_id
+            return_id, order_id, store_id, units, processing_store_id,
+            order_number=(order or {}).get("order_number"),
         )
         result["restocked"] = _restock_intent_rows(units)
         result["applied"] = False
@@ -3879,6 +3901,8 @@ async def retry_restock(
             current_user.get("active_store_id"),
             unread="the order",
             historical=None,
+            order_number=claim.get("order_number"),
+            refund_id=claim.get("shopify_refund_id"),
         )
         blocked_update = {
             "restocked": _merge_restocked(claim.get("restocked"),

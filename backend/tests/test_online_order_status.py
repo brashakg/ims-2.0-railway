@@ -3243,3 +3243,46 @@ def test_a_live_parcel_from_a_stale_read_never_takes_over_a_newer_one(swept, mon
     assert (doc["shopify_fulfillment_id"], doc["awb"]) == ("2", "AWB-2")
     assert doc[shopify_fulfillment.FULFILLMENT_WATERMARK] == datetime(2026, 9, 6, 3, 0)
     assert sorted(shopify_fulfillment.tracked_awbs(doc)) == ["AWB-1", "AWB-2"]
+
+
+class _Down:
+    """A stock write that raises (a Mongo failover)."""
+
+    def __call__(self, *args, **kwargs):
+        raise RuntimeError("stock write down")
+
+
+@pytest.mark.parametrize("posture", ["auto", "confirm"])
+def test_a_restock_that_ends_not_applied_always_raises_its_task(swept, monkeypatch, posture):
+    """Panel probe G: the stock writes fail, and _restock_good_items answers
+    soft (applied=False, nothing raised). Only a raise reached the task, so
+    AUTO credited the refund and left stk-1 SOLD for good: no task, no
+    review row. Now a restock that ends not applied raises the one blocked
+    task, naming the order by its number and only the doors that exist --
+    Goods back only where a review row takes it."""
+    oid, rid = (60251, 700451) if posture == "auto" else (60252, 700452)
+    if posture == "auto":
+        monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    doc = _book(swept, oid)
+    _claim_unit(swept, doc)
+    repo = swept["stock_repo"]
+    real = (repo.update, repo.create)
+    monkeypatch.setattr(repo, "update", _Down())
+    monkeypatch.setattr(repo, "create", _Down())
+    res = shopify_refund.handle_shopify_refund(swept["db"], _refund(rid, oid), webhook_id=None,
+                                               topic="refunds/create")
+    if posture == "confirm":
+        res = shopify_refund.post_from_review(
+            swept["db"], swept["review"].find_one({"shopify_refund_id": str(rid)}))
+
+    assert res["status"] == "credited" and res["restock_applied"] is False
+    assert _units(swept) == [("stk-1", "SOLD")]
+    ret = swept["returns"].find_one({"shopify_refund_id": str(rid)})
+    [task] = swept["db"]["tasks"].find({"source_ref": f"return_restock_blocked:{ret['return_id']}"})
+    text = task["title"] + " " + task["description"]
+    assert doc["order_number"] and doc["order_number"] in text and doc["order_id"] not in text
+    assert ("Refund reviews" in text) is (posture == "confirm")
+    assert "ask the IMS admin to retry it" in text
+    monkeypatch.setattr(repo, "update", real[0])
+    monkeypatch.setattr(repo, "create", real[1])
+    assert _retry(ret)["restock_applied"] is True and _units(swept) == [("stk-1", "AVAILABLE")]
