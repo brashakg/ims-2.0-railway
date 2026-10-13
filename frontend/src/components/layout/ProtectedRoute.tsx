@@ -27,6 +27,31 @@ interface ProtectedRouteProps {
   namesWhoCan?: boolean;
 }
 
+type Gate = Omit<ProtectedRouteProps, 'children'>;
+type GateAuth = Pick<ReturnType<typeof useAuth>, 'hasRole' | 'hasPermission' | 'hasModuleAccess'>;
+
+/** THE route gate: may this signed-in user open `pathname` behind `gate`?
+ *  ProtectedRoute redirects to /unauthorized when it says no, and a parent
+ *  breadcrumb is a link only when it says yes (AppLayout) -- one rule. */
+export function gateAllows(
+  auth: GateAuth,
+  { allowedRoles, requirePermission, requireModule }: Gate,
+  pathname: string,
+): boolean {
+  // Role-based access
+  if (allowedRoles && allowedRoles.length > 0 && !auth.hasRole(allowedRoles)) return false;
+  // Permission-based access
+  if (requirePermission && !auth.hasPermission(requirePermission)) return false;
+  // Per-user module access (deny-only override on top of the role above).
+  // The role check already ran, so this can only FURTHER restrict -- a denied
+  // module redirects to /unauthorized even via a direct URL, closing the gap
+  // that nav-hiding alone leaves open. `requireModule` (when passed) wins;
+  // otherwise the module is derived from the path. `requireModule === null`
+  // (explicit opt-out) and ungated paths (moduleForPath -> null) skip the gate.
+  const gatedModule = requireModule !== undefined ? requireModule : moduleForPath(pathname);
+  return !gatedModule || auth.hasModuleAccess(gatedModule);
+}
+
 export function ProtectedRoute({
   children,
   allowedRoles,
@@ -35,7 +60,8 @@ export function ProtectedRoute({
   deniedHint,
   namesWhoCan = true,
 }: ProtectedRouteProps) {
-  const { isAuthenticated, isLoading, hasRole, hasPermission, hasModuleAccess } = useAuth();
+  const auth = useAuth();
+  const { isAuthenticated, isLoading } = auth;
   const location = useLocation();
 
   // Show loading state - don't render children until auth initialization completes
@@ -55,34 +81,13 @@ export function ProtectedRoute({
     return <Navigate to="/login" state={{ from: location }} replace />;
   }
 
-  // Check role-based access
-  if (allowedRoles && allowedRoles.length > 0) {
-    if (!hasRole(allowedRoles)) {
-      // Tell the blocked page who CAN open this, so it can name them.
-      const who = namesWhoCan ? allowedRoles : undefined;
-      return (
-        <Navigate to="/unauthorized" state={{ from: location, allowedRoles: who, deniedHint }} replace />
-      );
-    }
-  }
-
-  // Check permission-based access
-  if (requirePermission) {
-    if (!hasPermission(requirePermission)) {
-      return <Navigate to="/unauthorized" state={{ from: location }} replace />;
-    }
-  }
-
-  // Check per-user module access (deny-only override on top of the role above).
-  // The role check already ran, so this can only FURTHER restrict -- a denied
-  // module redirects to /unauthorized even via a direct URL, closing the gap
-  // that nav-hiding alone leaves open. `requireModule` (when passed) wins;
-  // otherwise the module is derived from the path. `requireModule === null`
-  // (explicit opt-out) and ungated paths (moduleForPath -> null) skip the gate.
-  const gatedModule =
-    requireModule !== undefined ? requireModule : moduleForPath(location.pathname);
-  if (gatedModule && !hasModuleAccess(gatedModule)) {
-    return <Navigate to="/unauthorized" state={{ from: location }} replace />;
+  if (!gateAllows(auth, { allowedRoles, requirePermission, requireModule }, location.pathname)) {
+    // A role refusal tells the blocked page who CAN open this, so it can name them.
+    const roleRefused = !!allowedRoles?.length && !auth.hasRole(allowedRoles);
+    const state = roleRefused
+      ? { from: location, allowedRoles: namesWhoCan ? allowedRoles : undefined, deniedHint }
+      : { from: location };
+    return <Navigate to="/unauthorized" state={state} replace />;
   }
 
   return <>{children}</>;

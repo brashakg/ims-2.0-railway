@@ -23,23 +23,7 @@ import { SessionExpiryWarning } from './components/common/SessionExpiryWarning';
 // import { SpeedInsights } from '@vercel/speed-insights/react';
 import { Analytics } from '@vercel/analytics/react';
 
-import { dashboardRoutes } from './routes/dashboardRoutes';
-import { approvalRoutes } from './routes/approvalRoutes';
-import { posRoutes } from './routes/posRoutes';
-import { customerRoutes } from './routes/customerRoutes';
-import { onlineStoreRoutes } from './routes/onlineStoreRoutes';
-import { inventoryRoutes } from './routes/inventoryRoutes';
-import { orderRoutes } from './routes/orderRoutes';
-import { incentiveRoutes } from './routes/incentiveRoutes';
-import { clinicalRoutes } from './routes/clinicalRoutes';
-import { workshopRoutes } from './routes/workshopRoutes';
-import { purchaseRoutes } from './routes/purchaseRoutes';
-import { taskRoutes } from './routes/taskRoutes';
-import { hrRoutes } from './routes/hrRoutes';
-import { reportRoutes } from './routes/reportRoutes';
-import { settingsRoutes } from './routes/settingsRoutes';
-import { catalogRoutes } from './routes/catalogRoutes';
-import { financeRoutes } from './routes/financeRoutes';
+import { appRoutes } from './routes/appRoutes';
 
 // Public / shell pages
 const LoginPage = lazy(() => import('./pages/auth/LoginPage').then(m => ({ default: m.LoginPage })));
@@ -131,23 +115,7 @@ function App() {
                   {/* Redirect root to dashboard */}
                   <Route index element={<Navigate to="/dashboard" replace />} />
 
-                  {dashboardRoutes}
-                  {approvalRoutes}
-                  {posRoutes}
-                  {customerRoutes}
-                  {onlineStoreRoutes}
-                  {inventoryRoutes}
-                  {orderRoutes}
-                  {incentiveRoutes}
-                  {clinicalRoutes}
-                  {workshopRoutes}
-                  {purchaseRoutes}
-                  {taskRoutes}
-                  {hrRoutes}
-                  {reportRoutes}
-                  {settingsRoutes}
-                  {catalogRoutes}
-                  {financeRoutes}
+                  {appRoutes}
                 </Route>
 
                   {/* 404 */}
