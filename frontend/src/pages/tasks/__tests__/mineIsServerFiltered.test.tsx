@@ -116,6 +116,18 @@ describe('Mine is filtered on the server', () => {
     expect(screen.queryByText('Task 0')).not.toBeInTheDocument();
   });
 
+  it('offers Reassign to a manager only - the server refuses it for staff', async () => {
+    renderMine();
+    await screen.findByRole('button', { name: /Complete/ });
+    expect(screen.queryByRole('button', { name: /Reassign/ })).not.toBeInTheDocument();
+  });
+
+  it('a manager opening a task is offered Reassign', async () => {
+    auth.roles = ['STORE_MANAGER'];
+    renderMine();
+    expect(await screen.findByRole('button', { name: /Reassign/ })).toBeInTheDocument();
+  });
+
   it('does not show other people\'s tasks', async () => {
     renderMine();
     await screen.findByText('Till short by Rs 4,200');

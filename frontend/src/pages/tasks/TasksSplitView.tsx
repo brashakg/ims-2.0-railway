@@ -363,7 +363,11 @@ function TaskDetailPanel({
   onChanged: () => void;
 }) {
   const toast = useToast();
+  const { user } = useAuth();
   const isClosed = task.status === 'COMPLETED';
+  // Reassigning is a manager's call (owner ruling 2026-10-13); the server
+  // refuses it for everyone else, so nobody else is offered the button.
+  const canReassign = canSeeTeamTasks(user?.roles);
 
   const _errMsg = (e: unknown, fallback: string): string => {
     const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
@@ -473,9 +477,11 @@ function TaskDetailPanel({
               </button>
             </>
           )}
-          <button type="button" className="btn sm" onClick={handleReassign}>
-            <User className="w-3 h-3" /> Reassign
-          </button>
+          {canReassign && (
+            <button type="button" className="btn sm" onClick={handleReassign}>
+              <User className="w-3 h-3" /> Reassign
+            </button>
+          )}
         </div>
         <h3>{task.title}</h3>
         <div className="hint" style={{ fontSize: 11.5, color: 'var(--ink-4)', marginTop: 4 }}>

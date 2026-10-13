@@ -74,10 +74,13 @@ describe('the one team-task role list', () => {
     }
   });
 
-  it('lets the catalogue manager open Mine - catalogue tasks are assigned to them', () => {
-    expect(TASK_MODULE_ROLES).toContain('CATALOG_MANAGER');
-    expect(canSeeTeamTasks(['CATALOG_MANAGER'])).toBe(false);
-  });
+  it.each(['CATALOG_MANAGER', 'ACCOUNTANT'] as const)(
+    'lets the %s open Mine - their tasks (catalogue flags, "Book purchase invoice") are assigned to them',
+    (role) => {
+      expect(TASK_MODULE_ROLES).toContain(role);
+      expect(canSeeTeamTasks([role])).toBe(false);
+    },
+  );
 
   it.each(TASK_MODULE_ROLES)('shows %s exactly the sections its role allows', (role) => {
     const expected = (TEAM_TASK_ROLES as readonly string[]).includes(role);
