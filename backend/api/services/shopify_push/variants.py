@@ -28,6 +28,7 @@ from .product_input import (
     build_variant_price_inputs,
 )
 from .writeback import _writeback_variant
+from .inventory import inventory_policy_for, tracking_confirmed
 
 # ---------------------------------------------------------------------------
 # CREATE-side variant seeding (the price-0.00 / no-SKU fix)
@@ -413,6 +414,16 @@ async def _seed_variants_after_write(
     update_rows, create_rows, create_variants, pairs, skipped = _assign_seed_rows(
         seed_rows, nodes
     )
+    # A size created on a listing that is already live is on sale the moment
+    # it exists, so tracking + the stop-at-0 policy go in THE SAME call that
+    # creates it -- never a second call that can be refused while the size
+    # sells without limit. Shopify's answer must confirm both (below).
+    policy = inventory_policy_for(product)
+    create_rows = [
+        {**row, "inventoryPolicy": policy,
+         "inventoryItem": {**(row.get("inventoryItem") or {}), "tracked": True}}
+        for row in create_rows
+    ]
     summary: Dict[str, Any] = {
         "updated": 0,
         "created": 0,
@@ -510,6 +521,18 @@ async def _seed_variants_after_write(
         # The FIRST pair is the default variant (the product-level row for a
         # no-variant product) -- the one a later price push needs.
         summary["default_variant_gid"] = pairs[0][1]
+    # What Shopify's create answer CONFIRMS: tracked + this policy. A created
+    # variant it does not confirm may sell without limit -- push_product takes
+    # a LIVE listing off the website for it. The press names a size by its IMS
+    # SKU (the created node matched to its row through its option values
+    # above), else "a new size" -- never a Shopify id.
+    made = [_as_shopify_gid(n.get("id"), "ProductVariant") for n in created_nodes]
+    summary["size_names"] = {
+        **{g: "a new size" for g in made},
+        **{gid: v["sku"] for v, gid, _inv in pairs if (v or {}).get("sku")},
+    }
+    confirmed = tracking_confirmed(created_nodes, policy)
+    summary["unconfirmed_variant_gids"] = [g for g in made if g not in confirmed]
     return summary
 
 

@@ -108,7 +108,7 @@ def _install(monkeypatch, fail_prices):
     # and bury the code under test. The stock code has its own file and its own
     # fixtures (test_shopify_online_stock.py).
     async def _stock_written(*_a, **_k):
-        return {"ok": True, "code": None, "error": None, "set": 1, "quantities": {}}
+        return {"ok": True, "code": None, "error": None, "set": 1, "quantities": {}, "tracking_confirmed": True}
 
     monkeypatch.setattr(product_mod, "sync_product_stock", _stock_written)
     return fake

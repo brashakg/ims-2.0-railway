@@ -41,6 +41,7 @@ import pytest  # noqa: E402
 
 from api.routers import online_store_push as push_router  # noqa: E402
 from api.services import shopify_push  # noqa: E402
+from shopify_answers import tracking_answer  # noqa: E402
 
 # Reuse the sibling suite's harness rather than keep a second copy of it: the
 # same in-memory _DB whose _Coll nests dot-notation $set the way real Mongo does
@@ -99,6 +100,9 @@ class _Shopify:
     async def __call__(self, db, query, variables):
         op = self._op(query)
         self.calls.append({"op": op, "variables": copy.deepcopy(variables)})
+        answer = tracking_answer(query, variables)
+        if answer:
+            return answer
         variant_node = {
             "id": "gid://shopify/ProductVariant/901",
             "title": "Default Title",
@@ -307,8 +311,15 @@ def test_an_already_mapped_product_is_published_too(db, shopify):
 
     _run(shopify_push.push_product(db, doc, []))
 
-    assert _input_of(shopify, "imsProductUpdate")["status"] == "ACTIVE"
+    # Not on the website yet, so the first write holds it Draft and ACTIVE
+    # goes out only after the publish, once Shopify confirmed tracking on
+    # every size (product.py `hold_active`, the root rule).
+    assert _input_of(shopify, "imsProductUpdate")["status"] == "DRAFT"
     assert len(shopify.calls_of("imsPublishablePublish")) == 1
+    ops = shopify.ops()
+    last = len(ops) - 1 - ops[::-1].index("imsProductUpdate")
+    assert ops.index("imsPublishablePublish") < last
+    assert shopify.calls[last]["variables"]["input"] == {"id": "gid://shopify/Product/900", "status": "ACTIVE"}
 
 
 def test_ims_records_the_product_as_published(db, shopify):

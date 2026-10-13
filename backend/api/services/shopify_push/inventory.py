@@ -30,8 +30,9 @@ Fail loud, never pool, never silently skip:
     never blocks.
   * STOCK_ONHAND_UNKNOWN -- a shop whose on-hand read failed is written
     NOWHERE in that pass (unknown is never written as 0); every other shop's
-    true numbers still go out, and the baseline omits the unknown shop so the
-    next pass re-sends it.
+    true numbers still go out, and the baseline keeps the unknown shop's last
+    accepted number (what Shopify still shows there) so the next pass diffs
+    against it.
   * STOCK_TARGET_MISSING -- the SKU has no Shopify inventory item yet.
   * STOCK_ACTIVATION_FAILED -- Shopify said ITEM_NOT_STOCKED_AT_LOCATION, the
     item was activated at the chunk's locations, and the retry still failed.
@@ -380,21 +381,29 @@ def listing_strays(db, listing_ids: Iterable[str]) -> List[str]:
     hand. The sweep asks the same question of every listing it loops
     (round-7 P2); asked NOWHERE on the per-product doors, the 'Send to
     website' press, the drawer preview and the sale's own run row all read
-    green over a size the site kept selling (recheck round 1). Fail-soft: a
-    report never blocks a write, and the next sweep names what a failed read
-    here could not."""
+    green over a size the site kept selling (recheck round 1). STRICT: a dead
+    read RAISES -- "no stray" over a read that died is green (and SOLD OUT)
+    over a size the site may still sell; the caller names it in
+    ``_stray_unread``'s words and still writes."""
     from ..online_catalog import variant_rows_for_product
 
     out: set = set()
-    try:
-        coll = db["catalog_products"]
-        for pid in listing_ids:
-            doc = coll.find_one({"id": pid})
-            if doc:
-                out.update(baseline_strays(doc, product_skus(doc, variant_rows_for_product(db, doc))))
-    except Exception as exc:  # noqa: BLE001 -- a report never raises
-        logger.warning("[SHOPIFY_STOCK] stray read failed for the listing(s): %s", exc)
+    coll = db["catalog_products"]
+    for pid in listing_ids:
+        doc = coll.find_one({"id": pid})
+        if doc:
+            out.update(baseline_strays(doc, product_skus(doc, variant_rows_for_product(db, doc, strict=True))))
     return sorted(out)
+
+
+def _stray_unread(exc: Exception) -> str:
+    """The listing / stray-size check could not be read: said in its own
+    words, never "no stray" and never "nothing written" (the numbers still go
+    out)."""
+    return (
+        f"the stray-size check (which listing each SKU rides, and the sizes the "
+        f"website may still sell that IMS no longer lists) could not be read: {exc}"
+    )
 
 
 def stray_baseline_skus(db, skus: Iterable[str]) -> List[str]:
@@ -408,23 +417,21 @@ def stray_baseline_skus(db, skus: Iterable[str]) -> List[str]:
     Fail-soft: a report never blocks a write. ponytail: one scan of the
     listings that carry a baseline (121 docs today), only on a sale whose SKU
     has no target -- a query on a dynamic ``quantities.<sku>`` key scans the
-    same collection without an index and cannot take a dotted SKU."""
+    same collection without an index and cannot take a dotted SKU. STRICT, as
+    ``listing_strays``: a dead read raises and the sale names it."""
     from ..online_catalog import variant_rows_for_product
 
     wanted = {str(s) for s in skus if s}
     out: set = set()
     if not wanted:
         return []
-    try:
-        coll = db["catalog_products"]
-        for doc in coll.find({"ecom.online_stock.quantities": {"$exists": True}}):
-            carried = set((_last_sent(doc).get("quantities") or {}).keys())
-            if not (carried & wanted):
-                continue
-            strays = baseline_strays(doc, product_skus(doc, variant_rows_for_product(db, doc)))
-            out.update(s for s in strays if s in wanted)
-    except Exception as exc:  # noqa: BLE001 -- a report never raises
-        logger.warning("[SHOPIFY_STOCK] stray read failed for the SKU(s): %s", exc)
+    coll = db["catalog_products"]
+    for doc in coll.find({"ecom.online_stock.quantities": {"$exists": True}}):
+        carried = set((_last_sent(doc).get("quantities") or {}).keys())
+        if not (carried & wanted):
+            continue
+        strays = baseline_strays(doc, product_skus(doc, variant_rows_for_product(db, doc, strict=True)))
+        out.update(s for s in strays if s in wanted)
     return sorted(out)
 
 
@@ -572,11 +579,28 @@ async def plan_product_stock(db, product: Dict[str, Any], variants: Optional[Lis
 # ---------------------------------------------------------------------------
 
 
+def tracking_confirmed(nodes: Any, policy: str) -> set:
+    """The variant gids a Shopify answer CONFIRMS as tracked=true + ``policy``.
+    ONE rule for the size's create answer (variants.py) and the tracking
+    re-send's answer (below): a variant the answer leaves out, or echoes
+    untracked / on another policy, is not confirmed -- silence confirms
+    nothing, whichever call it answered."""
+    return {
+        _as_shopify_gid(n.get("id"), "ProductVariant")
+        for n in (nodes if isinstance(nodes, list) else [])
+        if isinstance(n, dict)
+        and (n.get("inventoryItem") or {}).get("tracked") is True
+        and n.get("inventoryPolicy") == policy
+    }
+
+
 async def _set_variant_tracking(
     db, product_gid: str, variant_gids: List[str], policy: str
 ) -> Dict[str, Any]:
-    """tracked=true + inventoryPolicy on every variant, chunked. Fail-soft."""
-    out: Dict[str, Any] = {"updated": 0, "errors": []}
+    """tracked=true + inventoryPolicy on every variant, chunked. Fail-soft.
+    ``updated`` counts what Shopify ACCEPTED; ``confirmed`` holds the gids its
+    answer echoed back tracked + this policy (``tracking_confirmed``)."""
+    out: Dict[str, Any] = {"updated": 0, "errors": [], "confirmed": set()}
     rows = [
         {"id": g, "inventoryPolicy": policy, "inventoryItem": {"tracked": True}}
         for g in variant_gids
@@ -592,6 +616,8 @@ async def _set_variant_tracking(
                 out["errors"].append(err)
             else:
                 out["updated"] += len(chunk)
+                answer = ((body.get("data") or {}).get("productVariantsBulkUpdate")) or {}
+                out["confirmed"] |= tracking_confirmed(answer.get("productVariants"), policy)
         except Exception as exc:  # noqa: BLE001 -- fail-soft side channel
             out["errors"].append(str(exc))
     return out
@@ -750,16 +776,19 @@ def _writeback_stock(
     db,
     product_id: str,
     per_sku: Dict[str, Dict[str, int]],
+    mapped: Iterable[str],
     *,
     policy: Optional[str] = None,
     tracked: Optional[bool] = None,
 ) -> None:
-    """Persist what was just sent (ecom.online_stock) so the next levels pass
-    can diff against it: ``quantities = {sku: {store_id: qty}}``, read-merge-
-    write per SKU -- a POS write-back for one SKU REPLACES only that SKU's
-    per-store row, and a shop whose read failed is simply absent from it so
-    the next pass re-sends that shop. NEVER touches locally_modified.
-    Fail-soft."""
+    """Persist what was just accepted (ecom.online_stock) so the next levels
+    pass can diff against it: ``quantities = {sku: {store_id: qty}}``,
+    read-merge-write PER SHOP. A mapped shop not written this pass (its write
+    refused, its shelf unreadable) keeps its last accepted number -- what
+    Shopify still shows there, and what ``release_store_location`` must zero
+    when that shop's location is removed. A shop no longer in ``mapped``
+    leaves the row (kept, the listing would read "changed" on every pass).
+    NEVER touches locally_modified. Fail-soft."""
     try:
         coll = db["catalog_products"]
         doc = coll.find_one({"id": product_id})
@@ -774,8 +803,10 @@ def _writeback_stock(
             for sku, rows in dict(prev.get("quantities") or {}).items()
             if isinstance(rows, dict)
         }
+        keep = set(mapped)
         for sku, rows in per_sku.items():
-            quantities[sku] = {sid: int(q) for sid, q in rows.items()}
+            old = {sid: q for sid, q in (quantities.get(sku) or {}).items() if sid in keep}
+            quantities[sku] = {**old, **{sid: int(q) for sid, q in rows.items()}}
         ecom["online_stock"] = {
             "quantities": quantities,
             "policy": policy if policy is not None else prev.get("policy"),
@@ -1425,6 +1456,7 @@ def _rows_ok(
         or summary["unknown_stores"]
         or summary["orphan_stores"]
         or summary.get("stray_skus")
+        or summary.get("stray_unread")
         or locations.get("stray")
         or locations.get("dead")
         or summary.get("locations_unread")
@@ -1485,6 +1517,7 @@ async def push_skus_stock(
         "dead_locations": [],
         "locations_unread": False,
         "stray_skus": [],
+        "stray_unread": None,
         "sold_out": False,
     }
     if not distinct:
@@ -1560,9 +1593,16 @@ async def push_skus_stock(
     # written per listing below, and the stray question (a SKU the site still
     # shows a number for that the listing no longer lists) is asked per listing
     # HERE -- on the press, the drawer preview's twin, and the sale's own run
-    # row, not only on the sweep (recheck round 1).
-    by_product = {product_id: list(distinct)} if product_id else listings_for_skus(db, distinct)
-    summary["stray_skus"] = listing_strays(db, by_product)
+    # row, not only on the sweep (recheck round 1). STRICT: a dead read is
+    # UNKNOWN and named, never "no stray"; the numbers still go out.
+    by_product: Dict[str, List[str]] = {}
+    stray_unread: Optional[str] = None
+    try:
+        by_product = {product_id: list(distinct)} if product_id else listings_for_skus(db, distinct, strict=True)
+        summary["stray_skus"] = listing_strays(db, by_product)
+    except Exception as exc:  # noqa: BLE001 -- a report never blocks the write
+        stray_unread = _stray_unread(exc)
+    summary["stray_unread"] = stray_unread
     # INVARIANT 2, on THIS door too (round-5 P1 + first-push P1). This is the
     # door every first publish goes through (sync_product_stock) and every POS
     # sale goes through (writeback_skus), and it never asked Shopify's own
@@ -1582,11 +1622,16 @@ async def push_skus_stock(
         stray_locations=summary["unmapped_locations"],
         dead_locations=summary["dead_locations"],
         locations_unread=summary["locations_unread"],
-        unknown_error=(
-            _unknown_error(_labels(stores, summary["unknown_stores"]))
-            if summary["unknown_stores"]
-            else None
-        ),
+        unknown_error=" -- ALSO: ".join(
+            line
+            for line in (
+                _unknown_error(_labels(stores, summary["unknown_stores"]))
+                if summary["unknown_stores"]
+                else None,
+                stray_unread,
+            )
+            if line
+        ) or None,
         orphans=orphans,
         stray_skus=summary["stray_skus"],
         duplicate_targets=duplicate_targets,
@@ -1659,28 +1704,28 @@ async def push_skus_stock(
             sku, sid = key_of[(inv_gid, loc)]
             written_per_sku.setdefault(sku, {})[sid] = qty
     # What was accepted goes to the baseline -- per listing, only the SKUs
-    # written, only the shops written (a failed or unknown shop is omitted so
-    # the next pass re-sends it).
+    # written, only the shops written; a failed or unknown shop keeps the
+    # number it last had accepted (what Shopify still shows there).
     if written_per_sku:
         for pid, pid_skus in by_product.items():
             rows_for = {s: written_per_sku[s] for s in pid_skus if s in written_per_sku}
             if rows_for:
-                _writeback_stock(db, pid, rows_for, policy=policy, tracked=tracked)
+                _writeback_stock(db, pid, rows_for, mapped, policy=policy, tracked=tracked)
     # What Shopify ACCEPTED, not what was planned: the sync page prints these
     # as the per-shop "last written" numbers, and a refused chunk must not
     # read as written (the baseline above already only takes the accepted rows).
     summary["quantities"] = written_per_sku
-    # LIVE AND SOLD OUT, said by the writer (recheck round 2): every number
-    # Shopify accepted was 0. Correct (IMS is master, the shelf is empty) but
-    # the listing now reads sold out with no code to say so -- and the drawer
-    # toast re-derived it in TypeScript from `quantities` while the sweep's
-    # tally spelled "sold out" as `set == 0` under a code and the summary
-    # line said nothing. One fact, one stamp; both screens print it. Nothing
-    # written is NOT this (that is the code's line, "NO stock written").
-    summary["sold_out"] = bool(written_per_sku) and all(
+    summary["ok"] = _rows_ok(summary, holders, conflicts, mapped, locations)
+    # LIVE AND SOLD OUT, said by the writer once (both screens print this
+    # stamp): every number written was 0 AND the pass is `ok` -- which is
+    # every listed SKU accepted at every mapped shop and nothing unknown (no
+    # refused write, no unreadable shelf, no unmapped holder, no stray size or
+    # location, no unread check). "Every number Shopify accepted was 0" alone
+    # said SOLD OUT over a refused shop still showing its old number, and over
+    # Pune holding the unit.
+    summary["sold_out"] = summary["ok"] and all(
         int(q) == 0 for rows in written_per_sku.values() for q in rows.values()
     )
-    summary["ok"] = _rows_ok(summary, holders, conflicts, mapped, locations)
     if summary["errors"] and not summary["error"]:
         summary["error"] = "; ".join(str(e) for e in summary["errors"][:5])
     return summary
@@ -1998,18 +2043,6 @@ def skus_on_live_listings(db, skus: Iterable[str], *, strict: bool = False) -> s
     return live_listing_split(db, skus, strict=strict)[0]
 
 
-def listing_already_live(product: Dict[str, Any]) -> bool:
-    """Visible AND no stock pass has recorded its tracking as unset
-    (``ecom.online_stock.tracked`` False: a size minted untracked, or the
-    staged draft above). Picks the WORDS of a refused tracking re-send and
-    what the baseline records: a refused productVariantsBulkUpdate changes
-    nothing on Shopify, so a listing whose tracking was confirmed keeps it --
-    reporting it "UNTRACKED" while it was visible and tracked was two screens
-    giving two answers about one listing (recheck round 1)."""
-    ecom = (product or {}).get("ecom") or {}
-    return listing_visible(product) and (ecom.get("online_stock") or {}).get("tracked") is not False
-
-
 async def sync_product_stock(
     db,
     product: Dict[str, Any],
@@ -2017,7 +2050,6 @@ async def sync_product_stock(
     product_gid: str,
     *,
     extra_variant_gids: Optional[List[Optional[str]]] = None,
-    minted_variant_gids: Optional[List[Optional[str]]] = None,
 ) -> Dict[str, Any]:
     """LIVE-only (the caller has passed the gates): tracking + policy on every
     known variant, then ``push_skus_stock`` for this product's SKUs -- one row
@@ -2026,25 +2058,20 @@ async def sync_product_stock(
     ~70 network writes, and a POS sale that lands mid-loop must not be
     overwritten with the pre-sale number (its own write-back would be undone
     until the next tick). Fail-soft summary, never raises; a shop whose
-    on-hand is UNKNOWN is never written as 0."""
+    on-hand is UNKNOWN is never written as 0.
+
+    THE ONE TRACKING RULE (owner, round 4): tracking is CONFIRMED only when
+    Shopify's answer to this re-send echoes EVERY size tracked=true + this
+    policy (``tracking_confirmed``). A refused call, a silent answer, or one
+    that says tracked=false / another policy confirms nothing -- first publish
+    or re-press, new size or old. ``tracking_confirmed`` (bool) and
+    ``tracking_unconfirmed`` (the gids) say it; push_product puts or keeps a
+    listing on the website only on it, and nothing here is ok, SOLD OUT or
+    recorded tracked without it."""
     pid = product.get("id") or product.get("product_id")
     policy = inventory_policy_for(product)
     gids = product_variant_gids(product, variants, extra_variant_gids)
-    tracked: Dict[str, Any] = {"updated": 0, "errors": []}
-    # "Already live" covers the variants an earlier publish CONFIRMED, never
-    # one this press minted (``minted_variant_gids``: what seeding just put on
-    # Shopify, its gid on no IMS row yet). For that variant this IS the first
-    # publish, and on a published product it is visible the moment it exists:
-    # a size added to a live listing under a refused tracking call went out
-    # UNTRACKED while the line said "the listing keeps the tracking its first
-    # publish set" and the baseline recorded tracked=True -- with the new
-    # SKU's row written beside it the sweep saw no diff, so nothing ever
-    # re-sent tracking. Not live -> the WITHOUT LIMIT line, tracked=False, and
-    # the next pass re-sends it.
-    known = set(product_variant_gids(product, variants))
-    live = listing_already_live(product) and not [
-        g for g in product_variant_gids({}, None, minted_variant_gids) if g not in known
-    ]
+    tracked: Dict[str, Any] = {"updated": 0, "errors": [], "confirmed": set()}
     # Tracking + DENY go on even when no quantity can follow (no shop mapped):
     # an UNTRACKED item sells without limit, which is the worse failure. The
     # listing then reads sold out and push_skus_stock says so, loudly, instead
@@ -2053,6 +2080,8 @@ async def sync_product_stock(
         tracked = await _set_variant_tracking(db, product_gid, gids, policy)
     else:
         tracked["errors"].append("no variant gid known -- tracking not set")
+    unconfirmed = [g for g in gids if g not in tracked["confirmed"]]
+    confirmed = bool(gids) and not unconfirmed
 
     skus = product_skus(product, variants)
     summary = await push_skus_stock(
@@ -2061,41 +2090,32 @@ async def sync_product_stock(
         source="product_push",
         product_id=str(pid) if pid else None,
         policy=policy,
-        # "Tracking is on Shopify": this call set it, or the listing's first
-        # publish did (a refused re-send changes nothing there). Recording
-        # False for a live listing would withhold its NEXT press instead.
-        tracked=tracked["updated"] > 0 or live,
+        # Recorded tracked only on Shopify's confirming answer: anything less
+        # is recorded untracked, so the next sweep re-sends it.
+        tracked=confirmed,
     )
     summary["policy"] = policy
     summary["tracked"] = tracked["updated"]
+    summary["tracking_confirmed"] = confirmed
+    summary["tracking_unconfirmed"] = unconfirmed
     summary["errors"] = list(tracked["errors"]) + list(summary["errors"])
-    summary["ok"] = summary["ok"] and not tracked["errors"]
-    if tracked["errors"]:
+    summary["ok"] = summary["ok"] and confirmed
+    summary["sold_out"] = summary["sold_out"] and summary["ok"]  # unconfirmed tracking is unknown
+    if not confirmed:
         # The worse failure gets the code (recheck round 2, first-push): with
-        # ok=False and NO code the press promoted nothing, the drawer toast and
-        # the sweep toast read green and the bulk tally filed the listing under
-        # `pushed` -- over a variant that is LIVE and UNTRACKED (Shopify sells
-        # it without limit) for up to 12 h until the next tick re-sends
-        # tracking (the baseline records tracked=False). The product press
-        # reads this code and WITHHOLDS the publish (product.py `tracking_ok`);
-        # the sweep re-sends tracking on the next tick. The quantity verdict,
-        # if any, rides under it.
-        why = "; ".join(str(e) for e in tracked["errors"][:3])
-        summary["code"] = STOCK_TRACKING_FAILED
-        if live:
-            line = (
-                f"tracking + {policy} could not be re-confirmed on the variant(s) "
-                f"({why}) -- the listing keeps the tracking its first publish set; "
-                f"press again"
-            )
-        else:
-            line = (
-                f"tracking + {policy} could not be set on the variant(s) ({why}) -- "
-                f"an UNTRACKED listing sells WITHOUT LIMIT; press again"
-            )
-        summary["error"] = line + (
-            f" -- ALSO: {summary['error']}" if summary.get("error") else ""
+        # ok=False and NO code the press promoted nothing and every screen read
+        # green over a variant that may sell without limit. The product press
+        # reads `tracking_confirmed` and withholds (or takes down) the
+        # listing; the sweep re-sends tracking on the next tick. The quantity
+        # verdict, if any, rides under it.
+        why = "; ".join(str(e) for e in tracked["errors"][:3]) or (
+            f"Shopify's answer did not confirm {len(unconfirmed)} of {len(gids)} size(s)"
         )
+        summary["code"] = STOCK_TRACKING_FAILED
+        summary["error"] = (
+            f"tracking + {policy} could not be confirmed on the variant(s) ({why}) -- "
+            f"until Shopify confirms it a size may sell WITHOUT LIMIT; press again"
+        ) + (f" -- ALSO: {summary['error']}" if summary.get("error") else "")
     elif summary["errors"] and not summary.get("error"):
         summary["error"] = "; ".join(str(e) for e in summary["errors"][:5])
     return summary
@@ -2107,33 +2127,30 @@ async def sync_product_stock(
 
 
 def _gid_products_with_variants(db) -> List[Tuple[Dict[str, Any], List[Dict[str, Any]]]]:
-    """Every catalog product already on Shopify, with its variant rows."""
+    """Every catalog product already on Shopify, with its variant rows.
+    STRICT: either read dying RAISES. Fail-soft, a dead listings read was a
+    green "nothing to do" and a dead size-row read shrank every listing to
+    its own SKU -- naming every live size a stray to delete in Shopify admin
+    and writing none of them. ``sync_stock_levels`` says UNKNOWN instead."""
     out: List[Tuple[Dict[str, Any], List[Dict[str, Any]]]] = []
-    try:
-        # A size variant (is_variant_of) never owns a listing: its SKU rides
-        # the parent's row set below. Filtered even if a repair script ever
-        # stamps the parent gid on the child twin (a double stock write and a
-        # second ledger otherwise).
-        products = [
-            d
-            for d in db["catalog_products"].find({})
-            if (d.get("ecom") or {}).get("shopify_product_id") and not is_variant_of(d)
-        ]
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[SHOPIFY_STOCK] catalog read failed: %s", exc)
-        return []
+    # A size variant (is_variant_of) never owns a listing: its SKU rides
+    # the parent's row set below. Filtered even if a repair script ever
+    # stamps the parent gid on the child twin (a double stock write and a
+    # second ledger otherwise).
+    products = [
+        d
+        for d in db["catalog_products"].find({})
+        if (d.get("ecom") or {}).get("shopify_product_id") and not is_variant_of(d)
+    ]
     if not products:
         return []
     by_pid: Dict[str, List[Dict[str, Any]]] = {}
     by_sku: Dict[str, List[Dict[str, Any]]] = {}
-    try:
-        for v in db["catalog_variants"].find({}):
-            if v.get("parent_product_id"):
-                by_pid.setdefault(str(v["parent_product_id"]), []).append(v)
-            if v.get("parent_sku"):
-                by_sku.setdefault(str(v["parent_sku"]), []).append(v)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[SHOPIFY_STOCK] variant read failed: %s", exc)
+    for v in db["catalog_variants"].find({}):
+        if v.get("parent_product_id"):
+            by_pid.setdefault(str(v["parent_product_id"]), []).append(v)
+        if v.get("parent_sku"):
+            by_sku.setdefault(str(v["parent_sku"]), []).append(v)
     from ..online_catalog import merge_variant_rows
 
     for p in products:
@@ -2175,7 +2192,25 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
     from ..online_catalog import inventory_items_for_skus
     from ..online_stock_writeback import online_quantities_for_skus, orphan_stock_stores
 
-    pairs = _gid_products_with_variants(db)
+    try:
+        pairs = _gid_products_with_variants(db)
+    except Exception as exc:  # noqa: BLE001 -- the sweep never raises; it says UNKNOWN
+        # No count at all (the screens print "-", never "0 of 0"); a LIVE
+        # press stays LIVE, never "preview".
+        live, reason = _live_or_reason(db)
+        return PushResult(
+            mode=MODE_LIVE if live and not dry_run else MODE_SIMULATED,
+            entity="stock",
+            action="sync",
+            ok=False,
+            code=STOCK_ONHAND_UNKNOWN,
+            error=(
+                f"the catalogue (the listings on Shopify or their sizes) could not be "
+                f"read -- nothing written this pass: {exc}"
+            ),
+            reason=reason if not live else ("dry_run (Preview first)" if dry_run else None),
+            payload={},
+        )
     all_skus: List[str] = []
     for product, variants in pairs:
         for sku in product_skus(product, variants):
@@ -2378,6 +2413,10 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
     failed = 0
     errors: List[str] = []
     failures: List[Tuple[Optional[str], str]] = []  # (the listing's own code, its line)
+    # Written, but the listing's OWN pass was not ok (e.g. its stray-size
+    # re-read died mid-loop): its code reaches the run, so its line and the
+    # red verdict do too -- never a code on a line that says ok.
+    notes: List[Tuple[Optional[str], str]] = []
     product_code: Optional[str] = None
     accepted: List[Dict[str, Any]] = []
     for product, variants, _skus, _mine in changed:
@@ -2412,6 +2451,9 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
             failures.append((res.get("code"), errors[-1]))
         else:
             synced += 1
+            if res.get("code") and not res.get("ok"):
+                pid = product.get("id") or product.get("product_id")
+                notes.append((res.get("code"), f"{pid}: {res.get('error') or res.get('code')}"))
         product_code = product_code or res.get("code")
     payload.update({
         "synced": synced,
@@ -2427,30 +2469,35 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
     })
     code, error = _verdict()
     code = code or product_code
-    if errors and not error:
-        error = "; ".join(errors[:3])
-    else:
+    said = errors + [line for _c, line in notes]
+    if said and not error:
+        error = "; ".join(said[:3])
+    elif error:
         # Every true rung is said (recheck round 2): a listing's OWN rung --
         # a code the run-level ladder did not state (tracking refused, a
         # chunk refused, a whole-listing abort) -- rides under the ladder's
         # line instead of being dropped once the ladder set one; under the
         # day-1 configuration (Pune ticked, the Jharkhand locations unticked)
-        # the ladder ALWAYS sets one. A listing whose code IS the run's is the
-        # ladder said once more per listing (each push_skus_stock re-scores
-        # it), so it is not repeated, and the ladder tail a listing's own line
-        # carries is cut.
-        own = [
-            line.removesuffix(f" -- ALSO: {error}")
-            for lcode, line in failures
-            if lcode and lcode != code
-        ]
+        # the ladder ALWAYS sets one. Each push_skus_stock re-scores the
+        # ladder, so a listing's line repeats the run's rungs: those are cut
+        # BY TEXT, rung by rung, never by code -- a listing's code is its TOP
+        # rung, and under the day-1 setup that is the run's code too, while
+        # its own rung (the stray-size check it could not read) rides under
+        # it as an ALSO and is said nowhere else.
+        said_rungs = set(error.split(" -- ALSO: "))
+        own = []
+        for _lcode, line in failures + notes:
+            pid, _sep, text = line.partition(": ")
+            new = [r for r in text.split(" -- ALSO: ") if r not in said_rungs]
+            if new:
+                own.append(f"{pid}: {' -- ALSO: '.join(new)}")
         if own:
             error = f"{error} -- ALSO: {'; '.join(own[:3])}"
     return PushResult(
         mode=MODE_LIVE,
         entity="stock",
         action="sync" if changed else "noop",
-        ok=failed == 0 and _all_ok(),
+        ok=failed == 0 and not notes and _all_ok(),
         payload=payload,
         code=code,
         error=error,
