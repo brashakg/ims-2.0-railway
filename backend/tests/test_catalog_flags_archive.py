@@ -50,6 +50,7 @@ from api.routers import tasks as tasks_mod  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
 from api.services import catalog_flags, rbac_policy, shopify_push  # noqa: E402
 from api.services.capabilities import capability_for, _CAP_ROLE_HINT  # noqa: E402
+from api.utils.ist import ist_today  # noqa: E402
 from database.repositories.audit_repository import AuditRepository  # noqa: E402
 from database.repositories.product_repository import ProductRepository  # noqa: E402
 from database.repositories.task_repository import TaskRepository  # noqa: E402
@@ -627,7 +628,9 @@ def test_archive_and_restore_do_not_move_the_last_edit(env):
     assert rows["P3"]["last_edited_at"] == datetime(2026, 9, 1, 6, 0)
     assert rows["P3"]["updated_by_name"] == "Akshay Ovhal"
     assert rows["P2"]["last_edited_at"] == datetime(2026, 10, 1, 6, 0)  # its add date
-    today = datetime.now().strftime("%Y-%m-%d")
+    # Today in India: a restore that stamped "edited now" would land in it
+    # at any hour (the box's UTC day missed it from 18:30 to midnight).
+    today = ist_today().isoformat()
     assert _list(ADMIN, sort="edited", is_active="true", date_on="edited",
                  date_from=today, date_to=today) == []
     assert _list(ADMIN, sort="edited", is_active="true", updated_by="none",

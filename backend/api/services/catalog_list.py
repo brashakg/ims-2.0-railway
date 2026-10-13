@@ -175,6 +175,10 @@ def ist_day_bounds(
     )
 
 
+# Every stored moment is at or after this one (an aware UTC instant).
+_ANY_DATE = datetime.min.replace(tzinfo=timezone.utc)
+
+
 def _range(gte, lt) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     if gte is not None:
@@ -229,10 +233,11 @@ def list_query(
         gte, lt = ist_day_bounds(date_from, date_to)
         if date_on == "edited":
             # THE last-edit moment, the Recently edited sort's own expression.
-            # The >= bound is always a date (year 1 when From is not chosen),
-            # so a row whose moment is missing or not a date never matches --
-            # exactly as a stored-field range would treat it.
-            cond = [{"$gte": [LAST_EDITED_AT, gte or datetime(1, 1, 1)]}]
+            # The >= bound is always a date (the first instant there is when
+            # From is not chosen -- a type gate, not a day), so a row whose
+            # moment is missing or not a date never matches -- exactly as a
+            # stored-field range would treat it.
+            cond = [{"$gte": [LAST_EDITED_AT, gte or _ANY_DATE]}]
             if lt is not None:
                 cond.append({"$lt": [LAST_EDITED_AT, lt]})
             clauses.append({"$expr": {"$and": cond}})
