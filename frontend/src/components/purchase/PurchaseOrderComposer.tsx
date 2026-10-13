@@ -15,9 +15,11 @@
 // lines -- is injected via props, so neither door regresses.
 //
 // Validation (mirrors the manual-form rule AND the earlier Buy Desk fix, so we
-// do not weaken either): every kept line needs product_id + quantity >= 1 +
-// unit_cost > 0. Cost cannot be added later at receiving (accept_grn reads the
-// PO's unit price), so a zero-cost line is blocked up front.
+// do not weaken either): every kept line needs product_id + quantity >= 1 and,
+// for the roles that price (COST_ROLES), unit_cost > 0 -- accounts set the
+// price agreed with the vendor here. A line nobody priced (a manager's, by
+// quantity) is still received onto the shelf and its cost comes with the bill
+// (owner ruling 2026-10-12).
 //
 // WHAT WE PAY (owner ruling 2026-10-12) is shown to COST_ROLES only. For
 // anyone else (`showPrices` false: area / store managers) the form is
@@ -529,13 +531,13 @@ export function PurchaseOrderComposer({
       );
       return;
     }
-    // Cost is required up front (it can't be backfilled at receiving) -- mirrors
-    // both the manual form and the Buy Desk fix. Checked BEFORE the generic
-    // "add a line" guard so a lone zero-cost line gets the precise, actionable
-    // message rather than a vague one.
+    // The pricing roles type the agreed price -- mirrors both the manual form
+    // and the Buy Desk fix. Checked BEFORE the generic "add a line" guard so a
+    // lone zero-cost line gets the precise, actionable message rather than a
+    // vague one.
     const zeroCost = lines.filter((l) => named(l) && l.quantity >= 1 && !priced(l));
     if (zeroCost.length > 0) {
-      toast.error('Every line needs a unit cost above 0 — cost cannot be added later at receiving.');
+      toast.error('Every line needs a unit cost above 0 — enter the price agreed with the vendor.');
       return;
     }
     if (valid.length === 0) {

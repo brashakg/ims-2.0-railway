@@ -584,9 +584,9 @@ export function PurchaseOrderForm({
                   `${it.new_product?.brand ?? ''} ${it.new_product?.model ?? ''}`.trim(),
                 sku: it.sku ?? '',
                 quantity: it.quantity,
-                unitCost: it.unit_price ?? 0,
+                unitCost: it.unit_price || null,
                 taxRate: it.taxRate,
-                total: it.lineTotal,
+                total: it.unit_price ? it.lineTotal : null,
               }));
 
               const newPO: PurchaseOrder = {

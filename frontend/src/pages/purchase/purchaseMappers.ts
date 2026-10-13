@@ -69,20 +69,25 @@ export function mapPOtoPurchaseOrder(po: any): PurchaseOrder {
       ? Math.round(((po.tax_amount ?? 0) / po.subtotal) * 1000) / 10
       : 0;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const items = rawItems.map((item: any) => ({
-    productId: item.product_id ?? '',
-    productName: item.product_name ?? '',
-    sku: item.sku ?? '',
-    quantity: item.ordered_qty ?? item.quantity ?? 0,
-    unitCost: item.unit_price ?? item.unit_cost ?? 0,
-    taxRate: item.tax_rate ?? impliedRate,
-    total:
-      item.total ??
-      (item.quantity ?? 0) *
-        (item.unit_price ?? item.unit_cost ?? 0) *
-        (1 + (item.tax_rate ?? impliedRate) / 100),
-    receivedQty: item.received_qty ?? headerReceived[item.product_id ?? ''] ?? 0,
-  }));
+  const items = rawItems.map((item: any) => {
+    // A line nobody priced (None from the server, 0.0 from a CL / forecast
+    // draft -- the server's is_unpriced_line) stays null: shown as needing a
+    // price, never as a real 0 (owner ruling 2026-10-12).
+    const unitCost: number | null = item.unit_price || item.unit_cost || null;
+    return {
+      productId: item.product_id ?? '',
+      productName: item.product_name ?? '',
+      sku: item.sku ?? '',
+      quantity: item.ordered_qty ?? item.quantity ?? 0,
+      unitCost,
+      taxRate: item.tax_rate ?? impliedRate,
+      total:
+        unitCost == null
+          ? null
+          : item.total ?? (item.quantity ?? 0) * unitCost * (1 + (item.tax_rate ?? impliedRate) / 100),
+      receivedQty: item.received_qty ?? headerReceived[item.product_id ?? ''] ?? 0,
+    };
+  });
 
   return {
     id: po.po_id ?? po._id ?? '',
@@ -105,4 +110,11 @@ export function mapPOtoPurchaseOrder(po: any): PurchaseOrder {
     receivedDate: po.received_date ?? po.received_at?.split('T')[0],
     notes: po.notes,
   };
+}
+
+/** What a PO line's price reads as: the rupees, or that accounts still have
+ *  to agree it (a line nobody priced -- never shown as a real 0). */
+export const PRICE_NEEDED = 'Price needed';
+export function poMoney(value: number | null): string {
+  return value == null ? PRICE_NEEDED : `₹${value.toLocaleString()}`;
 }

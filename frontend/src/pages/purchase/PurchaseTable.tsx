@@ -17,6 +17,7 @@ import { useAuth } from '../../context/AuthContext';
 import { COST_ROLES } from '../../components/common/CostCell';
 import { RECEIVABLE_PO_STATUSES } from './purchaseTypes';
 import type { PurchaseOrder } from './purchaseTypes';
+import { PRICE_NEEDED, poMoney } from './purchaseMappers';
 
 interface PurchaseTableProps {
   purchaseOrders: PurchaseOrder[];
@@ -55,7 +56,9 @@ function downloadPO(po: PurchaseOrder, showPrices: boolean) {
       `${idx + 1}. ${item.productName} (SKU: ${item.sku})` +
       ` | Qty: ${item.quantity}` +
       (showPrices
-        ? ` | Unit: Rs.${item.unitCost.toLocaleString()} | Total: Rs.${item.total.toLocaleString()}`
+        ? item.unitCost == null || item.total == null
+          ? ` | Unit: ${PRICE_NEEDED}`
+          : ` | Unit: Rs.${item.unitCost.toLocaleString()} | Total: Rs.${item.total.toLocaleString()}`
         : '')
     );
   });
@@ -188,7 +191,7 @@ export function PurchaseTable({ purchaseOrders, onViewPO }: PurchaseTableProps) 
               {po.items.map((item, idx) => (
                 <div key={idx} className="flex items-center justify-between text-sm">
                   <span className="text-gray-700">{item.productName} (x{item.quantity})</span>
-                  {showPrices && <span className="font-medium text-gray-900">{'\u20B9'}{item.total.toLocaleString()}</span>}
+                  {showPrices && <span className={`font-medium ${item.total == null ? 'text-amber-700' : 'text-gray-900'}`}>{poMoney(item.total)}</span>}
                 </div>
               ))}
             </div>

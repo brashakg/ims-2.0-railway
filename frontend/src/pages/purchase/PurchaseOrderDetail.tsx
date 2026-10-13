@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { getStatusBadge } from './statusBadge';
 import type { PurchaseOrder } from './purchaseTypes';
+import { poMoney } from './purchaseMappers';
 import { POPrint } from '../../components/print/POPrint';
 import { POLifecycleDrawer } from '../../components/purchase/POLifecycleDrawer';
 import { useAuth } from '../../context/AuthContext';
@@ -28,6 +29,7 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
   // What we pay: COST_ROLES only (owner ruling 2026-10-12). A manager sees
   // the products and quantities he ordered.
   const showPrices = hasRole(COST_ROLES);
+  const unpricedLines = po.items.filter((i) => i.unitCost == null).length;
   const [showPrint, setShowPrint] = useState(false);
   const [showTimeline, setShowTimeline] = useState(false);
 
@@ -190,9 +192,9 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
                       <td className="py-2 px-3 text-gray-900">{item.productName}</td>
                       <td className="py-2 px-3 text-gray-600">{item.sku}</td>
                       <td className="py-2 px-3 text-right text-gray-900">{item.quantity}</td>
-                      {showPrices && <td className="py-2 px-3 text-right text-gray-900">{'\u20B9'}{item.unitCost.toLocaleString()}</td>}
+                      {showPrices && <td className={`py-2 px-3 text-right ${item.unitCost == null ? 'text-amber-700 font-medium' : 'text-gray-900'}`}>{poMoney(item.unitCost)}</td>}
                       <td className="py-2 px-3 text-right text-gray-600">{item.taxRate}%</td>
-                      {showPrices && <td className="py-2 px-3 text-right font-medium text-gray-900">{'\u20B9'}{item.total.toLocaleString()}</td>}
+                      {showPrices && <td className={`py-2 px-3 text-right font-medium ${item.total == null ? 'text-amber-700' : 'text-gray-900'}`}>{poMoney(item.total)}</td>}
                     </tr>
                   ))}
                 </tbody>
@@ -238,6 +240,12 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
                 <span className="text-gray-900">Total</span>
                 <span className="text-gray-900">{'\u20B9'}{po.total.toLocaleString()}</span>
               </div>
+              {unpricedLines > 0 && (
+                <p className="text-xs text-amber-700">
+                  Not counted: {unpricedLines} {unpricedLines === 1 ? 'line needs' : 'lines need'} a price.
+                  Enter it when you book the bill in Purchase Invoices.
+                </p>
+              )}
             </div>
           </div>
           )}

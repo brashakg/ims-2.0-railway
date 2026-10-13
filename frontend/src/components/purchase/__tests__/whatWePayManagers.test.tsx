@@ -37,6 +37,7 @@ import { COST_ROLES } from '../../common/CostCell';
 import { vendorsApi } from '../../../services/api/inventory';
 import { PurchaseOrderDetail } from '../../../pages/purchase/PurchaseOrderDetail';
 import type { PurchaseOrder } from '../../../pages/purchase/purchaseTypes';
+import { mapPOtoPurchaseOrder, poMoney, PRICE_NEEDED } from '../../../pages/purchase/purchaseMappers';
 
 const getLastCost = vendorsApi.getLastCost as unknown as ReturnType<typeof vi.fn>;
 
@@ -140,6 +141,38 @@ describe('the PO detail', () => {
     render(<PurchaseOrderDetail po={PO} onClose={() => {}} onAction={() => {}} />);
     expect(screen.getByText('Unit Cost')).toBeTruthy();
     expect(screen.getAllByText(/4,321/).length).toBeGreaterThan(0);
+  });
+});
+
+describe('a line nobody priced', () => {
+  // A manager's PO line the server could not price is stored without a price
+  // (never a made-up 0). Accounts open it to agree the price: it must read as
+  // needing one, not as a real Rs 0 (owner ruling 2026-10-12).
+  const unpriced = mapPOtoPurchaseOrder({
+    po_id: 'PO9', po_number: 'PO-2026-0099', vendor_id: 'V1', vendor_name: 'Essilor India',
+    status: 'SENT', created_at: '2026-10-12T10:00:00',
+    items: [
+      { product_id: 'p9', product_name: 'Unpriced frame', sku: 'UF-1', quantity: 2, unit_price: null, tax_rate: 12 },
+      { product_id: 'p8', product_name: 'CL draft line', sku: 'CL-1', quantity: 1, unit_price: 0, tax_rate: 5 },
+    ],
+    subtotal: 0, tax_amount: 0, total_amount: 0,
+  });
+
+  it('maps to no price at all, not a 0', () => {
+    expect(unpriced.items.map((i) => [i.unitCost, i.total])).toEqual([[null, null], [null, null]]);
+    expect(poMoney(null)).toBe(PRICE_NEEDED);
+  });
+
+  it.each<UserRole>(COST_ROLES)('shows %s each one as needing a price', (role) => {
+    auth.role = role;
+    render(<PurchaseOrderDetail po={unpriced} onClose={() => {}} onAction={() => {}} />);
+    const rows = screen.getAllByRole('row').slice(1); // the two lines
+    expect(rows.map((r) => r.textContent)).toEqual([
+      expect.stringContaining(`${PRICE_NEEDED}12%${PRICE_NEEDED}`),
+      expect.stringContaining(`${PRICE_NEEDED}5%${PRICE_NEEDED}`),
+    ]);
+    rows.forEach((r) => expect(r.textContent).not.toContain('₹'));
+    expect(screen.getByText(/Not counted: 2 lines need a price/)).toBeTruthy();
   });
 });
 

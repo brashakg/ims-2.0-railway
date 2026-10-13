@@ -25,8 +25,9 @@ interface POItem {
   product_id: string;
   product_name: string;
   quantity: number;
-  unit_price: number;
-  total: number;
+  /** null = nobody priced the line yet: printed as needing a price, never 0. */
+  unit_price: number | null;
+  total: number | null;
 }
 
 interface POPrintData {
@@ -189,8 +190,8 @@ export function POPrint({ po, store, entity, overrides, showPrices = true, onClo
                     <td style={tblCell}>{index + 1}</td>
                     <td style={{ ...tblCell, textAlign: 'left' }}>{item.product_name}</td>
                     <td style={tblCell}>{item.quantity}</td>
-                    {showPrices && <td style={tblNum}>{inr(item.unit_price, { withPaise: true })}</td>}
-                    {showPrices && <td style={{ ...tblNum, fontWeight: 600 }}>{inr(item.total, { withPaise: true })}</td>}
+                    {showPrices && <td style={tblNum}>{item.unit_price == null ? 'Price needed' : inr(item.unit_price, { withPaise: true })}</td>}
+                    {showPrices && <td style={{ ...tblNum, fontWeight: 600 }}>{item.total == null ? 'Price needed' : inr(item.total, { withPaise: true })}</td>}
                   </tr>
                 ))}
                 {showPrices && <>
