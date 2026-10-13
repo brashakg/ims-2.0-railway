@@ -322,12 +322,12 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/settings/admin-controls",
-        "allowed": ["SUPERADMIN"],
+        "allowed": ["ADMIN", "SUPERADMIN"],
     },
     {
         "method": "PUT",
         "path": "/api/v1/settings/admin-controls",
-        "allowed": ["SUPERADMIN"],
+        "allowed": ["ADMIN", "SUPERADMIN"],
     },
     {
         "method": "GET",

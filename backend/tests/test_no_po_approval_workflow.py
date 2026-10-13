@@ -31,13 +31,13 @@ def test_the_defaults_offer_no_po_approval(client, auth_headers, monkeypatch):
     monkeypatch.setattr(settings_mod, "_get_settings_collection", lambda _name: None)
     types = _types(client, auth_headers)
     assert "PO_APPROVAL" not in types
-    assert "DISCOUNT_APPROVAL" in types  # the real workflows stay
+    assert "REFUND_APPROVAL" in types  # the real workflows stay
 
 
 def test_a_saved_po_approval_is_not_shown(client, auth_headers, monkeypatch):
-    discount = {**_PO_APPROVAL, "id": "wf-001", "type": "DISCOUNT_APPROVAL"}
+    refund = {**_PO_APPROVAL, "id": "wf-002", "type": "REFUND_APPROVAL"}
     coll = StrictCollection(
-        "approval_workflows", [{"_id": "default", "workflows": [discount, _PO_APPROVAL]}]
+        "approval_workflows", [{"_id": "default", "workflows": [refund, _PO_APPROVAL]}]
     )
     monkeypatch.setattr(settings_mod, "_get_settings_collection", lambda _name: coll)
-    assert _types(client, auth_headers) == ["DISCOUNT_APPROVAL"]
+    assert _types(client, auth_headers) == ["REFUND_APPROVAL"]
