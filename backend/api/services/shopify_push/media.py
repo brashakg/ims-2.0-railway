@@ -30,6 +30,7 @@ from .queries import (
     _MEDIA_LIMIT,
     _PRODUCT_CREATE_MEDIA,
     _PRODUCT_DELETE_MEDIA,
+    _PRODUCT_MEDIA_QUERY,
     _PRODUCT_REORDER_MEDIA,
 )
 
@@ -96,7 +97,7 @@ def product_photo_urls(product: Dict[str, Any]) -> List[str]:
 
 
 async def _attach_product_photos(
-    db, product_gid: str, urls: List[str]
+    db, product_gid: str, urls: List[str], alt: str = ""
 ) -> Dict[str, Any]:
     """LIVE-only: attach the product's photographs to the Shopify product in the
     SAME press that wrote the product (productCreateMedia). Fail-SOFT side
@@ -107,8 +108,10 @@ async def _attach_product_photos(
     Returns ``media_map`` too -- the ``[{url, id}]`` pairs Shopify minted for
     the urls it was given, IN INPUT ORDER (productCreateMedia answers one node
     per input, in order) -- so the photo pass can record which Shopify media
-    IMS owns and never attach the same photograph twice."""
-    media = build_media_inputs([{"url": u} for u in urls])
+    IMS owns and never attach the same photograph twice. ``alt`` is the
+    design row's alt text (the design press); the product's own photos go up
+    with alt ''."""
+    media = build_media_inputs([{"url": u, "alt_text": alt} for u in urls])
     if not media:
         return {"attached": 0, "error": "no usable photograph"}
     try:
@@ -116,7 +119,8 @@ async def _attach_product_photos(
             db, _PRODUCT_CREATE_MEDIA, {"productId": product_gid, "media": media}
         )
     except Exception as e:  # noqa: BLE001 -- fail-soft side channel
-        return {"attached": 0, "error": str(e)}
+        # No answer: the photo may or may not have landed.
+        return {"attached": 0, "error": str(e), "no_answer": True}
     err = _user_errors_media(body)
     if err:
         return {"attached": 0, "error": err}
@@ -156,6 +160,10 @@ async def _attach_product_photos(
         )
         return {
             "attached": 0,
+            "fetch_failed": True,
+            # The FAILED media Shopify made anyway: the design press records
+            # them so its next press takes them off (no pile-up).
+            "failed_ids": [str(n["id"]) for n in failed],
             "error": "Shopify could not fetch the photograph"
             + (": %s" % detail if detail else ""),
         }
@@ -435,6 +443,24 @@ def _tombstone_media(db, product_id: Optional[str], rows: List[Dict[str, Any]]) 
     )
 
 
+async def _delete_media(
+    db, product_id: Optional[str], product_gid: str, rows: List[Dict[str, Any]]
+) -> Optional[str]:
+    """Take media IMS owns off a listing: tombstone every row, then
+    productDeleteMedia. The error text, or None when done. No tombstone, no
+    delete. Never raises."""
+    try:
+        _tombstone_media(db, product_id, rows)
+        body = await _graphql(
+            db,
+            _PRODUCT_DELETE_MEDIA,
+            {"productId": product_gid, "mediaIds": [r["id"] for r in rows]},
+        )
+        return _user_errors_media(body, "productDeleteMedia")
+    except Exception as exc:  # noqa: BLE001 -- fail-soft side channel
+        return str(exc)
+
+
 def _writeback_media_map(db, product_id: str, media_map: List[Dict[str, str]]) -> bool:
     """Persist ecom.media_map (read-merge-write of the ecom sub-doc, the
     _writeback_product idiom). NEVER touches locally_modified. Fail-soft;
@@ -516,16 +542,7 @@ async def sync_product_media(
             return summary
     # 2. DELETE what IMS dropped -- tombstone first, then the call.
     if plan["delete"]:
-        try:
-            _tombstone_media(db, pid, plan["delete"])
-            body = await _graphql(
-                db,
-                _PRODUCT_DELETE_MEDIA,
-                {"productId": product_gid, "mediaIds": [d["id"] for d in plan["delete"]]},
-            )
-            err = _user_errors_media(body, "productDeleteMedia")
-        except Exception as exc:  # noqa: BLE001 -- fail-soft side channel
-            err = str(exc)
+        err = await _delete_media(db, pid, product_gid, plan["delete"])
         if err:
             summary["error"] = err
             return summary
@@ -586,15 +603,202 @@ def build_media_inputs(images: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 
+_LISTING_UNREAD = (
+    "IMS could not read the photos on the website listing, so it changed "
+    "nothing. Press Publish again in a minute."
+)
+_NO_LISTING = (
+    "The website has no listing for this product any more, so the photo has "
+    "nowhere to go and IMS changed nothing. Pressing Publish again will not "
+    "help: the product has to be put back on the website first."
+)
+_RECORDS_UNREAD = (
+    "IMS could not read its own records for this product, so it changed "
+    "nothing. Press Publish again in a minute."
+)
+_STILL_PROCESSING = (
+    "Shopify is still processing a photo on this listing, so IMS cannot tell "
+    "yet whether this photo is already there. It changed nothing; press "
+    "Publish again in a few minutes."
+)
+_TWO_COPIES = (
+    "This photo is on the website listing more than once and IMS cannot tell "
+    "which copy is its own, so it changed nothing. Remove the extra copy in "
+    "the Shopify admin, then press Publish again."
+)
+_TWICE_KEPT = (
+    "This photo is on the website listing twice. IMS cannot be sure it put "
+    "the other copy there, so it leaves it up: remove it in the Shopify admin "
+    "if it should go."
+)
+_TWICE_STUCK = (
+    "This photo is on the website listing twice and IMS could not take its "
+    "extra copy down. Press Publish again in a minute."
+)
+_SIBLING_SENT = (
+    "Another design photo of this product with the same file name was sent to "
+    "the website and IMS has not recorded it yet, so it cannot tell which copy "
+    "is this one. It changed nothing; press Publish on the other photo first, "
+    "then on this one."
+)
+_NO_ANSWER = (
+    "IMS could not tell whether the photo went up: Shopify did not answer. "
+    "Press Publish again in a minute; IMS looks for the photo on the listing "
+    "first."
+)
+_NOT_CONFIRMED = (
+    "The new photo was sent, but IMS cannot see it finished on the website "
+    "listing yet, so the old photo stays up. Press Publish again in a few "
+    "minutes."
+)
+_OLD_KEPT = (
+    "The new photo is on the website. The old one stays up: IMS cannot be "
+    "sure it put that photo there, so it never takes it down. Remove it in "
+    "the Shopify admin if it should go."
+)
+_OLD_STUCK = (
+    "The new photo is on the website, but IMS could not take the old one "
+    "down. Press Publish again in a minute."
+)
+_FAILED_STUCK = (
+    "Shopify could not fetch an earlier version of this photo and IMS could "
+    "not take that failed copy off the website listing, so it changed "
+    "nothing. Press Publish again in a minute."
+)
+_NOT_RECORDED = (
+    "IMS could not save where this photo is on the website listing. Press "
+    "Publish again in a minute; IMS looks for the photo on the listing first."
+)
+_UNEXPECTED = (
+    "Something went wrong inside IMS while publishing this photo. Check the "
+    "website listing before pressing Publish again."
+)
+_CHECK_ADDRESS = "Check that the photo opens in a browser, then press Publish again."
+
+
+def _cdn_url(node: Dict[str, Any]) -> str:
+    """A media node's CDN url ('' until Shopify has finished it)."""
+    return str((node.get("image") or {}).get("url") or "")
+
+
+def _status(node: Dict[str, Any]) -> str:
+    return str(node.get("status") or "").upper()
+
+
+async def _listing_media(db, product_gid: str) -> Optional[List[Any]]:
+    """READ-ONLY: the listing's media nodes as Shopify has them now, or None
+    when Shopify has no such product. Raises when IMS could not read them (a
+    transport failure, a GraphQL error body, an answer without the media
+    list). The ONE reader of a listing's media: the design press and the
+    adoption runbook (scripts/adopt_shopify_media_map.py)."""
+    body = await _graphql(db, _PRODUCT_MEDIA_QUERY, {"id": product_gid})
+    if body.get("errors"):
+        raise ValueError("graphql errors: %s" % str(body["errors"])[:300])
+    product = (body.get("data") or {}).get("product")
+    if product is None:
+        return None
+    return list(product["media"]["nodes"])
+
+
+_ANSWERS = "shopify_image_answers"
+
+
+def _answered(row: Dict[str, Any]) -> Dict[str, str]:
+    """A design row's proof: {media id: url sent} for every media Shopify
+    answered the row's sends with (``shopify_image_answers``). Pure."""
+    return {
+        str(a["id"]): str(a["url"])
+        for a in row.get(_ANSWERS) or []
+        if isinstance(a, dict) and a.get("id") and a.get("url")
+    }
+
+
+def _recorded_elsewhere(db, image: Dict[str, Any]) -> tuple:
+    """What the rest of IMS holds on this image's product: (ids, flying).
+    ids = the media the product's own photos (ecom.media_map) and its other
+    design rows record or were answered for; one media, one owner, so such a
+    media is never this row's copy, never taken down by this row and never a
+    doubt about it. flying = the urls other design rows sent with no answer
+    yet; a media named like one may be that row's photo, so it is a doubt.
+    Raises when IMS cannot read its own records (push_image says so)."""
+    pid = image.get("product_id")
+    parent = db["catalog_products"].find_one({"id": pid}) or {}
+    out = {r["id"] for r in owned_media(parent)}
+    flying: List[str] = []
+    me = (image.get("image_id"), image.get("url"))
+    for row in db["product_images"].find({"product_id": pid}):
+        if (row.get("image_id"), row.get("url")) == me:
+            continue
+        if row.get("shopify_image_id"):
+            out.add(str(row["shopify_image_id"]))
+        out.update(_answered(row))
+        if row.get("shopify_image_sent"):
+            flying.append(str(row["shopify_image_sent"]))
+    return out, flying
+
+
 async def push_image(db, image: Dict[str, Any]) -> PushResult:
-    """Push ONE APPROVED product image to Shopify (productCreateMedia) onto its
-    parent product. DARK by default; LIVE behind the gates with the returned
-    MediaImage gid written back to shopify_image_id. Never raises.
+    """Online Store -> Design Queue -> Publish: put ONE APPROVED design photo on
+    its parent product's Shopify listing. DARK by default; LIVE behind the
+    gates. Never raises.
 
     GUARD: only an APPROVED image is push-eligible (the design queue gate).
     Anything else returns ok=False action=skip (Fail Loudly) without a network
     call. The parent product MUST already be on Shopify (ecom.shopify_product_id)
-    -- without it there is nothing to attach the media to; that is a skip too."""
+    -- without it there is nothing to attach the media to; that is a skip too.
+
+    THE RECORD lives on the design row only (product_images, written by the
+    press alone -- no catalogue save touches that collection):
+    shopify_image_id = the media on the listing for this row;
+    shopify_image_sent = the url of a send with no answer yet (noted BEFORE
+    the attach, cleared once Shopify answers or refuses it, or the row
+    records); shopify_image_answers = [{id, url}], every media Shopify
+    answered this row's sends with and the url sent -- FAILED ones too.
+
+    PROOF that IMS uploaded a media is Shopify's answer to IMS's own attach:
+    an id in shopify_image_answers. A file name is not proof (a person's
+    upload of the same file carries it) and neither is originalSource
+    (Shopify's own storage copy, measured on prod 09-06), so a media found by
+    file name alone is recorded with no proof.
+
+    LIVE, every press reads the listing first (``_listing_media``):
+      1. The photo already there -- a media IMS uploaded from this url, else
+         a media NO IMS record owns carrying the IMS file name (the CDN copy
+         keeps it: ``_same_file``) -- is never attached again: action noop
+         once Shopify shows it READY, ``processing`` while it is still
+         finishing it. A media the product's photos or another design row own
+         is never this row's copy (one media, one owner).
+      2. More than one copy: when Shopify answered IMS for several (two
+         presses at the same moment both attached), the extra ones come down
+         once the copy kept is READY (action ``dedupe``; ``update`` when a
+         replaced photo comes down in the same press). A same-named copy
+         IMS cannot prove it made (a send the transport retried after a lost
+         answer, a person's upload) stays up and the press says the photo is
+         on the listing twice; another row's unanswered send is not one.
+      3. A replaced photo: the new one goes up first; the old one comes down
+         only once a read shows the new one READY, and only when IMS uploaded
+         it -- every media Shopify answered this row's sends of another url
+         with (the recorded one and an earlier edit never recorded) comes
+         down; one found by file name stays, and the press says so once the
+         new one is READY. The row records the new media only then.
+      4. Every media Shopify answered this row's sends with that it could not
+         fetch (answered FAILED, or failed later), from this url or an
+         earlier one, is taken off first by the next press, so failed copies
+         never pile up; when it was this photo and no other copy of it is
+         up, that press says so and sends nothing (the address may be bad).
+      5. When IMS cannot tell -- the read fails, two copies look alike, an
+         unnamed media is still processing, another row's unanswered send
+         carries the same file name, the attach got no answer -- it changes
+         nothing more and says so in plain words.
+    ponytail: a swap needs a second press while Shopify is still processing
+    the new photo (no wait inside the press); add a short re-read loop if
+    owners find that slow. Two presses at the same moment can both attach (no
+    lock); the next press takes the extra copy down (rule 2). Two same-named
+    rows whose sends BOTH lost their answer hold each other ("press the other
+    first") until one copy is removed in the Shopify admin. Answers are never
+    pruned (Shopify never reuses a media id, so a gone one matches nothing):
+    one entry per send that Shopify answered."""
+
     iid = image.get("image_id")
     existing_gid = image.get("shopify_image_id")
 
@@ -659,70 +863,241 @@ async def push_image(db, image: Dict[str, Any]) -> PushResult:
             payload=payload,
             error="no image url to push",
         )
+
+    def _done(
+        ok: bool, did: str, error: Optional[str] = None, gid: Optional[str] = None
+    ) -> PushResult:
+        return PushResult(
+            mode=MODE_LIVE,
+            entity="image",
+            action=did,
+            target_id=iid,
+            ok=ok,
+            shopify_id=gid,
+            payload=payload,
+            error=error,
+        )
+
+    filt = _image_writeback_filter(image)
+
+    def _note(update: Dict[str, Any]) -> None:
+        """The press's notes on its own row (what it sent, what Shopify
+        answered). Fail-soft."""
+        if not filt:
+            return
+        try:
+            db["product_images"].update_one(filt, update)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[SHOPIFY_PUSH] image note failed %s: %s", filt, exc)
+
     try:
-        body = await _graphql(
-            db, _PRODUCT_CREATE_MEDIA, {"productId": product_gid, "media": media}
-        )
-        err = _user_errors_media(body)
-        if err:
-            return PushResult(
-                mode=MODE_LIVE,
-                entity="image",
-                action=action,
-                target_id=iid,
-                ok=False,
-                payload=payload,
-                error=err,
+        want = media[0]["originalSource"]
+        sent_url = image.get("shopify_image_sent")
+        # Media IMS uploaded for this row -> the url it uploaded it from.
+        uploaded = _answered(image)
+        try:
+            elsewhere, flying = _recorded_elsewhere(db, image)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[SHOPIFY_PUSH] image records unread %s: %s", iid, exc)
+            return _done(False, action, _RECORDS_UNREAD)
+        try:
+            nodes = await _listing_media(db, product_gid)
+        except Exception as exc:  # noqa: BLE001 -- "could not read" is the answer
+            logger.warning("[SHOPIFY_PUSH] media read failed %s: %s", product_gid, exc)
+            return _done(False, action, _LISTING_UNREAD)
+        if nodes is None:
+            return _done(False, action, _NO_LISTING)
+        listing = [n for n in nodes if isinstance(n, dict) and n.get("id")]
+        by_id = {n["id"]: n for n in listing}
+
+        async def _take_off(ids: List[str]) -> Optional[str]:
+            # Media IMS uploaded, off the listing (tombstoned with its url).
+            return await _delete_media(
+                db,
+                image.get("product_id"),
+                product_gid,
+                [
+                    {"id": i, "url": uploaded.get(i), "shopify_url": _cdn_url(by_id[i]) or None}
+                    for i in ids
+                ],
             )
-        media_nodes = ((body.get("data") or {}).get("productCreateMedia") or {}).get(
-            "media"
-        ) or []
-        new_gid = (media_nodes[0].get("id") if media_nodes else None) or existing_gid
-        # Persist the MediaImage gid for idempotency. _writeback_image now takes
-        # the WHOLE image doc so it can locate the row even when image_id is null
-        # (the BVI-migrated docs) via the natural key (product_id + url). If it
-        # STILL cannot persist, the media WAS created on Shopify but we have no
-        # way to record it -> Fail Loudly (ok=False) instead of a silent success,
-        # because a clean-looking ok=True on an un-recorded create is exactly what
-        # let a re-run duplicate media. shopify_id is still returned so the audit
-        # row captures the orphaned gid for manual reconcile.
-        if new_gid:
-            persisted = _writeback_image(db, image, new_gid)
-            if not persisted:
-                return PushResult(
-                    mode=MODE_LIVE,
-                    entity="image",
-                    action=action,
-                    target_id=iid,
-                    ok=False,
-                    shopify_id=new_gid,
-                    payload=payload,
-                    error=(
-                        "media attached on Shopify (%s) but shopify_image_id "
-                        "write-back failed: no stable image key (image_id or "
-                        "product_id+url) to persist it -- manual reconcile "
-                        "required to avoid a duplicate on re-push" % new_gid
-                    ),
+
+        def _not_fetched(off: bool, up: bool) -> PushResult:
+            return _done(
+                False,
+                action,
+                "Shopify could not fetch this photo from its web address, so it "
+                "is not on the website."
+                + (" IMS took the failed copy off the listing." if off else "")
+                + (" The old photo stays up." if up else "")
+                + " "
+                + _CHECK_ADDRESS,
+            )
+
+        # Every media IMS uploaded for this row that Shopify could not fetch
+        # (answered FAILED or failed later), from this url or an earlier edit,
+        # comes off first, so failed copies never pile up.
+        failed = [
+            i
+            for i, n in by_id.items()
+            if _status(n) == "FAILED" and i in uploaded and i not in elsewhere
+        ]
+        this_failed = any(uploaded[i] == want for i in failed)
+        if failed:
+            err = await _take_off(failed)
+            if err:
+                logger.warning("[SHOPIFY_PUSH] failed copy not taken off %s: %s", failed, err)
+                if not this_failed:
+                    return _done(False, action, _FAILED_STUCK)
+                return _not_fetched(
+                    False,
+                    existing_gid in by_id
+                    and existing_gid not in failed
+                    and _status(by_id[existing_gid]) != "FAILED",
                 )
-        return PushResult(
-            mode=MODE_LIVE,
-            entity="image",
-            action=action,
-            target_id=iid,
-            ok=True,
-            shopify_id=new_gid,
-            payload=payload,
+            if existing_gid in failed:
+                _writeback_image(db, image, None)
+                existing_gid = None
+
+        def _is_copy(n: Dict[str, Any]) -> bool:
+            # One media, one owner: another record's media is never this
+            # row's. A media IMS uploaded is this photo only when made from
+            # this url; any other media when it carries the IMS file name. A
+            # FAILED media is not a photograph.
+            if _status(n) == "FAILED" or n["id"] in elsewhere:
+                return False
+            if n["id"] in uploaded:
+                return uploaded[n["id"]] == want
+            return _same_file(want, _cdn_url(n))
+
+        def _ready(gid: Optional[str]) -> bool:
+            return bool(gid) and _status(by_id[gid]) == "READY"
+
+        copies = [n["id"] for n in listing if _is_copy(n)]
+        ours = [c for c in copies if c in uploaded]
+        if ours:
+            # IMS's own copy: the recorded one, unless another one is READY
+            # and it is not.
+            pick = [c for c in ours if _ready(c)] or ours
+            new_gid = existing_gid if existing_gid in pick else pick[0]
+        elif len(copies) > 1:
+            return _done(False, action, _TWO_COPIES)
+        else:
+            new_gid = copies[0] if copies else None
+        if new_gid and new_gid not in uploaded and any(
+            _same_file(f, _cdn_url(by_id[new_gid])) for f in flying
+        ):
+            return _done(False, action, _SIBLING_SENT)
+        # IMS's other copies of this photo come down once the kept one is
+        # READY; a same-named copy it cannot prove it made only gets said
+        # (another row's unanswered send is not one).
+        extra = [c for c in ours if c != new_gid] if _ready(new_gid) else []
+        twice = bool(ours) and any(
+            c not in uploaded and not any(_same_file(f, _cdn_url(by_id[c])) for f in flying)
+            for c in copies
         )
-    except Exception as e:  # noqa: BLE001
-        return PushResult(
-            mode=MODE_LIVE,
-            entity="image",
-            action=action,
-            target_id=iid,
-            ok=False,
-            payload=payload,
-            error=str(e),
+        sent = None
+        # The old photo: every media on the listing IMS uploaded for this row
+        # from another url (the recorded one, and any earlier edit sent but
+        # never recorded) and no other record owns. It comes down once the
+        # new one is READY. The row's media found by file name alone (no
+        # proof IMS uploaded it) stays (kept). A failed media shows nothing:
+        # it came off above, and is never "kept up".
+        old = [
+            i
+            for i, n in by_id.items()
+            if i in uploaded
+            and uploaded[i] != want
+            and i not in elsewhere
+            and _status(n) != "FAILED"
+        ]
+        kept = (
+            existing_gid
+            if existing_gid in by_id
+            and existing_gid not in uploaded
+            and existing_gid not in copies
+            and existing_gid not in elsewhere
+            and _status(by_id[existing_gid]) != "FAILED"
+            else None
         )
+        shows = bool(old or kept)
+        if this_failed and new_gid is None:
+            # Said, and nothing sent this press: the address may be bad.
+            return _not_fetched(True, shows)
+        if new_gid is None:
+            # A media Shopify has not named yet could be IMS's own copy from a
+            # press whose answer was lost: wait for it rather than guess.
+            if any(
+                _status(n) in ("UPLOADED", "PROCESSING")
+                and not _cdn_url(n)
+                and n["id"] != existing_gid
+                and n["id"] not in uploaded
+                and n["id"] not in elsewhere
+                for n in listing
+            ):
+                return _done(False, action, _STILL_PROCESSING)
+            _note({"$set": {"shopify_image_sent": want}})
+            res = await _attach_product_photos(
+                db, product_gid, [want], alt=image.get("alt_text") or ""
+            )
+            if not res.get("media_map"):
+                stays = " The old photo stays up." if shows else ""
+                if res.get("no_answer"):
+                    return _done(False, action, _NO_ANSWER + stays)
+                logger.warning("[SHOPIFY_PUSH] design photo refused %s: %s", iid, res.get("error"))
+                _note({"$set": {"shopify_image_sent": None}})
+                if res.get("fetch_failed"):
+                    # The FAILED media is IMS's: the next press takes it off.
+                    for i in res.get("failed_ids") or []:
+                        _note({"$push": {_ANSWERS: {"id": i, "url": want}}})
+                    return _done(
+                        False,
+                        action,
+                        "The photo did not go up: Shopify could not fetch it from "
+                        "its web address.%s %s" % (stays, _CHECK_ADDRESS),
+                    )
+                return _done(False, action, "The photo did not go up: Shopify refused it.%s" % stays)
+            new_gid = sent = res["media_map"][0]["id"]
+            _note(
+                {
+                    "$set": {"shopify_image_sent": None},
+                    "$push": {_ANSWERS: {"id": new_gid, "url": want}},
+                }
+            )
+        if old or kept:
+            if sent:
+                try:
+                    listing = [n for n in await _listing_media(db, product_gid) or [] if isinstance(n, dict)]
+                except Exception as exc:  # noqa: BLE001 -- not confirmed is the answer
+                    logger.warning("[SHOPIFY_PUSH] media re-read failed %s: %s", product_gid, exc)
+                    listing = []
+            if not any(n.get("id") == new_gid and _status(n) == "READY" for n in listing):
+                return _done(False, action, _NOT_CONFIRMED, new_gid)
+        doomed = old + extra
+        if doomed:
+            err = await _take_off(doomed)
+            if err:
+                logger.warning("[SHOPIFY_PUSH] design photo copies not taken down %s: %s", doomed, err)
+                return _done(False, action, _OLD_STUCK if old else _TWICE_STUCK, new_gid)
+        if new_gid != existing_gid or sent_url:
+            if not _writeback_image(db, image, new_gid):
+                return _done(False, action, _NOT_RECORDED, new_gid)
+        if old:
+            did = "update"
+        elif sent:
+            did = "create"
+        elif extra:
+            did = "dedupe"
+        else:
+            did = "noop" if _ready(new_gid) else "processing"
+        if kept:
+            return _done(False, did, _OLD_KEPT, new_gid)
+        if twice:
+            return _done(False, did, _TWICE_KEPT, new_gid)
+        return _done(True, did, gid=new_gid)
+    except Exception:  # noqa: BLE001
+        logger.exception("[SHOPIFY_PUSH] design photo press failed %s", iid)
+        return _done(False, action, _UNEXPECTED)
 
 
 def _user_errors_media(body: Dict[str, Any], field: str = "productCreateMedia") -> Optional[str]:
@@ -788,12 +1163,14 @@ def _image_writeback_filter(image: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _writeback_image(db, image: Dict[str, Any], shopify_id: str) -> bool:
-    """Persist shopify_image_id on the product_images doc. Returns True iff a row
-    was actually located + written, False otherwise (no usable key, or a fail-soft
-    error). The gid presence is the idempotency key (the image has no
-    locally_modified flag), so a reliable write-back is what stops a re-push from
-    duplicating media.
+def _writeback_image(db, image: Dict[str, Any], shopify_id: Optional[str]) -> bool:
+    """Record on the product_images doc the media on the listing for it
+    (shopify_image_id) and clear the note of a send (shopify_image_sent: the
+    send is resolved). push_image is the only writer of the design row's
+    Shopify record; this is its record step, the press's ``_note`` its notes
+    of what it sent and what Shopify answered. Returns True iff a row was
+    actually located + written, False otherwise (no usable key, or a
+    fail-soft error).
 
     Takes the WHOLE image doc (not just an id) so it can locate the row via the
     natural key when image_id is null -- the exact condition that made the
@@ -804,7 +1181,13 @@ def _writeback_image(db, image: Dict[str, Any], shopify_id: str) -> bool:
     try:
         res = db["product_images"].update_one(
             filt,
-            {"$set": {"shopify_image_id": shopify_id, "updated_at": _now()}},
+            {
+                "$set": {
+                    "shopify_image_id": shopify_id,
+                    "shopify_image_sent": None,
+                    "updated_at": _now(),
+                }
+            },
         )
     except Exception as e:  # noqa: BLE001
         logger.warning(

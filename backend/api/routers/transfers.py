@@ -20,11 +20,11 @@ from ..dependencies import (
     user_store_scope,
     validate_store_access,
 )
-from ..services.cost_mask import can_see_cost, mask_cost
 
 # W1.4 / OS-032: shared ONLINE store-type detector -- a transfer must never
 # land stock on a pooled, stockless ONLINE store.
 from ..services import org_validation as ov
+from ..services.cost_mask import mask_cost
 from ..services.purchase_invoice_engine import classify_supply
 from ..services.stores_util import is_online_store
 
@@ -187,6 +187,14 @@ STOCK_TRANSFERS: Dict[str, Dict] = {}
 TRANSFER_COUNTER = {"count": 1000}
 
 
+def _for(user: Dict, body: Dict) -> Dict:
+    """A transfer reply as `user` may read it: a line's unit_cost and the
+    transfer's total_value (and a location's outgoing / incoming value) are at
+    cost, so they go to the roles services/cost_mask "product" admits only
+    (owner ruling D7)."""
+    return mask_cost(body, user, "product", extra=("total_value", "value"))
+
+
 def _get_db():
     try:
         from ..dependencies import get_db
@@ -342,15 +350,10 @@ def _caller_view(transfer: Dict, current_user: dict) -> Dict:
     original)."""
     if not isinstance(transfer, dict):
         return transfer
-    out = dict(transfer, can_print_challan=_can_print_challan(transfer, current_user))
-    if can_see_cost(current_user, "product"):
-        return out
-    out.pop("total_value", None)
-    out["items"] = [
-        mask_cost(dict(it), current_user, "product") if isinstance(it, dict) else it
-        for it in transfer.get("items") or []
-    ]
-    return out
+    return _for(
+        current_user,
+        dict(transfer, can_print_challan=_can_print_challan(transfer, current_user)),
+    )
 
 
 def generate_transfer_number() -> str:
@@ -2102,12 +2105,11 @@ async def get_transfer_analytics(
     )
     cancelled = len([t for t in transfers if t["status"] == TransferStatus.CANCELLED])
 
-    # D7: the value is the units' own cost (F51) -- a per-unit cost figure.
-    show_value = can_see_cost(current_user, "product")
-    total_value = sum(t.get("total_value", 0) for t in transfers) if show_value else None
+    # D7: the value is the units' own cost (F51) -- _for drops it for counter roles.
+    total_value = sum(t.get("total_value", 0) for t in transfers)
     total_items = sum(t.get("total_items", 0) for t in transfers)
 
-    return {
+    return _for(current_user, {
         "summary": {
             "total_transfers": total_transfers,
             "completed": completed,
@@ -2127,7 +2129,7 @@ async def get_transfer_analytics(
             p.value: len([t for t in transfers if t.get("priority") == p.value])
             for p in TransferPriority
         },
-    }
+    })
 
 
 @router.get("/analytics/location/{location_id}")
@@ -2139,10 +2141,9 @@ async def get_location_transfer_analytics(
 
     outgoing = [t for t in transfers if t.get("from_location_id") == location_id]
     incoming = [t for t in transfers if t.get("to_location_id") == location_id]
-    # D7: the value is the units' own cost (F51) -- a per-unit cost figure.
-    show_value = can_see_cost(current_user, "product")
+    # D7: each value is the units' own cost (F51) -- _for drops it for counter roles.
 
-    return {
+    return _for(current_user, {
         "location_id": location_id,
         "outgoing": {
             "total": len(outgoing),
@@ -2157,7 +2158,7 @@ async def get_location_transfer_analytics(
                     in [TransferStatus.PENDING_APPROVAL, TransferStatus.APPROVED]
                 ]
             ),
-            "value": sum(t.get("total_value", 0) for t in outgoing) if show_value else None,
+            "value": sum(t.get("total_value", 0) for t in outgoing),
         },
         "incoming": {
             "total": len(incoming),
@@ -2167,9 +2168,9 @@ async def get_location_transfer_analytics(
             "pending_receipt": len(
                 [t for t in incoming if t["status"] == TransferStatus.IN_TRANSIT]
             ),
-            "value": sum(t.get("total_value", 0) for t in incoming) if show_value else None,
+            "value": sum(t.get("total_value", 0) for t in incoming),
         },
-    }
+    })
 
 
 # ============================================================================
