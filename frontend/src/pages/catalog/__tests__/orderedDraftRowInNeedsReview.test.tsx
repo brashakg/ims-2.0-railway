@@ -18,7 +18,9 @@ import { MemoryRouter, useLocation } from 'react-router-dom';
 vi.mock('../../../context/AuthContext', () => ({
   useAuth: () => ({
     user: { id: 'USR-1', name: 'Cat', roles: ['CATALOG_MANAGER'] },
-    hasRole: () => false,
+    // The catalogue manager's roles, as main's canEdit (Edit / Clone, the
+    // Needs-review tab) asks them.
+    hasRole: (roles: string[]) => roles.includes('CATALOG_MANAGER'),
   }),
 }));
 vi.mock('../../../context/ToastContext', () => ({
@@ -43,6 +45,8 @@ const SPINE = {
 vi.mock('../../../services/api/products', () => ({
   productApi: {
     getProducts: vi.fn(async () => ({ products: [], total: 0 })),
+    // Main's catalogue filter bar (#1192) reads the facets on load.
+    getFacets: vi.fn(async () => ({})),
     getBrandOptions: vi.fn(async () => ({ brands: [] })),
     getProduct: vi.fn(async () => SPINE),
   },
@@ -82,8 +86,14 @@ function Where() {
   return null;
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   where = '';
+  // A test's catalogue rows never leak into the next one.
+  const { productApi } = await import('../../../services/api/products');
+  (productApi.getProducts as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+    products: [],
+    total: 0,
+  });
 });
 
 const renderReview = () =>
@@ -143,7 +153,7 @@ describe('an ordered draft in Needs review', () => {
 
   it('in the catalogue list it is the ordered draft, never a dimmed inactive row', async () => {
     const { productApi } = await import('../../../services/api/products');
-    (productApi.getProducts as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+    (productApi.getProducts as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
       products: [SPINE],
       total: 1,
     });
@@ -172,7 +182,7 @@ describe('an ordered draft in Needs review', () => {
     };
     const user = userEvent.setup();
     const { productApi } = await import('../../../services/api/products');
-    (productApi.getProducts as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+    (productApi.getProducts as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
       products: [FINISHED],
       total: 1,
     });

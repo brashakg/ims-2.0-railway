@@ -77,3 +77,28 @@ describe("a task's link", () => {
     },
   );
 });
+
+// Main's catalogue-flag task carries `links` (each flagged product's edit
+// page): the same one in-app rule (sameAppPath) decides which are rendered.
+describe("a task's links", () => {
+  it('render only the addresses inside the app', async () => {
+    getTasks.mockResolvedValue({
+      tasks: [
+        {
+          ...task(''),
+          links: [
+            { label: 'Fix Boss 1700', to: '/catalog/add?edit=P-1' },
+            { label: 'Backslash host', to: '/\\evil.example/x' },
+            { label: 'Tab host', to: '/\t/evil.example/x' },
+          ],
+        },
+      ],
+      total: 1,
+    });
+    renderMine();
+    const good = await screen.findByRole('link', { name: 'Fix Boss 1700' });
+    expect(good).toHaveAttribute('href', '/catalog/add?edit=P-1');
+    expect(screen.queryByRole('link', { name: 'Backslash host' })).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Tab host' })).toBeNull();
+  });
+});
