@@ -1,85 +1,32 @@
 """
-IMS 2.0 - Per-unit barcode generation (EAN-13 + Code128)
-========================================================
+IMS 2.0 - Per-unit barcode minting
+==================================
 Business rule (from the operator): a product's SKU is stable across purchases,
-but every physical UNIT gets a UNIQUE barcode at intake (GRN), unique per unit
-per purchase. The chosen symbology is EAN-13 (numeric, scanner-standard, check-
-digit protected) with a Code128 alphanumeric alternative.
+but every physical UNIT gets a UNIQUE barcode when it enters stock. That code is
+the shop's own (IMS) barcode; the manufacturer's UPC/EAN lives on the product
+(services/gtin.py) and is never minted here.
 
-EAN-13 layout used here:
-    [prefix][sequence][check]   = 13 digits total
-- `prefix` defaults to "20": GS1 reserves prefixes 20-29 for "restricted
-  distribution" / in-store use, so our internally minted codes never collide
-  with a real manufacturer GTIN.
-- `sequence` is a monotonic per-deployment counter (atomic, multi-worker safe)
-  zero-padded to fill the remaining payload width.
-- `check` is the standard EAN-13 mod-10 check digit.
+Owner ruling 2026-09-28: a unit barcode is letters and digits only, e.g.
+'BV0000012345', so a code typed at the till passes its /^[A-Z0-9]{8,}$/ check
+(frontend/src/components/pos/BarcodeScanner.tsx). `mint_unit_barcode` is the ONE
+minter -- GRN accept, /stock/add, opening stock, return restock and serial
+capture all call it. Codes minted before the ruling ('BV--91FA3858' from GRN,
+'2000000000015' EAN-13s from /stock/add) stay on their units. Every
+stock_units.barcode lookup goes through `unit_barcode_match`, so a code typed in
+lower case (a tablet keyboard) still finds its unit, in either format.
 
-All helpers are pure + dependency-light; only `allocate_sequence` /
-`next_unit_ean13` touch Mongo, and they fail soft (return None) when no DB is
-available so a stock intake is never blocked by the counter.
+Only `allocate_sequence` touches Mongo, and it fails soft (None) so a stock
+intake is never blocked by the counter.
 """
 
 from __future__ import annotations
 
-import os
+import re
+import uuid
 from typing import Optional
 
-# In-store / restricted-distribution prefix (GS1 20-29). Override per deployment.
-DEFAULT_EAN13_PREFIX = os.getenv("BARCODE_EAN13_PREFIX", "20")
 _COUNTER_NAME = "unit_barcode_seq"
-
-
-def ean13_check_digit(payload12: str) -> str:
-    """Standard EAN-13 mod-10 check digit for a 12-digit payload.
-
-    Odd positions (1st, 3rd, ... from the left, 1-indexed) weigh x1, even
-    positions weigh x3; check = (10 - sum mod 10) mod 10.
-    """
-    if len(payload12) != 12 or not payload12.isdigit():
-        raise ValueError("EAN-13 payload must be exactly 12 digits")
-    total = 0
-    for i, ch in enumerate(payload12):
-        total += int(ch) * (1 if i % 2 == 0 else 3)
-    return str((10 - total % 10) % 10)
-
-
-def format_ean13(sequence: int, prefix: str = DEFAULT_EAN13_PREFIX) -> str:
-    """Build a full 13-digit EAN-13 from an internal prefix + sequence.
-
-    Raises ValueError on a bad prefix, a negative sequence, or a sequence that
-    overflows the available payload width for the chosen prefix.
-    """
-    if not prefix.isdigit() or not (1 <= len(prefix) <= 11):
-        raise ValueError("prefix must be 1-11 digits")
-    if sequence < 0:
-        raise ValueError("sequence must be non-negative")
-    body_len = 12 - len(prefix)
-    body = str(sequence)
-    if len(body) > body_len:
-        raise ValueError(
-            f"sequence {sequence} overflows the {body_len}-digit body for prefix '{prefix}'"
-        )
-    payload = prefix + body.zfill(body_len)
-    return payload + ean13_check_digit(payload)
-
-
-def validate_ean13(code: str) -> bool:
-    """True iff `code` is a 13-digit string with a correct check digit."""
-    if not isinstance(code, str) or len(code) != 13 or not code.isdigit():
-        return False
-    return ean13_check_digit(code[:12]) == code[12]
-
-
-def format_code128(sequence: int, store_code: str = "", width: int = 8) -> str:
-    """Alphanumeric Code128 *value* for an internal unit barcode.
-
-    Code128 can encode the full alphanumeric set, so a human-readable
-    store-prefixed code is fine here (the symbology rendering is a print-side
-    concern). Returns e.g. 'BVRNC00000042'.
-    """
-    sc = "".join(c for c in (store_code or "").upper() if c.isalnum())
-    return f"{sc}{str(sequence).zfill(width)}"
+_NOT_ALNUM = re.compile(r"[^A-Z0-9]")
 
 
 def allocate_sequence(counter_coll, name: str = _COUNTER_NAME) -> Optional[int]:
@@ -107,12 +54,44 @@ def allocate_sequence(counter_coll, name: str = _COUNTER_NAME) -> Optional[int]:
     return None
 
 
-def next_unit_ean13(counter_coll, prefix: str = DEFAULT_EAN13_PREFIX) -> Optional[str]:
-    """Allocate the next sequence and return a fresh, valid EAN-13 unit barcode.
+def mint_unit_barcode(db, store_id: Optional[str]) -> str:
+    """THE barcode for one new physical unit: store prefix + 10 digits.
 
-    None when no counter is available (caller should fall back to its existing
-    barcode scheme so a GRN/intake is never blocked)."""
-    seq = allocate_sequence(counter_coll)
-    if seq is None:
-        return None
-    return format_ean13(seq, prefix=prefix)
+    The prefix is the first two letters/digits of the store id ('BV-DHN-02' ->
+    'BV'). It is cosmetic: every shop of a brand shares it, so uniqueness comes
+    from the body -- ONE chain-wide atomic counter (the same `unit_barcode_seq`
+    the retired EAN-13 mint used), so two shops can never mint the same code.
+
+    `db` is a raw Mongo database (or None). No counter reachable: 10 random hex
+    characters instead, so a receipt is never blocked and still never gets a
+    hyphen.
+    """
+    counter = None
+    if db is not None:
+        try:
+            counter = db.get_collection("counters")
+        except Exception:  # noqa: BLE001 - fail-soft, intake must not break
+            counter = None
+    seq = allocate_sequence(counter)
+    # ponytail: the no-counter fallback is 40 random bits, not a guarantee; it
+    # only runs when Mongo is unreachable (the insert then fails anyway).
+    body = str(seq).zfill(10) if seq is not None else uuid.uuid4().hex[:10].upper()
+    return _NOT_ALNUM.sub("", str(store_id or "").upper())[:2] + body
+
+
+def unit_barcode_match(code: Optional[str]) -> dict:
+    """THE stock_units filter for a scanned or typed unit code.
+
+    Every minted unit code is upper case, but a hand-typed one may not be
+    ('bv0000000001', or 'Bv0000000001' from a tablet that capitalises the first
+    letter), and a legacy code may be mixed case (serial capture used to store
+    any caller-supplied label verbatim, e.g. 'Ab12cd34ef'). So the whole code
+    matches exactly, ignoring letter case. A blank code (' ' scanned or typed)
+    matches nothing: '^$' would hit any unit stored with barcode ''.
+    """
+    raw = str(code or "").strip()
+    if not raw:
+        return {"barcode": {"$in": []}}
+    # ponytail: a case-insensitive regex cannot seek an index; fine while
+    # stock_units is small, add a collation index if lookups slow down.
+    return {"barcode": {"$regex": "^" + re.escape(raw) + "$", "$options": "i"}}

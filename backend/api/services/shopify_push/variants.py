@@ -22,10 +22,10 @@ from ._shared import (
 from .transport import _graphql, _user_errors
 from .queries import _VARIANTS_BULK_CREATE, _VARIANTS_BULK_UPDATE, _VARIANTS_PER_CALL
 from .product_input import (
-    _publishable_gtin,
     _resolve_variant_pricing,
     _variants_for_price_push,
     build_variant_price_inputs,
+    variant_barcode,
 )
 from .writeback import _writeback_variant
 
@@ -109,7 +109,8 @@ def build_variant_seed_rows(
                          EXPLICIT None (GraphQL null) so a stale strikethrough
                          on Shopify is CLEARED -- the same contract as
                          build_variant_price_inputs
-        barcode          the GTIN (variant gtin/barcode, else the product's) --
+        barcode          variant_barcode: the product's GTIN on its own
+                         variant, a sibling row's own GTIN only --
                          `store_barcode` is the physical join key and is never pushed
         inventoryItem.sku the IMS SKU (variant sku, else the product sku) -- in
                          the 2024-04+ product model the SKU lives on the
@@ -123,12 +124,7 @@ def build_variant_seed_rows(
         vd = v or {}
         price, mrp = _resolve_variant_pricing(product, vd)
         sku = str(vd.get("sku") or product.get("sku") or "").strip()
-        barcode = _publishable_gtin(
-            vd.get("gtin"),
-            vd.get("barcode"),
-            product.get("gtin"),
-            product.get("barcode"),
-        )
+        barcode = variant_barcode(product, v)
         row: Dict[str, Any] = {}
         if price > 0:
             row["price"] = f"{price:.2f}"

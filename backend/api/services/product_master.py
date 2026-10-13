@@ -56,7 +56,15 @@ from .gst_rates import (
     hsn_for_category,
     resolve_gst_rate_strict,
 )
-from .gtin import classify_gtin, is_valid_gtin, normalise_candidate
+from .gtin import (
+    MANUFACTURER_BARCODE_ATTRIBUTES,
+    classify_gtin,
+    fold_barcode_spellings,
+    gtin_spellings,
+    manufacturer_barcode_key,
+    normalise_candidate,
+    sanitise_gtin,
+)
 from .pricing_caps import evaluate_offer_price
 from .product_naming import (
     build_handle,
@@ -91,16 +99,28 @@ class ProductMasterError(Exception):
     offending attribute so the 422 body can point at it.
     """
 
-    def __init__(self, message: str, status: int = 422, field: Optional[str] = None):
+    def __init__(
+        self,
+        message: str,
+        status: int = 422,
+        field: Optional[str] = None,
+        code: Optional[str] = None,
+    ):
         super().__init__(message)
         self.message = message
         self.status = status
         self.field = field
-        # Optional machine code + conflict payload (Hub Phase 1 duplicate guard):
-        # a 409 carries `conflict = {product_id, sku, identity_key}` of the
-        # existing row so the caller/FE can link to it ("add stock / a variant").
-        self.code: Optional[str] = None
+        # Optional machine code (MISSING_FIELD, DUPLICATE_PRODUCT) + conflict
+        # payload (Hub Phase 1 duplicate guard): a 409 carries `conflict =
+        # {product_id, sku, identity_key}` of the existing row so the caller/FE
+        # can link to it ("add stock / a variant").
+        self.code: Optional[str] = code
         self.conflict: Optional[Dict[str, Any]] = None
+
+
+# The code on a "required field is empty" error: the catalogue create/import
+# doors answer only THAT with their historical "Missing required field: <f>".
+MISSING_FIELD = "MISSING_FIELD"
 
 
 # ===========================================================================
@@ -1617,8 +1637,35 @@ def find_similar_products(
         return empty
 
 
+def _drop_boxless_junk(attrs: Dict[str, Any], category: Any) -> Dict[str, Any]:
+    """`attrs` (mutated, returned) without a junk manufacturer barcode the
+    category's form has NO box for: dropped and logged, never a 422. gtin
+    always has one (Manage Barcode edits it on any product); upc only where the
+    form shows 'UPC (mfr)' (FRAME, SUNGLASS, SMARTGLASSES). A WATCH holding
+    upc 'NA' 422'd every Quick Add save and every Approve with nothing on
+    screen to fix -- the same treatment the fold gives a junk 'GTIN' key."""
+    spec = category_spec(category)
+    fields = (spec.required + spec.optional) if spec else ()
+    for key in MANUFACTURER_BARCODE_ATTRIBUTES:
+        if key == "gtin" or key in fields or key not in attrs:
+            continue
+        raw = attrs[key]
+        if sanitise_gtin(raw) or not normalise_candidate(raw):
+            continue
+        logger.warning(
+            "[PM] dropping invalid %s (no %s box on %s): reason=%s value=%.60r",
+            key,
+            key.upper(),
+            category,
+            classify_gtin(raw),
+            raw,
+        )
+        del attrs[key]
+    return attrs
+
+
 def _guard_gtin_attribute(
-    attributes: Dict[str, Any], *, strict: bool
+    attributes: Dict[str, Any], *, strict: bool, category: Any
 ) -> Dict[str, Any]:
     """Validate `attributes['gtin']` -- the PUBLIC barcode -- at the create door.
 
@@ -1642,31 +1689,182 @@ def _guard_gtin_attribute(
     value and fixes or clears it -- silently discarding what someone just typed
     would be worse. DRAFT/IMPORT (bulk + clone doors): drop the value and log
     it, so one bad cell never blocks a 2,000-row import while still never
-    persisting garbage. Empty stays empty in both modes.
+    persisting garbage. Empty stays empty in both modes. A valid GTIN is stored
+    SANITISED, digits only ('8 056597 720373', '805-6597-72037-3' ->
+    '8056597720373'), so one GTIN is one value and a scan finds it.
+
+    The `upc` attribute ('UPC (mfr)') is the same kind of code -- a UPC is a
+    GTIN-12 -- and reaches Shopify as the ims.upc metafield and the
+    description's 'UPC Code' row, so it gets the same rule.
+
+    Keys match in any letter case ('GTIN', 'Upc' publish as ims.gtin / ims.upc
+    too) and fold onto the one key (gtin.fold_barcode_spellings, THE fold): the
+    exact key wins, and a junk code under another spelling is DROPPED and
+    logged in BOTH modes, never a 422. No screen shows a 'GTIN' key (the GTIN
+    box and Manage Barcode read 'gtin'), yet Quick Add sends every stored key
+    back, so a 422 on an old stored 'GTIN' left the product unsaveable with
+    nothing on screen to fix. For the same reason a junk upc in a `category`
+    whose form has no UPC box is dropped, never refused (_drop_boxless_junk).
     """
-    attrs = attributes or {}
-    if "gtin" not in attrs:
-        return attrs
-    raw = attrs["gtin"]
-    if not normalise_candidate(raw) or is_valid_gtin(raw):
-        return attrs
-    reason = classify_gtin(raw)
-    if strict:
+    attrs = _drop_boxless_junk(fold_barcode_spellings(attributes), category)
+    for key in MANUFACTURER_BARCODE_ATTRIBUTES:
+        if key not in attrs:
+            continue
+        raw = attrs[key]
+        clean = sanitise_gtin(raw)
+        if clean or not normalise_candidate(raw):
+            attrs[key] = clean or raw
+            continue
+        reason = classify_gtin(raw)
+        if strict:
+            raise ProductMasterError(
+                f"'{str(raw)[:40]}' is not a valid {key.upper()} ({reason}). A "
+                "GTIN/UPC is 8, 12, 13 or 14 digits with a valid check digit. "
+                "Leave it blank if the manufacturer barcode is unknown.",
+                status=422,
+                field=key,
+            )
+        logger.warning(
+            "[PM] dropping invalid %s: reason=%s value=%.60r", key, reason, raw
+        )
+        del attrs[key]
+    return attrs
+
+
+def twin_barcode_fields(gtin: Any) -> Dict[str, Any]:
+    """The catalog-twin (or catalog_variants row) barcode fields for the
+    product's gtin attribute: the top-level `gtin` and, when the GTIN is
+    REMOVED, the legacy `barcode` too. A sibling row's push sends its `gtin`
+    (product_input.variant_barcode), and the one-holder rule reads both on a
+    twin (find_twin_by_barcode), so leaving either would send, or hold, the
+    removed code. ONE rule for every door that moves the gtin attribute."""
+    if gtin:
+        return {"gtin": gtin}
+    return {"gtin": None, "barcode": None}
+
+
+def drop_legacy_spine_barcode(product_repo, product_id: Any) -> None:
+    """The gtin attribute is a product's ONE manufacturer-barcode home, so a
+    door that writes it drops the legacy products.barcode (main's old Manage
+    Barcode wrote there). Left behind, a removed code stayed on the product:
+    assert_gtin_free still found it and no screen could clear it. $unset, never
+    "" or None: products.barcode carries a unique sparse index. The gtin key
+    in another spelling ('GTIN') goes too: the gtin just written wins
+    (gtin.fold_barcode_spellings), and the catalogue editor writes the spine's
+    attributes.gtin alone, so nothing else would remove it."""
+    coll = getattr(product_repo, "collection", None)
+    if coll is None or not product_id:
+        return
+    # No projection: the no-Mongo MockCollection.find_one takes a filter only.
+    attrs = (coll.find_one({"product_id": product_id}) or {}).get("attributes")
+    unset = {"barcode": ""}
+    if isinstance(attrs, dict):
+        unset.update(
+            {
+                f"attributes.{k}": ""
+                for k in attrs
+                if k != "gtin" and manufacturer_barcode_key(k) == "gtin"
+            }
+        )
+    coll.update_one({"product_id": product_id}, {"$unset": unset})
+
+
+def spine_holds_gtin(spine: Optional[Dict[str, Any]], gtin: Any) -> bool:
+    """True when the spine's attributes.gtin -- the key write_spine_gtin writes
+    and the till reads -- is `gtin` in any of its spellings: the till,
+    find_by_barcode and the one-holder check read a UPC-A and its 13-digit
+    form as ONE code (gtin_spellings), so this does too. A blank `gtin` (a
+    Remove) is held only by a blank."""
+    attrs = (spine or {}).get("attributes")
+    return isinstance(attrs, dict) and attrs.get("gtin") in (
+        gtin_spellings(gtin) or [gtin]
+    )
+
+
+def write_spine_gtin(product_repo, product_id: Any, gtin: str) -> None:
+    """Write the spine's ONE manufacturer barcode (attributes.gtin), then drop
+    its legacy products.barcode -- ONLY once the gtin write is confirmed, or
+    the spine would lose both codes. A spine whose attributes is not a dict
+    (null, a list) cannot take a $set on attributes.gtin -- Mongo refuses it
+    and BaseRepository.update answers False -- so it gets the dict {gtin} in
+    the same write. ProductMasterError 503 when the write is not confirmed:
+    the legacy barcode then stays where it was. update() answers
+    modified_count > 0, so a write that changed nothing (the spine already held
+    this gtin and its updated_at landed in the same millisecond as the write
+    before it) answers False too: the stored code is the confirmation."""
+    current = product_repo.find_by_id(product_id) or {}
+    if isinstance(current.get("attributes"), dict):
+        patch: Dict[str, Any] = {"attributes.gtin": gtin}
+    else:
+        patch = {"attributes": {"gtin": gtin}}
+    if not product_repo.update(product_id, patch) and not spine_holds_gtin(
+        product_repo.find_by_id(product_id), gtin
+    ):
         raise ProductMasterError(
-            f"'{str(raw)[:40]}' is not a valid GTIN ({reason}). A GTIN is 8, 12, "
-            "13 or 14 digits with a valid check digit. Leave it blank if the "
-            "manufacturer barcode is unknown.",
-            status=422,
+            "The billing product's barcode could not be updated, so nothing "
+            "was saved. Please save again.",
+            status=503,
             field="gtin",
         )
-    logger.warning(
-        "[PM] dropping invalid gtin on a draft/import row: reason=%s value=%.60r",
-        reason,
-        raw,
+    drop_legacy_spine_barcode(product_repo, product_id)
+
+
+def assert_gtin_free(code: Any, product_repo, this_product_id: Optional[str]) -> None:
+    """409 when ANOTHER product already holds this manufacturer barcode.
+
+    THE uniqueness rule for both manufacturer-barcode fields (products.barcode
+    and the gtin attribute), at every door that sets one: create, the spine
+    edit and the catalogue review editor. ProductRepository.find_by_barcode
+    reads both fields in every spelling of the one GTIN. A GTIN names ONE
+    maker's item: two products holding it would go to Shopify/Google as the
+    same thing. `this_product_id` None (a create) clashes with any holder.
+    Catalogue twins count too (find_twin_by_barcode): the bulk import writes
+    only a twin, and the push sends a twin's gtin."""
+    if not normalise_candidate(code) or not hasattr(product_repo, "find_by_barcode"):
+        return
+    clash = product_repo.find_by_barcode(code, exclude_product_id=this_product_id)
+    if clash is None and hasattr(product_repo, "find_twin_by_barcode"):
+        clash = product_repo.find_twin_by_barcode(
+            code, exclude_product_id=this_product_id
+        )
+    if clash is not None:
+        holder = clash.get("sku") or clash.get("product_id") or clash.get("id")
+        raise ProductMasterError(
+            f"Barcode '{normalise_candidate(code)[:40]}' is already assigned to "
+            f"another product ({holder}). "
+            "Barcodes must be unique.",
+            status=409,
+            field="gtin",
+        )
+
+
+def merge_attributes_edit(
+    stored: Optional[Dict[str, Any]],
+    patch: Dict[str, Any],
+    product_repo,
+    this_product_id: Optional[str],
+    category: Any,
+) -> Tuple[Dict[str, Any], bool]:
+    """(the attributes a partial edit stores, whether that write sets the gtin).
+    THE merge for both attribute edit doors (the spine PUT, the catalogue review
+    editor), on a `patch` already through _guard_gtin_attribute. Another stored
+    spelling of a barcode key folds onto the one key (fold_barcode_spellings),
+    so a stored 'GTIN' becomes the gtin even when the edit never sent one. The
+    gtin is WRITTEN when the edit sent it or the fold made or changed it, and a
+    written gtin passes the one-holder check: a folded 'GTIN' another product
+    holds 409s exactly as a typed one does. The caller then runs the barcode
+    projections (twin gtin, spine attributes.gtin, legacy barcode) on it. A
+    stored junk upc the `category` has no box for leaves storage here
+    (_drop_boxless_junk): the guard dropping it from the patch alone would let
+    the stored copy back in."""
+    stored = stored or {}
+    merged = _drop_boxless_junk(fold_barcode_spellings({**stored, **patch}), category)
+    written = "gtin" in patch or (merged.get("gtin") or "") != (
+        stored.get("gtin") or ""
     )
-    cleaned = dict(attrs)
-    cleaned.pop("gtin", None)
-    return cleaned
+    if written:
+        assert_gtin_free(merged.get("gtin"), product_repo, this_product_id)
+    return merged, written
 
 
 def normalise_payload(
@@ -1765,6 +1963,7 @@ def normalise_payload(
                 "Cannot save product -- missing required: " + ", ".join(names),
                 status=422,
                 field=names[0],
+                code=MISSING_FIELD,
             )
 
     # Catalog Dictionary: when the owner has configured allowed values for a
@@ -1781,7 +1980,7 @@ def normalise_payload(
     # A bad public GTIN is worse than none -- reject it here, before it can be
     # persisted and pushed to Shopify / the Shopping feeds. See the helper.
     attributes = _guard_gtin_attribute(
-        attributes, strict=not (as_draft or force_draft)
+        attributes, strict=not (as_draft or force_draft), category=canonical
     )
 
     # discount_category: forced for HA/SERVICES, else an explicit value wins
@@ -2175,12 +2374,9 @@ def _build_pim_doc(
         "offer_price": spine.get("offer_price"),
         "hsn_code": spine.get("hsn_code"),
         "gst_rate": spine.get("gst_rate"),
-        # The PUBLIC barcode. The spine captures it as the `gtin` ATTRIBUTE
-        # (FRAME/SUNGLASS specs), but the push's pseudo-variant reads it
-        # TOP-LEVEL off the twin (_variants_for_price_push -> _publishable_gtin,
-        # which also rejects the internal GS1 20-29 code). Never projected, so
-        # a catalogued GTIN only ever reached Shopify as an ims.gtin metafield
-        # -- never as the variant barcode the Google/Meta feeds republish.
+        # The PUBLIC barcode's top-level projection (the push itself reads the
+        # gtin ATTRIBUTE, product_input.variant_barcode; the one-holder rule,
+        # find_twin_by_barcode, reads this too).
         "gtin": attrs.get("gtin") or spine.get("gtin") or None,
         # Display identity the storefront + push read (top-level name/title).
         "name": name or None,
@@ -2719,7 +2915,14 @@ def clone_and_vary(
     if src is None:
         raise ProductMasterError("Source product not found.", status=404)
 
-    base_attrs = _overlay_attributes(src)  # canonical attrs incl. legacy overlay
+    # canonical attrs incl. legacy overlay -- never the source's manufacturer
+    # barcodes: a GTIN names ONE trade item, so a new SKU never inherits one (a
+    # variation may still carry its own).
+    base_attrs = {
+        k: v
+        for k, v in _overlay_attributes(src).items()
+        if manufacturer_barcode_key(k) is None
+    }
     base_payload: Dict[str, Any] = {}
     for f in _CLONE_CATALOG_FIELDS:
         if src.get(f) is not None:
@@ -2911,6 +3114,9 @@ def create_product(
     existing = find_existing_product(spine, product_repo)
     if existing is not None:
         raise _duplicate_error(existing)
+    # The gtin attribute is the manufacturer barcode that goes to Shopify: one
+    # product per GTIN at create too, not only on edit.
+    assert_gtin_free((spine.get("attributes") or {}).get("gtin"), product_repo, None)
 
     # --- STEP 1: spine FIRST + alone (single-document atomic create) ---
     # raise_on_duplicate=True so a race lost to the unique index surfaces as a
@@ -3022,9 +3228,37 @@ def _resolve_variant_parent(
     return parent
 
 
+def assert_size_row(sku: Any, db) -> None:
+    """A size variant's barcode reaches the website only on its
+    catalog_variants row. With no row for its sku the barcode can never land
+    on every copy and saving again cannot help, so both barcode doors (Manage
+    Barcode, the catalogue review editor) call this BEFORE their first write:
+    422 with nothing saved, so the billing product, the catalogue copy and the
+    row never disagree. A failed read is a 503, nothing saved either."""
+    try:
+        found = bool(sku) and db.get_collection("catalog_variants").find_one(
+            {"sku": sku}, {"_id": 1}
+        ) is not None
+    except Exception as exc:  # noqa: BLE001
+        raise ProductMasterError(
+            "Could not check this size's website row, so nothing was saved. "
+            "Please save again.",
+            status=503,
+            field="gtin",
+        ) from exc
+    if not found:
+        raise ProductMasterError(
+            f"This size ({sku or 'no SKU'}) has no row on its product's website "
+            "listing, so its barcode cannot be sent there. Nothing was saved. "
+            "Saving again will not help until the size is back on the listing.",
+            status=422,
+            field="gtin",
+        )
+
+
 def _mirror_variant_row_update(
     *, current: Dict[str, Any], patch: Dict[str, Any], db, mark_dirty: bool = True
-) -> None:
+) -> bool:
     """The SIZE-VARIANT half of the spine-edit mirror: a child's mrp / gtin
     live on its catalog_variants row (the price push reads the ROW, never the
     child twin), and the listing that must carry them is the PARENT's.
@@ -3036,29 +3270,33 @@ def _mirror_variant_row_update(
     PARENT twin. The child twin is never queued. ``mark_dirty=False`` (the
     #1137 opt-out: a write that only makes IMS agree with Shopify) still
     mirrors the row but skips the engine AND the queue -- the engine queues
-    the parent itself, so it waits for its next product-level pass. Fail-soft."""
+    the parent itself, so it waits for its next product-level pass. False
+    when NO row has that sku (nothing written): a barcode door answers that
+    as a failed size write. True otherwise (written, or nothing to write)."""
     if "mrp" not in patch and "gtin" not in (patch.get("attributes") or {}):
-        return
+        return True
     sku = current.get("sku")
     if not sku:
-        return
+        return False
     row_patch: Dict[str, Any] = {}
     if "mrp" in patch:
         row_patch["mrp"] = patch["mrp"]
     if "gtin" in (patch.get("attributes") or {}):
-        row_patch["gtin"] = patch["attributes"].get("gtin") or None
+        row_patch.update(twin_barcode_fields(patch["attributes"].get("gtin")))
     variants = db.get_collection("catalog_variants")
-    variants.update_one({"sku": sku}, {"$set": row_patch})
+    res = variants.update_one({"sku": sku}, {"$set": row_patch})
+    if not getattr(res, "matched_count", 1):
+        return False
     if not mark_dirty:
-        return
+        return True
     row = variants.find_one({"sku": sku}) or {}
     parent_twin_id = row.get("parent_product_id")
     if not parent_twin_id:
-        return
+        return True
     cat = db.get_collection("catalog_products")
     parent_twin = cat.find_one({"id": parent_twin_id})
     if parent_twin is None:
-        return
+        return True
     if "mrp" in row_patch:
         try:
             from .online_discount_engine import recompute_online_price
@@ -3071,6 +3309,7 @@ def _mirror_variant_row_update(
         except Exception:  # noqa: BLE001 -- the engine is fail-soft by contract
             logger.warning("[PM] online price recompute skipped for %s", sku, exc_info=True)
     cat.update_one({"id": parent_twin_id}, {"$set": {"ecom.locally_modified": True}})
+    return True
 
 
 def mirror_update_to_catalog_twin(
@@ -3080,7 +3319,7 @@ def mirror_update_to_catalog_twin(
     patch: Dict[str, Any],
     db=None,
     mark_dirty: bool = True,
-) -> None:
+) -> bool:
     """THE spine-edit -> catalog-twin mirror rule (products convergence).
 
     ``mark_dirty=False`` is the explicit opt-out (the catalog door's
@@ -3107,7 +3346,7 @@ def mirror_update_to_catalog_twin(
       * hsn_code / gst_rate / is_active / description / brand / model /
         category / attributes mirror top-level; tags mirror to ecom.seo.tags
         (the only spelling the push reads); an attributes.gtin projects to the
-        twin's top-level gtin (the pseudo-variant's public-barcode source).
+        twin's top-level gtin (twin_barcode_fields).
       * the twin QUEUES for the manual Online Store push
         (ecom.locally_modified) only when a field the storefront actually
         shows moved: mrp / offer_price (the variant price fallbacks),
@@ -3132,14 +3371,16 @@ def mirror_update_to_catalog_twin(
         DRAFT only when ABSENT, so an edit can never demote a live product.
 
     Fail-soft: never raises; a mirror error is logged and the spine save
-    stands. Queuing is not publishing: a human still presses the push button.
+    stands -- False then (True = written, or nothing to write), so a door
+    whose field must land on both copies (Manage Barcode's gtin) can say it
+    did not. Queuing is not publishing: a human still presses the push button.
     """
     try:
         if db is None or not getattr(db, "is_connected", True):
-            return
+            return True
         cat = db.get_collection("catalog_products")
         if cat is None:
-            return
+            return True
         cat_patch: Dict[str, Any] = {}
         for key in ("mrp", "offer_price"):
             if key in patch:
@@ -3171,9 +3412,8 @@ def mirror_update_to_catalog_twin(
             # The dot-path form of set_twin_tags: same field, same normaliser.
             cat_patch["ecom.seo.tags"] = normalise_tags(patch["tags"])
         if "gtin" in (patch.get("attributes") or {}):
-            # Same projection as _build_pim_doc: the public barcode rides
-            # top-level on the twin for the pseudo-variant.
-            cat_patch["gtin"] = patch["attributes"].get("gtin") or None
+            # Same projection as _build_pim_doc (twin_barcode_fields).
+            cat_patch.update(twin_barcode_fields(patch["attributes"].get("gtin")))
         # The photograph moves with the spine and QUEUES: it is the one field
         # the storefront shows more prominently than the price, and the push
         # reads it off the twin (see _build_pim_doc).
@@ -3207,27 +3447,31 @@ def mirror_update_to_catalog_twin(
                 cat_patch["title"] = new_name
                 if mark_dirty:
                     cat_patch["ecom.locally_modified"] = True
+        row_ok = True
         if current.get("variant_of"):
             # A SIZE VARIANT owns no listing: its twin is NEVER queued (a
             # rename never expects Shopify -- the title is the parent's), and
             # its price / barcode reach the storefront through its
-            # catalog_variants row on the PARENT's next push.
+            # catalog_variants row on the PARENT's next push. No row for its
+            # sku is a failed mirror (False), as a refused row write is.
             cat_patch.pop("ecom.locally_modified", None)
-            _mirror_variant_row_update(
+            row_ok = _mirror_variant_row_update(
                 current=current, patch=patch, db=db, mark_dirty=mark_dirty
             )
         if not cat_patch:
-            return
+            return row_ok
         if cat_patch.get("ecom.locally_modified"):
             if twin is None:
                 twin = cat.find_one({"id": twin_id}) or {}
             if not (twin.get("ecom") or {}).get("status"):
                 cat_patch["ecom.status"] = "DRAFT"
         cat.update_one({"id": twin_id}, {"$set": cat_patch})
+        return row_ok
     except Exception:  # noqa: BLE001 -- the spine save must stand regardless
         logger.warning(
             "[PM] catalog twin mirror skipped for %s", product_id, exc_info=True
         )
+        return False
 
 
 def update_product(
