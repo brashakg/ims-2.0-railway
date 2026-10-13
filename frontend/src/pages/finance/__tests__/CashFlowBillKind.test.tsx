@@ -168,6 +168,15 @@ describe('the goods/services declaration on the Record-Bill form', () => {
     expect(apis.vendorApApi.listReceipts).not.toHaveBeenCalled();
   });
 
+  it('no unbilled receipt: names the store manager, who receives (the accountant cannot)', async () => {
+    apis.vendorApApi.listReceipts.mockResolvedValue([]);
+    await openBillForm();
+    fireEvent.change(screen.getByDisplayValue('This bill is for…'), {
+      target: { value: 'GOODS' },
+    });
+    expect(await screen.findByText(/No unbilled goods receipts/)).toHaveTextContent(/store manager/);
+  });
+
   it('books the IST day by default, not the UTC day', async () => {
     // 2026-10-01 01:00 IST is still 30 September in UTC: the form defaulted
     // to the UTC day and the bill landed on September's GSTR-3B.

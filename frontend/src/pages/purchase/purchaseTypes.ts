@@ -5,13 +5,14 @@
 import type { UserRole } from '../../types';
 
 export type TabType = 'purchase-orders' | 'purchase-invoices' | 'variance' | 'suppliers' | 'vendor-returns' | 'analytics';
+// The statuses the server actually writes. There is NO approval step (owner
+// ruling 2026-09-28): a DRAFT is sent straight to the vendor, so the old
+// PENDING / APPROVED / ORDERED words are gone -- they only ever existed on
+// screen. PARTIAL is the legacy spelling of PARTIALLY_RECEIVED.
 export type POStatus =
   | 'DRAFT'
-  | 'PENDING'
-  | 'APPROVED'
   | 'SENT'
   | 'ACKNOWLEDGED'
-  | 'ORDERED'
   | 'PARTIAL'
   | 'PARTIALLY_RECEIVED'
   | 'RECEIVED'
@@ -65,23 +66,42 @@ export interface PurchaseOrder {
   /** true = IGST, false = CGST + SGST, undefined = the order predates the
    *  split (or the server could not tell). */
   interstate?: boolean;
-  approvedBy?: string;
   receivedDate?: string;
   notes?: string;
+  /** Why the order was cancelled (the timeline shows who and when). */
+  cancellationReason?: string;
+  /** The server's last-write stamp as read: sent back with a line cancel so a
+   *  stale screen is refused instead of cancelling another line. */
+  updatedAt?: string;
+  /** Set on drafts generated automatically (lens top-up / forecast): their
+   *  lines carry data the edit form cannot hold, so they are not editable. */
+  source?: string;
 }
 
 export interface POItem {
   productId: string;
   productName: string;
+  /** The line's own description when it has one: a lens order has one line
+   *  per power, all under one product name ("Acuvue Oasys SPH -2.00"). */
+  description?: string;
   sku: string;
   quantity: number;
   unitCost: number;
   taxRate: number;
+  /** The HSN stored on the line, and whether its GST rate was left unsettled
+   *  (tax_rate 0 then means "unknown", not "0%"). An edit sends them back so
+   *  saving never re-prices a line. */
+  hsn?: string;
+  gstUnresolved?: boolean;
   total: number;
   /** Units received so far (per-line received_qty, falling back to the PO
    *  header received_qty_by_product for pre-S1 POs). Drives the "N of M
    *  lines received" progress chip on the PO list. */
   receivedQty?: number;
+  /** Units withdrawn from this line by a cancel (never received stock). */
+  cancelledQty?: number;
+  /** Server line status: OPEN / PARTIAL / RECEIVED / CANCELLED. */
+  lineStatus?: string;
 }
 
 // An audit stamp names a PERSON. The backend resolves the raw user id it

@@ -11,7 +11,12 @@ from __future__ import annotations
 
 from typing import List, Union
 
-from ..cost_mask import AP_ROLES, PURCHASE_ROLES, RECEIVE_ROLES, RETURN_READERS as _RETURN_READERS
+from ..cost_mask import (
+    AP_ROLES,
+    PURCHASE_ROLES,
+    RECEIVE_ROLES,
+    RETURN_READERS as _RETURN_READERS,
+)
 
 # All 11 operational roles (INVESTOR excluded - read-only via middleware, never
 # an allow-list member). SUPERADMIN is a member of every gate implicitly.

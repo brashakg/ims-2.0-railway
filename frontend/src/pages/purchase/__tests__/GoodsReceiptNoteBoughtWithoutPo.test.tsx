@@ -291,6 +291,11 @@ describe('a PO receipt carries the date on the supplier invoice', () => {
       expect(date.max).toBe('2026-04-01');
       fireEvent.change(date, { target: { value: '2026-03-30' } });
       fireEvent.click(screen.getAllByLabelText(/Tally line 1/)[0]);
+      // Main's F-S3: a PO receipt carries the vendor's bill too.
+      const inv = new File(['inv'], 'inv-9.png', { type: 'image/png' });
+      fireEvent.change(screen.getByLabelText(/Attach the vendor invoice or challan/i), { target: { files: [inv] } });
+      await waitFor(() => expect(cockpit.uploadDoc).toHaveBeenCalled());
+      await waitFor(() => expect(screen.getByText(/Attached:/)).toBeInTheDocument());
       fireEvent.click(screen.getByRole('button', { name: /Post GRN/i }));
 
       await waitFor(() => expect(api.createGRN).toHaveBeenCalledTimes(1));

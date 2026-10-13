@@ -98,6 +98,14 @@ class _FakePORepo:
             self.po.update(patch)
         return True
 
+    def update_if(self, pid, expected, patch):
+        """Compare-and-set, like the real repository (the accept's PO write)."""
+        from strict_fakes import matches
+
+        if not self.po or pid != self.po["po_id"] or not matches(self.po, expected):
+            return False
+        return self.update(pid, patch)
+
 
 class _FakeStockRepo:
     def __init__(self):

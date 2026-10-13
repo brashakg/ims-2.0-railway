@@ -214,7 +214,7 @@ ROWS: List[Dict[str, object]] = [
     # Receiving goods into stock (log / accept / express / void / escalate a
     # receipt, its document upload, the receiving screen): owner ruling
     # 2026-09-28, RECEIVING IS MANAGERS ONLY -- the accountant is not here
-    # (_RECEIVE_ROLES in routers/vendors/_shared.py).
+    # (cost_mask.RECEIVE_ROLES, the _RECEIVE_ROLES gate).
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn",
@@ -422,6 +422,8 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/po-gst-heads",
         "allowed": PURCHASE,
     },
+    # Owner 2026-10-08: who may raise a PO is the purchase roles -- not the
+    # catalogue manager (the Buy Desk screen's PURCHASE_ROLES is pinned to it).
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-orders",
@@ -444,9 +446,21 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/purchase-orders/{po_id}/timeline",
         "allowed": PURCHASE,
     },
+    # Edit a DRAFT (qty, cost, lines). The handler refuses anything not DRAFT.
+    {
+        "method": "PUT",
+        "path": "/api/v1/vendors/purchase-orders/{po_id}",
+        "allowed": PURCHASE,
+    },
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-orders/{po_id}/cancel",
+        "allowed": PURCHASE,
+    },
+    # Cancel what is still due on one line, with a reason.
+    {
+        "method": "POST",
+        "path": "/api/v1/vendors/purchase-orders/{po_id}/items/{line_index}/cancel",
         "allowed": PURCHASE,
     },
     {

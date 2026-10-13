@@ -143,7 +143,15 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
         if not po:
             raise HTTPException(status_code=404, detail="Purchase order not found")
 
-        if po.get("status") not in _RECEIVABLE_PO_STATUSES:
+        from .po_detail import rejected_delivery_on_closed_order
+
+        # A rejected delivery on a closed order is logged as a STANDARD
+        # receipt, never a delivery challan: no bill is ever due on it, so a DC
+        # would sit in the accountant's unbilled-challan list for good.
+        if po.get("status") not in _RECEIVABLE_PO_STATUSES and not (
+            not is_dc
+            and rejected_delivery_on_closed_order(po, [it.model_dump() for it in grn.items])
+        ):
             raise HTTPException(
                 status_code=400, detail="PO is not in receivable status"
             )
@@ -326,6 +334,34 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
                     ),
                     "lines": untallied,
                 },
+            )
+
+    # No cancelled unit enters stock: what this receipt would ACCEPT is held to
+    # the LIVE order, so units of a line (or part of one) the order has
+    # withdrawn are refused here and never reach the accept; grn_accept holds
+    # the same rule at accept time. Owner ruling 2026-10-08: a delivery that
+    # brought cancelled items CAN be logged when every cancelled item on it is
+    # REJECTED -- they are counted as received, never accepted.
+    if po is not None:
+        from .po_detail import _received_by_product, beyond_open_quantity
+
+        over = beyond_open_quantity(
+            po,
+            [it.model_dump() for it in grn.items],
+            lambda: _received_by_product(po),
+        )
+        if over:
+            raise HTTPException(
+                status_code=400,
+                # What is known: the order has a cancelled line for the
+                # product -- never that these units were the cancelled ones.
+                detail=(
+                    "This order has a cancelled line for "
+                    + ", ".join(over)
+                    + ", so extra units cannot be told apart from the "
+                    "cancelled ones. Mark the extra rejected, or receive it "
+                    "on a new order."
+                ),
             )
 
     # Calculate totals

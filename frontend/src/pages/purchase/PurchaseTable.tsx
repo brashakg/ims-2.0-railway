@@ -109,6 +109,9 @@ export function PurchaseTable({ purchaseOrders, onViewPO }: PurchaseTableProps) 
                 {getStatusBadge(po.status)}
               </div>
               <p className="text-sm text-gray-600">{po.supplierName}</p>
+              {po.status === 'CANCELLED' && po.cancellationReason && (
+                <p className="text-xs text-red-700 mt-1">Cancelled: {po.cancellationReason}</p>
+              )}
               {/* Receiving column (Phase 1): owner 5-word vocabulary chip +
                   fully-received line count, once the PO is with the vendor. */}
               {progress && (
@@ -137,6 +140,8 @@ export function PurchaseTable({ purchaseOrders, onViewPO }: PurchaseTableProps) 
               )}
               <button
                 onClick={() => onViewPO(po)}
+                title="View order"
+                aria-label="View order"
                 className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
               >
                 <Eye className="w-5 h-5 text-gray-600" />
