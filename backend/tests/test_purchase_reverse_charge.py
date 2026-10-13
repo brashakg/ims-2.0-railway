@@ -54,7 +54,7 @@ from api.routers.vendors import performance  # noqa: E402
 from api.services import ap_engine  # noqa: E402
 from api.services.gstn_export import to_gstr3b_json  # noqa: E402
 from api.utils.ist import now_ist  # noqa: E402
-from test_purchase_invoice import BUY_JH, SUP_MH, _restore_router  # noqa: E402,F401
+from test_purchase_invoice import BUY_JH, BUY_MH, SUP_MH, _restore_router  # noqa: E402,F401
 
 _PI = "/api/v1/vendors/purchase-invoices"
 _ADMIN = {"user_id": "u1", "roles": ["ACCOUNTANT"], "store_ids": ["S1"], "active_store_id": "S1"}
@@ -543,6 +543,45 @@ class TestOtherReaders:
         out = _summary()
         assert out["net_gst_payable"] == 50.0
         assert out["gst_input_credit_carried_forward"] == 50.0
+
+
+class TestTwoRegistrations:
+    """One company, two GSTINs (Jharkhand + Maharashtra). Each registration
+    files its own GSTR-3B and sets off on it alone, so one GSTIN's spare IGST
+    credit never pays the other GSTIN's CGST/SGST -- on the Cross-Check and
+    the sign-off it stores as on the per-shop GSTR-3B screens."""
+
+    def test_one_gstins_spare_igst_never_pays_the_other_gstins_tax(self):
+        db, cli = _world()
+        db["entities"].update_one(
+            {"entity_id": "E1"},
+            {"$push": {"gstins": {"gstin": BUY_MH, "state_code": "27", "is_primary": False}}},
+        )
+        db["stores"].insert_one({"store_id": "S2", "entity_id": "E1", "state_code": "27", "gstin": BUY_MH})
+        # S1 (Jharkhand) buys from a Maharashtra supplier: Rs 1000 of IGST credit.
+        doc = _book(cli, {**_bill("FR-1", rcm=False),
+                          "lines": [{"description": "Freight", "qty": 1, "unit_price": 20000, "gst_rate": 5}]})
+        assert (doc["igst_total"], doc["recipient_gstin"]) == (1000.0, BUY_JH)
+        # S2 (Pune) sells intra-state: CGST 500 + SGST 500.
+        db["orders"].insert_one(
+            {"order_id": "O1", "store_id": "S2", "status": "COMPLETED", "tax_amount": 1000.0,
+             "grand_total": 6000.0, "created_at": datetime(2026, 5, 10, 6, 0)}
+        )
+
+        def _cash(sid):
+            c = reports._compute_gstr3b("2026-05", sid)["taxPaidCash"]
+            return c["integratedTax"] + c["centralTax"] + c["stateTax"]
+
+        assert (_cash("S1"), _cash("S2")) == (0.0, 1000.0)  # the per-shop screens
+        xc = _run_gst_cross_check(db, 5, 2026, "E1")
+        assert xc["gstr3b"]["netCash"]["total"] == 1000.0
+        assert xc["summary"]["gst_payable"] == 1000.0
+        row = next(c for c in xc["comparisons"] if c["metric"] == "Net GST payable (cash)")
+        assert row["status"] == "INFO"  # one pool would read 0; advisory, never a green MATCH
+        body = finance.GstCrossCheckSignoff(month=5, year=2026, entity_id="E1", note="ok")
+        out = asyncio.run(finance.gst_cross_check_signoff(body, dict(_ADMIN)))
+        stored = db[finance._GST_CROSSCHECK_SIGNOFFS].find_one({"entity_id": "E1"})
+        assert stored["gst_payable"] == 1000.0, out
 
 
 class TestCashRule:

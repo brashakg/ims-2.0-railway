@@ -260,17 +260,22 @@ def aggregate_gstr3b(
     empty: gst_itc._placement keeps no transfer mirror on a shop with no
     GSTIN, which files no return).
 
-    Net cash is derived ENTITY-LEVEL after aggregation by GSTR-3B's cash rule
-    (gst_itc.net_cash_due) and summed across entities -- one entity's ITC
-    surplus can never offset another entity's output tax (distinct GSTINs file
-    separately), and RCM is always discharged in cash on top.
+    Net cash is set off PER RETURN -- one per (company, GSTIN) -- by GSTR-3B's
+    cash rule (gst_itc.net_cash_due), then summed: each registration files and
+    sets off on its own, so one GSTIN's spare credit (an IGST surplus on a Pune
+    shop's out-of-state buying) never pays another GSTIN's tax, nor one
+    company's another's. A return sets off its own shops' outward tax against
+    its own credit -- its GSTIN-bound slice plus the company-wide remainder, as
+    that GSTIN's GSTR-3B prints it -- so the entity's net cash is the sum of
+    each GSTIN's own taxPaidCash. RCM is always discharged in cash on top.
+    Reports with no GSTIN share one return per company.
 
     ``entity_ids=None`` keeps the legacy per-report summation, for callers that
     already know every report is a distinct entity.
 
-    Also returns ``bucketCount`` (number of distinct entity buckets that
-    contributed) so build_crosscheck can mark the combined-view net-cash
-    comparator advisory when more than one entity clamps separately."""
+    Also returns ``bucketCount`` (number of returns that contributed) so
+    build_crosscheck can mark the combined-view net-cash comparator advisory
+    when more than one return sets off separately."""
     if entity_ids is None:
         reports = [r for r in (store_reports or []) if isinstance(r, dict)]
         keys: List[Any] = list(range(len(reports)))
@@ -296,15 +301,30 @@ def aggregate_gstr3b(
             "rcm_c": 0.0, "rcm_s": 0.0, "rcm_i": 0.0, "rcm_taxable": 0.0,
         }
 
-    # Accumulate PER ENTITY so ITC/RCM (entity-scoped) is not multiplied and net
-    # cash is clamped per entity, not on the cross-entity grand total.
+    # One bucket PER RETURN (company, GSTIN): its outward tax and the credit and
+    # RCM its own GSTR-3B carries, set off on its own. `tot` keeps the ITC/RCM
+    # totals, each bill counted once (company-wide once per entity).
     buckets: Dict[Any, Dict[str, float]] = {}
-    regular_taken: set = set()  # company-wide ITC + RCM: once per entity
+    tot = _blank()
+    regular_taken: set = set()  # company-wide ITC + RCM in tot: once per entity
     gstin_taken: set = set()    # GSTIN-bound ITC: once per (entity, GSTIN)
+
+    def _credit(dst, itc, rcm):
+        for h in ("c", "s", "i"):
+            dst["itc_" + h] += itc[h]
+            dst["rcm_" + h] += rcm[h]
+        dst["rcm_taxable"] += rcm["t"]
+
     for rep, key, gstin in zip(reports, keys, gstins):
         # Storeless stores (falsy entity_id) share one bucket: their outward is
         # real and counted, but they never contribute ITC/RCM.
-        bkey = key if (entity_ids is None or key) else "__no_entity__"
+        if entity_ids is None:
+            bkey = key
+        elif key:
+            bkey = (key, gstin or "")
+        else:
+            bkey = "__no_entity__"
+        new_return = bkey not in buckets
         b = buckets.setdefault(bkey, _blank())
         b["out_taxable"] += _f(rep.get("outwardTaxableValue"))
         osup = rep.get("outwardTaxableSupplies") or {}
@@ -317,18 +337,15 @@ def aggregate_gstr3b(
             continue
 
         rcm_reg, rcm_bound = _rcm_parts(rep)
+        reg = _itc_regular(rep)
 
-        # Company-wide ITC + RCM -> count ONCE per entity.
+        # Company-wide ITC + RCM: on every return of the company (its GSTR-3B
+        # prints it), counted ONCE per entity in the totals.
+        if new_return:
+            _credit(b, reg, rcm_reg)
         if key not in regular_taken:
             regular_taken.add(key)
-            reg = _itc_regular(rep)
-            b["itc_c"] += reg["c"]
-            b["itc_s"] += reg["s"]
-            b["itc_i"] += reg["i"]
-            b["rcm_c"] += rcm_reg["c"]
-            b["rcm_s"] += rcm_reg["s"]
-            b["rcm_i"] += rcm_reg["i"]
-            b["rcm_taxable"] += rcm_reg["t"]
+            _credit(tot, reg, rcm_reg)
 
         # GSTIN-bound ITC + RCM -> count ONCE per company + GSTIN (legacy per-report path
         # or a report with no GSTIN sums it in, since those keys are already
@@ -343,28 +360,19 @@ def aggregate_gstr3b(
                 continue
             gstin_taken.add((key, gstin))
         trf = _itc_gstin(rep)
-        b["itc_c"] += trf["c"]
-        b["itc_s"] += trf["s"]
-        b["itc_i"] += trf["i"]
-        b["rcm_c"] += rcm_bound["c"]
-        b["rcm_s"] += rcm_bound["s"]
-        b["rcm_i"] += rcm_bound["i"]
-        b["rcm_taxable"] += rcm_bound["t"]
+        _credit(b, trf, rcm_bound)
+        _credit(tot, trf, rcm_bound)
 
     vals = list(buckets.values())
     out_taxable = sum(b["out_taxable"] for b in vals)
     out_c = sum(b["out_c"] for b in vals)
     out_s = sum(b["out_s"] for b in vals)
     out_i = sum(b["out_i"] for b in vals)
-    itc_c = sum(b["itc_c"] for b in vals)
-    itc_s = sum(b["itc_s"] for b in vals)
-    itc_i = sum(b["itc_i"] for b in vals)
-    rcm_c = sum(b["rcm_c"] for b in vals)
-    rcm_s = sum(b["rcm_s"] for b in vals)
-    rcm_i = sum(b["rcm_i"] for b in vals)
-    rcm_taxable = sum(b["rcm_taxable"] for b in vals)
-    # Net cash: per entity, by GSTR-3B's own cash rule (net_cash_due -- the
-    # tax math stays in reports); then summed across entities.
+    itc_c, itc_s, itc_i = tot["itc_c"], tot["itc_s"], tot["itc_i"]
+    rcm_c, rcm_s, rcm_i = tot["rcm_c"], tot["rcm_s"], tot["rcm_i"]
+    rcm_taxable = tot["rcm_taxable"]
+    # Net cash: per return, by GSTR-3B's own cash rule (net_cash_due -- the
+    # tax math stays in reports); then summed across returns.
     from ..routers.reports.gst_itc import net_cash_due
 
     cash_i = cash_c = cash_s = 0.0
@@ -382,9 +390,9 @@ def aggregate_gstr3b(
         "sgst": _r(out_s),
         "igst": _r(out_i),
         "outwardTax": _r(out_c + out_s + out_i),
-        # Distinct entity buckets that contributed. >1 means the combined view
-        # clamps each entity's net cash separately, so build_crosscheck marks the
-        # 'Net GST payable (cash)' comparator advisory (R2).
+        # Returns that contributed. >1 means each sets off its own net cash,
+        # so build_crosscheck marks the 'Net GST payable (cash)' comparator
+        # advisory (R2).
         "bucketCount": len(buckets),
         "itc": {
             "cgst": _r(itc_c),
