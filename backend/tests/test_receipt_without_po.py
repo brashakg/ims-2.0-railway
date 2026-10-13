@@ -1072,14 +1072,20 @@ def test_c7_the_bill_task_names_no_dealer_to_the_counter(world):
     shop -- GET /tasks and GET /tasks/{id} gave every counter role there the
     dealer and the bill number (the home screen's priority tasks too)."""
     grn_id, _barcode = _walk_in_on_the_shelf(world)
+    # Control: the shop's manager sees the task (main's task_visibility rule,
+    # owner 2026-10-12: STORE_MANAGER sees every task of their shop).
+    managed = world["as_"](MANAGER).get("/tasks", params={"status": "OPEN"})
+    assert managed.status_code == 200, managed.text
+    mine = [t for t in managed.json()["tasks"] if grn_id in str(t.get("link"))]
+    assert mine, managed.text
     for role in ("SALES_STAFF", "CASHIER", "OPTOMETRIST", "WORKSHOP_STAFF"):
         counter = {"user_id": f"u-{role.lower()}", "roles": [role], "store_ids": [STORE], "active_store_id": STORE}
         listed = world["as_"](counter).get("/tasks", params={"status": "OPEN"})
         assert listed.status_code == 200, listed.text
-        mine = [t for t in listed.json()["tasks"] if grn_id in str(t.get("link"))]
-        assert mine, (role, listed.text)  # the control: the task IS listed
         one = world["as_"](counter).get(f"/tasks/{mine[0]['task_id']}")
+        assert one.status_code == 404, (role, one.text)  # not their task: not found
         for text in (listed.text, one.text):
+            assert grn_id not in text, (role, text)
             assert "Sharma" not in text and "CASH-77" not in text and "CASH77" not in text, (role, text)
     assert "bought without PO" in mine[0]["title"]
 
