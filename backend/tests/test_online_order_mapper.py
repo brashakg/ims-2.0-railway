@@ -56,6 +56,25 @@ class _DuplicateKeyError(Exception):
     pass
 
 
+_MISSING = object()
+
+
+def _path(doc, key):
+    """The value at a dotted path, as Mongo reads it: through an array of
+    subdocuments, the list of each element's value. _MISSING when absent."""
+    node = doc
+    for part in key.split("."):
+        if isinstance(node, list):
+            node = [e[part] for e in node if isinstance(e, dict) and part in e] or _MISSING
+        elif isinstance(node, dict):
+            node = node.get(part, _MISSING)
+        else:
+            node = _MISSING
+        if node is _MISSING:
+            return _MISSING
+    return node
+
+
 def _match(doc, filter_) -> bool:
     if not filter_:
         return True
@@ -64,7 +83,9 @@ def _match(doc, filter_) -> bool:
             if not any(_match(doc, sub) for sub in expected):
                 return False
             continue
-        actual = doc.get(k)
+        actual = _path(doc, k)
+        present = actual is not _MISSING
+        actual = actual if present else None
         if isinstance(expected, dict):
             for op, op_val in expected.items():
                 if op == "$type":
@@ -76,15 +97,45 @@ def _match(doc, filter_) -> bool:
                 elif op == "$lte":
                     if actual is None or actual > op_val:
                         return False
+                elif op == "$gt":
+                    if actual is None or actual <= op_val:
+                        return False
+                elif op == "$not":
+                    if _match({"v": actual} if present else {}, {"v": op_val}):
+                        return False
                 elif op == "$in":
                     if actual not in (op_val or []):
                         return False
+                elif op == "$ne":
+                    # Mongo: $ne on an array field means "no element equals".
+                    if op_val in actual if isinstance(actual, list) else actual == op_val:
+                        return False
+                elif op == "$exists":
+                    if present != bool(op_val):
+                        return False
+                elif op == "$elemMatch":
+                    # An array element matching the whole sub-filter (the
+                    # returnable-qty claim on an order line).
+                    if not any(isinstance(e, dict) and _match(e, op_val) for e in (actual or [])):
+                        return False
                 else:
                     return False
+        elif isinstance(actual, list) and not isinstance(expected, list):
+            # Mongo: a scalar matches an array holding it.
+            if expected not in actual:
+                return False
         else:
             if actual != expected:
                 return False
     return True
+
+
+def _push_unset(doc, update) -> None:
+    """$push (append; status_history is asserted on) and $unset."""
+    for k, v in ((update or {}).get("$push") or {}).items():
+        doc.setdefault(k, []).append(v)
+    for k in ((update or {}).get("$unset") or {}):
+        doc.pop(k, None)
 
 
 class _Cursor:
@@ -163,20 +214,60 @@ class FakeCollection:
             self.docs.append(target)
         if target is None:
             return None
+        # Positional "arr.$.leaf" is the first element the $elemMatch matched,
+        # resolved ONCE before any write, as Mongo does (re-matching after an
+        # $inc can miss the element the filter matched).
+        pos = {arr: next(e for e in target[arr] if isinstance(e, dict) and _match(e, cond["$elemMatch"]))
+               for arr, cond in filter_.items() if isinstance(cond, dict) and "$elemMatch" in cond}
+
+        def _slot(k):
+            """(container, leaf) for a key: positional as above; a dotted "a.b"
+            is nested, as Mongo -- after the positional element too."""
+            arr, _, rest = k.partition(".$.")
+            node = pos[arr] if rest else target
+            *parents, leaf = (rest or k).split(".")
+            for part in parents:
+                node = node.setdefault(part, {})
+            return node, leaf
+
         for op, fields in (update or {}).items():
-            if op == "$inc":
-                for k, v in fields.items():
-                    target[k] = (target.get(k) or 0) + v
-            elif op == "$set":
-                for k, v in fields.items():
-                    target[k] = v
+            for k, v in fields.items() if op in ("$inc", "$set", "$addToSet", "$pull", "$unset") else ():
+                node, leaf = _slot(k)
+                if op == "$inc":
+                    node[leaf] = (node.get(leaf) or 0) + v
+                elif op == "$set":
+                    node[leaf] = v
+                elif op == "$unset":
+                    node.pop(leaf, None)
+                elif op == "$addToSet":
+                    if v not in node.setdefault(leaf, []):
+                        node[leaf].append(v)
+                else:
+                    node[leaf] = [e for e in node.get(leaf) or [] if e != v]
+        _push_unset(target, update)
         return dict(target)
 
     def update_one(self, filter_, update, upsert=False):
         for d in self.docs:
             if _match(d, filter_):
                 for k, v in (update.get("$set") or {}).items():
-                    d[k] = v
+                    # Positional "arr.$.leaf": the first element the filter's
+                    # "arr.<field>" conditions match, as Mongo.
+                    arr, _, rest = k.partition(".$.")
+                    node = d
+                    if rest:
+                        cond = {f[len(arr) + 1:]: c for f, c in filter_.items() if f.startswith(arr + ".")}
+                        node = next(e for e in d[arr] if isinstance(e, dict) and _match(e, cond))
+                    *parents, leaf = (rest or k).split(".")
+                    for part in parents:
+                        node = node.setdefault(part, {})
+                    node[leaf] = v
+                for k, v in (update.get("$addToSet") or {}).items():
+                    if v not in d.setdefault(k, []):
+                        d[k].append(v)
+                for k, v in (update.get("$pull") or {}).items():
+                    d[k] = [e for e in d.get(k) or [] if e != v]
+                _push_unset(d, update)
                 return type("R", (), {"modified_count": 1, "matched_count": 1})()
         if upsert:
             doc = dict(filter_)
@@ -347,7 +438,9 @@ def test_status_only_update_without_line_items_syncs_existing(wired):
     assert res["status_synced"] is True
     order = wired["orders"].find_one({"shopify_order_id": "10003"})
     assert order["fulfillment_status"] == "FULFILLED"
-    assert order["status"] == "DELIVERED"
+    # Owner ruling 2026-09-28: Shopify "fulfilled" means SHIPPED; DELIVERED
+    # comes only from the courier.
+    assert order["status"] == "SHIPPED"
 
 
 # ---------------------------------------------------------------------------
@@ -413,7 +506,7 @@ def test_held_order_status_proceeds_after_hold_cleared(wired):
 
     assert res["status"] == "status_synced"
     order = wired["orders"].find_one({"shopify_order_id": "10103"})
-    assert order["status"] == "DELIVERED"
+    assert order["status"] == "SHIPPED"  # fulfilled == shipped (ruling 2026-09-28)
 
 
 def test_held_order_cancellation_still_lands(wired):

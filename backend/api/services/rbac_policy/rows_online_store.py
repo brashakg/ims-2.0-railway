@@ -516,6 +516,11 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/online-store/refund-reviews/{review_id}/reject",
         "allowed": ["ADMIN", "ACCOUNTANT", "SUPERADMIN"],
     },
+    {
+        "method": "POST",
+        "path": "/api/v1/online-store/refund-reviews/{review_id}/goods-back",
+        "allowed": ["ADMIN", "ACCOUNTANT", "SUPERADMIN"],
+    },
     # --- /api/v1/ondc ---  (BVI-20: ONDC Seller Node scaffolding -- DARK default)
     # Callback endpoints are PUBLIC (Beckn protocol; SNP signature-gated when
     # config.ukp is set). Admin routes require SUPERADMIN / ADMIN.

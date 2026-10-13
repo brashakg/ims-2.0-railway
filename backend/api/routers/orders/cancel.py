@@ -19,6 +19,7 @@ from ._shared import (
     router,
 )
 from .release import (
+    CANCELLABLE_STATUSES,
     _claim_order_for_cancel,
     _release_lens_lines,
 )
@@ -49,9 +50,19 @@ async def cancel_order(
         # the caller can access (403 otherwise; SUPERADMIN/ADMIN pass through).
         validate_store_access(order.get("store_id"), current_user)
 
-        if order.get("status") == "DELIVERED":
+        # The staff transition table decides (VALID_TRANSITIONS): a DELIVERED
+        # order, and a SHIPPED one whose goods are with the courier or the
+        # customer, is never cancelled here -- the cancel would put its units
+        # back to AVAILABLE. CANCELLED goes on to the retry door below.
+        status = order.get("status")
+        if status != "CANCELLED" and status not in CANCELLABLE_STATUSES:
             raise HTTPException(
-                status_code=400, detail="Cannot cancel delivered orders"
+                status_code=400,
+                detail=(
+                    "Cannot cancel delivered orders"
+                    if status == "DELIVERED"
+                    else f"Cannot cancel a {status} order"
+                ),
             )
 
         # ------------------------------------------------------------------
@@ -59,7 +70,7 @@ async def cancel_order(
         # check + update is check-then-act: two concurrent cancels of the same
         # order BOTH passed the check and BOTH ran the stock + loyalty undo.
         # The claim below is ONE guarded find_one_and_update whose filter
-        # excludes CANCELLED/DELIVERED, so exactly one caller can flip the
+        # claims only a cancellable status, so exactly one caller can flip the
         # order -- and only that caller runs the undo.
         #
         # RE-RUN PATH (panel must-fix 4): an order already CANCELLED whose
@@ -73,7 +84,7 @@ async def cancel_order(
         if claimed is None:
             fresh = repo.find_by_id(order_id) or {}
             if fresh.get("status") != "CANCELLED":
-                if fresh and fresh.get("status") != "DELIVERED":
+                if fresh and fresh.get("status") in CANCELLABLE_STATUSES:
                     # Still cancellable -> we did not lose a race, the STATUS
                     # WRITE ITSELF failed. Fail loudly; the order is untouched
                     # and no stock/loyalty undo has run.
