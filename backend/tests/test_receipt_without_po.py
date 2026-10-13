@@ -2054,6 +2054,23 @@ def test_c7_last_years_no_credit_bill_never_answers_this_years_2b_row(world):
     assert [b["bill_id"] for b in out["booked_no_credit"]] == ["B-5-OLD"], out
 
 
+def test_c7_a_bill_dated_after_the_return_period_is_not_in_its_2b(world):
+    """Panel mutant (round 11): 'a bill dated after the return period cannot
+    be in this 2B' (itc_reconcile) was unpinned -- replacing its `continue`
+    with `pass` left every test green. Bills S-1 (09-10, credit), O-1 (10-02,
+    credit) and O-2 (10-03, no credit) against September's 2B holding only
+    S-1: S-1 matched, nothing at risk. Without the rule O-1 read 'not in 2B'
+    and Rs 310 of October's credit 'at risk' on September's return."""
+    db = world["db"]
+    _booked(db, "B-S1", "S-1", "2026-09-10")
+    _booked(db, "B-O1", "O-1", "2026-10-02")
+    _booked(db, "B-O2", "O-2", "2026-10-03", credit=False)
+    out = _reconcile([{"gstin": DEALER_GSTIN, "invoice_no": "S-1", "taxable": 6200.0, "tax": 310.0}], "2026-09")
+    assert [m["bill_id"] for m in out["matched"]] == ["B-S1"], out
+    assert out["only_in_books"] == [] and out["booked_no_credit"] == [], out
+    assert (out["summary"]["itc_at_risk"], out["summary"]["total_book_itc"]) == (0.0, 310.0), out["summary"]
+
+
 def test_c7_a_walk_in_bill_answers_only_its_own_2b_row(world):
     """Panel probe (round 5, problem 4): a walk-in bill '1' (Rs 310, no
     credit) booked under a stand-in supplier took that supplier's GSTIN, and
