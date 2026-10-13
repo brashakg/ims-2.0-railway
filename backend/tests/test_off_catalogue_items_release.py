@@ -6267,3 +6267,45 @@ def test_r11_an_edit_to_its_own_stored_key_is_never_refused_against_itself(world
     refused = _edit_attrs(world, mine["product_id"], lens_size="52")
     finding(refused is None, f"R11-7: the edit was refused against the product itself ({getattr(refused, 'detail', None)})")
     assert world.product(mine["product_id"])["attributes"]["lens_size"] == "52"
+
+
+@pytest.mark.parametrize("exit_", ["unit_lost", "status_flip_fails"])
+def test_r11_a_managers_answer_that_dies_records_what_it_holds(world, monkeypatch, exit_):
+    # The store manager's 'Add to stock' shelves the Boss x2 a second receipt
+    # of the box holds beyond its order, and dies: its second unit does not
+    # insert, or the receipt's status flip fails after its last line. Nothing
+    # retries a hold beyond the order by itself, so the hold says at once what
+    # is still held -- 1, or nothing -- under the hold it was in.
+    from api.routers.vendors import grn_accept as _ga
+
+    po, grn1, boss = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    grn2, _ = _receive_again(world, po, "JOT/26-27/1241-DUP")
+    world.finish_draft(boss, offer=2790)
+    gid = grn2["grn_id"]
+    assert _held(world, gid) == [(boss, "over_order", 2)]
+    if exit_ == "unit_lost":
+        real = _ga._grn_mint_unit
+
+        def _second_unit_lost(stock_repo, doc, raises):
+            if doc.get("grn_id") == gid and doc.get("line_unit_seq") == 1:
+                return None
+            return real(stock_repo, doc, raises)
+
+        monkeypatch.setattr(_ga, "_grn_mint_unit", _second_unit_lost)
+        want, shelf = [(boss, "over_order", 1)], 3
+    else:
+
+        def _stepdown(*a, **k):
+            raise RuntimeError("primary stepped down")
+
+        monkeypatch.setattr(_ga, "_advance_grn_terminal_status", _stepdown)
+        want, shelf = [], 4
+    with pytest.raises(Exception):
+        _run(vd.accept_grn(gid, MANAGER))
+    status, received = _po_received(world, po)
+    finding(
+        len(world.units(boss)) == shelf and _held(world, gid) == want and received[boss] == shelf,
+        f"R11-1 ({exit_}): {len(world.units(boss))} Boss on the shelf, the receipt holds "
+        f"{_held(world, gid)}, the PO reads {received[boss]} ({status})",
+    )
+    assert len(_mgr_tasks(world, gid)) == (1 if want else 0)
