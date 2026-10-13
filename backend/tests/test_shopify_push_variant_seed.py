@@ -57,6 +57,7 @@ import pytest  # noqa: E402
 
 from database.connection import MockCollection  # noqa: E402
 from api.services import shopify_push  # noqa: E402
+from shopify_answers import tracking_answer  # noqa: E402
 
 # The push's other mechanics, for a brand that IS for the website (owner D6;
 # the brand rule has its own test in test_add_product_owner_rulings.py).
@@ -93,6 +94,9 @@ class _RouterSpy:
 
     async def __call__(self, db, query, variables):
         self.calls.append({"query": query, "variables": variables})
+        answer = tracking_answer(query, variables)
+        if answer:
+            return answer
         # LONGEST marker first: "productCreate" is a SUBSTRING of
         # "productCreateMedia", so first-match-wins would answer the
         # photograph mutation with the productCreate body and the engine

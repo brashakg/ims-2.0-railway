@@ -2043,18 +2043,6 @@ def skus_on_live_listings(db, skus: Iterable[str], *, strict: bool = False) -> s
     return live_listing_split(db, skus, strict=strict)[0]
 
 
-def listing_already_live(product: Dict[str, Any]) -> bool:
-    """Visible AND no stock pass has recorded its tracking as unset
-    (``ecom.online_stock.tracked`` False: a size minted untracked, or the
-    staged draft above). Picks the WORDS of a refused tracking re-send and
-    what the baseline records: a refused productVariantsBulkUpdate changes
-    nothing on Shopify, so a listing whose tracking was confirmed keeps it --
-    reporting it "UNTRACKED" while it was visible and tracked was two screens
-    giving two answers about one listing (recheck round 1)."""
-    ecom = (product or {}).get("ecom") or {}
-    return listing_visible(product) and (ecom.get("online_stock") or {}).get("tracked") is not False
-
-
 async def sync_product_stock(
     db,
     product: Dict[str, Any],
@@ -2062,7 +2050,6 @@ async def sync_product_stock(
     product_gid: str,
     *,
     extra_variant_gids: Optional[List[Optional[str]]] = None,
-    minted_variant_gids: Optional[List[Optional[str]]] = None,
 ) -> Dict[str, Any]:
     """LIVE-only (the caller has passed the gates): tracking + policy on every
     known variant, then ``push_skus_stock`` for this product's SKUs -- one row
@@ -2071,25 +2058,20 @@ async def sync_product_stock(
     ~70 network writes, and a POS sale that lands mid-loop must not be
     overwritten with the pre-sale number (its own write-back would be undone
     until the next tick). Fail-soft summary, never raises; a shop whose
-    on-hand is UNKNOWN is never written as 0."""
+    on-hand is UNKNOWN is never written as 0.
+
+    THE ONE TRACKING RULE (owner, round 4): tracking is CONFIRMED only when
+    Shopify's answer to this re-send echoes EVERY size tracked=true + this
+    policy (``tracking_confirmed``). A refused call, a silent answer, or one
+    that says tracked=false / another policy confirms nothing -- first publish
+    or re-press, new size or old. ``tracking_confirmed`` (bool) and
+    ``tracking_unconfirmed`` (the gids) say it; push_product puts or keeps a
+    listing on the website only on it, and nothing here is ok, SOLD OUT or
+    recorded tracked without it."""
     pid = product.get("id") or product.get("product_id")
     policy = inventory_policy_for(product)
     gids = product_variant_gids(product, variants, extra_variant_gids)
     tracked: Dict[str, Any] = {"updated": 0, "errors": [], "confirmed": set()}
-    # "Already live" covers the variants an earlier publish CONFIRMED, never
-    # one this press minted (``minted_variant_gids``: what seeding just put on
-    # Shopify, its gid on no IMS row yet -- less a size whose own create answer
-    # confirmed tracked + the policy, product.py). For that variant this IS the first
-    # publish, and on a published product it is visible the moment it exists:
-    # a size added to a live listing under a refused tracking call went out
-    # UNTRACKED while the line said "the listing keeps the tracking its first
-    # publish set" and the baseline recorded tracked=True -- with the new
-    # SKU's row written beside it the sweep saw no diff, so nothing ever
-    # re-sent tracking. Not live -> the WITHOUT LIMIT line, tracked=False, and
-    # the next pass re-sends it.
-    known = set(product_variant_gids(product, variants))
-    new = [g for g in product_variant_gids({}, None, minted_variant_gids) if g not in known]
-    live = listing_already_live(product) and not new
     # Tracking + DENY go on even when no quantity can follow (no shop mapped):
     # an UNTRACKED item sells without limit, which is the worse failure. The
     # listing then reads sold out and push_skus_stock says so, loudly, instead
@@ -2098,6 +2080,8 @@ async def sync_product_stock(
         tracked = await _set_variant_tracking(db, product_gid, gids, policy)
     else:
         tracked["errors"].append("no variant gid known -- tracking not set")
+    unconfirmed = [g for g in gids if g not in tracked["confirmed"]]
+    confirmed = bool(gids) and not unconfirmed
 
     skus = product_skus(product, variants)
     summary = await push_skus_stock(
@@ -2106,48 +2090,32 @@ async def sync_product_stock(
         source="product_push",
         product_id=str(pid) if pid else None,
         policy=policy,
-        # "Tracking is on Shopify": this call set it, or the listing's first
-        # publish did (a refused re-send changes nothing there). Recording
-        # False for a live listing would withhold its NEXT press instead. A
-        # variant this press newly linked counts only when Shopify's answer
-        # confirmed it (`tracking_confirmed`): one it echoed untracked, or
-        # left out, is recorded untracked so the next sweep re-sends it.
-        tracked=live or (tracked["updated"] > 0 and set(new) <= tracked["confirmed"]),
+        # Recorded tracked only on Shopify's confirming answer: anything less
+        # is recorded untracked, so the next sweep re-sends it.
+        tracked=confirmed,
     )
     summary["policy"] = policy
     summary["tracked"] = tracked["updated"]
-    # The gids Shopify's answer echoed tracked + the policy: what lets a
-    # refused take-down stand down (product.py), by the create's own rule.
-    summary["tracking_confirmed"] = sorted(tracked["confirmed"])
+    summary["tracking_confirmed"] = confirmed
+    summary["tracking_unconfirmed"] = unconfirmed
     summary["errors"] = list(tracked["errors"]) + list(summary["errors"])
-    summary["ok"] = summary["ok"] and not tracked["errors"]
+    summary["ok"] = summary["ok"] and confirmed
     summary["sold_out"] = summary["sold_out"] and summary["ok"]  # unconfirmed tracking is unknown
-    if tracked["errors"]:
+    if not confirmed:
         # The worse failure gets the code (recheck round 2, first-push): with
-        # ok=False and NO code the press promoted nothing, the drawer toast and
-        # the sweep toast read green and the bulk tally filed the listing under
-        # `pushed` -- over a variant that is LIVE and UNTRACKED (Shopify sells
-        # it without limit) for up to 12 h until the next tick re-sends
-        # tracking (the baseline records tracked=False). The product press
-        # reads this code and WITHHOLDS the publish (product.py `tracking_ok`);
-        # the sweep re-sends tracking on the next tick. The quantity verdict,
-        # if any, rides under it.
-        why = "; ".join(str(e) for e in tracked["errors"][:3])
-        summary["code"] = STOCK_TRACKING_FAILED
-        if live:
-            line = (
-                f"tracking + {policy} could not be re-confirmed on the variant(s) "
-                f"({why}) -- the listing keeps the tracking its first publish set; "
-                f"press again"
-            )
-        else:
-            line = (
-                f"tracking + {policy} could not be set on the variant(s) ({why}) -- "
-                f"an UNTRACKED listing sells WITHOUT LIMIT; press again"
-            )
-        summary["error"] = line + (
-            f" -- ALSO: {summary['error']}" if summary.get("error") else ""
+        # ok=False and NO code the press promoted nothing and every screen read
+        # green over a variant that may sell without limit. The product press
+        # reads `tracking_confirmed` and withholds (or takes down) the
+        # listing; the sweep re-sends tracking on the next tick. The quantity
+        # verdict, if any, rides under it.
+        why = "; ".join(str(e) for e in tracked["errors"][:3]) or (
+            f"Shopify's answer did not confirm {len(unconfirmed)} of {len(gids)} size(s)"
         )
+        summary["code"] = STOCK_TRACKING_FAILED
+        summary["error"] = (
+            f"tracking + {policy} could not be confirmed on the variant(s) ({why}) -- "
+            f"until Shopify confirms it a size may sell WITHOUT LIMIT; press again"
+        ) + (f" -- ALSO: {summary['error']}" if summary.get("error") else "")
     elif summary["errors"] and not summary.get("error"):
         summary["error"] = "; ".join(str(e) for e in summary["errors"][:5])
     return summary

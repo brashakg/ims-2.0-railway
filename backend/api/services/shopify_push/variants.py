@@ -523,12 +523,16 @@ async def _seed_variants_after_write(
         summary["default_variant_gid"] = pairs[0][1]
     # What Shopify's create answer CONFIRMS: tracked + this policy. A created
     # variant it does not confirm may sell without limit -- push_product takes
-    # a LIVE listing off the website for it ({gid: IMS sku, else the gid}).
-    sku_of = {gid: (v or {}).get("sku") for v, gid, _inv in pairs}
+    # a LIVE listing off the website for it. The press names a size by its IMS
+    # SKU (the created node matched to its row through its option values
+    # above), else "a new size" -- never a Shopify id.
     made = [_as_shopify_gid(n.get("id"), "ProductVariant") for n in created_nodes]
+    summary["size_names"] = {
+        **{g: "a new size" for g in made},
+        **{gid: v["sku"] for v, gid, _inv in pairs if (v or {}).get("sku")},
+    }
     confirmed = tracking_confirmed(created_nodes, policy)
-    summary["confirmed_variant_gids"] = sorted(confirmed)
-    summary["unconfirmed_variants"] = {g: sku_of.get(g) or g for g in made if g not in confirmed}
+    summary["unconfirmed_variant_gids"] = [g for g in made if g not in confirmed]
     return summary
 
 

@@ -104,6 +104,7 @@ from api.services import policy_engine as pe  # noqa: E402
 from api.services import product_master as pm  # noqa: E402
 from api.services import shopify_live_sync as ls  # noqa: E402
 from api.services import shopify_push  # noqa: E402
+from shopify_answers import tracking_answer  # noqa: E402
 from api.services.shopify_push import media as _media  # noqa: E402
 from api.services.online_catalog import catalog_counts, product_online_state  # noqa: E402
 from database.repositories.audit_repository import AuditRepository  # noqa: E402
@@ -150,6 +151,9 @@ class _Spy:
 
     async def __call__(self, db, query, variables):  # noqa: ARG002
         self.calls.append({"query": query, "variables": copy.deepcopy(variables)})
+        answer = tracking_answer(query, variables)
+        if answer:
+            return answer
         for marker, body in sorted(self._responses.items(), key=lambda kv: -len(kv[0])):
             if marker in query:
                 return body

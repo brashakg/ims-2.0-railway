@@ -4,10 +4,15 @@ Per-store website stock says only what IMS knows (rebuild of parked #1172).
 Four rules, each driven through the real writer with a MOCKED Shopify
 transcript (no network, no Mongo):
 
-  1. A size added to a listing that is already LIVE is created tracked and
-     "stop selling at 0" IN THE SAME productVariantsBulkCreate call, and
-     Shopify's answer must confirm both. Not confirmed on a live listing ->
-     the listing is taken off the website (Draft) and the press says so.
+  1. ONE RULE FOR EVERY PRESS (owner, round 4): a listing is put or kept
+     ACTIVE on the website only when Shopify's own answer confirms, for EVERY
+     size, tracked=true + the listing's policy (`tracking_confirmed`).
+     Silence, tracked=false or another policy confirms nothing, whichever
+     call it answered. A size added to a LIVE listing is created tracked and
+     "stop selling at 0" IN THE SAME productVariantsBulkCreate call; not
+     confirmed on a live listing -> taken off the website (Draft); not on the
+     website -> it stays Draft (never ACTIVE before the answer) and the press
+     says so. Sizes are named by their IMS SKU, never a Shopify id.
   2. "live and SOLD OUT" (the writer's `sold_out` stamp) only when every
      listed SKU was accepted as 0 at EVERY mapped shop and nothing is
      unknown: a refused write, an unreadable shelf, an unmapped holder or a
@@ -156,14 +161,13 @@ def _index(spy, marker):
 
 
 def test_1_a_new_size_on_a_live_listing_is_created_tracked_and_stop_at_zero_in_one_call(monkeypatch):
-    """The create call itself carries tracked=true + DENY, and Shopify's answer
-    confirming both is what makes the size safe: a refused re-send of tracking
-    afterwards changes nothing on Shopify, so the press is the live-listing
-    warning, never "WITHOUT LIMIT", and the listing stays on the website.
-    Send the create row without `tracked` / `inventoryPolicy` -> the first half
-    fails; treat a confirmed size as unconfirmed -> WITHOUT LIMIT -> fails."""
+    """The create call itself carries tracked=true + DENY, Shopify's answer
+    confirms both, and the stock pass's re-send answer confirms every size:
+    the listing stays on the website, green. Send the create row without
+    `tracked` / `inventoryPolicy` -> the first half fails; treat a confirmed
+    size as unconfirmed -> a Draft -> fails."""
     db, variants, upd = _live_listing_gets_size_l()
-    spy = _ThrottledTracking(_responses(**{"productUpdate(": upd, "productVariantsBulkCreate": _created()}))
+    spy = _Spy(_responses(**{"productUpdate(": upd, "productVariantsBulkCreate": _created()}))
     _live(monkeypatch, spy)
     res = _run(shopify_push.push_product(db, _cat(db), variants))
     (create,) = spy.calls_for("productVariantsBulkCreate")
@@ -173,11 +177,9 @@ def test_1_a_new_size_on_a_live_listing_is_created_tracked_and_stop_at_zero_in_o
     sel = shopify_push._VARIANTS_BULK_CREATE
     assert "inventoryPolicy" in sel and "tracked" in sel, "the answer must carry what it confirms"
     assert _drafts(spy) == [], "confirmed by Shopify -- the listing stays on the website"
-    assert res.ok is True and res.code == shopify_push.STOCK_TRACKING_FAILED, res
-    assert "re-confirmed" in res.error and "WITHOUT LIMIT" not in res.error, res.error
+    assert res.ok is True and res.code is None, res
     assert _cat(db)["ecom"]["status"] == "PUBLISHED"
     assert _baseline(db)["tracked"] is True
-
 
 @pytest.mark.parametrize(
     "answer",
@@ -412,6 +414,199 @@ def test_1_a_draft_listing_with_an_unconfirmed_size_is_never_taken_down_and_ever
     assert res.ok is True, res
 
 
+def _tracking_echoes(echo):
+    """A Spy body for productVariantsBulkUpdate: the tracking re-send answered
+    with `echo(gid)` per row (None leaves the row out), seeding answered ok."""
+    def body(query, variables):
+        if "imsVariantInventoryUpdate" not in query:
+            return _ok_body("productVariantsBulkUpdate", productVariants=[])
+        rows = variables.get("variants") or []
+        return _ok_body("productVariantsBulkUpdate", productVariants=[n for n in (echo(r["id"]) for r in rows) if n])
+    return body
+
+
+def _l_untracked(gid):
+    return _echo(gid, tracked=False, policy="CONTINUE") if gid == MINTED else _echo(gid)
+
+
+def _taken_down_with_size_l(monkeypatch):
+    """Press 1: the live listing gains L, Shopify's create answer leaves L
+    untracked, the listing is taken down (Draft, taken_down_at). Returns the
+    db and the size rows as IMS now holds them (L carries its gid)."""
+    db, variants, upd = _live_listing_gets_size_l()
+    _live(monkeypatch, _Spy(_responses(**{"productUpdate(": upd,
+                                           "productVariantsBulkCreate": _created(tracked=False)})))
+    first = _run(shopify_push.push_product(db, _cat(db), variants))
+    ecom = _cat(db)["ecom"]
+    assert first.ok is False and ecom["status"] == "DRAFT" and ecom.get("taken_down_at"), (first, ecom)
+    rows = list(db.get_collection("catalog_variants").find({"parent_product_id": "cat-1"}))
+    assert {r["sku"]: r.get("shopify_variant_id") for r in rows}["SP-1-L"] == MINTED
+    upd2 = _product_body("productUpdate")
+    upd2["data"]["productUpdate"]["product"]["variants"]["nodes"] = upd["data"]["productUpdate"]["product"]["variants"]["nodes"] + [
+        {"id": MINTED, "selectedOptions": [{"name": "Size", "value": "L"}], "inventoryItem": {"id": INV_L}}]
+    return db, rows, upd2
+
+
+@pytest.mark.parametrize(
+    "spy_for",
+    [
+        lambda r: _Spy({**r, "productVariantsBulkUpdate": _tracking_echoes(_l_untracked)}),
+        _ThrottledTracking,
+    ],
+    ids=["re-send-echoes-L-untracked-and-continue", "re-send-throttled"],
+)
+def test_1_a_re_press_after_a_take_down_stays_draft_until_shopify_confirms_every_size(monkeypatch, spy_for):
+    """Round-3 finding (oversell panel P1/P2). After the take-down the owner
+    presses Send to website again. The listing is NOT on the website, so its
+    first write goes out Draft -- ACTIVE used to go out at call 0, before the
+    tracking re-send was even answered, putting it back on sale. Shopify's
+    re-send answer then confirms nothing (L echoed untracked + CONTINUE, or
+    the call THROTTLED): the listing stays Draft on Shopify AND in IMS, no
+    publish, the press is not green and says it stays off the website.
+    Send the payload's ACTIVE in the first write -> fails; count the re-send
+    as confirmed -> publish + ACTIVE -> fails."""
+    db, rows, upd2 = _taken_down_with_size_l(monkeypatch)
+    spy = spy_for(_responses(**{"productUpdate(": upd2}))
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.push_product(db, _cat(db), rows))
+    updates = spy.calls_for("productUpdate(")
+    assert updates[0]["variables"]["input"]["status"] == "DRAFT", updates[0]["variables"]
+    assert [c for c in updates if c["variables"]["input"].get("status") == "ACTIVE"] == [], "never back on sale"
+    assert MINTED in _tracking_sent(spy) and spy.calls_for("publishablePublish") == []
+    assert res.ok is False and res.reason == "publish_withheld" and res.code == shopify_push.STOCK_TRACKING_FAILED, res
+    assert "stays OFF the website (Draft)" in res.error, res.error
+    ecom = _cat(db)["ecom"]
+    assert ecom["status"] == "DRAFT" and ecom.get("taken_down_at"), ecom
+    assert _baseline(db)["tracked"] is False
+
+
+def test_1_a_re_press_after_a_take_down_that_shopify_confirms_goes_back_on_the_website(monkeypatch):
+    """The control: the same re-press, Shopify's re-send answer confirming
+    every size tracked + DENY. Draft first, the re-send, the publish, THEN
+    ACTIVE -- and IMS PUBLISHED with the take-down marker cleared. Skip the
+    held-back ACTIVE -> the listing stays Draft on Shopify while IMS says
+    PUBLISHED -> fails."""
+    db, rows, upd2 = _taken_down_with_size_l(monkeypatch)
+    spy = _Spy(_responses(**{"productUpdate(": upd2}))
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.push_product(db, _cat(db), rows))
+    assert res.ok is True and res.code is None, res
+    updates = [i for i, c in enumerate(spy.calls) if "productUpdate(" in c["query"]]
+    assert spy.calls[updates[0]]["variables"]["input"]["status"] == "DRAFT"
+    (pub,) = _index(spy, "publishablePublish")
+    assert max(_index(spy, "imsVariantInventoryUpdate")) < pub < updates[-1]
+    assert spy.calls[updates[-1]]["variables"]["input"] == {"id": "gid://shopify/Product/111", "status": "ACTIVE"}
+    ecom = _cat(db)["ecom"]
+    assert ecom["status"] == "PUBLISHED" and not ecom.get("taken_down_at"), ecom
+    assert _baseline(db)["tracked"] is True
+
+
+def test_2_still_live_then_press_again_on_the_same_answer_is_still_live(monkeypatch):
+    """Round-3 finding (honest-screens probe A2). Press 1: L created with an
+    answer saying untracked + CONTINUE, the take-down refused, the re-send
+    echoing L untracked -> STILL LIVE, recorded untracked. Press 2 (the
+    scheduled run re-presses it -- no taken_down_at): L now has its gid, and
+    Shopify gives the identical answer. Same facts, same verdict: STILL LIVE,
+    a take-down tried, never ok, never SOLD OUT, no publish, still recorded
+    untracked. Check only newly minted sizes -> press 2 green -> fails."""
+    db, variants, upd = _live_listing_gets_size_l()
+    first = _DraftRefusedTrackingEchoes(
+        _responses(**{"productUpdate(": upd, "productVariantsBulkCreate": _created(tracked=False, policy="CONTINUE")}),
+        _l_untracked,
+    )
+    _live(monkeypatch, first)
+    res1 = _run(shopify_push.push_product(db, _cat(db), variants))
+    rows = list(db.get_collection("catalog_variants").find({"parent_product_id": "cat-1"}))
+    upd2 = _product_body("productUpdate")
+    upd2["data"]["productUpdate"]["product"]["variants"]["nodes"] = upd["data"]["productUpdate"]["product"]["variants"]["nodes"] + [
+        {"id": MINTED, "selectedOptions": [{"name": "Size", "value": "L"}], "inventoryItem": {"id": INV_L}}]
+    second = _DraftRefusedTrackingEchoes(_responses(**{"productUpdate(": upd2}), _l_untracked)
+    _live(monkeypatch, second)
+    res2 = _run(shopify_push.push_product(db, _cat(db), rows))
+    for res, spy in ((res1, first), (res2, second)):
+        assert len(_drafts(spy)) == 1 and spy.calls_for("publishablePublish") == []
+        assert res.ok is False and res.reason != "publish_withheld", res
+        assert res.code == shopify_push.STOCK_TRACKING_FAILED and res.stock["sold_out"] is False
+        assert "STILL LIVE" in res.error and "SP-1-L" in res.error, res.error
+    assert spy.calls_for("productVariantsBulkCreate") == [], "press 2 created nothing"
+    assert _cat(db)["ecom"]["status"] == "PUBLISHED"
+    assert _baseline(db)["tracked"] is False
+
+
+def test_1_a_size_shopify_labels_differently_is_named_a_new_size_never_its_id(monkeypatch):
+    """Round-3 finding (LOW). Shopify's create answer labels IMS size SP-1-L
+    as Size=Large, so it matches no IMS row by option values, and says
+    tracked=false. The press text names it 'a new size' -- never
+    gid://shopify/ProductVariant/77, an id the owner cannot act on. Fall back
+    to the gid -> fails."""
+    db, variants, upd = _live_listing_gets_size_l()
+    node = {"id": MINTED, "selectedOptions": [{"name": "Size", "value": "Large"}],
+            "inventoryItem": {"id": INV_L, "tracked": False}, "inventoryPolicy": "DENY"}
+    spy = _Spy(_responses(**{"productUpdate(": upd,
+                             "productVariantsBulkCreate": _ok_body("productVariantsBulkCreate", productVariants=[node])}))
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.push_product(db, _cat(db), variants))
+    assert len(_drafts(spy)) == 1
+    assert "a new size" in res.error and "gid://" not in res.error, res.error
+
+
+def test_1_a_shopify_size_ims_has_no_row_for_is_named_a_new_size_never_its_id(monkeypatch):
+    """The same rule for a size the re-send leaves unconfirmed that IMS holds
+    no row for (Shopify lists /99 on the live listing; IMS never linked it):
+    the take-down names it 'a new size', never its gid. Fall back to the gid
+    in the press text -> fails."""
+    hand = "gid://shopify/ProductVariant/99"
+    db = _db(a=2, b=1, c=0)
+    db.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True, status="PUBLISHED", locally_modified=True)])
+    upd = _product_body("productUpdate")
+    upd["data"]["productUpdate"]["product"]["variants"]["nodes"].append(
+        {"id": hand, "selectedOptions": [], "inventoryItem": {"id": "gid://shopify/InventoryItem/990"}})
+    spy = _Spy(_responses(**{"productUpdate(": upd,
+                             "productVariantsBulkUpdate": _tracking_echoes(lambda g: None if g == hand else _echo(g))}))
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.push_product(db, _cat(db), []))
+    assert hand in _tracking_sent(spy) and len(_drafts(spy)) == 1
+    assert "on a new size" in res.error and "gid://" not in res.error, res.error
+
+
+def test_1_a_live_listing_recorded_untracked_gaining_an_unconfirmed_size_is_taken_down(monkeypatch):
+    """Round-3 finding (test pin, M1). IMS holds the listing PUBLISHED with
+    accepted quantities -- it IS on the website -- but its last pass recorded
+    tracking as not set (what an unconfirmed size leaves behind). It gains L,
+    whose create answer says tracked=false. The take-down asks the ONE
+    listing reader (`listing_visible`), so the listing comes off the website
+    at once. Ask 'visible AND recorded tracked' instead -> no take-down, the
+    re-send's answer puts it back on sale green -> fails."""
+    db, variants, upd = _live_listing_gets_size_l()
+    db.get_collection("catalog_products").update_one({"id": "cat-1"}, {"$set": {"ecom.online_stock.tracked": False}})
+    spy = _Spy(_responses(**{"productUpdate(": upd, "productVariantsBulkCreate": _created(tracked=False)}))
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.push_product(db, _cat(db), variants))
+    drafts = _drafts(spy)
+    assert len(drafts) == 1 and drafts[0] < _index(spy, "inventorySetQuantities")[0], [c["query"][:40] for c in spy.calls]
+    assert res.ok is False and "taken OFF the website (Draft)" in res.error and "SP-1-L" in res.error, res
+    assert _cat(db)["ecom"]["status"] == "DRAFT"
+
+
+def test_1_an_allow_oversell_listing_gaining_a_size_confirms_against_its_own_policy(monkeypatch):
+    """Round-3 finding (test pin, M2 / M3). A made-to-order listing
+    (ecom.allow_oversell -> policy CONTINUE) gains L; Shopify answers L
+    tracked=true + CONTINUE. The create row asks for the listing's OWN policy
+    and the answer is confirmed against it, so the listing stays live and
+    green. Hardcode DENY on the create row -> the row assert fails; confirm
+    against a literal DENY -> a Draft + 'did not confirm' -> fails."""
+    db, variants, upd = _live_listing_gets_size_l()
+    db.get_collection("catalog_products").update_one({"id": "cat-1"}, {"$set": {"ecom.allow_oversell": True}})
+    spy = _Spy(_responses(**{"productUpdate(": upd, "productVariantsBulkCreate": _created(policy="CONTINUE")}))
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.push_product(db, _cat(db), variants))
+    (create,) = spy.calls_for("productVariantsBulkCreate")
+    assert create["variables"]["variants"][0]["inventoryPolicy"] == "CONTINUE"
+    assert _drafts(spy) == [], [c["query"][:40] for c in spy.calls]
+    assert res.ok is True and res.code is None, res
+    assert _cat(db)["ecom"]["status"] == "PUBLISHED" and _baseline(db)["tracked"] is True
+
+
 # ---------------------------------------------------------------------------
 # 2. SOLD OUT only when every mapped shop was written 0 and nothing is unknown
 # ---------------------------------------------------------------------------
@@ -478,23 +673,36 @@ def test_2_a_stray_size_is_not_sold_out(monkeypatch):
     assert out["sold_out"] is False
 
 
-def test_2_unconfirmed_tracking_on_a_live_listing_is_not_sold_out(monkeypatch):
-    """A live listing whose last pass recorded tracking as NOT set, every
-    shelf 0, the tracking re-send refused: the press stays live with
-    'sells WITHOUT LIMIT' -- and that is not SOLD OUT, whatever the numbers
-    say. Drop the tracking override in sync_product_stock -> sold_out True
-    beside WITHOUT LIMIT -> fails."""
+@pytest.mark.parametrize(
+    "spy_for",
+    [
+        _ThrottledTracking,
+        lambda r: _Spy({**r, "productVariantsBulkUpdate": _ok_body("productVariantsBulkUpdate", productVariants=[])}),
+        lambda r: _Spy({**r, "productVariantsBulkUpdate": _ok_body(
+            "productVariantsBulkUpdate", productVariants=[_echo(VARIANT_GID, tracked=False, policy="CONTINUE")])}),
+    ],
+    ids=["re-send-refused", "re-send-silent", "re-send-echoes-untracked"],
+)
+def test_2_unconfirmed_tracking_on_a_live_listing_is_not_sold_out_and_comes_off(monkeypatch, spy_for):
+    """Round-3 finding (honest-screens probe A). A live listing whose last
+    pass recorded tracking as NOT set, every shelf 0; the re-send is refused,
+    or accepted with an answer that confirms nothing. The size has its gid
+    (nothing new), and that is still unconfirmed: never ok, never SOLD OUT,
+    recorded untracked, and the listing comes off the website. Check only the
+    sizes this press minted -> ok + SOLD OUT -> fails; drop the sold_out
+    narrowing -> SOLD OUT beside an unconfirmed size -> fails."""
     left = {"quantities": {"SP-1": {"BV-A": 1, "BV-B": 0, "BV-C": 0}}, "tracked": False, "policy": "DENY"}
     db = _db(a=0, b=0, c=0)
     db.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=True, status="PUBLISHED",
                                               locally_modified=True, online_stock=left)])
-    spy = _ThrottledTracking(_responses())
+    spy = spy_for(_responses())
     _live(monkeypatch, spy)
     res = _run(shopify_push.push_product(db, _cat(db), []))
-    assert res.ok is True and res.code == shopify_push.STOCK_TRACKING_FAILED, res
-    assert "WITHOUT LIMIT" in res.error and res.stock["set"] == 3, res
-    assert res.stock["sold_out"] is False
-
+    assert res.stock["set"] == 3 and res.stock["ok"] is False and res.stock["sold_out"] is False, res.stock
+    assert res.ok is False and res.code == shopify_push.STOCK_TRACKING_FAILED, res
+    assert "taken OFF the website (Draft)" in res.error and "SP-1" in res.error, res.error
+    assert len(_drafts(spy)) == 1 and spy.calls_for("publishablePublish") == []
+    assert _baseline(db)["tracked"] is False
 
 # ---------------------------------------------------------------------------
 # 3. a read that died is unknown and named
