@@ -30,6 +30,7 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 from ..dependencies import user_store_scope
+from . import catalog_flags
 
 # Roles that see every task of the shops they reach.
 _SHOP_WIDE_ROLES = {"STORE_MANAGER", "AREA_MANAGER"}
@@ -50,8 +51,21 @@ def visibility_filter(current_user: dict) -> Dict[str, Any]:
     # may say "cashier").
     roles = sorted({str(r).strip().upper() for r in (current_user.get("roles") or []) if r})
     is_cross, stores = user_store_scope({**current_user, "roles": roles})
-    if is_cross:
+    flags = catalog_flags.handles_flags(current_user)
+    if is_cross and flags:
         return {}
+    # A catalogue-flag task belongs to no shop: the people who raise and clear
+    # flags (catalog_flags.handles_flags) see every one; nobody else sees any.
+    if not flags:
+        rest = {} if is_cross else _seen(current_user, roles, stores)
+        hide = {"payload.kind": {"$ne": catalog_flags.TASK_KIND}}
+        return {"$and": [hide, rest]} if rest else hide
+    seen = _seen(current_user, roles, stores)
+    seen["$or"].append({"payload.kind": catalog_flags.TASK_KIND})
+    return seen
+
+
+def _seen(current_user: dict, roles: list, stores) -> Dict[str, Any]:
     # store_ids is unchecked user data: a None / number / "" in it would make
     # sorted() raise TypeError (a 500 on every task door). Drop it.
     shops = {"$in": sorted({s for s in stores if isinstance(s, str) and s})}
@@ -63,7 +77,7 @@ def visibility_filter(current_user: dict) -> Dict[str, Any]:
         anyof = "|".join(re.escape(r) for r in roles)
         seen.append({"assigned_to": {"$regex": f"^({anyof})$", "$options": "i"}, "store_id": shops})
     # Nobody to match (no id, no role): see nothing rather than everything.
-    return {"$or": seen} if seen else {"task_id": {"$in": []}}
+    return {"$or": seen or [{"task_id": {"$in": []}}]}
 
 
 def visible(filters: Optional[Dict[str, Any]], current_user: dict) -> Dict[str, Any]:

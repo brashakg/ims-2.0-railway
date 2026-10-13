@@ -157,11 +157,15 @@ def _as_dt(v: Any) -> Optional[datetime]:
 # ---------------------------------------------------------------------------
 
 
-def _person_holding(role: str, store_id: Optional[str]) -> Optional[str]:
+def _person_holding(
+    role: str, store_id: Optional[str], *, any_store: bool = False
+) -> Optional[str]:
     """The user id of the person holding ``role`` at ``store_id``, through the
     staff-to-store assignment (users.store_ids, active users only). None when
-    nobody holds it there, or for a store-less task (no store = no person)."""
-    if not store_id:
+    nobody holds it there, or for a store-less task (no store = no person) --
+    unless ``any_store``: then any active holder of a role that belongs to no
+    shop (the catalogue's CATALOG_MANAGER)."""
+    if not store_id and not any_store:
         return None
     try:
         from ..dependencies import get_user_repository

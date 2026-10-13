@@ -146,6 +146,19 @@ def _authorise_attachment(file_id: str, current_user: dict) -> None:
         )
 
 
+def _ensure_may_close(task: dict, current_user: dict) -> None:
+    """Closing a catalogue-flag task clears its flags (complete = fixed,
+    cancel = withdrawn), so it takes the people who may clear a flag
+    (services/catalog_flags.clears_flags) -- the same as Mark fixed."""
+    from ..services import catalog_flags
+
+    if catalog_flags.is_flag_task(task) and not catalog_flags.clears_flags(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="Only a catalogue manager or an admin can close a catalogue flag task",
+        )
+
+
 # ============================================================================
 # SCHEMAS
 # ============================================================================
@@ -780,6 +793,8 @@ async def update_task(
                 detail="Use POST /{task_id}/complete to complete a task (records "
                 "completion notes, completed_by, completed_at).",
             )
+        if new_status == "CANCELLED":
+            _ensure_may_close(existing, current_user)
         update_data["status"] = new_status
         update_data["history"] = (existing.get("history") or []) + [
             {
@@ -812,6 +827,12 @@ async def update_task(
     if update_data:
         update_data["updated_at"] = datetime.now()
         if repo.update(task_id, update_data):
+            if update_data.get("status") == "CANCELLED":
+                # A catalogue-flag task: cancelling it withdraws its open flags
+                # (services/catalog_flags, the one rule; fail-soft).
+                from ..services.catalog_flags import on_task_closed
+
+                on_task_closed(existing, current_user, "CANCELLED")
             return {"task_id": task_id, "message": "Task updated"}
 
     return {"task_id": task_id, "message": "No changes made"}
@@ -830,6 +851,7 @@ async def complete_task(
         return {"task_id": task_id, "status": "COMPLETED"}
 
     task = _visible_task(repo, task_id, current_user)
+    _ensure_may_close(task, current_user)
 
     current_status = canon_status(task.get("status"))
 
@@ -863,6 +885,11 @@ async def complete_task(
     )
 
     if result:
+        # A catalogue-flag task: completing it fixes its flags (the one rule
+        # in services/catalog_flags; fail-soft, the completion stands).
+        from ..services.catalog_flags import on_task_closed
+
+        on_task_closed(task, current_user, "COMPLETED")
         return {"task_id": task_id, "status": "COMPLETED", "message": "Task completed"}
 
     raise HTTPException(status_code=500, detail="Failed to complete task")
@@ -1187,6 +1214,16 @@ async def escalate_task(
         return {"task_id": task_id, "status": "ESCALATED"}
 
     task = _visible_task(repo, task_id, current_user)
+
+    from ..services import catalog_flags
+
+    if catalog_flags.is_flag_task(task):
+        # The same rule as the SLA scan (task_sla.should_escalate): it stays
+        # with the people who may clear a flag.
+        raise HTTPException(
+            status_code=400,
+            detail="A catalogue flag task stays with the catalogue team - it is not escalated.",
+        )
 
     current_status = canon_status(task.get("status"))
     if current_status in TERMINAL_STATUSES:
