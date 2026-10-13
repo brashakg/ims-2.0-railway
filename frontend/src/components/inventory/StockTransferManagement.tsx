@@ -81,6 +81,8 @@ interface Transfer {
   total_items: number;
   tracking_number?: string;
   courier_name?: string;
+  /** The server's answer: may this user print this transfer's challan. */
+  can_print_challan?: boolean;
 }
 
 const errMsg = (e: any): string =>
@@ -558,20 +560,22 @@ export function StockTransferManagement() {
                 </p>
               </div>
               <div className="flex items-center gap-2">
-                <button
-                  onClick={async () => {
-                    try {
-                      await printDocumentsApi.openTransferChallan(selectedTransfer.id);
-                    } catch {
-                      toast.error('Could not open delivery challan');
-                    }
-                  }}
-                  className="btn-outline flex items-center gap-2 text-sm"
-                  title="Print Rule 55 Delivery Challan"
-                >
-                  <Truck className="w-4 h-4" />
-                  Delivery Challan
-                </button>
+                {gates.canPrintChallan(selectedTransfer) && (
+                  <button
+                    onClick={async () => {
+                      try {
+                        await printDocumentsApi.openTransferChallan(selectedTransfer.id);
+                      } catch (e) {
+                        toast.error(`Could not open delivery challan: ${errMsg(e)}`);
+                      }
+                    }}
+                    className="btn-outline flex items-center gap-2 text-sm"
+                    title="Print Rule 55 Delivery Challan"
+                  >
+                    <Truck className="w-4 h-4" />
+                    Delivery Challan
+                  </button>
+                )}
                 <button
                   onClick={closeDetails}
                   className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
