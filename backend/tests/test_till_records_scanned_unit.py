@@ -244,6 +244,34 @@ def test_barcode_trace_of_the_scanned_frame_shows_its_sale(client, till):
     assert shelf.json()["sales"] == []
 
 
+def test_trace_still_shows_the_sale_when_the_unit_lookup_fails(client, till, monkeypatch):
+    """The sales section now reads the unit's stock_id: a unit lookup that
+    errors must leave the line-barcode match (older orders carry the barcode
+    on the line) running, not empty the section."""
+    from api.routers import inventory as inv_mod
+
+    till["db"].get_collection("orders").insert_one({
+        "order_id": "ORD-OLD-1", "order_number": "BV-OLD-1", "store_id": STORE,
+        "status": "DELIVERED", "created_at": "2026-01-05T10:00:00+05:30",
+        "items": [{"product_id": PID, "barcode": UNIT_B["barcode"], "quantity": 1}],
+    })
+
+    class _UnitsDown:
+        def find_one(self, *a, **k):
+            raise RuntimeError("stock_units unreachable")
+
+    class _Db:
+        def get_collection(self, name):
+            return _UnitsDown() if name == "stock_units" else till["db"].get_collection(name)
+
+    monkeypatch.setattr(inv_mod, "_get_db", lambda: _Db())
+    trace = client.get(
+        f"/api/v1/inventory/barcode/{UNIT_B['barcode']}/trace", headers=_token(["SUPERADMIN"])
+    )
+    assert trace.status_code == 200, trace.text
+    assert [s["order_number"] for s in trace.json()["sales"]] == ["BV-OLD-1"]
+
+
 def test_same_unit_scanned_twice_on_one_bill_is_refused(client, till):
     scanned = _line(stock_id=UNIT_B["stock_id"])
     r = _sell(client, [scanned, dict(scanned)])
