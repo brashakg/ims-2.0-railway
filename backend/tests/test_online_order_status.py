@@ -1566,24 +1566,30 @@ def test_a_unit_shopify_never_fulfilled_goes_back_on_the_shelf_after_a_courier_d
     assert sorted(s for _, s in _units(swept)) == ["AVAILABLE", "SOLD"]
 
 
-def test_a_parcel_the_counter_marked_delivered_follows_the_courier_rule(swept, monkeypatch):
-    """Panel probe: a qty-2 line, both units SOLD; one parcel ships (AWB), the
-    counter marks the order delivered (no courier feed), then Shopify cancels
-    and refunds the unit it never fulfilled. Read off "DELIVERED by a user"
-    alone this was a counter handover: the cancel line restocked nothing, the
-    note sent staff to wait for goods that never left, and stk-2 stayed SOLD
-    for good (the retry: already restocked; the cancel door: refused)."""
-    oid = 61010
+@pytest.mark.parametrize("parcel", [{}, {"tracking_number": "", "tracking_url": "",
+                                         "shipment_status": "in_transit"}],
+                         ids=["awb", "shipment_status_only"])
+def test_a_parcel_the_counter_marked_delivered_follows_the_courier_rule(swept, monkeypatch, parcel):
+    """Panel probe: a qty-2 line, both units SOLD; one parcel ships (an AWB,
+    or no tracking number but a Shopify shipment status), the counter marks
+    the order delivered (no courier feed), then Shopify cancels and refunds
+    the unit it never fulfilled. Read off "DELIVERED by a user" alone this
+    was a counter handover: the cancel line restocked nothing, the note sent
+    staff to wait for goods that never left, and stk-2 stayed SOLD for good
+    (the retry: already restocked; the cancel door: refused)."""
+    oid = 61010 + bool(parcel)
     doc = _book(swept, oid, line_items=[{**_frame_order(oid)["line_items"][0], "quantity": 2}])
     _claim_unit(swept, doc)
     swept["stock_repo"].units.append({**swept["stock_repo"].units[0], "stock_id": "stk-2"})
-    shopify_fulfillment.reconcile_fulfillment(swept["db"], _fulfilment(oid, 1))
+    shopify_fulfillment.reconcile_fulfillment(swept["db"], _fulfilment(oid, 1, **parcel))
     assert _doc(swept, oid)["status"] == "SHIPPED"
+    assert bool(shopify_fulfillment.tracked_awbs(_doc(swept, oid))) is not bool(parcel)
     assert _counter_deliver(swept, monkeypatch, _doc(swept, oid)).status_code == 200
     assert (_doc(swept, oid)["status"], _doc(swept, oid)["status_updated_by"]) == ("DELIVERED", "u1")
-    shopify_refund.handle_shopify_refund(swept["db"], _refund(710010, oid), webhook_id=None,
+    rid = 710010 + bool(parcel)
+    shopify_refund.handle_shopify_refund(swept["db"], _refund(rid, oid), webhook_id=None,
                                          topic="refunds/create")
-    row = swept["review"].find_one({"shopify_refund_id": "710010"})
+    row = swept["review"].find_one({"shopify_refund_id": str(rid)})
     assert [(line["return_qty"], line["restock"]) for line in row["proposed_restock"]] == [(1, True)]
     assert "never left the shelf" in row["note"] and "physically come back" not in row["note"]
 
