@@ -1597,7 +1597,8 @@ def _reactivate_original_unit(
 
     A stock read or a reactivate write that FAILED raises: None means "no
     unit to reactivate" and the caller mints, so a failure read as None
-    minted a phantom AVAILABLE unit beside the one still SOLD.
+    minted a phantom AVAILABLE unit beside the one still SOLD. The write is
+    itself filtered on SOLD and read back on an error (_flip_sold_unit).
     """
     if stock_repo is None or not product_id:
         return None
@@ -1634,7 +1635,8 @@ def _reactivate_original_unit(
         # stamps the NEW order_id onto a clean unit.
         prior_order_id = unit.get("order_id") or order_id
         try:
-            ok = stock_repo.update(
+            ok = _flip_sold_unit(
+                stock_repo,
                 sid,
                 {
                     "status": "AVAILABLE",
@@ -1651,15 +1653,38 @@ def _reactivate_original_unit(
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[RETURNS] stock reactivate failed: %s", exc)
-            ok = False
+            failed = True
+            continue
         if ok:
             used_ids.add(sid)
             return str(sid)
-        # The real repository's update answers False on a write error.
-        failed = True
+        # No longer SOLD: another return flipped it first -- try the next one.
     if failed:
         raise RuntimeError("stock reactivate failed: the SOLD unit stays SOLD")
     return None
+
+
+def _flip_sold_unit(stock_repo: Any, sid: Any, fields: Dict[str, Any]) -> bool:
+    """Flip unit `sid` back to AVAILABLE only while it is still SOLD (a write
+    filtered on status SOLD): True flipped, False no longer SOLD (another
+    return took it first). RAISES when the write failed. A write that raised
+    is read back: committed with its reply lost, it is this flip -- counted
+    as not landed, the retry found no SOLD unit and minted a second one. A
+    fake repository without a collection keeps its update (False: failed)."""
+    coll = getattr(stock_repo, "collection", None)
+    if coll is None:
+        if not stock_repo.update(sid, fields):
+            raise RuntimeError("stock reactivate failed: the SOLD unit stays SOLD")
+        return True
+    try:
+        return coll.update_one({"stock_id": sid, "status": "SOLD"},
+                               {"$set": {**fields, "updated_at": datetime.now()}}).matched_count > 0
+    except Exception:  # noqa: BLE001
+        # ponytail: a read-back that also fails leaves it open (a second unit
+        # is possible only on two misses in a row).
+        if (coll.find_one({"stock_id": sid}) or {}).get("returned_at") == fields["returned_at"]:
+            return True
+        raise
 
 
 def _find_stock(stock_repo: Any, query: Dict[str, Any]) -> List[Dict[str, Any]]:

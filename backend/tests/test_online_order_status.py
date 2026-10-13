@@ -1420,6 +1420,18 @@ class _FlakyUnits:
             raise RuntimeError("stock read down")
         return _Cursor([u for u in self.repo.units if _match(u, query)])
 
+    def find_one(self, query=None, projection=None):
+        return next((dict(u) for u in self.repo.units if _match(u, query)), None)
+
+    def update_one(self, query, update, **kw):
+        """The reactivate's write, filtered on SOLD (returns._flip_sold_unit)."""
+        from types import SimpleNamespace
+
+        hit = [u for u in self.repo.units if _match(u, query)][:1]
+        for u in hit:
+            u.update(update["$set"])
+        return SimpleNamespace(matched_count=len(hit), modified_count=len(hit))
+
 
 def _stock_read_fails(monkeypatch, repo, times=1):
     from database.repositories.product_repository import StockRepository
@@ -3442,3 +3454,56 @@ def test_a_failed_read_of_which_shop_holds_the_unit_never_mints_at_the_first(swe
     coll.down = 0
     assert _retry(ret)["restock_applied"] is True
     assert _units(swept) == [("stk-1", "AVAILABLE"), ("stk-2", "AVAILABLE")]
+
+
+class _WriteLandsThenRaises(_FlakyUnits):
+    """The stock collection whose first write commits, then its reply is
+    lost (a socket timeout after the commit)."""
+
+    def __init__(self, repo):
+        super().__init__(repo, 0)
+        self.lost = False
+
+    def update_one(self, query, update, **kw):
+        out = super().update_one(query, update, **kw)
+        if not self.lost:
+            self.lost = True
+            raise RuntimeError("socket timeout after the commit")
+        return out
+
+
+def test_a_reactivate_whose_reply_was_lost_puts_the_unit_back_once(swept, monkeypatch):
+    """Panel follow-up: the reactivate write, an update by id, read a lost
+    reply as a failed write: stk-1 AVAILABLE with the restock open, and the
+    retry -- no SOLD unit left on the order -- minted a second unit for one
+    frame. The write is read back on an error: the unit is back, once."""
+    from database.repositories.product_repository import StockRepository
+
+    oid = 60264
+    _claim_unit(swept, _book(swept, oid))
+    _set(swept, oid, status="DELIVERED")
+    repo = swept["stock_repo"]
+    coll = _WriteLandsThenRaises(repo)
+    monkeypatch.setattr(repo, "collection", coll, raising=False)
+    monkeypatch.setattr(repo, "update", StockRepository(coll).update)  # the real repository's
+    out = _counter_return(swept, oid)
+    _retry(swept["returns"].find_one({"return_id": out["return_id"]}))
+    assert _units(swept) == [("stk-1", "AVAILABLE")], "one frame, one unit"
+    assert (out["restock_applied"], out["restock_stock_ids"]) == (True, ["stk-1"])
+
+
+def test_a_unit_another_return_flipped_first_is_never_flipped_twice(swept, monkeypatch):
+    """The reactivate read stk-1 SOLD, then another return flipped it first.
+    Unguarded, the write flipped it again and both returns counted the one
+    unit (the other frame got no stock row). The write is filtered on SOLD:
+    it loses the race and finds no unit."""
+
+    class _StaleRead(_FlakyUnits):
+        def find(self, query=None, projection=None):
+            return _Cursor([{**u, "status": "SOLD"} for u in self.repo.units])
+
+    repo = swept["stock_repo"]
+    repo.units.append({"stock_id": "stk-1", "product_id": "P", "store_id": "S", "status": "AVAILABLE"})
+    monkeypatch.setattr(repo, "collection", _StaleRead(repo, 0), raising=False)
+    assert returns_router._reactivate_original_unit(repo, "P", "S", None, set()) is None
+    assert "returned_at" not in repo.units[0], "flipped once, by the other return"
