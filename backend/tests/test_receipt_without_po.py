@@ -2174,6 +2174,45 @@ def test_g1_a_walk_in_bill_costs_the_latest_price_paid_never_a_blend(world):
     assert booked("CASH-85", True) == 3100.0
 
 
+def test_g1_a_late_walk_in_bill_never_puts_back_an_older_price(world):
+    """Panel probe (round 10): walk-in receipt dated 09-01 at 3100; a PO
+    receipt dated 09-20, billed at 2000, set the cost to 2000; the 09-01
+    walk-in's bill (CASH-E) booked after it put 3100 back (3255 with credit
+    off) -- the figure the stock, overview and margin reports read. The latest
+    price paid is the newest ACCEPTED receipt's, dated by its acceptance (as
+    /vendors/last-cost dates it), never the newest booking: an older receipt's
+    late bill does not stop a newer walk-in from costing what it paid."""
+    db = world["db"]
+
+    def frame_cost():
+        return db.products.find_one({"product_id": FRAME})["cost_price"]
+
+    po_line = [{"product_id": FRAME, "received_qty": 2, "accepted_qty": 2, "rejected_qty": 0}]
+    _seed_receipt(db, grn_id="GRN-PO-0815", subtype="STANDARD", po_id="PO-815", items=po_line, accepted_at="2026-08-15T10:00:00")
+    early = _on_the_shelf(world, vendor_invoice_no="CASH-E")
+    db.grns.update_one({"grn_id": early}, {"$set": {"accepted_at": "2026-09-01T10:00:00"}})
+    _seed_receipt(db, grn_id="GRN-PO-0920", subtype="STANDARD", po_id="PO-920", items=po_line, accepted_at="2026-09-20T10:00:00")
+    db.products.update_one({"product_id": FRAME}, {"$set": {"cost_price": 2000.0, "cost_source": "PURCHASE_INVOICE"}})
+
+    late = _invoice_body(early, "CASH-E")
+    late.itc_eligible = False
+    _run(pi.create_purchase_invoice(late, current_user=ACCOUNTANT))
+    assert frame_cost() == 2000.0
+    # A later receipt that accepted none of the frame, or was voided, paid
+    # no price for it.
+    _seed_receipt(db, grn_id="GRN-PO-1001", subtype="STANDARD", po_id="PO-1001", accepted_at="2026-10-01T10:00:00", items=[{**po_line[0], "accepted_qty": 0, "rejected_qty": 2}])
+    _seed_receipt(db, grn_id="GRN-PO-1002", subtype="STANDARD", po_id="PO-1002", items=po_line, status="VOID", accepted_at="2026-10-02T10:00:00")
+    newest = _on_the_shelf(world, vendor_invoice_no="CASH-N")
+    db.grns.update_one({"grn_id": newest}, {"$set": {"accepted_at": "2026-09-25T10:00:00"}})
+    # Accepting it set the cost to its price; its bill, booked with credit
+    # off, adds the GST it cannot claim back.
+    assert frame_cost() == 3100.0
+    off = _invoice_body(newest, "CASH-N")
+    off.itc_eligible = False
+    _run(pi.create_purchase_invoice(off, current_user=ACCOUNTANT))
+    assert frame_cost() == 3255.0
+
+
 def _three_b(world):
     from api.services.gstn_export import to_gstr3b_json
 

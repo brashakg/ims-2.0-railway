@@ -976,6 +976,26 @@ def _product_state_for_valuation(
     return state
 
 
+def _bought_since(db, product_id, accepted_at) -> bool:
+    """Whether a receipt accepted some of this product after `accepted_at` (a
+    receipt that accepted none of it, or is voided, paid no price for it)."""
+    from .vendors.grn_accept_lock import _GRN_TERMINAL_ACCEPT_STATUSES
+
+    if not accepted_at:
+        return False
+    return (
+        db.get_collection("grns").find_one(
+            {
+                "status": {"$in": list(_GRN_TERMINAL_ACCEPT_STATUSES)},
+                "accepted_at": {"$gt": accepted_at},
+                "items": {"$elemMatch": {"product_id": product_id, "accepted_qty": {"$gt": 0}}},
+            },
+            {"_id": 1},
+        )
+        is not None
+    )
+
+
 def _apply_valuation_trueup(db, invoice_doc, computed, config) -> Optional[list]:
     """Update each invoiced product's moving-average cost from the invoice's
     per-unit landed price. Returns the list of applied updates (for the audit
@@ -993,7 +1013,8 @@ def _apply_valuation_trueup(db, invoice_doc, computed, config) -> Optional[list]
         if grn_id:
             try:
                 grn = db.get_collection("grns").find_one(
-                    {"grn_id": grn_id}, {"_id": 0, "store_id": 1, "grn_subtype": 1}
+                    {"grn_id": grn_id},
+                    {"_id": 0, "store_id": 1, "grn_subtype": 1, "accepted_at": 1},
                 )
                 store_id = (grn or {}).get("store_id")
             except Exception:
@@ -1006,6 +1027,16 @@ def _apply_valuation_trueup(db, invoice_doc, computed, config) -> Optional[list]
         # shelf at the price paid, and both bill doors true up through here (a
         # 0% cash memo leaves the price paid).
         walk_in = (grn or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO
+        if walk_in:
+            # The latest price paid is the newest ACCEPTED receipt's, dated by
+            # its acceptance (as /vendors/last-cost dates it), never the newest
+            # booking: a walk-in bill booked late puts no older price back
+            # over a product a later receipt has bought.
+            lines = [
+                ln
+                for ln in lines
+                if not _bought_since(db, ln.get("product_id"), grn.get("accepted_at"))
+            ]
         if walk_in and invoice_doc.get("itc_eligible") is False:
             lines = [
                 {
