@@ -77,6 +77,8 @@ export interface Task {
   category: string;
   completionNotes?: string;
   attachment?: { file_id?: string; filename?: string; mime_type?: string } | null;
+  /** In-app pages the task points at (e.g. each flagged product's edit page). */
+  links?: Array<{ label: string; to: string }>;
 }
 
 // --- normalisation ---------------------------------------------------------
@@ -133,6 +135,12 @@ export function normaliseTask(t: Record<string, any>): Task {
     category: t.category || 'ADHOC',
     completionNotes: t.completion_notes,
     attachment: t.attachment || null,
+    // Only in-app addresses: a link off the app is never rendered.
+    links: Array.isArray(t.links)
+      ? t.links
+          .filter((l: any) => l && typeof l.to === 'string' && l.to.startsWith('/') && !l.to.startsWith('//'))
+          .map((l: any) => ({ label: String(l.label || l.to), to: String(l.to) }))
+      : [],
   };
 }
 

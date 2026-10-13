@@ -222,3 +222,29 @@ def test_no_router_reads_a_dead_salesperson_spelling_off_an_order():
         "these read a salesperson key no order-writing door sets - route them "
         "through name_resolver.order_actor_id instead: " + "; ".join(offenders)
     )
+
+
+# ---------------------------------------------------------------------------
+# Owner ruling 2026-09-28: a fulfilled online order is SHIPPED until the
+# courier delivers it (it used to go straight to DELIVERED). It is a done
+# sale: the ledger and the employee's own page both still credit it.
+# ---------------------------------------------------------------------------
+
+def _shipped(oid, amount):
+    doc = _order(oid, amount=amount)
+    doc["status"] = "SHIPPED"
+    return doc
+
+
+def test_a_shipped_online_sale_earns_its_commission(monkeypatch):
+    items = _commission(_db([_shipped("o1", 5000.0)]), monkeypatch, employee_id="u-sales")["items"]
+    assert any(float(i.get("revenue") or 0) == 5000.0 for i in items), items
+
+
+def test_my_own_commission_page_sees_a_shipped_sale(monkeypatch):
+    db = _db([_shipped("o1", 4000.0)])
+    monkeypatch.setattr(hr_self, "_get_db", lambda: db)
+    out = asyncio.run(hr_self.my_commission(
+        month=_NOW_IST.month, year=_NOW_IST.year,
+        current_user={"user_id": "u-sales", "roles": ["SALES_STAFF"], "active_store_id": STORE}))
+    assert (out.get("sales_count") or 0) == 1, out

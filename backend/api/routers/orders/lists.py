@@ -16,11 +16,19 @@ from ...dependencies import (
     validate_store_access,
 )
 from ._shared import (
+    VALID_TRANSITIONS,
     OrderStatus,
     _stamp_status_actor_names,
     order_to_frontend,
     router,
 )
+
+# ONE definition of "awaiting the counter's handover": every status the
+# transition table lets the counter deliver -- READY, and SHIPPED (a
+# click-and-collect order Shopify marked fulfilled; owner 2026-10-08: the
+# counter may Mark Delivered a SHIPPED order). The queue and its search
+# both filter on it, so they never drift from each other or the deliver door.
+DELIVERABLE_STATUSES = sorted(s for s, to in VALID_TRANSITIONS.items() if "DELIVERED" in to)
 
 # ============================================================================
 # ENDPOINTS
@@ -115,8 +123,8 @@ async def get_pending_deliveries(
     ``?q=`` searches the SAME queue through ``repo.search_orders`` -- the exact
     matcher GET /orders/search uses over order_number / customer_name /
     customer_phone -- and keeps only the rows still awaiting collection. No
-    second matcher, and the "awaiting collection" predicate comes from the
-    repository constant rather than a re-typed "READY".
+    second matcher, and the "awaiting collection" predicate is
+    DELIVERABLE_STATUSES rather than a re-typed "READY".
 
     30-DAY BROWSE HORIZON (owner ruling 2026-09-01; owner 2026-09-02: "let
     users search through 30 days pending delivery data, except admin and
@@ -149,7 +157,7 @@ async def get_pending_deliveries(
             orders = [
                 o
                 for o in (repo.search_orders(needle, active_store) or [])
-                if o.get("status") == repo.READY_FOR_DELIVERY_STATUS
+                if o.get("status") in DELIVERABLE_STATUSES
             ]
             # A fuzzy fragment ("ra", "ORD") is still BROWSING and stays
             # clamped. Resolving the query to one customer -- rather than
@@ -157,7 +165,7 @@ async def get_pending_deliveries(
             # search from becoming the way out of the window.
             customer_scoped = _query_names_one_customer(needle, active_store)
         else:
-            orders = repo.find_ready_for_delivery(active_store)
+            orders = repo.find_ready_for_delivery(DELIVERABLE_STATUSES, active_store)
             customer_scoped = False
 
         orders = drop_rows_before_horizon(
