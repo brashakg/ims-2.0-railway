@@ -152,23 +152,30 @@ async def get_budget(
 
 @router.get("/reconciliation")
 async def get_reconciliation(current_user: dict = Depends(get_current_user)):
+    # The one transfer store reach (transfers._in_callers_stores): a shop's
+    # manager never sees another region's transfers or their units' cost.
+    from ..transfers import _in_callers_stores
+
     db = _get_db()
     # Inter-store transfers needing reconciliation
-    pending = list(
-        db.get_collection("stock_transfers")
-        .find(
-            {"status": {"$in": ["shipped", "in_transit"]}},
-            {
-                "_id": 0,
-                "transfer_id": 1,
-                "from_store": 1,
-                "to_store": 1,
-                "items": 1,
-                "created_at": 1,
-            },
-        )
-        .limit(50)
-    )
+    pending = _in_callers_stores(
+        list(
+            db.get_collection("stock_transfers").find(
+                {"status": {"$in": ["shipped", "in_transit"]}},
+                {
+                    "_id": 0,
+                    "transfer_id": 1,
+                    "from_store": 1,
+                    "to_store": 1,
+                    "from_location_id": 1,
+                    "to_location_id": 1,
+                    "items": 1,
+                    "created_at": 1,
+                },
+            )
+        ),
+        current_user,
+    )[:50]
 
     return {
         "pending_transfers": len(pending),
