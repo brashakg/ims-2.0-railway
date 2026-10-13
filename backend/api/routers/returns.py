@@ -472,12 +472,8 @@ def _own_restock_share(
     shared out over the doc's own restock lines of that product, in order, so
     a second line of the same product (a no_restock one, or one whose unit
     did not land) is never counted for a unit another line took."""
-    pool: Dict[str, float] = {}
-    for row in doc.get("restocked") or []:
-        if isinstance(row, dict) and not row.get("booked"):
-            pid = str(row.get("product_id"))
-            pool[pid] = pool.get(pid, 0.0) + float(row.get("reactivated") or 0) + float(
-                row.get("minted") or 0)
+    pool = _landed_units([row for row in doc.get("restocked") or []
+                          if isinstance(row, dict) and not row.get("booked")])
     share = 0.0
     for prior in doc.get("items") or []:
         if not isinstance(prior, dict) or not prior.get("restock"):
@@ -488,6 +484,18 @@ def _own_restock_share(
         if _same_line(prior, item_id, product_id):
             share += got
     return share
+
+
+def _landed_units(rows: Any) -> Dict[str, float]:
+    """The units a return doc's `restocked` rows say landed (reactivated or
+    minted), per product."""
+    pool: Dict[str, float] = {}
+    for row in rows or []:
+        if isinstance(row, dict):
+            pid = str(row.get("product_id"))
+            pool[pid] = pool.get(pid, 0.0) + float(row.get("reactivated") or 0) + float(
+                row.get("minted") or 0)
+    return pool
 
 
 def _units_already_back(
@@ -2145,6 +2153,7 @@ def _restock_good_items(
     user_id: Optional[str] = None,
     processing_store_id: Optional[str] = None,
     order: Optional[Dict[str, Any]] = None,
+    already_back: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
     """Put GOOD-condition returned units BACK into sellable serialized stock.
 
@@ -2168,6 +2177,9 @@ def _restock_good_items(
     see _resolve_restock_store -- and the redirect is stamped on the result.
     An online order with no resolvable physical store restocks NOTHING and
     leaves applied=False (loud, retryable) rather than minting a phantom unit.
+
+    `already_back` {product id: units}: what an earlier attempt of this
+    return put back (_landed_units); those units are not restocked again.
 
     Returns a dict with `restocked` (per-line summary for the return doc),
     `restock_stock_ids` (every stock row touched), `applied`, `skipped`, and the
@@ -2196,6 +2208,12 @@ def _restock_good_items(
         return result
 
     units = plan.get("units", [])
+    left = dict(already_back or {})
+    for u in list(units):
+        pid = str(u.get("product_id"))
+        if left.get(pid, 0) >= 1:
+            left[pid] -= 1
+            units.remove(u)
     if not units:
         # Nothing resellable -> trivially "applied" (no work left to retry).
         result["applied"] = True
@@ -3975,7 +3993,7 @@ async def retry_restock(
                 "message": "Could not read the stock just now - nothing was restocked. Retry shortly.",
             }
 
-    def _restock(retry_lines):
+    def _restock(retry_lines, already_back=None):
         return _restock_good_items(
             retry_lines,
             claim_store,
@@ -3988,6 +4006,7 @@ async def retry_restock(
             processing_store_id=current_user.get("active_store_id"),
             # VERIFIED evidence (non-None was checked above).
             order=retry_order,
+            already_back=already_back,
         )
 
     try:
@@ -3998,7 +4017,10 @@ async def retry_restock(
                 processing_store_id=current_user.get("active_store_id"),
             ) or {"applied": True}
         else:
-            restock_result = _restock(lines)
+            # Only the units still out: re-run, the units an earlier attempt
+            # put back went again -- a counter order's order-agnostic fallback
+            # flipped another customer's SOLD unit to AVAILABLE, or minted.
+            restock_result = _restock(lines, _landed_units(claim.get("restocked")))
     except Exception as exc:  # noqa: BLE001
         # Even on failure we MUST release the in-progress flag so a future
         # retry isn't deadlocked.
