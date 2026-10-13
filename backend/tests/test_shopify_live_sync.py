@@ -40,6 +40,10 @@ from api.services import shopify_push  # noqa: E402
 from api.utils.ist import IST  # noqa: E402
 from tests.strict_fakes import StrictDB  # noqa: E402
 
+# The push's other mechanics, for a brand that IS for the website (owner D6;
+# the brand rule has its own test in test_add_product_owner_rulings.py).
+pytestmark = pytest.mark.usefixtures("brand_is_for_the_website")
+
 SUPER = {"user_id": "u-super", "roles": ["SUPERADMIN"]}
 ADMIN = {"user_id": "u-admin", "roles": ["ADMIN"]}
 

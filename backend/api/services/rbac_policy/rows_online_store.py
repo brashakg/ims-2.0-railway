@@ -188,7 +188,7 @@ ROWS: List[Dict[str, object]] = [
     },
     {
         "method": "DELETE",
-        "path": "/api/v1/online-store/collections/{collection_id}/products/{sku}",
+        "path": "/api/v1/online-store/collections/{collection_id}/products/{sku:path}",
         "allowed": ["ADMIN", "CATALOG_MANAGER", "DESIGN_MANAGER", "SUPERADMIN"],
     },
     {

@@ -47,6 +47,10 @@ from api.services import shopify_push  # noqa: E402
 # (the house strict double flattens it -- a weaker double than production).
 from test_online_push_dirty_flag import _DB, _run  # noqa: E402
 
+# The push's other mechanics, for a brand that IS for the website (owner D6;
+# the brand rule has its own test in test_add_product_owner_rulings.py).
+pytestmark = pytest.mark.usefixtures("brand_is_for_the_website")
+
 
 _PUB_GID = "gid://shopify/Publication/1"
 _DENIED_PUBLISH_MSG = (

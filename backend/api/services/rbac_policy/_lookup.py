@@ -112,9 +112,13 @@ def _segments(path: str) -> List[str]:
 
 def _template_matches(template: str, concrete: str) -> bool:
     """True if a concrete request path matches a (possibly templated) policy
-    path. A ``{param}`` segment matches exactly one non-empty concrete segment."""
+    path. A ``{param}`` segment matches exactly one non-empty concrete segment;
+    a trailing ``{param:path}`` (Starlette's path converter) takes the rest,
+    slashes and all -- e.g. a SKU like FR-X-M-1109/71."""
     t_segs = _segments(template)
     c_segs = _segments(concrete)
+    if t_segs and t_segs[-1].endswith(":path}") and len(c_segs) > len(t_segs):
+        c_segs = c_segs[: len(t_segs) - 1] + ["/".join(c_segs[len(t_segs) - 1 :])]
     if len(t_segs) != len(c_segs):
         return False
     for t, c in zip(t_segs, c_segs):
