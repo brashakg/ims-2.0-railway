@@ -905,14 +905,15 @@ INDEXES = {
             },
             "name": "uniq_std_vendor_invoice_store",
         },
-        # D14: one live "Bought without PO" receipt per bill photo per shop,
-        # keyed on the photo's sha256 -- a double-pressed post re-sends the
-        # same file, a retry after a reload uploads the same bytes under a new
-        # file id, and an unnumbered bill gives the index above nothing to
+        # D14: one live "Bought without PO" receipt per bill photo, in ANY
+        # shop, keyed on the photo's sha256 -- a double-pressed post re-sends
+        # the same file, a retry after a reload uploads the same bytes under a
+        # new file id, and an unnumbered bill gives the index above nothing to
         # key on. The atomic twin of the photo half of
-        # vendors.grn._find_duplicate_receipt. A VOID frees it.
+        # vendors.grn._find_duplicate_receipt, which matches in any shop. A
+        # VOID frees it.
         {
-            "keys": [("store_id", 1), ("attachment_sha256", 1)],
+            "keys": [("attachment_sha256", 1)],
             "unique": True,
             "partialFilterExpression": {
                 "grn_subtype": "NO_PO",

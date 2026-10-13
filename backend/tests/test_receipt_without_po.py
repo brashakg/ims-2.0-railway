@@ -590,11 +590,15 @@ def test_c7_a_new_photo_of_the_same_dealer_bill_is_still_the_same_bill(world):
     assert http.post("/vendors/grn", json=other).status_code == 201
 
 
-def test_c7_two_posts_at_once_meet_the_bill_photo_index(world, monkeypatch):
+@pytest.mark.parametrize("second_shop", [STORE, "BV-NOPO-02"])
+def test_c7_two_posts_at_once_meet_the_bill_photo_index(world, monkeypatch, second_shop):
     """Two posts of one bill at the same moment both pass the look-up; the
     partial unique index on the bill photo's hash makes the second insert
-    fail -- even when the photo was uploaded again under a new file id -- and
-    that must read as the same 409, never a second receipt."""
+    fail -- even when the photo was uploaded again under a new file id, and
+    (panel probe, round 9) when the second post is to ANOTHER shop: the
+    look-up matches a photo in any shop, and its twin keyed (shop, hash) let
+    both land -- and that must read as the same 409, never a second
+    receipt."""
     from api.routers.vendors import grn_create as gc
     from database.schemas import get_all_indexes
 
@@ -605,11 +609,14 @@ def test_c7_two_posts_at_once_meet_the_bill_photo_index(world, monkeypatch):
         name=spec["name"],
         partialFilterExpression=spec["partialFilterExpression"],
     )
-    http = world["as_"](MANAGER)
+    shop = world["db"].stores.find_one({"store_id": STORE}, {"_id": 0})
+    world["db"].stores.insert_one({**shop, "store_id": "BV-NOPO-02", "store_name": "BV No-PO Second Shop"})
+    area = {**MANAGER, "user_id": "u-area", "roles": ["AREA_MANAGER"], "store_ids": [STORE, "BV-NOPO-02"]}
     memo = b"\x89PNG the one cash memo"
     body = _walk_in_body(world, vendor_invoice_no=None, attachment_file_id=_bill_photo(world, memo))
-    assert http.post("/vendors/grn", json=body).status_code == 201
-    body["attachment_file_id"] = _bill_photo(world, memo)
+    assert world["as_"](area).post("/vendors/grn", json=body).status_code == 201
+    body["attachment_file_id"] = _bill_photo(world, memo, store=second_shop)
+    http = world["as_"]({**area, "active_store_id": second_shop})
 
     real = gc._find_duplicate_receipt
     calls = {"n": 0}
@@ -690,6 +697,25 @@ def test_c7_the_startup_index_copies_equal_the_schema(world):
     assert set(names) <= set(built)
     # The every-year bills index it replaces is gone from the startup path.
     assert "uniq_purchase_invoice_vendor_number" not in built
+
+
+def test_c7_startup_rekeys_a_per_shop_bill_photo_index(world):
+    """An earlier build keyed uniq_nopo_bill_hash on (shop, photo hash); an
+    index of that name on other keys refuses the new one ('already exists
+    with different options'), so a database that ran it would keep the
+    per-shop twin. Startup drops it and builds the photo-hash key."""
+    from database.connection import DatabaseConnection
+
+    db = world["db"]
+    db.grns.create_index([("store_id", 1), ("attachment_sha256", 1)], unique=True, name="uniq_nopo_bill_hash")
+    conn = DatabaseConnection()
+    saved = conn._db, conn._connected
+    try:
+        conn._db, conn._connected = db, True
+        conn.ensure_indexes()
+    finally:
+        conn._db, conn._connected = saved
+    assert db.grns.index_information()["uniq_nopo_bill_hash"]["key"] == [("attachment_sha256", 1)]
 
 
 def test_c7_the_same_bill_photo_uploaded_again_is_the_same_bill(world):

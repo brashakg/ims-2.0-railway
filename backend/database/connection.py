@@ -815,14 +815,22 @@ class DatabaseConnection:
             name="uniq_std_vendor_invoice_store",
             background=True,
         )
-        # D14: one live "Bought without PO" receipt per bill photo per shop,
-        # keyed on the photo's sha256 (the same bytes uploaded again are the
-        # same bill, numbered or not) -- the atomic twin of the photo half of
-        # vendors.grn._find_duplicate_receipt (schemas.py uniq_nopo_bill_hash).
-        # New subtype, so no existing rows can block the build.
+        # D14: one live "Bought without PO" receipt per bill photo, in ANY
+        # shop, keyed on the photo's sha256 (the same bytes uploaded again are
+        # the same bill, numbered or not) -- the atomic twin of the photo half
+        # of vendors.grn._find_duplicate_receipt, which matches in any shop
+        # (schemas.py uniq_nopo_bill_hash). New subtype, so no existing rows
+        # can block the build. An earlier build keyed it per shop: a held
+        # index of that name on other keys is dropped so this one can build.
+        try:
+            held = self._db["grns"].index_information().get("uniq_nopo_bill_hash")
+            if held and list(held.get("key") or []) != [("attachment_sha256", 1)]:
+                self._db["grns"].drop_index("uniq_nopo_bill_hash")
+        except Exception:  # noqa: BLE001 - absent on a fresh database
+            pass
         _idx(
             "grns",
-            [("store_id", 1), ("attachment_sha256", 1)],
+            [("attachment_sha256", 1)],
             unique=True,
             partialFilterExpression={
                 "grn_subtype": "NO_PO",
