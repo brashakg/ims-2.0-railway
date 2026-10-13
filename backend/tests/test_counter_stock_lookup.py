@@ -508,6 +508,37 @@ def test_d7b2_the_counter_finds_the_frame_by(call, mongo_db, label, query, pid):
     assert RB not in found, f"searching by {label} ({query!r}) dragged in the Ray-Ban"
 
 
+_MAKER_ONLY = "P-TITAN-T1"
+_MAKER_GTIN = "8901234567893"  # held only as the maker's GTIN (attributes.gtin)
+
+
+@pytest.mark.parametrize(
+    "query,found",
+    [(_MAKER_GTIN, True), (" 890-1234 56789-3 ", True), ("0" + _MAKER_GTIN, True),
+     ("890", False), ("890123", False), (_MAKER_GTIN[:-1], False)],
+)
+def test_d7b2_a_makers_gtin_is_found_only_on_the_full_code_as_at_the_till(
+    call, mongo_db, query, found
+):
+    # The till's rule (ProductRepository._till_query): the maker's GTIN matches
+    # only the EXACT, complete code in any spelling of it, never a leading
+    # chunk -- '890' would list every Indian-made product. The lookup is the
+    # till's search plus exact codes, so it answers the same.
+    from database.repositories.product_repository import ProductRepository
+
+    _seed(mongo_db)
+    mongo_db["products"].insert_one(
+        _product(_MAKER_ONLY, "WT-TITAN-T1-BLK", "Titan T1 Watch - Black", "BLK", "40",
+                 brand="Titan", model="T1", attributes={"gtin": _MAKER_GTIN})
+    )
+    items = _items(_ok(call(_user("CASHIER"), q=query.strip())))
+    assert (_MAKER_ONLY in items) is found, (query, sorted(items))
+    if found:
+        assert items[_MAKER_ONLY]["exact"] is True
+    till = ProductRepository(mongo_db["products"]).search_products(query.strip())
+    assert (_MAKER_ONLY in {p["product_id"] for p in till}) is found, query
+
+
 def test_d7b2_the_search_is_the_product_search(call, mongo_db, monkeypatch):
     # GET /products?search= and the lookup answer a text alike because the
     # lookup calls the SAME ProductRepository.search_products. A lookup that
