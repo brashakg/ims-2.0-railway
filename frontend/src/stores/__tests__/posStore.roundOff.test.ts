@@ -79,6 +79,17 @@ describe('the till collects the server-rounded bill and never rounds one itself'
     expect(usePOSStore.getState().getQuotedBill()).toBeNull();
   });
 
+  it('ignores a quote once a line discount is applied after it landed', () => {
+    add(1000.5);
+    quote(1001, 0.5);
+    const s = usePOSStore.getState();
+    s.applyDiscount(s.cart[0].id, 5, 'regular customer');
+    const after = usePOSStore.getState();
+    expect(after.getQuotedBill()).toBeNull();
+    // The pre-discount Rs 1001 is never shown or collected against.
+    expect(after.getGrandTotal()).toBe(950.48);
+  });
+
   it('a mixed-GST bill keeps its tax and taxable value; only the payable moves', () => {
     add(999.99, 'FRAME'); // 5%: 952.37 + 47.62
     add(500.5, 'SUNGLASS'); // 18%: 424.15 + 76.35

@@ -64,7 +64,8 @@ export function CartSidebar({
   const subtotal = store.getSubtotal();
   const grand = store.getGrandTotal();
   // The paise the server rounded the bill by (owner ruling 2026-10-08) -- its
-  // own line. When it is not 0 every figure shows paise so they add up.
+  // own line. When it is not 0 every figure -- the lines too -- shows paise
+  // so they add up.
   const roundOff = store.getRoundOff();
   const totalDiscount = quoted ? quoted.total_discount : store.getTotalDiscount();
   // GST-inclusive: GST is the tax extracted from WITHIN the (inclusive)
@@ -274,8 +275,9 @@ export function CartSidebar({
                       fontSize: 13,
                       color: 'var(--ink)',
                     }}
+                    data-testid="cart-line-total"
                   >
-                    ₹{Math.round(item.line_total).toLocaleString('en-IN')}
+                    ₹{money(item.line_total)}
                   </span>
                 </div>
               </div>

@@ -53,6 +53,8 @@ it("shows the server's rounded-up bill with a + Round off line that adds up", as
   expect((await screen.findByTestId('cart-round-off')).textContent).toBe('+₹0.50');
   // 1,000.50 + 0.50 reads as the 1,001 total.
   expect(screen.getByTestId('cart-subtotal').textContent).toBe('₹1,000.50');
+  // The line shows its paise too, or it reads as if 0.50 was added twice.
+  expect(screen.getByTestId('cart-line-total').textContent).toBe('₹1,000.50');
   expect(screen.getByTestId('cart-total').textContent).toBe('₹1,001');
   expect(screen.getByText('₹47.64')).toBeTruthy();
 });
@@ -64,6 +66,10 @@ it("shows the server's rounded-down bill with a − Round off line that adds up"
   render(<CartSidebar />);
   expect((await screen.findByTestId('cart-round-off')).textContent).toBe('−₹0.49');
   expect(screen.getByTestId('cart-subtotal').textContent).toBe('₹1,500.49');
+  // The lines add up to the Subtotal (rounded each, they read 1,000 + 501).
+  expect(screen.getAllByTestId('cart-line-total').map((e) => e.textContent)).toEqual([
+    '₹999.99', '₹500.50',
+  ]);
   expect(screen.getByTestId('cart-total').textContent).toBe('₹1,500');
 });
 
@@ -82,4 +88,20 @@ it('never rounds the bill itself while the quote is on its way', async () => {
   await waitFor(() => expect(mockedQuote).toHaveBeenCalled());
   expect(screen.queryByText('Round off')).toBeNull();
   expect(usePOSStore.getState().getGrandTotal()).toBe(1000.49);
+});
+
+it("shows the server's total for the Rs 265 cart, never its own rounding", async () => {
+  // Rs 265 frame, 1.5% line + 2.5% bill discount: the till's own figure is
+  // 254.49, which rounds to Rs 254; the server bills Rs 255 (+0.50).
+  mockedQuote.mockResolvedValue({
+    subtotal: 265, taxable: 242.38, tax: 12.12, total_discount: 10.5,
+    grand_total: 255, round_off: 0.5,
+  });
+  add(265);
+  const s = usePOSStore.getState();
+  s.applyDiscount(s.cart[0].id, 1.5, 'regular customer');
+  usePOSStore.getState().setCartDiscount(2.5, 'festival offer');
+  render(<CartSidebar />);
+  expect((await screen.findByTestId('cart-round-off')).textContent).toBe('+₹0.50');
+  expect(screen.getByTestId('cart-total').textContent).toBe('₹255');
 });
