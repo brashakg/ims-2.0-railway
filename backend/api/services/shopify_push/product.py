@@ -396,12 +396,14 @@ async def push_product(
                 minted_variant_gids=[g for g in seeded_gids if g not in confirmed],
             )
         # NOT taken down, but the stock pass just re-sent tracked + the policy
-        # to every size, the new one included, and Shopify accepted it: the
-        # listing is live AND tracked, so the press takes the normal path
-        # below. Never "STILL LIVE ... set it to Draft" over a press that made
-        # it safe (one press, one answer: the last-sent record says tracked).
-        if take_down is not None and not taken_down and stock_summary and (
-            stock_summary.get("code") != STOCK_TRACKING_FAILED
+        # to every size, and Shopify's ANSWER confirms both on every size the
+        # create left unconfirmed -- by the create's own rule
+        # (`tracking_confirmed`), never "no userErrors": an accepted re-send
+        # that echoes a size untracked, or says nothing about it, confirms
+        # nothing, so that listing stays STILL LIVE. Confirmed -> live AND
+        # tracked, the normal path below.
+        if take_down is not None and not taken_down and set(unconfirmed) <= set(
+            (stock_summary or {}).get("tracking_confirmed") or []
         ):
             take_down = None
         # SALES-CHANNEL PUBLISH -- the third shut door. An ACTIVE product

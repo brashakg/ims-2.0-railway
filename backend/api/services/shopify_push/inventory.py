@@ -579,11 +579,28 @@ async def plan_product_stock(db, product: Dict[str, Any], variants: Optional[Lis
 # ---------------------------------------------------------------------------
 
 
+def tracking_confirmed(nodes: Any, policy: str) -> set:
+    """The variant gids a Shopify answer CONFIRMS as tracked=true + ``policy``.
+    ONE rule for the size's create answer (variants.py) and the tracking
+    re-send's answer (below): a variant the answer leaves out, or echoes
+    untracked / on another policy, is not confirmed -- silence confirms
+    nothing, whichever call it answered."""
+    return {
+        _as_shopify_gid(n.get("id"), "ProductVariant")
+        for n in (nodes if isinstance(nodes, list) else [])
+        if isinstance(n, dict)
+        and (n.get("inventoryItem") or {}).get("tracked") is True
+        and n.get("inventoryPolicy") == policy
+    }
+
+
 async def _set_variant_tracking(
     db, product_gid: str, variant_gids: List[str], policy: str
 ) -> Dict[str, Any]:
-    """tracked=true + inventoryPolicy on every variant, chunked. Fail-soft."""
-    out: Dict[str, Any] = {"updated": 0, "errors": []}
+    """tracked=true + inventoryPolicy on every variant, chunked. Fail-soft.
+    ``updated`` counts what Shopify ACCEPTED; ``confirmed`` holds the gids its
+    answer echoed back tracked + this policy (``tracking_confirmed``)."""
+    out: Dict[str, Any] = {"updated": 0, "errors": [], "confirmed": set()}
     rows = [
         {"id": g, "inventoryPolicy": policy, "inventoryItem": {"tracked": True}}
         for g in variant_gids
@@ -599,6 +616,8 @@ async def _set_variant_tracking(
                 out["errors"].append(err)
             else:
                 out["updated"] += len(chunk)
+                answer = ((body.get("data") or {}).get("productVariantsBulkUpdate")) or {}
+                out["confirmed"] |= tracking_confirmed(answer.get("productVariants"), policy)
         except Exception as exc:  # noqa: BLE001 -- fail-soft side channel
             out["errors"].append(str(exc))
     return out
@@ -2056,7 +2075,7 @@ async def sync_product_stock(
     pid = product.get("id") or product.get("product_id")
     policy = inventory_policy_for(product)
     gids = product_variant_gids(product, variants, extra_variant_gids)
-    tracked: Dict[str, Any] = {"updated": 0, "errors": []}
+    tracked: Dict[str, Any] = {"updated": 0, "errors": [], "confirmed": set()}
     # "Already live" covers the variants an earlier publish CONFIRMED, never
     # one this press minted (``minted_variant_gids``: what seeding just put on
     # Shopify, its gid on no IMS row yet -- less a size whose own create answer
@@ -2069,9 +2088,8 @@ async def sync_product_stock(
     # re-sent tracking. Not live -> the WITHOUT LIMIT line, tracked=False, and
     # the next pass re-sends it.
     known = set(product_variant_gids(product, variants))
-    live = listing_already_live(product) and not [
-        g for g in product_variant_gids({}, None, minted_variant_gids) if g not in known
-    ]
+    new = [g for g in product_variant_gids({}, None, minted_variant_gids) if g not in known]
+    live = listing_already_live(product) and not new
     # Tracking + DENY go on even when no quantity can follow (no shop mapped):
     # an UNTRACKED item sells without limit, which is the worse failure. The
     # listing then reads sold out and push_skus_stock says so, loudly, instead
@@ -2090,11 +2108,17 @@ async def sync_product_stock(
         policy=policy,
         # "Tracking is on Shopify": this call set it, or the listing's first
         # publish did (a refused re-send changes nothing there). Recording
-        # False for a live listing would withhold its NEXT press instead.
-        tracked=tracked["updated"] > 0 or live,
+        # False for a live listing would withhold its NEXT press instead. A
+        # variant this press newly linked counts only when Shopify's answer
+        # confirmed it (`tracking_confirmed`): one it echoed untracked, or
+        # left out, is recorded untracked so the next sweep re-sends it.
+        tracked=live or (tracked["updated"] > 0 and set(new) <= tracked["confirmed"]),
     )
     summary["policy"] = policy
     summary["tracked"] = tracked["updated"]
+    # The gids Shopify's answer echoed tracked + the policy: what lets a
+    # refused take-down stand down (product.py), by the create's own rule.
+    summary["tracking_confirmed"] = sorted(tracked["confirmed"])
     summary["errors"] = list(tracked["errors"]) + list(summary["errors"])
     summary["ok"] = summary["ok"] and not tracked["errors"]
     summary["sold_out"] = summary["sold_out"] and summary["ok"]  # unconfirmed tracking is unknown

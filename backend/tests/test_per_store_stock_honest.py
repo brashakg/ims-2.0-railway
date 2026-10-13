@@ -246,15 +246,37 @@ def test_1_a_refused_take_down_says_the_listing_is_still_live(monkeypatch):
     assert spy.calls_for("publishablePublish") == []
 
 
-def test_1_a_refused_take_down_whose_tracking_re_send_was_accepted_is_one_answer(monkeypatch):
+class _DraftRefusedTrackingEchoes(_DraftRefused):
+    """The take-down refused; the tracking re-send (rows carrying
+    inventoryPolicy) is ACCEPTED -- no userErrors -- and its answer echoes
+    `echo(gid)` for each row sent (None leaves that row out of the answer)."""
+
+    def __init__(self, responses, echo):
+        super().__init__(responses)
+        self._echo = echo
+
+    async def __call__(self, db, query, variables):  # noqa: ARG002
+        rows = (variables or {}).get("variants") or []
+        if "productVariantsBulkUpdate" in query and any("inventoryPolicy" in r for r in rows):
+            self.calls.append({"query": query, "variables": variables})
+            nodes = [n for n in (self._echo(r["id"]) for r in rows) if n]
+            return _ok_body("productVariantsBulkUpdate", productVariants=nodes)
+        return await super().__call__(db, query, variables)
+
+
+def _echo(gid, *, tracked=True, policy="DENY"):
+    return {"id": gid, "inventoryPolicy": policy, "inventoryItem": {"id": "inv-" + gid, "tracked": tracked}}
+
+
+def test_1_a_refused_take_down_whose_tracking_re_send_shopify_confirmed_is_the_normal_press(monkeypatch):
     """The take-down refused, but the same press's stock pass re-sent tracked
-    + DENY to every size -- L included -- and Shopify accepted it. The listing
-    is live and tracked (the last-sent record says so), so the press must not
-    send the owner into Shopify admin to take it off sale: it is the normal
-    live press. Drop the 'tracking confirmed after all' step -> STILL LIVE ->
-    fails."""
+    + DENY to every size, and Shopify's ANSWER echoes L back tracked + DENY:
+    the create's own rule now confirms it, the listing is live and tracked,
+    so the press is the normal live press, never 'set it to Draft in Shopify
+    admin'. Drop the 'confirmed after all' step -> STILL LIVE -> fails."""
     db, variants, upd = _live_listing_gets_size_l()
-    spy = _DraftRefused(_responses(**{"productUpdate(": upd, "productVariantsBulkCreate": _created(tracked=None)}))
+    spy = _DraftRefusedTrackingEchoes(
+        _responses(**{"productUpdate(": upd, "productVariantsBulkCreate": _created(tracked=None)}), _echo)
     _live(monkeypatch, spy)
     res = _run(shopify_push.push_product(db, _cat(db), variants))
     assert len(_drafts(spy)) == 1
@@ -263,6 +285,41 @@ def test_1_a_refused_take_down_whose_tracking_re_send_was_accepted_is_one_answer
     assert res.ok is True and res.code is None, res
     assert "STILL LIVE" not in (res.error or "") and "Shopify admin" not in (res.error or ""), res.error
     assert _cat(db)["ecom"]["status"] == "PUBLISHED"
+
+
+@pytest.mark.parametrize(
+    "echo",
+    [
+        lambda gid: None,  # accepted, the size left out of the answer
+        lambda gid: _echo(gid, tracked=False, policy="CONTINUE") if gid == MINTED else _echo(gid),
+    ],
+    ids=["answer-silent", "echoes-untracked-and-continue"],
+)
+def test_1_a_refused_take_down_whose_re_send_answer_confirms_nothing_is_still_live(monkeypatch, echo):
+    """Round-3 finding: the take-down refused and the tracking re-send came
+    back with no userErrors -- but its answer does not confirm L (silent, or
+    Shopify itself says tracked=false / CONTINUE). That is the same fact the
+    create's answer-silent case counts as UNCONFIRMED, so it gets the same
+    verdict: STILL LIVE, set it to Draft in Shopify admin, never published,
+    never ok, and the last-sent record says untracked. Count 'no userErrors'
+    as confirmed (the round-2 code) -> publishablePublish + ok=True -> fails;
+    record an accepted re-send as tracked -> the sweep never re-sends -> fails."""
+    db, variants, upd = _live_listing_gets_size_l()
+    spy = _DraftRefusedTrackingEchoes(
+        _responses(**{"productUpdate(": upd, "productVariantsBulkCreate": _created(tracked=False, policy="CONTINUE")}),
+        echo,
+    )
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.push_product(db, _cat(db), variants))
+    assert len(_drafts(spy)) == 1 and MINTED in _tracking_sent(spy)
+    assert spy.calls_for("publishablePublish") == []
+    assert res.ok is False and res.reason != "publish_withheld", res
+    assert res.code == shopify_push.STOCK_TRACKING_FAILED
+    assert "STILL LIVE" in res.error and "Shopify admin" in res.error and "SP-1-L" in res.error, res.error
+    assert _cat(db)["ecom"]["status"] == "PUBLISHED"
+    # Shopify did not confirm L: the last-sent record says untracked, so the
+    # next sweep re-sends tracking (it re-sends only on tracked falsy).
+    assert _baseline(db)["tracked"] is False
 
 
 class _CredsGoSoft(_Spy):

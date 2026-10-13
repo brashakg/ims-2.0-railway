@@ -809,7 +809,11 @@ def _assert_tracked(spy, policy="DENY"):
 def test_live_create_tracks_denies_and_writes_each_shops_quantity(monkeypatch):
     db = _db(a=2, b=1, c=0)
     db.seed("catalog_products", [_catalog_row("cat-1", "SP-1", gid=False)])
-    spy = _Spy(_responses())
+    # Shopify's answer to the tracking call echoes the variant tracked + DENY:
+    # what lets the last-sent record say tracked for a variant this press
+    # newly linked (silence confirms nothing -- test_per_store_stock_honest).
+    echo = {"id": VARIANT_GID, "inventoryPolicy": "DENY", "inventoryItem": {"id": INV_GID, "tracked": True}}
+    spy = _Spy(_responses(productVariantsBulkUpdate=_ok_body("productVariantsBulkUpdate", productVariants=[echo])))
     _live(monkeypatch, spy)
     res = _run(shopify_push.push_product(db, db.get_collection("catalog_products").find_one({"id": "cat-1"}), []))
     assert res.mode == "LIVE" and res.action == "create", res

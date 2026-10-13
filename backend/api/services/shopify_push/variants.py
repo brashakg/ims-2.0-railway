@@ -28,7 +28,7 @@ from .product_input import (
     build_variant_price_inputs,
 )
 from .writeback import _writeback_variant
-from .inventory import inventory_policy_for
+from .inventory import inventory_policy_for, tracking_confirmed
 
 # ---------------------------------------------------------------------------
 # CREATE-side variant seeding (the price-0.00 / no-SKU fix)
@@ -526,10 +526,7 @@ async def _seed_variants_after_write(
     # a LIVE listing off the website for it ({gid: IMS sku, else the gid}).
     sku_of = {gid: (v or {}).get("sku") for v, gid, _inv in pairs}
     made = [_as_shopify_gid(n.get("id"), "ProductVariant") for n in created_nodes]
-    confirmed = {
-        g for g, n in zip(made, created_nodes)
-        if (n.get("inventoryItem") or {}).get("tracked") is True and n.get("inventoryPolicy") == policy
-    }
+    confirmed = tracking_confirmed(created_nodes, policy)
     summary["confirmed_variant_gids"] = sorted(confirmed)
     summary["unconfirmed_variants"] = {g: sku_of.get(g) or g for g in made if g not in confirmed}
     return summary
