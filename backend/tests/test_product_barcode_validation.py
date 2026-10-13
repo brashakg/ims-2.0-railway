@@ -770,6 +770,38 @@ class TestGtinAttributeOnTheEditDoor:
         _update(pid, attributes=sent)
         assert mock_db["catalog_products"].find_one({"id": twin_id})["attributes"][key] == code
 
+    @pytest.mark.parametrize("stored", [("GTIN", "gtin", _VALID_A), ("Upc", "upc", _UPC_A)])
+    def test_a_folded_stored_spelling_that_misses_the_catalogue_copy_is_no_success(
+        self, mock_db, monkeypatch, stored
+    ):
+        """Round 14. The spine holds its code under an old spelling ('GTIN',
+        'Upc') and the save sends no barcode key at all (the edit form changes
+        a colour): the merge folds the code onto the one key, so the barcode
+        MOVES without being sent. A twin that missed it is a failed save."""
+        import mongomock
+
+        old, key, code = stored
+        pid = _create("GT-FOLD-" + old)["product_id"]
+        mock_db["products"].update_one(
+            {"product_id": pid}, {"$set": {"attributes." + old: code}}
+        )
+        spine = mock_db["products"].find_one({"product_id": pid})
+        twin_id = spine.get("pim_product_id") or pid
+        real = mongomock.collection.Collection.update_one
+
+        def _twin_down(coll, *a, **k):
+            if coll.name == "catalog_products":
+                raise RuntimeError("catalogue copy unreachable")
+            return real(coll, *a, **k)
+
+        monkeypatch.setattr(mongomock.collection.Collection, "update_one", _twin_down)
+        with pytest.raises(HTTPException) as ei:
+            _update(pid, attributes={"frame_material": "Acetate"})
+        assert ei.value.status_code == 503
+        assert "not on its catalogue copy" in ei.value.detail
+        attrs = mock_db["products"].find_one({"product_id": pid})["attributes"]
+        assert attrs[key] == code and old not in attrs
+
 
 class TestGtinAttributeOnTheCreateDoor:
     def test_create_refuses_a_gtin_another_product_holds(self, mock_db):
