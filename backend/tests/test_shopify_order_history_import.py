@@ -269,7 +269,7 @@ def spies(monkeypatch):
         "rx_task": Spy(),
         "system_task": Spy(),
     }
-    monkeypatch.setattr(shopify_ingest, "_claim_units_multistore", s["claim"])
+    monkeypatch.setattr(shopify_ingest, "_claim_units_at", s["claim"])
     monkeypatch.setattr(wb_mod, "writeback_after_sale", s["writeback"])
     monkeypatch.setattr(rx_mod, "evaluate_rx_hold", s["rx_eval"])
     monkeypatch.setattr(rx_mod, "raise_rx_hold_task", s["rx_task"])

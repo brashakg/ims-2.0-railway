@@ -539,13 +539,17 @@ def _return_interstate_flag(db, ret, store_state, cache, fallback_state=""):
 
 
 def _ledger_row_return_doc(db, row):
-    """The returns doc a credit-note ledger row was minted for, or None.
+    """The returns doc a credit-note ledger row was minted for -- else the
+    row itself when its door stamped the order it reverses (the SUPERADMIN
+    post-invoice credit note, which has no returns doc) -- or None.
 
     The row's ref/reason carry the RET- id the note was issued against -- the
     same tokens both dedup scans already read. ONE lookup rule shared by the
     GSTR-1 CDNR pass and the GSTR-3B credit-note leg, so the two returns can
-    never attribute the same note differently. Fail-soft -> None (manual /
-    superadmin notes carry no RET- ref and stay attributed where booked).
+    never attribute the same note differently -- and every check on the
+    note's parent (its store, its tax head, its held sale) sees every door's
+    note. Fail-soft -> None (a manual note names no order and stays
+    attributed where booked).
     """
     for f in ("ref", "reason"):
         for tok in str(row.get(f) or "").replace(",", " ").split():
@@ -559,7 +563,50 @@ def _ledger_row_return_doc(db, row):
                 ret = None
             if isinstance(ret, dict):
                 return ret
-    return None
+    return row if row.get("order_id") else None
+
+
+def _db_store_finder(db):
+    """``find_store(store_id)`` over the raw db, for the seller check."""
+
+    def find(sid):
+        return db.get_collection("stores").find_one({"store_id": sid})
+
+    return find
+
+
+def _order_held_off_returns(db, order) -> dict:
+    """The seller-check problem that keeps an order OFF the GST returns (None
+    when it files): the seller hold its booking put on it still stands
+    (online_fulfillment_route.seller_problem -- the invoice door, the
+    challan, the e-invoice and GSTR-1 refuse on the same one; GSTR-3B and
+    Tally ask the SAME question, so the returns of one GSTIN never disagree
+    on a held order). Never re-judged on today's shop records: an order
+    never held, or released, files under its booked invoice date even if a
+    shop's GSTIN or state is edited later -- Re-map and clear-hold never
+    change it. None for an order never routed (POS, a historical import)."""
+    from ...services.online_fulfillment_route import stored_seller_problem
+
+    return stored_seller_problem(order, _db_store_finder(db))
+
+
+def _cn_parent_held(db, ret_doc, cache) -> bool:
+    """True when a credit note's (return doc's) PARENT order is held off the
+    returns (_order_held_off_returns): its sale was never filed, so its
+    credit note must not be either -- reversing output tax on a supply never
+    declared (and, for a B2B buyer, uploading the CDNR row). ONE answer for
+    GSTR-1's ledger + in-store passes and GSTR-3B's two legs. ``cache`` is
+    keyed by order_id. Fail-soft -> False (the note files, as before)."""
+    oid = str((ret_doc or {}).get("order_id") or "")
+    if not oid:
+        return False
+    if oid not in cache:
+        try:
+            order = db.get_collection("orders").find_one({"order_id": oid})
+            cache[oid] = bool(_order_held_off_returns(db, order))
+        except Exception:  # noqa: BLE001
+            cache[oid] = False
+    return cache[oid]
 
 
 def _cn_foreign_store(ret_doc, active_store) -> bool:
