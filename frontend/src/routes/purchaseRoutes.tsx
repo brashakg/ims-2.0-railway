@@ -9,8 +9,8 @@
 import { lazy } from 'react';
 import { Route, Navigate, useSearchParams } from 'react-router-dom';
 import { ProtectedRoute } from '../components/layout/ProtectedRoute';
-import { PURCHASE_MANAGER_ROLES, RECEIVING_MANAGER_ROLES } from '../pages/purchase/purchaseTypes';
-import type { UserRole } from '../types';
+import { RECEIVING_MANAGER_ROLES } from '../pages/purchase/purchaseTypes';
+import { PURCHASE_ROLES } from '../pages/purchase/purchaseRoles';
 
 // What the blocked page tells anyone else who opens a receiving screen
 // (audit F5). The page lists the roles that can right under it
@@ -30,10 +30,8 @@ const VendorReturns = lazy(() => import('../pages/purchase/VendorReturns').then(
 // Purchase S6: Accountant Reconciliation Console
 const ReconConsole = lazy(() => import('../pages/purchase/ReconConsole'));
 
-// The module gate for the section pages: the roles that send orders (one
-// list, mirrors the backend _VENDOR_ROLES gate). Receiving has its own,
-// narrower list below.
-const PURCHASE_ROLES: UserRole[] = [...PURCHASE_MANAGER_ROLES];
+// The module gate for the section pages (PURCHASE_ROLES): who may raise a PO.
+// Receiving has its own, narrower list (RECEIVING_MANAGER_ROLES).
 
 // Legacy ?tab= mapper: /purchase and /purchase?tab=<x> land on the section
 // page, carrying every other query param (grn_id!) along.

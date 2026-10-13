@@ -12,9 +12,9 @@ ONE service that unifies the two divergent product surfaces:
 WHAT THIS DELIVERS (packet PM / foundation N5):
   * A canonical category registry (long-form `FRAME` ... + short SKU prefix `FR`)
     that reconciles the two pre-existing, divergent category enums.
-  * `build_sku` -- a REWRITE of the SKU rule (PREFIX + BRAND + MODEL + COLORCODE
-    + SIZE per the Excel spec), format-PERMISSIVE for legacy SKUs (`/` and `-`
-    preserved, no length cap), atomic-counter suffix only on collision.
+  * `build_sku` -- THE SKU rule for new products, readable and separated
+    (CATEGORY-BRAND-MODEL-COLOUR-SIZE, owner D5); legacy SKUs are never
+    re-minted; atomic-counter suffix only on collision.
   * `validate_attributes` -- server-side category-conditional required-field
     validation (a Contact Lens without expiry, a Hearing Aid without serial_no,
     a Frame without colour_code are rejected -- not just on the FE wizard).
@@ -48,7 +48,8 @@ import uuid
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from decimal import Decimal
+from typing import Any, Dict, List, Optional, Tuple
 
 from .gst_rates import (
     gst_rate_for_category,
@@ -72,7 +73,9 @@ logger = logging.getLogger("ims.product_master")
 # Excel rule and Shopify both use. Deliberately NO length constraint -- the
 # canonical Excel example (SGPRADAVPR19W1AB1O153 / FRBURBERRYB31421109/7155)
 # already varies wildly, and legacy import must never be rejected.
-_SKU_PERMISSIVE = re.compile(r"^[A-Za-z0-9/_-]+$")
+# `.` is allowed because build_sku mints it in a size (52.5): every SKU the
+# minter makes must pass this check if it is ever sent back (a clone, an import).
+_SKU_PERMISSIVE = re.compile(r"^[A-Za-z0-9/._-]+$")
 
 # Valid discount cap tiers. Mirrors pricing_caps.CATEGORY_DISCOUNT_CAPS and the
 # schemas.py PRODUCT_SCHEMA.discount_category enum (SERVICE added in PM/N5).
@@ -577,60 +580,70 @@ def is_known_category(category: Any) -> bool:
 
 
 # ===========================================================================
-# SKU rule (REWRITE -- NOT a wrapper of catalog.generate_sku)
+# SKU rule -- THE one minter (owner ruling 2026-09-28, D5)
 # ===========================================================================
 
 
-def _sku_segment(value: Any, *, keep_separators: bool = False) -> str:
-    """Uppercase a value, stripping spaces. Keeps `/` and `-` when asked
-    (colour codes like `1109/71` must survive verbatim per the Excel rule)."""
-    s = str(value or "").strip().upper().replace(" ", "")
-    if keep_separators:
-        return s
-    return re.sub(r"[^A-Z0-9]", "", s)
+def _sku_segment(value: Any, keep_separators: bool = False) -> str:
+    """One SKU part, uppercase letters and digits. `-` separates the parts, so
+    it never appears inside one: a brand or model drops every other character
+    (RAY-BAN -> RAYBAN); a colour code or size (`keep_separators`) keeps its
+    own `/` or `-` as `/` (901/58, 1109-71 -> 1109/71), so colour 901/58 is
+    never the SKU of colour 901 in size 58, nor 1109-71 that of 110971."""
+    s = str(value or "").upper()
+    if not keep_separators:
+        return re.sub(r"[^A-Z0-9]", "", s)
+    s = re.sub(r"[^A-Z0-9/]", "", s.replace("-", "/"))
+    return "/".join(p for p in s.split("/") if p)
+
+
+def _plain_number(value: Any) -> Optional[str]:
+    """A size or lens index written as a plain decimal, in its shortest form,
+    digit for digit as typed: '1.50' and '1.5' are 1.5, '54.0' and a float
+    54.0 are 54, 54.1234567 stays 54.1234567. None for anything else (a sign,
+    an exponent, text): that is kept as typed. THE size rule the SKU
+    (_size_segment) and the duplicate key (compute_identity_key) share, so
+    the guard calls two spellings of one lens the same lens exactly when the
+    SKU does. ASCII digits only: a Devanagari or fullwidth digit is not a
+    plain number, so it never reaches a SKU that is_acceptable_sku refuses."""
+    m = re.fullmatch(r"([0-9]*)(?:\.([0-9]*))?", str("" if value is None else value).strip())
+    if not m or not (m.group(1) or m.group(2)):
+        return None
+    whole = m.group(1).lstrip("0") or "0"
+    frac = (m.group(2) or "").rstrip("0")
+    return whole + ("." + frac if frac else "")
+
+
+def _size_segment(value: Any) -> str:
+    """The size part. A number keeps its decimal point, so a 52.5 eye size is
+    never the SKU of a 525 one, and is written in its shortest form
+    (_plain_number). Anything else is an ordinary segment."""
+    return _plain_number(value) or _sku_segment(value, keep_separators=True)
 
 
 def build_sku(category: Any, attributes: Dict[str, Any], db=None) -> str:
-    """Mint a canonical SKU: PREFIX + BRAND + MODEL + COLORCODE + SIZE.
-
-    REWRITE of the SKU rule (the legacy catalog.generate_sku is left untouched
-    for the /catalog path). Key differences from generate_sku:
-      * verbatim concatenation per the Excel spec (no truncation to 2/4/3 chars),
-      * the colour code keeps `/` and `-` (e.g. `1109/71` stays `1109/71`),
-      * the atomic counter suffix is appended ONLY on a uniqueness collision,
-        not unconditionally.
-
-    `db` (optional) is used to allocate the collision-suffix counter atomically
-    + persistently (reuses catalog._next_sku_counter, falling back to an
-    in-memory dict when no DB). A `find_by_sku`-style dedupe is the caller's
-    responsibility; this function also resolves a collision itself when given
-    the product repo via `_resolve_collision`.
-    """
+    """Mint a NEW product's readable SKU: CATEGORY-BRAND-MODEL-COLOUR-SIZE,
+    e.g. FR-CARRERA-CA8895-807-54 (owner ruling 2026-09-28, D5). Empty parts
+    are skipped. The parts are identity_parts -- the same ones the duplicate
+    key folds -- so an Optical Lens (no model, colour or size) reads its
+    sub-brand, coating and index: LS-ESSILOR-CRIZAL-HC-1.56. Deterministic, so POST
+    /products/sku-preview shows the form exactly what the create door will
+    mint; a clash gets mint_unique_sku's counter suffix. Existing SKUs are
+    never re-minted (only a create without a SKU calls this). `db` is unused
+    (kept for the callers' signature)."""
     spec = category_spec(category)
     if spec is None:
         raise ProductMasterError(
             f"Unknown product category '{category}'.", status=422, field="category"
         )
-
-    brand = _sku_segment(attributes.get("brand_name") or attributes.get("brand"))
-    model = _sku_segment(
-        attributes.get("model_no")
-        or attributes.get("model_name")
-        or attributes.get("model")
-    )
-    # Colour code keeps separators (1109/71 -> 1109/71). Fall back to colour name.
-    colour = _sku_segment(
-        attributes.get("colour_code") or attributes.get("color_code"),
-        keep_separators=True,
-    )
-    if not colour:
-        colour = _sku_segment(
-            attributes.get("colour_name") or attributes.get("color"),
-            keep_separators=False,
-        )
-    size = _sku_segment(attributes.get("size"), keep_separators=True)
-
-    return f"{spec.prefix}{brand}{model}{colour}{size}"
+    a = attributes or {}
+    brand, model, colour, size = identity_parts(a, category)
+    segs = [
+        *map(_sku_segment, (spec.prefix, brand, model)),
+        _sku_segment(colour, keep_separators=True),
+        _size_segment(size) if size else "",
+    ]
+    return "-".join(seg for seg in segs if seg)
 
 
 def _next_collision_suffix(prefix: str, db=None) -> int:
@@ -686,6 +699,23 @@ def catalog_sku_taken(sku: Any, db=None) -> bool:
     return _catalog_sku_taken(sku, db=db)
 
 
+def sku_taken(sku: Any, product_repo=None, db=None) -> bool:
+    """True when a product already has `sku`: in the products spine (via
+    product_repo.find_by_sku; a read error counts as taken) or as a
+    catalog_products sku (_catalog_sku_taken). THE question mint_unique_sku
+    asks of the SKU it builds, and the one POST /products/sku-preview asks,
+    so the Review never shows a SKU the save then numbers (an edit moves a
+    product's identity but never its SKU, so the identity it left can be
+    added again while its SKU is taken)."""
+    if product_repo is not None:
+        try:
+            if product_repo.find_by_sku(sku) is not None:
+                return True
+        except Exception:  # noqa: BLE001 - fail toward minting a suffixed SKU
+            return True
+    return _catalog_sku_taken(sku, db=db)
+
+
 def mint_unique_sku(
     category: Any, attributes: Dict[str, Any], product_repo=None, db=None
 ) -> str:
@@ -706,13 +736,7 @@ def mint_unique_sku(
     base = build_sku(category, attributes, db=db)
     if product_repo is None and db is None:
         return base
-    spine_taken = False
-    if product_repo is not None:
-        try:
-            spine_taken = product_repo.find_by_sku(base) is not None
-        except Exception:  # noqa: BLE001 - fail toward minting a suffixed SKU
-            spine_taken = True
-    if not spine_taken and not _catalog_sku_taken(base, db=db):
+    if not sku_taken(base, product_repo, db):
         return base
     spec = category_spec(category)
     prefix = spec.prefix if spec else "XX"
@@ -734,7 +758,7 @@ def mint_unique_sku(
 
 def is_acceptable_sku(sku: Any) -> bool:
     """Format-PERMISSIVE legacy-SKU acceptance: allow letters/digits and the
-    `/`, `-`, `_` separators with no length constraint. Legacy Shopify-style
+    `/`, `-`, `_`, `.` separators with no length constraint. Legacy Shopify-style
     SKUs (FRBURBERRYB31421109/7155) and older formats must pass."""
     if sku is None:
         return False
@@ -1012,19 +1036,171 @@ def set_twin_tags(doc: Dict[str, Any], tags: Any) -> List[str]:
     return clean
 
 
-def _derive_brand_model_color_size(
-    attributes: Dict[str, Any],
-) -> Dict[str, Optional[str]]:
-    """Map category attribute keys onto the spine identity columns."""
+_MODEL_KEYS = ("model_no", "model_name")
+
+
+def _shown_attributes(attributes: Dict[str, Any], category: Any) -> Dict[str, Any]:
+    """`attributes` less a model_no / model_name its category has no field
+    for. main's create door folded a flat `model` into both, and main's form
+    sent a lens's sub-brand (or 'STD') as that model: every Optical Lens on
+    prod holds a model_no no form shows or clears, and a contact lens a
+    model_no copy of its Model Name. Such a copy never outranks the field the
+    form edits (and the door no longer writes one: normalise_door_payload).
+    An unknown category keeps them all."""
     attrs = attributes or {}
+    spec = category_spec(category)
+    if spec is None:
+        return attrs
+    hidden = [k for k in _MODEL_KEYS if k not in spec.required + spec.optional]
+    return {k: v for k, v in attrs.items() if k not in hidden}
+
+
+def _derive_brand_model_color_size(
+    attributes: Dict[str, Any], category: Any = None
+) -> Dict[str, Optional[str]]:
+    """Map category attribute keys onto the spine identity columns, read as
+    the category's form shows them (_shown_attributes). A category with no
+    model (Optical Lens) names its sub-brand in the model's place, so the
+    model column and the display name say Crizal."""
+    attrs = _shown_attributes(attributes, category)
     return {
         "brand": attrs.get("brand_name") or attrs.get("brand"),
-        "model": attrs.get("model_no") or attrs.get("model_name") or attrs.get("model"),
+        "model": attrs.get("model_no")
+        or attrs.get("model_name")
+        or attrs.get("model")
+        or attrs.get("subbrand"),
         "color": attrs.get("colour_code")
+        or attrs.get("color_code")
         or attrs.get("colour_name")
         or attrs.get("color"),
         "size": attrs.get("size"),
     }
+
+
+_CONTACT_LENSES = ("CONTACT_LENS", "COLORED_CONTACT_LENS")
+# A number as people write it: a sign (ASCII, the Unicode minus or a dash pasted
+# from Word/PDF, or +), up to 3 digits, a '.' or ',' decimal part, an optional
+# D/DS; PL or PLANO is 0. Digits are bounded, so an exponent or a 400-digit
+# number never reaches the arithmetic.
+_CL_POWER_RE = re.compile(r"([-+\u2212\u2013\u2014]?)\s*(\d{1,3})?(?:[.,](\d{1,3}))?\s*(?:DS?)?")
+# The fit of a contact lens, after its power: (SKU label, name label, key).
+_CL_FIT_FIELDS = (("BC", "BC", "base_curve"), ("DIA", "DIA", "diameter"), ("PK", "Pack of", "pack"))
+
+
+def _cl_number(attributes: Dict[str, Any], key: str) -> Optional[Decimal]:
+    """One contact-lens number as typed (_CL_POWER_RE), None when blank.
+    Anything that is not a number is refused (422 naming the field): text kept
+    as typed lost its sign in the SKU and the key, so -1.25D was the duplicate
+    of +1.25D."""
+    raw = str(attributes.get(key) if attributes.get(key) is not None else "").strip()
+    if not raw:
+        return None
+    if raw.upper() in ("PL", "PLANO"):
+        return Decimal(0)
+    m = _CL_POWER_RE.fullmatch(raw.upper())
+    if not (m and (m.group(2) or m.group(3))):
+        example = "8.6" if key in ("base_curve", "diameter", "pack") else "-1.25"
+        raise ProductMasterError(
+            f"{key} is not a number: '{raw[:20]}' (write it like {example}).",
+            status=422,
+            field=key,
+        )
+    d = Decimal("%s.%s" % (m.group(2) or "0", m.group(3) or "0"))
+    return d if m.group(1) in ("", "+") else -d
+
+
+def _cl_parts(attributes: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """What tells one contact lens of a model from another, as (SKU part, name
+    part) pairs -- owner 2026-09-28: each power is its own stock item, with
+    power, base curve, diameter and pack in its name and SKU. SPH, C cylinder,
+    X axis, A add, then BC, DIA, PK: -1.25/-0.75x180 BC 8.6 DIA 14.2 in 6s is
+    M125/CM075/X180/BC86/DIA142/PK6 in the SKU and '-1.25 -0.75 x180 BC 8.6
+    DIA 14.2 Pack of 6' in the name. A sign is a letter ('-' separates SKU
+    parts): -1.25 is M125, +1.25 and 1.25 are P125, 0 is PL (plano); in
+    hundredths, so -1.25 is never -12.50 (M1250). A zero (or blank) cylinder,
+    add, base curve, diameter or pack is none, and so is an axis with no
+    cylinder: an axis means nothing without one. Fit numbers are written in
+    their shortest form (_plain_number), so 8.60 and 8.6 are one lens."""
+    a = attributes or {}
+    sph, cyl, axis, add = (_cl_number(a, k) for k in ("power", "cl_cyl", "cl_axis", "cl_add"))
+    fit = [(s, n, _cl_number(a, k)) for s, n, k in _CL_FIT_FIELDS]
+
+    def signed(label: str, d: Decimal) -> str:
+        hundredths = int((abs(d) * 100).to_integral_value())
+        return "%s%s%03d" % (label, "M" if d < 0 else "P", hundredths)
+
+    out: List[Tuple[str, str]] = []
+    if sph is not None:
+        out.append(("PL", "Plano") if sph == 0 else (signed("", sph), format(sph, "+.2f")))
+    if cyl:
+        out.append((signed("C", cyl), format(cyl, "+.2f")))
+        if axis is not None:
+            out.append(("X%d" % int(abs(axis)), "x%d" % int(abs(axis))))
+    if add:
+        out.append((signed("A", add), "ADD " + format(add, "+.2f")))
+    for sku_label, name_label, d in fit:
+        if d:
+            num = _plain_number(str(abs(d)))
+            out.append((sku_label + num, "%s %s" % (name_label, num)))
+    return out
+
+
+def identity_parts(
+    attributes: Dict[str, Any], category: Any = None
+) -> Tuple[Any, Any, Any, Any]:
+    """(brand, model, colour, size): what tells one product from another --
+    THE parts build_sku mints from and the duplicate key (compute_identity_key)
+    folds, so a lens the guard calls new also gets a SKU of its own and the
+    Review preview is the SKU it saves. An Optical Lens has no colour or size:
+    its coating and index stand in (Crizal 1.56 HC and Crizal 1.67 HC are two
+    products; the same Crizal 1.56 HC twice is one). A frame's eye size
+    (lens_size) is its size: 52 and 54 are two products (owner 2026-09-28,
+    each eye size is its own variant). Each is read only for its own kind
+    (`category`): the form keeps a typed field when its category is switched,
+    and a Sunglass's leftover Lens Size 54 must never stand in for a lens's
+    index, nor a lens's index or coating for a frame's. A lens with no sub-brand
+    is the brand's own line: its coating takes the model's place, so Hoya HC
+    1.56 saved twice is still one product and the SKU mints no filler. A
+    lens's model_no/model_name (main's filler 'STD', or its sub-brand copied
+    there) is no field of the lens form, so it is never read
+    (_shown_attributes): an old row and the same lens entered today get one
+    key, and a sub-brand edit re-keys either. A contact lens (`category`) is
+    told apart by its power and fit in the size's place (_cl_parts): a second
+    power, base curve, diameter or pack of a model is a new product, the same
+    lens twice is one."""
+    ids = _derive_brand_model_color_size(attributes, category)
+    a = attributes or {}
+    kind = resolve_category(category)
+    lens = kind == "OPTICAL_LENS"
+    model, colour = ids["model"], ids["color"] or (a.get("coating") if lens else None)
+    if not model and not ids["color"]:
+        model, colour = colour, None
+    size = ids["size"] or a.get("index" if lens else "lens_size")
+    if kind in _CONTACT_LENSES:
+        size = "/".join(sku for sku, _ in _cl_parts(a)) or None
+    return (ids["brand"], model, colour, size)
+
+
+def identity_inputs(attributes: Dict[str, Any], category: Any) -> List[str]:
+    """The attributes that decide identity_parts for these values: changing
+    any other one (a lens colour, a USP, a Model Name under a Model No) cannot
+    make it another product. Read off the rule itself -- each field the
+    category has, or that was typed, is given another value and kept when the
+    parts move (or stop reading, a number field) -- so no list of the rule's
+    inputs is kept anywhere. The Add-product strip keeps its answer while
+    only other fields change (useSimilarProducts)."""
+    a = dict(attributes or {})
+    spec = category_spec(category)
+    fields = set(a) | set(spec.required + spec.optional if spec else ())
+
+    def parts(attrs: Dict[str, Any]) -> Any:
+        try:
+            return identity_parts(attrs, category)
+        except ProductMasterError:
+            return None
+
+    now = parts(a)
+    return sorted(k for k in fields if parts({**a, k: "\x00"}) != now)
 
 
 def normalise_identity_component(value: Any) -> str:
@@ -1084,7 +1260,7 @@ def compute_identity_key(
     if not b or not m:
         return None
     parts = [b, m, _norm(colour)]
-    s = _norm(size)
+    s = _norm(_plain_number(size) or size)
     if s:
         parts.append(s)
     return "|".join(parts)
@@ -1115,7 +1291,8 @@ def existing_product_summary(existing: Dict[str, Any]) -> Dict[str, Any]:
     size = existing.get("size") or attrs.get("lens_size") or attrs.get("size")
     # A contact lens or reading glass is one product per power (owner
     # 2026-09-28): the create door keeps it in attributes.power (the form also
-    # sends a contact lens's as cl_power) and mints a name without it.
+    # sends a contact lens's as cl_power); a reader takes it from here, never
+    # by parsing the name.
     power = attrs.get("power")
     if power in (None, ""):
         power = existing.get("cl_power")
@@ -1174,6 +1351,133 @@ def _duplicate_error(existing: Dict[str, Any]) -> "ProductMasterError":
     return err
 
 
+def _identity_attributes(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """A stored row's attributes as the identity reads them: the attributes
+    first, and a flat brand/model/color/size column only for a slot its
+    attributes leave empty (a legacy row). The flat columns are copies the
+    create door derived from the attributes (_derive_brand_model_color_size),
+    so a copy left behind by an edit (a lens's sub-brand, a colour name) never
+    outranks the attribute it came from. A flat model fills the model field
+    the category's form shows; a lens has none (its flat model is a copy of
+    main's hidden model_no), so it fills nothing."""
+    doc = doc or {}
+    category = doc.get("category")
+    attrs: Dict[str, Any] = dict(doc.get("attributes") or {})
+    ids = _derive_brand_model_color_size(attrs, category)
+    shown = _shown_attributes(dict.fromkeys(_MODEL_KEYS, True), category)
+    for slot, key in (
+        ("brand", "brand_name"),
+        ("model", next(iter(shown), None)),
+        ("color", "colour_code"),
+        ("size", "size"),
+    ):
+        flat = doc.get(slot) or (doc.get("colour") if slot == "color" else None)
+        if key and _is_blank(ids[slot]) and not _is_blank(flat):
+            attrs[key] = flat
+    return attrs
+
+
+def identity_key_of(doc: Dict[str, Any]) -> Optional[str]:
+    """THE duplicate key a stored product has, by the create rule: identity_parts
+    over its attributes, a legacy row's flat columns filling only an empty
+    slot (_identity_attributes). The edit door and the key rebuild
+    (scripts/migrate_identity_key_tighten.py) both read a row through here."""
+    return compute_identity_key(
+        *identity_parts(_identity_attributes(doc), (doc or {}).get("category"))
+    )
+
+
+def minted_name(doc: Dict[str, Any]) -> str:
+    """The name the create door mints for a product doc, its stored name aside.
+    A contact lens is named by the parts its SKU and key read (owner
+    2026-09-28: power, base curve, diameter and pack in the name too)."""
+    doc = doc or {}
+    detail = ""
+    if resolve_category(doc.get("category")) in _CONTACT_LENSES:
+        detail = " ".join(name for _, name in _cl_parts(doc.get("attributes") or {}))
+    # The name reads the model the form shows, never a hidden copy (_shown_attributes).
+    attrs = _shown_attributes(doc.get("attributes") or {}, doc.get("category"))
+    return build_product_name({**doc, "name": None, "attributes": attrs}, detail=detail)
+
+
+def name_was_minted(doc: Dict[str, Any]) -> bool:
+    """The stored name is one a create door minted for this doc, never a typed
+    one: today's (minted_name) or main's, made before a contact lens's power
+    and fit joined the name, reading the attributes as stored. Every contact
+    lens on prod carries main's."""
+    doc = doc or {}
+    name = doc.get("name")
+    if not name:
+        return False
+    if name == build_product_name({**doc, "name": None}):
+        return True
+    try:
+        return name == minted_name(doc)
+    except ProductMasterError:
+        return False
+
+
+def rekey_on_edit(
+    current: Dict[str, Any], patch: Dict[str, Any], product_repo=None
+) -> None:
+    """An edit that changes what tells a product apart (any identity_parts
+    input: an eye size, a contact lens's power or fit, a colour...) re-keys it
+    by the create rule, setting patch['identity_key'], and is refused (409
+    DUPLICATE_PRODUCT, the create door's error) when ANOTHER product already
+    has that identity. A name the create door minted says what the product is
+    (a lens's power, a frame's colour), so it is re-minted with the key
+    (patch['name']); a typed name stays. The SKU never moves: readable SKUs
+    are for new products only (owner 2026-09-28). A stored value that is not a
+    number (main's free-text power) blocks no edit that leaves it as it is:
+    the Edit form re-sends the whole attributes bag with a price change, so
+    the key and the name stay as stored. An edit that blanks the brand or
+    model keeps the stored key (ponytail: no $unset door, a unique sparse
+    index refuses two null keys). The flat brand/model/color/size columns
+    are copies of the attributes (_derive_brand_model_color_size): an edit
+    that moves the attribute a column comes from re-derives that column, so
+    the minted name and the model column say Varilux after a Crizal ->
+    Varilux sub-brand edit. A flat value the request carries otherwise wins (a
+    brand edit), unless it only echoes a hidden copy (_shown_attributes): the
+    Edit form loads a lens's stored model_no Crizal and sends it back as the
+    model with every save, which must never move the column off Varilux."""
+    if not any(k in patch for k in ("attributes", "brand", "model", "color", "size", "category")):
+        return
+    if "attributes" in patch:
+        category = patch.get("category") or current.get("category")
+        attrs = patch["attributes"] or {}
+        was = _derive_brand_model_color_size(current.get("attributes") or {}, category)
+        echo = _derive_brand_model_color_size(attrs)  # hidden copies read too
+        for slot, val in _derive_brand_model_color_size(attrs, category).items():
+            if not _is_blank(val) and (val != was[slot] or patch.get(slot, val) == echo[slot] != val):
+                patch[slot] = val
+    merged = {**current, **patch}
+    try:
+        old = identity_key_of(current)
+    except ProductMasterError:
+        old = None  # a stored value that is not a number: the edit's key decides
+    try:
+        new = identity_key_of(merged)
+    except ProductMasterError:
+        after, before = _identity_attributes(merged), _identity_attributes(current)
+        # A value this edit typed is still the 422 naming it.
+        identity_parts({k: v for k, v in after.items() if v != before.get(k)}, merged.get("category"))
+        # ponytail: the bad value is the stored one, untouched, so the key
+        # cannot be read; key and name stay as stored until it is fixed.
+        return
+    if new is None or new == old:
+        return
+    other = (
+        product_repo.find_by_identity_key(new)
+        if hasattr(product_repo, "find_by_identity_key")
+        else None
+    )
+    if other is not None and other.get("product_id") != current.get("product_id"):
+        raise _duplicate_error(other)
+    patch["identity_key"] = new
+    if "name" not in patch and name_was_minted(current):
+        patch["name"] = minted_name(merged) or current["name"]
+
+
 # Sibling cap for the live "similar products" strip (dup-detect Phase 2). The
 # strip is a hint, not a browser -- 12 chips is plenty; model_colour_count still
 # reports the TRUE distinct-colour total.
@@ -1207,10 +1511,7 @@ def find_similar_products(
     products_collection,
     *,
     category: Any,
-    brand: Any,
-    model: Any,
-    colour: Any = None,
-    size: Any = None,
+    attributes: Optional[Dict[str, Any]] = None,
     limit: int = SIMILAR_SIBLINGS_CAP,
 ) -> Dict[str, Any]:
     """Live as-you-type "similar products" lookup for the Add-Product form
@@ -1222,6 +1523,11 @@ def find_similar_products(
     folded punctuation (- / _ .) from a stored product MUST match, exactly as
     it would 409 at create time. Never reimplement the folding here or in the
     browser.
+
+    `attributes` is the form's attributes as typed, keyed by the create
+    door's own identity_parts -- whatever it reads (an eye size, a contact
+    lens's power and fit, a colour name, a lens's sub-brand, coating and
+    index) -- so the exact match is the row the save would 409 against.
 
     Matching strategy (cheapest possible): stored docs carry `identity_key`
     (unique+sparse indexed), which was BUILT by compute_identity_key -- so an
@@ -1251,7 +1557,11 @@ def find_similar_products(
     try:
         if products_collection is None:
             return empty
-        sibling_query = model_family_query(category, brand, model)
+        canonical = resolve_category(category)
+        if canonical is None:
+            return empty
+        brand, model, colour, size = identity_parts(attributes or {}, canonical)
+        sibling_query = model_family_query(canonical, brand, model)
         if sibling_query is None:
             return empty
 
@@ -1298,6 +1608,9 @@ def find_similar_products(
             "exact_match": existing_product_summary(exact_doc) if exact_doc else None,
             "siblings": siblings,
             "model_colour_count": model_colour_count,
+            # What decides this answer: the form keeps it while only other
+            # fields change, so the strip never reflows the grid needlessly.
+            "identity_fields": identity_inputs(attributes or {}, canonical),
         }
     except Exception as exc:  # noqa: BLE001 - fail-soft: hint only, never a 5xx
         logger.warning("[PM] find_similar_products failed: %s", exc)
@@ -1369,7 +1682,7 @@ def normalise_payload(
     gst_rate: Optional[float] = None,
     country_of_origin: Optional[str] = None,
     warranty_months: Optional[int] = None,
-    weight_grams: Optional[float] = None,
+    weight: Optional[float] = None,
     tags: Any = None,
     created_by: Optional[str] = None,
     created_by_name: Optional[str] = None,
@@ -1530,7 +1843,7 @@ def normalise_payload(
             canonical, attributes, product_repo=product_repo, db=db
         )
 
-    ids = _derive_brand_model_color_size(attributes)
+    ids = _derive_brand_model_color_size(attributes, canonical)
 
     doc: Dict[str, Any] = {
         "sku": resolved_sku,
@@ -1560,7 +1873,7 @@ def normalise_payload(
     # Stamped only when brand+model are both present (the minimum that makes an
     # identity meaningful); categories without a brand/model -- e.g. SERVICES --
     # carry no identity_key and are not identity-deduped.
-    _ident = compute_identity_key(ids["brand"], ids["model"], ids["color"], ids["size"])
+    _ident = compute_identity_key(*identity_parts(attributes, canonical))
     if _ident:
         doc["identity_key"] = _ident
     if dc is not None:
@@ -1572,15 +1885,18 @@ def normalise_payload(
         doc["country_of_origin"] = country_of_origin
     if warranty_months is not None:
         doc["warranty_months"] = int(warranty_months)
-    if weight_grams is not None:
-        doc["weight_grams"] = float(weight_grams)
+    if weight is not None:
+        doc["weight"] = float(weight)
     # Normalised, governed tags (step-12). Always present as a list (possibly
     # empty) so collection rules + the tag filter have a consistent shape.
     doc["tags"] = normalise_tags(tags)
     # Door-specific additive columns -- never override a canonical key, never a
-    # None value (keeps the spine lean + behaviour-preserving per door).
+    # None value (keeps the spine lean + behaviour-preserving per door). Never a
+    # website flag either: the brand default ALWAYS decides (owner D6), read
+    # live by shopify_push.product_push_refusal, so a stored copy could only go
+    # stale after a brand edit or a Brand Master change.
     for _k, _v in (extra_fields or {}).items():
-        if _v is not None and _k not in doc:
+        if _v is not None and _k not in doc and _k != "sync_to_shopify":
             doc[_k] = _v
     # Owner decision (2026-07-04): every new product is born with
     # reorder_quantity = -1 = "no auto-reorder" (see api/services/
@@ -1589,6 +1905,8 @@ def normalise_payload(
     # Reorder dashboard). setdefault so a door that DID supply a value
     # (via extra_fields) keeps it.
     doc.setdefault("reorder_quantity", -1)
+    # No reorder level here: levels are per shop (owner ruling D12,
+    # products.reorder_levels), a new product has none = not set.
     # --- SEO auto-naming: mint a display name when the payload leaves it blank ---
     # The spine has historically had NO `name` column (brand+model was the
     # implicit display identity), so products created via the Add-Product flow
@@ -1597,7 +1915,7 @@ def normalise_payload(
     # explicit door-supplied name (via extra_fields, e.g. a SERVICE's name)
     # is NEVER overwritten -- needs_name() only fires on a blank.
     if needs_name(doc):
-        minted = build_product_name(doc)
+        minted = minted_name(doc)
         if minted:
             doc["name"] = minted
     # --- Phase 0: stamp the catalog-done chokepoint on the spine ---
@@ -2177,7 +2495,6 @@ VALID_DOOR_SOURCES = frozenset({"FORM", "BULK", "CATALOG", "MASTER", "IMPORT", "
 # already set in attributes (attributes win -- they are the explicit source).
 _DOOR_IDENTITY_ALIASES = {
     "brand": "brand_name",
-    "model": "model_no",
     "color": "colour_code",
     "colour": "colour_code",
     "size": "size",
@@ -2199,14 +2516,20 @@ def normalise_door_payload(payload: Dict[str, Any], *, source: str) -> Dict[str,
         val = p.get(top_key)
         if val is not None and not (isinstance(val, str) and not val.strip()):
             attrs.setdefault(attr_key, val)
-    # A flat top-level `model` fills BOTH model_no AND model_name (mirrors the
-    # read-side _overlay_attributes). Several categories key identity on
-    # model_name (CONTACT_LENS, COLORED_CONTACT_LENS, SMARTWATCH, ...), so without
-    # this a flat FORM/BULK create supplying only `model` would be 422'd for a
-    # "missing model_name" the status stamp would otherwise have read fine.
-    _model = p.get("model")
-    if _model is not None and not (isinstance(_model, str) and not _model.strip()):
-        attrs.setdefault("model_name", _model)
+    # The model lands in the field its category's form shows: Model No and/or
+    # Model Name (a frame shows both: both, as before), else an Optical Lens's
+    # Sub Brand. A flat `model` (the PO 'new item' line) or a model_no /
+    # model_name the form has no field for (a price-list import, a clone of a
+    # main-era row) moves there, so the door stores no hidden copy and the SKU,
+    # the name and the duplicate key read what was typed (_shown_attributes).
+    spec = category_spec(p.get("category"))
+    fields = spec.required + spec.optional if spec else _MODEL_KEYS
+    copies = [attrs.pop(k) for k in _MODEL_KEYS if k not in fields and k in attrs]
+    model = next((v for v in (*copies, p.get("model")) if not _is_blank(v)), None)
+    shown = [k for k in _MODEL_KEYS if k in fields] or [k for k in ("subbrand",) if k in fields]
+    for k in shown if model is not None else ():
+        if _is_blank(attrs.get(k)):
+            attrs[k] = model
     p["attributes"] = attrs
     p["_source"] = source if source in VALID_DOOR_SOURCES else "FORM"
     return p
@@ -2244,7 +2567,7 @@ def build_canonical_product(
         gst_rate=p.get("gst_rate"),
         country_of_origin=p.get("country_of_origin"),
         warranty_months=p.get("warranty_months"),
-        weight_grams=p.get("weight_grams"),
+        weight=p.get("weight"),
         tags=p.get("tags"),
         created_by=p.get("created_by") or p.get("actor"),
         created_by_name=p.get("created_by_name") or p.get("actor_name"),
@@ -2328,7 +2651,7 @@ def create_via_door(
         gst_rate=p.get("gst_rate"),
         country_of_origin=p.get("country_of_origin"),
         warranty_months=p.get("warranty_months"),
-        weight_grams=p.get("weight_grams"),
+        weight=p.get("weight"),
         tags=p.get("tags"),
         as_draft=bool(p.get("as_draft", False)),
         force_draft=force_draft,
@@ -2363,7 +2686,7 @@ _CLONE_CATALOG_FIELDS = (
     "gst_rate",
     "country_of_origin",
     "warranty_months",
-    "weight_grams",
+    "weight",
 )
 
 
@@ -2500,7 +2823,7 @@ def create_product(
     gst_rate: Optional[float] = None,
     country_of_origin: Optional[str] = None,
     warranty_months: Optional[int] = None,
-    weight_grams: Optional[float] = None,
+    weight: Optional[float] = None,
     tags: Any = None,
     as_draft: bool = False,
     force_draft: bool = False,
@@ -2550,7 +2873,7 @@ def create_product(
         gst_rate=gst_rate,
         country_of_origin=country_of_origin,
         warranty_months=warranty_months,
-        weight_grams=weight_grams,
+        weight=weight,
         tags=tags,
         created_by=actor,
         # Attribution: a router-supplied username wins (no DB hit); doors that
@@ -2837,7 +3160,7 @@ def mirror_update_to_catalog_twin(
         # -- went stale after an edit (prod 2026-09-06: one twin had already
         # drifted from its spine on attributes). model / hsn / gst / is_active
         # mirror for the PIM screens but queue nothing: no pushed payload
-        # reads them, and the spine never recomputes `name` on edit.
+        # reads them (a name that moves arrives as `name`, below).
         for key in (
             "hsn_code", "gst_rate", "is_active", "description",
             "brand", "model", "category", "attributes",
@@ -2870,9 +3193,9 @@ def mirror_update_to_catalog_twin(
         # as the Shopify title, and no edit ever recomputed it. On an explicit
         # rename re-derive it with the SAME formula the create door uses
         # (pim_display_name) and queue the twin only when the title actually
-        # changed. ONLY a rename: the spine never recomputes `name` on a
-        # brand / model edit (product_naming honours a set name verbatim), so
-        # nothing else can move the title.
+        # changed. A rename, or an identity edit that re-mints a minted name
+        # (rekey_on_edit: a lens's new power); product_naming honours a set
+        # name verbatim, so nothing else can move the title.
         twin: Optional[Dict[str, Any]] = None
         if "name" in patch:
             twin = cat.find_one({"id": twin_id}) or {}
@@ -2968,6 +3291,8 @@ def update_product(
     # None-strip above (a caller intending to clear sends [] not None).
     if "tags" in (patch or {}) and patch.get("tags") is not None:
         clean["tags"] = normalise_tags(patch.get("tags"))
+
+    rekey_on_edit(current, clean, product_repo=product_repo)
 
     # Cataloguer attribution: stamp WHO edited (id + display name) on the doc.
     # Creation attribution is immutable -- a patch may never rewrite

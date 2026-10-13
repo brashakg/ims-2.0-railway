@@ -114,17 +114,6 @@ export function byPerson(name?: string | null, id?: string | null): string {
   return who ? ` by ${who}` : '';
 }
 
-/** The roles that send orders to vendors (the catalogue manager only raises
- *  drafts). ONE list for the purchase section pages and the Buy Desk's "who
- *  sends it" hint; mirrors the backend _VENDOR_ROLES gate (+ SUPERADMIN). */
-export const PURCHASE_MANAGER_ROLES: readonly UserRole[] = [
-  'SUPERADMIN',
-  'ADMIN',
-  'AREA_MANAGER',
-  'STORE_MANAGER',
-  'ACCOUNTANT',
-];
-
 /** Who receives goods into stock. Owner ruling 2026-09-28: RECEIVING IS
  *  MANAGERS ONLY -- not the accountant (bills and payments stay theirs), and
  *  workshop staff hand the box to one of these. ONE list for the receive

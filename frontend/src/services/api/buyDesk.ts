@@ -26,6 +26,10 @@ export interface BuyDeskRow {
   catalog_status: string | null;
   readiness: BuyDeskReadiness;
   ecom_state: EcomState;
+  /** The push gate's own reason whenever it refuses the row: a LIVE listing
+   *  still sells but its price and images no longer sync; a PUSH_LOCKED row
+   *  ("Not for website") says why (brand off / misspelt / inactive, a lock). */
+  ecom_note?: string | null;
   on_hand: number;
   /** Units on orders SENT to the vendor (owner D11, 2026-09-29) -- never drafts. */
   on_order: number;
