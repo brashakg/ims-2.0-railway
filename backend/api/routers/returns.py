@@ -1586,6 +1586,10 @@ def _reactivate_original_unit(
 
     A unit already reactivated earlier in this same return (`used_ids`) is
     skipped so two returned units never collapse onto one stock row.
+
+    A stock read or a reactivate write that FAILED raises: None means "no
+    unit to reactivate" and the caller mints, so a failure read as None
+    minted a phantom AVAILABLE unit beside the one still SOLD.
     """
     if stock_repo is None or not product_id:
         return None
@@ -1596,20 +1600,17 @@ def _reactivate_original_unit(
         base["store_id"] = store_id
     sold_only = {"status": "SOLD"}
 
-    try:
-        if order_id:
-            q = dict(base)
-            q["order_id"] = order_id
-            q.update(sold_only)
-            candidates = stock_repo.find_many(q) or []
-        if not candidates and not exact_order_only:
-            q = dict(base)
-            q.update(sold_only)
-            candidates = stock_repo.find_many(q) or []
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[RETURNS] stock lookup failed: %s", exc)
-        return None
+    if order_id:
+        q = dict(base)
+        q["order_id"] = order_id
+        q.update(sold_only)
+        candidates = _find_stock(stock_repo, q)
+    if not candidates and not exact_order_only:
+        q = dict(base)
+        q.update(sold_only)
+        candidates = _find_stock(stock_repo, q)
 
+    failed = False
     for unit in candidates:
         sid = unit.get("stock_id") or unit.get("_id")
         if not sid or sid in used_ids:
@@ -1642,11 +1643,28 @@ def _reactivate_original_unit(
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[RETURNS] stock reactivate failed: %s", exc)
-            continue
+            ok = False
         if ok:
             used_ids.add(sid)
             return str(sid)
+        # The real repository's update answers False on a write error.
+        failed = True
+    if failed:
+        raise RuntimeError("stock reactivate failed: the SOLD unit stays SOLD")
     return None
+
+
+def _find_stock(stock_repo: Any, query: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Stock rows matching `query`; RAISES when they cannot be read. Through
+    the repository's collection when it has one: the real repository's
+    find_many swallows a read error into [] -- "no SOLD unit", so a restock
+    minted a phantom beside the unit still SOLD (a fake repository without
+    one keeps find_many)."""
+    coll = getattr(stock_repo, "collection", None)
+    if coll is None:
+        return stock_repo.find_many(query) or []
+    clean = getattr(stock_repo, "_clean_id", None) or (lambda doc: doc)
+    return [clean(doc) for doc in coll.find(query)]
 
 
 def _audit_stock_transition(
@@ -1926,24 +1944,13 @@ def _has_order_scoped_sold_unit(
 ) -> bool:
     """True when THIS order still has an un-reclaimed SOLD unit of this product
     at this shop. Strictly order-scoped -- it can never see another order's
-    unit, so it adds no hijack risk. Fail-soft -> False."""
+    unit, so it adds no hijack risk. An unreadable answer raises: read as
+    False, the unit went to the first shop and minted there while the real
+    one stayed SOLD at the other."""
     if stock_repo is None or not product_id or not store_id or not order_id:
         return False
-    try:
-        rows = (
-            stock_repo.find_many(
-                {
-                    "product_id": product_id,
-                    "store_id": store_id,
-                    "order_id": order_id,
-                    "status": "SOLD",
-                }
-            )
-            or []
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[RETURNS] outstanding-unit lookup failed: %s", exc)
-        return False
+    rows = _find_stock(stock_repo, {"product_id": product_id, "store_id": store_id,
+                                    "order_id": order_id, "status": "SOLD"})
     for unit in rows:
         sid = unit.get("stock_id") or unit.get("_id")
         if sid and sid not in used_ids:
@@ -2297,18 +2304,6 @@ def _restock_good_items(
     all_ok = True
     for u in units:
         pid = u.get("product_id")
-        # Never the online store: every source here is filtered through
-        # _first_physical_store / _fulfilment_unit_queue, and target_store is
-        # physical too (an UNRESOLVED route returned early above).
-        queue = per_product_queue.get(pid) or []
-        if queue:
-            unit_store = _take_fulfilment_slot(
-                stock_repo, queue, pid, order_id, used_ids
-            )
-        else:
-            unit_store = per_product_default.get(pid) or target_store
-        if unit_store and unit_store not in landed_stores:
-            landed_stores.append(unit_store)
         row = per_line_applied.setdefault(
             pid,
             {
@@ -2319,27 +2314,50 @@ def _restock_good_items(
                 "reactivated": 0,
                 "minted": 0,
                 "applied": True,
-                # WHICH physical store(s) this product's units landed on.
-                "store_id": unit_store,
+                # WHICH physical store(s) this product's units landed on (set
+                # from store_ids below).
+                "store_id": None,
                 "store_ids": [],
             },
         )
+        # Never the online store: every source here is filtered through
+        # _first_physical_store / _fulfilment_unit_queue, and target_store is
+        # physical too (an UNRESOLVED route returned early above).
+        queue = per_product_queue.get(pid) or []
+        try:
+            if queue:
+                unit_store = _take_fulfilment_slot(
+                    stock_repo, queue, pid, order_id, used_ids
+                )
+            else:
+                unit_store = per_product_default.get(pid) or target_store
+            sid = _reactivate_original_unit(
+                stock_repo,
+                pid,
+                unit_store,
+                order_id,
+                used_ids,
+                # MUST-FIX 1: on the redirected path the sale was booked against
+                # the ONLINE store, so the order-scoped lookup legitimately
+                # misses (every historical import). Without this flag the
+                # order-AGNOSTIC fallback would grab an unrelated walk-in
+                # customer's SOLD unit at this shop -- flipping a frame that is
+                # on somebody's face to AVAILABLE and erasing their sale. Mint
+                # instead; that is the honest record.
+                exact_order_only=is_online_order,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # A stock read or write that failed is no answer: never a mint
+            # beside a unit that may still be SOLD (a phantom). Not applied,
+            # so the restock stays open for the retry.
+            logger.warning("[RETURNS] stock read/write failed, unit not restocked: %s", exc)
+            all_ok = False
+            row["applied"] = False
+            continue
+        if unit_store and unit_store not in landed_stores:
+            landed_stores.append(unit_store)
         if unit_store and unit_store not in row["store_ids"]:
             row["store_ids"].append(unit_store)
-        sid = _reactivate_original_unit(
-            stock_repo,
-            pid,
-            unit_store,
-            order_id,
-            used_ids,
-            # MUST-FIX 1: on the redirected path the sale was booked against the
-            # ONLINE store, so the order-scoped lookup legitimately misses (every
-            # historical import). Without this flag the order-AGNOSTIC fallback
-            # would grab an unrelated walk-in customer's SOLD unit at this shop
-            # -- flipping a frame that is on somebody's face to AVAILABLE and
-            # erasing their sale. Mint instead; that is the honest record.
-            exact_order_only=is_online_order,
-        )
         if sid:
             row["reactivated"] += 1
             row["quantity"] += 1

@@ -470,10 +470,8 @@ def _sold_units(order_id: Any, product_id: str) -> Optional[float]:
         repo = _r.get_stock_repository()
         if repo is None:
             return None
-        query = {"order_id": order_id, "product_id": product_id, "status": "SOLD"}
-        coll = getattr(repo, "collection", None)
-        rows = list(coll.find(query)) if coll is not None else (repo.find_many(query) or [])
-        return float(len(rows))
+        return float(len(_r._find_stock(
+            repo, {"order_id": order_id, "product_id": product_id, "status": "SOLD"})))
     except Exception:  # noqa: BLE001 -- no answer: the caller keeps the restock open
         logger.warning("[SHOPIFY_REFUND] SOLD-unit read failed for order=%s", order_id,
                        exc_info=True)

@@ -3286,3 +3286,132 @@ def test_a_restock_that_ends_not_applied_always_raises_its_task(swept, monkeypat
     monkeypatch.setattr(repo, "update", real[0])
     monkeypatch.setattr(repo, "create", real[1])
     assert _retry(ret)["restock_applied"] is True and _units(swept) == [("stk-1", "AVAILABLE")]
+
+
+class _StoreReadDown(_FlakyUnits):
+    """The stock collection while the restock's own store-scoped SOLD finds
+    fail (the next `down` of them); the SOLD-unit caps read the order across
+    shops and pass."""
+
+    def __init__(self, repo, down=10**6):
+        super().__init__(repo, 0)
+        self.down = down
+
+    def find(self, query=None, projection=None):
+        if self.down and "store_id" in (query or {}):
+            self.down -= 1
+            raise RuntimeError("stock read down")
+        return _Cursor([u for u in self.repo.units if _match(u, query)])
+
+
+class _NoWrites(_FlakyUnits):
+    """A stock collection whose writes fail: the REAL repository's update
+    swallows the error and answers False."""
+
+    def update_one(self, *args, **kwargs):
+        raise RuntimeError("stock write down")
+
+
+@pytest.mark.parametrize("down", ["read", "write"])
+def test_a_stock_read_or_write_that_fails_never_mints_a_phantom(swept, monkeypatch, down):
+    """Panel probe G's 'works' variant. AUTO, one SOLD unit; the restock's
+    own read of it (the real repository's find_many swallows the error into
+    []) or its reactivate write (update answers False) fails, minting works.
+    Read as 'no unit to reactivate', the restock MINTED a phantom AVAILABLE
+    unit beside stk-1 still SOLD and booked it applied. Now nothing is
+    minted, the restock stays open with its task, and the retry puts stk-1
+    back."""
+    from database.repositories.product_repository import StockRepository
+
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    oid, rid = (60253, 700453) if down == "read" else (60254, 700454)
+    _claim_unit(swept, _book(swept, oid))
+    repo = swept["stock_repo"]
+    real_update = repo.update
+    coll = _StoreReadDown(repo)
+    if down == "read":
+        monkeypatch.setattr(repo, "collection", coll, raising=False)
+        monkeypatch.setattr(repo, "find_many", StockRepository(coll).find_many)
+    else:
+        monkeypatch.setattr(repo, "update", StockRepository(_NoWrites(repo, 0)).update)
+    res = shopify_refund.handle_shopify_refund(swept["db"], _refund(rid, oid), webhook_id=None,
+                                               topic="refunds/create")
+
+    assert res["status"] == "credited" and res["restock_applied"] is False
+    assert _units(swept) == [("stk-1", "SOLD")], "no phantom minted"
+    ret = swept["returns"].find_one({"shopify_refund_id": str(rid)})
+    assert ret["restock_applied"] is False
+    assert swept["db"]["tasks"].count_documents(
+        {"source_ref": f"return_restock_blocked:{ret['return_id']}"}) == 1
+    coll.down = False
+    monkeypatch.setattr(repo, "update", real_update)
+    assert _retry(ret)["restock_applied"] is True and _units(swept) == [("stk-1", "AVAILABLE")]
+
+
+def test_a_unit_whose_write_fails_never_loses_the_units_that_landed(swept, monkeypatch):
+    """Both units of a qty-2 line refunded under AUTO; the reactivate write
+    of stk-1 fails. The unit that landed stays recorded: the return names
+    it and its line keeps it booked returned (lost, the counter return door
+    could take that unit back a second time). The other stays open: no
+    mint, the retry puts stk-1 back -- two frames, two rows."""
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    oid, rid = 60255, 700455
+    doc = _book(swept, oid, line_items=[{**_frame_order(oid)["line_items"][0], "quantity": 2}])
+    _claim_unit(swept, doc)
+    repo = swept["stock_repo"]
+    repo.units.append({**repo.units[0], "stock_id": "stk-2"})
+    real_update = repo.update
+
+    def stk1_down(sid, data):
+        if sid == "stk-1":
+            raise RuntimeError("stock write down")
+        return real_update(sid, data)
+
+    monkeypatch.setattr(repo, "update", stk1_down)
+    refund = _refund(rid, oid, amount="1998.00")
+    refund["refund_line_items"][0]["quantity"] = 2
+    res = shopify_refund.handle_shopify_refund(swept["db"], refund, webhook_id=None,
+                                               topic="refunds/create")
+
+    assert res["status"] == "credited" and res["restock_applied"] is False
+    assert _units(swept) == [("stk-1", "SOLD"), ("stk-2", "AVAILABLE")]
+    ret = swept["returns"].find_one({"shopify_refund_id": str(rid)})
+    assert ret["restock_stock_ids"] == ["stk-2"]
+    assert _doc(swept, oid)["items"][0]["returned_qty"] == 1
+    monkeypatch.setattr(repo, "update", real_update)
+    assert _retry(ret)["restock_applied"] is True
+    assert _units(swept) == [("stk-1", "AVAILABLE"), ("stk-2", "AVAILABLE")]
+
+
+def test_a_failed_read_of_which_shop_holds_the_unit_never_mints_at_the_first(swept, monkeypatch):
+    """A two-shop order (one unit each from GANGA and BOK); GANGA's unit is
+    already back on its shelf, BOK's is SOLD, and Shopify refunds one. The
+    restock asks each shop in turn which still holds the order's SOLD unit;
+    those reads fail. Read as "none", the unit went to the first shop
+    (GANGA), found nothing SOLD there and MINTED a phantom while BOK's real
+    unit stayed SOLD. Now nothing is minted and the retry sends it home."""
+    from database.repositories.product_repository import StockRepository
+
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    oid, rid = 60256, 700456
+    doc = _book(swept, oid, line_items=[{**_frame_order(oid)["line_items"][0], "quantity": 2}])
+    _claim_unit(swept, doc)
+    _set(swept, oid, fulfillment_stores=["BV-BOK-01", "BV-GANGA-01"], fulfillment_breakdown=[
+        {"product_id": "IMS-P-1", "store_id": "BV-GANGA-01", "qty": 1},
+        {"product_id": "IMS-P-1", "store_id": "BV-BOK-01", "qty": 1}])
+    repo = swept["stock_repo"]
+    repo.units[0].update(status="AVAILABLE", order_id=None)
+    repo.units.append({**repo.units[0], "stock_id": "stk-2", "store_id": "BV-BOK-01",
+                       "order_id": doc["order_id"], "status": "SOLD"})
+    coll = _StoreReadDown(repo, down=2)
+    monkeypatch.setattr(repo, "collection", coll, raising=False)
+    monkeypatch.setattr(repo, "find_many", StockRepository(coll).find_many)
+    res = shopify_refund.handle_shopify_refund(swept["db"], _refund(rid, oid), webhook_id=None,
+                                               topic="refunds/create")
+
+    assert res["status"] == "credited" and res["restock_applied"] is False
+    assert _units(swept) == [("stk-1", "AVAILABLE"), ("stk-2", "SOLD")], "no phantom minted"
+    ret = swept["returns"].find_one({"shopify_refund_id": str(rid)})
+    coll.down = 0
+    assert _retry(ret)["restock_applied"] is True
+    assert _units(swept) == [("stk-1", "AVAILABLE"), ("stk-2", "AVAILABLE")]
