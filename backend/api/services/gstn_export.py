@@ -483,6 +483,8 @@ def to_gstr3b_json(
     outward = data.get("outwardTaxableSupplies") or {}
     zero = data.get("zeroRatedSupplies") or {}
     itc = data.get("itcAvailable") or {}
+    itc_rcm = data.get("itcReverseCharge") or {}
+    rcm = data.get("inwardSuppliesReverseCharge") or {}
 
     # 3.1(a) — Outward taxable supplies (other than zero/nil/exempt)
     osup_det = {
@@ -510,28 +512,26 @@ def to_gstr3b_json(
         "osup_zero": osup_zero,
         "osup_nil_exmp": osup_nil_exmp,
         "osup_nongst": {"txval": _num(data.get("nonGstSupplies"))},
+        # 3.1(d) — Inward supplies liable to reverse charge: the shop's own
+        # GST on its RCM purchases (it was uploaded as zero).
         "isup_rev": {
-            "txval": 0.0,
-            "iamt": 0.0,
-            "camt": 0.0,
-            "samt": 0.0,
-            "csamt": 0.0,
+            "txval": _num(data.get("inwardSuppliesReverseChargeValue")),
+            "iamt": _num(rcm.get("integratedTax")),
+            "camt": _num(rcm.get("centralTax")),
+            "samt": _num(rcm.get("stateTax")),
+            "csamt": _num(rcm.get("cess")),
         },
     }
 
-    # Table 4 — Eligible ITC. (A)(5) All other ITC, (C) Net ITC available.
-    itc_block = {
-        "iamt": _num(itc.get("integratedTax")),
-        "camt": _num(itc.get("centralTax")),
-        "samt": _num(itc.get("stateTax")),
-        "csamt": _num(itc.get("cess")),
-    }
+    # Table 4 — Eligible ITC. (A)(3) inward supplies liable to reverse charge
+    # (a part of the credit), (A)(5) all other ITC, (C) Net ITC available.
+    keys = {"iamt": "integratedTax", "camt": "centralTax", "samt": "stateTax", "csamt": "cess"}
+    itc_block = {k: _num(itc.get(src)) for k, src in keys.items()}
+    isrc = {k: _num(itc_rcm.get(src)) for k, src in keys.items()}
     itc_elg = {
         "itc_avl": [
-            {
-                "ty": "OTH",  # All other ITC
-                **itc_block,
-            }
+            {"ty": "OTH", **{k: round(itc_block[k] - isrc[k], 2) for k in keys}},
+            {"ty": "ISRC", **isrc},
         ],
         "itc_net": dict(itc_block),
     }

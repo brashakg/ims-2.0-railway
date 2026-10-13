@@ -115,6 +115,9 @@ export interface PurchaseInvoice {
   is_interstate?: boolean;
   // false = this bill claims NO input credit (server verdict, itc_claimable).
   itc_eligible?: boolean;
+  // Reverse charge: the GST is the shop's own to pay the government, so
+  // total_amount (what the supplier is owed) is the taxable value.
+  reverse_charge?: boolean;
   lines: PurchaseInvoiceLine[];
   taxable_amount: number;
   cgst: number;
@@ -259,8 +262,9 @@ export interface PurchaseInvoiceCreate {
   // What the bill is FOR ('GOODS' | 'SERVICES'). Required by the server on a
   // receipt-less booking; a GOODS bill refuses without its receipt link.
   bill_kind?: 'GOODS' | 'SERVICES';
-  // Reverse charge: we pay the tax, and may claim it even from an
-  // unregistered supplier. Server default false.
+  // Reverse charge: we pay the tax to the government (the supplier is owed
+  // the taxable value only), and may claim it even from an unregistered
+  // supplier. Server default false.
   reverse_charge?: boolean;
   // The user's own switch for input credit (server default true); the server
   // still refuses credit when the supplier has no valid GSTIN and the bill is
@@ -285,6 +289,9 @@ export interface PurchaseInvoicePreview {
   sgst_total: number;
   igst_total: number;
   tax_total: number;
+  // Reverse charge as the server booked it; `total` is then the taxable value
+  // (what the supplier is owed -- the booking's total_amount).
+  reverse_charge?: boolean;
   total: number;
 }
 
