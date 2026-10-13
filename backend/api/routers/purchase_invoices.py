@@ -1392,13 +1392,12 @@ def _assert_products_catalogued(lines, found) -> None:
         # unit_price into products.cost_price moments after this gate passes.
         # Refusing the bill for the one figure the bill is holding would refuse
         # essentially every vendor bill in the system: all 68 live products
-        # carry exactly done_gaps ["cost_price"] and nothing else. send_po
-        # subtracts the same field for the same reason (vendors.py,
-        # PO_LINES_INCOMPLETE). DO NOT put cost_price back into this gate --
-        # the product ends up WITH a cost precisely because the bill booked.
-        # (list comprehension, not a set: the refusal message must keep
-        # compute_catalog_status's field order.)
-        gaps = [g for g in _pm.compute_catalog_status(prod)[1] if g != "cost_price"]
+        # carry exactly done_gaps ["cost_price"] and nothing else. send_po and
+        # the goods receipt ask the same rule (_pm.purchase_gaps). DO NOT put
+        # cost_price back into this gate -- the product ends up WITH a cost
+        # precisely because the bill booked. (purchase_gaps keeps
+        # compute_catalog_status's field order for the refusal message.)
+        gaps = _pm.purchase_gaps(prod)
         if gaps:
             blocked.append(
                 {

@@ -3538,6 +3538,16 @@ def compute_catalog_status(doc: Dict[str, Any]) -> tuple:
     return status, ordered_gaps
 
 
+def purchase_gaps(doc: Dict[str, Any]) -> List[str]:
+    """What stops a product being BOUGHT: compute_catalog_status's gaps less
+    cost_price, in its order. The cost arrives late (rulings 11 + 12) -- the PO
+    rate or the receipt fills it when someone knows it, else the vendor's bill
+    does (purchase_invoices._apply_valuation_trueup) -- so a missing cost never
+    blocks sending the PO, accepting the goods or booking the bill. The one
+    rule behind all three (po_detail.send_po, grn_accept, the bill gate)."""
+    return [g for g in compute_catalog_status(doc)[1] if g != "cost_price"]
+
+
 def _positive_number(val: Any) -> bool:
     """True when val is a number strictly > 0. Tolerant of numeric strings;
     None / blank / non-numeric -> False."""
