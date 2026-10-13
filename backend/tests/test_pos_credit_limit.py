@@ -174,8 +174,9 @@ def _make_client():
     return TestClient(app)
 
 
-def test_credit_summary_unlimited(monkeypatch):
-    """Customer with credit_limit=0 → unlimited, ar_available=None."""
+def test_credit_summary_no_limit_of_their_own_gets_chain_default(monkeypatch):
+    """credit_limit=0 = no limit of their own -> the chain default (owner
+    2026-10-08: Rs 1,50,000), not unlimited."""
     import api.routers.customers as cm
 
     customer = {"customer_id": "CX1", "credit_limit": 0}
@@ -186,9 +187,9 @@ def test_credit_summary_unlimited(monkeypatch):
 
     assert r.status_code == 200
     body = r.json()
-    assert body["credit_limit"] == 0.0
+    assert body["credit_limit"] == 150000.0
     assert body["ar_outstanding"] == 0.0
-    assert body["ar_available"] is None
+    assert body["ar_available"] == 150000.0
     assert body["limit_exceeded"] is False
 
 
