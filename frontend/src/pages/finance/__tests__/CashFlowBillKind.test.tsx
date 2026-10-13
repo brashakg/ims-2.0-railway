@@ -206,9 +206,15 @@ describe('the goods/services declaration on the Record-Bill form', () => {
     const hint = await screen.findByText(/No unbilled goods receipts/);
     expect(hint).toHaveTextContent(/Bought without PO/);
     expect(hint).not.toHaveTextContent(/Log them as a Delivery Challan/);
-    // The dealer is a supplier (owner 2026-10-12): its receipt lists here
-    // under it, so the hint sends nobody to a screen that cannot book it.
+    // The dealer is a supplier (owner 2026-10-12). This form opens only for a
+    // supplier in the AP Aging list, which lists only suppliers with an
+    // unpaid bill: a dealer quick-added at receiving has none, so the hint
+    // names the screen that books any receipt's bill (round 8 panel: "record
+    // the bill here, under that supplier" was a dead end).
     expect(hint).toHaveTextContent(/adding it as a supplier/);
+    expect(hint).toHaveTextContent(/Purchase → Invoices → Create from GRN/);
+    expect(hint).toHaveTextContent(/Book the bill/);
+    expect(hint).not.toHaveTextContent(/record the\s+bill here/);
     expect(hint).not.toHaveTextContent(/typed by\s+name/);
   });
 });

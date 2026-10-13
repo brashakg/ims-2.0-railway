@@ -1086,7 +1086,7 @@ export function GoodsReceiptNote() {
                           <th>Tally</th>
                           <th>Item</th>
                           <th className="right">Qty received</th>
-                          {isNoPo && <th className="right">Cost / unit (₹)</th>}
+                          {isNoPo && <th className="right">Cost / unit before GST (₹)</th>}
                           {isNoPo && <th>Expiry</th>}
                           <th></th>
                         </tr>
