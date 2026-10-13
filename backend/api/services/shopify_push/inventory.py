@@ -579,28 +579,46 @@ async def plan_product_stock(db, product: Dict[str, Any], variants: Optional[Lis
 # ---------------------------------------------------------------------------
 
 
-def tracking_confirmed(nodes: Any, policy: str) -> set:
-    """The variant gids a Shopify answer CONFIRMS as tracked=true + ``policy``.
-    ONE rule for the size's create answer (variants.py) and the tracking
-    re-send's answer (below): a variant the answer leaves out, or echoes
-    untracked / on another policy, is not confirmed -- silence confirms
-    nothing, whichever call it answered."""
+def tracking_verdicts(nodes: Any, policy: str) -> Dict[str, bool]:
+    """What a Shopify answer SAYS about each variant it echoes: True when
+    tracked=true + ``policy``, False when it says anything else (untracked,
+    another policy, the fields left out). ONE rule for the size's create
+    answer (variants.py) and the tracking re-send's answer (below). A variant
+    the answer does not mention gets NO verdict: a refused or throttled call
+    says nothing about it, so it keeps the state Shopify last confirmed
+    (``_remember_tracking``)."""
     return {
-        _as_shopify_gid(n.get("id"), "ProductVariant")
+        _as_shopify_gid(n.get("id"), "ProductVariant"): (
+            (n.get("inventoryItem") or {}).get("tracked") is True and n.get("inventoryPolicy") == policy
+        )
         for n in (nodes if isinstance(nodes, list) else [])
-        if isinstance(n, dict)
-        and (n.get("inventoryItem") or {}).get("tracked") is True
-        and n.get("inventoryPolicy") == policy
+        if isinstance(n, dict) and n.get("id")
     }
+
+
+def _deleted_rows(body: Any, chunk: List[Dict[str, Any]]) -> List[str]:
+    """The variant gids of ``chunk`` that Shopify's userErrors say do not
+    exist (a size deleted in Shopify admin), found by the error's field path
+    ``["variants", "<row>", ...]``."""
+    field_obj = ((body or {}).get("data") or {}).get("productVariantsBulkUpdate") or {}
+    out: List[str] = []
+    for e in field_obj.get("userErrors") or []:
+        if not isinstance(e, dict) or "does not exist" not in str(e.get("message") or "").lower():
+            continue
+        path = [str(f) for f in e.get("field") or []]
+        if len(path) > 1 and path[0] == "variants" and path[1].isdigit() and int(path[1]) < len(chunk):
+            out.append(chunk[int(path[1])]["id"])
+    return out
 
 
 async def _set_variant_tracking(
     db, product_gid: str, variant_gids: List[str], policy: str
 ) -> Dict[str, Any]:
     """tracked=true + inventoryPolicy on every variant, chunked. Fail-soft.
-    ``updated`` counts what Shopify ACCEPTED; ``confirmed`` holds the gids its
-    answer echoed back tracked + this policy (``tracking_confirmed``)."""
-    out: Dict[str, Any] = {"updated": 0, "errors": [], "confirmed": set()}
+    ``updated`` counts what Shopify ACCEPTED; ``verdicts`` is what its answer
+    said about each size (``tracking_verdicts``), ``confirmed`` the sizes it
+    confirmed; ``deleted`` the sizes a refusal says no longer exist."""
+    out: Dict[str, Any] = {"updated": 0, "errors": [], "verdicts": {}, "deleted": []}
     rows = [
         {"id": g, "inventoryPolicy": policy, "inventoryItem": {"tracked": True}}
         for g in variant_gids
@@ -614,13 +632,79 @@ async def _set_variant_tracking(
             err = _user_errors(body, "productVariantsBulkUpdate")
             if err:
                 out["errors"].append(err)
+                out["deleted"] += _deleted_rows(body, chunk)
             else:
                 out["updated"] += len(chunk)
                 answer = ((body.get("data") or {}).get("productVariantsBulkUpdate")) or {}
-                out["confirmed"] |= tracking_confirmed(answer.get("productVariants"), policy)
+                out["verdicts"].update(tracking_verdicts(answer.get("productVariants"), policy))
         except Exception as exc:  # noqa: BLE001 -- fail-soft side channel
             out["errors"].append(str(exc))
+    out["confirmed"] = {g for g, ok in out["verdicts"].items() if ok}
     return out
+
+
+def sku_by_variant_gid(product: Dict[str, Any], variants: Optional[List[Dict[str, Any]]]) -> Dict[str, str]:
+    """Each STORED size gid -> its IMS SKU (the listing's default, then each
+    size row: the sources ``product_variant_gids`` reads), so a line names a
+    size the owner can act on, never a Shopify id."""
+    pairs = [((product.get("ecom") or {}).get("shopify_variant_id"), product.get("sku"))]
+    pairs += [((v or {}).get("shopify_variant_id"), (v or {}).get("sku")) for v in variants or []]
+    return {_as_shopify_gid(g, "ProductVariant"): str(s) for g, s in pairs if g and s}
+
+
+def _remember_tracking(db, product: Dict[str, Any], verdicts: Dict[str, bool], policy: str) -> Dict[str, str]:
+    """``ecom.confirmed_sizes = {variant gid: policy}`` -- each size's
+    tracking + policy as Shopify's answer last CONFIRMED it (owner, round 6).
+    A verdict sets (True) or clears (False) its size; a size with no verdict
+    -- a refused or throttled call, an answer that leaves it out -- keeps its
+    last confirmed state. Returns the record. Read-merge-write of ecom (the _writeback_product
+    idiom); a failed read falls back to what ``product`` carried, a failed
+    write is logged."""
+    pid = product.get("id") or product.get("product_id")
+    coll = db["catalog_products"]
+    try:
+        doc = coll.find_one({"id": pid}) if pid else None
+    except Exception as exc:  # noqa: BLE001 -- the record falls back to the press's copy
+        logger.warning("[SHOPIFY_STOCK] confirmed-sizes read failed for %s: %s", pid, exc)
+        doc = None
+    held = dict(((doc or product).get("ecom") or {}).get("confirmed_sizes") or {})
+    record = dict(held)
+    for g, ok in verdicts.items():
+        if ok:
+            record[g] = policy
+        else:
+            record.pop(g, None)
+    if doc is not None and record != held:
+        try:
+            coll.update_one({"id": pid}, {"$set": {"ecom": {**(doc.get("ecom") or {}), "confirmed_sizes": record}}})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[SHOPIFY_STOCK] confirmed-sizes write failed for %s: %s", pid, exc)
+    return record
+
+
+def _forget_deleted_sizes(db, product: Dict[str, Any], deleted: Iterable[str]) -> None:
+    """Clear the Shopify ids of each size Shopify says no longer exists (a
+    size deleted in Shopify admin) -- its size row's, and the listing's
+    default when it is one of them -- so the next press re-creates it through
+    the create path (tracked + the policy in the create call, confirmed by
+    its answer). Fail-soft."""
+    wanted = sorted({x for g in deleted for x in (g, g.rsplit("/", 1)[-1])})
+    if not wanted:
+        return
+    try:
+        db["catalog_variants"].update_many(
+            {"shopify_variant_id": {"$in": wanted}},
+            {"$unset": {"shopify_variant_id": "", "shopify_inventory_item_id": ""}},
+        )
+        pid = product.get("id") or product.get("product_id")
+        doc = db["catalog_products"].find_one({"id": pid}) if pid else None
+        ecom = dict((doc or {}).get("ecom") or {})
+        if doc is not None and str(ecom.get("shopify_variant_id") or "") in wanted:
+            ecom.pop("shopify_variant_id", None)
+            ecom.pop("shopify_inventory_item_id", None)
+            db["catalog_products"].update_one({"id": pid}, {"$set": {"ecom": ecom}})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[SHOPIFY_STOCK] clearing deleted size ids failed: %s", exc)
 
 
 # Not a Shopify code: the marker _set_chunk puts in the code set when the call
@@ -2050,6 +2134,7 @@ async def sync_product_stock(
     product_gid: str,
     *,
     extra_variant_gids: Optional[List[Optional[str]]] = None,
+    answered: Optional[Dict[str, bool]] = None,
 ) -> Dict[str, Any]:
     """LIVE-only (the caller has passed the gates): tracking + policy on every
     known variant, then ``push_skus_stock`` for this product's SKUs -- one row
@@ -2060,18 +2145,22 @@ async def sync_product_stock(
     until the next tick). Fail-soft summary, never raises; a shop whose
     on-hand is UNKNOWN is never written as 0.
 
-    THE ONE TRACKING RULE (owner, round 4): tracking is CONFIRMED only when
-    Shopify's answer to this re-send echoes EVERY size tracked=true + this
-    policy (``tracking_confirmed``). A refused call, a silent answer, or one
-    that says tracked=false / another policy confirms nothing -- first publish
-    or re-press, new size or old. ``tracking_confirmed`` (bool) and
-    ``tracking_unconfirmed`` (the gids) say it; push_product puts or keeps a
-    listing on the website only on it, and nothing here is ok, SOLD OUT or
-    recorded tracked without it."""
+    THE ONE TRACKING RULE (owner, rounds 4 + 6): a size is CONFIRMED when
+    Shopify's answer last said tracked=true + this policy about it
+    (``tracking_verdicts``, remembered per size by ``_remember_tracking``):
+    this re-send's answer, ``answered`` (what the size's own create call
+    answered this press), or an earlier press's. An answer saying
+    tracked=false / another policy clears it; a refused or throttled re-send
+    says nothing, so a size keeps its last confirmed state and is re-sent on
+    the next stock pass (recorded untracked); a size never confirmed is not.
+    ``tracking_confirmed`` (bool: every size) and ``tracking_unconfirmed``
+    (the gids) say it; push_product puts or keeps a listing on the website
+    only on it. A size Shopify says no longer exists is cleared from IMS and
+    named, so the next press re-creates it."""
     pid = product.get("id") or product.get("product_id")
     policy = inventory_policy_for(product)
     gids = product_variant_gids(product, variants, extra_variant_gids)
-    tracked: Dict[str, Any] = {"updated": 0, "errors": [], "confirmed": set()}
+    tracked: Dict[str, Any] = {"updated": 0, "errors": [], "verdicts": {}, "deleted": [], "confirmed": set()}
     # Tracking + DENY go on even when no quantity can follow (no shop mapped):
     # an UNTRACKED item sells without limit, which is the worse failure. The
     # listing then reads sold out and push_skus_stock says so, loudly, instead
@@ -2080,8 +2169,24 @@ async def sync_product_stock(
         tracked = await _set_variant_tracking(db, product_gid, gids, policy)
     else:
         tracked["errors"].append("no variant gid known -- tracking not set")
-    unconfirmed = [g for g in gids if g not in tracked["confirmed"]]
+    # A size deleted in Shopify admin: its stored ids would refuse every
+    # re-send for ever. Cleared BEFORE the quantities (its SKU then has no
+    # Shopify item and is named so); it sells nothing, so it is no part of
+    # this listing's verdict.
+    deleted = [g for g in gids if g in tracked["deleted"]]
+    sku_of = sku_by_variant_gid(product, variants)
+    deleted_lines = [
+        f"size {sku_of.get(g) or 'a size'} was deleted on Shopify - it is re-created on the next Send to website"
+        for g in deleted
+    ]
+    if deleted:
+        _forget_deleted_sizes(db, product, deleted)
+        gids = [g for g in gids if g not in deleted]
+    fresh = {**(answered or {}), **tracked["verdicts"]}  # what Shopify said THIS press
+    record = _remember_tracking(db, product, fresh, policy)
+    unconfirmed = [g for g in gids if record.get(g) != policy]
     confirmed = bool(gids) and not unconfirmed
+    answered_all = bool(gids) and all(fresh.get(g) for g in gids)
 
     skus = product_skus(product, variants)
     summary = await push_skus_stock(
@@ -2090,17 +2195,20 @@ async def sync_product_stock(
         source="product_push",
         product_id=str(pid) if pid else None,
         policy=policy,
-        # Recorded tracked only on Shopify's confirming answer: anything less
-        # is recorded untracked, so the next sweep re-sends it.
-        tracked=confirmed,
+        # Recorded tracked only when THIS press's answers confirmed every
+        # size: a size held only by its remembered state is recorded
+        # untracked, so the next stock pass re-sends it.
+        tracked=answered_all,
     )
     summary["policy"] = policy
     summary["tracked"] = tracked["updated"]
     summary["tracking_confirmed"] = confirmed
     summary["tracking_unconfirmed"] = unconfirmed
-    summary["errors"] = list(tracked["errors"]) + list(summary["errors"])
-    summary["ok"] = summary["ok"] and confirmed
+    summary["errors"] = deleted_lines + list(tracked["errors"]) + list(summary["errors"])
+    summary["ok"] = summary["ok"] and answered_all
     summary["sold_out"] = summary["sold_out"] and summary["ok"]  # unconfirmed tracking is unknown
+    also = f" -- ALSO: {summary['error']}" if summary.get("error") else ""
+    why = "; ".join(str(e) for e in tracked["errors"][:3])
     if not confirmed:
         # The worse failure gets the code (recheck round 2, first-push): with
         # ok=False and NO code the press promoted nothing and every screen read
@@ -2108,16 +2216,27 @@ async def sync_product_stock(
         # reads `tracking_confirmed` and withholds (or takes down) the
         # listing; the sweep re-sends tracking on the next tick. The quantity
         # verdict, if any, rides under it.
-        why = "; ".join(str(e) for e in tracked["errors"][:3]) or (
-            f"Shopify's answer did not confirm {len(unconfirmed)} of {len(gids)} size(s)"
-        )
+        why = why or f"Shopify's answer did not confirm {len(unconfirmed)} of {len(gids)} size(s)"
         summary["code"] = STOCK_TRACKING_FAILED
         summary["error"] = (
             f"tracking + {policy} could not be confirmed on the variant(s) ({why}) -- "
             f"until Shopify confirms it a size may sell WITHOUT LIMIT; press again"
-        ) + (f" -- ALSO: {summary['error']}" if summary.get("error") else "")
+        ) + also
+    elif not answered_all:
+        # Every size held by what Shopify last CONFIRMED, this re-send
+        # unanswered: the listing stays on the website, the line says so, and
+        # the next stock pass re-sends it (recorded untracked above).
+        why = why or "Shopify's answer left a size out"
+        summary["code"] = STOCK_TRACKING_FAILED
+        summary["error"] = (
+            f"the tracking + {policy} re-send got no answer ({why}) -- Shopify's last answer "
+            f"confirmed every size, so the listing stays on the website; the next stock pass "
+            f"(01:00 / 09:00) sends it again"
+        ) + also
     elif summary["errors"] and not summary.get("error"):
         summary["error"] = "; ".join(str(e) for e in summary["errors"][:5])
+    if deleted_lines:
+        summary["error"] = " -- ALSO: ".join(deleted_lines + ([summary["error"]] if summary.get("error") else []))
     return summary
 
 
@@ -2169,6 +2288,24 @@ def _gid_products_with_variants(db) -> List[Tuple[Dict[str, Any], List[Dict[str,
     return out
 
 
+def _sweep_unknown(db, dry_run: bool, error: str, payload: Dict[str, Any]) -> PushResult:
+    """A sweep that could not read what it needs: nothing written, UNKNOWN,
+    said once for every early return. A LIVE press stays LIVE -- never
+    "preview" over the button the owner pressed -- and only a dark gate or
+    "Preview first" reads SIMULATED."""
+    live, reason = _live_or_reason(db)
+    return PushResult(
+        mode=MODE_LIVE if live and not dry_run else MODE_SIMULATED,
+        entity="stock",
+        action="sync",
+        ok=False,
+        code=STOCK_ONHAND_UNKNOWN,
+        error=error,
+        reason=reason if not live else ("dry_run (Preview first)" if dry_run else None),
+        payload=payload,
+    )
+
+
 async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
     """Send every product on Shopify whose per-store numbers CHANGED since they
     were last sent (or was never sent / never tracked). ONE call of the rule
@@ -2195,21 +2332,13 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
     try:
         pairs = _gid_products_with_variants(db)
     except Exception as exc:  # noqa: BLE001 -- the sweep never raises; it says UNKNOWN
-        # No count at all (the screens print "-", never "0 of 0"); a LIVE
-        # press stays LIVE, never "preview".
-        live, reason = _live_or_reason(db)
-        return PushResult(
-            mode=MODE_LIVE if live and not dry_run else MODE_SIMULATED,
-            entity="stock",
-            action="sync",
-            ok=False,
-            code=STOCK_ONHAND_UNKNOWN,
-            error=(
-                f"the catalogue (the listings on Shopify or their sizes) could not be "
-                f"read -- nothing written this pass: {exc}"
-            ),
-            reason=reason if not live else ("dry_run (Preview first)" if dry_run else None),
-            payload={},
+        # No count at all (the screens print "-", never "0 of 0").
+        return _sweep_unknown(
+            db,
+            dry_run,
+            f"the catalogue (the listings on Shopify or their sizes) could not be "
+            f"read -- nothing written this pass: {exc}",
+            {},
         )
     all_skus: List[str] = []
     for product, variants in pairs:
@@ -2219,27 +2348,17 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
     try:
         stores = _stores(db)
     except Exception as exc:  # noqa: BLE001
-        return PushResult(
-            mode=MODE_SIMULATED,
-            entity="stock",
-            action="sync",
-            ok=False,
-            code=STOCK_ONHAND_UNKNOWN,
-            error=f"shop list unknown (store read failed) -- nothing written: {exc}",
-            payload={"candidates": len(pairs)},
+        return _sweep_unknown(
+            db, dry_run, f"shop list unknown (store read failed) -- nothing written: {exc}",
+            {"candidates": len(pairs)},
         )
     mapped = _mapped(stores)
     quantities = online_quantities_for_skus(db, all_skus) if all_skus else {}
     if all_skus and not quantities:
         # STRICT: an absolute writer never fails soft to 0 for a whole batch.
-        return PushResult(
-            mode=MODE_SIMULATED,
-            entity="stock",
-            action="sync",
-            ok=False,
-            code=STOCK_ONHAND_UNKNOWN,
-            error=_whole_batch_unknown_error(),
-            payload={"candidates": len(pairs), "stores_total": len(stores), "stores_mapped": len(mapped)},
+        return _sweep_unknown(
+            db, dry_run, _whole_batch_unknown_error(),
+            {"candidates": len(pairs), "stores_total": len(stores), "stores_mapped": len(mapped)},
         )
     changed = []
     for product, variants in pairs:

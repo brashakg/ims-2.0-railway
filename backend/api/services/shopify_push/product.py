@@ -51,6 +51,7 @@ from .inventory import (
     listing_visible,
     plan_product_stock,
     push_skus_stock,
+    sku_by_variant_gid,
     sync_product_stock,
 )
 from .media import plan_product_media, product_photo_urls, sync_product_media
@@ -400,14 +401,17 @@ async def push_product(
                 extra_variant_gids=[n.get("id") for n in variant_nodes if isinstance(n, dict)]
                 + list((seed_summary or {}).get("variant_gids") or [])
                 + new_unconfirmed,
+                answered=(seed_summary or {}).get("tracking_verdicts"),
             )
-        # THE ROOT RULE (owner, round 4) -- one rule for every press, first or
-        # re-press, new size or old: a listing is put or kept ON the website
+        # THE ROOT RULE (owner, rounds 4 + 6) -- one rule for every press, first
+        # or re-press, new size or old: a listing is put or kept ON the website
         # only when Shopify's answer confirmed tracked=true + the listing's
         # policy on EVERY size. The stock pass re-sent both to every size and
-        # asked `tracking_confirmed` of the answer; a refused re-send, a silent
-        # answer or one echoing a size untracked / on another policy confirms
-        # nothing. Nothing below keeps a test of its own.
+        # read each size's verdict, remembered per size: an answer echoing a
+        # size untracked / on another policy unconfirms it; a refused or
+        # throttled re-send keeps what Shopify last confirmed (the listing
+        # stays live, the next stock pass re-sends); a size never confirmed is
+        # not. Nothing below keeps a test of its own.
         tracking_ok = bool((stock_summary or {}).get("tracking_confirmed"))
         unconfirmed = new_unconfirmed + [
             g for g in (stock_summary or {}).get("tracking_unconfirmed") or [] if g not in new_unconfirmed
@@ -449,13 +453,7 @@ async def push_product(
         pub_summary = None
         if take_down is not None:
             # Each size by its IMS SKU, never a Shopify id.
-            names_of = {
-                _as_shopify_gid(g, "ProductVariant"): sku
-                for g, sku in [(ecom.get("shopify_variant_id"), product.get("sku"))]
-                + [((v or {}).get("shopify_variant_id"), (v or {}).get("sku")) for v in variants]
-                if g and sku
-            }
-            names_of.update((seed_summary or {}).get("size_names") or {})
+            names_of = {**sku_by_variant_gid(product, variants), **((seed_summary or {}).get("size_names") or {})}
             names = ", ".join(sorted({names_of.get(g) or "a new size" for g in unconfirmed})) or "its sizes"
             rule = "stop selling at 0" if inventory_policy_for(product) == "DENY" else "keep selling at 0"
             why = f"Shopify did not confirm stock tracking + {rule} on {names}"
@@ -929,6 +927,11 @@ async def _delist_variant_row(db, product: Dict[str, Any]) -> PushResult:
         payload["rows"] = written.get("quantities") or {}
         payload["stores_mapped"] = written.get("stores_mapped", 0)
         own = list(tracked.get("errors") or [])
+        # DENY stuck only when Shopify's ANSWER says so (`tracking_verdicts`,
+        # the one rule) -- an accepted call that echoes the size untracked, on
+        # another policy or not at all confirms nothing.
+        if not own and variant_gid not in tracked["confirmed"]:
+            own.append(f"Shopify's answer did not confirm {sku} tracked + stop selling at 0")
         # A row above 0 is the rule saying the size is NOT off sale -- its
         # spine is still active -- and this door says so instead of reporting
         # a green take-down the next pass would undo.

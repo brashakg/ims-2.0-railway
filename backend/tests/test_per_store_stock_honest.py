@@ -430,12 +430,14 @@ def _l_untracked(gid):
 
 
 def _taken_down_with_size_l(monkeypatch):
-    """Press 1: the live listing gains L, Shopify's create answer leaves L
-    untracked, the listing is taken down (Draft, taken_down_at). Returns the
-    db and the size rows as IMS now holds them (L carries its gid)."""
+    """Press 1: the live listing gains L, Shopify's create answer AND the
+    tracking re-send's answer both leave L untracked (L was never confirmed),
+    the listing is taken down (Draft, taken_down_at). Returns the db and the
+    size rows as IMS now holds them (L carries its gid)."""
     db, variants, upd = _live_listing_gets_size_l()
     _live(monkeypatch, _Spy(_responses(**{"productUpdate(": upd,
-                                           "productVariantsBulkCreate": _created(tracked=False)})))
+                                           "productVariantsBulkCreate": _created(tracked=False),
+                                           "productVariantsBulkUpdate": _tracking_echoes(_l_untracked)})))
     first = _run(shopify_push.push_product(db, _cat(db), variants))
     ecom = _cat(db)["ecom"]
     assert first.ok is False and ecom["status"] == "DRAFT" and ecom.get("taken_down_at"), (first, ecom)
@@ -461,7 +463,8 @@ def test_1_a_re_press_after_a_take_down_stays_draft_until_shopify_confirms_every
     first write goes out Draft -- ACTIVE used to go out at call 0, before the
     tracking re-send was even answered, putting it back on sale. Shopify's
     re-send answer then confirms nothing (L echoed untracked + CONTINUE, or
-    the call THROTTLED): the listing stays Draft on Shopify AND in IMS, no
+    the call THROTTLED over an L Shopify never confirmed -- a throttle keeps
+    only a CONFIRMED size's state): the listing stays Draft on Shopify AND in IMS, no
     publish, the press is not green and says it stays off the website.
     Send the payload's ACTIVE in the first write -> fails; count the re-send
     as confirmed -> publish + ACTIVE -> fails."""
