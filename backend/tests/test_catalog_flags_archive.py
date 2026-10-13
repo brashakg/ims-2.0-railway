@@ -972,6 +972,33 @@ def test_the_review_drawers_restore_is_the_restore_door(env):
     assert p2["deleted_at"] is None and p2["is_active"] is True
 
 
+def test_approving_an_archived_import_is_refused_only_restore_brings_it_back(env):
+    db = env["db"]
+    db.catalog_products.insert_one({
+        "id": "T-IMP", "sku": "IMP-1", "title": "Vogue VO5051", "name": "Vogue VO5051",
+        "brand": "Vogue", "category": "FRAME", "hsn_code": "900311", "gst_rate": 5.0,
+        "mrp": 5000.0, "offer_price": 4500.0, "pricing": {"mrp": 5000.0, "offer_price": 4500.0},
+        "attributes": {"brand_name": "Vogue", "model_no": "VO5051", "colour_code": "BLK"},
+        "is_active": True, "needs_review": True, "source": "bvi_import",
+    })
+
+    def promote(dry):
+        return env["call"](CAT_MGR, "POST", "/api/v1/catalog/products/T-IMP/promote",
+                           params={"dry_run": str(dry).lower()})
+
+    ok = promote(True)
+    assert ok.status_code == 200 and ok.json()["ok"] is True, ok.text  # approvable as it stands
+    asyncio.run(catalog_mod.delete_catalog_product("T-IMP", current_user=ADMIN))
+    for dry in (True, False):
+        res = promote(dry)
+        assert res.status_code == 409 and res.json()["detail"] == "This product is archived - use Restore"
+    assert db.products.find_one({"product_id": "T-IMP"}) is None  # nothing on sale at the till
+    assert "T-IMP" not in _list(_user("u-c", "CASHIER"), search="Vogue")
+    # Restore is the way back, and then it can be approved.
+    assert _restore(env, ["T-IMP"]).json()["results"][0]["status"] == "done"
+    assert promote(True).json()["ok"] is True
+
+
 # ---------------------------------------------------------------------------
 # THE twin -> spine rule: the Added column reads the spine every door acts on
 # ---------------------------------------------------------------------------

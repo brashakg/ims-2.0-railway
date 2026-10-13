@@ -2822,6 +2822,10 @@ async def promote_catalog_product(
     doc = _get_catalog_product(product_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Product not found")
+    # Approving puts it on sale at the till: only Restore brings an archived
+    # product back (catalog_list.switches_on_archived), dry run included.
+    if _catalog_list.switches_on_archived(doc, True):
+        raise HTTPException(status_code=409, detail=_catalog_list.USE_RESTORE)
 
     repo = get_product_repository()
     if repo is None:
