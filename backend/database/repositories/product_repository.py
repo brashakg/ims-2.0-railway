@@ -144,6 +144,18 @@ class ProductRepository(BaseRepository):
         through here."""
         if data.get("is_active") is True:
             data["switched_on_at"] = datetime.now(timezone.utc)
+        if "updated_by" not in data and "edited_at" not in data:
+            # NOT a catalogue edit (every edit door writes updated_by through
+            # api.services.catalog_list.edit_stamp), yet this write moves
+            # updated_at. A product last edited before edited_at existed
+            # keeps that edit's moment, so the write cannot make it read as
+            # edited now (catalog_list.LAST_EDITED_AT). One read, fail-soft.
+            try:
+                doc = self.find_by_id(id) or {}
+                if doc.get("updated_by") and not doc.get("edited_at") and doc.get("updated_at"):
+                    data["edited_at"] = doc["updated_at"]
+            except Exception:  # noqa: BLE001 -- the write itself stands
+                pass
         return super().update(id, data)
 
     def find_by_sku(self, sku: str) -> Optional[Dict]:

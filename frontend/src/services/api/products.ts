@@ -322,6 +322,31 @@ export const catalogApi = {
   },
 };
 
+/** GET /products/facets: each filter's options with counts ('Black (179)'). */
+export interface CatalogFacets {
+  total: number;
+  brand?: Array<{ value: string; count: number }>;
+  frame_color?: Array<{ value: string; count: number }>;
+  lens_colour?: Array<{ value: string; count: number }>;
+  gender?: Array<{ value: string; count: number }>;
+  shape?: Array<{ value: string; count: number }>;
+  frame_type?: Array<{ value: string; count: number }>;
+  frame_material?: Array<{ value: string; count: number }>;
+  /** People who added products: user id, full name, count. */
+  created_by?: Array<{ value: string; label: string; count: number }>;
+  /** People who last edited products, plus value 'none' = Never edited. */
+  updated_by?: Array<{ value: string; label: string; count: number }>;
+  flags?: {
+    /** Products with any open flag. */
+    open: number;
+    /** ...of them, added by the signed-in user. */
+    mine: number;
+    by_type: Record<string, number>;
+    /** Admins only. */
+    archived?: number;
+  };
+}
+
 /** The Catalog screen's counts row, from GET /catalog/online-summary. */
 export interface CatalogCounts {
   in_catalog: number;
@@ -365,9 +390,36 @@ export const productApi = {
      *  the product's catalog twin, the doc the push reads); 'missing' = none.
      *  Rows come back stamped with has_photo + online either way. */
     photo?: 'has' | 'missing';
+    /** The Catalog page's sort + filters (owner 2026-10-12). Any one of them
+     *  makes the server sort the WHOLE filtered result (Recently edited by
+     *  default) and page it; options match trimmed + case-insensitive. */
+    sort?: string;
+    frame_color?: string;
+    lens_colour?: string;
+    gender?: string;
+    shape?: string;
+    frame_type?: string;
+    frame_material?: string;
+    /** Last edited by this user_id; 'none' = never edited. */
+    updated_by?: string;
+    /** Which date From / To read: when it was added, or last edited. */
+    date_on?: 'added' | 'edited';
+    /** India days (YYYY-MM-DD), both included. */
+    date_from?: string;
+    date_to?: string;
+    /** 'any' | 'mine' | a flag type | 'archived' (admins only). */
+    flag?: string;
   }) => {
     const response = await api.get('/products', { params });
     return response.data;
+  },
+
+  /** The Catalog page's filter options with counts + the open-flag counts
+   *  for the red banner (manager ladder). `is_active: 'all'` = Include
+   *  inactive. Import DIRECTLY from this module (TS2614). */
+  getFacets: async (params?: { is_active?: 'true' | 'all' }): Promise<CatalogFacets> => {
+    const response = await api.get('/products/facets', { params });
+    return response.data as CatalogFacets;
   },
 
   // Cataloguer roster for the "Catalogued by" filter + performance counts.

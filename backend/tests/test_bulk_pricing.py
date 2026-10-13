@@ -379,6 +379,8 @@ class TestBulkOfferEndpoint:
         assert res["summary"]["counts"]["total"] == 1  # brand filter
         lux_doc = _get_product(mongo_db, pids[1])
         assert lux_doc["offer_price"] == 98000.0  # 2% off 100000
+        # A person's price change is a catalogue edit: THE edit stamp.
+        assert lux_doc["updated_by"] == ADMIN_USER["user_id"] and lux_doc["edited_at"]
 
     async def test_clear_offer_resets_to_mrp(self, mongo_db, patch_db):
         """CLEAR resets offer_price back up to MRP (removes the discount)."""
@@ -462,6 +464,7 @@ class TestBulkPriceEndpoint:
         assert doc["mrp"] == 1100.0
         assert doc["offer_price"] == 1100.0
         assert res["summary"]["committed"] == 1
+        assert doc["updated_by"] == ADMIN_USER["user_id"] and doc["edited_at"]
 
     async def test_offer_cut_violating_cap_is_rejected(self, mongo_db, patch_db):
         """A flat -Rs cut to OFFER only that pushes a Cartier below its 2% cap

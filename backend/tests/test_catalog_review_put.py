@@ -190,6 +190,9 @@ def test_offer_only_patch_spine_mirror_keeps_luxury_tier(env):
     spine = env["repo"].find_by_id(doc["id"])
     assert spine["discount_category"] == "LUXURY"
     assert spine["offer_price"] == 4200.0
+    # A person's price change through this door is a catalogue edit of the
+    # product: its spine carries THE edit stamp (catalog_list.edit_stamp).
+    assert spine["updated_by"] == _user()["user_id"] and spine["edited_at"]
 
 
 def test_offer_above_existing_mrp_still_400s(env):
