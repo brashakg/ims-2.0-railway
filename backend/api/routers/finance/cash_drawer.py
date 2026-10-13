@@ -10,7 +10,7 @@ from ...utils.ist import ist_date_str
 from typing import Any, Optional, List, Dict
 from fastapi import Depends, HTTPException, Query
 from ..auth import get_current_user
-from ...dependencies import validate_store_access
+from ...dependencies import store_in_view, validate_store_access
 from ...services import cash_register
 from ...services.stores_util import is_online_store
 from ...services import cash_denominations as cash_denom
@@ -493,19 +493,22 @@ async def list_cash_register_sessions(
 
     Also returns the live `open_session` (if any) and an `expected_preview` for
     it so the close screen can show the running expected figure before a count
-    is entered."""
+    is entered.
+
+    The shop is the one store-level rule (store_in_view): a named shop must be
+    the caller's; none named, the active shop. A non-admin login with NO shop
+    reads none (owner ruling 2026-10-12, R4) -- it used to read every shop's
+    sessions and open till."""
     db = _get_db()
     if db is None:
         return {"sessions": [], "open_session": None, "expected_preview": None}
 
-    scoped_store = validate_store_access(store_id or "", current_user)
+    scoped_store = store_in_view(store_id, current_user)
     coll = db.get_collection(_CASH_SESSIONS)
 
     match: Dict = {}
     if scoped_store:
         match["store_id"] = scoped_store
-    elif store_id:
-        match["store_id"] = store_id
     if status:
         match["status"] = status.upper()
 
@@ -523,8 +526,6 @@ async def list_cash_register_sessions(
         open_match = {"status": "OPEN"}
         if scoped_store:
             open_match["store_id"] = scoped_store
-        elif store_id:
-            open_match["store_id"] = store_id
         open_session = coll.find_one(open_match, {"_id": 0})
     except Exception:
         open_session = None
