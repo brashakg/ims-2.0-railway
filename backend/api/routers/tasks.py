@@ -78,6 +78,14 @@ def _ensure_task_store_access(task: dict, current_user: dict) -> None:
     -> any authenticated caller may proceed (it cannot leak another store's
     data because it belongs to none).
     """
+    from ..services import catalog_flags
+
+    if catalog_flags.is_flag_task(task) and not catalog_flags.handles_flags(current_user):
+        # A catalogue-flag task belongs to no shop, yet it is no one's at the
+        # counter: only the people who raise and clear flags open it.
+        raise HTTPException(
+            status_code=403, detail="Catalogue flag tasks are for the catalogue team"
+        )
     store_id = task.get("store_id")
     if not store_id:
         return
@@ -134,6 +142,28 @@ def _authorise_attachment(file_id: str, current_user: dict) -> None:
 # (the same rungs the escalation ladder climbs). A non-manager who is neither
 # the assignee nor the assigner/creator must not act on someone else's task.
 _TASK_MANAGER_ROLES = {"STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"}
+
+
+def _ensure_may_close(task: dict, current_user: dict) -> None:
+    """Closing a catalogue-flag task clears its flags (complete = fixed,
+    cancel = withdrawn), so it takes the people who may clear a flag
+    (services/catalog_flags.clears_flags) -- the same as Mark fixed."""
+    from ..services import catalog_flags
+
+    if catalog_flags.is_flag_task(task) and not catalog_flags.clears_flags(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="Only a catalogue manager or an admin can close a catalogue flag task",
+        )
+
+
+def _hide_flag_tasks(filters: dict, current_user: dict) -> None:
+    """A task list for someone who does not handle catalogue flags leaves the
+    flag tasks out (they belong to no shop, so the store scope keeps them)."""
+    from ..services import catalog_flags
+
+    if not catalog_flags.handles_flags(current_user):
+        filters["payload.kind"] = {"$ne": catalog_flags.TASK_KIND}
 
 
 def _ensure_task_actor(task: dict, current_user: dict) -> None:
@@ -486,6 +516,7 @@ async def list_tasks(
             allowed = sorted(stores) + [None]
             filters["store_id"] = {"$in": allowed}
         # cross-store roles (SUPERADMIN/ADMIN): no store_id filter -> all stores.
+    _hide_flag_tasks(filters, current_user)
 
     tasks = [
         _canon_task_out(t) for t in repo.find_many(filters, skip=skip, limit=limit)
@@ -738,6 +769,7 @@ async def get_overdue_tasks(
 
     if active_store:
         filters["store_id"] = active_store
+    _hide_flag_tasks(filters, current_user)
 
     # limit=0 -> unbounded (PR-#522 idiom): the default limit=100 silently hid
     # overdue tasks past the first 100 from the escalation view.
@@ -834,6 +866,8 @@ async def update_task(
                 detail="Use POST /{task_id}/complete to complete a task (records "
                 "completion notes, completed_by, completed_at).",
             )
+        if new_status == "CANCELLED":
+            _ensure_may_close(existing, current_user)
         update_data["status"] = new_status
         update_data["history"] = (existing.get("history") or []) + [
             {
@@ -866,6 +900,12 @@ async def update_task(
     if update_data:
         update_data["updated_at"] = datetime.now()
         if repo.update(task_id, update_data):
+            if update_data.get("status") == "CANCELLED":
+                # A catalogue-flag task: cancelling it withdraws its open flags
+                # (services/catalog_flags, the one rule; fail-soft).
+                from ..services.catalog_flags import on_task_closed
+
+                on_task_closed(existing, current_user, "CANCELLED")
             return {"task_id": task_id, "message": "Task updated"}
 
     return {"task_id": task_id, "message": "No changes made"}
@@ -890,6 +930,7 @@ async def complete_task(
 
     _ensure_task_store_access(task, current_user)
     _ensure_task_actor(task, current_user)
+    _ensure_may_close(task, current_user)
 
     current_status = canon_status(task.get("status"))
 
@@ -923,6 +964,11 @@ async def complete_task(
     )
 
     if result:
+        # A catalogue-flag task: completing it fixes its flags (the one rule
+        # in services/catalog_flags; fail-soft, the completion stands).
+        from ..services.catalog_flags import on_task_closed
+
+        on_task_closed(task, current_user, "COMPLETED")
         return {"task_id": task_id, "status": "COMPLETED", "message": "Task completed"}
 
     raise HTTPException(status_code=500, detail="Failed to complete task")
@@ -1254,6 +1300,16 @@ async def escalate_task(
 
     _ensure_task_store_access(task, current_user)
     _ensure_task_actor(task, current_user)
+
+    from ..services import catalog_flags
+
+    if catalog_flags.is_flag_task(task):
+        # The same rule as the SLA scan (task_sla.should_escalate): it stays
+        # with the people who may clear a flag.
+        raise HTTPException(
+            status_code=400,
+            detail="A catalogue flag task stays with the catalogue team - it is not escalated.",
+        )
 
     current_status = canon_status(task.get("status"))
     if current_status in TERMINAL_STATUSES:
