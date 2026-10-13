@@ -65,6 +65,24 @@ export const orderApi = {
     return response.data;
   },
 
+  // THE till bill total: the cart priced by order create's own math and
+  // rounded to the rupee by the server (POST /orders/quote, read-only). The
+  // till shows and collects this figure; it never rounds a bill itself.
+  quoteBill: async (data: {
+    items: unknown[];
+    cart_discount_percent: number;
+  }): Promise<{
+    subtotal: number;
+    taxable: number;
+    tax: number;
+    total_discount: number;
+    grand_total: number;
+    round_off: number;
+  }> => {
+    const response = await api.post('/orders/quote', data);
+    return response.data;
+  },
+
   addOrderItem: async (orderId: string, item: Partial<import('../../types').OrderItem>) => {
     const response = await api.post(`/orders/${orderId}/items`, item);
     return response.data;

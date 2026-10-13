@@ -77,6 +77,11 @@ vi.mock('../../../services/api', () => {
   return {
     customerApi: { search: noop, getCustomer: noop },
     orderApi: {
+      quoteBill: async () => {
+        // POST /orders/quote stand-in: the server bills the till's own value here.
+        const v = (await import('../../../stores/posStore')).usePOSStore.getState().getBillValue();
+        return { subtotal: v, taxable: v, tax: 0, total_discount: 0, grand_total: v, round_off: 0 };
+      },
       createOrder: (...a: unknown[]) => (createOrderMock as any)(...a),
       addPayment: (...a: unknown[]) => (addPaymentMock as any)(...a),
     },

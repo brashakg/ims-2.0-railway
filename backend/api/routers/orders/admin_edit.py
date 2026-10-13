@@ -206,6 +206,7 @@ async def superadmin_edit_order(
         "tax_amount": gst["tax"],
         "total_discount": gst["total_discount"],
         "grand_total": gst["grand_total"],
+        "round_off": gst["round_off"],
         "pricing_model": gst.get("pricing_model", "inclusive"),
         "updated_by": current_user.get("user_id"),
         "superadmin_edited": True,
@@ -356,6 +357,7 @@ async def superadmin_invoice_change(
             "tax_amount": gst["tax"],
             "total_discount": gst["total_discount"],
             "grand_total": gst["grand_total"],
+            "round_off": gst["round_off"],
         }
     )
     if body.customer_id is not None:
@@ -397,6 +399,7 @@ async def superadmin_invoice_change(
             "tax_amount": gst["tax"],
             "total_discount": gst["total_discount"],
             "grand_total": gst["grand_total"],
+            "round_off": gst["round_off"],
             "pricing_model": gst.get("pricing_model", "inclusive"),
             "invoice_number": new_invoice_number,
             "invoice_date": datetime.now(),

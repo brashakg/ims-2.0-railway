@@ -9,6 +9,7 @@
 import { ShoppingCart, X } from 'lucide-react';
 import { usePOSStore, type CartLineItem } from '../../stores/posStore';
 import type { SellableStock } from '../../services/api/inventory';
+import { useBillQuote } from './billQuote';
 
 /** Next free pair label for a cart ("Pair 1", "Pair 2", …). Gaps left by a
     removed pair are reused, so labels stay small and stable. */
@@ -57,12 +58,23 @@ export function CartSidebar({
   const pairIds = Array.from(
     new Set((store.cart || []).map((i) => i.pair_id).filter(Boolean) as string[])
   ).sort();
+  // The bill total is the server's (POST /orders/quote); keep it fresh.
+  useBillQuote();
+  const quoted = store.getQuotedBill();
   const subtotal = store.getSubtotal();
   const grand = store.getGrandTotal();
-  const totalDiscount = store.getTotalDiscount();
+  // The paise the server rounded the bill by (owner ruling 2026-10-08) -- its
+  // own line. When it is not 0 every figure -- the lines too -- shows paise
+  // so they add up.
+  const roundOff = store.getRoundOff();
+  const totalDiscount = quoted ? quoted.total_discount : store.getTotalDiscount();
   // GST-inclusive: GST is the tax extracted from WITHIN the (inclusive)
   // grand total, not added on top. See posStore.getTax.
-  const gst = store.getTax();
+  const gst = quoted ? quoted.tax : store.getTax();
+  const money = (v: number) =>
+    roundOff !== 0
+      ? v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+      : Math.round(v).toLocaleString('en-IN');
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
@@ -263,8 +275,9 @@ export function CartSidebar({
                       fontSize: 13,
                       color: 'var(--ink)',
                     }}
+                    data-testid="cart-line-total"
                   >
-                    ₹{Math.round(item.line_total).toLocaleString('en-IN')}
+                    ₹{money(item.line_total)}
                   </span>
                 </div>
               </div>
@@ -403,18 +416,26 @@ export function CartSidebar({
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--ink-3)' }}>
           <span>Subtotal</span>
-          <span className="figure" style={{ fontSize: 'inherit' }}>₹{Math.round(subtotal).toLocaleString('en-IN')}</span>
+          <span className="figure" style={{ fontSize: 'inherit' }} data-testid="cart-subtotal">₹{money(subtotal)}</span>
         </div>
         {totalDiscount > 0 && (
           <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--ok)' }}>
             <span>Discount</span>
-            <span className="figure" style={{ fontSize: 'inherit' }}>−₹{Math.round(totalDiscount).toLocaleString('en-IN')}</span>
+            <span className="figure" style={{ fontSize: 'inherit' }} data-testid="cart-discount">−₹{money(totalDiscount)}</span>
           </div>
         )}
         <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--ink-3)' }}>
           <span>GST</span>
-          <span className="figure" style={{ fontSize: 'inherit' }}>₹{Math.round(gst).toLocaleString('en-IN')}</span>
+          <span className="figure" style={{ fontSize: 'inherit' }}>₹{money(gst)}</span>
         </div>
+        {roundOff !== 0 && (
+          <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--ink-3)' }}>
+            <span>Round off</span>
+            <span className="figure" style={{ fontSize: 'inherit' }} data-testid="cart-round-off">
+              {roundOff > 0 ? '+' : '−'}₹{Math.abs(roundOff).toFixed(2)}
+            </span>
+          </div>
+        )}
         <div
           style={{
             display: 'flex',
@@ -428,7 +449,7 @@ export function CartSidebar({
           }}
         >
           <span>Total (incl. GST)</span>
-          <span className="figure" style={{ color: 'var(--bv)', fontSize: 'inherit' }}>
+          <span className="figure" style={{ color: 'var(--bv)', fontSize: 'inherit' }} data-testid="cart-total">
             ₹{Math.round(grand).toLocaleString('en-IN')}
           </span>
         </div>

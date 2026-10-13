@@ -14,19 +14,10 @@ import { orderApi, loyaltyApi, workshopApi } from '../../services/api';
 import { canonicalCategory } from '../../utils/categoryNormalize';
 import type { CashTenderCapture } from '../../stores/posStore';
 import { buildPaymentBody } from './paymentBody';
+import { orderLinesOf, refreshBillQuote } from './billQuote';
 
-export function mapCategory(cat: string): string {
-  // item_type vocabulary for the order payload (drives backend GST item_type-
-  // wins). Canonicalise the input first so EVERY category spelling (short code,
-  // plural, canonical) resolves; outputs are unchanged from the legacy map.
-  const canonical = canonicalCategory(cat);
-  const map: Record<string, string> = {
-    FRAME: 'FRAME', SUNGLASS: 'SUNGLASS', OPTICAL_LENS: 'LENS',
-    CONTACT_LENS: 'CONTACT_LENS', COLORED_CONTACT_LENS: 'CONTACT_LENS',
-    ACCESSORIES: 'ACCESSORY', WATCH: 'WATCH', SMARTWATCH: 'SMARTWATCH', SERVICES: 'SERVICE',
-  };
-  return map[canonical] || canonical || cat;
-}
+// The order-line vocabulary lives with the line builder the quote shares.
+export { mapCategory } from './billQuote';
 
 export interface SubmitPosOrderResult {
   ok: boolean;
@@ -75,6 +66,25 @@ export async function submitPosOrder(
     }
   }
 
+  // THE bill total is the SERVER's (POST /orders/quote, priced by create's own
+  // math and rounded to the rupee there): take a fresh quote now, so the
+  // tenders below are checked against the rupee this order will bill. The
+  // till never rounds a bill itself, and never collects against an estimate.
+  try {
+    await refreshBillQuote();
+  } catch (err) {
+    // The server's own reason (a role that may not bill, a line it refuses),
+    // or the API client's network text -- never a guess at the connection.
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      error: 'Could not get the bill total from the server: ' + (msg || 'Network error'),
+    };
+  }
+  if (!store.getQuotedBill()) {
+    return { ok: false, error: 'The bill changed while it was being priced. Check the total and try again.' };
+  }
+
   if (store.getBalance() > 0.01 && !store.is_advance_payment) {
     return { ok: false, error: 'Payment incomplete. Add payments or enable "Advance payment only".' };
   }
@@ -88,15 +98,23 @@ export async function submitPosOrder(
   // order saved as fully OUTSTANDING with the cash physically in the drawer,
   // surfacing at day-end as an unexplained surplus. Refuse BEFORE creating
   // anything, so nothing is half-saved.
+  // The total can also drop by paise: a payment added from the till's estimate
+  // before the server's rounded total arrived. So the figures keep their paise
+  // (Math.round showed "₹0 more than the bill").
   const overTendered = -store.getBalance();
   if (overTendered > 0.01) {
+    const rs = (v: number) =>
+      '₹' +
+      v.toLocaleString('en-IN', {
+        minimumFractionDigits: Number.isInteger(v) ? 0 : 2,
+        maximumFractionDigits: 2,
+      });
     return {
       ok: false,
       error:
-        `Tendered ₹${Math.round(store.getTotalPaid()).toLocaleString('en-IN')} is ` +
-        `₹${Math.round(overTendered).toLocaleString('en-IN')} more than the bill ` +
-        `total of ₹${Math.round(store.getGrandTotal()).toLocaleString('en-IN')}. ` +
-        `If a discount was applied after the payment, re-enter the payment.`,
+        `Tendered ${rs(store.getTotalPaid())} is ${rs(overTendered)} more than the ` +
+        `bill total of ${rs(store.getGrandTotal())}. The total changed after the ` +
+        `payment was added. Remove the payment and add it again.`,
     };
   }
 
@@ -111,22 +129,7 @@ export async function submitPosOrder(
       order_type: store.sale_type,
       salesperson_id: store.salesperson_id,
       salesperson_name: store.salesperson_name,
-      items: (store.cart || []).map((item: any) => ({
-        item_type: mapCategory(item.category),
-        product_id: item.product_id,
-        product_name: item.name,
-        sku: item.sku,
-        brand: item.brand,
-        subbrand: item.subbrand,
-        category: item.category,
-        quantity: item.quantity,
-        unit_price: item.unit_price,
-        discount_percent: item.discount_percent,
-        discount_reason: item.discount_reason || undefined,
-        prescription_id: item.linked_prescription_id,
-        lens_details: item.lens_details,
-        item_note: item.item_note || undefined,
-      })),
+      items: orderLinesOf(store.cart),
       notes: store.cart_note || undefined,
       // Phase 6.7 — pass delivery + cart-discount fields through to backend
       delivery_date: store.delivery_date || undefined,
