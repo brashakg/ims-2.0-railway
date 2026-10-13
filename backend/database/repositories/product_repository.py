@@ -323,9 +323,15 @@ class ProductRepository(BaseRepository):
             if not letters:
                 # A lone hyphen ('ray - ban') is spacing, not a word to match.
                 continue
-            code = {"$regex": "^" + re.escape(tok), "$options": "i"}
             name = {
                 "$regex": r"[\s\-]*".join(re.escape(c) for c in letters),
+                "$options": "i",
+            }
+            # A code still matches from its start; past main's tier
+            # (till=False) its hyphens are ignored too, so 'SGRAY' finds a
+            # readable SKU SG-RAYBAN-RB3025-001 (owner ruling 2026-09-28, D5).
+            code = {
+                "$regex": "^" + (name["$regex"] if till else re.escape(tok)),
                 "$options": "i",
             }
             ors = [{f: code} for f in self.CODE_SEARCH_FIELDS]

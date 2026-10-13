@@ -85,6 +85,10 @@ from datetime import datetime, timezone
 
 import pytest
 
+# The push's other mechanics, for a brand that IS for the website (owner D6;
+# the brand rule has its own test in test_add_product_owner_rulings.py).
+pytestmark = pytest.mark.usefixtures("brand_is_for_the_website")
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("JWT_SECRET_KEY", "test")
@@ -405,7 +409,7 @@ def _create_via_door(db, payload, name=CHILD_NAME):
         source="MASTER",
         actor="u-admin",
         actor_name="admin",
-        extra_fields={"name": name, "images": [PARENT_PHOTO], "sync_to_shopify": True},
+        extra_fields={"name": name, "images": [PARENT_PHOTO]},
         product_repo=ProductRepository(db["products"]),
         variant_repo=CatalogVariantRepository(db["catalog_variants"]),
         audit_repo=AuditRepository(db["audit_logs"]),
@@ -741,7 +745,7 @@ def test_live_sync_never_selects_a_child_as_a_listing(monkeypatch):
     assert run["selected"] == 0 and run["awaiting_first_publish"] == 0 and run["attempted"] == 0
     assert osp._product_counts(db) == {"staged": 1, "pushed": 1, "pending": 0}
     assert catalog_counts(db)["pending"] == 0
-    state = product_online_state(_twin(db, "tw-child"))
+    state = product_online_state(_twin(db, "tw-child"), None)
     assert state["queued"] is False and state["online"] == "OFF"
 
 
@@ -759,7 +763,7 @@ def test_the_one_create_door_mints_a_size_variant():
     assert spine["size"] == "Large" and spine["identity_key"].endswith("|large")
     assert spine["name"] == CHILD_NAME and spine["name"] != _spine(db, "sp-parent")["name"]
     assert spine["category"] == "SMARTGLASSES" and spine["hsn_code"] == "852580" and spine["gst_rate"] == 18.0
-    assert spine["images"] == [PARENT_PHOTO] and spine["sync_to_shopify"] is True
+    assert spine["images"] == [PARENT_PHOTO]
 
     twin = _twin(db, spine["pim_product_id"])
     assert twin["ecom"]["variant_of"] == _child_link()
@@ -785,8 +789,8 @@ def test_the_one_create_door_mints_a_size_variant():
 
 
 def test_without_an_explicit_sku_the_mint_ends_large():
-    """Documents WHY the runbook passes the -L sku: build_sku appends the size
-    with no joiner, but Shopify holds '...601/71-L' and a reseed writes
+    """Documents WHY the runbook passes the -L sku: build_sku mints its own
+    readable shape ending '-LARGE', but Shopify holds '...601/71-L' and a reseed writes
     inventoryItem.sku = row.sku, so IMS must equal Shopify."""
     db = _world(seed_child=False)
     created = _create_via_door(db, _child_payload(sku=None))

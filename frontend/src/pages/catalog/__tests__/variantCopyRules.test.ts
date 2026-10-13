@@ -250,13 +250,26 @@ describe('productToVariantFormValues', () => {
     ]);
   });
 
-  it('behaves like a fresh create for online flags + carries the source identity', () => {
+  it('carries the source identity', () => {
     const seed = productToVariantFormValues(SG_PRODUCT);
-    expect(seed.values.syncToShopify).toBe(false);
-    expect(seed.values.shopifyTags).toEqual([]);
     expect(seed.sourceProductId).toBe('P-1');
     expect(seed.sourceSku).toBe('SGRAYBANRB2140BLK');
     expect(seed.sourceLabel).toBe('Ray-Ban RB-2140');
+  });
+
+  it("names the source by the model its form shows, never main's hidden model_no copy", () => {
+    // main's door copied a contact lens's model into model_no and a lens's
+    // sub-brand (or 'STD') into both model keys; neither form shows them.
+    const cl = productToVariantFormValues({
+      product_id: 'P-CL', category: 'CL', brand: 'Acuvue', model: 'Oasys',
+      attributes: { brand_name: 'Acuvue', model_no: 'Oasys', model_name: 'Oasys Max' },
+    } as ProductDoc);
+    expect(cl.sourceLabel).toBe('Acuvue Oasys Max');
+    const lens = productToVariantFormValues({
+      product_id: 'P-LS', category: 'LS', brand: 'Hoya', model: 'STD',
+      attributes: { brand_name: 'Hoya', model_no: 'STD', model_name: 'STD', subbrand: 'Nulux' },
+    } as ProductDoc);
+    expect(lens.sourceLabel).toBe('Hoya Nulux');
   });
 
   it('drops a dictionary-governed value outside the current options (with a note), case-insensitively keeps valid ones', () => {

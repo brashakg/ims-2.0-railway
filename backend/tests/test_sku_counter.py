@@ -1,7 +1,8 @@
 """
 IMS 2.0 — SKU counter must be atomic + persistent (cross-cutting)
 =================================================================
-generate_sku minted its numeric tail from a MODULE-GLOBAL in-memory dict
+The SKU counter (now only the collision suffix of product_master.mint_unique_sku)
+used a MODULE-GLOBAL in-memory dict
 (SKU_COUNTERS), which (a) reset to 1000 on every server restart -> reissued
 already-used SKUs, and (b) was per-worker -> two Railway workers minted the SAME
 counter -> duplicate SKUs. The counter now comes from an atomic find_one_and_update
@@ -88,14 +89,3 @@ def test_fallback_without_db_still_works():
     x = _next_sku_counter(cat, db=None)
     y = _next_sku_counter(cat, db=None)
     assert isinstance(x, int) and y == x + 1  # in-memory fallback monotonic
-
-
-def test_generate_sku_shape_and_uses_db_counter():
-    from api.routers.catalog import ProductCategory, generate_sku
-
-    db = FakeDB()
-    cat = next(iter(ProductCategory))
-    sku = generate_sku(cat, {"brand_name": "Ray-Ban", "model_no": "Wayfarer", "colour_name": "Black"}, db=db)
-    # prefix-BR-WAYFBLA-1001 shape; ends with the DB counter value.
-    assert sku.endswith("-1001")
-    assert sku.startswith(cat.value)
