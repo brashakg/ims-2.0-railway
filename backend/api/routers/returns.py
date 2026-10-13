@@ -2078,7 +2078,7 @@ def _raise_restock_blocked_task(
     our Shopify order-history import (True), a live order (False), or could
     not be read (None) -- a historical order's re-run puts nothing back: it
     books the frames and raises the stock-in task, which closes this one
-    (shopify_refund._stock_in_task).
+    (shopify_refund.raise_stock_in_task).
 
     Without this the fail-loud branch is one Railway log line while real goods
     sit on the counter with no stock row -- developer-only recovery on a live
@@ -2243,6 +2243,18 @@ def _restock_good_items(
         # Nothing resellable -> trivially "applied" (no work left to retry).
         result["applied"] = True
         return result
+
+    # A HISTORICAL order (our Shopify order-history import) predates IMS stock:
+    # no door ever adds or reactivates a unit for it (owner 2026-10-01). The
+    # one rule every door runs: one stock-in task for the shop's store manager
+    # (the counter return and its retry here; the Shopify doors book first).
+    if (order or {}).get("historical"):
+        from ..services.shopify_refund import raise_stock_in_task
+
+        return {**result, **raise_stock_in_task(
+            order, len(units), {str(u.get("sku") or u.get("product_id")) for u in units},
+            f"Return {return_id}", f"historical_stock_in:{return_id}",
+            processing_store_id, return_id=return_id)}
 
     stock_repo = None
     try:
@@ -4108,6 +4120,11 @@ async def retry_restock(
         except Exception as exc:  # noqa: BLE001
             logger.debug("[RETURNS] retry write-back skipped: %s", exc)
 
+    booked_earlier = False
+    if refund_id and retry_order is not None and retry_order.get("historical"):
+        from ..services.shopify_refund import _booked_for
+
+        booked_earlier = _booked_for(retry_order, str(refund_id))
     return {
         "return_id": return_id,
         "restock_applied": update["restock_applied"],
@@ -4115,12 +4132,13 @@ async def retry_restock(
         "restock_store_id": update["restock_store_id"],
         "restock_store_ids": update["restock_store_ids"],
         "stock_in_task": restock_result.get("stock_in_task"),
-        # A historical order's frame is booked, never put back in stock: by
-        # this retry (its task) or by the door that booked it first.
+        # What happened: a historical order's frame is booked, never put back
+        # in stock -- by this retry (its task) or by the Shopify door that
+        # booked it first (its task, its booking on the line).
         "message": (
             "Booked. This order predates IMS stock: a task asks the shop's store "
             "manager to add the frame(s) through stock-in"
-            if update["restock_applied"] and (retry_order or {}).get("historical")
+            if restock_result.get("stock_in_task") or (update["restock_applied"] and booked_earlier)
             else "Restock applied"
             if update["restock_applied"]
             else "Nothing booked: the stock-in task could not be saved - retry shortly"

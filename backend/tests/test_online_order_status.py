@@ -1812,11 +1812,18 @@ def _stock_in(swept, oid):
 
 def _premark(monkeypatch):
     """A restock as it ran before the order-line marks (every refund confirmed
-    on main): no booking, so a historical frame is minted. Returns the undo."""
-    real = shopify_refund._restock_booked
+    on main): no booking, and no historical rule in the restock either, so a
+    historical frame is minted. Returns the undo."""
+    real, real_restock = shopify_refund._restock_booked, returns_router._restock_good_items
     monkeypatch.setattr(shopify_refund, "_restock_booked",
                         lambda order, lines, rid, restock, **kw: restock(lines))
-    return lambda: monkeypatch.setattr(shopify_refund, "_restock_booked", real)
+    monkeypatch.setattr(returns_router, "_restock_good_items", lambda *a, order=None, **kw: real_restock(
+        *a, order={**order, "historical": False} if order else order, **kw))
+
+    def undo():
+        monkeypatch.setattr(shopify_refund, "_restock_booked", real)
+        monkeypatch.setattr(returns_router, "_restock_good_items", real_restock)
+    return undo
 
 
 def test_a_historical_orders_never_shipped_note_says_what_confirm_does(swept, monkeypatch):
@@ -3454,6 +3461,98 @@ def test_a_failed_read_of_which_shop_holds_the_unit_never_mints_at_the_first(swe
     coll.down = 0
     assert _retry(ret)["restock_applied"] is True
     assert _units(swept) == [("stk-1", "AVAILABLE"), ("stk-2", "AVAILABLE")]
+
+
+# ---------------------------------------------------------------------------
+# Round 26. The owner rule of 2026-10-01 on the counter return door and its
+# /returns/{id}/restock retry: no door ever adds a stock row for a HISTORICAL
+# order (our Shopify order-history import, older than IMS stock). The return
+# and its credit are booked as for every order; ONE stock-in task asks the
+# shop's store manager to add the frame (shopify_refund.raise_stock_in_task,
+# the rule the Shopify doors run too).
+# ---------------------------------------------------------------------------
+
+
+def _historical_order(swept, oid):
+    """A historical order the customer brings its frame back on: its line
+    resolves to an IMS product, and no SOLD unit exists (no IMS stock then)."""
+    doc = _book(swept, oid)
+    _set(swept, oid, historical=True, import_source="shopify_order_history",
+         fulfillment_stores=["BV-GANGA-01"], status="DELIVERED",
+         items=[{**doc["items"][0], "ims_product_id": "IMS-P-1"}])
+    if not swept["db"]["users"].find_one({"user_id": _MANAGER}):
+        swept["db"]["users"].insert_one({"user_id": _MANAGER, "roles": ["STORE_MANAGER"],
+                                         "is_active": True, "store_ids": ["BV-GANGA-01"]})
+
+
+def test_a_counter_return_on_a_historical_order_raises_one_stock_in_task(swept):
+    """Panel (pre-existing on main): the counter door minted a unit for a
+    historical frame at create (NEW-1 in the probe), with no task. Now it
+    books the return and raises ONE task for the store manager; a retry
+    adds nothing."""
+    oid = 60261
+    _historical_order(swept, oid)
+    out = _counter_return(swept, oid)
+    assert (out["restock_applied"], out["restock_stock_ids"]) == (True, [])
+    assert _minted(swept) == [], "IMS adds no stock row for a historical frame"
+    [task] = _stock_in(swept, oid)
+    assert (task["assigned_to"], task["store_id"], task["status"]) == (_MANAGER, "BV-GANGA-01", "OPEN")
+    assert task["title"] == f"Order {_doc(swept, oid)['order_number']}: add 1 returned frame(s) through stock-in"
+    assert f"Return {out['return_id']} on order" in task["description"]
+    assert _retry(swept["returns"].find_one({"return_id": out["return_id"]}))["message"] == "Already restocked"
+    assert _minted(swept) == [] and len(_stock_in(swept, oid)) == 1, "one frame, one task"
+
+
+@pytest.mark.parametrize("left_open_by", ["main_door", "task_not_saved"])
+def test_the_restock_retry_of_a_counter_return_on_a_historical_order_mints_nothing(swept, monkeypatch,
+                                                                                 left_open_by):
+    """Panel MEDIUM (returns.py retry, a return with no shopify_refund_id).
+    The counter return's restock was left open -- by main's door (its mint
+    failed) or here by a stock-in task that could not be saved. The retry
+    ran _restock_good_items' mint: NEW-1 for the historical frame, no task,
+    and its message said a task asks the store manager to add the frame (two
+    rows for one frame once he did). Now the retry raises the one stock-in
+    task, and its message says what happened."""
+    oid = 60262 + (left_open_by == "task_not_saved")
+    _historical_order(swept, oid)
+    # An earlier counter return on another order: no Shopify refund id either.
+    swept["returns"].insert_one({"return_id": "RET-EARLIER", "order_id": "ORD-OTHER"})
+    repo, tasks = swept["stock_repo"], swept["db"]["tasks"]
+    real_create, real_insert = repo.create, tasks.insert_one
+    if left_open_by == "main_door":
+        undo = _premark(monkeypatch)
+        monkeypatch.setattr(repo, "create", _Down())
+    else:
+        monkeypatch.setattr(tasks, "insert_one", _Down())
+    out = _counter_return(swept, oid)
+    assert out["restock_applied"] is False and _minted(swept) == [] and _stock_in(swept, oid) == []
+    ret = swept["returns"].find_one({"return_id": out["return_id"]})
+    if left_open_by == "main_door":
+        undo()
+        monkeypatch.setattr(repo, "create", real_create)
+    else:
+        no = _retry(ret)
+        assert (no["restock_applied"], no["stock_in_task"]) == (False, None)
+        assert no["message"] == "Nothing booked: the stock-in task could not be saved - retry shortly"
+        monkeypatch.setattr(tasks, "insert_one", real_insert)
+        # A blip reading the order: the blocked task says the re-run books the
+        # frame and raises the stock-in task, which closes this one.
+        real_load = returns_router._load_order_for_restock
+        monkeypatch.setattr(returns_router, "_load_order_for_restock", lambda order_id: None)
+        assert _retry(ret)["restock_applied"] is False
+        monkeypatch.setattr(returns_router, "_load_order_for_restock", real_load)
+        [blocked] = tasks.find({"source_ref": f"return_restock_blocked:{ret['return_id']}"})
+        assert "stock-in" in blocked["description"] and blocked["status"] == "OPEN"
+
+    res = _retry(ret)
+    assert _minted(swept) == [], "no NEW-1 for the historical frame"
+    [task] = _stock_in(swept, oid)
+    assert (res["restock_applied"], res["stock_in_task"]) == (True, task["task_id"])
+    assert res["message"] == ("Booked. This order predates IMS stock: a task asks the shop's store "
+                              "manager to add the frame(s) through stock-in")
+    assert task["assigned_to"] == _MANAGER
+    if left_open_by == "task_not_saved":
+        assert tasks.find_one({"task_id": blocked["task_id"]})["status"] == "COMPLETED"
 
 
 class _WriteLandsThenRaises(_FlakyUnits):
