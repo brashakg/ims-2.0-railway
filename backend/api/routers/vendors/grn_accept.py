@@ -1,5 +1,6 @@
 """POST /grn/{grn_id}/accept - the three-way match and the stock mint."""
 
+from contextvars import ContextVar
 from datetime import timedelta
 from typing import Tuple
 from urllib.parse import quote
@@ -145,6 +146,10 @@ def held_receipts(product_id: str) -> List[dict]:
         or []
     )
 
+
+# Set while a failed accept runs its releases (_put_on_shelf): a release it
+# runs that fails in turn does not run them again.
+_AFTER_A_FAILED_ACCEPT: ContextVar = ContextVar("after_a_failed_accept", default=False)
 
 # A PO in one of these will never bring the item in again.
 _PO_DONE_STATUSES = ("CANCELLED", "RECEIVED", "CLOSED")
@@ -463,6 +468,7 @@ def _put_on_shelf(
     grn = _claimed_receipt(grn_repo, grn_id, claim_token)
 
     deferred_releases: List[str] = []
+    progress: dict = {}
     try:
         result = _accept_grn_claimed(
             grn_id,
@@ -476,21 +482,39 @@ def _put_on_shelf(
             order_cap=order_cap,
             manager_decides=manager_decides,
             deferred_releases=deferred_releases,
+            progress=progress,
         )
     except Exception:
-        # Nothing was committed we can attribute to this call, or the accept
-        # died half-way: hand the claim back (token-guarded) so the operator can
-        # retry immediately instead of waiting out the stale window. The
-        # per-(grn, line) mint guard makes that retry idempotent.
+        # THE one way out of an accept that died part-way -- a count it could
+        # not read, the order cap's reads, a unit that did not insert, a lost
+        # heartbeat: still under the claim, the hold is rewritten to what the
+        # receipt really holds now.
+        if progress:
+            _record_what_a_dead_accept_holds(
+                grn_repo, stock_repo, po_repo, grn, claim_token, **progress
+            )
+        # Hand the claim back (token-guarded) so the operator can retry
+        # immediately instead of waiting out the stale window. The per-(grn,
+        # line) mint guard makes that retry idempotent.
         _release_grn_accept_claim(grn_repo, grn_id, claim_token)
-        # A cost the promote already wrote stays written: the retry finds it in
-        # place and promotes nothing, so the draft it finished must release its
-        # other held receipts now, or they wait on a finished item for ever.
+        # A cost the promote already wrote stays written (the retry promotes
+        # nothing), and a catalogue save that lost its release to this claim
+        # swallowed its 409: both release now, or they wait on a finished item
+        # for ever. Once per failure: a release this runs that fails in turn
+        # runs only its own promote's releases, so a failure that keeps
+        # failing never retries itself for ever.
+        first = not _AFTER_A_FAILED_ACCEPT.get()
+        token = _AFTER_A_FAILED_ACCEPT.set(True)
         try:
-            for pid in dict.fromkeys(deferred_releases):
-                release_held_receipts(pid)
+            if first:
+                release_finished_meanwhile(grn_repo, grn_id, deferred_releases)
+            else:
+                for pid in dict.fromkeys(deferred_releases):
+                    release_held_receipts(pid)
         except Exception as exc:  # noqa: BLE001 - never mask the accept's error
-            logger.error("[VENDOR] GRN %s: deferred release failed: %s", grn_id, exc)
+            logger.error("[VENDOR] GRN %s: the release after a failed accept failed: %s", grn_id, exc)
+        finally:
+            _AFTER_A_FAILED_ACCEPT.reset(token)
         raise
     # The receipt's cost finished a draft mid-accept (gst._finished_by_the_promote):
     # its OTHER held receipts go on the shelf now that this claim is handed back.
@@ -505,9 +529,10 @@ def release_finished_meanwhile(grn_repo, grn_id: str, also=()) -> None:
     claim was held: that save's release lost the claim (and swallowed its
     409), so the release is run here -- whichever of the two finishes last
     sees the other (R1-19, follow-ups 1 and 43). `also`: products the caller
-    already knows to release. Never run on a failed accept's way out: a
-    release that keeps failing would retry itself for ever. Fail-soft: the
-    hold stands, and 'Add to stock' or the next save retries it."""
+    already knows to release. A failed accept runs it once per failure
+    (_put_on_shelf), never from a release it ran itself: a release that keeps
+    failing would retry itself for ever. Fail-soft: the hold stands, and 'Add
+    to stock' or the next save retries it."""
     pids = list(also)
     try:
         grn = grn_repo.find_by_id(grn_id) or {}
@@ -526,15 +551,17 @@ def release_finished_meanwhile(grn_repo, grn_id: str, also=()) -> None:
 
 
 def _record_what_a_dead_accept_holds(
-    grn_repo, stock_repo, po_repo, grn, claim_token, decided, line_index, left
+    grn_repo, stock_repo, po_repo, grn, claim_token, decided, line_index, left=None
 ) -> None:
     """A re-accept of a HELD receipt (PARTIALLY_ACCEPTED: the catalogue
-    release, 'Add to stock') that dies part-way through line `line_index` has
-    put some of that line's units on the shelf. Before its 503 -- under its
-    claim -- the hold is rewritten to what it really holds: the lines before
-    it as this run decided them (`decided`), the dead line's units not
-    inserted (`left`), each later line's units not yet received by origin,
-    each under the hold it was in. The order's received counts are refreshed
+    release, 'Add to stock') that dies part-way through line `line_index` may
+    have put lines -- and some of that line's units -- on the shelf. On its
+    way out (_put_on_shelf), under its claim, the hold is rewritten to what it
+    really holds: the lines before it as this run decided them (`decided`),
+    the dead line's units not on the shelf (`left`, when the run knows them
+    without a read), each later line's -- and a dead line's `left` does not
+    give -- units not yet received by origin, each under the hold it was in.
+    The order's received counts are refreshed
     and the tasks re-worded, so the order, the PO timeline, the movements
     ledger and the tasks count what is on the shelf now, not at the last
     accept. A PENDING receipt is left as it is: no reader counts one until
@@ -552,11 +579,12 @@ def _record_what_a_dead_accept_holds(
         def _as_held(entry: dict) -> dict:
             return {**(was.get(entry["product_id"]) or {"reason": "incomplete_catalog"}), **entry}
 
-        held = list(decided) + [_as_held(left)]
+        held = list(decided) + ([_as_held(left)] if left else [])
+        first = line_index + 1 if left else line_index
         for idx, it in enumerate(grn.get("items") or []):
             pid = it.get("product_id")
             accepted = int(it.get("accepted_qty") or 0)
-            if idx <= line_index or accepted <= 0 or not pid:
+            if idx < first or accepted <= 0 or not pid:
                 continue
             rest = accepted - _grn_already_minted(
                 stock_repo, _received_on(grn, product_id=pid, grn_line_index=idx)
@@ -571,7 +599,10 @@ def _record_what_a_dead_accept_holds(
         if written is not True:
             return
         refresh_po_received(po_repo, grn_repo, grn.get("po_id"))
-        _sync_catalogue_tasks(grn_id, grn, held, "PARTIALLY_ACCEPTED", get_product_repository())
+        # Holding nothing (it died after its last line), no task waits on it.
+        _sync_catalogue_tasks(
+            grn_id, grn, held, "PARTIALLY_ACCEPTED" if held else "ACCEPTED", get_product_repository()
+        )
     except Exception:  # noqa: BLE001 - never mask the accept's own error
         logger.error("[VENDOR] GRN %s: the hold left by a dead accept was not rewritten", grn_id, exc_info=True)
 
@@ -641,13 +672,19 @@ def _accept_grn_claimed(
     order_cap: bool = False,
     manager_decides: bool = False,
     deferred_releases: Optional[List[str]] = None,
+    progress: Optional[dict] = None,
 ) -> dict:
     """The accept body, run ONLY by the caller that won the F8 claim.
 
     Unchanged from the original inline body: idempotent per-(grn, line) stock
     minting, the Hub-Phase-2 ghost-stock hold, cost backfill, the GRN status
     flip and the PO receipt math. Extracted so the claim can be released on any
-    failure without re-indenting the whole engine."""
+    failure without re-indenting the whole engine. `progress` is kept current
+    as the run goes -- the lines it decided, the line it is on, that line's
+    units not yet on the shelf -- for the caller's way out of a run that dies
+    (_record_what_a_dead_accept_holds)."""
+    if progress is None:
+        progress = {}
     store_id = grn.get("store_id")
     po_id = grn.get("po_id")
     grn_number = grn.get("grn_number")
@@ -721,6 +758,9 @@ def _accept_grn_claimed(
 
     if stock_repo is not None:
         for line_index, item in enumerate(grn.get("items", []) or []):
+            # Lines before this one are decided (on the shelf, or held in
+            # `unresolved_lines`); this one's units on the shelf are not known yet.
+            progress.update(decided=unresolved_lines, line_index=line_index, left=None)
             try:
                 accepted_qty = int(item.get("accepted_qty", 0) or 0)
             except (TypeError, ValueError):
@@ -775,6 +815,7 @@ def _accept_grn_claimed(
             # the line's accepted_qty: a release that died part-way through a
             # line left some of its units on the shelf.
             held = {"product_id": product_id, "accepted_qty": accepted_qty, "held_qty": to_mint}
+            progress["left"] = held
 
             # Hub Phase 2 ghost-stock gate: only mint against a product that
             # exists on the `products` spine. An uncatalogued line is HELD (no
@@ -865,6 +906,8 @@ def _accept_grn_claimed(
             # covers 0..N-1, a takeover that read `already = k` covers k..N-1, the
             # overlap is rejected by the index, and the union is exactly N units.
             for seq in range(already, already + to_mint):
+                # Ordinals before `seq` are on the shelf.
+                progress["left"] = {**held, "held_qty": accepted_qty - seq}
                 # Keep the claim alive while we work, and STOP immediately if it
                 # was taken over (raises 409). `to_mint` was computed before this
                 # loop started, so without this check a worker that was wedged
@@ -920,17 +963,8 @@ def _accept_grn_claimed(
                         line_index,
                         seq,
                     )
-                    # Ordinals 0..seq-1 are on the shelf: the hold says so.
-                    _record_what_a_dead_accept_holds(
-                        grn_repo,
-                        stock_repo,
-                        po_repo,
-                        grn,
-                        claim_token,
-                        unresolved_lines,
-                        line_index,
-                        {**held, "held_qty": accepted_qty - seq},
-                    )
+                    # Ordinals 0..seq-1 are on the shelf: the hold says so
+                    # (`progress`, on the way out).
                     raise HTTPException(
                         status_code=503,
                         detail=(
@@ -989,6 +1023,10 @@ def _accept_grn_claimed(
                                 "[VENDOR] GRN mint ledger emit skipped: %s",
                                 _le_exc,
                             )
+
+    # Every line is decided.
+    if progress:
+        progress.update(line_index=len(grn.get("items") or []), left=None)
 
     # Mark the GRN accepted -- or PARTIALLY_ACCEPTED when one or more lines were
     # HELD because their product is not yet catalogued (Hub Phase 2). A held GRN

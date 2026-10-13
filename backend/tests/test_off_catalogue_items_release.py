@@ -5303,9 +5303,10 @@ def test_r9_the_bills_cost_finishes_the_draft_as_the_editor_does(world, monkeypa
 
 def test_r9_a_release_that_died_part_way_counts_only_what_is_really_held(world, monkeypatch):
     # The panel's partial-release probe: an order of Boss x2, receipt 1 holds
-    # 2 for the catalogue, receipt 2 (a second count) holds 1. On the first
-    # catalogue save receipt 1's second unit does not insert, so 1 of its 2
-    # reaches the shelf and receipt 2 shelves 1. On the next save receipt 1's
+    # 2 for the catalogue, receipt 2 (a second count) holds 1. Throughout the
+    # first catalogue save receipt 1's second unit does not insert (the
+    # failed accept's own retry too), so 1 of its 2 reaches the shelf and
+    # receipt 2 shelves 1. On the next save receipt 1's
     # last unit is beyond the order. Every reader then counts what the
     # receipt really holds (1), never the line's accepted 2.
     from api.routers.vendors import grn_accept as _ga
@@ -5318,7 +5319,7 @@ def test_r9_a_release_that_died_part_way_counts_only_what_is_really_held(world, 
     failed = []
 
     def _second_unit_lost(stock_repo, doc, raises):
-        if doc.get("grn_id") == grn1["grn_id"] and doc.get("line_unit_seq") == 1 and not failed:
+        if doc.get("grn_id") == grn1["grn_id"] and doc.get("line_unit_seq") == 1:
             failed.append(doc)
             return None
         return real(stock_repo, doc, raises)
@@ -5816,6 +5817,127 @@ def _held(world, gid):
     ]
 
 
+@pytest.mark.parametrize("exit_", ["count_read_once", "heartbeat", "order_cap_read", "duplicate_key"])
+def test_r11_every_way_out_of_a_release_that_dies_records_what_it_holds(world, monkeypatch, exit_):
+    # The panel's probe: D x2 and E x1 held on one receipt, D finished. The
+    # release shelves D, then dies on E's line -- its count read failing once
+    # (a transient socket error), or, with E finished by a door that never
+    # releases, every time on E's heartbeat, the order cap's read or a
+    # duplicate-key error from another index. Whatever the exit, the receipt
+    # no longer holds D, the PO counts D's 2 and the task drops D.
+    from pymongo.errors import DuplicateKeyError
+
+    from api.routers.vendors import grn_accept as _ga
+
+    po, d_id, e_id, gid = _d_x2_and_e_x1_held(world)
+    failed = []
+    if exit_ != "count_read_once":
+        _finished_without_a_release(world, e_id, offer=2890)
+    if exit_ in ("count_read_once", "order_cap_read"):
+        real_count = _ga._grn_already_minted
+
+        def _reads(repo, flt):
+            if exit_ == "count_read_once":
+                hit = flt.get("grn_line_index") == 1 and not failed
+            else:
+                hit = flt.get("product_id") == e_id and "po_id" in flt
+            if hit:
+                failed.append(flt)
+                raise _Unreadable("socket closed")
+            return real_count(repo, flt)
+
+        monkeypatch.setattr(_ga, "_grn_already_minted", _reads)
+    elif exit_ == "heartbeat":
+
+        def _tick(repo, grn_id, token, state):
+            if len(world.units(d_id)) == 2:
+                failed.append(grn_id)
+                raise HTTPException(status_code=503, detail="Could not confirm the claim")
+
+        monkeypatch.setattr(_ga, "_grn_accept_heartbeat_tick", _tick)
+    else:
+        real_mint = _ga._grn_mint_unit
+
+        def _mint(stock_repo, doc, raises):
+            if doc.get("product_id") == e_id:
+                failed.append(doc)
+                raise DuplicateKeyError("E11000 another index")
+            return real_mint(stock_repo, doc, raises)
+
+        monkeypatch.setattr(_ga, "_grn_mint_unit", _mint)
+
+    world.finish_draft(d_id, offer=2790)
+    assert failed and len(world.units(d_id)) == 2 and world.units(e_id) == []
+    status, received = _po_received(world, po)
+    tasks = _catalogue_tasks(world, gid)
+    finding(
+        _held(world, gid) == [(e_id, "incomplete_catalog", 1)],
+        f"R11-1 ({exit_}): D is on the shelf, yet the receipt holds {_held(world, gid)}",
+    )
+    finding(
+        received[d_id] == 2 and status == "PARTIALLY_RECEIVED",
+        f"R11-1 ({exit_}): the PO reads D {received[d_id]} received ({status})",
+    )
+    finding(
+        len(tasks) == 1
+        and "BOSS 1700 " not in tasks[0]["description"]
+        and "BOSS 1701" in tasks[0]["description"],
+        f"R11-1 ({exit_}): the catalogue task reads {[t['description'] for t in tasks]}",
+    )
+
+
+def test_r11_a_failure_that_keeps_failing_retries_once_never_for_ever(world, monkeypatch):
+    # A failed accept runs the release a save lost to its claim -- once: the
+    # release it runs fails the same way and does not run it again.
+    from api.routers.vendors import grn_accept as _ga
+
+    po, d_id, e_id, gid = _d_x2_and_e_x1_held(world)
+    _finished_without_a_release(world, e_id, offer=2890)
+    real, claims = _ga._claim_grn_for_accept, []
+
+    def _counted(repo, grn_id, user_id):
+        claims.append(grn_id)
+        return real(repo, grn_id, user_id)
+
+    def _tick(repo, grn_id, token, state):
+        if len(world.units(d_id)) == 2:
+            raise HTTPException(status_code=503, detail="Could not confirm the claim")
+
+    monkeypatch.setattr(_ga, "_claim_grn_for_accept", _counted)
+    monkeypatch.setattr(_ga, "_grn_accept_heartbeat_tick", _tick)
+    world.finish_draft(d_id, offer=2790)
+    finding(claims == [gid, gid], f"R11-1: one save accepted the receipt {len(claims)} time(s)")
+
+
+def test_r11_a_save_lost_to_a_failed_accept_still_releases(world, monkeypatch):
+    # The cataloguer saves E while the manager's 'Add to stock' holds the
+    # receipt's claim (E's release finds it: 409, swallowed); the accept then
+    # dies on E's count read. Its way out runs the release E's save lost.
+    from api.routers.vendors import grn_accept as _ga
+
+    po, d_id, e_id, gid = _d_x2_and_e_x1_held(world)
+    world.finish_draft(d_id, offer=2790)
+    assert _held(world, gid) == [(e_id, "incomplete_catalog", 1)]
+    real, saved = _ga._grn_already_minted, []
+
+    def _cataloguer_saves_meanwhile(repo, flt):
+        if flt.get("grn_line_index") == 1 and not saved:
+            saved.append(world.finish_draft(e_id, offer=2890))
+            raise _Unreadable("socket closed")
+        return real(repo, flt)
+
+    monkeypatch.setattr(_ga, "_grn_already_minted", _cataloguer_saves_meanwhile)
+    with pytest.raises(HTTPException) as died:
+        _drive(vd.accept_grn(gid, MANAGER))
+    assert saved and died.value.status_code == 503
+    finding(
+        len(world.units(e_id)) == 1 and world.grn(gid)["status"] == "ACCEPTED",
+        f"R11-1: the finished E has {len(world.units(e_id))} unit(s); the receipt reads "
+        f"{world.grn(gid)['status']} {_held(world, gid)}",
+    )
+    assert _catalogue_tasks(world, gid) == []
+
+
 def test_r11_a_managers_add_to_stock_never_shelves_a_duplicate_unasked(world, monkeypatch):
     # The panel's probe: an order of Boss x2, receipt R1 and a duplicate R2
     # (another invoice number) both held for the catalogue. Finishing the
@@ -5856,3 +5978,130 @@ def test_r11_a_managers_add_to_stock_never_shelves_a_duplicate_unasked(world, mo
     _run(vd.accept_grn(r2["grn_id"], MANAGER))
     assert len(world.units(boss)) == 4 and world.grn(r2["grn_id"])["status"] == "ACCEPTED"
     assert _mgr_tasks(world, r2["grn_id"]) == []
+
+
+def _four_line_receipt(world):
+    """Receipt R: E (typed, unfinished) x1, D (typed) x2, Vogue G x1 beyond
+    its order (an earlier receipt brought the 1 ordered) and Carrera C x1
+    within its order. The manager's 'Add to stock' shelves C and holds E and
+    D for the catalogue and G beyond the order."""
+    carrera = world.catalogue_frame("Carrera", "CA 8895", "807", "54", mrp=6990, offer=6490, cost=3155.76)
+    vogue = world.catalogue_frame("Vogue", "VO 5286", "W44", "52", mrp=4990, offer=4490, cost=2100)
+    po = world.raise_po(
+        [
+            {"new_product": dict(BOSS_1701), "quantity": 1, "unit_price": 1300},
+            {"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 1200},
+            {
+                "product_id": vogue["product_id"],
+                "product_name": "Vogue VO 5286 W44",
+                "sku": vogue["sku"],
+                "quantity": 1,
+                "unit_price": 2200,
+            },
+            {
+                "product_id": carrera["product_id"],
+                "product_name": "Carrera CA 8895 807",
+                "sku": carrera["sku"],
+                "quantity": 1,
+                "unit_price": 3200,
+            },
+        ]
+    )
+    e_id, d_id, g_id, c_id = (it["product_id"] for it in po["items"])
+    _receive_some(world, po, {g_id: 1}, "JOT/26-27/1231")
+    grn, _ = _receive_some(world, po, {e_id: 1, d_id: 2, g_id: 1, c_id: 1}, "JOT/26-27/1232")
+    gid = grn["grn_id"]
+    assert _held(world, gid) == [
+        (e_id, "incomplete_catalog", 1),
+        (d_id, "incomplete_catalog", 2),
+        (g_id, "over_order", 1),
+    ]
+    assert len(world.units(c_id)) == 1
+    return po, e_id, d_id, g_id, c_id, gid
+
+
+def test_r11_a_dead_release_keeps_every_other_hold_as_it_was(world, monkeypatch):
+    # D's release loses its second unit (every time this save). The hold
+    # then says: E as this run held it, D's 1 not on the shelf, G still
+    # beyond its order (the store manager's, never re-labelled a catalogue
+    # hold), and nothing for C, whose unit is on the shelf.
+    from api.routers.vendors import grn_accept as _ga
+
+    po, e_id, d_id, g_id, c_id, gid = _four_line_receipt(world)
+    real = _ga._grn_mint_unit
+
+    def _second_unit_lost(stock_repo, doc, raises):
+        if doc.get("product_id") == d_id and doc.get("line_unit_seq") == 1:
+            return None
+        return real(stock_repo, doc, raises)
+
+    monkeypatch.setattr(_ga, "_grn_mint_unit", _second_unit_lost)
+    world.finish_draft(d_id, offer=2790)
+    assert len(world.units(d_id)) == 1
+    finding(
+        _held(world, gid)
+        == [(e_id, "incomplete_catalog", 1), (d_id, "incomplete_catalog", 1), (g_id, "over_order", 1)],
+        f"R11-4: the receipt records its hold as {_held(world, gid)}",
+    )
+    assert len(_mgr_tasks(world, gid)) == 1
+    (task,) = _catalogue_tasks(world, gid)
+    assert "Vogue" not in task["description"] and "Carrera" not in task["description"]
+
+
+def test_r11_a_worker_whose_claim_was_stolen_never_rewrites_the_hold(world, monkeypatch):
+    # D's release loses its second unit just as another worker takes the
+    # receipt's claim over and writes its own hold: the dead worker's
+    # rewrite is token-guarded, so the real holder's hold stands.
+    from datetime import datetime
+
+    from api.routers.vendors import grn_accept as _ga
+
+    po, e_id, d_id, g_id, c_id, gid = _four_line_receipt(world)
+    real = _ga._grn_mint_unit
+    theirs = [{"product_id": e_id, "accepted_qty": 1, "held_qty": 1, "reason": "incomplete_catalog"}]
+
+    def _taken_over(stock_repo, doc, raises):
+        if doc.get("product_id") == d_id and doc.get("line_unit_seq") == 1:
+            world.db.grns.update_one(
+                {"grn_id": gid},
+                {
+                    "$set": {
+                        "accept_lock_token": "the-takeover",
+                        "accept_lock_at": datetime.now().isoformat(),
+                        "unresolved_lines": theirs,
+                    }
+                },
+            )
+            return None
+        return real(stock_repo, doc, raises)
+
+    monkeypatch.setattr(_ga, "_grn_mint_unit", _taken_over)
+    world.finish_draft(d_id, offer=2790)
+    finding(
+        world.grn(gid)["unresolved_lines"] == theirs,
+        f"R11-4: a worker whose claim was stolen rewrote the hold to {_held(world, gid)}",
+    )
+
+
+def test_r11_an_accept_that_dies_after_its_last_line_holds_nothing(world, monkeypatch):
+    # The release shelves D and E, then the receipt's status flip fails (a
+    # stepdown): the hold says nothing is held, the PO counts both and no
+    # catalogue task names them.
+    from api.routers.vendors import grn_accept as _ga
+
+    po, d_id, e_id, gid = _d_x2_and_e_x1_held(world)
+    _finished_without_a_release(world, e_id, offer=2890)
+
+    def _stepdown(*a, **k):
+        raise RuntimeError("primary stepped down")
+
+    monkeypatch.setattr(_ga, "_advance_grn_terminal_status", _stepdown)
+    world.finish_draft(d_id, offer=2790)
+    assert len(world.units(d_id)) == 2 and len(world.units(e_id)) == 1
+    status, received = _po_received(world, po)
+    finding(
+        _held(world, gid) == [] and received == {d_id: 2, e_id: 1} and status == "RECEIVED",
+        f"R11-1: everything is on the shelf, yet the receipt holds {_held(world, gid)} "
+        f"and the PO reads {received} ({status})",
+    )
+    finding(_catalogue_tasks(world, gid) == [], "R11-1: a catalogue task still names the shelved items")
