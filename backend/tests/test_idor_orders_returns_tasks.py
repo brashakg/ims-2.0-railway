@@ -722,13 +722,23 @@ def test_task_complete_assignee_lowrole_ok(monkeypatch):
     assert repo.task["completed_by"] == "u-test"
 
 
-def test_task_handed_out_below_manager_is_the_assignees_not_the_assigners(monkeypatch):
-    """Owner ruling 2026-10-12: below manager you see a task only when it is
-    assigned to YOU (or your role). Handing a task to a colleague hands it
-    over -- the assigner no longer opens or acts on it; their manager does."""
+def test_task_handed_out_below_manager_stays_with_the_person_who_raised_it(monkeypatch):
+    """Owner question 1, decided 2026-10-13: a staff member who hands a task
+    to a colleague keeps seeing it and can follow it up. A task someone ELSE
+    handed out stays 'not found' to them."""
     client, repo = _tasks_client(
         monkeypatch,
         _seed_task(store_id=OWN_STORE, assigned_to="someone-else", assigned_by="u-test"),
+        ["SALES_STAFF"],
+        OWN_STORE,
+    )
+    assert client.get("/api/v1/tasks/T1").status_code == 200
+    assert client.post("/api/v1/tasks/T1/start").status_code == 200
+    assert repo.task["status"] == "IN_PROGRESS"
+
+    client, repo = _tasks_client(
+        monkeypatch,
+        _seed_task(store_id=OWN_STORE, assigned_to="someone-else", assigned_by="u-other"),
         ["SALES_STAFF"],
         OWN_STORE,
     )

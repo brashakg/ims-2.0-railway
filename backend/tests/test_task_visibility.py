@@ -2,6 +2,7 @@
 
   * a staff member sees -- and may act on -- a task only when it is assigned to
     them (their user id) or to their ROLE at their shop (no person on it yet);
+  * whoever created a task also sees it and can follow it up;
   * STORE_MANAGER: every task of their shop(s); AREA_MANAGER: every task of
     their area's shops; ADMIN / SUPERADMIN: all.
 
@@ -64,14 +65,15 @@ USERS = {
 }
 
 
-def _task(task_id, assigned_to, store_id, status="OPEN", due=PAST):
+def _task(task_id, assigned_to, store_id, status="OPEN", due=PAST, **extra):
     return {
         "task_id": task_id,
         "title": f"Task {task_id}",
         "status": status,
         "priority": "P2",
         "assigned_to": assigned_to,
-        "assigned_by": "u-mgr",
+        "assigned_by": "system",
+        **extra,
         "store_id": store_id,
         "due_at": due,
         "created_at": datetime.now() - timedelta(days=3),
@@ -93,6 +95,10 @@ TASKS = (
         _task("P-S3", "u-y", S3),
         _task("G", None, None),  # no shop at all
         _task("P-SALES-S3", uid("SALES_STAFF"), S3),  # yours, at another shop
+        # Raised BY the sales person for someone else: POST /tasks stamps
+        # assigned_by, other producers created_by. The creator follows it up.
+        _task("C-SALES", "u-sales-peer", S1, assigned_by=uid("SALES_STAFF")),
+        _task("C-SALES-S2", "u-x", S2, assigned_by=None, created_by=uid("SALES_STAFF")),
     ]
 )
 ALL = {t["task_id"] for t in TASKS}
@@ -127,7 +133,7 @@ TASK_ROUTES = {
 def expected(role: str) -> set:
     if role in STAFF_ROLES:
         mine = {f"P-{role}", f"R-{role}"}
-        return mine | ({"P-SALES-S3"} if role == "SALES_STAFF" else set())
+        return mine | ({"P-SALES-S3", "C-SALES", "C-SALES-S2"} if role == "SALES_STAFF" else set())
     if role == "STORE_MANAGER":
         return S1_IDS
     if role == "AREA_MANAGER":
@@ -244,6 +250,27 @@ def test_shop_filter_and_its_counts_agree(world, role):
     overdue = c.get("/api/v1/tasks/overdue", params={"store_id": S1})
     assert _ids(overdue) == expected(role) & OVERDUE & S1_IDS
     assert s["overdue"] == overdue.json()["total"]
+
+
+@pytest.mark.parametrize("role", STAFF_ROLES)
+def test_the_creator_sees_and_follows_up_the_task_they_raised(world, role):
+    """Owner question 1 (decided): a staff member who raises a task for a
+    colleague keeps seeing it and can follow it up. A third person cannot."""
+    as_role, db = world
+    colleague = "CASHIER" if role != "CASHIER" else "SALES_STAFF"
+    stranger = next(r for r in STAFF_ROLES if r not in (role, colleague))
+    made = as_role(role).post("/api/v1/tasks", json={
+        "title": "Ring Mrs Rao about her frame", "priority": "P2",
+        "assigned_to": uid(colleague), "due_at": FUTURE.isoformat()})
+    assert made.status_code == 201, made.text
+    tid = made.json()["task_id"]
+    assert tid in _ids(as_role(role).get("/api/v1/tasks"))
+    assert as_role(role).get(f"/api/v1/tasks/{tid}").status_code == 200
+    r = as_role(role).patch(f"/api/v1/tasks/{tid}", json={"notes": "chased her"})
+    assert r.status_code == 200, r.text
+    assert db.tasks.find_one({"task_id": tid}).get("notes") == "chased her"
+    assert tid in _ids(as_role(colleague).get("/api/v1/tasks"))
+    assert as_role(stranger).get(f"/api/v1/tasks/{tid}").status_code == 404
 
 
 @pytest.mark.parametrize("role", ROLES)

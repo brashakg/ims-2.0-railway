@@ -6,6 +6,8 @@ Owner ruling 2026-10-12 (and 2026-09-03 "assign to PEOPLE, not titles"):
   * a staff member sees -- and may act on -- a task only when it is assigned
     to them (assigned_to = their user id), or to their ROLE at their shop (a
     task addressed to a role, with no person on it yet);
+  * whoever CREATED a task also sees it and can follow it up, whatever their
+    role (POST /tasks stamps assigned_by, other producers created_by);
   * STORE_MANAGER sees every task of their shop(s);
   * AREA_MANAGER sees every task of their area's shops;
   * ADMIN / SUPERADMIN see all.
@@ -38,7 +40,7 @@ def visibility_filter(current_user: dict) -> Dict[str, Any]:
     roles = {str(r).strip().upper() for r in (current_user.get("roles") or [])}
     shops = {"$in": sorted(stores)}
     uid = current_user.get("user_id")
-    seen = [{"assigned_to": uid}] if uid else []
+    seen = [{"assigned_to": uid}, {"assigned_by": uid}, {"created_by": uid}] if uid else []
     if roles & _SHOP_WIDE_ROLES:
         seen.append({"store_id": shops})
     elif roles:
