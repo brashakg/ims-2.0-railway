@@ -251,8 +251,10 @@ def test_units_view_by_receipt_never_leaks_another_shops_units(world):
 # catalogue -- see per-unit cost; counter staff never). A test that only sent
 # STORE_MANAGER vs ADMIN let a leak to the counter roles (SALES_STAFF, CASHIER)
 # pass.
-_NO_COST_ROLES = ["SALES_STAFF", "CASHIER", "OPTOMETRIST", "WORKSHOP_STAFF"]
-_COST_ROLES = ["ADMIN", "ACCOUNTANT", "STORE_MANAGER", "CATALOG_MANAGER"]
+# Owner ruling 2026-10-12: what we pay is the owner's and accounts' only.
+_NO_COST_ROLES = ["SALES_STAFF", "CASHIER", "OPTOMETRIST", "WORKSHOP_STAFF",
+                  "STORE_MANAGER", "CATALOG_MANAGER"]
+_COST_ROLES = ["ADMIN", "ACCOUNTANT"]
 
 
 def _as_role(role):

@@ -729,15 +729,10 @@ _PRODUCT_COST_KEYS = {
     "moving_avg_cost",
     "purchase_price",
 }
-# The product master feeds the PO form (buyers) and the product edit form.
-_PRODUCT_COST_ROLES = (
-    "ADMIN",
-    "ACCOUNTANT",
-    "AREA_MANAGER",
-    "STORE_MANAGER",
-    "CATALOG_MANAGER",
-    "SUPERADMIN",
-)
+# Who reads product cost: the owner and the accounts roles (owner ruling
+# 2026-10-12 -- the managers see MRP / selling price only).
+_PRODUCT_COST_ROLES = ("ADMIN", "ACCOUNTANT", "SUPERADMIN")
+_NO_PRODUCT_COST = (*COUNTER_ROLES, "AREA_MANAGER", "STORE_MANAGER", "CATALOG_MANAGER")
 
 
 class _ProductRepo:
@@ -790,7 +785,7 @@ PRODUCT_READS = (
 
 
 @pytest.mark.parametrize("path", PRODUCT_READS)
-@pytest.mark.parametrize("role", COUNTER_ROLES)
+@pytest.mark.parametrize("role", _NO_PRODUCT_COST)
 def test_counter_roles_read_products_without_cost(client, product_repo, role, path):
     rows = _product_rows(client, role, path)
     assert rows and rows[0]["mrp"] == 5000
@@ -799,7 +794,7 @@ def test_counter_roles_read_products_without_cost(client, product_repo, role, pa
 
 @pytest.mark.parametrize("path", PRODUCT_READS)
 @pytest.mark.parametrize("role", _PRODUCT_COST_ROLES)
-def test_buyers_and_catalog_still_read_product_cost(client, product_repo, role, path):
+def test_accounts_still_read_product_cost(client, product_repo, role, path):
     row = _product_rows(client, role, path)[0]
     assert row["cost_price"] == 3173.37 and row["landed_cost"] == 3301.5
     assert row["purchase_price"] == 3088.88
@@ -961,12 +956,13 @@ def test_bank_statement_handlers_refuse_managers(role):
 # 13. ONE purchase-role rule: the purchase gate and the purchase mask
 # ---------------------------------------------------------------------------
 # Who may open the purchase reads (vendor detail, POs, GRNs, and the return /
-# debit-note / RMA writes) and who is shown what was paid and to whom (the
-# full vendor list, prices on returns and debit notes) is one question. Two
-# constants let them drift: narrowing the gate alone left the vendor LIST
-# handing GSTIN and bank to a role the vendor DETAIL refused. So every gate IS
-# cost_mask.PURCHASE_ROLES (identity, not a synced copy), and the mask answers
-# exactly its members for every role.
+# debit-note / RMA writes) and who is shown the supplier in full (the vendor
+# list) is one question. Two constants let them drift: narrowing the gate
+# alone left the vendor LIST handing GSTIN and bank to a role the vendor
+# DETAIL refused. So every gate IS cost_mask.PURCHASE_ROLES (identity, not a
+# synced copy), and the "supplier" mask answers exactly its members for every
+# role. What was PAID is the accounts roles' only (owner ruling 2026-10-12,
+# tests/test_what_we_pay_accounts_only.py).
 from api.routers import vendor_rma as rma_router  # noqa: E402
 from api.services.cost_mask import PURCHASE_ROLES, can_see_cost  # noqa: E402
 
@@ -983,7 +979,7 @@ def test_purchase_gates_are_the_one_purchase_role_constant():
 
 @pytest.mark.parametrize("role", rbac.ALL_ROLES)
 def test_purchase_mask_is_membership_of_the_purchase_gate(app, role):
-    sees = can_see_cost({"roles": [role]}, "purchase")
+    sees = can_see_cost({"roles": [role]}, "supplier")
     assert sees is (role == "SUPERADMIN" or role in _VENDOR_ROLES), role
     # ...and the route itself agrees, so a handler switched onto another tuple
     # cannot reopen the gap either.
@@ -998,7 +994,8 @@ def test_purchase_mask_is_membership_of_the_purchase_gate(app, role):
 # while /catalog/products said no (and yes to the catalogue manager only on
 # the form) and the frontend CostCell said no to all three: one question,
 # three answers. Every product read now asks cost_mask's "product" context,
-# and CostCell's PRODUCT_COST_ROLES is that set.
+# and CostCell's COST_ROLES is that set (owner ruling 2026-10-12: the
+# accounts roles only -- it reversed the managers-see-cost of 2026-09-28).
 from api.routers import catalog as catalog_mod  # noqa: E402
 
 _CATALOG_DOC = {
@@ -1117,9 +1114,9 @@ def test_product_cost_is_one_answer_on_every_product_route(
 
 
 def test_product_cost_follows_the_owner_ruling():
-    roles = _product_cost_roles()
-    assert {"STORE_MANAGER", "AREA_MANAGER", "CATALOG_MANAGER"} <= roles
-    assert not roles & set(COUNTER_ROLES), roles
+    # 2026-10-12: what we pay -- product cost included -- is the owner's and
+    # the accounts roles' only (it reversed 2026-09-28's managers-see-cost).
+    assert _product_cost_roles() == {"SUPERADMIN", "ADMIN", "ACCOUNTANT"}
 
 
 _COST_CELL = os.path.join(
@@ -1150,13 +1147,17 @@ def _assert_screens_read(name, screens):
         assert len(re.findall(r"\b" + name + r"\b", code)) >= 2, rel
 
 
+def _frontend_cost_roles():
+    with open(_COST_CELL, encoding="utf-8") as fh:
+        m = re.search(r"COST_ROLES[^=]*=\s*\[([^\]]*)\]", fh.read())
+    assert m, "CostCell.tsx no longer declares COST_ROLES"
+    return set(re.findall(r"'([A-Z_]+)'", m.group(1)))
+
+
 @pytest.mark.skipif(not os.path.exists(_COST_CELL), reason="frontend/ not shipped here")
 def test_frontend_cost_cell_is_the_product_context():
-    with open(_COST_CELL, encoding="utf-8") as fh:
-        m = re.search(r"PRODUCT_COST_ROLES[^=]*=\s*\[([^\]]*)\]", fh.read())
-    assert m, "CostCell.tsx no longer declares PRODUCT_COST_ROLES"
-    assert set(re.findall(r"'([A-Z_]+)'", m.group(1))) == _product_cost_roles()
-    _assert_screens_read("PRODUCT_COST_ROLES", _PRODUCT_COST_SCREENS)
+    assert _frontend_cost_roles() == _product_cost_roles()
+    _assert_screens_read("COST_ROLES", _PRODUCT_COST_SCREENS)
 
 
 # Every frontend check on supplier payments (Finance dashboard tab + schedule,
@@ -1171,12 +1172,10 @@ _PAYABLES_SCREENS = (
 
 @pytest.mark.skipif(not os.path.exists(_COST_CELL), reason="frontend/ not shipped here")
 def test_frontend_payables_roles_are_the_payables_context():
-    with open(_COST_CELL, encoding="utf-8") as fh:
-        m = re.search(r"PAYABLES_ROLES[^=]*=\s*\[([^\]]*)\]", fh.read())
-    assert m, "CostCell.tsx no longer declares PAYABLES_ROLES"
+    # One list (owner ruling 2026-10-12): supplier payments are what we pay too.
     want = {r for r in rbac.ALL_ROLES if can_see_cost({"roles": [r]}, "payables")}
-    assert set(re.findall(r"'([A-Z_]+)'", m.group(1))) == want
-    _assert_screens_read("PAYABLES_ROLES", _PAYABLES_SCREENS)
+    assert _frontend_cost_roles() == want
+    _assert_screens_read("COST_ROLES", _PAYABLES_SCREENS)
 
 
 # ---------------------------------------------------------------------------
@@ -1620,24 +1619,32 @@ def _price_leaks(client, role, path):
     return [s for s in _SECRETS if s in resp.text]
 
 
-def test_narrowing_the_purchase_rule_moves_every_purchase_read(
+def test_widening_the_purchase_rule_moves_every_purchase_read(
     client, vendor_repo, return_docs, monkeypatch
 ):
-    # STORE_MANAGER still passes every route gate; only the mask rule moves.
-    assert all(_price_leaks(client, "STORE_MANAGER", p) for p in RETURN_DOC_READS)
+    # STORE_MANAGER passes every route gate; only the mask rule moves.
+    assert not any(_price_leaks(client, "STORE_MANAGER", p) for p in RETURN_DOC_READS)
+    monkeypatch.setitem(cost_mask_mod._CONTEXT_ROLES, "purchase", {"STORE_MANAGER"})
+    for path in RETURN_DOC_READS:
+        assert _price_leaks(client, "STORE_MANAGER", path), path
+        assert not _price_leaks(client, "AREA_MANAGER", path), path
+
+
+def test_narrowing_the_supplier_rule_moves_the_vendor_list(
+    client, vendor_repo, monkeypatch
+):
+    resp = client.get("/api/v1/vendors", headers=_headers("STORE_MANAGER"))
+    assert set(resp.json()["vendors"][0]) != _NAME_KEYS
     monkeypatch.setitem(
         cost_mask_mod._CONTEXT_ROLES,
-        "purchase",
-        cost_mask_mod._CONTEXT_ROLES["purchase"] - {"STORE_MANAGER"},
+        "supplier",
+        cost_mask_mod._CONTEXT_ROLES["supplier"] - {"STORE_MANAGER"},
     )
-    for path in RETURN_DOC_READS:
-        assert not _price_leaks(client, "STORE_MANAGER", path), path
-        assert _price_leaks(client, "AREA_MANAGER", path), path
     resp = client.get("/api/v1/vendors", headers=_headers("STORE_MANAGER"))
     assert set(resp.json()["vendors"][0]) == _NAME_KEYS
 
 
-def test_narrowing_the_purchase_rule_moves_the_vendor_search(
+def test_narrowing_the_supplier_rule_moves_the_vendor_search(
     client, real_vendor_repo, monkeypatch
 ):
     # Which keys ?search may match (the GSTIN-oracle guard, section 5) is the
@@ -1646,8 +1653,8 @@ def test_narrowing_the_purchase_rule_moves_the_vendor_search(
     assert _search(client, "STORE_MANAGER", "27AAPFU")
     monkeypatch.setitem(
         cost_mask_mod._CONTEXT_ROLES,
-        "purchase",
-        cost_mask_mod._CONTEXT_ROLES["purchase"] - {"STORE_MANAGER"},
+        "supplier",
+        cost_mask_mod._CONTEXT_ROLES["supplier"] - {"STORE_MANAGER"},
     )
     assert _search(client, "STORE_MANAGER", "27AAPFU") == []
     assert _search(client, "STORE_MANAGER", "acme")
@@ -1711,21 +1718,20 @@ def test_the_purchase_projections_are_cost_mask_s(
     assert not {"vendor_id", "vendor_code"} & set(vendor), vendor
 
 
-def test_narrowing_the_product_rule_moves_every_product_read(
+def test_widening_the_product_rule_moves_every_product_read(
     client, product_repo, catalog_docs, stock_docs, recs_db, monkeypatch
 ):
-    monkeypatch.setitem(
-        cost_mask_mod._CONTEXT_ROLES,
-        "product",
-        cost_mask_mod._CONTEXT_ROLES["product"] - {"STORE_MANAGER"},
-    )
+    assert not any(_product_cost_answers(client, "STORE_MANAGER").values())
+    monkeypatch.setitem(cost_mask_mod._CONTEXT_ROLES, "product", {"STORE_MANAGER"})
+    # /products caches its masked page; a rule change is a new page.
+    monkeypatch.setattr(cache_mod, "cache", _JsonCache())
     answers = _product_cost_answers(client, "STORE_MANAGER")
-    assert not any(answers.values()), answers
-    assert all(_product_cost_answers(client, "AREA_MANAGER").values())
+    assert all(answers.values()), answers
+    assert not any(_product_cost_answers(client, "AREA_MANAGER").values())
     resp = client.get(
         "/api/v1/reports/purchase/recommendations",
         params={"store_id": "BV-TEST-01"},
-        headers=_headers("STORE_MANAGER"),
+        headers=_headers("AREA_MANAGER"),
     )
     assert resp.status_code == 200, resp.text
     assert "1111.11" not in resp.text and "4444.44" not in resp.text, resp.text

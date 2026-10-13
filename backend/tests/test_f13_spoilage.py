@@ -550,9 +550,19 @@ class TestSpoilageAnalytics:
         c = _client(monkeypatch, [role], repo, db)
         assert c.get("/workshop/spoilage-analytics").status_code == 403
 
-    def test_manager_gets_windowed_summary(self, monkeypatch, db):
+    def test_manager_gets_windowed_summary_without_the_cost(self, monkeypatch, db):
+        # Owner ruling 2026-10-12: the spoilage cost is what we paid -- the
+        # managers keep the remake counts, the accounts roles the rupees.
         repo = self._seed_jobs(db)
         c = _client(monkeypatch, ["STORE_MANAGER"], repo, db)
+        s = c.get("/workshop/spoilage-analytics", params={"days": 90}).json()
+        assert (s["total_jobs"], s["total_remakes"], s["remake_rate_pct"]) == (2, 1, 50.0)
+        assert "spoilage_cost_total_paise" not in s and "45000" not in str(s), s
+        assert s["by_technician"] == {"TECH-1": {"count": 1}}
+
+    def test_admin_gets_windowed_summary(self, monkeypatch, db):
+        repo = self._seed_jobs(db)
+        c = _client(monkeypatch, ["ADMIN"], repo, db)
         r = c.get("/workshop/spoilage-analytics", params={"days": 90})
         assert r.status_code == 200, r.text
         s = r.json()
@@ -580,7 +590,7 @@ class TestSpoilageAnalytics:
             ],
         )
         repo = _repo_with(db, [old_created])
-        c = _client(monkeypatch, ["AREA_MANAGER"], repo, db)
+        c = _client(monkeypatch, ["ADMIN"], repo, db)
         s = c.get("/workshop/spoilage-analytics", params={"days": 90}).json()
         assert s["total_jobs"] == 1 and s["total_remakes"] == 1
         assert s["by_category"] == {"VENDOR_FAULT": {"count": 1, "cost_paise": 7000}}
@@ -670,15 +680,18 @@ class TestDashboardKpiKeys:
         )
         clean = _mk_job("j2", status="PENDING")
         repo = _repo_with(db, [remade, clean])
-        c = _client(monkeypatch, ["STORE_MANAGER"], repo, db)
+        c = _client(monkeypatch, ["ADMIN"], repo, db)
         r = c.get("/workshop/dashboard-kpis")
         assert r.status_code == 200, r.text
         k = r.json()
         assert k["spoilage_cost_mtd_paise"] == 45000
         assert k["remake_rate_pct"] == 50.0  # 1 of 2 jobs
+        # A manager keeps the rate, never the rupees (owner ruling 2026-10-12).
+        m = _client(monkeypatch, ["STORE_MANAGER"], repo, db).get("/workshop/dashboard-kpis").json()
+        assert "spoilage_cost_mtd_paise" not in m and m["remake_rate_pct"] == 50.0, m
 
     def test_kpis_empty_path_still_carries_keys(self, monkeypatch):
-        c = _client(monkeypatch, ["STORE_MANAGER"], None, None)
+        c = _client(monkeypatch, ["ADMIN"], None, None)
         k = c.get("/workshop/dashboard-kpis").json()
         assert k["spoilage_cost_mtd_paise"] == 0
         assert k["remake_rate_pct"] == 0.0

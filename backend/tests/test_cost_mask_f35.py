@@ -2,9 +2,9 @@
 
 The intent: cost_price + every derived margin/COGS figure is stripped from an API
 payload for any role not authorised to see cost. SUPERADMIN/ADMIN/ACCOUNTANT always
-see it; the managers (area, store, catalogue) see per-unit product cost (the
-"product" context, owner ruling 2026-09-28) but not operational aggregates;
-counter roles never. No emoji.
+see it; the managers (area, store, catalogue) see no cost in any context
+(owner ruling 2026-10-12: what we pay is the accounts roles' only; it reversed
+the 2026-09-28 "managers see product cost"); counter roles never. No emoji.
 """
 import os
 import sys
@@ -29,10 +29,10 @@ def test_can_see_cost_role_matrix():
     assert can_see_cost(_u("SUPERADMIN")) is True
     assert can_see_cost(_u("ADMIN")) is True
     assert can_see_cost(_u("ACCOUNTANT")) is True
-    # The managers: per-unit product cost yes, operational aggregates no.
+    # The managers: no cost and no price paid, in any context (2026-10-12).
     for r in ("AREA_MANAGER", "STORE_MANAGER", "CATALOG_MANAGER"):
-        assert can_see_cost(_u(r)) is False, r
-        assert can_see_cost(_u(r), context="product") is True, r
+        for ctx in ("default", "product", "purchase", "payables"):
+            assert can_see_cost(_u(r), context=ctx) is False, (r, ctx)
     # Counter roles: never, in any context (owner ruling D7).
     for r in ("OPTOMETRIST", "SALES_CASHIER", "SALES_STAFF", "CASHIER",
               "WORKSHOP_STAFF"):
@@ -78,13 +78,13 @@ def test_accountant_sees_real_cost():
     assert doc["pricing"]["cost_price"] == 2200
 
 
-def test_catalog_manager_product_cost_vs_operational():
-    # a product read -> sees the per-unit cost
-    edit = mask_cost(_product(), _u("CATALOG_MANAGER"), context="product")
-    assert edit["cost_price"] == 2200
-    # an operational aggregate (default context) -> stripped
-    op = mask_cost(_product(), _u("CATALOG_MANAGER"))
-    assert "cost_price" not in op and "cost_price" not in op["pricing"]
+def test_catalog_manager_sees_no_product_cost():
+    # Owner ruling 2026-10-12: the catalogue manager sees MRP / selling price;
+    # the cost comes at acceptance and is read by accounts.
+    for ctx in ("product", "default"):
+        doc = mask_cost(_product(), _u("CATALOG_MANAGER"), context=ctx)
+        assert "cost_price" not in doc and "cost_price" not in doc["pricing"], ctx
+        assert doc["mrp"] == 5000 and doc["pricing"]["offer_price"] == 4500
 
 
 def test_mask_cost_list_pages():
