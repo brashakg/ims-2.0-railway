@@ -6,8 +6,9 @@ check — any authenticated user could create POs or accept GRNs (which adjust
 stock and vendor liability) by hitting the API directly, despite the frontend
 /purchase/* routes being restricted. The 8 write endpoints are now gated to
 the roles those routes allow (ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT;
-SUPERADMIN auto-passes). Reads intentionally stay open (they may feed
-inventory views for catalog/workshop roles).
+SUPERADMIN auto-passes). The vendor LIST stays open (names only outside the
+purchase roles -- workshop / catalog pick a vendor by name); the cost and
+payable reads are gated too (F60, test_counter_roles_no_purchase_reads.py).
 
 End-to-end via the conftest TestClient fixtures.
 """
@@ -105,11 +106,12 @@ class TestVendorWriteGating:
         assert resp.status_code != 403
 
 
-class TestVendorReadsStayOpen:
+class TestVendorReads:
     def test_staff_can_list_vendors(self, client, staff_headers):
-        # Reads intentionally remain open (may feed inventory views).
+        # The list stays open (names only for non-purchase roles).
         assert client.get("/api/v1/vendors", headers=staff_headers).status_code != 403
 
-    def test_staff_can_list_purchase_orders(self, client, staff_headers):
+    def test_staff_cannot_list_purchase_orders(self, client, staff_headers):
+        # F60: POs carry unit cost prices -- purchase roles only.
         resp = client.get("/api/v1/vendors/purchase-orders", headers=staff_headers)
-        assert resp.status_code != 403
+        assert resp.status_code == 403

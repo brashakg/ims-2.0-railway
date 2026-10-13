@@ -16,12 +16,15 @@ import { portalApi, type OrderTracking } from '../../services/api/portal';
 
 // Canonical order lifecycle, in display order. We render every step and mark
 // the ones that have happened (present in status_history) as complete, with
-// the current status highlighted.
+// the current status highlighted. SHIPPED (an online order on its way) is a
+// step only while the order is there, as on the staff tracker: a counter
+// order never ships.
 const FLOW: Array<{ key: string; label: string }> = [
   { key: 'DRAFT', label: 'Order placed' },
   { key: 'CONFIRMED', label: 'Confirmed' },
   { key: 'PROCESSING', label: 'In progress' },
   { key: 'READY', label: 'Ready for pickup' },
+  { key: 'SHIPPED', label: 'Shipped' },
   { key: 'DELIVERED', label: 'Delivered' },
 ];
 
@@ -87,10 +90,14 @@ export default function OrderTrackingPage() {
   }, [data]);
 
   const isCancelled = data?.status === 'CANCELLED';
+  const flow = useMemo(
+    () => FLOW.filter((s) => s.key !== 'SHIPPED' || data?.status === 'SHIPPED'),
+    [data],
+  );
   const currentIndex = useMemo(() => {
     if (!data?.status) return -1;
-    return FLOW.findIndex((s) => s.key === data.status);
-  }, [data]);
+    return flow.findIndex((s) => s.key === data.status);
+  }, [data, flow]);
 
   if (!token) {
     return <Shell><ErrorCard msg="This tracking link is missing its code." /></Shell>;
@@ -140,7 +147,7 @@ export default function OrderTrackingPage() {
             <div>
               <p className="text-gray-500">Status</p>
               <p className={`font-semibold ${isCancelled ? 'text-red-600' : 'text-gray-900'}`}>
-                {isCancelled ? 'Cancelled' : (FLOW[currentIndex]?.label ?? data.status)}
+                {isCancelled ? 'Cancelled' : (flow[currentIndex]?.label ?? data.status)}
               </p>
             </div>
             {data.expected_delivery && !isCancelled && (
@@ -167,11 +174,11 @@ export default function OrderTrackingPage() {
             </div>
           ) : (
             <ol className="space-y-0">
-              {FLOW.map((step, i) => {
+              {flow.map((step, i) => {
                 const done = step.key in reached || (currentIndex >= 0 && i <= currentIndex);
                 const isCurrent = i === currentIndex;
                 const ts = reached[step.key];
-                const isLast = i === FLOW.length - 1;
+                const isLast = i === flow.length - 1;
                 return (
                   <li key={step.key} className="flex gap-3">
                     <div className="flex flex-col items-center">

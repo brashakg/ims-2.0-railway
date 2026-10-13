@@ -15,6 +15,7 @@ from ...dependencies import (
     get_db,
     validate_store_access,
 )
+from ...services.cost_mask import mask_cost
 from ...services.name_resolver import order_actor_id, order_actor_name_map
 from ._shared import (
     _REPORT_FINANCE_ROLES,
@@ -517,13 +518,19 @@ async def daily_stock_count(
         total_items += 1
         total_value += item.get("quantity", 0) * item.get("cost_price", 0)
 
-    return {
-        "data": list(by_category.values()),
-        "summary": {
-            "total_items": total_items,
-            "total_value": round(total_value, 2),
-            "total_quantity": sum(item.get("quantity", 0) for item in all_stock),
+    # Stock value is at cost: the roles that see product cost only (D7).
+    return mask_cost(
+        {
+            "data": list(by_category.values()),
+            "summary": {
+                "total_items": total_items,
+                "total_value": round(total_value, 2),
+                "total_quantity": sum(item.get("quantity", 0) for item in all_stock),
+            },
         },
-    }
+        current_user,
+        "product",
+        extra=("total_value",),
+    )
 
 

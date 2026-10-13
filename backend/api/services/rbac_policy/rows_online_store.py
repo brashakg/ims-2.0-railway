@@ -188,7 +188,7 @@ ROWS: List[Dict[str, object]] = [
     },
     {
         "method": "DELETE",
-        "path": "/api/v1/online-store/collections/{collection_id}/products/{sku}",
+        "path": "/api/v1/online-store/collections/{collection_id}/products/{sku:path}",
         "allowed": ["ADMIN", "CATALOG_MANAGER", "DESIGN_MANAGER", "SUPERADMIN"],
     },
     {
@@ -514,6 +514,11 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/online-store/refund-reviews/{review_id}/reject",
+        "allowed": ["ADMIN", "ACCOUNTANT", "SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/online-store/refund-reviews/{review_id}/goods-back",
         "allowed": ["ADMIN", "ACCOUNTANT", "SUPERADMIN"],
     },
     # --- /api/v1/ondc ---  (BVI-20: ONDC Seller Node scaffolding -- DARK default)

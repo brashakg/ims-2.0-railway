@@ -15,6 +15,9 @@ registry by collapsing every catalogued ``(method, path)`` to a single key:
                                        gated and must NOT broaden the
                                        products:write role union -- see
                                        capability_for)
+    /catalog/flags                  -> "catalog:flag"       (curated: STORE_
+                                       MANAGER raises catalogue flags and must
+                                       not broaden catalog:write)
     /online-store/orders/*/clear-rx-hold
                                     -> "online-store:rx-clear"  (curated: the
                                        clinical Rx-hold release is kept OUT of
@@ -133,8 +136,34 @@ def capability_for(method: str, path: str) -> Optional[str]:
     # in the module deny.
     if mod == "online-store" and tmpl.endswith("/clear-rx-hold"):
         return "online-store:rx-clear"
+    # Curated finer capability: raising a catalogue flag ("needs work",
+    # owner 2026-10-12). STORE_MANAGER may flag; collapsing it to the generic
+    # catalog:write would let the grant guard treat a store manager as able
+    # to hand out catalogue editing. Marking a flag fixed stays catalog:write
+    # (its roles already edit the catalogue).
+    if tmpl == "/api/v1/catalog/flags":
+        return "catalog:flag"
+    # Curated finer capability: LOGGING a vendor return. Owner ruling
+    # 2026-10-12 lets WORKSHOP_STAFF log one (unpriced); on the generic
+    # vendor-returns:write key they would join the approve / ship / credit
+    # union the grant guard reasons from. A stored per-user deny or grant of
+    # vendor-returns:write, and a 'vendors' module deny (which denies
+    # vendor-returns:write), still answer it: PARENT_CAPABILITY.
+    if method.upper() == "POST" and tmpl.rstrip("/") == "/api/v1/vendor-returns":
+        return "vendor-returns:create"
     verb = "read" if method.upper() in _READ_METHODS else "write"
     return f"{mod}:{verb}"
+
+
+# A curated key carved out of its module's generic key for the ROLE layer only.
+# The route was the parent key before the carve-out, so a per-user deny or
+# grant stored on the parent must keep answering it (permission_resolver):
+# else a user denied vendor-returns:write could log returns again. It is also
+# the one place a module deny reaches the carved-out key (the module deny names
+# the parent), so the key needs no MODULE_EXTRA_DENY_CAPABILITIES entry.
+PARENT_CAPABILITY: Dict[str, str] = {
+    "vendor-returns:create": "vendor-returns:write",
+}
 
 
 def _build_universe() -> (

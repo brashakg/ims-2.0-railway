@@ -1,0 +1,63 @@
+// ============================================================================
+// The Delivery Challan button follows the server's answer (owner 2026-10-08)
+// ============================================================================
+// A valued challan (a move between two GST registrations) is printed by
+// managers and accounts only. Every transfer reply carries the print route's
+// own answer, can_print_challan; the details modal offers the button exactly
+// when it says yes, so nobody is shown a button that answers 403.
+
+import { render, screen, fireEvent } from '@testing-library/react';
+import { describe, it, expect, vi } from 'vitest';
+
+const getTransfers = vi.fn();
+
+vi.mock('../../../context/AuthContext', () => ({
+  useAuth: () => ({
+    user: { id: 'u1', roles: ['STORE_MANAGER'], storeIds: ['ST-DHN-1'], activeStoreId: 'ST-DHN-1' },
+  }),
+}));
+vi.mock('../../../context/ToastContext', () => ({
+  useToast: () => ({ error: () => {}, success: () => {}, warning: () => {}, info: () => {} }),
+}));
+vi.mock('../../../services/api', () => ({
+  inventoryApi: { getTransfers: (...a: unknown[]) => getTransfers(...a) },
+}));
+vi.mock('../../../services/api/printDocuments', () => ({
+  printDocumentsApi: { openTransferChallan: vi.fn() },
+}));
+
+import { StockTransferManagement } from '../StockTransferManagement';
+
+const transfer = (canPrintChallan: boolean) => ({
+  id: 'trf_1',
+  transfer_number: 'TRF-202610-0001',
+  from_location_id: 'ST-DHN-1',
+  from_location_name: 'Hirapur Dhanbad',
+  to_location_id: 'ST-BOK-1',
+  to_location_name: 'Sector 4 Bokaro',
+  status: 'in_transit',
+  items: [],
+  created_by: 'u1',
+  created_at: '2026-10-13T05:00:00',
+  total_items: 2,
+  can_print_challan: canPrintChallan,
+});
+
+async function openDetails(canPrintChallan: boolean) {
+  getTransfers.mockResolvedValue({ transfers: [transfer(canPrintChallan)] });
+  const view = render(<StockTransferManagement />);
+  fireEvent.click(await screen.findByText('#TRF-202610-0001'));
+  expect(await screen.findByText('Transfer #TRF-202610-0001')).toBeInTheDocument();
+  return view;
+}
+
+describe('the transfer details modal', () => {
+  it('offers the Delivery Challan only when the server says this user prints it', async () => {
+    const refused = await openDetails(false);
+    expect(screen.queryByRole('button', { name: /Delivery Challan/ })).toBeNull();
+    refused.unmount();
+
+    await openDetails(true);
+    expect(screen.getByRole('button', { name: /Delivery Challan/ })).toBeInTheDocument();
+  });
+});

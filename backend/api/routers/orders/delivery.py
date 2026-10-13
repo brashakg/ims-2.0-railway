@@ -163,7 +163,7 @@ async def deliver_order(
         if not validate_status_transition(order.get("status", ""), "DELIVERED"):
             raise HTTPException(
                 status_code=400,
-                detail=f"Cannot deliver — current status is {order.get('status')}. Must be READY.",
+                detail=f"Cannot deliver — current status is {order.get('status')}. Must be READY or SHIPPED.",
             )
 
         # PATIENT SAFETY: THIS is the handover door the counter actually uses --
@@ -235,7 +235,7 @@ async def deliver_order(
             repo,
             order_id,
             "DELIVERED",
-            "READY",
+            order.get("status"),  # the status the transition check just passed
             current_user.get("user_id"),
             extra=_claim_extra,
         ):

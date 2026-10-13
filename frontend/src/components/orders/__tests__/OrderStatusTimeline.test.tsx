@@ -51,3 +51,18 @@ describe('OrderStatusTimeline actor names', () => {
     expect(screen.getByText(`Changed by: ${RAW_ID}`)).toBeTruthy();
   });
 });
+
+describe('OrderStatusTimeline shipped entry', () => {
+  it('draws a SHIPPED line with its own truck, not the DRAFT look', () => {
+    render(
+      <OrderStatusTimeline
+        statusHistory={history({ status: 'SHIPPED' })}
+        createdAt="2026-08-25T09:00:00"
+        createdBy="System"
+      />,
+    );
+    const shipped = screen.getByText('SHIPPED');
+    expect(shipped.className).toContain('text-indigo-600');
+    expect(shipped.closest('.flex.gap-3')?.textContent).toContain('🚚');
+  });
+});

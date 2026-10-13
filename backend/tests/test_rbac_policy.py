@@ -228,7 +228,7 @@ def test_finance_owner_reports_narrowed_to_org_admins():
         "/api/v1/finance/itc-register",
     ):
         allowed = _allowed("GET", path)
-        assert set(allowed) == {"ACCOUNTANT", "ADMIN", "SUPERADMIN"}, path
+        assert set(allowed) - {"SUPERADMIN"} == {"ACCOUNTANT", "ADMIN"}, path
         assert "STORE_MANAGER" not in allowed
 
 

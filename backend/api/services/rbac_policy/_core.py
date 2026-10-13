@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import List, Union
 
+from ..cost_mask import AP_ROLES, PURCHASE_ROLES, RETURN_READERS as _RETURN_READERS
+
 # All 11 operational roles (INVESTOR excluded - read-only via middleware, never
 # an allow-list member). SUPERADMIN is a member of every gate implicitly.
 ALL_ROLES: List[str] = [
@@ -36,3 +38,17 @@ PUBLIC = "PUBLIC"
 AUTHENTICATED = "AUTHENTICATED"
 
 Allowed = Union[List[str], str]
+
+# The accounts roles: services/cost_mask.AP_ROLES, the one supplier-money rule.
+# Every row whose handler asks it -- require_roles(*_AP_ROLES),
+# finance _require_finance_admin, can_see_cost(user, "payables") -- says
+# ACCOUNTS rather than spelling the roles, so narrowing AP_ROLES moves the
+# middleware row with the handler. (SUPERADMIN passes every row on its own.)
+ACCOUNTS: List[str] = sorted(AP_ROLES)
+
+# The purchase roles and the Vendor Returns readers: services/cost_mask, the
+# one purchase rule. Every row whose handler gate is require_roles(*<that
+# tuple>) -- vendors, POs, GRNs, vendor returns, RMAs, RTV debit notes -- says
+# PURCHASE / RETURN_READERS, so changing the tuple moves the row with the gate.
+PURCHASE: List[str] = sorted(PURCHASE_ROLES)
+RETURN_READERS: List[str] = sorted(_RETURN_READERS)

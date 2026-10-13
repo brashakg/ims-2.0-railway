@@ -12,6 +12,7 @@ from fastapi import Depends, Query
 from ..auth import get_current_user
 from ...dependencies import validate_store_access
 from ...services import ap_engine, cashflow
+from ...services.cost_mask import can_see_cost
 from ...services.salary_visibility import is_payroll_shaped_expense, is_salary_admin
 from ._shared import (
     PAID_STATUSES,
@@ -87,34 +88,49 @@ async def get_cash_flow(
             ]
         )
     )
-    po_match = {
-        "date": {"$gte": start.isoformat()},
-        "payment_status": {"$in": PAID_STATUSES},
-    }
-    if active_store:
-        po_match["delivery_store_id"] = active_store
-    po_out = list(
-        db.get_collection("purchase_orders").aggregate(
-            [
-                {"$match": po_match},
-                {
-                    "$group": {
-                        "_id": None,
-                        "total": {
-                            "$sum": {
-                                "$ifNull": ["$total_amount", {"$ifNull": ["$total", 0]}]
-                            }
-                        },
-                    }
-                },
-            ]
+    # What was paid to suppliers -- the paid POs below AND vendor_payments --
+    # is ADMIN + ACCOUNTANT only (owner rulings 2026-09-29, 2026-10-12):
+    # services/cost_mask "payables", the one rule /finance/vendor-payments and
+    # the vendor ledger (AP_ROLES) answer. Anyone else never has either figure
+    # read, so neither is in a key nor in `outflows` / `net_cash_flow`, which
+    # would hand it straight back as
+    #     outflows - expense_outflow
+    # (the trap the payroll strip below documents); the reply says so with
+    # `vendor_payments_restricted` instead.
+    ap_reader = can_see_cost(current_user, "payables")
+    po_out = []
+    if ap_reader:
+        po_match = {
+            "date": {"$gte": start.isoformat()},
+            "payment_status": {"$in": PAID_STATUSES},
+        }
+        if active_store:
+            po_match["delivery_store_id"] = active_store
+        po_out = list(
+            db.get_collection("purchase_orders").aggregate(
+                [
+                    {"$match": po_match},
+                    {
+                        "$group": {
+                            "_id": None,
+                            "total": {
+                                "$sum": {
+                                    "$ifNull": [
+                                        "$total_amount",
+                                        {"$ifNull": ["$total", 0]},
+                                    ]
+                                }
+                            },
+                        }
+                    },
+                ]
+            )
         )
-    )
     # Real cash paid to vendors this period (vendor_payments). AP is org-level,
     # so only fold it in for the org/owner view (no specific store selected) to
     # avoid double-attributing HQ payments to one store.
     vendor_payment_outflow = 0.0
-    if not active_store:
+    if ap_reader and not active_store:
         try:
             vp = list(
                 db.get_collection("vendor_payments").aggregate(
@@ -182,9 +198,14 @@ async def get_cash_flow(
         "outflows": total_outflow,
         "net_cash_flow": round(total_inflow - total_outflow, 2),
         "expense_outflow": expense_outflow,
-        "purchase_outflow": purchase_outflow,
-        "vendor_payment_outflow": vendor_payment_outflow,
     }
+    if ap_reader:
+        body["purchase_outflow"] = purchase_outflow
+        body["vendor_payment_outflow"] = vendor_payment_outflow
+    else:
+        # The outflows leave what was paid to suppliers out for this reader:
+        # a flag, never a figure (as expenses_partially_restricted below).
+        body["vendor_payments_restricted"] = True
     if expenses_partially_restricted:
         # Same flag /pnl sets, and for the same reason: a short total must not
         # read as the truth. A flag, never a figure.
