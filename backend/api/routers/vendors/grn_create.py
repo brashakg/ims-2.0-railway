@@ -143,8 +143,12 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
 
         from .po_detail import rejected_delivery_on_closed_order
 
+        # A rejected delivery on a closed order is logged as a STANDARD
+        # receipt, never a delivery challan: no bill is ever due on it, so a DC
+        # would sit in the accountant's unbilled-challan list for good.
         if po.get("status") not in _RECEIVABLE_PO_STATUSES and not (
-            rejected_delivery_on_closed_order(po, [it.model_dump() for it in grn.items])
+            not is_dc
+            and rejected_delivery_on_closed_order(po, [it.model_dump() for it in grn.items])
         ):
             raise HTTPException(
                 status_code=400, detail="PO is not in receivable status"

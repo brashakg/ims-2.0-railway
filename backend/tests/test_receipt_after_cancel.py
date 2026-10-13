@@ -743,6 +743,18 @@ def test_cancelled_items_rejected_on_delivery_log_on_an_order_the_cancel_closed(
         assert e.value.status_code == 400, door
 
     rejected = [{"product_id": "P2", "received_qty": 3, "accepted_qty": 0, "rejected_qty": 3}]
+    # Not as a delivery challan: no bill is due on a closed order, so a DC
+    # would list as an unbilled challan for good.
+    dc = vendors_mod.GRNCreate(
+        po_id="PO-1", grn_subtype="DELIVERY_CHALLAN", dc_number="DC-77",
+        dc_date="2026-07-01", items=[{**i, "tallied": True} for i in rejected],
+    )
+    before = len(grn_repo.docs)
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(vendors_mod.create_grn(dc, current_user=_user()))
+    assert (e.value.status_code, e.value.detail) == (400, "PO is not in receivable status")
+    assert len(grn_repo.docs) == before
+
     gid = _create("normal", rejected, _user(), inv="INV-2")["grn_id"]
     assert _accept(gid)["grn_status"] == "ACCEPTED"
     assert grn_repo.docs[gid]["total_rejected"] == 3
