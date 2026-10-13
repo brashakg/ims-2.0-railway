@@ -5,7 +5,7 @@
  */
 import { describe, it, expect } from 'vitest';
 
-import { HANDOVER_ROLES, canCloseHandover } from '../handoverRoles';
+import { HANDOVER_ROLES, canCloseHandover, canMarkDelivered } from '../handoverRoles';
 
 describe('canCloseHandover', () => {
   it('allows every counter and scan role', () => {
@@ -62,5 +62,21 @@ describe('canCloseHandover', () => {
         'WORKSHOP_STAFF',
       ].sort(),
     );
+  });
+});
+
+describe('canMarkDelivered', () => {
+  it('offers Mark Delivered on READY and on a Shopify-fulfilled SHIPPED order', () => {
+    // Owner ruling 2026-09-28: Shopify "fulfilled" is SHIPPED; a click-and-collect
+    // order is handed over at the counter, so SHIPPED -> DELIVERED is the
+    // counter's (backend VALID_TRANSITIONS, orders/_shared.py).
+    expect(canMarkDelivered('READY')).toBe(true);
+    expect(canMarkDelivered('SHIPPED')).toBe(true);
+  });
+
+  it('never offers it where the backend refuses', () => {
+    for (const status of ['DRAFT', 'CONFIRMED', 'PROCESSING', 'DELIVERED', 'CANCELLED', 'VOID', '', null, undefined]) {
+      expect(canMarkDelivered(status)).toBe(false);
+    }
   });
 });

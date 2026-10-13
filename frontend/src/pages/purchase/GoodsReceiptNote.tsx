@@ -17,6 +17,7 @@ import { PurchaseShopPicker, usePurchaseShop } from './purchaseShop';
 import { matchingTotal } from './purchaseQueries';
 import { RowShop } from './invoices/pickers';
 import { useStores } from '../../hooks/usePOSQueries';
+import { grnCockpitApi, type UploadDocResult } from '../../services/api/grnCockpit';
 import { useToast } from '../../context/ToastContext';
 import { GRNPrint } from '../../components/print/GRNPrint';
 import { UnitLabelsModal } from '../../components/labels/UnitLabelsModal';
@@ -72,6 +73,7 @@ interface POOption {
   status?: string;
   // The shop the order delivers to: a standard receipt against it is booked there.
   delivery_store_id?: string;
+  closed_by_cancel?: boolean;
   items?: Array<{
     po_item_id?: string;
     id?: string;
@@ -214,6 +216,10 @@ export function GoodsReceiptNote() {
   const [pos, setPos] = useState<POOption[]>([]);
   const [, setIsLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  // F-S3: a STANDARD receipt carries the vendor's bill (the server refuses one
+  // without it, 400 ATTACHMENT_REQUIRED); a Delivery Challan is exempt.
+  const [bill, setBill] = useState<UploadDocResult | null>(null);
+  const [uploading, setUploading] = useState(false);
   // Print state: which GRN is currently being previewed (null = no print modal).
   const [printGrn, setPrintGrn] = useState<GRN | null>(null);
   // Issuing (receiving) store identity for the GRN print, resolved from the
@@ -242,6 +248,9 @@ export function GoodsReceiptNote() {
     return () => { cancelled = true; };
   }, [printGrn, grnScope, ownStoreId]);
 
+  // An order a cancel CLOSED (the server stamps closed_by_cancel) is listed
+  // too, apart, only to log a delivery the vendor sent anyway: every unit on
+  // it is rejected, nothing goes into stock (owner ruling 2026-10-08 (c)).
   const isReceivablePO = (status?: string) => !status || RECEIVABLE_PO_STATUSES.includes(status);
 
   // One read per open status, not one unfiltered page: the list route answers
@@ -249,7 +258,8 @@ export function GoodsReceiptNote() {
   // open ones (the newest) fell off the end behind the closed ones.
   const fetchPurchaseOrders = async (): Promise<POOption[]> => {
     const pages = await Promise.all(
-      RECEIVABLE_PO_STATUSES.map((status) =>
+      // CANCELLED / RECEIVED are read only for the orders a cancel closed.
+      [...RECEIVABLE_PO_STATUSES, 'CANCELLED', 'RECEIVED'].map((status) =>
         vendorsApi.getPurchaseOrders({ store_id: grnScope, status }).catch(() => null),
       ),
     );
@@ -264,10 +274,11 @@ export function GoodsReceiptNote() {
         vendor_name: p.vendor_name || p.vendor?.trade_name || p.vendor?.legal_name,
         status: p.status,
         delivery_store_id: p.delivery_store_id,
+        closed_by_cancel: !!p.closed_by_cancel,
         items: p.items || p.line_items || [],
       }))
       .filter((p: POOption) => {
-        if (!isReceivablePO(p.status) || seen.has(p.po_id)) return false;
+        if (!(p.closed_by_cancel || isReceivablePO(p.status)) || seen.has(p.po_id)) return false;
         seen.add(p.po_id);
         return true;
       });
@@ -319,6 +330,24 @@ export function GoodsReceiptNote() {
   // Receiving without a PO = DC mode with no PO picked. Lines are then typed
   // in from the product picker instead of hydrated from a PO.
   const noPoDc = isDcMode && !poNumber;
+  const needsBill = !isDcMode && !!poNumber;
+  // An order a cancel closed takes no unit: every unit that arrived is
+  // rejected, whatever the Rejected box says.
+  const rejectOnly = !!pos.find((p) => p.po_id === poNumber)?.closed_by_cancel;
+  const rejectedOf = (i: GRNLineItem) => (rejectOnly ? i.received_qty : i.rejected_qty);
+
+  const attachBill = async (file?: File) => {
+    if (!file) return;
+    setUploading(true);
+    try {
+      setBill(await grnCockpitApi.uploadDoc(file));
+    } catch {
+      setBill(null);
+      toast.error('Could not upload the bill - try again');
+    } finally {
+      setUploading(false);
+    }
+  };
 
   // Load the vendor list the first time DC mode is switched on. Fail-soft with
   // a visible error state — with no vendors the no-PO path cannot post, and a
@@ -413,7 +442,8 @@ export function GoodsReceiptNote() {
     setPoNumber(poId);
     const po = pos.find((p) => p.po_id === poId || p.po_number === poId);
     const lines = (po?.items || []).map((it) => {
-      const qty = it.quantity ?? it.qty ?? it.ordered_qty ?? 0;
+      // Nothing is due on an order a cancel closed: the receiver counts what came.
+      const qty = po?.closed_by_cancel ? 0 : it.quantity ?? it.qty ?? it.ordered_qty ?? 0;
       return {
         po_item_id: it.po_item_id || it.id || it.product_id,
         product_id: it.product_id,
@@ -511,23 +541,30 @@ export function GoodsReceiptNote() {
       toast.error('Every line needs a quantity of at least 1');
       return;
     }
+    // A closed order's receipt carries only what arrived: a line at 0 would
+    // read as a shortage on an order with nothing due.
+    const lines = rejectOnly ? receivedItems.filter((i) => i.received_qty > 0) : receivedItems;
+    if (lines.length === 0) {
+      toast.error('Enter the units that arrived - each one is logged as rejected');
+      return;
+    }
     // Ruling 14 -- the tally. Mirrored server-side (LINES_NOT_TALLIED) for
     // PO-backed receipts; a PO-less DC has no server mirror, so the tick here
     // is the ONLY "a person counted this" record — required, not decorative.
-    const untallied = receivedItems.filter((i) => !i.tallied);
+    const untallied = lines.filter((i) => !i.tallied);
     if ((!isDcMode || noPoDc) && untallied.length > 0) {
       toast.error(
         `Tick every line to confirm what arrived (${untallied.length} still unchecked)`,
       );
       return;
     }
-    const badSplit = receivedItems.filter((i) => i.rejected_qty > i.received_qty);
+    const badSplit = lines.filter((i) => rejectedOf(i) > i.received_qty);
     if (badSplit.length > 0) {
       toast.error('A line cannot reject more units than arrived');
       return;
     }
-    const noReason = receivedItems.filter(
-      (i) => i.rejected_qty > 0 && !(i.rejection_reason || '').trim(),
+    const noReason = lines.filter(
+      (i) => rejectedOf(i) > 0 && !(i.rejection_reason || '').trim(),
     );
     if (noReason.length > 0) {
       toast.error('Say why the units were rejected — the debit note needs the reason');
@@ -535,6 +572,14 @@ export function GoodsReceiptNote() {
     }
     if (isDcMode && !dcNumber.trim()) {
       toast.error('DC Number is required for a Delivery Challan');
+      return;
+    }
+    if (!isDcMode && !vendorInvoiceNo.trim()) {
+      toast.error('Enter the vendor invoice number');
+      return;
+    }
+    if (needsBill && !bill?.file_id) {
+      toast.error('Attach the vendor invoice or challan (image or PDF) before posting');
       return;
     }
     setSubmitting(true);
@@ -553,13 +598,16 @@ export function GoodsReceiptNote() {
         vendor_id: noPoDc ? dcVendorId : undefined,
         vendor_invoice_no: vendorInvoiceNo || undefined,
         vendor_invoice_date: new Date().toISOString().split('T')[0],
-        items: receivedItems.map((item) => ({
+        attachment_file_id: needsBill ? bill?.file_id ?? undefined : undefined,
+        attachment_filename: needsBill ? bill?.filename : undefined,
+        attachment_mime: needsBill ? bill?.mime : undefined,
+        items: lines.map((item) => ({
           po_item_id: item.po_item_id || undefined,
           product_id: item.product_id,
           received_qty: item.received_qty,
-          accepted_qty: item.received_qty - item.rejected_qty,
-          rejected_qty: item.rejected_qty,
-          rejection_reason: item.rejected_qty > 0 ? item.rejection_reason : undefined,
+          accepted_qty: item.received_qty - rejectedOf(item),
+          rejected_qty: rejectedOf(item),
+          rejection_reason: rejectedOf(item) > 0 ? item.rejection_reason : undefined,
           tallied: item.tallied,
         })),
         notes: qualityNotes || undefined,
@@ -593,10 +641,14 @@ export function GoodsReceiptNote() {
           : posted?.po_status === 'PARTIALLY_RECEIVED'
             ? 'PO partially received'
             : '';
-      toast.success(
-        `GRN posted${units ? ` · ${units} unit${units === 1 ? '' : 's'} added to stock` : ''}${poState ? ` · ${poState}` : ''}`,
-      );
-      if (grnId) setLabelsFor(grnId);
+      if (rejectOnly) {
+        toast.success('Rejected delivery logged · nothing added to stock · a discrepancy task follows');
+      } else {
+        toast.success(
+          `GRN posted${units ? ` · ${units} unit${units === 1 ? '' : 's'} added to stock` : ''}${poState ? ` · ${poState}` : ''}`,
+        );
+        if (grnId) setLabelsFor(grnId);
+      }
 
       setActiveTab('history');
       setPoNumber('');
@@ -604,6 +656,7 @@ export function GoodsReceiptNote() {
       setInspectionChecks({});
       setQualityNotes('');
       setVendorInvoiceNo('');
+      setBill(null);
       setDiscrepancies('');
       setIsDcMode(false);
       setDcNumber('');
@@ -613,7 +666,13 @@ export function GoodsReceiptNote() {
       // Posting changes which POs are still receivable — refresh both lists.
       await Promise.all([reloadGrns(), reloadPurchaseOrders()]);
     } catch (err) {
-      toast.error('Failed to create GRN');
+      // The server's own reason (a refused unit, a missing bill) beats a bare failure.
+      const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+      toast.error(
+        typeof detail === 'string'
+          ? detail
+          : (detail as { message?: string } | undefined)?.message || 'Failed to create GRN',
+      );
     } finally {
       setSubmitting(false);
     }
@@ -811,6 +870,9 @@ export function GoodsReceiptNote() {
                       setDcQuery('');
                       setDcResults([]);
                     }
+                    // A rejected delivery on a closed order is never a DC: no
+                    // bill is due on it, so it would list as unbilled for good.
+                    if (on && rejectOnly) onSelectPO('');
                   }}
                 />
                 This is a Delivery Challan (no invoice yet)
@@ -883,15 +945,32 @@ export function GoodsReceiptNote() {
                     <select value={poNumber} onChange={(e) => onSelectPO(e.target.value)} className="input w-full">
                       <option value="">{isDcMode ? 'No PO — receiving over the counter' : 'Select a PO…'}</option>
                       {onAllStores ? (
-                        <PoOptionsNamingShop pos={pos} />
+                        <PoOptionsNamingShop pos={pos.filter((p) => !p.closed_by_cancel)} />
                       ) : (
-                        pos.map((p) => (
+                        pos.filter((p) => !p.closed_by_cancel).map((p) => (
                           <option key={p.po_id} value={p.po_id}>
                             {poLabel(p)}
                           </option>
                         ))
                       )}
+                      {!isDcMode && pos.some((p) => p.closed_by_cancel) && (
+                        <optgroup label="Log a rejected delivery">
+                          {pos.filter((p) => p.closed_by_cancel).map((p) => (
+                            <option key={p.po_id} value={p.po_id}>
+                              {poLabel(p)}
+                              {' · closed by a cancel'}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
                     </select>
+                    {rejectOnly && (
+                      <p className="text-xs mt-1" style={{ color: 'var(--ink-3)' }}>
+                        This order was closed by a cancel. Count what the vendor sent: every unit
+                        is logged as rejected, nothing goes into stock, and a discrepancy task
+                        follows for the debit note.
+                      </p>
+                    )}
                   </div>
                   <div>
                     <label className="block text-xs font-medium mb-1" style={{ color: 'var(--ink-4)' }}>
@@ -905,6 +984,25 @@ export function GoodsReceiptNote() {
                       className="input w-full"
                     />
                   </div>
+                  {needsBill && (
+                    <div className="tablet:col-span-2">
+                      <label className="block text-xs font-medium mb-1" style={{ color: 'var(--ink-4)' }}>
+                        Vendor invoice or challan (image or PDF)
+                      </label>
+                      <input
+                        type="file"
+                        accept="image/*,application/pdf"
+                        aria-label="Attach the vendor invoice or challan"
+                        onChange={(e) => attachBill(e.target.files?.[0])}
+                        className="text-sm"
+                      />
+                      {uploading ? (
+                        <Loader2 className="w-4 h-4 animate-spin inline ml-2" style={{ color: 'var(--ink-4)' }} />
+                      ) : bill?.file_id ? (
+                        <span className="text-xs ml-2" style={{ color: 'var(--ok)' }}>Attached: {bill.filename}</span>
+                      ) : null}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -1092,6 +1190,7 @@ export function GoodsReceiptNote() {
                             type="number"
                             min={0}
                             value={item.received_qty}
+                            aria-label={`Received units on line ${idx + 1}`}
                             onChange={(e) =>
                               startTransition(() => {
                                 const v = Math.max(0, parseInt(e.target.value) || 0);
@@ -1118,7 +1217,8 @@ export function GoodsReceiptNote() {
                             type="number"
                             min={0}
                             max={item.received_qty}
-                            value={item.rejected_qty}
+                            value={rejectedOf(item)}
+                            disabled={rejectOnly}
                             aria-label={`Rejected units on line ${idx + 1}`}
                             onChange={(e) =>
                               startTransition(() => {
@@ -1131,7 +1231,7 @@ export function GoodsReceiptNote() {
                             className="input"
                             style={{ width: 64, textAlign: 'right', height: 30, padding: '0 6px' }}
                           />
-                          {item.rejected_qty > 0 ? (
+                          {rejectedOf(item) > 0 ? (
                             <input
                               type="text"
                               value={item.rejection_reason || ''}
@@ -1252,7 +1352,9 @@ export function GoodsReceiptNote() {
           {/* Footer actions */}
           <div className="flex items-center gap-3 flex-wrap">
             <span className="text-xs" style={{ color: 'var(--ink-4)' }}>
-              {noPoDc
+              {rejectOnly
+                ? `Posting logs ${totals.rec} rejected unit${totals.rec === 1 ? '' : 's'} against ${poNumber} · nothing goes into stock · the order stays closed.`
+                : noPoDc
                 ? `Posting this Delivery Challan adds ${totals.rec} unit${totals.rec === 1 ? '' : 's'} to your own shop's stock · the receipt is what the vendor's bill will link to.`
                 : `Posting against ${poNumber || 'the selected PO'} adds ${totals.rec} unit${totals.rec === 1 ? '' : 's'} to the stock of the shop it delivers to · the PO is marked partially / fully received · variance raises a debit note.`}
             </span>
@@ -1270,6 +1372,7 @@ export function GoodsReceiptNote() {
               onClick={handleSubmit}
               disabled={
                 submitting ||
+                uploading ||
                 receivedItems.length === 0 ||
                 (!poNumber && !(isDcMode && dcVendorId))
               }

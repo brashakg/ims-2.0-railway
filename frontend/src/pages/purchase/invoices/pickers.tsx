@@ -109,7 +109,7 @@ export function GrnPickerModal({
           ) : grns.length === 0 ? (
             <div className="text-center py-8 text-gray-500">
               <PackageCheck className="w-10 h-10 text-gray-300 mx-auto mb-2" />
-              No accepted GRNs to invoice <ScopeWords storeId={storeId} />. Receive and accept goods in the GRN flow first.
+              No accepted GRNs to invoice <ScopeWords storeId={storeId} />. The shop&rsquo;s store manager receives and accepts the goods first.
             </div>
           ) : (
             <div className="space-y-2">
@@ -281,7 +281,7 @@ export function DcPickerModal({
           ) : dcs.length === 0 ? (
             <div className="text-center py-8 text-gray-500">
               <PackageCheck className="w-10 h-10 text-gray-300 mx-auto mb-2" />
-              No open Delivery Challans for this filter <ScopeWords storeId={storeId} />. Log + accept a DC in the GRN flow first.
+              No open Delivery Challans for this filter <ScopeWords storeId={storeId} />. The shop&rsquo;s store manager logs and accepts the DC first.
             </div>
           ) : (
             <div className="space-y-2">

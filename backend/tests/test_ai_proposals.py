@@ -201,8 +201,10 @@ class TestReversibleAutoExecutes:
         pos = db.get_collection("purchase_orders").docs
         assert len(pos) == 1
         assert pos[0]["status"] == "DRAFT"
-        assert pos[0]["sku"] == "SKU-1"
-        assert pos[0]["quantity"] == 12
+        # The one order shape: priced `items` lines, not a bare sku/quantity.
+        assert [(i["sku"], i["quantity"]) for i in pos[0]["items"]] == [("SKU-1", 12)]
+        assert pos[0]["items"][0]["line_status"] == "OPEN"
+        assert "quantity" not in pos[0]
         assert pos[0]["from_proposal_id"] == prop["proposal_id"]
         # Sending is NOT auto-done: it's a draft that still needs a human
         assert pos[0]["requires_approval"] is True

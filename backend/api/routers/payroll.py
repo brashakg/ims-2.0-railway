@@ -27,6 +27,7 @@ from ..dependencies import (
 )
 from ..utils.ist import now_ist, ist_day_start_utc, ist_date_str, ist_month_window_utc
 from ..services.name_resolver import order_actor_id, order_actor_name_map
+from ..services.online_order_status import SALE_DONE_STATUSES
 from ..services.payroll_engine import (
     DEFAULT_PT_SLABS,
     pt_for,
@@ -2196,7 +2197,7 @@ async def get_commission_summary(
 
         # Build order query.
         order_query: dict = {
-            "status": {"$in": ["COMPLETED", "DELIVERED", "PAID"]},
+            "status": {"$in": SALE_DONE_STATUSES},
             "created_at": {"$gte": from_dt, "$lte": to_dt},
         }
         active_store = store_in_view(store_id, current_user)
@@ -2343,7 +2344,7 @@ async def get_commission_leaderboard(
 
         active_store = store_in_view(store_id, current_user)
         query: dict = {
-            "status": {"$in": ["COMPLETED", "DELIVERED", "PAID"]},
+            "status": {"$in": SALE_DONE_STATUSES},
             "created_at": {"$gte": from_dt},
         }
         if active_store:

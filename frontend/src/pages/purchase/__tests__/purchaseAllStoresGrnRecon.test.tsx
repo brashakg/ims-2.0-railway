@@ -30,6 +30,11 @@ vi.mock('../../../context/AuthContext', () => ({
 const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() }));
 vi.mock('../../../context/ToastContext', () => ({ useToast: () => toast }));
 vi.mock('../../../components/print/GRNPrint', () => ({ GRNPrint: () => null }));
+vi.mock('../../../services/api/grnCockpit', () => ({
+  grnCockpitApi: {
+    uploadDoc: vi.fn().mockResolvedValue({ file_id: 'F-1', filename: 'bill.pdf', mime: 'application/pdf', size: 1, sha256: 'x', persisted: true }),
+  },
+}));
 const identity = vi.hoisted(() => ({ resolveStoreIdentity: vi.fn() }));
 vi.mock('../../../components/print/storeIdentity', () => identity);
 
@@ -231,6 +236,11 @@ describe('F63: Goods received on All stores -- the PO picker reads what the list
     await screen.findByText(/PO-PUN-7/);
     fireEvent.change(poPicker(), { target: { value: 'po-pun-7' } });
     fireEvent.change(screen.getByPlaceholderText('e.g. JJ/24/04/2240'), { target: { value: 'INV-9' } });
+    // A standard receipt carries the vendor's bill (#1165 F-S3).
+    fireEvent.change(screen.getByLabelText('Attach the vendor invoice or challan'), {
+      target: { files: [new File(['%PDF'], 'bill.pdf', { type: 'application/pdf' })] },
+    });
+    await screen.findByText('Attached: bill.pdf');
     fireEvent.click(screen.getByLabelText(/Tally line 1/));
     fireEvent.click(screen.getByRole('button', { name: /Post GRN/i }));
     await waitFor(() => expect(http.post).toHaveBeenCalledWith('/vendors/grn', expect.anything()));

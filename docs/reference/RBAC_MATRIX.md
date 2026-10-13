@@ -1035,11 +1035,9 @@ manager gets 404).
 | `GET` | `/api/v1/tasks/` | AUTH |  |
 | `POST` | `/api/v1/tasks/` | AUTH |  |
 | `POST` | `/api/v1/tasks/auto-escalate-overdue` | AUTH |  |
-| `POST` | `/api/v1/tasks/auto-generate` | AUTH |  |
+| `POST` | `/api/v1/tasks/auto-generate` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |
 | `GET` | `/api/v1/tasks/checklists` | AUTH |  |
 | `POST` | `/api/v1/tasks/checklists/{checklist_type}/complete-item` | AUTH |  |
-| `GET` | `/api/v1/tasks/completion-stats` | AUTH |  |
-| `GET` | `/api/v1/tasks/escalations` | AUTH |  |
 | `GET` | `/api/v1/tasks/integrity/fake-closures` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
 | `GET` | `/api/v1/tasks/integrity/silent` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
 | `GET` | `/api/v1/tasks/my-tasks` | AUTH |  |
@@ -1064,7 +1062,7 @@ manager gets 404).
 | `POST` | `/api/v1/tasks/{task_id}/acknowledge` | AUTH |  |
 | `PATCH` | `/api/v1/tasks/{task_id}/complete` | AUTH |  |
 | `POST` | `/api/v1/tasks/{task_id}/escalate` | AUTH |  |
-| `POST` | `/api/v1/tasks/{task_id}/reassign` | AUTH |  |
+| `POST` | `/api/v1/tasks/{task_id}/reassign` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |
 | `POST` | `/api/v1/tasks/{task_id}/start` | AUTH |  |
 
 ### `/api/v1/transfers`
@@ -1150,6 +1148,13 @@ manager gets 404).
 
 ### `/api/v1/vendors`
 
+> Receiving goods (log a delivery, accept it, express receive, void, escalate,
+> upload the receipt document, the receiving cockpit) is **managers only** --
+> store manager, area manager, admin, superadmin; NOT the accountant (owner
+> ruling 2026-09-28). Raising, sending, editing and cancelling a purchase
+> order stay with the four order roles -- not the catalogue manager (owner
+> 2026-10-08).
+
 | Method | Path | Allowed | S |
 |---|---|---|---|
 | `GET` | `/api/v1/vendors` | AUTH |  |
@@ -1159,14 +1164,21 @@ manager gets 404).
 | `GET` | `/api/v1/vendors/purchases-this-month` | ADMIN, ACCOUNTANT |  |
 | `GET` | `/api/v1/vendors/ap-aging` | ADMIN, ACCOUNTANT |  |
 | `GET` | `/api/v1/vendors/grn` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-| `POST` | `/api/v1/vendors/grn` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
+| `POST` | `/api/v1/vendors/grn` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
+| `POST` | `/api/v1/vendors/grn/express` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
+| `POST` | `/api/v1/vendors/grn/upload-doc` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
 | `GET` | `/api/v1/vendors/grn/{grn_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-| `POST` | `/api/v1/vendors/grn/{grn_id}/accept` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/vendors/grn/{grn_id}/escalate` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
+| `POST` | `/api/v1/vendors/grn/{grn_id}/accept` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
+| `POST` | `/api/v1/vendors/grn/{grn_id}/escalate` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
+| `POST` | `/api/v1/vendors/grn/{grn_id}/void` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
+| `GET` | `/api/v1/vendors/goods-receipt/cockpit` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
+| `GET` | `/api/v1/vendors/last-cost` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `GET` | `/api/v1/vendors/purchase-orders` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `POST` | `/api/v1/vendors/purchase-orders` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `GET` | `/api/v1/vendors/purchase-orders/{po_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
+| `PUT` | `/api/v1/vendors/purchase-orders/{po_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `POST` | `/api/v1/vendors/purchase-orders/{po_id}/cancel` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
+| `POST` | `/api/v1/vendors/purchase-orders/{po_id}/items/{line_index}/cancel` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `POST` | `/api/v1/vendors/purchase-orders/{po_id}/send` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `GET` | `/api/v1/vendors/purchase-orders/{po_id}/timeline` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `GET` | `/api/v1/vendors/{vendor_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |

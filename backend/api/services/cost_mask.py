@@ -72,6 +72,11 @@ PURCHASE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
 # the item, quantity and reason only (mask_vendor_return / mask_debit_note).
 # Their read gates ARE this tuple.
 RETURN_READERS = (*PURCHASE_ROLES, "WORKSHOP_STAFF")
+# Who receives goods into stock (log, accept, express-receive, void or escalate
+# a receipt; the receiving screen): owner ruling 2026-09-28, RECEIVING IS
+# MANAGERS ONLY -- the purchase roles without the accountant. The receiving
+# gates (routers/vendors/_shared._RECEIVE_ROLES) ARE this tuple.
+RECEIVE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER")
 # context -> the roles it admits on top of COST_VISIBLE_ROLES.
 _CONTEXT_ROLES = {
     "purchase": set(PURCHASE_ROLES),

@@ -260,6 +260,11 @@ class _FakeColl:
                 return _FakeResult(1)
         return _FakeResult(0)
 
+    def find(self, query=None, projection=None):
+        # The counter door's earlier-returns scan: a collection it cannot
+        # read is no answer (503), so the fake answers like Mongo.
+        return [dict(d) for d in self.docs if _doc_matches(d, query)]
+
     def find_one_and_update(self, query, update, return_document=None):
         for d in self.docs:
             if _doc_matches(d, query):
@@ -1265,3 +1270,37 @@ def test_concurrent_retry_restock_mints_exactly_one_unit(monkeypatch):
     assert available[0]["stock_id"] == "STK-OLD-1"
     # No fresh unit was minted (the single SOLD unit was reactivated once).
     assert all(not u["stock_id"].startswith("NEW-") for u in stock_repo.units)
+
+
+@pytest.mark.parametrize("walk_in", [True, False])
+def test_a_counter_retry_restocks_only_the_units_still_out(ctx, monkeypatch, walk_in):
+    """Panel finding (9da6612): a counter return of 2 on ORD-1 (SOLD STK-OLD-1
+    and STK-B); STK-OLD-1's write fails (the real update answers False), so
+    the return ends with STK-B back and the restock open. The retry re-ran
+    BOTH units: one reactivated STK-OLD-1, the other found no SOLD unit on
+    ORD-1 and the counter's order-agnostic fallback flipped the walk-in's
+    sold STK-W to AVAILABLE (or, with no such unit, minted a phantom) -- 3
+    units back for 2 returned. The retry puts back only what is still out."""
+    units = ctx["stock_repo"].units
+    units.append({**units[0], "stock_id": "STK-B"})
+    if walk_in:
+        units.append({**units[0], "stock_id": "STK-W", "order_id": "ORD-WALKIN"})
+    real_update = ctx["stock_repo"].update
+    down = {"STK-OLD-1"}
+    monkeypatch.setattr(ctx["stock_repo"], "update",
+                        lambda sid, data: False if sid in down else real_update(sid, data))
+    hdr = {"Authorization": f"Bearer {_staff_token(['ADMIN'])}"}
+    payload = _payload()
+    payload["items"][0]["return_qty"] = 2
+    created = ctx["client"].post("/api/v1/returns", json=payload, headers=hdr).json()
+    assert created["restock_applied"] is False and created["restock_stock_ids"] == ["STK-B"]
+
+    down.clear()
+    body = ctx["client"].post(f"/api/v1/returns/{created['return_id']}/restock", headers=hdr).json()
+    assert body["restock_applied"] is True
+    assert body["restock_stock_ids"] == ["STK-B", "STK-OLD-1"]
+    want = {"STK-OLD-1": "AVAILABLE", "STK-B": "AVAILABLE"}
+    if walk_in:
+        want["STK-W"] = "SOLD"
+    assert {u["stock_id"]: u["status"] for u in units} == want, "2 back for 2, no hijack, no mint"
+    assert all(u.get("order_id") == "ORD-WALKIN" for u in units if u["stock_id"] == "STK-W")

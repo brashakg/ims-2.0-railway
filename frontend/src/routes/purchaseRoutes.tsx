@@ -11,8 +11,15 @@ import { lazy } from 'react';
 import { Route, Navigate, useSearchParams } from 'react-router-dom';
 import { ProtectedRoute } from '../components/layout/ProtectedRoute';
 import { APPROVE_ROLES } from '../pages/purchase/invoices/shared';
+import { RECEIVING_MANAGER_ROLES } from '../pages/purchase/purchaseTypes';
 import { PURCHASE_ROLES, RETURN_READERS } from '../pages/purchase/purchaseRoles';
 import { NoShopGate } from '../components/common/NoShopNotice';
+
+// What the blocked page tells anyone else who opens a receiving screen
+// (audit F5). The page lists the roles that can right under it
+// (RECEIVING_MANAGER_ROLES -- managers only, owner ruling 2026-09-28), so the
+// hint points at that list rather than naming one title.
+const RECEIVE_DENIED_HINT = 'Goods are received into stock by staff in the roles listed below. Hand the delivery to one of them.';
 
 const PurchaseLayout = lazy(() => import('../pages/purchase/PurchaseLayout').then(m => ({ default: m.PurchaseLayout })));
 const PurchaseOrdersSection = lazy(() => import('../pages/purchase/PurchaseOrdersSection').then(m => ({ default: m.PurchaseOrdersSection })));
@@ -31,6 +38,7 @@ const ReconConsole = lazy(() => import('../pages/purchase/ReconConsole'));
 // list is requested), as PurchaseLayout does with NoShopNotice.
 
 // The module gate for the section pages (PURCHASE_ROLES): who may raise a PO.
+// Receiving has its own, narrower list (RECEIVING_MANAGER_ROLES).
 
 // Legacy ?tab= mapper: /purchase and /purchase?tab=<x> land on the section
 // page, carrying every other query param (grn_id!) along.
@@ -69,7 +77,7 @@ export const purchaseRoutes = (
     <Route
       path="purchase"
       element={
-        <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'WORKSHOP_STAFF']}>
+        <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'WORKSHOP_STAFF']} namesWhoCan={false}>
           <PurchaseLayout />
         </ProtectedRoute>
       }
@@ -156,20 +164,20 @@ export const purchaseRoutes = (
     <Route
       path="purchase/grn"
       element={
-        <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
+        <ProtectedRoute allowedRoles={[...RECEIVING_MANAGER_ROLES]} deniedHint={RECEIVE_DENIED_HINT}>
           <NoShopGate title="Goods received"><GoodsReceiptNote /></NoShopGate>
         </ProtectedRoute>
       }
     />
 
     {/* Procurement Phase 2: Deliveries inbox + guided express
-        receive (mandatory attachment gate). ALL receiving roles —
-        mirrors the backend /vendors/grn* gate (owner decision:
-        express receive for all receiving staff). */}
+        receive (mandatory attachment gate). Managers only (owner
+        ruling 2026-09-28: receiving stays with them) — mirrors the
+        backend /vendors/grn* gate. */}
     <Route
       path="purchase/receive"
       element={
-        <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT']}>
+        <ProtectedRoute allowedRoles={[...RECEIVING_MANAGER_ROLES]} deniedHint={RECEIVE_DENIED_HINT}>
           <NoShopGate title="Receive goods"><GoodsReceiptCockpit /></NoShopGate>
         </ProtectedRoute>
       }
