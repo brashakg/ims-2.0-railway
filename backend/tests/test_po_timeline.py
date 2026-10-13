@@ -148,6 +148,9 @@ def test_full_lifecycle_events_in_order(monkeypatch):
     kinds = [e["kind"] for e in out["events"]]
     # Chronological: ordered < sent < box_received < on_shelf < bill_settled
     assert kinds == ["ordered", "sent", "box_received", "on_shelf", "bill_settled"]
+    # Every PO is born a DRAFT; it is not "ordered" until it is SENT (owner
+    # 2026-09-28 / D11) -- the first event says what actually happened.
+    assert [e["label"] for e in out["events"]][:2] == ["Draft raised", "Sent"]
     assert len(out["grns"]) == 1 and len(out["invoices"]) == 1
     assert out["status"] == "PARTIAL"
 

@@ -4,10 +4,12 @@
 
 import { useState, useEffect } from 'react';
 import {
-  FileText,
+  Send,
+  Pencil,
   X as XIcon,
   Printer,
   History,
+  Ban,
 } from 'lucide-react';
 import { getStatusBadge } from './statusBadge';
 import type { PurchaseOrder } from './purchaseTypes';
@@ -15,17 +17,82 @@ import { POPrint } from '../../components/print/POPrint';
 import { POLifecycleDrawer } from '../../components/purchase/POLifecycleDrawer';
 import { useAuth } from '../../context/AuthContext';
 import { resolveStoreIdentity, type StoreIdentity } from '../../components/print/storeIdentity';
+import { lineLabel } from './purchaseMappers';
+
+/** What a person can do to an order from this modal (owner rulings
+ *  2026-09-28): send a draft to the vendor, edit a draft, cancel the order or
+ *  one line -- the cancels always WITH a reason. */
+export type POAction = 'send' | 'edit' | 'cancel' | 'cancel-line';
+export interface POActionOptions {
+  reason?: string;
+  lineIndex?: number;
+}
 
 interface PurchaseOrderDetailProps {
   po: PurchaseOrder;
   onClose: () => void;
-  onAction: (po: PurchaseOrder, action: string) => void;
+  onAction: (po: PurchaseOrder, action: POAction, opts?: POActionOptions) => void | Promise<void>;
+}
+
+const PART_RECEIVED = new Set(['PARTIALLY_RECEIVED', 'PARTIAL']);
+const CANCELLABLE = new Set(['DRAFT', 'SENT', 'ACKNOWLEDGED', ...PART_RECEIVED]);
+
+/** Units still due on a line (ordered minus received, never negative). */
+function dueOn(item: PurchaseOrder['items'][number]): number {
+  return Math.max(0, (item.quantity ?? 0) - (item.receivedQty ?? 0));
 }
 
 export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDetailProps) {
   const { user } = useAuth();
   const [showPrint, setShowPrint] = useState(false);
   const [showTimeline, setShowTimeline] = useState(false);
+  // The cancel being confirmed: the whole order, or one line (by position).
+  const [cancelTarget, setCancelTarget] = useState<{ lineIndex?: number } | null>(null);
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  // Set once THIS modal sent the draft: the send step then offers Print PO
+  // right there (owner 2026-09-29) -- the vendor needs the paper or the PDF.
+  const [sentHere, setSentHere] = useState(false);
+
+  const isDraft = po.status === 'DRAFT';
+  const partReceived = PART_RECEIVED.has(po.status);
+  const cancellable = CANCELLABLE.has(po.status);
+  // A draft line is removed (it never went to the vendor) but never the last
+  // one -- that is cancelling the order. A sent line cancels what is still due.
+  const canCancelLine = (item: PurchaseOrder['items'][number]) =>
+    cancellable && (isDraft ? po.items.length > 1 : dueOn(item) > 0);
+  const anyLineCancellable = po.items.some(canCancelLine);
+  const cancelLine = cancelTarget?.lineIndex !== undefined ? po.items[cancelTarget.lineIndex] : null;
+
+  const closeCancel = () => {
+    setCancelTarget(null);
+    setReason('');
+  };
+  const confirmCancel = async () => {
+    const why = reason.trim();
+    if (why.length < 3 || !cancelTarget) return;
+    setBusy(true);
+    try {
+      if (cancelTarget.lineIndex !== undefined) {
+        await onAction(po, 'cancel-line', { reason: why, lineIndex: cancelTarget.lineIndex });
+      } else {
+        await onAction(po, 'cancel', { reason: why });
+      }
+      closeCancel();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const send = async () => {
+    setBusy(true);
+    try {
+      await onAction(po, 'send');
+      setSentHere(true);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   // Resolve the issuing (buyer) store + its legal entity from the PO's own
   // store_id (falls back to the user's active store) so the PO header shows the
@@ -65,7 +132,8 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
     vendor_name: po.supplierName,
     vendor_address: '',
     vendor_gstin: '',
-    items: po.items.map((item) => ({
+    // A line cancelled in full orders nothing -- it does not print.
+    items: po.items.filter((item) => item.quantity > 0).map((item) => ({
       product_id: item.productId,
       product_name: item.productName,
       quantity: item.quantity,
@@ -90,7 +158,7 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
     )}
     {/* Lifecycle drawer layers over this modal (z-60 > z-50). No
         onSendToVendor here — for a DRAFT the send action is the modal's own
-        "Submit for Approval" button right behind the drawer. */}
+        "Send to vendor" button right behind the drawer. */}
     {showTimeline && (
       <POLifecycleDrawer
         poId={po.id}
@@ -142,12 +210,6 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
               <p className="text-xs text-gray-600 mb-1">Expected Delivery</p>
               <p className="text-sm font-medium text-gray-900">{new Date(po.expectedDelivery).toLocaleDateString()}</p>
             </div>
-            {po.approvedBy && (
-              <div>
-                <p className="text-xs text-gray-600 mb-1">Approved By</p>
-                <p className="text-sm font-medium text-gray-900">{po.approvedBy}</p>
-              </div>
-            )}
             {po.receivedDate && (
               <div>
                 <p className="text-xs text-gray-600 mb-1">Received Date</p>
@@ -155,6 +217,14 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
               </div>
             )}
           </div>
+
+          {po.status === 'CANCELLED' && po.cancellationReason && (
+            <div className="p-3 bg-red-50 rounded-lg border border-red-200">
+              <p className="text-xs text-red-700 font-medium mb-1">Cancelled</p>
+              <p className="text-sm text-red-800">Reason: {po.cancellationReason}</p>
+              <p className="text-xs text-red-700 mt-1">The Timeline shows who cancelled it and when.</p>
+            </div>
+          )}
 
           {/* Notes */}
           {po.notes && (
@@ -177,17 +247,37 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
                     <th className="text-right py-2 px-3 text-xs font-medium text-gray-600">Unit Cost</th>
                     <th className="text-right py-2 px-3 text-xs font-medium text-gray-600">Tax %</th>
                     <th className="text-right py-2 px-3 text-xs font-medium text-gray-600">Total</th>
+                    {anyLineCancellable && <th className="py-2 px-3" aria-label="Line actions" />}
                   </tr>
                 </thead>
                 <tbody>
                   {po.items.map((item, idx) => (
                     <tr key={idx} className="border-b border-gray-100">
-                      <td className="py-2 px-3 text-gray-900">{item.productName}</td>
+                      <td className={`py-2 px-3 ${item.lineStatus === 'CANCELLED' ? 'text-gray-400 line-through' : 'text-gray-900'}`}>{lineLabel(item)}</td>
                       <td className="py-2 px-3 text-gray-600">{item.sku}</td>
-                      <td className="py-2 px-3 text-right text-gray-900">{item.quantity}</td>
+                      <td className="py-2 px-3 text-right text-gray-900">
+                        {item.quantity}
+                        {(item.cancelledQty ?? 0) > 0 && (
+                          <span className="block text-xs text-red-600">{item.cancelledQty} cancelled</span>
+                        )}
+                      </td>
                       <td className="py-2 px-3 text-right text-gray-900">{'\u20B9'}{item.unitCost.toLocaleString()}</td>
                       <td className="py-2 px-3 text-right text-gray-600">{item.taxRate}%</td>
                       <td className="py-2 px-3 text-right font-medium text-gray-900">{'\u20B9'}{item.total.toLocaleString()}</td>
+                      {anyLineCancellable && (
+                        <td className="py-2 px-3 text-right">
+                          {canCancelLine(item) && (
+                            <button
+                              type="button"
+                              onClick={() => { setReason(''); setCancelTarget({ lineIndex: idx }); }}
+                              aria-label={`Cancel line ${lineLabel(item)}`}
+                              className="px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-50 rounded-lg whitespace-nowrap"
+                            >
+                              Cancel line
+                            </button>
+                          )}
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
@@ -236,8 +326,70 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
           </div>
         </div>
 
+        {/* Cancel needs a reason: it goes on the order timeline beside the
+            person's name and the time (owner ruling 2026-09-28). */}
+        {cancelTarget && (
+          <div className="px-6 py-4 border-t border-red-200 bg-red-50 space-y-2">
+            <label htmlFor="po-cancel-reason" className="block text-sm font-medium text-red-900">
+              {cancelLine
+                ? `Why is this line (${lineLabel(cancelLine)}) being cancelled?`
+                : partReceived
+                  ? 'Why is what is still due being cancelled?'
+                  : 'Why is this order being cancelled?'}
+            </label>
+            <textarea
+              id="po-cancel-reason"
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              rows={2}
+              className="input-field w-full"
+              placeholder="e.g. qty typo, vendor out of stock"
+            />
+            <p className="text-xs text-red-800">
+              {partReceived || (cancelLine && !isDraft)
+                ? 'Only what has not arrived is cancelled - stock already received stays. '
+                : ''}
+              The reason shows on the order timeline with your name and the time.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={closeCancel}
+                className="px-4 py-2 text-sm font-medium text-gray-700 hover:bg-white rounded-lg"
+              >
+                Keep it
+              </button>
+              <button
+                type="button"
+                onClick={confirmCancel}
+                disabled={busy || reason.trim().length < 3}
+                className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg disabled:opacity-50"
+              >
+                Confirm cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Only once the server took it (a refused send leaves it a DRAFT). */}
+        {sentHere && po.status === 'SENT' && (
+          <div role="status" className="px-6 py-4 border-t border-blue-200 bg-blue-50 flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm text-blue-900">
+              Sent to {po.supplierName}. Print the PO to hand over, or save it as a PDF to share with them.
+            </p>
+            <button
+              type="button"
+              onClick={() => setShowPrint(true)}
+              className="btn-primary flex items-center gap-2"
+            >
+              <Printer className="w-4 h-4" />
+              Print PO now
+            </button>
+          </div>
+        )}
+
         {/* Footer - Action Buttons */}
-        <div className="flex items-center justify-between p-6 border-t border-gray-200">
+        <div className="flex flex-wrap items-center justify-between gap-2 p-6 border-t border-gray-200">
           <button
             type="button"
             onClick={onClose}
@@ -245,7 +397,7 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
           >
             Close
           </button>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             {/* Print PO (RPT-4) — available for all statuses */}
             <button
               type="button"
@@ -255,24 +407,37 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
               <Printer className="w-4 h-4" />
               Print PO
             </button>
-            {po.status === 'DRAFT' && (
+            {cancellable && (
               <button
                 type="button"
-                onClick={() => onAction(po, 'submit')}
-                className="btn-primary flex items-center gap-2"
+                onClick={() => { setReason(''); setCancelTarget({}); }}
+                className="px-4 py-2 text-sm font-medium text-red-700 border border-red-200 hover:bg-red-50 rounded-lg transition-colors flex items-center gap-2"
               >
-                <FileText className="w-4 h-4" />
-                Submit for Approval
+                <Ban className="w-4 h-4" />
+                {partReceived ? 'Cancel what is still due' : 'Cancel order'}
               </button>
             )}
-            {po.status === 'PENDING' && (
+            {isDraft && !po.source && (
               <button
                 type="button"
-                onClick={() => onAction(po, 'reject')}
-                className="px-4 py-2 text-sm font-medium text-red-700 bg-red-50 hover:bg-red-100 rounded-lg transition-colors flex items-center gap-2"
+                onClick={() => onAction(po, 'edit')}
+                className="px-4 py-2 text-sm font-medium text-gray-700 border border-gray-300 hover:bg-gray-50 rounded-lg transition-colors flex items-center gap-2"
               >
-                <XIcon className="w-4 h-4" />
-                Reject
+                <Pencil className="w-4 h-4" />
+                Edit
+              </button>
+            )}
+            {/* No approval step (owner 2026-09-28): a draft goes straight to
+                the vendor, and every screen calls it that. */}
+            {isDraft && (
+              <button
+                type="button"
+                onClick={send}
+                disabled={busy}
+                className="btn-primary flex items-center gap-2 disabled:opacity-50"
+              >
+                <Send className="w-4 h-4" />
+                Send to vendor
               </button>
             )}
             {/* P0-4 (launch gate): the Approve / Mark-as-Ordered /
