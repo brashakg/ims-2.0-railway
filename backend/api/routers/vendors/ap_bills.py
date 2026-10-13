@@ -267,8 +267,9 @@ async def create_vendor_bill(
     #
     # A DELIVERY CHALLAN receipt is billable here too (a supplier's goods that
     # came on a challan, often with no PO -- THIS is the screen the accountant
-    # records the bill on; a walk-in buy has its own no-credit "Bought without
-    # PO" receipt, D14, billed like a PO receipt below). The DC takes the
+    # records the bill on; a walk-in buy has its own "Bought without
+    # PO" receipt, D14 - credit only from a registered supplier, G2 - billed
+    # like a PO receipt below). The DC takes the
     # same one-bill-per-receipt stance as the STANDARD header guard, enforced
     # by CLAIMING the DC (dc_matched) before the bill is written -- so neither
     # a second header bill nor a later consolidated /from-dcs invoice can bill
@@ -446,6 +447,24 @@ async def create_vendor_bill(
                     ),
                 ) from exc
             raise HTTPException(status_code=500, detail="Failed to save bill") from exc
+    # G1 on this door too: a walk-in receipt's bill costs its goods by THE
+    # true-up the line-detail door runs (purchase_invoices.
+    # _apply_valuation_trueup: the price paid, plus the bill's GST when it
+    # claims no credit). This form names no lines, so each receipt line
+    # carries the bill's tax share as its rate.
+    # ponytail: one share for every line; a mixed-rate walk-in bill wants the
+    # line-detail door (Purchase -> Invoices -> Create from GRN).
+    if db is not None and (linked or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO:
+        from ..purchase_invoices import _apply_valuation_trueup, _resolved_purchase_config
+        from ...services.purchase_invoice_engine import lines_from_grn
+
+        share = 100 * bill.tax_amount / bill.taxable_amount if bill.taxable_amount else 0.0
+        _apply_valuation_trueup(
+            db,
+            {**doc, "invoice_id": bill_id},
+            {"lines": [{**ln, "gst_rate": share} for ln in lines_from_grn(linked, None)]},
+            _resolved_purchase_config(db),
+        )
     return _clean(doc)
 
 

@@ -12,6 +12,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from ..auth import get_current_user
 from ...services import itc_reconcile, csv_safe
+from ...services.ap_engine import bill_supplier_gstin
 from ._shared import _get_db, _require_finance_admin, router
 from .gst import _bill_booked, _itc_eligible_bill
 
@@ -132,11 +133,7 @@ def _book_rows_from_db(db) -> List[dict]:
             rows.append(
                 {
                     "claims_credit": _itc_eligible_bill(b),
-                    "gstin": (
-                        b.get("vendor_gstin")
-                        if "vendor_gstin" in b
-                        else gstin_by_vendor.get(b.get("vendor_id"))
-                    ),
+                    "gstin": bill_supplier_gstin(b, gstin_by_vendor.get),
                     "invoice_no": b.get("bill_number"),
                     "taxable": b.get("taxable_amount"),
                     "tax": b.get("tax_amount"),

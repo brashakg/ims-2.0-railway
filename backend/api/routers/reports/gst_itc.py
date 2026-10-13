@@ -3,7 +3,7 @@
 import re
 from datetime import date
 
-from ...services.ap_engine import iso_bill_date
+from ...services.ap_engine import bill_supplier_gstin, iso_bill_date
 from ...services.org_validation import has_valid_gstin, itc_claimable, shop_gstins
 
 # ============================================================================
@@ -222,16 +222,17 @@ def _no_credit_inward(db, active_store, year, mon, last_day) -> dict:
     """GSTR-3B Table 5 and Table 4(D) (owner 2026-10-13, G3), from the
     purchase bills _placement puts on this GSTIN's return -- the placement
     Table 4 reads, so every bill is on one return. A stock-transfer mirror is
-    not a purchase (whether a GSTIN-less shop's transfer carries tax is still
-    the CA's open question) and stays out of both.
+    not a purchase and stays out of both. Each bill lands in ONE of the two:
       * Table 5 (exempt, nil-rated, non-GST and composition inward supplies):
         the taxable value of a bill from an unregistered supplier (no valid
-        GSTIN on the bill, not reverse charge) or one that charged no GST (a
-        composition dealer's, an exempt or nil-rated one), inter-/intra-state
-        by the bill's stored head.
-      * Table 4(D) (ineligible ITC): the GST on a bill that claims no input
-        credit -- paid, never claimed. Exactly the bills Table 4 (_itc_match)
-        leaves out, so a bill's tax is in one of the two.
+        GSTIN on the bill -- ap_engine.bill_supplier_gstin, the reconcile's
+        reader -- and not reverse charge, which is 3.1(d)) or one that charged
+        no GST (a composition dealer's, an exempt or nil-rated one), inter-/
+        intra-state by the bill's stored head. Whatever "tax" such a bill
+        shows, it is no GST and not in 4(D).
+      * Table 4(D) (ineligible ITC): the GST on every other bill that claims
+        no input credit -- paid, never claimed. Table 4 (_itc_match) counts
+        the claiming bills, so a bill's GST is in one of the two.
     Returns {"inter", "intra", "igst", "cgst", "sgst"}; fail-soft zeros."""
     out = dict.fromkeys(("inter", "intra", "igst", "cgst", "sgst"), 0.0)
     if db is None:
@@ -242,16 +243,21 @@ def _no_credit_inward(db, active_store, year, mon, last_day) -> dict:
             **_placement(shops, entity_id, store_gstin, year, mon, last_day),
             "source_transfer_id": None,
         }
+
+        def on_file(vendor_id):
+            row = db["vendors"].find_one({"vendor_id": vendor_id}, {"gstin": 1})
+            return (row or {}).get("gstin")
+
         for b in db["vendor_bills"].find(placed, {"_id": 0}):
             tax = b.get("tax_amount")
             no_gst = tax is not None and float(tax or 0) <= 0
-            if not b.get("reverse_charge") and (
-                no_gst or not has_valid_gstin(b.get("vendor_gstin"))
-            ):
+            unregistered = not has_valid_gstin(bill_supplier_gstin(b, on_file))
+            if not b.get("reverse_charge") and (no_gst or unregistered):
                 side = "inter" if b.get("interstate") else "intra"
                 out[side] += float(b.get("taxable_amount") or 0)
-        heads = _sum_heads(db, {**placed, "itc_eligible": False})
-        out["igst"], out["cgst"], out["sgst"] = heads[:3]
+            elif b.get("itc_eligible") is False:
+                for head in ("igst", "cgst", "sgst"):
+                    out[head] += float(b.get(f"{head}_total") or 0)
     except Exception:
         return dict.fromkeys(out, 0.0)
     return {k: round(v, 2) for k, v in out.items()}

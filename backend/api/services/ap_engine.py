@@ -99,7 +99,8 @@ NO_RECEIPT_WAY_OUT = (
     "dealer, a cash bill), ask the shop's store manager to receive them on the "
     "Goods Receipt screen with 'Bought without PO' ticked (the dealer - added "
     "as a supplier if new -, each item's cost and a photo of the bill), then "
-    "bill against that receipt under that supplier - "
+    "book the bill against that receipt from Purchase -> Invoices -> Create "
+    "from GRN (or the 'Book the bill' task the receipt sends accounts) - "
     "it claims GST input credit only from a GST-registered dealer. Goods a "
     "supplier delivered on a delivery "
     "challan are logged there as a Delivery Challan instead."
@@ -127,6 +128,18 @@ def normalize_bill_kind(value):
 # whatever the client sent (owner 2026-10-13, G2; org_validation.itc_claimable,
 # the one credit rule, reads it).
 GRN_SUBTYPE_NO_PO = "NO_PO"
+
+
+def bill_supplier_gstin(bill: dict, gstin_on_file):
+    """THE supplier GSTIN a booked bill carries: the one stamped on it (both
+    bill doors store vendor_gstin -- None for an unregistered supplier); only
+    a bill from before that field (the header door stored none until #1167)
+    reads its supplier's GSTIN on file, ``gstin_on_file(vendor_id)``. The
+    GSTR-2B reconcile and GSTR-3B Table 5 both ask it, so a bill is never
+    registered on one and unregistered on the other."""
+    if "vendor_gstin" in bill:
+        return bill.get("vendor_gstin")
+    return gstin_on_file(bill.get("vendor_id"))
 
 
 def _f(v) -> float:

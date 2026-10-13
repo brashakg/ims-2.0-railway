@@ -14,13 +14,12 @@ from ._shared import (
     get_product_repository,
     get_purchase_order_repository,
     get_stock_repository,
-    get_vendor_repository,
     is_online_store,
     logger,
     require_roles,
     router,
 )
-from .gst import WALK_IN_COST_SOURCE, _po_line_gst_rate, _promote_cost_from_rate
+from .gst import WALK_IN_COST_SOURCE, _promote_cost_from_rate
 from .numbering import (
     _cumulative_received_by_product,
     _grn_barcode,
@@ -42,8 +41,6 @@ from .grn_accept_lock import (
     _stock_create_raises_on_duplicate,
 )
 from .models import GRN_SUBTYPE_NO_PO
-from ...services.org_validation import itc_claimable
-from ...services.purchase_match import landed_unit_cost
 
 
 @router.post("/grn/{grn_id}/accept")
@@ -275,19 +272,12 @@ def _accept_grn_claimed(
         except Exception:  # noqa: BLE001
             po_unit_price = {}
 
-    # G1 (owner 2026-10-13): a walk-in buy whose bill will claim no input
-    # credit -- THE credit rule on the receipt's supplier -- goes on the shelf
-    # at the price paid plus its GST (purchase_match.landed_unit_cost): tax it
-    # cannot claim back is part of what the goods cost. None on a PO receipt.
-    walk_in_credit = None
-    if grn.get("grn_subtype") == GRN_SUBTYPE_NO_PO:
-        vendor_repo = get_vendor_repository()
-        vendor = (
-            vendor_repo.find_by_id(grn.get("vendor_id"))
-            if vendor_repo is not None and grn.get("vendor_id")
-            else None
-        )
-        walk_in_credit = itc_claimable((vendor or {}).get("gstin"), receipt=grn)
+    # G1 (owner 2026-10-13) is decided at the BILL, not here: a walk-in unit
+    # goes on the shelf at the price paid, the GST an unclaimed bill adds to
+    # its cost is the GST that bill charged (purchase_invoices.
+    # _apply_valuation_trueup, on both bill doors). Receiving cannot know it:
+    # an unregistered dealer charges none, and a registered one's credit
+    # hangs on its bill and GSTR-2B.
 
     minted_stock_ids: List[str] = []
     units_added = 0
@@ -398,9 +388,6 @@ def _accept_grn_claimed(
                 )
             except (TypeError, ValueError):
                 line_cost = po_unit_price.get(product_id, 0.0)
-            if line_cost and line_cost > 0 and walk_in_credit is not None:
-                rate = _po_line_gst_rate({"hsn": item.get("hsn")}, prod)[0]
-                line_cost = landed_unit_cost(line_cost, rate, walk_in_credit)
             cost_fields = {}
             if line_cost and line_cost > 0:
                 # A walk-in buy's price is labelled as one (and, as that

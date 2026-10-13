@@ -998,17 +998,22 @@ def _apply_valuation_trueup(db, invoice_doc, computed, config) -> Optional[list]
                 store_id = (grn or {}).get("store_id")
             except Exception:
                 store_id = None
-        # G1: a walk-in buy's bill that claims no input credit costs its goods
-        # at the price plus the GST it cannot claim back -- the same rule its
-        # units went on the shelf by (purchase_match.landed_unit_cost).
+        # G1 (owner 2026-10-13): a walk-in buy's bill that claims no input
+        # credit costs its goods at the price plus the GST it charged -- tax
+        # that cannot be claimed back is part of what the goods cost. THE
+        # place G1 is decided: the units went on the shelf at the price paid,
+        # and both bill doors true up through here (a 0% cash memo leaves the
+        # price paid).
         if (grn or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO and (
             invoice_doc.get("itc_eligible") is False
         ):
             lines = [
                 {
                     **ln,
-                    "unit_price": pmatch.landed_unit_cost(
-                        ln.get("unit_price"), ln.get("gst_rate"), False
+                    "unit_price": round(
+                        float(ln.get("unit_price") or 0)
+                        * (1 + float(ln.get("gst_rate") or 0) / 100),
+                        2,
                     ),
                 }
                 for ln in lines
@@ -1090,25 +1095,29 @@ def _receipt_store_id(db, grn_doc, linked_dc_ids) -> Optional[str]:
     return store_id or None
 
 
-def _draft_lines(db, receipt: dict, po: Optional[dict]) -> list:
+def _draft_lines(db, receipt: dict, po: Optional[dict], supplier_gstin=None) -> list:
     """A receipt's billable lines for BOTH drafts (from-GRN, from-DCs), with
     the name and HSN the receipt and its PO lack taken from the catalogue: a
     receipt line stores only product_id + quantities and a DC has no PO, so the
     DC door opened every line blank and the form would not book until each
     name was retyped. A "Bought without PO" receipt has no PO line to carry a
     GST rate either: its lines take THE PO-line rate rule (vendors.gst.
-    _po_line_gst_rate -- the HSN's rate, else the catalogued one), the rate
-    its units were costed at, never a 0% that booked a registered dealer's
-    bill with no tax. Fail-soft: a catalogue miss leaves the line as it was."""
+    _po_line_gst_rate -- the HSN's rate, else the catalogued one) when its
+    supplier is GST-registered (``supplier_gstin`` valid), never a 0% that
+    booked a registered dealer's bill with no tax; an unregistered dealer
+    charges no GST, so its lines stay at 0% and the bill at the cash memo.
+    Fail-soft: a catalogue miss leaves the line as it was."""
     from .vendors.gst import _po_line_gst_rate
 
     lines = pinv.lines_from_grn(receipt, po)
-    walk_in = (receipt or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO
+    taxed_walk_in = (receipt or {}).get(
+        "grn_subtype"
+    ) == ap_engine.GRN_SUBTYPE_NO_PO and ov.has_valid_gstin(supplier_gstin)
     missing = {
         ln["product_id"]
         for ln in lines
         if ln.get("product_id")
-        and (walk_in or not (ln.get("description") and ln.get("hsn")))
+        and (taxed_walk_in or not (ln.get("description") and ln.get("hsn")))
     }
     if not missing or db is None:
         return lines
@@ -1124,7 +1133,7 @@ def _draft_lines(db, receipt: dict, po: Optional[dict]) -> list:
         p = products.get(ln.get("product_id")) or {}
         ln["description"] = ln.get("description") or p.get("name")
         ln["hsn"] = ln.get("hsn") or p.get("hsn_code")
-        if walk_in and p:
+        if taxed_walk_in and p:
             rate = _po_line_gst_rate({"hsn": ln.get("hsn")}, p)[0]
             if rate is not None:
                 ln["gst_rate"] = float(rate)
@@ -2356,7 +2365,7 @@ async def draft_invoice_from_grn(
         db, grn.get("store_id"), None, current_user.get("active_store_id")
     )
 
-    raw_lines = _draft_lines(db, grn, po)
+    raw_lines = _draft_lines(db, grn, po, supplier_gstin)
     computed = pinv.compute_invoice(
         raw_lines, supplier_gstin, recipient.get("recipient_gstin")
     )
