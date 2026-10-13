@@ -718,6 +718,10 @@ async def push_all_pending(
                 # storefront (so it is pushed), at the OLD price (so it gets
                 # its own line and stays queued -- see push_product).
                 bucket["price_not_synced"] = bucket.get("price_not_synced", 0) + 1
+            elif data.get("code") == shopify_push.PHOTOS_NOT_SYNCED:
+                # Live, but a photo step failed: its own line, still queued
+                # (same rule as the price) -- never a stock warning.
+                bucket["photos_not_synced"] = bucket.get("photos_not_synced", 0) + 1
             elif data.get("code"):
                 # ANY OTHER code on an ok push is the STOCK pass not being
                 # clean (STORE_UNMAPPED, SHOPIFY_LOCATION_*, STOCK_*). Without

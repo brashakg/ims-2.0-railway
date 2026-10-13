@@ -1,12 +1,14 @@
 // Quick Add - INVENTORY. The reorder level (stock, SKU and barcode are all
-// automatic) plus the Product Images block: upload, drag-and-drop, the
-// variant photo copy, remove and remove-background. `#product-images` is the
+// automatic) plus the Product Images block: the angle guide, upload,
+// drag-and-drop, the variant photo copy, and the photos in order
+// (ProductPhotoGrid: move, remove and remove-background). `#product-images` is the
 // anchor the catalog list's "Add photo" deep link scrolls to.
 // MOVED verbatim out of QuickAddPage.tsx (Wave 3 file diet).
 
-import { Boxes, ImageIcon, Loader2, Upload, Wand2, X } from 'lucide-react';
+import { Boxes, ImageIcon, Loader2, Upload } from 'lucide-react';
 import clsx from 'clsx';
 import { Section } from './parts';
+import { AngleGuide, ProductPhotoGrid } from './ProductPhotoGrid';
 import type { QuickAddForm } from './useQuickAddForm';
 import { isBadInput } from '../../../utils/reorderLevel';
 
@@ -15,7 +17,7 @@ export function InventorySection({ form }: { form: QuickAddForm }) {
     isReviewMode, reorderLevel, setReorderLevel, setReorderBadInput, canSetReorderLevel, reorderShop,
     images, setImages, variantCtx,
     imageInputRef, onImageInputChange, onImageDrop, dragActive, setDragActive,
-    uploadingImages, editingImages, removeImage, editImage,
+    uploadingImages, editingImages, removeImage, moveImage, editImage,
     openSections, toggleSection, sectionIssues,
   } = form;
 
@@ -86,6 +88,9 @@ export function InventorySection({ form }: { form: QuickAddForm }) {
           is the #images anchor the catalog list's "Add photo" lands on. */}
       <div id="product-images" className="mt-4 pt-4 border-t border-gray-100 scroll-mt-4">
         <label className="block text-xs font-medium text-gray-700 mb-2">Product Images</label>
+        <div className="mb-3">
+          <AngleGuide />
+        </div>
 
         <input
           ref={imageInputRef}
@@ -145,50 +150,13 @@ export function InventorySection({ form }: { form: QuickAddForm }) {
         )}
 
         {images.length > 0 && (
-          <div className="mt-3 grid grid-cols-3 tablet:grid-cols-4 laptop:grid-cols-6 desktop:grid-cols-8 gap-3">
-            {images.map((url) => {
-              // Every image is editable now: an external URL
-              // is re-hosted into our store first, then cleaned.
-              const isEditing = editingImages.has(url);
-              return (
-              <div key={url} className="relative group aspect-square rounded-lg overflow-hidden border border-gray-200">
-                <img
-                  src={url}
-                  alt="Product"
-                  className="w-full h-full object-cover"
-                  onError={(e) => { (e.currentTarget as HTMLImageElement).style.opacity = '0.3'; }}
-                />
-                {/* Both photo controls are real 40px tap targets: they
-                    were the two smallest things on the page, and one of
-                    them is destructive. */}
-                <button
-                  type="button"
-                  onClick={(e) => { e.stopPropagation(); removeImage(url); }}
-                  aria-label="Remove image"
-                  title="Remove image"
-                  className="absolute top-1 right-1 inline-flex min-h-10 min-w-10 items-center justify-center rounded-full bg-white/90 text-gray-600 hover:text-red-600 shadow"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-                <button
-                  type="button"
-                  onClick={(e) => { e.stopPropagation(); void editImage(url); }}
-                  disabled={isEditing}
-                  aria-label="Remove background"
-                  title="Remove background (clean up + resize)"
-                  className="absolute bottom-1 left-1 inline-flex min-h-10 items-center gap-1 px-2.5 rounded-md bg-white/90 text-gray-700 hover:text-bv shadow text-[11px] font-medium disabled:opacity-60 disabled:cursor-not-allowed"
-                >
-                  {isEditing ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  ) : (
-                    <Wand2 className="w-3.5 h-3.5" />
-                  )}
-                  <span>{isEditing ? 'Working…' : 'Remove bg'}</span>
-                </button>
-              </div>
-              );
-            })}
-          </div>
+          <ProductPhotoGrid
+            images={images}
+            onMove={moveImage}
+            onRemove={removeImage}
+            onEdit={(url) => void editImage(url)}
+            editing={editingImages}
+          />
         )}
       </div>
     </Section>

@@ -1281,14 +1281,6 @@ def existing_product_summary(existing: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(attrs, dict):
         attrs = {}
 
-    def _first_image() -> Optional[str]:
-        imgs = existing.get("images")
-        if isinstance(imgs, (list, tuple)):
-            for u in imgs:
-                if isinstance(u, str) and u.strip():
-                    return u
-        return None
-
     brand = existing.get("brand") or attrs.get("brand_name")
     model = (
         existing.get("model") or attrs.get("model_no") or attrs.get("model_name")
@@ -1329,7 +1321,7 @@ def existing_product_summary(existing: Dict[str, Any]) -> Dict[str, Any]:
         "offer_price": existing.get("offer_price"),
         "is_active": existing.get("is_active"),
         "catalog_status": existing.get("catalog_status"),
-        "image_url": _first_image(),
+        "image_url": main_photo(existing),
     }
 
 
@@ -2241,6 +2233,28 @@ def _build_pim_doc(
         }
         doc["ecom"]["locally_modified"] = False
     return doc
+
+
+def main_photo(doc: Dict[str, Any]) -> Optional[str]:
+    """THE main-photo rule (owner 2026-10-12: "photo 1 is the main photo on
+    the website and at the till"). The order of a product's photos IS its
+    ``images`` array, so the main photo is its first usable entry (a string
+    or a ``{url|src}`` dict); only a product with no ``images`` falls back to
+    the legacy singular ``image_url``, then ``image``. A stale ``image_url``
+    never outranks photo 1. Every reader that shows ONE photo for a product
+    asks here. Pure; never raises."""
+    doc = doc if isinstance(doc, dict) else {}
+    imgs = doc.get("images")
+    for item in imgs if isinstance(imgs, (list, tuple)) else ():
+        if isinstance(item, dict):
+            item = item.get("url") or item.get("src")
+        if isinstance(item, str) and item.strip():
+            return item.strip()
+    for key in ("image_url", "image"):
+        value = doc.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
 
 
 def _spine_images(spine: Dict[str, Any]) -> List[str]:
