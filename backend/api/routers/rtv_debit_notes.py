@@ -15,10 +15,13 @@ It REUSES (no fork):
     resolve_store_scope) from vendor_returns / vendor_rma.
 
 RBAC: ADMIN / AREA_MANAGER / STORE_MANAGER / ACCOUNTANT (+ SUPERADMIN via
-require_roles) may issue / export. A cashier / sales / workshop / optometrist can
-NEVER issue a debit note. GET list/detail/print add WORKSHOP_STAFF (the Vendor
-Returns screen), store-scoped per object, and show it the items and quantities
-only (services/cost_mask.mask_debit_note; owner ruling 2026-09-29).
+require_roles) may issue. A cashier / sales / workshop / optometrist can NEVER
+issue a debit note. GET list/detail/print add WORKSHOP_STAFF (the Vendor Returns
+screen), store-scoped per object. Every reply, the issue reply included, goes
+through services/cost_mask.mask_debit_note: outside the accounts roles it shows
+the items and quantities only (owner rulings 2026-09-29 / 2026-10-12). The Tally
+export is nothing but the note's money, so it is for the accounts roles
+(AP_ROLES) only.
 
 No comms. No emoji (Windows cp1252). Money is paise-exact integers; responses
 carry both paise and a rupee display field.
@@ -41,7 +44,7 @@ from ..dependencies import (
     validate_store_access,
     user_store_scope,
 )
-from ..services.cost_mask import PURCHASE_ROLES, mask_debit_note
+from ..services.cost_mask import AP_ROLES, PURCHASE_ROLES, mask_debit_note
 from ..services.rtv_debit_note import (
     DebitNoteEngine,
     paise_to_rupees,
@@ -241,9 +244,11 @@ async def issue_debit_note(
     )
     if not res.get("ok"):
         raise _http_from_result(res)
+    # Masked as GET /{id} masks it: re-issuing returns an existing note, so an
+    # unmasked reply would read any note's money (owner ruling 2026-10-12).
     return {
         "idempotent": bool(res.get("idempotent")),
-        "debit_note": _with_rupees(res.get("debit_note")),
+        "debit_note": mask_debit_note(_with_rupees(res.get("debit_note")), current_user),
     }
 
 
@@ -278,10 +283,11 @@ async def print_debit_note(
 @router.get("/{debit_note_id}/tally", response_class=PlainTextResponse)
 async def export_debit_note_tally(
     debit_note_id: str,
-    current_user: dict = Depends(require_roles(*_DEBIT_NOTE_ROLES)),
+    current_user: dict = Depends(require_roles(*AP_ROLES)),
 ):
     """Tally import XML carrying the Debit Note voucher (balanced; debits ==
-    credits). Vendor/AP roles only. Store-IDOR guarded."""
+    credits). Every line of it is money we are owed back, so the accounts roles
+    only (owner ruling 2026-10-12). Store-IDOR guarded."""
     eng = _engine()
     doc = eng.get(debit_note_id)
     if doc is None:

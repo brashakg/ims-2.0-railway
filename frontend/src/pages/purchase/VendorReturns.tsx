@@ -502,7 +502,7 @@ export function VendorReturns() {
                         {debitNotes[ret.return_id] ? (
                           <p className="text-gray-900 font-semibold">
                             {debitNotes[ret.return_id].debit_note_number}
-                            {debitNotes[ret.return_id].totals_rupees && (
+                            {canPrice && debitNotes[ret.return_id].totals_rupees && (
                               <span className="ml-2 text-gray-500 font-normal text-sm">
                                 {rupees(debitNotes[ret.return_id].totals_rupees?.grand_total)}
                                 {debitNotes[ret.return_id].is_inter_state ? ' (IGST)' : ' (CGST+SGST)'}
@@ -524,26 +524,32 @@ export function VendorReturns() {
                             >
                               Print
                             </button>
-                            <button
-                              onClick={() =>
-                                handleExportTally(
-                                  debitNotes[ret.return_id].debit_note_id,
-                                  debitNotes[ret.return_id].debit_note_number,
-                                )
-                              }
-                              className="border border-gray-300 hover:bg-gray-100 text-gray-700 px-3 py-1.5 rounded text-sm font-medium transition"
-                            >
-                              Export Tally
-                            </button>
+                            {/* The Tally voucher is nothing but the note's
+                                money: accounts only (owner ruling 2026-10-12). */}
+                            {canPrice && (
+                              <button
+                                onClick={() =>
+                                  handleExportTally(
+                                    debitNotes[ret.return_id].debit_note_id,
+                                    debitNotes[ret.return_id].debit_note_number,
+                                  )
+                                }
+                                className="border border-gray-300 hover:bg-gray-100 text-gray-700 px-3 py-1.5 rounded text-sm font-medium transition"
+                              >
+                                Export Tally
+                              </button>
+                            )}
                           </>
                         ) : (
-                          <button
-                            disabled={dnBusy === ret.return_id}
-                            onClick={() => handleIssueDebitNote(ret.return_id)}
-                            className="bg-gray-900 hover:bg-gray-800 disabled:opacity-50 text-white px-3 py-1.5 rounded text-sm font-medium transition"
-                          >
-                            {dnBusy === ret.return_id ? 'Issuing...' : 'Issue Debit Note'}
-                          </button>
+                          canPrice && (
+                            <button
+                              disabled={dnBusy === ret.return_id}
+                              onClick={() => handleIssueDebitNote(ret.return_id)}
+                              className="bg-gray-900 hover:bg-gray-800 disabled:opacity-50 text-white px-3 py-1.5 rounded text-sm font-medium transition"
+                            >
+                              {dnBusy === ret.return_id ? 'Issuing...' : 'Issue Debit Note'}
+                            </button>
+                          )
                         )}
                       </div>
                     </div>

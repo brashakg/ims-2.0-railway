@@ -901,7 +901,7 @@ def test_grn_detail_is_store_scoped(monkeypatch):
             "GET",
             "/api/v1/rtv-debit-notes/DN-1/tally",
             "/api/v1/rtv-debit-notes/{debit_note_id}/tally",
-            _RETURN_WRITERS,
+            _AP_ROLES,
         ),
     ],
 )
