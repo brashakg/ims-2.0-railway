@@ -39,8 +39,10 @@ const counts = { totalAlerts: 1, critical: 0, high: 0, medium: 0, low: 1 };
 describe('StockAlertsOverview cost figures', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('workshop staff see the alert and its units, no value at cost', async () => {
-    auth.role = 'WORKSHOP_STAFF';
+  // Owner ruling 2026-10-12: the managers see no value at cost either.
+  it.each(['WORKSHOP_STAFF', 'STORE_MANAGER', 'AREA_MANAGER', 'CATALOG_MANAGER'])(
+    '%s see the alert and its units, no value at cost', async (role) => {
+    auth.role = role;
     apiMock.getStockAlerts.mockResolvedValue({ alerts: [alert], stats: counts });
     render(<StockAlertsOverview />);
     expect(await screen.findByText('Aviator')).toBeTruthy();
@@ -52,8 +54,8 @@ describe('StockAlertsOverview cost figures', () => {
     expect(document.body.textContent).not.toContain('₹');
   });
 
-  it('a store manager still sees the value at cost', async () => {
-    auth.role = 'STORE_MANAGER';
+  it('accounts still see the value at cost', async () => {
+    auth.role = 'ACCOUNTANT';
     apiMock.getStockAlerts.mockResolvedValue({
       alerts: [{ ...alert, costImpact: 17287 }],
       stats: { ...counts, deadStockValue: 17287, recommendedRestockValue: 0 },

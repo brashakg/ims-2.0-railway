@@ -111,6 +111,12 @@ def _user(roles=("STORE_MANAGER",), active="S1", uid="mgr_dhn2"):
     }
 
 
+def _accounts():
+    """Who prices a PO line (owner ruling 2026-10-12): a manager's price is
+    not taken, so a test of a typed price types it as accounts."""
+    return _user(roles=("ACCOUNTANT",))
+
+
 def _line(pid, name, qty, price, rate=5, received=0):
     return {
         "product_id": pid,
@@ -195,7 +201,7 @@ def test_edit_draft_changes_qty_cost_and_lines(monkeypatch):
              "quantity": 1, "unit_price": 4000, "gst_rate": 5},
         ]
     )
-    out = _run(v.update_po("PO1", body, _user()))
+    out = _run(v.update_po("PO1", body, _accounts()))
     doc = repo.pos["PO1"]
     assert [i["product_id"] for i in doc["items"]] == ["P1", "P3"]
     assert doc["items"][0]["quantity"] == 3
@@ -259,10 +265,11 @@ def test_an_edit_to_one_of_two_lines_of_a_product_is_saved(monkeypatch, new_line
     edit to any but the last line of a product was answered 200 'saved' with
     no write, no timeline entry and no audit row."""
     repo, audit = _wire(monkeypatch, _two_p1_lines())
-    _run(v.update_po("PO1", _edit_body(new_lines), _user()))
+    _run(v.update_po("PO1", _edit_body(new_lines), _accounts()))
     doc = repo.pos["PO1"]
     assert [(i["quantity"], i["unit_price"]) for i in doc["items"]] == stored
-    detail = doc["history"][-1]["detail"]
+    ev = doc["history"][-1]
+    detail = f"{ev['detail']}; {ev.get('price_detail', '')}"
     for w in words:
         assert w in detail
     assert [r["action"] for r in audit.rows] == ["purchase_order.edit"]
@@ -760,7 +767,7 @@ def test_an_edit_that_fills_a_cost_audits_it(monkeypatch):
     products = _ProductRepo({"P1": {"product_id": "P1"}})
     monkeypatch.setattr(v, "get_product_repository", lambda: products)
 
-    _run(v.update_po("PO1", _rate_777_body(), _user()))
+    _run(v.update_po("PO1", _rate_777_body(), _accounts()))
 
     assert products.prods["P1"]["cost_price"] == 777
     assert products.prods["P1"]["cost_source"] == "PO_RATE"
@@ -965,7 +972,7 @@ def test_a_product_made_meanwhile_is_reused_retaxed_and_audited(monkeypatch):
     repo, audit = _wire(monkeypatch, _po())
     spine = _real_spine(monkeypatch)
     _rival_appears(monkeypatch, category="SUNGLASS", hsn_code="90041000", gst_rate=18)
-    _run(v.update_po("PO1", _typed_in_vogue_body(), _user()))
+    _run(v.update_po("PO1", _typed_in_vogue_body(), _accounts()))
     assert [d["product_id"] for d in spine.collection.docs] == ["RIVAL"]
     doc = repo.pos["PO1"]
     line = doc["items"][0]
@@ -1630,7 +1637,7 @@ def test_create_answers_with_the_order_as_stored_after_settling(monkeypatch):
     body = v.POCreate(vendor_id="V1", delivery_store_id="S1", items=[
         v.POItemCreate(new_product=dict(_VOGUE), quantity=1, unit_price=2000),
     ])
-    out = _run(v.create_po(body, _user()))
+    out = _run(v.create_po(body, _accounts()))
     doc = po_repo.collection.docs[0]
     assert doc["total_amount"] == 2360
     assert out["total_amount"] == 2360
@@ -1718,7 +1725,7 @@ def test_a_paise_cost_change_reads_as_it_is():
         [{"product_id": "P1", "product_name": "Frame", "quantity": 1, "unit_price": 12345.67}],
         [{"product_id": "P1", "product_name": "Frame", "quantity": 1, "unit_price": 12345.68}],
     )
-    assert out == ["Frame: cost Rs 12345.67 -> Rs 12345.68"]
+    assert out == ([], ["Frame: cost Rs 12345.67 -> Rs 12345.68"])
 
 
 def test_an_automatic_cancel_is_audited_as_a_cancel_with_its_reason(monkeypatch):
@@ -2130,3 +2137,103 @@ def test_a_change_on_an_unreadable_order_answers_503_not_404(monkeypatch, change
         attempt("PO1")
     assert e.value.status_code == 503 and "try again" in e.value.detail.lower()
     assert po_repo.collection.docs == before
+
+
+# =========================================================================== #
+# Owner ruling 2026-10-12: what we pay is for accounts -- the edit and cancel
+# doors take no price from anyone else and hand none back
+# =========================================================================== #
+
+_PRICE_KEYS = {
+    "unit_price", "subtotal", "tax_amount", "total_amount", "gst_summary",
+    "line_total", "line_tax", "cgst", "sgst", "igst", "price_detail",
+}
+
+
+def _prices_in(value, path="$"):
+    """Every price key, and every 'Rs ' figure in words, anywhere in a reply."""
+    found = []
+    if isinstance(value, dict):
+        for k, val in value.items():
+            if k in _PRICE_KEYS:
+                found.append(f"{path}.{k}")
+            found += _prices_in(val, f"{path}.{k}")
+    elif isinstance(value, list):
+        for i, val in enumerate(value):
+            found += _prices_in(val, f"{path}[{i}]")
+    elif isinstance(value, str) and "Rs " in value:
+        found.append(f"{path}={value!r}")
+    return found
+
+
+def test_a_managers_edit_keeps_the_price_accounts_agreed_and_shows_him_none(monkeypatch):
+    repo, _ = _wire(monkeypatch, _po())
+    out = _run(v.update_po("PO1", _edit_body([_p1(3, 999), _p1(1, 5)]), _user()))
+    doc = repo.pos["PO1"]
+    # Both P1 lines keep the price stored on P1 (1000); 999 and 5 are not taken.
+    assert [(i["quantity"], i["unit_price"]) for i in doc["items"]] == [(3, 1000), (1, 1000)]
+    assert "price_detail" not in doc["history"][-1]
+    assert _prices_in(out) == []
+
+
+def test_accounts_price_change_is_read_by_accounts_only(monkeypatch):
+    repo, _ = _wire(monkeypatch, _po())
+    monkeypatch.setattr(v, "_get_db", lambda: _NoBillsDB())
+    _run(v.update_po("PO1", _edit_body([_p1(2, 950)]), _accounts()))
+    assert "Rs 1000 -> Rs 950" in repo.pos["PO1"]["history"][-1]["price_detail"]
+    for read in (v.get_po("PO1", _user()), v.get_po_timeline("PO1", _user())):
+        assert _prices_in(_run(read)) == []
+    tl = _run(v.get_po_timeline("PO1", _accounts()))
+    assert any("Rs 1000 -> Rs 950" in (e.get("price_detail") or "") for e in tl["events"])
+
+
+def test_a_managers_new_line_is_priced_by_the_server_not_by_him(monkeypatch):
+    _wire(monkeypatch, _po())
+    seen = {}
+
+    def fake(vendor_id, catalogue):
+        seen["vendor"] = vendor_id
+        return {pid: 321.0 for pid in catalogue}
+
+    monkeypatch.setattr(sys.modules[v.price_po_lines.__module__], "server_line_prices", fake)
+    repo = v.get_purchase_order_repository()
+    _run(v.update_po("PO1", _edit_body([
+        _p1(2, 1000),
+        {"product_id": "P9", "product_name": "Oakley", "sku": "P9", "quantity": 1, "unit_price": 999},
+    ]), _user()))
+    assert [i["unit_price"] for i in repo.pos["PO1"]["items"]] == [1000, 321.0]
+    assert seen["vendor"] == "V1"
+
+
+def test_cancel_replies_carry_no_price_for_a_manager(monkeypatch):
+    _wire(monkeypatch, _po(status="SENT"))
+    line = _run(v.cancel_po_line("PO1", 1, _line_body(reason="qty typo"), _user()))
+    whole = _run(v.cancel_po("PO1", "vendor closed", _user()))
+    assert _prices_in(line) == [] and _prices_in(whole) == []
+
+
+def test_a_managers_typed_in_new_product_takes_no_price_from_him(monkeypatch):
+    po_repo, spine = _create_world(monkeypatch)
+    body = v.POCreate(vendor_id="V1", delivery_store_id="S1", items=[
+        v.POItemCreate(new_product=dict(_VOGUE), quantity=1, unit_price=999),
+    ])
+    _run(v.create_po(body, _user()))
+    line = po_repo.collection.docs[0]["items"][0]
+    made = spine.collection.docs
+    assert line["unit_price"] is None
+    assert len(made) == 1 and not made[0].get("cost_price")
+
+
+def test_an_accounts_line_sent_at_0_is_priced_by_the_server(monkeypatch):
+    po_repo, spine = _create_world(monkeypatch)
+    spine.collection.insert_one({"_id": "P1", "product_id": "P1", "sku": "P1"})
+    monkeypatch.setattr(
+        sys.modules[v.price_po_lines.__module__], "server_line_prices",
+        lambda _vendor, catalogue: {pid: 777.0 for pid in catalogue},
+    )
+    body = v.POCreate(vendor_id="V1", delivery_store_id="S1", items=[
+        v.POItemCreate(product_id="P1", product_name="Frame", sku="P1", quantity=1, unit_price=0),
+        v.POItemCreate(product_id="P1", product_name="Frame", sku="P1", quantity=1, unit_price=500),
+    ])
+    _run(v.create_po(body, _accounts()))
+    assert [i["unit_price"] for i in po_repo.collection.docs[0]["items"]] == [777.0, 500]

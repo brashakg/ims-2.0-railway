@@ -395,7 +395,13 @@ def test_reports_profit_by_store_is_clean_and_stays_open(reports_orders):
     assert r.status_code == 200, r.text
     rows = r.json()["data"]
     assert [row["store_id"] for row in rows] == [SOLO_STORE], "store scope leaked"
-    row = rows[0]
+    # Owner ruling 2026-10-12: cost and profit are the accounts roles' only;
+    # the manager keeps the revenue and order count of his own shop.
+    assert set(rows[0]) == {"store_id", "revenue", "orders"}
+    r = _reports_client("ACCOUNTANT").get(
+        "/api/v1/reports/profit/by-store?from_date=2026-03-01&to_date=2026-03-31"
+    )
+    row = r.json()["data"][0]
     assert set(row) == {"store_id", "revenue", "cost", "profit", "orders"}
     assert "payroll" not in row
     # profit is exactly revenue - cost: no wage term can hide inside it.

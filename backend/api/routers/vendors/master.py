@@ -51,13 +51,13 @@ async def list_vendors(
 
     # F60: the list stays open because the workshop job, vendor returns and the
     # buy desk pick a vendor BY NAME. Who sees more of a supplier, and what a
-    # vendor by name is, is the one purchase-mask rule (services/cost_mask) --
-    # the same one that hides it on vendor returns / debit notes.
+    # vendor by name is, is the one supplier rule (services/cost_mask
+    # "supplier" context, mask_vendor).
     if search:
         # A names-only caller searches only the keys it is shown. Matching the
         # hidden gstin made ?search an oracle: "does the GSTIN start with X?"
         # walked one character at a time recovered the whole number.
-        if can_see_cost(current_user, "purchase"):
+        if can_see_cost(current_user, "supplier"):
             vendors = vendor_repo.search_vendors(search)
         else:
             vendors = vendor_repo.search_vendors(search, fields=VENDOR_NAME_KEYS)

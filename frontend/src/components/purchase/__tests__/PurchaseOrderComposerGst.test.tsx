@@ -51,6 +51,7 @@ function renderComposer(over: Partial<PurchaseOrderComposerProps> = {}) {
   const props: PurchaseOrderComposerProps = {
     mode: 'modal',
     vendors: [{ id: 'v-1', name: 'Luxottica India', code: 'LUX' }],
+    showPrices: true,
     initialVendorId: 'v-1',
     initialLines: [LINE()],
     renderProductCell: ({ line }) => <div data-testid="cell">{line.productName}</div>,

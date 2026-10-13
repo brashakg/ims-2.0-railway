@@ -12,6 +12,7 @@ import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { promotionsApi, type PromoReport } from '../../services/api/promotions';
+import { COST_ROLES } from '../../components/common/CostCell';
 
 function rupees(n: number): string {
   return `Rs ${(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
@@ -27,6 +28,11 @@ export default function PromotionsReportPage() {
   const { user } = useAuth();
   const toast = useToast();
   const storeId = user?.activeStoreId || undefined;
+  // Cost of goods and margin are what we pay: COST_ROLES only (owner ruling
+  // 2026-10-12). The server drops them for anyone else, so the managers see
+  // the discount report without a cost column -- never a column of false 0s.
+  const canSeeCost = (user?.roles || []).some((r) => COST_ROLES.includes(r));
+  const cols = canSeeCost ? 6 : 4;
 
   const [start, setStart] = useState(todayISO(-30));
   const [end, setEnd] = useState(todayISO(0));
@@ -64,7 +70,9 @@ export default function PromotionsReportPage() {
             Offer Tally
           </h1>
           <p className="text-sm text-gray-500 mt-1">
-            What promos fired, the discount given, and the margin impact.
+            {canSeeCost
+              ? 'What promos fired, the discount given, and the margin impact.'
+              : 'What promos fired and the discount given.'}
           </p>
         </div>
         <div className="flex items-end gap-2">
@@ -96,7 +104,7 @@ export default function PromotionsReportPage() {
       </div>
 
       {/* Summary cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+      <div className={clsx('grid grid-cols-2 gap-3 mb-6', canSeeCost ? 'md:grid-cols-4' : 'md:grid-cols-3')}>
         <div className="bg-white border border-gray-200 rounded-xl p-4">
           <div className="text-xs text-gray-500">Total discount given</div>
           <div className="text-xl font-semibold text-gray-900 mt-1">
@@ -115,20 +123,22 @@ export default function PromotionsReportPage() {
             {s?.promos_fired ?? 0}
           </div>
         </div>
-        <div className="bg-white border border-gray-200 rounded-xl p-4">
-          <div className="text-xs text-gray-500">Net margin impact</div>
-          <div
-            className={clsx(
-              'text-xl font-semibold mt-1',
-              (s?.net_margin_impact || 0) < 0 ? 'text-red-600' : 'text-gray-900',
-            )}
-          >
-            {rupees(s?.net_margin_impact || 0)}
+        {canSeeCost && (
+          <div className="bg-white border border-gray-200 rounded-xl p-4">
+            <div className="text-xs text-gray-500">Net margin impact</div>
+            <div
+              className={clsx(
+                'text-xl font-semibold mt-1',
+                (s?.net_margin_impact || 0) < 0 ? 'text-red-600' : 'text-gray-900',
+              )}
+            >
+              {rupees(s?.net_margin_impact || 0)}
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
-      {s?.any_cogs_estimated && (
+      {canSeeCost && s?.any_cogs_estimated && (
         <div className="flex items-center gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-4">
           <AlertTriangle className="w-4 h-4 shrink-0" />
           Some rows use an ESTIMATED cost of goods (60% fallback) because the line
@@ -144,20 +154,20 @@ export default function PromotionsReportPage() {
               <th className="text-left font-medium px-4 py-3">Type</th>
               <th className="text-right font-medium px-4 py-3">Orders</th>
               <th className="text-right font-medium px-4 py-3">Discount given</th>
-              <th className="text-right font-medium px-4 py-3">Est. COGS</th>
-              <th className="text-right font-medium px-4 py-3">Net margin impact</th>
+              {canSeeCost && <th className="text-right font-medium px-4 py-3">Est. COGS</th>}
+              {canSeeCost && <th className="text-right font-medium px-4 py-3">Net margin impact</th>}
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {loading ? (
               <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-gray-400">
+                <td colSpan={cols} className="px-4 py-8 text-center text-gray-400">
                   Loading...
                 </td>
               </tr>
             ) : !report || report.promos.length === 0 ? (
               <tr>
-                <td colSpan={6} className="px-4 py-8 text-center text-gray-400">
+                <td colSpan={cols} className="px-4 py-8 text-center text-gray-400">
                   No promo applications in this window.
                 </td>
               </tr>
@@ -166,7 +176,7 @@ export default function PromotionsReportPage() {
                 <tr key={r.promo_id} className="hover:bg-gray-50">
                   <td className="px-4 py-3">
                     <div className="font-medium text-gray-900">{r.promo_name}</div>
-                    {r.cogs_is_estimated && (
+                    {canSeeCost && r.cogs_is_estimated && (
                       <span className="text-xs text-amber-600">estimated COGS</span>
                     )}
                   </td>
@@ -177,17 +187,21 @@ export default function PromotionsReportPage() {
                   <td className="px-4 py-3 text-right text-gray-900">
                     {rupees(r.total_discount_given)}
                   </td>
-                  <td className="px-4 py-3 text-right text-gray-600">
-                    {rupees(r.estimated_cogs)}
-                  </td>
-                  <td
-                    className={clsx(
-                      'px-4 py-3 text-right font-medium',
-                      r.net_margin_after_promo < 0 ? 'text-red-600' : 'text-gray-900',
-                    )}
-                  >
-                    {rupees(r.net_margin_after_promo)}
-                  </td>
+                  {canSeeCost && (
+                    <td className="px-4 py-3 text-right text-gray-600">
+                      {rupees(r.estimated_cogs ?? 0)}
+                    </td>
+                  )}
+                  {canSeeCost && (
+                    <td
+                      className={clsx(
+                        'px-4 py-3 text-right font-medium',
+                        (r.net_margin_after_promo ?? 0) < 0 ? 'text-red-600' : 'text-gray-900',
+                      )}
+                    >
+                      {rupees(r.net_margin_after_promo ?? 0)}
+                    </td>
+                  )}
                 </tr>
               ))
             )}

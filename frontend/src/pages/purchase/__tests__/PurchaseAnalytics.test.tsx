@@ -6,7 +6,12 @@
 // and reverting it passed every purchase suite (verifier, hollow test).
 
 import { render, screen } from '@testing-library/react';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+
+// A store manager: the drafts count is the same for every role.
+vi.mock('../../../context/AuthContext', () => ({
+  useAuth: () => ({ hasRole: (r: string[]) => r.includes('STORE_MANAGER') }),
+}));
 import { PurchaseAnalytics } from '../PurchaseAnalytics';
 import type { PurchaseOrder } from '../purchaseTypes';
 

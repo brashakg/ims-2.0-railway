@@ -53,7 +53,10 @@ vi.mock('../InventoryLayout', () => ({
 }));
 
 vi.mock('../../../context/AuthContext', () => ({
-  useAuth: () => ({ user: { id: 'm1', activeStoreId: 'S1', roles: ['STORE_MANAGER'] } }),
+  useAuth: () => ({
+    user: { id: 'm1', activeStoreId: 'S1', roles: ['STORE_MANAGER'] },
+    hasRole: (roles: string[]) => roles.includes('STORE_MANAGER'),
+  }),
 }));
 
 vi.mock('../../../context/ToastContext', () => ({

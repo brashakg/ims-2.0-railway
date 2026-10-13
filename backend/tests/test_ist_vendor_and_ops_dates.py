@@ -244,8 +244,9 @@ def _purchase_history(pos, grns, months=12):
         get_vendor_repository=lambda: _VendorRepo(),
     ):
         return asyncio.run(
+            # What we spent is the accounts roles' (owner ruling 2026-10-12).
             vendors_mod.vendor_purchase_history(
-                vendor_id=VENDOR, months=months, current_user={}
+                vendor_id=VENDOR, months=months, current_user={"roles": ["ACCOUNTANT"]}
             )
         )
 

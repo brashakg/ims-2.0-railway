@@ -1,5 +1,7 @@
 """Purchase-order list and creation (manual + from forecast)."""
 
+from collections import Counter
+
 from ._shared import (
     BaseModel,
     Depends,
@@ -25,6 +27,9 @@ from ._shared import (
     uuid,
     validate_store_access,
 )
+from ...services.cost_mask import can_see_cost, mask_purchase
+from ...services.purchase_match import is_unpriced_line
+from .cockpit import server_line_prices
 from .gst import (
     _PO_PROVISIONAL_COST_SOURCE,
     _promote_cost_from_rate,
@@ -72,7 +77,7 @@ async def list_pos(
     for po in pos:
         po["closed_by_cancel"] = closed_by_cancel(po)
 
-    return {"purchase_orders": pos, "total": len(pos)}
+    return {"purchase_orders": mask_purchase(pos, current_user), "total": len(pos)}
 
 
 # INV-9: Demand forecast -> nightly draft-PO suggestions
@@ -207,9 +212,6 @@ async def create_pos_from_forecast(
                 continue
 
             vendor_id = prod.get("preferred_vendor_id") or "UNASSIGNED"
-            unit_price = float(
-                prod.get("cost_price", 0) or prod.get("purchase_price", 0) or 0
-            )
             sku = sales.get("sku") or prod.get("sku", "")
             product_name = sales.get("product_name") or prod.get("name", "")
 
@@ -223,7 +225,6 @@ async def create_pos_from_forecast(
                 "predicted_demand": round(predicted, 1),
                 "safety_buffer": round(buffer, 1),
                 "reorder_quantity": reorder_qty,
-                "estimated_unit_price": unit_price,
             }
             suggestions.append(suggestion)
 
@@ -234,9 +235,25 @@ async def create_pos_from_forecast(
                         "product_name": product_name,
                         "sku": sku,
                         "quantity": reorder_qty,
-                        "unit_price": unit_price,
                     }
                 )
+
+        # Every line priced by the one rule create_po uses (server_line_prices:
+        # last paid to this vendor, else the catalogue cost, else None).
+        prices: dict = {}
+        for sg in suggestions:
+            prices.setdefault(sg["vendor_id"], {})[sg["product_id"]] = (
+                prod_docs.get(sg["product_id"]) or {}
+            ).get("cost_price")
+        prices = {
+            v: server_line_prices(None if v == "UNASSIGNED" else v, cat)
+            for v, cat in prices.items()
+        }
+        for sg in suggestions:
+            sg["estimated_unit_price"] = prices[sg["vendor_id"]][sg["product_id"]]
+        for v_id, lines in reorder_items.items():
+            for ln in lines:
+                ln["unit_price"] = prices[v_id][ln["product_id"]]
 
         # --- Step 3: create DRAFT POs per vendor group ---
         created_pos = []
@@ -309,7 +326,7 @@ async def create_pos_from_forecast(
                             f"[INV-9] PO create failed for vendor {v_id}: {_e}"
                         )
 
-        return {
+        return mask_purchase({
             "store_id": active_store,
             "dry_run": body.dry_run,
             "horizon_days": horizon,
@@ -318,7 +335,7 @@ async def create_pos_from_forecast(
             "pos_created": len(created_pos),
             "created_pos": created_pos,
             "suggestions": suggestions,
-        }
+        }, current_user)
 
     except HTTPException:
         raise
@@ -362,18 +379,35 @@ def _new_product_invalid(err) -> HTTPException:
     )
 
 
-def price_po_lines(items, vendor, delivery_store_id, current_user):
+def price_po_lines(items, vendor_id, vendor, delivery_store_id, current_user, stored_items=None):
     """ONE path from the lines a person typed to the lines a PO stores.
 
     Both doors that take typed lines -- create (POST) and the draft edit (PUT)
     -- call this, so an edited order is priced and gated exactly as a new one:
     the catalogue gate runs, typed-in new products are validated by the product
-    door and given their product_id, and GST is built per line (build_po_gst).
-    Mutates `items` (a typed-in line gets its product_id). Writes NOTHING.
+    door and given their product_id, every line is priced by the one rule
+    below, and GST is built per line (build_po_gst). Mutates `items` (a
+    typed-in line gets its product_id, every line its price). Writes NOTHING.
     Returns (build_po_gst result, the product docs read, the typed-in products
     still to write) -- after the order write, hand the last to
     po_detail.settle_typed_in_lines, then the docs to fill_cost_from_rate.
+
+    Owner ruling 2026-10-12: what we pay is for the accounts roles. A price
+    anyone else sends is never taken. On an edit (`stored_items`, the draft's
+    lines, from the same vendor) each of their lines keeps the price stored on
+    that product's line -- so a quantity change never wipes a price accounts
+    agreed; any other line of theirs is priced by the server.
     """
+    if not can_see_cost(current_user, "purchase"):
+        kept: dict = {}
+        for old in stored_items or []:
+            kept.setdefault(old.get("product_id"), []).append(old.get("unit_price"))
+        nth: Counter = Counter()
+        for it in items:
+            olds = kept.get(it.product_id) if it.new_product is None else None
+            k = nth[it.product_id]
+            nth[it.product_id] += 1
+            it.unit_price = olds[min(k, len(olds) - 1)] if olds else None
     product_repo = get_product_repository()
 
     # Hub Phase 2: every PO line must reference a REAL catalogued product on the
@@ -480,6 +514,20 @@ def price_po_lines(items, vendor, delivery_store_id, current_user):
         for it in items:
             if it.product_id not in products:
                 products[it.product_id] = product_repo.find_by_id(it.product_id)
+
+    # A line with no price -- every manager's new line, one accounts left blank
+    # or at 0 -- takes the price last paid to this vendor (the one last-paid
+    # rule, every shop: nobody is shown it here), else the catalogue cost.
+    # Neither known: the line stays unpriced (None, never a made-up 0) and
+    # sending the PO raises a task for accounts (po_detail._flag_unpriced_lines).
+    unpriced = [it for it in items if is_unpriced_line({"unit_price": it.unit_price})]
+    if unpriced:
+        prices = server_line_prices(
+            vendor_id,
+            {it.product_id: (products.get(it.product_id) or {}).get("cost_price") for it in unpriced},
+        )
+        for it in unpriced:
+            it.unit_price = prices[it.product_id]
     computed = build_po_gst(
         # A typed-in line was given its product_id above (the product itself
         # is written after the order); the spent `new_product: None` payload
@@ -661,6 +709,7 @@ async def create_po(
 
     computed, products, typed_in = price_po_lines(
         po.items,
+        po.vendor_id,
         vendor if vendor_repo is not None else None,
         po.delivery_store_id,
         current_user,
@@ -751,18 +800,23 @@ async def create_po(
         po_id, po_number, po.items, products, current_user
     )
 
-    return {
-        "po_id": po_id,
-        "po_number": po_number,
-        "total_amount": total,
-        "interstate": interstate,
-        "gst_summary": gst_summary,
-        # EVERY line whose HSN could not settle the rate -- including the ones
-        # taxed anyway off the catalogue rate. HSN is mandatory on a GST
-        # purchase document, so a taxed line with no HSN is still a problem the
-        # buyer has to be told about.
-        "gst_warnings": gst_warnings,
-        "cost_filled": cost_filled,
-        "products_not_created": not_created,
-        "message": "Purchase order created",
-    }
+    return mask_purchase(
+        {
+            "po_id": po_id,
+            "po_number": po_number,
+            "total_amount": total,
+            "interstate": interstate,
+            "gst_summary": gst_summary,
+            # EVERY line whose HSN could not settle the rate -- including the ones
+            # taxed anyway off the catalogue rate. HSN is mandatory on a GST
+            # purchase document, so a taxed line with no HSN is still a problem the
+            # buyer has to be told about.
+            "gst_warnings": gst_warnings,
+            # Only the roles that typed (or see) the rates are told a cost was
+            # recorded from them: a manager typed none (owner ruling 2026-10-12).
+            "cost_filled": cost_filled if can_see_cost(current_user, "purchase") else [],
+            "products_not_created": not_created,
+            "message": "Purchase order created",
+        },
+        current_user,
+    )

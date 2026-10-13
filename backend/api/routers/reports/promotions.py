@@ -7,6 +7,7 @@ from ...utils.ist import (
     ist_day_start_utc,
 )
 from ..auth import get_current_user, require_roles
+from ...services.cost_mask import mask_cost
 from ...dependencies import (
     get_db,
     validate_store_access,
@@ -25,6 +26,9 @@ from ._shared import (
 # at 60% otherwise -- estimated rows are flagged so the owner never mistakes
 # estimated margin for real margin (F11 business rule). Empty + fail-soft when
 # the engine is dark / no applications exist.
+_PROMO_COST_KEYS = ("estimated_cogs", "net_margin_after_promo", "net_margin_impact")
+
+
 @router.get("/promotions")
 async def promotions_report(
     start_date: Optional[str] = Query(None, description="ISO date YYYY-MM-DD"),
@@ -47,6 +51,7 @@ async def promotions_report(
         "start_date": start_date,
         "end_date": end_date,
     }
+    empty = mask_cost(empty, current_user, "product", extra=_PROMO_COST_KEYS)
     if db is None:
         return empty
 
@@ -146,18 +151,25 @@ async def promotions_report(
         promos_out.append(row)
     promos_out.sort(key=lambda r: r["total_discount_given"], reverse=True)
 
-    return {
-        "summary": {
-            "total_discount_given": round(total_discount, 2),
-            "orders_with_promos": len([o for o in order_ids if o]),
-            "promos_fired": len(promos_out),
-            "net_margin_impact": round(total_margin, 2),
-            "any_cogs_estimated": any_estimated,
+    # The margin after the offer and its COGS are worked out from cost: the
+    # accounts roles' only (owner ruling 2026-10-12); the discount stays.
+    return mask_cost(
+        {
+            "summary": {
+                "total_discount_given": round(total_discount, 2),
+                "orders_with_promos": len([o for o in order_ids if o]),
+                "promos_fired": len(promos_out),
+                "net_margin_impact": round(total_margin, 2),
+                "any_cogs_estimated": any_estimated,
+            },
+            "promos": promos_out,
+            "start_date": start_date,
+            "end_date": end_date,
         },
-        "promos": promos_out,
-        "start_date": start_date,
-        "end_date": end_date,
-    }
+        current_user,
+        "product",
+        extra=_PROMO_COST_KEYS,
+    )
 
 
 # ============================================================================
