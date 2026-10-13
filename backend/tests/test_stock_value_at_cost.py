@@ -60,6 +60,7 @@ No emoji (Windows cp1252).
 from __future__ import annotations
 
 import os
+import re
 import sys
 import uuid
 from datetime import datetime, timedelta
@@ -1061,8 +1062,9 @@ def test_a_manager_reads_no_stock_at_cost_anywhere(world, path, params, role):
     if path in _REPORTS:
         values = [v for v in _REPORTS[path][1](body) if v is not None]
         _open(not values, f"{role} reads stock value at cost {values} on {path}")
-    for figure in ("6300", "3100", "3200"):
-        assert figure not in resp.text, (role, path, figure)
+    # As a JSON number, never inside a timestamp's digits.
+    figures = re.findall(r"(?<![\d.])(6300|3100|3200)(?:\.0+)?(?![\d])", resp.text)
+    assert not figures, (role, path, figures)
 
 
 def test_the_store_manager_probe_reads_selling_value_only(world):
