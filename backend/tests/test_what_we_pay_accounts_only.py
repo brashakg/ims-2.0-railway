@@ -493,3 +493,218 @@ def test_moving_a_return_on_reads_its_price_back_to_accounts_only(client, buying
     assert r.status_code == 200, r.text
     assert r.json()["return"]["status"] == "approved"
     assert bool(_leaks(r.json(), _PRICE_KEYS + ("total_value",))) is sees, r.json()
+
+
+# ---------------------------------------------------------------------------
+# 4. Writes answer through the same mask as the reads (panel round 2)
+# ---------------------------------------------------------------------------
+_NOTE_MONEY = ("rate_paise", "taxable_paise", "totals", "totals_rupees")
+
+
+@pytest.fixture
+def notes(buying, monkeypatch):
+    """The shop plus our company, so a debit note knows which GSTIN it is
+    issued on (rtv_debit_notes bound get_db at import)."""
+    from api.routers import rtv_debit_notes as dn_mod
+
+    monkeypatch.setattr(dn_mod, "get_db", lambda: _Conn(buying))
+    buying.entities.insert_one({"entity_id": "E1", "name": "Better Vision", "gstins": [{"gstin": "27AABCB1234C1ZE"}]})
+    buying.stores.insert_one({"store_id": STORE, "entity_id": "E1", "gstin": "27AABCB1234C1ZE", "state_code": "27"})
+    return buying
+
+
+@pytest.mark.parametrize("role,sees", (
+    ("STORE_MANAGER", False), ("AREA_MANAGER", False), ("ACCOUNTANT", True), ("ADMIN", True)))
+def test_issuing_a_debit_note_reads_its_money_back_to_accounts_only(client, notes, role, sees):
+    # Issuing is idempotent: the second post returns the note already issued,
+    # so an unmasked reply would read any note's money.
+    body = {"source_type": "vendor_return", "rtv_id": "VR1"}
+    first = client.post("/api/v1/rtv-debit-notes/issue", json=body, headers=_headers(role))
+    again = client.post("/api/v1/rtv-debit-notes/issue", json=body, headers=_headers(role))
+    assert (first.status_code, again.status_code) == (201, 201), first.text
+    assert again.json()["idempotent"] is True
+    for r in (first, again):
+        note = r.json()["debit_note"]
+        assert note["debit_note_number"] and note["lines"][0]["qty"] == 1
+        assert bool(_leaks(r.json(), _NOTE_MONEY)) is sees, r.json()
+        assert ("27AAPFU0939F1ZV" in r.text) is sees  # the supplier's GSTIN
+
+
+@pytest.mark.parametrize("role,status", (
+    ("STORE_MANAGER", 403), ("AREA_MANAGER", 403), ("ACCOUNTANT", 200), ("ADMIN", 200)))
+def test_the_debit_note_tally_export_is_for_accounts_only(client, notes, role, status):
+    issued = client.post(
+        "/api/v1/rtv-debit-notes/issue", json={"rtv_id": "VR1"}, headers=_headers("ACCOUNTANT")
+    )
+    assert issued.status_code == 201, issued.text
+    dn = issued.json()["debit_note"]["debit_note_id"]
+    r = client.get(f"/api/v1/rtv-debit-notes/{dn}/tally", headers=_headers(role))
+    assert r.status_code == status, r.text[:300]
+    assert (str(COST) in r.text) is (status == 200)
+
+
+@pytest.mark.parametrize("role,sees", (("STORE_MANAGER", False), ("AREA_MANAGER", False), ("ADMIN", True)))
+def test_the_quarantine_queue_and_its_writes_show_cost_to_accounts_only(client, buying, role, sees):
+    h = _headers(role)
+    put = client.patch("/api/v1/inventory/stock/U1/quarantine", json={"reason": "DEFECTIVE"}, headers=h)
+    assert put.status_code == 200, put.text
+    assert put.json()["stock_unit"]["status"] == "QUARANTINED"
+    queue = _get(client, role, "/api/v1/inventory/stock/quarantined")
+    assert queue.status_code == 200, queue.text
+    assert [it["stock_id"] for it in queue.json()["items"]] == ["U1"]
+    lift = client.patch(
+        "/api/v1/inventory/stock/U1/lift-quarantine",
+        json={"lift_reason": "not defective after all"}, headers=h,
+    )
+    assert lift.status_code == 200, lift.text
+    for r in (put, queue, lift):
+        assert bool(_leaks(r.json())) is sees, r.json()
+
+
+@pytest.mark.parametrize("role,sees", (("STORE_MANAGER", False), ("AREA_MANAGER", False), ("ADMIN", True)))
+def test_locking_the_day_end_count_shows_its_value_to_accounts_only(client, buying, role, sees):
+    # P1 counted at 0 with units on hand: the lock reveals a shortage at cost.
+    h = _headers(role)
+    opened = client.post("/api/v1/blind-count/open", json={"store_id": STORE}, headers=h)
+    assert opened.status_code == 200, opened.text
+    sid = opened.json()["session_id"]
+    sub = client.post(
+        f"/api/v1/blind-count/{sid}/submit",
+        json={"counts": [{"product_id": "P1", "counted_qty": 0}]}, headers=h,
+    )
+    assert sub.status_code == 200, sub.text
+    locked = client.post(f"/api/v1/blind-count/{sid}/lock", headers=h)
+    assert locked.status_code == 200, locked.text
+    assert locked.json()["status"].upper() == "LOCKED"
+    assert any(it.get("variance_units") for it in locked.json()["items"]), locked.json()
+    assert bool(_leaks(locked.json())) is sees, locked.json()
+
+
+@pytest.mark.parametrize("role,sees", (("CATALOG_MANAGER", False), ("ADMIN", True)))
+def test_writing_a_lens_line_echoes_its_cost_to_accounts_only(client, buying, role, sees):
+    for enum_id, items in (("brands", ["Essilor", "Zeiss"]), ("series", ["Crizal", "Clear"])):
+        buying.lens_enum_config.insert_one({"enum_id": enum_id, "items": items})
+    buying.lens_catalog.update_one({"lens_line_id": "LL1"}, {"$set": {"mrp": 9999.0}})
+    h = _headers(role)
+    replies = [
+        client.patch("/api/v1/lens-catalog/LL1", json={}, headers=h),
+        client.patch("/api/v1/lens-catalog/LL1", json={"notes": "re-checked"}, headers=h),
+        client.post(
+            "/api/v1/lens-catalog",
+            json={"brand": "Zeiss", "series": "Clear", "index": 1.6, "material": "POLY",
+                  "lens_type": "SV", "coating": "AR", "mrp": 9999.0, "cost_price": COST},
+            headers=h,
+        ),
+    ]
+    for r in replies:
+        assert r.status_code in (200, 201), r.text
+        assert r.json()["lens_line"]["brand"]
+        assert bool(_leaks(r.json())) is sees, r.json()
+
+
+@pytest.mark.parametrize("role", ("STORE_MANAGER", "CATALOG_MANAGER", "ADMIN"))
+def test_a_collection_rule_cannot_search_on_cost(client, buying, role):
+    # A rule over the cost (or the text of a nested object that holds it) is a
+    # cost oracle: "cost > X" binary-searched recovers it to the paisa. It
+    # matches nothing, for every role; a real rule still matches.
+    buying.products.update_one(
+        {"product_id": "P1"}, {"$set": {"pricing": {"cost_price": COST, "offer_price": 9999.0}}}
+    )
+
+    def count(rules):
+        r = client.post("/api/v1/collections/preview", json={"rules": rules}, headers=_headers(role))
+        assert r.status_code == 200, r.text
+        return r.json()["match_count"]
+
+    assert count([{"field": "brand", "relation": "EQUALS", "value": "Ray-Ban"}]) >= 1
+    for field in ("cost_price", "Cost Price", "landed_cost"):
+        for value in ("0", "4321", "4322"):
+            assert count([{"field": field, "relation": "GREATER_THAN", "value": value}]) == 0, field
+            assert count([{"field": field, "relation": "LESS_THAN", "value": value}]) == 0, field
+    assert count([{"field": "pricing", "relation": "CONTAINS", "value": "4321"}]) == 0
+
+
+# ---------------------------------------------------------------------------
+# 5. One price rule for every PO door; a line nobody priced is not a 0
+# ---------------------------------------------------------------------------
+def test_an_unpriced_line_billed_at_its_price_is_no_price_exception():
+    # None (create_po) or 0.0 (a CL / forecast draft) is "no PO price": the
+    # bill's price stands; it is not "differs from PO price 0 by 1e9%".
+    from api.services.purchase_match import three_way_match
+
+    def match(po_price):
+        return three_way_match(
+            {"items": [{"product_id": "P4", "quantity": 2, "unit_price": po_price}]},
+            {"items": [{"product_id": "P4", "accepted_qty": 2}]},
+            [{"product_id": "P4", "qty": 2, "unit_price": 600.0}],
+        )
+
+    for unpriced in (None, 0.0):
+        res = match(unpriced)
+        assert res["match_status"] == "MATCHED", (unpriced, res["exceptions"])
+        assert res["lines"][0]["po_unit_price"] is None
+    # ...while a priced line still has its price checked.
+    assert match(500.0)["match_status"] != "MATCHED"
+
+
+@pytest.mark.parametrize("unpriced", (None, 0.0))
+def test_sending_a_draft_with_an_unpriced_line_raises_the_accounts_task(client, catalogue, unpriced):
+    # A CL / forecast draft stored 0.0 where create_po stores None: both are
+    # "nobody priced it" and both raise the task at send.
+    catalogue.purchase_orders.insert_one(
+        {"po_id": "PO-CL", "po_number": "PO-CL-1", "vendor_id": "V1", "vendor_name": "Acme Optics",
+         "delivery_store_id": STORE, "status": "DRAFT", "source": "cl_po_generator",
+         "items": [{"product_id": "P2", "product_name": "P2", "quantity": 1, "ordered_qty": 1,
+                    "unit_price": unpriced, "line_status": "OPEN"}]}
+    )
+    r = client.post("/api/v1/vendors/purchase-orders/PO-CL/send", headers=_headers("STORE_MANAGER"))
+    assert r.status_code == 200, r.text
+    assert [t["source_ref"] for t in _price_tasks(catalogue)] == ["po-price:PO-CL"]
+
+
+def test_the_forecast_drafts_price_their_lines_by_the_one_rule(client, catalogue):
+    # P1 was last paid COST to V1 (its catalogue says 1234.5); P3 has no price
+    # anywhere. The forecast door stores what create_po stores: COST and None.
+    catalogue.products.update_many(
+        {"product_id": {"$in": ["P1", "P3"]}}, {"$set": {"preferred_vendor_id": "V1"}}
+    )
+    catalogue.orders.insert_one(
+        {"order_id": "O9", "store_id": STORE, "status": "DELIVERED", "created_at": datetime.now(),
+         "items": [{"product_id": "P3", "product_name": "P3", "quantity": 5}]}
+    )
+    r = client.post(
+        "/api/v1/vendors/purchase-orders/from-forecast",
+        json={"store_id": STORE}, headers=_headers("STORE_MANAGER"),
+    )
+    assert r.status_code == 201, r.text
+    assert not _leaks(r.json(), _PRICE_KEYS + ("estimated_unit_price",)), r.json()
+    (po,) = list(catalogue.purchase_orders.find({"source": "demand_forecast"}))
+    assert {it["product_id"]: it["unit_price"] for it in po["items"]} == {"P1": COST, "P3": None}
+
+
+def test_the_cl_drafts_price_their_lines_by_the_one_rule(client, catalogue, monkeypatch):
+    from api.routers import cl_po
+
+    needs = [
+        {"product_id": "P1", "sph": -1.0, "qty": 2, "description": "Aviator", "unit_price": 1234.5},
+        {"product_id": "LL9", "sph": -2.0, "qty": 1, "description": "Unknown lens", "unit_price": 0.0},
+    ]
+    monkeypatch.setattr(cl_po, "_read_gap_planner_needs", lambda *_a, **_k: needs)
+    monkeypatch.setattr(cl_po, "_make_vendor_resolver", lambda _db: (lambda _need: "V1"))
+    r = client.post(
+        "/api/v1/cl-po/generate", json={"store_id": STORE, "source": "gap-planner", "dry_run": True},
+        headers=_headers("ADMIN"),
+    )
+    assert r.status_code == 200, r.text
+    (group,) = r.json()["groups"]
+    assert {ln["product_id"]: ln["unit_price"] for ln in group["lines"]} == {"P1": COST, "LL9": None}
+
+
+@pytest.mark.parametrize("role,told", (("STORE_MANAGER", False), ("ACCOUNTANT", True)))
+def test_only_the_roles_that_price_are_told_a_cost_was_recorded(client, buying, role, told):
+    # P1 has no catalogue cost; the server prices it at the last price paid and
+    # records that as its cost. A manager typed no rate: he is not told so.
+    buying.products.update_one({"product_id": "P1"}, {"$unset": {"cost_price": ""}})
+    reply = _po(client, role, ("P1", {}))
+    assert bool(reply["cost_filled"]) is told, reply
+    assert buying.products.find_one({"product_id": "P1"})["cost_price"] == COST
