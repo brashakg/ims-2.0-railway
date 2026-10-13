@@ -6189,6 +6189,50 @@ def test_r11_an_ordered_frame_draft_is_finished_as_the_sunglass_it_is(world):
     assert (twin["category"], twin["hsn_code"]) == ("SUNGLASS", hsn)
 
 
+def _edit_attrs(world, pid, **attrs):
+    cur = world.product(pid)
+    body = _products.ProductUpdate(attributes={**(cur.get("attributes") or {}), **attrs})
+    try:
+        _run(_products.update_product(pid, body, CATALOGUER))
+    except HTTPException as exc:
+        return exc
+    return None
+
+
+def test_r11_an_edit_to_a_frames_eye_size_keyed_before_eye_size_is_refused(world):
+    # The edit door asks the create door's rule (identity_conflict): giving
+    # a Carrera 52 the eye size of the Carrera 54 still keyed before eye size
+    # joined the key would be a twin -- refused, naming it.
+    old = _pre_deploy_frame(world, lens_size="54")
+    mine = world.catalogue_frame("Carrera", "CA 8895", "807", "52", mrp=6990, offer=6490, cost=3155.76)
+    refused = _edit_attrs(world, mine["product_id"], lens_size="54")
+    finding(
+        refused is not None
+        and refused.status_code == 409
+        and (refused.detail.get("existing") or {}).get("product_id") == old["product_id"],
+        f"R11-7: the edit made a twin of the frame keyed before eye size ({getattr(refused, 'detail', None)})",
+    )
+    assert world.product(mine["product_id"])["attributes"]["lens_size"] == "52"
+
+
+def test_r11_an_edit_to_a_sizeless_frame_beside_sized_ones_is_asked_the_eye_size(world):
+    # A sizeless Boss C3 recoloured C2, where Boss C2 is catalogued by eye
+    # size: the create door asks for the eye size (EYE_SIZE_NEEDED), so the
+    # edit does too, never a sizeless twin.
+    world.catalogue_frame("Boss", "BOSS 1700", "C2", "52", mrp=2990, offer=2790, cost=1200)
+    c3 = world.catalogue_frame("Boss", "BOSS 1700", "C3", None, mrp=2990, offer=2790, cost=1200)
+    refused = _edit_attrs(world, c3["product_id"], colour_code="C2")
+    finding(
+        refused is not None
+        and refused.status_code == 422
+        and "by eye size (52)" in str(refused.detail),
+        f"R11-7: the edit made a sizeless Boss C2 beside the 52 ({getattr(refused, 'detail', None)})",
+    )
+    # Its own eye size is never "another" product: the sized frame edits freely.
+    sized = world.products_named("Boss", "BOSS 1700")[0]
+    assert _edit_attrs(world, sized["product_id"], colour_code="C4") is None
+
+
 def test_r11_an_accept_that_dies_after_its_last_line_holds_nothing(world, monkeypatch):
     # The release shelves D and E, then the receipt's status flip fails (a
     # stepdown): the hold says nothing is held, the PO counts both and no
@@ -6211,3 +6255,15 @@ def test_r11_an_accept_that_dies_after_its_last_line_holds_nothing(world, monkey
         f"and the PO reads {received} ({status})",
     )
     finding(_catalogue_tasks(world, gid) == [], "R11-1: a catalogue task still names the shelved items")
+
+
+def test_r11_an_edit_to_its_own_stored_key_is_never_refused_against_itself(world):
+    # A row whose stored key is stale (keyed before a rule changed) edited to
+    # what that key says: the product is never its own twin.
+    mine = world.catalogue_frame("Carrera", "CA 8895", "807", "54", mrp=6990, offer=6490, cost=3155.76)
+    world.db.products.update_one(
+        {"product_id": mine["product_id"]}, {"$set": {"identity_key": "carrera|ca8895|807|52"}}
+    )
+    refused = _edit_attrs(world, mine["product_id"], lens_size="52")
+    finding(refused is None, f"R11-7: the edit was refused against the product itself ({getattr(refused, 'detail', None)})")
+    assert world.product(mine["product_id"])["attributes"]["lens_size"] == "52"

@@ -1473,9 +1473,12 @@ def rekey_on_edit(
 ) -> None:
     """An edit that changes what tells a product apart (any identity_parts
     input: an eye size, a contact lens's power or fit, a colour...) re-keys it
-    by the create rule, setting patch['identity_key'], and is refused (409
-    DUPLICATE_PRODUCT, the create door's error) when ANOTHER product already
-    has that identity. A name the create door minted says what the product is
+    by the create rule, setting patch['identity_key'], and is refused by the
+    create door's own "we already have this" rule (identity_conflict): 409
+    DUPLICATE_PRODUCT when ANOTHER product already has that identity (a frame
+    keyed before eye size joined the key included), 422 EYE_SIZE_NEEDED when
+    it leaves a frame without the eye size its siblings are catalogued by. A
+    name the create door minted says what the product is
     (a lens's power, a frame's colour), so it is re-minted with the key
     (patch['name']); a typed name stays. The SKU never moves: readable SKUs
     are for new products only (owner 2026-09-28). A stored value that is not a
@@ -1517,13 +1520,24 @@ def rekey_on_edit(
         return
     if new is None or new == old:
         return
-    other = (
-        product_repo.find_by_identity_key(new)
-        if hasattr(product_repo, "find_by_identity_key")
-        else None
-    )
-    if other is not None and other.get("product_id") != current.get("product_id"):
-        raise _duplicate_error(other)
+    if product_repo is not None:
+        brand, model, colour, size = identity_parts(
+            _identity_attributes(merged), merged.get("category")
+        )
+        err = identity_conflict(
+            {
+                "category": resolve_category(merged.get("category")),
+                "brand": brand,
+                "model": model,
+                "color": colour,
+                "size": size,
+                "identity_key": new,
+            },
+            product_repo,
+            self_id=current.get("product_id"),
+        )
+        if err is not None:
+            raise err
     patch["identity_key"] = new
     if "name" not in patch and name_was_minted(current):
         patch["name"] = minted_name(merged) or current["name"]
@@ -3135,25 +3149,31 @@ def _row_eye_size(row: Dict[str, Any]) -> str:
     return normalise_identity_component(eye_size_of(derived))
 
 
-def identity_conflict(spine: Dict[str, Any], product_repo) -> Optional[ProductMasterError]:
-    """THE one "we already have this" rule. The create door's guard (above)
-    and the PO's typed-line check (purchase_orders) both run it, so the two
-    doors can never answer the same item differently.
+def identity_conflict(
+    spine: Dict[str, Any], product_repo, self_id: Optional[str] = None
+) -> Optional[ProductMasterError]:
+    """THE one "we already have this" rule. The create door's guard (above),
+    the PO's typed-line check (purchase_orders) and an edit's re-key
+    (rekey_on_edit, `self_id` the product being edited, which is never its
+    own twin) all run it, so no two doors answer the same item differently.
 
     A product that exists by SKU, brand+model+colour(+size) identity or barcode
     -> the 409 naming it. An eye-size category item WITHOUT its eye size whose
     brand/model/colour is catalogued BY eye size (each eye size is its own item,
     owner 09-28) -> 422 EYE_SIZE_NEEDED naming the sizes: it cannot be told
     apart from them, so it is never created as a sizeless twin."""
+    def _other(row):
+        return None if row is not None and self_id and row.get("product_id") == self_id else row
+
     # A blank SKU names no product (find_one({"sku": None}) would match any row
     # without one).
-    existing = product_repo.find_by_sku(spine["sku"]) if spine.get("sku") else None
+    existing = _other(product_repo.find_by_sku(spine["sku"])) if spine.get("sku") else None
     key = spine.get("identity_key")
     eye_item = _size_attribute_key(spine.get("category")) == "lens_size"
     sizeless = not normalise_identity_component(spine.get("size"))
     legacy_sized: List[Dict[str, Any]] = []
     if existing is None and key and hasattr(product_repo, "find_by_identity_key"):
-        existing = product_repo.find_by_identity_key(key)
+        existing = _other(product_repo.find_by_identity_key(key))
         # A frame keyed before eye size joined the key still carries the 3-part
         # key a SIZELESS typed line makes -- but it has an eye size, so it is a
         # sized item (the migration re-keys it so): EYE_SIZE_NEEDED below,
@@ -3170,7 +3190,7 @@ def identity_conflict(spine: Dict[str, Any], product_repo) -> Optional[ProductMa
             legacy_sized, existing = [existing], None
     if existing is None and key and hasattr(product_repo, "find_by_identity_key"):
         try:
-            existing = _keyed_before_eye_size(spine, key, product_repo)
+            existing = _other(_keyed_before_eye_size(spine, key, product_repo))
         except Exception as exc:  # noqa: BLE001 - fail loud, never a silent twin
             logger.error("[PRODUCT_MASTER] legacy-key check could not read %s: %s", key, exc)
             return _catalogue_unreadable()
@@ -3180,7 +3200,7 @@ def identity_conflict(spine: Dict[str, Any], product_repo) -> Optional[ProductMa
         and hasattr(product_repo, "find_by_barcode")
     ):
         try:
-            existing = product_repo.find_by_barcode(spine["barcode"])
+            existing = _other(product_repo.find_by_barcode(spine["barcode"]))
         except Exception:  # noqa: BLE001
             existing = None
     if existing is not None:
@@ -3206,6 +3226,7 @@ def identity_conflict(spine: Dict[str, Any], product_repo) -> Optional[ProductMa
         for p in rows
         if str(p.get("identity_key") or "").startswith(prefix)
         and not revivable_discarded_draft(p)
+        and _other(p) is not None
     ]
     if not sized:
         return None
