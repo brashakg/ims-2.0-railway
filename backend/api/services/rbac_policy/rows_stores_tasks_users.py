@@ -95,7 +95,7 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/tasks/auto-generate",
-        # Managers only (owner ruling 2026-10-13); = tasks.MANAGER_ROLES.
+        # Managers only (owner ruling 2026-10-13); = task_visibility.MANAGER_ROLES.
         "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SUPERADMIN"],
     },
     {"method": "GET", "path": "/api/v1/tasks/checklists", "allowed": "AUTHENTICATED"},
@@ -206,7 +206,7 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/tasks/{task_id}/reassign",
-        # Managers only (owner ruling 2026-10-13); = tasks.MANAGER_ROLES.
+        # Managers only (owner ruling 2026-10-13); = task_visibility.MANAGER_ROLES.
         "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SUPERADMIN"],
     },
     {

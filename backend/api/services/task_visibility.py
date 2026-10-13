@@ -31,9 +31,15 @@ from typing import Any, Dict, Optional
 
 from ..dependencies import user_store_scope
 from . import catalog_flags
+from .user_roles import DEPRECATED_ROLE_ALIASES
 
 # Roles that see every task of the shops they reach.
 _SHOP_WIDE_ROLES = {"STORE_MANAGER", "AREA_MANAGER"}
+
+# Who manages tasks (owner ruling 2026-10-13, control over convenience):
+# cancel, reassign, hand a task to a named person, issue the day's SOP tasks.
+# The rbac rows for /reassign and /auto-generate name exactly these roles.
+MANAGER_ROLES = ("STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN")
 
 # The marker POST /tasks stamps on a task a person raised by hand. Only it
 # makes assigned_by a "creator" the rule lets follow the task up.
@@ -45,11 +51,30 @@ MANUAL = "manual"
 NOT_CANCELLED = {"status": {"$nin": ["CANCELLED", "cancelled", "CANCELED", "canceled"]}}
 
 
+def task_roles(user: dict) -> list:
+    """``user``'s roles as every task rule reads them. Upper case (a legacy row
+    or token may say "cashier"). A sales cashier is both a sales person and a
+    cashier (owner 2026-10-13). Sign-in folds SALES_CASHIER into SALES_STAFF
+    (user_roles.DEPRECATED_ROLE_ALIASES), so SALES_STAFF also answers to the
+    old name a task may still be addressed to."""
+    held = {str(r).strip().upper() for r in (user.get("roles") or []) if r}
+    roles = set(held)
+    if "SALES_CASHIER" in held:
+        roles |= {"SALES_STAFF", "CASHIER"}
+    roles |= {old for old, new in DEPRECATED_ROLE_ALIASES.items() if new in held}
+    return sorted(roles)
+
+
+def is_manager(user: dict) -> bool:
+    """THE manager test for tasks: the role gate on cancel, reassign, a named
+    escalation and the day's SOP tasks, read the same way as visibility."""
+    return bool(set(task_roles(user)) & set(MANAGER_ROLES))
+
+
 def visibility_filter(current_user: dict) -> Dict[str, Any]:
     """The tasks ``current_user`` may see, as a Mongo filter. ``{}`` = all."""
-    # Roles compared case-insensitively, here and on the task (a legacy row
-    # may say "cashier").
-    roles = sorted({str(r).strip().upper() for r in (current_user.get("roles") or []) if r})
+    # Roles compared case-insensitively, here and on the task (task_roles).
+    roles = task_roles(current_user)
     is_cross, stores = user_store_scope({**current_user, "roles": roles})
     flags = catalog_flags.handles_flags(current_user)
     if is_cross and flags:

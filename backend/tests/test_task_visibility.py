@@ -40,6 +40,7 @@ from api.routers.auth import get_current_user  # noqa: E402
 from api.routers.reports import router as reports_router  # noqa: E402
 from api.services.rbac_policy import policy_for  # noqa: E402
 from api.services.file_store import InMemoryFileStore  # noqa: E402
+from api.services.task_visibility import MANAGER_ROLES  # noqa: E402
 from database.repositories.task_repository import TaskRepository  # noqa: E402
 
 S1, S2, S3 = "BV-S1", "BV-S2", "BV-S3"
@@ -109,7 +110,8 @@ TASKS = (
         # A role name is matched as the WHOLE assigned_to, never a part of it:
         # CASHIER is inside SALES_CASHIER, and real user ids carry role names
         # (user-cashier-bok1, user-accountant, cashier-bok2). No staff role
-        # here sees these.
+        # here sees these -- except SALES_STAFF, which sign-in made of
+        # SALES_CASHIER, so the old name is still theirs.
         _task("R-SALES_CASHIER", "SALES_CASHIER", S1),
         _task("P-CASHIER-2", "user-cashier-bok1", S1),
         _task("P-ACCOUNTANT-2", "user-accountant", S1),
@@ -159,7 +161,7 @@ MANAGERS = ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"]
 def expected(role: str) -> set:
     if role in STAFF_ROLES:
         mine = {f"P-{role}", f"R-{role}"}
-        return mine | ({"P-SALES-S3", "C-SALES"} if role == "SALES_STAFF" else set())
+        return mine | ({"P-SALES-S3", "C-SALES", "R-SALES_CASHIER"} if role == "SALES_STAFF" else set())
     if role == "STORE_MANAGER":
         return S1_IDS
     if role == "AREA_MANAGER":
@@ -529,7 +531,7 @@ def test_the_manager_only_rows_name_the_code_gate(path):
     """The rbac row the middleware enforces names exactly the roles the
     handler's own gate admits, so neither can drift from the other."""
     row = policy_for("POST", path)
-    assert set(row["allowed"]) == set(tasks_mod.MANAGER_ROLES), row
+    assert set(row["allowed"]) == set(MANAGER_ROLES), row
 
 
 def test_pressing_auto_generate_never_makes_anyone_a_tasks_creator(world, monkeypatch):
@@ -585,3 +587,52 @@ def test_a_token_with_no_user_id_has_no_tasks_of_its_own(world):
         assert _ids(as_role("NO_ID").get("/api/v1/tasks/my-tasks")) == set()
     finally:
         USERS.pop("NO_ID")
+
+
+@pytest.mark.parametrize("route", MANAGER_ROUTES)
+def test_a_manager_is_a_manager_whatever_the_case_of_the_role(world, route):
+    """The manager gate reads roles the way the visibility rule does: a
+    token that says "store_manager" sees the shop's tasks AND may cancel or
+    reassign them (it used to see them and get 403)."""
+    as_role, db = world
+    method, tail, kw, landed = MANAGER_ROUTES[route]
+    for role in MANAGERS:
+        USERS["LOWER"] = {**USERS[role], "roles": [role.lower()]}
+        try:
+            tid = "P-OPTOMETRIST"
+            db.tasks.update_one({"task_id": tid}, {"$set": {"status": "OPEN", "assigned_to": uid("OPTOMETRIST")}})
+            r = getattr(as_role("LOWER"), method)(f"/api/v1/tasks/{tid}{tail}", **kw)
+            assert r.status_code == 200, (role, r.status_code, r.text)
+            assert landed(db.tasks.find_one({"task_id": tid})), role
+        finally:
+            USERS.pop("LOWER")
+
+
+def test_a_lower_case_manager_issues_the_days_sop_tasks(world, monkeypatch):
+    as_role, db = world
+    monkeypatch.setattr(tasks_mod, "_sop_collection", lambda: db.sop_templates)
+    USERS["LOWER"] = {**USERS["STORE_MANAGER"], "roles": ["store_manager"]}
+    try:
+        assert as_role("LOWER").post("/api/v1/tasks/auto-generate").status_code == 200
+    finally:
+        USERS.pop("LOWER")
+
+
+def test_a_sales_cashier_works_sales_and_cashier_tasks(world):
+    """Owner 2026-10-13: a sales cashier is both, so a task addressed to
+    SALES_CASHIER, SALES_STAFF or CASHIER at their shop is theirs to see and
+    to do. Another role's task, or the sales role's at another shop, is not."""
+    as_role, db = world
+    theirs = {"R-SALES_CASHIER", "R-SALES_STAFF", "R-CASHIER"}
+    USERS["SALES_CASHIER"] = {"user_id": "u-sc", "roles": ["SALES_CASHIER"], "store_ids": [S1], "active_store_id": S1}
+    try:
+        c = as_role("SALES_CASHIER")
+        assert _ids(c.get("/api/v1/tasks")) == theirs
+        assert c.get("/api/v1/tasks/R-SALES-S2").status_code == 404
+        assert c.get("/api/v1/tasks/R-OPTOMETRIST").status_code == 404
+        for tid in sorted(theirs):
+            r = c.patch(f"/api/v1/tasks/{tid}/complete", json={"completion_notes": "done it"})
+            assert r.status_code == 200, (tid, r.text)
+            assert db.tasks.find_one({"task_id": tid})["status"] == "COMPLETED", tid
+    finally:
+        USERS.pop("SALES_CASHIER")

@@ -47,6 +47,7 @@ from ..services.task_notify import notify_escalation
 from ..services.task_visibility import (
     MANUAL,
     NOT_CANCELLED,
+    is_manager,
     overdue_filter,
     task_counts,
     visible,
@@ -73,13 +74,17 @@ VALID_STATUSES = {"OPEN", "IN_PROGRESS", "COMPLETED", "ESCALATED", "CANCELLED"}
 # Statuses from which no further lifecycle transitions are allowed.
 TERMINAL_STATUSES = {"COMPLETED", "CANCELLED"}
 
-# Cancel or reassign a task (PATCH/PUT assigned_to, /reassign, /escalate with
-# a named person), and issue the day's SOP tasks: managers only (owner ruling
-# 2026-10-13, control over convenience). Staff start, complete and escalate
-# up the ladder their own tasks. The rbac rows for /reassign and /auto-generate
-# name exactly these roles.
-MANAGER_ROLES = ("STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN")
-_managers_only = require_roles(*MANAGER_ROLES)
+async def _managers_only(current_user: dict = Depends(get_current_user)) -> dict:
+    """Cancel or reassign a task (PATCH/PUT assigned_to, /reassign, /escalate
+    with a named person), and issue the day's SOP tasks: managers only
+    (task_visibility.MANAGER_ROLES, roles read the way visibility reads them).
+    Staff start, complete and escalate up the ladder their own tasks."""
+    if not is_manager(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="Only a store manager, area manager or admin can do this.",
+        )
+    return current_user
 
 
 def _visible_task(repo, task_id: str, current_user: dict) -> dict:
