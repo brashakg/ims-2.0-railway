@@ -12,6 +12,7 @@ from ._shared import (
 from .helpers import (
     _get_db,
 )
+from ...services.cost_mask import mask_cost
 
 # ============================================================================
 # INV-12: BARCODE LIFECYCLE TRACE
@@ -177,4 +178,7 @@ async def barcode_lifecycle_trace(
     except Exception as exc:  # noqa: BLE001
         logger.warning("[INV-12] returns lookup failed for barcode %s: %s", barcode, exc)
 
-    return result
+    # The unit's cost, a sale line's cost_at_sale, a transfer line's unit cost
+    # and the receipt's prices go to the roles that see product cost only
+    # (owner ruling D7).
+    return mask_cost(result, current_user, "product")

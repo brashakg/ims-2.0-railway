@@ -126,6 +126,7 @@ from ..dependencies import (
     validate_store_access,
     can_access_store_scoped,
 )
+from ..services.cost_mask import mask_cost_list
 from ..services.phone import normalize_indian_mobile
 
 
@@ -1560,7 +1561,9 @@ async def get_customer_orders(
     orders = order_repo.find_many(
         {"$or": or_clauses}, sort=[("created_at", -1)], limit=500
     )
-    return {"orders": orders}
+    # A line's cost_at_sale goes to the roles that see product cost only
+    # (owner rulings D7 / 2026-10-12), as on GET /orders.
+    return {"orders": mask_cost_list(orders, current_user, "product")}
 
 
 def _ar_outstanding(customer_id: str, customer_doc: Optional[dict]) -> float:

@@ -225,23 +225,33 @@ def _split_line_tax(taxable_paise: int, gst_rate: float, is_inter_state: bool) -
     return {"cgst_paise": cgst, "sgst_paise": sgst, "igst_paise": 0, "tax_paise": tax_paise}
 
 
+# Where a line's rate can come from: the first key present wins. The *_paise
+# keys are integer paise, the rest rupees. _norm_line prices a line by it and
+# DebitNoteEngine.issue refuses a line it finds no key on -- one list, so the
+# refusal and the price can never disagree (a vendor RMA line carries only
+# unit_cost, routers/vendor_rma.py).
+_LINE_RATE_KEYS = ("rate_paise", "unit_cost_paise", "unit_cost", "rate", "unit_price")
+
+
+def _rate_key(line: Dict[str, Any]) -> Optional[str]:
+    """The _LINE_RATE_KEYS key `line` is priced by, or None for an unpriced line."""
+    return next((k for k in _LINE_RATE_KEYS if line.get(k) is not None), None)
+
+
 def _norm_line(line: Dict[str, Any], is_inter_state: bool) -> Dict[str, Any]:
     """Normalize one input line into a paise-exact debit-note line. ``rate_paise``
     is authoritative when present (integer paise); else the rupee ``unit_cost`` /
-    ``rate`` / ``unit_price`` is converted at the edge."""
+    ``rate`` / ``unit_price`` is converted at the edge (_LINE_RATE_KEYS order)."""
     qty = int(line.get("qty") or line.get("quantity") or 0)
     if qty < 0:
         qty = 0
-    if line.get("rate_paise") is not None:
-        rate_paise = int(line.get("rate_paise") or 0)
-    elif line.get("unit_cost_paise") is not None:
-        rate_paise = int(line.get("unit_cost_paise") or 0)
+    key = _rate_key(line)
+    if key is None:
+        rate_paise = 0
+    elif key.endswith("_paise"):
+        rate_paise = int(line.get(key) or 0)
     else:
-        rate_paise = rupees_to_paise(
-            line.get("unit_cost")
-            if line.get("unit_cost") is not None
-            else (line.get("rate") if line.get("rate") is not None else line.get("unit_price"))
-        )
+        rate_paise = rupees_to_paise(line.get(key))
     if rate_paise < 0:
         rate_paise = 0
     taxable_paise = qty * rate_paise
@@ -987,6 +997,20 @@ class DebitNoteEngine:
         # rate + HSN (the source RTV docs don't persist them). Fail loud on a
         # taxable line whose GST is unresolvable rather than emit a 0% tax doc.
         src_lines = lines if lines else (rtv_doc.get("lines") or rtv_doc.get("items") or [])
+        # A return workshop staff logged carries no price (owner ruling
+        # 2026-10-12). A tax document at Rs 0 for it would be wrong money, so
+        # refuse it -- never read a missing price as zero.
+        if any(
+            isinstance(ln, dict) and _rate_key(ln) is None for ln in src_lines
+        ):
+            return {
+                "ok": False,
+                "http": 422,
+                "error": "line_without_price",
+                "message": "An item on this return has no price paid yet, so no "
+                "debit note was issued. Approve the return first and enter the "
+                "price paid for each item.",
+            }
 
         # The note reverses the credit the returned goods' bill claimed, at
         # the rate that bill booked -- and a bill that claimed none (an
