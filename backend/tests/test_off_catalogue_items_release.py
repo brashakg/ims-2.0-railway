@@ -2747,8 +2747,11 @@ def test_r5_another_receipt_with_the_same_number_is_never_this_ones_units(world)
     legacy = "GRN-BV--2606101432"
     for rid in (r1["grn_id"], r2["grn_id"]):
         world.db.grns.update_one({"grn_id": rid}, {"$set": {"grn_number": legacy}})
+    # R1's unit was minted before grn_id was stamped (every unit on prod at
+    # this deploy): only the shared number could name it -- and it is not R2's.
     world.db.stock_units.update_one(
-        {"product_id": existing["product_id"]}, {"$set": {"grn_number": legacy}}
+        {"product_id": existing["product_id"]},
+        {"$set": {"grn_number": legacy}, "$unset": {"grn_id": ""}},
     )
     accepted = _run(vd.accept_grn(r2["grn_id"], MANAGER))
     finding(
@@ -6486,4 +6489,40 @@ def test_merge_a_revive_that_fails_never_fills_the_discarded_rows_cost(world, mo
         and spine.get("discarded_draft") is True
         and not spine.get("cost_price"),
         f"Merge: a failed revive filled the discarded row's cost ({spine.get('cost_price')})",
+    )
+
+
+def test_merge_not_received_never_writes_over_a_claim_taken_from_it(world, monkeypatch):
+    # 'Not received' writes the receipt through the void's one guarded write
+    # (_write_under_claim): status as read and the claim token. A worker whose
+    # claim was taken over meanwhile (a stale-claim takeover) writes nothing.
+    from datetime import datetime
+
+    from api.routers.vendors import grn_void as _gv
+
+    po, boss, carrera, grn1, grn2 = _mixed_held_receipt(world)
+    world.finish_draft(boss, offer=2790)
+    gid = grn2["grn_id"]
+    before = world.grn(gid)
+    assert [ln["reason"] for ln in before["unresolved_lines"]] == ["over_order"]
+    real = _gv._claimed_receipt
+
+    def _taken_over(repo, grn_id, token):
+        doc = real(repo, grn_id, token)
+        world.db.grns.update_one(
+            {"grn_id": grn_id},
+            {"$set": {"accept_lock_token": "the-takeover", "accept_lock_at": datetime.now().isoformat()}},
+        )
+        return doc
+
+    monkeypatch.setattr(_gv, "_claimed_receipt", _taken_over)
+    with pytest.raises(HTTPException) as refused:
+        _run(vd.drop_over_order(gid, MANAGER))
+    after = world.grn(gid)
+    finding(
+        refused.value.status_code == 409
+        and after["items"] == before["items"]
+        and after["unresolved_lines"] == before["unresolved_lines"],
+        f"Merge: 'Not received' wrote over a claim taken from it ({refused.value.status_code}; "
+        f"{after['status']} {after['unresolved_lines']})",
     )
