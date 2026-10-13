@@ -308,11 +308,16 @@ def test_dc_rows_never_collide_with_the_standard_guard(monkeypatch):
 def test_created_doc_carries_the_folded_norm_for_the_unique_index(monkeypatch):
     """The uniq_std_vendor_invoice_store partial unique index (schemas.py)
     keys on vendor_invoice_no_norm -- the create path must stamp it, folded,
-    or the atomic race backstop indexes nothing."""
+    or the atomic race backstop indexes nothing. It is the bill's financial
+    year + number (GST rule 46: serials restart each year); with no bill date
+    the year is the day it was received."""
+    from api.utils.ist import fy_start_year_ist
+
     repo = _MemGRNRepo()
     store = _wire(monkeypatch, repo)
     _create(_grn_body(store, invoice_no="go inv/9007"))
-    assert repo.docs[0]["vendor_invoice_no_norm"] == "GOINV9007"
+    fy = fy_start_year_ist()
+    assert repo.docs[0]["vendor_invoice_no_norm"] == f"{fy}-{str(fy + 1)[-2:]}|GOINV9007"
 
 
 def test_race_backstop_maps_swallowed_duplicate_key_to_the_same_409(

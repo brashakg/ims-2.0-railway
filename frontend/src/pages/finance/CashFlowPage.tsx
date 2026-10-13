@@ -439,9 +439,12 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
                 <p className="text-xs text-red-600 mt-1">Could not load this vendor&rsquo;s receipts — try again in a moment.</p>
               ) : receipts !== null && receipts.length === 0 ? (
                 <p className="text-xs text-amber-700 mt-1">
-                  No unbilled goods receipts for this vendor at your store. The goods are received first, by the
-                  shop&rsquo;s store manager — bought without a PO? Ask them to log a Delivery Challan on the Goods
-                  Receipt screen, then record the bill here.
+                  No unbilled goods receipts for this vendor at your store. The shop&rsquo;s store manager receives
+                  the goods first — bought without a PO from a local dealer? They tick &lsquo;Bought without PO&rsquo; on
+                  the Goods Receipt screen and pick the dealer (adding it as a supplier if new; that bill claims GST
+                  credit only from a GST-registered dealer); a supplier&rsquo;s delivery challan is logged there as a Delivery Challan. Then book
+                  the bill from Purchase &rarr; Invoices &rarr; Create from GRN, or the &lsquo;Book the bill&rsquo; task the receipt
+                  sends you &mdash; a new dealer has no bill yet, so it is not in the list above.
                 </p>
               ) : null}
             </div>

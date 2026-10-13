@@ -259,6 +259,15 @@ def _norm_line(line: Dict[str, Any], is_inter_state: bool) -> Dict[str, Any]:
         gst_rate = float(line.get("gst_rate") or line.get("tax_rate") or 0.0)
     except (TypeError, ValueError):
         gst_rate = 0.0
+    # Goods whose bill claimed no input credit (DebitNoteEngine.issue marks
+    # them by the one credit rule) have none to reverse (owner 2026-10-12),
+    # yet the supplier credits back all the bill charged for them: the GST it
+    # charged is carried in the return's value, as it is in their cost (G1).
+    # Per unit, so qty x rate is the taxable value still.
+    if line.get("claims_credit") is False:
+        rate_paise += _split_line_tax(rate_paise, gst_rate, False)["tax_paise"]
+        taxable_paise = qty * rate_paise
+        gst_rate = 0.0
     tax = _split_line_tax(taxable_paise, gst_rate, is_inter_state)
     return {
         "sku": line.get("sku") or line.get("product_id"),
@@ -779,9 +788,11 @@ class DebitNoteEngine:
         """P1: the source vendor_returns / vendor_rma line docs do NOT persist
         gst_rate or hsn, so a debit note built straight off them would compute
         ZERO tax + blank HSN (a silently tax-free ITC-reversal document). Resolve
-        both PER LINE from the PRODUCT -- the same source the sales invoice uses
-        (product.gst_rate -> category GST map; product.hsn -> category HSN map).
-        An explicit non-zero rate already on the line wins (manual override).
+        both PER LINE: the rate the returned goods' bill booked (issue() puts
+        it on the line), else THE purchase-side rate rule on the product
+        (vendors.gst._po_line_gst_rate: HSN first, then the catalogued rate),
+        else the category GST map; product.hsn -> category HSN map. An
+        explicit non-zero rate already on the line wins (manual override).
 
         FAIL LOUD: a line with a taxable qty whose GST rate cannot be resolved at
         all (no explicit rate, no product, no category) returns an error rather
@@ -808,10 +819,19 @@ class DebitNoteEngine:
                 prod = self._find_product(ln.get("sku") or ln.get("product_id"))
             category = (prod or {}).get("category") or ln.get("category")
 
-            resolved_rate: Optional[float] = float(explicit) if has_explicit else None
+            resolved_rate: Optional[float] = (
+                float(explicit) if has_explicit else ln.get("billed_gst_rate")
+            )
             if resolved_rate is None:
-                pr = (prod or {}).get("gst_rate")
-                if pr not in (None, ""):
+                # THE purchase-side rate rule (vendors.gst._po_line_gst_rate:
+                # the HSN's rate, else the catalogued one) -- the rate the PO
+                # and the bill draft tax these goods at, so the note reverses
+                # what the bill claimed, never the catalogue's other rate.
+                from api.routers.vendors.gst import _po_line_gst_rate
+
+                hsn_in = ln.get("hsn") or ln.get("hsn_code") or (prod or {}).get("hsn")
+                pr = _po_line_gst_rate({"hsn": hsn_in}, prod)[0]
+                if pr is not None:
                     resolved_rate = float(pr)
                 elif category and gst_rate_for_category is not None:
                     try:
@@ -838,6 +858,119 @@ class DebitNoteEngine:
             ln["gst_rate"] = resolved_rate
             out.append(ln)
         return out, None
+
+    def _receipts_of(self, rtv_doc: Dict[str, Any]) -> Dict[Any, Any]:
+        """{product_id: the goods receipt the returned units came in on} --
+        key None for every line when the RTV names its receipt (an RMA's
+        grn_id), else read off the units linked to the return (rtv_vendor_id):
+        the receipt that minted each, wherever it is now -- the grn_id the
+        mint stamps (a transfer rewrites source_type / source_id, never it),
+        else the old source fields (grn_accept_lock._receipt_unit_filters).
+        Fail-soft {}.
+
+        ponytail: one receipt per product (the first linked unit's); a return
+        mixing one product's walk-in and PO units would need a line per unit."""
+        if self._db is None:
+            return {}
+        try:
+            grns = self._db.get_collection("grns")
+            if rtv_doc.get("grn_id"):
+                return {None: grns.find_one({"grn_id": rtv_doc["grn_id"]}, {"_id": 0})}
+            if not rtv_doc.get("return_id"):
+                return {}
+            out: Dict[Any, Any] = {}
+            for u in self._db.get_collection("stock_units").find(
+                {"rtv_vendor_id": rtv_doc["return_id"]},
+                {"_id": 0, "product_id": 1, "grn_id": 1, "source_type": 1, "source_id": 1},
+            ):
+                minted_by = u.get("grn_id") or (
+                    u.get("source_id") if u.get("source_type") == "GRN" else None
+                )
+                if minted_by and u.get("product_id") not in out:
+                    out[u.get("product_id")] = grns.find_one({"grn_id": minted_by}, {"_id": 0})
+            return out
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _latest_receipt(self, rtv_doc: Dict[str, Any], product_id) -> Optional[Dict[str, Any]]:
+        """A return that links no units (the New-return form sends none unless
+        opened from one): the supplier's latest live receipt of that product.
+
+        ponytail: the latest receipt stands in for the unit's own; a supplier
+        who sold one product both on a PO and walk-in needs the unit linked."""
+        if self._db is None or not product_id or not rtv_doc.get("vendor_id"):
+            return None
+        try:
+            q: Dict[str, Any] = {
+                "vendor_id": rtv_doc["vendor_id"],
+                "items.product_id": product_id,
+                "status": {"$ne": "VOID"},
+            }
+            if rtv_doc.get("store_id"):
+                q["store_id"] = rtv_doc["store_id"]
+            rows = list(
+                self._db.get_collection("grns").find(q, {"_id": 0}).sort("created_at", -1).limit(1)
+            )
+            return rows[0] if rows else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _booked_bills(self, receipt: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """The booked bills against the returned goods' receipt (a DC's
+        consolidated bill among them). Fail-soft []."""
+        from api.routers.finance.gst import _bill_booked
+
+        gid = (receipt or {}).get("grn_id")
+        if not gid or self._db is None:
+            return []
+        try:
+            return [
+                b
+                for b in self._db.get_collection("vendor_bills").find(
+                    {"$or": [{"grn_id": gid}, {"linked_dc_ids": gid}]}, {"_id": 0}
+                )
+                if _bill_booked(b)
+            ]
+        except Exception:  # noqa: BLE001
+            return []
+
+    @staticmethod
+    def _credit_claimed(vendor: Dict[str, Any], bills) -> bool:
+        """Did the returned goods' bill claim input credit? The bill booked
+        against their receipt answers from its STORED flag -- what the ITC
+        register counted (finance.gst._itc_eligible_bill: reverse charge, the
+        GSTIN on the bill, credit switched off, 17(5) blocked) -- never
+        re-decided from today's supplier master. No bill booked yet: THE
+        credit rule (org_validation.itc_claimable) on the supplier, as the
+        booking will decide it."""
+        from api.routers.finance.gst import _itc_eligible_bill
+
+        from .org_validation import itc_claimable
+
+        if bills:
+            return any(_itc_eligible_bill(b) for b in bills)
+        return itc_claimable((vendor or {}).get("gstin"))
+
+    @staticmethod
+    def _billed_rate(bills, product_id) -> Optional[float]:
+        """The GST rate the booked bill charged on this product: a line-detail
+        bill's line for it, else a header-only bill's tax share (ap_engine.
+        header_bill_gst_rate); None when no bill says."""
+        from .ap_engine import header_bill_gst_rate
+
+        for b in bills:
+            for bl in b.get("lines") or []:
+                if isinstance(bl, dict) and bl.get("product_id") == product_id:
+                    try:
+                        return float(bl.get("gst_rate"))
+                    except (TypeError, ValueError):
+                        return None
+        for b in bills:
+            if not b.get("lines"):
+                rate = header_bill_gst_rate(b.get("tax_amount"), b.get("taxable_amount"))
+                if rate is not None:
+                    return rate
+        return None
 
     def issue(
         self,
@@ -898,7 +1031,31 @@ class DebitNoteEngine:
                 "debit note was issued. Approve the return first and enter the "
                 "price paid for each item.",
             }
-        enriched, gst_err = self._enrich_lines_gst(src_lines)
+
+        # The note's total is what the returned goods' bill charged for them
+        # (their price + the GST at the bill's rate) -- what the supplier
+        # credits back. It reverses the credit that bill claimed; a bill that
+        # claimed none (credit off, 17(5) blocked, an unregistered supplier's
+        # walk-in buy, G2) has none to reverse (owner 2026-10-12): its GST is
+        # carried in the value (_norm_line). Per line, from the receipt the
+        # returned units came in on.
+        receipt_of = self._receipts_of(rtv_doc)
+        src = []
+        for raw in src_lines:
+            ln = dict(raw)
+            pid = ln.get("product_id")
+            receipt = receipt_of.get(pid, receipt_of.get(None)) or self._latest_receipt(rtv_doc, pid)
+            bills = self._booked_bills(receipt)
+            ln["claims_credit"] = self._credit_claimed(vendor, bills)
+            # The bill's booked rate -- 0% is a booked rate too (it reverses
+            # no tax), so None alone means "no bill says". No bill yet and no
+            # credit: the supplier has no GSTIN, so charges no GST (the bill
+            # draft's 0%), whatever rate a line names -- the note is the price.
+            ln["billed_gst_rate"] = self._billed_rate(bills, pid)
+            if not bills and not ln["claims_credit"]:
+                ln.update(billed_gst_rate=0.0, gst_rate=None, tax_rate=None)
+            src.append(ln)
+        enriched, gst_err = self._enrich_lines_gst(src)
         if gst_err:
             return {"ok": False, "http": 422, "error": gst_err}
 

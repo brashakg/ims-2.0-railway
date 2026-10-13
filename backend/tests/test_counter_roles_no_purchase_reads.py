@@ -1794,6 +1794,7 @@ def test_every_purchase_route_row_is_the_one_list(app):
         ("GET", "/api/v1/rtv-debit-notes/{debit_note_id}/print"),
         ("POST", "/api/v1/rtv-debit-notes/issue"),
         ("POST", "/api/v1/vendors/grn"),
+        ("POST", "/api/v1/vendors/grn/{grn_id}/accept"),
         ("POST", "/api/v1/vendors/purchase-orders"),
         ("PUT", "/api/v1/vendors/purchase-orders/{po_id}"),
     } <= set(want)

@@ -715,7 +715,7 @@ export interface CreatedPurchaseOrder {
 
 export const vendorsApi = {
   // Vendors
-  getVendors: async (params?: { search?: string; is_active?: boolean }) => {
+  getVendors: async (params?: { search?: string; is_active?: boolean; limit?: number }) => {
     const response = await api.get('/vendors', { params });
     return response.data;
   },
@@ -941,8 +941,9 @@ export const vendorsApi = {
     po_id?: string;
     vendor_invoice_no?: string;
     vendor_invoice_date?: string;
-    // F9 — Delivery-Challan subtype + fields.
-    grn_subtype?: 'STANDARD' | 'DELIVERY_CHALLAN';
+    // F9 — Delivery-Challan subtype + fields. D14 — NO_PO: bought from a local
+    // dealer without a PO (the dealer as a supplier, a cost per line, bill photo).
+    grn_subtype?: 'STANDARD' | 'DELIVERY_CHALLAN' | 'NO_PO';
     dc_number?: string;
     dc_date?: string;
     vendor_id?: string;
@@ -960,6 +961,9 @@ export const vendorsApi = {
       // Ruling 14: the receiver's per-line tally tick. A PO-backed receipt is
       // refused (422 LINES_NOT_TALLIED) until every line carries it.
       tallied?: boolean;
+      // NO_PO only: the cost paid per unit (required there) and the expiry.
+      unit_price?: number;
+      expiry_date?: string;
     }>;
     notes?: string;
   }) => {

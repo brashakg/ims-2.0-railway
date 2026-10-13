@@ -68,8 +68,7 @@ _VENDOR_ROLES = PURCHASE_ROLES
 # Receiving goods into stock -- log, accept, express-receive, void or escalate
 # a receipt, and the receiving screen itself. Owner ruling 2026-09-28:
 # RECEIVING IS MANAGERS ONLY, so the accountant is not here (they keep bills,
-# payments and the receipt document read). Defined once in services/cost_mask;
-# mirrors the frontend RECEIVE_ROLES.
+# payments and the receipt document read). Defined once in services/cost_mask.
 _RECEIVE_ROLES = RECEIVE_ROLES
 
 # The metadata.kind this router's own GRN upload stamps. Anything else in the

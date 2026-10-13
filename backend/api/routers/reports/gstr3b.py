@@ -29,6 +29,7 @@ from .gst_itc import (
     _itc_from_vendor_bills,
     _itc_gstin_from_vendor_bills,
     _itc_store_scope,
+    _no_credit_inward,
     _placement,
     _sum_heads,
     _ledger_row_return_doc,
@@ -286,6 +287,10 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
                 (vendor_bills cgst/sgst/igst_total), placed on the store's GSTIN
                 (gst_itc._itc_match).
                 Returns zeros when no purchase data is present.
+    Table 4(D) - ineligible ITC: GST paid on a bill that claims no credit.
+    Table 5   - exempt, nil, non-GST and composition inward supplies, with
+                purchases from unregistered suppliers (gst_itc._no_credit_inward,
+                owner 2026-10-13 G3).
     Table 6.1 - Payment of tax: net cash liability = output tax - ITC.
     Returns all-zero figures when no data exists for the period.
     """
@@ -314,6 +319,9 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
     itc_igst = 0.0
     itc_cgst = 0.0
     itc_sgst = 0.0
+
+    # G3: Table 5 (no-GST inward) and Table 4(D) (GST paid, not claimed).
+    no_credit = _no_credit_inward(None, active_store, 0, 0, 0)
 
     # R1: the GSTIN-bound ITC slice, split out of the total above.
     t_itc_igst = 0.0
@@ -467,6 +475,8 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
             db, active_store, year, mon, last_day
         )
 
+        no_credit = _no_credit_inward(db, active_store, year, mon, last_day)
+
         # NEW-GST-RCM: Table 3.1(d) inward supplies liable to reverse charge.
         rcm_igst, rcm_cgst, rcm_sgst, rcm_taxable = _rcm_from_vendor_bills(
             db, active_store, year, mon, last_day
@@ -553,6 +563,19 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
             "centralTax": _r(t_itc_cgst),
             "stateTax": _r(t_itc_sgst),
             "cess": 0.0,
+        },
+        # Table 4(D): GST paid on purchase bills that claim no input credit.
+        "itcIneligible": {
+            "integratedTax": no_credit["igst"],
+            "centralTax": no_credit["cgst"],
+            "stateTax": no_credit["sgst"],
+            "cess": 0.0,
+        },
+        # Table 5: exempt, nil-rated, non-GST and composition inward supplies,
+        # purchases from unregistered suppliers among them.
+        "inwardExemptNilNonGst": {
+            "interState": no_credit["inter"],
+            "intraState": no_credit["intra"],
         },
         "exemptSupplies": 0.0,
         "taxPayable": {

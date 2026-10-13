@@ -347,6 +347,48 @@ describe('panel round 4 - every door hands its lines on, and the list follows th
   });
 
   it.each(['the GRN picker', 'the ?grn_id= link'])(
+    'a "Bought without PO" receipt books from %s with its supplier filled',
+    async (door) => {
+      // Round 5 HIGH: a walk-in dealer typed by name left the draft with
+      // vendor_id null -- the locked supplier box opened empty and Book
+      // stopped at "Select a supplier". The dealer is a supplier now (owner
+      // 2026-10-12), so the receipt's draft carries it.
+      const WALK_IN = {
+        ...GRN_DRAFT,
+        vendor_id: 'V1',
+        po_id: null,
+        grn_id: 'G9',
+        grn_number: 'RCPT 0009',
+        invoice_number: 'CASH-77',
+        invoice_date: '2026-09-14',
+      };
+      routeReceipts(
+        { grns: [{ grn_id: 'G9', grn_number: 'RCPT 0009', grn_subtype: 'NO_PO', po_number: null, vendor_id: 'V1', vendor_name: 'Mumbai Lens House', vendor_invoice_no: 'CASH-77', status: 'ACCEPTED', total_accepted: 3 }] },
+        { grns: [] },
+        { '/vendors/purchase-invoices/from-grn/G9': WALK_IN },
+      );
+      if (door === 'the GRN picker') {
+        renderTab();
+        fireEvent.click(await screen.findByRole('button', { name: /Create from GRN/ }));
+        const picker = within((await screen.findByText('Pick an accepted GRN to invoice')).closest('.fixed') as HTMLElement);
+        expect(await picker.findByText(/Bought without PO · Supplier inv CASH-77/)).toBeTruthy();
+        expect(picker.queryByText(/PO - ·/)).toBeNull();
+        fireEvent.click(await picker.findByRole('button', { name: /Invoice/ }));
+      } else {
+        renderTab('/purchase/invoices?grn_id=G9'); // the "Book the bill" task's link
+      }
+      await screen.findByText(/Inter-state supply:/);
+      const drawer = within(screen.getByText('Invoice from GRN RCPT 0009').closest('.fixed') as HTMLElement);
+      const supplier = drawer.getByDisplayValue('Mumbai Lens House') as HTMLSelectElement;
+      expect(supplier.value).toBe('V1');
+      fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
+      await waitFor(() => expect(createCalls()).toHaveLength(1));
+      expect(createCalls()[0][1]).toMatchObject({ vendor_id: 'V1', grn_id: 'G9', invoice_number: 'CASH-77' });
+      expect(toastMock.error).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['the GRN picker', 'the ?grn_id= link'])(
     'a refused receipt draft opens no form from %s, only the reason',
     async (door) => {
       // The draft door refuses on purpose (the receipt's shop has no company):
@@ -520,10 +562,19 @@ describe('round 11 - a bill with no tax head is not shown as CGST+SGST', () => {
 
 describe('round 14 - the credit verdict is visible and settable', () => {
   it('shows "no valid GSTIN" when the preview says no credit, and nothing when it says credit', async () => {
-    routePosts(preview({ itc_eligible: false }));
+    routePosts(preview({ itc_eligible: false, itc_reason: 'the supplier has no valid GSTIN' }));
     await openManualServicesBill({ name: 'Freight', qty: '1', price: '1000', rate: '18' });
     expect(await screen.findByText('No input credit: the supplier has no valid GSTIN')).toBeTruthy();
     expect(screen.queryByText('No input credit: switched off')).toBeNull();
+  });
+
+  it("says the server's reason as sent, never one of its own (round 6)", async () => {
+    // The form kept its own copy of the credit rule's reasons and told a
+    // registered dealer's walk-in bill 'the supplier has no valid GSTIN'.
+    routePosts(preview({ itc_eligible: false, itc_reason: 'a reason only the server knows' }));
+    await openManualServicesBill({ name: 'Freight', qty: '1', price: '1000', rate: '18' });
+    expect(await screen.findByText('No input credit: a reason only the server knows')).toBeTruthy();
+    expect(screen.queryByText(/no valid GSTIN|switched off/)).toBeNull();
   });
 
   it('shows no line when the preview says the credit is claimable', async () => {
@@ -551,7 +602,7 @@ describe('round 14 - the credit verdict is visible and settable', () => {
     expect(previewCalls().at(-1)?.[1].itc_eligible).toBe(true);
     expect(previewCalls().at(-1)?.[1].reverse_charge).not.toBe(true);
 
-    routePosts(preview({ itc_eligible: false }));
+    routePosts(preview({ itc_eligible: false, itc_reason: 'switched off' }));
     const before = previewCalls().length;
     fireEvent.click(screen.getByRole('switch', { name: /Claim input credit/ }));
     expect(await screen.findByText('No input credit: switched off')).toBeTruthy();
@@ -566,7 +617,7 @@ describe('round 14 - the credit verdict is visible and settable', () => {
   });
 
   it('the form offers no Reverse charge tick and never sends reverse_charge true', async () => {
-    routePosts(preview({ itc_eligible: false }));
+    routePosts(preview({ itc_eligible: false, itc_reason: 'the supplier has no valid GSTIN' }));
     await openManualServicesBill({ name: 'Freight', qty: '1', price: '1000', rate: '18' });
     await screen.findByText('No input credit: the supplier has no valid GSTIN');
     expect(screen.queryByRole('checkbox', { name: /Reverse charge/ })).toBeNull();

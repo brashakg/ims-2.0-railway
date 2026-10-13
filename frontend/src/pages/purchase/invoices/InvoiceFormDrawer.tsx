@@ -227,9 +227,10 @@ export function InvoiceFormDrawer({
                 <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
                   A goods bill starts from its goods receipt, so the quantities are tallied before the
                   purchase is final. Close this form and use <span className="font-semibold">Create from GRN</span> (a
-                  PO-backed receipt) or <span className="font-semibold">Match DCs to Invoice</span> (Delivery
-                  Challans). Goods bought without a PO? Ask the shop&rsquo;s store manager to log them as a Delivery
-                  Challan on the Goods Receipt screen first (tick &lsquo;This is a Delivery Challan&rsquo;, pick the vendor, add what arrived).
+                  PO-backed or &lsquo;Bought without PO&rsquo; receipt) or <span className="font-semibold">Match DCs to Invoice</span> (Delivery
+                  Challans). Goods bought without a PO from a local dealer? Ask the shop&rsquo;s store manager to receive
+                  them on the Goods Receipt screen with &lsquo;Bought without PO&rsquo; ticked first — that bill claims GST
+                  credit only from a GST-registered dealer. A supplier&rsquo;s delivery challan is logged there as a Delivery Challan.
                 </div>
               )}
             </div>
@@ -291,9 +292,8 @@ export function InvoiceFormDrawer({
             </div>
             {pv && pv.itc_eligible === false && (
               <p className="text-xs font-medium text-amber-800">
-                {claimCredit
-                  ? 'No input credit: the supplier has no valid GSTIN'
-                  : 'No input credit: switched off'}
+                {/* The server's reason, as sent: the credit rule lives there. */}
+                {pv.itc_reason ? `No input credit: ${pv.itc_reason}` : 'No input credit'}
               </p>
             )}
           </div>

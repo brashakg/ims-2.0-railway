@@ -275,6 +275,10 @@ class TestHeaderBillMustDeclareItsKind:
         assert "Delivery Challan" in d["message"]
         assert "Goods Receipt" in d["message"]
         assert "store manager" in d["message"]
+        # D14: a walk-in buy goes on a 'Bought without PO' receipt (no
+        # credit) -- never told to pose as a challan, whose bill claims it.
+        assert "Bought without PO" in d["message"]
+        assert "log them as a Delivery Challan" not in d["message"]
         assert _bills(db) == []
 
     def test_a_declared_services_bill_books_exactly_as_before(self):
@@ -583,6 +587,13 @@ class TestBothDoorsEnforceTheSameRule:
             assert "Delivery Challan" in msg
             assert "Goods Receipt" in msg
             assert "store manager" in msg
+            assert "Bought without PO" in msg
+            # The way to book it is a screen that works -- Create from GRN --
+            # never the old dead end of recording it on this door "under that
+            # supplier" with no receipt to link (panel, round 9).
+            assert "Create from GRN" in msg
+            assert "under that supplier" not in msg
+        assert d1["message"].endswith(d2["message"].split("final. ", 1)[1])
         assert _bills(db) == []
 
     def test_missing_declaration_refuses_identically_on_both_doors(self):

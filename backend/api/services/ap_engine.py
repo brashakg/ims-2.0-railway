@@ -89,14 +89,21 @@ BILL_KIND_GOODS = "GOODS"
 BILL_KIND_SERVICES = "SERVICES"
 
 # The way out for a goods bill that has no receipt to link, for BOTH doors.
-# Receiving is managers only (owner 2026-09-28) while the bill is booked by
-# ADMIN / ACCOUNTANT, so it names who logs the receipt -- the accountant can
-# no longer open the Goods Receipt screen themselves.
+# A walk-in / local-dealer buy goes on a "Bought without PO" receipt, whose
+# bill claims credit only from a GST-registered dealer (G2) -- telling staff
+# to log it as a Delivery Challan, as these doors used to, booked full credit
+# on any. Receiving is the
+# store manager's (owner 2026-09-28), so it says who logs the receipt.
 NO_RECEIPT_WAY_OUT = (
-    "If the goods arrived without a purchase order, ask the shop's store "
-    "manager to log them as a Delivery Challan on the Goods Receipt screen "
-    "(tick 'This is a Delivery Challan', pick the vendor, add what arrived), "
-    "then bill against that receipt."
+    "If the goods were bought without a purchase order (a local or walk-in "
+    "dealer, a cash bill), ask the shop's store manager to receive them on the "
+    "Goods Receipt screen with 'Bought without PO' ticked (the dealer - added "
+    "as a supplier if new -, each item's cost and a photo of the bill), then "
+    "book the bill against that receipt from Purchase -> Invoices -> Create "
+    "from GRN (or the 'Book the bill' task the receipt sends accounts) - "
+    "it claims GST input credit only from a GST-registered dealer. Goods a "
+    "supplier delivered on a delivery "
+    "challan are logged there as a Delivery Challan instead."
 )
 
 
@@ -113,6 +120,36 @@ def normalize_bill_kind(value):
     if s in ("SERVICES", "SERVICE", "EXPENSE", "EXPENSES", "SERVICES_EXPENSES"):
         return BILL_KIND_SERVICES
     raise ValueError("bill_kind must be GOODS or SERVICES")
+
+
+# Owner ruling D14 (2026-09-29): goods bought from a local / walk-in dealer
+# without a purchase order arrive on a "Bought without PO" receipt; a bill
+# booked against one claims input credit only from a GST-registered supplier,
+# whatever the client sent (owner 2026-10-13, G2; org_validation.itc_claimable,
+# the one credit rule), and is never reverse charge (purchase_invoices.
+# refuse_walk_in_reverse_charge, every bill door).
+GRN_SUBTYPE_NO_PO = "NO_PO"
+
+
+def header_bill_gst_rate(tax_amount, taxable_amount) -> Optional[float]:
+    """The GST rate a header-only bill (no lines) charged: its tax as a share
+    of its taxable value, the rate every item on it carries -- for the cost
+    true-up its door runs and the debit note returning those goods. None when
+    it states no taxable value."""
+    taxable = _f(taxable_amount)
+    return 100 * _f(tax_amount) / taxable if taxable > 0 else None
+
+
+def bill_supplier_gstin(bill: dict, gstin_on_file):
+    """THE supplier GSTIN a booked bill carries: the one stamped on it (both
+    bill doors store vendor_gstin -- None for an unregistered supplier); only
+    a bill from before that field (the header door stored none until #1167)
+    reads its supplier's GSTIN on file, ``gstin_on_file(vendor_id)``. The
+    GSTR-2B reconcile and GSTR-3B Table 5 both ask it, so a bill is never
+    registered on one and unregistered on the other."""
+    if "vendor_gstin" in bill:
+        return bill.get("vendor_gstin")
+    return gstin_on_file(bill.get("vendor_id"))
 
 
 def _f(v) -> float:

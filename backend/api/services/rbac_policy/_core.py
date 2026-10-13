@@ -57,6 +57,6 @@ ACCOUNTS: List[str] = sorted(AP_ROLES)
 # PURCHASE / RETURN_READERS, so changing the tuple moves the row with the gate.
 PURCHASE: List[str] = sorted(PURCHASE_ROLES)
 RETURN_READERS: List[str] = sorted(_RETURN_READERS)
-# Receiving goods into stock (managers only): the same rule, from the same
-# cost_mask tuple its require_roles gates are.
+# The receiving managers (cost_mask.RECEIVE_ROLES): every row whose handler
+# gate is require_roles(*_RECEIVE_ROLES) says RECEIVE.
 RECEIVE: List[str] = sorted(RECEIVE_ROLES)

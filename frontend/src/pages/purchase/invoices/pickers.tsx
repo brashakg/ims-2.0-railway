@@ -93,7 +93,7 @@ export function GrnPickerModal({
                   <div>
                     <div className="font-medium text-gray-900">{g.grn_number} <span className="text-xs font-normal text-gray-500">· {g.vendor_name || g.vendor_id}</span></div>
                     <div className="text-xs text-gray-500">
-                      PO {g.po_number || '-'} · Supplier inv {g.vendor_invoice_no || '-'} · {g.total_accepted ?? 0} units accepted
+                      {g.grn_subtype === 'NO_PO' ? 'Bought without PO' : `PO ${g.po_number || '-'}`} · Supplier inv {g.vendor_invoice_no || '-'} · {g.total_accepted ?? 0} units accepted
                     </div>
                     {held ? (
                       <div className="text-xs text-amber-700 mt-0.5">

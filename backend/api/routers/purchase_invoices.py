@@ -699,6 +699,44 @@ def _release_grn_units(db, grn, claim, invoice_id):
         )
 
 
+def find_duplicate_bill(db, vendor_id, number, bill_date, po_id=None):
+    """The bill of this supplier already recorded as the same bill under THE
+    same-bill rule (pinv.same_bill -- the receiving door's rule too): the same
+    PO's number, or the same supplier's number in the same financial year.
+    Both bill doors call it; its atomic twin is uniq_vendor_bill_number_key
+    (vendor_id + pinv.bill_key, which both doors store as bill_number_key).
+    Raises on a DB error (the callers fail soft).
+
+    ponytail: a linear scan over one supplier's bills; index bill_number_key
+    here if a supplier ever holds thousands."""
+    target = pinv.normalize_invoice_no(number)
+    if not target or db is None:
+        return None
+    mine = {"no": target, "fy": pinv.bill_fy(bill_date), "po_id": po_id, "vendor_id": vendor_id}
+    rows = db.get_collection("vendor_bills").find(
+        {"vendor_id": vendor_id},
+        {
+            "_id": 0,
+            "bill_id": 1,
+            "bill_number": 1,
+            "bill_date": 1,
+            "invoice_date": 1,
+            "po_id": 1,
+            "vendor_id": 1,
+        },
+    )
+    for r in rows:
+        theirs = {
+            "no": r.get("bill_number"),
+            "fy": pinv.bill_fy(r.get("bill_date") or r.get("invoice_date")),
+            "po_id": r.get("po_id"),
+            "vendor_id": r.get("vendor_id"),
+        }
+        if pinv.same_bill(mine, theirs):
+            return r
+    return None
+
+
 def assert_grn_billable_header_only(db, grn_id, vendor_id):
     """The same two guards for the HEADER-ONLY vendor-bill door
     (vendors.create_vendor_bill), which accepts a grn_id but carries no lines.
@@ -844,6 +882,22 @@ def _run_match_for_invoice(db, po_id, grn_id, computed_lines, tolerance_pct):
             po = po_repo.find_by_id(po_id)
         if grn_id and grn_repo is not None:
             grn = grn_repo.find_by_id(grn_id)
+        # D14: a "Bought without PO" receipt is its own order. The bill is
+        # held to what was accepted and the cost the receiver recorded (the
+        # cost its units went on the shelf at); with no PO every line read
+        # "not on purchase order", whatever the bill said.
+        if po is None and (grn or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO:
+            po = {
+                "items": [
+                    {
+                        "product_id": gi.get("product_id"),
+                        "quantity": gi.get("accepted_qty"),
+                        "unit_price": gi.get("unit_price"),
+                    }
+                    for gi in grn.get("items") or []
+                    if isinstance(gi, dict)
+                ]
+            }
         # Need at least one comparison doc to make a meaningful verdict.
         if po is None and grn is None:
             return None
@@ -922,6 +976,33 @@ def _product_state_for_valuation(
     return state
 
 
+def _bought_since(db, product_id, accepted_at) -> bool:
+    """Whether a receipt accepted after `accepted_at` paid a price for this
+    product -- the question /vendors/last-cost asks of each receipt, through
+    the same helper (grn_accept_lock._receipt_price_paid): a receipt that
+    minted no unit of it at a price (accepted none, held the line, had no
+    price) or is voided paid none."""
+    from .vendors.grn_accept_lock import (
+        _GRN_TERMINAL_ACCEPT_STATUSES,
+        _receipt_price_paid,
+    )
+
+    if not accepted_at:
+        return False
+    stock = db.get_collection("stock_units")
+    return any(
+        _receipt_price_paid(stock, g.get("grn_id"), product_id)
+        for g in db.get_collection("grns").find(
+            {
+                "status": {"$in": list(_GRN_TERMINAL_ACCEPT_STATUSES)},
+                "accepted_at": {"$gt": accepted_at},
+                "items.product_id": product_id,
+            },
+            {"_id": 0, "grn_id": 1},
+        )
+    )
+
+
 def _apply_valuation_trueup(db, invoice_doc, computed, config) -> Optional[list]:
     """Update each invoiced product's moving-average cost from the invoice's
     per-unit landed price. Returns the list of applied updates (for the audit
@@ -933,21 +1014,55 @@ def _apply_valuation_trueup(db, invoice_doc, computed, config) -> Optional[list]
         if db is None or not pids:
             return None
         store_id = None
+        grn = None
         # Prefer the receiving store from the linked GRN for the on-hand scope.
         grn_id = invoice_doc.get("grn_id")
         if grn_id:
             try:
                 grn = db.get_collection("grns").find_one(
-                    {"grn_id": grn_id}, {"_id": 0, "store_id": 1}
+                    {"grn_id": grn_id},
+                    {"_id": 0, "store_id": 1, "grn_subtype": 1, "accepted_at": 1},
                 )
                 store_id = (grn or {}).get("store_id")
             except Exception:
                 store_id = None
+        # A walk-in buy's cost is ONE rule at receiving and at booking: the
+        # LATEST PRICE PAID (owner 2026-10-12), never the configured blend --
+        # plus, G1 (owner 2026-10-13), the GST its bill charged when that bill
+        # claims no input credit: tax that cannot be claimed back is part of
+        # what the goods cost. THE place G1 is decided: the units went on the
+        # shelf at the price paid, and both bill doors true up through here (a
+        # 0% cash memo leaves the price paid).
+        walk_in = (grn or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO
+        if walk_in:
+            # The latest price paid is the newest ACCEPTED receipt's, dated by
+            # its acceptance (as /vendors/last-cost dates it), never the newest
+            # booking: a walk-in bill booked late puts no older price back
+            # over a product a later receipt has bought.
+            lines = [
+                ln
+                for ln in lines
+                if not _bought_since(db, ln.get("product_id"), grn.get("accepted_at"))
+            ]
+        if walk_in and invoice_doc.get("itc_eligible") is False:
+            lines = [
+                {
+                    **ln,
+                    "unit_price": round(
+                        float(ln.get("unit_price") or 0)
+                        * (1 + float(ln.get("gst_rate") or 0) / 100),
+                        2,
+                    ),
+                }
+                for ln in lines
+            ]
         product_state = _product_state_for_valuation(
             db, pids, store_id, exclude_grn_id=grn_id
         )
         updates = pmatch.valuation_trueup_for_invoice(
-            lines, product_state, config.get("valuation_method")
+            lines,
+            product_state,
+            pmatch.VALUATION_LATEST_PRICE if walk_in else config.get("valuation_method"),
         )
         if not updates:
             return None
@@ -1020,17 +1135,29 @@ def _receipt_store_id(db, grn_doc, linked_dc_ids) -> Optional[str]:
     return store_id or None
 
 
-def _draft_lines(db, receipt: dict, po: Optional[dict]) -> list:
+def _draft_lines(db, receipt: dict, po: Optional[dict], supplier_gstin=None) -> list:
     """A receipt's billable lines for BOTH drafts (from-GRN, from-DCs), with
     the name and HSN the receipt and its PO lack taken from the catalogue: a
     receipt line stores only product_id + quantities and a DC has no PO, so the
     DC door opened every line blank and the form would not book until each
-    name was retyped. Fail-soft: a catalogue miss leaves the line as it was."""
+    name was retyped. A "Bought without PO" receipt has no PO line to carry a
+    GST rate either: its lines take THE PO-line rate rule (vendors.gst.
+    _po_line_gst_rate -- the HSN's rate, else the catalogued one) when its
+    supplier is GST-registered (``supplier_gstin`` valid), never a 0% that
+    booked a registered dealer's bill with no tax; an unregistered dealer
+    charges no GST, so its lines stay at 0% and the bill at the cash memo.
+    Fail-soft: a catalogue miss leaves the line as it was."""
+    from .vendors.gst import _po_line_gst_rate
+
     lines = pinv.lines_from_grn(receipt, po)
+    taxed_walk_in = (receipt or {}).get(
+        "grn_subtype"
+    ) == ap_engine.GRN_SUBTYPE_NO_PO and ov.has_valid_gstin(supplier_gstin)
     missing = {
         ln["product_id"]
         for ln in lines
-        if ln.get("product_id") and not (ln.get("description") and ln.get("hsn"))
+        if ln.get("product_id")
+        and (taxed_walk_in or not (ln.get("description") and ln.get("hsn")))
     }
     if not missing or db is None:
         return lines
@@ -1038,7 +1165,7 @@ def _draft_lines(db, receipt: dict, po: Optional[dict]) -> list:
     for pid in missing:
         try:
             products[pid] = db.get_collection("products").find_one(
-                {"product_id": pid}, {"_id": 0, "name": 1, "hsn_code": 1}
+                {"product_id": pid}, {"_id": 0, "name": 1, "hsn_code": 1, "gst_rate": 1}
             ) or {}
         except Exception:
             products[pid] = {}
@@ -1046,6 +1173,10 @@ def _draft_lines(db, receipt: dict, po: Optional[dict]) -> list:
         p = products.get(ln.get("product_id")) or {}
         ln["description"] = ln.get("description") or p.get("name")
         ln["hsn"] = ln.get("hsn") or p.get("hsn_code")
+        if taxed_walk_in and p:
+            rate = _po_line_gst_rate({"hsn": ln.get("hsn")}, p)[0]
+            if rate is not None:
+                ln["gst_rate"] = float(rate)
     return lines
 
 
@@ -1293,6 +1424,23 @@ def _vendor_gstin(db, vendor: Optional[dict], vendor_id: str) -> Optional[str]:
         return None
 
 
+WALK_IN_REVERSE_CHARGE = (
+    "Goods bought without a PO are not a reverse-charge purchase: the dealer "
+    "charges GST on the bill, or none if not registered. Book this bill with "
+    "reverse charge off."
+)
+
+
+def refuse_walk_in_reverse_charge(reverse_charge, receipt) -> None:
+    """A "Bought without PO" receipt's bill is never reverse charge (owner
+    2026-10-13): spectacles bought from a dealer are not a reverse-charge
+    supply. Every bill door -- this one (booking and /preview, through
+    _bill_math) and the header-only AP bill door -- refuses it here, 422, so
+    one bill has one GST outcome whichever door books it."""
+    if reverse_charge and (receipt or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO:
+        raise HTTPException(status_code=422, detail=WALK_IN_REVERSE_CHARGE)
+
+
 def _bill_math(db, vendor, body, grn_doc, current_user):
     """Everything a booking stores about tax: (supplier GSTIN, recipient,
     computed invoice). POST / books it and POST /preview shows it through this
@@ -1301,6 +1449,7 @@ def _bill_math(db, vendor, body, grn_doc, current_user):
     shop is the form's own store_id, never whichever the token names by the
     time Book is pressed. A receipt's shop decides a receipt's bill, so the
     form's shop is only checked (403) when it is the one that counts."""
+    refuse_walk_in_reverse_charge(body.reverse_charge, grn_doc)
     supplier_gstin = _vendor_gstin(db, vendor, body.vendor_id)
     receipt_store = _receipt_store_id(db, grn_doc, body.linked_dc_ids)
     recipient = _bill_recipient(
@@ -1598,6 +1747,20 @@ async def create_purchase_invoice(
     # single-GRN mirror of the DC path's mixed_vendors 409. DC-consolidated
     # invoices validate each linked DC separately below (via _load_linked_dcs),
     # so the single-GRN guard skips them.
+    #
+    # A bill is EITHER one goods receipt OR a set of Delivery Challans, never
+    # both: with both named, the receipt was never read -- not checked
+    # (ACCEPTED, vendor, over-billing) and not seen by the no-credit rule
+    # below, so a "Bought without PO" receipt booked full ITC (D14). No screen
+    # sends both (the DC draft carries no grn_id).
+    if body.grn_id and body.linked_dc_ids:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "A bill links one goods receipt or a set of Delivery "
+                "Challans, not both - book them as separate bills."
+            ),
+        )
     grn_doc = None
     if body.grn_id and not body.linked_dc_ids:
         grn_doc = _load_standard_grn(body.grn_id, expected_vendor_id=body.vendor_id)
@@ -1630,10 +1793,11 @@ async def create_purchase_invoice(
     # book -- software cannot read the carton.)
     #
     # A genuine no-order purchase (goods bought over the counter, no PO) has a
-    # way out: the store manager receives it on the Goods Receipt screen's
-    # Delivery-Challan mode (no PO needed), and the receipt it posts is
-    # linkable from every billing door. The booker is ADMIN / ACCOUNTANT and
-    # receiving is managers only, so the message says who does it.
+    # way out the UI can actually WALK: the Goods Receipt screen's "Bought
+    # without PO" mode (supplier, cost per line, bill photo), whose receipt is
+    # linkable from every billing door and claims input credit only from a
+    # GST-registered supplier (G2). A
+    # supplier's delivery on a challan keeps the Delivery-Challan mode.
     if not body.grn_id and not body.linked_dc_ids:
         if (
             body.po_id
@@ -1668,32 +1832,21 @@ async def create_purchase_invoice(
     # Ruling 15 -- and only for CATALOGUED products, naming what is missing.
     _assert_products_catalogued(body.lines, _line_products(db, body.lines))
 
-    # Duplicate-invoice guard (application-level; mirrors create_vendor_bill).
-    # The same vendor tax-invoice number must not be booked twice -- a double
-    # entry would double the payable AND double-count the ITC. Compared
-    # case/punctuation-FOLDED (pinv.normalize_invoice_no, the SAME normaliser
-    # the GRN duplicate guard uses): the exact-string check let 'GO-INV/9007'
-    # book the payable a second time next to 'GO-INV-9007'. ponytail: linear
-    # scan over one vendor's bills; index vendor_invoice_no_norm here too if a
-    # vendor ever holds thousands.
+    # Duplicate-invoice guard: THE same-bill rule (find_duplicate_bill ->
+    # pinv.same_bill), the one the receiving door and the header bill door
+    # use. A double entry would double the payable AND double-count the ITC;
+    # a bill number the supplier reuses in a new financial year (GST rule 46)
+    # is a new bill -- else goods on the shelf held a bill that could not be
+    # booked under its real number.
     if db is not None:
         try:
-            target = pinv.normalize_invoice_no(body.invoice_number)
-            dup = None
-            if target:
-                rows = db.get_collection("vendor_bills").find(
-                    {"vendor_id": body.vendor_id},
-                    {"_id": 0, "bill_id": 1, "bill_number": 1},
-                )
-                dup = next(
-                    (
-                        r
-                        for r in rows
-                        if pinv.normalize_invoice_no(r.get("bill_number"))
-                        == target
-                    ),
-                    None,
-                )
+            dup = find_duplicate_bill(
+                db,
+                body.vendor_id,
+                body.invoice_number,
+                body.invoice_date,
+                po_id=body.po_id,
+            )
             if dup:
                 recorded = dup.get("bill_number")
                 variant = (
@@ -1705,8 +1858,8 @@ async def create_purchase_invoice(
                     status_code=409,
                     detail=(
                         f"Invoice number '{body.invoice_number}' is already "
-                        f"recorded for this vendor{variant}. Duplicate vendor "
-                        f"invoices are not allowed."
+                        f"recorded for this vendor{variant} in this financial "
+                        f"year. Duplicate vendor invoices are not allowed."
                     ),
                 )
         except HTTPException:
@@ -1828,6 +1981,9 @@ async def create_purchase_invoice(
         "invoice_number": body.invoice_number,
         "bill_date": body.invoice_date,
         "invoice_date": body.invoice_date,
+        # The bill's identity for the uniq_vendor_bill_number_key index (the
+        # same-bill rule's atomic twin).
+        "bill_number_key": pinv.bill_key(body.invoice_number, body.invoice_date),
         "due_date": due_date,
         "credit_days": credit_days,
         "po_id": body.po_id,
@@ -1870,7 +2026,9 @@ async def create_purchase_invoice(
         "tds": round(body.tds, 2),
         # Round 12 item 6: no valid supplier GSTIN on the invoice, no input
         # credit -- decided here, once, so the register, GSTR-3B and the
-        # Cross-Check all read it from the stored flag.
+        # Cross-Check all read it from the stored flag. A bill for goods
+        # bought without a PO is never reverse charge (_bill_math refused it),
+        # so it claims credit only from a registered supplier (G2).
         "itc_eligible": ov.itc_claimable(
             supplier_gstin, body.reverse_charge, body.itc_eligible
         ),
@@ -1933,8 +2091,8 @@ async def create_purchase_invoice(
                     status_code=409,
                     detail=(
                         f"Invoice number '{body.invoice_number}' is already "
-                        f"recorded for this vendor. Duplicate vendor invoices are "
-                        f"not allowed."
+                        f"recorded for this vendor in this financial year. "
+                        f"Duplicate vendor invoices are not allowed."
                     ),
                 ) from exc
             raise HTTPException(
@@ -2113,11 +2271,13 @@ async def preview_purchase_invoice(
     supplier_gstin, recipient, computed = _bill_math(
         db, vendor, body, grn_doc, current_user
     )
+    # The verdict AND its reason from the one rule: the form shows the reason
+    # as sent, so it never explains a refusal by a rule of its own.
+    refusal = ov.itc_refusal(supplier_gstin, body.reverse_charge, body.itc_eligible)
     return {
         "vendor_gstin": supplier_gstin,
-        "itc_eligible": ov.itc_claimable(
-            supplier_gstin, body.reverse_charge, body.itc_eligible
-        ),
+        "itc_eligible": refusal is None,
+        "itc_reason": refusal,
         "recipient_entity_id": recipient.get("recipient_entity_id"),
         "recipient_gstin": recipient.get("recipient_gstin"),
         "supplier_state": computed["supplier_state"],
@@ -2261,7 +2421,7 @@ async def draft_invoice_from_grn(
         db, grn.get("store_id"), None, current_user.get("active_store_id")
     )
 
-    raw_lines = _draft_lines(db, grn, po)
+    raw_lines = _draft_lines(db, grn, po, supplier_gstin)
     computed = pinv.compute_invoice(
         raw_lines, supplier_gstin, recipient.get("recipient_gstin")
     )

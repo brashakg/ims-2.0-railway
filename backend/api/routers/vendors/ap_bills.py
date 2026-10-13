@@ -52,6 +52,10 @@ class VendorBillCreate(BaseModel):
     # handler can refuse with a stable, plain-English 422 (BILL_KIND_REQUIRED)
     # instead of a raw pydantic error, and so stored legacy rows re-read fine.
     bill_kind: Optional[str] = None
+    # This door books no reverse charge (the line-detail door does). Read only
+    # so a walk-in bill sent with it is refused in words, as on that door
+    # (purchase_invoices.refuse_walk_in_reverse_charge), never booked quietly.
+    reverse_charge: bool = False
 
     @field_validator("bill_kind", mode="before")
     @classmethod
@@ -258,15 +262,18 @@ async def create_vendor_bill(
                 },
             )
 
+    linked = None  # the goods receipt this bill names, read below
     # This door accepts a grn_id but validated NOTHING about it -- so the same
     # two money leaks the first-class purchase-invoice door had were reachable
     # here too: bill another vendor's receipt, or bill one receipt again and
     # again. Reuse the purchase-invoice guards (imported at call time, like
     # check_period_locked above, so no cross-router import cycle).
     #
-    # A DELIVERY CHALLAN receipt is billable here too (the whole point of the
-    # no-PO receive path: goods bought over the counter get a DC receipt, and
-    # THIS is the screen the accountant records the bill on). The DC takes the
+    # A DELIVERY CHALLAN receipt is billable here too (a supplier's goods that
+    # came on a challan, often with no PO -- THIS is the screen the accountant
+    # records the bill on; a walk-in buy has its own "Bought without
+    # PO" receipt, D14 - credit only from a registered supplier, G2 - billed
+    # like a PO receipt below). The DC takes the
     # same one-bill-per-receipt stance as the STANDARD header guard, enforced
     # by CLAIMING the DC (dc_matched) before the bill is written -- so neither
     # a second header bill nor a later consolidated /from-dcs invoice can bill
@@ -283,6 +290,9 @@ async def create_vendor_bill(
         grn_repo = get_grn_repository()
         linked = grn_repo.find_by_id(bill.grn_id) if grn_repo is not None else None
         _receipt_store = (linked or {}).get("store_id")
+        from ..purchase_invoices import refuse_walk_in_reverse_charge
+
+        refuse_walk_in_reverse_charge(bill.reverse_charge, linked)
         if linked is not None and linked.get("grn_subtype") == GRN_SUBTYPE_DC:
             # 404 missing / 400 not-ACCEPTED / 409 already-matched.
             dc_docs = _load_linked_dcs(db_early, [bill.grn_id])
@@ -292,40 +302,30 @@ async def create_vendor_bill(
         else:
             assert_grn_billable_header_only(db_early, bill.grn_id, vendor_id)
 
-    # Duplicate bill guard: the same vendor invoice number must not be recorded
-    # twice for the same vendor. A double-entry would double the outstanding
-    # payable and produce a duplicate payment row in the ledger.
-    # Compared case/punctuation-FOLDED through the ONE normaliser
-    # (purchase_invoice_engine.normalize_invoice_no -- the same fold the GRN
-    # duplicate guard and the line-detail invoice door use): the exact-string
-    # check here let 'GO-INV/9007' book the payable a second time next to
-    # 'GO-INV-9007'. ponytail: linear scan over one vendor's bills; index a
-    # normalised column if a vendor ever holds thousands.
+    # Duplicate bill guard: THE same-bill rule (purchase_invoices.
+    # find_duplicate_bill -> purchase_invoice_engine.same_bill), the one the
+    # receiving door and the line-detail invoice door use. A double entry
+    # would double the outstanding payable and the ledger's payment row; a
+    # number the supplier reuses in a new financial year is a new bill.
+    from ..purchase_invoices import find_duplicate_bill
+    from ...services.purchase_invoice_engine import bill_key
+
     if db_early is not None:
         try:
-            from ...services.purchase_invoice_engine import normalize_invoice_no
-
-            _target = normalize_invoice_no(bill.bill_number)
-            _rows = db_early.get_collection("vendor_bills").find(
-                {"vendor_id": vendor_id},
-                {"_id": 0, "bill_id": 1, "bill_number": 1},
+            dup = find_duplicate_bill(
+                db_early,
+                vendor_id,
+                bill.bill_number,
+                bill.bill_date,
+                po_id=bill.po_id,
             )
-            dup = None
-            if _target:
-                dup = next(
-                    (
-                        r
-                        for r in _rows
-                        if normalize_invoice_no(r.get("bill_number")) == _target
-                    ),
-                    None,
-                )
             if dup:
                 raise HTTPException(
                     status_code=409,
                     detail=(
                         f"Bill number '{bill.bill_number}' is already recorded "
-                        f"for this vendor. Duplicate vendor invoices are not allowed."
+                        f"for this vendor in this financial year. Duplicate "
+                        f"vendor invoices are not allowed."
                     ),
                 )
         except HTTPException:
@@ -364,6 +364,9 @@ async def create_vendor_bill(
         or (vendor or {}).get("legal_name"),
         "bill_number": bill.bill_number,
         "bill_date": bill.bill_date,
+        # The bill's identity for the uniq_vendor_bill_number_key index (the
+        # same-bill rule's atomic twin, shared with the line-detail door).
+        "bill_number_key": bill_key(bill.bill_number, bill.bill_date),
         "due_date": due_date,
         "credit_days": credit_days,
         "vendor_gstin": supplier_gstin,
@@ -380,8 +383,9 @@ async def create_vendor_bill(
         "igst_total": heads["igst_total"],
         "total_amount": round(bill.total_amount, 2),
         "outstanding": round(bill.total_amount, 2),
-        # No valid supplier GSTIN, no input credit (purchase_invoices does the
-        # same on its doors): one rule, org_validation.itc_claimable.
+        # No valid supplier GSTIN, no input credit (a bill for goods bought
+        # without a PO, G2, the same) -- purchase_invoices does the same on
+        # its doors: one rule, org_validation.itc_claimable.
         "itc_eligible": itc_claimable(supplier_gstin),
         "po_id": bill.po_id,
         "grn_id": bill.grn_id,
@@ -438,7 +442,36 @@ async def create_vendor_bill(
                         bill.grn_id,
                         bill_id,
                     )
+            # The same-bill rule's atomic twin (uniq_vendor_bill_number_key):
+            # a rival booking of this bill won the race -- the guard's 409.
+            if exc.__class__.__name__ == "DuplicateKeyError":
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Bill number '{bill.bill_number}' is already recorded "
+                        f"for this vendor in this financial year. Duplicate "
+                        f"vendor invoices are not allowed."
+                    ),
+                ) from exc
             raise HTTPException(status_code=500, detail="Failed to save bill") from exc
+    # G1 on this door too: a walk-in receipt's bill costs its goods by THE
+    # true-up the line-detail door runs (purchase_invoices.
+    # _apply_valuation_trueup: the price paid, plus the bill's GST when it
+    # claims no credit). This form names no lines, so each receipt line
+    # carries the bill's tax share as its rate.
+    # ponytail: one share for every line; a mixed-rate walk-in bill wants the
+    # line-detail door (Purchase -> Invoices -> Create from GRN).
+    if db is not None and (linked or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO:
+        from ..purchase_invoices import _apply_valuation_trueup, _resolved_purchase_config
+        from ...services.purchase_invoice_engine import lines_from_grn
+
+        share = ap_engine.header_bill_gst_rate(bill.tax_amount, bill.taxable_amount) or 0.0
+        _apply_valuation_trueup(
+            db,
+            {**doc, "invoice_id": bill_id},
+            {"lines": [{**ln, "gst_rate": share} for ln in lines_from_grn(linked, None)]},
+            _resolved_purchase_config(db),
+        )
     return _clean(doc)
 
 

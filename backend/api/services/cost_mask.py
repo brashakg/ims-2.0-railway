@@ -18,10 +18,14 @@ Role policy (DECISIONS sec 9, owner rulings 2026-09-28 / D7 / 2026-09-29):
     lens line, the below-cost and cost-floor price errors, stock counts,
     stock value at cost, stock alerts, transfers and workshop remake cost --
     the managers keep them, counter roles never get the key.
+    The price paid on a goods receipt's line (mask_receipt) and the last
+    price paid (/vendors/last-cost) are that cost too -- a walk-in's units
+    and product are costed at it -- so they ask this context, never another.
   * What was paid and to whom (context="purchase"): PURCHASE_ROLES. A vendor
     return / RTV debit note shows anyone else the item, quantity and reason
     only, and a vendor shows only VENDOR_NAME_KEYS (the vendor list, a debit
-    note's vendor block) -- all of it asks can_see_cost(user, "purchase").
+    note's vendor block); a goods receipt's supplier, bill, bill photo and
+    accept lock (mask_receipt) -- all of it asks can_see_cost(user, "purchase").
   * Operational aggregates (default context: analytics, P&L) -- cost + margin
     stay with SUPERADMIN / ADMIN / ACCOUNTANT.
   * Supplier payments (context="payables": bills, payments, balances, per
@@ -65,10 +69,13 @@ PURCHASE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
 # the item, quantity and reason only (mask_vendor_return / mask_debit_note).
 # Their read gates ARE this tuple.
 RETURN_READERS = (*PURCHASE_ROLES, "WORKSHOP_STAFF")
-# Who receives goods into stock (log, accept, express-receive, void or escalate
-# a receipt; the receiving screen): owner ruling 2026-09-28, RECEIVING IS
-# MANAGERS ONLY -- the purchase roles without the accountant. The receiving
-# gates (routers/vendors/_shared._RECEIVE_ROLES) ARE this tuple.
+# Who receives goods into stock -- log, accept, express-receive, void or
+# escalate a receipt, its bill-photo upload and the receiving screen. Owner
+# ruling 2026-09-28: RECEIVING IS MANAGERS ONLY; the accountant keeps bills,
+# payments and the receipt reads. Defined ONCE, here: the receiving gates
+# (routers/vendors/_shared._RECEIVE_ROLES) ARE this tuple, their rbac_policy
+# rows are rbac_policy._core.RECEIVE, and the frontend RECEIVING_MANAGER_ROLES
+# is pinned to it (receivingRoles.test.ts).
 RECEIVE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER")
 # context -> the roles it admits on top of COST_VISIBLE_ROLES.
 _CONTEXT_ROLES = {
@@ -152,6 +159,52 @@ def mask_cost_list(
     if can_see_cost(user, context):
         return docs
     return [mask_cost(d, user, context, extra) if isinstance(d, dict) else d for d in (docs or [])]
+
+
+# What a goods receipt shows outside the purchase roles -- the barcode trace
+# is open to every signed-in role: when and where it came in, what and how
+# many. Never who sold it or for which order, the bill number, the bill photo
+# (file id / hash) or the accept lock (owner ruling 2026-10-12). Allow-lists,
+# so a field added later stays hidden until someone lists it here.
+_RECEIPT_KEYS = (
+    "grn_id", "grn_number", "grn_subtype", "store_id", "status",
+    "received_at", "accepted_at", "created_at",
+    "total_received", "total_accepted", "total_rejected",
+)
+_RECEIPT_ITEM_KEYS = (
+    "product_id", "product_name", "sku", "received_qty", "accepted_qty",
+    "rejected_qty", "batch_code", "lot_number", "expiry_date", "location_code",
+)
+
+
+# A receipt line's price paid is its cost; not in _COST_FIELDS because an order
+# line's unit_price is the selling price.
+_RECEIPT_LINE_COST_FIELDS = _ALL_MASKED | {"unit_price"}
+
+
+def mask_receipt(grn: dict, user: dict) -> dict:
+    """The one rule on a goods receipt. To whom -- who sold it, the bill, the
+    bill photo, the accept lock -- is the "purchase" context: anyone else sees
+    only _RECEIPT_KEYS / _RECEIPT_ITEM_KEYS. What was paid on each line (a
+    "Bought without PO" receipt records it as `unit_price`) is the cost of the
+    units it minted, so it is the "product" context, as every read of a unit's
+    or product's cost: narrowing that one context takes it off every read at
+    once. Never edits `grn` (see mask_cost). Every read that returns a receipt
+    -- GET /vendors/grn, GET /vendors/grn/{id}, the barcode trace -- goes
+    through this."""
+    if not isinstance(grn, dict):
+        return grn
+    paid = can_see_cost(user, "product")
+    if can_see_cost(user, "purchase"):
+        if paid:
+            return grn
+        out = mask_cost(grn, user, "product")
+        out["items"] = _strip(grn.get("items") or [], _RECEIPT_LINE_COST_FIELDS)
+        return out
+    item_keys = _RECEIPT_ITEM_KEYS + (("unit_price",) if paid else ())
+    out = _pick(grn, _RECEIPT_KEYS)
+    out["items"] = [_pick(it, item_keys) for it in grn.get("items") or []]
+    return out
 
 
 def mask_fields(doc: Dict, user: dict, context: str = "default") -> Dict:

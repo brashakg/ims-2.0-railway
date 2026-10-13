@@ -477,17 +477,45 @@ def _grn_already_minted(stock_repo, flt: dict) -> int:
     raise RuntimeError("stock repository exposes no way to count minted units")
 
 
+def _receipt_unit_filters(grn_id, **match):
+    """The units goods receipt `grn_id` minted (narrowed by `match`), WHEREVER
+    THEY ARE NOW: a stock transfer rewrites a unit's source_type and source_id
+    (transfers._rehome) but never its grn_id, which the mint stamps; a unit
+    minted before that stamp has no grn_id and is matched the old way. No unit
+    fits both filters."""
+    return (
+        {**match, "grn_id": grn_id},
+        {**match, "grn_id": None, "source_type": "GRN", "source_id": grn_id},
+    )
+
+
 def _receipt_units(stock_repo, grn_id, **match) -> int:
-    """Units goods receipt `grn_id` put in stock (narrowed by `match`),
-    WHEREVER THEY ARE NOW. A stock transfer rewrites a unit's source_type and
-    source_id (transfers._rehome) but never its grn_id, which the mint
-    stamps; a unit minted before that stamp has no grn_id and is matched the
-    old way. No unit fits both counts. Raises like _grn_already_minted, so
-    every caller fails closed. The accept's mint, its refusal advice, the void
-    and the order's count of what arrived all ask this."""
-    stamped = _grn_already_minted(stock_repo, {**match, "grn_id": grn_id})
-    legacy = {**match, "grn_id": None, "source_type": "GRN", "source_id": grn_id}
-    return stamped + _grn_already_minted(stock_repo, legacy)
+    """How many units goods receipt `grn_id` put in stock (narrowed by
+    `match`), wherever they are now (_receipt_unit_filters). Raises like
+    _grn_already_minted, so every caller fails closed. The accept's mint, its
+    refusal advice, the void and the order's count of what arrived all ask
+    this."""
+    return sum(
+        _grn_already_minted(stock_repo, flt)
+        for flt in _receipt_unit_filters(grn_id, **match)
+    )
+
+
+def _receipt_price_paid(stock, grn_id, product_id) -> Optional[float]:
+    """THE price goods receipt `grn_id` paid for `product_id`: the cost at
+    acceptance its mint stamped on a unit of it (wherever that unit is now),
+    or None. A line held (catalogue incomplete) or accepted with no price
+    minted no price paid, so it never answers. /vendors/last-cost and the
+    walk-in bill's cost true-up (purchase_invoices._bought_since) both ask
+    this, so "the latest price paid" is one rule. `stock` is the stock
+    repository or the raw collection -- anything with find_one(filter)."""
+    for flt in _receipt_unit_filters(
+        grn_id, product_id=product_id, unit_cost={"$gt": 0}
+    ):
+        unit = stock.find_one(flt)
+        if unit:
+            return unit.get("unit_cost")
+    return None
 
 
 def _stock_create_raises_on_duplicate(stock_repo) -> bool:

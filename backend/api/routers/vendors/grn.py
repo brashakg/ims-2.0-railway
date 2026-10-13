@@ -1,5 +1,11 @@
 """Goods receipt list, document upload/download and duplicate detection."""
 
+from datetime import datetime
+
+from ...services.ap_engine import GRN_SUBTYPE_NO_PO
+from ...services.cost_mask import mask_receipt
+from ...services.purchase_invoice_engine import bill_fy, same_bill
+from ...services.purchase_invoice_engine import bill_key as _bill_key
 from ._shared import (
     ALLOWED_MIME_TYPES,
     Depends,
@@ -212,6 +218,8 @@ async def list_grns(
     ]
 
     _enrich_grn_names(grns)
+    # The price paid on a line goes through the one cost rule (cost_mask).
+    grns = [mask_receipt(g, current_user) for g in grns]
 
     return {"grns": grns, "total": len(grns)}
 
@@ -370,52 +378,82 @@ async def download_grn_doc(
     )
 
 
-def _find_duplicate_standard_grn(
-    grn_repo, po_id, vendor_id, invoice_no, exclude_grn_id=None
-):
-    """First non-VOID non-DC GRN already holding this vendor invoice number.
+def _find_duplicate_receipt(grn_repo, grn, vendor_id, photo_sha=None, exclude_grn_id=None):
+    """The first live (non-VOID) receipt, in ANY shop, already holding this
+    bill -- for every receipt but a Delivery Challan (its own guard keys on
+    the DC number). It is the same bill when it has
+      * the same bill photo, for a "Bought without PO" receipt (D14) -- the
+        same upload (a double-pressed post) or the same bytes uploaded again
+        (a retry after a page reload mints a new file id; upload-doc stamps
+        the sha256, which every receipt keeps), or
+      * the same bill under THE same-bill rule (purchase_invoice_engine.
+        same_bill, which both bill doors use too): the same purchase order's
+        number, or the same supplier's number in the same financial year.
+    A VOIDed receipt frees its bill (the sanctioned correction path). The
+    atomic twins: uniq_std_vendor_invoice_store (supplier + bill_key + shop),
+    uniq_nopo_vendor_bill (supplier + bill_key, walk-in receipts) and
+    uniq_nopo_bill_hash.
 
-    P0-1 (launch gate): the STANDARD twin of the DC duplicate guard. The
-    invoice number is compared case/punctuation-folded (normalize_invoice_no,
-    the same normaliser the payable dedupe uses) so 'GO-INV-9007' and
-    'GO-INV/9007' read as the same piece of paper. Candidates are matched by
-    po_id OR vendor_id (two equality queries -- the repo layer speaks no $or),
-    then filtered in Python so legacy rows without the norm field are still
-    caught. A VOIDed receipt frees its invoice number (that is the sanctioned
-    correction path). Fail-soft on a repo error, mirroring the DC guard; the
-    partial unique index (uniq_std_vendor_invoice_store) is the atomic
-    race backstop.
-
-    ponytail: linear scan over one vendor's receipts -- fine at this scale;
-    move to an indexed query on vendor_invoice_no_norm if a vendor ever holds
-    thousands of GRNs.
+    ponytail: candidates are the newest 500 receipts carrying this bill
+    number (either key shape), plus the PO's and the supplier's receipts for
+    rows older than the number key -- index vendor_id + created_at if one
+    supplier ever holds thousands of receipts.
     """
-    norm = _normalize_invoice_no(invoice_no)
-    if not norm or grn_repo is None:
+    if grn_repo is None or grn.grn_subtype == GRN_SUBTYPE_DC:
         return None
+
+    def live(r) -> bool:
+        return (
+            r.get("grn_id") != exclude_grn_id
+            and r.get("status") != "VOID"
+            and r.get("grn_subtype") != GRN_SUBTYPE_DC
+        )
+
+    if grn.grn_subtype == GRN_SUBTYPE_NO_PO:
+        photo = str(grn.attachment_file_id or "").strip()
+        for probe in (
+            {"attachment_file_id": photo} if photo else None,
+            {"attachment_sha256": photo_sha} if photo_sha else None,
+        ):
+            for r in grn_repo.find_many(probe, limit=50) if probe else []:
+                if live(r):
+                    return r
+
+    norm = _normalize_invoice_no(grn.vendor_invoice_no)
+    if not norm:
+        return None
+    now = datetime.now()
+    key = _bill_key(grn.vendor_invoice_no, grn.vendor_invoice_date, now)
     candidates: dict = {}
     for flt in (
-        {"po_id": po_id} if po_id else None,
+        {"vendor_invoice_no_norm": key},
+        {"vendor_invoice_no_norm": norm} if key != norm else None,
+        {"po_id": grn.po_id} if grn.po_id else None,
         {"vendor_id": vendor_id} if vendor_id else None,
     ):
         if not flt:
             continue
         try:
-            rows = grn_repo.find_many(flt, limit=500) or []
+            rows = grn_repo.find_many(flt, sort=[("created_at", -1)], limit=500) or []
         except Exception:  # noqa: BLE001 - fail-soft, like the DC guard
             rows = []
         for r in rows:
-            rid = r.get("grn_id")
-            if rid and rid not in candidates:
-                candidates[rid] = r
+            candidates.setdefault(r.get("grn_id"), r)
+
+    mine = {
+        "no": norm,
+        "fy": bill_fy(grn.vendor_invoice_date, now),
+        "po_id": grn.po_id,
+        "vendor_id": vendor_id,
+    }
     for r in candidates.values():
-        if r.get("grn_id") == exclude_grn_id:
-            continue
-        if r.get("status") == "VOID":
-            continue
-        if r.get("grn_subtype") == GRN_SUBTYPE_DC:
-            continue
-        if _normalize_invoice_no(r.get("vendor_invoice_no")) == norm:
+        theirs = {
+            "no": r.get("vendor_invoice_no"),
+            "fy": bill_fy(r.get("vendor_invoice_date"), r.get("created_at")),
+            "po_id": r.get("po_id"),
+            "vendor_id": r.get("vendor_id"),
+        }
+        if live(r) and same_bill(mine, theirs):
             return r
     return None
 

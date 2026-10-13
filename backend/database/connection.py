@@ -794,9 +794,11 @@ class DatabaseConnection:
         # P0-1 (launch gate): the STANDARD twin of the DC index above. A
         # vendor invoice number identifies one delivery + one bill, so two
         # live (non-VOID) STANDARD receipts must never share it per vendor +
-        # store. Keys on the case/punctuation-FOLDED number the create path
-        # stamps (vendor_invoice_no_norm), so 'GO-INV-9007' vs 'GO-INV/9007'
-        # collide; legacy rows without the field are simply not indexed
+        # store. Keys on the bill's identity the create path stamps
+        # (vendor_invoice_no_norm = purchase_invoice_engine.bill_key: its
+        # financial year + the case/punctuation-FOLDED number), so
+        # 'GO-INV-9007' vs 'GO-INV/9007' collide within a year; legacy rows
+        # (a bare folded number) or rows without the field are simply not indexed
         # (same fail-soft posture as the DC index). $in on status keeps a
         # VOIDed receipt out of the index so the sanctioned void-then-recreate
         # correction path still works ($in in partialFilterExpression needs
@@ -813,31 +815,77 @@ class DatabaseConnection:
             name="uniq_std_vendor_invoice_store",
             background=True,
         )
+        # D14: one live "Bought without PO" receipt per bill photo, in ANY
+        # shop, keyed on the photo's sha256 (the same bytes uploaded again are
+        # the same bill, numbered or not) -- the atomic twin of the photo half
+        # of vendors.grn._find_duplicate_receipt, which matches in any shop
+        # (schemas.py uniq_nopo_bill_hash). New subtype, so no existing rows
+        # can block the build. An earlier build keyed it per shop: a held
+        # index of that name on other keys is dropped so this one can build.
+        try:
+            held = self._db["grns"].index_information().get("uniq_nopo_bill_hash")
+            if held and list(held.get("key") or []) != [("attachment_sha256", 1)]:
+                self._db["grns"].drop_index("uniq_nopo_bill_hash")
+        except Exception:  # noqa: BLE001 - absent on a fresh database
+            pass
+        _idx(
+            "grns",
+            [("attachment_sha256", 1)],
+            unique=True,
+            partialFilterExpression={
+                "grn_subtype": "NO_PO",
+                "attachment_sha256": {"$type": "string"},
+                "status": {"$in": ["PENDING", "PARTIALLY_ACCEPTED", "ACCEPTED"]},
+            },
+            name="uniq_nopo_bill_hash",
+            background=True,
+        )
+        # D14: one live "Bought without PO" receipt per supplier bill (supplier
+        # + financial year + folded number, any shop) -- the atomic twin of
+        # the number half of _find_duplicate_receipt for walk-in receipts
+        # (schemas.py uniq_nopo_vendor_bill). New subtype: no rows can block it.
+        _idx(
+            "grns",
+            [("vendor_id", 1), ("vendor_invoice_no_norm", 1)],
+            unique=True,
+            partialFilterExpression={
+                "grn_subtype": "NO_PO",
+                "vendor_invoice_no_norm": {"$type": "string"},
+                "status": {"$in": ["PENDING", "PARTIALLY_ACCEPTED", "ACCEPTED"]},
+            },
+            name="uniq_nopo_vendor_bill",
+            background=True,
+        )
 
         # Vendor bills / purchase invoices (AP + ITC). bill_id UNIQUE sparse;
         # (vendor_id, bill_number) is NON-unique on purpose -- the duplicate-
         # invoice guard lives in app code (legacy prod data may already have one).
         _idx("vendor_bills", "bill_id", unique=True, sparse=True, background=True)
         _idx("vendor_bills", [("vendor_id", 1), ("bill_number", 1)], background=True)
-        # F4: DB-level duplicate-invoice backstop. The same vendor tax-invoice
-        # number must never be booked twice as a PURCHASE_INVOICE -- a double
-        # entry doubles the payable AND the ITC. The app-level check-then-insert
-        # in create_purchase_invoice races; this UNIQUE index is the atomic
-        # guard (insert loser -> DuplicateKeyError -> 409). PARTIAL to
-        # doc_type == PURCHASE_INVOICE so legacy header-only vendor_bills (and
-        # rows with a null/missing bill_number) are never indexed and can't
-        # collide. If prod already holds duplicate PURCHASE_INVOICE rows this
-        # build fails SOFT (logged, never aborts boot -- see _idx); a data-hygiene
-        # pass must de-dupe before the index can take effect.
+        # F4: DB-level duplicate-invoice backstop -- the atomic twin of THE
+        # same-bill rule (purchase_invoices.find_duplicate_bill). The app-level
+        # check-then-insert on both bill doors races; this UNIQUE index makes
+        # the insert loser a DuplicateKeyError -> 409. Keyed on what every new
+        # bill stores as bill_number_key: the bill's financial year + folded
+        # number (purchase_invoice_engine.bill_key) per supplier, so a
+        # supplier's serial reused in a new year (GST rule 46) is a new bill.
+        # PARTIAL to rows carrying
+        # the key: legacy bills (no key) are never indexed -- the app-level
+        # rule still reads them.
+        #
+        # It replaces uniq_purchase_invoice_vendor_number (vendor_id +
+        # bill_number, every year) which refused next year's bill '1' as a
+        # 409 while its goods were already on the shelf: drop it first.
+        try:
+            self._db["vendor_bills"].drop_index("uniq_purchase_invoice_vendor_number")
+        except Exception:  # noqa: BLE001 - absent on a fresh database
+            pass
         _idx(
             "vendor_bills",
-            [("vendor_id", 1), ("bill_number", 1)],
+            [("vendor_id", 1), ("bill_number_key", 1)],
             unique=True,
-            partialFilterExpression={
-                "doc_type": "PURCHASE_INVOICE",
-                "bill_number": {"$type": "string"},
-            },
-            name="uniq_purchase_invoice_vendor_number",
+            partialFilterExpression={"bill_number_key": {"$type": "string"}},
+            name="uniq_vendor_bill_number_key",
             background=True,
         )
         _idx("vendor_bills", "po_id", sparse=True, background=True)

@@ -12,8 +12,10 @@ import { useState, useEffect, useMemo, startTransition } from 'react';
 import { Check, AlertCircle, Package, FileText, Printer, Loader2, Trash2 } from 'lucide-react';
 import clsx from 'clsx';
 import { vendorsApi } from '../../services/api';
-import { productApi } from '../../services/api/products';
 import { grnCockpitApi, type UploadDocResult } from '../../services/api/grnCockpit';
+import { istDayString } from '../../utils/datetime';
+import { SupplierFormModal } from './SupplierFormModal';
+import { productApi } from '../../services/api/products';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { GRNPrint } from '../../components/print/GRNPrint';
@@ -35,6 +37,9 @@ interface GRNLineItem {
   // old all-or-nothing quality verdict.
   rejected_qty: number;
   rejection_reason?: string;
+  // D14 "Bought without PO" lines: what was paid per unit, and the expiry.
+  unit_price?: number;
+  expiry_date?: string;
 }
 
 interface GRNDiscrepancyItem {
@@ -51,6 +56,8 @@ interface GRN {
   grn_number: string;
   po_id: string;
   po_number: string;
+  // What the receipt was against: "Against <PO>" or "Bought without PO · dealer".
+  source: string;
   received_at: string;
   items_received: number;
   total_received: number;
@@ -94,11 +101,17 @@ function transformGRN(grn: any): GRN {
     grn.total_accepted ?? items.reduce((s, i) => s + (i.accepted_qty || 0), 0);
   const totalRejected =
     grn.total_rejected ?? items.reduce((s, i) => s + (i.rejected_qty || 0), 0);
+  const noPo = grn.grn_subtype === 'NO_PO';
   return {
     id: grn.grn_id || grn.id || grn._id,
     grn_number: grn.grn_number,
     po_id: grn.po_id,
-    po_number: grn.po_number || 'Unknown PO',
+    po_number: grn.po_number || (noPo ? 'Bought without PO' : 'Unknown PO'),
+    source: grn.po_number
+      ? `Against ${grn.po_number}`
+      : noPo
+        ? `Bought without PO${grn.vendor_name ? ` · ${grn.vendor_name}` : ''}`
+        : 'Against Unknown PO',
     received_at: grn.received_at || grn.created_at,
     items_received: grn.items_received ?? totalReceived,
     total_received: totalReceived,
@@ -166,12 +179,25 @@ export function GoodsReceiptNote() {
     Array<{ product_id: string; name?: string; product_name?: string; sku?: string; hsn_code?: string }>
   >([]);
   const [dcSearching, setDcSearching] = useState(false);
+  // D14 — "Bought without PO": a cash buy from a local dealer. The supplier
+  // (a dealer not on the list is quick-added as one, owner 2026-10-12), each
+  // line's cost, the bill photo, the bill number/date if any. Posts a NO_PO
+  // receipt; its bill books under that supplier, claiming GST credit only
+  // when the supplier is GST-registered (owner 2026-10-13).
+  const [isNoPo, setIsNoPo] = useState(false);
+  const [addingDealer, setAddingDealer] = useState(false);
+  // Today in IST (toISOString is the UTC day -- yesterday before 05:30 IST).
+  // Reset whenever the mode is ticked, or the next walk-in receipt carried the
+  // previous bill's date into its receipt and, later, its bill draft.
+  const istToday = () => istDayString(new Date()) ?? '';
+  const [billDate, setBillDate] = useState(istToday);
   const [grns, setGrns] = useState<GRN[]>([]);
   const [pos, setPos] = useState<POOption[]>([]);
   const [, setIsLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   // F-S3: a STANDARD receipt carries the vendor's bill (the server refuses one
-  // without it, 400 ATTACHMENT_REQUIRED); a Delivery Challan is exempt.
+  // without it, 400 ATTACHMENT_REQUIRED); so does a 'Bought without PO' receipt
+  // (the dealer's bill photo). A Delivery Challan is exempt.
   const [bill, setBill] = useState<UploadDocResult | null>(null);
   const [uploading, setUploading] = useState(false);
   // Print state: which GRN is currently being previewed (null = no print modal).
@@ -256,6 +282,9 @@ export function GoodsReceiptNote() {
   // Receiving without a PO = DC mode with no PO picked. Lines are then typed
   // in from the product picker instead of hydrated from a PO.
   const noPoDc = isDcMode && !poNumber;
+  // Either way of receiving with no PO types its lines in from the catalogue.
+  const typedLines = noPoDc || isNoPo;
+  const noPoSeller = !!dcVendorId;
   const needsBill = !isDcMode && !!poNumber;
   // An order a cancel closed takes no unit: every unit that arrived is
   // rejected, whatever the Rejected box says.
@@ -266,7 +295,9 @@ export function GoodsReceiptNote() {
     if (!file) return;
     setUploading(true);
     try {
-      setBill(await grnCockpitApi.uploadDoc(file));
+      const res = await grnCockpitApi.uploadDoc(file);
+      if (!res.file_id) throw new Error('not stored');
+      setBill(res);
     } catch {
       setBill(null);
       toast.error('Could not upload the bill - try again');
@@ -277,12 +308,15 @@ export function GoodsReceiptNote() {
 
   // Load the vendor list the first time DC mode is switched on. Fail-soft with
   // a visible error state — with no vendors the no-PO path cannot post, and a
-  // silent empty dropdown would read as "no vendors exist".
+  // silent empty dropdown would read as "no vendors exist". EVERY supplier,
+  // switched off or not, up to the server's 1000: the dealer quick-add refuses
+  // a name already on file, so every supplier on file must be pickable here
+  // (the server's default first 50 hid the newest walk-in dealers).
   useEffect(() => {
-    if (!isDcMode || dcVendors.length > 0) return;
+    if (!(isDcMode || isNoPo) || dcVendors.length > 0) return;
     let cancelled = false;
     vendorsApi
-      .getVendors({ is_active: true })
+      .getVendors({ limit: 1000 })
       .then((resp: any) => {
         if (cancelled) return;
         const rows: any[] = Array.isArray(resp) ? resp : resp?.vendors || [];
@@ -303,12 +337,12 @@ export function GoodsReceiptNote() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isDcMode]);
+  }, [isDcMode, isNoPo]);
 
   // Debounced product search for the no-PO DC lines (same pattern as the PO
   // composer's ProductSearchSelect).
   useEffect(() => {
-    if (!noPoDc) return;
+    if (!typedLines) return;
     const q = dcQuery.trim();
     if (q.length < 2) {
       setDcResults([]);
@@ -330,7 +364,7 @@ export function GoodsReceiptNote() {
       cancelled = true;
       clearTimeout(t);
     };
-  }, [dcQuery, noPoDc]);
+  }, [dcQuery, typedLines]);
 
   // Add a typed line for the no-PO DC. po_qty mirrors received_qty (nothing
   // was ordered, so there is no variance to show) and starts untallied —
@@ -407,7 +441,7 @@ export function GoodsReceiptNote() {
 
   // 4-step receive flow state: PO (or DC vendor) -> lines -> inspection -> post.
   const steps = useMemo(() => {
-    const hasSource = !!poNumber || (isDcMode && !!dcVendorId);
+    const hasSource = !!poNumber || (isDcMode && !!dcVendorId) || (isNoPo && noPoSeller);
     const hasLines = receivedItems.length > 0;
     const allTallied =
       receivedItems.length > 0 && receivedItems.every((i) => i.tallied);
@@ -416,8 +450,18 @@ export function GoodsReceiptNote() {
       {
         done: hasSource,
         active: !hasSource,
-        t: isDcMode && !poNumber ? 'Pick the vendor (DC, no PO)' : 'Match PO & vendor invoice',
-        s: poNumber || (isDcMode && dcVendorId ? 'Receiving without a PO' : 'Pick the order being received'),
+        t: isNoPo
+          ? 'Pick the supplier & attach the bill'
+          : isDcMode && !poNumber
+            ? 'Pick the vendor (DC, no PO)'
+            : 'Match PO & vendor invoice',
+        s:
+          poNumber ||
+          (hasSource
+            ? 'Receiving without a PO'
+            : isNoPo
+              ? 'Pick the supplier, or add the dealer'
+              : 'Pick the order being received'),
       },
       {
         done: hasSource && hasLines && allTallied,
@@ -425,17 +469,18 @@ export function GoodsReceiptNote() {
         t: 'Tally what arrived',
         s: hasLines
           ? `${receivedItems.filter((i) => i.tallied).length} / ${receivedItems.length} lines ticked`
-          : isDcMode && !poNumber
+          : typedLines
             ? 'Add the items received'
             : 'No lines on this PO',
       },
       { done: inspected, active: hasLines && !inspected, t: 'Quality inspection', s: `${checksComplete}/${INSPECTION_CHECKLIST.length} checks` },
       { done: false, active: inspected && hasLines, t: 'Post & close', s: 'Stock ledger updated' },
     ];
-  }, [poNumber, receivedItems, allChecksComplete, discrepancies, checksComplete, isDcMode, dcVendorId]);
+  }, [poNumber, receivedItems, allChecksComplete, discrepancies, checksComplete, isDcMode, dcVendorId, isNoPo, noPoSeller, typedLines]);
+
 
   const handleSubmit = async () => {
-    if (!poNumber && !isDcMode) {
+    if (!poNumber && !isDcMode && !isNoPo) {
       toast.error('Please select a Purchase Order');
       return;
     }
@@ -443,11 +488,15 @@ export function GoodsReceiptNote() {
       toast.error('Pick the vendor this Delivery Challan is from');
       return;
     }
-    if (receivedItems.length === 0) {
-      toast.error(noPoDc ? 'Add the items that arrived' : 'No line items to receive on this PO');
+    if (isNoPo && !noPoSeller) {
+      toast.error('Pick the supplier the goods were bought from, or add the dealer as one');
       return;
     }
-    if (noPoDc && receivedItems.some((i) => i.received_qty <= 0)) {
+    if (receivedItems.length === 0) {
+      toast.error(typedLines ? 'Add the items that arrived' : 'No line items to receive on this PO');
+      return;
+    }
+    if (typedLines && receivedItems.some((i) => i.received_qty <= 0)) {
       toast.error('Every line needs a quantity of at least 1');
       return;
     }
@@ -484,7 +533,15 @@ export function GoodsReceiptNote() {
       toast.error('DC Number is required for a Delivery Challan');
       return;
     }
-    if (!isDcMode && !vendorInvoiceNo.trim()) {
+    if (isNoPo && receivedItems.some((i) => !(i.unit_price && i.unit_price > 0))) {
+      toast.error('Enter the cost paid per unit on every line');
+      return;
+    }
+    if (isNoPo && !bill?.file_id) {
+      toast.error("Attach a photo of the dealer's bill");
+      return;
+    }
+    if (!isDcMode && !isNoPo && !vendorInvoiceNo.trim()) {
       toast.error('Enter the vendor invoice number');
       return;
     }
@@ -500,17 +557,19 @@ export function GoodsReceiptNote() {
         po_id: poNumber || undefined,
         // F9 — in DC mode the vendor invoice no. arrives later; send the
         // subtype + dc_number/dc_date so the bulk DC->invoice tally can pick it.
-        grn_subtype: isDcMode ? 'DELIVERY_CHALLAN' : 'STANDARD',
+        grn_subtype: isNoPo ? 'NO_PO' : isDcMode ? 'DELIVERY_CHALLAN' : 'STANDARD',
         dc_number: isDcMode ? dcNumber.trim() : undefined,
         dc_date: isDcMode ? dcDate : undefined,
         // No-PO DC: the vendor comes from the picker (a PO-backed receipt
         // derives it from the PO server-side).
-        vendor_id: noPoDc ? dcVendorId : undefined,
+        vendor_id: noPoDc || isNoPo ? dcVendorId : undefined,
         vendor_invoice_no: vendorInvoiceNo || undefined,
-        vendor_invoice_date: new Date().toISOString().split('T')[0],
-        attachment_file_id: needsBill ? bill?.file_id ?? undefined : undefined,
-        attachment_filename: needsBill ? bill?.filename : undefined,
-        attachment_mime: needsBill ? bill?.mime : undefined,
+        // The date printed on the supplier's bill (its financial year decides
+        // whether the number is a new bill); a challan's invoice comes later.
+        vendor_invoice_date: isDcMode ? istToday() : billDate || undefined,
+        attachment_file_id: isNoPo || needsBill ? bill?.file_id || undefined : undefined,
+        attachment_filename: isNoPo || needsBill ? bill?.filename : undefined,
+        attachment_mime: isNoPo || needsBill ? bill?.mime : undefined,
         items: lines.map((item) => ({
           po_item_id: item.po_item_id || undefined,
           product_id: item.product_id,
@@ -519,6 +578,8 @@ export function GoodsReceiptNote() {
           rejected_qty: rejectedOf(item),
           rejection_reason: rejectedOf(item) > 0 ? item.rejection_reason : undefined,
           tallied: item.tallied,
+          unit_price: isNoPo ? item.unit_price : undefined,
+          expiry_date: isNoPo ? item.expiry_date || undefined : undefined,
         })),
         notes: qualityNotes || undefined,
       });
@@ -569,6 +630,8 @@ export function GoodsReceiptNote() {
       setBill(null);
       setDiscrepancies('');
       setIsDcMode(false);
+      setIsNoPo(false);
+      setBillDate(istToday());
       setDcNumber('');
       setDcVendorId('');
       setDcQuery('');
@@ -737,9 +800,13 @@ export function GoodsReceiptNote() {
           {/* PO selection */}
           <div className="card">
             <div className="card-head">
-              <h3>Select purchase order</h3>
+              <h3>{isNoPo ? 'Supplier & bill' : 'Select purchase order'}</h3>
               <span className="meta">
-                {isDcMode ? 'DC · invoice arrives later' : 'PO precedes GRN · GRN is the GST document'}
+                {isDcMode
+                  ? 'DC · invoice arrives later'
+                  : isNoPo
+                    ? 'No PO · GST credit only from a registered dealer'
+                    : 'PO precedes GRN · GRN is the GST document'}
               </span>
             </div>
             <div className="card-body">
@@ -755,6 +822,10 @@ export function GoodsReceiptNote() {
                   onChange={(e) => {
                     const on = e.target.checked;
                     setIsDcMode(on);
+                    if (on && isNoPo) {
+                      setIsNoPo(false);
+                      setReceivedItems([]);
+                    }
                     // Leaving DC mode with typed (no-PO) lines: those lines
                     // belong to no PO, so they cannot post as STANDARD.
                     if (!on && !poNumber) {
@@ -770,6 +841,119 @@ export function GoodsReceiptNote() {
                 />
                 This is a Delivery Challan (no invoice yet)
               </label>
+              <label
+                className="flex items-center gap-2 mb-4 text-sm cursor-pointer"
+                style={{ color: 'var(--ink-3)' }}
+              >
+                <input
+                  type="checkbox"
+                  checked={isNoPo}
+                  onChange={(e) => {
+                    setIsNoPo(e.target.checked);
+                    setIsDcMode(false);
+                    setPoNumber('');
+                    setReceivedItems([]);
+                    setDcVendorId('');
+                    setBill(null);
+                    setBillDate(istToday());
+                    setDcQuery('');
+                    setDcResults([]);
+                  }}
+                />
+                Bought without PO (local dealer, cash bill) — GST credit only from a GST-registered dealer
+              </label>
+              {isNoPo && (
+                <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4 mb-4">
+                  <div className="tablet:col-span-2">
+                    <label
+                      htmlFor="no-po-supplier"
+                      className="block text-xs font-medium mb-1"
+                      style={{ color: 'var(--ink-4)' }}
+                    >
+                      Supplier (the dealer)
+                    </label>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <select
+                        id="no-po-supplier"
+                        value={dcVendorId}
+                        onChange={(e) => setDcVendorId(e.target.value)}
+                        className="input flex-1"
+                      >
+                        <option value="">Select the vendor…</option>
+                        {dcVendors.map((v) => (
+                          <option key={v.vendor_id} value={v.vendor_id}>{v.name}</option>
+                        ))}
+                      </select>
+                      <button type="button" className="btn sm" onClick={() => setAddingDealer(true)}>
+                        Not on the list? Add the dealer
+                      </button>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium mb-1" style={{ color: 'var(--ink-4)' }}>
+                      Bill no. (if any)
+                    </label>
+                    <input
+                      type="text"
+                      value={vendorInvoiceNo}
+                      onChange={(e) => setVendorInvoiceNo(e.target.value)}
+                      className="input w-full"
+                    />
+                  </div>
+                  <div>
+                    <label
+                      htmlFor="no-po-bill-date"
+                      className="block text-xs font-medium mb-1"
+                      style={{ color: 'var(--ink-4)' }}
+                    >
+                      Bill date
+                    </label>
+                    <input
+                      id="no-po-bill-date"
+                      type="date"
+                      value={billDate}
+                      max={istToday()}
+                      onChange={(e) => setBillDate(e.target.value)}
+                      className="input w-full"
+                    />
+                  </div>
+                  <div className="tablet:col-span-2">
+                    <label
+                      htmlFor="no-po-bill-photo"
+                      className="block text-xs font-medium mb-1"
+                      style={{ color: 'var(--ink-4)' }}
+                    >
+                      Bill photo (required)
+                    </label>
+                    <input
+                      id="no-po-bill-photo"
+                      type="file"
+                      accept="image/*,application/pdf"
+                      onChange={(e) => attachBill(e.target.files?.[0])}
+                      className="text-sm"
+                    />
+                    <span className="text-xs ml-2" style={{ color: 'var(--ink-4)' }}>
+                      {uploading ? 'Uploading…' : bill ? `Attached: ${bill.filename}` : ''}
+                    </span>
+                    {dcVendorsFailed && (
+                      <p className="text-xs mt-1" style={{ color: 'var(--err)' }}>
+                        Could not load the vendor list — try again in a moment.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+              {addingDealer && (
+                <SupplierFormModal
+                  quick
+                  onClose={() => setAddingDealer(false)}
+                  onCreated={(dealer) => {
+                    setDcVendors((list) => [...list, { vendor_id: dealer.id, name: dealer.name }]);
+                    setDcVendorId(dealer.id);
+                    setAddingDealer(false);
+                  }}
+                />
+              )}
               {isDcMode && (
                 <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4 mb-4">
                   <div>
@@ -819,7 +1003,7 @@ export function GoodsReceiptNote() {
                   )}
                 </div>
               )}
-              {pos.length === 0 ? (
+              {isNoPo ? null : pos.length === 0 ? (
                 <div className="text-center py-6" style={{ color: 'var(--ink-4)', fontSize: 13 }}>
                   <Package className="w-8 h-8 mx-auto mb-2" style={{ color: 'var(--ink-5)' }} />
                   No open purchase orders to receive against.
@@ -878,6 +1062,25 @@ export function GoodsReceiptNote() {
                       className="input w-full"
                     />
                   </div>
+                  {!isDcMode && (
+                    <div>
+                      <label
+                        htmlFor="po-bill-date"
+                        className="block text-xs font-medium mb-1"
+                        style={{ color: 'var(--ink-4)' }}
+                      >
+                        Vendor invoice date
+                      </label>
+                      <input
+                        id="po-bill-date"
+                        type="date"
+                        value={billDate}
+                        max={istToday()}
+                        onChange={(e) => setBillDate(e.target.value)}
+                        className="input w-full"
+                      />
+                    </div>
+                  )}
                   {needsBill && (
                     <div className="tablet:col-span-2">
                       <label className="block text-xs font-medium mb-1" style={{ color: 'var(--ink-4)' }}>
@@ -903,7 +1106,7 @@ export function GoodsReceiptNote() {
           </div>
 
           {/* No-PO DC: type in what arrived (product picker + qty + tally) */}
-          {noPoDc && (
+          {typedLines && (
             <div className="card">
               <div className="card-head">
                 <h3 className="flex items-center gap-2">
@@ -961,6 +1164,8 @@ export function GoodsReceiptNote() {
                           <th>Tally</th>
                           <th>Item</th>
                           <th className="right">Qty received</th>
+                          {isNoPo && <th className="right">Cost / unit before GST (₹)</th>}
+                          {isNoPo && <th>Expiry</th>}
                           <th></th>
                         </tr>
                       </thead>
@@ -1006,6 +1211,44 @@ export function GoodsReceiptNote() {
                                 style={{ width: 72, textAlign: 'right', height: 30, padding: '0 6px' }}
                               />
                             </td>
+                            {isNoPo && (
+                              <td className="right">
+                                <input
+                                  type="number"
+                                  min={0}
+                                  step="0.01"
+                                  value={item.unit_price ?? ''}
+                                  aria-label={`Cost on line ${idx + 1}`}
+                                  onChange={(e) => {
+                                    const v = parseFloat(e.target.value);
+                                    setReceivedItems((arr) =>
+                                      arr.map((r, j) =>
+                                        j === idx ? { ...r, unit_price: v > 0 ? v : undefined } : r,
+                                      ),
+                                    );
+                                  }}
+                                  className="input"
+                                  style={{ width: 96, textAlign: 'right', height: 30, padding: '0 6px' }}
+                                />
+                              </td>
+                            )}
+                            {isNoPo && (
+                              <td>
+                                <input
+                                  type="date"
+                                  value={item.expiry_date ?? ''}
+                                  aria-label={`Expiry on line ${idx + 1}`}
+                                  onChange={(e) => {
+                                    const v = e.target.value;
+                                    setReceivedItems((arr) =>
+                                      arr.map((r, j) => (j === idx ? { ...r, expiry_date: v } : r)),
+                                    );
+                                  }}
+                                  className="input"
+                                  style={{ height: 30, padding: '0 6px' }}
+                                />
+                              </td>
+                            )}
                             <td className="right">
                               <button
                                 type="button"
@@ -1029,7 +1272,7 @@ export function GoodsReceiptNote() {
           )}
 
           {/* Items reception */}
-          {receivedItems.length > 0 && !noPoDc && (
+          {receivedItems.length > 0 && !typedLines && (
             <div className="card">
               <div className="card-head">
                 <h3 className="flex items-center gap-2">
@@ -1248,6 +1491,8 @@ export function GoodsReceiptNote() {
             <span className="text-xs" style={{ color: 'var(--ink-4)' }}>
               {rejectOnly
                 ? `Posting logs ${totals.rec} rejected unit${totals.rec === 1 ? '' : 's'} against ${poNumber} · nothing goes into stock · the order stays closed.`
+                : isNoPo
+                ? `Posting adds ${totals.rec} unit${totals.rec === 1 ? '' : 's'} to this store's stock at the cost typed · accounts get a task to book the bill.`
                 : noPoDc
                 ? `Posting this Delivery Challan adds ${totals.rec} unit${totals.rec === 1 ? '' : 's'} to this store's stock · the receipt is what the vendor's bill will link to.`
                 : `Posting against ${poNumber || 'the selected PO'} adds ${totals.rec} unit${totals.rec === 1 ? '' : 's'} to this store's stock · the PO is marked partially / fully received · variance raises a debit note.`}
@@ -1268,7 +1513,7 @@ export function GoodsReceiptNote() {
                 submitting ||
                 uploading ||
                 receivedItems.length === 0 ||
-                (!poNumber && !(isDcMode && dcVendorId))
+                (!poNumber && !(isDcMode && dcVendorId) && !(isNoPo && noPoSeller))
               }
               className="btn accent"
             >
@@ -1296,7 +1541,7 @@ export function GoodsReceiptNote() {
                 <div className="flex items-start justify-between mb-3">
                   <div>
                     <p className="font-semibold mono" style={{ color: 'var(--ink)' }}>{grn.grn_number}</p>
-                    <p className="text-sm" style={{ color: 'var(--ink-4)' }}>Against {grn.po_number}</p>
+                    <p className="text-sm" style={{ color: 'var(--ink-4)' }}>{grn.source}</p>
                   </div>
                   <div className="flex items-center gap-2">
                     <span className={clsx('chip', qualityChip(grn.quality_status))}>
@@ -1376,7 +1621,7 @@ export function GoodsReceiptNote() {
                   <div className="flex items-start justify-between mb-2">
                     <div>
                       <p className="font-semibold mono" style={{ color: 'var(--ink)' }}>{g.grn_number}</p>
-                      <p className="text-sm" style={{ color: 'var(--ink-4)' }}>Against {g.po_number}</p>
+                      <p className="text-sm" style={{ color: 'var(--ink-4)' }}>{g.source}</p>
                     </div>
                     <span className={clsx('chip', isQualityFail ? 'err' : 'warn')}>
                       {isQualityFail ? 'Quality rejection' : 'Quantity variance'}
