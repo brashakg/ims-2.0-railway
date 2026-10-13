@@ -1566,31 +1566,47 @@ def test_c7_counter_staff_never_read_what_was_paid(world):
     assert world["as_"](other_shop).get(f"/vendors/grn/{grn_id}").status_code == 404
 
 
-def test_c7_what_was_paid_has_one_visibility_rule(world):
-    """Panel probe: as STORE_MANAGER the barcode trace showed line prices
-    [None, None] (cost_mask) while GET /vendors/grn/{id} and the list returned
-    [3100, 420]; AREA_MANAGER the same. The price paid on a receipt line is
-    cost: every read that returns a receipt goes through the one cost rule
-    (cost_mask.mask_receipt) -- the managers who receive read the receipt,
-    not what was paid; the roles that see cost read both."""
+def test_c7_what_was_paid_has_one_visibility_rule(world, monkeypatch):
+    """Panel probes (rounds 6 and 9): what was paid on a walk-in had three
+    visibility rules. As STORE_MANAGER after a walk-in at 3100 the receipt
+    reads hid each line's price (GET /vendors/grn/{id}, the list and the
+    trace's purchase section: [None, None]) while the same response's unit
+    read 3100 ("product" context) and /vendors/last-cost 3100 (no mask) --
+    the hide protected nothing. ONE context answers all of them, "purchase"
+    (what was paid and to whom): a role it admits reads the price on every
+    read, a role it does not reads it on none. Narrow that context (as the
+    owner's what-we-pay ruling does for the managers) and every read moves
+    with it -- no read is widened past it."""
+    from api.services.cost_mask import _CONTEXT_ROLES, can_see_cost
+
     grn_id, barcode = _walk_in_on_the_shelf(world)
-    reads = (
-        lambda http: http.get(f"/vendors/grn/{grn_id}").json(),
-        lambda http: http.get("/vendors/grn", params={"grn_subtype": "NO_PO"}).json()["grns"][0],
-        lambda http: http.get(f"/inventory/barcode/{barcode}/trace").json()["purchase"][0],
-    )
-    for role in ("STORE_MANAGER", "AREA_MANAGER"):
-        user = {**MANAGER, "user_id": f"u-{role.lower()}", "roles": [role]}
-        for read in reads:
-            grn = read(world["as_"](user))
-            assert grn["grn_id"] == grn_id, (role, grn)
-            assert [it.get("unit_price") for it in grn["items"]] == [None, None], (role, grn)
-            assert [it["accepted_qty"] for it in grn["items"]] == [2, 3], (role, grn)
-    for role in ("ADMIN", "ACCOUNTANT"):
-        user = {**MANAGER, "user_id": f"u-{role.lower()}", "roles": [role]}
-        for read in reads:
-            grn = read(world["as_"](user))
-            assert [it["unit_price"] for it in grn["items"]] == [3100.0, 420.0], (role, grn)
+
+    def answers(user):
+        http = world["as_"](user)
+        trace = http.get(f"/inventory/barcode/{barcode}/trace").json()
+        receipts = (
+            http.get(f"/vendors/grn/{grn_id}").json(),
+            http.get("/vendors/grn", params={"grn_subtype": "NO_PO"}).json()["grns"][0],
+            trace["purchase"][0],
+        )
+        assert all(g["grn_id"] == grn_id and [it["accepted_qty"] for it in g["items"]] == [2, 3] for g in receipts), receipts
+        last = http.get("/vendors/last-cost", params={"vendor_id": SHARMA, "product_ids": FRAME})
+        assert last.status_code == 200, last.text
+        return (
+            [[it.get("unit_price") for it in g["items"]] for g in receipts],
+            trace["stock_unit"].get("unit_cost"),
+            (last.json()["costs"].get(FRAME) or {}).get("unit_price"),
+        )
+
+    paid = ([[3100.0, 420.0]] * 3, 3100.0, 3100.0)
+    hidden = ([[None, None]] * 3, None, None)
+    users = {role: {**MANAGER, "user_id": f"u-{role.lower()}", "roles": [role]} for role in ("STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT", "ADMIN")}
+    for role, user in users.items():
+        assert answers(user) == (paid if can_see_cost(user, "purchase") else hidden), role
+    monkeypatch.setitem(_CONTEXT_ROLES, "purchase", _CONTEXT_ROLES["purchase"] - {"STORE_MANAGER"})
+    assert answers(users["STORE_MANAGER"]) == hidden
+    assert answers(users["AREA_MANAGER"]) == paid
+    assert answers(users["ACCOUNTANT"]) == paid
 
 
 def _walk_in_on_the_shelf(world):
@@ -1610,14 +1626,13 @@ def test_c7_the_barcode_trace_shows_no_counter_what_was_paid(world):
     cost 3100 and each line's price paid [3100, 420]. The route stays open to
     every signed-in role (the sale, transfer and return history carries no
     cost); what was paid goes through the one cost rule (cost_mask): the
-    unit's cost through its "product" context (#1161: the managers read a
-    product's per-unit cost, the counter never), each receipt line's price
-    paid through mask_receipt.
+    unit's cost and each receipt line's price paid through its "purchase"
+    context (mask_receipt) -- the counter never.
 
     Owner ruling 2026-10-12: nor does a counter role read who sold it, the
     bill number, the bill photo's file id / hash or the accept lock there
     (SALES_STAFF read 'V-SHARMA', 'CASH-77' and the photo's sha256); the
-    managers and accounts still do, and the managers never what was paid."""
+    managers and accounts still do."""
     from api.services.cost_mask import can_see_cost
 
     grn_id, barcode = _walk_in_on_the_shelf(world)
@@ -1647,12 +1662,11 @@ def test_c7_the_barcode_trace_shows_no_counter_what_was_paid(world):
         body = res.json()
         assert body["stock_unit"]["barcode"] == barcode
         assert body["purchase"][0]["grn_id"] == grn_id
-        sees_unit_cost = can_see_cost(counter, "product")
+        sees_unit_cost = can_see_cost(counter, "purchase")
         assert sees_unit_cost == role.endswith("_MANAGER"), role  # owner ruling D7
         assert bool({"unit_cost", "cost_price"} & set(body["stock_unit"])) == sees_unit_cost, (role, body)
-        assert [sorted(it) for it in body["purchase"][0]["items"]] and all(
-            "unit_price" not in it for it in body["purchase"][0]["items"]
-        ), (role, body)
+        items = body["purchase"][0]["items"]
+        assert items and all(("unit_price" in it) == sees_unit_cost for it in items), (role, body)
     # The control: a role the cost rule admits reads both figures (unregistered
     # Sharma's frame went on the shelf at the 3100 paid: no GST was charged).
     mine = world["as_"](ADMIN).get(url).json()

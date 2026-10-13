@@ -21,7 +21,10 @@ Role policy (DECISIONS sec 9, owner rulings 2026-09-28 / D7 / 2026-09-29):
   * What was paid and to whom (context="purchase"): PURCHASE_ROLES. A vendor
     return / RTV debit note shows anyone else the item, quantity and reason
     only, and a vendor shows only VENDOR_NAME_KEYS (the vendor list, a debit
-    note's vendor block) -- all of it asks can_see_cost(user, "purchase").
+    note's vendor block); a goods receipt and its price paid per line
+    (mask_receipt), the cost of the units it minted on the barcode trace and
+    the last price paid (/vendors/last-cost) answer alike -- all of it asks
+    can_see_cost(user, "purchase").
   * Operational aggregates (default context: analytics, P&L) -- cost + margin
     stay with SUPERADMIN / ADMIN / ACCOUNTANT.
   * Supplier payments (context="payables": bills, payments, balances, per
@@ -157,12 +160,6 @@ def mask_cost_list(
     return [mask_cost(d, user, context, extra) if isinstance(d, dict) else d for d in (docs or [])]
 
 
-# A goods receipt's line carries the price paid as `unit_price` (a "Bought
-# without PO" receipt records it): on a receipt line that IS the cost. Not in
-# _COST_FIELDS because an order line's unit_price is the selling price.
-_RECEIPT_LINE_COST_FIELDS = _ALL_MASKED | {"unit_price"}
-
-
 # What a goods receipt shows outside the purchase roles -- the barcode trace
 # is open to every signed-in role: when and where it came in, what and how
 # many. Never who sold it or for which order, the bill number, the bill photo
@@ -180,26 +177,19 @@ _RECEIPT_ITEM_KEYS = (
 
 
 def mask_receipt(grn: dict, user: dict) -> dict:
-    """The one rule on a goods receipt. The purchase roles read who sold it,
-    the bill and the bill photo; anyone else only _RECEIPT_KEYS /
-    _RECEIPT_ITEM_KEYS. Unless the caller may see cost, a copy also without
-    its cost fields and without the price paid on each of its lines. Never
-    edits `grn` (see mask_cost). Every read that returns a receipt -- GET
-    /vendors/grn, GET /vendors/grn/{id}, the barcode trace -- goes through
-    this."""
-    if not isinstance(grn, dict) or can_see_cost(user):
+    """The one rule on a goods receipt: what was paid and to whom, the
+    "purchase" context. Those roles read who sold it, the bill, the bill photo
+    and the price paid on each line (a "Bought without PO" receipt records
+    it as `unit_price`); anyone else only _RECEIPT_KEYS / _RECEIPT_ITEM_KEYS.
+    The same figure on the units it minted (the barcode trace's stock_unit)
+    and as the last price paid (/vendors/last-cost) answers to the same
+    context. Never edits `grn` (see mask_cost). Every read that returns a
+    receipt -- GET /vendors/grn, GET /vendors/grn/{id}, the barcode trace --
+    goes through this."""
+    if not isinstance(grn, dict) or can_see_cost(user, "purchase"):
         return grn
-    if not can_see_cost(user, "purchase"):
-        out = _pick(grn, _RECEIPT_KEYS)
-        out["items"] = [_pick(it, _RECEIPT_ITEM_KEYS) for it in grn.get("items") or []]
-        return out
-    out = mask_cost(grn, user)
-    out["items"] = [
-        {k: v for k, v in it.items() if k not in _RECEIPT_LINE_COST_FIELDS}
-        if isinstance(it, dict)
-        else it
-        for it in grn.get("items") or []
-    ]
+    out = _pick(grn, _RECEIPT_KEYS)
+    out["items"] = [_pick(it, _RECEIPT_ITEM_KEYS) for it in grn.get("items") or []]
     return out
 
 

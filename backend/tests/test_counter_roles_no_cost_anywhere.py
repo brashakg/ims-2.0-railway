@@ -370,7 +370,11 @@ def test_counter_role_reads_no_cost(client, shop, role, method, path, extra):
 @pytest.mark.parametrize("method,path,extra", READS)
 def test_managers_still_read_the_cost(client, shop, role, method, path, extra):
     body = _get(client, role, method, path)
-    assert _cost_keys(body, extra), (role, path, body)
+    # The trace's unit cost is what was paid for it (cost_mask "purchase"
+    # context, as on its goods receipt): the catalogue manager, who is no
+    # purchase role, reads a product's cost on the product reads instead.
+    sees = not (role == "CATALOG_MANAGER" and path.endswith("/trace"))
+    assert bool(_cost_keys(body, extra)) == sees, (role, path, body)
 
 
 def _without_cost_keys(body):

@@ -20,6 +20,7 @@ from ._shared import (
     validate_store_access,
     _get_db,
 )
+from ...services.cost_mask import can_see_cost
 from .gst import po_gst_context
 from .grn_accept_lock import _GRN_TERMINAL_ACCEPT_STATUSES
 
@@ -180,7 +181,13 @@ async def get_last_purchase_cost(
     /purchase-orders/{po_id} so the literal path wins.
 
     Shape: {"costs": {product_id: {unit_price, po_number, po_id, date}, ...}}.
+
+    A price paid -- a walk-in buy's among them -- answers to the receipt's
+    rule (cost_mask.mask_receipt, the "purchase" context): a reader it hides
+    the price from gets no prices.
     """
+    if not can_see_cost(current_user, "purchase"):
+        return {"costs": {}}
     wanted = {p.strip() for p in (product_ids or "").split(",") if p.strip()}
     if not vendor_id or not wanted:
         return {"costs": {}}
