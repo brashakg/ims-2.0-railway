@@ -294,6 +294,9 @@ export function CatalogManagerPage({
   const [items, setItems] = useState<CatalogDrawerItem[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  // The latest list request: an answer to an older one is dropped (a slow
+  // page-5 answer must not move the page a newer choice already set).
+  const loadSeq = useRef(0);
   const [error, setError] = useState<string | null>(null);
 
   // Search box: typed text is local, the debounced text goes to the address.
@@ -369,12 +372,15 @@ export function CatalogManagerPage({
 
   // ---- Data loads -----------------------------------------------------------
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
+    const stale = () => seq !== loadSeq.current;
     setLoading(true);
     setError(null);
     // A page past the end (a shared link, or a bulk archive that emptied the
     // last page) goes to the last page that has rows -- never a dead end.
     let pastEnd = false;
     const show = (next: CatalogDrawerItem[], n: number) => {
+      if (stale()) return;
       const last = Math.max(1, Math.ceil(n / pageSize));
       if (next.length === 0 && page > last) {
         pastEnd = true;
@@ -416,12 +422,14 @@ export function CatalogManagerPage({
         );
       }
     } catch (e: unknown) {
+      if (stale()) return;
       setItems([]);
       setTotal(0);
       setError(e instanceof Error ? e.message : 'Could not load the catalog.');
     } finally {
-      // Past the end: still loading -- the last page's load takes over.
-      if (!pastEnd) setLoading(false);
+      // Past the end: still loading -- the last page's load takes over. A
+      // newer request owns the spinner.
+      if (!pastEnd && !stale()) setLoading(false);
     }
   }, [segment, filters, photo, page, pageSize, setPage]);
 
@@ -593,15 +601,19 @@ export function CatalogManagerPage({
     });
   }, []);
 
-  const pageIds = items.map((it) => docId(it.doc)).filter(Boolean);
+  // On Needs review a tick is for Approve, and an archived row is never
+  // approved (only Restore brings it back): it gets no tick box.
+  const canTick = (it: CatalogDrawerItem) => segment !== 'review' || !it.doc.deleted_at;
+  const tickable = items.filter(canTick);
+  const pageIds = tickable.map((it) => docId(it.doc)).filter(Boolean);
   const allOnPage = pageIds.length > 0 && pageIds.every((id) => selected.has(id));
   const toggleAllOnPage = () => {
     setSelected((prev) => {
       const next = new Set(prev);
       if (allOnPage) {
-        for (const it of items) next.delete(docId(it.doc));
+        for (const it of tickable) next.delete(docId(it.doc));
       } else {
-        for (const it of items) {
+        for (const it of tickable) {
           const id = docId(it.doc);
           if (!id || next.size >= BULK_CAP) continue;
           next.add(id);
@@ -1009,13 +1021,15 @@ export function CatalogManagerPage({
                     >
                       {showChecks && (
                         <td className="px-3 py-2 align-middle">
-                          <input
-                            type="checkbox"
-                            checked={selected.has(pid)}
-                            onChange={() => toggleSelect(pid)}
-                            className="h-3.5 w-3.5 accent-amber-500"
-                            aria-label={`Select ${name}`}
-                          />
+                          {canTick(it) && (
+                            <input
+                              type="checkbox"
+                              checked={selected.has(pid)}
+                              onChange={() => toggleSelect(pid)}
+                              className="h-3.5 w-3.5 accent-amber-500"
+                              aria-label={`Select ${name}`}
+                            />
+                          )}
                         </td>
                       )}
                       <td className="px-3 py-2 align-middle">

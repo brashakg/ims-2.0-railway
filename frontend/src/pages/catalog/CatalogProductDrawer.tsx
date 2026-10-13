@@ -943,25 +943,28 @@ export function CatalogProductDrawer({
                   {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                   Save fixes
                 </button>
-                <button
-                  type="button"
-                  onClick={() => void handleApprove()}
-                  disabled={!dry?.ok || approving || dryLoading}
-                  className={clsx(
-                    'flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-white',
-                    dry?.ok && !approving
-                      ? 'bg-green-600 hover:bg-green-700'
-                      : 'bg-gray-300 cursor-not-allowed'
-                  )}
-                  title={dry?.ok ? 'Create the billing record and make it sellable' : 'Fix the checklist first'}
-                >
-                  {approving ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  ) : (
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                  )}
-                  Approve for POS
-                </button>
+                {/* Archived: only Restore brings it back (the server refuses approval). */}
+                {!archived && (
+                  <button
+                    type="button"
+                    onClick={() => void handleApprove()}
+                    disabled={!dry?.ok || approving || dryLoading}
+                    className={clsx(
+                      'flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-white',
+                      dry?.ok && !approving
+                        ? 'bg-green-600 hover:bg-green-700'
+                        : 'bg-gray-300 cursor-not-allowed'
+                    )}
+                    title={dry?.ok ? 'Create the billing record and make it sellable' : 'Fix the checklist first'}
+                  >
+                    {approving ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                    )}
+                    Approve for POS
+                  </button>
+                )}
                 {(!archived || canRestore) && (
                   <button
                     type="button"

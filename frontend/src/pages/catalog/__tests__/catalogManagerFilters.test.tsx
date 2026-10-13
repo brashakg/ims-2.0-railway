@@ -541,10 +541,63 @@ describe('a page past the end is never a dead end', () => {
     expect(await screen.findByTestId('catalog-table')).toBeTruthy();
   });
 
+  it("a late answer to an older request never moves the page a newer choice set", async () => {
+    let lateAnswer: (v: unknown) => void = () => {};
+    getProducts.mockImplementation(({ skip }: { skip: number }) =>
+      skip >= 60
+        ? new Promise((resolve) => {
+            lateAnswer = resolve;
+          })
+        : Promise.resolve({ products: [ROW], total: 1, total_count: 60 })
+    );
+    renderAt('?page=5&rows=50');
+    await waitFor(() => expect(getProducts).toHaveBeenCalledWith(expect.objectContaining({ skip: 200 })));
+    // Sort by changes before the page-5 answer arrives: page 1 of the new sort.
+    fireEvent.change(screen.getByLabelText('Sort by'), { target: { value: 'name_asc' } });
+    await screen.findByTestId('catalog-table');
+    expect(where().get('page')).toBeNull();
+    lateAnswer({ products: [], total: 0, total_count: 60 });
+    await new Promise((r) => setTimeout(r, 0));
+    await waitFor(() => expect(where().get('sort')).toBe('name_asc'));
+    expect(where().get('page')).toBeNull();
+    expect(screen.getByTestId('catalog-table')).toBeTruthy();
+  });
+
   it('the pages and Rows per page stay whenever the list has rows to page through', async () => {
     getProducts.mockResolvedValue({ products: [], total: 0, total_count: 5 });
     renderAt('');
     expect(await screen.findByLabelText('Rows per page')).toBeTruthy();
+  });
+});
+
+describe('an archived row on Needs review is never approved', () => {
+  it('gets no tick box, so the bulk Approve never sends it', async () => {
+    reviewList.mockReset();
+    reviewList.mockResolvedValue({
+      products: [
+        { id: 'IMP-1', sku: 'IMP-1', title: 'Imported one', needs_review: true },
+        { id: 'IMP-2', sku: 'IMP-2', title: 'Archived two', needs_review: true, is_active: false,
+          deleted_at: '2026-10-12T05:00:00+00:00' },
+      ],
+      total: 2,
+    });
+    const promote = catalogProductsApi.promote as unknown as ReturnType<typeof vi.fn>;
+    promote.mockReset();
+    promote.mockResolvedValue({ sku: 'IMP-1' });
+    render(
+      <MemoryRouter initialEntries={['/catalog/review']}>
+        <Routes>
+          <Route path="/catalog/review" element={<CatalogManagerPage segment="review" />} />
+        </Routes>
+      </MemoryRouter>
+    );
+    expect(await screen.findByLabelText('Select Imported one')).toBeTruthy();
+    expect(screen.queryByLabelText('Select Archived two')).toBeNull();
+    fireEvent.click(screen.getByLabelText('Select all on this page'));
+    expect((screen.getByLabelText('Select all on this page') as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: /Approve for POS/ }));
+    await waitFor(() => expect(promote).toHaveBeenCalledTimes(1));
+    expect(promote).toHaveBeenCalledWith('IMP-1');
   });
 });
 

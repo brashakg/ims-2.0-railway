@@ -120,6 +120,24 @@ describe('the drawer Restore', () => {
     await waitFor(() => expect(update).toHaveBeenCalledWith('T-IMP', { is_active: false }));
   });
 
+  it('an archived import offers no Approve for POS (only Restore brings it back)', () => {
+    for (const roles of [['ADMIN'], ['CATALOG_MANAGER']]) {
+      auth.roles = roles;
+      const { unmount } = render(
+        <MemoryRouter>
+          <CatalogProductDrawer
+            item={{ kind: 'imported', doc: { ...IMPORT, is_active: true, deleted_at: '2026-10-12T05:00:00+00:00' } }}
+            onClose={() => {}}
+          />
+        </MemoryRouter>
+      );
+      expect(screen.queryByRole('button', { name: /Approve for POS/ })).toBeNull();
+      unmount();
+    }
+    open({ ...IMPORT, is_active: true });
+    expect(screen.getByRole('button', { name: /Approve for POS/ })).toBeTruthy();
+  });
+
   it('only an admin is offered Restore on an archived product (the door is theirs)', () => {
     auth.roles = ['CATALOG_MANAGER'];
     open({ ...IMPORT, deleted_at: '2026-10-12T05:00:00+00:00' });
