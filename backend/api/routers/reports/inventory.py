@@ -11,6 +11,7 @@ from ...dependencies import (
     get_db,
     validate_store_access,
 )
+from ...services.cost_mask import mask_cost
 from ...services.reorder_policy import low_stock_rows
 from ._shared import (
     _REPORT_FINANCE_ROLES,
@@ -54,15 +55,21 @@ async def inventory_summary(
 
     out_of_stock = [s for s in all_stock if s.get("quantity", 0) <= 0]
 
-    return {
-        "summary": {
-            "total_items": len(all_stock),
-            "total_quantity": sum(s.get("quantity", 0) for s in all_stock),
-            "total_value": round(total_value, 2),
-            "low_stock_count": len(low_stock) if low_stock else 0,
-            "out_of_stock_count": len(out_of_stock),
-        }
-    }
+    # Stock value is at cost: the roles that see product cost only (D7).
+    return mask_cost(
+        {
+            "summary": {
+                "total_items": len(all_stock),
+                "total_quantity": sum(s.get("quantity", 0) for s in all_stock),
+                "total_value": round(total_value, 2),
+                "low_stock_count": len(low_stock) if low_stock else 0,
+                "out_of_stock_count": len(out_of_stock),
+            }
+        },
+        current_user,
+        "product",
+        extra=("total_value",),
+    )
 
 
 @router.get("/inventory/valuation")

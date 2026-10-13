@@ -48,10 +48,7 @@ function renderHint(overrides: Partial<Parameters<typeof SimilarProductsHint>[0]
   const utils = render(
     <SimilarProductsHint
       category="FR"
-      brand="Ray-Ban"
-      model="RB-2140"
-      colour=""
-      size=""
+      attributes={{ brand_name: 'Ray-Ban', model_no: 'RB-2140' }}
       onPickSibling={onPickSibling}
       onOpenExisting={onOpenExisting}
       {...overrides}
@@ -187,5 +184,14 @@ describe('SimilarProductsHint — eye size needed', () => {
       /in the catalogue by eye size \(52, 54\)\. Type the eye size/
     );
     expect(screen.queryByText(/already exists/)).toBeNull();
+  });
+});
+
+describe('SimilarProductsHint asks with the form as typed', () => {
+  it("passes the category and the form's attributes on to the lookup", () => {
+    mockHook.mockReturnValue({ armed: false, data: null });
+    const attributes = { brand_name: 'Acuvue', colour_name: 'Hazel', pack: '6' };
+    renderHint({ category: 'CCL', attributes });
+    expect(mockHook).toHaveBeenCalledWith({ category: 'CCL', attributes });
   });
 });

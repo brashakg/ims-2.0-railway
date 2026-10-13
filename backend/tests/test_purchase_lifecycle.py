@@ -559,6 +559,31 @@ class TestOrderAnUncataloguedItem:
         items = po_repo.created[0]["items"]
         assert items[0]["product_id"] == items[1]["product_id"] == repo.rows[0]["product_id"]
 
+    def test_a_lens_typed_on_a_line_is_its_sub_brand_and_is_reused(self):
+        """An Optical Lens shows no Model No: the model typed on the line is its
+        Sub Brand, so the row is LS-ESSILOR-CRIZAL, 'Essilor Crizal Lenses',
+        with a duplicate key; the same line typed again is answered with it
+        (audit C2, as for a frame: the composer asks "use it?"), and Varilux
+        is another lens goods receipt can tell apart."""
+        repo = _ProductRepo()
+        po_repo = _POCreateRepo()
+        lens = {"category": "LS", "brand": "Essilor", "model": "Crizal", "mrp": 2500}
+        _raise_po([{"new_product": dict(lens), "quantity": 2, "unit_price": 900}], repo, po_repo)
+        p = repo.rows[0]
+        with pytest.raises(HTTPException) as exc:
+            _raise_po([{"new_product": dict(lens), "quantity": 3, "unit_price": 900}], repo, po_repo)
+        assert exc.value.status_code == 409
+        assert exc.value.detail["code"] == "ALREADY_IN_CATALOGUE"
+        assert exc.value.detail["matches"][0]["existing"]["product_id"] == p["product_id"]
+        assert len(repo.rows) == 1, "a second spine row was minted for the same lens"
+        assert (p["sku"], p["model"], p["name"], p["identity_key"]) == (
+            "LS-ESSILOR-CRIZAL", "Crizal", "Essilor Crizal Lenses", "essilor|crizal|")
+        assert p["attributes"]["subbrand"] == "Crizal"
+        assert not {"model_no", "model_name"} & set(p["attributes"])
+        _raise_po([{"new_product": dict(lens, model="Varilux"), "quantity": 1, "unit_price": 900}],
+                  repo, po_repo)
+        assert (repo.rows[1]["sku"], repo.rows[1]["name"]) == ("LS-ESSILOR-VARILUX", "Essilor Varilux Lenses")
+
     def test_a_line_must_name_a_product_or_describe_one(self):
         with pytest.raises(Exception) as exc:
             vendors_mod.POItemCreate(quantity=1, unit_price=100)

@@ -184,7 +184,7 @@ PRODUCT_SCHEMA = {
         "sku_prefix": {"bsonType": "string"},       # short code (FR/SG/CL/...) for grid grouping
         "country_of_origin": {"bsonType": "string"},
         "warranty_months": {"bsonType": "int", "minimum": 0},
-        "weight_grams": {"bsonType": "double"},
+        "weight": {"bsonType": "double"},
         # Mirror-sync compensation log (PM triple-write): per-target best-effort
         # status recorded back on the Mongo spine. Never blocks the spine write.
         "sync_status": {"bsonType": "object"},
@@ -2113,8 +2113,23 @@ PRODUCT_IMAGE_SCHEMA = {
         "submitted_by": {"bsonType": ["string", "null"]},  # who queued it
         "reviewed_by": {"bsonType": ["string", "null"]},   # who approved/rejected
         "approved_at": {"bsonType": ["date", "null"]},
-        # Shopify-side identity (set on the Phase-5 push; null while PUSH-DARK).
+        # Shopify-side identity (set on the Phase-5 push; null while PUSH-DARK):
+        # the media on the listing for this row, the url of a send with no
+        # answer yet (noted before the attach), and every media Shopify
+        # answered this row's sends with ({id, url}: IMS's proof it uploaded
+        # that media). Written by shopify_push.media.push_image only.
         "shopify_image_id": {"bsonType": ["string", "null"]},
+        "shopify_image_sent": {"bsonType": ["string", "null"]},
+        "shopify_image_answers": {
+            "bsonType": "array",
+            "items": {
+                "bsonType": "object",
+                "properties": {
+                    "id": {"bsonType": "string"},
+                    "url": {"bsonType": "string"},
+                },
+            },
+        },
         "created_at": {"bsonType": "date"},
         "updated_at": {"bsonType": "date"},
     },

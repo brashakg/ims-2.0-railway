@@ -47,6 +47,8 @@ vi.mock('../../../services/api/products', () => ({
     getBrandOptions: vi.fn(async () => ({ brands: [] })),
     getProduct: (...a: unknown[]) => getProduct(...(a as [])),
     updateProduct: vi.fn(async () => ({})),
+    previewSku: vi.fn(async () => ({ category: 'FRAME', sku: 'FR-BOSS-BOSS1700-C2-52' })),
+    getWebsiteVerdict: vi.fn(async (brand: string) => ({ brand, online: true, reason: null })),
   },
 }));
 vi.mock('../../../services/api/productTemplates', () => ({
@@ -84,8 +86,8 @@ vi.mock('../../../services/api/catalog', () => ({
 }));
 const hintSizes: string[] = [];
 vi.mock('../SimilarProductsHint', () => ({
-  SimilarProductsHint: (p: { size?: string }) => {
-    hintSizes.push(p.size ?? '');
+  SimilarProductsHint: (p: { attributes?: Record<string, string> }) => {
+    hintSizes.push(p.attributes?.lens_size ?? '');
     return null;
   },
 }));
@@ -125,9 +127,11 @@ describe('an ordered draft in Needs review', () => {
     await waitFor(() => expect(getProduct).toHaveBeenCalledWith('P-SPINE'));
   });
 
-  it('the similar-products hint reads a frame by its eye size, never an old stored size', async () => {
+  it("the similar-products hint is sent the frame's eye size as typed", async () => {
     // `size` left the frame registry; a legacy "52-18-140" can still sit
-    // beside the eye size, and the server keys the frame by lens_size.
+    // beside the eye size. The hint sends the attributes as typed and the
+    // server keys the frame by lens_size first (identity_parts, merge of
+    // main #1174), so the eye size must reach it.
     getProduct.mockImplementation(async () => ({
       ...SPINE,
       attributes: { ...SPINE.attributes, size: '52-18-140' },
@@ -135,7 +139,6 @@ describe('an ordered draft in Needs review', () => {
     try {
       renderAt('/catalog/add?edit=P-SPINE');
       await waitFor(() => expect(hintSizes).toContain('52'));
-      expect(hintSizes).not.toContain('52-18-140');
     } finally {
       getProduct.mockImplementation(async () => SPINE);
     }

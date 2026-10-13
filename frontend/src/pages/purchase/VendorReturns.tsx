@@ -19,6 +19,8 @@ import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import api from '../../services/api/client';
 import { rtvDebitNotesApi, type DebitNote } from '../../services/api/rtvDebitNotes';
+import { PURCHASE_PRICE_ROLES } from '../../components/common/CostCell';
+import { errMsg } from './invoices/shared';
 
 interface ReturnItem {
   product_id: string;
@@ -99,6 +101,9 @@ export function VendorReturns() {
   // rtv_vendor_id). Without reading it, the advertised one-click linkage was dead.
   const [searchParams] = useSearchParams();
   const linkedStockId = searchParams.get('stock_id');
+  // Workshop staff log a return (item, quantity, reason) but never see or type
+  // what was paid: a purchase role prices it (owner ruling 2026-10-12).
+  const canPrice = (user?.roles || []).some((r) => PURCHASE_PRICE_ROLES.includes(r));
 
   const [activeTab, setActiveTab] = useState<'active' | 'history'>('active');
   const [isLoading, setIsLoading] = useState(true);
@@ -110,6 +115,9 @@ export function VendorReturns() {
   // physical return is unchanged; this is the formal debiting document layer.
   const [debitNotes, setDebitNotes] = useState<Record<string, DebitNote>>({});
   const [dnBusy, setDnBusy] = useState<string | null>(null);
+  // Prices typed at Approve for lines the workshop logged without one:
+  // return_id -> item index -> the typed price.
+  const [approvePrices, setApprovePrices] = useState<Record<string, Record<number, string>>>({});
 
   // Form state
   const [selectedVendor, setSelectedVendor] = useState('');
@@ -191,8 +199,9 @@ export function VendorReturns() {
         vendor_id: selectedVendor,
         vendor_name: vendor?.legal_name || selectedVendor,
         store_id: activeStoreId,
-        items: items.map(i => ({
+        items: items.map(({ unit_price, ...i }) => ({
           ...i,
+          ...(canPrice ? { unit_price } : {}),
           product_id: i.product_id || i.product_name.toLowerCase().replace(/\s+/g, '-'),
         })),
         return_type: returnType,
@@ -224,13 +233,27 @@ export function VendorReturns() {
   const displayReturns = activeTab === 'active' ? activeReturns : historyReturns;
 
   const handleUpdateStatus = async (returnId: string, newStatus: string) => {
+    // A return the workshop logged has no price paid: it is priced at Approve.
+    const ret = returns.find(r => r.return_id === returnId);
+    const typed = approvePrices[returnId] || {};
+    const unpriced = newStatus === 'approved' && !!ret?.items.some(i => i.unit_price == null);
+    const unitPrices = unpriced
+      ? ret!.items.map((i, idx) => (i.unit_price != null ? i.unit_price : typed[idx] ? Number(typed[idx]) : null))
+      : null;
+    if (unitPrices && unitPrices.some(p => p == null || !Number.isFinite(p) || p < 0)) {
+      toast.error('Enter the price paid for every item before approving this return.');
+      return;
+    }
     try {
-      const resp = await api.patch(`/vendor-returns/${returnId}/status`, { status: newStatus });
+      const resp = await api.patch(`/vendor-returns/${returnId}/status`, {
+        status: newStatus,
+        ...(unitPrices ? { unit_prices: unitPrices } : {}),
+      });
       const updated: VendorReturn = resp.data.return;
       setReturns(prev => prev.map(r => r.return_id === returnId ? updated : r));
       toast.success(`Status updated to ${STATUS_LABELS[newStatus] || newStatus}`);
-    } catch {
-      toast.error('Failed to update return status');
+    } catch (e) {
+      toast.error(errMsg(e, 'Failed to update return status'));
     }
   };
 
@@ -246,8 +269,8 @@ export function VendorReturns() {
           ? `Debit note already issued: ${res.debit_note.debit_note_number}`
           : `Debit note ${res.debit_note.debit_note_number} issued`,
       );
-    } catch {
-      toast.error('Failed to issue debit note (vendor/AP role required)');
+    } catch (e) {
+      toast.error(errMsg(e, 'Failed to issue debit note (vendor/AP role required)'));
     } finally {
       setDnBusy(null);
     }
@@ -424,6 +447,25 @@ export function VendorReturns() {
                               Qty: {item.quantity}
                               {item.unit_price != null && ` @ ${rupees(item.unit_price)}`}
                             </p>
+                            {canPrice && ret.status === 'created' && item.unit_price == null && (
+                              <label className="mt-1 flex items-center gap-2 text-xs text-gray-600">
+                                Price paid per piece
+                                <input
+                                  type="number"
+                                  min="0"
+                                  inputMode="decimal"
+                                  aria-label={`Price paid for ${item.product_name}`}
+                                  value={approvePrices[ret.return_id]?.[idx] ?? ''}
+                                  onChange={(e) =>
+                                    setApprovePrices((prev) => ({
+                                      ...prev,
+                                      [ret.return_id]: { ...(prev[ret.return_id] || {}), [idx]: e.target.value },
+                                    }))
+                                  }
+                                  className="w-28 px-2 py-1 bg-white border border-gray-300 rounded text-gray-900 text-sm outline-none focus:border-blue-500"
+                                />
+                              </label>
+                            )}
                           </div>
                           <div className="text-right">
                             <p className="text-gray-600 font-medium">
@@ -507,8 +549,9 @@ export function VendorReturns() {
                     </div>
                   </div>
 
-                  {/* Action Buttons */}
-                  {activeTab === 'active' && (
+                  {/* Action Buttons: approve / ship / credit are the purchase
+                      roles' (the server refuses anyone else). */}
+                  {activeTab === 'active' && canPrice && (
                     <div className="flex gap-2 pt-4 border-t border-gray-300">
                       {ret.status === 'created' && (
                         <button
@@ -657,16 +700,18 @@ export function VendorReturns() {
                         </div>
                       </div>
                       <div className="grid grid-cols-2 gap-3">
-                        <div>
-                          <label className="block text-xs text-gray-500 mb-1">Unit Price</label>
-                          <input
-                            type="number"
-                            min="0"
-                            value={item.unit_price}
-                            onChange={(e) => handleItemChange(idx, 'unit_price', parseFloat(e.target.value) || 0)}
-                            className="w-full px-3 py-2 bg-white border border-gray-300 rounded text-gray-900 text-sm outline-none focus:border-blue-500"
-                          />
-                        </div>
+                        {canPrice && (
+                          <div>
+                            <label className="block text-xs text-gray-500 mb-1">Unit Price</label>
+                            <input
+                              type="number"
+                              min="0"
+                              value={item.unit_price}
+                              onChange={(e) => handleItemChange(idx, 'unit_price', parseFloat(e.target.value) || 0)}
+                              className="w-full px-3 py-2 bg-white border border-gray-300 rounded text-gray-900 text-sm outline-none focus:border-blue-500"
+                            />
+                          </div>
+                        )}
                         <div>
                           <label className="block text-xs text-gray-500 mb-1">Reason</label>
                           <select
@@ -708,12 +753,18 @@ export function VendorReturns() {
               </div>
 
               {/* Total */}
-              <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
-                <div className="flex justify-between items-center">
-                  <p className="text-gray-600 font-medium">Total Return Value</p>
-                  <p className="text-2xl font-bold text-gray-900">₹{totalValue.toLocaleString('en-IN')}</p>
+              {canPrice ? (
+                <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+                  <div className="flex justify-between items-center">
+                    <p className="text-gray-600 font-medium">Total Return Value</p>
+                    <p className="text-2xl font-bold text-gray-900">₹{totalValue.toLocaleString('en-IN')}</p>
+                  </div>
                 </div>
-              </div>
+              ) : (
+                <p className="text-sm text-gray-500">
+                  The price paid is entered by the manager who approves this return.
+                </p>
+              )}
             </div>
 
             {/* Modal Footer */}

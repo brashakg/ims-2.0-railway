@@ -4,8 +4,8 @@
 // The quiet as-you-type "similar products" strip rendered under the model
 // field of the Add-Product form. Contract (council ruling):
 //
-//   * Renders NOTHING while: not armed (brand + model >= 2 chars not both
-//     set), loading/debouncing, errored, or no matches — NEVER a spinner or
+//   * Renders NOTHING while: not armed (no category or brand yet), before
+//     the first answer, errored, or no matches — NEVER a spinner or
 //     placeholder over the form.
 //   * siblings only -> one quiet line: "This model exists in N colours:"
 //     followed by clickable chips. A chip click prefills the form through the
@@ -32,10 +32,9 @@ import type { SimilarProductSummary } from '../../services/api/products';
 export interface SimilarProductsHintProps {
   /** CATEGORIES picker code (SG/FR/...). */
   category: string;
-  brand: string;
-  model: string;
-  colour: string;
-  size: string;
+  /** The form's attributes, sent as typed: the server decides what the
+   *  duplicate key reads (useSimilarProducts). */
+  attributes: Record<string, string>;
   /** Variant mode: suppress the sibling strip for the locked brand/model but
    *  keep the exact-colour warning live. */
   variantMode?: boolean;
@@ -59,16 +58,13 @@ function chipLabel(s: SimilarProductSummary): string {
 
 export function SimilarProductsHint({
   category,
-  brand,
-  model,
-  colour,
-  size,
+  attributes,
   variantMode = false,
   onPickSibling,
   onOpenExisting,
   selfId = null,
 }: SimilarProductsHintProps) {
-  const { data, armed } = useSimilarProducts({ category, brand, model, colour, size });
+  const { data, armed } = useSimilarProducts({ category, attributes });
 
   // Render NOTHING unless armed with a completed response (null covers idle,
   // debouncing, in-flight and error states — the hook's contract).
@@ -156,7 +152,7 @@ export function SimilarProductsHint({
               title={`${s.name || 'Product'}${s.sku ? ` — SKU ${s.sku}` : ''}${
                 s.is_active === false ? ' (inactive)' : ''
               } — click to add another variant of this model`}
-              className="inline-flex items-center mr-1 mb-0.5 px-1.5 py-px rounded border border-gray-200 bg-gray-50 text-[11px] text-gray-700 hover:border-bv hover:bg-bv-50 disabled:cursor-default disabled:hover:border-gray-200 disabled:hover:bg-gray-50 align-middle"
+              className="inline-flex items-center min-h-9 mr-1 mb-1 px-2.5 rounded border border-gray-200 bg-gray-50 text-xs text-gray-700 hover:border-bv hover:bg-bv-50 disabled:cursor-default disabled:hover:border-gray-200 disabled:hover:bg-gray-50 align-middle"
             >
               {chipLabel(s)}
             </button>

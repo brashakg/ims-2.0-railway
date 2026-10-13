@@ -275,9 +275,15 @@ class ProductRepository(BaseRepository):
             if not letters:
                 # A lone hyphen ('ray - ban') is spacing, not a word to match.
                 continue
-            code = {"$regex": "^" + re.escape(tok), "$options": "i"}
             name = {
                 "$regex": r"[\s\-]*".join(re.escape(c) for c in letters),
+                "$options": "i",
+            }
+            # A code still matches from its start; past main's tier
+            # (till=False) its hyphens are ignored too, so 'SGRAY' finds a
+            # readable SKU SG-RAYBAN-RB3025-001 (owner ruling 2026-09-28, D5).
+            code = {
+                "$regex": "^" + (name["$regex"] if till else re.escape(tok)),
                 "$options": "i",
             }
             ors = [{f: code} for f in self.CODE_SEARCH_FIELDS]
@@ -311,20 +317,38 @@ class ProductRepository(BaseRepository):
         # thirty 'Gunmetal Gray' frames for 'ray', or a model behind a title
         # word. Tier 1 is main's till rule; the box's tier 2 is main's wide
         # rule (main listed its till hits, then its wide ones). Every tier
-        # sits inside the query, so the list is what count_search_products
+        # sits inside search_products_filter, the query count_search_products
         # counts ('  ' is everything to the till, nothing to the wide rule).
-        main_till = self._search_query(
-            query, list(self.LEGACY_SEARCH_FIELDS), extra, word_fields=()
-        )
-        if not anywhere:
-            till_q = self._search_query(query, list(self.SEARCH_FIELDS), extra)
-            return self.find_ranked(till_q, [main_till], skip=skip, limit=limit)
+        tiers = [
+            self._search_query(query, list(self.LEGACY_SEARCH_FIELDS), extra, word_fields=())
+        ]
+        if anywhere:
+            tiers.append(self._product_search_query(query, extra, till=False))
         return self.find_ranked(
-            self._product_search_query(query, extra),
-            [main_till, self._product_search_query(query, extra, till=False)],
+            self.search_products_filter(
+                query, category, is_active=is_active, created_by=created_by, anywhere=anywhere
+            ),
+            tiers,
             skip=skip,
             limit=limit,
         )
+
+    def search_products_filter(
+        self,
+        query: str,
+        category: str = None,
+        *,
+        is_active: Optional[bool] = True,
+        created_by: Optional[str] = None,
+        anywhere: bool = False,
+    ) -> Dict:
+        """THE filter search_products lists and count_search_products counts --
+        one builder, so a list, its total and the counter stock lookup's total
+        (which ORs it into a wider query) can never disagree."""
+        extra = self._search_extra_filter(category, is_active, created_by)
+        if anywhere:
+            return self._product_search_query(query, extra)
+        return self._search_query(query, list(self.SEARCH_FIELDS), extra)
 
     def count_search_products(
         self,
@@ -335,10 +359,11 @@ class ProductRepository(BaseRepository):
         created_by: Optional[str] = None,
         anywhere: bool = False,
     ) -> int:
-        extra = self._search_extra_filter(category, is_active, created_by)
-        if not anywhere:
-            return self.search_count(query, list(self.SEARCH_FIELDS), extra)
-        return self.count(self._product_search_query(query, extra))
+        return self.count(
+            self.search_products_filter(
+                query, category, is_active=is_active, created_by=created_by, anywhere=anywhere
+            )
+        )
 
     def cataloguer_stats(self) -> List[Dict]:
         """Per-creator cataloguing rollup (attribution feature).

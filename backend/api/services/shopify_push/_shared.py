@@ -59,7 +59,9 @@ class PushResult:
 
     mode         SIMULATED (dry-run, no network) | LIVE (a real Shopify write).
     entity       product | variant | variant-prices | collection | menu | image.
-    action       create | update | skip | noop (what we did / would do).
+    action       create | update | skip | noop (what we did / would do); the
+                 design photo press (media.push_image) also answers
+                 processing | dedupe.
     target_id    the IMS doc id we were asked to push.
     ok           True unless an error occurred (a SIMULATED dry-run is ok=True).
     shopify_id   the Shopify gid (set on a LIVE write OR echoed if already mapped).
@@ -138,6 +140,18 @@ class PushResult:
 PRICE_NOT_SYNCED = "PRICE_NOT_SYNCED"
 _PRICE_NOT_SYNCED_MSG = (
     "Live on the website at the OLD price: the price change did not reach "
+    "Shopify. The product stays queued -- press again, or the next scheduled "
+    "sync retries it."
+)
+
+# ...and the same rule for its PHOTOS: the product is live, but a photo step of
+# the press (attach, delete or reorder) failed, so the website's photos are
+# not IMS's photos in IMS's order. The row stays queued so the next press or
+# scheduled sync sends the step again (a reorder-only edit has no other retry).
+PHOTOS_NOT_SYNCED = "PHOTOS_NOT_SYNCED"
+_PHOTOS_NOT_SYNCED_MSG = (
+    "Live on the website, but its photos there do not match IMS: a photo "
+    "change (a new photo, a removed photo or a new order) did not reach "
     "Shopify. The product stays queued -- press again, or the next scheduled "
     "sync retries it."
 )
@@ -303,6 +317,17 @@ def _live_or_reason(db) -> Tuple[bool, Optional[str]]:
     return True, None
 
 
+def _product_brand(doc: Dict[str, Any]) -> Any:
+    """A product's brand as the push gates read it: the spine's `brand`, else a
+    Shopify-shaped `vendor`, else `attributes.brand_name` -- a CATALOG-door twin
+    carries only the last, and the website gate fails closed on no brand."""
+    return (
+        doc.get("brand")
+        or doc.get("vendor")
+        or (doc.get("attributes") or {}).get("brand_name")
+    )
+
+
 def push_lock_reason(db, entity: str, doc: Dict[str, Any]) -> Optional[str]:
     """Hub Phase 5 (owner DECISION C): return a reason if this entity is push-
     LOCKED, else None. A locked brand (product) or collection handle in the
@@ -324,8 +349,7 @@ def push_lock_reason(db, entity: str, doc: Dict[str, Any]) -> Optional[str]:
         return str(v or "").strip().lower()
 
     if entity == "product":
-        attrs = doc.get("attributes") or {}
-        brand = _norm(doc.get("brand") or doc.get("vendor") or attrs.get("brand_name"))
+        brand = _norm(_product_brand(doc))
         if brand and brand in {_norm(b) for b in (locks.get("brands") or [])}:
             return "brand '%s' is push-locked" % brand
     elif entity == "collection":
@@ -333,6 +357,29 @@ def push_lock_reason(db, entity: str, doc: Dict[str, Any]) -> Optional[str]:
         if handle and handle in {_norm(c) for c in (locks.get("collections") or [])}:
             return "collection '%s' is push-locked" % handle
     return None
+
+
+def product_push_refusal(db, product: Dict[str, Any]) -> Optional[str]:
+    """Why this product must not be written to Shopify, or None. THE product
+    gate: push_product, push_variant_prices, the image push and the press/live
+    sweep queue all ask it first, so none of them can disagree.
+
+    A push-locked brand (above), or a brand Settings > Brand Master keeps off the
+    website (owner ruling 2026-09-29, D6: the brand default ALWAYS decides,
+    read live -- products store no copy of it). Unknown, inactive brand / read
+    trouble -> refused (fail-closed, never list by accident), each with its own
+    reason (catalog_dictionary.brand_website_refusal). The Add/Edit form's
+    website line asks this same function (GET /products/website-verdict).
+
+    Stock is deliberately NOT gated: a listing already live when its brand is
+    switched off keeps a true stock count until someone takes it down (Online
+    Store > Take down), so the website never sells a frame that is not there."""
+    lock = push_lock_reason(db, "product", product)
+    if lock:
+        return lock
+    from .. import catalog_dictionary
+
+    return catalog_dictionary.brand_website_refusal(db, _product_brand(product))
 
 
 def is_variant_of(doc: Any) -> bool:

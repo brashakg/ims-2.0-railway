@@ -58,6 +58,10 @@ from test_online_push_dirty_flag import (  # noqa: E402
 )
 from test_shopify_live_sync import _seed_products, world  # noqa: E402,F401
 
+# The push's other mechanics, for a brand that IS for the website (owner D6;
+# the brand rule has its own test in test_add_product_owner_rulings.py).
+pytestmark = pytest.mark.usefixtures("brand_is_for_the_website")
+
 TOMB = shopify_push.TOMBSTONES_COLLECTION
 GID = "gid://shopify/Product/900"
 U1, U2, U3 = (

@@ -493,3 +493,19 @@ export function getCategoryFields(code: string | null | undefined): CategoryFiel
 
   return merged;
 }
+
+// The fields a category's form shows its model in, in the server's order
+// (product_master._derive_brand_model_color_size over _shown_attributes):
+// Model No, Model Name, then Sub Brand (an Optical Lens's model). A
+// model_no / model_name the form has no field for is a hidden copy (main's
+// door wrote one on every lens and contact lens) and is never read. A code
+// with no known fields keeps them all, as the server does.
+export function modelFields(code: string | null | undefined): string[] {
+  const shown = getCategoryFields(CANONICAL_TO_PICKER[code ?? ''] || code).map((f) => f.name);
+  return ['model_no', 'model_name', 'subbrand'].filter((k) => !shown.length || shown.includes(k));
+}
+
+/** THE model a product's form shows: the first of modelFields that is filled. */
+export function modelOf(code: string | null | undefined, attributes: Record<string, unknown>): string {
+  return modelFields(code).map((k) => String(attributes[k] ?? '').trim()).find(Boolean) ?? '';
+}

@@ -4666,16 +4666,12 @@ def test_r7_the_script_asks_again_by_name_for_an_ask_raised_before(world, monkey
 
 
 def _similar_hint(world, brand, model, colour, size):
-    """GET /products/similar -- the live hint under Add product's model field."""
+    """GET /products/similar -- the live hint under Add product's model field,
+    sent as the form sends it: the frame's attributes as typed."""
+    typed = {"brand_name": brand, "model_no": model, "colour_code": colour, "lens_size": size or ""}
+    request = type("Req", (), {"query_params": {"category": "FR", **typed}})()
     return _run(
-        _products.get_similar_products(
-            category="FR",
-            brand=brand,
-            model_no=model,
-            colour_code=colour,
-            size=size or "",
-            current_user=CATALOGUER,
-        )
+        _products.get_similar_products(request=request, category="FR", current_user=CATALOGUER)
     )
 
 

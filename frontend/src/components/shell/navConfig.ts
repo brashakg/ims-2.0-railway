@@ -10,6 +10,7 @@
 import { moduleForPath } from '../../context/ModuleContext';
 import { TASK_MODULE_ROLES } from '../../pages/tasks/taskRoles';
 import {
+  STOCK_LOOKUP_ROLES,
   INVENTORY_MODULE_ROLES,
   INVENTORY_MANAGE_ROLES,
   POWER_GRID_ROLES,
@@ -103,17 +104,19 @@ export const NAV_GROUPS: NavGroup[] = [
       // address. The module's seventeen sections live behind the Inventory
       // entry, which now lands on the stock ledger.
       { id: 'inventory', label: 'Inventory', to: '/inventory/stock', icon: 'box', requireRoles: INVENTORY_MODULE_ROLES },
+      // D7b: the counter's read-only stock lookup (this shop, other shops, in transit).
+      { id: 'stock-lookup', label: 'Stock Lookup', to: '/inventory/lookup', icon: 'box', requireRoles: STOCK_LOOKUP_ROLES },
       { id: 'stock-count', label: 'Stock Count', to: '/inventory/audit', icon: 'box', requireRoles: INVENTORY_MANAGE_ROLES },
       { id: 'replenishment', label: 'Replenishment', to: '/inventory/replenishment', icon: 'box', requireRoles: INVENTORY_MANAGE_ROLES },
       { id: 'opening-stock', label: 'Opening Stock', to: '/inventory/opening-stock', icon: 'box', requireRoles: INVENTORY_MANAGE_ROLES },
       { id: 'power-grid', label: 'Power Grid', to: '/inventory/power-grid', icon: 'box', requireRoles: POWER_GRID_ROLES },
       { id: 'online-stock', label: 'Online Stock', to: '/inventory/online-sync', icon: 'box', requireRoles: INVENTORY_MANAGE_ROLES },
-      { id: 'purchase', label: 'Purchase', to: '/purchase', icon: 'truck', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
+      { id: 'purchase', label: 'Purchase - orders, receiving, bills', to: '/purchase', icon: 'truck', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
       // Buy Desk — the one-screen catalog -> purchase landing. The page + route
       // shipped earlier but only ModuleContext's sidebar knew about it; this
       // surfaces it in BOTH shells. requireRoles mirrors the /catalog/buy-desk
       // ProtectedRoute gate in App.tsx.
-      { id: 'buy-desk', label: 'Buy Desk', to: '/catalog/buy-desk', icon: 'cart', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
+      { id: 'buy-desk', label: 'Buy Desk - what to reorder', to: '/catalog/buy-desk', icon: 'cart', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
       // Receive Goods stays in the sidebar: it is the daily-work door for
       // receiving staff (the Purchase page's per-PO "Receive" button lands on
       // the same screen with the PO prefilled). ACCOUNTANT added to match the

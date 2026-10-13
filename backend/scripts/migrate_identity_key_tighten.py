@@ -47,42 +47,21 @@ from typing import Any, Dict
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from api.services.product_master import (  # noqa: E402
-    _derive_brand_model_color_size,
-    _size_attribute_key,
-    compute_identity_key,
-    frame_size_of,
+    ProductMasterError,
+    identity_key_of as _identity_of,
 )
 
-
-def _identity_of(doc: Dict[str, Any]):
-    """The key the create door stamps: product_master's own derivation over the
-    attributes (_derive_brand_model_color_size -> compute_identity_key), never
-    a second reading of the fields. Only a field the attributes do not carry
-    at all (a legacy row that predates them) falls back to the spine's
-    top-level column -- the door wrote those FROM the attributes, so for a
-    door-made row the fallback never fires."""
-    attrs = doc.get("attributes") if isinstance(doc.get("attributes"), dict) else {}
-    ids = _derive_brand_model_color_size(attrs, doc.get("category"))
-    top = {
-        "brand": doc.get("brand"),
-        "model": doc.get("model"),
-        "color": doc.get("color") or doc.get("colour"),
-        # A frame's legacy top-level "52-18-140" is eye size 52, as the
-        # derivation reads it from the attributes (frame_size_of).
-        "size": (
-            frame_size_of(doc.get("size"))
-            if _size_attribute_key(doc.get("category")) == "lens_size"
-            else doc.get("size")
-        ),
-    }
-    ids = {k: ids.get(k) or top.get(k) for k in top}
-    return compute_identity_key(ids["brand"], ids["model"], ids["color"], ids["size"])
+# _identity_of is the edit door's own rule (product_master.identity_key_of):
+# the create door's identity_parts over the row's attributes, its flat
+# brand/model/color/size filling the gaps exactly as the FORM door folds them.
+# Never a copy here: a rebuilt key the create door does not compute lets a new
+# entry of the same product past the 409.
 
 
 def run(products, *, apply: bool) -> Dict[str, Any]:
     rows = list(products.find({}))
     stats = {"scanned": len(rows), "unchanged": 0, "rewritten": 0,
-             "now_none": 0, "collisions": 0}
+             "now_none": 0, "collisions": 0, "unreadable": 0}
 
     planned: Dict[str, Any] = {}
     by_new = defaultdict(list)
@@ -90,7 +69,14 @@ def run(products, *, apply: bool) -> Dict[str, Any]:
     for doc in rows:
         pid = doc.get("product_id") or doc.get("_id")
         old = doc.get("identity_key")
-        new = _identity_of(doc)
+        try:
+            new = _identity_of(doc)
+        except ProductMasterError as exc:
+            # e.g. a contact lens whose stored power is not a number: a human
+            # fixes the row; the rest of the rebuild goes on.
+            stats["unreadable"] += 1
+            print(f"  [skip] {doc.get('sku')}: {exc.message} -- fix the row, keeping {old!r}")
+            continue
         if new is None:
             # Brand or model missing -> no identity at all. Leave whatever is
             # there alone; clearing it is a separate decision.
@@ -155,7 +141,7 @@ def main() -> int:
     stats = run(db["products"], apply=apply)
     print(
         "\nscanned={scanned} unchanged={unchanged} rewritten={rewritten} "
-        "no-identity={now_none} collisions={collisions}".format(**stats)
+        "no-identity={now_none} collisions={collisions} unreadable={unreadable}".format(**stats)
     )
     if not apply and stats["rewritten"]:
         print("\nRe-run with --apply to write these.")
