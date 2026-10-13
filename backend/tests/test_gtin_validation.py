@@ -363,6 +363,16 @@ def test_only_the_makers_gtin_attribute_is_ever_the_variant_barcode():
     assert "barcode" not in rows[1]["row"]
     assert price_push(product)[0]["barcode"] == VALID_EAN13_B
 
+    # A size / sibling row sends only its row gtin, never a random EAN-13 left
+    # in its legacy `barcode`; with no gtin the key is omitted, never blanked.
+    sibling = {"sku": "P1-B", "shopify_variant_id": "gid://shopify/ProductVariant/2",
+               "barcode": random_ean13}
+    seed = build_variant_seed_rows(product, [{"sku": "P1"}, dict(sibling)])
+    price_rows, _ = build_variant_price_inputs(product, [dict(sibling)])
+    assert "barcode" not in seed[1]["row"] and "barcode" not in price_rows[0]
+    price_rows, _ = build_variant_price_inputs(product, [{**sibling, "gtin": VALID_EAN13}])
+    assert price_rows[0]["barcode"] == VALID_EAN13
+
 
 def test_the_self_row_never_shadows_the_products_gtin():
     """The product's own variant reads ONLY the product's GTIN (one home): a

@@ -458,12 +458,14 @@ def variant_barcode(
     top-level gtin the attribute does not hold: IMS never changes a live
     product's barcode to a code that is not the maker's. One home; the row
     keeps no copy to fall out of sync. Any other row (a size
-    variant of the listing, a colour option) carries ONLY its own: a GTIN
-    names one trade item, so the parent's never lands on a sibling."""
+    variant of the listing, a colour option) carries ONLY its own maker
+    GTIN, the row's `gtin` (owner ruling 2026-10-01): a GTIN names one trade
+    item, so the parent's never lands on a sibling, and the row's legacy
+    `barcode` (Generate wrote random EAN-13s there too) is never sent."""
     if row is not None:
         sku = str(row.get("sku") or "").strip()
         if not sku or sku != str(product.get("sku") or "").strip():
-            return _publishable_gtin(row.get("gtin"), row.get("barcode"))
+            return _publishable_gtin(row.get("gtin"))
     attrs = product.get("attributes")
     return _publishable_gtin(
         _manufacturer_codes(attrs).get("gtin") if isinstance(attrs, dict) else None

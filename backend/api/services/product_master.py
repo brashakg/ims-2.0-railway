@@ -1734,7 +1734,7 @@ def _guard_gtin_attribute(
 def twin_barcode_fields(gtin: Any) -> Dict[str, Any]:
     """The catalog-twin (or catalog_variants row) barcode fields for the
     product's gtin attribute: the top-level `gtin` and, when the GTIN is
-    REMOVED, the legacy `barcode` too. A sibling row's push reads both
+    REMOVED, the legacy `barcode` too. A sibling row's push sends its `gtin`
     (product_input.variant_barcode), and the one-holder rule reads both on a
     twin (find_twin_by_barcode), so leaving either would send, or hold, the
     removed code. ONE rule for every door that moves the gtin attribute."""
