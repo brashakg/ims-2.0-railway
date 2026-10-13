@@ -5423,6 +5423,7 @@ def _every_reader(world, draft_id, twin_id):
         refused = False
     except HTTPException as exc:
         refused = exc.status_code == 409 and "product editor" in str(exc.detail)
+    counts = _online.catalog_counts(world.db)
     return {
         "list_row": row["ordered_draft"],
         "product_get": _run(_products.get_product(draft_id, CATALOGUER))["ordered_draft"],
@@ -5430,7 +5431,10 @@ def _every_reader(world, draft_id, twin_id):
         "in_review": [p["sku"] for p in review] == [spine["sku"], "BVI-NEWER"]
         and review[0]["ordered_draft"] is True
         and review[0]["spine_product_id"] == draft_id,
-        "review_count": _online.catalog_counts(world.db)["needs_review"],
+        "review_count": counts["needs_review"],
+        # The catalogue population (online_catalog._in_catalog): the counts
+        # row and the sidebar's 'Missing photos' badge (no_photo).
+        "in_catalog": (counts["in_catalog"], counts["no_photo"]),
         "popup": _pm.existing_product_summary(spine)["provisional"],
         "import_review_refuses": refused,
     }
@@ -5467,7 +5471,7 @@ def test_r9_a_finished_row_still_marked_provisional_reads_pos_ready_everywhere(w
     assert world.product(draft_id)["catalog_status"] == "ACTIVE"
     want = {
         "list_row": False, "product_get": False, "copy_get": False,
-        "in_review": False, "review_count": 1, "popup": False,
+        "in_review": False, "review_count": 1, "in_catalog": (1, 1), "popup": False,
         "import_review_refuses": False,
     }
     seen = _every_reader(world, draft_id, twin["id"])
@@ -5501,7 +5505,7 @@ def test_r9_a_draft_whose_copy_predates_the_marks_is_a_draft_everywhere(world):
     finding(
         seen == {
             "list_row": True, "product_get": True, "copy_get": True,
-            "in_review": True, "review_count": 2, "popup": True,
+            "in_review": True, "review_count": 2, "in_catalog": (0, 0), "popup": True,
             "import_review_refuses": True,
         },
         f"R9-7: an ordered draft whose copy predates the marks is not one everywhere: {seen}",
