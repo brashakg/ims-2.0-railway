@@ -11,6 +11,7 @@ from typing import Optional, List
 from datetime import datetime, timedelta
 from ..auth import get_current_user
 from ...services import spoilage_analytics
+from ...services.cost_mask import mask_cost
 from ...dependencies import get_db, get_workshop_repository, validate_store_access
 from ._shared import logger, router
 
@@ -149,4 +150,8 @@ async def get_spoilage_analytics(
     summary = spoilage_analytics.build_spoilage_summary(windowed, window_days=days)
     summary["store_id"] = active_store
     summary["as_of"] = datetime.now().isoformat()
-    return summary
+    # The spoilage cost is worked out from what we pay: the accounts roles'
+    # only (owner ruling 2026-10-12); managers keep the remake counts.
+    return mask_cost(
+        summary, current_user, "product", extra=("spoilage_cost_total_paise",)
+    )

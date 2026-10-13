@@ -81,8 +81,13 @@ async def inventory_valuation(
     active_store = validate_store_access(store_id, current_user)
     stock_repo = get_stock_repository()
 
+    # Stock at cost is what we paid (owner ruling 2026-10-12): the accounts
+    # roles see the values, anyone else the quantities.
+    def _out(body):
+        return mask_cost(body, current_user, "product", extra=("value", "total"))
+
     if stock_repo is None:
-        return {"valuation": {"by_category": [], "total": 0}}
+        return _out({"valuation": {"by_category": [], "total": 0}})
 
     all_stock = stock_repo.find_many({"store_id": active_store}, limit=0)
 
@@ -103,12 +108,14 @@ async def inventory_valuation(
 
     total = sum(c["value"] for c in by_category.values())
 
-    return {
-        "valuation": {
-            "by_category": list(by_category.values()),
-            "total": round(total, 2),
+    return _out(
+        {
+            "valuation": {
+                "by_category": list(by_category.values()),
+                "total": round(total, 2),
+            }
         }
-    }
+    )
 
 
 @router.get("/inventory/tax-code-audit")
