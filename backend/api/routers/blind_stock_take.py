@@ -257,7 +257,8 @@ async def lock_count(session_id: str, current_user: Dict[str, Any] = Depends(get
         _raise(exc)
     _audit("blind_count.lock", entity_id=session_id, actor=current_user, store_id=store_id,
            detail={"summary": updated.get("summary")})
-    return updated
+    # The same view as GET /{id}: the variance at cost is product cost (D7).
+    return svc.redact_for_counter(updated, current_user)
 
 
 @router.post("/{session_id}/reopen")

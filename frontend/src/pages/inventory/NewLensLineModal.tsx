@@ -21,6 +21,8 @@ import {
   type LensLineCreatePayload,
 } from '../../services/api/lensCatalog';
 import { useToast } from '../../context/ToastContext';
+import { useAuth } from '../../context/AuthContext';
+import { COST_ROLES } from '../../components/common/CostCell';
 
 interface Props {
   meta: LensCatalogMetaOptions | null;
@@ -54,6 +56,10 @@ function toRange(r: RangeForm) {
 
 export default function NewLensLineModal({ meta, onClose, onCreated }: Props) {
   const toast = useToast();
+  const { user } = useAuth();
+  // The cost box follows the one cost rule, as on Add product: COST_ROLES
+  // only (owner ruling 2026-10-12). A catalogue manager leaves it to accounts.
+  const canSeeCost = (user?.roles || []).some((r) => COST_ROLES.includes(r));
 
   const [brand, setBrand] = useState('');
   const [series, setSeries] = useState('');
@@ -232,7 +238,7 @@ export default function NewLensLineModal({ meta, onClose, onCreated }: Props) {
               <input type="number" step="0.01" value={mrp} onChange={(e) => setMrp(e.target.value)}
                 className="border border-line rounded-lg px-2 py-1.5 text-sm w-full" placeholder="0.00" />
             ))}
-            {field('Cost price (₹)', 'cost', (
+            {canSeeCost && field('Cost price (₹)', 'cost', (
               <input type="number" step="0.01" value={cost} onChange={(e) => setCost(e.target.value)}
                 className="border border-line rounded-lg px-2 py-1.5 text-sm w-full" placeholder="optional" />
             ))}

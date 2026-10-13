@@ -421,7 +421,7 @@ async def create_lens_line(
 
     cleaned = _clean(doc) or {}
     _audit("create", lens_line_id, current_user, before=None, after=cleaned)
-    return {"status": "success", "lens_line": cleaned}
+    return {"status": "success", "lens_line": mask_cost(cleaned, current_user, "product")}
 
 
 @router.patch("/{lens_line_id}")
@@ -443,7 +443,7 @@ async def update_lens_line(
 
     raw = payload.model_dump(exclude_none=True)
     if not raw:
-        return {"status": "no_changes", "lens_line": _clean(existing)}
+        return {"status": "no_changes", "lens_line": mask_cost(_clean(existing), current_user, "product")}
 
     enum_config = load_enum_config()
     try:
@@ -459,7 +459,7 @@ async def update_lens_line(
         if k in raw:
             changed[k] = v
     if not changed:
-        return {"status": "no_changes", "lens_line": _clean(existing)}
+        return {"status": "no_changes", "lens_line": mask_cost(_clean(existing), current_user, "product")}
     changed["updated_at"] = _now()
 
     try:
@@ -478,7 +478,7 @@ async def update_lens_line(
         before=cleaned_before,
         after=cleaned_after,
     )
-    return {"status": "success", "lens_line": cleaned_after}
+    return {"status": "success", "lens_line": mask_cost(cleaned_after, current_user, "product")}
 
 
 @router.delete("/{lens_line_id}")
