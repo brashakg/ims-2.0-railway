@@ -2161,6 +2161,13 @@ def _discard(world, draft_id, po, grn=None):
     assert world.product(draft_id)["discarded_draft"] is True
 
 
+def _restored(world, pid):
+    """Main's archive rule (owner 2026-10-12): only Restore brings an archived
+    product back -- a discarded draft is switched on after it."""
+    _seed_user(world, ADMIN)
+    _run(_catalog.bulk_restore_products(_catalog.BulkProductIds(product_ids=[pid], apply=True), ADMIN))
+
+
 class _Truthless:
     """What a pymongo Database hands back for an unknown attribute: a
     Collection, whose truth value raises."""
@@ -2219,6 +2226,7 @@ def test_r5_a_discarded_draft_switched_on_since_is_never_switched_off(world):
     po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
     _discard(world, draft_id, po, grn)
     world.finish_draft(draft_id, offer=2790)
+    _restored(world, draft_id)
     _run(
         _products.update_product(
             draft_id, _products.ProductUpdate(is_active=True), CATALOGUER
@@ -4052,6 +4060,7 @@ def test_r6_a_discarded_draft_switched_on_since_is_received_like_any_product(wor
     po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
     _discard(world, draft_id, po, grn)
     world.finish_draft(draft_id, offer=2790)
+    _restored(world, draft_id)
     _run(_products.update_product(draft_id, _products.ProductUpdate(is_active=True), CATALOGUER))
     assert world.product(draft_id)["discarded_draft"] is True
     po2 = world.raise_po(
@@ -6309,3 +6318,20 @@ def test_r11_a_managers_answer_that_dies_records_what_it_holds(world, monkeypatc
         f"{_held(world, gid)}, the PO reads {received[boss]} ({status})",
     )
     assert len(_mgr_tasks(world, gid)) == (1 if want else 0)
+
+
+def test_merge_the_bulk_archive_never_discards_a_held_draft(world):
+    # Main's Catalog-page bulk Delete is the same archive as the single Delete
+    # (_archive_product), and asks the same refusal (_archive_refusal, audit
+    # C1): a draft a receipt holds units for is never discarded behind it.
+    _seed_user(world, ADMIN)
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    body = _catalog.BulkProductIds(product_ids=[draft_id], apply=True)
+    (row,) = _run(_catalog.bulk_archive_products(body, ADMIN))["results"]
+    finding(
+        row["status"] == "refused" and grn["grn_number"] in row["reason"],
+        f"The bulk archive discarded a held draft: {row}",
+    )
+    assert not world.product(draft_id).get("deleted_at")
+    assert world.product(draft_id)["provisional"] is True
+    assert world.grn(grn["grn_id"])["status"] == "PARTIALLY_ACCEPTED"
