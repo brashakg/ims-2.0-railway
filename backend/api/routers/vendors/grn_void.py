@@ -3,6 +3,7 @@
 from ._shared import (
     Depends,
     HTTPException,
+    Optional,
     Query,
     _VENDOR_ROLES,
     can_access_store_scoped,
@@ -38,21 +39,23 @@ def _hand_back(grn_repo, grn_id: str, claim_token) -> None:
     release_finished_meanwhile(grn_repo, grn_id)
 
 
-def _reopen_po_if_nothing_received(grn_repo, grn, current_user=None) -> None:
+def _reopen_po_if_nothing_received(grn_repo, grn, current_user=None) -> Optional[str]:
     """A held receipt's accept moved its PO to PARTIALLY_RECEIVED with nothing
-    on the shelf. Voided, and with no other live receipt on the order and
-    nothing counted received, nothing was received: the order goes back to
-    SENT, so it reads true and can be cancelled again (cancel refuses a
-    part-received order) -- the way out for a draft whose box went back (a
-    draft an open order still expects is never discarded, catalog DELETE).
+    on the shelf. Voided -- by Void, or by 'Not received' for all it held --
+    and with no other live receipt on the order and nothing counted received,
+    nothing was received: the order goes back to SENT, so it reads true and
+    can be cancelled again (cancel refuses a part-received order) -- the way
+    out for a draft whose box went back (a draft an open order still expects
+    is never discarded, catalog DELETE).
 
     One GUARDED write: it lands only while the order is still part-received
     with nothing counted received, so an accept of another receipt that
     commits in between (it writes the received counts) is never undone.
-    Fail-soft: the void stands."""
+    Answers "SENT" when it reopened the order. Fail-soft: the void stands."""
     po_id = (grn or {}).get("po_id")
     if not po_id:
-        return
+        return None
+    reopened = None
     try:
         po_repo = get_purchase_order_repository()
         if po_repo is None:
@@ -80,7 +83,8 @@ def _reopen_po_if_nothing_received(grn_repo, grn, current_user=None) -> None:
                 {"po_id": po_id, "status": "SENT"},
                 {"$set": {"status": po.get("status"), "updated_at": datetime.now()}},
             )
-            return
+            return None
+        reopened = "SENT"
         audit = get_audit_repository()
         if audit is not None:
             audit.create(
@@ -102,6 +106,7 @@ def _reopen_po_if_nothing_received(grn_repo, grn, current_user=None) -> None:
             po_id,
             exc_info=True,
         )
+    return reopened
 
 
 @router.post("/grn/{grn_id}/void")
@@ -575,6 +580,9 @@ async def drop_over_order(
                 detail="The receipt changed while this ran. Refresh and check it before trying again.",
             )
         po_status = refresh_po_received(po_repo, grn_repo, po_id)
+        if status == "VOID":
+            # Voided as a void leaves it: nothing received, the order reopens.
+            po_status = _reopen_po_if_nothing_received(grn_repo, grn, current_user) or po_status
         if not still_over:
             try:
                 _db = _get_db()

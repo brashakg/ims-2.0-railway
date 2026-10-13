@@ -5980,6 +5980,63 @@ def test_r11_a_managers_add_to_stock_never_shelves_a_duplicate_unasked(world, mo
     assert _mgr_tasks(world, r2["grn_id"]) == []
 
 
+def test_r11_not_received_for_everything_reopens_the_order_as_a_void_does(world):
+    # The panel's probe: an order for a Carrera x1; a receipt line for a
+    # catalogued Boss the order never named, held beyond the order (ordered
+    # 0) by the accountant's 'Add to stock'. 'Not received' leaves the receipt
+    # VOID with nothing received: the order is SENT again and can be
+    # cancelled -- the same rule Void runs.
+    _seed_user(world, ACCOUNTANT)
+    carrera = world.catalogue_frame("Carrera", "CA 8895", "807", "54", mrp=6990, offer=6490, cost=3155.76)
+    boss = world.catalogue_frame("Boss", "BOSS 1700", "C2", "52", mrp=2990, offer=2790, cost=1200)
+    po = world.raise_po(
+        [
+            {
+                "product_id": carrera["product_id"],
+                "product_name": "Carrera CA 8895 807",
+                "sku": carrera["sku"],
+                "quantity": 1,
+                "unit_price": 3200,
+            }
+        ]
+    )
+    created = _run(
+        vd.create_grn(
+            vd.GRNCreate(
+                po_id=po["po_id"],
+                vendor_invoice_no="JOT/26-27/1221",
+                vendor_invoice_date="2026-09-28",
+                items=[
+                    vd.GRNItemCreate(
+                        product_id=boss["product_id"],
+                        received_qty=1,
+                        accepted_qty=1,
+                        rejected_qty=0,
+                        tallied=True,
+                    )
+                ],
+                attachment_file_id="F-RECEIPT-PHOTO",
+                attachment_filename="bill.jpg",
+                attachment_mime="image/jpeg",
+            ),
+            MANAGER,
+        )
+    )
+    gid = created["grn_id"]
+    _run(vd.accept_grn(gid, ACCOUNTANT))
+    assert _held(world, gid) == [(boss["product_id"], "over_order", 1)]
+    assert world.db.purchase_orders.find_one({"po_id": po["po_id"]})["status"] == "PARTIALLY_RECEIVED"
+    out = _run(vd.drop_over_order(gid, MANAGER))
+    stored = world.db.purchase_orders.find_one({"po_id": po["po_id"]})
+    assert out["grn_status"] == "VOID" and world.grn(gid)["status"] == "VOID"
+    finding(
+        stored["status"] == "SENT" and out["po_status"] == "SENT",
+        f"R11-3: the receipt is VOID with nothing received, yet the order reads "
+        f"{stored['status']} (answered {out['po_status']})",
+    )
+    _run(vd.cancel_po(po["po_id"], "box went back", MANAGER))
+
+
 def _four_line_receipt(world):
     """Receipt R: E (typed, unfinished) x1, D (typed) x2, Vogue G x1 beyond
     its order (an earlier receipt brought the 1 ordered) and Carrera C x1
