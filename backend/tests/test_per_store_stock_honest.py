@@ -57,6 +57,10 @@ from test_shopify_online_stock import (  # noqa: E402,F401 -- _reset is the auto
     _set_error,
 )
 
+# The push's other mechanics, for a brand that IS for the website (owner D6;
+# the brand rule has its own test in test_add_product_owner_rulings.py).
+pytestmark = pytest.mark.usefixtures("brand_is_for_the_website")
+
 MINTED = "gid://shopify/ProductVariant/77"
 INV_L = "gid://shopify/InventoryItem/777"
 
