@@ -45,11 +45,13 @@ from ..services.task_sla import (
 from ..services.task_escalation import resolve_escalation_target
 from ..services.task_notify import notify_escalation
 from ..services.task_visibility import (
+    MANUAL,
     NOT_CANCELLED,
     overdue_filter,
     task_counts,
     visible,
 )
+from ..services.user_roles import VALID_ROLES
 from ..services.sop_checklist import (
     apply_item_toggle,
     completion_status,
@@ -70,6 +72,13 @@ VALID_STATUSES = {"OPEN", "IN_PROGRESS", "COMPLETED", "ESCALATED", "CANCELLED"}
 
 # Statuses from which no further lifecycle transitions are allowed.
 TERMINAL_STATUSES = {"COMPLETED", "CANCELLED"}
+
+# Cancel or reassign a task, and issue the day's SOP tasks: managers only
+# (owner ruling 2026-10-13, control over convenience). Staff start and
+# complete their own tasks. The rbac rows for /reassign and /auto-generate
+# name exactly these roles.
+MANAGER_ROLES = ("STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN")
+_managers_only = require_roles(*MANAGER_ROLES)
 
 
 def _visible_task(repo, task_id: str, current_user: dict) -> dict:
@@ -484,8 +493,16 @@ async def create_task(
         "priority": task.priority,  # P0-P4
         "status": "OPEN",
         "source": canon_source(task.source or task.type),  # SYSTEM | USER | SOP
-        "assigned_to": task.assigned_to,
+        # A role name ("cashier") is stored as the role ("CASHIER").
+        "assigned_to": (
+            task.assigned_to.strip().upper()
+            if task.assigned_to.strip().upper() in VALID_ROLES
+            else task.assigned_to
+        ),
         "assigned_by": current_user.get("user_id"),
+        # Raised by hand: the one marker that makes assigned_by the task's
+        # creator, who keeps seeing it (services/task_visibility.py).
+        "created_via": MANUAL,
         "store_id": current_user.get("active_store_id"),
         "due_at": due_at,
         "attachment": attachment,
@@ -727,6 +744,8 @@ async def update_task(
         return {"task_id": task_id, "message": "Task updated"}
 
     existing = _visible_task(repo, task_id, current_user)
+    if update.assigned_to or (update.status and canon_status(update.status) == "CANCELLED"):
+        await _managers_only(current_user)
 
     current_status = canon_status(existing.get("status"))
 
@@ -912,7 +931,7 @@ async def complete_checklist_item(
 @router.post("/auto-generate")
 async def auto_generate_daily_tasks(
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(_managers_only),
 ):
     """Issue today's daily tasks from this store's DAILY SOP templates.
 
@@ -1001,7 +1020,8 @@ async def auto_generate_daily_tasks(
             "status": "OPEN",
             "source": "SOP",
             "assigned_to": assignee or current_user.get("user_id"),
-            "assigned_by": current_user.get("user_id"),
+            # The SOP issued it, not the manager who pressed the button.
+            "assigned_by": "system",
             "store_id": active_store,
             "due_at": now + timedelta(days=1),
             "created_at": now,
@@ -2173,7 +2193,7 @@ async def start_task(
 async def reassign_task(
     task_id: str,
     body: TaskReassign,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(_managers_only),
 ):
     """Reassign an open/in-progress task to another user. Audit-logged via task history."""
     repo = get_task_repository()

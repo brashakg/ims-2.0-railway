@@ -2,7 +2,9 @@
 
   * a staff member sees -- and may act on -- a task only when it is assigned to
     them (their user id) or to their ROLE at their shop (no person on it yet);
-  * whoever created a task also sees it and can follow it up;
+  * whoever raised a task BY HAND (POST /tasks) also sees it and can follow it
+    up; a system, SOP or review task never makes anyone its creator;
+  * only a manager cancels or reassigns a task; staff start and complete;
   * STORE_MANAGER: every task of their shop(s); AREA_MANAGER: every task of
     their area's shops; ADMIN / SUPERADMIN: all.
 
@@ -36,6 +38,7 @@ from api.routers import dashboard_widgets as widgets_mod  # noqa: E402
 from api.routers import tasks as tasks_mod  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
 from api.routers.reports import router as reports_router  # noqa: E402
+from api.services.rbac_policy import policy_for  # noqa: E402
 from api.services.file_store import InMemoryFileStore  # noqa: E402
 from database.repositories.task_repository import TaskRepository  # noqa: E402
 
@@ -95,9 +98,13 @@ TASKS = (
         _task("P-S3", "u-y", S3),
         _task("G", None, None),  # no shop at all
         _task("P-SALES-S3", uid("SALES_STAFF"), S3),  # yours, at another shop
-        # Raised BY the sales person for someone else: POST /tasks stamps
-        # assigned_by, other producers created_by. The creator follows it up.
-        _task("C-SALES", "u-sales-peer", S1, assigned_by=uid("SALES_STAFF")),
+        # Raised BY HAND by the sales person for someone else: POST /tasks
+        # stamps assigned_by + created_via "manual". The creator follows it up.
+        _task("C-SALES", "u-sales-peer", S1, assigned_by=uid("SALES_STAFF"), created_via="manual"),
+        # NOT raised by hand: a button the sales person pressed (walk-out,
+        # accountability, an SOP run) stamps them as assigned_by, and a review
+        # task names them created_by. Neither makes them its creator.
+        _task("C-SALES-AUTO", "u-sales-peer", S1, assigned_by=uid("SALES_STAFF")),
         _task("C-SALES-S2", "u-x", S2, assigned_by=None, created_by=uid("SALES_STAFF")),
     ]
 )
@@ -126,14 +133,24 @@ TASK_ROUTES = {
     "start": ("post", "/start", {}, lambda d: d["status"] == "IN_PROGRESS"),
     "escalate": ("post", "/escalate", {}, lambda d: d["status"] == "ESCALATED"),
     "escalate to": ("post", "/escalate", {"params": {"escalate_to": "u-mgr"}}, lambda d: d["assigned_to"] == "u-mgr"),
+}
+
+# Cancel and reassign: a manager's call, never staff's (owner ruling
+# 2026-10-13), even on the staff member's own task.
+MANAGER_ROUTES = {
+    "cancel": ("patch", "", {"json": {"status": "CANCELLED"}}, lambda d: d["status"] == "CANCELLED"),
+    "cancel via put": ("put", "", {"json": {"status": "cancelled"}}, lambda d: d["status"] == "CANCELLED"),
+    "patch assignee": ("patch", "", {"json": {"assigned_to": "u-mgr"}}, lambda d: d["assigned_to"] == "u-mgr"),
+    "put assignee": ("put", "", {"json": {"assigned_to": "u-mgr"}}, lambda d: d["assigned_to"] == "u-mgr"),
     "reassign": ("post", "/reassign", {"json": {"assigned_to": "u-mgr"}}, lambda d: d["assigned_to"] == "u-mgr"),
 }
+MANAGERS = ["STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"]
 
 
 def expected(role: str) -> set:
     if role in STAFF_ROLES:
         mine = {f"P-{role}", f"R-{role}"}
-        return mine | ({"P-SALES-S3", "C-SALES", "C-SALES-S2"} if role == "SALES_STAFF" else set())
+        return mine | ({"P-SALES-S3", "C-SALES"} if role == "SALES_STAFF" else set())
     if role == "STORE_MANAGER":
         return S1_IDS
     if role == "AREA_MANAGER":
@@ -476,3 +493,86 @@ def test_junk_store_ids_on_the_token_do_not_500_any_task_door(world, role):
         assert r.json()["appointmentsToday"] == clean_dash["appointmentsToday"]
     finally:
         USERS.pop("JUNK")
+
+
+@pytest.mark.parametrize("route", MANAGER_ROUTES)
+def test_only_a_manager_cancels_or_reassigns_a_task(world, route):
+    """Owner ruling 2026-10-13 (control over convenience): staff start and
+    complete their own tasks but never cancel or hand them on - 403 on their
+    own task, nothing written. A manager does both."""
+    as_role, db = world
+    method, tail, kw, landed = MANAGER_ROUTES[route]
+    for role in STAFF_ROLES:
+        tid = f"P-{role}"
+        before = db.tasks.find_one({"task_id": tid})
+        r = getattr(as_role(role), method)(f"/api/v1/tasks/{tid}{tail}", **kw)
+        assert r.status_code == 403, (role, r.status_code, r.text)
+        assert db.tasks.find_one({"task_id": tid}) == before, role
+    for i, role in enumerate(MANAGERS):
+        tid = f"P-{STAFF_ROLES[i]}"  # a staff member's task at BV-S1
+        r = getattr(as_role(role), method)(f"/api/v1/tasks/{tid}{tail}", **kw)
+        assert r.status_code == 200, (role, r.status_code, r.text)
+        assert landed(db.tasks.find_one({"task_id": tid})), role
+
+
+@pytest.mark.parametrize("path", ["/api/v1/tasks/auto-generate", "/api/v1/tasks/{task_id}/reassign"])
+def test_the_manager_only_rows_name_the_code_gate(path):
+    """The rbac row the middleware enforces names exactly the roles the
+    handler's own gate admits, so neither can drift from the other."""
+    row = policy_for("POST", path)
+    assert set(row["allowed"]) == set(tasks_mod.MANAGER_ROLES), row
+
+
+def test_pressing_auto_generate_never_makes_anyone_a_tasks_creator(world, monkeypatch):
+    """The panel's probe (round 6): POST /tasks/auto-generate was open to every
+    signed-in role and stamped the presser as assigned_by on every SOP task
+    it issued - so a sales person who pressed it became the 'creator' of the
+    cashier's cash-drawer SOP and could open it. Now staff cannot press it,
+    the SOP tasks are the system's, and the cashier's stays 'not found'."""
+    as_role, db = world
+    db.sop_templates.insert_one({
+        "template_id": "SOP-CASH", "title": "Count the cash drawer", "frequency": "DAILY",
+        "is_active": True, "store_id": S1, "assigned_users": [uid("CASHIER")],
+        "steps": [{"instruction": "Count the float"}],
+    })
+    monkeypatch.setattr(tasks_mod, "_sop_collection", lambda: db.sop_templates)
+    assert as_role("SALES_STAFF").post("/api/v1/tasks/auto-generate").status_code == 403
+    assert db.tasks.count_documents({"source": "SOP"}) == 0
+    r = as_role("STORE_MANAGER").post("/api/v1/tasks/auto-generate")
+    assert r.status_code == 200 and r.json()["generated"] == 1, r.text
+    sop = db.tasks.find_one({"source": "SOP"})
+    assert sop["assigned_to"] == uid("CASHIER")
+    assert sop["assigned_by"] == "system" and "created_via" not in sop
+    assert as_role("CASHIER").get(f"/api/v1/tasks/{sop['task_id']}").status_code == 200
+    assert as_role("SALES_STAFF").get(f"/api/v1/tasks/{sop['task_id']}").status_code == 404
+
+
+def test_roles_are_matched_whatever_their_case(world):
+    """A legacy row addressed to "cashier", a token that says "cashier", and a
+    task raised for "cashier" all mean the CASHIER role."""
+    as_role, db = world
+    db.tasks.insert_one(_task("R-lower", "cashier", S1))
+    assert "R-lower" in _ids(as_role("CASHIER").get("/api/v1/tasks"))
+    for role in ("CASHIER", "STORE_MANAGER", "ADMIN"):
+        USERS["LOWER"] = {**USERS[role], "roles": [role.lower()]}
+        try:
+            assert _ids(as_role("LOWER").get("/api/v1/tasks")) == expected(role) | {"R-lower"}, role
+        finally:
+            USERS.pop("LOWER")
+    made = as_role("STORE_MANAGER").post("/api/v1/tasks", json={
+        "title": "Re-count the float", "priority": "P2", "assigned_to": "cashier",
+        "due_at": FUTURE.isoformat()})
+    assert made.status_code == 201, made.text
+    assert db.tasks.find_one({"task_id": made.json()["task_id"]})["assigned_to"] == "CASHIER"
+
+
+def test_a_token_with_no_user_id_has_no_tasks_of_its_own(world):
+    """my-tasks asks for assigned_to = the caller's id. With no id that is
+    assigned_to = None - every unassigned task in the chain - unless the
+    visibility rule still narrows it."""
+    as_role, _ = world
+    USERS["NO_ID"] = {**USERS["SALES_STAFF"], "user_id": None}
+    try:
+        assert _ids(as_role("NO_ID").get("/api/v1/tasks/my-tasks")) == set()
+    finally:
+        USERS.pop("NO_ID")

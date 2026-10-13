@@ -696,11 +696,14 @@ def test_task_lifecycle_non_assignee_lowrole_404(monkeypatch):
         ("post", "/api/v1/tasks/T1/start", {}),
         ("post", "/api/v1/tasks/T1/acknowledge", {}),
         ("post", "/api/v1/tasks/T1/escalate", {}),
-        ("post", "/api/v1/tasks/T1/reassign", {"json": {"assigned_to": "u9"}}),
     ]
     for method, url, kw in calls:
         r = getattr(client, method)(url, **kw)
         assert r.status_code == 404, f"{method.upper()} {url} -> {r.status_code}"
+    # Reassigning is a manager's action (owner ruling 2026-10-13): refused
+    # for the role on ANY task id, so it cannot probe one either.
+    r = client.post("/api/v1/tasks/T1/reassign", json={"assigned_to": "u9"})
+    assert r.status_code == 403, r.status_code
     # Nothing was written.
     assert repo.updates == []
     assert repo.task["status"] == "OPEN"
@@ -728,7 +731,7 @@ def test_task_handed_out_below_manager_stays_with_the_person_who_raised_it(monke
     handed out stays 'not found' to them."""
     client, repo = _tasks_client(
         monkeypatch,
-        _seed_task(store_id=OWN_STORE, assigned_to="someone-else", assigned_by="u-test"),
+        _seed_task(store_id=OWN_STORE, assigned_to="someone-else", assigned_by="u-test", created_via="manual"),
         ["SALES_STAFF"],
         OWN_STORE,
     )

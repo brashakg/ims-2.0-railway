@@ -6,8 +6,10 @@ Owner ruling 2026-10-12 (and 2026-09-03 "assign to PEOPLE, not titles"):
   * a staff member sees -- and may act on -- a task only when it is assigned
     to them (assigned_to = their user id), or to their ROLE at their shop (a
     task addressed to a role, with no person on it yet);
-  * whoever CREATED a task also sees it and can follow it up, whatever their
-    role (POST /tasks stamps assigned_by, other producers created_by);
+  * whoever RAISED a task by hand also sees it and can follow it up, whatever
+    their role: POST /tasks stamps assigned_by + created_via "manual", and
+    only that marker counts. A system, SOP or review task never makes anyone
+    its creator (the person who pressed a button did not raise it);
   * STORE_MANAGER sees every task of their shop(s);
   * AREA_MANAGER sees every task of their area's shops;
   * ADMIN / SUPERADMIN see all.
@@ -23,6 +25,7 @@ SEES a task -- who a task is ASSIGNED to stays with task_triggers / escalation.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any, Dict, Optional
 
@@ -30,6 +33,10 @@ from ..dependencies import user_store_scope
 
 # Roles that see every task of the shops they reach.
 _SHOP_WIDE_ROLES = {"STORE_MANAGER", "AREA_MANAGER"}
+
+# The marker POST /tasks stamps on a task a person raised by hand. Only it
+# makes assigned_by a "creator" the rule lets follow the task up.
+MANUAL = "manual"
 
 # What a task list returns when no status is asked for: every task but the
 # cancelled ones (PENDING and any legacy status included). THE task total
@@ -39,19 +46,22 @@ NOT_CANCELLED = {"status": {"$nin": ["CANCELLED", "cancelled", "CANCELED", "canc
 
 def visibility_filter(current_user: dict) -> Dict[str, Any]:
     """The tasks ``current_user`` may see, as a Mongo filter. ``{}`` = all."""
-    is_cross, stores = user_store_scope(current_user)
+    # Roles compared case-insensitively, here and on the task (a legacy row
+    # may say "cashier").
+    roles = sorted({str(r).strip().upper() for r in (current_user.get("roles") or []) if r})
+    is_cross, stores = user_store_scope({**current_user, "roles": roles})
     if is_cross:
         return {}
-    roles = {str(r).strip().upper() for r in (current_user.get("roles") or [])}
     # store_ids is unchecked user data: a None / number / "" in it would make
     # sorted() raise TypeError (a 500 on every task door). Drop it.
     shops = {"$in": sorted({s for s in stores if isinstance(s, str) and s})}
     uid = current_user.get("user_id")
-    seen = [{"assigned_to": uid}, {"assigned_by": uid}, {"created_by": uid}] if uid else []
-    if roles & _SHOP_WIDE_ROLES:
+    seen = [{"assigned_to": uid}, {"assigned_by": uid, "created_via": MANUAL}] if uid else []
+    if set(roles) & _SHOP_WIDE_ROLES:
         seen.append({"store_id": shops})
     elif roles:
-        seen.append({"assigned_to": {"$in": sorted(roles)}, "store_id": shops})
+        anyof = "|".join(re.escape(r) for r in roles)
+        seen.append({"assigned_to": {"$regex": f"^({anyof})$", "$options": "i"}, "store_id": shops})
     # Nobody to match (no id, no role): see nothing rather than everything.
     return {"$or": seen} if seen else {"task_id": {"$in": []}}
 
