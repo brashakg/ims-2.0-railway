@@ -490,7 +490,7 @@ _SEARCHES = [
     ("sku", "SG-CARRERA-CA8895-807-54", P54),
     ("manufacturer barcode (top-level)", GTIN_TOP, P54),
     ("manufacturer GTIN (attributes.gtin)", GTIN_ATTR, P54),
-    # Round 7: a code goes through the one GTIN rule (gtin.sanitise_gtin), so
+    # Round 7: a code goes through the one GTIN rule (gtin.gtin_spellings), so
     # one typed as printed under the bars, or with hyphens, is the same GTIN.
     ("manufacturer GTIN typed as printed, with spaces", "8 056597 054324", P54),
     ("manufacturer GTIN typed with hyphens", "805-6597-05432-4", P54),
@@ -601,7 +601,10 @@ def _seed_contact_lens_family(db, powers: int = _CL_POWERS) -> str:
 @pytest.mark.parametrize(
     "label,query",
     [("its sku", _CL_TARGET_SKU), ("its product barcode", _CL_TARGET_BARCODE),
-     ("its gtin", _CL_TARGET_GTIN), ("its unit barcode", _CL_TARGET_UNIT)],
+     ("its gtin", _CL_TARGET_GTIN), ("its unit barcode", _CL_TARGET_UNIT),
+     # One GTIN in another spelling: the UPC-A printed on the box of a code
+     # stored in its 13-digit form (gtin.gtin_spellings, the till's own rule).
+     ("its gtin as the box's UPC-A", _CL_TARGET_GTIN.lstrip("0"))],
 )
 def test_d7b2_a_scanned_power_is_never_cut_from_a_big_family(call, mongo_db, label, query):
     _seed(mongo_db)
