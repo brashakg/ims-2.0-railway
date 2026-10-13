@@ -3218,3 +3218,28 @@ def test_an_older_live_parcel_takes_over_a_cancelled_pre_clock_stamp(swept):
     doc = _doc(swept, oid)
     assert (doc["shopify_fulfillment_id"], doc["awb"]) == ("1", "AWB-1")
     assert shopify_fulfillment.tracked_awbs(doc) == ["AWB-1"]
+
+
+def test_a_live_parcel_from_a_stale_read_never_takes_over_a_newer_one(swept, monkeypatch):
+    """Panel probe P4, two workers. F3 goes out (00:30) and is cancelled
+    (00:45); worker A reads the order. F2 goes out at 03:00 and takes the
+    display over the cancelled F3. A then applies F1 (live, 01:00) from its
+    read, where the shown parcel is the cancelled F3. The takeover of a
+    cancelled display must still find F3 shown when it writes: matched on
+    the cancelled list entry alone, F1 took the display from the live F2 and
+    moved the watermark back from 03:00 to 01:00 (order bodies of that gap
+    stopped counting as stale)."""
+    oid = 60247
+    _book(swept, oid)
+    _reconcile(swept, oid, 3, "AWB-3", "success", _T("00:30"))
+    _reconcile(swept, oid, 3, "AWB-3", "cancelled", _T("00:45"))
+    a_read = copy.deepcopy(_doc(swept, oid))
+    assert a_read["shopify_fulfillment_id"] == "3"
+    _reconcile(swept, oid, 2, "AWB-2", "success", _T("03:00"))
+    monkeypatch.setattr(shopify_fulfillment, "_find_ims_order", lambda db, sid: copy.deepcopy(a_read))
+    _reconcile(swept, oid, 1, "AWB-1", "success", _T("01:00"))
+
+    doc = _doc(swept, oid)
+    assert (doc["shopify_fulfillment_id"], doc["awb"]) == ("2", "AWB-2")
+    assert doc[shopify_fulfillment.FULFILLMENT_WATERMARK] == datetime(2026, 9, 6, 3, 0)
+    assert sorted(shopify_fulfillment.tracked_awbs(doc)) == ["AWB-1", "AWB-2"]
