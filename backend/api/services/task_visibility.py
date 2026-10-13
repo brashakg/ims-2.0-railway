@@ -43,7 +43,9 @@ def visibility_filter(current_user: dict) -> Dict[str, Any]:
     if is_cross:
         return {}
     roles = {str(r).strip().upper() for r in (current_user.get("roles") or [])}
-    shops = {"$in": sorted(stores)}
+    # store_ids is unchecked user data: a None / number / "" in it would make
+    # sorted() raise TypeError (a 500 on every task door). Drop it.
+    shops = {"$in": sorted({s for s in stores if isinstance(s, str) and s})}
     uid = current_user.get("user_id")
     seen = [{"assigned_to": uid}, {"assigned_by": uid}, {"created_by": uid}] if uid else []
     if roles & _SHOP_WIDE_ROLES:

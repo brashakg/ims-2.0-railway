@@ -451,3 +451,28 @@ def test_integrity_lists_stay_inside_the_managers_shops(world, path):
     key = "silent" if path.endswith("silent") else "flagged"
     got = {t["task_id"] for t in r.json()[key]}
     assert got and got <= S1_IDS, got
+
+
+@pytest.mark.parametrize("role", ["SALES_STAFF", "STORE_MANAGER", "AREA_MANAGER"])
+def test_junk_store_ids_on_the_token_do_not_500_any_task_door(world, role):
+    """auth copies store_ids from the user record unchecked, so a stray None
+    (or a number, or "") reaches the rule. A bare sorted() of that raised
+    TypeError: a 500 on every task door and on the Reports dashboard. The
+    junk is dropped; the caller sees exactly what the clean token sees."""
+    as_role, _ = world
+    doors = ["/api/v1/tasks", "/api/v1/tasks/summary", "/api/v1/tasks/overdue",
+             f"/api/v1/tasks/P-{role}" if role in STAFF_ROLES else "/api/v1/tasks/U-S1"]
+    clean = {p: as_role(role).get(p).json() for p in doors}
+    clean_dash = as_role(role).get("/api/v1/reports/dashboard", params={"store_id": S1}).json()
+    USERS["JUNK"] = {**USERS[role], "store_ids": [*USERS[role]["store_ids"], None, 7, ""]}
+    try:
+        c = as_role("JUNK")
+        for p in doors:
+            r = c.get(p)
+            assert r.status_code == 200, (p, r.text)
+            assert r.json() == clean[p], p
+        r = c.get("/api/v1/reports/dashboard", params={"store_id": S1})
+        assert r.status_code == 200, r.text
+        assert r.json()["appointmentsToday"] == clean_dash["appointmentsToday"]
+    finally:
+        USERS.pop("JUNK")
