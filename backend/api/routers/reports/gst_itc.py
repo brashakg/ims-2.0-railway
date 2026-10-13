@@ -5,6 +5,7 @@ from datetime import date
 
 from ...services.ap_engine import bill_supplier_gstin, iso_bill_date
 from ...services.org_validation import has_valid_gstin, itc_claimable, shop_gstins
+from ...services.purchase_invoice_engine import determine_place_of_supply
 
 # ============================================================================
 # GST RETURNS - GSTR-3B (Summary Return)
@@ -224,12 +225,16 @@ def _no_credit_inward(db, active_store, year, mon, last_day) -> dict:
     Table 4 reads, so every bill is on one return. A stock-transfer mirror is
     not a purchase and stays out of both. Each bill lands in ONE of the two:
       * Table 5 (exempt, nil-rated, non-GST and composition inward supplies):
-        the taxable value of a bill from an unregistered supplier (no valid
-        GSTIN on the bill -- ap_engine.bill_supplier_gstin, the reconcile's
-        reader -- and not reverse charge, which is 3.1(d)) or one that charged
-        no GST (a composition dealer's, an exempt or nil-rated one), inter-/
-        intra-state by the bill's stored head. Whatever "tax" such a bill
-        shows, it is no GST and not in 4(D).
+        a bill from an unregistered supplier (no valid GSTIN on the bill --
+        ap_engine.bill_supplier_gstin, the reconcile's reader -- and not
+        reverse charge, which is 3.1(d)) at its BILL TOTAL: whatever "tax" it
+        shows is no GST but part of the price, so it is not in 4(D) either.
+        Its supply is inter- or intra-state by THE place-of-supply rule
+        (purchase_invoice_engine.determine_place_of_supply) on the supplier's
+        recorded state (the quick-add records it) against the shop's -- it has
+        no GSTIN for the bill doors to place it by. A bill that charged no GST
+        (a composition dealer's, an exempt or nil-rated one) at its taxable
+        value, by the bill's stored head.
       * Table 4(D) (ineligible ITC): the GST on every other bill that claims
         no input credit -- paid, never claimed. Table 4 (_itc_match) counts
         the claiming bills, so a bill's GST is in one of the two.
@@ -244,15 +249,30 @@ def _no_credit_inward(db, active_store, year, mon, last_day) -> dict:
             "source_transfer_id": None,
         }
 
-        def on_file(vendor_id):
-            row = db["vendors"].find_one({"vendor_id": vendor_id}, {"gstin": 1})
-            return (row or {}).get("gstin")
+        suppliers: dict = {}
+
+        def supplier(vendor_id):
+            if vendor_id not in suppliers:
+                suppliers[vendor_id] = db["vendors"].find_one(
+                    {"vendor_id": vendor_id}, {"_id": 0, "gstin": 1, "state_code": 1, "state": 1}
+                ) or {}
+            return suppliers[vendor_id]
 
         for b in db["vendor_bills"].find(placed, {"_id": 0}):
             tax = b.get("tax_amount")
             no_gst = tax is not None and float(tax or 0) <= 0
-            unregistered = not has_valid_gstin(bill_supplier_gstin(b, on_file))
-            if not b.get("reverse_charge") and (no_gst or unregistered):
+            unregistered = not has_valid_gstin(
+                bill_supplier_gstin(b, lambda vid: supplier(vid).get("gstin"))
+            )
+            if not b.get("reverse_charge") and unregistered:
+                sup = supplier(b.get("vendor_id"))
+                _pos, inter = determine_place_of_supply(
+                    sup.get("state_code") or sup.get("state"),
+                    b.get("recipient_gstin") or store_gstin,
+                )
+                total = float(b.get("taxable_amount") or 0) + float(tax or 0)
+                out["inter" if inter else "intra"] += float(b.get("total_amount") or 0) or total
+            elif not b.get("reverse_charge") and no_gst:
                 side = "inter" if b.get("interstate") else "intra"
                 out[side] += float(b.get("taxable_amount") or 0)
             elif b.get("itc_eligible") is False:

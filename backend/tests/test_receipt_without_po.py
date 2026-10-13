@@ -2162,9 +2162,10 @@ def _three_b(world):
 def test_g3_table_5_reports_the_unregistered_and_no_gst_buys(world):
     """G3: GSTR-3B Table 5 (exempt, nil, non-GST and composition inward
     supplies) carries the purchase from an unregistered supplier (Sharma's
-    walk-in bill, Rs 6200) and a bill that charged no GST (exempt, nil-rated
-    or a composition dealer's: Rs 6200 at 0%), intra-state here; a
-    registered dealer's taxed bill is not there. The portal JSON's inward_sup says the same."""
+    walk-in bill at its total: Rs 6200 + the Rs 310 it calls tax) and a bill
+    that charged no GST (exempt, nil-rated or a composition dealer's: Rs 6200
+    at 0%), intra-state here; a registered dealer's taxed bill is not there.
+    The portal JSON's inward_sup says the same."""
     db = world["db"]
     sharma = _on_the_shelf(world, vendor_id=SHARMA, vendor_invoice_no="1")
     _line_bill(sharma, "1", "2026-09-14", vendor=SHARMA)
@@ -2173,9 +2174,9 @@ def test_g3_table_5_reports_the_unregistered_and_no_gst_buys(world):
     nil = _on_the_shelf(world, vendor_invoice_no="CASH-92")
     _run(pi.create_purchase_invoice(_invoice_body(nil, "CASH-92", rate=0.0), current_user=ACCOUNTANT))
     data, portal = _three_b(world)
-    assert data["inwardExemptNilNonGst"] == {"interState": 0.0, "intraState": 12400.0}
+    assert data["inwardExemptNilNonGst"] == {"interState": 0.0, "intraState": 12710.0}
     gst_row = portal["inward_sup"]["isup_details"][0]
-    assert (gst_row["ty"], gst_row["inter"], gst_row["intra"]) == ("GST", 0.0, 12400.0)
+    assert (gst_row["ty"], gst_row["inter"], gst_row["intra"]) == ("GST", 0.0, 12710.0)
 
 
 def test_g3_table_4d_reports_the_gst_paid_and_never_claimed(world):
@@ -2183,8 +2184,10 @@ def test_g3_table_4d_reports_the_gst_paid_and_never_claimed(world):
     that claims no input credit -- a registered dealer's booked with credit
     switched off (Rs 310) -- and Table 4 the claiming bill (its Rs 310).
     Unregistered Sharma's bill showing Rs 310 'tax' is no GST: it is in
-    Table 5, never in 4(D) as well (round 8: one bill filed as untaxed and
-    taxed). The portal JSON's itc_elg.itc_inelg 'others' row says the same."""
+    Table 5 at its total (6200 + 310 = 6510, round 9: the 310 paid was in
+    neither table), never in 4(D) as well (round 8: one bill filed as untaxed
+    and taxed). The portal JSON's itc_elg.itc_inelg 'others' row says the
+    same."""
     sharma = _on_the_shelf(world, vendor_id=SHARMA, vendor_invoice_no="1")
     _line_bill(sharma, "1", "2026-09-14", vendor=SHARMA)
     off_grn = _on_the_shelf(world, vendor_invoice_no="CASH-93")
@@ -2196,9 +2199,33 @@ def test_g3_table_4d_reports_the_gst_paid_and_never_claimed(world):
     data, portal = _three_b(world)
     assert data["itcIneligible"] == {"integratedTax": 0.0, "centralTax": 155.0, "stateTax": 155.0, "cess": 0.0}
     assert data["itcAvailable"]["centralTax"] + data["itcAvailable"]["stateTax"] == 310.0
-    assert data["inwardExemptNilNonGst"] == {"interState": 0.0, "intraState": 6200.0}
+    assert data["inwardExemptNilNonGst"] == {"interState": 0.0, "intraState": 6510.0}
     others = portal["itc_elg"]["itc_inelg"][1]
     assert (others["ty"], others["camt"], others["samt"]) == ("OTH", 155.0, 155.0)
+
+
+def test_g3_table_5_places_an_unregistered_supplier_by_its_state_at_the_bill_total(world):
+    """Panel probes (round 9): Table 5 placed an unregistered supplier's bill
+    by the bill's stored head, which both bill doors work out from GSTINs --
+    it has none, so unregistered 'Kolkata Optical' (West Bengal, 19, recorded
+    at quick-add) selling to this Jharkhand (20) shop read intra-state. And
+    it took the taxable value only: Sharma's header bill 6200 + 310 'tax'
+    showed 6200 in Table 5 and 0 in 4(D), the Rs 310 paid in neither. THE
+    place-of-supply rule on the supplier's recorded state vs the shop's; the
+    bill total, since what an unregistered dealer calls tax is part of the
+    price."""
+    db = world["db"]
+    sharma = db.vendors.find_one({"vendor_id": SHARMA}, {"_id": 0})
+    db.vendors.insert_one({**sharma, "vendor_id": "V-KOLKATA", "legal_name": "Kolkata Optical", "trade_name": "Kolkata Optical", "state": "West Bengal", "state_code": "19"})
+    _book_as_drafted(_on_the_shelf(world, vendor_id="V-KOLKATA", vendor_invoice_no="K-1"))  # 7460 at 0%
+    _header_bill(_on_the_shelf(world, vendor_id="V-KOLKATA", vendor_invoice_no="K-2"), "K-2", "2026-09-14", vendor="V-KOLKATA")
+    _header_bill(_on_the_shelf(world, vendor_id=SHARMA, vendor_invoice_no="S-1"), "S-1", "2026-09-14", vendor=SHARMA)
+    assert {b["interstate"] for b in db.vendor_bills.find({"vendor_id": "V-KOLKATA"})} == {False}
+    data, portal = _three_b(world)
+    assert data["inwardExemptNilNonGst"] == {"interState": 13970.0, "intraState": 6510.0}
+    assert data["itcIneligible"] == {"integratedTax": 0.0, "centralTax": 0.0, "stateTax": 0.0, "cess": 0.0}
+    gst_row = portal["inward_sup"]["isup_details"][0]
+    assert (gst_row["inter"], gst_row["intra"]) == (13970.0, 6510.0)
 
 
 def _placed_bill(db, bill_id, **over):
@@ -2238,10 +2265,13 @@ def test_g3_each_bill_lands_in_one_table_on_its_own_return(world):
     other_gstin = "27AABCB1234C1ZT"  # this company's Maharashtra registration
     unreg = {"vendor_id": SHARMA, "vendor_gstin": None}
     no_gst = {"tax_amount": 0.0, "cgst_total": 0.0, "sgst_total": 0.0}
-    # Table 5, intra / inter by the bill's head.
-    _placed_bill(db, "T5-INTRA", **unreg, **no_gst)
-    _placed_bill(db, "T5-INTER", **unreg, **no_gst, taxable_amount=2000.0, interstate=True)
-    # An unregistered supplier's bill showing 'tax': Table 5, not 4(D).
+    # Table 5: an unregistered supplier's bill (Sharma, Jharkhand: intra
+    # whatever its stored head) and a registered supplier's no-GST bill,
+    # inter / intra by the bill's head.
+    _placed_bill(db, "T5-INTRA", **unreg, **no_gst, interstate=True)
+    _placed_bill(db, "T5-INTER", vendor_gstin="27AACCD5678E1ZX", **no_gst, taxable_amount=2000.0, interstate=True)
+    # An unregistered supplier's bill showing 'tax': Table 5 at its total
+    # (3000 + 150), not 4(D).
     _placed_bill(db, "T5-TAXED", **unreg, taxable_amount=3000.0, tax_amount=150.0, cgst_total=75.0, sgst_total=75.0)
     # Legacy bills with no vendor_gstin field: the supplier on file decides.
     _placed_bill(db, "T5-LEGACY-URD", vendor_id=SHARMA, **no_gst, taxable_amount=600.0)
@@ -2262,10 +2292,10 @@ def test_g3_each_bill_lands_in_one_table_on_its_own_return(world):
     _placed_bill(db, "MIRROR-4D", **mirror, cgst_total=40.0, sgst_total=40.0)
 
     data, portal = _three_b(world)
-    assert data["inwardExemptNilNonGst"] == {"interState": 2000.0, "intraState": 4600.0}
+    assert data["inwardExemptNilNonGst"] == {"interState": 2000.0, "intraState": 4750.0}
     assert data["itcIneligible"] == {"integratedTax": 90.0, "centralTax": 25.0, "stateTax": 25.0, "cess": 0.0}
     gst_row = portal["inward_sup"]["isup_details"][0]
-    assert (gst_row["inter"], gst_row["intra"]) == (2000.0, 4600.0)
+    assert (gst_row["inter"], gst_row["intra"]) == (2000.0, 4750.0)
     others = portal["itc_elg"]["itc_inelg"][1]
     assert (others["iamt"], others["camt"], others["samt"]) == (90.0, 25.0, 25.0)
     # The GSTR-2B reconcile reads a bill's GSTIN by the same rule.
