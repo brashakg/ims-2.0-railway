@@ -2567,6 +2567,13 @@ async def update_catalog_product(
         )
     message = "Product updated successfully"
     if spine_gtin is not None:
+        # A size with no website row: refused BEFORE the spine write, or the
+        # spine would take the code while the twin (refused below) never can.
+        if _is_variant_of(existing):
+            try:
+                _pm.assert_size_row(existing.get("sku"), _get_db())
+            except _pm.ProductMasterError as err:
+                raise HTTPException(status_code=err.status, detail=err.message) from err
         if _spine_id:
             try:
                 _pm.write_spine_gtin(_pr, _spine_id, spine_gtin)
@@ -2582,7 +2589,8 @@ async def update_catalog_product(
         # and NOT fail-soft -- as Manage Barcode: a size left on the old code is
         # a failed save. Refused, the twin is not saved, so the retry (the same
         # payload and updated_at) redoes it.
-        # No row for its sku (False) is a failed size write too.
+        # A False here is a row deleted since the check above: a failed size
+        # write too.
         if _is_variant_of(existing):
             try:
                 if not _pm._mirror_variant_row_update(

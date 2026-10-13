@@ -1185,23 +1185,28 @@ def test_a_drawer_barcode_removal_clears_the_size_rows_gtin_and_barcode(monkeypa
     assert not _spine(db, "sp-child")["attributes"]["gtin"]
 
 
-def test_a_drawer_barcode_edit_on_a_size_with_no_row_is_a_503(monkeypatch):
+def test_a_drawer_barcode_edit_on_a_size_with_no_row_saves_nothing(monkeypatch):
     """No catalog_variants row for the size's sku means the barcode cannot
-    reach the website: a failed size write (503, twin not saved), like a
-    refused row write, never 'Product updated successfully'."""
+    reach the website, and saving again cannot help: refused (422) BEFORE the
+    spine write, so the till's copy (the spine) and the catalogue copy (the
+    twin) keep ONE code -- never 'Product updated successfully', never a
+    'nothing saved' that left the spine on the new code."""
     from fastapi import HTTPException
 
     db = _world()
     _wire_catalog(monkeypatch, db)
     db["catalog_variants"].delete_one({"sku": CHILD_SKU})
-    twin_before = _twin(db, "tw-child")
+    twin_before, spine_before = _twin(db, "tw-child"), _spine(db, "sp-child")
 
     with pytest.raises(HTTPException) as ei:
         _run(cat.update_catalog_product(
             "tw-child", cat.ProductUpdateInput(attributes={"gtin": "4006381333931"}),
             current_user=ADMIN,
         ))
-    assert ei.value.status_code == 503
+    assert ei.value.status_code == 422
+    assert "Nothing was saved" in ei.value.detail
+    assert _spine(db, "sp-child") == spine_before
+    assert _spine(db, "sp-child")["attributes"]["gtin"] == CHILD_GTIN
     assert _twin(db, "tw-child") == twin_before
 
 

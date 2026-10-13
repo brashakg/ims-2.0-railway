@@ -618,10 +618,12 @@ class TestGtinAttributeOnTheEditDoor:
         row = mock_db["catalog_variants"].find_one({"sku": "CH-1"})
         assert row["gtin"] is None and row["barcode"] is None
 
-    def test_manage_barcode_on_a_size_with_no_row_is_a_503(self, mock_db, mirror_on):
+    def test_manage_barcode_on_a_size_with_no_row_saves_nothing(self, mock_db, mirror_on):
         """A size variant's barcode reaches the website only on its
-        catalog_variants row: with none for its sku the save is a failed size
-        write (503), as in the catalogue editor, never 'Product updated'."""
+        catalog_variants row: with none for its sku the save is refused (422)
+        BEFORE any write, as in the catalogue editor -- the spine and its
+        catalogue copy keep one code, and the answer never says 'Product
+        updated' or 'press Save again' (it can never land while no row)."""
         from fastapi import HTTPException
         from api.services import product_master as pm
         from database.repositories.catalog_variant_repository import (
@@ -647,9 +649,19 @@ class TestGtinAttributeOnTheEditDoor:
             db=mock_db,
         )
         assert mock_db["catalog_variants"].delete_one({"sku": "GT-NR-L"}).deleted_count
+        spine = mock_db["products"].find_one({"product_id": child["product_id"]})
+        twin_id = spine.get("pim_product_id") or child["product_id"]
+        spine_before = (spine.get("attributes") or {}).get("gtin")
+        twin_before = mock_db["catalog_products"].find_one({"id": twin_id})
+        assert twin_before is not None
         with pytest.raises(HTTPException) as ei:
             _update(child["product_id"], attributes={"gtin": _VALID_B})
-        assert ei.value.status_code == 503
+        assert ei.value.status_code == 422
+        assert "Nothing was saved" in ei.value.detail
+        assert "will not help" in ei.value.detail
+        spine = mock_db["products"].find_one({"product_id": child["product_id"]})
+        assert (spine.get("attributes") or {}).get("gtin") == spine_before != _VALID_B
+        assert mock_db["catalog_products"].find_one({"id": twin_id}) == twin_before
 
     def test_stock_row_offers_the_gtin_not_the_unit_code(self):
         """Manage Barcode opens pre-filled from the row's `gtin`. It used to be

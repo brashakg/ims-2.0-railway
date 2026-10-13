@@ -3228,6 +3228,34 @@ def _resolve_variant_parent(
     return parent
 
 
+def assert_size_row(sku: Any, db) -> None:
+    """A size variant's barcode reaches the website only on its
+    catalog_variants row. With no row for its sku the barcode can never land
+    on every copy and saving again cannot help, so both barcode doors (Manage
+    Barcode, the catalogue review editor) call this BEFORE their first write:
+    422 with nothing saved, so the billing product, the catalogue copy and the
+    row never disagree. A failed read is a 503, nothing saved either."""
+    try:
+        found = bool(sku) and db.get_collection("catalog_variants").find_one(
+            {"sku": sku}, {"_id": 1}
+        ) is not None
+    except Exception as exc:  # noqa: BLE001
+        raise ProductMasterError(
+            "Could not check this size's website row, so nothing was saved. "
+            "Please save again.",
+            status=503,
+            field="gtin",
+        ) from exc
+    if not found:
+        raise ProductMasterError(
+            f"This size ({sku or 'no SKU'}) has no row on its product's website "
+            "listing, so its barcode cannot be sent there. Nothing was saved. "
+            "Saving again will not help until the size is back on the listing.",
+            status=422,
+            field="gtin",
+        )
+
+
 def _mirror_variant_row_update(
     *, current: Dict[str, Any], patch: Dict[str, Any], db, mark_dirty: bool = True
 ) -> bool:

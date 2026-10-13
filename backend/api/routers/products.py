@@ -3687,6 +3687,18 @@ async def update_product(
             )
         )
 
+        # A size with no website row can never take the barcode on every copy:
+        # refused BEFORE the spine write (the same check as the review editor).
+        if _barcode_moved and existing.get("variant_of"):
+            try:
+                from ..dependencies import get_db as _gdb_row
+
+                _pm.assert_size_row(existing.get("sku"), _gdb_row())
+            except _pm.ProductMasterError as err:
+                raise HTTPException(
+                    status_code=err.status, detail=_pm_error_detail(err)
+                ) from err
+
         if repo.update(product_id, update_data):
             if _gtin_written and "barcode" not in update_data:
                 _pm.drop_legacy_spine_barcode(repo, product_id)
