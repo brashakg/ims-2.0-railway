@@ -166,7 +166,7 @@ export function OperationalRulesSection() {
             aria-label={LIMIT_LABEL}
             value={text}
             disabled={!loaded}
-            placeholder={loaded ? undefined : 'Loading...'}
+            placeholder={loaded || loadError ? undefined : 'Loading...'}
             onChange={(e) => setText(e.target.value)}
             aria-invalid={!!limitError}
             aria-describedby={limitError ? 'credit-limit-error' : loaded ? 'credit-limit-amount' : undefined}

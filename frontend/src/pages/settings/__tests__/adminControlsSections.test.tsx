@@ -146,6 +146,7 @@ describe('/settings/rules: the default credit limit, nothing else', () => {
     expect(button).toBeDisabled();
     expect(screen.getByRole('spinbutton')).toBeDisabled();
     expect(screen.getByRole('spinbutton')).toHaveValue(null);
+    expect(screen.getByPlaceholderText('Loading...')).toBeInTheDocument();
     expect(document.body.textContent).not.toMatch(/1,?50,?000/);
     fireEvent.click(button);
     expect(mockUpdateAdminControls).not.toHaveBeenCalled();
@@ -177,6 +178,7 @@ describe('/settings/rules: the default credit limit, nothing else', () => {
     arrange();
     renderRoute('/settings/rules', ['SUPERADMIN']);
     expect(await screen.findByRole('alert', undefined, FIND)).toHaveTextContent(/Could not load the saved settings/);
+    expect(screen.queryByPlaceholderText('Loading...')).toBeNull();
     const button = screen.getByRole('button', { name: /^Save Operational Rules$/ });
     expect(button).toBeDisabled();
     fireEvent.click(button);
