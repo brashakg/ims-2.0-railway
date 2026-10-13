@@ -201,8 +201,8 @@ export function flattenTasks(data: { pages: TaskPage[] } | undefined): Task[] {
   return data?.pages.flatMap((p) => p.tasks) ?? [];
 }
 
-/** Store-wide status counts. Store-scoped on the server, so this is only ever
- *  shown to the roles allowed to see the whole store (see taskRoles.ts). */
+/** Status counts, counted on the server by the same rule as the list, so each
+ *  count equals its list (`total` = the list with no status: all but cancelled). */
 export function useTaskSummary(storeId: string | undefined) {
   const viewer = useViewer();
   return useQuery({

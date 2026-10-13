@@ -2,8 +2,8 @@
 // IMS 2.0 - Tasks: the priority strip + list + detail panel
 // ============================================================================
 // ONE implementation, used by both /tasks/mine and /tasks/team. They differ by
-// a single server parameter (`assigned_to`), so they are one component with a
-// scope prop rather than two pages that will drift.
+// a single server parameter (`assigned_to`, sent on a manager's Mine only), so
+// they are one component with a scope prop rather than two pages that drift.
 //
 // NO 30-DAY BROWSE HORIZON HERE (owner ruling 2026-09-03). A task queue is
 // work IN HAND, not a browse-by-date list: an open P0 raised 45 days ago must
@@ -49,7 +49,8 @@ const PRI_VAR: Record<PCode, string> = {
 const STATUS_OPTIONS: TaskStatus[] = ['OPEN', 'IN_PROGRESS', 'ESCALATED', 'COMPLETED'];
 
 export interface TasksSplitViewProps {
-  /** 'mine' adds the server-side assigned_to filter; 'team' does not. */
+  /** 'mine' adds the server-side assigned_to filter for a manager (below
+   *  manager the server rule alone is "mine"); 'team' never does. */
   scope: 'mine' | 'team';
   /** Copy for the empty state, which differs meaningfully between the two. */
   emptyLine: string;
