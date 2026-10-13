@@ -1,5 +1,5 @@
 // ============================================================================
-// Quick Add - the product-image machinery (upload / remove / remove-bg).
+// Quick Add - the product-image machinery (upload / remove / move / remove-bg).
 // ============================================================================
 // MOVED verbatim out of QuickAddPage.tsx (Wave 3 file diet). `images` itself
 // stays in useQuickAddForm (it rides in ProductFormValues, so the reset /
@@ -10,6 +10,20 @@
 import { useCallback, useRef, useState } from 'react';
 import { useToast } from '../../../context/ToastContext';
 import { productApi } from '../../../services/api/products';
+
+/** THE photo move rule (owner 2026-10-12): take the photo at `from` out and
+ *  put it back at `to`. A drag and the Earlier / Later buttons both go
+ *  through here, so they always produce the same array. The order IS the
+ *  saved images array: photo 1 (index 0) is the main photo on the website and
+ *  at the till. A no-op or out-of-range move returns the same array. */
+export function movePhoto<T>(list: T[], from: number, to: number): T[] {
+  const n = list.length;
+  if (from === to || from < 0 || to < 0 || from >= n || to >= n) return list;
+  const next = [...list];
+  const [photo] = next.splice(from, 1);
+  next.splice(to, 0, photo);
+  return next;
+}
 
 export function useProductImages(setImages: React.Dispatch<React.SetStateAction<string[]>>) {
   const toast = useToast();
@@ -88,6 +102,10 @@ export function useProductImages(setImages: React.Dispatch<React.SetStateAction<
     setImages((prev) => prev.filter((u) => u !== url));
   }, [setImages]);
 
+  const moveImage = useCallback((from: number, to: number) => {
+    setImages((prev) => movePhoto(prev, from, to));
+  }, [setImages]);
+
   // A self-hosted product image looks like /api/v1/products/image/{file_id}
   // (absolute or relative). Return the file_id for those; null for an external
   // URL (e.g. a pasted brand-site photo) — editImage RE-HOSTS those first.
@@ -152,6 +170,7 @@ export function useProductImages(setImages: React.Dispatch<React.SetStateAction<
     onImageInputChange,
     onImageDrop,
     removeImage,
+    moveImage,
     editImage,
   };
 }
