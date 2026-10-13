@@ -495,9 +495,12 @@ async def update_return_status(
         if "_id" in updated_doc:
             del updated_doc["_id"]
 
+        # A manager may move a return on, and type its price at approval, but
+        # what we pay is read back by the accounts roles only (owner ruling
+        # 2026-10-12).
         return {
             "message": f"Return status updated to {status_update.status}",
-            "return": updated_doc,
+            "return": mask_vendor_return(updated_doc, current_user),
         }
 
     except HTTPException:
