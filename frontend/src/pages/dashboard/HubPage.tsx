@@ -16,6 +16,7 @@ import HandoffInboxCard from '../../components/handoffs/HandoffInboxCard';
 import { HandoffUploadModal } from '../../components/handoffs/HandoffUploadModal';
 import ClinicalHandoverCard from '../../components/handoffs/ClinicalHandoverCard';
 import { NewTaskModal } from '../../components/tasks/NewTaskModal';
+import { canSeeTeamTasks } from '../tasks/taskRoles';
 import DashboardNotifications from '../../components/notifications/DashboardNotifications';
 import OwnerDigestCard from '../../components/dashboard/OwnerDigestCard';
 import TickerCard from '../../components/hub/TickerCard';
@@ -109,6 +110,9 @@ export default function HubPage() {
   // and the POS/Clinical cards are swapped for online-store surfaces below.
   // Display-only: no POS or billing logic changes.
   const isOnlineStoreActive = useIsOnlineStore();
+  // Where the Hub's task figure and list lead: a manager's count is the whole
+  // shop's, so Team; everyone else's is their own, so Mine.
+  const tasksHome = canSeeTeamTasks(user?.roles) ? '/tasks/team' : '/tasks/mine';
   const [meta, setMeta] = useState<HeroMeta>({
     salesToday: '—',
     salesDelta: '',
@@ -351,7 +355,7 @@ export default function HubPage() {
         },
     {
       id: 'tasks',
-      to: '/tasks',
+      to: tasksHome,
       title: 'Tasks & SOPs',
       eyebrow: 'Ops',
       desc: 'P0–P4 priorities with countdown timers and auto-escalation tied to SOPs.',
@@ -492,7 +496,7 @@ export default function HubPage() {
             <span className="hub-work-title">
               <AlertTriangle size={16} /> Priority tasks
             </span>
-            <button className="hub-work-link" onClick={() => navigate('/tasks')}>
+            <button className="hub-work-link" onClick={() => navigate(tasksHome)}>
               View all <ChevronRight size={14} />
             </button>
           </div>
@@ -508,7 +512,7 @@ export default function HubPage() {
                 const due = dueLabel(t.due_at);
                 return (
                   <li key={t.id || t.title}>
-                    <button className="hub-task-row" onClick={() => navigate('/tasks')}>
+                    <button className="hub-task-row" onClick={() => navigate(tasksHome)}>
                       <span className={`hub-prio hub-prio-${t.priority.toLowerCase()}`}>
                         {t.priority}
                       </span>

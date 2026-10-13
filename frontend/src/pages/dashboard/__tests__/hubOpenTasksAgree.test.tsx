@@ -10,8 +10,8 @@
 // asked for (comma-separated) and reports the matching total. Ask for OPEN
 // only and the started task disappears -> this test goes red.
 
-import { render, screen, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { fireEvent, render, screen, within } from '@testing-library/react';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('../../../services/api', () => ({
@@ -19,10 +19,11 @@ vi.mock('../../../services/api', () => ({
   clinicalApi: { getQueue: vi.fn() },
   tasksApi: { getTasks: vi.fn(), getTaskSummary: vi.fn(), getSopTemplates: vi.fn() },
 }));
+let role = 'SALES_STAFF';
 vi.mock('../../../context/AuthContext', () => ({
   useAuth: () => ({
-    user: { id: 'u-sales', activeStoreId: 'BV-S1', roles: ['SALES_STAFF'], activeRole: 'SALES_STAFF' },
-    hasRole: (roles: string[]) => roles.includes('SALES_STAFF'),
+    user: { id: 'u-sales', activeStoreId: 'BV-S1', roles: [role], activeRole: role },
+    hasRole: (roles: string[]) => roles.includes(role),
     hasModuleAccess: () => true,
   }),
 }));
@@ -52,6 +53,7 @@ const MINE = [
 ];
 
 beforeEach(() => {
+  role = 'SALES_STAFF';
   mocked(analyticsApi.getDashboardSummary).mockResolvedValue({});
   mocked(clinicalApi.getQueue).mockResolvedValue([]);
   mocked(tasksApi.getSopTemplates).mockResolvedValue({ templates: [] });
@@ -75,5 +77,40 @@ describe('Hub task figure and list', () => {
     expect(screen.queryByText(/Nothing urgent/)).not.toBeInTheDocument();
     const card = screen.getByText('Open Tasks').parentElement as HTMLElement;
     expect(within(card).getByText('1')).toBeInTheDocument();
+  });
+});
+
+// The figure is a manager's whole shop, everyone else's own tasks, so the
+// Hub's 'View all', its task rows and the Tasks card lead to that same list.
+describe('Hub task links', () => {
+  it.each([
+    ['SALES_STAFF', '/tasks/mine'],
+    ['CASHIER', '/tasks/mine'],
+    ['STORE_MANAGER', '/tasks/team'],
+    ['AREA_MANAGER', '/tasks/team'],
+  ])('%s goes to %s', async (who, to) => {
+    role = who;
+    const view = () =>
+      render(
+        <MemoryRouter>
+          <Routes>
+            <Route path="/" element={<HubPage />} />
+            <Route path="/tasks/mine" element={<p>The Mine list</p>} />
+            <Route path="/tasks/team" element={<p>The Team list</p>} />
+          </Routes>
+        </MemoryRouter>,
+      );
+    const page = to === '/tasks/team' ? 'The Team list' : 'The Mine list';
+
+    let r = view();
+    expect(screen.getByRole('link', { name: /Tasks & SOPs/ })).toHaveAttribute('href', to);
+    fireEvent.click(screen.getByRole('button', { name: /View all/ }));
+    expect(screen.getByText(page)).toBeInTheDocument();
+    r.unmount();
+
+    r = view();
+    fireEvent.click(await screen.findByRole('button', { name: /Fit Mr Iyer's new lenses/ }));
+    expect(screen.getByText(page)).toBeInTheDocument();
+    r.unmount();
   });
 });

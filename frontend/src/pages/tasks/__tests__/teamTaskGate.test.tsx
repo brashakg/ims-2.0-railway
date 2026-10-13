@@ -67,6 +67,11 @@ describe('the one team-task role list', () => {
     expect(canSeeTeamTasks(['ACCOUNTANT'])).toBe(false);
   });
 
+  it('reads a role in any case, like the server (a token may say "store_manager")', () => {
+    for (const role of TEAM_TASK_ROLES) expect(canSeeTeamTasks([role.toLowerCase()])).toBe(true);
+    expect(canSeeTeamTasks(['sales_staff'])).toBe(false);
+  });
+
   it('covers the four floor roles for Mine and the daily checklist', () => {
     for (const role of ['SALES_STAFF', 'CASHIER', 'OPTOMETRIST', 'WORKSHOP_STAFF'] as UserRole[]) {
       expect(TASK_MODULE_ROLES).toContain(role);

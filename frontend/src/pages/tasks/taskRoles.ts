@@ -58,8 +58,9 @@ export const TASK_MODULE_ROLES: UserRole[] = [
   'CATALOG_MANAGER',
 ];
 
-/** The runtime half of the same ruling, for nav/tab visibility. */
+/** The runtime half of the same ruling, for nav/tab visibility. Roles are
+ *  read case-insensitively, like the server's task rule (task_roles). */
 export function canSeeTeamTasks(roles: readonly string[] | undefined | null): boolean {
   if (!roles) return false;
-  return roles.some((r) => (TEAM_TASK_ROLES as readonly string[]).includes(r));
+  return roles.some((r) => (TEAM_TASK_ROLES as readonly string[]).includes(String(r).toUpperCase()));
 }
