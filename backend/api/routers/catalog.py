@@ -2582,13 +2582,15 @@ async def update_catalog_product(
         # and NOT fail-soft -- as Manage Barcode: a size left on the old code is
         # a failed save. Refused, the twin is not saved, so the retry (the same
         # payload and updated_at) redoes it.
+        # No row for its sku (False) is a failed size write too.
         if _is_variant_of(existing):
             try:
-                _pm._mirror_variant_row_update(
+                if not _pm._mirror_variant_row_update(
                     current=existing,
                     patch={"attributes": {"gtin": spine_gtin}},
                     db=_get_db(),
-                )
+                ):
+                    raise LookupError(f"no size row for {existing.get('sku')}")
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(
                     status_code=503,

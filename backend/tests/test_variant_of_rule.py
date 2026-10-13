@@ -1167,6 +1167,26 @@ def test_a_drawer_barcode_edit_the_size_row_refuses_is_a_503_and_save_again_land
     assert _twin(db, "tw-child")["mrp"] == 47000.0
 
 
+def test_a_drawer_barcode_edit_on_a_size_with_no_row_is_a_503(monkeypatch):
+    """No catalog_variants row for the size's sku means the barcode cannot
+    reach the website: a failed size write (503, twin not saved), like a
+    refused row write, never 'Product updated successfully'."""
+    from fastapi import HTTPException
+
+    db = _world()
+    _wire_catalog(monkeypatch, db)
+    db["catalog_variants"].delete_one({"sku": CHILD_SKU})
+    twin_before = _twin(db, "tw-child")
+
+    with pytest.raises(HTTPException) as ei:
+        _run(cat.update_catalog_product(
+            "tw-child", cat.ProductUpdateInput(attributes={"gtin": "4006381333931"}),
+            current_user=ADMIN,
+        ))
+    assert ei.value.status_code == 503
+    assert _twin(db, "tw-child") == twin_before
+
+
 def test_push_image_never_attaches_a_childs_photo_to_the_parents_listing(monkeypatch):
     """P3: push_image resolves the media target from the image's product
     twin. Invariant 1 (a child twin never carries a gid) is enforced

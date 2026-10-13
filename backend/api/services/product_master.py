@@ -3218,7 +3218,7 @@ def _resolve_variant_parent(
 
 def _mirror_variant_row_update(
     *, current: Dict[str, Any], patch: Dict[str, Any], db, mark_dirty: bool = True
-) -> None:
+) -> bool:
     """The SIZE-VARIANT half of the spine-edit mirror: a child's mrp / gtin
     live on its catalog_variants row (the price push reads the ROW, never the
     child twin), and the listing that must carry them is the PARENT's.
@@ -3230,29 +3230,33 @@ def _mirror_variant_row_update(
     PARENT twin. The child twin is never queued. ``mark_dirty=False`` (the
     #1137 opt-out: a write that only makes IMS agree with Shopify) still
     mirrors the row but skips the engine AND the queue -- the engine queues
-    the parent itself, so it waits for its next product-level pass. Fail-soft."""
+    the parent itself, so it waits for its next product-level pass. False
+    when NO row has that sku (nothing written): a barcode door answers that
+    as a failed size write. True otherwise (written, or nothing to write)."""
     if "mrp" not in patch and "gtin" not in (patch.get("attributes") or {}):
-        return
+        return True
     sku = current.get("sku")
     if not sku:
-        return
+        return False
     row_patch: Dict[str, Any] = {}
     if "mrp" in patch:
         row_patch["mrp"] = patch["mrp"]
     if "gtin" in (patch.get("attributes") or {}):
         row_patch.update(twin_barcode_fields(patch["attributes"].get("gtin")))
     variants = db.get_collection("catalog_variants")
-    variants.update_one({"sku": sku}, {"$set": row_patch})
+    res = variants.update_one({"sku": sku}, {"$set": row_patch})
+    if not getattr(res, "matched_count", 1):
+        return False
     if not mark_dirty:
-        return
+        return True
     row = variants.find_one({"sku": sku}) or {}
     parent_twin_id = row.get("parent_product_id")
     if not parent_twin_id:
-        return
+        return True
     cat = db.get_collection("catalog_products")
     parent_twin = cat.find_one({"id": parent_twin_id})
     if parent_twin is None:
-        return
+        return True
     if "mrp" in row_patch:
         try:
             from .online_discount_engine import recompute_online_price
@@ -3265,6 +3269,7 @@ def _mirror_variant_row_update(
         except Exception:  # noqa: BLE001 -- the engine is fail-soft by contract
             logger.warning("[PM] online price recompute skipped for %s", sku, exc_info=True)
     cat.update_one({"id": parent_twin_id}, {"$set": {"ecom.locally_modified": True}})
+    return True
 
 
 def mirror_update_to_catalog_twin(
@@ -3402,24 +3407,26 @@ def mirror_update_to_catalog_twin(
                 cat_patch["title"] = new_name
                 if mark_dirty:
                     cat_patch["ecom.locally_modified"] = True
+        row_ok = True
         if current.get("variant_of"):
             # A SIZE VARIANT owns no listing: its twin is NEVER queued (a
             # rename never expects Shopify -- the title is the parent's), and
             # its price / barcode reach the storefront through its
-            # catalog_variants row on the PARENT's next push.
+            # catalog_variants row on the PARENT's next push. No row for its
+            # sku is a failed mirror (False), as a refused row write is.
             cat_patch.pop("ecom.locally_modified", None)
-            _mirror_variant_row_update(
+            row_ok = _mirror_variant_row_update(
                 current=current, patch=patch, db=db, mark_dirty=mark_dirty
             )
         if not cat_patch:
-            return True
+            return row_ok
         if cat_patch.get("ecom.locally_modified"):
             if twin is None:
                 twin = cat.find_one({"id": twin_id}) or {}
             if not (twin.get("ecom") or {}).get("status"):
                 cat_patch["ecom.status"] = "DRAFT"
         cat.update_one({"id": twin_id}, {"$set": cat_patch})
-        return True
+        return row_ok
     except Exception:  # noqa: BLE001 -- the spine save must stand regardless
         logger.warning(
             "[PM] catalog twin mirror skipped for %s", product_id, exc_info=True

@@ -618,6 +618,39 @@ class TestGtinAttributeOnTheEditDoor:
         row = mock_db["catalog_variants"].find_one({"sku": "CH-1"})
         assert row["gtin"] is None and row["barcode"] is None
 
+    def test_manage_barcode_on_a_size_with_no_row_is_a_503(self, mock_db, mirror_on):
+        """A size variant's barcode reaches the website only on its
+        catalog_variants row: with none for its sku the save is a failed size
+        write (503), as in the catalogue editor, never 'Product updated'."""
+        from fastapi import HTTPException
+        from api.services import product_master as pm
+        from database.repositories.catalog_variant_repository import (
+            CatalogVariantRepository,
+        )
+        from database.repositories.product_repository import ProductRepository
+
+        parent_id = _create("GT-NR")["product_id"]
+        child = pm.create_via_door(
+            {
+                "category": "FRAME",
+                "sku": "GT-NR-L",
+                "attributes": {"brand_name": "B", "model_no": "M-GT-NR",
+                               "colour_code": "Black", "size": "Large"},
+                "mrp": 1100.0,
+                "offer_price": 1100.0,
+                "variant_of": parent_id,
+            },
+            source="MASTER",
+            actor="u-admin",
+            product_repo=ProductRepository(mock_db["products"]),
+            variant_repo=CatalogVariantRepository(mock_db["catalog_variants"]),
+            db=mock_db,
+        )
+        assert mock_db["catalog_variants"].delete_one({"sku": "GT-NR-L"}).deleted_count
+        with pytest.raises(HTTPException) as ei:
+            _update(child["product_id"], attributes={"gtin": _VALID_B})
+        assert ei.value.status_code == 503
+
     def test_stock_row_offers_the_gtin_not_the_unit_code(self):
         """Manage Barcode opens pre-filled from the row's `gtin`. It used to be
         pre-filled with the row's `barcode` -- a unit's IMS code such as
