@@ -26,7 +26,7 @@ from ._shared import (
     validate_store_access,
 )
 from ...services.cost_mask import can_see_cost, mask_purchase
-from .cockpit import last_paid_prices
+from .cockpit import server_line_prices
 from .gst import (
     _PO_PROVISIONAL_COST_SOURCE,
     _promote_cost_from_rate,
@@ -208,9 +208,6 @@ async def create_pos_from_forecast(
                 continue
 
             vendor_id = prod.get("preferred_vendor_id") or "UNASSIGNED"
-            unit_price = float(
-                prod.get("cost_price", 0) or prod.get("purchase_price", 0) or 0
-            )
             sku = sales.get("sku") or prod.get("sku", "")
             product_name = sales.get("product_name") or prod.get("name", "")
 
@@ -224,7 +221,6 @@ async def create_pos_from_forecast(
                 "predicted_demand": round(predicted, 1),
                 "safety_buffer": round(buffer, 1),
                 "reorder_quantity": reorder_qty,
-                "estimated_unit_price": unit_price,
             }
             suggestions.append(suggestion)
 
@@ -235,9 +231,25 @@ async def create_pos_from_forecast(
                         "product_name": product_name,
                         "sku": sku,
                         "quantity": reorder_qty,
-                        "unit_price": unit_price,
                     }
                 )
+
+        # Every line priced by the one rule create_po uses (server_line_prices:
+        # last paid to this vendor, else the catalogue cost, else None).
+        prices: dict = {}
+        for sg in suggestions:
+            prices.setdefault(sg["vendor_id"], {})[sg["product_id"]] = (
+                prod_docs.get(sg["product_id"]) or {}
+            ).get("cost_price")
+        prices = {
+            v: server_line_prices(None if v == "UNASSIGNED" else v, cat)
+            for v, cat in prices.items()
+        }
+        for sg in suggestions:
+            sg["estimated_unit_price"] = prices[sg["vendor_id"]][sg["product_id"]]
+        for v_id, lines in reorder_items.items():
+            for ln in lines:
+                ln["unit_price"] = prices[v_id][ln["product_id"]]
 
         # --- Step 3: create DRAFT POs per vendor group ---
         created_pos = []
@@ -485,13 +497,12 @@ async def create_po(
     # raises a task for accounts (po_detail._flag_unpriced_lines).
     unpriced = [it for it in po.items if not it.unit_price]
     if unpriced:
-        paid = last_paid_prices(
-            po.vendor_id, {it.product_id for it in unpriced}, lambda _store: True
+        prices = server_line_prices(
+            po.vendor_id,
+            {it.product_id: (products.get(it.product_id) or {}).get("cost_price") for it in unpriced},
         )
         for it in unpriced:
-            last = (paid.get(it.product_id) or {}).get("unit_price")
-            catalogue = (products.get(it.product_id) or {}).get("cost_price")
-            it.unit_price = float(last or catalogue or 0) or None
+            it.unit_price = prices[it.product_id]
     computed = build_po_gst(
         # A typed-in new product was minted onto the spine above and its line
         # given a real product_id; the spent `new_product: None` payload must
@@ -594,7 +605,9 @@ async def create_po(
             # purchase document, so a taxed line with no HSN is still a problem the
             # buyer has to be told about.
             "gst_warnings": gst_warnings,
-            "cost_filled": cost_filled,
+            # Only the roles that typed (or see) the rates are told a cost was
+            # recorded from them: a manager typed none (owner ruling 2026-10-12).
+            "cost_filled": cost_filled if sees_prices else [],
             "message": "Purchase order created",
         },
         current_user,

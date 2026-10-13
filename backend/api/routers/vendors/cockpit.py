@@ -316,6 +316,26 @@ def last_paid_prices(vendor_id, wanted, may_see_store) -> dict:
     return costs
 
 
+def server_line_prices(vendor_id, catalogue_cost) -> dict:
+    """THE one rule that prices a PO line nobody priced (owner ruling
+    2026-10-12), for every door that makes a PO: create_po (a manager's lines,
+    a blank left by accounts), the demand-forecast drafts and the CL / lens
+    drafts. `catalogue_cost` maps each product_id to its catalogue cost (or
+    None). Each takes the price last paid to this vendor (last_paid_prices,
+    every shop: nobody is shown it here), else the catalogue cost; neither
+    known -> None, never a made-up 0 (sending the PO then raises the accounts
+    task, po_detail._flag_unpriced_lines). Returns {product_id: price | None}."""
+    paid = last_paid_prices(vendor_id, set(catalogue_cost), lambda _store: True)
+    out = {}
+    for pid, catalogue in catalogue_cost.items():
+        last = (paid.get(pid) or {}).get("unit_price")
+        try:
+            out[pid] = float(last or catalogue or 0) or None
+        except (TypeError, ValueError):
+            out[pid] = None
+    return out
+
+
 
 
 @router.get("/po-gst-heads")

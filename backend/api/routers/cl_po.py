@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field
 
 from .auth import require_roles
 from .vendors import build_po_gst, generate_po_number, po_gst_context
+from .vendors.cockpit import server_line_prices
 from ..dependencies import (
     get_audit_repository,
     get_purchase_order_repository,
@@ -408,6 +409,13 @@ async def generate_cl_po(
                     vendor_name = vendor.get("trade_name") or vendor.get("legal_name")
             except Exception:  # noqa: BLE001
                 vendor_name = None
+        # The one PO line price rule (server_line_prices): last paid to this
+        # vendor, else the lens line's catalogue cost, else None -- never 0.
+        prices = server_line_prices(
+            vendor_id, {ln["product_id"]: ln.get("unit_price") or None for ln in lines}
+        )
+        for ln in lines:
+            ln["unit_price"] = prices[ln["product_id"]]
         subtotal = round(
             sum(ln["quantity"] * float(ln.get("unit_price") or 0) for ln in lines), 2
         )

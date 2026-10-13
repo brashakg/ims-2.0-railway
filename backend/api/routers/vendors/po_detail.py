@@ -18,6 +18,7 @@ from ._shared import (
     router,
 )
 from ...services.cost_mask import can_see_cost, mask_purchase
+from ...services.purchase_match import is_unpriced_line
 
 
 def _stamp_event_actors(events: list) -> None:
@@ -349,7 +350,7 @@ def _flag_unpriced_lines(po: dict) -> None:
         it.get("product_name") or it.get("sku") or it.get("product_id") or "an item"
         for it in po.get("items") or []
         if isinstance(it, dict)
-        and not it.get("unit_price")  # None from create_po, 0.0 from a CL draft
+        and is_unpriced_line(it)
         and it.get("line_status") != "CANCELLED"
     ]
     if not names:
