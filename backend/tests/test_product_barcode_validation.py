@@ -214,7 +214,15 @@ class TestBarcodeValidatorPure:
             assert ei.value.status_code == 409 and holder in str(ei.value.detail)
 
     @pytest.mark.parametrize(
-        "held", [{"attributes": {"gtin": _VALID_A}}, {"gtin": "0" + _VALID_A}]
+        "held",
+        [
+            {"attributes": {"gtin": _VALID_A}},
+            {"gtin": "0" + _VALID_A},
+            # A legacy twin with only a top-level barcode: the push still sends
+            # it as the variant barcode (product_input falls back to it).
+            {"barcode": _VALID_A},
+            {"barcode": "0" + _VALID_A},
+        ],
     )
     def test_a_catalogue_twin_with_no_spine_holds_its_gtin(self, held):
         """POST /catalog/products/import writes only a catalog_products twin,
