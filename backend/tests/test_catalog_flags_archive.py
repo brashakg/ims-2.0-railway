@@ -972,6 +972,43 @@ def test_the_review_drawers_restore_is_the_restore_door(env):
     assert p2["deleted_at"] is None and p2["is_active"] is True
 
 
+# ---------------------------------------------------------------------------
+# THE twin -> spine rule: the Added column reads the spine every door acts on
+# ---------------------------------------------------------------------------
+
+
+def test_an_imported_row_and_every_door_find_the_same_spine(env):
+    db = env["db"]
+    db.catalog_products.delete_many({})
+    db.products.delete_many({})
+    db.products.insert_many([
+        # T-X: spine A carries T-X only as its pim_product_id; spine B has
+        # T-X's sku. THE rule (id = product_id, else sku) picks B.
+        _spine("A", "u-akshay", pim_product_id="T-X", sku="SKU-A"),
+        _spine("B", "u-mansi", pim_product_id="other", sku="SKU-X"),
+        # T-Y: a spine shares its id, another has its sku. The id wins.
+        _spine("T-Y", "u-akshay", pim_product_id=None, sku="SKU-Y2"),
+        _spine("D", "u-mansi", pim_product_id=None, sku="SKU-Y"),
+    ])
+    db.catalog_products.insert_many([
+        {"id": "T-X", "sku": "SKU-X", "title": "X", "needs_review": True, "is_active": True},
+        {"id": "T-Y", "sku": "SKU-Y", "title": "Y", "needs_review": True, "is_active": True},
+    ])
+    rows = {r["id"]: r for r in _imported(ADMIN, "name_asc")}
+    assert (rows["T-X"]["created_by"], rows["T-X"]["created_by_name"]) == ("u-mansi", "Mansi Kumari")
+    assert (rows["T-Y"]["created_by"], rows["T-Y"]["created_by_name"]) == ("u-akshay", "Akshay Ovhal")
+    # The edit door acts on that same spine, and the column then shows its edit.
+    res = env["call"](CAT_MGR, "PUT", "/api/v1/catalog/products/T-X", json={"name": "X renamed"})
+    assert res.status_code == 200, res.text
+    assert db.products.find_one({"product_id": "B"})["updated_by"] == "u-mansi"
+    assert not db.products.find_one({"product_id": "A"}).get("updated_by")
+    assert _imported(ADMIN, "edited")[0]["id"] == "T-X"
+    # The archive door too: archiving T-X archives B, never A.
+    asyncio.run(catalog_mod.delete_catalog_product("T-X", current_user=ADMIN))
+    assert db.products.find_one({"product_id": "B"})["deleted_at"]
+    assert not db.products.find_one({"product_id": "A"}).get("deleted_at")
+
+
 @pytest.mark.parametrize("role", ["AREA_MANAGER", "ACCOUNTANT", "STORE_MANAGER", "SALES_STAFF"])
 def test_a_flag_task_goes_only_to_someone_who_can_open_and_close_it(env, role):
     db = env["db"]

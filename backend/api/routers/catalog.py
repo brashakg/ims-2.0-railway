@@ -1463,15 +1463,38 @@ def _spine_product_id(repo, catalog_doc: Optional[Dict]) -> Optional[str]:
     product is sold from at POS, and for a size variant -- whose only
     off-sale marker is the spine's is_active (online_stock_writeback lists
     an inactive spine at 0) -- the next stock pass put the size straight
-    back on sale. None when there is no spine (a BVI-only twin)."""
+    back on sale. None when there is no spine (a BVI-only twin) or the read
+    failed (fail-soft, as every caller's spine sync is)."""
     if repo is None or not catalog_doc:
         return None
-    spine = None
-    if catalog_doc.get("id"):
-        spine = repo.find_by_id(catalog_doc["id"])
-    if spine is None and catalog_doc.get("sku"):
-        spine = repo.find_by_sku(catalog_doc["sku"])
-    return (spine or {}).get("product_id")
+    try:
+        return _spine_ids(repo, [catalog_doc])[0]
+    except Exception:  # noqa: BLE001
+        logger.warning("[CATALOG] spine lookup failed", exc_info=True)
+        return None
+
+
+def _spine_ids(repo, docs: List[Optional[Dict]]) -> List[Optional[str]]:
+    """THE twin -> spine rule (_spine_product_id's, and the review list's
+    Added column and sort through _spine_facts), batched: for each twin (same
+    order) the spine whose product_id is the twin's id, else the spine with
+    the twin's sku; None when neither. One read; raises when it fails."""
+    ids = [d["id"] for d in docs if d and d.get("id")]
+    skus = [d["sku"] for d in docs if d and d.get("sku")]
+    by_id: Dict[Any, str] = {}
+    by_sku: Dict[Any, str] = {}
+    if ids or skus:
+        for s in repo.collection.find(
+            {"$or": [{"product_id": {"$in": ids}}, {"sku": {"$in": skus}}]},
+            {"_id": 0, "product_id": 1, "sku": 1},
+        ):
+            if s.get("product_id"):
+                by_id.setdefault(s["product_id"], s["product_id"])
+                if s.get("sku"):
+                    by_sku.setdefault(s["sku"], s["product_id"])
+    return [
+        (by_id.get(d.get("id")) or by_sku.get(d.get("sku"))) if d else None for d in docs
+    ]
 
 
 def _next_sku_counter(prefix: str, db=None) -> int:
@@ -1759,50 +1782,32 @@ def _row_facts(docs: List[Dict]) -> List[Dict]:
 
 
 def _spine_facts(docs: List[Dict]) -> Optional[List[Dict]]:
-    """The added / edited facts of each imported row's spine (same order),
-    read by pim_product_id / product_id, then sku, in one batched read, with
-    the spine's last_edited_at computed by catalog_list.LAST_EDITED_AT. {}
-    for a row with no spine; None when the read fails (unknown, never "no
-    spine")."""
+    """The added / edited facts of each imported row's spine (same order) --
+    the spine THE rule picks (_spine_ids: the one every edit / archive /
+    restore door acts on) -- with its last_edited_at computed by
+    catalog_list.LAST_EDITED_AT. {} for a row with no spine; None when a read
+    fails (unknown, never "no spine")."""
     from ..dependencies import get_product_repository
 
     repo = get_product_repository()
     if repo is None or not docs:
         return [{} for _ in docs]
-    ids = [d.get("id") for d in docs if d.get("id")]
-    skus = [d.get("sku") for d in docs if d.get("sku")]
-    by_key: Dict[str, Dict] = {}
-    by_sku: Dict[str, Dict] = {}
-    proj: Dict[str, Any] = {"_id": 0, "product_id": 1, "pim_product_id": 1, "sku": 1}
+    proj: Dict[str, Any] = {"_id": 0, "product_id": 1}
     proj.update({f: 1 for f in _ATTRIBUTION_FIELDS})
     proj["last_edited_at"] = _catalog_list.LAST_EDITED_AT
     try:
-        for s in repo.collection.aggregate(
-            [
-                {
-                    "$match": {
-                        "$or": [
-                            {"pim_product_id": {"$in": ids}},
-                            {"product_id": {"$in": ids}},
-                            {"sku": {"$in": skus}},
-                        ]
-                    }
-                },
-                {"$project": proj},
-            ]
-        ):
-            for k in (s.get("pim_product_id"), s.get("product_id")):
-                if k:
-                    by_key.setdefault(str(k), s)
-            if s.get("sku"):
-                by_sku.setdefault(str(s["sku"]), s)
+        spine_ids = _spine_ids(repo, docs)
+        found = [p for p in spine_ids if p]
+        facts = {
+            s["product_id"]: s
+            for s in repo.collection.aggregate(
+                [{"$match": {"product_id": {"$in": found}}}, {"$project": proj}]
+            )
+        } if found else {}
     except Exception:  # noqa: BLE001 -- the column just shows '-'
         logger.warning("[CATALOG] spine attribution read failed", exc_info=True)
         return None
-    return [
-        by_key.get(str(d.get("id") or "")) or by_sku.get(str(d.get("sku") or "")) or {}
-        for d in docs
-    ]
+    return [facts.get(p) or {} if p else {} for p in spine_ids]
 
 
 def _stamp_spine_attribution(docs: List[Dict], facts: List[Dict]) -> None:
