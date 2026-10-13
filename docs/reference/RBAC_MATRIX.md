@@ -156,8 +156,6 @@ are the exact current gate (SUPERADMIN always implied).
 | `GET` | `/api/v1/admin/discounts/promo-codes` | SUPERADMIN, ADMIN |  |
 | `POST` | `/api/v1/admin/discounts/promo-codes` | SUPERADMIN, ADMIN |  |
 | `DELETE` | `/api/v1/admin/discounts/promo-codes/{code_id}` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/discounts/role-caps` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/discounts/role-caps` | SUPERADMIN, ADMIN |  |
 | `GET` | `/api/v1/admin/discounts/rules` | SUPERADMIN, ADMIN |  |
 | `GET` | `/api/v1/admin/discounts/tier-discounts` | SUPERADMIN, ADMIN |  |
 | `POST` | `/api/v1/admin/discounts/tier-discounts` | SUPERADMIN, ADMIN |  |
@@ -227,8 +225,6 @@ are the exact current gate (SUPERADMIN always implied).
 | `POST` | `/api/v1/admin/system/backups` | SUPERADMIN, ADMIN |  |
 | `POST` | `/api/v1/admin/system/backups/{backup_id}/restore` | SUPERADMIN, ADMIN |  |
 | `GET` | `/api/v1/admin/system/export/{export_type}` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/system/settings` | SUPERADMIN, ADMIN |  |
-| `PUT` | `/api/v1/admin/system/settings` | SUPERADMIN, ADMIN |  |
 | `GET` | `/api/v1/admin/system/status` | SUPERADMIN, ADMIN |  |
 | `POST` | `/api/v1/admin/techcherry/import` | SUPERADMIN |  |
 | `GET` | `/api/v1/admin/techcherry/status` | SUPERADMIN |  |
@@ -940,8 +936,8 @@ are the exact current gate (SUPERADMIN always implied).
 |---|---|---|---|
 | `GET` | `/api/v1/settings` | PUBLIC |  |
 | `GET` | `/api/v1/settings/` | PUBLIC |  |
-| `GET` | `/api/v1/settings/admin-controls` | SUPERADMIN |  |
-| `PUT` | `/api/v1/settings/admin-controls` | SUPERADMIN |  |
+| `GET` | `/api/v1/settings/admin-controls` | SUPERADMIN, ADMIN |  |
+| `PUT` | `/api/v1/settings/admin-controls` | SUPERADMIN, ADMIN |  |
 | `GET` | `/api/v1/settings/approval-workflows` | SUPERADMIN, ADMIN |  |
 | `PUT` | `/api/v1/settings/approval-workflows` | SUPERADMIN, ADMIN |  |
 | `GET` | `/api/v1/settings/audit-logs` | SUPERADMIN, ADMIN |  |
