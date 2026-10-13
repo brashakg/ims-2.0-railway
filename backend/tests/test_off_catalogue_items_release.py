@@ -5596,3 +5596,32 @@ def test_r10_a_delete_whose_product_cannot_be_read_deletes_nothing(world, monkey
     assert twin.get("is_active") is not False and not twin.get("deleted_at")
     assert world.product(draft_id)["provisional"] is True
     assert world.grn(grn["grn_id"])["status"] == "PARTIALLY_ACCEPTED"
+
+
+def _catalogue_tasks(world, grn_id):
+    return [
+        t for t in _open_tasks(world)
+        if t.get("grn_id") == grn_id and t.get("category") == "Catalogue"
+    ]
+
+
+def test_r10_only_a_receiving_manager_voids_a_held_receipt(world):
+    # Receiving is managers only: voiding a receipt held for the catalogue
+    # says the boxes in the shop never came -- not the accountant's answer.
+    po, grn, draft_id = world.order_and_receive(BOSS_TYPED, qty=2, cost=1200)
+    gid = grn["grn_id"]
+    _seed_user(world, ACCOUNTANT)
+    try:
+        _run(vd.void_grn(gid, ACCOUNTANT))
+        refused = None
+    except HTTPException as exc:
+        refused = exc
+    finding(
+        refused is not None
+        and refused.status_code == 403
+        and world.grn(gid)["status"] == "PARTIALLY_ACCEPTED"
+        and len(_catalogue_tasks(world, gid)) == 1,
+        f"R10-4: an accountant voided a held receipt ({refused}; now {world.grn(gid)['status']})",
+    )
+    out = _run(vd.void_grn(gid, MANAGER))
+    assert out["grn_status"] == "VOID" and _catalogue_tasks(world, gid) == []

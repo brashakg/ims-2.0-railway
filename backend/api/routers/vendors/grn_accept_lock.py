@@ -452,10 +452,11 @@ def _grn_accept_heartbeat_tick(grn_repo, grn_id: str, token, state: dict) -> Non
 
 def refuse_beyond_order_below_manager(grn: dict, current_user: dict, nothing_done: str) -> None:
     """A receipt holding units beyond its order (an unresolved line with
-    reason over_order) waits for the store manager: 'Not received', 'Add to
-    stock' and 'Void' each answer whether the vendor really sent them, so
-    each is the receiving managers' (owner 2026-09-28, receiving is managers
-    only; cost_mask.RECEIVING_MANAGERS). Anyone else is refused (403)."""
+    reason over_order) waits for the store manager: 'Not received' and 'Add
+    to stock' each answer whether the vendor really sent them, so each is the
+    receiving managers' (owner 2026-09-28, receiving is managers only;
+    cost_mask.RECEIVING_MANAGERS). Anyone else is refused (403). Voiding ANY
+    held receipt is theirs too (grn_void.void_grn)."""
     if is_receiving_manager(current_user):
         return
     if any((ln or {}).get("reason") == "over_order" for ln in (grn or {}).get("unresolved_lines") or []):

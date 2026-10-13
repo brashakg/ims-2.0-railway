@@ -266,6 +266,14 @@ describe('Receive Goods - a receipt held for cataloguing (audit C1)', () => {
     authState.roles = ['ACCOUNTANT'];
     const row = await heldRow();
     expect(within(row).getByRole('button', { name: /add to stock/i })).toBeTruthy();
+    // Voiding it says the vendor never sent what is in the shop: receiving,
+    // managers only (403 below manager), so it is not offered.
+    expect(within(row).queryByRole('button', { name: /void/i })).toBeNull();
+  });
+
+  it('a store manager may void a receipt held only for the catalogue', async () => {
+    const row = await heldRow();
+    expect(within(row).getByRole('button', { name: /void/i })).toBeTruthy();
   });
 
   it('a receipt held only for the catalogue offers no "Not received"', async () => {

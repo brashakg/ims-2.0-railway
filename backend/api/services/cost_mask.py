@@ -62,8 +62,9 @@ RETURN_READERS = (*PURCHASE_ROLES, "WORKSHOP_STAFF")
 # The receiving managers: the purchase roles without the accountant. Receiving
 # decisions that are managers only (owner 2026-09-28) gate on this tuple --
 # today 'Not received' for a held receipt's units beyond its order (the shop's
-# store manager's decision, 2026-09-29), and 'Add to stock' or 'Void' on a
-# receipt holding such units (is_receiving_manager). Defined ONCE, here.
+# store manager's decision, 2026-09-29), 'Add to stock' on a receipt holding
+# such units, and 'Void' on any held receipt (is_receiving_manager). Defined
+# ONCE, here.
 RECEIVING_MANAGERS = tuple(r for r in PURCHASE_ROLES if r != "ACCOUNTANT")
 
 

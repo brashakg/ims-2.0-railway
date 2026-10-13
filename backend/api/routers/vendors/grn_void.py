@@ -16,7 +16,7 @@ from ._shared import (
     router,
 )
 from .grn import _require_receipt_number
-from ...services.cost_mask import RECEIVING_MANAGERS
+from ...services.cost_mask import RECEIVING_MANAGERS, is_receiving_manager
 from .grn_accept_lock import (
     _GRN_TERMINAL_ACCEPT_STATUSES,
     _GRN_WRITE_ERROR,
@@ -144,6 +144,19 @@ async def void_grn(
                 "vendor return."
             ),
         )
+    # A held receipt's units are in the shop: voiding it says the vendor never
+    # sent them, which is receiving -- the receiving managers' (owner
+    # 2026-09-28), whatever it holds them for. The void's write is guarded on
+    # this status, so a PENDING receipt held meanwhile is voided by nobody.
+    if status == "PARTIALLY_ACCEPTED" and not is_receiving_manager(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "This receipt is holding units that arrived: whether the vendor "
+                "really sent them is the store manager's to decide in Receive "
+                "Goods ('Void', 'Not received' or 'Add to stock'). Nothing was voided."
+            ),
+        )
 
     # The void audit is immutable and the response names the receipt: a
     # receipt still on its PENDING/<id> placeholder is numbered first (a
@@ -173,19 +186,6 @@ async def void_grn(
         )
 
     try:
-        # A receipt holding units beyond its order waits for the store manager
-        # ('Not received' / 'Add to stock'): voiding it answers that question
-        # too, so it is the receiving managers' as 'Not received' is. Read
-        # under the claim -- the catalogue release can hold a line beyond the
-        # order after the read above.
-        now = grn_repo.find_by_id(grn_id)
-        if not now:
-            raise HTTPException(
-                status_code=503,
-                detail="Could not read this goods receipt again -- try again. Nothing was voided.",
-            )
-        refuse_beyond_order_below_manager(now, current_user, "Nothing was voided.")
-
         # STOCK GATE. FAILS CLOSED: if we cannot establish that this receipt put
         # nothing on the shelf, we do not void it. Read UNDER the claim, so no
         # accept can be minting while we look.

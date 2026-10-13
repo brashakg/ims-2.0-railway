@@ -135,9 +135,9 @@ export function GoodsReceiptCockpit() {
   const toast = useToast();
   const storeId = user?.activeStoreId || '';
   // Units beyond the order are the receiving managers' to decide (owner
-  // 2026-09-28): 'Not received', 'Add to stock' and 'Void' on such a receipt
-  // are refused to anyone else (grn_accept_lock.refuse_beyond_order_below_manager),
-  // who is told who decides instead.
+  // 2026-09-28): 'Not received' and 'Add to stock' on such a receipt are
+  // refused to anyone else (grn_accept_lock.refuse_beyond_order_below_manager),
+  // who is told who decides instead; so is voiding any held receipt.
   const decidesOverOrder = (user?.roles || []).some((r) => RECEIVING_MANAGER_ROLES.includes(r));
   // W1.4 / OS-006: receiving books stock at the active store. An ONLINE store
   // holds no stock — warn up front (backend rejects the GRN with 400 too).
@@ -1412,10 +1412,10 @@ export function GoodsReceiptCockpit() {
                                 Not received
                               </button>
                             ) : null}
-                            {/* Voiding a receipt held beyond its order answers the same
-                                question as 'Not received': the server refuses it below
-                                manager (403), so it is not offered. */}
-                            {g.overOrder && !decidesOverOrder ? null : (
+                            {/* Voiding a held receipt says the vendor never sent what is
+                                in the shop -- receiving: the server refuses it below
+                                manager (403, grn_void.void_grn), so it is not offered. */}
+                            {g.status === 'PARTIALLY_ACCEPTED' && !decidesOverOrder ? null : (
                               <button
                                 type="button"
                                 onClick={() => voidPendingGrn(g.grn_id, g.grn_number)}
