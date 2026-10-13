@@ -564,7 +564,8 @@ def _counter_handover(order: Dict[str, Any]) -> bool:
 def _never_shipped(payload: Dict[str, Any], order: Dict[str, Any]) -> bool:
     """Every line of this refund is a Shopify "cancel" (a quantity Shopify
     never fulfilled) on an order not handed over at the counter: the units
-    never left the shelf, and the confirm puts them back."""
+    never left the shelf, and the confirm puts them back (a historical
+    order's: books them and raises the stock-in task)."""
     rows = [rl for rl in payload.get("refund_line_items") or []
             if isinstance(rl, dict) and _f(rl.get("quantity")) > 0]
     return bool(rows) and not _counter_handover(order) and all(
@@ -925,6 +926,12 @@ def handle_shopify_refund(
         )
         if goods_out and not (door_cancelled or counter_returned):
             note = (
+                # A historical order is never restocked (owner 2026-10-01).
+                "Shopify cancelled units it never shipped. This order predates IMS "
+                "stock: Confirm books them and raises a task for the shop's store "
+                "manager to add the frame(s) through stock-in (never a counter "
+                "return -- Shopify already refunded this money)."
+                if _never_shipped(payload, order) and order.get("historical") else
                 "Shopify cancelled units it never shipped: they never left the "
                 "shelf, and Confirm puts them back in stock (never a counter "
                 "return -- Shopify already refunded this money)."

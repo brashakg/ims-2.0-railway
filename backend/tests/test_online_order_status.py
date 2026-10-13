@@ -1767,7 +1767,8 @@ def test_a_restock_retry_that_cannot_read_the_stock_restocks_nothing(swept, monk
 _MANAGER = "u-mgr-ganga"
 
 
-def _historical_refund(swept, monkeypatch, oid, rid, ims_product_id=None, **order_set):
+def _historical_refund(swept, monkeypatch, oid, rid, ims_product_id=None, restock_type="return",
+                       **order_set):
     doc = _book(swept, oid)
     if ims_product_id:  # the SKU resolved: the line keeps Shopify's product_id beside it
         order_set["items"] = [{**doc["items"][0], "ims_product_id": ims_product_id}]
@@ -1776,7 +1777,7 @@ def _historical_refund(swept, monkeypatch, oid, rid, ims_product_id=None, **orde
     if not swept["db"]["users"].find_one({"user_id": _MANAGER}):
         swept["db"]["users"].insert_one({"user_id": _MANAGER, "roles": ["STORE_MANAGER"],
                                          "is_active": True, "store_ids": ["BV-GANGA-01"]})
-    shopify_refund.handle_shopify_refund(swept["db"], _refund(rid, oid, restock_type="return"),
+    shopify_refund.handle_shopify_refund(swept["db"], _refund(rid, oid, restock_type=restock_type),
                                          webhook_id=None, topic="refunds/create")
     return swept["review"].find_one({"shopify_refund_id": str(rid)})
 
@@ -1798,6 +1799,26 @@ def _premark(monkeypatch):
     monkeypatch.setattr(shopify_refund, "_restock_booked",
                         lambda order, lines, rid, restock, **kw: restock(lines))
     return lambda: monkeypatch.setattr(shopify_refund, "_restock_booked", real)
+
+
+def test_a_historical_orders_never_shipped_note_says_what_confirm_does(swept, monkeypatch):
+    """Panel finding (97714d9): the history import stores DELIVERED with no
+    user and no AWB, so a refund of only Shopify "cancel" lines is "never
+    shipped" -- and the note promised "Confirm puts them back in stock". A
+    historical order is never restocked: Confirm books the frame and raises
+    the stock-in task. The note says that."""
+    oid = 69001
+    row = _historical_refund(swept, monkeypatch, oid, 769001, restock_type="cancel",
+                             status="DELIVERED")
+    assert row["status"] == "PENDING" and [line["restock"] for line in row["proposed_restock"]] == [True]
+    assert "predates IMS stock" in row["note"] and "stock-in" in row["note"]
+    assert "back in stock" not in row["note"] and "never left the shelf" not in row["note"]
+
+    res = _confirm(row)["result"]
+    assert res["restock_applied"] is True and res["stock_in_task"]
+    assert _minted(swept) == [], "IMS adds no stock row for a historical frame"
+    [task] = _stock_in(swept, oid)
+    assert "through stock-in" in task["title"]
 
 
 @pytest.mark.parametrize("goods_first", [True, False])
