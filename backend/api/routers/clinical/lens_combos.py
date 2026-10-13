@@ -11,6 +11,7 @@ from typing import Optional
 from datetime import datetime
 import uuid
 from ..auth import require_roles
+from ...dependencies import store_in_view
 from ...dependencies import (
     get_db,
     validate_store_access,
@@ -80,7 +81,7 @@ async def list_lens_power_combos(
     col = _get_lens_power_combos_col()
     if col is None:
         return {"combos": [], "total": 0}
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     flt: dict = {}
     if active_store:
         flt["store_id"] = active_store
@@ -122,7 +123,7 @@ async def create_lens_power_combo(
     if col is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user, writing=True)
     # Refuse to MINT an unattributed combo. A store-less session (auth.py yields
     # active_store_id=None for a user with no store, e.g. a plain ADMIN) would
     # otherwise stamp store_id=None, and an unattributed doc is precisely the

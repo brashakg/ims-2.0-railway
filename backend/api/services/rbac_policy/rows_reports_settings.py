@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Dict, List
 
+from ._core import ACCOUNTS
+
 ROWS: List[Dict[str, object]] = [
     # --- /api/v1/reports ---
     {"method": "GET", "path": "/api/v1/reports", "allowed": "PUBLIC"},
@@ -87,12 +89,18 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/reports/gstr3b",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        # Input tax summed from supplier bills (Table 4, 3.1(d)): the accounts
+        # roles' alone (owner ruling 2026-10-07, R1); the handler's gate is
+        # require_roles(*cost_mask.AP_ROLES).
+        "allowed": ACCOUNTS,
     },
+    # The GSTR-3B portal upload carries Table 4 input credit -- supplier money,
+    # the accounts roles' alone (owner ruling 2026-10-12, R5); the handler's
+    # gate is require_roles(*cost_mask.AP_ROLES).
     {
         "method": "GET",
         "path": "/api/v1/reports/gstr3b/gstn-json",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",

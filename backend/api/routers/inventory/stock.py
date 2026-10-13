@@ -1,5 +1,6 @@
 """GET /stock - the store stock ledger, plus its GRN-cost and ledger-row builders."""
 
+from ...dependencies import store_in_view
 from ._shared import (
     _INVENTORY_ROLES,
     BaseModel,
@@ -95,7 +96,10 @@ async def get_stock(
     """
     stock_repo = get_stock_repository()
     product_repo = get_product_repository()
-    active_store = validate_store_access(store_id, current_user)
+    # THE validate-or-active shop (store_in_view): a non-admin login with NO
+    # shop reads no shop's stock (R4) -- validate_store_access alone gave it
+    # None, every shop.
+    active_store = store_in_view(store_id, current_user)
 
     # Cataloguer attribution is a MANAGER surface (panel finding 4): mirrors
     # the GET /products/cataloguers gate so the roster + per-user activity
@@ -152,6 +156,23 @@ async def get_stock(
         created_by=created_by,
         include_attribution=can_see_attribution,
     )
+    # F47: each row's units at cost -- stock at cost, so WHO sees it is
+    # stock_value.COST_CONTEXT (the accounts roles, owner ruling 2026-10-12)
+    # and WHICH keys are cost is cost_mask's; a manager's row keeps the
+    # product's own cost_price ("product", below) and none of these.
+    from ...services import stock_value
+    from ...services.cost_mask import mask_cost
+
+    shelf = _shelf_cost(stock_repo, product_repo, active_store)
+    if shelf is not None:
+        for row in items:
+            row.update(
+                mask_cost(
+                    _row_cost(shelf.get(row["product_id"])),
+                    current_user,
+                    stock_value.COST_CONTEXT,
+                )
+            )
     return {"items": mask_cost_list(items, current_user, "product"), "total": len(items)}
 
 
@@ -353,10 +374,18 @@ def _build_store_ledger(
 
     # ---- 3. Edge case - units exist for a product that's NOT in the
     # active catalog (deactivated SKU still on the shelf). Surface those
-    # rows too so the manager can see + clear them. ------------------
-    for pid, on_hand in on_hand_by_product.items():
+    # rows too so the manager can see + clear them. A product whose ONLY
+    # units here are RESERVED (a discontinued frame set aside for a
+    # customer's order) is held stock as much: the "Stock value at cost"
+    # tile sums these rows and the one stock-value rule counts reserved
+    # units, so it needs its row too (review r3 #6). ------------------
+    held_pids = list(on_hand_by_product) + [
+        pid for pid in reserved_by_product if pid not in on_hand_by_product
+    ]
+    for pid in held_pids:
         if pid in seen_pids:
             continue
+        on_hand = on_hand_by_product.get(pid, 0)
         product = product_repo.find_by_id(pid) or {"product_id": pid}
         # Respect the cataloguer filter on stranded rows too -- a unit whose
         # product was created by someone else must not leak into a filtered
@@ -388,6 +417,37 @@ def _build_store_ledger(
         )
 
     return items
+
+
+def _shelf_cost(
+    stock_repo, product_repo, store_id: Optional[str]
+) -> Optional[Dict[str, Dict]]:
+    """F47: what the units at this shop COST, per product -- the one stock
+    value rule (services/stock_value). None when no shop is in view. Who may
+    see it is not decided here: get_stock masks each row's cost with
+    stock_value.COST_CONTEXT."""
+    from ...services import stock_value
+
+    if not store_id:
+        return None
+    return stock_value.by_product(
+        stock_value.shelf_units(stock_repo, product_repo, store_id)
+    )
+
+
+def _row_cost(held: Optional[Dict]) -> Dict:
+    """The cost fields of one ledger row, read off stock_value.by_product.
+
+    cost_value: the units on the shelf + reserved, at cost (the same units as
+    the row's stock + reserved). unit_cost: per COSTED unit, None when no unit
+    has a cost (never Rs 0). uncosted_units: units with no cost, so the screen
+    can say so instead of quietly valuing them at nothing."""
+    held = held or {}
+    return {
+        "cost_value": held.get("cost") or 0.0,
+        "unit_cost": held.get("unit_cost"),
+        "uncosted_units": held.get("uncosted_units") or 0,
+    }
 
 
 def _ledger_row(
@@ -518,7 +578,7 @@ async def list_units(
     # the caller's active store (an admin receiving for another shop). Without
     # an explicit store, a receipt read is scoped per unit below instead.
     if store_id or not grn_id:
-        active_store = validate_store_access(store_id, current_user)
+        active_store = store_in_view(store_id, current_user)
         if not active_store:
             raise HTTPException(status_code=400, detail="Pick a store first")
         flt["store_id"] = active_store

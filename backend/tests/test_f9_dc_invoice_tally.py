@@ -1128,10 +1128,13 @@ class TestMixedVendorGuard:
         assert r.json()["detail"]["code"] == "mixed_vendors"
 
     def test_from_dcs_mixed_stores_409(self):
+        # An ADMIN reaches both shops: since F63 an accountant at S1 is told
+        # S2's DC is not found (test_purchase_objects_by_id_scope), so only a
+        # cross-shop caller can reach the mixed-stores refusal.
         db = _FakeDB()
         _seed_accepted_dc(db, "D1", [_grn_item("P1", 50)], store_id="S1")
         _seed_accepted_dc(db, "D2", [_grn_item("P2", 20)], store_id="S2")
-        c = _pi_client_full(db, _GRNRepo(db))
+        c = _pi_client_full(db, _GRNRepo(db), roles=("ADMIN",))
         r = c.get(
             "/api/v1/vendors/purchase-invoices/from-dcs",
             params={"dc_ids": "D1,D2", "vendor_id": "V1"},

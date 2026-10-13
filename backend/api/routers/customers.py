@@ -123,6 +123,8 @@ def _check_dob_not_future(v):
 from ..dependencies import (
     get_customer_repository,
     get_audit_repository,
+    no_shop_scope_for,
+    store_in_view,
     validate_store_access,
     can_access_store_scoped,
 )
@@ -741,12 +743,19 @@ async def list_customers(
         # Determine the effective store filter
         user_roles = current_user.get("roles", [])
         is_hq = any(r in user_roles for r in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"])
-        if is_hq:
+        # R4 (owner ruling 2026-10-12): a non-admin login with NO shop -- an
+        # AREA_MANAGER too -- sees no shop's customers (naming one is a 403);
+        # it used to read every shop's customer list.
+        no_shop = no_shop_scope_for(store_id, current_user)
+        if no_shop:
+            effective_store = no_shop
+        elif is_hq:
             # HQ roles: honour explicit ?store_id, otherwise no scope.
             effective_store = store_id
         else:
-            # Store-level roles: always pinned to active_store_id.
-            effective_store = current_user.get("active_store_id")
+            # Store-level roles: always pinned to their own shop (the active
+            # one, else the first own shop: store_in_view).
+            effective_store = store_in_view(None, current_user)
 
         store_clause: Optional[Dict[str, Any]] = None
         if effective_store:

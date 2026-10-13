@@ -57,6 +57,9 @@ class _StockRepo:
                 r["oldest"] = u["created_at"]
         return list(out.values())
 
+    def find_many(self, flt, limit=0):  # stock_value.shelf_units (F47 cost)
+        return [dict(u) for u in _UNITS]
+
 
 class _ProductRepo:
     def find_by_id(self, pid):
@@ -157,6 +160,9 @@ def test_unknown_stock_age_is_old_on_every_screen(monkeypatch, stamp):
                 return []
             # group_with_oldest_arrival: None when undated, else the lone string.
             return [{"_id": "P-OLD", "quantity": 1, "oldest": stamp, "total_value": 0}]
+
+        def find_many(self, flt, limit=0):  # stock_value.shelf_units (F47 cost)
+            return [dict(unit)]
 
     _mongo(monkeypatch, [unit])
     monkeypatch.setattr(inv, "get_stock_repository", lambda: _LegacyStockRepo())

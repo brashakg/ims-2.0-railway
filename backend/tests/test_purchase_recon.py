@@ -211,7 +211,7 @@ def test_build_recon_block_note():
 
 def test_upsert_recon_persists_and_returns(monkeypatch):
     """POST /recon should write flags to vendor_bills and return recon block."""
-    bill = {"bill_id": "INV-001", "vendor_id": "V1"}
+    bill = {"bill_id": "INV-001", "vendor_id": "V1", "store_id": "BV-01"}
     coll = _FakeCollection([bill])
     db = _FakeDB({"vendor_bills": coll})
 
@@ -233,6 +233,7 @@ def test_upsert_recon_is_idempotent(monkeypatch):
     """A second POST with the same flags should not corrupt the recon block."""
     bill = {
         "bill_id": "INV-002",
+        "store_id": "BV-01",
         "recon": {
             "reconciled": True,
             "reconciled_by": "acc-1",
@@ -265,7 +266,7 @@ def test_upsert_recon_404_on_missing_bill(monkeypatch):
 
 def test_get_recon_returns_defaults_when_no_recon(monkeypatch):
     """GET /recon should return all 4 flags as False when no recon yet."""
-    bill = {"bill_id": "INV-003", "vendor_id": "V1"}
+    bill = {"bill_id": "INV-003", "vendor_id": "V1", "store_id": "BV-01"}
     db = _FakeDB({"vendor_bills": _FakeCollection([bill])})
     monkeypatch.setattr(recon_mod, "_get_db", lambda: db)
 
@@ -280,6 +281,7 @@ def test_get_recon_returns_existing_flags(monkeypatch):
     """GET /recon should return persisted flags."""
     bill = {
         "bill_id": "INV-004",
+        "store_id": "BV-01",
         "recon": {
             "reconciled": True,
             "reconciled_by": "u1",
@@ -356,6 +358,11 @@ def test_worklists_returns_all_four_lists(monkeypatch):
                 "created_at": "2026-06-01T00:00:00+00:00",
                 # cn_received_at NOT present -> pending
             }
+        ]),
+        # V1 bills BV-01, so its rebate note is BV-01's on the supplier
+        # ledger (F63: an accountant sees only their shop's notes).
+        "vendor_bills": _FakeCollection([
+            {"bill_id": "B-1", "vendor_id": "V1", "store_id": "BV-01", "bill_date": "2026-05-01"}
         ]),
     })
     monkeypatch.setattr(recon_mod, "_get_db", lambda: db)
@@ -465,7 +472,7 @@ def test_worklists_503_on_db_upsert_error(monkeypatch):
     class _BrokenColl:
         def find_one(self, q, proj=None):
             # Return a doc so we get past the 404 check
-            return {"bill_id": "INV-X"}
+            return {"bill_id": "INV-X", "store_id": "BV-01"}
 
         def update_one(self, q, upd, upsert=False):
             raise RuntimeError("DB unavailable")
@@ -492,7 +499,11 @@ def test_mark_scheme_cn_received_sets_timestamp(monkeypatch):
         "amount": 5000,
     }
     coll = _FakeCollection([cn])
-    db = _FakeDB({"vendor_debit_notes": coll})
+    # V1 bills BV-01, the accountant's shop: the note is theirs to tick (F63).
+    bills = _FakeCollection(
+        [{"bill_id": "B-1", "vendor_id": "V1", "store_id": "BV-01", "bill_date": "2026-05-01"}]
+    )
+    db = _FakeDB({"vendor_debit_notes": coll, "vendor_bills": bills})
     monkeypatch.setattr(recon_mod, "_get_db", lambda: db)
 
     result = asyncio.run(mark_scheme_cn_received("CN-REB-1", current_user=_user()))

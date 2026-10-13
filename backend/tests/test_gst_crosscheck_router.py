@@ -182,7 +182,10 @@ def test_run_cross_check_itc_leg_failed_flag(patch_compute):
 # ---------------------------------------------------------------------------
 
 
-_USER = {"roles": ["ACCOUNTANT"], "user_id": "u1", "name": "Acc"}
+# An accountant who holds a shop: one with none is refused the org-wide
+# sign-off (R4, finance._require_org_finance).
+_USER = {"roles": ["ACCOUNTANT"], "user_id": "u1", "name": "Acc",
+         "store_ids": ["S1"], "active_store_id": "S1"}
 
 
 def _signoff(monkeypatch, server_result, *, prior=None, db_none=False):

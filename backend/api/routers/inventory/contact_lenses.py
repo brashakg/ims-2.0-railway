@@ -1,5 +1,6 @@
 """Contact-lens inventory with batch/expiry tracking."""
 
+from ...dependencies import store_in_view
 from ._shared import (
     Depends,
     Dict,
@@ -175,7 +176,7 @@ async def list_contact_lens_inventory(
     GET /inventory/contact-lenses?brand=Acuvue&modality=DAILY&near_expiry_days=90
     Store-scoped. Fail-soft: returns an empty list when DB is unavailable.
     """
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     db = _get_db()
     rows = _load_cl_stock_rows(db, active_store)
 
@@ -223,7 +224,7 @@ async def get_contact_lens_expiry_status(
     GET /inventory/contact-lenses/expiry-status?expiring_within_days=90
     Store-scoped. Fail-soft: returns empty buckets when DB is unavailable.
     """
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     db = _get_db()
     rows = _load_cl_stock_rows(db, active_store)
 

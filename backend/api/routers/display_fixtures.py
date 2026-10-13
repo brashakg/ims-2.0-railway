@@ -39,6 +39,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .auth import get_current_user, require_roles
+from ..dependencies import store_in_view
 from ..dependencies import get_audit_repository, validate_store_access
 from ..services.fixture_validation import (
     CATALOG_TYPES,
@@ -251,7 +252,7 @@ async def list_fixtures(
     current_user: dict = Depends(get_current_user),
 ):
     """List fixtures, store-scoped. active=True (default) hides soft-deleted."""
-    active_store = validate_store_access(store_id, current_user)
+    active_store = store_in_view(store_id, current_user)
     coll = _fixtures_coll()
     if coll is None:
         return {"fixtures": [], "total": 0}

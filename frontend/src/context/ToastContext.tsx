@@ -3,7 +3,7 @@
 // ============================================================================
 // Provides toast notifications throughout the application
 
-import { createContext, useContext, useState, useCallback } from 'react';
+import { createContext, useContext, useState, useCallback, useMemo } from 'react';
 import type { ReactNode } from 'react';
 
 // ============================================================================
@@ -27,8 +27,11 @@ export interface Toast {
   action?: ToastAction;
 }
 
+/** The toast functions. Deliberately NOT the toast list: the value never
+ *  changes, so a screen that lists `toast` in a hook's deps (a load callback)
+ *  is not re-run by its own toast -- an error toast used to hand every
+ *  consumer a new object and re-fire the load that raised it, forever. */
 interface ToastContextType {
-  toasts: Toast[];
   success: (message: unknown, duration?: number, action?: ToastAction) => void;
   error: (message: unknown, duration?: number) => void;
   warning: (message: unknown, duration?: number) => void;
@@ -109,15 +112,10 @@ export function ToastProvider({ children }: ToastProviderProps) {
     setToasts([]);
   }, []);
 
-  const value: ToastContextType = {
-    toasts,
-    success,
-    error,
-    warning,
-    info,
-    dismiss,
-    dismissAll,
-  };
+  const value = useMemo<ToastContextType>(
+    () => ({ success, error, warning, info, dismiss, dismissAll }),
+    [success, error, warning, info, dismiss, dismissAll],
+  );
 
   return (
     <ToastContext.Provider value={value}>

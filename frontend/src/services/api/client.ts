@@ -187,9 +187,38 @@ async function performRefresh(): Promise<string | null> {
     if (resp.data?.refresh_token) {
       localStorage.setItem(REFRESH_TOKEN_STORAGE_KEY, resp.data.refresh_token);
     }
+    syncCachedUserShops(newAccess);
     return newAccess;
   } catch {
     return null;
+  }
+}
+
+/** Fired after syncCachedUserShops rewrites the cached user; AuthContext
+ *  re-reads it so the screen follows at once. */
+export const USER_SHOPS_SYNCED_EVENT = 'ims:user-shops-synced';
+
+/** The token is the one source of a login's shops: the server scopes every
+ *  read by its claims. After a refresh the cached user (ims_user) takes its
+ *  active shop and assigned shops from the new token, so a login whose shop
+ *  the server dropped -- an area manager an older login defaulted to a shop
+ *  he was never given -- is shown the no-shop message (hasNoShop), not a
+ *  screen of 403s for a shop the client still remembered. */
+export function syncCachedUserShops(token: string): void {
+  try {
+    const part = token.split('.')[1];
+    const claims = JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/')));
+    const raw = localStorage.getItem('ims_user');
+    if (!raw) return;
+    const user = JSON.parse(raw);
+    const activeStoreId = claims.active_store_id || '';
+    const storeIds = Array.isArray(claims.store_ids) ? claims.store_ids : [];
+    // Unchanged shops (nearly every refresh): nothing re-renders.
+    if (user.activeStoreId === activeStoreId && JSON.stringify(user.storeIds) === JSON.stringify(storeIds)) return;
+    localStorage.setItem('ims_user', JSON.stringify({ ...user, activeStoreId, storeIds }));
+    window.dispatchEvent(new Event(USER_SHOPS_SYNCED_EVENT));
+  } catch {
+    /* an unreadable token or cache changes nothing */
   }
 }
 

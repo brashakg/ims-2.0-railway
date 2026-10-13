@@ -10,6 +10,7 @@ from ._shared import (
     get_audit_repository,
     get_grn_repository,
     get_stock_repository,
+    in_reach_or_404,
     logger,
     require_roles,
     router,

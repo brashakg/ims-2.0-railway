@@ -16,12 +16,19 @@ Role policy (DECISIONS sec 9, owner rulings 2026-09-28 / D7 / 2026-09-29):
     cost at the shop (owner ruling 2026-10-12): an order line's cost_at_sale,
     the till scan's unit and product, a serial and its warranty lookup, a
     lens line, the below-cost and cost-floor price errors, stock counts,
-    stock value at cost, stock alerts, transfers and workshop remake cost --
-    the managers keep them, counter roles never get the key.
-  * What was paid and to whom (context="purchase"): PURCHASE_ROLES. A vendor
-    return / RTV debit note shows anyone else the item, quantity and reason
-    only, and a vendor shows only VENDOR_NAME_KEYS (the vendor list, a debit
-    note's vendor block) -- all of it asks can_see_cost(user, "purchase").
+    stock alerts, transfers and workshop remake cost -- the managers keep
+    them, counter roles never get the key. Stock value at cost is narrower
+    (owner ruling 2026-10-12, what we pay): the accounts roles only, asked
+    through services/stock_value.COST_CONTEXT.
+  * What was paid and to whom (context="purchase"): PURCHASE_ROLES. An RTV
+    debit note shows anyone else the item, quantity and reason only, and a
+    vendor shows only VENDOR_NAME_KEYS (the vendor list, a debit note's vendor
+    block) -- both ask can_see_cost(user, "purchase"). A vendor return (and an
+    RMA) is stricter (owner ruling 2026-10-12, R3): its price is the basis of
+    the supplier's credit, so outside the accounts roles -- managers included
+    -- it shows the item, quantity and reason only; mask_vendor_return asks
+    can_see_cost(user, "payables"), and every return line, a vendor return's or
+    an RMA's, is cut by the one allow-list in return_line_for_reader.
   * Operational aggregates (default context: analytics, P&L) -- cost + margin
     stay with SUPERADMIN / ADMIN / ACCOUNTANT.
   * Supplier payments (context="payables": bills, payments, balances, per
@@ -84,6 +91,9 @@ _COST_FIELDS = {
     "cost_price", "cost_value", "cost_at_sale", "unit_cost",
     "landed_cost", "landed_cost_paise", "moving_avg_cost", "purchase_price",
     "estimated_purchase_cost",
+    # How many units carry NO cost: it goes with the cost it qualifies (F47
+    # stock ledger rows), so the one mask hides it with cost_value.
+    "uncosted_units",
 }
 # Derived margin / COGS figures emitted by analytics + finance payloads.
 _MARGIN_FIELDS = {
@@ -179,15 +189,22 @@ def mask_vendor(doc: Dict, user: dict) -> Dict:
     return _pick(doc, VENDOR_NAME_KEYS)
 
 
-# What a vendor return / RTV debit note shows outside the purchase roles: the
-# item, quantity and reason (owner ruling 2026-09-29). Allow-lists, so a money
-# field added later stays hidden until someone lists it here.
+# What a vendor return shows outside the accounts roles (owner rulings
+# 2026-09-29 and 2026-10-12 R3: mask_vendor_return asks "payables") and an RTV
+# debit note outside the purchase roles (mask_debit_note asks "purchase"): the
+# item, quantity and reason. Allow-lists, so a money field added later stays
+# hidden until someone lists it here.
 _RETURN_KEYS = (
     "return_id", "vendor_id", "vendor_name", "store_id", "return_type",
     "status", "notes", "status_history",
     "courier_name", "tracking_number", "tracking_url", "shipped_at",
     "created_at", "created_by", "updated_at", "updated_by",
 )
+# A return LINE -- a vendor return's item or an RMA's line -- as anyone outside
+# the accounts roles reads it (owner ruling 2026-10-12, R3): the item, the
+# quantity and the reason, never a unit price, rate or line value under any
+# name. ONE allow-list for both kinds of return (return_line_for_reader), so a
+# price key added later under a new name stays hidden on both.
 _RETURN_ITEM_KEYS = ("product_id", "product_name", "quantity", "reason")
 _DEBIT_NOTE_KEYS = (
     "debit_note_id", "debit_note_number", "financial_year", "issue_date",
@@ -197,14 +214,27 @@ _DEBIT_NOTE_KEYS = (
 _DEBIT_NOTE_LINE_KEYS = ("sku", "description", "hsn", "qty")
 
 
+def return_line_for_reader(line: Dict) -> Dict:
+    """One return line (a vendor return's item, an RMA's line) cut to the
+    allow-list a non-accounts reader gets. The caller has already asked the
+    'payables' rule: mask_vendor_return here, payables_mask.strip_rma_credit
+    for an RMA."""
+    return _pick(line, _RETURN_ITEM_KEYS)
+
+
 def mask_vendor_return(doc: Dict, user: dict) -> Dict:
     """A vendor return without the price paid, its total, the credit amount or
-    the supplier's credit-note / bill reference, unless the caller is a
-    purchase role."""
-    if not isinstance(doc, dict) or can_see_cost(user, "purchase"):
+    the supplier's credit-note / bill reference, unless the caller is an
+    accounts role. Owner ruling 2026-10-12 (R3): on a return every role outside
+    the accounts roles -- managers included -- reads the items, quantities and
+    reasons only (a return's price is the basis of the supplier's credit, i.e.
+    supplier money; the per-unit cost a manager reads on stock and POs is the
+    'product' / 'purchase' rule's and is unchanged). THE one projection for a
+    vendor return: list, detail and the status-change response."""
+    if not isinstance(doc, dict) or can_see_cost(user, "payables"):
         return doc
     out = _pick(doc, _RETURN_KEYS)
-    out["items"] = [_pick(it, _RETURN_ITEM_KEYS) for it in doc.get("items") or []]
+    out["items"] = [return_line_for_reader(it) for it in doc.get("items") or []]
     return out
 
 

@@ -34,6 +34,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .auth import get_current_user
+from ..dependencies import store_in_view
 from ..dependencies import validate_store_access
 from ..services import cash_denominations as cash_denom
 from ..services import eod_tally as till
@@ -332,7 +333,7 @@ async def list_till_sessions(
     WIRE, not merely off the screen. Store-scoped."""
     if not (_roles(current_user) & (_TILL_READ_ROLES | _TILL_OPERATE_ROLES)):
         raise HTTPException(status_code=403, detail="not permitted to view till sessions")
-    scoped = validate_store_access(store_id, current_user)
+    scoped = store_in_view(store_id, current_user)
     if not scoped:
         raise HTTPException(status_code=403, detail="not permitted for this store")
     rows = till.list_sessions(

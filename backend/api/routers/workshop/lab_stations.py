@@ -10,6 +10,7 @@ from fastapi import HTTPException, Depends, Query
 from typing import Optional
 from datetime import datetime
 from ..auth import get_current_user, require_roles
+from ...dependencies import store_in_view
 from ...dependencies import (
     get_db,
     get_workshop_repository,
@@ -62,9 +63,7 @@ async def list_lab_stations(
     Seeds the 6 defaults on first use. Fail-soft: no DB -> empty list."""
     from ...services import lab_routing
 
-    active_store = validate_store_access(store_id, current_user) or current_user.get(
-        "active_store_id"
-    )
+    active_store = store_in_view(store_id, current_user)
     db = get_db()
     if db is None or not active_store:
         return {"stations": [], "store_id": active_store}
@@ -163,9 +162,7 @@ async def get_station_queue(
     Each row carries time-at-station + an SLA colour chip. Store-scoped."""
     from ...services import lab_routing
 
-    active_store = validate_store_access(store_id, current_user) or current_user.get(
-        "active_store_id"
-    )
+    active_store = store_in_view(store_id, current_user)
     db = get_db()
     if db is None or not active_store:
         return {"station": code.upper(), "store_id": active_store, "jobs": [], "total": 0}

@@ -500,20 +500,31 @@ def rt(monkeypatch, db):
 
 
 def test_router_raise_and_list(rt, db):
-    from api.routers.vendor_rma import raise_rma, list_rmas, RMACreate, RMALineCreate
+    from api.routers.vendor_rma import (
+        RMACreate, RMALineCreate, RMAPrices, list_rmas, price_rma, raise_rma,
+    )
 
+    # The manager raises the goods; the price per piece is the accounts
+    # roles' to enter (owner rulings 2026-10-12 R2 + R3).
     body = RMACreate(
         vendor_id="V1", vendor_name="Zeiss", store_id="S1",
         lines=[RMALineCreate(product_id="P1", product_name="Lens", quantity=2,
-                             reason="DEFECTIVE", unit_cost=1500.0)],
+                             reason="DEFECTIVE")],
     )
     res = _run(raise_rma(body, current_user=_user(["STORE_MANAGER"])))
     assert res["ok"] is True
+    assert res.get("expected_credit_paise") is None
+    priced = _run(price_rma(res["rma_id"], RMAPrices(unit_costs=[1500.0]),
+                            current_user=_user(["ACCOUNTANT"])))
+    assert priced["expected_credit_paise"] == 300000
     # Pass the query params explicitly: calling the handler directly bypasses
     # FastAPI's Query-default resolution, so the raw Query objects must be
     # overridden with concrete values.
+    # The credit is supplier money -- the accounts roles' alone (owner ruling
+    # 2026-10-01; a manager's read is checked in
+    # test_supplier_money_masked_for_managers.py), so an ACCOUNTANT reads it.
     listed = _run(list_rmas(store_id=None, vendor_id=None, status=None, skip=0,
-                            limit=50, current_user=_user(["STORE_MANAGER"])))
+                            limit=50, current_user=_user(["ACCOUNTANT"])))
     assert listed["total"] == 1
     # rupee display field present alongside the paise integer
     assert listed["rmas"][0]["expected_credit_rupees"] == 3000.0
@@ -535,7 +546,9 @@ def test_router_cross_store_create_403(rt, db):
     assert ei.value.status_code == 403
 
 
-def test_router_cross_store_read_403(rt, engine):
+def test_router_cross_store_read_is_not_found(rt, engine):
+    """Another shop's RMA is the 404 a missing one gets (audit F63, round 4
+    P5): never a 403 that confirms it exists and names its shop."""
     from fastapi import HTTPException
 
     from api.routers.vendor_rma import get_rma
@@ -543,7 +556,7 @@ def test_router_cross_store_read_403(rt, engine):
     rma_id = _seed_rma(engine, store_id="S2")
     with pytest.raises(HTTPException) as ei:
         _run(get_rma(rma_id, current_user=_user(["STORE_MANAGER"], store_ids=["S1"], active="S1")))
-    assert ei.value.status_code == 403
+    assert (ei.value.status_code, ei.value.detail) == (404, "RMA not found")
 
 
 def test_router_admin_reads_cross_store(rt, engine):

@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 import uuid
 
 from .auth import get_current_user, require_roles
+from ..dependencies import store_in_view
 from ..dependencies import (
     get_task_repository,
     get_user_repository,
@@ -951,7 +952,7 @@ async def get_daily_checklists(
             "progress": 0,
         }
 
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
 
     # Get SOP template for this checklist type
     filters = {"type": checklist_type, "store_id": active_store, "active": True}
@@ -975,7 +976,7 @@ async def complete_checklist_item(
     current_user: dict = Depends(get_current_user),
 ):
     """Mark a checklist item as done"""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user, writing=True)
 
     return {
         "checklist_type": checklist_type,
@@ -1004,7 +1005,7 @@ async def auto_generate_daily_tasks(
     Re-running on the same day tops up what is missing rather than duplicating.
     """
     repo = get_task_repository()
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user, writing=True)
 
     if repo is None:
         return {"generated": 0, "message": "Auto-generate failed"}
@@ -1411,7 +1412,7 @@ async def auto_escalate_overdue_tasks(
     if repo is None:
         return {"escalated": 0, "message": "Auto-escalation failed"}
 
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
 
     # Only the tasks the caller can see: a press from the floor must not
     # escalate (and reassign) a colleague's task it may not even open.
@@ -1489,7 +1490,7 @@ async def scan_payment_variance(
     if order_repo is None:
         return {"scanned": 0, "anomalies": 0, "tasks_created": 0}
 
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     # BUG-031 dual window. `orders.created_at` is a BSON Date on every live
     # write path (BaseRepository._add_timestamps stamps datetime.now();
     # shopify_ingest persists naive-UTC datetimes), and Mongo type-bracketing
@@ -1555,7 +1556,7 @@ async def list_fake_closures(
     if repo is None:
         return {"flagged": [], "count": 0}
 
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     cutoff = datetime.now() - timedelta(days=days)
     filters: dict = {
         "status": {
@@ -1600,7 +1601,7 @@ async def list_silent_tasks(
     if repo is None:
         return {"silent": [], "count": 0}
 
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     filters: dict = {"status": {"$in": ["OPEN", "open"]}}
     if active_store:
         filters["store_id"] = active_store
@@ -2065,7 +2066,7 @@ async def get_sop_checklist(
     if not tpl:
         raise HTTPException(status_code=404, detail="SOP template not found")
 
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     # IST audit: the checklist day key must be the IST business day. The UTC
     # day (datetime.now() on Railway) put late-night reads on yesterday's doc.
     day = date or ist_today().isoformat()

@@ -9,6 +9,7 @@ from fastapi import Depends, Query
 from typing import List, Optional
 from datetime import datetime
 from ..auth import require_roles
+from ...dependencies import store_in_view
 from ...dependencies import get_db, get_prescription_repository, validate_store_access
 from ...services import clinical_abuse as _abuse
 from ._shared import _ABUSE_VIEW_ROLES, router
@@ -289,9 +290,7 @@ async def get_abuse_detection(
 
     # BUG-062: authorise the requested store; default to the caller's own when
     # none is given (a store-scoped role passing another store's id is 403'd).
-    store_id = validate_store_access(store_id, current_user) or current_user.get(
-        "active_store_id"
-    )
+    store_id = store_in_view(store_id, current_user)
 
     cutoff = now - timedelta(days=days)
 

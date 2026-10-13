@@ -12,13 +12,14 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from ._core import AUTHENTICATED
+from ._core import ACCOUNTS, AUTHENTICATED
 
 ROWS: List[Dict[str, object]] = [
     # --- /api/v1/approvals (E4 PIN-gated maker-checker) ---
     # Any authenticated maker can open a request, view their own, or consume an
     # approval they hold; approve/reject is gated to business approvers (the PIN
-    # is the second factor inside the handler). Inbox adds ACCOUNTANT (read-only).
+    # is the second factor inside the handler). Inbox adds ACCOUNTANT, who
+    # approves 'rtv' requests only (approve / reject rows below).
     {"method": "POST", "path": "/api/v1/approvals/requests", "allowed": AUTHENTICATED},
     {
         "method": "GET",
@@ -44,12 +45,18 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/approvals/requests/{request_id}/approve",
-        "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        # routers/approvals._DECIDE_ROLES: the business approvers plus the
+        # accounts roles, who approve 'rtv' (supplier credit) requests -- owner
+        # ruling 2026-10-12. The engine refuses an ACCOUNTANT any other type.
+        "allowed": sorted({"SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", *ACCOUNTS}),
     },
     {
         "method": "POST",
         "path": "/api/v1/approvals/requests/{request_id}/reject",
-        "allowed": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        # routers/approvals._DECIDE_ROLES: the business approvers plus the
+        # accounts roles, who approve 'rtv' (supplier credit) requests -- owner
+        # ruling 2026-10-12. The engine refuses an ACCOUNTANT any other type.
+        "allowed": sorted({"SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", *ACCOUNTS}),
     },
     {
         "method": "POST",

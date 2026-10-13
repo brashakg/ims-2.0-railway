@@ -13,7 +13,7 @@ Covers the F20 acceptance list:
   - totals = sum(line taxable) + tax
   - builds off an existing RTV / vendor-return (and a vendor_rma)
   - Tally Debit Note voucher XML is balanced (debits == credits)
-  - store/entity-scope 403; cashier 403
+  - store scope (another shop's id: 404, as a missing one); cashier 403
   - idempotent (re-issue returns the same note, no double-serial)
 
 CI-robust: every accessor monkeypatched + docs seeded; no whole-JSON substring.
@@ -562,7 +562,7 @@ def test_fail_soft_no_db():
 
 
 # ============================================================================
-# 7. Router: RBAC (cashier 403) + store-scope 403 + idempotent issue
+# 7. Router: RBAC (cashier 403) + store-scope 404 + idempotent issue
 # ============================================================================
 
 
@@ -618,16 +618,21 @@ def test_router_reissue_idempotent(rt, db):
     assert len(db.get_collection("debit_notes").docs) == 1
 
 
-def test_router_cross_store_issue_403(rt, db):
+def test_router_cross_store_issue_is_not_found(rt, db):
     from fastapi import HTTPException
     from api.routers.rtv_debit_notes import issue_debit_note, DebitNoteIssue
 
     _seed_return(db, return_id="VR-S2", store_id="S2")  # not the caller's store
     body = DebitNoteIssue(source_type="vendor_return", rtv_id="VR-S2")
+    # An accountant (who may issue: owner ruling 2026-10-12) bound to S1 -- so
+    # the refusal is the store guard, not the role. Another shop's return is
+    # the 404 a missing one gets (audit F63, round 4 P5): never a 403 that
+    # confirms it exists and names its shop.
     with pytest.raises(HTTPException) as ei:
-        _run(issue_debit_note(body, current_user=_user(["STORE_MANAGER"],
+        _run(issue_debit_note(body, current_user=_user(["ACCOUNTANT"],
                                                        store_ids=["S1"], active="S1")))
-    assert ei.value.status_code == 403
+    assert (ei.value.status_code, ei.value.detail) == (404, "source RTV not found")
+    assert db.get_collection("debit_notes").docs == []
 
 
 def test_router_issue_unknown_rtv_404(rt, db):
@@ -641,16 +646,20 @@ def test_router_issue_unknown_rtv_404(rt, db):
 
 
 def test_cashier_cannot_issue_403():
-    # require_roles is the enforcement primitive used on the issue + tally routes.
-    # A cashier hitting it raises 403 (SUPERADMIN/AP roles pass).
+    # require_roles is the enforcement primitive on the issue route: its own
+    # gate (read off the route) refuses a cashier and, since the owner's
+    # 2026-10-12 ruling, a store manager too; the accounts roles pass.
     from fastapi import HTTPException
-    from api.routers.auth import require_roles
-    from api.routers.rtv_debit_notes import _DEBIT_NOTE_ROLES
+    from api.routers.rtv_debit_notes import router
 
-    dep = require_roles(*_DEBIT_NOTE_ROLES)
-    with pytest.raises(HTTPException) as ei:
-        _run(dep(current_user=_user(["SALES_CASHIER"])))
-    assert ei.value.status_code == 403
+    (route,) = [r for r in router.routes
+                if getattr(r, "path", None) == "/issue" and "POST" in r.methods]
+    (dep,) = [d.call for d in route.dependant.dependencies
+              if getattr(d.call, "__name__", "") == "_dep"]
+    for refused in ("SALES_CASHIER", "STORE_MANAGER"):
+        with pytest.raises(HTTPException) as ei:
+            _run(dep(current_user=_user([refused])))
+        assert ei.value.status_code == 403
     # An accountant passes.
     out = _run(dep(current_user=_user(["ACCOUNTANT"])))
     assert out["roles"] == ["ACCOUNTANT"]
@@ -665,7 +674,7 @@ def test_rbac_policy_rows_present():
     by_path = {(p["method"], p["path"]): p for p in POLICY
                if "rtv-debit-notes" in p.get("path", "")}
     issue = by_path[("POST", "/api/v1/rtv-debit-notes/issue")]
-    assert set(issue["allowed"]) == {"ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"}
+    assert set(issue["allowed"]) == {"ACCOUNTANT", "ADMIN"}  # owner ruling 2026-10-12
     assert issue.get("store_scoped") is True
     tally = by_path[("GET", "/api/v1/rtv-debit-notes/{debit_note_id}/tally")]
     assert "SALES_CASHIER" not in tally["allowed"]

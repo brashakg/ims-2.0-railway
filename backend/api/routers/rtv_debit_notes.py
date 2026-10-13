@@ -11,17 +11,25 @@ It REUSES (no fork):
   * the FY-scoped atomic serial + CGST/SGST/IGST split + Tally Debit-Note voucher
     from ``services/rtv_debit_note`` (which themselves mirror the sales-invoice
     serial + splitter + the Receipt-voucher builder),
-  * the vendor/AP RBAC role set + the store-IDOR guard (validate_store_access /
+  * the vendor/AP RBAC role set + the store-IDOR guard (in_reach_or_404 /
     resolve_store_scope) from vendor_returns / vendor_rma.
 
-RBAC: ADMIN / AREA_MANAGER / STORE_MANAGER / ACCOUNTANT (+ SUPERADMIN via
-require_roles) may issue / export. A cashier / sales / workshop / optometrist can
-NEVER issue a debit note. GET list/detail/print add WORKSHOP_STAFF (the Vendor
-Returns screen), store-scoped per object, and show it the items and quantities
-only (services/cost_mask.mask_debit_note; owner ruling 2026-09-29).
+RBAC: issue, print and the Tally export are the accounts roles' (ADMIN /
+ACCOUNTANT, + SUPERADMIN via require_roles). GET list/detail are the return
+readers' (the purchase roles + WORKSHOP_STAFF, the Vendor Returns screen),
+store-scoped per object, through ONE projection (payables_mask.
+debit_note_for_reader): the cost rule's supplier-identity allow-list for a
+non-purchase role (cost_mask.mask_debit_note, owner ruling 2026-09-29) and
+the supplier money stripped for every non-accounts role.
 
 No comms. No emoji (Windows cp1252). Money is paise-exact integers; responses
 carry both paise and a rupee display field.
+
+Supplier money (owner ruling 2026-10-01): a note's amounts are the accounts
+roles' alone (services/payables_mask). The JSON reads drop them for anyone
+else; the print and the Tally export, which are nothing but those amounts,
+answer 403 to anyone else. Issuing a note records that money, so the issue
+route is the accounts roles' too (owner ruling 2026-10-12).
 """
 
 from __future__ import annotations
@@ -37,24 +45,23 @@ from .auth import require_roles
 from .vendor_returns import _VENDOR_RETURN_READERS
 from ..dependencies import (
     get_db,
+    in_reach_or_404,
     resolve_store_scope,
-    validate_store_access,
     user_store_scope,
 )
-from ..services.cost_mask import PURCHASE_ROLES, mask_debit_note
 from ..services.rtv_debit_note import (
     DebitNoteEngine,
     paise_to_rupees,
     render_debit_note_html,
     tally_build_debit_note_xml,
 )
+from ..services.payables_mask import (
+    AP_ROLES,
+    debit_note_for_reader,
+    require_payables,
+)
 
 logger = logging.getLogger(__name__)
-
-# The purchase roles (services/cost_mask), as on vendor_returns / vendor_rma. A
-# debit note is a financial instrument against a vendor; juniors are excluded.
-# SUPERADMIN passes via require_roles.
-_DEBIT_NOTE_ROLES = PURCHASE_ROLES
 
 router = APIRouter()
 
@@ -208,7 +215,7 @@ async def list_debit_notes(
     else:
         rows = eng.list(store_ids=list(reach), vendor_id=vendor_id, skip=skip, limit=limit)
     return {
-        "debit_notes": [mask_debit_note(_with_rupees(r), current_user) for r in rows],
+        "debit_notes": [debit_note_for_reader(_with_rupees(r), current_user) for r in rows],
         "total": len(rows),
     }
 
@@ -216,20 +223,20 @@ async def list_debit_notes(
 @router.post("/issue", status_code=201)
 async def issue_debit_note(
     body: DebitNoteIssue,
-    current_user: dict = Depends(require_roles(*_DEBIT_NOTE_ROLES)),
+    current_user: dict = Depends(require_roles(*AP_ROLES)),
 ):
     """Issue the GST debit note for an existing RTV (vendor_return / vendor_rma).
     Idempotent: re-issuing for the same RTV returns the first note (no new
-    serial). Store-IDOR guarded on the source RTV's store."""
+    serial). Store-IDOR guarded on the source RTV's store. The note IS the
+    supplier money it records: the accounts roles only (owner ruling
+    2026-10-12); the managers keep the goods side on the return / RMA."""
+    require_payables(current_user, "Issuing the RTV debit note")
     db = _get_db()
     eng = _engine()
     if eng._coll() is None:  # noqa: SLF001 - intentional fail-soft DB probe
         raise HTTPException(status_code=503, detail="Database not available")
 
-    rtv = _load_rtv(db, body.source_type, body.rtv_id)
-    if rtv is None:
-        raise HTTPException(status_code=404, detail="source RTV not found")
-    validate_store_access(rtv.get("store_id"), current_user)
+    rtv = in_reach_or_404(_load_rtv(db, body.source_type, body.rtv_id), current_user, "source RTV not found")
 
     vendor = _load_vendor(db, rtv.get("vendor_id"))
     seller = _load_seller(db, rtv.get("store_id"), rtv.get("entity_id"))
@@ -239,6 +246,8 @@ async def issue_debit_note(
         actor=current_user.get("user_id"),
         seller=seller,
     )
+    # Only an accounts role gets this far (require_payables above), so the
+    # answer is never stripped: the caller may read every figure on it.
     if not res.get("ok"):
         raise _http_from_result(res)
     return {
@@ -252,41 +261,42 @@ async def get_debit_note(
     debit_note_id: str,
     current_user: dict = Depends(require_roles(*_VENDOR_RETURN_READERS)),
 ):
-    """Get a single debit note. Store-IDOR guarded (cross-store -> 403)."""
+    """Get a single debit note. Another shop's is the 404 a missing one gets."""
     eng = _engine()
-    doc = eng.get(debit_note_id)
-    if doc is None:
-        raise HTTPException(status_code=404, detail="Debit note not found")
-    validate_store_access(doc.get("store_id"), current_user)
-    return mask_debit_note(_with_rupees(doc), current_user)
+    doc = in_reach_or_404(eng.get(debit_note_id), current_user, "Debit note not found")
+    return debit_note_for_reader(_with_rupees(doc), current_user)
+
+
+# The printed note and the Tally voucher ARE the debit note's money: the
+# accounts roles only (owner ruling 2026-10-01, supplier money is ADMIN /
+# SUPERADMIN / ACCOUNTANT's; 2026-10-12 R2/R3 leave managers no debit-note
+# work and no return price). The inline require_payables is the same rule for
+# a direct call that skips Depends.
+_AP_ROLES = AP_ROLES
 
 
 @router.get("/{debit_note_id}/print", response_class=HTMLResponse)
 async def print_debit_note(
     debit_note_id: str,
-    current_user: dict = Depends(require_roles(*_VENDOR_RETURN_READERS)),
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
-    """Printable GST debit-note HTML. Store-IDOR guarded."""
+    """Printable GST debit-note HTML. Accounts roles only. Store-IDOR guarded."""
+    require_payables(current_user, "The debit note print")
     eng = _engine()
-    doc = eng.get(debit_note_id)
-    if doc is None:
-        raise HTTPException(status_code=404, detail="Debit note not found")
-    validate_store_access(doc.get("store_id"), current_user)
-    return HTMLResponse(content=render_debit_note_html(mask_debit_note(doc, current_user)))
+    doc = in_reach_or_404(eng.get(debit_note_id), current_user, "Debit note not found")
+    return HTMLResponse(content=render_debit_note_html(doc))
 
 
 @router.get("/{debit_note_id}/tally", response_class=PlainTextResponse)
 async def export_debit_note_tally(
     debit_note_id: str,
-    current_user: dict = Depends(require_roles(*_DEBIT_NOTE_ROLES)),
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
     """Tally import XML carrying the Debit Note voucher (balanced; debits ==
-    credits). Vendor/AP roles only. Store-IDOR guarded."""
+    credits). Accounts roles only. Store-IDOR guarded."""
+    require_payables(current_user, "The debit note Tally export")
     eng = _engine()
-    doc = eng.get(debit_note_id)
-    if doc is None:
-        raise HTTPException(status_code=404, detail="Debit note not found")
-    validate_store_access(doc.get("store_id"), current_user)
+    doc = in_reach_or_404(eng.get(debit_note_id), current_user, "Debit note not found")
     try:
         xml = tally_build_debit_note_xml(doc)
     except ValueError as e:

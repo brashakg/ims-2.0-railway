@@ -509,7 +509,7 @@ class TestInventoryStockCountStoreGuard:
 
 
 # ===========================================================================
-# 5. VENDOR RETURNS -- validate_store_access on PATCH /{id}/status (403)
+# 5. VENDOR RETURNS -- the one per-object guard on PATCH /{id}/status (404)
 # ===========================================================================
 
 
@@ -554,8 +554,9 @@ def _seed_vendor_return(**over):
 
 
 class TestVendorReturnStatusStoreGuard:
-    """vendor_returns.py: PATCH /{id}/status 403s a foreign-store actor before
-    the status (and any credit-note) write."""
+    """vendor_returns.py: PATCH /{id}/status answers a foreign-store actor
+    404 (the detail's own guard, never a 403 naming the shop) before the
+    status (and any credit-note) write."""
 
     def _install(self, monkeypatch, doc):
         coll = _VendorReturnColl(doc)
@@ -567,15 +568,16 @@ class TestVendorReturnStatusStoreGuard:
     def _update(self, status="approved"):
         return vendor_returns_mod.VendorReturnStatusUpdate(status=status)
 
-    def test_status_cross_store_403_no_write(self, monkeypatch):
+    def test_status_cross_store_404_no_write(self, monkeypatch):
         coll = self._install(monkeypatch, _seed_vendor_return())
         err = _expect_status(
             vendor_returns_mod.update_return_status(
                 "VR-1", status_update=self._update(), current_user=MGR_OWN
             ),
-            403,
+            404,
         )
-        assert "store" in err.detail.lower()
+        assert err.detail == "Return not found"
+        assert OTHER_STORE not in str(err.detail)
         assert coll.updates == []  # no status transition persisted
         assert coll.doc["status"] == "created"
 

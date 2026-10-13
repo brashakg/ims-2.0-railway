@@ -4,7 +4,10 @@
 // The approvals the current user is eligible to action. The backend already
 // tier/role/store-scopes the list, so we render exactly what it returns. Two
 // tabs: Pending (live, urgency-sorted) and History (recent actioned rows).
-// Approve / Reject open the PIN modal.
+// Approve / Reject open the PIN modal, on the rows the server says this reader
+// can act on (can_approve). The approver's own PIN is set at the foot of the
+// page: an ACCOUNTANT approves Return-to-Vendor requests (owner ruling
+// 2026-10-12) and has no other screen that sets one.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Loader2, Inbox } from 'lucide-react';
@@ -16,6 +19,7 @@ import {
   PINApproveModal,
   type PinModalMode,
 } from '../../components/approvals/PINApproveModal';
+import { ApprovalPinSection } from '../../components/settings/ApprovalPinSection';
 
 type Tab = 'pending' | 'history';
 
@@ -115,6 +119,10 @@ export function ApprovalInboxPage() {
           ))}
         </div>
       )}
+
+      <div className="mt-8">
+        <ApprovalPinSection />
+      </div>
 
       {modal && (
         <PINApproveModal

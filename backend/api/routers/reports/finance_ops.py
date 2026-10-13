@@ -9,6 +9,7 @@ from ...utils.ist import (
     ist_day_start_utc,
 )
 from ..auth import get_current_user, require_roles
+from ...dependencies import store_in_view
 from ...dependencies import (
     get_order_repository,
     get_task_repository,
@@ -39,7 +40,7 @@ async def attendance_report(
     current_user: dict = Depends(get_current_user),
 ):
     """Get attendance report for month"""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     attendance_repo = get_attendance_repository()
 
     if attendance_repo is None:
@@ -83,7 +84,7 @@ async def outstanding_report(
     current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
     """Get outstanding payments report"""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     order_repo = get_order_repository()
 
     if order_repo is None:
@@ -201,7 +202,7 @@ async def gst_report(
     `created_at` as a BSON datetime, so the previous `.isoformat()` STRING
     filter never matched a single order.
     """
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     order_repo = get_order_repository()
 
     if order_repo is None:
@@ -330,7 +331,7 @@ async def task_summary(
     current_user: dict = Depends(get_current_user),
 ):
     """Get task summary"""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     task_repo = get_task_repository()
 
     if task_repo is None:

@@ -50,7 +50,12 @@ bill lines and rolled into the product master as ``landed_cost`` /
 re-invoked (see allocate_invoice_landed_costs for why).
 
 Roles: create / book is an accounting action -> ADMIN / ACCOUNTANT (+SUPERADMIN
-via require_roles). Reads are AUTHENTICATED.
+via require_roles); so are the reads (F1). Shop scope (F63): the list filters
+on the one Purchase shop rule, and every route that acts on ONE bill by id
+answers 404 for a bill outside the caller's shop (in_reach_or_404);
+every route that drafts, previews or books a bill from a goods receipt or
+Delivery Challan answers the same 404 for a receipt outside it
+(in_reach_or_404), exactly as for a missing one.
 """
 
 import logging
@@ -63,6 +68,11 @@ from pydantic import BaseModel, Field, field_validator
 
 from .auth import get_current_user, require_roles
 from ..dependencies import (
+    NO_SHOP_DETAIL,
+    can_access_store_scoped,
+    in_reach_or_404,
+    is_no_shop_scope,
+    resolve_store_scope,
     get_vendor_repository,
     get_purchase_order_repository,
     get_grn_repository,
@@ -132,7 +142,9 @@ class PurchaseInvoiceCreate(BaseModel):
     # The shop the form was filled at (a bill with no receipt is that shop's
     # company's). Sent by the preview AND the booking, so a shop switched in
     # another tab between the two cannot move the bill; the token's active
-    # shop only when absent. Checked by validate_store_access (403).
+    # shop only when absent -- except from ADMIN / SUPERADMIN, who must name
+    # it (owner ruling R9, _bill_shop: 422 BILL_SHOP_REQUIRED). Checked by
+    # validate_store_access (403); a receipt's bill keeps the receipt's shop.
     store_id: Optional[str] = None
     tds: float = Field(0, ge=0)
     itc_eligible: bool = True
@@ -196,6 +208,50 @@ class PurchaseInvoicePreview(BaseModel):
 
 def _clean(doc: dict) -> dict:
     return {k: v for k, v in doc.items() if k != "_id"}
+
+
+def _dcs_in_scope_or_404(db, dc_ids, current_user: dict) -> None:
+    """in_reach_or_404 on every Delivery Challan a bill would consolidate,
+    run BEFORE anything else reads them for the bill (the recipient's shop,
+    _load_linked_dcs's 400 / 409 checks, the tally). A DC that cannot be read
+    is the same 404 _load_linked_dcs gives it."""
+    if db is None:
+        return
+    for dc_id in dc_ids or []:
+        try:
+            # grn_id rides along so a DC with no shop is a non-empty (found)
+            # row, never read as missing.
+            doc = db.get_collection("grns").find_one(
+                {"grn_id": dc_id}, {"_id": 0, "grn_id": 1, "store_id": 1}
+            )
+        except Exception:  # noqa: BLE001 - unreadable reads as missing, as below
+            doc = None
+        in_reach_or_404(doc, current_user, f"DC {dc_id} not found")
+
+
+def _bills_named_for(bills: list, current_user: Optional[dict]) -> list:
+    """The bill numbers (else ids) a 'this receipt is already billed by ...'
+    refusal may name to this caller: only bills in the caller's shop scope
+    (in_reach_or_404's rule), so a refusal never names another shop's
+    bill -- nor a bill with no shop -- to a non-admin. `current_user` None
+    means a door that scoped the caller itself: every name, as before."""
+    return [
+        b.get("bill_number") or b.get("bill_id")
+        for b in bills or []
+        if current_user is None or can_access_store_scoped(b.get("store_id"), current_user)
+    ]
+
+
+def _billed_by_text(named: list, total: int) -> str:
+    """'INV-1', 'INV-1 and 1 other bill', or 'another bill' when none of the
+    `total` bills may be named (_bills_named_for)."""
+    hidden = total - len(named)
+    if not named:
+        return "another bill" if hidden == 1 else f"{hidden} other bills"
+    text = ", ".join(str(n) for n in named)
+    if hidden:
+        text += f" and {hidden} other bill" + ("s" if hidden > 1 else "")
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +327,7 @@ def _load_linked_dcs(db, dc_ids):
     return docs
 
 
-def _load_standard_grn(grn_id, expected_vendor_id=None):
+def _load_standard_grn(grn_id, expected_vendor_id=None, current_user=None):
     """Load a STANDARD (PO-backed) GRN and verify it is ACCEPTED -- and that it
     belongs to the vendor being billed -- before it can be billed. The mirror of
     the DC guards in `_load_linked_dcs` + `_assert_dcs_single_vendor_store`.
@@ -295,6 +351,11 @@ def _load_standard_grn(grn_id, expected_vendor_id=None):
     A Delivery Challan is out of scope here (it is billed via the /from-dcs
     consolidated path) -> 400. Fail-soft only when there is no GRN repository /
     no DB (returns None).
+
+    ``current_user`` applies the shop rule FIRST (in_reach_or_404): a
+    receipt outside the caller's shop is the same 404 as a missing one, before
+    any check below can confirm it exists. None = the caller scoped the
+    receipt itself (vendors.create_vendor_bill does).
     """
     if not grn_id:
         return None
@@ -302,6 +363,8 @@ def _load_standard_grn(grn_id, expected_vendor_id=None):
     if grn_repo is None:
         return None
     doc = grn_repo.find_by_id(grn_id)
+    if current_user is not None:
+        in_reach_or_404(doc, current_user, f"GRN {grn_id} not found")
     if not doc:
         raise HTTPException(status_code=404, detail=f"GRN {grn_id} not found")
     if doc.get("grn_subtype") == GRN_SUBTYPE_DC:
@@ -340,7 +403,7 @@ def _load_standard_grn(grn_id, expected_vendor_id=None):
     return doc
 
 
-def _assert_grn_not_over_billed(db, grn, proposed_lines):
+def _assert_grn_not_over_billed(db, grn, proposed_lines, current_user=None):
     """LEAK GUARD: a goods receipt may be billed in PARTS, but never for more
     units than it actually accepted.
 
@@ -367,6 +430,10 @@ def _assert_grn_not_over_billed(db, grn, proposed_lines):
     booking is a deliberate, low-frequency single-accountant action, so the
     pre-check is proportionate. The over-bill still surfaces in the PO-variance
     report, which prompts a debit note for exactly this overage.
+
+    The refusal names the bills that took the units only where the caller may
+    see them (_bills_named_for): never another shop's bill, nor one with no
+    shop, to a non-admin.
     """
     if db is None or not grn:
         return
@@ -377,7 +444,7 @@ def _assert_grn_not_over_billed(db, grn, proposed_lines):
         prior_bills = list(
             db.get_collection("vendor_bills").find(
                 {"grn_id": grn_id},
-                {"_id": 0, "bill_id": 1, "bill_number": 1, "lines": 1},
+                {"_id": 0, "bill_id": 1, "bill_number": 1, "lines": 1, "store_id": 1},
             )
         )
     except Exception as exc:  # noqa: BLE001
@@ -411,19 +478,21 @@ def _assert_grn_not_over_billed(db, grn, proposed_lines):
             grn_id,
             ",".join(str(b) for b in blind_by),
         )
+        named = _bills_named_for(blind, current_user)
         raise HTTPException(
             status_code=409,
             detail={
                 "code": "grn_billed_without_lines",
                 "message": (
-                    f"Goods receipt {grn_id} already carries bill(s) "
-                    f"{', '.join(str(b) for b in blind_by)} recorded WITHOUT "
+                    f"Goods receipt {grn_id} already carries "
+                    f"{'bill(s) ' if named else ''}"
+                    f"{_billed_by_text(named, len(blind))} recorded WITHOUT "
                     f"line detail, so how many units they already covered "
                     f"cannot be determined. Void that bill and re-raise it as a "
                     f"purchase invoice with lines, then bill the balance."
                 ),
                 "grn_id": grn_id,
-                "billed_by": blind_by,
+                "billed_by": named,
             },
         )
 
@@ -461,7 +530,7 @@ def _assert_grn_not_over_billed(db, grn, proposed_lines):
                 f"the extra goods."
             ),
             "grn_id": grn_id,
-            "already_billed_by": already_billed_by,
+            "already_billed_by": _bills_named_for(prior_bills, current_user),
             "products": over,
         },
     )
@@ -699,7 +768,7 @@ def _release_grn_units(db, grn, claim, invoice_id):
         )
 
 
-def assert_grn_billable_header_only(db, grn_id, vendor_id):
+def assert_grn_billable_header_only(db, grn_id, vendor_id, current_user=None):
     """The same two guards for the HEADER-ONLY vendor-bill door
     (vendors.create_vendor_bill), which accepts a grn_id but carries no lines.
 
@@ -708,13 +777,19 @@ def assert_grn_billable_header_only(db, grn_id, vendor_id):
     receipt already carrying a bill may not take a second, blind one. (Split
     billing stays available through the first-class purchase-invoice door, which
     does carry lines and is quantity-checked.)
+
+    With ``current_user`` the shop rule runs here too: another shop's receipt
+    is the same 404 as a missing one, and the 409 names the bill that took
+    the receipt only when the caller may see it (_bills_named_for).
     """
-    grn = _load_standard_grn(grn_id, expected_vendor_id=vendor_id)
+    grn = _load_standard_grn(
+        grn_id, expected_vendor_id=vendor_id, current_user=current_user
+    )
     if grn is None or db is None:
         return
     try:
         existing = db.get_collection("vendor_bills").find_one(
-            {"grn_id": grn_id}, {"_id": 0, "bill_id": 1, "bill_number": 1}
+            {"grn_id": grn_id}, {"_id": 0, "bill_id": 1, "bill_number": 1, "store_id": 1}
         )
     except Exception as exc:  # noqa: BLE001
         logger.error(
@@ -730,19 +805,20 @@ def assert_grn_billable_header_only(db, grn_id, vendor_id):
             ),
         ) from exc
     if existing:
+        named = _bills_named_for([existing], current_user)
         raise HTTPException(
             status_code=409,
             detail={
                 "code": "grn_already_billed",
                 "message": (
                     f"Goods receipt {grn_id} is already billed by "
-                    f"{existing.get('bill_number') or existing.get('bill_id')}. "
+                    f"{_billed_by_text(named, 1)}. "
                     f"To bill the balance of a part-delivered receipt, use the "
                     f"purchase-invoice screen (it checks quantities line by "
                     f"line); a header-only bill cannot prove what is left."
                 ),
                 "grn_id": grn_id,
-                "billed_by": existing.get("bill_number") or existing.get("bill_id"),
+                "billed_by": named[0] if named else None,
             },
         )
 
@@ -828,11 +904,17 @@ class PurchaseConfigUpdate(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _run_match_for_invoice(db, po_id, grn_id, computed_lines, tolerance_pct):
+def _run_match_for_invoice(
+    db, po_id, grn_id, computed_lines, tolerance_pct, current_user=None
+):
     """Fetch the PO + GRN and run the 3-way match against the computed invoice
     lines. Returns the match dict, or None when there is no PO/GRN to match
     against (a manual invoice with no link). Fail-soft -- a fetch/compute error
-    returns None so booking proceeds (the invoice is simply unmatched)."""
+    returns None so booking proceeds (the invoice is simply unmatched).
+
+    The match detail carries the PO's ordered quantities and prices and the
+    receipt's quantities, so a PO or receipt outside the caller's shop (F63)
+    is matched exactly as a missing one is: not at all."""
     if not (po_id or grn_id):
         return None
     try:
@@ -844,6 +926,11 @@ def _run_match_for_invoice(db, po_id, grn_id, computed_lines, tolerance_pct):
             po = po_repo.find_by_id(po_id)
         if grn_id and grn_repo is not None:
             grn = grn_repo.find_by_id(grn_id)
+        if current_user is not None:
+            if po and not can_access_store_scoped(po.get("delivery_store_id"), current_user):
+                po = None
+            if grn and not can_access_store_scoped(grn.get("store_id"), current_user):
+                grn = None
         # Need at least one comparison doc to make a meaningful verdict.
         if po is None and grn is None:
             return None
@@ -1020,6 +1107,135 @@ def _receipt_store_id(db, grn_doc, linked_dc_ids) -> Optional[str]:
     return store_id or None
 
 
+# Owner ruling 2026-10-12 (R9): the refusal when an ADMIN / SUPERADMIN books a
+# bill no goods receipt places (rent, freight, job-work) without naming its shop.
+BILL_SHOP_REQUIRED = {
+    "code": "BILL_SHOP_REQUIRED",
+    "message": "Pick the shop this bill is for.",
+}
+
+
+def _bill_shop(db, receipt_store_id, asked_store_id, current_user: dict):
+    """THE shop a purchase bill books to -- and so whose company and GST
+    registration take it (owner ruling 2026-10-12, R9). One rule for every
+    door that books a bill: POST /purchase-invoices and its /preview, and the
+    Cash Flow '+ Bill' (POST /vendors/{id}/bills).
+
+      * a bill naming a goods receipt that has a shop: that shop. A store_id
+        naming another shop is a contradiction (422), never re-filed.
+      * no receipt (rent, freight, job-work), or a legacy receipt with no
+        shop on record:
+          - ADMIN / SUPERADMIN must name the shop (store_id): 422
+            BILL_SHOP_REQUIRED without it. Never his topbar shop -- that is
+            where he sits, not the shop the rent or freight is for: a Pune
+            rent bill booked from Dhanbad sat in Dhanbad's books on
+            Dhanbad's GSTIN.
+          - anyone else: the shop named when it is one of theirs
+            (validate_store_access: another shop is 403), else their own
+            shop by the ONE shop rule (resolve_store_scope: the active shop,
+            else the first of store_ids). A login holding NO shop is refused
+            403 NO_SHOP_DETAIL (owner ruling 2026-10-12, R4), before anything
+            is written -- as ap_payments._money_shop refuses its money.
+
+    Checked before anything is claimed or written. Returns (shop, picked):
+    `picked` is True when the shop is the admin's pick, so _bill_recipient
+    takes that shop's registration and words its refusals for a picked shop."""
+    from ..dependencies import user_store_scope
+
+    asked = (asked_store_id or "").strip() or None
+    if asked:
+        asked = validate_store_access(asked, current_user)
+    if receipt_store_id:
+        if asked and asked != receipt_store_id:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "BILL_SHOP_NOT_RECEIPT_SHOP",
+                    "message": (
+                        f"This bill's goods receipt is shop {receipt_store_id}'s, "
+                        f"so the bill is too -- not {asked}'s. Leave the shop "
+                        "as the receipt's. Nothing was recorded."
+                    ),
+                },
+            )
+        return receipt_store_id, False
+    cross_store, _ = user_store_scope(current_user)
+    if not cross_store:
+        if asked:
+            return asked, False
+        own = resolve_store_scope(None, current_user)
+        if is_no_shop_scope(own):
+            raise HTTPException(status_code=403, detail=NO_SHOP_DETAIL)
+        return own, False
+    if not asked:
+        raise HTTPException(status_code=422, detail=dict(BILL_SHOP_REQUIRED))
+    found = True
+    if db is not None:
+        try:
+            found = bool(
+                db.get_collection("stores").find_one(
+                    {"store_id": asked}, {"_id": 0, "store_id": 1}
+                )
+            )
+        except Exception:  # noqa: BLE001 - _bill_recipient reads it again and refuses
+            found = True
+    if not found:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "BILL_SHOP_UNKNOWN",
+                "message": f"Shop {asked} is not one of our shops. Pick the shop this bill is for.",
+            },
+        )
+    return asked, True
+
+
+def _bill_shop_and_recipient(
+    db, receipt_store_id, asked_store_id, body_gstin, current_user, gstin_box=True
+):
+    """(shop, recipient) for a bill: _bill_shop's shop, and the company + GSTIN
+    that shop's bill goes to (_bill_recipient). A receipt's shop and an
+    admin's picked shop decide the registration outright; anyone else's own
+    shop is the fallback a typed GSTIN may name another company past, as
+    before."""
+    shop, picked = _bill_shop(db, receipt_store_id, asked_store_id, current_user)
+    if receipt_store_id or picked:
+        recipient = _bill_recipient(
+            db,
+            shop,
+            body_gstin,
+            None,
+            gstin_box=gstin_box,
+            current_user=current_user,
+            picked=picked,
+        )
+    else:
+        recipient = _bill_recipient(
+            db, None, body_gstin, shop, gstin_box=gstin_box, current_user=current_user
+        )
+    return shop, recipient
+
+
+def _draft_shop_and_recipient(db, receipt_store_id, current_user):
+    """(shop, recipient) a from-receipt DRAFT prefills (from-GRN, from-DCs):
+    _bill_shop_and_recipient with nothing picked yet, so the draft and the
+    booking name the same shop. A receipt with a shop: that shop and its
+    registration. A legacy receipt with no shop on record: anyone else's own
+    shop, as before -- but an ADMIN / SUPERADMIN has not picked one yet (R9),
+    so the draft names NO shop and NO recipient, and the booking form asks him
+    for the shop; its preview and Book then read the picked shop's
+    registration. The draft used to prefill his topbar shop's GSTIN, which
+    the form sent back beside the shop he picked -- refused as 'not one of our
+    GST numbers' on another company's shop -- and a SUPERADMIN with no topbar
+    shop could not open the draft at all (RECIPIENT_UNRESOLVED)."""
+    try:
+        return _bill_shop_and_recipient(db, receipt_store_id, None, None, current_user)
+    except HTTPException as exc:
+        if isinstance(exc.detail, dict) and exc.detail.get("code") == BILL_SHOP_REQUIRED["code"]:
+            return None, {"recipient_entity_id": None, "recipient_gstin": None}
+        raise
+
+
 def _draft_lines(db, receipt: dict, po: Optional[dict]) -> list:
     """A receipt's billable lines for BOTH drafts (from-GRN, from-DCs), with
     the name and HSN the receipt and its PO lack taken from the catalogue: a
@@ -1069,6 +1285,7 @@ def _bill_recipient(
     fallback_store_id=None,
     gstin_box=True,
     current_user=None,
+    picked=False,
 ) -> dict:
     """THE recipient of a purchase bill -- one resolution for every bill door
     (the booking, its preview, both drafts, the Cash Flow '+ bill'), decided on
@@ -1101,6 +1318,11 @@ def _bill_recipient(
     refusal never tells the accountant to type into a box that is not there
     (the Cash Flow '+ bill' form has none). A company master that cannot be
     read is a 503, never 'no companies'.
+
+    `picked`: receipt_store_id is not a receiving shop but the shop an ADMIN
+    picked for a bill no receipt places (R9, _bill_shop) -- the same rule (that
+    shop's company and registration; a typed GSTIN may only agree with it),
+    with refusals worded for a services bill.
     """
     gstin = (body_gstin or "").strip().upper() or None
     if db is None:
@@ -1195,7 +1417,10 @@ def _bill_recipient(
             "RECIPIENT_UNRESOLVED",
             "Cannot tell which of our companies this bill is for: "
             + (
-                f"the receiving shop {receipt_store_id} has no company set."
+                f"shop {receipt_store_id} has no company set in Organization "
+                "(left menu), then record the bill again."
+                if picked
+                else f"the receiving shop {receipt_store_id} has no company set."
                 if receipt_store_id
                 else (
                     (
@@ -1215,6 +1440,20 @@ def _bill_recipient(
     held = _registrations(entity)
     name = entity.get("name") or entity.get("entity_id")
     if gstin:
+        picked_reg = ov.shop_gstin(entity, shop) if picked else None
+        if picked and gstin != picked_reg:
+            # The admin's picked shop decides the registration (R9). Any other
+            # number -- the same company's other shop, or another company's --
+            # is refused naming the shop he picked: 'not one of our numbers,
+            # check the supplier's bill' blamed the bill for a number left in
+            # the box from another shop.
+            _refuse_recipient(
+                "RECIPIENT_GSTIN_NOT_BILL_SHOP",
+                f"{gstin} is not the GST number of shop {receipt_store_id}"
+                + (f" ({picked_reg})" if picked_reg else ", which has none")
+                + ", the shop this bill is for. Clear the Recipient GSTIN "
+                "box, or pick the shop whose GST number is on the bill.",
+            )
         if gstin not in held:
             _refuse_recipient(
                 "RECIPIENT_GSTIN_NOT_OURS",
@@ -1294,28 +1533,27 @@ def _vendor_gstin(db, vendor: Optional[dict], vendor_id: str) -> Optional[str]:
 
 
 def _bill_math(db, vendor, body, grn_doc, current_user):
-    """Everything a booking stores about tax: (supplier GSTIN, recipient,
-    computed invoice). POST / books it and POST /preview shows it through this
-    one call on the same body, so the form cannot preview one tax head, split
-    or paisa and the ledger store another (F6 / F40) -- nor another shop: the
-    shop is the form's own store_id, never whichever the token names by the
-    time Book is pressed. A receipt's shop decides a receipt's bill, so the
-    form's shop is only checked (403) when it is the one that counts."""
+    """Everything a booking stores about tax and shop: (supplier GSTIN,
+    recipient, computed invoice, shop). POST / books it and POST /preview
+    shows it through this one call on the same body, so the form cannot
+    preview one tax head, split or paisa and the ledger store another (F6 /
+    F40) -- nor another shop: the shop is _bill_shop's (the receipt's; else
+    the form's own store_id -- required from an admin (R9), never whichever
+    shop the token names by the time Book is pressed)."""
     supplier_gstin = _vendor_gstin(db, vendor, body.vendor_id)
-    receipt_store = _receipt_store_id(db, grn_doc, body.linked_dc_ids)
-    recipient = _bill_recipient(
+    shop, recipient = _bill_shop_and_recipient(
         db,
-        receipt_store,
+        _receipt_store_id(db, grn_doc, body.linked_dc_ids),
+        body.store_id,
         body.recipient_gstin,
-        None if receipt_store else validate_store_access(body.store_id, current_user),
-        current_user=current_user,
+        current_user,
     )
     computed = pinv.compute_invoice(
         [ln.model_dump() for ln in body.lines],
         supplier_gstin,
         recipient.get("recipient_gstin"),
     )
-    return supplier_gstin, recipient, computed
+    return supplier_gstin, recipient, computed, shop
 
 
 def _line_product_ids(lines) -> list:
@@ -1600,7 +1838,14 @@ async def create_purchase_invoice(
     # so the single-GRN guard skips them.
     grn_doc = None
     if body.grn_id and not body.linked_dc_ids:
-        grn_doc = _load_standard_grn(body.grn_id, expected_vendor_id=body.vendor_id)
+        grn_doc = _load_standard_grn(
+            body.grn_id, expected_vendor_id=body.vendor_id, current_user=current_user
+        )
+    # F63: every receipt the bill names is one the caller's shop can reach --
+    # another shop's is the same 404 as a missing one, BEFORE the recipient is
+    # read off its shop or any check below can confirm it exists.
+    if body.linked_dc_ids:
+        _dcs_in_scope_or_404(db, body.linked_dc_ids, current_user)
 
     # Ruling 15 -- the bill must be LINKED to the goods-received record. A bill
     # for goods nobody counted in settles a purchase whose quantities were
@@ -1721,7 +1966,7 @@ async def create_purchase_invoice(
     # SUPPLIER's state under that name, the form sent it back, and reading it
     # as the buyer's state stored a Maharashtra supplier's IGST bill as
     # CGST+SGST.
-    supplier_gstin, recipient, computed = _bill_math(
+    supplier_gstin, recipient, computed, bill_shop = _bill_math(
         db, vendor, body, grn_doc, current_user
     )
 
@@ -1743,7 +1988,9 @@ async def create_purchase_invoice(
     # from a false zero on any receipt whose bills predate the counter.
     grn_priors = None
     if grn_doc is not None:
-        grn_priors = _assert_grn_not_over_billed(db, grn_doc, computed["lines"])
+        grn_priors = _assert_grn_not_over_billed(
+            db, grn_doc, computed["lines"], current_user
+        )
 
     credit_days = int((vendor or {}).get("credit_days", 30) or 30)
     due_date = ap_engine.compute_due_date(body.invoice_date, credit_days)
@@ -1756,7 +2003,12 @@ async def create_purchase_invoice(
     # link -> no match (match_status None = a manual/unmatched invoice).
     config = _resolved_purchase_config(db)
     match = _run_match_for_invoice(
-        db, body.po_id, body.grn_id, computed["lines"], config["match_tolerance_pct"]
+        db,
+        body.po_id,
+        body.grn_id,
+        computed["lines"],
+        config["match_tolerance_pct"],
+        current_user=current_user,
     )
     match_status = match.get("match_status") if match else None
 
@@ -1810,6 +2062,10 @@ async def create_purchase_invoice(
         "invoice_id": invoice_id,
         "doc_type": "PURCHASE_INVOICE",
         "vendor_id": body.vendor_id,
+        # The shop the goods landed in; with no receipt the shop the admin
+        # picked (R9), else the booker's own -- the shop the recipient was
+        # read off (_bill_shop): every Purchase tab scopes on it (F63).
+        "store_id": bill_shop,
         "vendor_name": (vendor or {}).get("trade_name")
         or (vendor or {}).get("legal_name"),
         "vendor_gstin": supplier_gstin,
@@ -2100,7 +2356,12 @@ async def preview_purchase_invoice(
     is written. The Purchase Invoices form shows this instead of doing its own
     GST math: its own copy previewed CGST + SGST on a manual bill the server
     booked as IGST, called a junk-prefix GSTIN inter-state, and rounded a
-    paisa differently (panel on F6/F40)."""
+    paisa differently (panel on F6/F40).
+
+    The receipts it names obey the shop rule as the booking does (F63): a
+    GRN or DC outside the caller's shop is the same 404 as a missing one --
+    the booking's own answer -- never a preview of the other shop's recipient
+    and totals."""
     vendor_repo = get_vendor_repository()
     vendor = vendor_repo.find_by_id(body.vendor_id) if vendor_repo is not None else None
     if vendor_repo is not None and vendor is None:
@@ -2109,8 +2370,12 @@ async def preview_purchase_invoice(
     grn_doc = None
     if body.grn_id and not body.linked_dc_ids:
         grn_repo = get_grn_repository()
-        grn_doc = grn_repo.find_by_id(body.grn_id) if grn_repo is not None else None
-    supplier_gstin, recipient, computed = _bill_math(
+        if grn_repo is not None:
+            grn_doc = grn_repo.find_by_id(body.grn_id)
+            in_reach_or_404(grn_doc, current_user, f"GRN {body.grn_id} not found")
+    if body.linked_dc_ids:
+        _dcs_in_scope_or_404(db, body.linked_dc_ids, current_user)
+    supplier_gstin, recipient, computed, _shop = _bill_math(
         db, vendor, body, grn_doc, current_user
     )
     return {
@@ -2166,6 +2431,7 @@ async def list_purchase_invoices(
     # data -- restrict to the AP roles (ACCOUNTANT/ADMIN; SUPERADMIN auto-passes),
     # same gate as the create/approve writes, instead of any authenticated user.
     current_user: dict = Depends(require_roles(*_AP_ROLES)),
+    store_id: Optional[str] = Query(None),
 ):
     """List every supplier bill, newest first: the screen's line-detail
     invoices AND the Cash Flow '+ bill' door's header-only bills -- the same
@@ -2179,21 +2445,46 @@ async def list_purchase_invoices(
     flt: dict = {"source_transfer_id": None}
     if vendor_id:
         flt["vendor_id"] = vendor_id
-    if status:
-        flt["status"] = status
     if unmatched is True:
         flt["po_id"] = None
         flt["grn_id"] = None
+    # The one Purchase shop scope (F63): a Pune login never lists Dhanbad bills.
+    scope = resolve_store_scope(store_id, current_user)
+    if scope:
+        flt["store_id"] = scope
     try:
         rows = list(db.get_collection("vendor_bills").find(flt, {"_id": 0}))
     except Exception:
         rows = []
+    # The status filter reads the as-of status the rows are shown with.
+    rows = [r for r in stamp_bills_as_of(db, rows) if not status or r["status"] == status]
     rows.sort(
         key=lambda r: r.get("invoice_date") or r.get("bill_date") or "", reverse=True
     )
     _stamp_bill_actor_names(db, rows)
     _stamp_receipt_numbers(db, rows)
     return {"purchase_invoices": rows, "total": len(rows)}
+
+
+def stamp_bills_as_of(db, bills: list) -> list:
+    """THE as-of rule on every bill handed to a screen: status and outstanding
+    struck on today by ap_engine.bill_as_of, as the supplier ledger, AP aging,
+    the Purchases report and Cash Flow strike them -- money dated after today
+    (a post-dated cheque) is noted (post_dated_money / post_dated_until), not
+    counted, so the bill reads PAID only once the cheque's day arrives. The
+    stored pair (vendors.ap_bills._recompute_bill_status) counts every
+    recorded payment and is never served. Returns `bills`, stamped in place."""
+    ids = [b.get("bill_id") for b in bills if b.get("bill_id")]
+    try:
+        money = [
+            list(db.get_collection(coll).find({"bill_id": {"$in": ids}}, {"_id": 0}))
+            for coll in ("vendor_payments", "vendor_debit_notes")
+        ]
+    except Exception:
+        money = [[], []]
+    for b in bills:
+        b.update(ap_engine.bill_as_of(b, *money))
+    return bills
 
 
 def _stamp_receipt_numbers(db, rows) -> None:
@@ -2233,8 +2524,9 @@ async def draft_invoice_from_grn(
     grn_repo = get_grn_repository()
     po_repo = get_purchase_order_repository()
     grn = grn_repo.find_by_id(grn_id) if grn_repo is not None else None
-    if grn_repo is not None and grn is None:
-        raise HTTPException(status_code=404, detail="GRN not found")
+    if grn_repo is not None:
+        # Missing, or another shop's (F63): the same 404 either way.
+        in_reach_or_404(grn, current_user, "GRN not found")
     grn = grn or {}
 
     # F3: only a still-ACCEPTED standard GRN can be drafted into an invoice, so
@@ -2257,8 +2549,11 @@ async def draft_invoice_from_grn(
         vendor = vendor_repo.find_by_id(vendor_id)
 
     supplier_gstin = _vendor_gstin(db, vendor, vendor_id) if vendor_id else None
-    recipient = _bill_recipient(
-        db, grn.get("store_id"), None, current_user.get("active_store_id")
+    # The booking's own shop rule (F63, R9): the receipt's shop; a legacy
+    # receipt with no shop is the booker's own -- an admin's is left for him
+    # to pick on the form (None), never his topbar shop.
+    bill_shop, recipient = _draft_shop_and_recipient(
+        db, _receipt_store_id(db, grn, None), current_user
     )
 
     raw_lines = _draft_lines(db, grn, po)
@@ -2288,6 +2583,10 @@ async def draft_invoice_from_grn(
         "po_id": po_id,
         "grn_id": grn_id,
         "grn_number": grn.get("grn_number"),
+        # The shop the bill will book to -- the booking's own rule (F63), so
+        # the form can say it on every door, the deep link included. None:
+        # an admin's legacy receipt with no shop -- the form asks him (R9).
+        "store_id": bill_shop,
         "lines": computed["lines"],
         "taxable_total": computed["taxable_total"],
         "cgst_total": computed["cgst_total"],
@@ -2324,6 +2623,9 @@ async def draft_invoice_from_dcs(
         raise HTTPException(status_code=400, detail="No DC ids provided")
 
     db = _get_db()
+    # F63: another shop's DC is the same 404 as a missing one, before the
+    # checks below (or the draft's recipient and lines) can read it.
+    _dcs_in_scope_or_404(db, ids, current_user)
     dc_docs = _load_linked_dcs(db, ids)
     # F9 P3: the draft must not consolidate across vendors (or stores) -- the
     # old first-wins resolution silently mis-attributed a cross-vendor select.
@@ -2357,8 +2659,10 @@ async def draft_invoice_from_dcs(
     supplier_gstin = (
         _vendor_gstin(db, vendor, resolved_vendor_id) if resolved_vendor_id else None
     )
-    recipient = _bill_recipient(
-        db, _receipt_store_id(db, None, ids), None, current_user.get("active_store_id")
+    # The booking's own shop rule (F63, R9), as the from-GRN draft: a legacy
+    # DC with no shop is the booker's own; an admin's is his to pick (None).
+    bill_shop, recipient = _draft_shop_and_recipient(
+        db, _receipt_store_id(db, None, ids), current_user
     )
 
     computed = pinv.compute_invoice(
@@ -2379,6 +2683,8 @@ async def draft_invoice_from_dcs(
         "interstate": computed["interstate"],
         "linked_dc_ids": ids,
         "dc_count": len(dc_docs),
+        # The shop the bill will book to, as the from-GRN draft names it.
+        "store_id": bill_shop,
         "lines": computed["lines"],
         "taxable_total": computed["taxable_total"],
         "cgst_total": computed["cgst_total"],
@@ -2501,8 +2807,7 @@ async def get_invoice_match(
         )
     except Exception:
         doc = None
-    if not doc:
-        raise HTTPException(status_code=404, detail="Purchase invoice not found")
+    in_reach_or_404(doc, current_user, "Purchase invoice not found")
 
     detail = doc.get("match_detail")
     status = doc.get("match_status")
@@ -2521,6 +2826,7 @@ async def get_invoice_match(
             doc.get("grn_id"),
             doc.get("lines"),
             cfg["match_tolerance_pct"],
+            current_user=current_user,
         )
         if detail:
             detail = {**detail, "match_status": status}
@@ -2557,8 +2863,7 @@ async def get_invoice_dc_match(
         )
     except Exception:
         doc = None
-    if not doc:
-        raise HTTPException(status_code=404, detail="Purchase invoice not found")
+    in_reach_or_404(doc, current_user, "Purchase invoice not found")
     return {
         "invoice_id": invoice_id,
         "dc_match_status": doc.get("dc_match_status") or "N_A",
@@ -2592,8 +2897,9 @@ async def approve_invoice_exception(
         )
     except Exception:
         doc = None
-    if not doc:
-        raise HTTPException(status_code=404, detail="Purchase invoice not found")
+    # Before the status check: another shop's held bill must read as missing,
+    # not as "not on hold".
+    in_reach_or_404(doc, current_user, "Purchase invoice not found")
 
     if doc.get("match_status") != pmatch.MATCH_ON_HOLD:
         raise HTTPException(
@@ -2767,6 +3073,7 @@ async def set_invoice_landed_costs(
     exactly what the accountant last reviewed."""
     db = _get_db()
     doc = _load_purchase_invoice_or_404(db, invoice_id)
+    in_reach_or_404(doc, current_user, "Purchase invoice not found")
     if doc.get("landed_cost_allocated"):
         raise HTTPException(
             status_code=409,
@@ -2858,6 +3165,7 @@ async def preview_invoice_landed_costs(
     missing line weight)."""
     db = _get_db()
     doc = _load_purchase_invoice_or_404(db, invoice_id)
+    in_reach_or_404(doc, current_user, "Purchase invoice not found")
     components = doc.get("landed_cost_components") or []
     if not components:
         raise HTTPException(
@@ -2913,6 +3221,7 @@ async def allocate_invoice_landed_costs(
     no second AVCO writer is introduced."""
     db = _get_db()
     doc = _load_purchase_invoice_or_404(db, invoice_id)
+    in_reach_or_404(doc, current_user, "Purchase invoice not found")
     if doc.get("landed_cost_allocated"):
         raise HTTPException(
             status_code=409,
@@ -3106,7 +3415,7 @@ async def get_purchase_invoice(
         )
     except Exception:
         doc = None
-    if not doc:
-        raise HTTPException(status_code=404, detail="Purchase invoice not found")
+    in_reach_or_404(doc, current_user, "Purchase invoice not found")
+    stamp_bills_as_of(db, [doc])
     _stamp_bill_actor_names(db, [doc])
     return doc

@@ -244,8 +244,10 @@ def _purchase_history(pos, grns, months=12):
         get_vendor_repository=lambda: _VendorRepo(),
     ):
         return asyncio.run(
+            # An ADMIN reads every shop's orders (these carry none); any
+            # other login its own shop's (F63), a login with none no shop's.
             vendors_mod.vendor_purchase_history(
-                vendor_id=VENDOR, months=months, current_user={}
+                vendor_id=VENDOR, months=months, current_user={"roles": ["ADMIN"]}
             )
         )
 
@@ -305,10 +307,12 @@ def _performance(grns, months=6, bills=None, now=FROZEN_NOW):
         _get_db=lambda: db,
         get_vendor_repository=lambda: _VendorRepo(),
     ):
+        # mtd_spend is supplier money: the accounts roles alone get it (owner
+        # ruling 2026-10-01). An ADMIN reads every shop's bills (these carry
+        # none); an accountant with no shop reads no shop's -- Rs 0 (R4).
         return asyncio.run(
             vendors_mod.vendor_performance(
-                # an accounts role: mtd_spend is supplier-bill money
-                vendor_id=VENDOR, months=months, current_user={"roles": ["ACCOUNTANT"]}
+                vendor_id=VENDOR, months=months, current_user={"roles": ["ADMIN"]}
             )
         )
 

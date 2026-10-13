@@ -37,6 +37,8 @@ vi.mock('../../../context/AuthContext', () => ({
 vi.mock('../../../context/ToastContext', () => ({
   useToast: () => ({ success: vi.fn(), error: vi.fn(), info: vi.fn() }),
 }));
+// The dashboard's Shop picker / shop names read the store list (react-query).
+vi.mock('../../../hooks/usePOSQueries', () => ({ useStores: () => ({ data: [] }) }));
 
 import FinanceDashboard from '../FinanceDashboard';
 import { financeApi } from '../../../services/api/finance';

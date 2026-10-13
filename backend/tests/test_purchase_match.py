@@ -422,6 +422,9 @@ def _restore_router():
 _PO_DOC = {
     "po_id": "PO1",
     "vendor_id": "V1",
+    # Every PO is raised for a shop (POCreate.delivery_store_id is required);
+    # since F63 the match reads only a PO in the booker's shop.
+    "delivery_store_id": "S1",
     "items": [
         {
             "product_id": "P1",
