@@ -3,8 +3,9 @@
 
   1. EVERYTHING WE PAY -- purchase prices (PO line prices and totals, the
      receiving cockpit, the last price paid, a vendor's purchase history, a
-     vendor return's price) and product cost (cost price, landed cost, margin,
-     stock value at cost, profit) -- reaches SUPERADMIN / ADMIN / ACCOUNTANT
+     vendor return's price, a vendor RMA's credit and write-off, a receipt read
+     through a barcode) and product cost (cost price, landed cost, margin,
+     stock value at cost, profit, COGS by category) -- reaches SUPERADMIN / ADMIN / ACCOUNTANT
      only. AREA_MANAGER, STORE_MANAGER and CATALOG_MANAGER see MRP and selling
      price, never cost: their raw JSON carries no cost or purchase-price key
      and no cost figure under any name (one walker, ``_leaks``).
@@ -12,7 +13,8 @@
      each line from the last price paid to that vendor (the one last-paid
      rule), else the catalogue cost; a price he types is not taken; a line
      nobody can price stays unpriced (never 0) and sending it raises a task
-     for accounts. Accounts keep their typed price.
+     for accounts; its goods are still received onto the shelf and the bill
+     brings the cost. Accounts keep their typed price.
   3. Every read follows cost_mask: widen its rule and the managers see cost
      again everywhere, so no read keeps a copy of it.
 
@@ -63,6 +65,15 @@ _PRICE_KEYS = (
 )
 
 
+GRN_BARCODE = "2900000000024"
+# A vendor RMA's money keys (none says "cost").
+_RMA_MONEY = (
+    "expected_credit_paise", "received_credit_paise", "variance_paise",
+    "written_off_paise", "received_paise", "credit_notes",
+    "expected_credit_rupees", "received_credit_rupees", "variance_rupees",
+)
+
+
 def _filled(body):
     """`body` without empty containers: an empty {"costs": {}} carries no money."""
     if isinstance(body, dict):
@@ -84,12 +95,15 @@ def _leaks(body, extra=()):
 @pytest.fixture
 def buying(shop, monkeypatch):
     """The shop plus what it bought: vendor V1, a sent PO at COST, an accepted
-    receipt whose unit was received at COST, a priced vendor return, a sold
-    order line at cost, and an accountant at the shop."""
+    receipt whose unit was received at COST, a priced vendor return, a vendor
+    RMA credited and written off at COST, a sold order line at cost, and an
+    accountant at the shop."""
     from api.routers import vendor_returns as vr_mod
+    from api.routers import vendor_rma as rma_mod
 
-    # vendor_returns bound get_db at import; point it at this shop too.
+    # vendor_returns and vendor_rma bound get_db at import; point them here too.
     monkeypatch.setattr(vr_mod, "get_db", lambda: _Conn(shop))
+    monkeypatch.setattr(rma_mod, "get_db", lambda: _Conn(shop))
     # The products ride the provisional door, so the send gate's catalogue
     # completeness check (not this ruling) stays out of the way.
     shop.products.update_many({}, {"$set": {"provisional": True}})
@@ -127,7 +141,7 @@ def buying(shop, monkeypatch):
         }
     )
     shop.stock_units.insert_one(
-        {"stock_id": "U-GRN", "product_id": "P1", "store_id": STORE,
+        {"stock_id": "U-GRN", "barcode": GRN_BARCODE, "product_id": "P1", "store_id": STORE,
          "status": "SOLD", "quantity": 0, "source_type": "GRN", "source_id": "G1",
          "unit_cost": COST, "cost_price": COST, "created_at": now}
     )
@@ -137,6 +151,24 @@ def buying(shop, monkeypatch):
          "items": [{"product_id": "P1", "product_name": "Aviator", "quantity": 1,
                     "reason": "broken", "unit_price": COST}],
          "total_value": COST, "created_at": now.isoformat()}
+    )
+    # Two pairs back to V1 at COST each, credited COST, the rest written off.
+    shop.vendor_rmas.insert_one(
+        {"rma_id": "RMA1", "vendor_id": "V1", "vendor_name": "Acme Optics",
+         "store_id": STORE, "status": "CLOSED", "vendor_rma_number": "VRMA-1",
+         "lines": [{"product_id": "P1", "product_name": "Aviator", "quantity": QTY,
+                    "reason": "DEFECTIVE", "unit_cost_paise": COST_PAISE,
+                    "line_expected_paise": QTY * COST_PAISE}],
+         "expected_credit_paise": QTY * COST_PAISE, "received_credit_paise": COST_PAISE,
+         "variance_paise": COST_PAISE, "written_off_paise": COST_PAISE,
+         "credit_notes": [{"credit_note_number": "CN-1", "received_paise": COST_PAISE}],
+         "created_at": now,
+         "status_history": [
+             {"status": "CREDIT_RECEIVED", "at": now, "by": "u-acct",
+              "notes": f"credit note CN-1 for {COST_PAISE} paise"},
+             {"status": "CLOSED", "at": now, "by": "u-acct",
+              "notes": f"closed; wrote off {COST_PAISE} paise"},
+         ]}
     )
     shop.orders.insert_one(
         {"order_id": "O4", "order_number": "BV-O4", "store_id": STORE,
@@ -166,6 +198,10 @@ PURCHASE_READS = [
     ("/api/v1/vendors/V1/purchase-history", _PRICE_KEYS),
     ("/api/v1/vendor-returns", _PRICE_KEYS + ("total_value",)),
     ("/api/v1/vendor-returns/VR1", _PRICE_KEYS + ("total_value",)),
+    ("/api/v1/vendor-rma", _RMA_MONEY),
+    ("/api/v1/vendor-rma/RMA1", _RMA_MONEY),
+    # The unit's receipt, read through its barcode (open to every role).
+    (f"/api/v1/inventory/barcode/{GRN_BARCODE}/trace", _PRICE_KEYS),
 ]
 # Reports and dashboards worked out from cost.
 REPORT_READS = [
@@ -177,6 +213,8 @@ REPORT_READS = [
      ("cost", "profit")),
     (f"/api/v1/analytics/inventory-intelligence?store_id={STORE}", ("value", "total_value")),
     (f"/api/v1/workshop/spoilage-analytics?store_id={STORE}", ("spoilage_cost_total_paise",)),
+    # The Finance dashboard's P&L by category (open to the shop managers).
+    (f"/api/v1/finance/pnl/by-category?{_WINDOW}", ("gross_profit", "total_gross_profit")),
 ]
 SHOP = [(path, extra) for _m, path, extra in [*SHOP_READS, BLIND]]
 ALL_READS = PURCHASE_READS + REPORT_READS + SHOP
@@ -253,6 +291,9 @@ def catalogue(buying):
              "hsn_code": "900311", "cost_price": cost, "is_active": True,
              "provisional": True}
         )
+    # P1's catalogue cost is not what was last paid for it (COST, receipt G1),
+    # so a PO that took the catalogue cost over the last price paid shows.
+    buying.products.update_one({"product_id": "P1"}, {"$set": {"cost_price": 1234.5}})
     return buying
 
 
@@ -292,6 +333,43 @@ def test_sending_an_unpriced_po_raises_a_task_for_accounts(client, catalogue):
     assert task["assigned_to"] == "u-acct"
     assert task["store_id"] == STORE
     assert "P3" in task["description"] and "Purchase Invoices" in task["description"]
+
+
+def test_an_unpriced_line_is_received_and_billed_its_cost_comes_with_the_bill(client, catalogue):
+    # P4 is catalogued but for its cost (catalogue managers have no cost box,
+    # nothing was paid to V1 for it). A manager orders it by quantity and sends
+    # it, the goods arrive and are accepted: they go on the shelf without a
+    # cost, and the receipt can be booked in Purchase Invoices, which is where
+    # the task sent to accounts says the price is entered.
+    catalogue.products.insert_one(
+        {"product_id": "P4", "sku": "SKU-P4", "name": "P4", "category": "FRAME",
+         "brand": "Ray-Ban", "mrp": 9999.0, "offer_price": 9999.0, "gst_rate": 12,
+         "hsn_code": "900311", "is_active": True,
+         "attributes": {"brand_name": "Ray-Ban", "model_no": "M-P4", "colour_code": "BLK"}}
+    )
+    po_id = _po(client, "STORE_MANAGER", ("P4", {}))["po_id"]
+    assert _stored(catalogue, po_id) == {"P4": None}
+    sent = client.post(f"/api/v1/vendors/purchase-orders/{po_id}/send", headers=_headers("STORE_MANAGER"))
+    assert sent.status_code == 200, sent.text
+    catalogue.grns.insert_one(
+        {"grn_id": "G4", "grn_number": "GRN-4", "po_id": po_id, "vendor_id": "V1",
+         "store_id": STORE, "status": "PENDING", "vendor_invoice_no": "INV-4",
+         "items": [{"product_id": "P4", "received_qty": QTY, "accepted_qty": QTY,
+                    "tallied": True}]}
+    )
+    r = client.post("/api/v1/vendors/grn/G4/accept", headers=_headers("STORE_MANAGER"))
+    assert r.status_code == 200, r.text
+    assert (r.json()["grn_status"], r.json()["units_added"]) == ("ACCEPTED", QTY), r.json()
+    units = list(catalogue.stock_units.find({"source_id": "G4"}))
+    assert [u["status"] for u in units] == ["AVAILABLE"] * QTY
+    assert not any(u.get("cost_price") for u in units)  # no made-up cost
+    # Our company, so the bill knows which GSTIN it books on.
+    catalogue.entities.insert_one({"entity_id": "E1", "name": "Better Vision", "gstins": [{"gstin": "27AABCB1234C1ZE"}]})
+    catalogue.stores.insert_one({"store_id": STORE, "entity_id": "E1", "gstin": "27AABCB1234C1ZE", "state_code": "27"})
+    bill = client.get(
+        "/api/v1/vendors/purchase-invoices/from-grn/G4", headers=_headers("ACCOUNTANT")
+    )
+    assert bill.status_code == 200, bill.text
 
 
 def test_sending_a_priced_po_raises_no_task(client, catalogue):
@@ -354,6 +432,55 @@ def test_the_frontend_reads_one_list_and_it_is_this_rule():
                     if re.search(r"\b(PRODUCT_COST_ROLES|PURCHASE_PRICE_ROLES|PAYABLES_ROLES)\b", fh.read()):
                         stale.append(name)
     assert not stale, stale
+
+
+@pytest.mark.parametrize("role,sees", (("STORE_MANAGER", False), ("ACCOUNTANT", True)))
+def test_a_vendor_rma_run_end_to_end_reads_its_money_back_to_accounts_only(client, buying, role, sees):
+    # Raise two pairs at COST, authorize, dispatch, take a credit note for one
+    # pair, try to close (refused: a variance is still owed), then write it
+    # off. Every reply, the refusal and the RMA read afterwards: the money (in
+    # keys, or in the words a step writes into the history) is the accounts'.
+    def post(path, body):
+        return client.post(f"/api/v1/vendor-rma{path}", json=body, headers=_headers(role))
+
+    made = post("", {"vendor_id": "V1", "vendor_name": "Acme Optics", "store_id": STORE,
+                     "lines": [{"product_id": "P1", "product_name": "Aviator",
+                                "quantity": QTY, "reason": "DEFECTIVE", "unit_cost": COST}]})
+    assert made.status_code == 201, made.text
+    rid = made.json()["rma_id"]
+    steps = [made]
+    for path, body in (
+        ("/authorize", {"vendor_rma_number": "VRMA-2"}),
+        ("/dispatch", {"carrier": "Delhivery", "awb": "AWB-2"}),
+        ("/credit-note", {"credit_note_number": "CN-2", "received_amount": COST}),
+    ):
+        steps.append(post(f"/{rid}{path}", body))
+        assert steps[-1].status_code == 200, (path, steps[-1].text)
+    refused = post(f"/{rid}/close", {})
+    assert refused.status_code == 409, refused.text
+    assert refused.json()["detail"]["error"] == "variance_outstanding"
+    closed = post(f"/{rid}/close", {"write_off_variance": True})
+    assert (closed.status_code, closed.json()["status"]) == (200, "CLOSED"), closed.text
+    read = client.get(f"/api/v1/vendor-rma/{rid}", headers=_headers(role)).json()
+    assert [s["status"] for s in read["status_history"]] == [
+        "DRAFT", "AUTHORIZED", "DISPATCHED", "CREDIT_RECEIVED", "CLOSED"]
+    assert [ln["quantity"] for ln in read["lines"]] == [QTY]
+    money = (made, steps[3], refused, closed)
+    if sees:
+        assert all(_leaks(r.json(), _RMA_MONEY) for r in money), [r.json() for r in money]
+        assert _leaks(read, _RMA_MONEY)
+    else:
+        assert not any(_leaks(r.json(), _RMA_MONEY) for r in steps + [refused, closed]), [
+            r.json() for r in steps + [refused, closed]]
+        assert not _leaks(read, _RMA_MONEY), read
+
+
+@pytest.mark.parametrize("role", ("SALES_STAFF", "CASHIER", "WORKSHOP_STAFF"))
+def test_a_counter_role_reads_no_receipt_price_through_a_barcode(client, buying, role):
+    r = _get(client, role, f"/api/v1/inventory/barcode/{GRN_BARCODE}/trace")
+    assert r.status_code == 200, r.text
+    assert r.json()["purchase"][0]["grn_id"] == "G1"  # the receipt, not its prices
+    assert not _leaks(r.json(), _PRICE_KEYS), r.json()
 
 
 @pytest.mark.parametrize("role,sees", (("STORE_MANAGER", False), ("ACCOUNTANT", True)))

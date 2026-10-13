@@ -1132,19 +1132,44 @@ _COST_CELL = os.path.join(
 
 
 _FRONTEND_SRC = os.path.dirname(os.path.dirname(os.path.dirname(_COST_CELL)))
-# Every frontend check on per-unit product cost outside CostCell itself (the
-# Add/Edit-product form's cost field and margin) reads the one list.
-_PRODUCT_COST_SCREENS = ("pages/catalog/quickadd/useQuickAddForm.ts",)
+# Every frontend check on what we pay outside CostCell itself reads the one
+# list (owner ruling 2026-10-12): the Add/Edit-product cost field and margin,
+# the PO form, detail, list and analytics, the Buy Desk's draft PO, stock
+# counts, replenishment, stock alerts and vendor returns. On screen the vitest
+# suites whatWePayManagers, PurchaseOrderForm.byQuantity, stockAuditCostGate
+# and VendorPaymentsAccess render them per role.
+_PRODUCT_COST_SCREENS = (
+    "pages/catalog/quickadd/useQuickAddForm.ts",
+    "pages/purchase/PurchaseOrderForm.tsx",
+    "pages/purchase/PurchaseOrderDetail.tsx",
+    "pages/purchase/PurchaseTable.tsx",
+    "pages/purchase/PurchaseAnalytics.tsx",
+    "pages/catalog/BuyDeskDraftPOModal.tsx",
+    "pages/inventory/StockAudit.tsx",
+    "pages/inventory/StockReplenishment.tsx",
+    "components/inventory/StockAlertsOverview.tsx",
+    "pages/purchase/VendorReturns.tsx",
+)
 
 
 def _assert_screens_read(name, screens):
-    """Each screen imports CostCell's `name` and uses it."""
+    """Each screen imports CostCell's `name` and asks it as it is: every use is
+    hasRole(name), name.includes(role) or an alias `: UserRole[] = name;` --
+    never widened ([...name, 'STORE_MANAGER']) and never dropped (a gate set
+    to true leaves only the import behind)."""
+    asked = (
+        r"hasRole\(\s*" + name + r"\s*\)|\b" + name + r"\.includes\("
+        r"|:\s*UserRole\[\]\s*=\s*" + name + r"\s*;"
+    )
     for rel in screens:
         with open(os.path.join(_FRONTEND_SRC, rel), encoding="utf-8") as fh:
             # Code only: a comment naming the list is not a use of it.
             code = re.sub(r"/\*.*?\*/|//[^\n]*", "", fh.read(), flags=re.S)
-        assert re.search(r"import\s*\{[^}]*\b" + name + r"\b", code), rel
-        assert len(re.findall(r"\b" + name + r"\b", code)) >= 2, rel
+        imports = re.findall(r"import\s*\{[^}]*\b" + name + r"\b[^}]*\}", code)
+        assert imports, rel
+        uses = len(re.findall(r"\b" + name + r"\b", code)) - len(imports)
+        assert uses >= 1, (rel, "imports the list but never asks it")
+        assert len(re.findall(asked, code)) == uses, (rel, "a use that is not the list as it is")
 
 
 def _frontend_cost_roles():
