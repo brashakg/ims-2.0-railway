@@ -368,13 +368,21 @@ def test_push_menu_live_writes_back_gid(monkeypatch):
 
 def test_push_image_live_attaches_media_and_writes_back(monkeypatch):
     """An APPROVED image whose parent product is already on Shopify pushes via
-    productCreateMedia and writes back the MediaImage gid."""
-    spy = _force_live(monkeypatch, {
-        "data": {"productCreateMedia": {
+    productCreateMedia (after reading the listing: tests/test_design_photo_press.py)
+    and writes back the MediaImage gid."""
+    _force_live(monkeypatch, {})
+    spy = _SpyGraphQL(None)
+
+    async def _answer(db_, query, variables):
+        await spy(db_, query, variables)
+        if "imsProductMedia" in query:
+            return {"data": {"product": {"id": "gid://shopify/Product/111", "media": {"nodes": []}}}}
+        return {"data": {"productCreateMedia": {
             "media": [{"id": "gid://shopify/MediaImage/900"}],
             "mediaUserErrors": [],
-        }}
-    })
+        }}}
+
+    monkeypatch.setattr(shopify_push, "_graphql", _answer)
     db = _EngineDB()
     # Parent product must already carry a Shopify gid (media attaches to a product).
     db["catalog_products"].insert_one(
@@ -389,7 +397,8 @@ def test_push_image_live_attaches_media_and_writes_back(monkeypatch):
     assert res.ok is True and res.shopify_id == "gid://shopify/MediaImage/900"
     assert db["product_images"].find_one({"image_id": "I1"})["shopify_image_id"] == "gid://shopify/MediaImage/900"
     # Prefer the EDITED asset as the source.
-    assert spy.calls[0]["variables"]["media"][0]["originalSource"] == "http://x/edited.jpg"
+    creates = [c for c in spy.calls if "productCreateMedia" in c["query"]]
+    assert [c["variables"]["media"][0]["originalSource"] for c in creates] == ["http://x/edited.jpg"]
 
 
 def test_push_image_live_skips_when_parent_not_on_shopify(monkeypatch):

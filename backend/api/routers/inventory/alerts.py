@@ -21,6 +21,7 @@ from .helpers import (
     _had_the_window,
     _shelf_by_product,
 )
+from ...services.cost_mask import mask_cost
 from ...services.reorder_policy import (
     DISCONTINUED_FIELDS,
     is_low_stock,
@@ -352,7 +353,9 @@ async def get_stock_alerts(
     """
     db = _get_db()
     if db is None:
-        return {"alerts": [], "stats": _empty_alert_stats()}
+        return mask_cost(
+            {"alerts": [], "stats": _empty_alert_stats()}, current_user, "product"
+        )
 
     active_store = validate_store_access(store_id, current_user)
 
@@ -448,8 +451,17 @@ async def get_stock_alerts(
         )
         alerts = alerts[:limit]
 
-        return {"alerts": alerts, "stats": _summarise_alert_stats(alerts)}
+        # costImpact and the dead-stock / restock totals are at cost: the roles
+        # that see product cost only (owner ruling D7). The alert, its units
+        # and its advice stay for everyone.
+        return mask_cost(
+            {"alerts": alerts, "stats": _summarise_alert_stats(alerts)},
+            current_user,
+            "product",
+        )
 
     except Exception as e:
         logger.error(f"get_stock_alerts error: {e}")
-        return {"alerts": [], "stats": _empty_alert_stats()}
+        return mask_cost(
+            {"alerts": [], "stats": _empty_alert_stats()}, current_user, "product"
+        )

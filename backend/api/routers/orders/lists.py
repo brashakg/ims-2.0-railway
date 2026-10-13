@@ -95,7 +95,7 @@ async def list_orders(
         from ...utils.pagination import paginate
 
         _stamp_status_actor_names(orders)
-        orders_formatted = [order_to_frontend(o) for o in orders]
+        orders_formatted = [order_to_frontend(o, current_user) for o in orders]
         page = (skip // limit) + 1 if limit > 0 else 1
         result = paginate(orders_formatted, page=page, page_size=limit)
         result["orders"] = result["data"]  # backward compat
@@ -172,7 +172,7 @@ async def get_pending_deliveries(
             orders, current_user, customer_scoped=customer_scoped
         )
         _stamp_status_actor_names(orders)
-        orders_formatted = [order_to_frontend(o) for o in orders]
+        orders_formatted = [order_to_frontend(o, current_user) for o in orders]
         return {"orders": orders_formatted}
 
     return {"orders": []}
@@ -190,7 +190,7 @@ async def get_unpaid_orders(
     if repo is not None:
         orders = repo.find_unpaid(active_store)
         _stamp_status_actor_names(orders)
-        orders_formatted = [order_to_frontend(o) for o in orders]
+        orders_formatted = [order_to_frontend(o, current_user) for o in orders]
         return {"orders": orders_formatted}
 
     return {"orders": []}
@@ -208,7 +208,7 @@ async def get_overdue_orders(
     if repo is not None:
         orders = repo.find_overdue(active_store)
         _stamp_status_actor_names(orders)
-        orders_formatted = [order_to_frontend(o) for o in orders]
+        orders_formatted = [order_to_frontend(o, current_user) for o in orders]
         return {"orders": orders_formatted}
 
     return {"orders": []}
@@ -295,7 +295,7 @@ async def search_orders(
             customer_scoped=_query_names_one_customer(q, active_store),
         )
         _stamp_status_actor_names(orders)
-        orders_formatted = [order_to_frontend(o) for o in orders]
+        orders_formatted = [order_to_frontend(o, current_user) for o in orders]
         return {"orders": orders_formatted}
 
     return {"orders": []}
