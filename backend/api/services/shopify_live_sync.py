@@ -153,6 +153,8 @@ def write_push_audit(result: Dict[str, Any], current_user: dict) -> None:
                     # The price side channel keeps its RAW vendor error the
                     # same way (PRICE_NOT_SYNCED rides `code` + `error`).
                     "variant_prices": result.get("variant_prices"),
+                    # ...and the photo side channel (PHOTOS_NOT_SYNCED).
+                    "photos": result.get("photos"),
                 },
             }
         )
@@ -511,6 +513,10 @@ async def sync_live_products(
     price_not_synced = sum(
         1 for r in results if r.get("code") == shopify_push.PRICE_NOT_SYNCED
     )
+    # Live, but its photos are not IMS's photos in IMS's order: same treatment.
+    photos_not_synced = sum(
+        1 for r in results if r.get("code") == shopify_push.PHOTOS_NOT_SYNCED
+    )
     failed = sum(
         1
         for r in results
@@ -557,6 +563,7 @@ async def sync_live_products(
         "refused_no_photo": refused_no_photo,
         "publish_withheld": publish_withheld,
         "price_not_synced": price_not_synced,
+        "photos_not_synced": photos_not_synced,
         "awaiting_first_publish": awaiting_first_publish,
         "taken_down_skipped": taken_down_skipped,
         "blocked_skipped": batch["blocked_skipped"],
@@ -579,9 +586,11 @@ async def sync_live_products(
     run.update(summary)
     logger.info(
         "[LIVE-SYNC] %s run (%s) mode=%s selected=%s ok=%s failed=%s "
-        "refused=%s withheld=%s price_not_synced=%s awaiting_first_publish=%s",
+        "refused=%s withheld=%s price_not_synced=%s photos_not_synced=%s "
+        "awaiting_first_publish=%s",
         trigger, slot, mode, len(live), pushed_ok, failed,
-        refused_no_photo, publish_withheld, price_not_synced, awaiting_first_publish,
+        refused_no_photo, publish_withheld, price_not_synced, photos_not_synced,
+        awaiting_first_publish,
     )
     return _serialise_run(run)
 

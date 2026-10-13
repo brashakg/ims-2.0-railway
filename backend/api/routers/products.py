@@ -1171,13 +1171,13 @@ async def list_products(
         # POS grid + other consumers read the SINGULAR `image_url`, but spine
         # docs carry an `images` ARRAY -- so every image silently rendered as
         # the placeholder icon even though the files load fine. Stamp the
-        # first image as the alias here (single-brain fix for every consumer
-        # of this list); an existing explicit image_url is never overwritten.
+        # alias here (single-brain fix for every consumer of this list). It is
+        # PHOTO 1 (product_master.main_photo, owner 2026-10-12): a stored
+        # image_url no longer outranks the photo order the product page sets.
         for p in products:
-            if not p.get("image_url"):
-                imgs = p.get("images")
-                if isinstance(imgs, list) and imgs and isinstance(imgs[0], str):
-                    p["image_url"] = imgs[0]
+            first = _pm.main_photo(p)
+            if first:
+                p["image_url"] = first
 
         _strip_attribution(products, current_user)
         products = mask_cost_list(products, current_user, "product")
@@ -2999,12 +2999,7 @@ async def generate_qc_samples(
             pname = (
                 p.get("name") or f"{brand} {model}".strip() or p.get("sku") or ""
             )
-            imgs = p.get("images")
-            image_url = (
-                imgs[0]
-                if isinstance(imgs, list) and imgs and isinstance(imgs[0], str)
-                else None
-            )
+            image_url = _pm.main_photo(p)
             items.append(
                 {
                     "item_id": str(uuid.uuid4()),
@@ -3502,11 +3497,10 @@ async def get_product(product_id: str, current_user: dict = Depends(get_current_
         product = repo.find_by_id(product_id)
         if product is not None:
             # Same image_url alias as list_products (owner bug 2026-07-05):
-            # consumers read the singular field; spine docs carry images[].
-            if not product.get("image_url"):
-                imgs = product.get("images")
-                if isinstance(imgs, list) and imgs and isinstance(imgs[0], str):
-                    product["image_url"] = imgs[0]
+            # consumers read the singular field; it is photo 1.
+            first = _pm.main_photo(product)
+            if first:
+                product["image_url"] = first
             _strip_attribution([product], current_user)
             return mask_cost(product, current_user, "product")
         raise HTTPException(status_code=404, detail="Product not found")

@@ -247,6 +247,23 @@ describe('the bulk press reports what it refused', () => {
     expect(msg).toMatch(/STORE_UNMAPPED/);
   });
 
+  // Photo order (owner 2026-10-12): live, but a photo step failed, so the
+  // website's photos are not IMS's. Its own line, still queued, never green,
+  // and never filed as a stock warning.
+  it('shows the listings whose photos did not reach Shopify, and does not call it green', async () => {
+    (pushApi.pushAllPending as any).mockResolvedValue(
+      sweep({ pushed: 2, failed: 0, noop: 0, photos_not_synced: 2 }, 2),
+    );
+
+    await pressProducts();
+
+    expect(await screen.findByText(/2 with photos NOT as IMS\s+has them/)).toBeTruthy();
+    expect(toastCalls.some((t) => t.kind === 'success')).toBe(false);
+    const msg = toastCalls.map((t) => t.msg).join(' | ');
+    expect(msg).toMatch(/2 live with their photos NOT as IMS has them \(still queued\)/);
+    expect(msg).not.toMatch(/stock/i);
+  });
+
   // RECHECK ROUND 1: the products press ends with its OWN whole-catalogue stock
   // pass, whose verdict is over EVERY listing -- a stray SKU on an UNCHANGED
   // listing lives there and in no product row. The backend returned it as
