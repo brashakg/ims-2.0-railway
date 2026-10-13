@@ -130,7 +130,9 @@ def rebuild_edited_line(line: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def recompute_totals(items: List[Dict[str, Any]], cart_discount_pct: float, gst_fn) -> Dict[str, Any]:
+def recompute_totals(
+    items: List[Dict[str, Any]], cart_discount_pct: float, gst_fn, rounded: bool = True
+) -> Dict[str, Any]:
     """Recompute order money via the canonical per-category GST helper.
 
     ``gst_fn`` is orders._compute_per_category_gst, injected so this module
@@ -138,8 +140,10 @@ def recompute_totals(items: List[Dict[str, Any]], cart_discount_pct: float, gst_
     tax_amount onto each item IN PLACE (same as create) and returns the
     aggregate dict, whose ``grand_total`` / ``round_off`` are the bill's
     rounded payable and its round off -- the SAME figures create bills.
+    ``rounded`` is orders.bills_round_off(order): an order billed before the
+    round-off rule keeps its exact paise total.
     """
-    return gst_fn(items, cart_discount_pct)
+    return gst_fn(items, cart_discount_pct, rounded=rounded)
 
 
 def order_money_snapshot(order: Dict[str, Any]) -> Dict[str, Any]:

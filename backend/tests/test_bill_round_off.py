@@ -208,6 +208,39 @@ def test_till_quote_is_the_bill_create_makes(
     )
 
 
+@pytest.mark.parametrize(
+    "price, line_pct, bill_pct, billed",
+    [(177.0, 2.5, 7.0, 160.0), (1569.0, 5.0, 10.0, 1341.0), (1501.0, 0.5, 0.0, 1493.0)],
+)
+def test_till_collects_the_bill_create_makes_on_the_panel_carts(
+    client, auth_headers, patched_orders, price, line_pct, bill_pct, billed
+):
+    """The carts where the till's own line math asked a rupee MORE than create
+    billed (160.50 -> 161 against 160.49 -> 160), so the last cash leg was
+    refused as an over-tender and the till said it 'did NOT record'. The till
+    now collects the quote: the quote, the created order and a payment of
+    exactly that figure all agree. frontend POSPaymentQuotedBill.test.tsx pins
+    the till to these same figures."""
+    item = _disc_frame(price, line_pct)
+    q = _quote(client, auth_headers, [item], bill_pct)
+    assert q.status_code == 200, q.text
+    assert q.json()["grand_total"] == billed
+    extra = (
+        {"cart_discount_percent": bill_pct, "cart_discount_reason": "festival offer"}
+        if bill_pct else {}
+    )
+    resp = _post_order(client, auth_headers, [item], **extra)
+    assert resp.status_code in (200, 201), resp.text
+    # The create reply carries the bill the till checks its tenders against.
+    assert (resp.json()["grand_total"], resp.json()["round_off"]) == (
+        billed, q.json()["round_off"]
+    )
+    order_id = resp.json()["order_id"]
+    assert _pay(client, auth_headers, order_id, "CASH", billed).status_code in (200, 201)
+    saved = _saved(patched_orders, order_id)
+    assert (saved["balance_due"], saved["payment_status"]) == (0.0, "PAID")
+
+
 def test_till_quote_is_for_roles_that_bill(client, patched_orders):
     from tests.test_returns_gst_refund import _staff_token
 
@@ -405,3 +438,103 @@ def test_revised_invoice_stores_the_new_round_off(client, auth_headers, wired):
 
 # The dead round-off settings keys went with the whole /admin/system/settings
 # door (#1188, pinned by test_settings_one_rule_credit_default.py).
+
+
+# ============================================================================
+# 5. An order billed BEFORE the rule keeps its exact paise; the edit preview
+#    is the server's quote of exactly what the door will save
+# ============================================================================
+
+
+def _seed_old_paid_bill(order_repo, **extra):
+    """A Rs 1000.49 frame billed before the round-off rule: paid to the paise,
+    no round_off stored."""
+    line = dict(_edit_item(unit_price=1000.49), item_total=1000.49, gst_rate=5.0,
+                taxable_value=952.85, tax_amount=47.64)
+    _seed_order(order_repo, items=[line], subtotal=1000.49, tax_amount=47.64,
+                grand_total=1000.49, amount_paid=1000.49,
+                payments=[{"method": "CASH", "amount": 1000.49}], **extra)
+
+
+@pytest.mark.parametrize(
+    "door, body, extra",
+    [
+        ("superadmin-edit", {}, {}),
+        ("superadmin-invoice-change", {"mode": "REVISED_INVOICE"},
+         {"invoice_number": "INV/BOK-01/25-26/0042"}),
+    ],
+)
+@pytest.mark.parametrize(
+    "price, grand_total, balance_due, status",
+    [(1000.49, 1000.49, 0.0, "PAID"), (1200.75, 1200.75, 200.26, "PARTIAL")],
+)
+def test_an_order_billed_before_the_rule_keeps_its_exact_total(
+    client, auth_headers, wired, door, body, extra, price, grand_total, balance_due, status
+):
+    """Re-rounding an old paid Rs 1000.49 bill to Rs 1000 left 49 paise
+    overpaid and hidden (balance_due floors at 0). Its corrections stay to the
+    paise, with no round off, on both doors that rewrite the order."""
+    _seed_old_paid_bill(wired["order_repo"], **extra)
+    r = client.put(
+        f"/api/v1/orders/ord-16/{door}",
+        json={"reason": "customer name typed wrong",
+              "items": [_edit_item(unit_price=price)], **body},
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    saved = wired["order_repo"].find_by_id("ord-16")
+    assert (saved["grand_total"], saved.get("round_off"), saved["balance_due"],
+            saved["payment_status"]) == (grand_total, None, balance_due, status)
+
+
+def _edit_quote(client, headers, price, order_id="ord-16"):
+    """The SUPERADMIN edit preview's quote, as SuperadminOrderEditModal asks it."""
+    return client.post(
+        "/api/v1/orders/quote",
+        json={"order_id": order_id, "cart_discount_percent": 0,
+              "items": [{"item_type": "FRAME", "product_id": "", "category": "FRAME",
+                         "quantity": 1, "unit_price": price, "discount_percent": 0}]},
+        headers=headers,
+    )
+
+
+@pytest.mark.parametrize("price, quoted, note", [(1000.49, 1000.0, None), (900.30, 900.0, 100.0)])
+def test_edit_preview_quote_is_the_note_the_door_issues(
+    client, auth_headers, wired, price, quoted, note
+):
+    """The panel's two probes on an invoiced Rs 1000 bill (1000.49, round off
+    -0.49). Unchanged lines: the browser's own sum promised a Rs 0.49 debit
+    note the door then refused; the quote says Rs 1000, no change. Price to
+    900.30: the browser promised Rs 99.70; the door issues Rs 100."""
+    line = dict(_edit_item(unit_price=1000.49), item_total=1000.49, gst_rate=5.0,
+                taxable_value=952.85, tax_amount=47.64)
+    _seed_order(wired["order_repo"], items=[line], subtotal=1000.49, tax_amount=47.64,
+                grand_total=1000.0, round_off=-0.49, invoice_number="INV/BOK-01/26-27/0902")
+    q = _edit_quote(client, auth_headers, price)
+    assert q.status_code == 200, q.text
+    assert q.json()["grand_total"] == quoted
+    r = client.put(
+        "/api/v1/orders/ord-16/superadmin-invoice-change",
+        json={"mode": "CREDIT_NOTE", "reason": "price agreed with customer",
+              "items": [_edit_item(unit_price=price)]},
+        headers=auth_headers,
+    )
+    if note is None:
+        assert r.status_code == 400, r.text
+        return
+    assert r.status_code == 200, r.text
+    issued = next(
+        d for d in wired["db"].get_collection("credit_note_ledger").docs
+        if d.get("note_type") == "CREDIT_NOTE"
+    )
+    assert issued["amount"] == note == round(1000.0 - quoted, 2)
+
+
+def test_edit_preview_quote_of_an_old_bill_keeps_its_paise(client, auth_headers, wired):
+    """The preview of an order billed before the rule is priced as its edit
+    saves it -- to the paise -- while the till's own quote rounds."""
+    _seed_old_paid_bill(wired["order_repo"])
+    assert _edit_quote(client, auth_headers, 1000.49).json()["grand_total"] == 1000.49
+    till = _quote(client, auth_headers, [_frame_item(1000.49)])
+    assert till.json()["grand_total"] == 1000.0
+    assert _edit_quote(client, auth_headers, 1000.49, "no-such-order").status_code == 404

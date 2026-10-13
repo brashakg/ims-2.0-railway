@@ -183,7 +183,17 @@ def round_bill(total: float) -> tuple:
     return payable, round(payable - exact, 2)
 
 
-def _compute_per_category_gst(items: list, cart_discount_pct: float) -> dict:
+def bills_round_off(order: dict) -> bool:
+    """Whether a re-price of this saved order rounds its bill. An order billed
+    before the round-off rule stores no ``round_off``; it keeps its exact
+    paise total for good (a correction of an old Rs 1000.49 paid bill must
+    not turn it into Rs 1000 with 49 paise silently overpaid)."""
+    return (order or {}).get("round_off") is not None
+
+
+def _compute_per_category_gst(
+    items: list, cart_discount_pct: float, rounded: bool = True
+) -> dict:
     """Per-category GST aggregation. Mirrors the frontend's getGrandTotal
     so cart total = sum of taxable + sum of tax across rates.
 
@@ -204,6 +214,10 @@ def _compute_per_category_gst(items: list, cart_discount_pct: float) -> dict:
                               the nearest rupee by round_bill (the stored total)
       round_off             — grand_total - (taxable + tax); its own invoice
                               line, never part of taxable or tax
+
+    ``rounded=False`` prices an order billed before the round-off rule (see
+    bills_round_off): grand_total stays taxable + tax to the paise and
+    round_off is None, so it stays an un-rounded bill.
     """
     cart_discount_pct = max(0.0, min(100.0, cart_discount_pct or 0.0))
     cart_factor = 1.0 - (cart_discount_pct / 100.0)
@@ -268,7 +282,10 @@ def _compute_per_category_gst(items: list, cart_discount_pct: float) -> dict:
         max(per_rate_taxable, key=per_rate_taxable.get) if per_rate_taxable else 18.0
     )
     total_discount = round(item_discount_sum + cart_discount_amount, 2)
-    grand_total, round_off = round_bill(taxable + tax)
+    if rounded:
+        grand_total, round_off = round_bill(taxable + tax)
+    else:
+        grand_total, round_off = round(taxable + tax, 2), None
     return {
         "subtotal": round(subtotal, 2),
         "taxable": taxable,

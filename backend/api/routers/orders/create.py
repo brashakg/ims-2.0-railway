@@ -18,6 +18,7 @@ from ...dependencies import (
     get_order_repository,
     get_product_repository,
     get_walkin_counter_repository,
+    validate_store_access,
 )
 from ...services.stores_util import is_online_store
 from ._shared import (
@@ -25,6 +26,7 @@ from ._shared import (
     _compute_per_category_gst,
     _get_db,
     bill_line_value,
+    bills_round_off,
     logger,
     router,
 )
@@ -1220,6 +1222,10 @@ class BillQuoteRequest(BaseModel):
 
     items: List[OrderItemCreate]
     cart_discount_percent: float = Field(default=0.0, ge=0.0, le=100.0)
+    # A saved order these lines would replace (the SUPERADMIN edit preview):
+    # priced exactly as the edit door will save it -- an order billed before
+    # the round-off rule keeps its exact paise (bills_round_off).
+    order_id: Optional[str] = None
 
 
 @router.post("/quote")
@@ -1255,7 +1261,15 @@ async def quote_bill(
                 "item_total": item_total,
             }
         )
-    gst = _compute_per_category_gst(lines, body.cart_discount_percent)
+    rounded = True
+    if body.order_id:
+        repo = get_order_repository()
+        order = repo.find_by_id(body.order_id) if repo is not None else None
+        if order is None:
+            raise HTTPException(status_code=404, detail="Order not found")
+        validate_store_access(order.get("store_id"), current_user)
+        rounded = bills_round_off(order)
+    gst = _compute_per_category_gst(lines, body.cart_discount_percent, rounded=rounded)
     return {
         k: gst[k]
         for k in ("subtotal", "taxable", "tax", "total_discount", "grand_total", "round_off")
