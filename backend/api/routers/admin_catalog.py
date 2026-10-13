@@ -291,10 +291,9 @@ class BrandCreate(BaseModel):
     warranty: Optional[int] = Field(None, ge=0, le=120, description="Warranty months")
     description: Optional[str] = None
     status: Optional[str] = "ACTIVE"
-    # Default Shopify-sync INTENT for products of this brand. Nothing pushes
-    # to Shopify from IMS anymore (the BVI app owns Shopify) -- the product
-    # create door stamps `sync_to_shopify` from this default so the future
-    # BVI-side push knows which products the owner wants online.
+    # Whether this brand's products go to the website (owner D6: the brand
+    # default ALWAYS decides). The Shopify push reads it live for every
+    # product (shopify_push.product_push_refusal); products store no copy.
     sync_to_shopify_default: bool = False
 
 

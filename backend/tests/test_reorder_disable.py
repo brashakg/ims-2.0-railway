@@ -194,7 +194,6 @@ class TestBuyDeskGuard:
             product,
             readiness={"complete": True, "missing": [], "blockers": [],
                        "purchasable": True},
-            push_locked=False,
             on_hand=1,
             on_order=0,
             velocity_per_day=2.0,

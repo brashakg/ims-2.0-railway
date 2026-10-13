@@ -80,6 +80,9 @@ FRONT, ANGLED, SIDE = (
     "https://cdn.example.com/rb-angled.jpg",
     "https://cdn.example.com/rb-side.jpg",
 )
+# The push mechanics for a brand that IS for the website (owner D6).
+pytestmark = pytest.mark.usefixtures("brand_is_for_the_website")
+
 USER = {"user_id": "u1", "username": "t", "roles": ["ADMIN"], "active_store_id": "S1"}
 
 
