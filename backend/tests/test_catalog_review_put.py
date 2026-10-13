@@ -977,6 +977,43 @@ def test_a_failed_spine_lookup_on_a_barcode_save_saves_nothing(gtin_env, monkeyp
     assert res["message"] == "Product updated successfully" and calls["n"] == 2
 
 
+def test_a_mongo_read_error_under_the_spine_lookup_refuses_a_barcode_save(
+    gtin_env, monkeypatch
+):
+    """Round 16 (the merge with #1192). The stub above raises from
+    _spine_product_id itself; a read error UNDER it must reach the save too.
+    The lookup read through find_by_id / find_one, which print and answer
+    None on any error, and #1192's resolver swallowed into None: either way
+    a read error was 'no linked spine', so the twin took the code alone
+    ('catalogue copy only') and the spine kept the old one. Every attributes
+    save runs the one-holder check, which needs the spine, so it refuses
+    too; a save with no attributes stays fail-soft."""
+    coll = gtin_env.collection
+    real_find, real_find_one = coll.find, coll.find_one
+
+    def _blip(real):
+        def _read(flt=None, *a, **kw):
+            if "twin-g1" in str(flt):  # the twin -> spine lookup, any shape
+                raise RuntimeError("db blip")
+            return real(flt, *a, **kw)
+
+        return _read
+
+    monkeypatch.setattr(coll, "find", _blip(real_find))
+    monkeypatch.setattr(coll, "find_one", _blip(real_find_one))
+    loaded = catalog_mod.CATALOG_PRODUCTS["twin-g1"]["updated_at"]
+    for attrs in ({"gtin": _GTIN}, {"colour_code": "RED"}):
+        with pytest.raises(HTTPException) as exc:
+            _put("twin-g1", {"attributes": attrs})
+        assert exc.value.status_code == 503 and "nothing was saved" in exc.value.detail
+    twin = catalog_mod.CATALOG_PRODUCTS["twin-g1"]
+    assert twin["updated_at"] == loaded and "gtin" not in twin["attributes"]
+    assert twin["attributes"]["colour_code"] == "BLK"
+    assert "gtin" not in gtin_env.find_by_id("spine-g1")["attributes"]
+    res = _put("twin-g1", {"description": "x"})
+    assert res["message"] == "Product updated successfully"
+
+
 def test_a_twin_sharing_only_a_sku_never_writes_or_excuses_that_spine(gtin_env):
     """Round 13 (the panel's probe). A review-queue twin can share its sku
     with an UNRELATED product's spine (promote 409s on exactly that). The
