@@ -106,6 +106,14 @@ TASKS = (
         # task names them created_by. Neither makes them its creator.
         _task("C-SALES-AUTO", "u-sales-peer", S1, assigned_by=uid("SALES_STAFF")),
         _task("C-SALES-S2", "u-x", S2, assigned_by=None, created_by=uid("SALES_STAFF")),
+        # A role name is matched as the WHOLE assigned_to, never a part of it:
+        # CASHIER is inside SALES_CASHIER, and real user ids carry role names
+        # (user-cashier-bok1, user-accountant, cashier-bok2). No staff role
+        # here sees these.
+        _task("R-SALES_CASHIER", "SALES_CASHIER", S1),
+        _task("P-CASHIER-2", "user-cashier-bok1", S1),
+        _task("P-ACCOUNTANT-2", "user-accountant", S1),
+        _task("P-CASHIER-3", "cashier-bok2", S1),  # an id that STARTS with a role
     ]
 )
 ALL = {t["task_id"] for t in TASKS}
