@@ -866,10 +866,11 @@ def _return_round_off(
         if not isinstance(line, dict):
             continue
         back_now = sum(q for orig, q in returning if orig is line)
-        already = _already_returned_qty(
-            order_id, line.get("item_id") or line.get("id"), line.get("product_id")
-        )
-        if already + back_now < _line_purchased_qty(line) - 1e-9:
+        # THE count of a line's units already back (the return door's own).
+        # Unreadable -> never settle the round off on a guess (the POST then
+        # refuses at its own count).
+        back = _units_already_back(order_id, line)
+        if back is None or back[0] + back_now < _line_purchased_qty(line) - 1e-9:
             completes = False
             break
     refund = left if completes else min(lines_gross, left)
