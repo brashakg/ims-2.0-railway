@@ -53,6 +53,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
 
+from .cost_mask import can_see_cost
+
 logger = logging.getLogger(__name__)
 
 FLAG_KEY = "pricing.cost_floor_enabled"
@@ -101,6 +103,7 @@ def enforce_cost_floor(
     cost_by_pid: Optional[Dict[str, float]] = None,
     store_id: Optional[str] = None,
     order_has_cart_discount: bool = False,
+    user: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Raise HTTP 400 when any DISCOUNTED priced line's effective
     post-discount per-unit taxable price is below cost x (1 + pct/100).
@@ -115,6 +118,10 @@ def enforce_cost_floor(
     is the call-site-derived "a cart-level discount applies to this order"
     signal -- when False, a line with no per-line discount is a pure
     full-sticker sale and is exempt (owner decision 2026-06-09 rev 2).
+    ``user`` is the seller: the refusal names the floor only to a role
+    services/cost_mask "product" admits -- cost is the floor / (1 + pct%)
+    -- as the below-cost refusal in orders/pricing.py does (owner ruling
+    2026-10-12). No user = no figure. The line is refused either way.
     """
     enabled, pct = _floor_policy(store_id)
     if not enabled:
@@ -160,10 +167,7 @@ def enforce_cost_floor(
         floor = cost * (1.0 + pct / 100.0)
         if eff_unit < floor - _EPS:
             name = it.get("product_name") or pid or "item"
-            # Message parity note: the legacy below-cost guard already prints
-            # the raw cost itself; the floor value here is derivable to
-            # nothing more than that. The opt-out hint makes the 400
-            # actionable on the shop floor without widening the leak.
+            # The opt-out hint makes the 400 actionable for a manager.
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -172,5 +176,7 @@ def enforce_cost_floor(
                     f"Rs{round(floor, 2)}. Contact a manager, or have an "
                     f"administrator adjust or disable the cost floor for "
                     f"this store in Settings."
+                    if can_see_cost(user, "product")
+                    else "This price is below the allowed minimum - ask a manager"
                 ),
             )

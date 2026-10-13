@@ -13,7 +13,9 @@ is unchanged). Every status change here moves the shop's on-hand, so each one en
 in ``_sync_online_stock`` (the Shopify per-shop write-back), the same door the POS
 sale uses -- these routes write stock_units directly, so no ledger hook fires.
 Every route store-scopes; a cashier can never mint / relabel / recall a serial
-(only read a warranty).
+(only read a warranty). A unit's cost (and, on the warranty lookup, the sold
+order's line cost_at_sale) reaches only a role services/cost_mask "product"
+admits (owner rulings D7 / 2026-10-12).
 
 No emoji (Windows cp1252).
 """
@@ -28,6 +30,7 @@ from .auth import get_current_user
 from ..dependencies import validate_store_access
 from ..services import barcode as barcode_svc
 from ..services import serial_tracking as svc
+from ..services.cost_mask import mask_cost
 
 router = APIRouter(tags=["serials"])
 
@@ -188,7 +191,7 @@ async def mark_sold(serial: str, body: MarkSoldBody, current_user: Dict[str, Any
     _audit("serial.sold", entity_id=updated.get("serial"), actor=current_user,
            store_id=unit.get("store_id"), detail={"order_id": body.order_id})
     _sync_online_stock(updated, source="serial_sold")
-    return updated
+    return mask_cost(updated, current_user, "product")
 
 
 @router.post("/{serial}/recall")
@@ -208,7 +211,7 @@ async def recall(serial: str, body: RecallBody, current_user: Dict[str, Any] = D
     _audit("serial.recall", entity_id=serial, actor=current_user,
            store_id=unit.get("store_id"), detail={"reason": body.reason})
     _sync_online_stock(updated, source="serial_recall")
-    return updated
+    return mask_cost(updated, current_user, "product")
 
 
 @router.post("/{serial}/return")
@@ -225,7 +228,7 @@ async def return_unit(serial: str, current_user: Dict[str, Any] = Depends(get_cu
     except svc.SerialError as exc:
         _raise(exc)
     _sync_online_stock(updated, source="serial_return")
-    return updated
+    return mask_cost(updated, current_user, "product")
 
 
 @router.get("/warranty/{serial}")
@@ -239,7 +242,8 @@ async def warranty(serial: str, current_user: Dict[str, Any] = Depends(get_curre
     except svc.SerialError as exc:
         _raise(exc)
     validate_store_access((res.get("unit") or {}).get("store_id"), current_user)
-    return res
+    # The unit's cost and the sold order's line cost_at_sale, as on GET /orders.
+    return mask_cost(res, current_user, "product")
 
 
 @router.get("/{serial}")
@@ -250,4 +254,4 @@ async def get_serial(serial: str, current_user: Dict[str, Any] = Depends(get_cur
     if unit is None:
         raise HTTPException(status_code=404, detail="serial not found")
     validate_store_access(unit.get("store_id"), current_user)
-    return unit
+    return mask_cost(unit, current_user, "product")
