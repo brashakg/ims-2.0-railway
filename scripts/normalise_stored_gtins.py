@@ -40,8 +40,9 @@ It REPORTS, and never changes:
   * every legacy products.barcode (main's old Manage Barcode wrote it; its
     Generate made random EAN-13s that pass the format check, so a valid one
     is still not proven to be the maker's);
-  * every catalog_products.barcode / catalog_variants.barcode (the Shopify
-    push falls back to it when the row has no gtin);
+  * every catalog_products.barcode (no longer sent to Shopify, still held by
+    the one-holder rule) / catalog_variants.barcode (a size row's push falls
+    back to it when the row has no gtin);
   * each barcode key in another spelling, with its verdict (its value counts
     towards the duplicates).
 

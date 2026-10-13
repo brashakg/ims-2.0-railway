@@ -186,7 +186,8 @@ class ProductRepository(BaseRepository):
         not `exclude_product_id`'s own (a spine id, or a spineless twin's id).
         The bulk import writes a twin with no spine, and the Shopify push sends
         a twin's gtin as its variant barcode, so the one-holder rule reads twins
-        too: every field the push reads a barcode from, in every spelling. A
+        too: every field a twin carries a barcode in (the gtin attribute, its
+        top-level projection, the legacy barcode), in every spelling. A
         spine's own twin is the one keyed on its id or pim_product_id -- never
         one that merely shares its sku (an unrelated review-queue twin can)."""
         spellings = gtin_spellings(barcode)

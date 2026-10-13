@@ -1732,12 +1732,12 @@ def _guard_gtin_attribute(
 
 
 def twin_barcode_fields(gtin: Any) -> Dict[str, Any]:
-    """The catalog-twin (or catalog_variants row) fields the Shopify push reads
-    a barcode from, for the product's gtin attribute: the top-level `gtin`
-    and, when the GTIN is REMOVED, the legacy `barcode` too -- the push falls
-    back to it (variants.build_variant_seed_rows, the price push's
-    pseudo-variant), so leaving it would send the removed code again. ONE rule
-    for every door that moves the gtin attribute."""
+    """The catalog-twin (or catalog_variants row) barcode fields for the
+    product's gtin attribute: the top-level `gtin` and, when the GTIN is
+    REMOVED, the legacy `barcode` too. A sibling row's push reads both
+    (product_input.variant_barcode), and the one-holder rule reads both on a
+    twin (find_twin_by_barcode), so leaving either would send, or hold, the
+    removed code. ONE rule for every door that moves the gtin attribute."""
     if gtin:
         return {"gtin": gtin}
     return {"gtin": None, "barcode": None}
@@ -2374,12 +2374,9 @@ def _build_pim_doc(
         "offer_price": spine.get("offer_price"),
         "hsn_code": spine.get("hsn_code"),
         "gst_rate": spine.get("gst_rate"),
-        # The PUBLIC barcode. The spine captures it as the `gtin` ATTRIBUTE
-        # (FRAME/SUNGLASS specs), but the push's pseudo-variant reads it
-        # TOP-LEVEL off the twin (_variants_for_price_push -> _publishable_gtin,
-        # which also rejects the internal GS1 20-29 code). Never projected, so
-        # a catalogued GTIN only ever reached Shopify as an ims.gtin metafield
-        # -- never as the variant barcode the Google/Meta feeds republish.
+        # The PUBLIC barcode's top-level projection (the push itself reads the
+        # gtin ATTRIBUTE, product_input.variant_barcode; the one-holder rule,
+        # find_twin_by_barcode, reads this too).
         "gtin": attrs.get("gtin") or spine.get("gtin") or None,
         # Display identity the storefront + push read (top-level name/title).
         "name": name or None,
@@ -3304,7 +3301,7 @@ def mirror_update_to_catalog_twin(
       * hsn_code / gst_rate / is_active / description / brand / model /
         category / attributes mirror top-level; tags mirror to ecom.seo.tags
         (the only spelling the push reads); an attributes.gtin projects to the
-        twin's top-level gtin (the pseudo-variant's public-barcode source).
+        twin's top-level gtin (twin_barcode_fields).
       * the twin QUEUES for the manual Online Store push
         (ecom.locally_modified) only when a field the storefront actually
         shows moved: mrp / offer_price (the variant price fallbacks),
@@ -3370,8 +3367,7 @@ def mirror_update_to_catalog_twin(
             # The dot-path form of set_twin_tags: same field, same normaliser.
             cat_patch["ecom.seo.tags"] = normalise_tags(patch["tags"])
         if "gtin" in (patch.get("attributes") or {}):
-            # Same projection as _build_pim_doc: the public barcode rides
-            # top-level on the twin for the pseudo-variant.
+            # Same projection as _build_pim_doc (twin_barcode_fields).
             cat_patch.update(twin_barcode_fields(patch["attributes"].get("gtin")))
         # The photograph moves with the spine and QUEUES: it is the one field
         # the storefront shows more prominently than the price, and the push

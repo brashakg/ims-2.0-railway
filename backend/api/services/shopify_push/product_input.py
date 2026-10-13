@@ -429,14 +429,10 @@ def _publishable_gtin(*candidates: Any) -> Optional[str]:
     -- a missing GTIN costs some feed match-rate, a WRONG GTIN gets the item
     rejected or matched to another manufacturer's product.
 
-    Two behaviours worth calling out:
-      - it picks the first VALID candidate, not the first non-empty one, so a
-        junk value on the variant no longer shadows a good GTIN on the parent
-        product (the old `or` chain stopped at the first truthy string);
-      - `product["barcode"]` is in the fallback chain and, on many rows, holds
-        our INTERNALLY minted GS1 20-29 code. classify_gtin rejects that whole
-        prefix range as RESTRICTED, so an in-store barcode can no longer leak
-        out as if it were a manufacturer GTIN.
+    It picks the first VALID candidate, not the first non-empty one (the old
+    `or` chain stopped at the first truthy string), and classify_gtin rejects
+    the whole GS1 20-29 range as RESTRICTED, so an in-store barcode can never
+    leak out as if it were a manufacturer GTIN.
     """
     for candidate in candidates:
         cleaned = sanitise_gtin(candidate)
@@ -455,10 +451,13 @@ def variant_barcode(
     The product's OWN variant -- the SELF row the create door writes (sku ==
     the product's sku; the price push's pseudo-variant is one too) or no row
     at all (the seed's single default variant) -- carries the PRODUCT's GTIN:
-    the gtin attribute (its key in any spelling, read by the SAME fold as the
-    ims.gtin metafield, so whenever ims.gtin is sent the variant carries that
-    same code), then its top-level projection, then the legacy barcode. One
-    home; the row keeps no copy to fall out of sync. Any other row (a size
+    the gtin attribute ONLY (its key in any spelling, read by the SAME fold as
+    the ims.gtin metafield, so the variant carries exactly the code ims.gtin
+    does). Never the twin's legacy top-level barcode -- main's retired Manage
+    Barcode > Generate wrote random check-digit-valid EAN-13s there -- nor a
+    top-level gtin the attribute does not hold: IMS never changes a live
+    product's barcode to a code that is not the maker's. One home; the row
+    keeps no copy to fall out of sync. Any other row (a size
     variant of the listing, a colour option) carries ONLY its own: a GTIN
     names one trade item, so the parent's never lands on a sibling."""
     if row is not None:
@@ -467,9 +466,7 @@ def variant_barcode(
             return _publishable_gtin(row.get("gtin"), row.get("barcode"))
     attrs = product.get("attributes")
     return _publishable_gtin(
-        _manufacturer_codes(attrs).get("gtin") if isinstance(attrs, dict) else None,
-        product.get("gtin"),
-        product.get("barcode"),
+        _manufacturer_codes(attrs).get("gtin") if isinstance(attrs, dict) else None
     )
 
 

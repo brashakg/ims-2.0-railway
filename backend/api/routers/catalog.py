@@ -2172,8 +2172,8 @@ async def update_catalog_product(
             raise HTTPException(status_code=err.status, detail=err.message) from err
         existing["attributes"] = merged_attrs
         if gtin_written:
-            # The twin's top-level gtin is what the push sends as the variant
-            # barcode (the same projection as the spine door's mirror).
+            # The twin's top-level barcode fields follow (the same projection
+            # as the spine door's mirror).
             existing.update(_pm.twin_barcode_fields(merged_attrs.get("gtin")))
         # Title regen is BEST-EFFORT: imported (BVI) docs store the canonical
         # long-form category ("FRAME"), which is not a ProductCategory short

@@ -327,25 +327,41 @@ def test_push_sends_a_valid_barcode():
     assert rows[0]["barcode"] == VALID_EAN13
 
 
-def test_push_falls_through_junk_to_the_products_valid_gtin():
-    """The old `or` chain stopped at the first TRUTHY value, so a junk value
-    shadowed a good GTIN. It now picks the first VALID one. The product's own
-    variant (its self row) reads the PRODUCT's GTIN; a sibling row (P1-A) never
-    inherits it -- a GTIN names one trade item."""
-    from api.services.shopify_push import build_variant_seed_rows
-
-    rows = build_variant_seed_rows(
-        {
-            "sku": "P1",
-            "mrp": 5000,
-            "offer_price": 4000,
-            "attributes": {"gtin": "2511661"},
-            "gtin": VALID_EAN13,
-        },
-        [{"sku": "P1", "gtin": "2511661"}, {"sku": "P1-A", "gtin": "2511661"}],
+def test_only_the_makers_gtin_attribute_is_ever_the_variant_barcode():
+    """Decided 2026-10-01: IMS never changes a live product's barcode to a code
+    that is not the maker's. A legacy twin's top-level `barcode` can be a
+    random EAN-13 from main's retired Manage Barcode > Generate (a valid check
+    digit, not the maker's), and a top-level `gtin` without the attribute is
+    no maker GTIN either: neither is sent -- the key is omitted, so Shopify
+    keeps the code it has. Only the gtin attribute (the fold the ims.gtin
+    metafield reads) is. A sibling row (P1-A) never inherits it."""
+    from api.services.shopify_push import (
+        _variants_for_price_push,
+        build_variant_price_inputs,
+        build_variant_seed_rows,
     )
-    assert rows[0]["row"]["barcode"] == VALID_EAN13
+
+    def price_push(product):  # the price push's own rows: the pseudo-variant
+        return build_variant_price_inputs(product, _variants_for_price_push(product, []))[0]
+
+    random_ean13 = "8712345678906"  # valid check digit, not GS1 20-29
+    gid = {"ecom": {"shopify_variant_id": "gid://shopify/ProductVariant/1"}}
+    for legacy in ({"barcode": random_ean13}, {"gtin": VALID_EAN13},
+                   {"barcode": random_ean13, "attributes": {"gtin": "2511661"}}):
+        product = {"sku": "P1", "mrp": 5000, "offer_price": 4000, **gid, **legacy}
+        seed = build_variant_seed_rows(product, [])
+        assert "barcode" not in seed[0]["row"], legacy
+        price_rows = price_push(product)
+        assert price_rows and "barcode" not in price_rows[0], legacy
+
+    product = {"sku": "P1", "mrp": 5000, "offer_price": 4000, **gid,
+               "barcode": random_ean13, "attributes": {"GTIN": VALID_EAN13_B}}
+    rows = build_variant_seed_rows(
+        product, [{"sku": "P1"}, {"sku": "P1-A", "gtin": "2511661"}]
+    )
+    assert rows[0]["row"]["barcode"] == VALID_EAN13_B
     assert "barcode" not in rows[1]["row"]
+    assert price_push(product)[0]["barcode"] == VALID_EAN13_B
 
 
 def test_the_self_row_never_shadows_the_products_gtin():
