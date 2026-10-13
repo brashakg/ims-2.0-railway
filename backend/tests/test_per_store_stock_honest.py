@@ -324,6 +324,29 @@ def test_1_a_refused_take_down_whose_re_send_answer_confirms_nothing_is_still_li
     assert _baseline(db)["tracked"] is False
 
 
+def test_1_a_staged_published_listing_gaining_a_size_is_not_live_and_never_taken_down(monkeypatch):
+    """Round-3 finding (the staged axis of the ONE listing reader). IMS holds
+    the listing PUBLISHED, but its baseline says tracking was never set and
+    no quantity was ever accepted -- the staged-PUBLISHED draft, which
+    `listing_visible` counts as NOT on the website (this is its first
+    publish). A new size whose create answer is silent must therefore send
+    NO Draft and write no taken_down_at: there is nothing on the website to
+    take off. Swap `listing_visible` for a bare `status == PUBLISHED` check
+    -> a Draft + 'taken OFF the website' about a listing never on it -> fails."""
+    db, variants, upd = _live_listing_gets_size_l()
+    db.get_collection("catalog_products").update_one(
+        {"id": "cat-1"}, {"$set": {"ecom.online_stock": {"tracked": False}}}
+    )
+    spy = _Spy(_responses(**{"productUpdate(": upd,
+                             "productVariantsBulkCreate": _created(tracked=None, policy=None)}))
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.push_product(db, _cat(db), variants))
+    assert _drafts(spy) == [], "a staged listing is not on the website -- nothing to take down"
+    assert not _cat(db)["ecom"].get("taken_down_at")
+    assert "taken OFF" not in (res.error or ""), res.error
+    assert res.ok is True, res
+
+
 class _CredsGoSoft(_Spy):
     """The creds resolve True until the size is created, then False (an OAuth
     re-mint failing after the token cache expired): the gate reads DARK, and
