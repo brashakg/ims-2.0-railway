@@ -2,7 +2,7 @@
 // WHO SEES TEAM TASKS - one answer, checked against every role
 // ============================================================================
 // Owner ruling 2026-09-03: STORE_MANAGER, AREA_MANAGER, ADMIN and SUPERADMIN.
-// Everyone else sees only what is assigned to them.
+// Everyone else gets Mine only - their own tasks (owner ruling 2026-10-12).
 //
 // Three copies of this answer used to disagree (the /tasks route gate admitted
 // ACCOUNTANT; the TasksDashboard tab admitted only the two managers;
@@ -67,12 +67,25 @@ describe('the one team-task role list', () => {
     expect(canSeeTeamTasks(['ACCOUNTANT'])).toBe(false);
   });
 
+  it('reads a role in any case, like the server (a token may say "store_manager")', () => {
+    for (const role of TEAM_TASK_ROLES) expect(canSeeTeamTasks([role.toLowerCase()])).toBe(true);
+    expect(canSeeTeamTasks(['sales_staff'])).toBe(false);
+  });
+
   it('covers the four floor roles for Mine and the daily checklist', () => {
     for (const role of ['SALES_STAFF', 'CASHIER', 'OPTOMETRIST', 'WORKSHOP_STAFF'] as UserRole[]) {
       expect(TASK_MODULE_ROLES).toContain(role);
       expect(canSeeTeamTasks([role])).toBe(false);
     }
   });
+
+  it.each(['CATALOG_MANAGER', 'ACCOUNTANT'] as const)(
+    'lets the %s open Mine - their tasks (catalogue flags, "Book purchase invoice") are assigned to them',
+    (role) => {
+      expect(TASK_MODULE_ROLES).toContain(role);
+      expect(canSeeTeamTasks([role])).toBe(false);
+    },
+  );
 
   it.each(TASK_MODULE_ROLES)('shows %s exactly the sections its role allows', (role) => {
     const expected = (TEAM_TASK_ROLES as readonly string[]).includes(role);

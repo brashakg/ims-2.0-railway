@@ -11,6 +11,7 @@ import logging
 from ..auth import get_current_user, require_roles
 from ...services import power_grid
 from ...services import barcode as barcode_svc
+from ...services.online_order_status import SALE_DONE_ANY_CASE
 from ...services.reorder_policy import (
     auto_reorder_disabled as _reorder_disabled,
     discontinued as _discontinued,
@@ -90,22 +91,6 @@ _INVENTORY_ROLES = (
 )
 
 
-# Broad "this order represents a real sale" status set (both cases seen in DB).
-# Defined here — before its first use in get_non_moving_stock — so it is
-# unambiguously initialised before ANY call-site (including the functions below
-# that also reference it: get_sell_through_analysis, get_overstock_analysis,
-# get_stock_alerts, _aggregate_sales_by_barcode).
-_SOLD_STATUSES = [
-    "DELIVERED",
-    "delivered",
-    "Delivered",
-    "COMPLETED",
-    "completed",
-    "Completed",
-    "PAID",
-    "paid",
-    "Paid",
-    "FULFILLED",
-    "fulfilled",
-    "Fulfilled",
-]
+# "This order is a real sale": the ONE set in online_order_status (any case,
+# so imported history counts; SHIPPED, so a fulfilled online sale does).
+_SOLD_STATUSES = SALE_DONE_ANY_CASE

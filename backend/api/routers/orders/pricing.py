@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import Any, Optional
 from ...services import cash_denominations as cash_denom
+from ...services.cost_mask import can_see_cost
 from ._shared import logger
 from .stock import _VIRTUAL_PID_PREFIXES
 
@@ -220,7 +221,9 @@ def assert_stack_within_cap(
         )
 
 
-def _enforce_line_pricing(item, product, *, is_admin: bool, role_cap: float) -> dict:
+def _enforce_line_pricing(
+    item, product, *, is_admin: bool, role_cap: float, user: Optional[dict] = None
+) -> dict:
     """THE per-line price-integrity + discount-cap gate.
 
     ONE implementation, shared by create_order and POST /{order_id}/items.
@@ -233,6 +236,9 @@ def _enforce_line_pricing(item, product, *, is_admin: bool, role_cap: float) -> 
     ``item``    -- an OrderItemCreate (both doors use the same model).
     ``product`` -- the doc from _resolve_billable_product (None for virtual
                    lines, or when no product repo is available).
+    ``user``    -- the seller; the below-cost refusal names the cost only to a
+                   role services/cost_mask "product" admits (owner ruling
+                   2026-10-12). No user = no figure.
 
     Enforces (BUG-119/BUG-118 + SYSTEM_INTENT discount matrix):
       * unit_price <= catalog ceiling (offer_price when HQ-discounted,
@@ -292,12 +298,16 @@ def _enforce_line_pricing(item, product, *, is_admin: bool, role_cap: float) -> 
         # Cost floor: never sell a PRICED line below cost. A Rs0 line is a
         # free / 100%-discount item gated by the approval requirement (C-4),
         # so it is exempt here.
+        # The counter is refused without the figure (owner ruling 2026-10-12);
+        # the managers still read it. The sale is blocked the same either way.
         if cost and cost > 0 and up > 1e-6 and up < cost - 1e-6:
             raise HTTPException(
                 status_code=400,
                 detail=(
                     f"unit_price Rs{up} is below cost Rs{cost} for "
                     f"{item.product_name or pid}. Contact a manager."
+                    if can_see_cost(user, "product")
+                    else "This price is below cost - ask a manager"
                 ),
             )
         # BUG-118 (SYSTEM_INTENT s3): an HQ-discounted item (offer<MRP) sells

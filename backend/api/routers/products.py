@@ -5,7 +5,7 @@ Product catalog management endpoints
 """
 
 import io
-from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File
+from fastapi import APIRouter, HTTPException, Depends, Query, Request, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -26,8 +26,15 @@ from ..services.file_store import (
 # Imported at module level so the edit endpoint below (and its test) resolve the
 # editor through THIS module -- tests monkeypatch `get_image_editor` here.
 from ..services.image_editor import get_image_editor, EditSpec
+from ..services import catalog_list as _catalog_list
+from ..services.catalog_flags import FLAG_TYPES as _FLAG_TYPES
 
 router = APIRouter()
+
+# The Catalog page's Flags filter: any open flag, open flags on MY entries,
+# one flag type, or the archived (deleted) products -- admins only.
+_FLAG_FILTER_PATTERN = "^(any|mine|archived|" + "|".join(_FLAG_TYPES) + ")$"
+_ARCHIVE_VIEW_ROLES = {"ADMIN", "SUPERADMIN"}
 
 logger = logging.getLogger("ims.products")
 
@@ -398,9 +405,11 @@ def _canonical_door_payload(
         "hsn_code": product.hsn_code,
         "gst_rate": product.gst_rate,
         "tags": product.tags,
+        "weight": product.weight,
         # Flat identity columns -- normalise_door_payload folds these into the
-        # registry's attribute keys (brand->brand_name, model->model_no,
-        # color->colour_code) so the required-field gate sees them.
+        # registry's attribute keys (brand->brand_name, model->the model field
+        # the category's form shows, color->colour_code) so the required-field
+        # gate sees them.
         "brand": product.brand,
         "model": product.model,
         "color": product.color,
@@ -418,32 +427,6 @@ def _form_extra_fields(product: "ProductCreate") -> dict:
         if v is not None:
             out[f] = v
     return out
-
-
-def _resolve_sync_to_shopify(product: "ProductCreate", db) -> bool:
-    """The `sync_to_shopify` INTENT to stamp on a new spine product.
-
-    NOTE: nothing pushes to Shopify from IMS anymore (IMS->Shopify is
-    retired; the BVI app owns Shopify) -- the stamp records the owner's
-    intent so the FUTURE BVI-side push knows which products to list.
-
-    An explicit payload value wins; when omitted (None) the brand's
-    Brand Master `sync_to_shopify_default` decides (case-insensitive name
-    match). FAIL-SOFT: unknown brand / no db / read trouble -> False
-    (never sync by accident)."""
-    explicit = getattr(product, "sync_to_shopify", None)
-    if explicit is not None:
-        return bool(explicit)
-    try:
-        from ..dependencies import get_db as _get_db_dep
-        from ..services import catalog_dictionary as _cd
-
-        db = db if db is not None else _get_db_dep()
-        if db is not None and getattr(db, "is_connected", False):
-            return _cd.load_brand_sync_default(db, product.brand)
-    except Exception:  # noqa: BLE001 - intent stamp must never block a create
-        pass
-    return False
 
 
 def _create_via_canonical_door(
@@ -475,10 +458,9 @@ def _create_via_canonical_door(
     except Exception:  # noqa: BLE001 - mirror is fail-soft; never block a create
         variant_repo = None
 
-    # Additive door columns + the resolved Shopify-sync INTENT (explicit
-    # payload value, else the brand's Brand Master default, fail-soft False).
+    # Additive door columns. (No website flag: the brand default decides it
+    # live at push time -- owner D6.)
     extra = _form_extra_fields(product)
-    extra["sync_to_shopify"] = _resolve_sync_to_shopify(product, db)
 
     try:
         return _pm.create_via_door(
@@ -577,6 +559,10 @@ class ProductCreate(BaseModel):
     # silently dropped it on every create and no IMS-born product ever carried a
     # description to Shopify. Optional + additive.
     description: Optional[str] = None
+    # Grams -- the same `weight` key PUT /products/{id} writes and the form
+    # reads back. Was never modelled here, so pydantic dropped it on every
+    # create and the same-model chip had no weight to copy (audit F69).
+    weight: Optional[float] = Field(default=None, ge=0)
     # Governed product tags (step-12). Accepts a list or a comma-separated
     # string; normalised (lowercase/trim/dedupe) server-side via the canonical
     # door so FORM/BULK/CATALOG all yield an identical `tags` array. Tags back
@@ -624,13 +610,8 @@ class ProductCreate(BaseModel):
     @classmethod
     def _validate_images(cls, v):
         return _clean_image_urls(v)
-
-    # Shopify-sync INTENT for the new product. NOTE: nothing pushes to
-    # Shopify from IMS anymore (IMS->Shopify is retired; the BVI app owns
-    # Shopify) -- this stamps the owner's intent for the FUTURE BVI-side
-    # push. None (default) = resolve from the brand's Brand Master
-    # `sync_to_shopify_default`; an explicit true/false is honoured as-is.
-    sync_to_shopify: Optional[bool] = None
+    # No `sync_to_shopify` here: the brand default always decides (owner
+    # 2026-09-29, D6); a stale client that still sends one is ignored.
 
 
 class ProductUpdate(BaseModel):
@@ -829,7 +810,9 @@ class BulkOfferRequest(BulkScopeFilter):
 async def list_products(
     category: Optional[str] = Query(None),
     brand: Optional[str] = Query(None),
-    search: Optional[str] = Query(None),
+    # 100 characters: far past any name or code typed or scanned at the
+    # till or the counter, and no pasted wall of text builds a huge regex.
+    search: Optional[str] = Query(None, max_length=100),
     match: Optional[str] = Query(
         None,
         pattern="^anywhere$",
@@ -837,8 +820,9 @@ async def list_products(
             "'anywhere' = the purchase-order product box's wide search: the "
             "model number anywhere in the model, brands spelt with or without "
             "spaces/hyphens, colour words, the GTIN (audit F21). Absent = the "
-            "till's rule: every word from the START of brand / model / SKU / "
-            "variant / barcode (POS, goods receipt and every other search box)."
+            "till's rule: every word STARTS a word of brand / model / name / "
+            "model name / subbrand, or the start of SKU / variant / barcode "
+            "(POS, goods receipt and every other search box)."
         ),
     ),
     tag: Optional[str] = Query(
@@ -875,6 +859,30 @@ async def list_products(
             "online (LIVE / QUEUED / OFF / BLOCKED), computed here."
         ),
     ),
+    # ---- The Catalog page's sort + filters (owner 2026-10-12). ALL optional:
+    # a caller sending none of them gets exactly the legacy list below. Any
+    # one of them routes through services/catalog_list (one query for the
+    # page AND its count, sorted on the server across the whole result).
+    sort: Optional[str] = Query(None, pattern=_catalog_list.SORT_PATTERN),
+    frame_color: Optional[str] = Query(None, max_length=_catalog_list.VALUE_MAX),
+    lens_colour: Optional[str] = Query(None, max_length=_catalog_list.VALUE_MAX),
+    gender: Optional[str] = Query(None, max_length=_catalog_list.VALUE_MAX),
+    shape: Optional[str] = Query(None, max_length=_catalog_list.VALUE_MAX),
+    frame_type: Optional[str] = Query(None, max_length=_catalog_list.VALUE_MAX),
+    frame_material: Optional[str] = Query(None, max_length=_catalog_list.VALUE_MAX),
+    updated_by: Optional[str] = Query(
+        None,
+        max_length=_catalog_list.VALUE_MAX,
+        description="Last edited by this user_id; 'none' = never edited.",
+    ),
+    date_on: Optional[str] = Query(None, pattern="^(added|edited)$"),
+    date_from: Optional[str] = Query(
+        None, pattern=_catalog_list.DATE_PATTERN, description="India day, included."
+    ),
+    date_to: Optional[str] = Query(
+        None, pattern=_catalog_list.DATE_PATTERN, description="India day, included."
+    ),
+    flag: Optional[str] = Query(None, pattern=_FLAG_FILTER_PATTERN),
     current_user: dict = Depends(get_current_user),
 ):
     """List active catalog products with optional search / brand / category
@@ -897,6 +905,47 @@ async def list_products(
         photo = None
     anywhere = match == "anywhere"
 
+    # The Catalog page's sort + filters (same direct-call safety: a Query
+    # default object or a blank string is "absent").
+    def _opt(v):
+        return v.strip() if isinstance(v, str) and v.strip() else None
+
+    new = {
+        "sort": _opt(sort),
+        "updated_by": _opt(updated_by),
+        "date_on": _opt(date_on),
+        "date_from": _opt(date_from),
+        "date_to": _opt(date_to),
+        "flag": _opt(flag),
+        "attributes": {
+            k: _opt(v)
+            for k, v in (
+                ("frame_color", frame_color),
+                ("lens_colour", lens_colour),
+                ("gender", gender),
+                ("shape", shape),
+                ("frame_type", frame_type),
+                ("frame_material", frame_material),
+            )
+            if _opt(v)
+        },
+    }
+    use_catalog_list = any(new.values())
+    if new["flag"] == "archived" and not (
+        set(current_user.get("roles") or []) & _ARCHIVE_VIEW_ROLES
+    ):
+        raise HTTPException(
+            status_code=403, detail="Only an admin can see archived products"
+        )
+    if new["flag"] == "mine":
+        # "Flagged on my entries" depends on who asks: part of the cache key.
+        new["me"] = current_user.get("user_id")
+    if use_catalog_list:
+        try:
+            _catalog_list.ist_day_bounds(new["date_from"], new["date_to"])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
     def _stamped(result: Dict[str, Any]) -> Dict[str, Any]:
         # Photo / online truth is stamped on EVERY response, cache hit or
         # miss: a push or a photo edit must show on the next load, not after
@@ -917,11 +966,8 @@ async def list_products(
     # nor the attribution fields on the returned docs -- otherwise any staff
     # account could reconstruct the exact roster + per-user counts that
     # GET /products/cataloguers deliberately withholds from them.
-    can_see_attribution = bool(
-        set(current_user.get("roles") or [])
-        & ({"SUPERADMIN"} | set(_CATALOGUER_VIEW_ROLES))
-    )
-    if created_by and not can_see_attribution:
+    can_see_attribution = _sees_attribution(current_user)
+    if (created_by or new["updated_by"]) and not can_see_attribution:
         raise HTTPException(
             status_code=403,
             detail="Your role does not have access to the cataloguer filter",
@@ -950,6 +996,13 @@ async def list_products(
         f"products:{active_store}:{category}:{brand}:{search}:{tag}:{skip}:{limit}"
         f":{is_active}:{created_by}:{_tier}:{photo}:{anywhere}:{_cost_tier}"
     )
+    if use_catalog_list:
+        # EVERY catalog-list parameter is in the key (lesson of #1161 / #1170:
+        # two different filters or sorts must never share a cached page) --
+        # the whole dict, so a parameter added later cannot be forgotten.
+        import json as _json
+
+        cache_key += ":cl:" + _json.dumps(new, sort_keys=True)
     cached = cache.get(cache_key)
     if cached is not None:
         return _stamped(cached)
@@ -982,7 +1035,38 @@ async def list_products(
             filtered_active = is_active == "true"
             default_active = filtered_active
 
-        if search:
+        if use_catalog_list:
+            # ONE query for the page and its count. The search box keeps the
+            # till's own word rule (or the wide one with match=anywhere) --
+            # reused, never changed.
+            query = _catalog_list.list_query(
+                category=category,
+                brand=brand,
+                is_active=filtered_active,
+                created_by=created_by,
+                updated_by=new["updated_by"],
+                attributes=new["attributes"],
+                date_on=new["date_on"],
+                date_from=new["date_from"],
+                date_to=new["date_to"],
+                flag=new["flag"],
+                me=current_user.get("user_id"),
+            )
+            if search:
+                query = (
+                    repo._product_search_query(search, query)
+                    if anywhere
+                    else repo._search_query(search, list(repo.SEARCH_FIELDS), query)
+                )
+            products = _catalog_list.page(
+                repo.collection, query, new["sort"] or "edited", _skip, _limit
+            )
+            total_count = repo.count(query)
+            if can_see_attribution:
+                from ..dependencies import get_db as _people_db
+
+                _catalog_list.stamp_people(_people_db(), products)
+        elif search:
             products = repo.search_products(
                 search,
                 category,
@@ -1061,26 +1145,15 @@ async def list_products(
         # POS grid + other consumers read the SINGULAR `image_url`, but spine
         # docs carry an `images` ARRAY -- so every image silently rendered as
         # the placeholder icon even though the files load fine. Stamp the
-        # first image as the alias here (single-brain fix for every consumer
-        # of this list); an existing explicit image_url is never overwritten.
+        # alias here (single-brain fix for every consumer of this list). It is
+        # PHOTO 1 (product_master.main_photo, owner 2026-10-12): a stored
+        # image_url no longer outranks the photo order the product page sets.
         for p in products:
-            if not p.get("image_url"):
-                imgs = p.get("images")
-                if isinstance(imgs, list) and imgs and isinstance(imgs[0], str):
-                    p["image_url"] = imgs[0]
+            first = _pm.main_photo(p)
+            if first:
+                p["image_url"] = first
 
-        # Attribution stripping for non-manager callers (panel finding 4):
-        # covers the newly stamped names AND the pre-existing raw created_by
-        # user_id, so the roster stays non-derivable from this endpoint.
-        if not can_see_attribution:
-            for p in products:
-                for _f in (
-                    "created_by",
-                    "created_by_name",
-                    "updated_by",
-                    "updated_by_name",
-                ):
-                    p.pop(_f, None)
+        _strip_attribution(products, current_user)
         products = mask_cost_list(products, current_user, "product")
 
         if _scan:
@@ -1744,6 +1817,10 @@ async def bulk_price_update(
                         "offer_price": _round_money(new_offer),
                         "price_updated_at": datetime.utcnow(),
                         "price_updated_by": current_user.get("user_id"),
+                        # A price change by a person IS a catalogue edit.
+                        **_catalog_list.edit_stamp(
+                            current_user.get("user_id"), current_user.get("username")
+                        ),
                     },
                 )
                 row["applied"] = bool(ok)
@@ -1881,6 +1958,10 @@ async def bulk_offer_update(
                         "offer_price": _round_money(new_offer),
                         "price_updated_at": datetime.utcnow(),
                         "price_updated_by": current_user.get("user_id"),
+                        # A price change by a person IS a catalogue edit.
+                        **_catalog_list.edit_stamp(
+                            current_user.get("user_id"), current_user.get("username")
+                        ),
                     },
                 )
                 row["applied"] = bool(ok)
@@ -2080,8 +2161,9 @@ async def get_brand_options(
     canonical name like 'FRAME'; omit for all), each with its sub-brand names
     so the form can restrict the Sub Brand select per selected brand.
 
-    Shape: {"brands": [{"name": str, "subbrands": [str, ...], "tier": str|None,
-    "sync_to_shopify_default": bool}, ...]}.
+    Shape: {"brands": [{"name": str, "subbrands": [str, ...], "tier": str|None}, ...]}.
+    Whether a brand goes to the website is NOT here: that is the push gate's
+    answer alone (GET /products/website-verdict, owner D6).
     Fail-soft: db trouble -> {"brands": []}.
     """
     try:
@@ -2102,21 +2184,35 @@ async def get_brand_options(
             # tier: shown read-only in the form's Review (the product's
             # discount band derives from it at create time).
             tier = _cd.load_brand_tier(db, name)
-            brands.append(
-                {
-                    "name": name,
-                    "subbrands": subs,
-                    "tier": tier,
-                    # Default Shopify-sync INTENT for the brand (Settings ->
-                    # Brand Master); the create door stamps sync_to_shopify
-                    # from it when the payload doesn't say explicitly.
-                    "sync_to_shopify_default": _cd.load_brand_sync_default(db, name),
-                }
-            )
+            brands.append({"name": name, "subbrands": subs, "tier": tier})
         return {"brands": brands}
     except Exception as e:  # noqa: BLE001 - read-only projection, never a blocker
         logger.warning("[CATALOG-DICT] brand-options read failed: %s", e)
         return {"brands": []}
+
+
+@router.get("/website-verdict")
+async def get_website_verdict(
+    brand: str = "",
+    current_user: dict = Depends(get_current_user),
+):
+    """Whether a product of this brand goes to the website, and why not: THE
+    push gate's own answer (shopify_push.product_push_refusal: a push-locked
+    brand, or the brand's Settings > Brand Master default, owner D6), so the
+    Add/Edit form's read-only line can never disagree with the push. The form
+    works nothing out itself.
+
+    Shape: {"brand": str, "online": bool, "reason": str|None}. Fail-closed
+    like the gate: no db -> online false, reason says Brand Master could not
+    be read."""
+    from ..dependencies import get_db as _get_db_dep
+    from ..services.shopify_push import product_push_refusal
+
+    db = _get_db_dep()
+    if db is not None and not getattr(db, "is_connected", False):
+        db = None
+    reason = product_push_refusal(db, {"brand": brand})
+    return {"brand": brand, "online": reason is None, "reason": reason}
 
 
 # NOTE: registered here (with the other literal /products/* paths like
@@ -2124,15 +2220,15 @@ async def get_brand_options(
 # GET /products/{product_id} catch-all -- the literal path must win.
 @router.get("/similar")
 async def get_similar_products(
+    request: Request,
     category: str,
-    brand: str = "",
-    model_no: str = "",
-    colour_code: str = "",
-    size: str = "",
     current_user: dict = Depends(get_current_user),
 ):
     """Live as-you-type "similar products" check for the Add-Product form
-    (dup-detect council ruling, Phase 2).
+    (dup-detect council ruling, Phase 2). The form sends its category and its
+    attributes as typed (every other query parameter); the server keys them
+    with the create door's own identity_parts, so the client keeps no list of
+    what the duplicate key reads.
 
     Any authenticated catalog operator may call it (mirrors GET /products).
     The matching runs through product_master.find_similar_products, which
@@ -2154,10 +2250,7 @@ async def get_similar_products(
         return _pm.find_similar_products(
             db.db.get_collection("products"),
             category=category,
-            brand=brand,
-            model=model_no,
-            colour=colour_code,
-            size=size,
+            attributes={k: v for k, v in request.query_params.items() if k != "category"},
         )
     except Exception as e:  # noqa: BLE001 - hint endpoint, never a blocker
         logger.warning("[SIMILAR] lookup failed: %s", e)
@@ -2317,6 +2410,61 @@ _CATALOGUER_VIEW_ROLES = (
     "STORE_MANAGER",
     "CATALOG_MANAGER",
 )
+
+# What only the cataloguer ladder sees on a product (panel finding 4): who
+# added, edited or archived it (the roster GET /products/cataloguers
+# withholds) and its catalogue flags (notes for the cataloguers). The till
+# and the other counter screens get every other field exactly as before.
+_ATTRIBUTION_ONLY = (
+    "created_by",
+    "created_by_name",
+    "updated_by",
+    "updated_by_name",
+    "deleted_by",
+    "flags",
+)
+
+
+def _sees_attribution(current_user: dict) -> bool:
+    return bool(
+        set(current_user.get("roles") or []) & ({"SUPERADMIN"} | set(_CATALOGUER_VIEW_ROLES))
+    )
+
+
+def _strip_attribution(products: List[Dict[str, Any]], current_user: dict):
+    """THE strip, in place, for every door that hands out a product doc
+    (GET /products, /products/{id}, /products/sku/{sku}). Returns the list."""
+    if not _sees_attribution(current_user):
+        for p in products:
+            for f in _ATTRIBUTION_ONLY:
+                p.pop(f, None)
+    return products
+
+
+@router.get("/facets")
+async def catalog_facets(
+    is_active: Optional[str] = Query(None, pattern="^(true|all)$"),
+    current_user: dict = Depends(require_roles(*_CATALOGUER_VIEW_ROLES)),
+):
+    """The Catalog page's filter options: each filter's distinct values with
+    counts ('Black (179)'), the people who added / last edited products (full
+    names from users) and the open-flag counts for the red banner, counted
+    over the rows the list shows with no other filter (services/catalog_list).
+    `is_active=all` = Include inactive. The archived count is admins only.
+    Manager ladder, like /products/cataloguers (the roster is a manager
+    surface)."""
+    repo = get_product_repository()
+    if repo is None:
+        return {"total": 0}
+    from ..dependencies import get_db as _facets_db
+
+    return _catalog_list.facets(
+        _facets_db(),
+        repo.collection,
+        include_inactive=is_active == "all",
+        me=current_user.get("user_id") or "",
+        is_admin=bool(set(current_user.get("roles") or []) & _ARCHIVE_VIEW_ROLES),
+    )
 
 
 @router.get("/cataloguers")
@@ -2837,12 +2985,7 @@ async def generate_qc_samples(
             pname = (
                 p.get("name") or f"{brand} {model}".strip() or p.get("sku") or ""
             )
-            imgs = p.get("images")
-            image_url = (
-                imgs[0]
-                if isinstance(imgs, list) and imgs and isinstance(imgs[0], str)
-                else None
-            )
+            image_url = _pm.main_photo(p)
             items.append(
                 {
                     "item_id": str(uuid.uuid4()),
@@ -3324,6 +3467,7 @@ async def get_product_by_sku(sku: str, current_user: dict = Depends(get_current_
     if repo is not None:
         product = repo.find_by_sku(sku)
         if product is not None:
+            _strip_attribution([product], current_user)
             return mask_cost(product, current_user, "product")
         raise HTTPException(status_code=404, detail="Product not found")
 
@@ -3339,11 +3483,11 @@ async def get_product(product_id: str, current_user: dict = Depends(get_current_
         product = repo.find_by_id(product_id)
         if product is not None:
             # Same image_url alias as list_products (owner bug 2026-07-05):
-            # consumers read the singular field; spine docs carry images[].
-            if not product.get("image_url"):
-                imgs = product.get("images")
-                if isinstance(imgs, list) and imgs and isinstance(imgs[0], str):
-                    product["image_url"] = imgs[0]
+            # consumers read the singular field; it is photo 1.
+            first = _pm.main_photo(product)
+            if first:
+                product["image_url"] = first
+            _strip_attribution([product], current_user)
             return mask_cost(product, current_user, "product")
         raise HTTPException(status_code=404, detail="Product not found")
 
@@ -3400,6 +3544,8 @@ async def update_product(
         # purchasable product's price. Mirrors the service-layer update_product
         # None-strip. A field is CLEARED with its empty value ("" / []), never null.
         update_data = {k: v for k, v in update_data.items() if v is not None}
+        if _catalog_list.switches_on_archived(existing, update_data.get("is_active")):
+            raise HTTPException(status_code=409, detail=_catalog_list.USE_RESTORE)
         # Pre-write snapshot for the take-down / republish rule below: read
         # BEFORE repo.update (an in-memory repo hands back the live dict).
         _was_active = existing.get("is_active", True)
@@ -3487,16 +3633,26 @@ async def update_product(
         if "tags" in update_data:
             update_data["tags"] = _pm.normalise_tags(update_data["tags"])
 
-        update_data["updated_by"] = current_user.get("user_id")
-        # Cataloguer attribution: the editor's display name rides next to the id
-        # (JWT already carries the username). ALWAYS written when updated_by is
-        # written -- falling back to the raw id -- so a stale previous editor's
-        # name can never survive next to a new editor's id. Creation
-        # attribution is immutable: ProductUpdate has no created_by* fields and
-        # the None-strip above cannot introduce them, so created_by /
+        # An identity edit (eye size, CL power...) re-keys the product by the
+        # create rule; a clash with another product is the create door's 409.
+        try:
+            _pm.rekey_on_edit(existing, update_data, product_repo=repo)
+        except _pm.ProductMasterError as err:
+            raise HTTPException(
+                status_code=err.status, detail=_pm_error_detail(err)
+            ) from err
+
+        # Cataloguer attribution: THE edit stamp (catalog_list.edit_stamp) --
+        # who (id + display name, the JWT's username, falling back to the raw
+        # id so a stale previous editor's name can never survive next to a
+        # new editor's id) and when (edited_at). Creation attribution is
+        # immutable: ProductUpdate has no created_by* fields and the
+        # None-strip above cannot introduce them, so created_by /
         # created_by_name are never rewritten here.
-        update_data["updated_by_name"] = current_user.get("username") or current_user.get(
-            "user_id"
+        update_data.update(
+            _catalog_list.edit_stamp(
+                current_user.get("user_id"), current_user.get("username")
+            )
         )
 
         if repo.update(product_id, update_data):
@@ -3510,10 +3666,18 @@ async def update_product(
             # shape -- keep the two in sync. Fail-soft: an audit hiccup never
             # blocks the product save.
             try:
+                # identity_key is derived from the edited fields (rekey_on_edit),
+                # a stamp like updated_by, never a field someone corrected.
                 _changed_keys = [
                     k
                     for k in update_data.keys()
-                    if k not in ("updated_by", "updated_by_name")
+                    if k
+                    not in (
+                        "updated_by",
+                        "updated_by_name",
+                        "edited_at",
+                        "identity_key",
+                    )
                 ]
                 if _changed_keys:
                     from ..dependencies import (

@@ -439,8 +439,9 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
                 <p className="text-xs text-red-600 mt-1">Could not load this vendor&rsquo;s receipts — try again in a moment.</p>
               ) : receipts !== null && receipts.length === 0 ? (
                 <p className="text-xs text-amber-700 mt-1">
-                  No unbilled goods receipts for this vendor at your store. Receive the goods first —
-                  bought without a PO? Log them as a Delivery Challan on the Goods Receipt screen, then record the bill here.
+                  No unbilled goods receipts for this vendor at your store. The goods are received first, by the
+                  shop&rsquo;s store manager — bought without a PO? Ask them to log a Delivery Challan on the Goods
+                  Receipt screen, then record the bill here.
                 </p>
               ) : null}
             </div>

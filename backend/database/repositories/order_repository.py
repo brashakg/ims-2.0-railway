@@ -173,15 +173,11 @@ class OrderRepository(BaseRepository):
             filter["store_id"] = store_id
         return self.find_many(filter, sort=[("created_at", 1)])
     
-    # ONE definition of "awaiting collection at the counter". The delivery
-    # counter's search-the-queue path (orders.get_pending_deliveries) filters on
-    # THIS constant rather than re-typing "READY", so the queue and the search
-    # over it can never drift apart.
-    READY_FOR_DELIVERY_STATUS = "READY"
-
-    def find_ready_for_delivery(self, store_id: str = None) -> List[Dict]:
-        """Find orders ready for delivery"""
-        filter = {"status": self.READY_FOR_DELIVERY_STATUS}
+    def find_ready_for_delivery(self, statuses, store_id: str = None) -> List[Dict]:
+        """Orders awaiting the counter's handover, in `statuses`: the caller's
+        ONE definition (orders.lists.DELIVERABLE_STATUSES, read off the
+        transition table), which its search over the queue filters on too."""
+        filter = {"status": {"$in": list(statuses)}}
         if store_id:
             filter["store_id"] = store_id
         return self.find_many(filter, sort=[("created_at", 1)])

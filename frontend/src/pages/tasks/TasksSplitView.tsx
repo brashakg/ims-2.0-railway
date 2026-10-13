@@ -2,8 +2,8 @@
 // IMS 2.0 - Tasks: the priority strip + list + detail panel
 // ============================================================================
 // ONE implementation, used by both /tasks/mine and /tasks/team. They differ by
-// a single server parameter (`assigned_to`), so they are one component with a
-// scope prop rather than two pages that will drift.
+// a single server parameter (`assigned_to`, sent on a manager's Mine only), so
+// they are one component with a scope prop rather than two pages that drift.
 //
 // NO 30-DAY BROWSE HORIZON HERE (owner ruling 2026-09-03). A task queue is
 // work IN HAND, not a browse-by-date list: an open P0 raised 45 days ago must
@@ -12,6 +12,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
+import { Link } from 'react-router-dom';
 import {
   ArrowLeft,
   CheckSquare,
@@ -36,6 +37,7 @@ import {
   type Task,
   type TaskStatus,
 } from './tasksQueries';
+import { canSeeTeamTasks } from './taskRoles';
 
 const PRI_VAR: Record<PCode, string> = {
   P0: 'var(--p0)',
@@ -48,7 +50,8 @@ const PRI_VAR: Record<PCode, string> = {
 const STATUS_OPTIONS: TaskStatus[] = ['OPEN', 'IN_PROGRESS', 'ESCALATED', 'COMPLETED'];
 
 export interface TasksSplitViewProps {
-  /** 'mine' adds the server-side assigned_to filter; 'team' does not. */
+  /** 'mine' adds the server-side assigned_to filter for a manager (below
+   *  manager the server rule alone is "mine"); 'team' never does. */
   scope: 'mine' | 'team';
   /** Copy for the empty state, which differs meaningfully between the two. */
   emptyLine: string;
@@ -66,17 +69,25 @@ export function TasksSplitView({ scope, emptyLine }: TasksSplitViewProps) {
   // THE FIX: the assignee filter is a SERVER filter. The old pages fetched the
   // store's first 50 tasks and narrowed them in the browser, so past 50 tasks
   // "Mine" could show none of your own work. See tasksQueries.ts.
+  //
+  // Below manager the server already returns ONLY your tasks plus the ones
+  // addressed to your role at your shop (owner ruling 2026-10-12,
+  // backend services/task_visibility.py), so "Mine" asks for exactly that and
+  // adds no assignee filter - one that would hide your role's tasks. A
+  // manager's "Mine" still narrows to tasks assigned to them by name.
+  const narrowToMe = scope === 'mine' && canSeeTeamTasks(user?.roles);
   const params = useMemo(
     () => ({
-      ...(scope === 'mine' ? { assigned_to: user?.id || '' } : {}),
+      ...(narrowToMe ? { assigned_to: user?.id || '' } : {}),
       ...(status !== 'ALL' ? { status } : {}),
       ...(priority !== 'ALL' ? { priority } : {}),
     }),
-    [scope, user?.id, status, priority],
+    [narrowToMe, user?.id, status, priority],
   );
 
-  // A "mine" query with no user id would silently become a whole-store query.
-  const ready = scope === 'team' || !!user?.id;
+  // A manager's "mine" query with no user id would silently become a
+  // whole-store query.
+  const ready = !narrowToMe || !!user?.id;
   const q = useTaskList(params, ready);
 
   const tasks = flattenTasks(q.data);
@@ -353,7 +364,11 @@ function TaskDetailPanel({
   onChanged: () => void;
 }) {
   const toast = useToast();
+  const { user } = useAuth();
   const isClosed = task.status === 'COMPLETED';
+  // Reassigning is a manager's call (owner ruling 2026-10-13); the server
+  // refuses it for everyone else, so nobody else is offered the button.
+  const canReassign = canSeeTeamTasks(user?.roles);
 
   const _errMsg = (e: unknown, fallback: string): string => {
     const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
@@ -463,9 +478,11 @@ function TaskDetailPanel({
               </button>
             </>
           )}
-          <button type="button" className="btn sm" onClick={handleReassign}>
-            <User className="w-3 h-3" /> Reassign
-          </button>
+          {canReassign && (
+            <button type="button" className="btn sm" onClick={handleReassign}>
+              <User className="w-3 h-3" /> Reassign
+            </button>
+          )}
         </div>
         <h3>{task.title}</h3>
         <div className="hint" style={{ fontSize: 11.5, color: 'var(--ink-4)', marginTop: 4 }}>
@@ -486,9 +503,24 @@ function TaskDetailPanel({
         {task.description && (
           <div className="d-sec">
             <h4>Brief</h4>
-            <p style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--ink-2)' }}>
+            <p style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--ink-2)', whiteSpace: 'pre-line' }}>
               {task.description}
             </p>
+          </div>
+        )}
+
+        {task.links && task.links.length > 0 && (
+          <div className="d-sec">
+            <h4>Open</h4>
+            <ul style={{ display: 'grid', gap: 4 }}>
+              {task.links.map((l) => (
+                <li key={l.to}>
+                  <Link to={l.to} style={{ fontSize: 12.5, textDecoration: 'underline' }}>
+                    {l.label}
+                  </Link>
+                </li>
+              ))}
+            </ul>
           </div>
         )}
 

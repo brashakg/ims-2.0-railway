@@ -275,7 +275,7 @@ def _assemble_invoice(order_id: str, current_user: dict):
             invoice_number = repo.next_invoice_number(store_id, store_doc=store_doc)
             repo.set_invoice(order_id, invoice_number)
         # Convert items to camelCase
-        items_formatted = [item_to_frontend(item) for item in order.get("items", [])]
+        items_formatted = [item_to_frontend(item, current_user) for item in order.get("items", [])]
 
         # C-6 (DELTA 4): per-rate CGST/SGST/IGST tax summary + place of supply.
         from ...utils.online_gst import order_place_of_supply

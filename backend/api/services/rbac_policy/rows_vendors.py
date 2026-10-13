@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from ._core import ACCOUNTS, PURCHASE, RETURN_READERS
+from ._core import ACCOUNTS, PURCHASE, RECEIVE, RETURN_READERS
 
 ROWS: List[Dict[str, object]] = [
     # --- /api/v1/vendor-portal ---
@@ -41,11 +41,14 @@ ROWS: List[Dict[str, object]] = [
         "allowed": RETURN_READERS,
         "store_scoped": True,
     },
-    # Writes = the handler's require_roles(*_VENDOR_RETURN_ROLES).
+    # Logging a return = the readers (owner ruling 2026-10-12: WORKSHOP_STAFF
+    # logs the defective pair, unpriced); its own capability key
+    # (vendor-returns:create, services/capabilities). Status changes = the
+    # handler's require_roles(*_VENDOR_RETURN_ROLES).
     {
         "method": "POST",
         "path": "/api/v1/vendor-returns",
-        "allowed": PURCHASE,
+        "allowed": RETURN_READERS,
     },
     {
         "method": "GET",
@@ -56,7 +59,7 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendor-returns/",
-        "allowed": PURCHASE,
+        "allowed": RETURN_READERS,
     },
     {
         "method": "GET",
@@ -208,20 +211,23 @@ ROWS: List[Dict[str, object]] = [
         "allowed": PURCHASE,
         "store_scoped": True,
     },
+    # Receiving goods into stock (log / accept / express / void / escalate a
+    # receipt, its document upload, the receiving screen): owner ruling
+    # 2026-09-28, RECEIVING IS MANAGERS ONLY -- the accountant is not here
+    # (cost_mask.RECEIVE_ROLES, the _RECEIVE_ROLES gate).
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn",
-        "allowed": PURCHASE,
+        "allowed": RECEIVE,
     },
     # Procurement Phase 2: one-shot express receive for a CLEAN delivery
     # (create + accept + invoice-draft preview + accountant task, server-side).
-    # Same gate as creating/accepting a GRN -- ALL receiving roles (owner
-    # decision); every receiving control (attachment gate, store boundary,
+    # Same gate as creating/accepting a GRN -- the receiving managers; every receiving control (attachment gate, store boundary,
     # PO receivable) is enforced inside via the shared create/accept impls.
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn/express",
-        "allowed": PURCHASE,
+        "allowed": RECEIVE,
     },
     {
         "method": "GET",
@@ -232,24 +238,24 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn/{grn_id}/accept",
-        "allowed": PURCHASE,
+        "allowed": RECEIVE,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn/{grn_id}/void",
-        "allowed": PURCHASE,
+        "allowed": RECEIVE,
     },
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn/{grn_id}/escalate",
-        "allowed": PURCHASE,
+        "allowed": RECEIVE,
     },
     # P1/S2: vendor-first goods-receipt cockpit (open POs + worklists for the
     # receiving screen). Same gate as receiving -- the receiving roles.
     {
         "method": "GET",
         "path": "/api/v1/vendors/goods-receipt/cockpit",
-        "allowed": PURCHASE,
+        "allowed": RECEIVE,
     },
     # P1/S3: the ops user uploads the mandatory goods-receipt document (vendor
     # invoice/challan) here BEFORE creating the GRN. Same gate as creating the
@@ -257,11 +263,11 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn/upload-doc",
-        "allowed": PURCHASE,
+        "allowed": RECEIVE,
     },
     # P1/S3: stream the attached goods-receipt document (accountant recon links
     # here). Store-scoped object access inside the handler; the role gate is the
-    # receiving + accounting roles.
+    # receiving managers + the accountant, who reads it to match the bill.
     {
         "method": "GET",
         "path": "/api/v1/vendors/grn/{grn_id}/document",
@@ -416,6 +422,8 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/po-gst-heads",
         "allowed": PURCHASE,
     },
+    # Owner 2026-10-08: who may raise a PO is the purchase roles -- not the
+    # catalogue manager (the Buy Desk screen's PURCHASE_ROLES is pinned to it).
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-orders",
@@ -438,9 +446,21 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/purchase-orders/{po_id}/timeline",
         "allowed": PURCHASE,
     },
+    # Edit a DRAFT (qty, cost, lines). The handler refuses anything not DRAFT.
+    {
+        "method": "PUT",
+        "path": "/api/v1/vendors/purchase-orders/{po_id}",
+        "allowed": PURCHASE,
+    },
     {
         "method": "POST",
         "path": "/api/v1/vendors/purchase-orders/{po_id}/cancel",
+        "allowed": PURCHASE,
+    },
+    # Cancel what is still due on one line, with a reason.
+    {
+        "method": "POST",
+        "path": "/api/v1/vendors/purchase-orders/{po_id}/items/{line_index}/cancel",
         "allowed": PURCHASE,
     },
     {

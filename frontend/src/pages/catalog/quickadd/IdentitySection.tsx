@@ -211,7 +211,7 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
     }
   };
 
-  // Weight is a TOP-LEVEL payload field (weight_grams), not an attribute. For
+  // Weight is a TOP-LEVEL payload field (`weight`, grams), not an attribute. For
   // SG/FR it renders inline in the attribute grid (between Warranty and UPC —
   // owner-locked order); for every other category it stays under Advanced.
   // Plain render helper (NOT a nested component — avoids the remount bug).
@@ -397,10 +397,7 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
                     {renderField(f, i === 0)}
                     <SimilarProductsHint
                       category={selectedCategory}
-                      brand={attributes.brand_name || ''}
-                      model={attributes.model_no || attributes.model_name || ''}
-                      colour={attributes.colour_code || ''}
-                      size={attributes.size || ''}
+                      attributes={attributes}
                       variantMode={Boolean(variantCtx)}
                       onPickSibling={handleSimilarPick}
                       onOpenExisting={handleSimilarOpen}

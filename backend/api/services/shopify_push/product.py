@@ -16,12 +16,14 @@ from ._shared import (
     MODE_SIMULATED,
     PRICE_NOT_SYNCED,
     _PRICE_NOT_SYNCED_MSG,
+    PHOTOS_NOT_SYNCED,
+    _PHOTOS_NOT_SYNCED_MSG,
     PushResult,
     _blocked_result,
     _live_or_reason,
     is_variant_of,
     price_on_update_enabled,
-    push_lock_reason,
+    product_push_refusal,
 )
 from .transport import _graphql, _user_errors
 from .queries import _PRODUCT_CREATE, _PRODUCT_UPDATE
@@ -81,11 +83,11 @@ async def push_product(
         re-scan). The sweep passes ``None`` (not ``False``) when it could not
         verify the config, so this fail-closed skip still applies."""
     pid = product.get("id") or product.get("product_id")
-    # Hub Phase 5: push-lock is the FIRST gate -- a locked brand is NEVER pushed,
-    # before the dark/live gate (fail-closed).
-    _lock = push_lock_reason(db, "product", product)
-    if _lock:
-        return _blocked_result("product", pid, _lock)
+    # FIRST gate, before the dark/live gate (fail-closed): a push-locked brand,
+    # or a brand Brand Master keeps off the website (owner D6, read live).
+    _refusal = product_push_refusal(db, product)
+    if _refusal:
+        return _blocked_result("product", pid, _refusal)
     # VARIANT-OF (owner ruling 2026-09-06): a size variant owns NO listing. Its
     # price, barcode and stock ride the PARENT's push (push_variant_prices /
     # sync_product_stock over the parent's catalog_variants rows); every
@@ -521,12 +523,19 @@ async def push_product(
         # them. No re-queue: the stock diff still sees this product as changed
         # (nothing reached its baseline), so the next pass retries it.
         stock_not_written = bool(stock_summary) and not stock_summary.get("ok")
+        # ...AND SO ARE THE PHOTOS (owner 2026-10-12: photo 1 is the main photo
+        # on the website). A failed attach / delete / reorder is reported only
+        # in PushResult.photos, and the product write-back above already
+        # cleared the queue flag -- so a reorder that did not land was never
+        # sent again and the website kept the old photo 1. Same rule as the
+        # price: live, so ok stays True, but re-queued with its own code.
+        photos_not_synced = bool((photo_summary or {}).get("error"))
         # THE ONE RE-QUEUE RULE. The press reached Shopify but did not do all
         # it was pressed for -- the product is not visible, or it is visible at
-        # the wrong price. Either way the row goes BACK in the queue so the next
-        # press / scheduled sync retries it. See _requeue_unpublished for why
-        # this is not the ping-pong hazard.
-        if pid and (not published_ok or price_not_synced):
+        # the wrong price or with the wrong photos. Either way the row goes
+        # BACK in the queue so the next press / scheduled sync retries it. See
+        # _requeue_unpublished for why this is not the ping-pong hazard.
+        if pid and (not published_ok or price_not_synced or photos_not_synced):
             _requeue_unpublished(db, pid)
         return PushResult(
             mode=MODE_LIVE,
@@ -546,6 +555,7 @@ async def push_product(
                         line
                         for line in (
                             _PRICE_NOT_SYNCED_MSG if price_not_synced else None,
+                            _PHOTOS_NOT_SYNCED_MSG if photos_not_synced else None,
                             (stock_summary or {}).get("error") if stock_not_written else None,
                         )
                         if line
@@ -563,6 +573,8 @@ async def push_product(
                 (
                     PRICE_NOT_SYNCED
                     if price_not_synced
+                    else PHOTOS_NOT_SYNCED
+                    if photos_not_synced
                     else ((stock_summary or {}).get("code") if stock_not_written else None)
                 )
                 if published_ok

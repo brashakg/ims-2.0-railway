@@ -55,7 +55,7 @@ import {
 } from '../../services/api/onlineStore';
 import OnlineStoreSyncBanner, {
   SyncChip,
-  formatPushResult,
+  formatPhotoPublish,
   type OnlineStoreSyncBannerHandle,
 } from '../../components/online-store/OnlineStoreSyncBanner';
 
@@ -294,19 +294,21 @@ export default function DesignQueuePage() {
   // Publish (push) ONE approved image to Shopify. DARK by default -> a SIMULATED
   // dry-run; the returned mode (SIMULATED vs LIVE) is surfaced in the toast so a
   // dry-run is never mistaken for a live write. A non-APPROVED image returns
-  // ok=false action=skip (not an HTTP error) which we surface honestly. On a LIVE
-  // push refresh the board + banner so the Synced chip + counts update.
+  // ok=false action=skip (not an HTTP error) which we surface honestly. After
+  // ANY live press refresh the board + banner: even a press that did not finish
+  // can change the photo's record (a new photo recorded while the old one stays
+  // up, a failed copy taken off), so the Synced chip + counts must re-read it.
   const publishImage = async (img: EcomProductImage) => {
     setPublishingId(img.id);
     try {
       const label = `Image "${img.product_title || img.model_no || img.product_id}"`;
       const result = await pushApi.pushImage(img.id);
       if (result.ok) {
-        toast.success(formatPushResult(label, result));
+        toast.success(formatPhotoPublish(label, result));
       } else {
-        toast.warning(formatPushResult(label, result));
+        toast.warning(formatPhotoPublish(label, result));
       }
-      if (result.ok && result.mode === 'LIVE') {
+      if (result.mode === 'LIVE') {
         await load();
         bannerRef.current?.refresh();
       }

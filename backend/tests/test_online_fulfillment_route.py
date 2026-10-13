@@ -745,6 +745,23 @@ def test_webhook_drain_and_missed_webhook_pull_both_route(world, monkeypatch):
         assert order["fulfillment_route"]["reason"] == "ASSIGNED"
 
 
+def test_the_pulls_status_sweep_goes_through_the_drains_door(world, monkeypatch):
+    """A booked order's missed status webhook, caught by the hourly pull, goes
+    through the SAME door as the webhook drain (map_routed_order): the move a
+    crash left PLANNED is sent by it, exactly as by the next delivery."""
+    from agents import nexus_providers as np
+
+    db = world["db"]
+    oid, _real = _book_with_a_planned_move(world, monkeypatch, 53009)
+    body = {**_order(53009), "fulfillment_status": "partial"}  # a fact IMS missed
+    existing = db.orders.find_one({"order_id": oid})
+
+    asyncio.run(np._sweep_booked_order(db, body, dict(body), existing, "53009", True))
+
+    assert len(world["shop"].moves()) == 1
+    assert db.orders.find_one({"order_id": oid})["fulfillment_route"]["moves"][0]["status"] == "MOVED"
+
+
 def test_a_routing_stamp_on_a_stored_payload_is_never_trusted(world):
     """A replayed/stored payload may carry an old _ims_routing stamp; only the
     door's own fresh read decides the shop."""

@@ -10,10 +10,12 @@
 import { moduleForPath } from '../../context/ModuleContext';
 import { TASK_MODULE_ROLES } from '../../pages/tasks/taskRoles';
 import {
+  STOCK_LOOKUP_ROLES,
   INVENTORY_MODULE_ROLES,
   INVENTORY_MANAGE_ROLES,
   POWER_GRID_ROLES,
 } from '../../pages/inventory/inventoryRoles';
+import { RECEIVING_MANAGER_ROLES } from '../../pages/purchase/purchaseTypes';
 import type { IconName } from './Icon';
 import type { NavBadgeKey } from './NavBadge';
 import type { UserRole } from '../../types';
@@ -103,22 +105,24 @@ export const NAV_GROUPS: NavGroup[] = [
       // address. The module's seventeen sections live behind the Inventory
       // entry, which now lands on the stock ledger.
       { id: 'inventory', label: 'Inventory', to: '/inventory/stock', icon: 'box', requireRoles: INVENTORY_MODULE_ROLES },
+      // D7b: the counter's read-only stock lookup (this shop, other shops, in transit).
+      { id: 'stock-lookup', label: 'Stock Lookup', to: '/inventory/lookup', icon: 'box', requireRoles: STOCK_LOOKUP_ROLES },
       { id: 'stock-count', label: 'Stock Count', to: '/inventory/audit', icon: 'box', requireRoles: INVENTORY_MANAGE_ROLES },
       { id: 'replenishment', label: 'Replenishment', to: '/inventory/replenishment', icon: 'box', requireRoles: INVENTORY_MANAGE_ROLES },
       { id: 'opening-stock', label: 'Opening Stock', to: '/inventory/opening-stock', icon: 'box', requireRoles: INVENTORY_MANAGE_ROLES },
       { id: 'power-grid', label: 'Power Grid', to: '/inventory/power-grid', icon: 'box', requireRoles: POWER_GRID_ROLES },
       { id: 'online-stock', label: 'Online Stock', to: '/inventory/online-sync', icon: 'box', requireRoles: INVENTORY_MANAGE_ROLES },
-      { id: 'purchase', label: 'Purchase', to: '/purchase', icon: 'truck', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
+      { id: 'purchase', label: 'Purchase - orders, receiving, bills', to: '/purchase', icon: 'truck', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
       // Buy Desk — the one-screen catalog -> purchase landing. The page + route
       // shipped earlier but only ModuleContext's sidebar knew about it; this
       // surfaces it in BOTH shells. requireRoles mirrors the /catalog/buy-desk
       // ProtectedRoute gate in App.tsx.
-      { id: 'buy-desk', label: 'Buy Desk', to: '/catalog/buy-desk', icon: 'cart', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
+      { id: 'buy-desk', label: 'Buy Desk - what to reorder', to: '/catalog/buy-desk', icon: 'cart', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
       // Receive Goods stays in the sidebar: it is the daily-work door for
       // receiving staff (the Purchase page's per-PO "Receive" button lands on
-      // the same screen with the PO prefilled). ACCOUNTANT added to match the
-      // /purchase/receive route gate in App.tsx.
-      { id: 'grn-cockpit', label: 'Receive Goods', to: '/purchase/receive', icon: 'truck', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
+      // the same screen with the PO prefilled). Same list as the
+      // /purchase/receive route gate: managers only.
+      { id: 'grn-cockpit', label: 'Receive Goods', to: '/purchase/receive', icon: 'truck', requireRoles: [...RECEIVING_MANAGER_ROLES] },
       // De-dup (owner 2026-07-05): managers/admins reach Vendor Returns via
       // Purchase -> Vendor Returns tab; the sidebar shortcut stays ONLY for
       // WORKSHOP_STAFF, who cannot open /purchase at all.
@@ -126,7 +130,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { id: 'workshop', label: 'Workshop', to: '/workshop', icon: 'wrench', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'WORKSHOP_STAFF'] },
       // Catalog Manager: the browse/review landing at /catalog ("+ Add product"
       // inside it links on to /catalog/add — no second sidebar entry).
-      { id: 'catalog', label: 'Catalog', to: '/catalog', icon: 'tag', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
+      { id: 'catalog', label: 'Catalog', to: '/catalog', icon: 'tag', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'STORE_MANAGER'] },
       // Two work lists off the Catalog Manager (design 2026-08-30, built
       // 2026-09-04) — real addresses somebody can be SENT to, each with its
       // live size. Same gate as /catalog; the counts come from the server.

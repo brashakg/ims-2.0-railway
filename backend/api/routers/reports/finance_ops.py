@@ -15,6 +15,7 @@ from ...dependencies import (
     get_attendance_repository,
     validate_store_access,
 )
+from ...services.task_visibility import task_counts
 from ._shared import (
     _REPORT_FINANCE_ROLES,
     router,
@@ -348,15 +349,14 @@ async def task_summary(
             }
         }
 
-    summary = task_repo.get_task_summary(active_store)
-    overdue_count = task_repo.get_overdue_count(active_store)
-
+    # THE task count (services/task_visibility.py): only what the caller can see.
+    c = task_counts(task_repo, current_user, {"store_id": active_store} if active_store else {})
     return {
         "summary": {
-            "open": summary.get("OPEN", 0) if summary else 0,
-            "in_progress": summary.get("IN_PROGRESS", 0) if summary else 0,
-            "completed": summary.get("COMPLETED", 0) if summary else 0,
-            "overdue": overdue_count or 0,
+            "open": c["summary"]["OPEN"],
+            "in_progress": c["summary"]["IN_PROGRESS"],
+            "completed": c["summary"]["COMPLETED"],
+            "overdue": c["overdue"],
         }
     }
 

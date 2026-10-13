@@ -16,7 +16,8 @@ Endpoints (prefix /api/v1/lens-catalog):
 
 Role gates (per locked spec):
   READ  -- any authenticated user (no store gate; the lens catalog is
-           cross-store identity, not stock).
+           cross-store identity, not stock); a line's cost_price only for
+           the roles services/cost_mask "product" admits.
   WRITE -- SUPERADMIN / ADMIN / CATALOG_MANAGER (lens lines are master data;
            store managers do NOT edit identity, only stock).
 
@@ -38,6 +39,7 @@ from pydantic import BaseModel, Field
 
 from .auth import get_current_user, require_roles
 from ..dependencies import get_audit_repository
+from ..services.cost_mask import mask_cost, mask_cost_list
 from ..services.lens_catalog_validation import (
     DEFAULT_ENUM_ITEMS,
     ENUM_TYPES,
@@ -286,7 +288,6 @@ async def list_lens_lines(
     The lens catalog is cross-store identity (one row per combo regardless
     of where stock sits), so we do NOT store-scope here -- a STORE_MANAGER
     in Bokaro and a CATALOG_MANAGER in Pune both see the same catalog."""
-    _ = current_user
     coll = _catalog_coll()
     if coll is None:
         return {"lens_lines": [], "total": 0}
@@ -335,7 +336,12 @@ async def list_lens_lines(
             (d or {}).get("coating") or "",
         )
     )
-    return {"lens_lines": cleaned, "total": len(cleaned)}
+    # A line's cost_price goes to the roles that see product cost only
+    # (owner rulings D7 / 2026-10-12).
+    return {
+        "lens_lines": mask_cost_list(cleaned, current_user, "product"),
+        "total": len(cleaned),
+    }
 
 
 @router.get("/{lens_line_id}")
@@ -344,7 +350,6 @@ async def get_lens_line(
     current_user: dict = Depends(get_current_user),
 ):
     """Single lens line by slug. 404 when missing."""
-    _ = current_user
     coll = _catalog_coll()
     if coll is None:
         raise HTTPException(status_code=503, detail="Database not available")
@@ -355,7 +360,7 @@ async def get_lens_line(
         raise HTTPException(status_code=500, detail="Failed to get lens line")
     if not doc:
         raise HTTPException(status_code=404, detail="Lens line not found")
-    return {"lens_line": _clean(doc)}
+    return {"lens_line": mask_cost(_clean(doc), current_user, "product")}
 
 
 @router.post("", status_code=201)

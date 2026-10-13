@@ -153,10 +153,13 @@ from ._shared import (  # noqa: F401
     _has_shopify_creds,
     _live_or_reason,
     push_lock_reason,
+    product_push_refusal,
     _blocked_result,
     is_variant_of,
     PRICE_NOT_SYNCED,
     _PRICE_NOT_SYNCED_MSG,
+    PHOTOS_NOT_SYNCED,
+    _PHOTOS_NOT_SYNCED_MSG,
 )
 from .transport import (  # noqa: F401
     _MAX_RETRIES,

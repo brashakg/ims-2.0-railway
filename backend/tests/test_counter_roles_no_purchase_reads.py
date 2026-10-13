@@ -882,29 +882,38 @@ def test_grn_detail_is_store_scoped(monkeypatch):
 # The route's own `_dep` is called for every role: comparing the row with a
 # module constant stayed green when a route was switched onto the READERS
 # tuple, and that gate is the last line once a per-user capability grant lets
-# a request past the middleware.
+# a request past the middleware. Logging a return is the readers' (owner
+# ruling 2026-10-12: WORKSHOP_STAFF logs it, unpriced -- its own capability key,
+# test_counter_roles_no_cost_anywhere); every other write is the writers'.
 @pytest.mark.parametrize(
-    "method,path,template",
+    "method,path,template,gate",
     [
-        ("POST", "/api/v1/vendor-returns", "/api/v1/vendor-returns"),
-        ("POST", "/api/v1/vendor-returns/", "/api/v1/vendor-returns/"),
+        ("POST", "/api/v1/vendor-returns", "/api/v1/vendor-returns", _RETURN_READERS),
+        ("POST", "/api/v1/vendor-returns/", "/api/v1/vendor-returns/", _RETURN_READERS),
         (
             "PATCH",
             "/api/v1/vendor-returns/VR1/status",
             "/api/v1/vendor-returns/{return_id}/status",
+            _RETURN_WRITERS,
         ),
-        ("POST", "/api/v1/rtv-debit-notes/issue", "/api/v1/rtv-debit-notes/issue"),
+        (
+            "POST",
+            "/api/v1/rtv-debit-notes/issue",
+            "/api/v1/rtv-debit-notes/issue",
+            _RETURN_WRITERS,
+        ),
         (
             "GET",
             "/api/v1/rtv-debit-notes/DN-1/tally",
             "/api/v1/rtv-debit-notes/{debit_note_id}/tally",
+            _RETURN_WRITERS,
         ),
     ],
 )
-def test_vendor_return_write_rows_equal_the_code_gate(app, method, path, template):
+def test_vendor_return_write_rows_equal_the_code_gate(app, method, path, template, gate):
     row = rbac.policy_for(method, path)
     assert row["path"] == template
-    assert set(row["allowed"]) - {"SUPERADMIN"} == set(_RETURN_WRITERS)
+    assert set(row["allowed"]) - {"SUPERADMIN"} == set(gate)
     for role in rbac.ALL_ROLES:
         want = role == "SUPERADMIN" or role in row["allowed"]
         assert _route_allows(app, template, role, method) is want, role
@@ -1257,6 +1266,17 @@ class _CashDb:
         return _RecsColl(rows if name == "vendor_payments" else [])
 
 
+_PAID_POS = 6543.21
+
+
+class _PaidPoDb:
+    """Paid purchase orders only: the cash-flow paid-PO total's one source."""
+
+    def get_collection(self, name):
+        rows = [{"_id": None, "total": _PAID_POS}]
+        return _RecsColl(rows if name == "purchase_orders" else [])
+
+
 def _vendor_payments_admits(monkeypatch, role):
     monkeypatch.setattr(receivables_mod, "_get_db", lambda: None)
     try:
@@ -1460,6 +1480,12 @@ def _supplier_payment_answers(monkeypatch, role):
     body = asyncio.run(
         cash_flow_mod.get_cash_flow(period="month", store_id=None, current_user=user)
     )
+    # The paid-PO total, alone in its own db: in a key, or folded into
+    # `outflows` (which would hand it back as outflows - expense_outflow).
+    monkeypatch.setattr(cash_flow_mod, "_get_db", lambda: _PaidPoDb())
+    paid_pos = asyncio.run(
+        cash_flow_mod.get_cash_flow(period="month", store_id=None, current_user=user)
+    )
     try:
         rebates_router._require(user, "read rebates")
         rebates = True
@@ -1474,6 +1500,7 @@ def _supplier_payment_answers(monkeypatch, role):
     return {
         **bills,
         "cash-flow total": "vendor_payment_outflow" in body,
+        "cash-flow paid POs": "purchase_outflow" in paid_pos or paid_pos["outflows"] != 0,
         "vendor-payments": _vendor_payments_admits(monkeypatch, role),
         "vendor rebates": rebates,
         "owner-dashboard payables": _admits(
@@ -1739,16 +1766,22 @@ def test_unhiding_a_cost_field_moves_every_product_read(
 # code gate is the object its require_roles resolves to (section 20), never
 # its spelling.
 def test_every_purchase_route_row_is_the_one_list(app):
-    from api.services.rbac_policy._core import PURCHASE, RETURN_READERS
+    from api.services.cost_mask import RECEIVE_ROLES
+    from api.services.rbac_policy._core import (
+        PURCHASE,
+        RECEIVE,
+        RETURN_READERS,
+    )
 
+    lists = {
+        id(PURCHASE_ROLES): PURCHASE,
+        id(_RETURN_READERS): RETURN_READERS,
+        id(RECEIVE_ROLES): RECEIVE,
+    }
     want = {}
     for route in app.routes:
-        const = _route_gate_constant(route)
-        if const is PURCHASE_ROLES:
-            gate = PURCHASE
-        elif const is _RETURN_READERS:
-            gate = RETURN_READERS
-        else:
+        gate = lists.get(id(_route_gate_constant(route)))
+        if gate is None:
             continue
         for method in route.methods - {"HEAD", "OPTIONS"}:
             want[(method, route.path)] = gate
@@ -1760,6 +1793,9 @@ def test_every_purchase_route_row_is_the_one_list(app):
         ("GET", "/api/v1/vendor-returns/{return_id}"),
         ("GET", "/api/v1/rtv-debit-notes/{debit_note_id}/print"),
         ("POST", "/api/v1/rtv-debit-notes/issue"),
+        ("POST", "/api/v1/vendors/grn"),
+        ("POST", "/api/v1/vendors/purchase-orders"),
+        ("PUT", "/api/v1/vendors/purchase-orders/{po_id}"),
     } <= set(want)
     wrong = {
         key: rbac.policy_for(*key)["allowed"]
@@ -1769,6 +1805,7 @@ def test_every_purchase_route_row_is_the_one_list(app):
     assert not wrong, wrong
     assert PURCHASE == sorted(PURCHASE_ROLES)
     assert RETURN_READERS == sorted(_RETURN_READERS)
+    assert RECEIVE == sorted(RECEIVE_ROLES)
     assert vr_router._VENDOR_RETURN_READERS is _RETURN_READERS
 
 
@@ -1794,7 +1831,10 @@ import importlib  # noqa: E402
 import pkgutil  # noqa: E402
 import textwrap  # noqa: E402
 
-_GATE_CONSTANTS = (AP_ROLES, PURCHASE_ROLES, _RETURN_READERS)
+from api.services.cost_mask import RECEIVE_ROLES  # noqa: E402
+
+# RECEIVE_ROLES: receiving is managers only (owner ruling 2026-09-28).
+_GATE_CONSTANTS = (AP_ROLES, PURCHASE_ROLES, _RETURN_READERS, RECEIVE_ROLES)
 _MONEY_ROUTERS = (
     "vendors", "finance", "purchase_invoices", "purchase_recon",
     "rtv_debit_notes", "vendor_returns", "vendor_rma", "vendor_rebates",

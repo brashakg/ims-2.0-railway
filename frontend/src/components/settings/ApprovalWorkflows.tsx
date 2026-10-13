@@ -21,7 +21,6 @@ import {
   AlertTriangle,
   BadgePercent,
   RotateCcw,
-  ShoppingCart,
   PackageMinus,
   CreditCard,
   User,
@@ -83,7 +82,6 @@ const APPROVER_ROLES = [
 const WORKFLOW_ICONS: Record<string, typeof Shield> = {
   DISCOUNT_APPROVAL: BadgePercent,
   REFUND_APPROVAL: RotateCcw,
-  PO_APPROVAL: ShoppingCart,
   STOCK_ADJUSTMENT: PackageMinus,
   CREDIT_SALE: CreditCard,
 };
