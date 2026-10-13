@@ -792,16 +792,19 @@ def stored_seller_problem(
 
 
 def _held_on(order: Optional[Dict[str, Any]], codes) -> bool:
-    """The order's hold is the one a route problem with one of ``codes`` put
-    on it (the stock-hold reason IS that problem's text)."""
+    """The order is held on a route problem with one of ``codes``: the
+    stock-hold reason IS that problem's text, or the route's own hold is
+    (a failed move beside a stock miss or a seller hold keeps that one's
+    reason, move_fulfillment_orders)."""
     order = order or {}
     route = order.get("fulfillment_route")
     if not order.get("fulfillment_hold") or not isinstance(route, dict):
         return False
-    return order.get("stock_hold_reason") in {
+    texts = {
         p.get("message") for p in route.get("problems") or []
         if isinstance(p, dict) and p.get("code") in codes
     }
+    return order.get("stock_hold_reason") in texts or route.get("hold_reason") in texts
 
 
 # Stamped on the route by clear-hold when it releases a seller hold.
@@ -1892,7 +1895,8 @@ async def map_routed_order(
     overwrites any stamp a stored payload carries), hand it to the (sync)
     mapper -> ingest, then send the planned moves -- for an order already
     booked too (a replayed or orders/updated delivery), so moves a crash left
-    PLANNED are retried by the next delivery. Returns the mapper's result.
+    PLANNED are retried by the next delivery. Returns the mapper's result
+    (with ``moves_sent``: move_fulfillment_orders' tally of the moves it sent).
     Never raises."""
     from . import online_order_mapper
     from .shopify_ingest import order_payload_refusal
@@ -1917,7 +1921,7 @@ async def map_routed_order(
         "order_id"
     ):
         try:
-            await move_fulfillment_orders(db, result["order_id"])
+            result["moves_sent"] = await move_fulfillment_orders(db, result["order_id"])
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ONLINE_ROUTE] moves skipped for %s: %s", sid, exc)
     return result

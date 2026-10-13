@@ -2967,6 +2967,71 @@ def test_a_failed_split_leg_move_names_the_legs_shop(world):
     assert order["stock_hold_reason"] == p["message"]
 
 
+def test_a_failed_move_beside_a_stock_miss_keeps_its_remap_door(world, monkeypatch):
+    """[LOW] Round 25, item 2: Shopify split RB -> Bokaro (short; BV Dhanbad,
+    Bokaro's GSTIN, holds it, so that leg moves there) and OA -> Ranchi
+    (nobody holds it: a stock miss, whose text owns the hold reason). Shopify
+    refused the move. The MOVE_FAILED text says 'press Re-map' but the list
+    offered none (the door read only the stock-hold reason), and Re-map
+    answered ok with nothing done. The route's own hold is read too: Re-map
+    is offered and resends the move."""
+    from api.routers import online_store_orders as oso
+
+    db = world["db"]
+    _shop(db, "BV-DHN-01", "BV Dhanbad", "20AAAAA0000A1Z5", LOC_DHN)
+    _stock(db, "BV-DHN-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1)])
+    world["shop"].fo(FO_2, LOC_RAN, lines=[(9001, 1)])
+    world["shop"].move_error = "Location does not stock the item"
+    payload = _order(58075, lines=(("RB-1234", 1), ("OA-5", 1)))
+    res, order = _book(world, payload)
+    route = order["fulfillment_route"]
+    assert [p["code"] for p in route["problems"]] == ["MOVE_FAILED"]
+    assert [m["status"] for m in route["moves"]] == ["FAILED"]
+    assert _sold_at(db, res["order_id"]) == ["BV-DHN-01"]
+    assert order["stock_hold_reason"] != route["hold_reason"], "the stock miss owns the reason"
+    assert oso._slim_list_row(dict(order))["remap_hold"] is True
+    world["shop"].move_error = None  # stocked at Dhanbad's location in Shopify admin
+
+    out = _remap(world, monkeypatch, payload, on_file=False)
+
+    assert out["ok"] and out["result"]["status"] == "rerouted", out
+    assert world["shop"].moves()[-1] == {"id": FO_1, "newLocationId": LOC_DHN}
+    after = db.orders.find_one({"order_id": res["order_id"]})
+    assert [m["status"] for m in after["fulfillment_route"]["moves"]] == ["MOVED"]
+    assert _sold_at(db, res["order_id"]) == ["BV-DHN-01"]
+    assert after["fulfillment_hold"] is True, "the OA is still missing: held on the stock miss"
+
+
+def test_a_remap_with_nothing_to_resend_says_so(world, monkeypatch):
+    """Round 25, item 2: an order held on a hold Re-map does not release (a
+    plain stock miss) and in step with Shopify: Re-map did nothing and
+    answered ok with no message -- the screen toasted 'Order re-mapped into
+    the books'. It says plainly that it had nothing to resend."""
+    world["shop"].fo(FO_1, LOC_BOK)
+    payload = _order(58076)
+    res, order = _book(world, payload)
+    assert order["fulfillment_hold"] is True and not order["fulfillment_route"]["moves"]
+
+    out = _remap(world, monkeypatch, payload)
+
+    assert out["ok"] is False and "nothing to resend" in (out["message"] or ""), out["result"]["status"]
+    assert "stays on hold" in out["message"]
+    after = world["db"].orders.find_one({"order_id": res["order_id"]})
+    assert after["invoice_number"] == order["invoice_number"] and after["fulfillment_hold"] is True
+
+
+def test_a_remap_that_sends_a_waiting_move_is_a_success(world, monkeypatch):
+    """The other side of 'nothing to resend': a move a crash left PLANNED is
+    sent by the press, and that is said as done."""
+    oid, _real = _book_with_a_planned_move(world, monkeypatch, 58078)
+
+    out = _remap(world, monkeypatch, _order(58078))
+
+    assert out["ok"] is True and out["message"] is None, out
+    assert world["db"].orders.find_one({"order_id": oid})["fulfillment_route"]["moves"][0]["status"] == "MOVED"
+
+
 def test_a_human_moved_split_leg_rewrites_the_shops_stock_at_dispatch(world, monkeypatch):
     """[LOW] The split twin of the whole-order rule: the leg's move failed, a
     human moved FO_2 from Ranchi to Dhanbad in Shopify admin and cleared the

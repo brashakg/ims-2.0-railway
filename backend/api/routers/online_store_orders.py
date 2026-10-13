@@ -651,6 +651,20 @@ async def remap_online_order(
         result = await map_routed_order(payload, db, topic=topic or "orders/create")
     except Exception as exc:  # noqa: BLE001 - the mapper is fail-soft; belt-and-braces
         result = {"status": "error", "error": str(exc)}
+    sent = (result or {}).get("moves_sent") or {}
+    if (
+        booked
+        and str((result or {}).get("status")) in ("duplicate", "replayed")
+        and not (sent.get("moved") or sent.get("failed"))
+    ):
+        # Already booked and no move waiting: the replay only re-read its
+        # status -- nothing resent, never answered as a success.
+        result = {**result, "nothing_done": True, "message": (
+            "Re-map had nothing to resend: this order is already in the books "
+            "(its status was re-read from Shopify) and holds no failed move or "
+            "seller hold." + (
+                " It stays on hold: " + str(booked.get("stock_hold_reason") or "see its row")
+                if booked.get("fulfillment_hold") or booked.get("rx_pending") else ""))}
 
     _write_remap_audit(shopify_order_id, result, current_user)
     return _remap_verdict(shopify_order_id, result)
@@ -664,14 +678,15 @@ def _remap_verdict(shopify_order_id: str, result: Optional[Dict[str, Any]]) -> D
     # the books' for an order that was NOT booked. Say plainly whether the order
     # is in the books so the UI can never invent a false success.
     status = str((result or {}).get("status") or "")
-    ok = status in _REMAP_OK_STATUSES
+    booked = status in _REMAP_OK_STATUSES
     return {
         "shopify_order_id": shopify_order_id,
-        "ok": ok,
-        "map_status": "MAPPED" if ok else "FAILED",
+        # A press that did nothing is no success (its message says so).
+        "ok": booked and not (result or {}).get("nothing_done"),
+        "map_status": "MAPPED" if booked else "FAILED",
         "map_error": (
             None
-            if ok
+            if booked
             else (result or {}).get("error") or (result or {}).get("reason") or status or "unknown"
         ),
         # A re-route (or its refusal) says in words what happened to the hold.
