@@ -680,7 +680,9 @@ async def auto_edit_image(
 
         raw = await _fetch_image_bytes(img.get("url"))
         edited = await editor.edit(raw, EditSpec.from_env())
-        key = f"{img.get('product_id') or 'product'}/{image_id}.png"
+        # A NEW file name every edit: the website matches its copy of a photo
+        # by file name, so a re-edit under the old name would never reach it.
+        key = f"{img.get('product_id') or 'product'}/{image_id}-{uuid.uuid4().hex}.png"
         edited_url = storage.put(key, edited, "image/png")
 
         updated = repo.attach_edited(image_id, edited_url, by=user_id)

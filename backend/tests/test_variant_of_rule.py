@@ -1103,7 +1103,11 @@ def test_push_image_never_attaches_a_childs_photo_to_the_parents_listing(monkeyp
     would attach the child's APPROVED image to the PARENT's listing through
     productCreateMedia. The gid resolver now reads a child twin as None."""
     db = _world()
-    spy = _Spy({**_responses(), "productCreateMedia": _ok("productCreateMedia", media=[{"id": "gid://shopify/MediaImage/9"}])})
+    spy = _Spy({
+        **_responses(),
+        "productCreateMedia": _ok("productCreateMedia", media=[{"id": "gid://shopify/MediaImage/9"}]),
+        "imsProductMedia": {"data": {"product": {"id": P_GID, "media": {"nodes": []}}}},
+    })
     _live(monkeypatch, spy)
     child = db["catalog_products"].find_one({"id": "tw-child"})
     child["ecom"]["shopify_product_id"] = P_GID  # what a twin-repair-by-SKU script would do
