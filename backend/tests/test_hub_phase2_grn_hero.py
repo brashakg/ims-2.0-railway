@@ -77,6 +77,12 @@ class _PORepo:
             return True
         return False
 
+    def update_if(self, pid, expected, fields):
+        doc = self.pos.get(pid)
+        if doc is None or any(doc.get(k) != v for k, v in expected.items()):
+            return False
+        return self.update(pid, fields)
+
 
 class _VendorRepo:
     def find_by_id(self, vid):
@@ -496,9 +502,25 @@ def test_create_po_gate_dark_by_default_allows_unknown(monkeypatch):
 
 
 def test_send_po_gate_dark_by_default_allows_uncatalogued(monkeypatch):
+    # Dark gate: an UNCATALOGUED (incomplete) product still sends...
+    monkeypatch.setattr(vd, "_po_catalog_gate_on", lambda: False)
+    po_repo = _po_repo_with_line("new-77777")
+    monkeypatch.setattr(vd, "get_purchase_order_repository", lambda: po_repo)
+    monkeypatch.setattr(
+        vd, "get_product_repository", lambda: _ProductRepo([{"product_id": "new-77777"}])
+    )
+    out = _run(vd.send_po("PO-1", _ADMIN))
+    assert po_repo.pos["PO-1"]["status"] == "SENT"  # gate dark -> sends
+
+
+def test_send_po_refuses_a_product_that_does_not_exist_even_with_the_gate_dark(monkeypatch):
+    # ...but a line naming NO product never goes to a vendor, gate or no gate.
     monkeypatch.setattr(vd, "_po_catalog_gate_on", lambda: False)
     po_repo = _po_repo_with_line("new-77777")
     monkeypatch.setattr(vd, "get_purchase_order_repository", lambda: po_repo)
     monkeypatch.setattr(vd, "get_product_repository", lambda: _ProductRepo([]))
-    out = _run(vd.send_po("PO-1", _ADMIN))
-    assert po_repo.pos["PO-1"]["status"] == "SENT"  # gate dark -> sends
+    with pytest.raises(HTTPException) as e:
+        _run(vd.send_po("PO-1", _ADMIN))
+    assert e.value.status_code == 400
+    assert e.value.detail["code"] == "PO_LINE_PRODUCT_MISSING"
+    assert po_repo.pos["PO-1"]["status"] != "SENT"

@@ -405,7 +405,7 @@ def test_feature_toggles_no_longer_carry_eye_test_or_workshop():
 def test_approval_workflows_drop_the_discount_and_credit_rows(db):
     admin = _client(_user("ADMIN"))
     types = {w["type"] for w in admin.get("/settings/approval-workflows").json()["workflows"]}
-    assert types == {"REFUND_APPROVAL", "PO_APPROVAL", "STOCK_ADJUSTMENT"}
+    assert types == {"REFUND_APPROVAL", "STOCK_ADJUSTMENT"}
     # A copy saved before the removal is not shown either.
     db["approval_workflows"].insert_one({"_id": "default", "workflows": [
         {"id": "wf-001", "type": "DISCOUNT_APPROVAL"}, {"id": "wf-002", "type": "REFUND_APPROVAL"},
