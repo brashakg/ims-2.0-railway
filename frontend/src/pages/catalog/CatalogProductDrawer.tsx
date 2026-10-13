@@ -50,6 +50,7 @@ import {
 } from '../../components/online-store/OnlineStoreSyncBanner';
 // Import DIRECT from the modules (not the services/api barrel — TS2614).
 import {
+  catalogBulkApi,
   catalogProductsApi,
   type CatalogProductDoc,
   type PromoteDryRunResult,
@@ -238,6 +239,10 @@ export function CatalogProductDrawer({
   // "Send to website" is a live-write affordance -> SUPERADMIN / ADMIN only,
   // mirroring the backend push gate (online_store_push.py _PUSH_ROLES).
   const canPush = hasRole(['SUPERADMIN', 'ADMIN']);
+  // The add / edit door's roles (catalogRoutes /catalog/add).
+  const canEdit = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']);
+  // The restore door's roles (POST /catalog/products/bulk-restore): admins.
+  const canRestore = hasRole(['SUPERADMIN', 'ADMIN']);
 
   // Local copy of the doc so a review-form save can refresh it in place.
   const [doc, setDoc] = useState<Record<string, unknown>>(item.doc);
@@ -322,6 +327,10 @@ export function CatalogProductDrawer({
   const needsReview = Boolean(doc.needs_review);
   const inactive = doc.is_active === false;
   const orderedDraft = isOrderedDraft(doc);
+  // Archived (deleted): only THE restore door brings it back -- as it was
+  // before the archive, never re-published. Switched off with no archive
+  // ("Not for POS") is an ordinary switch.
+  const archived = Boolean(doc.deleted_at);
 
   const seedForm = useCallback((d: Record<string, unknown>) => {
     const attrs = (d.attributes || {}) as Record<string, unknown>;
@@ -484,17 +493,27 @@ export function CatalogProductDrawer({
     if (!id || archiving) return;
     setArchiving(true);
     try {
-      await catalogProductsApi.update(id, { is_active: !inactive });
+      let note = '';
+      if (archived) {
+        const row = (await catalogBulkApi.restore([id])).results[0];
+        if (row?.status !== 'done') throw new Error(row?.reason || 'Could not restore the product.');
+        note = row.note || '';
+      } else {
+        // Restore an inactive one (true), archive an active one (false). The
+        // old `!inactive` sent the opposite, so neither button did anything.
+        await catalogProductsApi.update(id, { is_active: inactive });
+      }
       const fresh = await catalogProductsApi.get(id);
       setDoc(fresh as unknown as Record<string, unknown>);
       onUpdated?.(fresh);
-      toast.success(inactive ? 'Restored to the review queue.' : 'Archived — not for POS.');
+      if (note) toast.warning(`Restored. ${note}`);
+      else toast.success(inactive ? 'Restored to the review queue.' : 'Archived — not for POS.');
     } catch (e: unknown) {
       toast.error(e instanceof Error && e.message ? e.message : 'Could not update the product.');
     } finally {
       setArchiving(false);
     }
-  }, [id, archiving, inactive, onUpdated, toast]);
+  }, [id, archiving, archived, inactive, onUpdated, toast]);
 
   // ---- "Edit everything" → the FULL cataloguing page (?review=<id>) --------
   // The parent (Catalog Manager) stashes the whole grid page as the queue;
@@ -939,80 +958,87 @@ export function CatalogProductDrawer({
                   {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                   Save fixes
                 </button>
-                <button
-                  type="button"
-                  onClick={() => void handleApprove()}
-                  disabled={!dry?.ok || approving || dryLoading}
-                  className={clsx(
-                    'flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-white',
-                    dry?.ok && !approving
-                      ? 'bg-green-600 hover:bg-green-700'
-                      : 'bg-gray-300 cursor-not-allowed'
-                  )}
-                  title={dry?.ok ? 'Create the billing record and make it sellable' : 'Fix the checklist first'}
-                >
-                  {approving ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  ) : (
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                  )}
-                  Approve for POS
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void handleArchiveToggle()}
-                  disabled={archiving}
-                  className="ml-auto flex items-center gap-1.5 rounded-lg px-2.5 py-2 text-xs text-gray-500 hover:bg-gray-100"
-                  title={
-                    inactive
-                      ? 'Return this item to the review queue'
-                      : 'Not for POS — hide it from the active queue'
-                  }
-                >
-                  {inactive ? (
-                    <ArchiveRestore className="w-3.5 h-3.5" />
-                  ) : (
-                    <Archive className="w-3.5 h-3.5" />
-                  )}
-                  {inactive ? 'Restore' : 'Archive'}
-                </button>
+                {/* Archived: only Restore brings it back (the server refuses approval). */}
+                {!archived && (
+                  <button
+                    type="button"
+                    onClick={() => void handleApprove()}
+                    disabled={!dry?.ok || approving || dryLoading}
+                    className={clsx(
+                      'flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-white',
+                      dry?.ok && !approving
+                        ? 'bg-green-600 hover:bg-green-700'
+                        : 'bg-gray-300 cursor-not-allowed'
+                    )}
+                    title={dry?.ok ? 'Create the billing record and make it sellable' : 'Fix the checklist first'}
+                  >
+                    {approving ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                    )}
+                    Approve for POS
+                  </button>
+                )}
+                {(!archived || canRestore) && (
+                  <button
+                    type="button"
+                    onClick={() => void handleArchiveToggle()}
+                    disabled={archiving}
+                    className="ml-auto flex items-center gap-1.5 rounded-lg px-2.5 py-2 text-xs text-gray-500 hover:bg-gray-100"
+                    title={
+                      inactive
+                        ? 'Return this item to the review queue'
+                        : 'Not for POS — hide it from the active queue'
+                    }
+                  >
+                    {inactive ? (
+                      <ArchiveRestore className="w-3.5 h-3.5" />
+                    ) : (
+                      <Archive className="w-3.5 h-3.5" />
+                    )}
+                    {inactive ? 'Restore' : 'Archive'}
+                  </button>
+                )}
               </div>
             </div>
           )}
         </div>
 
-        {/* Footer actions (spine products) */}
+        {/* Footer actions (spine products). Edit / Clone open the add-product
+            door, which only the catalogue roles may open; a store manager
+            (here to flag) sees the product without them. */}
         {!isImported && (
           <div className="border-t border-gray-200 px-5 py-3 flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => navigate(`/catalog/add?edit=${encodeURIComponent(id)}`)}
-              className="btn-primary flex items-center gap-1.5 text-sm"
-            >
-              <Pencil className="w-3.5 h-3.5" /> Edit
-            </button>
+            {canEdit && (
+              <button
+                type="button"
+                onClick={() => navigate(`/catalog/add?edit=${encodeURIComponent(id)}`)}
+                className="btn-primary flex items-center gap-1.5 text-sm"
+              >
+                <Pencil className="w-3.5 h-3.5" /> Edit
+              </button>
+            )}
             {/* An unfinished draft is neither cloned (its gaps would copy) nor
                 ordered again (the Buy Desk cannot buy it): finish it first. */}
+            {canEdit && !orderedDraft && (
+              <button
+                type="button"
+                onClick={() => navigate(`/catalog/add?clone=${encodeURIComponent(id)}`)}
+                className="btn-secondary flex items-center gap-1.5 text-sm"
+                title="Duplicate as a new SKU"
+              >
+                <CopyPlus className="w-3.5 h-3.5" /> Clone
+              </button>
+            )}
             {!orderedDraft && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => navigate(`/catalog/add?clone=${encodeURIComponent(id)}`)}
-                  className="btn-secondary flex items-center gap-1.5 text-sm"
-                  title="Duplicate as a new SKU"
-                >
-                  <CopyPlus className="w-3.5 h-3.5" /> Clone
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    navigate(`/catalog/buy-desk?add_product=${encodeURIComponent(id)}`)
-                  }
-                  className="ml-auto flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
-                >
-                  <ShoppingCart className="w-3.5 h-3.5" /> Order stock
-                </button>
-              </>
+              <button
+                type="button"
+                onClick={() => navigate(`/catalog/buy-desk?add_product=${encodeURIComponent(id)}`)}
+                className="ml-auto flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+              >
+                <ShoppingCart className="w-3.5 h-3.5" /> Order stock
+              </button>
             )}
           </div>
         )}

@@ -125,6 +125,13 @@ def should_escalate(
     status = canon_status(task.get("status"))
     if status in TERMINAL_STATUSES:
         return False, ""
+    # A catalogue flag task stays with the people who may clear a flag
+    # (catalog_flags._assignee): the ladder's store and area managers can
+    # neither close it nor, for an area manager, open it.
+    from .catalog_flags import is_flag_task
+
+    if is_flag_task(task):
+        return False, ""
 
     now = now or datetime.now()
     if now.tzinfo:

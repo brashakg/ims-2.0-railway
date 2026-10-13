@@ -568,9 +568,14 @@ class _TaskRepo:
     @staticmethod
     def _matches(doc, filt):
         for key, cond in (filt or {}).items():
-            val = doc.get(key)
+            val = doc
+            for part in key.split("."):  # a dotted path, as Mongo reads it
+                val = val.get(part) if isinstance(val, dict) else None
             if isinstance(cond, dict) and "$in" in cond:
                 if val not in cond["$in"]:
+                    return False
+            elif isinstance(cond, dict) and "$ne" in cond:
+                if val == cond["$ne"]:
                     return False
             elif val != cond:
                 return False

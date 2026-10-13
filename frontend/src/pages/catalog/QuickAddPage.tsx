@@ -28,6 +28,7 @@ import { IdentitySection } from './quickadd/IdentitySection';
 import { InventorySection } from './quickadd/InventorySection';
 import { OnlineStrip } from './quickadd/OnlineStrip';
 import { PricingSection } from './quickadd/PricingSection';
+import { ProductFlagsPanel } from './quickadd/ProductFlagsPanel';
 import { QuickAddHeader } from './quickadd/QuickAddHeader';
 import { ReviewCard } from './quickadd/ReviewCard';
 import { SaveBar } from './quickadd/SaveBar';
@@ -126,6 +127,9 @@ export function QuickAddPage() {
           </button>
         </div>
       )}
+
+      {/* Open catalogue flags on this product: fix, then Mark fixed. */}
+      {editMode?.kind === 'spine' && <ProductFlagsPanel productId={editMode.id} />}
 
       {/* REVIEW MODE banner: what's being reviewed, the auto-SKU note, the
           read-only online (Shopify) status, and the way back to the queue. */}

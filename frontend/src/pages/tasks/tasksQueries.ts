@@ -80,6 +80,8 @@ export interface Task {
   /** In-app page where the work is done (a system task's `link`, e.g. a held
    *  receipt's items in Catalogue > Needs review). Only a same-app path. */
   link?: string;
+  /** In-app pages the task points at (e.g. each flagged product's edit page). */
+  links?: Array<{ label: string; to: string }>;
 }
 
 // --- normalisation ---------------------------------------------------------
@@ -137,6 +139,13 @@ export function normaliseTask(t: Record<string, any>): Task {
     completionNotes: t.completion_notes,
     attachment: t.attachment || null,
     link: sameAppPath(t.link),
+    // Only in-app addresses (sameAppPath, the one rule): a link off the app
+    // is never rendered.
+    links: Array.isArray(t.links)
+      ? t.links
+          .filter((l: any) => l && sameAppPath(l.to))
+          .map((l: any) => ({ label: String(l.label || l.to), to: String(l.to) }))
+      : [],
   };
 }
 

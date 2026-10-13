@@ -487,7 +487,7 @@ function TaskDetailPanel({
         {task.description && (
           <div className="d-sec">
             <h4>Brief</h4>
-            <p style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--ink-2)' }}>
+            <p style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--ink-2)', whiteSpace: 'pre-line' }}>
               {task.description}
             </p>
           </div>
@@ -498,6 +498,21 @@ function TaskDetailPanel({
             <Link to={task.link} className="btn sm">
               Open where this is done
             </Link>
+          </div>
+        )}
+
+        {task.links && task.links.length > 0 && (
+          <div className="d-sec">
+            <h4>Open</h4>
+            <ul style={{ display: 'grid', gap: 4 }}>
+              {task.links.map((l) => (
+                <li key={l.to}>
+                  <Link to={l.to} style={{ fontSize: 12.5, textDecoration: 'underline' }}>
+                    {l.label}
+                  </Link>
+                </li>
+              ))}
+            </ul>
           </div>
         )}
 

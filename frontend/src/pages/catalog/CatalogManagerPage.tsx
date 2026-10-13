@@ -24,6 +24,18 @@
 // cannot disagree. "Waiting to push" reads ecom.locally_modified — the flag
 // the push sweep walks; cataloguing sets it, a human still presses publish.
 //
+// SORT, FILTERS, ROWS PER PAGE (owner 2026-10-12, mockup artboard Main):
+// every choice lives in the page ADDRESS (catalogListState), the server sorts
+// and filters the whole result (GET /products via services/catalog_list) and
+// the filter options + their counts come from GET /products/facets. Rows per
+// page is also remembered on this device.
+//
+// SELECT, FLAG, ARCHIVE (owner 2026-10-12, artboards Main + FlagDialog): tick
+// rows, then Flag (ADMIN / SUPERADMIN / STORE_MANAGER -> one task per person
+// who added them) or Delete (archive; admins, the existing soft delete);
+// Flags: Archived lists them for Restore. The review segment's bulk Approve
+// uses the SAME selection.
+//
 // A row click opens the slide-over drawer (view / edit-in-place links /
 // review + approve). Approving PROMOTES the imported doc in place (same id)
 // — the only thing that clears needs_review. Bulk approve is a client-side
@@ -32,10 +44,9 @@
 //
 // POS is untouched.
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, NavLink, useNavigate, useSearchParams } from 'react-router-dom';
 import {
-  Search,
   RefreshCw,
   Plus,
   Loader2,
@@ -44,21 +55,29 @@ import {
   CheckCircle2,
   ImagePlus,
   Pencil,
+  Flag,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useToast } from '../../context/ToastContext';
+import { useAuth } from '../../context/AuthContext';
 import { Pagination } from '../../components/common/Pagination';
 import { ImageLightbox } from '../../components/common/ImageLightbox';
 import { refreshNavCounts } from '../../components/shell/NavBadge';
 // Import DIRECT from the modules (not the services/api barrel — TS2614).
-import { productApi, catalogApi, type CatalogCounts } from '../../services/api/products';
 import {
+  productApi,
+  catalogApi,
+  type CatalogCounts,
+  type CatalogFacets,
+} from '../../services/api/products';
+import {
+  catalogBulkApi,
   catalogProductsApi,
   type CatalogProductDoc,
   type OnlineState,
   type PhotoFilter,
+  type ProductFlag,
 } from '../../services/api/catalog';
-import { CATEGORY_BROWSE_OPTIONS } from '../../utils/categoryNormalize';
 import {
   CatalogProductDrawer,
   CatalogImage,
@@ -71,8 +90,21 @@ import {
   type CatalogDrawerItem,
 } from './CatalogProductDrawer';
 import { writeReviewQueue } from './reviewQueue';
+import { CatalogFiltersBar } from './CatalogFiltersBar';
+import { ArchiveDialog, FlagDialog, SelectionBar } from './CatalogBulkActions';
+import {
+  PAGE_SIZES,
+  PAGE_SIZE_STORAGE_KEY,
+  addedColumn,
+  flagLabel,
+  readFilters,
+  resultLine,
+  toProductParams,
+  writeFilters,
+  type CatalogFilters,
+  type FlagType,
+} from './catalogListState';
 
-const PAGE_SIZE = 48;
 const BULK_CAP = 200;
 const BULK_CONCURRENCY = 4;
 
@@ -93,6 +125,31 @@ const fmtINR = (n: number | null): string => {
 
 const fmtN = (n: number | undefined | null): string =>
   typeof n === 'number' && Number.isFinite(n) ? n.toLocaleString('en-IN') : '—';
+
+/** This device's remembered rows per page (fail-soft: private mode etc.). */
+function storedRows(): number | null {
+  try {
+    return Number(window.localStorage.getItem(PAGE_SIZE_STORAGE_KEY)) || null;
+  } catch {
+    return null;
+  }
+}
+
+function rememberRows(n: number): void {
+  try {
+    window.localStorage.setItem(PAGE_SIZE_STORAGE_KEY, String(n));
+  } catch {
+    /* not remembered on this device; the address still carries it */
+  }
+}
+
+/** A row's open flags, newest first. */
+function openFlags(doc: Record<string, unknown>): ProductFlag[] {
+  const flags = Array.isArray(doc.flags) ? (doc.flags as ProductFlag[]) : [];
+  return flags
+    .filter((f) => f && f.status === 'open')
+    .sort((a, b) => String(b.at || '').localeCompare(String(a.at || '')));
+}
 
 // ---------------------------------------------------------------------------
 // Chips — the server's booleans rendered with the app's own .chip tokens.
@@ -192,13 +249,30 @@ export function CatalogManagerPage({
 }) {
   const navigate = useNavigate();
   const toast = useToast();
+  const { user, hasRole } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
+
+  // Who may do what (the server enforces the same; these only hide buttons).
+  const canEdit = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']);
+  const canFlag = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']);
+  const isAdmin = hasRole(['SUPERADMIN', 'ADMIN']);
+  const isCataloguer = (user?.roles || []).includes('CATALOG_MANAGER');
 
   // Page lives in the URL (not useState) so the full-page review editor's
   // "Back to queue" (/catalog/review?page=N&focus=<id>) restores the exact
   // list position. Unknown/absent params fall back to page 1.
   const pageRaw = parseInt(searchParams.get('page') || '1', 10);
   const page = Number.isFinite(pageRaw) && pageRaw > 0 ? pageRaw : 1;
+
+  // Sort + filters + rows per page: the address is the state.
+  // This device's remembered size: state, read only when the address has
+  // no rows (an old link, a plain /catalog) -- and then written into it.
+  const [rowsMemory, setRowsMemory] = useState(storedRows);
+  const filtersKey = JSON.stringify(readFilters(searchParams, rowsMemory, segment, isAdmin));
+  const filters: CatalogFilters = useMemo(() => JSON.parse(filtersKey), [filtersKey]);
+  const pageSize = filters.rows;
+  const photo: PhotoFilter | undefined = photoPreset ?? (filters.photo || undefined);
+  const archivedView = segment === 'catalog' && filters.flag === 'archived';
 
   const setPage = useCallback(
     (next: number) => {
@@ -215,29 +289,45 @@ export function CatalogManagerPage({
     [setSearchParams]
   );
 
+  // The address ALWAYS carries rows per page (50 too): a page number then
+  // means the same rows on every device, in every tab and shared link.
+  useEffect(() => {
+    if (searchParams.get('rows') === String(pageSize)) return;
+    setSearchParams(
+      (prev) => {
+        const sp = new URLSearchParams(prev);
+        sp.set('rows', String(pageSize));
+        return sp;
+      },
+      { replace: true }
+    );
+  }, [searchParams, pageSize, setSearchParams]);
+
   const [items, setItems] = useState<CatalogDrawerItem[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  // The latest list request: an answer to an older one is dropped (a slow
+  // page-5 answer must not move the page a newer choice already set).
+  const loadSeq = useRef(0);
   const [error, setError] = useState<string | null>(null);
 
-  // Toolbar state
-  const [search, setSearch] = useState('');
-  const [debouncedSearch, setDebouncedSearch] = useState('');
-  const [category, setCategory] = useState('');
-  const [brand, setBrand] = useState('');
-  const [brandOptions, setBrandOptions] = useState<string[]>([]);
-  const [includeInactive, setIncludeInactive] = useState(false);
-  const [photoPick, setPhotoPick] = useState<PhotoFilter | ''>('');
-  const photo: PhotoFilter | undefined = photoPreset ?? (photoPick || undefined);
+  // Search box: typed text is local, the debounced text goes to the address.
+  const [search, setSearch] = useState(filters.q);
+  const [reviewBrands, setReviewBrands] = useState<string[]>([]);
 
   // Counts row + review badge — the server's tally, one fetch.
   const [counts, setCounts] = useState<CatalogCounts | null>(null);
   const reviewCount = counts?.needs_review ?? 0;
+  // Filter options with counts + the open-flag counts (red banner).
+  const [facets, setFacets] = useState<CatalogFacets | null>(null);
 
-  // Review machinery
+  // ONE selection (flag / archive / restore on the catalog, Approve on the
+  // review queue), kept across pages.
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [failMap, setFailMap] = useState<Record<string, string>>({});
   const [bulkRunning, setBulkRunning] = useState(false);
+  const [flagType, setFlagType] = useState<FlagType>('needs_revision');
+  const [dialog, setDialog] = useState<'flag' | 'archive' | null>(null);
 
   // Drawer: an index into `items` (list navigation), or a standalone item
   // (?focus= deep link to a product not on the current page).
@@ -247,61 +337,119 @@ export function CatalogManagerPage({
   // Page-level lightbox opened straight from a row thumbnail.
   const [lightbox, setLightbox] = useState<{ images: string[]; alt: string } | null>(null);
 
+  const clearSelection = useCallback(() => {
+    setSelected(new Set());
+  }, []);
+
+  /** Change the filters: written to the address, back to page 1, selection
+   *  and drawer cleared. An updater reads the CURRENT address, so a late
+   *  search flush never undoes a filter picked meanwhile. */
+  const setFilters = useCallback(
+    (next: CatalogFilters | ((current: CatalogFilters) => CatalogFilters)) => {
+      setSearchParams(
+        (prev) => {
+          const f =
+            typeof next === 'function'
+              ? next(readFilters(prev, rowsMemory, segment, isAdmin))
+              : next;
+          const sp = writeFilters(f, prev, segment);
+          sp.delete('page');
+          return sp;
+        },
+        { replace: true }
+      );
+      clearSelection();
+      setDrawerIdx(null);
+    },
+    [setSearchParams, clearSelection, rowsMemory, segment, isAdmin]
+  );
+
   // ---- Search debounce (300ms; Enter flushes for barcode scanners) --------
+  const flushSearch = useCallback(
+    (text: string) => {
+      if (text.trim() !== filters.q) setFilters((f) => ({ ...f, q: text.trim() }));
+    },
+    [filters.q, setFilters]
+  );
   useEffect(() => {
-    const t = window.setTimeout(() => setDebouncedSearch(search.trim()), 300);
+    const t = window.setTimeout(() => flushSearch(search), 300);
     return () => window.clearTimeout(t);
+    // Only the typed text re-arms the timer.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search]);
+  // Back / a shared link changed the address: the box follows it.
+  useEffect(() => {
+    setSearch((s) => (s.trim() === filters.q ? s : filters.q));
+  }, [filters.q]);
 
   // ---- Data loads -----------------------------------------------------------
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
+    const stale = () => seq !== loadSeq.current;
     setLoading(true);
     setError(null);
+    // A page past the end (a shared link, or a bulk archive that emptied the
+    // last page) goes to the last page that has rows -- never a dead end.
+    let pastEnd = false;
+    const show = (next: CatalogDrawerItem[], n: number) => {
+      if (stale()) return;
+      const last = Math.max(1, Math.ceil(n / pageSize));
+      if (next.length === 0 && page > last) {
+        pastEnd = true;
+        setPage(last);
+        return;
+      }
+      setItems(next);
+      setTotal(n);
+    };
     try {
       if (segment === 'catalog') {
         const res = await productApi.getProducts({
-          search: debouncedSearch || undefined,
-          category: category || undefined,
-          brand: brand || undefined,
-          is_active: includeInactive ? 'all' : 'true',
+          ...toProductParams(filters),
           photo,
-          skip: (page - 1) * PAGE_SIZE,
-          limit: PAGE_SIZE,
+          skip: (page - 1) * pageSize,
+          limit: pageSize,
         });
         const docs = (res?.products || []) as Array<Record<string, unknown>>;
-        setItems(docs.map((doc) => ({ kind: 'spine' as const, doc })));
-        setTotal(Number(res?.total_count ?? res?.total ?? docs.length));
+        show(
+          docs.map((doc) => ({ kind: 'spine' as const, doc })),
+          Number(res?.total_count ?? res?.total ?? docs.length)
+        );
       } else {
         const res = await catalogProductsApi.list({
           needs_review: true,
           is_active: 'all',
-          search: debouncedSearch || undefined,
-          category: category || undefined,
-          brand: brand || undefined,
+          search: filters.q || undefined,
+          category: filters.category || undefined,
+          brand: filters.brand || undefined,
           photo,
+          sort: filters.sort,
           page,
-          limit: PAGE_SIZE,
+          limit: pageSize,
         });
         const docs = (res?.products || []) as unknown as Array<Record<string, unknown>>;
-        setItems(
+        show(
           docs.map((doc) =>
             // A manager's typed-in draft (audit C1) already HAS its billing
             // row: it opens in the product editor, never the import approve.
             isOrderedDraft(doc)
               ? { kind: 'spine' as const, doc: { ...doc, product_id: doc.spine_product_id } }
               : { kind: 'imported' as const, doc }
-          )
+          ),
+          Number(res?.total ?? docs.length)
         );
-        setTotal(Number(res?.total ?? docs.length));
       }
     } catch (e: unknown) {
+      if (stale()) return;
       setItems([]);
       setTotal(0);
       setError(e instanceof Error ? e.message : 'Could not load the catalog.');
     } finally {
-      setLoading(false);
+      // Past the end: still loading -- the last page's load takes over. A
+      // newer request owns the spinner.
+      if (!pastEnd && !stale()) setLoading(false);
     }
-  }, [segment, debouncedSearch, category, brand, includeInactive, photo, page]);
+  }, [segment, filters, photo, page, pageSize, setPage]);
 
   useEffect(() => {
     void load();
@@ -323,41 +471,50 @@ export function CatalogManagerPage({
     void refreshCounts();
   }, [refreshCounts]);
 
-  // Brand select options (Brand Master; re-scoped when a category is picked).
+  // Filter options + flag counts (the spine catalogue; Include inactive
+  // widens what they count, exactly as it widens the list).
+  const refreshFacets = useCallback(async () => {
+    if (segment !== 'catalog') return;
+    try {
+      setFacets(await productApi.getFacets({ is_active: filters.inactive ? 'all' : 'true' }));
+    } catch {
+      setFacets(null); // fail-soft: the selects just offer "Any"
+    }
+  }, [segment, filters.inactive]);
+
   useEffect(() => {
+    void refreshFacets();
+  }, [refreshFacets]);
+
+  // Brand choices for the imported review queue (its docs are not on the
+  // spine the facets count): the Brand Master list, as before.
+  useEffect(() => {
+    if (segment !== 'review') return;
     let alive = true;
     productApi
-      .getBrandOptions(category || undefined)
+      .getBrandOptions(filters.category || undefined)
       .then((r) => {
-        if (alive) setBrandOptions((r.brands || []).map((b) => b.name).filter(Boolean));
+        if (alive) setReviewBrands((r.brands || []).map((b) => b.name).filter(Boolean));
       })
       .catch(() => {
-        if (alive) setBrandOptions([]);
+        if (alive) setReviewBrands([]);
       });
     return () => {
       alive = false;
     };
-  }, [category]);
+  }, [segment, filters.category]);
 
-  // Reset page + selection when the view meaningfully changes. Skipped on the
-  // FIRST run so a deep-linked ?page=N isn't clobbered back to page 1 on
-  // mount (page lives in the URL).
+  // A different address (segment / preset) is a different list: drop the
+  // selection and the drawer. Skipped on the FIRST run.
   const viewResetReady = useRef(false);
   useEffect(() => {
     if (!viewResetReady.current) {
       viewResetReady.current = true;
       return;
     }
-    setPage(1);
-    setSelected(new Set());
+    clearSelection();
     setDrawerIdx(null);
-    // setPage is EXCLUDED on purpose: react-router's setSearchParams (and so
-    // setPage) gets a new identity on every URL-search change, so depending on
-    // it made ANY page change snap straight back to page 1 (and broke
-    // Back-to-queue's ?page=N restore). setPage uses the functional-updater
-    // form, so a stale closure is harmless.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [segment, debouncedSearch, category, brand, includeInactive, photo]);
+  }, [segment, photoPreset, clearSelection]);
 
   // Keep the review-queue stash current: whenever the review segment shows a
   // page of imported docs, that page (+ filters + list position) IS the
@@ -371,16 +528,17 @@ export function CatalogManagerPage({
     writeReviewQueue({
       ids,
       index: 0,
-      offset: (page - 1) * PAGE_SIZE,
+      offset: (page - 1) * pageSize,
       total,
       filters: {
-        search: debouncedSearch || undefined,
-        category: category || undefined,
-        brand: brand || undefined,
+        search: filters.q || undefined,
+        category: filters.category || undefined,
+        brand: filters.brand || undefined,
         page,
+        address: searchParams.toString(),
       },
     });
-  }, [segment, loading, items, page, total, debouncedSearch, category, brand]);
+  }, [segment, loading, items, page, pageSize, total, filters, searchParams]);
 
   // "Edit everything" (drawer / row action) → full cataloguing page with the
   // queue stashed at this item's position. `hash` = '#images' lands on the
@@ -392,18 +550,19 @@ export function CatalogManagerPage({
       writeReviewQueue({
         ids: at >= 0 ? ids : [id],
         index: Math.max(0, at),
-        offset: at >= 0 ? (page - 1) * PAGE_SIZE : 0,
+        offset: at >= 0 ? (page - 1) * pageSize : 0,
         total: at >= 0 ? total : undefined,
         filters: {
-          search: debouncedSearch || undefined,
-          category: category || undefined,
-          brand: brand || undefined,
+          search: filters.q || undefined,
+          category: filters.category || undefined,
+          brand: filters.brand || undefined,
           page,
+          address: searchParams.toString(),
         },
       });
       navigate(`/catalog/add?review=${encodeURIComponent(id)}${hash}`);
     },
-    [items, page, total, debouncedSearch, category, brand, navigate]
+    [items, page, pageSize, total, filters, navigate, searchParams]
   );
 
   // Row action. "Add photo" opens the ONE existing image upload (QuickAdd's
@@ -451,11 +610,80 @@ export function CatalogManagerPage({
   const toggleSelect = useCallback((pid: string) => {
     setSelected((prev) => {
       const next = new Set(prev);
-      if (next.has(pid)) next.delete(pid);
-      else if (next.size < BULK_CAP) next.add(pid);
+      if (next.has(pid)) {
+        next.delete(pid);
+      } else if (next.size < BULK_CAP) {
+        next.add(pid);
+      }
       return next;
     });
   }, []);
+
+  // On Needs review a tick is for Approve, and an archived row is never
+  // approved (only Restore brings it back): it gets no tick box.
+  // In Needs review a tick is for the bulk approve: never an archived row,
+  // nor an ordered draft (finished in the product editor, never approved).
+  const canTick = (it: CatalogDrawerItem) =>
+    segment !== 'review' || (!it.doc.deleted_at && !isOrderedDraft(it.doc));
+  const tickable = items.filter(canTick);
+  const pageIds = tickable.map((it) => docId(it.doc)).filter(Boolean);
+  const allOnPage = pageIds.length > 0 && pageIds.every((id) => selected.has(id));
+  const toggleAllOnPage = () => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (allOnPage) {
+        for (const it of tickable) next.delete(docId(it.doc));
+      } else {
+        for (const it of tickable) {
+          const id = docId(it.doc);
+          if (!id || next.size >= BULK_CAP) continue;
+          next.add(id);
+        }
+      }
+      return next;
+    });
+  };
+
+  const afterBulk = useCallback(
+    (message: string, ok: boolean) => {
+      setDialog(null);
+      toast[ok ? 'success' : 'warning'](message);
+      clearSelection();
+      void load();
+      void refreshFacets();
+      void refreshCounts();
+    },
+    [toast, clearSelection, load, refreshFacets, refreshCounts]
+  );
+
+  const handleRestore = useCallback(async () => {
+    const ids = Array.from(selected);
+    if (ids.length === 0 || bulkRunning) return;
+    const ok = window.confirm(
+      `Restore ${ids.length} product${ids.length === 1 ? '' : 's'}?\n\n` +
+        'They come back in the catalogue and at the till. They do NOT go back on the ' +
+        'website by themselves - publish them again from Online Store when they are ready. ' +
+        'One still on a listing that is live on the website comes back switched off.'
+    );
+    if (!ok) return;
+    setBulkRunning(true);
+    try {
+      const res = await catalogBulkApi.restore(ids);
+      const done = res.results.filter((r) => r.status === 'done').length;
+      const off = res.results.filter((r) => r.status === 'done' && r.switched_on === false);
+      const no = res.results.filter((r) => r.status === 'refused');
+      afterBulk(
+        `${done} restored` +
+          (off.length ? ` - ${off.length} switched off. ${off[0].note}` : '') +
+          (no.length ? ` - ${no.length} refused (${no[0].reason})` : ''),
+        no.length === 0 && off.length === 0
+      );
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : 'Could not restore the products.');
+    } finally {
+      setBulkRunning(false);
+    }
+  }, [selected, bulkRunning, afterBulk, toast]);
 
   // ---- Approve flows ----------------------------------------------------------
   const advanceAfterApprove = useCallback(
@@ -574,6 +802,17 @@ export function CatalogManagerPage({
             ? ' without a usable photo — cannot go online'
             : ' in the catalog'
       }`;
+  // The result line's "of N": the catalogue in scope (or the archived count).
+  const scopeTotal =
+    segment !== 'catalog'
+      ? null
+      : archivedView
+        ? facets?.flags?.archived ?? null
+        : facets?.total ?? null;
+
+  const flaggedOpen = facets?.flags?.open ?? 0;
+  const flaggedMine = facets?.flags?.mine ?? 0;
+  const showChecks = segment === 'review' || canFlag || isAdmin;
 
   const segmentLink = (active: boolean) =>
     clsx(
@@ -594,17 +833,20 @@ export function CatalogManagerPage({
             onClick={() => {
               void load();
               void refreshCounts();
+              void refreshFacets();
             }}
             className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
           >
             <RefreshCw className="h-4 w-4" /> Refresh
           </button>
-          <button
-            onClick={() => navigate('/catalog/add')}
-            className="btn-primary inline-flex items-center gap-1.5"
-          >
-            <Plus className="h-4 w-4" /> Add product
-          </button>
+          {canEdit && (
+            <button
+              onClick={() => navigate('/catalog/add')}
+              className="btn-primary inline-flex items-center gap-1.5"
+            >
+              <Plus className="h-4 w-4" /> Add product
+            </button>
+          )}
         </div>
       </div>
 
@@ -612,7 +854,7 @@ export function CatalogManagerPage({
       {segment === 'catalog' && <CountsRow counts={counts} />}
 
       {/* Amber review banner — links to the queue's own address */}
-      {reviewCount > 0 && segment === 'catalog' && (
+      {reviewCount > 0 && segment === 'catalog' && canEdit && (
         <Link
           to="/catalog/review"
           className="w-full flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-left hover:bg-amber-100 transition-colors"
@@ -629,98 +871,67 @@ export function CatalogManagerPage({
       )}
 
       {/* Segment links — real addresses, not a query string */}
-      <div className="inline-flex rounded-lg border border-gray-200 bg-gray-50 p-0.5">
-        <NavLink to="/catalog" end className={({ isActive }) => segmentLink(isActive)}>
-          Catalog
-        </NavLink>
-        <NavLink to="/catalog/review" className={({ isActive }) => segmentLink(isActive)}>
-          Needs review
-          {reviewCount > 0 && (
-            <span className="inline-flex items-center justify-center rounded-full bg-amber-500 px-1.5 py-px text-[10px] font-semibold text-white min-w-[1.25rem]">
-              {reviewCount > 999 ? '999+' : reviewCount}
-            </span>
-          )}
-        </NavLink>
-      </div>
-
-      {/* Toolbar */}
-      <div className="space-y-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="relative flex-1 min-w-[220px] max-w-md">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              onKeyDown={(e) => {
-                // Barcode scanners type digits + Enter — flush the debounce.
-                if (e.key === 'Enter') setDebouncedSearch(search.trim());
-              }}
-              placeholder="Search name, SKU or scan a barcode…"
-              className="input-field w-full pl-9"
-            />
-          </div>
-          <select
-            value={brand}
-            onChange={(e) => setBrand(e.target.value)}
-            className="input-field w-44"
-            title="Filter by brand"
-          >
-            <option value="">All brands</option>
-            {brandOptions.map((b) => (
-              <option key={b} value={b}>
-                {b}
-              </option>
-            ))}
-          </select>
-          {/* Photo filter — the server's predicate; fixed on /catalog/missing-photos */}
-          {!photoPreset && (
-            <select
-              value={photoPick}
-              onChange={(e) => setPhotoPick(e.target.value as PhotoFilter | '')}
-              className="input-field w-40"
-              title="Filter by photo"
-              aria-label="Photo"
-            >
-              <option value="">Photo: Any</option>
-              <option value="has">Photo: Has photo</option>
-              <option value="missing">Photo: Missing</option>
-            </select>
-          )}
-          {segment === 'catalog' && (
-            <label className="flex items-center gap-1.5 text-sm text-gray-600 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={includeInactive}
-                onChange={(e) => setIncludeInactive(e.target.checked)}
-                className="h-3.5 w-3.5 accent-gray-600"
-              />
-              Include inactive
-            </label>
-          )}
+      {canEdit && (
+        <div className="inline-flex rounded-lg border border-gray-200 bg-gray-50 p-0.5">
+          <NavLink to="/catalog" end className={({ isActive }) => segmentLink(isActive)}>
+            Catalog
+          </NavLink>
+          <NavLink to="/catalog/review" className={({ isActive }) => segmentLink(isActive)}>
+            Needs review
+            {reviewCount > 0 && (
+              <span className="inline-flex items-center justify-center rounded-full bg-amber-500 px-1.5 py-px text-[10px] font-semibold text-white min-w-[1.25rem]">
+                {reviewCount > 999 ? '999+' : reviewCount}
+              </span>
+            )}
+          </NavLink>
         </div>
+      )}
 
-        {/* Category chips (the ONE shared browse vocabulary) */}
-        <div className="flex flex-wrap gap-1.5">
-          <button
-            type="button"
-            onClick={() => setCategory('')}
-            className={clsx('ims-chip', category === '' && 'ims-chip--on')}
-          >
-            All
-          </button>
-          {CATEGORY_BROWSE_OPTIONS.map((o) => (
-            <button
-              key={o.value}
-              type="button"
-              onClick={() => setCategory((c) => (c === o.value ? '' : o.value))}
-              className={clsx('ims-chip', category === o.value && 'ims-chip--on')}
-            >
-              {o.label}
-            </button>
-          ))}
-        </div>
-      </div>
+      {/* Red flags banner — products flagged as needing work (server counts) */}
+      {segment === 'catalog' && flaggedOpen > 0 && (
+        <button
+          type="button"
+          onClick={() =>
+            setFilters({ ...filters, flag: isCataloguer && flaggedMine > 0 ? 'mine' : 'any' })
+          }
+          className="w-full flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-left hover:bg-red-100 transition-colors"
+          data-testid="flags-banner"
+        >
+          <Flag className="h-4 w-4 text-red-700 shrink-0" />
+          <span className="text-sm text-red-900">
+            <span className="font-semibold">
+              {flaggedOpen.toLocaleString('en-IN')} product{flaggedOpen === 1 ? ' is' : 's are'}
+            </span>{' '}
+            flagged as needing work
+            {flaggedMine > 0 && (
+              <>
+                {' '}- <span className="font-semibold">{flaggedMine.toLocaleString('en-IN')} of them
+                {flaggedMine === 1 ? ' is' : ' are'} yours</span>
+              </>
+            )}
+          </span>
+          <span className="ml-auto text-sm font-medium text-red-800 underline">Show them</span>
+        </button>
+      )}
+
+      <CatalogFiltersBar
+        segment={segment}
+        filters={filters}
+        onChange={setFilters}
+        facets={facets}
+        reviewBrands={reviewBrands}
+        search={search}
+        onSearch={setSearch}
+        onSearchFlush={() => flushSearch(search)}
+        photoFixed={Boolean(photoPreset)}
+        isAdmin={isAdmin}
+      />
+
+      {!loading && !error && (
+        <p className="text-sm text-gray-700" data-testid="result-line">
+          {resultLine(total, scopeTotal, filters.sort)}
+        </p>
+      )}
 
       {/* List */}
       {error ? (
@@ -770,12 +981,18 @@ export function CatalogManagerPage({
               paint makes this box their containing block, so they stay
               clipped with the table. Measured 687 -> 350 at 360px. */}
           <div className="overflow-x-auto [contain:paint] rounded-xl border border-gray-200 bg-white">
-            <table className="w-full min-w-[780px] text-sm" data-testid="catalog-table">
+            <table className="w-full min-w-[960px] text-sm" data-testid="catalog-table">
               <thead>
                 <tr className="text-left text-[10px] font-semibold uppercase tracking-[.08em] text-gray-500">
-                  {segment === 'review' && (
+                  {showChecks && (
                     <th className="w-8 px-3 pb-2 pt-3">
-                      <span className="sr-only">Select</span>
+                      <input
+                        type="checkbox"
+                        checked={allOnPage}
+                        onChange={toggleAllOnPage}
+                        className="h-3.5 w-3.5 accent-gray-700"
+                        aria-label="Select all on this page"
+                      />
                     </th>
                   )}
                   <th className="w-12 px-3 pb-2 pt-3">
@@ -787,6 +1004,7 @@ export function CatalogManagerPage({
                   <th className="px-3 pb-2 pt-3 text-right">MRP</th>
                   <th className="px-3 pb-2 pt-3">Photo</th>
                   <th className="px-3 pb-2 pt-3">Online</th>
+                  <th className="px-3 pb-2 pt-3">Added</th>
                   <th className="px-3 pb-2 pt-3">
                     <span className="sr-only">Actions</span>
                   </th>
@@ -809,6 +1027,9 @@ export function CatalogManagerPage({
                   const needsReview = it.kind === 'imported' && Boolean(doc.needs_review);
                   const hasPhoto = doc.has_photo as boolean | undefined;
                   const online = doc.online as OnlineState | undefined;
+                  const flags = openFlags(doc);
+                  const noted = flags.find((f) => f.note);
+                  const added = addedColumn(doc);
                   const openRow = () => {
                     setFocusItem(null);
                     setDrawerIdx(idx);
@@ -822,9 +1043,9 @@ export function CatalogManagerPage({
                         inactive && 'opacity-60'
                       )}
                     >
-                      {segment === 'review' && (
+                      {showChecks && (
                         <td className="px-3 py-2 align-middle">
-                          {orderedDraft ? null : (
+                          {canTick(it) && (
                             <input
                               type="checkbox"
                               checked={selected.has(pid)}
@@ -862,6 +1083,10 @@ export function CatalogManagerPage({
                               <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">
                                 <AlertTriangle className="h-3 w-3" /> Ordered — finish it
                               </span>
+                            ) : doc.deleted_at ? (
+                              <span className="inline-flex items-center rounded-full bg-gray-200 px-2 py-0.5 text-[10px] font-medium text-gray-700">
+                                Archived
+                              </span>
                             ) : inactive ? (
                               <span className="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-500">
                                 Inactive
@@ -871,6 +1096,15 @@ export function CatalogManagerPage({
                                 <ShieldCheck className="h-3 w-3" /> POS-ready
                               </span>
                             )}
+                            {flags.map((f) => (
+                              <span
+                                key={f.flag_id}
+                                className="inline-flex items-center gap-1 rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-semibold text-red-800"
+                                data-testid="flag-chip"
+                              >
+                                <Flag className="h-2.5 w-2.5" /> {flagLabel(f.type)}
+                              </span>
+                            ))}
                             {failMap[pid] && (
                               <span
                                 className="inline-flex items-center rounded-full bg-orange-100 px-2 py-0.5 text-[10px] font-medium text-orange-700"
@@ -880,6 +1114,11 @@ export function CatalogManagerPage({
                               </span>
                             )}
                           </div>
+                          {noted && (
+                            <div className="mt-1 text-[11.5px] text-red-800">
+                              Note from {noted.by_name || 'a manager'}: {noted.note}
+                            </div>
+                          )}
                         </button>
                       </td>
                       <td className="px-3 py-2 align-middle font-mono text-xs text-gray-700">
@@ -900,8 +1139,13 @@ export function CatalogManagerPage({
                       <td className="px-3 py-2 align-middle" data-testid="online-cell">
                         <OnlineChip state={online} note={doc.online_note as string | null | undefined} />
                       </td>
+                      <td className="px-3 py-2 align-middle text-[11.5px] leading-snug" data-testid="added-cell">
+                        <div className="font-medium text-gray-900">{added.by}</div>
+                        <div className="text-gray-600">{added.when}</div>
+                        <div className="text-gray-500">{added.edited}</div>
+                      </td>
                       <td className="px-3 py-2 align-middle text-right">
-                        {hasPhoto === false ? (
+                        {!canEdit ? null : hasPhoto === false ? (
                           <button
                             type="button"
                             onClick={() => openEditor(it, '#images')}
@@ -925,13 +1169,61 @@ export function CatalogManagerPage({
               </tbody>
             </table>
           </div>
-          <Pagination
-            currentPage={page}
-            totalItems={total}
-            pageSize={PAGE_SIZE}
-            onPageChange={setPage}
-          />
         </>
+      )}
+
+      {/* Pages + Rows per page: whenever the list has rows to page through,
+          so no page is ever a dead end. */}
+      {!error && total > 0 && (
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <span className="pb-2 text-xs text-gray-500">Times shown in India time (IST)</span>
+          <div className="flex flex-wrap items-end gap-3">
+            <Pagination
+              currentPage={page}
+              totalItems={total}
+              pageSize={pageSize}
+              onPageChange={setPage}
+            />
+            <label className="flex items-center gap-2 pb-1 text-sm text-gray-700">
+              Rows per page
+              <select
+                value={pageSize}
+                onChange={(e) => {
+                  const rows = Number(e.target.value);
+                  rememberRows(rows);
+                  setRowsMemory(rows);
+                  setFilters({ ...filters, rows });
+                }}
+                className="input-field w-20"
+                aria-label="Rows per page"
+              >
+                {PAGE_SIZES.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        </div>
+      )}
+
+      {/* Selection bar — catalog: flag / archive / restore (light grey) */}
+      {segment === 'catalog' && selected.size > 0 && (canFlag || isAdmin) && (
+        <SelectionBar
+          count={selected.size}
+          cap={BULK_CAP}
+          canFlag={canFlag}
+          canArchive={isAdmin}
+          archivedView={archivedView}
+          flagType={flagType}
+          onFlagType={setFlagType}
+          onFlag={() => setDialog('flag')}
+          onArchive={() => setDialog('archive')}
+          onRestore={() => void handleRestore()}
+          onClear={clearSelection}
+          busy={bulkRunning}
+        />
       )}
 
       {/* Sticky bulk-approve bar (review segment) */}
@@ -945,7 +1237,7 @@ export function CatalogManagerPage({
           </span>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => setSelected(new Set())}
+              onClick={clearSelection}
               className="rounded-lg px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-100"
               disabled={bulkRunning}
             >
@@ -965,6 +1257,22 @@ export function CatalogManagerPage({
             </button>
           </div>
         </div>
+      )}
+
+      {dialog === 'flag' && (
+        <FlagDialog
+          ids={Array.from(selected)}
+          initialType={flagType}
+          onClose={() => setDialog(null)}
+          onDone={afterBulk}
+        />
+      )}
+      {dialog === 'archive' && (
+        <ArchiveDialog
+          ids={Array.from(selected)}
+          onClose={() => setDialog(null)}
+          onDone={afterBulk}
+        />
       )}
 
       {/* Drawer */}
