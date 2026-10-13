@@ -159,22 +159,28 @@ SUBBRAND_COLLECTION = "subbrand_masters"
 BRAND_TIERS = frozenset({"MASS", "PREMIUM", "LUXURY"})
 
 
+def _brand_rows(db, brand_name: str) -> List[Dict[str, Any]]:
+    """Every brand_masters row whose name matches `brand_name` without case
+    (casefold), active or not. Raises on a read failure: callers decide."""
+    probe = str(brand_name or "").strip().casefold()
+    return [
+        doc
+        for doc in db.get_collection(BRAND_COLLECTION).find({})
+        if str(doc.get("name") or "").strip().casefold() == probe
+    ]
+
+
 def _find_active_brand(db, brand_name: str) -> Optional[Dict[str, Any]]:
     """The ACTIVE brand_masters doc whose name matches case-insensitively,
     or None (not found / no db / read failure)."""
     if db is None or not str(brand_name or "").strip():
         return None
     try:
-        probe = str(brand_name).strip().casefold()
-        for doc in db.get_collection(BRAND_COLLECTION).find({"is_active": {"$ne": False}}):
-            if doc.get("is_active") is False:
-                continue
-            if str(doc.get("name") or "").strip().casefold() == probe:
-                return doc
-        return None
+        rows = _brand_rows(db, brand_name)
     except Exception as e:  # noqa: BLE001
         logger.warning("[CATALOG-DICT] brand lookup failed: %s", e)
         return None
+    return next((d for d in rows if d.get("is_active") is not False), None)
 
 
 def load_brand_tier(db, brand_name: str) -> Optional[str]:
@@ -189,18 +195,38 @@ def load_brand_tier(db, brand_name: str) -> Optional[str]:
     return tier if tier in BRAND_TIERS else None
 
 
-def load_brand_sync_default(db, brand_name: str) -> bool:
-    """The brand's `sync_to_shopify_default` flag (Settings -> Brand Master).
+def brand_website_refusal(db, brand_name: str) -> Optional[str]:
+    """None when Settings > Brand Master sends this brand to the website, else
+    why not, in words a cataloguer can act on.
 
-    Used by the product create door to stamp `sync_to_shopify` INTENT on new
-    spine products when the payload doesn't say explicitly. NOTE: nothing
-    pushes to Shopify from IMS anymore (the BVI app owns Shopify) -- this is
-    a recorded intent for the future BVI-side push. FAIL-SOFT: unknown brand /
-    no db / read failure -> False (never sync by accident)."""
-    doc = _find_active_brand(db, brand_name)
-    if doc is None:
-        return False
-    return doc.get("sync_to_shopify_default") is True
+    THE website rule (owner ruling 2026-09-29, D6): the brand default always
+    decides, read LIVE. The Shopify push gate (shopify_push.
+    product_push_refusal) asks it, and the Add/Edit form's line asks that
+    gate (GET /products/website-verdict). Products store no copy of it.
+    FAIL-CLOSED (never sync by accident), each case with its own reason, so a
+    misspelt or renamed brand, an inactive one or a read failure is never
+    mistaken for a brand that is switched off."""
+    name = str(brand_name or "").strip()
+    if not name:
+        return "the product has no brand"
+    try:
+        rows = _brand_rows(db, name) if db is not None else None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[CATALOG-DICT] brand lookup failed: %s", e)
+        rows = None
+    if rows is None:
+        return "Settings > Brand Master could not be read just now"
+    active = [d for d in rows if d.get("is_active") is not False]
+    if not active:
+        if rows:
+            return "brand '%s' is inactive in Settings > Brand Master" % name
+        return (
+            "brand '%s' is not in Settings > Brand Master (check its spelling, "
+            "or whether the brand was renamed)" % name
+        )
+    if active[0].get("sync_to_shopify_default") is not True:
+        return "brand '%s' is not for the website (Settings > Brand Master)" % name
+    return None
 
 
 def load_subbrand_options(db, brand_name: str) -> Optional[List[str]]:

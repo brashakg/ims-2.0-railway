@@ -37,6 +37,9 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+# A card's photo is the product's main photo -- the one rule (photo 1).
+from .product_master import main_photo
+
 logger = logging.getLogger(__name__)
 
 # Cap the number of product cards a single PDF renders. 100+ products paginate
@@ -153,25 +156,6 @@ def _brand_of(product: Dict) -> str:
     return _clean_str(product.get("brand")) or _clean_str(_attr(product, "brand")) or ""
 
 
-def _image_url_of(product: Dict) -> Optional[str]:
-    """The best single image URL for a product (mirrors the list_products alias:
-    singular image_url, else the first of the images[] array, else `image`)."""
-    url = _clean_str(product.get("image_url"))
-    if url:
-        return url
-    imgs = product.get("images")
-    if isinstance(imgs, list):
-        for it in imgs:
-            if isinstance(it, str) and it.strip():
-                return it.strip()
-            if isinstance(it, dict):
-                cand = _clean_str(it.get("url") or it.get("src"))
-                if cand:
-                    return cand
-    single = _clean_str(product.get("image"))
-    return single or None
-
-
 def _description_of(product: Dict) -> str:
     """A short plain-text description. Prefers short_description; falls back to
     description; strips HTML tags from an html-only source. Capped."""
@@ -238,7 +222,7 @@ def build_product_rows(
             "sku": _clean_str(p.get("sku")),
             "brand": _brand_of(p),
             "name": _name_of(p),
-            "image": _image_url_of(p),
+            "image": main_photo(p),
         }
         if include_mrp:
             mrp = _mrp_of(p)

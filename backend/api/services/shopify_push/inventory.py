@@ -1938,29 +1938,34 @@ def listing_visible(product: Dict[str, Any]) -> bool:
     )
 
 
-def live_listing_split(db, skus: Iterable[str], *, strict: bool = False) -> Tuple[set, set]:
-    """``(live, shared)`` -- the one "is this SKU's listing live" answer, split
-    on the writer's own duplicate-inventory-item guard. ``shared`` holds the
-    live, addressable SKUs whose Shopify inventory item another SKU also claims
-    (``_duplicates_or_error``, the guard ``push_skus_stock`` applies): the
-    writer sends NEITHER, so nothing can be compared or set for them and they
-    are in no view and no tally. An unreadable guard is UNKNOWN: strict raises,
-    fail-soft gives ``(set(), set())``."""
-    from ..online_catalog import _coll, inventory_items_for_skus, listings_for_skus
+def _live_listing_reads(db, skus: Iterable[str], *, strict: bool) -> Tuple[set, set, set]:
+    """``(live, shared, own)`` for ``live_listing_split`` and
+    ``skus_on_sale_online``: ``own`` holds the keys that ARE a visible
+    listing's own SKU (a single product on its own listing), addressable or
+    not."""
+    from ..online_catalog import (
+        _coll,
+        inventory_items_for_skus,
+        listings_for_skus,
+        normalize_sku,
+    )
 
     by_listing = listings_for_skus(db, list(skus or []), strict=strict)
     if not by_listing:
-        return set(), set()
+        return set(), set(), set()
     coll = _coll(db, "catalog_products")
     try:
         if coll is None:
             raise RuntimeError("catalog_products unavailable")
         live = {
-            str(d.get("id"))
-            for d in coll.find({"id": {"$in": sorted(by_listing)}}, {"_id": 0, "id": 1, "ecom": 1})
+            str(d.get("id")): normalize_sku(d.get("sku"))
+            for d in coll.find(
+                {"id": {"$in": sorted(by_listing)}}, {"_id": 0, "id": 1, "sku": 1, "ecom": 1}
+            )
             if listing_visible(d)
         }
         on_live = [s for pid, keys in by_listing.items() if pid in live for s in keys]
+        own = {s for pid, keys in by_listing.items() if pid in live for s in keys if s == live[pid]}
         targeted = inventory_items_for_skus(db, on_live) if on_live else {}
         addressable = {s: targeted[s] for s in on_live if s in targeted}
         duplicates, claim_error = _duplicates_or_error(db, addressable)
@@ -1969,9 +1974,34 @@ def live_listing_split(db, skus: Iterable[str], *, strict: bool = False) -> Tupl
     except Exception:  # noqa: BLE001
         if strict:
             raise
-        return set(), set()
+        return set(), set(), set()
     shared = {s for skus_ in duplicates.values() for s in skus_ if s in addressable}
-    return set(addressable) - shared, shared
+    return set(addressable) - shared, shared, own
+
+
+def live_listing_split(db, skus: Iterable[str], *, strict: bool = False) -> Tuple[set, set]:
+    """``(live, shared)`` -- the one "is this SKU's listing live" answer, split
+    on the writer's own duplicate-inventory-item guard. ``shared`` holds the
+    live, addressable SKUs whose Shopify inventory item another SKU also claims
+    (``_duplicates_or_error``, the guard ``push_skus_stock`` applies): the
+    writer sends NEITHER, so nothing can be compared or set for them and they
+    are in no view and no tally. An unreadable guard is UNKNOWN: strict raises,
+    fail-soft gives ``(set(), set())``."""
+    live, shared, _own = _live_listing_reads(db, skus, strict=strict)
+    return live, shared
+
+
+def skus_on_sale_online(db, skus: Iterable[str], *, strict: bool = False) -> set:
+    """THE "a shopper can buy this SKU on the website" answer for the doors
+    that take a product off or put it back (the archive dialog, restore):
+    ``skus_on_live_listings`` plus what only the stock writer leaves out --
+    a SKU whose inventory item another SKU also claims, and a single product
+    on its own visible listing whose inventory item IMS never recorded. Both
+    are on sale, and the take-down (push_product_delist) still takes them
+    down. A size not yet minted on Shopify is not on sale. Fail-soft set()
+    -- or, ``strict``, a failed read raises."""
+    live, shared, own = _live_listing_reads(db, skus, strict=strict)
+    return live | shared | own
 
 
 def skus_on_live_listings(db, skus: Iterable[str], *, strict: bool = False) -> set:

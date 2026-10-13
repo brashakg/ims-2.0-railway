@@ -425,7 +425,9 @@ class TestReworkJustification:
         assert body["status"] == "IN_PROGRESS"
         assert body["rework_count"] == 1
         assert body["remake_reason_code"] == "AXIS_ERROR"  # case-normalised
-        assert body["spoilage_cost_paise"] == 45000  # 450.00 rupees WAC -> paise
+        # Workshop staff send the rework but never see what it cost (owner
+        # ruling D7, services/cost_mask "product"); the job keeps the cost.
+        assert "spoilage_cost_paise" not in body
 
         job = coll.find_one({"job_id": "j1"})
         assert job["status"] == "IN_PROGRESS" and job["rework_count"] == 1
@@ -434,7 +436,7 @@ class TestReworkJustification:
         e = entries[0]
         assert e["reason_code"] == "AXIS_ERROR"
         assert e["category"] == "LAB_FAULT"  # defaulted from the taxonomy
-        assert e["cost_paise"] == 45000
+        assert e["cost_paise"] == 45000  # 450.00 rupees WAC -> paise
         assert e["by"] == "u1" and e["notes"] == "axis off by 5" and e["at"]
 
         # THE atomicity intent: ONE find_one_and_update did everything; no
@@ -485,7 +487,8 @@ class TestReworkJustification:
         c = _client(monkeypatch, ["WORKSHOP_STAFF"], repo, db)
         r = c.post("/workshop/jobs/j1/rework", params={"remake_reason_code": "OTHER"})
         assert r.status_code == 200, r.text
-        assert r.json()["spoilage_cost_paise"] == 0  # costing gap never blocks
+        job = db.get_collection("workshop_jobs").find_one({"job_id": "j1"})
+        assert job["remake_reasons"][0]["cost_paise"] == 0  # costing gap never blocks
 
     def test_db_absent_still_records_with_default_taxonomy(self, monkeypatch):
         # No Mongo at all: taxonomy falls back to the seed, cost is 0, audit is
@@ -495,8 +498,8 @@ class TestReworkJustification:
         c = _client(monkeypatch, ["WORKSHOP_STAFF"], repo, db=None)
         r = c.post("/workshop/jobs/j1/rework", params={"remake_reason_code": "POWER_ERROR"})
         assert r.status_code == 200, r.text
-        assert r.json()["spoilage_cost_paise"] == 0
         job = bare.get_collection("workshop_jobs").find_one({"job_id": "j1"})
+        assert job["remake_reasons"][0]["cost_paise"] == 0
         assert job["remake_reasons"][0]["reason_code"] == "POWER_ERROR"
 
     def test_wrong_status_400_and_race_409(self, monkeypatch, db):

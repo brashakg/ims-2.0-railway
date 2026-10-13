@@ -199,6 +199,9 @@ function sweepToast(
   const heldDown = n('taken_down_skipped');
   const archived = n('archived_not_listed');
   const oldPrice = n('price_not_synced');
+  // LIVE, BUT ITS PHOTOS ARE NOT IMS's (a photo step failed): still queued,
+  // and the website's photo 1 may not be the main photo IMS shows.
+  const oldPhotos = n('photos_not_synced');
   // LIVE, BUT SOLD OUT. The listing published and its quantities reached
   // no location at all (no shop mapped, two SKUs on one inventory
   // item...). It has its own count for the same reason the OLD price
@@ -243,12 +246,13 @@ function sweepToast(
     (heldDown ? ` · ${heldDown} skipped (taken down)` : '') +
     (archived ? ` · ${archived} archived (not listed)` : '') +
     (oldPrice ? ` · ${oldPrice} at the OLD price (price not synced)` : '') +
+    (oldPhotos ? ` · ${oldPhotos} live with their photos NOT as IMS has them (still queued)` : '') +
     (noStock ? ` · ${noStock} live with NO stock written (sold out)` : '') +
     (stockWarn ? ` · ${stockWarn} live with a stock warning (see the stock line)` : '') +
     (soldOut ? ` · ${soldOut} live and SOLD OUT (0 at every shop)` : '') +
     why +
     stockPassLine;
-  const bad = refused || withheld || noStock || stockWarn || stockPassBad || failed;
+  const bad = refused || withheld || oldPhotos || noStock || stockWarn || stockPassBad || failed;
   return { level: bad ? 'warning' : 'success', msg };
 }
 
@@ -986,6 +990,9 @@ export default function OnlineShopifySyncPage() {
               {(lastRun.refused_no_photo ?? 0) > 0 && <> · {fmt(lastRun.refused_no_photo)} refused (no photo)</>}
               {(lastRun.publish_withheld ?? 0) > 0 && <> · {fmt(lastRun.publish_withheld)} withheld</>}
               {(lastRun.price_not_synced ?? 0) > 0 && <> · {fmt(lastRun.price_not_synced)} at the OLD price</>}
+              {(lastRun.photos_not_synced ?? 0) > 0 && (
+                <> · {fmt(lastRun.photos_not_synced)} with photos NOT as IMS has them</>
+              )}
               {lastRun.limit_reached && <> · stopped at the {lastRun.limit ?? '?'}-product cap</>}
             </p>
             {lastRun.stock && <StockPassLine stock={lastRun.stock} testId="live-sync-stock-line" />}
@@ -1153,6 +1160,20 @@ export default function OnlineShopifySyncPage() {
                         ) : null;
                       })()}
                       {(() => {
+                        const oldPhotos = Number(
+                          (sweep.summary?.[ent.token]?.photos_not_synced ?? 0) as number,
+                        );
+                        return oldPhotos > 0 ? (
+                          <span
+                            className="inline-flex items-center gap-1 text-red-700"
+                            title="Live on the website, but a photo change did not reach Shopify, so the website's photos or their order are not what IMS shows. They are still queued - press again, or the next scheduled sync retries them."
+                          >
+                            <AlertTriangle className="w-3 h-3" /> {fmt(oldPhotos)} with photos NOT as IMS
+                            has them
+                          </span>
+                        ) : null;
+                      })()}
+                      {(() => {
                         const noStock = Number(
                           (sweep.summary?.[ent.token]?.stock_not_written ?? 0) as number,
                         );
@@ -1206,7 +1227,8 @@ export default function OnlineShopifySyncPage() {
                           </span>
                         ) : null;
                       })()}
-                      {/* Push-locked SKUs the sweep excluded (from summary.products). */}
+                      {/* Products the sweep excluded (from summary.products): push-locked,
+                          or a brand Brand Master keeps off the website. */}
                       {(() => {
                         const blocked = Number(
                           (sweep.summary?.[ent.token]?.blocked_skipped ?? 0) as number,
@@ -1214,7 +1236,7 @@ export default function OnlineShopifySyncPage() {
                         return blocked > 0 ? (
                           <span
                             className="inline-flex items-center gap-1 text-amber-700"
-                            title="Push-locked SKUs skipped by this sweep"
+                            title="Skipped by this sweep: push-locked, or the brand is not for the website (Settings > Brand Master). They go out once the brand is ticked."
                           >
                             · {fmt(blocked)} blocked (skipped)
                           </span>

@@ -172,6 +172,37 @@ describe('Live sync card', () => {
     expect(rows[0]).toHaveTextContent(/OLD price/);
   });
 
+  // Photo order (owner 2026-10-12): a photo step that failed on a live
+  // product (a reorder that did not land) gets its own count and failure row
+  // too -- it stays queued and the next run sends it again.
+  it('shows a live product whose photos did not reach Shopify on its own line, with the code', async () => {
+    const run = {
+      ...LAST_RUN,
+      failed: 0,
+      pushed_ok: 3,
+      photos_not_synced: 1,
+      failures: [
+        {
+          product_id: 'P12',
+          sku: 'RB-4165',
+          name: 'Justin',
+          code: 'PHOTOS_NOT_SYNCED',
+          reason: null,
+          error: 'Live on the website, but its photos there do not match IMS.',
+        },
+      ],
+    };
+    vi.mocked(pushApi.getStatus).mockResolvedValue(status({ ...SCHEDULE_ON, last_run: run }) as any);
+    render(<OnlineShopifySyncPage />);
+
+    const card = await screen.findByTestId('live-sync-card');
+    expect(card).toHaveTextContent('1 with photos NOT as IMS has them');
+    const failures = within(card).getByRole('list', { name: /live sync failures/i });
+    const rows = within(failures).getAllByRole('listitem');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent('PHOTOS_NOT_SYNCED');
+  });
+
   it('the button runs the same backend door and reloads the status', async () => {
     vi.mocked(pushApi.getStatus).mockResolvedValue(status({ ...SCHEDULE_ON, last_run: null }) as any);
     vi.mocked(pushApi.syncLiveNow).mockResolvedValue({

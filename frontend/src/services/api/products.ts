@@ -91,13 +91,6 @@ export interface CreateProductPayload {
   cost_price?: number;
   discount_category?: string;
   images?: string[];
-  shopify?: {
-    // Online-store staging flags for a new product. IMS owns Shopify writes
-    // directly; the actual push happens from the Online Store module.
-    sync_to_shopify: boolean;
-    shopify_tags?: string[];
-    publish_to_pos?: boolean;
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +103,13 @@ export interface CreateProductPayload {
 // payload as a typed DuplicateProductError — the shared axios interceptor
 // would otherwise flatten the object detail into a generic string Error.
 // ---------------------------------------------------------------------------
+/** One Brand Master row as the Add-product form needs it. */
+export interface BrandOption {
+  name: string;
+  subbrands: string[];
+  tier?: string;
+}
+
 export interface DuplicateProductInfo {
   product_id?: string | null;
   sku?: string | null;
@@ -154,6 +154,10 @@ export interface SimilarProductsResponse {
   exact_match: SimilarProductSummary | null;
   siblings: SimilarProductSummary[];
   model_colour_count: number;
+  /** The typed attributes that decide this answer (the server's identity
+   *  rule, product_master.identity_inputs): a change to any other one leaves
+   *  it true. Absent = every attribute decides. */
+  identity_fields?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -318,6 +322,31 @@ export const catalogApi = {
   },
 };
 
+/** GET /products/facets: each filter's options with counts ('Black (179)'). */
+export interface CatalogFacets {
+  total: number;
+  brand?: Array<{ value: string; count: number }>;
+  frame_color?: Array<{ value: string; count: number }>;
+  lens_colour?: Array<{ value: string; count: number }>;
+  gender?: Array<{ value: string; count: number }>;
+  shape?: Array<{ value: string; count: number }>;
+  frame_type?: Array<{ value: string; count: number }>;
+  frame_material?: Array<{ value: string; count: number }>;
+  /** People who added products: user id, full name, count. */
+  created_by?: Array<{ value: string; label: string; count: number }>;
+  /** People who last edited products, plus value 'none' = Never edited. */
+  updated_by?: Array<{ value: string; label: string; count: number }>;
+  flags?: {
+    /** Products with any open flag. */
+    open: number;
+    /** ...of them, added by the signed-in user. */
+    mine: number;
+    by_type: Record<string, number>;
+    /** Admins only. */
+    archived?: number;
+  };
+}
+
 /** The Catalog screen's counts row, from GET /catalog/online-summary. */
 export interface CatalogCounts {
   in_catalog: number;
@@ -344,8 +373,11 @@ export const productApi = {
     search?: string;
     /** 'anywhere' = the purchase-order product box's wide search (model
      *  number anywhere, brand spelt any way, colour words, GTIN -- audit F21).
-     *  Omit for the till's rule: every word from the START of brand / model /
-     *  SKU / variant / barcode. POS and every other search box omit it. */
+     *  Omit for the till's rule: every word STARTS a word of the brand, model,
+     *  product name, model name or sub-brand ("optix" finds "Air Optix"), or
+     *  the start of the SKU / variant / barcode; what the old rule (start of
+     *  brand / model / SKU / variant / barcode) found is listed first. POS
+     *  and every other search box omit it. */
     match?: 'anywhere';
     store_id?: string;
     skip?: number;
@@ -357,9 +389,36 @@ export const productApi = {
      *  the product's catalog twin, the doc the push reads); 'missing' = none.
      *  Rows come back stamped with has_photo + online either way. */
     photo?: 'has' | 'missing';
+    /** The Catalog page's sort + filters (owner 2026-10-12). Any one of them
+     *  makes the server sort the WHOLE filtered result (Recently edited by
+     *  default) and page it; options match trimmed + case-insensitive. */
+    sort?: string;
+    frame_color?: string;
+    lens_colour?: string;
+    gender?: string;
+    shape?: string;
+    frame_type?: string;
+    frame_material?: string;
+    /** Last edited by this user_id; 'none' = never edited. */
+    updated_by?: string;
+    /** Which date From / To read: when it was added, or last edited. */
+    date_on?: 'added' | 'edited';
+    /** India days (YYYY-MM-DD), both included. */
+    date_from?: string;
+    date_to?: string;
+    /** 'any' | 'mine' | a flag type | 'archived' (admins only). */
+    flag?: string;
   }) => {
     const response = await api.get('/products', { params });
     return response.data;
+  },
+
+  /** The Catalog page's filter options with counts + the open-flag counts
+   *  for the red banner (manager ladder). `is_active: 'all'` = Include
+   *  inactive. Import DIRECTLY from this module (TS2614). */
+  getFacets: async (params?: { is_active?: 'true' | 'all' }): Promise<CatalogFacets> => {
+    const response = await api.get('/products/facets', { params });
+    return response.data as CatalogFacets;
   },
 
   // Cataloguer roster for the "Catalogued by" filter + performance counts.
@@ -404,13 +463,32 @@ export const productApi = {
   // applicable to the category (short code like 'FR' or canonical), each with
   // its sub-brand names — drives the Brand Name select and restricts the
   // Sub Brand select per selected brand. Authenticated (not admin-gated).
-  getBrandOptions: async (
-    category?: string
-  ): Promise<{ brands: Array<{ name: string; subbrands: string[]; tier?: string }> }> => {
+  getBrandOptions: async (category?: string): Promise<{ brands: BrandOption[] }> => {
     const response = await api.get('/products/brand-options', { params: { category } });
-    return response.data as {
-      brands: Array<{ name: string; subbrands: string[]; tier?: string }>;
-    };
+    return response.data as { brands: BrandOption[] };
+  },
+
+  // Whether a product of this brand goes to the website, and why not: THE
+  // push gate's own answer (shopify_push.product_push_refusal -- a push-locked
+  // brand, or the brand's Brand Master default). The form shows it and never
+  // works it out itself.
+  getWebsiteVerdict: async (
+    brand: string
+  ): Promise<{ brand: string; online: boolean; reason: string | null }> => {
+    const response = await api.get('/products/website-verdict', { params: { brand } });
+    return response.data as { brand: string; online: boolean; reason: string | null };
+  },
+
+  // The SKU a NEW product will get, from the server's one minter
+  // (product_master.build_sku) -- the form shows it before saving and never
+  // builds a SKU itself. `taken`: another product already has it, so the save
+  // adds a number to the end (product_master.sku_taken, the save's question).
+  previewSku: async (
+    category: string,
+    attributes: Record<string, string>
+  ): Promise<{ category: string | null; sku: string; taken?: boolean }> => {
+    const response = await api.post('/products/sku-preview', { category, attributes });
+    return response.data as { category: string | null; sku: string; taken?: boolean };
   },
 
   getBrands: async (category?: string) => {
@@ -433,13 +511,9 @@ export const productApi = {
   // module (not the api barrel) — the barrel re-export fails for new methods
   // (TS2614).
   getSimilarProducts: async (
-    params: {
-      category: string;
-      brand: string;
-      model_no: string;
-      colour_code?: string;
-      size?: string;
-    },
+    // The category and the form's attributes as typed: the server keys them
+    // with the create door's own identity rule.
+    params: { category: string; [attribute: string]: string },
     signal?: AbortSignal
   ): Promise<SimilarProductsResponse> => {
     const response = await api.get('/products/similar', { params, signal });
@@ -693,7 +767,7 @@ export const adminBrandApi = {
     warranty?: number;
     description?: string;
     status?: string;
-    /** Default Shopify-sync intent stamped on new products of this brand. */
+    /** Whether this brand's products go to the website (D6; the push gate reads it live). */
     sync_to_shopify_default?: boolean;
   }) => {
     const response = await api.post('/admin/brands', data);

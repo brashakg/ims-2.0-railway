@@ -4,7 +4,7 @@
 // MOVED verbatim out of QuickAddPage.tsx (Wave 3 file diet).
 
 import { Sparkles } from 'lucide-react';
-import { categoryName, fieldLabelFor } from '../productAddShared';
+import { categoryName, fieldLabelFor, modelOf } from '../productAddShared';
 import { ReviewRow } from './parts';
 import type { QuickAddForm } from './useQuickAddForm';
 
@@ -12,7 +12,7 @@ export function ReviewCard({ form }: { form: QuickAddForm }) {
   const {
     selectedCategory, attributes, mrp, offerPrice, canSeeCost, costPrice,
     weight, hsnCode, gstRate, hsnMatchesCategory, discountCategory, brandTiers,
-    isReviewMode, reorderLevel, images, syncToShopify,
+    isReviewMode, reorderLevel, images, websiteVerdict, editMode, skuPreview,
   } = form;
 
   return (
@@ -24,12 +24,14 @@ export function ReviewCard({ form }: { form: QuickAddForm }) {
         </div>
 
         <dl className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-3 gap-x-8 gap-y-1.5 text-sm">
+          {/* The server-minted SKU this new product will get (F13/D5): a
+              full-width row that wraps, so a long SKU is read whole on a
+              1024px tablet (no hover there to reveal a cut-off value). First,
+              so the grid leaves no empty cell beside it. */}
+          {!editMode && <ReviewRow label="SKU" value={skuPreview || '—'} wide />}
           <ReviewRow label="Category" value={categoryName(selectedCategory) || '—'} />
           <ReviewRow label="Brand" value={attributes.brand_name || '—'} />
-          <ReviewRow
-            label="Model"
-            value={attributes.model_no || attributes.model_name || '—'}
-          />
+          <ReviewRow label="Model" value={modelOf(selectedCategory, attributes) || '—'} />
           {/* Remaining filled category attributes (parity with the Guided
               wizard's review, which listed every filled attribute), named
               by the registry label the form itself uses -- never a raw key
@@ -67,7 +69,9 @@ export function ReviewCard({ form }: { form: QuickAddForm }) {
           {images.length > 0 && (
             <ReviewRow label="Images" value={`${images.length} uploaded`} />
           )}
-          {syncToShopify && !isReviewMode && <ReviewRow label="Shopify" value="Will sync" />}
+          {websiteVerdict?.online && !isReviewMode && (
+            <ReviewRow label="Shopify" value="Will sync" />
+          )}
         </dl>
       </div>
     </aside>

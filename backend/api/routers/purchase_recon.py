@@ -39,12 +39,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from .auth import get_current_user, require_roles
+from ..services.cost_mask import AP_ROLES
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# Same gate as purchase_invoices.py
-_AP_ROLES = ("ADMIN", "ACCOUNTANT")
+# The accounts roles (services/cost_mask), as purchase_invoices.py.
+_AP_ROLES = AP_ROLES
 
 # Statuses that mean a vendor return is still open/in-flight (not resolved)
 _OPEN_RETURN_STATUSES = {"created", "shipped", "received_by_vendor"}

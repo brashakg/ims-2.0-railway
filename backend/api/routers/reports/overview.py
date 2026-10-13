@@ -19,6 +19,7 @@ from ...dependencies import (
     get_db,
     validate_store_access,
 )
+from ...services.cost_mask import mask_cost
 from ...services.name_resolver import order_actor_id, order_actor_name_map
 from ...services.reorder_policy import low_stock_rows
 from ._shared import (
@@ -186,13 +187,19 @@ async def inventory_report(
                 "cost_price", 0
             )
 
-        return {
-            "totalItems": total_items,
-            "totalValue": round(total_value, 2),
-            "lowStock": low_stock_count,
-            "outOfStock": out_of_stock,
-            "categories": list(categories.values()),
-        }
+        # Stock value is at cost: the roles that see product cost only (D7).
+        return mask_cost(
+            {
+                "totalItems": total_items,
+                "totalValue": round(total_value, 2),
+                "lowStock": low_stock_count,
+                "outOfStock": out_of_stock,
+                "categories": list(categories.values()),
+            },
+            current_user,
+            "product",
+            extra=("totalValue", "value"),
+        )
 
     return {
         "totalItems": 0,

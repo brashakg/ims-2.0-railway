@@ -7,7 +7,6 @@ from ._shared import (
     _get_db,
     ap_engine,
     datetime,
-    get_current_user,
     get_vendor_repository,
     require_roles,
     router,
@@ -95,7 +94,7 @@ async def create_vendor_payment(
 @router.get("/{vendor_id}/payments")
 async def list_vendor_payments(
     vendor_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
     """List a vendor's payments (newest first)."""
     db = _get_db()
@@ -163,7 +162,7 @@ async def create_debit_note(
 @router.get("/{vendor_id}/debit-notes")
 async def list_debit_notes(
     vendor_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
     """List a vendor's debit notes (newest first)."""
     db = _get_db()
@@ -184,7 +183,7 @@ async def list_debit_notes(
 @router.get("/{vendor_id}/ledger")
 async def vendor_ledger(
     vendor_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
     """Full vendor ledger: bills (credit) + payments + debit notes (debit) with
     a running payable balance, plus an aging snapshot for the same vendor."""
