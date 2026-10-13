@@ -494,7 +494,7 @@ def _resolve_cl_reorder(
 
 
 # F41: order statuses that count as a REAL confirmed sale -- a DRAFT/CANCELLED
-# order does NOT keep a patient "active". Mirrors crm._SOLD_STATUSES intent but
+# order does NOT keep a patient "active". Mirrors online_order_status.SALE_DONE_ANY_CASE intent but
 # expressed as the exclusion the resolver needs (anything not draft/cancelled is
 # a real touch). Lapse threshold default (24 months) lives in E2 policy.
 LAPSED_THRESHOLD_MONTHS = 24

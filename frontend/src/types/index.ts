@@ -289,6 +289,7 @@ export type OrderStatus =
   | 'CONFIRMED'
   | 'PROCESSING'
   | 'READY'
+  | 'SHIPPED' // an online order Shopify fulfilled; delivered at the counter or by the courier
   | 'DELIVERED'
   | 'CANCELLED';
 

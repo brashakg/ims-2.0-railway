@@ -15,6 +15,7 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime
 
 from ..utils.ist import ist_day_start_utc, ist_today, now_ist
+from ..services.online_order_status import BOOKED_STATUSES
 from .auth import get_current_user, require_roles
 from ..dependencies import validate_store_access
 from ..services.reorder_policy import low_stock_rows, out_of_stock_count
@@ -77,49 +78,14 @@ def _today() -> str:
     return ist_today().isoformat()
 
 
-_COUNTED = {"CONFIRMED", "PROCESSING", "READY", "DELIVERED"}
+_COUNTED = BOOKED_STATUSES
 
 
 # ── Tasks ──────────────────────────────────────────────────────────────────
-
-
-@router.get("/tasks/completion-stats")
-async def tasks_completion_stats(
-    store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
-):
-    coll = _coll("tasks")
-    sid = _store(current_user, store_id)
-    if coll is None:
-        return {"open": 0, "in_progress": 0, "completed": 0, "completion_rate": 0}
-    base = {"store_id": sid} if sid else {}
-    open_c = coll.count_documents({**base, "status": "open"})
-    inprog = coll.count_documents({**base, "status": "in_progress"})
-    done = coll.count_documents({**base, "status": "completed"})
-    total = open_c + inprog + done
-    return {
-        "open": open_c,
-        "in_progress": inprog,
-        "completed": done,
-        "completion_rate": round(done / total * 100, 1) if total else 0,
-    }
-
-
-@router.get("/tasks/escalations")
-async def tasks_escalations(
-    status: Optional[str] = Query(None),
-    store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
-):
-    coll = _coll("tasks")
-    sid = _store(current_user, store_id)
-    if coll is None:
-        return {"escalations": [], "count": 0}
-    q: Dict[str, Any] = {"status": "escalated"}
-    if sid:
-        q["store_id"] = sid
-    rows = [{k: v for k, v in r.items() if k != "_id"} for r in coll.find(q).limit(20)]
-    return {"escalations": rows, "count": len(rows)}
+# GET /tasks/completion-stats and /tasks/escalations used to live here and
+# counted / listed EVERY task of the shop for any signed-in role. No screen
+# called them; they are deleted (owner ruling 2026-10-12: who sees a task is
+# services/task_visibility.py, and GET /tasks/summary is THE task count).
 
 
 # ── Clinical ────────────────────────────────────────────────────────────────
