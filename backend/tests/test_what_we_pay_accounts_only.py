@@ -252,10 +252,11 @@ def test_buyers_still_open_every_purchase_read(client, buying, role, path, extra
 @pytest.mark.parametrize("path,extra", ALL_READS)
 def test_accounts_still_read_what_we_pay(client, buying, role, path, extra):
     # The positive control that keeps the managers' "no leak" from passing on
-    # an empty shop. The accountant has no workshop / blind-count screen.
+    # an empty shop. The accountant has no workshop / blind-count screen, and
+    # no receiving cockpit (receiving is managers only, ruling 2026-09-28).
     r = _get(client, role, path)
     if role == "ACCOUNTANT" and r.status_code == 403:
-        assert "spoilage" in path or "blind-count" in path, path
+        assert any(k in path for k in ("spoilage", "blind-count", "goods-receipt/cockpit")), path
         return
     assert r.status_code == 200, (role, path, r.text[:300])
     assert _leaks(r.json(), extra), (role, path, r.json())
