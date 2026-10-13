@@ -29,8 +29,10 @@ other action type refuses them (insufficient_tier), as before. Whoever raised
 an 'rtv' cannot approve it ('rtv' is maker-checker): a second accounts person
 does.
 
-Spending by id (/consume) follows the rule GET applies (_request_in_reach):
-its maker or consumer, else a caller whose shops it is in.
+Approving, rejecting and spending by id (/approve, /reject, /consume) follow
+the rule GET applies (_request_in_reach): its maker or consumer, else a caller
+whose shops it is in. Anyone else gets exactly what a missing id gets (404),
+checked before any role, tier or PIN gate could tell the two apart.
 """
 
 from __future__ import annotations
@@ -261,6 +263,16 @@ def _request_in_reach(eng: ApprovalEngine, doc: Dict[str, Any], user: Dict[str, 
     return eng._store_scope_ok(doc.get("store_id"), set(_roles(user)), sorted(stores))
 
 
+def _in_reach_or_missing(eng: ApprovalEngine, request_id: str, user: Dict[str, Any]) -> None:
+    """approve / reject: a request the caller may not open by id (the rule GET
+    applies, _request_in_reach) answers exactly what a missing id answers --
+    the engine's 404 not_found -- before the engine's tier, maker-checker,
+    store or PIN gate can tell another shop's request from no request (F63)."""
+    doc = eng.get(request_id)
+    if doc is not None and not _request_in_reach(eng, doc, user):
+        _decode({"ok": False, "http": 404, "error": "not_found"}, success_keys=())
+
+
 @router.get("/requests/{request_id}")
 async def get_request(
     request_id: str,
@@ -303,8 +315,11 @@ async def approve_request(
 ):
     """Approve a request with the approver's PIN. The state transition + token
     mint are a single atomic op inside the engine. An 'rtv' request is the
-    accounts roles' at any tier (R1); a manager gets 404 for one."""
-    res = _engine().approve(
+    accounts roles' at any tier (R1); a manager gets 404 for one, and so does
+    anyone for another shop's request (_in_reach_or_missing)."""
+    eng = _engine()
+    _in_reach_or_missing(eng, request_id, current_user)
+    res = eng.approve(
         request_id,
         approver_user_id=current_user.get("user_id"),
         approver_roles=_roles(current_user),
@@ -320,8 +335,11 @@ async def reject_request(
     body: RejectAction,
     current_user: Dict[str, Any] = Depends(require_roles(*_DECIDE_ROLES)),
 ):
-    """Reject a request with the approver's PIN. Same routing as approve."""
-    res = _engine().reject(
+    """Reject a request with the approver's PIN. Same routing and the same
+    shop rule as approve."""
+    eng = _engine()
+    _in_reach_or_missing(eng, request_id, current_user)
+    res = eng.reject(
         request_id,
         approver_user_id=current_user.get("user_id"),
         approver_roles=_roles(current_user),

@@ -307,13 +307,52 @@ def test_an_accountant_stays_inside_their_shops(world):
     acct = _user("ACCOUNTANT")  # S1 only
     assert rid not in {r["request_id"] for r in _inbox(world, acct)}
     assert world.as_(acct).get(_ONE.format(rid)).status_code == 404
-    r = world.as_(acct).post(_APPROVE.format(rid), json={"pin": PIN})
-    assert r.status_code == 403 and r.json()["detail"]["error"] == "store_scope"
+    # Approving it answers exactly what a missing id answers (F63).
+    got, ghost = _missing_like(world.as_(acct).post(_APPROVE.format(rid), json={"pin": PIN}),
+                               world.as_(acct).post(_APPROVE.format("REQ-NOPE"), json={"pin": PIN}))
+    assert got == ghost == {"error": "not_found"}
     # Nor by naming the other shop on the inbox (the one shop rule).
     assert world.as_(acct).get(_INBOX, params={"store_id": S2}).status_code == 403
     # Pune's own accountant lists it.
     pune = _user("ACCOUNTANT", store=S2, uid="u-accountant-pune")
     assert rid in {r["request_id"] for r in _inbox(world, pune)}
+
+
+@pytest.mark.parametrize("kind", ("rtv", "refund"))
+@pytest.mark.parametrize(
+    "who",
+    [_user("ACCOUNTANT"), _user("STORE_MANAGER"), _user("AREA_MANAGER"),
+     {"user_id": "u-accountant-new", "roles": ["ACCOUNTANT"], "store_ids": [], "active_store_id": None}],
+    ids=["accountant", "store_manager", "area_manager", "accountant_no_shop"],
+)
+def test_another_shops_request_is_approved_or_rejected_like_a_missing_one(world, who, kind):
+    """F63 on approve / reject, through the rule GET applies: a BV-DHN-01 login
+    (or one with no shop) acting on a WO-PUN-01 request gets byte for byte what
+    a missing id gets -- never 403 store_scope or insufficient_tier, which would
+    confirm the request exists -- and nothing moves: the request stays
+    REQUESTED and the caller's PIN throttle is untouched."""
+    if kind == "rtv":
+        rid = world.rtv(store=S2, rma="RMA-PUN")
+    else:
+        rid = world.eng.request(action_type="refund", requested_by="u-maker",
+                                requested_by_roles=["STORE_MANAGER"], store_id=S2,
+                                amount=999.0, context={"order_id": "O-PUN"})["request_id"]
+    before = _doc(world, rid)
+    cli = world.as_(who)
+    for path, body in ((_APPROVE, {"pin": PIN}), (_REJECT, {"pin": PIN, "reason": "x"})):
+        got = cli.post(path.format(rid), json=body)
+        ghost = cli.post(path.format("REQ-NOPE"), json=body)
+        assert (got.status_code, got.json()) == (ghost.status_code, ghost.json()) == (
+            404, {"detail": {"error": "not_found"}}), (path, got.text)
+    assert _doc(world, rid) == before
+    assert _attempts(world, who["user_id"]) is None
+    # Pune's own accountant still acts on Pune's 'rtv' (the rule, not a block).
+    if kind == "rtv":
+        pune = _user("ACCOUNTANT", store=S2, uid="u-accountant-pune")
+        world.db["users"].update_one({"user_id": "u-accountant-pune"},
+                                     {"$set": {"approval_pin_hash": _PIN_HASH}})
+        r = world.as_(pune).post(_REJECT.format(rid), json={"pin": PIN, "reason": "short"})
+        assert r.status_code == 200, r.text
 
 
 def test_an_accountant_sets_their_own_pin_and_approves_with_it(world, monkeypatch):
