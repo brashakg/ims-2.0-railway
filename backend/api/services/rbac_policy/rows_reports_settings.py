@@ -89,10 +89,10 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/reports/gstr3b",
-        # Managers keep their OUTPUT figures; the handler strips Table 4 ITC,
-        # 3.1(d) RCM and cash paid for a non-accounts role (owner ruling
-        # 2026-10-12, R5). The gate is require_roles(*_REPORT_FINANCE_ROLES).
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        # Input tax summed from supplier bills (Table 4, 3.1(d)): the accounts
+        # roles' alone (owner ruling 2026-10-07, R1); the handler's gate is
+        # require_roles(*cost_mask.AP_ROLES).
+        "allowed": ACCOUNTS,
     },
     # The GSTR-3B portal upload carries Table 4 input credit -- supplier money,
     # the accounts roles' alone (owner ruling 2026-10-12, R5); the handler's

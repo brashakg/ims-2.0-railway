@@ -202,10 +202,10 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/finance/gst/summary",
-        # Managers keep OUTPUT GST; the handler leaves the input credit (and
-        # the net struck with it) out for a non-accounts role (owner ruling
-        # 2026-10-12, R5) -- the route is the finance router's readers.
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        # Input tax summed from supplier bills: the accounts roles' alone
+        # (owner ruling 2026-10-07, R1); the handler's gate is
+        # _require_finance_admin (cost_mask "payables").
+        "allowed": ACCOUNTS,
     },
     {
         "method": "POST",

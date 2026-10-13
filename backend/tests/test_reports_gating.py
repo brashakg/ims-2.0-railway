@@ -49,14 +49,11 @@ FINANCIAL = [
     "/api/v1/reports/discount/analysis",
     "/api/v1/reports/finance/expense-vs-revenue",
     "/api/v1/reports/gstr1",
-    # Owner ruling 2026-10-12 (R5): managers keep GSTR-3B's OUTPUT figures;
-    # the handler leaves Table 4 ITC / 3.1(d) RCM / cash paid out for them.
-    "/api/v1/reports/gstr3b",
 ]
 
-# The GSTR-3B portal upload carries Table 4 input credit whole: the accounts
-# roles only (owner ruling 2026-10-12, R5).
-INPUT_TAX = ["/api/v1/reports/gstr3b/gstn-json"]
+# GSTR-3B and its portal upload carry input tax summed from supplier bills:
+# the accounts roles only (owner ruling 2026-10-07, R1).
+INPUT_TAX = ["/api/v1/reports/gstr3b", "/api/v1/reports/gstr3b/gstn-json"]
 
 BLOCKED_ROLES = [["SALES_STAFF"], ["CASHIER"], ["OPTOMETRIST"]]
 ALLOWED_ROLES = [["ACCOUNTANT"], ["STORE_MANAGER"], ["AREA_MANAGER"]]

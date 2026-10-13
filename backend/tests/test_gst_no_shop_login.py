@@ -26,6 +26,10 @@ Unchanged: ADMIN / SUPERADMIN (every shop; the GSTR-3B's old default shop),
 and a multi-store login with no active shop -- which now gets its OWN first
 shop's return instead of store-001's.
 
+The only non-admin either route admits is the ACCOUNTANT (owner ruling
+2026-10-07, R1: a manager is refused both outright, shop or not --
+test_gst_input_accounts_only), so the no-shop rule is pinned on it.
+
 Handlers run for real against mongomock; the last test goes through the live
 app (middleware + routers). No emoji (cp1252).
 """
@@ -57,8 +61,6 @@ S0 = "store-001"  # the old fall-through shop
 S1_GSTIN = "20AAACB1234C1Z5"
 S0_GSTIN = "20AAACB9999C1Z5"
 
-INPUT_KEYS = {"gst_input_credit", "gst_input_credit_excluded", "net_gst_payable"}
-
 
 def _user(role: str, active=None, stores=()) -> Dict[str, Any]:
     return {
@@ -79,9 +81,8 @@ def _storeless(role: str) -> List[Dict[str, Any]]:
     ]
 
 
-# The roles the GST summary / GSTR-3B admit that are not admins.
-MANAGERS = ("STORE_MANAGER", "AREA_MANAGER")
-NON_ADMIN_FINANCE = (*MANAGERS, "ACCOUNTANT")
+# The roles the GST summary / GSTR-3B admit that are not admins (R1).
+NON_ADMIN_FINANCE = ("ACCOUNTANT",)
 
 
 # ============================================================================
@@ -194,23 +195,7 @@ def test_the_world_is_not_empty_admins_and_shop_logins_read_every_shop(summary_d
     for role in NON_ADMIN_FINANCE:
         assert _summary(_user(role, S1, (S1,)))["gst_collected"] == 180.0, role
     # A multi-store login with no active shop reads its first own shop.
-    assert _summary(_user("AREA_MANAGER", None, (S1, S0)))["gst_collected"] == 180.0
-
-
-@pytest.mark.parametrize("role", MANAGERS)
-def test_a_storeless_manager_reads_an_empty_summary(summary_db, role):
-    for token in _storeless(role):
-        summary_db.read.clear()
-        body = _summary(token)
-        assert (body["gst_collected"], body["cgst"], body["sgst"], body["igst"]) == (
-            0.0, 0.0, 0.0, 0.0,
-        ), (token, body)
-        assert not INPUT_KEYS & set(body), body  # R5 still holds
-        assert not {180.0, 360.0, 540.0} & set(
-            v for v in body.values() if isinstance(v, (int, float))
-        ), body
-        # No supplier bill was read for it (R5); its sales read matched none.
-        assert "vendor_bills" not in summary_db.read, summary_db.read
+    assert _summary(_user("ACCOUNTANT", None, (S1, S0)))["gst_collected"] == 180.0
 
 
 def test_a_storeless_accountant_reads_no_shops_output_or_input(summary_db):
@@ -281,8 +266,8 @@ def test_a_storeless_accountant_gets_no_portal_file(reports_world):
 def test_a_multi_store_login_with_no_active_shop_gets_its_own_return(reports_world):
     """Its token holds Bokaro but no active shop: it reads Bokaro's return,
     never store-001's (the old fall-through)."""
-    area = _user("AREA_MANAGER", None, (S1,))
-    r = _get(GSTR3B, area)
+    multi = _user("ACCOUNTANT", None, (S1,))
+    r = _get(GSTR3B, multi)
     assert r.status_code == 200, r.text
     assert (r.json()["gstin"], r.json()["legalName"]) == (S1_GSTIN, "Bokaro")
     acct = _user("ACCOUNTANT", None, (S1,))

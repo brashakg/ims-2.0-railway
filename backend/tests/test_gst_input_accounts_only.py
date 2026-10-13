@@ -1,23 +1,18 @@
-"""GST input tax is the accounts roles' alone (owner ruling 2026-10-12, R5).
+"""The GST summary and GSTR-3B are the accounts roles' alone (owner ruling
+2026-10-07, R1).
 
-Ruling (extends 2026-10-01 "supplier balances should not be shown to anyone
-apart from admin superadmin and accountant"): GST input tax -- the credit
-taken on supplier bills -- on Finance > GST summary and on GSTR-3B (Table 4
-ITC, 3.1(d) inward supplies on reverse charge) is shown only to ADMIN /
-SUPERADMIN / ACCOUNTANT. Managers keep their sales-side (output) figures.
+Ruling: the GST summary and the GSTR-3B report show input-tax totals summed
+from supplier bills -- managers do NOT need them; ONLY admins (SUPERADMIN,
+ADMIN) and accounts (ACCOUNTANT) see them. (It replaces 2026-10-12 R5, under
+which managers kept the sales-side figures with the input side stripped.)
 
-ONE rule decides: payables_mask.can_see_payables (cost_mask.can_see_cost(user,
-"payables")). For STORE_MANAGER / AREA_MANAGER:
-  * GET /finance/gst/summary carries no input credit, no "held back" credit
-    and no net payable (collected - input credit hands the credit back by
-    subtraction) -- the keys are ABSENT at every depth, and no figure equal to
-    one of them hides under another name;
-  * GET /reports/gstr3b carries no Table 4, no 3.1(d) and no tax-paid-in-cash
-    (output - ITC + RCM: beside taxPayable it hands the credit back);
-  * GET /reports/gstr3b/gstn-json -- the portal upload IS the return, Table 4
-    included -- is refused (403): by the route's own gate, by the rbac_policy
-    row, and through the live app's middleware.
-The accounts roles read every figure unchanged.
+ONE rule decides: cost_mask "payables" (AP_ROLES + SUPERADMIN, asked as
+payables_mask.can_see_payables). For STORE_MANAGER / AREA_MANAGER every one of
+GET /finance/gst/summary, /reports/gstr3b and /reports/gstr3b/gstn-json is a
+403 -- by the route's own gate, by the rbac_policy row, and through the live
+app's middleware -- and nothing is read for them. The accounts roles read
+every figure unchanged. payables_mask.strip_input_tax (R5) still drops the
+input side for any reader outside the rule, should a route ever admit one.
 
 Handlers run for real against mongomock; no network. No emoji (cp1252).
 """
@@ -76,17 +71,6 @@ def _keys(node: Any) -> Iterator[str]:
     elif isinstance(node, list):
         for item in node:
             yield from _keys(item)
-
-
-def _numbers(node: Any) -> Iterator[float]:
-    if isinstance(node, dict):
-        for v in node.values():
-            yield from _numbers(v)
-    elif isinstance(node, list):
-        for item in node:
-            yield from _numbers(item)
-    elif isinstance(node, (int, float)) and not isinstance(node, bool):
-        yield float(node)
 
 
 def _inputish(body: Any) -> set:
@@ -194,24 +178,7 @@ class TestGstSummary:
         assert body["net_gst_payable"] == 60.0
 
     @pytest.mark.parametrize("role", MANAGERS)
-    def test_managers_read_output_figures_only(self, finance_db, role):
-        r = _finance_client(role).get(SUMMARY_URL)
-        assert r.status_code == 200, r.text
-        body = r.json()
-        # The sales side stays, unchanged.
-        assert (body["gst_collected"], body["cgst"], body["sgst"], body["igst"]) == (
-            180.0, 90.0, 90.0, 0.0,
-        )
-        assert body["month"] == 5 and body["year"] == 2026
-        # The input side is ABSENT (not 0), at every depth, by name and shape.
-        assert not SUMMARY_INPUT_KEYS & set(_keys(body)), body
-        assert _inputish(body) == set(), body
-        # ...and no figure equal to the credit, the held-back credit or the
-        # net sits in the body under another name.
-        assert not {120.0, 33.0, 60.0} & set(_numbers(body)), body
-
-    @pytest.mark.parametrize("role", MANAGERS)
-    def test_managers_summary_never_reads_the_supplier_bills(self, finance_db, role):
+    def test_managers_are_refused_and_nothing_is_read(self, finance_db, role):
         reads = []
         real = finance_db.get_collection
 
@@ -220,19 +187,18 @@ class TestGstSummary:
             return real(name, *a, **k)
 
         finance_db.get_collection = _spy
-        assert _finance_client(role).get(SUMMARY_URL).status_code == 200
-        assert "vendor_bills" not in reads
-        assert "orders" in reads
+        r = _finance_client(role).get(SUMMARY_URL)
+        assert r.status_code == 403, r.text
+        assert reads == []
 
     @pytest.mark.parametrize("role", MANAGERS)
-    def test_no_db_skeleton_carries_no_input_either(self, role):
+    def test_managers_are_refused_with_no_db_too(self, role):
         original = finance._get_db
         finance._get_db = lambda: None
         try:
-            body = _finance_client(role).get(SUMMARY_URL).json()
+            assert _finance_client(role).get(SUMMARY_URL).status_code == 403
         finally:
             finance._get_db = original
-        assert body == {"tax_collected": 0, "gst_by_rate": {}}
 
     def test_accounts_no_db_skeleton_unchanged(self):
         original = finance._get_db
@@ -296,26 +262,10 @@ class TestGstr3b:
         assert GSTR3B_INPUT_KEYS <= set(body)
 
     @pytest.mark.parametrize("role", MANAGERS)
-    def test_managers_read_the_sales_side_only(self, reports_db, role):
-        r = _reports_client(role).get(GSTR3B_URL)
-        assert r.status_code == 200, r.text
-        body = r.json()
-        accounts = _reports_client("ACCOUNTANT").get(GSTR3B_URL).json()
-        # Exactly the accounts report minus the input side: every other
-        # figure is the same, so a manager keeps the sales-side return.
-        assert set(body) == set(accounts) - GSTR3B_INPUT_KEYS
-        assert body == {k: v for k, v in accounts.items() if k not in GSTR3B_INPUT_KEYS}
-        assert body["outwardTaxableSupplies"] == _heads(0.0, 90.0, 90.0)
-        assert body["taxPayable"] == _heads(0.0, 90.0, 90.0)
-        # No input key at any depth, by name or by shape...
-        assert not GSTR3B_INPUT_KEYS & set(_keys(body)), body
-        assert _inputish(body) == set(), body
-        # ...and no ITC / RCM / cash figure under another name.
-        assert not {60.0, 120.0, 10.0, 20.0, 400.0, 40.0, 80.0} & set(_numbers(body)), body
-
-    @pytest.mark.parametrize("role", MANAGERS)
-    def test_managers_get_no_portal_export(self, reports_db, role):
-        assert _reports_client(role).get(GSTN_URL).status_code == 403
+    def test_managers_get_neither_the_report_nor_the_portal_export(self, reports_db, role):
+        for url in (GSTR3B_URL, GSTN_URL):
+            r = _reports_client(role).get(url)
+            assert r.status_code == 403, (url, r.text)
 
     @pytest.mark.parametrize("role", ACCOUNTS)
     def test_accounts_portal_export_unchanged(self, reports_db, role):
@@ -351,17 +301,25 @@ def _gate_admits(gate, role: str) -> bool:
         return False
 
 
-def test_export_gate_route_and_policy_row_are_the_accounts_rule():
+def test_every_gate_and_policy_row_is_the_accounts_rule(finance_db):
+    """GSTR-3B, its portal file and the GST summary: the route's own gate and
+    its rbac_policy row each admit exactly the accounts rule, role by role."""
     from api.services.payables_mask import can_see_payables
 
-    gate = _route_gate(reports.router, "GET", "/gstr3b/gstn-json")
-    path = "/api/v1/reports/gstr3b/gstn-json"
+    for route in ("/gstr3b", "/gstr3b/gstn-json"):
+        gate = _route_gate(reports.router, "GET", route)
+        path = f"/api/v1/reports{route}"
+        for role in ALL_ROLES:
+            accounts = can_see_payables({"roles": [role]})
+            assert _gate_admits(gate, role) is accounts, (route, role)
+            assert rbac.check_access("GET", path, [role]) is accounts, (path, role)
     for role in ALL_ROLES:
         accounts = can_see_payables({"roles": [role]})
-        assert _gate_admits(gate, role) is accounts, role
-        assert rbac.check_access("GET", path, [role]) is accounts, role
-    # The JSON report itself stays open to the managers (they keep 3.1(a)).
-    assert rbac.check_access("GET", "/api/v1/reports/gstr3b", ["STORE_MANAGER"])
+        assert (
+            rbac.check_access("GET", "/api/v1/finance/gst/summary", [role]) is accounts
+        ), role
+        code = _finance_client(role).get(SUMMARY_URL).status_code
+        assert code == (200 if accounts else 403), (role, code)
 
 
 def _bearer(role: str) -> Dict[str, str]:
@@ -375,17 +333,16 @@ def _bearer(role: str) -> Dict[str, str]:
 
 
 @pytest.mark.parametrize("role", MANAGERS)
-def test_live_app_refuses_the_export_and_strips_the_report(client, role):
-    """Through the real app (middleware + routers, no DB): the export is 403
-    and the GSTR-3B / GST summary carry no input-tax key."""
+def test_live_app_refuses_a_manager_all_three(client, role):
+    """Through the real app (middleware + routers, no DB)."""
     h = _bearer(role)
-    assert client.get("/api/v1/reports/gstr3b/gstn-json?month=2026-05", headers=h).status_code == 403
-    rep = client.get("/api/v1/reports/gstr3b?month=2026-05", headers=h)
-    assert rep.status_code == 200, rep.text
-    assert _inputish(rep.json()) == set(), rep.json()
-    summ = client.get("/api/v1/finance/gst/summary?month=5&year=2026", headers=h)
-    assert summ.status_code == 200, summ.text
-    assert _inputish(summ.json()) == set(), summ.json()
+    for url in (
+        "/api/v1/reports/gstr3b/gstn-json?month=2026-05",
+        "/api/v1/reports/gstr3b?month=2026-05",
+        "/api/v1/finance/gst/summary?month=5&year=2026",
+    ):
+        r = client.get(url, headers=h)
+        assert r.status_code == 403, (url, r.text)
 
 
 def test_live_app_accountant_still_exports(client):
@@ -402,32 +359,26 @@ def test_live_app_accountant_still_exports(client):
 
 
 class TestOneInputTaxStrip:
-    """R5 has one implementation: payables_mask.INPUT_TAX_KEYS + strip_input_tax.
-    Widening that ONE key set changes what a manager reads on BOTH routes --
-    a router that kept its own key list or its own strip would not move."""
+    """R5 has one implementation: payables_mask.INPUT_TAX_KEYS + strip_input_tax,
+    the strip both routes return through. No manager reaches either route now
+    (R1), so the strip is pinned on the accounts' own bodies."""
 
     def test_the_one_key_set_is_both_payloads_input_side(self):
         from api.services import payables_mask
 
         assert payables_mask.INPUT_TAX_KEYS == SUMMARY_INPUT_KEYS | GSTR3B_INPUT_KEYS
 
-    def test_widening_the_one_key_set_moves_both_routes(self, monkeypatch, finance_db, reports_db):
-        from api.services import payables_mask
+    def test_the_strip_drops_both_bodies_input_side_outside_the_rule(self, finance_db, reports_db):
+        from api.services.payables_mask import INPUT_TAX_KEYS, strip_input_tax
 
-        before_summary = _finance_client("STORE_MANAGER").get(SUMMARY_URL).json()
-        before_3b = _reports_client("STORE_MANAGER").get(GSTR3B_URL).json()
-        assert "gst_collected" in before_summary and "taxPayable" in before_3b
-
-        monkeypatch.setattr(
-            payables_mask, "INPUT_TAX_KEYS",
-            payables_mask.INPUT_TAX_KEYS | {"gst_collected", "taxPayable"},
-        )
-        summary = _finance_client("STORE_MANAGER").get(SUMMARY_URL).json()
-        gstr3b = _reports_client("STORE_MANAGER").get(GSTR3B_URL).json()
-        assert "gst_collected" not in summary
-        assert "taxPayable" not in gstr3b
-        # The accounts roles are untouched by the key set.
-        assert "gst_collected" in _finance_client("ACCOUNTANT").get(SUMMARY_URL).json()
+        summary = _finance_client("ACCOUNTANT").get(SUMMARY_URL).json()
+        gstr3b = _reports_client("ACCOUNTANT").get(GSTR3B_URL).json()
+        for body in (summary, gstr3b):
+            assert _inputish(body), body
+            out = strip_input_tax(body, _user("STORE_MANAGER"))
+            assert out == {k: v for k, v in body.items() if k not in INPUT_TAX_KEYS}
+            assert _inputish(out) == set(), out
+            assert strip_input_tax(body, _user("ACCOUNTANT")) is body
 
     def test_no_router_keeps_a_copy_of_the_rule(self):
         api_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "api")

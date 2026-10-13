@@ -17,6 +17,7 @@ from ._shared import (
     _REAL_ORDER_STATUS_FILTER,
     _customer_state_map,
     _get_db,
+    _require_finance_admin,
     _split_output_tax,
     _store_state_map,
     router,
@@ -24,8 +25,10 @@ from ._shared import (
 
 # === GST Management ===
 
-# Owner ruling 2026-10-12 (R5): input tax is the accounts roles'; the one
-# strip is services/payables_mask.strip_input_tax (keys and rule there).
+# Owner ruling 2026-10-07 (R1): the GST summary carries input tax summed from
+# supplier bills, so it is the accounts roles' alone (_require_finance_admin);
+# a manager is refused. Its input-tax keys also pass services/payables_mask.
+# strip_input_tax (R5, keys and rule there) for a reader outside that rule.
 
 
 # Bill statuses that mean "not yet received / not bookable for ITC". A bill in
@@ -61,6 +64,8 @@ async def get_gst_summary(
     year: Optional[int] = None,
     current_user: dict = Depends(get_current_user),
 ):
+    # R1 (owner ruling 2026-10-07): ADMIN / SUPERADMIN / ACCOUNTANT only.
+    _require_finance_admin(current_user)
     # The one shop rule (F63), as the ITC register and GSTR-2B books beside
     # it: ADMIN / SUPERADMIN read every shop; any other login its own shop's
     # sales tax (and, for an accounts role, input credit) -- never every
@@ -85,10 +90,9 @@ async def get_gst_summary(
             },
             current_user,
         )
-    # R5 (owner ruling 2026-10-12): the route stays open to the finance
-    # readers -- managers keep OUTPUT GST -- but a non-accounts caller's
-    # summary never reads the supplier bills, and strip_input_tax drops the
-    # input-tax keys from what it returns.
+    # R5 (owner ruling 2026-10-12): a caller outside the accounts rule never
+    # reads the supplier bills, and strip_input_tax drops the input-tax keys
+    # from what it returns (the R1 gate above admits none today).
     show_input = can_see_payables(current_user)
     now = now_ist()
     m = month or now.month

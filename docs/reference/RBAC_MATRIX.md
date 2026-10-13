@@ -479,7 +479,7 @@ manager gets 404).
 | `GET` | `/api/v1/finance/cash-register/sessions` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
 | `GET` | `/api/v1/finance/gst-status` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `GET` | `/api/v1/finance/gst/reconciliation` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/finance/gst/summary` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
+| `GET` | `/api/v1/finance/gst/summary` | ADMIN, ACCOUNTANT |  |
 | `POST` | `/api/v1/finance/gstr2b-reconcile` | SUPERADMIN, ADMIN, ACCOUNTANT |  |
 | `POST` | `/api/v1/finance/itc-export` | SUPERADMIN, ADMIN, ACCOUNTANT |  |
 | `GET` | `/api/v1/finance/itc-register` | SUPERADMIN, ADMIN, ACCOUNTANT |  |
@@ -898,7 +898,7 @@ manager gets 404).
 | `GET` | `/api/v1/reports/finance/outstanding` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `GET` | `/api/v1/reports/gstr1` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
 | `GET` | `/api/v1/reports/gstr1/gstn-json` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/reports/gstr3b` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
+| `GET` | `/api/v1/reports/gstr3b` | ADMIN, ACCOUNTANT |  |
 | `GET` | `/api/v1/reports/gstr3b/gstn-json` | ADMIN, ACCOUNTANT |  |
 | `GET` | `/api/v1/reports/hr/attendance` | AUTH |  |
 | `GET` | `/api/v1/reports/inventory` | AUTH |  |

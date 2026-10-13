@@ -17,7 +17,6 @@ from ...dependencies import (
 from ...services.cost_mask import AP_ROLES
 from ...services.payables_mask import strip_input_tax
 from ._shared import (
-    _REPORT_FINANCE_ROLES,
     logger,
     router,
 )
@@ -40,9 +39,11 @@ from .gst_itc import (
     _transfer_outward_bills,
 )
 
-# Owner ruling 2026-10-12 (R5): Table 4 (ITC), 3.1(d) (RCM) and the cash
-# figure are the accounts roles'; the one strip is services/payables_mask.
-# strip_input_tax (keys and rule there).
+# Owner ruling 2026-10-07 (R1): GSTR-3B carries input tax summed from supplier
+# bills, so the report and its portal file are the accounts roles' alone
+# (cost_mask.AP_ROLES + SUPERADMIN); a manager is refused. Table 4 (ITC),
+# 3.1(d) (RCM) and the cash figure also pass services/payables_mask.
+# strip_input_tax (R5, keys and rule there) for a reader outside that rule.
 
 
 def _return_shop(store_id: Optional[str], current_user: dict) -> str:
@@ -615,11 +616,12 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
 async def gstr3b_report(
     month: str = Query(..., description="Tax period in YYYY-MM format"),
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
+    current_user: dict = Depends(require_roles(*AP_ROLES)),
 ):
     """GSTR-3B summary return (IMS internal shape). See _compute_gstr3b.
-    Input tax (Table 4, 3.1(d), cash paid) is the accounts roles' (R5).
-    A non-admin login with no shop is refused (R4, _return_shop)."""
+    The accounts roles' alone (R1, owner ruling 2026-10-07): it carries input
+    tax from supplier bills; a manager is a 403. A non-admin login with no
+    shop is refused (R4, _return_shop)."""
     active_store = _return_shop(store_id, current_user)
     return strip_input_tax(_compute_gstr3b(month, active_store), current_user)
 
