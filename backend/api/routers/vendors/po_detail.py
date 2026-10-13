@@ -532,13 +532,36 @@ def beyond_open_quantity(po: dict, lines, received_of) -> list:
     ]
 
 
+def _order_or_503(
+    po_repo,
+    po_id,
+    detail: str = "Could not read this order, so nothing was changed. Try again in a moment.",
+):
+    """The order, or None when there is no such order.
+    BaseRepository.find_by_id swallows a driver error into None, which read
+    as 'no order': a receipt accept skipped its whole hold, and a cancel or an
+    edit told the manager an existing order did not exist. So a None is
+    checked against the RAW collection, and a read that fails there answers
+    503. Only a minimal mock whose collection has no find_one takes the None
+    as is. The receipt accept and every PO change read the order here."""
+    po = po_repo.find_by_id(po_id)
+    finder = getattr(getattr(po_repo, "collection", None), "find_one", None)
+    if po or not callable(finder):
+        return po
+    try:
+        return finder({"po_id": po_id})
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=detail) from exc
+
+
 def _po_for_change(po_id: str, current_user: dict):
     """(repo, po) for a write, behind the same store boundary as every other
-    PO write: another store's order answers 404, never a hint it exists."""
+    PO write: another store's order answers 404, never a hint it exists. An
+    unreadable order answers 503 (_order_or_503); 404 only when it is absent."""
     po_repo = get_purchase_order_repository()
     if po_repo is None:
         raise HTTPException(status_code=503, detail="Purchase orders unavailable")
-    po = po_repo.find_by_id(po_id)
+    po = _order_or_503(po_repo, po_id)
     if not po or not can_access_store_scoped(po.get("delivery_store_id"), current_user):
         raise HTTPException(status_code=404, detail="Purchase order not found")
     return po_repo, po

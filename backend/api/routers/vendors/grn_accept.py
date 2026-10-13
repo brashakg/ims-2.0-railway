@@ -22,6 +22,7 @@ from ._shared import (
 from .gst import _promote_cost_from_rate
 from .po_detail import (
     _as_read,
+    _order_or_503,
     _qty,
     _received_by_product,
     _received_per_line,
@@ -203,7 +204,12 @@ def _hold_order_open_for_receipt(po_repo, grn) -> None:
         return
     gid = grn.get("grn_id")
     for _attempt in range(3):
-        po = _order_or_503(po_repo, po_id)
+        po = _order_or_503(
+            po_repo,
+            po_id,
+            "Could not read the order this delivery is for, so nothing was "
+            "added to stock. Try again in a moment.",
+        )
         if not po:
             return
         if po.get("status") == "CANCELLED":
@@ -244,29 +250,6 @@ def _hold_order_open_for_receipt(po_repo, grn) -> None:
         status_code=409,
         detail="This order kept changing while the delivery was being accepted - accept it again.",
     )
-
-
-def _order_or_503(po_repo, po_id):
-    """The order this receipt is for, or None when there is no such order.
-    BaseRepository.find_by_id swallows a driver error into None, which read
-    as 'no order' and skipped the whole hold -- one transient error and a
-    receipt for a cancelled line was minted. So a None is checked against
-    the RAW collection, and a read that fails there answers 503. Only a
-    minimal mock whose collection has no find_one takes the None as is."""
-    po = po_repo.find_by_id(po_id)
-    finder = getattr(getattr(po_repo, "collection", None), "find_one", None)
-    if po or not callable(finder):
-        return po
-    try:
-        return finder({"po_id": po_id})
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Could not read the order this delivery is for, so nothing was "
-                "added to stock. Try again in a moment."
-            ),
-        ) from exc
 
 
 def _way_out_of(grn) -> str:

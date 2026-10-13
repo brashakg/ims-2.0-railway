@@ -2095,3 +2095,38 @@ def test_the_cancel_never_names_a_receipt_by_its_placeholder(monkeypatch):
     assert "a delivery logged just now is logged but not accepted" in e.value.detail
     assert db.grns.find_one({"grn_id": "G-DEAD"})["grn_number"] == "RCPT/S1/26-27/0007"
     assert repo.updates == [] and audit.rows == []
+
+
+@pytest.mark.parametrize("change", ["cancel", "cancel_line", "edit"])
+def test_a_change_on_an_unreadable_order_answers_503_not_404(monkeypatch, change):
+    """Round 16 item 2. BaseRepository.find_by_id turns a driver error into
+    None; a cancel or an edit then told the manager an existing order was
+    'not found'. Read through the raw re-read (vendors.po_detail
+    ._order_or_503): a read that fails answers 503 'try again' and writes
+    nothing; an order that is really absent still answers 404."""
+    po_repo = PurchaseOrderRepository(StrictCollection("purchase_orders", []))
+    _wire(monkeypatch, None)
+    monkeypatch.setattr(v, "get_purchase_order_repository", lambda: po_repo)
+    po_repo.create(_po(status="SENT"))
+    before = copy.deepcopy(po_repo.collection.docs)
+
+    def attempt(po_id):
+        if change == "cancel":
+            return _run(v.cancel_po(po_id, reason="vendor closed", current_user=_user()))
+        if change == "cancel_line":
+            body = v.POLineCancel(reason="vendor short", product_id="P1")
+            return _run(v.cancel_po_line(po_id, 0, body, _user()))
+        return _run(v.update_po(po_id, _edit_body([_p1(3, 1000)]), _user()))
+
+    with pytest.raises(HTTPException) as e:
+        attempt("PO-NOPE")
+    assert e.value.status_code == 404
+
+    def find_one(*_a, **_k):
+        raise RuntimeError("socket timeout")
+
+    po_repo.collection.find_one = find_one
+    with pytest.raises(HTTPException) as e:
+        attempt("PO1")
+    assert e.value.status_code == 503 and "try again" in e.value.detail.lower()
+    assert po_repo.collection.docs == before
