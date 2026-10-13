@@ -651,6 +651,10 @@ def test_post_returns_for_the_second_scanned_line_restocks_that_unit(
     db = till["db"]
     monkeypatch.setattr(ret_mod, "_get_db", lambda: db)
     monkeypatch.setattr(ret_mod, "get_order_repository", lambda: till["orders"])
+    # The returnable-quantity booking (#1153) is an `items.$` update that
+    # mongomock cannot run (it raises, or books the wrong line); its own tests
+    # run it on a fake that can (test_shopify_status_catchup). Not this rule.
+    monkeypatch.setattr(ret_mod, "_claim_returnable_qty", lambda *a, **k: True)
     db.stock_units.update_one({"stock_id": "SU-A"}, {"$set": {"serial": "SER-A"}})
     db.stock_units.update_one({"stock_id": "SU-B"}, {"$set": {"serial": "SER-B"}})
     r = _sell(client, [_line(stock_id="SU-A"), _line(stock_id="SU-B")])
