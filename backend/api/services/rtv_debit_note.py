@@ -814,7 +814,9 @@ class DebitNoteEngine:
                 prod = self._find_product(ln.get("sku") or ln.get("product_id"))
             category = (prod or {}).get("category") or ln.get("category")
 
-            resolved_rate: Optional[float] = float(explicit) if has_explicit else None
+            resolved_rate: Optional[float] = (
+                float(explicit) if has_explicit else ln.get("billed_gst_rate")
+            )
             if resolved_rate is None:
                 # THE purchase-side rate rule (vendors.gst._po_line_gst_rate:
                 # the HSN's rate, else the catalogued one) -- the rate the PO
@@ -1025,9 +1027,9 @@ class DebitNoteEngine:
             receipt = receipt_of.get(pid, receipt_of.get(None)) or self._latest_receipt(rtv_doc, pid)
             bills = self._booked_bills(receipt)
             ln["claims_credit"] = self._credit_claimed(receipt, vendor, bills)
-            billed = self._billed_rate(bills, pid)
-            if billed and ln.get("gst_rate") in (None, "", 0, 0.0) and ln.get("tax_rate") in (None, "", 0, 0.0):
-                ln["gst_rate"] = billed
+            # The bill's booked rate -- 0% is a booked rate too (it reverses
+            # no tax), so None alone means "no line to read it from".
+            ln["billed_gst_rate"] = self._billed_rate(bills, pid)
             src.append(ln)
         enriched, gst_err = self._enrich_lines_gst(src)
         if gst_err:

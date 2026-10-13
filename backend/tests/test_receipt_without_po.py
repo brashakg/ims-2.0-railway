@@ -2306,3 +2306,17 @@ def test_r5_a_walk_in_return_reverses_at_the_rate_its_bill_booked(world):
 
     unbilled = _on_the_shelf(world, vendor_invoice_no="CASH-73")
     assert returned_lens(unbilled, "VR-73") == 2100  # no bill yet: the PO-line rule
+
+    # Panel probe (round 9): V-DEALER's walk-in CASH-55 booked with the frame
+    # at 0% (credit on, Rs 0 tax); one frame returned reversed Rs 155 (5%,
+    # the PO-line rule) -- a 0% line read as "no booked rate". 0% reverses 0.
+    zero = _on_the_shelf(world, vendor_invoice_no="CASH-55")
+    _run(pi.create_purchase_invoice(_invoice_body(zero, "CASH-55", rate=0.0), current_user=ACCOUNTANT))
+    assert db.vendor_bills.find_one({"bill_number": "CASH-55"})["itc_eligible"] is True
+    frame_unit = db.stock_units.find_one({"source_id": zero, "product_id": FRAME})["stock_id"]
+    rtv, _pid = _return_of(world, "VR-55", frame_unit)
+    vendor = db.vendors.find_one({"vendor_id": DEALER}, {"_id": 0})
+    frame = [{"product_id": FRAME, "product_name": "Acme Aviator", "quantity": 1, "unit_price": 3100.0}]
+    res = DebitNoteEngine(db).issue(rtv, vendor, actor="u-acct", seller=_SELLER, lines=frame)
+    assert res["ok"], res
+    assert res["debit_note"]["totals"]["tax_paise"] == 0
