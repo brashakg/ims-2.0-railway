@@ -462,6 +462,97 @@ def test_the_push_all_press_gives_it_its_own_line_never_a_stock_line(
     assert "stock_not_written" not in products and "stock_warning" not in products
 
 
+class _Website(_Shopify):
+    """The media rig with a MEMORY: an attach appends, a delete removes, a
+    reorder moves -- so the second press sees what the first one left on the
+    website. productDeleteMedia is switchable to a transport error."""
+
+    def __init__(self, media_nodes):
+        super().__init__(media_nodes)
+        self.fail_delete = True
+
+    def order(self):
+        return [n["id"] for n in self.media_nodes]
+
+    async def __call__(self, db, query, variables):
+        op = self._op(query)
+        if op == "imsProductDeleteMedia" and self.fail_delete:
+            self.calls.append({"op": op, "variables": copy.deepcopy(variables)})
+            raise RuntimeError("Shopify 503")
+        body = await super().__call__(db, query, variables)
+        if op == "imsProductCreateMedia":
+            new = body["data"]["productCreateMedia"]["media"]
+            self.media_nodes = self.media_nodes + [
+                {"id": n["id"], "image": {"url": "https://cdn.shopify.com/new.jpg"}} for n in new
+            ]
+        elif op == "imsProductDeleteMedia":
+            gone = set(variables["mediaIds"])
+            self.media_nodes = [n for n in self.media_nodes if n["id"] not in gone]
+        elif op == "imsProductReorderMedia":
+            by_id = {n["id"]: n for n in self.media_nodes}
+            self.media_nodes = [by_id[i] for i in _apply_moves(self.order(), variables["moves"])]
+        return body
+
+
+def test_a_failed_delete_keeps_the_removed_photo_owned_until_the_retry_deletes_it(
+    db, gates, monkeypatch  # noqa: F811
+):
+    """One save: a NEW photo uploaded as photo 1 and the front shot (photo 1
+    on the website) removed. Press 1 attaches the new photo, then
+    productDeleteMedia fails. The front shot must STAY in the map, marked
+    pending_delete -- dropped there, press 2 would see it as media IMS does
+    not own, never delete it, and the website would keep leading with the
+    photo the user removed. Press 2 sends the delete and the reorder; the
+    website ends [NEW, ANGLED, SIDE] and only then is the map clean."""
+    new = "https://cdn.example.com/rb-new.jpg"
+    fake = _Website(_nodes(1, 2, 3))
+    monkeypatch.setattr(shopify_push, "_graphql", fake)
+
+    async def _stock_written(*_a, **_k):
+        return {"ok": True, "code": None, "error": None, "set": 1, "quantities": {}}
+
+    monkeypatch.setattr(product_mod, "sync_product_stock", _stock_written)
+    _seed(
+        db,
+        _product(
+            [new, ANGLED, SIDE],
+            media_map=[(FRONT, _m(1)), (ANGLED, _m(2)), (SIDE, _m(3))],
+        ),
+    )
+
+    # PRESS 1: the attach lands, the delete fails.
+    res = _run(shopify_push.push_product(db, copy.deepcopy(_twin(db)), []))
+
+    assert _media_ops(fake) == ["imsProductCreateMedia", "imsProductDeleteMedia"]
+    assert fake.order() == [_m(1), _m(2), _m(3), _m(100)]
+    assert res.ok is True and res.code == shopify_push.PHOTOS_NOT_SYNCED
+    assert res.photos["error"] == "Shopify 503"
+    assert _twin(db)["ecom"]["locally_modified"] is True
+    assert _twin(db)["ecom"]["media_map"] == [
+        {"url": new, "id": _m(100)},
+        {"url": ANGLED, "id": _m(2)},
+        {"url": SIDE, "id": _m(3)},
+        {"url": FRONT, "id": _m(1), "pending_delete": True},
+    ]
+
+    # PRESS 2: Shopify is back. The removed photo is deleted, then the order.
+    fake.fail_delete = False
+    fake.calls.clear()
+    res = _run(shopify_push.push_product(db, copy.deepcopy(_twin(db)), []))
+
+    assert _media_ops(fake) == ["imsProductDeleteMedia", "imsProductReorderMedia"]
+    (dele,) = fake.calls_of("imsProductDeleteMedia")
+    assert dele["variables"]["mediaIds"] == [_m(1)]
+    assert fake.order() == [_m(100), _m(2), _m(3)], "the website: NEW, ANGLED, SIDE"
+    assert res.ok is True and res.code is None
+    assert _twin(db)["ecom"]["locally_modified"] is False
+    assert _twin(db)["ecom"]["media_map"] == [
+        {"url": new, "id": _m(100)},
+        {"url": ANGLED, "id": _m(2)},
+        {"url": SIDE, "id": _m(3)},
+    ]
+
+
 # ===========================================================================
 # 3. ONE MAIN-PHOTO RULE: images[0] wherever one photo is shown
 # ===========================================================================

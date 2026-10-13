@@ -168,7 +168,8 @@ async def _attach_product_photos(
 #
 # OWNERSHIP. IMS manages ONLY the media it attached itself, recorded on the
 # twin as ``ecom.media_map = [{url: <IMS source url>, id: <MediaImage gid>}]``
-# (written on attach, pruned on delete). Media that is on Shopify but not in
+# (written on attach; a dropped photo's row stays, marked pending_delete,
+# until its delete has landed). Media that is on Shopify but not in
 # the map -- the hand-uploaded photographs on the connector-created Ray-Ban
 # Meta products, anything the design queue (push_image) attached, anything a
 # human added in the Shopify admin -- is NEVER deleted or re-attached: it is
@@ -501,7 +502,15 @@ async def sync_product_media(
         summary["on_shopify"] += summary["attached"]
         owned.extend(res.get("media_map") or [])
         if pid and res.get("media_map"):
-            _writeback_media_map(db, pid, _in_ims_order(owned, photos))
+            # A photo still waiting for its delete STAYS in the map (marked
+            # pending_delete) until productDeleteMedia lands: dropped here, a
+            # failed delete would leave it on the website as media IMS no
+            # longer owns, never deleted and still leading the listing.
+            pending = [
+                {"url": d["url"], "id": d["id"], "pending_delete": True}
+                for d in plan["delete"]
+            ]
+            _writeback_media_map(db, pid, _in_ims_order(owned, photos) + pending)
         if res.get("error"):
             summary["error"] = res["error"]
             return summary
