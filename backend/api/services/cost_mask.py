@@ -12,7 +12,12 @@ Role policy (DECISIONS sec 9, owner rulings 2026-09-28 / D7 / 2026-09-29):
     recommendations also admit the managers -- AREA_MANAGER / STORE_MANAGER
     (the purchase roles) and CATALOG_MANAGER. ONE context, so every product
     route answers alike, and the frontend CostCell's PRODUCT_COST_ROLES is
-    this set.
+    this set. The same context answers every figure worked out from that
+    cost at the shop (owner ruling 2026-10-12): an order line's cost_at_sale,
+    the till scan's unit and product, a serial and its warranty lookup, a
+    lens line, the below-cost and cost-floor price errors, stock counts,
+    stock value at cost, stock alerts, transfers and workshop remake cost --
+    the managers keep them, counter roles never get the key.
   * What was paid and to whom (context="purchase"): PURCHASE_ROLES. A vendor
     return / RTV debit note shows anyone else the item, quantity and reason
     only, and a vendor shows only VENDOR_NAME_KEYS (the vendor list, a debit
@@ -24,7 +29,8 @@ Role policy (DECISIONS sec 9, owner rulings 2026-09-28 / D7 / 2026-09-29):
     AP_ROLES. The vendor AP and TDS gates ARE that tuple, the finance reads of
     the same money (owner dashboard, forecast, survival, bank statements,
     ITC / GST / Tally via finance _require_finance_admin, vendor-payments,
-    the cash-flow total, vendor rebates) ask can_see_cost(user, "payables"),
+    the cash-flow supplier totals -- paid POs and vendor payments, owner
+    ruling 2026-10-12 -- vendor rebates) ask can_see_cost(user, "payables"),
     and their rbac_policy rows ARE rbac_policy._core.ACCOUNTS, built from it.
   * Counter roles (SALES_*, CASHIER, OPTOMETRIST, WORKSHOP_STAFF) see cost in
     no context (audit F46/F60, owner ruling D7). A router never keeps its own
@@ -37,7 +43,7 @@ Role policy (DECISIONS sec 9, owner rulings 2026-09-28 / D7 / 2026-09-29):
 "Hidden" = the field is removed server-side so it never reaches the browser.
 No emoji (Windows cp1252).
 """
-from typing import Dict, List
+from typing import Dict, Iterable, List
 
 # The accounts roles. Defined ONCE, here: they see cost + margin, and they
 # alone see supplier payments -- the vendor ledger / bills / payments / debit
@@ -90,7 +96,18 @@ _MARGIN_FIELDS = {
     "gross_margin_pct", "net_margin_pct", "avg_margin_pct",
     "total_cost", "cogs_estimated_lines", "unit_margin", "estimated_margin",
 }
-_ALL_MASKED = _COST_FIELDS | _MARGIN_FIELDS
+# Money worked out from cost (owner ruling D7: counter roles see no figure
+# worked out from cost, anywhere): a stock count's variance / shrinkage /
+# overage at cost, a stock alert's cost impact and its two totals, a workshop
+# remake's spoilage cost, a blind count's unit cost and variance at cost.
+_COST_DERIVED_FIELDS = {
+    "variance_value", "shrinkage_value", "overage_value",
+    "shrinkage_value_written_off",
+    "costImpact", "deadStockValue", "recommendedRestockValue",
+    "cost_paise", "spoilage_cost_paise", "spoilage_cost_mtd_paise",
+    "variance_value_paise", "net_variance_value_paise",
+}
+_ALL_MASKED = _COST_FIELDS | _COST_DERIVED_FIELDS | _MARGIN_FIELDS
 
 
 def _roles_of(user: dict) -> set:
@@ -108,28 +125,38 @@ def can_see_cost(user: dict, context: str = "default") -> bool:
     return bool(roles & (COST_VISIBLE_ROLES | _CONTEXT_ROLES.get(context, set())))
 
 
-def _strip(doc: dict) -> dict:
-    return {k: v for k, v in doc.items() if k not in _ALL_MASKED}
+def _strip(value, hide):
+    if isinstance(value, dict):
+        return {k: _strip(v, hide) for k, v in value.items() if k not in hide}
+    if isinstance(value, list):
+        return [_strip(v, hide) for v in value]
+    return value
 
 
-def mask_cost(doc: dict, user: dict, context: str = "default") -> dict:
-    """`doc` without cost + margin fields (top level and `pricing`) unless the
-    caller may see cost. Returns a copy and never edits `doc`: a repository may
-    hand back the stored dict itself (the no-Mongo MockCollection does), and
-    masking it would strip the cost for the next reader and for the sale."""
+def mask_cost(
+    doc: dict, user: dict, context: str = "default", extra: Iterable[str] = ()
+) -> dict:
+    """`doc` without cost + margin fields, at any depth (an order's lines, a
+    unit's joined product, a count's variances), unless the caller may see
+    cost. `extra` names keys that are a value at cost on THIS response only
+    (a stock report's "totalValue", a transfer's "total_value") -- generic
+    names that mean something else elsewhere.
+
+    Returns a copy and never edits `doc`: a repository may hand back the
+    stored dict itself (the no-Mongo MockCollection does), and masking it
+    would strip the cost for the next reader and for the sale."""
     if not isinstance(doc, dict) or can_see_cost(user, context):
         return doc
-    out = _strip(doc)
-    if isinstance(out.get("pricing"), dict):
-        out["pricing"] = _strip(out["pricing"])
-    return out
+    return _strip(doc, _ALL_MASKED | set(extra))
 
 
-def mask_cost_list(docs: List[dict], user: dict, context: str = "default") -> List[dict]:
+def mask_cost_list(
+    docs: List[dict], user: dict, context: str = "default", extra: Iterable[str] = ()
+) -> List[dict]:
     """mask_cost over a list (e.g. a catalog / inventory page)."""
     if can_see_cost(user, context):
         return docs
-    return [mask_cost(d, user, context) if isinstance(d, dict) else d for d in (docs or [])]
+    return [mask_cost(d, user, context, extra) if isinstance(d, dict) else d for d in (docs or [])]
 
 
 def mask_fields(doc: Dict, user: dict, context: str = "default") -> Dict:

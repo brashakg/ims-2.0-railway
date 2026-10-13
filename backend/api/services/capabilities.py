@@ -138,11 +138,31 @@ def capability_for(method: str, path: str) -> Optional[str]:
     # vendors:write would add that role to the union the grant guard reasons
     # from, and a catalogue manager could then grant vendor / send / receive
     # writes to anyone. A 'vendors' module deny (or a vendors:write deny)
-    # still covers it through CAPABILITY_PARENT.
+    # still covers it through PARENT_CAPABILITY.
     if tmpl == "/api/v1/vendors/purchase-orders" and method.upper() == "POST":
         return "vendors:po-draft"
+    # Curated finer capability: LOGGING a vendor return. Owner ruling
+    # 2026-10-12 lets WORKSHOP_STAFF log one (unpriced); on the generic
+    # vendor-returns:write key they would join the approve / ship / credit
+    # union the grant guard reasons from. A stored per-user deny or grant of
+    # vendor-returns:write, and a 'vendors' module deny (which denies
+    # vendor-returns:write), still answer it: PARENT_CAPABILITY.
+    if method.upper() == "POST" and tmpl.rstrip("/") == "/api/v1/vendor-returns":
+        return "vendor-returns:create"
     verb = "read" if method.upper() in _READ_METHODS else "write"
     return f"{mod}:{verb}"
+
+
+# A curated key carved out of its module's generic key for the ROLE layer only.
+# The route was the parent key before the carve-out, so a per-user deny or
+# grant stored on the parent must keep answering it (permission_resolver):
+# else a user denied vendor-returns:write could log returns again. It is also
+# the one place a module deny reaches the carved-out key (the module deny names
+# the parent), so the key needs no MODULE_EXTRA_DENY_CAPABILITIES entry.
+PARENT_CAPABILITY: Dict[str, str] = {
+    "vendor-returns:create": "vendor-returns:write",
+    "vendors:po-draft": "vendors:write",
+}
 
 
 def _build_universe() -> (
@@ -267,15 +287,6 @@ MODULE_TO_CAPABILITY_MODULES: Dict[str, List[str]] = {
 # (the rbac capability-union gotcha concerns POLICY rows, not this map).
 MODULE_EXTRA_DENY_CAPABILITIES: Dict[str, List[str]] = {
     "online-store": ["online-store:rx-clear"],
-}
-
-# A carved key that still answers to the generic key it was carved out of, for
-# the per-user override layer only: an explicit deny (or grant) of the parent
-# covers the carved route exactly as it did before the carve-out, so moving a
-# route to its own key never quietly lifts a deny. Override-only -- this never
-# feeds a role union (the grant guard's reasoning is untouched).
-CAPABILITY_PARENT: Dict[str, str] = {
-    "vendors:po-draft": "vendors:write",
 }
 
 

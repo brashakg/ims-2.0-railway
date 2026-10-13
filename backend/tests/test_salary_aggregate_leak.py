@@ -1414,8 +1414,9 @@ def test_cash_flow_moves_all_three_figures_together(cross_route_db, role):
     residue = (
         body["outflows"]
         - body["expense_outflow"]
-        - body["purchase_outflow"]
-        # Absent below ADMIN / ACCOUNTANT (supplier payments, 2026-09-29).
+        # Both absent below ADMIN / ACCOUNTANT (what was paid to suppliers,
+        # owner rulings 2026-09-29 / 2026-10-12) and then not in `outflows`.
+        - body.get("purchase_outflow", 0)
         - body.get("vendor_payment_outflow", 0)
     )
     assert abs(residue) < 0.005, f"{residue} of payroll left inside `outflows`"
@@ -1447,9 +1448,12 @@ def test_cash_flow_leaves_an_innocent_month_completely_alone(monkeypatch):
     monkeypatch.setattr(finance, "_get_db", lambda: _CleanDB())
     manager = _cash_flow("STORE_MANAGER")
     admin = _cash_flow("ADMIN")
-    # Supplier payments are ADMIN + ACCOUNTANT only (owner ruling 2026-09-29):
-    # the one key the manager's body lacks, and a store view folds in none.
+    # What was paid to suppliers is ADMIN + ACCOUNTANT only (owner rulings
+    # 2026-09-29 / 2026-10-12): the keys the manager's body lacks -- with the
+    # flag that says so -- and none was paid this month.
     assert admin.pop("vendor_payment_outflow") == 0
+    assert admin.pop("purchase_outflow") == 0
+    assert manager.pop("vendor_payments_restricted") is True
     assert manager == admin
     assert manager["expense_outflow"] == XCLEAN
 

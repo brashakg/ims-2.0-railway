@@ -41,11 +41,14 @@ ROWS: List[Dict[str, object]] = [
         "allowed": RETURN_READERS,
         "store_scoped": True,
     },
-    # Writes = the handler's require_roles(*_VENDOR_RETURN_ROLES).
+    # Logging a return = the readers (owner ruling 2026-10-12: WORKSHOP_STAFF
+    # logs the defective pair, unpriced); its own capability key
+    # (vendor-returns:create, services/capabilities). Status changes = the
+    # handler's require_roles(*_VENDOR_RETURN_ROLES).
     {
         "method": "POST",
         "path": "/api/v1/vendor-returns",
-        "allowed": PURCHASE,
+        "allowed": RETURN_READERS,
     },
     {
         "method": "GET",
@@ -56,7 +59,7 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendor-returns/",
-        "allowed": PURCHASE,
+        "allowed": RETURN_READERS,
     },
     {
         "method": "GET",

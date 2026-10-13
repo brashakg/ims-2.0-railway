@@ -56,12 +56,13 @@ def test_every_non_public_route_maps_to_exactly_one_capability():
 
 def test_capability_universe_nonempty_and_verb_shaped():
     """Every key is ``<module>:read|write`` or a curated key
-    (approvals:approve, products:qc, online-store:rx-clear, vendors:po-draft)."""
+    (approvals:approve, products:qc, online-store:rx-clear, vendors:po-draft,
+    vendor-returns:create)."""
     assert C.VALID_CAPABILITY_KEYS
     for key in C.VALID_CAPABILITY_KEYS:
         assert ":" in key, key
         verb = key.rsplit(":", 1)[1]
-        assert verb in ("read", "write", "approve", "qc", "rx-clear", "po-draft"), key
+        assert verb in ("read", "write", "approve", "qc", "rx-clear", "po-draft", "create"), key
 
 
 def test_po_draft_carveout_keeps_catalog_manager_out_of_vendors_write():
@@ -80,13 +81,13 @@ def test_po_draft_carveout_keeps_catalog_manager_out_of_vendors_write():
 
 def test_a_vendors_module_deny_blocks_a_draft_through_the_parent_key_alone():
     """ONE mechanism carries a vendors deny onto the carved key: the module
-    deny adds vendors:write and CAPABILITY_PARENT points the draft key at it.
+    deny adds vendors:write and PARENT_CAPABILITY points the draft key at it.
     A second copy (a vendors entry in MODULE_EXTRA_DENY_CAPABILITIES) was
     redundant -- the deny held with it removed -- so it is gone."""
     from api.services.permission_resolver import apply_user_permissions
 
     cap = C.capability_for("POST", "/api/v1/vendors/purchase-orders")
-    assert C.CAPABILITY_PARENT[cap] == "vendors:write"
+    assert C.PARENT_CAPABILITY[cap] == "vendors:write"
     assert cap not in C.module_deny_to_capability_denies({"vendors": False})
     assert apply_user_permissions(True, cap, None, {"vendors": False}) is False
 

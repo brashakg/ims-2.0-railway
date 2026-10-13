@@ -10,7 +10,9 @@ default or validation was changed.
 from fastapi import HTTPException
 from datetime import datetime
 import uuid
+from typing import Optional
 from ...dependencies import get_db, can_access_store_scoped
+from ...services.cost_mask import mask_cost
 
 
 # ============================================================================
@@ -211,8 +213,12 @@ def _stamp_job_actor_names(jobs: list) -> None:
         pass
 
 
-def job_to_frontend(job: dict) -> dict:
-    """Convert workshop job from snake_case to camelCase for frontend"""
+def job_to_frontend(job: dict, user: Optional[dict] = None) -> dict:
+    """Convert workshop job from snake_case to camelCase for frontend.
+
+    `user` is the reader: a remake's spoilage cost (remake_reasons[].cost_paise,
+    priced from the lens's cost) reaches only a role services/cost_mask
+    "product" admits (owner ruling D7). No user = nobody's cost."""
     if job is None:
         return job
 
@@ -262,4 +268,4 @@ def job_to_frontend(job: dict) -> dict:
             # Keep other fields as-is
             result[key] = value
 
-    return result
+    return mask_cost(result, user, "product")

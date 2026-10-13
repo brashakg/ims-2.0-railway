@@ -35,7 +35,7 @@ from __future__ import annotations
 from typing import Optional
 
 from .capabilities import (
-    CAPABILITY_PARENT,
+    PARENT_CAPABILITY,
     is_ungrantable,
     module_deny_to_capability_denies,
 )
@@ -83,8 +83,10 @@ def apply_user_permissions(
     cap_denies = _deny_set(permissions)
     cap_grants = _grant_set(permissions)
     module_denies = module_deny_to_capability_denies(module_access)
-    # The route's key, plus the generic key a carved key was carved out of.
-    keys = {capability, CAPABILITY_PARENT.get(capability, capability)}
+
+    # The route's key, plus the key it was carved out of: an override stored
+    # on the parent still answers the carved-out route.
+    keys = {capability, PARENT_CAPABILITY.get(capability, capability)}
 
     # --- Step 2 + 3: ANY deny wins (module-shim deny OR explicit capability
     # deny). Deny ALWAYS beats grant and beats the role default. ---
