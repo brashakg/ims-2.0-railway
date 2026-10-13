@@ -5,10 +5,13 @@ Main entry point for the API server
 """
 
 from fastapi import FastAPI, Request, HTTPException, Depends
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse
 from contextlib import asynccontextmanager
 from collections import defaultdict
 import time
+import math
 import logging
 import os
 import sys
@@ -1038,6 +1041,28 @@ async def http_exception_handler(request: Request, exc: HTTPException):
             response.headers[header_name] = header_value
 
     return response
+
+
+def _json_safe(value):
+    """`value` with every NaN / Infinity turned into its text: JSON cannot
+    carry them."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    return value
+
+
+# FastAPI's own 422 for a request that fails validation. Starlette's JSON
+# reader accepts NaN / Infinity, a field refuses them, and the stock handler
+# echoed that input back -- which JSON cannot carry, so the 422 became a 500.
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=422, content={"detail": _json_safe(jsonable_encoder(exc.errors()))}
+    )
 
 
 # Global exception handler for unexpected errors

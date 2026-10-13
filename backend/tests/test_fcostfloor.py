@@ -153,6 +153,11 @@ def _post(client, headers, items, customer_id="cust-x", **extra):
     )
 
 
+# The floor refusal a counter role reads (owner ruling 2026-10-12): no price,
+# no floor -- cost is the floor / 1.1.
+_FLOOR_TO_COUNTER = "This price is below the allowed minimum - ask a manager"
+
+
 @pytest.fixture
 def cashier_headers():
     """JWT for a SALES_CASHIER (10% role cap) -- packet test 5 actor."""
@@ -347,7 +352,7 @@ def test_floor_blocks_when_caps_pass_cashier_raw_cost(client, cashier_headers, f
     pid = _seed_product(floor_env, pid="FLR-14", cost_price=95.0, mrp=100.0)
     r = _post(client, cashier_headers, [_item(pid, 100.0, discount_percent=10.0)])
     assert r.status_code == 400, r.text
-    assert "floor" in r.json()["detail"].lower()
+    assert r.json()["detail"] == _FLOOR_TO_COUNTER  # the floor's words, no figure
 
 
 def test_luxury_brand_cap_still_enforced(client, staff_headers, floor_env):
@@ -485,10 +490,10 @@ def test_unit_cost_by_pid_fallback_used(monkeypatch):
         enforce_cost_floor(
             [{"product_id": "P2", "product_name": "X", "quantity": 2,
               "discount_percent": 10.0, "taxable_value": 100.0}],  # eff 50/unit
-            {"P2": 100.0}, "BV-TEST-01",
+            {"P2": 100.0}, "BV-TEST-01", user={"roles": ["ADMIN"]},
         )
     assert exc.value.status_code == 400
-    assert "floor" in exc.value.detail.lower()
+    assert "floor Rs110.0" in exc.value.detail
 
 
 def test_unit_policy_engine_down_falls_back_to_defaults(monkeypatch, caplog):
@@ -586,7 +591,7 @@ def test_items_path_cashier_below_floor_400_and_not_persisted(
     r2 = _add_item(client, cashier_headers, order_id,
                    _item(pid_low, 100.0, discount_percent=10.0))
     assert r2.status_code == 400, r2.text
-    assert "floor" in r2.json()["detail"].lower()
+    assert r2.json()["detail"] == _FLOOR_TO_COUNTER
 
     saved = floor_env["order_repo"].find_by_id(order_id)
     assert len(saved["items"]) == 1  # offending line NOT appended
@@ -714,3 +719,68 @@ def test_items_path_sticker_sale_thin_sku_allowed(client, auth_headers, floor_en
     saved = floor_env["order_repo"].find_by_id(order_id)
     assert len(saved["items"]) == 2
     assert saved["items"][1]["cost_at_sale"] == 100.0
+
+
+# --------------------------------------------------------------------------
+# 12. The refusal names the floor to the managers only; the line is refused
+#     for everyone (owner ruling 2026-10-12, as the below-cost refusal)
+# --------------------------------------------------------------------------
+
+
+def _role_headers(role):
+    from api.routers.auth import create_access_token
+
+    token = create_access_token(
+        {
+            "user_id": f"u-{role.lower()}",
+            "username": role.lower(),
+            "roles": [role],
+            "store_ids": ["BV-TEST-01"],
+            "active_store_id": "BV-TEST-01",
+        }
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _floor_refusals(client, env, role):
+    """A 10% line netting Rs90 under a Rs95 cost (floor Rs104.5), at POST
+    /orders and at POST /orders/{id}/items: both refuse it, and the order it
+    was added to keeps only its first line. Returns the two details."""
+    h = _role_headers(role)
+    low = _seed_product(env, pid=f"FLR-LOW-{role}", cost_price=95.0, mrp=100.0)
+    ok = _seed_product(env, pid=f"FLR-OK-{role}", cost_price=50.0, mrp=100.0)
+    created = _post(client, h, [_item(low, 100.0, discount_percent=10.0)])
+    r = _post(client, h, [_item(ok, 100.0)])
+    assert r.status_code in (200, 201), r.text
+    order_id = r.json()["order_id"]
+    added = _add_item(client, h, order_id, _item(low, 100.0, discount_percent=10.0))
+    for res in (created, added):
+        assert res.status_code == 400, (role, res.text)
+    assert len(env["order_repo"].find_by_id(order_id)["items"]) == 1
+    return [created.json()["detail"], added.json()["detail"]]
+
+
+@pytest.mark.parametrize("role", ("SALES_STAFF", "SALES_CASHIER"))
+def test_floor_refusal_names_no_figure_to_the_counter(client, floor_env, role):
+    for detail in _floor_refusals(client, floor_env, role):
+        assert detail == _FLOOR_TO_COUNTER, detail
+
+
+@pytest.mark.parametrize("role", ("STORE_MANAGER", "AREA_MANAGER", "ADMIN"))
+def test_floor_refusal_still_names_the_floor_to_managers(client, floor_env, role):
+    for detail in _floor_refusals(client, floor_env, role):
+        assert "cost+10.0% floor Rs104.5" in detail, detail
+
+
+def test_floor_refusal_follows_the_product_cost_rule(client, floor_env, monkeypatch):
+    # The figure goes to whoever services/cost_mask "product" admits, not a
+    # copy of it: take STORE_MANAGER out there and it reads the counter's words.
+    from api.services import cost_mask
+
+    monkeypatch.setitem(
+        cost_mask._CONTEXT_ROLES,
+        "product",
+        cost_mask._CONTEXT_ROLES["product"] - {"STORE_MANAGER"},
+    )
+    for detail in _floor_refusals(client, floor_env, "STORE_MANAGER"):
+        assert detail == _FLOOR_TO_COUNTER, detail

@@ -18,6 +18,7 @@ from .models import (
 from .helpers import (
     _get_db,
 )
+from ...services.cost_mask import mask_cost
 from .stock_count import (
     _load_open_count,
     _on_hand_now,
@@ -265,10 +266,13 @@ async def complete_stock_count(
                 create_system_task(
                     get_task_repository(),
                     title=f"Stock-count variance: {count_doc.get('audit_number', count_id)}",
+                    # Units only: every store role reads the store's open tasks,
+                    # and the value at cost is the managers' (owner ruling D7) --
+                    # they read it on the count itself.
                     description=(
-                        f"{total_shrinkage} units short (Rs {shrinkage_value:,.2f} at cost), "
-                        f"{total_overage} units over (Rs {overage_value:,.2f}) "
-                        f"across {len(items)} counted lines. "
+                        f"{total_shrinkage} units short, {total_overage} units over "
+                        f"across {len(items)} counted lines (the value at cost is "
+                        f"on the count in Stock Count). "
                         f"Shrinkage {shrinkage_pct}% / overall variance {overall_var_pct}%. "
                         + (
                             f"{products_counted} of {products_expected} expected "
@@ -288,7 +292,9 @@ async def complete_stock_count(
         except Exception as _e:  # noqa: BLE001
             logger.warning(f"[INVENTORY] variance task creation skipped: {_e}")
 
-        return {
+        # WORKSHOP_STAFF may complete a count; the rupee figures go to the roles
+        # that see product cost only (D7) -- the units stay for everyone.
+        return mask_cost({
             "message": "Stock count completed",
             "count_id": count_id,
             "audit_number": count_doc.get("audit_number", ""),
@@ -308,7 +314,7 @@ async def complete_stock_count(
             "full_count": full_count,
             "unknown_status_tokens": unknown_tokens or [],
             "variances": variances,
-        }
+        }, current_user, "product")
 
     except HTTPException:
         raise
