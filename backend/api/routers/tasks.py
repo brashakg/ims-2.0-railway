@@ -44,7 +44,12 @@ from ..services.task_sla import (
 )
 from ..services.task_escalation import resolve_escalation_target
 from ..services.task_notify import notify_escalation
-from ..services.task_visibility import overdue_filter, task_counts, visible
+from ..services.task_visibility import (
+    NOT_CANCELLED,
+    overdue_filter,
+    task_counts,
+    visible,
+)
 from ..services.sop_checklist import (
     apply_item_toggle,
     completion_status,
@@ -409,9 +414,14 @@ async def list_tasks(
     filters: dict = {}
 
     if status:
-        # Tolerant: match canonical UPPERCASE and any legacy lowercase rows.
-        canon = canon_status(status)
-        filters["status"] = {"$in": list({canon, canon.lower()})}
+        # One status or several, comma-separated (the Hub asks for
+        # OPEN,IN_PROGRESS). Tolerant: canonical UPPERCASE + legacy lowercase.
+        wanted = {canon_status(s) for s in status.split(",") if s.strip()}
+        filters["status"] = {"$in": sorted(wanted | {s.lower() for s in wanted})}
+    else:
+        # The default list: everything but the cancelled (the task total
+        # counts the same set -- task_visibility.NOT_CANCELLED).
+        filters.update(NOT_CANCELLED)
     if priority:
         filters["priority"] = priority
     if assigned_to:

@@ -222,13 +222,26 @@ def test_overdue_shows_only_what_the_role_may_see(world, role):
 
 @pytest.mark.parametrize("role", ROLES)
 def test_summary_counts_equal_the_lists(world, role):
-    as_role, _ = world
+    """THE rule for counts and lists: the default list is every task but the
+    cancelled (PENDING kept -- the transfer, reminder and online-Rx producers
+    write it), and the summary total counts exactly that list."""
+    as_role, db = world
     c = as_role(role)
+    me, shop = USERS[role]["user_id"], USERS[role]["active_store_id"] or S1
+    db.tasks.insert_many([
+        _task("X-CANC", me, shop, "CANCELLED"),
+        _task("X-canc", me, shop, "cancelled"),
+        _task("X-PEND", me, shop, "PENDING"),
+        _task("X-pend", me, shop, "pending"),
+    ])
     s = c.get("/api/v1/tasks/summary").json()
     for status in ("OPEN", "IN_PROGRESS", "COMPLETED", "ESCALATED"):
         listed = c.get("/api/v1/tasks", params={"status": status}).json()["total"]
         assert s["summary"][status] == listed, status
-    assert s["total"] == c.get("/api/v1/tasks").json()["total"]
+    everything = c.get("/api/v1/tasks").json()
+    shown = {t["task_id"] for t in everything["tasks"]}
+    assert {"X-PEND", "X-pend"} <= shown and not {"X-CANC", "X-canc"} & shown
+    assert s["total"] == everything["total"] == len(expected(role)) + 2
     assert s["overdue"] == c.get("/api/v1/tasks/overdue").json()["total"]
     assert s["open"] == s["summary"]["OPEN"] + s["summary"]["IN_PROGRESS"]
 
@@ -250,6 +263,22 @@ def test_shop_filter_and_its_counts_agree(world, role):
     overdue = c.get("/api/v1/tasks/overdue", params={"store_id": S1})
     assert _ids(overdue) == expected(role) & OVERDUE & S1_IDS
     assert s["overdue"] == overdue.json()["total"]
+
+
+@pytest.mark.parametrize("role", ROLES)
+def test_the_hub_lists_every_task_its_open_count_counts(world, role):
+    """The Hub's 'Open Tasks' figure and its 'Priority tasks' list are ONE
+    request, GET /tasks?status=OPEN,IN_PROGRESS: a task the person has
+    started stays listed, so the Hub never says 'Nothing urgent' beside
+    'Open Tasks 1'. The summary's open count is the same set."""
+    as_role, _ = world
+    c = as_role(role)
+    r = c.get("/api/v1/tasks", params={"store_id": S1, "status": "OPEN,IN_PROGRESS"})
+    want = {t["task_id"] for t in TASKS if t["task_id"] in expected(role)
+            and t["store_id"] == S1 and t["status"] in ("OPEN", "IN_PROGRESS")}
+    assert _ids(r) == want and r.json()["total"] == len(want)
+    assert f"R-{role}" in want or role not in STAFF_ROLES  # their started task
+    assert c.get("/api/v1/tasks/summary", params={"store_id": S1}).json()["open"] == len(want)
 
 
 @pytest.mark.parametrize("role", STAFF_ROLES)

@@ -31,6 +31,11 @@ from ..dependencies import user_store_scope
 # Roles that see every task of the shops they reach.
 _SHOP_WIDE_ROLES = {"STORE_MANAGER", "AREA_MANAGER"}
 
+# What a task list returns when no status is asked for: every task but the
+# cancelled ones (PENDING and any legacy status included). THE task total
+# counts exactly this, so the total always equals the list behind it.
+NOT_CANCELLED = {"status": {"$nin": ["CANCELLED", "cancelled", "CANCELED", "canceled"]}}
+
 
 def visibility_filter(current_user: dict) -> Dict[str, Any]:
     """The tasks ``current_user`` may see, as a Mongo filter. ``{}`` = all."""
@@ -72,8 +77,9 @@ def task_counts(
 ) -> Dict[str, Any]:
     """Status + overdue counts over the tasks the caller can see. THE task
     count: GET /tasks/summary, /reports/tasks/summary and the reports
-    dashboard all read it, so a count always equals the list behind it.
-    Tolerant of canonical UPPERCASE and legacy lowercase status rows."""
+    dashboard all read it. Each status count equals GET /tasks?status=<it>,
+    and `total` equals GET /tasks with no status (NOT_CANCELLED). Tolerant
+    of canonical UPPERCASE and legacy lowercase status rows."""
     base = dict(filters or {})
 
     def _count(extra: Dict[str, Any]) -> int:
@@ -94,5 +100,5 @@ def task_counts(
         "overdue": overdue,
         "overdue_count": overdue,
         "escalated_count": by_status["ESCALATED"],
-        "total": sum(by_status.values()),
+        "total": _count(NOT_CANCELLED),
     }
