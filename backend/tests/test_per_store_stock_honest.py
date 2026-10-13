@@ -49,6 +49,8 @@ from test_shopify_online_stock import (  # noqa: E402,F401 -- _reset is the auto
     _db,
     _listed,
     _live,
+    _loc,
+    _locations,
     _ok_body,
     _product_body,
     _reset,
@@ -551,23 +553,48 @@ def test_3_a_dead_listing_read_on_a_sale_is_named_never_sold_out(monkeypatch):
     assert "parent read died" in out["error"] and out["sold_out"] is False, out
 
 
-def test_3_a_dead_stray_check_inside_the_sweep_is_named_never_a_green_pass(monkeypatch):
+PUNE = _loc("gid://shopify/Location/76684427513", "GANGADHAM- PUNE")
+
+
+@pytest.mark.parametrize(
+    "setup, code",
+    [
+        ("clean", shopify_push.STOCK_ONHAND_UNKNOWN),
+        # The documented day-1 setup, how production runs: Gangadham Pune
+        # fulfils online orders and is mapped to no shop, so EVERY run's code
+        # is SHOPIFY_LOCATION_UNMAPPED -- the listing's top code too.
+        ("pune-unmapped", shopify_push.SHOPIFY_LOCATION_UNMAPPED),
+        # The run's own code is STOCK_ONHAND_UNKNOWN for another reason (one
+        # shop's shelf unreadable) -- the listing's top code again.
+        ("one-shop-unreadable", shopify_push.STOCK_ONHAND_UNKNOWN),
+    ],
+)
+def test_3_a_dead_stray_check_inside_the_sweep_is_named_never_a_green_pass(monkeypatch, setup, code):
     """The sweep's own reads answer, but one listing's size-row re-read dies
     inside the loop (listing_strays, strict). Its numbers went out (written,
-    not failed), and its pass says STOCK_ONHAND_UNKNOWN with the stray line.
-    That code reached the run with NO line and ok=True: a green Push stock
-    toast and 'Stock pass: ok ... STOCK_ONHAND_UNKNOWN'. Now the run is not
-    ok and names the check. Drop the per-listing note -> ok, no line ->
-    fails."""
+    not failed), and its pass says the stray line under its top rung. That
+    used to reach the run with NO line and ok=True; then (round 3) with the
+    line dropped whenever the listing's top code matched the run's -- which
+    is every run under the day-1 location setup. Now the run is not ok and
+    names the check in every setup. Cut a listing's line by CODE again ->
+    'pune-unmapped' and 'one-shop-unreadable' lose the line -> fail; drop
+    the per-listing note -> 'clean' fails."""
     db = _listed(_db(a=2, b=1, c=0))
     _dead_size_rows(db)
-    spy = _Spy(_responses())
+    over = {}
+    if setup == "pune-unmapped":
+        over["imsLocationList"] = _locations(_loc(LOC_A, "Bokaro"), _loc(LOC_B, "Dhanbad"), _loc(LOC_C, "Sector 4"), PUNE)
+    if setup == "one-shop-unreadable":
+        _break_shop(db, "BV-B")
+    spy = _Spy(_responses(**over))
     _live(monkeypatch, spy)
     res = _run(shopify_push.sync_stock_levels(db))
     assert (res.payload["synced"], res.payload["failed"]) == (1, 0), res.payload
     assert (INV_GID, LOC_A, 2) in spy.rows()
-    assert res.ok is False and res.code == shopify_push.STOCK_ONHAND_UNKNOWN, res
-    assert "cat-1" in res.error and "stray" in res.error and "size rows died" in res.error, res.error
+    assert res.ok is False and res.code == code, res
+    assert "cat-1: the stray-size check" in res.error and "size rows died" in res.error, res.error
+    if setup == "pune-unmapped":
+        assert "GANGADHAM- PUNE" in res.error and res.error.count("GANGADHAM- PUNE") == 1, res.error
 
 
 @pytest.mark.parametrize("dead", ["last-sent stock", "size rows"])

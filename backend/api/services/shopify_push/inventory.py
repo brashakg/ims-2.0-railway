@@ -2504,21 +2504,25 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
     said = errors + [line for _c, line in notes]
     if said and not error:
         error = "; ".join(said[:3])
-    else:
+    elif error:
         # Every true rung is said (recheck round 2): a listing's OWN rung --
         # a code the run-level ladder did not state (tracking refused, a
         # chunk refused, a whole-listing abort) -- rides under the ladder's
         # line instead of being dropped once the ladder set one; under the
         # day-1 configuration (Pune ticked, the Jharkhand locations unticked)
-        # the ladder ALWAYS sets one. A listing whose code IS the run's is the
-        # ladder said once more per listing (each push_skus_stock re-scores
-        # it), so it is not repeated, and the ladder tail a listing's own line
-        # carries is cut.
-        own = [
-            line.removesuffix(f" -- ALSO: {error}")
-            for lcode, line in failures + notes
-            if lcode and lcode != code
-        ]
+        # the ladder ALWAYS sets one. Each push_skus_stock re-scores the
+        # ladder, so a listing's line repeats the run's rungs: those are cut
+        # BY TEXT, rung by rung, never by code -- a listing's code is its TOP
+        # rung, and under the day-1 setup that is the run's code too, while
+        # its own rung (the stray-size check it could not read) rides under
+        # it as an ALSO and is said nowhere else.
+        said_rungs = set(error.split(" -- ALSO: "))
+        own = []
+        for _lcode, line in failures + notes:
+            pid, _sep, text = line.partition(": ")
+            new = [r for r in text.split(" -- ALSO: ") if r not in said_rungs]
+            if new:
+                own.append(f"{pid}: {' -- ALSO: '.join(new)}")
         if own:
             error = f"{error} -- ALSO: {'; '.join(own[:3])}"
     return PushResult(
