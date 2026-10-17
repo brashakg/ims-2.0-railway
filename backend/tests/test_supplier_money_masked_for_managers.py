@@ -678,11 +678,12 @@ def test_rma_never_shows_a_manager_the_credit(rma, role):
     listed, detail = _rma_reads(rma, rid, role)
     for body in (listed, detail):
         assert not _keys(body) & RMA_CREDIT, _keys(body) & RMA_CREDIT
-        # The engine's own history note ("... for 100000 paise") keeps the
-        # event and drops the figure.
+        assert "credit_notes" not in _keys(body)
+        # Financial history notes and the supplier's credit documents are
+        # absent; managers retain the operational status, actor and timestamp.
         assert not [s for s in _strings(body) if " paise" in s]
     assert detail["status"] == "CREDIT_RECEIVED"
-    assert detail["credit_notes"][0]["credit_note_number"] == "CN-Z1"
+    assert all("notes" not in entry for entry in detail["status_history"])
     assert detail["lines"][0]["quantity"] == 2
 
     # The close refusal names the outstanding variance -- not to a manager.
@@ -702,7 +703,8 @@ def test_rma_never_shows_a_manager_the_credit(rma, role):
     assert closed["status"] == "CLOSED"
     _, detail = _rma_reads(rma, rid, role)
     assert not [s for s in _strings(detail) if " paise" in s]
-    assert "closed; variance written off" in [h.get("notes") for h in detail["status_history"]]
+    assert detail["status"] == "CLOSED"
+    assert all("notes" not in entry for entry in detail["status_history"])
 
     # Every write still landed with its money.
     stored = rma.db.get_collection("vendor_rmas").find_one({"rma_id": rid})
@@ -777,7 +779,7 @@ def test_every_rma_write_result_goes_through_the_strip(rma, monkeypatch, write, 
     assert (RMA_CREDIT <= set(res)) is shown and bool(set(res) & RMA_CREDIT) is shown
 
 
-@pytest.mark.parametrize("role", ("ACCOUNTANT", "ADMIN"))
+@pytest.mark.parametrize("role", ACCOUNTS)
 def test_rma_accounts_see_the_credit(rma, role):
     rid, writes = _rma_to_credit(rma, role)
     assert writes[0]["expected_credit_paise"] == 300000
@@ -788,6 +790,7 @@ def test_rma_accounts_see_the_credit(rma, role):
     assert detail["received_credit_rupees"] == 1000.0
     assert detail["variance_rupees"] == 2000.0
     assert detail["credit_notes"][0]["received_paise"] == 100000
+    assert detail["credit_notes"][0]["credit_note_number"] == "CN-Z1"
     assert listed["rmas"][0]["variance_paise"] == 200000
     assert any(h.get("notes") == "credit note CN-Z1 for 100000 paise"
                for h in detail["status_history"])

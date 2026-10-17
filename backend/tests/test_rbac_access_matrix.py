@@ -50,7 +50,7 @@ COVERAGE LIST (method, path, roles_tested)
   POST /api/v1/prescriptions               -> clinical roles (self-enforced); SALES_STAFF -> 403 clinical
   PUT  /api/v1/prescriptions/{id}          -> clinical roles; CASHIER -> 403
   GET  /api/v1/reports/inventory/valuation -> finance roles; SALES_CASHIER -> 403
-  GET  /api/v1/reports/gstr1               -> finance roles; SALES_STAFF -> 403
+  GET  /api/v1/reports/gstr1               -> accounts roles; managers/staff -> 403
   POST /api/v1/returns                     -> cashier/admin roles; OPTOMETRIST -> 403
   POST /api/v1/users                       -> ADMIN/SUPERADMIN; STORE_MANAGER -> 403
   GET  /api/v1/audit/verify                -> SUPERADMIN; ADMIN -> 403
@@ -549,13 +549,16 @@ class TestFinancePayrollHrRoutes:
         ("GET", "/api/v1/finance/pnl"),
         ("GET", "/api/v1/hr/attendance"),
         ("GET", "/api/v1/hr/leaves"),
-        ("GET", "/api/v1/reports/gstr1"),
         ("GET", "/api/v1/reports/inventory/valuation"),
+    ]
+    # GST reports follow the approved Admin/Superadmin/Accounts-only rule.
+    _ACCOUNTS_GST_PATHS = [
+        ("GET", "/api/v1/reports/gstr1"),
         ("GET", "/api/v1/reports/finance/gst"),
     ]
 
     # All paths (including divergent ones) for the non-finance denial test
-    _FINANCE_PATHS = _FINANCE_PATHS_ALL_4_ALLOWED + [
+    _FINANCE_PATHS = _FINANCE_PATHS_ALL_4_ALLOWED + _ACCOUNTS_GST_PATHS + [
         ("POST", "/api/v1/payroll/run"),
         ("GET", "/api/v1/expenses/aging"),
         # OWNER RULING 2026-08-09: the salary-config LIST is every employee's
@@ -567,6 +570,18 @@ class TestFinancePayrollHrRoutes:
     @pytest.mark.parametrize("method,path", _FINANCE_PATHS_ALL_4_ALLOWED)
     @pytest.mark.parametrize("role", ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"])
     def test_finance_role_allowed(self, matrix_client, method, path, role):
+        r = matrix_client.request(method, path, headers=ALL_ROLE_HEADERS[role])
+        assert_route_allowed(r, role, method, path)
+
+    @pytest.mark.parametrize("method,path", _ACCOUNTS_GST_PATHS)
+    @pytest.mark.parametrize("role", ["AREA_MANAGER", "STORE_MANAGER"])
+    def test_gst_reports_deny_manager_roles(self, client, method, path, role):
+        r = client.request(method, path, headers=ALL_ROLE_HEADERS[role])
+        assert_middleware_403(r, method, path)
+
+    @pytest.mark.parametrize("method,path", _ACCOUNTS_GST_PATHS)
+    @pytest.mark.parametrize("role", ["ACCOUNTANT", "ADMIN", "SUPERADMIN"])
+    def test_gst_reports_allow_accounts_roles(self, matrix_client, method, path, role):
         r = matrix_client.request(method, path, headers=ALL_ROLE_HEADERS[role])
         assert_route_allowed(r, role, method, path)
 
