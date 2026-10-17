@@ -1781,7 +1781,7 @@ def spine_holds_gtin(spine: Optional[Dict[str, Any]], gtin: Any) -> bool:
     )
 
 
-def write_spine_gtin(product_repo, product_id: Any, gtin: str) -> None:
+def write_spine_gtin(product_repo, product_id: Any, gtin: str, *, write_token=None) -> None:
     """Write the spine's ONE manufacturer barcode (attributes.gtin), then drop
     its legacy products.barcode -- ONLY once the gtin write is confirmed, or
     the spine would lose both codes. A spine whose attributes is not a dict
@@ -1797,6 +1797,8 @@ def write_spine_gtin(product_repo, product_id: Any, gtin: str) -> None:
         patch: Dict[str, Any] = {"attributes.gtin": gtin}
     else:
         patch = {"attributes": {"gtin": gtin}}
+    if write_token is not None:
+        patch["_gtin_write_token"] = write_token
     if not product_repo.update(product_id, patch) and not spine_holds_gtin(
         product_repo.find_by_id(product_id), gtin
     ):
@@ -1807,6 +1809,61 @@ def write_spine_gtin(product_repo, product_id: Any, gtin: str) -> None:
             field="gtin",
         )
     drop_legacy_spine_barcode(product_repo, product_id)
+
+
+def undo_catalogue_barcode_write(
+    collection, key: dict, before: dict, token: str, *, spine: bool,
+    winning_attributes=None, previous_attributes=None,
+) -> None:
+    """Compensate only the barcode fields this refused edit still owns.
+
+    A newer barcode writer has a different token and is never overwritten.
+    If the catalogue CAS winner changed its GTIN, restore that winner's code
+    rather than a snapshot taken before its edit. Other attributes, prices
+    and the winning catalogue document are untouched.
+    """
+    old_attrs = before.get("attributes")
+    winning = fold_barcode_spellings(winning_attributes or {})
+    previous = fold_barcode_spellings(previous_attributes or {})
+    winner_changed_code = ("gtin" in winning) and (
+        winning.get("gtin") != previous.get("gtin") or "gtin" not in previous
+    )
+    fields = {"barcode": before.get("barcode")} if "barcode" in before else {}
+    unset = {"barcode": ""} if "barcode" not in before else {}
+    if spine:
+        if winner_changed_code:
+            fields["attributes.gtin"] = winning["gtin"]
+            fields.pop("barcode", None)
+            unset["barcode"] = ""
+        elif isinstance(old_attrs, dict):
+            if "gtin" in old_attrs:
+                fields["attributes.gtin"] = old_attrs["gtin"]
+            else:
+                unset["attributes.gtin"] = ""
+            for name, value in old_attrs.items():
+                if name != "gtin" and manufacturer_barcode_key(name) == "gtin":
+                    fields[f"attributes.{name}"] = value
+        elif "attributes" in before:
+            fields["attributes"] = old_attrs
+        else:
+            unset["attributes"] = ""
+    elif winner_changed_code:
+        fields.update(twin_barcode_fields(winning["gtin"]))
+        unset.pop("barcode", None)
+    elif "gtin" in before:
+        fields["gtin"] = before["gtin"]
+    else:
+        unset["gtin"] = ""
+    if "_gtin_write_token" in before:
+        fields["_gtin_write_token"] = before["_gtin_write_token"]
+    else:
+        unset["_gtin_write_token"] = ""
+    patch = {}
+    if fields:
+        patch["$set"] = fields
+    if unset:
+        patch["$unset"] = unset
+    collection.update_one({**key, "_gtin_write_token": token}, patch)
 
 
 def assert_gtin_free(code: Any, product_repo, this_product_id: Optional[str]) -> None:
@@ -3257,7 +3314,8 @@ def assert_size_row(sku: Any, db) -> None:
 
 
 def _mirror_variant_row_update(
-    *, current: Dict[str, Any], patch: Dict[str, Any], db, mark_dirty: bool = True
+    *, current: Dict[str, Any], patch: Dict[str, Any], db, mark_dirty: bool = True,
+    write_token=None,
 ) -> bool:
     """The SIZE-VARIANT half of the spine-edit mirror: a child's mrp / gtin
     live on its catalog_variants row (the price push reads the ROW, never the
@@ -3283,6 +3341,7 @@ def _mirror_variant_row_update(
         row_patch["mrp"] = patch["mrp"]
     if "gtin" in (patch.get("attributes") or {}):
         row_patch.update(twin_barcode_fields(patch["attributes"].get("gtin")))
+        row_patch["_gtin_write_token"] = write_token or uuid.uuid4().hex
     variants = db.get_collection("catalog_variants")
     res = variants.update_one({"sku": sku}, {"$set": row_patch})
     if not getattr(res, "matched_count", 1):

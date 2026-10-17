@@ -948,6 +948,70 @@ def test_a_refused_spine_gtin_write_saves_nothing_and_save_again_lands_it(
     assert "barcode" not in spine and flips == [(True, False)]
 
 
+def test_a_lost_catalogue_cas_does_not_change_the_billing_barcode(gtin_env, monkeypatch):
+    """A stale catalogue save must not change the till's barcode before its
+    guarded catalogue write refuses the edit."""
+    before = gtin_env.find_by_id("spine-g1")
+    loaded = catalog_mod.CATALOG_PRODUCTS["twin-g1"]["updated_at"]
+
+    def concurrent_writer(category, attrs, db=None):
+        catalog_mod.CATALOG_PRODUCTS["twin-g1"].update(
+            {"updated_at": "2026-07-10T10:05:00", "description": "colleague's saved edit"}
+        )
+        return attrs
+
+    monkeypatch.setattr(catalog_mod._pm, "enforce_dictionary_values", concurrent_writer)
+    with pytest.raises(HTTPException) as exc:
+        _put("twin-g1", {"attributes": {"gtin": _GTIN}, "expected_updated_at": loaded})
+
+    assert exc.value.status_code == 409
+    assert catalog_mod.CATALOG_PRODUCTS["twin-g1"]["description"] == "colleague's saved edit"
+    after = gtin_env.find_by_id("spine-g1")
+    assert after.get("attributes") == before.get("attributes")
+    assert after.get("barcode") == before.get("barcode")
+
+
+def test_lost_catalogue_cas_preserves_a_later_billing_barcode_writer(gtin_env, monkeypatch):
+    loaded = catalog_mod.CATALOG_PRODUCTS["twin-g1"]["updated_at"]
+
+    def concurrent_winner(_document, _expected):
+        gtin_env.update("spine-g1", {"attributes.gtin": _UPC})
+        catalog_mod.CATALOG_PRODUCTS["twin-g1"].update(
+            {"updated_at": "2026-07-10T10:05:00", "attributes": {"gtin": _UPC}}
+        )
+        return False
+
+    monkeypatch.setattr(catalog_mod, "_save_catalog_product_cas", concurrent_winner)
+    with pytest.raises(HTTPException) as exc:
+        _put("twin-g1", {"attributes": {"gtin": _GTIN}, "expected_updated_at": loaded})
+    assert exc.value.status_code == 409
+    assert gtin_env.find_by_id("spine-g1")["attributes"]["gtin"] == _UPC
+
+
+def test_lost_catalogue_cas_restores_the_winners_code_when_it_saved_before_the_spine_write(
+    gtin_env, monkeypatch,
+):
+    loaded = catalog_mod.CATALOG_PRODUCTS["twin-g1"]["updated_at"]
+    original_update = gtin_env.update
+    raced = False
+
+    def concurrent_winner(pid, patch):
+        nonlocal raced
+        if not raced and patch.get("attributes.gtin") == _GTIN:
+            raced = True
+            original_update(pid, {"attributes.gtin": _UPC})
+            catalog_mod.CATALOG_PRODUCTS["twin-g1"].update(
+                {"updated_at": "2026-07-10T10:05:00", "attributes": {"gtin": _UPC}}
+            )
+        return original_update(pid, patch)
+
+    monkeypatch.setattr(gtin_env, "update", concurrent_winner)
+    with pytest.raises(HTTPException) as exc:
+        _put("twin-g1", {"attributes": {"gtin": _GTIN}, "expected_updated_at": loaded})
+    assert exc.value.status_code == 409
+    assert gtin_env.find_by_id("spine-g1")["attributes"]["gtin"] == _UPC
+
+
 def test_a_failed_spine_lookup_on_a_barcode_save_saves_nothing(gtin_env, monkeypatch):
     """Round 14. The spine lookup that keys the gtin write was fail-soft: a
     transient error there read as 'no linked spine', so the twin took the new

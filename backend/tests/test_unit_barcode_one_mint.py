@@ -320,6 +320,32 @@ def test_trace_shows_the_till_sale_of_a_scanned_unit(monkeypatch):
     assert out["sales"][0]["matched_lines"] == [{"product_id": "P1", "stock_id": "SU-7"}]
 
 
+def test_trace_keeps_scanned_sale_history_after_a_typed_item_resale(monkeypatch):
+    """The unit now names its latest sale, but its earlier scanned sale still
+    belongs in the trace. Both links must survive the #1181 merge, including
+    when a tablet types the unit code in lower case."""
+    import mongomock
+
+    db = mongomock.MongoClient().db
+    db.stock_units.insert_one(
+        {"stock_id": "SU-7", "barcode": "BV0000000007", "product_id": "P1",
+         "store_id": STORE, "status": "SOLD", "order_id": "ORD-RESALE"}
+    )
+    db.orders.insert_many([
+        {"order_id": "ORD-SCAN", "order_number": "FIRST-SALE",
+         "created_at": "2026-09-22", "items": [{"product_id": "P1", "stock_id": "SU-7"}]},
+        {"order_id": "ORD-RESALE", "order_number": "TYPED-RESALE",
+         "created_at": "2026-10-01", "items": [{"product_id": "P1"}]},
+        {"order_id": "ORD-OTHER", "order_number": "OTHER-UNIT",
+         "created_at": "2026-10-02", "items": [{"product_id": "P1", "stock_id": "SU-8"}]},
+    ])
+
+    out = _trace(monkeypatch, db, "bv0000000007")
+    sales = {sale["order_number"]: sale for sale in out["sales"]}
+    assert set(sales) == {"TYPED-RESALE", "FIRST-SALE"}
+    assert sales["FIRST-SALE"]["matched_lines"] == [{"product_id": "P1", "stock_id": "SU-7"}]
+
+
 def test_trace_shows_a_transfer_that_moved_the_unit(monkeypatch):
     """A transfer line records the moved units by stock_id, not by code."""
     import mongomock

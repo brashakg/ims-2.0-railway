@@ -6,6 +6,7 @@ Product and Stock data access operations
 
 import logging
 import re
+import uuid
 from typing import List, NamedTuple, Optional, Dict
 from datetime import datetime, date, timedelta, timezone
 
@@ -142,6 +143,11 @@ class ProductRepository(BaseRepository):
         'switched on, sold, switched off'. Every spine door that writes
         is_active (catalog drawer, PUT /products, /products/master) writes
         through here."""
+        if "attributes.gtin" in data or "attributes" in data or "barcode" in data:
+            # A failed catalogue CAS may compensate its own barcode write.
+            # Every later billing-product barcode write takes ownership so
+            # that compensation cannot undo the later editor's code.
+            data.setdefault("_gtin_write_token", uuid.uuid4().hex)
         if data.get("is_active") is True:
             data["switched_on_at"] = datetime.now(timezone.utc)
         if "updated_by" not in data and "edited_at" not in data:

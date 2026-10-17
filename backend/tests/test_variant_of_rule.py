@@ -1185,6 +1185,36 @@ def test_a_drawer_barcode_removal_clears_the_size_rows_gtin_and_barcode(monkeypa
     assert not _spine(db, "sp-child")["attributes"]["gtin"]
 
 
+@pytest.mark.parametrize("attempted", ["4006381333931", ""])
+def test_a_lost_drawer_cas_restores_the_size_row_and_billing_barcode(monkeypatch, attempted):
+    from fastapi import HTTPException
+
+    db = _world()
+    _wire_catalog(monkeypatch, db)
+    stamp = "2026-10-01T10:00:00"
+    db["catalog_products"].update_one({"id": "tw-child"}, {"$set": {"updated_at": stamp}})
+    row_before = _row(db, CHILD_SKU)
+    spine_before = _spine(db, "sp-child")
+
+    def winner(_document, _expected):
+        db["catalog_products"].update_one(
+            {"id": "tw-child"},
+            {"$set": {"updated_at": "2026-10-01T10:05:00", "description": "colleague's edit"}},
+        )
+        return False
+
+    monkeypatch.setattr(cat, "_save_catalog_product_cas", winner)
+    with pytest.raises(HTTPException) as exc:
+        _run(cat.update_catalog_product(
+            "tw-child", cat.ProductUpdateInput(attributes={"gtin": attempted}, expected_updated_at=stamp),
+            current_user=ADMIN,
+        ))
+    assert exc.value.status_code == 409
+    assert _row(db, CHILD_SKU) == row_before
+    assert _spine(db, "sp-child")["attributes"] == spine_before["attributes"]
+    assert _twin(db, "tw-child")["description"] == "colleague's edit"
+
+
 def test_a_drawer_barcode_edit_on_a_size_with_no_row_saves_nothing(monkeypatch):
     """No catalog_variants row for the size's sku means the barcode cannot
     reach the website, and saving again cannot help: refused (422) BEFORE the

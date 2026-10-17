@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from enum import Enum
 import logging
 import uuid
+from copy import deepcopy
 
 logger = logging.getLogger(__name__)
 
@@ -2566,18 +2567,53 @@ async def update_catalog_product(
             "[CATALOG] spine lookup skipped for %s", product_id, exc_info=True
         )
     message = "Product updated successfully"
+    barcode_token = uuid.uuid4().hex
+    spine_before = size_before = None
+    size_collection = None
+
+    def undo_refused_barcode():
+        """A refused catalogue edit must not leave its barcode on the till
+        or the size row. Token guards preserve any newer barcode writer."""
+        try:
+            winner = _get_catalog_product(product_id)
+            if winner is None:
+                raise LookupError("catalogue winner could not be read")
+            copies = []
+            if spine_before is not None:
+                copies.append((_pr.collection, {"product_id": _spine_id}, spine_before, True))
+            if size_before is not None:
+                copies.append((size_collection, {"sku": existing.get("sku")}, size_before, False))
+            for collection, key, before, is_spine in copies:
+                _pm.undo_catalogue_barcode_write(
+                    collection, key, before, barcode_token, spine=is_spine,
+                    winning_attributes=winner.get("attributes"),
+                    previous_attributes=pre_edit.get("attributes"),
+                )
+        except Exception as exc:  # noqa: BLE001 - never claim clean refusal after failed repair
+            logger.error("[CATALOG] refused barcode edit could not be restored for %s", product_id, exc_info=True)
+            raise HTTPException(
+                status_code=503,
+                detail="This catalogue edit was not saved, but its barcode copies "
+                "could not be restored. Reload the item and check its barcode before retrying.",
+            ) from exc
+
     if spine_gtin is not None:
         # A size with no website row: refused BEFORE the spine write, or the
         # spine would take the code while the twin (refused below) never can.
         if _is_variant_of(existing):
             try:
-                _pm.assert_size_row(existing.get("sku"), _get_db())
+                size_db = _get_db()
+                _pm.assert_size_row(existing.get("sku"), size_db)
+                size_collection = size_db.get_collection("catalog_variants")
+                size_before = deepcopy(size_collection.find_one({"sku": existing.get("sku")}))
             except _pm.ProductMasterError as err:
                 raise HTTPException(status_code=err.status, detail=err.message) from err
         if _spine_id:
             try:
-                _pm.write_spine_gtin(_pr, _spine_id, spine_gtin)
+                spine_before = deepcopy(_pr.find_by_id(_spine_id))
+                _pm.write_spine_gtin(_pr, _spine_id, spine_gtin, write_token=barcode_token)
             except _pm.ProductMasterError as err:
+                undo_refused_barcode()
                 raise HTTPException(status_code=err.status, detail=err.message) from err
         else:
             message = (
@@ -2597,9 +2633,11 @@ async def update_catalog_product(
                     current=existing,
                     patch={"attributes": {"gtin": spine_gtin}},
                     db=_get_db(),
+                    write_token=barcode_token,
                 ):
                     raise LookupError(f"no size row for {existing.get('sku')}")
             except Exception as exc:  # noqa: BLE001
+                undo_refused_barcode()
                 raise HTTPException(
                     status_code=503,
                     detail="The website copy of this size could not take the "
@@ -2622,6 +2660,8 @@ async def update_catalog_product(
         # another writer landed inside the check-to-write window (which
         # includes live DB round-trips) -- 409 instead of clobbering.
         if not _save_catalog_product_cas(to_write, raw_expected_ts):
+            if spine_gtin is not None:
+                undo_refused_barcode()
             raise HTTPException(
                 status_code=409,
                 detail=(
