@@ -46,7 +46,8 @@ def _order(order_id, **extra):
 def db(monkeypatch):
     db = mongomock.MongoClient()["ims_pos"]
     db.stores.insert_one({"store_id": "BV-BOK-01", "store_name": "Bokaro", "state_code": "20",
-                          "state": "20", "gstin": "20AAAAA0000A1Z5", "is_active": True})
+                          "state": "20", "gstin": "20AAAAA0000A1Z5", "entity_id": "entity-bv", "is_active": True})
+    db.entities.insert_one({"entity_id": "entity-bv", "gstins": [{"gstin": "20AAAAA0000A1Z5"}]})
     # A returning buyer: the customer doc still carries their FIRST delivery state.
     db.customers.insert_one({"customer_id": "C-1", "name": "Ravi", "state": "20",
                              "customer_type": "B2B", "billing_address": {"state_code": "20"}})
@@ -57,6 +58,7 @@ def db(monkeypatch):
     db.orders.insert_one(_order("POS-1"))
 
     import api.dependencies as deps
+    from api.services import print_identity
     from api.routers.orders import invoices as inv_mod
     from api.routers.reports import gstr1 as gstr1_mod
     from database.repositories.customer_repository import CustomerRepository
@@ -67,6 +69,7 @@ def db(monkeypatch):
             return db.stores.find_one({"store_id": store_id}, {"_id": 0})
 
     monkeypatch.setattr(deps, "get_store_repository", lambda: _Stores())
+    monkeypatch.setattr(print_identity, "_db", lambda: db)
     monkeypatch.setattr(inv_mod, "get_order_repository", lambda: OrderRepository(db.orders))
     monkeypatch.setattr(inv_mod, "get_customer_repository", lambda: CustomerRepository(db.customers))
     monkeypatch.setattr(gstr1_mod, "_get_raw_db", lambda: db)

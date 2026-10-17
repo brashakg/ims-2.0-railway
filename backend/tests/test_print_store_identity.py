@@ -122,20 +122,17 @@ def test_gstin_is_the_stores_own_never_the_primary():
     assert LegalHeader(BV_ENTITY, karnataka, "delivery_challan")["gstin"] == ""
 
 
-def test_a_shop_moved_to_another_company_prints_what_its_invoice_issues():
-    """Round 25, item 7 (one rule with the invoice door, a POS file): Pune is
-    moved to Better Vision on the Setup page and keeps WizOpt's 27AABFW...
-    on store.gstin. The tax-invoice door issues from store.gstin; the
-    challan refused it and the header printed Better Vision's MH number --
-    two answers for one shop. Both print store.gstin now (the stricter
-    shop_gstin rule waits for the owner's yes at both doors)."""
+def test_a_shop_moved_to_another_company_cannot_issue_a_gst_document():
+    """Owner-approved: a company move must not issue the former GSTIN."""
     moved = dict(WIZ_STORE_MH, entity_id="ent-bv")
 
     assert LegalHeader(BV_ENTITY, moved, "delivery_challan")["gstin"] == "27AABFW5678N1Z3"
-    assert_issuing_identity(moved, require_gstin=True, entity=BV_ENTITY)
+    with pytest.raises(HTTPException, match="legal entity"):
+        assert_issuing_identity(moved, require_gstin=True, entity=BV_ENTITY)
     no_company = dict(WIZ_STORE_MH, entity_id=None)
     assert LegalHeader(None, no_company, "estimate")["gstin"] == "27AABFW5678N1Z3"
-    assert_issuing_identity(no_company, require_gstin=True, entity=None)
+    with pytest.raises(HTTPException, match="legal entity"):
+        assert_issuing_identity(no_company, require_gstin=True, entity={})
 
 
 def test_logo_read_from_nested_invoice_identity():

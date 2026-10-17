@@ -799,8 +799,8 @@ def LegalHeader(  # noqa: N802 - intentionally mirror the JSX export name
     )
 
     # ---- the seller GSTIN: the store's OWN (store.gstin) -- the one its tax
-    # invoice prints and issues from (one rule with the invoice door, see the
-    # ponytail note in print_identity.assert_issuing_identity). A store never
+    # invoice prints and issues from (the GST-document gate verifies that its
+    # company holds it in print_identity.assert_store_gstin). A store never
     # stamped prints THE shop's GSTIN (org_validation.shop_gstin: its
     # company's registration for the shop's own state -- a transfer challan
     # must carry the consignor's GSTIN, Rule 55), never the company's PRIMARY.

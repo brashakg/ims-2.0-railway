@@ -218,13 +218,10 @@ def _assemble_invoice(order_id: str, current_user: dict):
                 if store_repo:
                     store_doc = store_repo.find_by_id(store_id)
             except Exception:
-                pass  # don't block a POS invoice if store lookup fails
-        if store_doc and not store_doc.get("gstin"):
-            raise HTTPException(
-                status_code=400,
-                detail="Cannot generate invoice: store GSTIN is not configured. "
-                "Update store settings with a valid GSTIN first.",
-            )
+                pass  # the shared gate below refuses an unresolved identity
+        from ...services.print_identity import assert_store_gstin
+
+        assert_store_gstin(store_doc)
         # A routed online order: THE seller check its booking held it on
         # (owner Q1 -- the shipping shop's and every split-leg shop's OWN
         # GSTIN, one GSTIN per order, a named shop). An unreadable shop is
