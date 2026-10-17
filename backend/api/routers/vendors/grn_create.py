@@ -138,7 +138,9 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
     # no pre-logged PO) -- only validate when one was supplied.
     po = None
     if po_repo is not None and grn.po_id:
-        po = po_repo.find_by_id(grn.po_id)
+        from .po_detail import _order_or_503
+
+        po = _order_or_503(po_repo, grn.po_id)
         if not po:
             raise HTTPException(status_code=404, detail="Purchase order not found")
 
@@ -147,7 +149,9 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
         # A rejected delivery on a closed order is logged as a STANDARD
         # receipt, never a delivery challan: no bill is ever due on it, so a DC
         # would sit in the accountant's unbilled-challan list for good.
-        if po.get("status") not in _RECEIVABLE_PO_STATUSES and not (
+        # Owner 2026-10-18: managers may count extra goods after full receipt.
+        # The cancelled-product quantity guard below still applies to every line.
+        if po.get("status") not in (*_RECEIVABLE_PO_STATUSES, "RECEIVED") and not (
             not is_dc
             and rejected_delivery_on_closed_order(po, [it.model_dump() for it in grn.items])
         ):

@@ -474,8 +474,8 @@ def test_express_books_to_po_store_not_active(monkeypatch):
     assert all(u["store_id"] == "STORE-B" for u in stock_repo.units)
 
 
-def test_express_unreceivable_po_400(monkeypatch):
-    grn_repo, _po_repo, stock_repo, _t = _wire(monkeypatch, po=_po(status="RECEIVED"))
+def test_express_unsent_draft_po_400(monkeypatch):
+    grn_repo, _po_repo, stock_repo, _t = _wire(monkeypatch, po=_po(status="DRAFT"))
     with pytest.raises(HTTPException) as e:
         _run(_body(), _user())
     assert e.value.status_code == 400

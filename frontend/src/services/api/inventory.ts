@@ -775,7 +775,7 @@ export const vendorsApi = {
   },
 
   // Purchase Orders
-  getPurchaseOrders: async (params?: { vendor_id?: string; status?: string; store_id?: string }) => {
+  getPurchaseOrders: async (params?: { vendor_id?: string; status?: string; store_id?: string; receipt_candidates?: boolean }) => {
     const response = await api.get('/vendors/purchase-orders', { params });
     return response.data;
   },

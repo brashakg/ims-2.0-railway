@@ -90,8 +90,9 @@ describe('a delivery against an order a cancel closed', () => {
     expect(group).not.toBeNull();
     expect([...group!.querySelectorAll('option')].map((o) => o.value)).toEqual(['PO-CXL']);
     expect(screen.getByRole('option', { name: 'PO-OPEN' }).closest('optgroup')).toBeNull();
-    // A plain received order with no cancel has nothing to log against.
-    expect(screen.queryByRole('option', { name: /PO-DONE/ })).toBeNull();
+    // The manager can count an extra delivery against an uncancelled order.
+    expect(screen.getByRole('option', { name: /PO-DONE.*count extra goods/ })).toBeInTheDocument();
+    expect(api.getPurchaseOrders).toHaveBeenCalledWith({ store_id: 'S1', receipt_candidates: true });
   });
 
   it('posts every unit that arrived as rejected - nothing accepted - with the bill', async () => {
@@ -161,6 +162,46 @@ describe('a delivery against an order a cancel closed', () => {
 });
 
 describe('a standard receipt on this screen', () => {
+  it('counts only the new extra goods on a fully received order', async () => {
+    await open();
+    fireEvent.change(screen.getByDisplayValue('Select a PO…'), { target: { value: 'PO-DONE' } });
+    expect(screen.getByLabelText('Received units on line 1')).toHaveValue(0);
+    expect(screen.getByLabelText('Received units on line 2')).toHaveValue(0);
+    fireEvent.change(screen.getByLabelText('Received units on line 1'), { target: { value: '2' } });
+    fireEvent.click(screen.getByLabelText(/Tally line 1/));
+    await attachBillAndInvoice();
+    fireEvent.click(screen.getByRole('button', { name: /Post GRN/i }));
+    await waitFor(() => expect(api.createGRN).toHaveBeenCalledTimes(1));
+    expect(api.createGRN.mock.calls[0][0].items).toEqual([
+      expect.objectContaining({ product_id: 'P1', received_qty: 2, accepted_qty: 2, rejected_qty: 0 }),
+    ]);
+  });
+
+  it('keeps cancelled items rejected when another completed line can take extras', async () => {
+    api.getPurchaseOrders.mockResolvedValue({ purchase_orders: [{
+      po_id: 'PO-MIXED', po_number: 'PO-MIXED', status: 'RECEIVED',
+      closed_by_cancel: true, extra_receipt_allowed: true,
+      items: [lines[0], { ...lines[1], quantity: 0, cancelled_qty: 3, line_status: 'CANCELLED' }],
+    }] });
+    await open();
+    fireEvent.change(screen.getByDisplayValue('Select a PO…'), { target: { value: 'PO-MIXED' } });
+    fireEvent.change(screen.getByLabelText('Received units on line 1'), { target: { value: '1' } });
+    fireEvent.change(screen.getByLabelText('Received units on line 2'), { target: { value: '2' } });
+    expect(screen.getByLabelText('Rejected units on line 1')).not.toBeDisabled();
+    expect(screen.getByLabelText('Rejected units on line 2')).toBeDisabled();
+    expect(screen.getByLabelText('Rejected units on line 2')).toHaveValue(2);
+    fireEvent.change(screen.getByLabelText('Rejection reason on line 2'), { target: { value: 'cancelled' } });
+    fireEvent.click(screen.getByLabelText(/Tally line 1/));
+    fireEvent.click(screen.getByLabelText(/Tally line 2/));
+    await attachBillAndInvoice();
+    fireEvent.click(screen.getByRole('button', { name: /Post GRN/i }));
+    await waitFor(() => expect(api.createGRN).toHaveBeenCalledTimes(1));
+    expect(api.createGRN.mock.calls[0][0].items).toEqual([
+      expect.objectContaining({ product_id: 'P1', received_qty: 1, accepted_qty: 1 }),
+      expect.objectContaining({ product_id: 'P2', received_qty: 2, accepted_qty: 0, rejected_qty: 2 }),
+    ]);
+  });
+
   it('needs the vendor bill attached before it posts', async () => {
     await open();
     fireEvent.change(screen.getByDisplayValue('Select a PO…'), { target: { value: 'PO-OPEN' } });

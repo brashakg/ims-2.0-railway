@@ -319,7 +319,7 @@ def test_worklists_returns_all_four_lists(monkeypatch):
                 "po_id": "PO-1",
                 "po_number": "PO-2026-001",
                 "vendor_id": "V1",
-                "status": "APPROVED",
+                "status": "SENT",
                 "delivery_store_id": "BV-01",
                 "items": [
                     {
@@ -411,7 +411,7 @@ def test_worklists_fully_received_po_not_shown(monkeypatch):
                 "po_id": "PO-DONE",
                 "po_number": "PO-2026-002",
                 "vendor_id": "V1",
-                "status": "APPROVED",
+                "status": "SENT",
                 "items": [
                     {
                         "product_id": "P2",

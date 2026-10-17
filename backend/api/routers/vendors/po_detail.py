@@ -561,12 +561,16 @@ def _order_or_503(
     checked against the RAW collection, and a read that fails there answers
     503. Only a minimal mock whose collection has no find_one takes the None
     as is. The receipt accept and every PO change read the order here."""
-    po = po_repo.find_by_id(po_id)
-    finder = getattr(getattr(po_repo, "collection", None), "find_one", None)
-    if po or not callable(finder):
-        return po
     try:
-        return finder({"po_id": po_id})
+        po = po_repo.find_by_id(po_id)
+        finder = getattr(getattr(po_repo, "collection", None), "find_one", None)
+        if po or not callable(finder):
+            return po
+        po = finder({"po_id": po_id})
+        if po is not None:
+            po = dict(po)
+            po.pop("_id", None)
+        return po
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=detail) from exc
 

@@ -7,6 +7,7 @@ from ._shared import (
     HTTPException,
     Optional,
     Query,
+    _RECEIVABLE_PO_STATUSES,
     _VENDOR_ROLES,
     _auto_reorder_disabled,
     _get_db,
@@ -189,6 +190,7 @@ async def list_pos(
     store_id: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
+    receipt_candidates: bool = Query(False),
     current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
 ):
     """List purchase orders with filters"""
@@ -208,11 +210,26 @@ async def list_pos(
     if active_store:
         filter_dict["delivery_store_id"] = active_store
 
-    pos = po_repo.find_many(filter_dict, skip=skip, limit=limit) or []
-    from .po_detail import closed_by_cancel  # po_detail imports this module
+    if receipt_candidates is True:
+        # Filter before limiting: an old sent-then-cancelled order must not
+        # vanish behind the most recent 50 drafts. Receiving offers all matches.
+        filter_dict["$or"] = [
+            {"status": {"$in": [*_RECEIVABLE_PO_STATUSES, "RECEIVED"]}},
+            {"status": "CANCELLED", "sent_at": {"$exists": True, "$nin": [None, ""]}},
+        ]
+        pos = po_repo.find_many(
+            filter_dict, sort=[("created_at", -1), ("po_id", -1)], limit=0,
+        ) or []
+    else:
+        pos = po_repo.find_many(filter_dict, skip=skip, limit=limit) or []
+    from .po_detail import _cancelled_products, closed_by_cancel  # po_detail imports this module
 
     for po in pos:
         po["closed_by_cancel"] = closed_by_cancel(po)
+        cancelled = _cancelled_products(po)
+        po["extra_receipt_allowed"] = po.get("status") == "RECEIVED" and any(
+            line.get("product_id") not in cancelled for line in po.get("items") or []
+        )
 
     return {"purchase_orders": pos, "total": len(pos)}
 

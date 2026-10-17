@@ -36,6 +36,7 @@ interface GRNLineItem {
   // old all-or-nothing quality verdict.
   rejected_qty: number;
   rejection_reason?: string;
+  reject_only?: boolean;
 }
 
 interface GRNDiscrepancyItem {
@@ -69,7 +70,10 @@ interface POOption {
   vendor_name?: string;
   status?: string;
   closed_by_cancel?: boolean;
+  extra_receipt_allowed?: boolean;
   items?: Array<{
+    cancelled_qty?: number;
+    line_status?: string;
     po_item_id?: string;
     id?: string;
     product_id: string;
@@ -194,19 +198,16 @@ export function GoodsReceiptNote() {
     return () => { cancelled = true; };
   }, [printGrn, storeId]);
 
-  // Only POs that still have goods to receive belong in the receive picker.
-  // A DRAFT PO hasn't been sent; a RECEIVED/CANCELLED one is closed. Keep the
-  // legacy "PARTIAL" alias alongside the canonical "PARTIALLY_RECEIVED".
-  // An order a cancel CLOSED (the server stamps closed_by_cancel) is listed
-  // too, apart, only to log a delivery the vendor sent anyway: every unit on
-  // it is rejected, nothing goes into stock (owner ruling 2026-10-08 (c)).
+  // Managers can count extra goods after full receipt. Cancelled quantities
+  // are still rejected; the server returns the complete receiving worklist.
   const isReceivablePO = (status?: string) =>
     !status ||
-    ['SENT', 'ACKNOWLEDGED', 'PARTIAL', 'PARTIALLY_RECEIVED'].includes(status);
+    ['SENT', 'ACKNOWLEDGED', 'PARTIAL', 'PARTIALLY_RECEIVED', 'RECEIVED'].includes(status);
+  const isRejectedOrder = (p?: POOption) => !!p?.closed_by_cancel && !p.extra_receipt_allowed;
 
   const fetchPurchaseOrders = async (): Promise<POOption[]> => {
     const poResp = await vendorsApi
-      .getPurchaseOrders({ store_id: storeId })
+      .getPurchaseOrders({ store_id: storeId, receipt_candidates: true })
       .catch(() => null);
     const poList: any[] = Array.isArray(poResp)
       ? poResp
@@ -218,6 +219,7 @@ export function GoodsReceiptNote() {
         vendor_name: p.vendor_name || p.vendor?.trade_name || p.vendor?.legal_name,
         status: p.status,
         closed_by_cancel: !!p.closed_by_cancel,
+        extra_receipt_allowed: !!p.extra_receipt_allowed,
         items: p.items || p.line_items || [],
       }))
       .filter((p: POOption) => p.closed_by_cancel || isReceivablePO(p.status));
@@ -260,8 +262,10 @@ export function GoodsReceiptNote() {
   const needsBill = !isDcMode && !!poNumber;
   // An order a cancel closed takes no unit: every unit that arrived is
   // rejected, whatever the Rejected box says.
-  const rejectOnly = !!pos.find((p) => p.po_id === poNumber)?.closed_by_cancel;
-  const rejectedOf = (i: GRNLineItem) => (rejectOnly ? i.received_qty : i.rejected_qty);
+  const selectedPO = pos.find((p) => p.po_id === poNumber);
+  const rejectOnly = isRejectedOrder(selectedPO);
+  const extraReceipt = selectedPO?.status === 'RECEIVED' && !rejectOnly;
+  const rejectedOf = (i: GRNLineItem) => (rejectOnly || i.reject_only ? i.received_qty : i.rejected_qty);
 
   const attachBill = async (file?: File) => {
     if (!file) return;
@@ -368,9 +372,13 @@ export function GoodsReceiptNote() {
   const onSelectPO = (poId: string) => {
     setPoNumber(poId);
     const po = pos.find((p) => p.po_id === poId || p.po_number === poId);
+    const cancelledProducts = new Set((po?.items || [])
+      .filter((it) => it.line_status === 'CANCELLED' || (it.cancelled_qty || 0) > 0)
+      .map((it) => it.product_id));
     const lines = (po?.items || []).map((it) => {
-      // Nothing is due on an order a cancel closed: the receiver counts what came.
-      const qty = po?.closed_by_cancel ? 0 : it.quantity ?? it.qty ?? it.ordered_qty ?? 0;
+      // Nothing is due on a completed order: count only the new delivery.
+      const qty = po?.closed_by_cancel || po?.status === 'RECEIVED'
+        ? 0 : it.quantity ?? it.qty ?? it.ordered_qty ?? 0;
       return {
         po_item_id: it.po_item_id || it.id || it.product_id,
         product_id: it.product_id,
@@ -381,6 +389,7 @@ export function GoodsReceiptNote() {
         received_qty: qty,
         tallied: false,
         rejected_qty: 0,
+        reject_only: po?.status === 'RECEIVED' && cancelledProducts.has(it.product_id),
       };
     });
     setReceivedItems(lines);
@@ -454,9 +463,9 @@ export function GoodsReceiptNote() {
     }
     // A closed order's receipt carries only what arrived: a line at 0 would
     // read as a shortage on an order with nothing due.
-    const lines = rejectOnly ? receivedItems.filter((i) => i.received_qty > 0) : receivedItems;
+    const lines = rejectOnly || extraReceipt ? receivedItems.filter((i) => i.received_qty > 0) : receivedItems;
     if (lines.length === 0) {
-      toast.error('Enter the units that arrived - each one is logged as rejected');
+      toast.error(rejectOnly ? 'Enter the units that arrived - each one is logged as rejected' : 'Enter the extra units that arrived');
       return;
     }
     // Ruling 14 -- the tally. Mirrored server-side (LINES_NOT_TALLIED) for
@@ -829,18 +838,18 @@ export function GoodsReceiptNote() {
                     </label>
                     <select value={poNumber} onChange={(e) => onSelectPO(e.target.value)} className="input w-full">
                       <option value="">{isDcMode ? 'No PO — receiving over the counter' : 'Select a PO…'}</option>
-                      {pos.filter((p) => !p.closed_by_cancel).map((p) => (
+                      {pos.filter((p) => !isRejectedOrder(p)).map((p) => (
                         <option key={p.po_id} value={p.po_id}>
                           {p.po_number}
                           {p.vendor_name ? ` · ${p.vendor_name}` : ''}
                           {p.status === 'PARTIALLY_RECEIVED' || p.status === 'PARTIAL'
                             ? ' · partially received'
-                            : ''}
+                            : p.status === 'RECEIVED' ? ' · received — count extra goods' : ''}
                         </option>
                       ))}
-                      {!isDcMode && pos.some((p) => p.closed_by_cancel) && (
+                      {!isDcMode && pos.some((p) => isRejectedOrder(p)) && (
                         <optgroup label="Log a rejected delivery">
-                          {pos.filter((p) => p.closed_by_cancel).map((p) => (
+                          {pos.filter((p) => isRejectedOrder(p)).map((p) => (
                             <option key={p.po_id} value={p.po_id}>
                               {p.po_number}
                               {p.vendor_name ? ` · ${p.vendor_name}` : ''}
@@ -855,6 +864,12 @@ export function GoodsReceiptNote() {
                         This order was closed by a cancel. Count what the vendor sent: every unit
                         is logged as rejected, nothing goes into stock, and a discrepancy task
                         follows for the debit note.
+                      </p>
+                    )}
+                    {extraReceipt && (
+                      <p className="text-xs mt-1" style={{ color: 'var(--ink-3)' }}>
+                        This order is fully received. Count only the extra goods in this delivery.
+                        Cancelled items stay rejected. The receipt records who accepted the extra stock.
                       </p>
                     )}
                   </div>
@@ -1104,7 +1119,7 @@ export function GoodsReceiptNote() {
                             min={0}
                             max={item.received_qty}
                             value={rejectedOf(item)}
-                            disabled={rejectOnly}
+                            disabled={rejectOnly || item.reject_only}
                             aria-label={`Rejected units on line ${idx + 1}`}
                             onChange={(e) =>
                               startTransition(() => {

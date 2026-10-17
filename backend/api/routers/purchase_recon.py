@@ -222,8 +222,9 @@ async def get_recon(
 # GET /recon/worklists  -- accountant console worklists
 # ---------------------------------------------------------------------------
 
-# PO statuses that still have goods to arrive (mirrors vendors.py _RECEIVABLE_PO_STATUSES)
-_RECEIVABLE_PO_STATUSES = {"APPROVED", "PARTIALLY_RECEIVED", "PENDING"}
+# The same open-order states used by receiving; draft/fully received orders
+# have nothing outstanding on the accountant's worklist.
+from .vendors._shared import _RECEIVABLE_PO_STATUSES
 
 
 def _safe_list(db, collection: str, query: dict, limit: int = 200) -> list:
