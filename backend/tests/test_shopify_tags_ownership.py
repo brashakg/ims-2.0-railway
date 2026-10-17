@@ -48,6 +48,7 @@ import pytest  # noqa: E402
 from api.routers import catalog as catalog_mod  # noqa: E402
 from api.services import product_master as pm  # noqa: E402
 from api.services import shopify_push  # noqa: E402
+from shopify_answers import tracking_answer  # noqa: E402
 
 # The sibling harnesses, not copies: the in-memory _DB whose $set nests
 # dot-notation, and the review PUT's no-DB rig (in-memory catalog + a real
@@ -105,6 +106,9 @@ class _Shopify:
     async def __call__(self, db, query, variables):
         op = self._op(query)
         self.calls.append({"op": op, "variables": copy.deepcopy(variables)})
+        answer = tracking_answer(query, variables)
+        if answer:
+            return answer
         variant = {
             "id": "gid://shopify/ProductVariant/901",
             "title": "Default Title",

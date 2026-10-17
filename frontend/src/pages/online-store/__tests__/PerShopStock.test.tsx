@@ -223,6 +223,37 @@ describe('per-shop stock on the sync page', () => {
     expect(warn.msg).not.toContain('not mapped, stock invisible online');
   });
 
+  // A LIVE pass whose catalogue read died counted nothing: the backend sends
+  // STOCK_ONHAND_UNKNOWN with NO count. The toast and the stock card printed
+  // `?? 0` -- "0 of 0 listings changed, 0 written" -- a green-looking count
+  // over a pass that never read the catalogue. Unknown prints "—". Put
+  // `?? 0` back in either place -> this fails.
+  it('a pass that counted nothing prints a dash, never "0 of 0"', async () => {
+    vi.mocked(pushApi.getStatus).mockResolvedValue(status() as any);
+    vi.mocked(pushApi.pushStock).mockResolvedValue({
+      mode: 'LIVE',
+      entity: 'stock',
+      action: 'sync',
+      ok: false,
+      code: 'STOCK_ONHAND_UNKNOWN',
+      error: 'the catalogue (the listings on Shopify or their sizes) could not be read -- nothing written this pass',
+      payload: {},
+    } as any);
+    render(<OnlineShopifySyncPage />);
+    await userEvent.click(await screen.findByRole('checkbox'));
+    const button = await screen.findByRole('button', { name: /push stock/i });
+    await waitFor(() => expect(button).not.toBeDisabled());
+    await userEvent.click(button);
+
+    await waitFor(() => expect(toastCalls.some((t) => t.kind === 'warning')).toBe(true));
+    const warn = toastCalls.find((t) => t.kind === 'warning')!;
+    expect(warn.msg).toContain('Stock (LIVE): — of — listings changed, — written');
+    expect(warn.msg).toContain('could not be read');
+    const result = await screen.findByTestId('stock-pass-result');
+    expect(result).toHaveTextContent('— of — listings changed, — written, — failed');
+    expect(result.textContent).not.toContain('0 of 0');
+  });
+
   it("shows the scheduled run's stock verdict on the Live sync card", async () => {
     const run = {
       run_id: 'r1',
