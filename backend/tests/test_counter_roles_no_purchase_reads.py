@@ -1205,12 +1205,15 @@ _PRODUCT_COST_SCREENS = (
 
 def _assert_screens_read(name, screens):
     """Each screen imports CostCell's `name` and asks it as it is: every use is
-    hasRole(name), name.includes(role) or an alias `: UserRole[] = name;` --
+    hasRole(name), name.includes(role), a typed alias, or the unchanged list
+    passed to a navigation/route role gate --
     never widened ([...name, 'STORE_MANAGER']) and never dropped (a gate set
     to true leaves only the import behind)."""
     asked = (
         r"hasRole\(\s*" + name + r"\s*\)|\b" + name + r"\.includes\("
         r"|:\s*UserRole\[\]\s*=\s*" + name + r"\s*;"
+        r"|\broles\s*:\s*" + name + r"\s*(?=[,}])"
+        r"|\ballowedRoles\s*=\s*\{\s*" + name + r"\s*\}"
     )
     for rel in screens:
         with open(os.path.join(_FRONTEND_SRC, rel), encoding="utf-8") as fh:

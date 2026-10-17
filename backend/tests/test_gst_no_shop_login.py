@@ -111,18 +111,18 @@ def _world() -> Any:
     db["vendor_bills"].insert_many([
         {"bill_id": "B-1", "store_id": S1, "bill_number": "PB-1", "vendor_id": "V1",
          "bill_date": "2026-05-04", "invoice_date": "2026-05-04",
-         "recipient_entity_id": "E1", "recipient_gstin": None,
+         "recipient_entity_id": "E1", "recipient_gstin": S1_GSTIN,
          "taxable_amount": 1111.0, "tax_amount": 100.0, "cgst_total": 50.0,
          "sgst_total": 50.0, "igst_total": 0.0, "status": "OUTSTANDING"},
         {"bill_id": "B-2", "store_id": S1, "bill_number": "RCM-1", "vendor_id": "V2",
          "bill_date": "2026-05-06", "invoice_date": "2026-05-06",
          "reverse_charge": True, "recipient_entity_id": "E1",
-         "recipient_gstin": None, "taxable_amount": 400.0, "tax_amount": 20.0,
+         "recipient_gstin": S1_GSTIN, "taxable_amount": 400.0, "tax_amount": 20.0,
          "cgst_total": 10.0, "sgst_total": 10.0, "igst_total": 0.0,
          "status": "OUTSTANDING"},
         {"bill_id": "B-3", "store_id": S1, "bill_number": "PB-3", "vendor_id": "V1",
          "bill_date": "2026-05-08", "invoice_date": "2026-05-08",
-         "recipient_entity_id": "E1", "recipient_gstin": None,
+         "recipient_entity_id": "E1", "recipient_gstin": S1_GSTIN,
          "taxable_amount": 300.0, "tax_amount": 33.0, "cgst_total": 16.5,
          "sgst_total": 16.5, "igst_total": 0.0, "itc_blocked": True,
          "itc_eligible": False, "status": "OUTSTANDING"},
@@ -187,7 +187,9 @@ def test_the_world_is_not_empty_admins_and_shop_logins_read_every_shop(summary_d
     for admin in (_user("ADMIN"), _user("SUPERADMIN"), _user("ADMIN", S1, (S1,))):
         body = _summary(admin)
         assert body["gst_collected"] == 540.0, body
-        assert (body["gst_input_credit"], body["net_gst_payable"]) == (120.0, 420.0)
+        assert (body["gst_input_credit"], body["reverse_charge_tax"]) == (120.0, 20.0)
+        # The RCM liability is paid in cash as well as entering eligible ITC.
+        assert body["net_gst_payable"] == 540.0 + 20.0 - 120.0
     # A login that holds a shop reads its OWN shop's (F63, the one shop rule;
     # it used to read every shop's 540 -- OS-031, retired by the merge of the
     # parallel session's at_shop filter, panel 2026-10-08). Not yet an owner
@@ -288,7 +290,19 @@ def test_shop_logins_and_admins_are_unchanged(reports_world):
     assert _get(f"{GSTR3B}&store_id={S0}", _user("ADMIN", S1)).json()["gstin"] == S0_GSTIN
     assert _get(GSTR3B, _user("ADMIN", S1)).json()["gstin"] == S1_GSTIN
     assert _get(GSTR3B, _user("ADMIN")).json()["gstin"] == S0_GSTIN
-    assert _get(GSTN, _user("ADMIN")).json()["gstin"] == S0_GSTIN
+    portal = _get(GSTN, _user("ADMIN"))
+    assert portal.status_code == 200, portal.text
+    assert portal.json()["gstin"] == S0_GSTIN
+
+
+def test_a_shop_assignment_does_not_allow_unallocated_bill_portal_export(reports_world):
+    reports._get_raw_db()["vendor_bills"].update_one(
+        {"bill_id": "B-1"}, {"$set": {"recipient_gstin": None}}
+    )
+    for user in (_user("ACCOUNTANT", S1, (S1,)), _user("ADMIN")):
+        portal = _get(GSTN, user)
+        assert portal.status_code == 409, portal.text
+        assert "receiving GSTIN" in portal.json()["detail"]
 
 
 # ============================================================================
