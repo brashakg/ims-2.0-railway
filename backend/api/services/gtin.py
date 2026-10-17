@@ -10,12 +10,12 @@ product. An EMPTY gtin is always safer than a wrong one.
 This is deliberately NOT the internal barcode. The two-barcode model:
 
     gtin / barcode   the manufacturer's public GTIN  -> pushed to Shopify
-    store_barcode    our internally minted EAN-13    -> NEVER pushed
+    store_barcode    our internally minted unit code -> NEVER pushed
 
-`services/barcode.py` mints the internal one under GS1 prefix 20-29
-("restricted distribution" / in-store only), which is exactly why a code in
-that range must never be accepted as a public GTIN: it is by definition not a
-manufacturer identifier.
+Until 2026-09-28 `services/barcode.py` minted unit codes as EAN-13s under GS1
+prefix 20-29 ("restricted distribution" / in-store only) and those units keep
+them. That is exactly why a code in that range must never be accepted as a
+public GTIN: it is by definition not a manufacturer identifier.
 
 Observed real damage this guards against (prod audit, 2026-07-29 -- 353 of
 2,815 gtin-bearing variants were invalid):
@@ -33,8 +33,11 @@ No emojis (Windows cp1252).
 
 from __future__ import annotations
 
+import logging
 import re
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger("ims.gtin")
 
 # GS1 defines exactly these four lengths: GTIN-8, GTIN-12 (UPC-A), GTIN-13
 # (EAN-13) and GTIN-14 (case/carton).
@@ -48,13 +51,64 @@ REASON_BADLEN = "BADLEN"
 REASON_RESTRICTED = "RESTRICTED"
 REASON_BADCHECK = "BADCHECK"
 
-_DIGITS = re.compile(r"^\d+$")
+# ASCII 0-9 only: `\d` also matches every other script's digits, so a
+# Devanagari or full-width EAN passed as "numeric" and was pushed as-is.
+_DIGITS = re.compile(r"^[0-9]+\Z")
 # Separators a human or a spec sheet may legitimately put inside one code.
 # Stripping them is what makes "805-6597-72037-3" valid and, deliberately,
 # what makes "8056597720373 8056597720380" collapse to 26 digits -> BADLEN.
 _SEPARATORS = re.compile(r"[\s\-]+")
 
+# The product attributes that hold a MANUFACTURER's barcode: the GTIN that
+# becomes the Shopify variant barcode, and the 'UPC (mfr)' box (a UPC is a
+# GTIN-12). Both are validated as GTINs and both publish as ims.* metafields.
+MANUFACTURER_BARCODE_ATTRIBUTES = ("gtin", "upc")
+
+
+def manufacturer_barcode_key(key: Any) -> Optional[str]:
+    """'gtin' / 'upc' when an attribute KEY names a manufacturer barcode in any
+    letter case or padding ('GTIN', ' Upc '), else None. The Shopify push
+    lower-cases keys into ims.* metafields, so 'GTIN' publishes as ims.gtin."""
+    k = str(key).strip().lower()
+    return k if k in MANUFACTURER_BARCODE_ATTRIBUTES else None
+
+
+def fold_barcode_spellings(attributes: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """`attributes` with every manufacturer-barcode key in another spelling
+    ('GTIN', ' Upc ') folded onto gtin / upc and REMOVED. THE rule for every
+    write of attributes -- the guard on a submit, the merge doors on the merged
+    bag, normalise_stored_gtins on a stored row -- so another spelling never
+    survives a write: no screen shows one, the one-holder check cannot see one
+    and a clone would carry it.
+
+    The exact key wins: the other spelling is then never read. Without it the
+    first spelling that is a GTIN (stored sanitised) or blank is the code; a
+    junk one is dropped and logged. Every other key passes through as it is."""
+    src = attributes or {}
+    out: Dict[str, Any] = {}
+    for k, raw in src.items():
+        key = manufacturer_barcode_key(k)
+        if key is None or key == k:
+            out[k] = raw
+            continue
+        if key in src or key in out:
+            continue
+        clean = sanitise_gtin(raw)
+        if clean or not normalise_candidate(raw):
+            out[key] = clean or raw
+            continue
+        logger.warning(
+            "[GTIN] dropping invalid %s (key %r): reason=%s value=%.60r",
+            key,
+            k,
+            classify_gtin(raw),
+            raw,
+        )
+    return out
+
+
 _RESTRICTED_PREFIXES = frozenset(str(n) for n in range(20, 30))
+_RESTRICTED_UPC_PREFIXES = frozenset("0" + p for p in _RESTRICTED_PREFIXES)
 
 
 def check_digit_ok(digits: str) -> bool:
@@ -74,13 +128,19 @@ def check_digit_ok(digits: str) -> bool:
     return (10 - (total % 10)) % 10 == int(check)
 
 
-def _gs1_prefix2(digits: str) -> str:
-    """The two leading digits of the GS1 company prefix.
+def _is_restricted(digits: str) -> bool:
+    """True when the GS1 prefix is restricted distribution (in-store only).
 
-    A GTIN-14 leads with a packaging INDICATOR digit, so its GS1 prefix starts
-    one position later; for 8/12/13 the prefix starts at the front.
+    GTIN-12/13/14 are read in their one GTIN-13 form -- a UPC-A is a GTIN-13
+    with a leading 0, a GTIN-14 is a packaging INDICATOR digit plus a GTIN-13 --
+    so one code gets one verdict however it is padded. Restricted there is
+    prefix 20-29, and 020-029 (UPC-A number system 2). A GTIN-8 is its own
+    numbering: 20-29 at the front.
     """
-    return digits[1:3] if len(digits) == 14 else digits[:2]
+    if len(digits) == 8:
+        return digits[:2] in _RESTRICTED_PREFIXES
+    g13 = digits[-13:].zfill(13)
+    return g13[:2] in _RESTRICTED_PREFIXES or g13[:3] in _RESTRICTED_UPC_PREFIXES
 
 
 def normalise_candidate(raw: Any) -> str:
@@ -106,9 +166,9 @@ def classify_gtin(raw: Any) -> Optional[str]:
         return REASON_ZEROS
     if len(candidate) not in VALID_GTIN_LENGTHS:
         return REASON_BADLEN
-    if _gs1_prefix2(candidate) in _RESTRICTED_PREFIXES:
-        # GS1 20-29 is restricted distribution / in-store only. That is the
-        # range services/barcode.py mints our own store_barcode in, so such a
+    if _is_restricted(candidate):
+        # GS1 20-29 is restricted distribution / in-store only -- the range
+        # IMS minted its own unit barcodes in before 2026-09-28 -- so such a
         # code is either somebody's shelf label or our own internal barcode
         # leaking into the public field. Never publish it.
         return REASON_RESTRICTED
@@ -132,3 +192,22 @@ def sanitise_gtin(raw: Any) -> Optional[str]:
     if not is_valid_gtin(raw):
         return None
     return normalise_candidate(raw)
+
+
+def gtin_spellings(raw: Any) -> List[str]:
+    """Every stored spelling of ONE GTIN, for an exact-match lookup.
+
+    GS1 reads every GTIN right-aligned in 14 digits, so the UPC-A
+    036000291452, 0036000291452 and 00036000291452 are one code: two products
+    holding them would reach Shopify/Google as the same item. A non-numeric or
+    over-long value is only itself; '' / None -> [].
+    """
+    code = normalise_candidate(raw)
+    if not code:
+        return []
+    if not _DIGITS.match(code):
+        return [code]
+    g14 = code.zfill(14)
+    return sorted(
+        {code} | {g14[-n:] for n in VALID_GTIN_LENGTHS if not g14[:-n].strip("0")}
+    )
