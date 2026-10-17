@@ -5,6 +5,7 @@ from ._shared import (
     Field,
     List,
     Optional,
+    ap_engine,
     field_validator,
     model_validator,
     validate_vendor_gstin,
@@ -232,6 +233,15 @@ class GRNItemCreate(BaseModel):
     batch_code: Optional[str] = None
     lot_number: Optional[str] = None
     expiry_date: Optional[str] = None
+    # D14: what the shop paid per unit on a "Bought without PO" receipt -- the
+    # only place that cost exists (no PO to read it from). accept stamps it on
+    # every minted unit. Required there, and only kept there: a PO receipt is
+    # costed at the order's agreed price (GRNCreate drops it on other types).
+    # Finite (an Infinity minted units at cost inf and every receipt read then
+    # 500'd) and at most Rs 5 lakh a unit, so a slipped zero is refused rather
+    # than becoming the stock cost. ponytail: raise the cap if a single item
+    # bought over the counter ever really costs more.
+    unit_price: Optional[float] = Field(None, gt=0, le=500_000, allow_inf_nan=False)
 
     @field_validator("batch_code", "lot_number", "expiry_date", mode="before")
     @classmethod
@@ -276,7 +286,14 @@ class GRNItemCreate(BaseModel):
 # docs reads as STANDARD (backward-compatible).
 GRN_SUBTYPE_STANDARD = "STANDARD"
 GRN_SUBTYPE_DC = "DELIVERY_CHALLAN"
-_GRN_SUBTYPES = (GRN_SUBTYPE_STANDARD, GRN_SUBTYPE_DC)
+# D14 (owner 2026-09-29): goods bought from a local / walk-in dealer with no
+# PO. The supplier on file (a dealer not on the list is quick-added as one,
+# owner 2026-10-12), a cost on every line, the bill photo (same
+# mandatory-document gate as STANDARD), bill number/date if any.
+# Its bill claims input credit only from a GST-registered supplier
+# (org_validation.itc_claimable, owner 2026-10-13 G2).
+GRN_SUBTYPE_NO_PO = ap_engine.GRN_SUBTYPE_NO_PO
+_GRN_SUBTYPES = (GRN_SUBTYPE_STANDARD, GRN_SUBTYPE_DC, GRN_SUBTYPE_NO_PO)
 
 
 class GRNCreate(BaseModel):
@@ -297,7 +314,8 @@ class GRNCreate(BaseModel):
     grn_subtype: str = GRN_SUBTYPE_STANDARD
     dc_number: Optional[str] = None
     dc_date: Optional[str] = None
-    # F9: the vendor a no-PO DC is for (a STANDARD GRN derives this from the PO).
+    # F9: the vendor a no-PO DC or a "Bought without PO" receipt is from (a
+    # STANDARD GRN derives this from the PO).
     vendor_id: Optional[str] = None
     # F-S3: mandatory goods-receipt document. The ops user (Superadmin/Admin/
     # Store Manager) physically receiving the stock MUST attach the vendor
@@ -317,6 +335,18 @@ class GRNCreate(BaseModel):
         s = str(v or GRN_SUBTYPE_STANDARD).strip().upper().replace("-", "_")
         return s if s in _GRN_SUBTYPES else GRN_SUBTYPE_STANDARD
 
+    @field_validator("vendor_invoice_date", mode="before")
+    @classmethod
+    def _bill_date(cls, v):
+        """THE bill-date rule of every bill door (ap_engine.iso_bill_date): a
+        real date from the start of GST to today. The bill's financial year
+        decides whether its number is a new bill (the same-bill rule), so a
+        slipped year ('2027-09-14', '0202-09-14') would put one bill on the
+        shelf twice. Blank = no date on the bill."""
+        if v is None or not str(v).strip():
+            return None
+        return ap_engine.iso_bill_date(v)
+
     @model_validator(mode="after")
     def _validate_subtype_fields(self):
         """F9 subtype-specific required-field guard.
@@ -325,12 +355,45 @@ class GRNCreate(BaseModel):
                   contract -- a standard GRN is always against a PO + invoice).
         DELIVERY_CHALLAN: dc_number + dc_date are required; po_id +
                   vendor_invoice_no are optional (they come later).
+        NO_PO (D14): no po_id; the supplier (vendor_id). Accounts may record
+                  a price; a manager's receipt remains unpriced until billing.
+                  The bill number/date stay optional.
         """
+        if self.grn_subtype != GRN_SUBTYPE_NO_PO:
+            # A PO receipt is costed at the order's agreed price; a cost typed
+            # on its lines is not the receiver's to set (accept would prefer it).
+            for it in self.items:
+                it.unit_price = None
         if self.grn_subtype == GRN_SUBTYPE_DC:
             if not (self.dc_number and str(self.dc_number).strip()):
                 raise ValueError("dc_number is required for a Delivery Challan")
             if not (self.dc_date and str(self.dc_date).strip()):
                 raise ValueError("dc_date is required for a Delivery Challan")
+        elif self.grn_subtype == GRN_SUBTYPE_NO_PO:
+            if self.po_id and str(self.po_id).strip():
+                raise ValueError(
+                    "Goods bought without a PO name no purchase order - "
+                    "receive goods that have an order against that order"
+                )
+            # Owner ruling 2026-10-12: the seller is always a supplier on
+            # file -- a walk-in dealer not on the list is quick-added as one
+            # (name, phone, city / state, GSTIN if any) before the receipt.
+            # A typed name named a seller the bill doors and the GSTR-2B
+            # reconcile could not identify.
+            if not (self.vendor_id or "").strip():
+                raise ValueError(
+                    "Pick the supplier the goods were bought from - a dealer "
+                    "not on the list is added as a supplier first"
+                )
+            # Nothing arrived on a line means it is not a purchase: an all-zero
+            # receipt accepted nothing and sent accounts a bill to book that
+            # no bill could match.
+            empty = [n for n, it in enumerate(self.items, 1) if it.received_qty < 1]
+            if empty:
+                raise ValueError(
+                    "Enter how many arrived on every line (none on line "
+                    f"{', '.join(map(str, empty))})"
+                )
         else:
             if not (self.po_id and str(self.po_id).strip()):
                 raise ValueError("po_id is required for a standard GRN")

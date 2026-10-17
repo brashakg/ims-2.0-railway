@@ -62,10 +62,13 @@ PURCHASE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
 # COST_VISIBLE_ROLES a reader is shown the item, quantity and reason only
 # (mask_vendor_return / mask_debit_note). Their read gates ARE this tuple.
 RETURN_READERS = (*PURCHASE_ROLES, "WORKSHOP_STAFF")
-# Who receives goods into stock (log, accept, express-receive, void or escalate
-# a receipt; the receiving screen): owner ruling 2026-09-28, RECEIVING IS
-# MANAGERS ONLY -- the purchase roles without the accountant. The receiving
-# gates (routers/vendors/_shared._RECEIVE_ROLES) ARE this tuple.
+# Who receives goods into stock -- log, accept, express-receive, void or
+# escalate a receipt, its bill-photo upload and the receiving screen. Owner
+# ruling 2026-09-28: RECEIVING IS MANAGERS ONLY; the accountant keeps bills,
+# payments and the receipt reads. Defined ONCE, here: the receiving gates
+# (routers/vendors/_shared._RECEIVE_ROLES) ARE this tuple, their rbac_policy
+# rows are rbac_policy._core.RECEIVE, and the frontend RECEIVING_MANAGER_ROLES
+# is pinned to it (receivingRoles.test.ts).
 RECEIVE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER")
 # context -> the roles it admits on top of COST_VISIBLE_ROLES. Owner ruling
 # 2026-10-12: nobody past the accounts roles sees what we pay, so "product",
@@ -84,6 +87,9 @@ _COST_FIELDS = {
     "cost_price", "cost_value", "cost_at_sale", "unit_cost",
     "landed_cost", "landed_cost_paise", "moving_avg_cost", "purchase_price",
     "estimated_purchase_cost",
+    # How many units carry NO cost: it goes with the cost it qualifies (F47
+    # stock ledger rows), so the one mask hides it with cost_value.
+    "uncosted_units",
 }
 # Derived margin / COGS figures emitted by analytics + finance payloads.
 _MARGIN_FIELDS = {
@@ -172,6 +178,52 @@ def mask_cost_list(
     return [mask_cost(d, user, context, extra) if isinstance(d, dict) else d for d in (docs or [])]
 
 
+# What a goods receipt shows outside the purchase roles -- the barcode trace
+# is open to every signed-in role: when and where it came in, what and how
+# many. Never who sold it or for which order, the bill number, the bill photo
+# (file id / hash) or the accept lock (owner ruling 2026-10-12). Allow-lists,
+# so a field added later stays hidden until someone lists it here.
+_RECEIPT_KEYS = (
+    "grn_id", "grn_number", "grn_subtype", "store_id", "status",
+    "received_at", "accepted_at", "created_at",
+    "total_received", "total_accepted", "total_rejected",
+)
+_RECEIPT_ITEM_KEYS = (
+    "product_id", "product_name", "sku", "received_qty", "accepted_qty",
+    "rejected_qty", "batch_code", "lot_number", "expiry_date", "location_code",
+)
+
+
+# A receipt line's price paid is its cost; not in _COST_FIELDS because an order
+# line's unit_price is the selling price.
+_RECEIPT_LINE_COST_FIELDS = _ALL_MASKED | {"unit_price"}
+
+
+def mask_receipt(grn: dict, user: dict) -> dict:
+    """The one rule on a goods receipt. To whom -- who sold it, the bill, the
+    bill photo, the accept lock -- is the "supplier" context: anyone else sees
+    only _RECEIPT_KEYS / _RECEIPT_ITEM_KEYS. What was paid on each line (a
+    "Bought without PO" receipt records it as `unit_price`) is the cost of the
+    units it minted, so it is the "product" context, as every read of a unit's
+    or product's cost: narrowing that one context takes it off every read at
+    once. Never edits `grn` (see mask_cost). Every read that returns a receipt
+    -- GET /vendors/grn, GET /vendors/grn/{id}, the barcode trace -- goes
+    through this."""
+    if not isinstance(grn, dict):
+        return grn
+    paid = can_see_cost(user, "product")
+    if can_see_cost(user, "supplier"):
+        if paid:
+            return grn
+        out = mask_cost(grn, user, "product")
+        out["items"] = _strip(grn.get("items") or [], _RECEIPT_LINE_COST_FIELDS)
+        return out
+    item_keys = _RECEIPT_ITEM_KEYS + (("unit_price",) if paid else ())
+    out = _pick(grn, _RECEIPT_KEYS)
+    out["items"] = [_pick(it, item_keys) for it in grn.get("items") or []]
+    return out
+
+
 def mask_fields(doc: Dict, user: dict, context: str = "default") -> Dict:
     """Alias for masking an aggregate payload (e.g. a P&L dict)."""
     return mask_cost(doc, user, context)
@@ -235,6 +287,11 @@ _RETURN_KEYS = (
     "courier_name", "tracking_number", "tracking_url", "shipped_at",
     "created_at", "created_by", "updated_at", "updated_by",
 )
+# A return LINE -- a vendor return's item or an RMA's line -- as anyone outside
+# the accounts roles reads it (owner ruling 2026-10-12, R3): the item, the
+# quantity and the reason, never a unit price, rate or line value under any
+# name. ONE allow-list for both kinds of return (return_line_for_reader), so a
+# price key added later under a new name stays hidden on both.
 _RETURN_ITEM_KEYS = ("product_id", "product_name", "quantity", "reason")
 _DEBIT_NOTE_KEYS = (
     "debit_note_id", "debit_note_number", "financial_year", "issue_date",
@@ -244,6 +301,14 @@ _DEBIT_NOTE_KEYS = (
 _DEBIT_NOTE_LINE_KEYS = ("sku", "description", "hsn", "qty")
 
 
+def return_line_for_reader(line: Dict) -> Dict:
+    """One return line (a vendor return's item, an RMA's line) cut to the
+    allow-list a non-accounts reader gets. The caller has already asked the
+    'payables' rule: mask_vendor_return here, payables_mask.strip_rma_credit
+    for an RMA."""
+    return _pick(line, _RETURN_ITEM_KEYS)
+
+
 def mask_vendor_return(doc: Dict, user: dict) -> Dict:
     """A vendor return without the price paid, its total, the credit amount or
     the supplier's credit-note / bill reference, unless the caller may see
@@ -251,7 +316,7 @@ def mask_vendor_return(doc: Dict, user: dict) -> Dict:
     if not isinstance(doc, dict) or can_see_cost(user, "purchase"):
         return doc
     out = _pick(doc, _RETURN_KEYS)
-    out["items"] = [_pick(it, _RETURN_ITEM_KEYS) for it in doc.get("items") or []]
+    out["items"] = [return_line_for_reader(it) for it in doc.get("items") or []]
     return out
 
 

@@ -24,25 +24,40 @@ import {
   type Gstr2bRow,
 } from '../../services/api/itc';
 import { useToast } from '../../context/ToastContext';
+import { istDayString } from '../../utils/datetime';
 
 const inr = (n?: number) => `₹${Math.round(Number(n) || 0).toLocaleString('en-IN')}`;
+
+// A portal date ('14-09-2026', '14/09/2026') or an ISO one, as YYYY-MM-DD.
+function isoDay(value?: string): string | undefined {
+  const v = (value || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+  const m = v.match(/^(\d{2})[-/](\d{2})[-/](\d{4})$/);
+  return m ? `${m[3]}-${m[2]}-${m[1]}` : undefined;
+}
 
 function parseCsv(text: string): Gstr2bRow[] {
   const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   if (!lines.length) return [];
   let start = 0;
-  let idx = { gstin: 0, invoice_no: 1, taxable: 2, tax: 3 };
+  let idx = { gstin: 0, invoice_no: 1, taxable: 2, tax: 3, invoice_date: -1 };
   if (/gstin|invoice|inv|tax/i.test(lines[0])) {
     const cols = lines[0].split(',').map((c) => c.trim().toLowerCase());
-    const find = (names: string[], fallback: number) => {
-      const i = cols.findIndex((c) => names.some((n) => c.includes(n)));
+    // A date column ('Invoice date') is only ever the date, and the taxable
+    // value is never the tax ('Taxable' contains 'tax': the tax was read off
+    // the taxable column, so every row mismatched by its whole value).
+    const find = (names: string[], fallback: number, date = false, not?: string) => {
+      const i = cols.findIndex(
+        (c) => c.includes('date') === date && !(not && c.includes(not)) && names.some((n) => c.includes(n)),
+      );
       return i >= 0 ? i : fallback;
     };
     idx = {
       gstin: find(['gstin', 'gst'], 0),
       invoice_no: find(['invoice', 'inv', 'bill', 'document', 'doc'], 1),
       taxable: find(['taxable', 'value', 'base'], 2),
-      tax: find(['tax', 'igst', 'amount'], 3),
+      tax: find(['tax', 'igst', 'amount'], 3, false, 'taxable'),
+      invoice_date: find(['date'], -1, true),
     };
     start = 1;
   }
@@ -55,6 +70,7 @@ function parseCsv(text: string): Gstr2bRow[] {
       invoice_no: c[idx.invoice_no],
       taxable: parseFloat(c[idx.taxable]) || 0,
       tax: parseFloat(c[idx.tax]) || 0,
+      invoice_date: isoDay(c[idx.invoice_date]),
     });
   }
   return rows;
@@ -69,8 +85,16 @@ function currentFyMonth(): string {
   return `${y}-${String(m).padStart(2, '0')}`;
 }
 
+// The month before today in IST: the 2B a business reconciles is last month's.
+function lastMonth(today = istDayString(new Date()) ?? ''): string {
+  const [y, m] = today.split('-').map(Number);
+  return m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, '0')}`;
+}
+
 export default function ItcReconcilePage() {
   const toast = useToast();
+  // The 2B's return period: the bills it is compared with are that period's.
+  const [returnPeriod, setReturnPeriod] = useState(() => lastMonth());
   const [reg, setReg] = useState<ItcRegister | null>(null);
   const [allPeriods, setAllPeriods] = useState<string[]>([]);
   const [selectedPeriod, setSelectedPeriod] = useState<string>('');
@@ -137,7 +161,7 @@ export default function ItcReconcilePage() {
     setRunning(true);
     setParsedRows(rows);
     try {
-      setResult(await itcApi.reconcile(rows));
+      setResult(await itcApi.reconcile(rows, returnPeriod || undefined));
       toast.success(`Reconciled ${rows.length} GSTR-2B rows`);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Reconciliation failed');
@@ -157,7 +181,7 @@ export default function ItcReconcilePage() {
     if (!result || !parsedRows.length) return;
     setExporting(bucket);
     try {
-      const blob = await itcApi.exportBucketCsv(bucket, parsedRows);
+      const blob = await itcApi.exportBucketCsv(bucket, parsedRows, returnPeriod || undefined);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -262,11 +286,20 @@ export default function ItcReconcilePage() {
 
       {/* GSTR-2B reconcile */}
       <h2 className="text-sm font-semibold text-gray-700 mb-2">Reconcile against GSTR-2B</h2>
-      <p className="text-xs text-gray-500 mb-2">Download GSTR-2B from the GST portal, export the B2B rows as CSV (GSTIN, Invoice no, Taxable value, Tax), then paste or upload below.</p>
+      <p className="text-xs text-gray-500 mb-2">Download GSTR-2B from the GST portal, export the B2B rows as CSV (GSTIN, Invoice no, Taxable value, Tax, and the Invoice date if you have it), pick its return period, then paste or upload below.</p>
       <textarea value={csv} onChange={(e) => setCsv(e.target.value)} rows={5}
         placeholder="GSTIN,Invoice,Taxable,Tax&#10;27AAPFU0939F1ZV,INV-001,1000,50"
         className="w-full border border-gray-300 rounded-lg px-3 py-2 text-xs font-mono mb-2" />
-      <div className="flex items-center gap-3 mb-5">
+      <div className="flex items-center gap-3 mb-5 flex-wrap">
+        <label className="inline-flex items-center gap-1.5 text-sm text-gray-600">
+          2B return period
+          <input
+            type="month"
+            value={returnPeriod}
+            onChange={(e) => setReturnPeriod(e.target.value)}
+            className="border border-gray-300 rounded-lg px-2 py-1 text-sm"
+          />
+        </label>
         <label className="inline-flex items-center gap-1.5 text-sm text-gray-600 hover:bg-gray-100 rounded-lg px-3 py-1.5 cursor-pointer border border-gray-200">
           <Upload className="w-4 h-4" /> Upload .csv
           <input type="file" accept=".csv,text/csv" className="hidden" onChange={(e) => onFile(e.target.files?.[0])} />
@@ -331,6 +364,13 @@ export default function ItcReconcilePage() {
             cols={['gstin', 'invoice_no', 'taxable', 'tax']}
             onExport={() => downloadBucket('only_in_2b')}
             exporting={exporting === 'only_in_2b'}
+          />
+          <Bucket
+            title="Booked, no credit claimed (switched off, unregistered supplier or blocked)"
+            rows={result.booked_no_credit ?? []}
+            cols={['vendor_name', 'invoice_no', 'gstin', 'book_tax', 'portal_tax']}
+            onExport={() => downloadBucket('booked_no_credit')}
+            exporting={exporting === 'booked_no_credit'}
           />
           <Bucket
             title="Matched (safe to claim)"

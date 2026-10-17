@@ -207,15 +207,29 @@ def has_valid_gstin(value) -> bool:
     return validate_gstin(value, verify_checksum=False)
 
 
+def itc_refusal(supplier_gstin, reverse_charge=False, user_allows=True) -> Optional[str]:
+    """THE input-credit rule: None when the bill's input credit is claimable,
+    else why not, in words the booking form shows. Claimable when the user did
+    not switch credit off AND the supplier has a valid GSTIN -- or the bill is
+    reverse charge (the recipient pays that tax and may claim it even from an
+    unregistered supplier). A "Bought without PO" receipt's bill is never
+    reverse charge (every bill door refuses it: purchase_invoices.
+    refuse_walk_in_reverse_charge), so a walk-in buy claims credit only from a
+    GST-registered supplier (owner 2026-10-13, G2 -- reversing D14's "no
+    credit on any no-PO bill"). Whether the bill is then in GSTR-2B is the
+    reconcile's question, as for every bill. Booking, /preview, the debit
+    note and the ITC readers all call this, so none can disagree -- nor give
+    a different reason."""
+    if not user_allows:
+        return "switched off"
+    if has_valid_gstin(supplier_gstin) or reverse_charge:
+        return None
+    return "the supplier has no valid GSTIN"
+
+
 def itc_claimable(supplier_gstin, reverse_charge=False, user_allows=True) -> bool:
-    """THE answer to 'is this bill's input credit claimable'. The user did not
-    switch credit off AND (the bill is reverse charge OR the supplier has a
-    valid GSTIN). Under GST reverse charge the recipient pays the tax and may
-    claim it even when the supplier is unregistered. Booking, /preview and the
-    ITC reader all call this, so the three can never disagree."""
-    return bool(user_allows) and (
-        bool(reverse_charge) or has_valid_gstin(supplier_gstin)
-    )
+    """THE answer to 'is this bill's input credit claimable' (itc_refusal)."""
+    return itc_refusal(supplier_gstin, reverse_charge, user_allows) is None
 
 
 def validate_ifsc(ifsc: Optional[str]) -> bool:

@@ -10,20 +10,30 @@ from typing import Annotated, List, Optional, Literal
 from datetime import datetime
 import uuid
 from .auth import require_roles
-from ..dependencies import get_db, resolve_store_scope, validate_store_access
-from ..services.cost_mask import (
-    PURCHASE_ROLES,
-    RETURN_READERS,
-    can_see_cost,
-    mask_vendor_return,
+from ..dependencies import (
+    in_reach_or_404,
+    get_db,
+    resolve_store_scope,
+    validate_store_access,
 )
+from ..services.cost_mask import AP_ROLES, PURCHASE_ROLES, RETURN_READERS, mask_vendor_return
+from ..services.payables_mask import require_payables
+from ..services.rtv_debit_note import debit_note_issued
+
+# The transitions that RECORD supplier money: credit_issued writes the
+# credit-note number and amount. Owner ruling 2026-10-12: the accounts roles
+# alone (services/payables_mask.require_payables). Every other transition is
+# the goods side and stays with _VENDOR_RETURN_ROLES -- save 'replaced' on a
+# return owed a credit, which forgoes it (update_return_status).
+_CREDIT_TRANSITIONS = frozenset({"credit_issued"})
 
 # A vendor return mints a debit/credit note -- a financial instrument against a
 # vendor. Restrict status changes (approve, ship, credit) to the same roles that
 # manage vendors / AP (the purchase roles, services/cost_mask); they were
 # previously open to ANY authenticated user (down to a cashier). Logging a
 # return is the readers' too: owner ruling 2026-10-12 lets WORKSHOP_STAFF log
-# the defective pair through the same door, priced by a purchase role only.
+# the defective pair through the same door; its price is the accounts roles'
+# alone (PUT /{return_id}/prices, rulings 2026-10-12 R2 + R3).
 _VENDOR_RETURN_ROLES = PURCHASE_ROLES
 
 # F60: a return carries the unit cost of each returned piece, so READS go to the
@@ -31,8 +41,10 @@ _VENDOR_RETURN_ROLES = PURCHASE_ROLES
 # WORKSHOP_STAFF, who logs the defective pair). SALES_STAFF / CASHIER /
 # OPTOMETRIST have no screen and no read. rtv_debit_notes reads use this too.
 # Owner ruling 2026-09-29: WORKSHOP_STAFF sees the item, quantity and reason
-# only -- services/cost_mask strips the prices on every read. The tuple is
-# cost_mask.RETURN_READERS, so the rbac_policy rows are the same list.
+# only; 2026-10-12 (R3): so does every other role outside the accounts roles,
+# managers included -- services/cost_mask.mask_vendor_return projects every
+# read. The tuple is cost_mask.RETURN_READERS, so the rbac_policy rows are the
+# same list.
 _VENDOR_RETURN_READERS = RETURN_READERS
 
 router = APIRouter()
@@ -43,8 +55,8 @@ router = APIRouter()
 # ============================================================================
 
 
-# What was paid per piece -- ONE rule for the create door and the approval
-# that prices a line the workshop logged: 0 to 1 crore, a real number (NaN /
+# What was paid per piece -- ONE rule for the create door and the accounts'
+# pricing (PUT /{return_id}/prices): 0 to 1 crore, a real number (NaN /
 # Infinity would be stored and then break every read of the return).
 UnitPricePaid = Annotated[float, Field(ge=0, le=10_000_000, allow_inf_nan=False)]
 
@@ -56,9 +68,16 @@ class ReturnItemCreate(BaseModel):
     # debit-note amount. Upper bound mirrors the orders.py line guard.
     quantity: int = Field(..., gt=0, le=100000)
     reason: str  # defective, wrong_item, expired, damaged_in_transit, quality_issue, not_as_ordered, other
-    # What was paid per piece. A purchase role must give it; anyone else (the
-    # workshop) is never shown a price, so one they send is not taken.
+    # The price per piece is the basis of the supplier's credit: supplier
+    # money, so the accounts roles' to write as well as to read (owner rulings
+    # 2026-10-12 R2 + R3). A manager or the workshop logs the return without
+    # it; an accounts role prices it here or later (PUT /{return_id}/prices).
     unit_price: Optional[UnitPricePaid] = None
+
+
+class ReturnPrices(BaseModel):
+    # One price per piece for each of the return's items, in their order.
+    unit_prices: List[UnitPricePaid] = Field(..., min_length=1)
 
 
 class VendorReturnCreate(BaseModel):
@@ -83,10 +102,6 @@ class VendorReturnStatusUpdate(BaseModel):
     courier_name: Optional[str] = Field(default=None, max_length=120)
     tracking_number: Optional[str] = Field(default=None, max_length=120)
     tracking_url: Optional[str] = Field(default=None, max_length=500)
-    # Approving a return logged without prices (workshop staff, owner ruling
-    # 2026-10-12): the price paid per piece, one per item in the return's order.
-    # Only a line with no price takes one; a priced line keeps its own.
-    unit_prices: Optional[List[Optional[UnitPricePaid]]] = None
 
 
 # ============================================================================
@@ -159,32 +174,31 @@ def _link_stock_units_to_rtv(db, stock_ids, return_id, store_id, actor_id) -> No
             continue
 
 
-def _price_unpriced_lines(items, unit_prices) -> Optional[list]:
-    """The return's items with each unpriced line priced from `unit_prices`
-    (one per item, in order), or None when every line already has a price.
-    422 when an unpriced line gets no price -- never approved at an unknown
-    amount."""
-    unpriced = [i for i, it in enumerate(items) if it.get("unit_price") is None]
-    if not unpriced:
+def _priced_total(items) -> Optional[float]:
+    """A return's value -- the credit the supplier owes on it -- once EVERY
+    line carries its price; None while any line is unpriced (a manager or the
+    workshop logged it and no accounts role has priced it yet). Never a
+    partial sum."""
+    prices = [(it.get("quantity") or 0, it.get("unit_price")) for it in items or []]
+    if not prices or any(price is None for _qty, price in prices):
         return None
-    given = list(unit_prices or [])
-    if len(given) != len(items) or any(given[i] is None for i in unpriced):
-        raise HTTPException(
-            status_code=422,
-            detail="Enter the price paid for every item before approving this return.",
-        )
-    return [
-        {**it, "unit_price": float(given[i])} if i in unpriced else dict(it)
-        for i, it in enumerate(items)
-    ]
+    return round(sum(qty * price for qty, price in prices), 2)
 
 
-def _return_total(items) -> Optional[float]:
-    """The return's value: quantity x price paid over its lines; unknown
-    (None, never 0) while a line is unpriced."""
-    if any(it.get("unit_price") is None for it in items):
-        return None
-    return sum(float(it.get("quantity") or 0) * it["unit_price"] for it in items)
+_PRICE_REQUIRED = {
+    "error": "price_required",
+    "message": "This return's lines are not priced yet. Accounts set each "
+               "line's price first (Purchase > Vendor Returns > Set prices).",
+}
+
+
+def _return_in_reach(collection, return_id: str, current_user: dict) -> dict:
+    """THE per-object store guard of a vendor return -- the detail and the
+    status change both ask it. A return outside the caller's shops (another
+    shop's, or a legacy one stamped with no shop) is "not found": a 404 that
+    never confirms the id exists or names its shop, and never a write to a
+    return the detail hides. Admins reach every return."""
+    return in_reach_or_404(collection.find_one({"return_id": return_id}), current_user, "Return not found")
 
 
 # ============================================================================
@@ -228,12 +242,14 @@ async def list_vendor_returns(
         returns = list(
             collection.find(filter_dict).sort("created_at", -1).skip(skip).limit(limit)
         )
-
         # Clean up MongoDB _id field for response
         for ret in returns:
             if "_id" in ret:
                 del ret["_id"]
 
+        # THE projection (cost_mask.mask_vendor_return): anyone outside the
+        # accounts roles reads items, quantities and reasons only -- no price,
+        # no total, no credit (owner rulings 2026-10-01 and 2026-10-12, R3).
         returns = [mask_vendor_return(r, current_user) for r in returns]
         return {"returns": returns, "total": total}
 
@@ -251,9 +267,10 @@ async def create_vendor_return(
     current_user: dict = Depends(require_roles(*_VENDOR_RETURN_READERS)),
 ):
     """Log a vendor return (the debit note is issued later). The purchase roles
-    price each line; WORKSHOP_STAFF (owner ruling 2026-10-12) log item,
-    quantity and reason only -- their lines carry no price and the return no
-    total until a purchase role prices it, and the reply carries no price."""
+    and WORKSHOP_STAFF (owner ruling 2026-10-12) log item, quantity and reason;
+    a line's price is the accounts roles' alone (rulings 2026-10-12 R2 + R3),
+    given here or later (PUT /{return_id}/prices). Until every line is priced
+    the return has no total."""
     db = _get_db()
     if db is None:
         raise HTTPException(status_code=500, detail="Database not available")
@@ -262,13 +279,10 @@ async def create_vendor_return(
     # to their own store; HQ roles pass). Without this a STORE_MANAGER could forge
     # store_id + RTV-link another store's QUARANTINED units (cross-store write).
     validate_store_access(return_data.store_id, current_user)
-
-    prices_shown = can_see_cost(current_user, "purchase")
-    if prices_shown and any(i.unit_price is None for i in return_data.items):
-        raise HTTPException(
-            status_code=422, detail="Enter the unit price paid for every item."
-        )
-    prices = [i.unit_price if prices_shown else None for i in return_data.items]
+    # A price on a line records the supplier money the credit is built from:
+    # the accounts roles' alone (R2 + R3). A manager sends none.
+    if any(item.unit_price is not None for item in return_data.items):
+        require_payables(current_user, "Pricing a vendor return")
 
     try:
         collection = db.get_collection("vendor_returns")
@@ -280,9 +294,9 @@ async def create_vendor_return(
                 "product_name": item.product_name,
                 "quantity": item.quantity,
                 "reason": item.reason,
-                "unit_price": price,
+                "unit_price": item.unit_price,
             }
-            for item, price in zip(return_data.items, prices)
+            for item in return_data.items
         ]
 
         # Create return document
@@ -294,7 +308,7 @@ async def create_vendor_return(
             "items": items,
             "return_type": return_data.return_type,
             "status": "created",
-            "total_value": _return_total(items),
+            "total_value": _priced_total(items),
             "credit_note_number": None,
             "credit_note_amount": None,
             "notes": return_data.notes or "",
@@ -345,13 +359,7 @@ async def get_vendor_return(
         raise HTTPException(status_code=500, detail="Database not available")
 
     try:
-        collection = db.get_collection("vendor_returns")
-        return_doc = collection.find_one({"return_id": return_id})
-
-        if not return_doc:
-            raise HTTPException(status_code=404, detail="Return not found")
-        # Same per-object store guard as the RMA / debit-note detail reads.
-        validate_store_access(return_doc.get("store_id"), current_user)
+        return_doc = _return_in_reach(db.get_collection("vendor_returns"), return_id, current_user)
 
         # Clean up MongoDB _id field
         if "_id" in return_doc:
@@ -374,18 +382,29 @@ async def update_return_status(
     status_update: VendorReturnStatusUpdate,
     current_user: dict = Depends(require_roles(*_VENDOR_RETURN_ROLES)),
 ):
-    """Update vendor return status (incl. issuing a credit note). Vendor/AP roles only."""
+    """Update vendor return status (incl. issuing a credit note). Vendor/AP roles
+    only; issuing the credit note -- or closing a credit-note return as
+    'replaced', which forgoes that credit -- is the accounts roles' alone."""
+    if status_update.status in _CREDIT_TRANSITIONS:
+        require_payables(current_user, "Recording a vendor return's credit note")
     db = _get_db()
     if db is None:
         raise HTTPException(status_code=500, detail="Database not available")
 
     try:
         collection = db.get_collection("vendor_returns")
-        return_doc = collection.find_one({"return_id": return_id})
-
-        if not return_doc:
-            raise HTTPException(status_code=404, detail="Return not found")
-        validate_store_access(return_doc.get("store_id"), current_user)
+        return_doc = _return_in_reach(collection, return_id, current_user)
+        # A return not typed 'replacement' is owed a credit: closing it as
+        # 'replaced' ends it without that credit -- forgoing supplier money,
+        # the accounts roles' (owner ruling 2026-10-12, R2). On a replacement
+        # return, 'replaced' is the goods coming back: the managers'. Checked
+        # before any write; return_type is fixed at create.
+        if status_update.status == "replaced" and return_doc.get("return_type") != "replacement":
+            require_payables(current_user, "Closing a credit-note return as replaced")
+        # The credit is the priced lines' value: an unpriced return has none to
+        # record (it would go down as a credit of nothing).
+        if status_update.status == "credit_issued" and return_doc.get("total_value") is None:
+            raise HTTPException(status_code=422, detail=dict(_PRICE_REQUIRED))
 
         # Valid status transitions
         current_status = return_doc.get("status")
@@ -403,20 +422,6 @@ async def update_return_status(
             raise HTTPException(
                 status_code=400,
                 detail=f"Cannot transition from {current_status} to {status_update.status}",
-            )
-
-        # Moving physical goods and agreeing their price are separate rights.
-        # The same cost rule used by create controls prices at approval too.
-        if status_update.unit_prices is not None and not can_see_cost(
-            current_user, "purchase"
-        ):
-            raise HTTPException(status_code=403, detail="Only accounts or an administrator can set purchase prices.")
-        if status_update.status == "credit_issued" and not can_see_cost(current_user, "purchase"):
-            raise HTTPException(status_code=403, detail="Only accounts or an administrator can record supplier credit.")
-        priced_items = None
-        if status_update.status == "approved":
-            priced_items = _price_unpriced_lines(
-                return_doc.get("items") or [], status_update.unit_prices
             )
 
         # Generate credit note if transitioning to credit_issued
@@ -441,10 +446,6 @@ async def update_return_status(
                     update_dict[field_name] = str(value).strip()
             if status_update.status == "shipped" and not return_doc.get("shipped_at"):
                 update_dict["shipped_at"] = datetime.now().isoformat()
-
-        if priced_items is not None:
-            update_dict["items"] = priced_items
-            update_dict["total_value"] = _return_total(priced_items)
 
         # Add status to history
         status_history = return_doc.get("status_history", [])
@@ -505,6 +506,8 @@ async def update_return_status(
         # 2026-10-12).
         return {
             "message": f"Return status updated to {status_update.status}",
+            # The same one projection as the reads: the credit just issued
+            # and every line price are the accounts roles' (2026-10-01, R3).
             "return": mask_vendor_return(updated_doc, current_user),
         }
 
@@ -515,3 +518,68 @@ async def update_return_status(
             status_code=500,
             detail="A database error occurred. Please try again or contact support.",
         )
+
+
+# Once the credit is recorded (or the return closed) its prices are what the
+# books carry; so are they once the GST debit note was issued at them.
+_PRICES_FIXED_STATUSES = frozenset({"credit_issued", "replaced", "cancelled"})
+
+
+@router.put("/{return_id}/prices")
+async def price_vendor_return(
+    return_id: str,
+    body: ReturnPrices,
+    current_user: dict = Depends(require_roles(*AP_ROLES)),
+):
+    """Set the price per piece of each of a return's lines -- the basis of
+    the supplier's credit and of the GST debit note. The accounts roles only
+    (owner rulings 2026-10-12 R2 + R3: a return's price is supplier money, the
+    accounts roles' to write and to read); a manager raises the return without
+    it. Refused once the credit is recorded, the return closed, or the debit
+    note issued at the old prices."""
+    require_payables(current_user, "Pricing a vendor return")
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not available")
+    collection = db.get_collection("vendor_returns")
+    return_doc = _return_in_reach(collection, return_id, current_user)
+
+    items = return_doc.get("items") or []
+    if len(body.unit_prices) != len(items):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Send one price for each of the return's {len(items)} line(s).",
+        )
+    current_status = return_doc.get("status")
+    if current_status in _PRICES_FIXED_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A return that is {current_status} keeps the prices it was settled at.",
+        )
+    if debit_note_issued(db, return_id):
+        raise HTTPException(
+            status_code=409,
+            detail="The GST debit note was issued at this return's prices; they stay.",
+        )
+
+    priced = [dict(it, unit_price=float(price)) for it, price in zip(items, body.unit_prices)]
+    now = datetime.now().isoformat()
+    # Compare-and-swap on the status just read: a credit issued in between
+    # makes this a 409, never a re-price under a recorded credit.
+    result = collection.update_one(
+        {"return_id": return_id, "status": current_status},
+        {"$set": {
+            "items": priced,
+            "total_value": _priced_total(priced),
+            "priced_by": current_user.get("user_id"),
+            "priced_at": now,
+            "updated_at": now,
+            "updated_by": current_user.get("user_id"),
+        }},
+    )
+    matched = getattr(result, "matched_count", None)
+    if matched == 0:
+        raise HTTPException(status_code=409, detail="Return was updated by another request")
+    updated = collection.find_one({"return_id": return_id}) or {}
+    updated.pop("_id", None)
+    return {"message": "Return prices set", "return": mask_vendor_return(updated, current_user)}

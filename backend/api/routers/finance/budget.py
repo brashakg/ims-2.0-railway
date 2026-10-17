@@ -13,7 +13,7 @@ from ..auth import get_current_user
 from ...services.salary_visibility import is_salary_admin
 from ._shared import _get_db, _require_finance_admin, router
 from .pnl import _is_payroll_shaped_expense
-from .survival import _build_survival_payload
+from .survival import _build_survival_payload, _survival_scope
 
 # === Budget ===
 
@@ -98,7 +98,9 @@ async def get_budget(
         # flag when the requested period is not the current month, so the
         # envelope can never mislead.
         survival_now = now_ist_naive()
-        survival = _build_survival_payload(db, survival_now)
+        # The ONE shop rule (F63), as GET /finance/survival-cashflow: a shop's
+        # accountant reads their own shop's AP, income and expenses here too.
+        survival = _build_survival_payload(db, survival_now, **_survival_scope(None, current_user))
         budget["survival"] = survival
         budget["survival_as_of"] = survival["as_of"]
         budget["survival_month"] = f"{survival_now.year:04d}-{survival_now.month:02d}"

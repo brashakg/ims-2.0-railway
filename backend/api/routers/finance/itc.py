@@ -11,9 +11,11 @@ from fastapi import Depends, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from ..auth import get_current_user
+from ...dependencies import resolve_store_scope
 from ...services import itc_reconcile, csv_safe
+from ...services.ap_engine import bill_supplier_gstin
 from ._shared import _get_db, _require_finance_admin, router
-from .gst import _itc_eligible_bill
+from .gst import _bill_booked, _itc_eligible_bill
 
 # === GST input-tax-credit (ITC) reconciliation (ADMIN / ACCOUNTANT) ===
 
@@ -28,7 +30,11 @@ async def itc_register(
 
     When `period` (YYYY-MM) is given, only that period is returned in
     `periods[]` (totals still represent the full bill set so the FE can show
-    a "Total booked ITC" anchor)."""
+    a "Total booked ITC" anchor).
+
+    Shop scope (F63): ADMIN / SUPERADMIN read every shop's bills; any other
+    login only its own shop's (resolve_store_scope -- the rule every Purchase
+    tab and AP figure applies), so a Pune accountant never sees Dhanbad's."""
     _require_finance_admin(current_user)
     db = _get_db()
     if db is None:
@@ -53,6 +59,9 @@ async def itc_register(
     q: dict = {}
     if entity_id:
         q["recipient_entity_id"] = entity_id
+    scope = resolve_store_scope(None, current_user)
+    if scope:
+        q["store_id"] = scope
     try:
         raw_bills = list(
             db.get_collection("vendor_bills").find(
@@ -91,15 +100,31 @@ class Gstr2bRow(BaseModel):
     invoice_no: Optional[str] = None
     taxable: Optional[float] = 0
     tax: Optional[float] = 0
+    # YYYY-MM-DD as on the portal row: its financial year keys the bill.
+    invoice_date: Optional[str] = None
 
 
 class Gstr2bReconcileBody(BaseModel):
     rows: List[Gstr2bRow] = Field(default_factory=list)
     as_of: Optional[str] = None
+    # The 2B's return period, YYYY-MM: the bills compared are that period's.
+    period: Optional[str] = None
 
 
-def _book_rows_from_db(db) -> List[dict]:
-    """Pull all vendor bills + their vendor GSTIN, formatted for the reconciler."""
+def _book_rows_from_db(db, store_id: Optional[str] = None) -> List[dict]:
+    """Every booked vendor bill + its vendor GSTIN, formatted for the
+    reconciler, each saying whether its GST counts as input credit (the ONE
+    rule the ITC register uses, gst._itc_eligible_bill). A booked bill that
+    claims no credit -- credit switched off, an unregistered supplier's
+    (a walk-in dealer's among them, G2), a 17(5)-blocked one -- is neither
+    "matched (claim)" nor "ITC at risk", and when its supplier filed it, it is
+    its own "booked, no credit claimed" line that answers that 2B row, tax gap
+    or not (never "not booked - book then claim").
+    A draft / cancelled bill is not booked, so it answers nothing.
+
+    Each bill reaches the reconciler under the GSTIN it was booked with (both
+    bill doors stamp vendor_gstin; none for an unregistered supplier); only a
+    legacy bill without that field reads its supplier's GSTIN on file."""
     gstin_by_vendor: Dict[str, str] = {}
     try:
         for v in db.get_collection("vendors").find(
@@ -110,10 +135,15 @@ def _book_rows_from_db(db) -> List[dict]:
         pass
     rows = []
     try:
-        for b in db.get_collection("vendor_bills").find({}, {"_id": 0}):
+        for b in db.get_collection("vendor_bills").find(
+            {"store_id": store_id} if store_id else {}, {"_id": 0}
+        ):
+            if not _bill_booked(b):
+                continue
             rows.append(
                 {
-                    "gstin": gstin_by_vendor.get(b.get("vendor_id")),
+                    "claims_credit": _itc_eligible_bill(b),
+                    "gstin": bill_supplier_gstin(b, gstin_by_vendor.get),
                     "invoice_no": b.get("bill_number"),
                     "taxable": b.get("taxable_amount"),
                     "tax": b.get("tax_amount"),
@@ -135,14 +165,20 @@ async def gstr2b_reconcile(
     """Reconcile booked vendor bills against an uploaded GSTR-2B (rows parsed
     client-side from the portal download). Returns matched / mismatch /
     only-in-books (ITC at risk) / only-in-2B buckets, plus a sum-identity
-    summary (matched + mismatch + at-risk == total booked ITC)."""
+    summary (matched + mismatch + at-risk == total booked ITC).
+
+    The booked side is the caller's shop scope (F63, as /itc-register):
+    every shop for ADMIN / SUPERADMIN, else the caller's own shop."""
     _require_finance_admin(current_user)
     rows = [r.model_dump() for r in body.rows]
     db = _get_db()
     if db is None:
-        return itc_reconcile.reconcile_gstr2b([], rows, as_of_iso=body.as_of)
+        return itc_reconcile.reconcile_gstr2b(
+            [], rows, as_of_iso=body.as_of, period=body.period
+        )
+    scope = resolve_store_scope(None, current_user)
     return itc_reconcile.reconcile_gstr2b(
-        _book_rows_from_db(db), rows, as_of_iso=body.as_of
+        _book_rows_from_db(db, scope), rows, as_of_iso=body.as_of, period=body.period
     )
 
 
@@ -173,23 +209,37 @@ _ITC_CSV_HEADERS = {
         "days_old",
     ],
     "only_in_2b": ["gstin", "invoice_no", "taxable", "tax"],
+    "booked_no_credit": [
+        "vendor_name",
+        "gstin",
+        "invoice_no",
+        "bill_date",
+        "book_tax",
+        "portal_tax",
+    ],
 }
 
 
 @router.post("/itc-export")
 async def itc_export_csv(
     body: Gstr2bReconcileBody,
-    bucket: str = Query(..., pattern="^(matched|mismatch|only_in_books|only_in_2b)$"),
+    bucket: str = Query(
+        ..., pattern="^(matched|mismatch|only_in_books|only_in_2b|booked_no_credit)$"
+    ),
     current_user: dict = Depends(get_current_user),
 ):
     """CSV export of a single reconciliation bucket. POST instead of GET
     because the GSTR-2B rows live client-side (the FE keeps the upload in
-    memory; re-uploading on every download would be terrible UX)."""
+    memory; re-uploading on every download would be terrible UX). The booked
+    side is the caller's shop scope, as /gstr2b-reconcile."""
     _require_finance_admin(current_user)
     rows = [r.model_dump() for r in body.rows]
     db = _get_db()
-    book_rows = _book_rows_from_db(db) if db is not None else []
-    recon = itc_reconcile.reconcile_gstr2b(book_rows, rows, as_of_iso=body.as_of)
+    scope = resolve_store_scope(None, current_user)
+    book_rows = _book_rows_from_db(db, scope) if db is not None else []
+    recon = itc_reconcile.reconcile_gstr2b(
+        book_rows, rows, as_of_iso=body.as_of, period=body.period
+    )
     bucket_rows = recon.get(bucket) or []
     headers = _ITC_CSV_HEADERS[bucket]
 

@@ -2,8 +2,9 @@
 // IMS 2.0 - Workshop staff log a vendor return without a price
 // ============================================================================
 // Owner ruling 2026-10-12: WORKSHOP_STAFF may create a vendor return (item,
-// quantity, reason) but never see or type what was paid. The manager who
-// approves it enters the price paid for each unpriced line.
+// quantity, reason) but never see or type what was paid. A return's price is
+// the accounts roles' alone (rulings 2026-10-12 R2 + R3): a manager approves
+// the goods unpriced and accounts set the prices ("Set prices").
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
@@ -83,20 +84,16 @@ describe('VendorReturns create - who prices the return', () => {
     expect(body.items[0]).toMatchObject({ product_name: 'RB Frame', quantity: 1, reason: 'defective' });
   });
 
-  it('accounts still type the unit price and it is sent', async () => {
-    auth.role = 'ACCOUNTANT';
+  it('a store manager logs the goods too - no price field, no total', async () => {
+    auth.role = 'STORE_MANAGER';
     load();
-    render(
-      <MemoryRouter>
-        <VendorReturns />
-      </MemoryRouter>,
-    );
-    fireEvent.click(await screen.findByRole('button', { name: /create return/i }));
-    expect(screen.getByText('Unit Price')).toBeTruthy();
-    expect(screen.getByText('Total Return Value')).toBeTruthy();
+    const body = await fillAndCreate();
+    expect(screen.queryByText('Unit Price')).toBeNull();
+    expect(screen.queryByText('Total Return Value')).toBeNull();
+    expect(body.items[0]).not.toHaveProperty('unit_price');
   });
 
-  it('workshop staff get no approve / ship / credit buttons', async () => {
+  it('workshop staff get no approve / ship / credit buttons and no pricing', async () => {
     load([unpriced]);
     render(
       <MemoryRouter>
@@ -105,11 +102,11 @@ describe('VendorReturns create - who prices the return', () => {
     );
     fireEvent.click(await screen.findByText('Acme'));
     expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
-    expect(screen.queryByLabelText(/price paid for/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: /set prices/i })).toBeNull();
   });
 
-  it('accounts enter the price paid for an unpriced line when they approve', async () => {
-    auth.role = 'ACCOUNTANT';
+  it('the manager approves an unpriced return without a price; accounts price it', async () => {
+    auth.role = 'STORE_MANAGER';
     load([unpriced]);
     apiMock.patch.mockResolvedValue({ data: { return: { ...unpriced, status: 'approved' } } });
     render(
@@ -118,15 +115,9 @@ describe('VendorReturns create - who prices the return', () => {
       </MemoryRouter>,
     );
     fireEvent.click(await screen.findByText('Acme'));
-    // No price typed: refused on the screen, nothing sent.
-    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
-    expect(apiMock.patch).not.toHaveBeenCalled();
-    expect(toastMock.error).toHaveBeenCalledWith(
-      'Enter the price paid for every item before approving this return.',
-    );
-    fireEvent.change(screen.getByLabelText('Price paid for RB Frame'), { target: { value: '1500' } });
+    expect(screen.queryByRole('button', { name: /set prices/i })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
     await waitFor(() => expect(apiMock.patch).toHaveBeenCalled());
-    expect(apiMock.patch.mock.calls[0][1]).toEqual({ status: 'approved', unit_prices: [1500] });
+    expect(apiMock.patch.mock.calls[0][1]).toEqual({ status: 'approved' });
   });
 });

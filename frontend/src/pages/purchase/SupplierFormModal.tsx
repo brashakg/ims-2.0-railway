@@ -11,6 +11,10 @@
 // the two to disagree. The name shown back comes from the server's state-code
 // list (the same one org_validation taxes with), so a mistyped GSTIN is
 // visible as the wrong state before it is ever saved.
+//
+// `quick` (owner 2026-10-12): the walk-in dealer quick-add on the Goods
+// Receipt screen -- the same create door, asking only name, phone, city /
+// state and the GSTIN if they have one (none = unregistered).
 
 import { useState } from 'react';
 import {
@@ -34,6 +38,8 @@ interface SupplierFormModalProps {
   supplier?: Supplier;
   /** Edit mode: the saved supplier. */
   onSaved?: (supplier: Supplier) => void;
+  /** Create mode, small: name, phone, city / state, GSTIN only. */
+  quick?: boolean;
 }
 
 export function SupplierFormModal({
@@ -41,6 +47,7 @@ export function SupplierFormModal({
   onCreated,
   supplier,
   onSaved,
+  quick = false,
 }: SupplierFormModalProps) {
   const toast = useToast();
   const isEdit = Boolean(supplier);
@@ -65,7 +72,8 @@ export function SupplierFormModal({
     gstinStateCode(supplier?.gstNumber) || supplier?.stateCode || '',
   );
   const [gst, setGST] = useState(supplier?.gstNumber ?? '');
-  const [paymentTerms, setPaymentTerms] = useState(supplier?.paymentTerms ?? 30);
+  // A walk-in dealer's bill is a cash bill: due the day it is dated.
+  const [paymentTerms, setPaymentTerms] = useState(supplier?.paymentTerms ?? (quick ? 0 : 30));
   const [creditLimit, setCreditLimit] = useState(supplier?.creditLimit ?? 0);
   const [gstError, setGSTError] = useState('');
   const [isSaving, setIsSaving] = useState(false);
@@ -172,9 +180,7 @@ export function SupplierFormModal({
         gstNumber: gstin ?? '',
         paymentTerms,
         creditLimit,
-        currentOutstanding: supplier?.currentOutstanding ?? 0,
         rating: supplier?.rating ?? 0,
-        totalPurchases: supplier?.totalPurchases ?? 0,
         lastPurchaseDate: supplier?.lastPurchaseDate ?? '',
         performance: supplier?.performance ?? {
           onTimeDelivery: 0,
@@ -220,7 +226,7 @@ export function SupplierFormModal({
         <div className="flex items-center justify-between p-6 border-b border-gray-200">
           <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
             <Truck className="w-5 h-5 text-blue-600" />
-            {isEdit ? 'Edit Supplier' : 'Add Supplier'}
+            {isEdit ? 'Edit Supplier' : quick ? 'Add the dealer as a supplier' : 'Add Supplier'}
           </h2>
           <button
             onClick={onClose}
@@ -236,7 +242,9 @@ export function SupplierFormModal({
           {/* Company & Code */}
           <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
-              <label htmlFor="sup-name" className="block text-sm font-medium text-gray-700 mb-1">Company Name *</label>
+              <label htmlFor="sup-name" className="block text-sm font-medium text-gray-700 mb-1">
+                {quick ? "Dealer's name *" : 'Company Name *'}
+              </label>
               <input
                 id="sup-name"
                 type="text"
@@ -246,7 +254,7 @@ export function SupplierFormModal({
                 className="input-field"
               />
             </div>
-            <div>
+            {!quick && <div>
               <label htmlFor="sup-code" className="block text-sm font-medium text-gray-700 mb-1">Supplier Code</label>
               <input
                 id="sup-code"
@@ -256,12 +264,12 @@ export function SupplierFormModal({
                 placeholder="e.g., SUP004"
                 className="input-field"
               />
-            </div>
+            </div>}
           </div>
 
           {/* Contact Person, Phone, Email */}
           <div className="grid grid-cols-1 tablet:grid-cols-3 gap-4">
-            <div>
+            {!quick && <div>
               <label htmlFor="sup-contact" className="block text-sm font-medium text-gray-700 mb-1">Contact Person</label>
               <input
                 id="sup-contact"
@@ -271,7 +279,7 @@ export function SupplierFormModal({
                 placeholder="Full name"
                 className="input-field"
               />
-            </div>
+            </div>}
             <div>
               <label htmlFor="sup-phone" className="block text-sm font-medium text-gray-700 mb-1">Phone *</label>
               <input
@@ -283,7 +291,7 @@ export function SupplierFormModal({
                 className="input-field"
               />
             </div>
-            <div>
+            {!quick && <div>
               <label htmlFor="sup-email" className="block text-sm font-medium text-gray-700 mb-1">Email</label>
               <input
                 id="sup-email"
@@ -293,12 +301,12 @@ export function SupplierFormModal({
                 placeholder="email@company.com"
                 className="input-field"
               />
-            </div>
+            </div>}
           </div>
 
           {/* Address, City */}
           <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
-            <div>
+            {!quick && <div>
               <label htmlFor="sup-address" className="block text-sm font-medium text-gray-700 mb-1">Address</label>
               <input
                 id="sup-address"
@@ -308,7 +316,7 @@ export function SupplierFormModal({
                 placeholder="Street address"
                 className="input-field"
               />
-            </div>
+            </div>}
             <div>
               <label htmlFor="sup-city" className="block text-sm font-medium text-gray-700 mb-1">City</label>
               <input
@@ -380,7 +388,7 @@ export function SupplierFormModal({
           )}
 
           {/* Payment Terms & Credit Limit */}
-          <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
+          {!quick && <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
               <label htmlFor="sup-terms" className="block text-sm font-medium text-gray-700 mb-1">Payment Terms (days)</label>
               <input
@@ -404,7 +412,7 @@ export function SupplierFormModal({
                 className="input-field"
               />
             </div>
-          </div>
+          </div>}
         </div>
 
         {/* Footer */}

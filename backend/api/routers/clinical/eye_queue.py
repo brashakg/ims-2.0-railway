@@ -9,6 +9,7 @@ from fastapi import HTTPException, Depends, Query
 from datetime import datetime
 import uuid
 from ..auth import get_current_user, require_roles
+from ...dependencies import store_in_view
 from ...dependencies import (
     get_eye_test_queue_repository,
     get_eye_test_repository,
@@ -48,7 +49,7 @@ async def get_queue(
 ):
     """Get eye test queue for a store"""
     # BUG-062: 403 a store-scoped caller asking for another store's queue.
-    store_id = validate_store_access(store_id, current_user)
+    store_id = store_in_view(store_id, current_user)
     queue_repo = get_eye_test_queue_repository()
 
     if queue_repo is not None:
@@ -224,7 +225,7 @@ async def get_queue_stats(
 ):
     """Get queue statistics for today"""
     # BUG-062: 403 a store-scoped caller asking for another store's stats.
-    store_id = validate_store_access(store_id, current_user)
+    store_id = store_in_view(store_id, current_user)
     queue_repo = get_eye_test_queue_repository()
 
     if queue_repo is not None:

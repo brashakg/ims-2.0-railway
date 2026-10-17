@@ -72,6 +72,15 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/vendor-returns/{return_id}/status",
         "allowed": PURCHASE,
     },
+    {
+        "method": "PUT",
+        "path": "/api/v1/vendor-returns/{return_id}/prices",
+        # Owner rulings 2026-10-12 R2 + R3: a return's price is supplier
+        # money, the accounts roles' to write (handler: require_roles(
+        # *AP_ROLES) + require_payables). Store-scoped per object (404).
+        "allowed": ACCOUNTS,
+        "store_scoped": True,
+    },
     # --- /api/v1/vendor-rma (N4 Vendor RMA + credit-note reconciliation) ---
     # An RMA + its vendor credit note are financial instruments against a
     # vendor; create + every lifecycle transition is gated to the same vendor/AP
@@ -123,7 +132,18 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendor-rma/{rma_id}/credit-note",
-        "allowed": PURCHASE,
+        # Owner ruling 2026-10-12: recording supplier money is accounts-only
+        # (handler: require_roles(*AP_ROLES) + require_payables).
+        "allowed": ACCOUNTS,
+        "store_scoped": True,
+    },
+    {
+        "method": "PUT",
+        "path": "/api/v1/vendor-rma/{rma_id}/prices",
+        # Owner rulings 2026-10-12 R2 + R3: pricing the lines sets the
+        # expected supplier credit -- the accounts roles' (handler:
+        # require_roles(*AP_ROLES) + require_payables).
+        "allowed": ACCOUNTS,
         "store_scoped": True,
     },
     {
@@ -162,7 +182,9 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/rtv-debit-notes/issue",
-        "allowed": PURCHASE,
+        # Owner ruling 2026-10-12: recording supplier money is accounts-only
+        # (handler: require_roles(*AP_ROLES) + require_payables).
+        "allowed": ACCOUNTS,
         "store_scoped": True,
     },
     {
@@ -174,12 +196,15 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/rtv-debit-notes/{debit_note_id}/print",
-        "allowed": RETURN_READERS,
+        # The printed note IS supplier money end to end (owner ruling
+        # 2026-10-01; R2/R3 2026-10-12): handler require_roles(*AP_ROLES).
+        "allowed": ACCOUNTS,
         "store_scoped": True,
     },
     {
         "method": "GET",
         "path": "/api/v1/rtv-debit-notes/{debit_note_id}/tally",
+        # The Tally voucher IS the note's money: handler require_roles(*AP_ROLES).
         "allowed": ACCOUNTS,
         "store_scoped": True,
     },
@@ -281,6 +306,14 @@ ROWS: List[Dict[str, object]] = [
         "method": "GET",
         "path": "/api/v1/vendors/grn/{grn_id}/document",
         "allowed": PURCHASE,
+    },
+    # Purchases this month (F56): per-vendor ordered / received / billed / paid /
+    # owed from the supplier ledger -- the supplier-balance readers only, the
+    # same set as /vendors/ap-aging; never a manager, never the counter.
+    {
+        "method": "GET",
+        "path": "/api/v1/vendors/purchases-this-month",
+        "allowed": ACCOUNTS,
     },
     # Purchase Invoices (first-class AP+ITC; books the payable + ITC ledger).
     # Create/from-grn/book AND reads are accounting actions -> ACCOUNTANT/ADMIN.
@@ -565,11 +598,15 @@ ROWS: List[Dict[str, object]] = [
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/performance",
         "allowed": PURCHASE,
+        # F63 / R4: the caller's shop's orders and receipts (resolve_store_scope).
+        "store_scoped": True,
     },
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/purchase-history",
         "allowed": PURCHASE,
+        # F63 / R4: the caller's shop's orders and receipts (resolve_store_scope).
+        "store_scoped": True,
     },
     {
         "method": "GET",

@@ -513,6 +513,88 @@ def _grn_already_minted(stock_repo, flt: dict) -> int:
     raise RuntimeError("stock repository exposes no way to count minted units")
 
 
+def _receipt_origin_filters(grn: dict, number_unique: bool, **match) -> list:
+    """Disjoint origin filters for units minted by one receipt.
+
+    The immutable id is authoritative. Only units missing it can use their
+    old GRN source, or a globally unique receipt number after a transfer.
+    Callers decide how a failed uniqueness read must be handled.
+    """
+    grn_id = grn.get("grn_id")
+    origin = [{"source_type": "GRN", "source_id": grn_id}]
+    if grn.get("grn_number") and number_unique:
+        origin.append({"grn_number": grn["grn_number"]})
+    return [
+        {**match, "grn_id": grn_id},
+        {**match, "grn_id": None, "$or": origin},
+    ]
+
+
+def _receipt_unit_filters(grn, **match):
+    """The units goods receipt `grn_id` minted (narrowed by `match`), WHEREVER
+    THEY ARE NOW: a stock transfer rewrites a unit's source_type and source_id
+    (transfers._rehome) but never its grn_id, which the mint stamps; a unit
+    minted before that stamp has no grn_id and is matched the old way. No unit
+    fits both filters."""
+    number = grn.get("grn_number")
+    return _receipt_origin_filters(
+        grn, bool(number and _number_is_this_receipts_alone(number)), **match
+    )
+
+
+def _receipt_price_paid(stock, grn, product_id, db=None) -> Optional[float]:
+    """THE price goods receipt `grn_id` paid for `product_id`: the cost at
+    acceptance its mint stamped on a unit of it (wherever that unit is now),
+    or a unique booked invoice price when the units arrived unpriced. A held
+    line with no minted unit never answers. /vendors/last-cost and the
+    walk-in bill's cost true-up (purchase_invoices._bought_since) both ask
+    this, so "the latest price paid" is one rule. `stock` is the stock
+    repository or the raw collection -- anything with find_one(filter)."""
+    for flt in _receipt_unit_filters(
+        grn, product_id=product_id, unit_cost={"$gt": 0}
+    ):
+        unit = stock.find_one(flt)
+        if unit:
+            return unit.get("unit_cost")
+    if db is None or not grn.get("grn_id"):
+        return None
+    if not any(stock.find_one(flt) for flt in _receipt_unit_filters(grn, product_id=product_id)):
+        return None
+    # Accounts may first enter the price at billing. Read only real purchase
+    # invoices tied to this receipt/product, never credit notes or catalogue
+    # prices, and never infer how to split conflicting billed prices.
+    import math
+
+    prices = set()
+    bill_filter = {
+        "grn_id": grn["grn_id"], "doc_type": "PURCHASE_INVOICE",
+        "lines.product_id": product_id,
+    }
+    if grn.get("vendor_id"):
+        bill_filter["vendor_id"] = grn["vendor_id"]
+    bills = db.get_collection("vendor_bills").find(bill_filter)
+    for bill in bills:
+        if str(bill.get("status") or "").upper() not in {"OUTSTANDING", "PARTIAL", "PAID"}:
+            continue
+        for line in bill.get("lines") or []:
+            if line.get("product_id") != product_id:
+                continue
+            try:
+                quantity = float(line.get("qty") or 0)
+                price = float(line.get("unit_price") or 0)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(quantity) and math.isfinite(price) and quantity > 0 and price > 0:
+                prices.add(round(price, 2))
+    if len(prices) > 1:
+        # Both callers fail closed: no inferred last-paid quote, and no older bill
+        # overwrites the newer receipt's cost on an ambiguous price read.
+        raise ValueError("Receipt has conflicting booked supplier prices")
+    if prices:
+        return prices.pop()
+    return None
+
+
 def _receipt_units(stock_repo, grn: dict, **match) -> int:
     """Units goods receipt `grn` (the receipt doc) put in stock, narrowed by
     `match`, WHEREVER THEY ARE NOW: read by the unit's ORIGIN, never its
@@ -535,14 +617,7 @@ def _receipt_units(stock_repo, grn: dict, **match) -> int:
     ponytail: a unit minted before #310 (2026-05-28) AND transferred since
     matches nothing, nor does a pre-grn_id unit of a duplicated number that
     has been transferred; backfill its grn_id if prod ever has one."""
-    grn_id = grn.get("grn_id")
-    stamped = _grn_already_minted(stock_repo, {**match, "grn_id": grn_id})
-    origin = [{"source_type": "GRN", "source_id": grn_id}]
-    number = grn.get("grn_number")
-    if number and _number_is_this_receipts_alone(number):
-        origin.append({"grn_number": number})
-    legacy = {**match, "grn_id": None, "$or": origin}
-    return stamped + _grn_already_minted(stock_repo, legacy)
+    return sum(_grn_already_minted(stock_repo, flt) for flt in _receipt_unit_filters(grn, **match))
 
 
 def _stock_create_raises_on_duplicate(stock_repo) -> bool:

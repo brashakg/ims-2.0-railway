@@ -8,6 +8,7 @@ from ...utils.ist import (
     ist_month_window_utc,
 )
 from ..auth import get_current_user, require_roles
+from ...dependencies import store_in_view
 from ...services.cost_mask import mask_cost
 from ...dependencies import (
     get_order_repository,
@@ -39,7 +40,7 @@ async def sales_comparison(
     current_user: dict = Depends(get_current_user),
 ):
     """Daily/Monthly/Yearly sales comparison (current vs previous period)"""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     order_repo = get_order_repository()
 
     if order_repo is None:
@@ -115,7 +116,7 @@ async def sales_growth(
     current_user: dict = Depends(get_current_user),
 ):
     """MoM (Month-over-Month) and YoY (Year-over-Year) growth percentages"""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     order_repo = get_order_repository()
 
     if order_repo is None:
@@ -188,7 +189,7 @@ async def profit_by_category(
     current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
     """Profit by product category"""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     order_repo = get_order_repository()
 
     if order_repo is None:
@@ -333,7 +334,7 @@ async def discount_analysis(
     current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
     """Discount average by category and store"""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     order_repo = get_order_repository()
 
     if order_repo is None:

@@ -46,6 +46,7 @@ from ._shared import (  # noqa: F401  # re-exported: see _ReportsModule
     get_eye_test_repository,
     get_product_repository,
     get_db,
+    store_in_view,
     validate_store_access,
     order_actor_id,
     order_actor_name_map,

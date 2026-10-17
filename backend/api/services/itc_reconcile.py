@@ -14,14 +14,20 @@ Pure, DB-free helpers for the purchase-side GST:
                           -> ITC AT RISK (chase the vendor; may need reversal)
       - only_in_2b     -> supplier reported it but you have no bill booked
                           -> missing purchase entry (book it, then claim)
+      - booked_no_credit -> supplier reported it and the bill IS booked, but
+                          it claims no credit (credit switched off, or an
+                          unregistered supplier's): nothing to book, nothing
+                          to claim; a tax gap shows beside it
 
     The sum identity (P0 #1): every rupee booked must land somewhere -- the
     return now reports itc_safe + itc_in_mismatch + itc_at_risk == total
     booked ITC. Mismatched ITC is in its own bucket (it was silently dropped
     in the pre-fix code) and adds back into total_itc.
 
-Matching key = (supplier GSTIN, normalised invoice number). Tax amounts are
-compared with a small rupee tolerance. Also flags bills older than 180 days
+Matching key = (supplier GSTIN, normalised invoice number, financial year of
+the invoice date -- GST rule 46 lets a serial restart every 1 April), and one
+2B row answers ONE booked bill. Tax amounts are compared with a small rupee
+tolerance. Also flags bills older than 180 days
 (the ITC-reversal window when unpaid is a separate AP concern, but old
 unmatched bills are surfaced).
 
@@ -37,7 +43,7 @@ from typing import List, Optional
 # clock (00:00-05:30 IST would otherwise age invoices against YESTERDAY).
 from api.utils.ist import now_ist_naive
 
-from .purchase_invoice_engine import split_header_tax
+from .purchase_invoice_engine import bill_fy, split_header_tax
 
 
 def _f(v) -> float:
@@ -142,11 +148,32 @@ def reconcile_gstr2b(
     gstr2b_rows: List[dict],
     tax_tolerance: float = 1.0,
     as_of_iso: Optional[str] = None,
+    period: Optional[str] = None,
 ) -> dict:
     """Match booked vendor bills against GSTR-2B rows. Returns buckets + summary.
 
-    book_rows:   [{gstin, invoice_no, taxable, tax, bill_id, vendor_name, bill_date}]
-    gstr2b_rows: [{gstin, invoice_no, taxable, tax}]
+    book_rows:   [{gstin, invoice_no, taxable, tax, bill_id, vendor_name,
+                   bill_date, claims_credit (default True)}]
+    gstr2b_rows: [{gstin, invoice_no, taxable, tax, invoice_date (optional)}]
+    period:      the 2B's return period, 'YYYY-MM' (optional).
+
+    A bill is keyed by (GSTIN, number, financial year of its date); a 2B row
+    by the same, its year read off its own invoice date, else the return
+    period's (unknown on either side matches any year). A number a supplier
+    reuses in a new year is a new bill, so it never answers last year's row.
+    One 2B row answers ONE booked bill -- never "safe to claim" for one and
+    "booked, no credit" for another.
+
+    Within the return period: a bill dated after it cannot be in it and is
+    left out; one dated before it answers its row when the supplier filed it
+    late, and is otherwise not "at risk" here -- it belongs to its own
+    period's 2B. Without a period every booked bill is compared.
+
+    A booked bill that claims no credit counts in no ITC total; it answers
+    its own 2B row (booked_no_credit) whatever the tax -- the supplier, number
+    and year ARE the bill (the bill doors refuse a second one), so a tax gap is
+    a difference on that bill, shown beside it (book_tax / portal_tax), never
+    "in 2B, not booked" sending accounts to book it again.
 
     Sum identity (P0 #1): total booked ITC == itc_safe + itc_in_mismatch +
     itc_at_risk. The pre-fix code dropped mismatched book_tax from BOTH the
@@ -163,21 +190,38 @@ def reconcile_gstr2b(
     except ValueError:
         as_of = now_ist_naive()
 
-    # Index GSTR-2B by (gstin, invoice).
-    b2 = {}
+    if not (period and re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", period)):
+        period = None
+    period_fy = bill_fy(f"{period}-01") if period else None
+
+    # GSTR-2B rows by (gstin, invoice) -> every row under it, each with its year.
+    b2: dict = {}
     for r in gstr2b_rows or []:
         if not isinstance(r, dict):
             continue
         key = (_norm_gstin(r.get("gstin")), _norm_inv(r.get("invoice_no")))
-        b2[key] = {
-            "gstin": r.get("gstin"),
-            "invoice_no": r.get("invoice_no"),
-            "taxable": _f(r.get("taxable")),
-            "tax": _f(r.get("tax")),
-        }
+        b2.setdefault(key, []).append(
+            {
+                "gstin": r.get("gstin"),
+                "invoice_no": r.get("invoice_no"),
+                "taxable": _f(r.get("taxable")),
+                "tax": _f(r.get("tax")),
+                "fy": bill_fy(r.get("invoice_date")) if r.get("invoice_date") else period_fy,
+                "seen": False,
+            }
+        )
 
-    matched, mismatch, only_books = [], [], []
-    seen_2b = set()
+    def take(key, fy):
+        """The first 2B row not yet answered under `key` in year `fy` --
+        marked answered."""
+        for e in b2.get(key, ()):
+            if e["seen"] or (fy is not None and e["fy"] is not None and fy != e["fy"]):
+                continue
+            e["seen"] = True
+            return e
+        return None
+
+    matched, mismatch, only_books, no_credit = [], [], [], []
     itc_safe = 0.0
     itc_in_mismatch = 0.0
     itc_at_risk = 0.0
@@ -186,10 +230,32 @@ def reconcile_gstr2b(
     for row in book_rows or []:
         if not isinstance(row, dict):
             continue
-        key = (_norm_gstin(row.get("gstin")), _norm_inv(row.get("invoice_no")))
-        book_tax = _f(row.get("tax"))
-        total_book_tax += book_tax
         bill_date = row.get("bill_date")
+        month = str(bill_date or "")[:7]
+        if period and month and month > period:
+            continue  # dated after the return period: cannot be in this 2B
+        key = (_norm_gstin(row.get("gstin")), _norm_inv(row.get("invoice_no")))
+        fy = bill_fy(bill_date)
+        book_tax = _f(row.get("tax"))
+        if row.get("claims_credit") is False:
+            hit = take(key, fy)
+            if hit:
+                no_credit.append(
+                    {
+                        "gstin": row.get("gstin"),
+                        "invoice_no": row.get("invoice_no"),
+                        "vendor_name": row.get("vendor_name"),
+                        "bill_id": row.get("bill_id"),
+                        "bill_date": bill_date,
+                        "book_tax": book_tax,
+                        "portal_tax": hit["tax"],
+                    }
+                )
+            continue
+        hit = take(key, fy)
+        if hit is None and period and month and month < period:
+            continue  # an earlier period's bill not filed in this 2B: not this return's
+        total_book_tax += book_tax
         days_old = None
         bd = None
         try:
@@ -209,9 +275,8 @@ def reconcile_gstr2b(
             "book_tax": book_tax,
             "days_old": days_old,
         }
-        if key in b2:
-            seen_2b.add(key)
-            portal_tax = b2[key]["tax"]
+        if hit:
+            portal_tax = hit["tax"]
             if abs(portal_tax - book_tax) <= tax_tolerance:
                 matched.append({**base, "portal_tax": portal_tax})
                 itc_safe += book_tax
@@ -230,22 +295,25 @@ def reconcile_gstr2b(
 
     only_2b = [
         {
-            "gstin": v["gstin"],
-            "invoice_no": v["invoice_no"],
-            "taxable": v["taxable"],
-            "tax": v["tax"],
+            "gstin": e["gstin"],
+            "invoice_no": e["invoice_no"],
+            "taxable": e["taxable"],
+            "tax": e["tax"],
         }
-        for k, v in b2.items()
-        if k not in seen_2b
+        for rows in b2.values()
+        for e in rows
+        if not e["seen"]
     ]
 
     return {
         "as_of": as_of.date().isoformat(),
+        "period": period,
         "summary": {
             "matched": len(matched),
             "mismatch": len(mismatch),
             "only_in_books": len(only_books),
             "only_in_2b": len(only_2b),
+            "booked_no_credit": len(no_credit),
             "itc_safe_to_claim": round(itc_safe, 2),
             "itc_in_mismatch": round(itc_in_mismatch, 2),
             "itc_at_risk": round(itc_at_risk, 2),
@@ -255,4 +323,5 @@ def reconcile_gstr2b(
         "mismatch": mismatch,
         "only_in_books": sorted(only_books, key=lambda x: -(x.get("book_tax") or 0)),
         "only_in_2b": sorted(only_2b, key=lambda x: -(x.get("tax") or 0)),
+        "booked_no_credit": no_credit,
     }

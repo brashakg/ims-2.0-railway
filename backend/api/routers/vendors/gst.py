@@ -13,6 +13,11 @@ from ._shared import _get_db, _pm, get_store_repository, get_vendor_repository, 
 # at a call site that could silently be passed the wrong thing.
 _PO_PROVISIONAL_COST_SOURCE = "PO_RATE"
 _COST_SOURCE_RANK = {_PO_PROVISIONAL_COST_SOURCE: 1, "GRN_PO": 2}
+# A walk-in buy (a "Bought without PO" receipt, D14) at acceptance: what was
+# paid over the counter IS the product's cost from then on, over any cost on
+# file -- the LATEST PRICE PAID WINS (owner 2026-10-12). Labelled as itself,
+# never as a PO price.
+WALK_IN_COST_SOURCE = "GRN_WALKIN"
 
 
 def _promote_cost_from_rate(
@@ -26,7 +31,8 @@ def _promote_cost_from_rate(
     the rate on the goods receipt that follows.
 
     Writes into an EMPTY cost, or over a cost whose source this one OUTRANKS
-    (see _COST_SOURCE_RANK). Cost feeds margin and stock valuation, so every
+    (see _COST_SOURCE_RANK) -- a walk-in buy's price over any cost
+    (WALK_IN_COST_SOURCE). Cost feeds margin and stock valuation, so every
     other existing figure is left exactly as it is. Restamps the catalogue
     status atomically, so a product that was DRAFT for the single reason
     "no cost" turns ACTIVE the moment a rate is agreed. Returns True when a cost
@@ -40,7 +46,7 @@ def _promote_cost_from_rate(
         return False
     if cost <= 0:
         return False
-    if prod.get("cost_price"):
+    if prod.get("cost_price") and source != WALK_IN_COST_SOURCE:
         held = _COST_SOURCE_RANK.get(str(prod.get("cost_source") or ""))
         mine = _COST_SOURCE_RANK.get(str(source or ""))
         if held is None or mine is None or mine <= held:

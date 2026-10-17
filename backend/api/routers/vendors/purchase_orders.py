@@ -23,6 +23,7 @@ from ._shared import (
     is_online_store,
     logger,
     require_roles,
+    resolve_store_scope,
     router,
     timedelta,
     uuid,
@@ -200,9 +201,9 @@ async def list_pos(
 ):
     """List purchase orders with filters"""
     po_repo = get_purchase_order_repository()
-    active_store = validate_store_access(store_id, current_user) or current_user.get(
-        "active_store_id"
-    )
+    # One shop scope for every Purchase tab (F63): no shop chosen = all shops
+    # for an admin, the caller's own shop for everyone else.
+    active_store = resolve_store_scope(store_id, current_user)
 
     if po_repo is None:
         return {"purchase_orders": [], "total": 0}
@@ -223,10 +224,13 @@ async def list_pos(
             {"status": "CANCELLED", "sent_at": {"$exists": True, "$nin": [None, ""]}},
         ]
         pos = po_repo.find_many(
-            filter_dict, sort=[("created_at", -1), ("po_id", -1)], limit=0,
+            filter_dict, sort=_PO_NEWEST_FIRST, limit=0,
         ) or []
+        total = len(pos)
     else:
-        pos = po_repo.find_many(filter_dict, skip=skip, limit=limit) or []
+        # Ordinary lists retain newest-first pagination and the full count.
+        pos = po_repo.find_many(filter_dict, sort=_PO_NEWEST_FIRST, skip=skip, limit=limit) or []
+        total = max(po_repo.count(filter_dict), skip + len(pos))
     from .po_detail import _cancelled_products, closed_by_cancel  # po_detail imports this module
 
     for po in pos:
@@ -236,7 +240,11 @@ async def list_pos(
             line.get("product_id") not in cancelled for line in po.get("items") or []
         )
 
-    return {"purchase_orders": mask_purchase(pos, current_user), "total": len(pos)}
+    return {"purchase_orders": mask_purchase(pos, current_user), "total": total}
+
+
+# Raised-at descending; the id breaks a tie so pages never overlap.
+_PO_NEWEST_FIRST = [("created_at", -1), ("_id", -1)]
 
 
 # INV-9: Demand forecast -> nightly draft-PO suggestions

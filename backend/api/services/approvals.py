@@ -50,6 +50,9 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from .cost_mask import AP_ROLES
+from .payables_mask import SUPPLIER_MONEY_ACTIONS, can_see_payables
+
 logger = logging.getLogger(__name__)
 
 
@@ -108,8 +111,12 @@ ACTION_TYPES: frozenset = frozenset({
 # REFUND_APPROVAL_MATRIX (F27): the cashier/manager who requests a refund cannot
 # PIN-approve their own refund -- SYSTEM_INTENT "Requester CANNOT approve own
 # request" / separation of duties for revenue-out money movement.
+# rtv (owner ruling 2026-10-12, R1 + R2): the accounts roles both record a
+# supplier credit and approve its 'rtv' approval, so whoever raises one cannot
+# also PIN-approve it -- the E4 two-person control on a large supplier credit
+# (services/vendor_rma.credit_requires_approval) needs a second accounts person.
 MAKER_CHECKER_ACTIONS: frozenset = frozenset(
-    {"journal_entry", "petty_cash", "REFUND_APPROVAL_MATRIX"}
+    {"journal_entry", "petty_cash", "REFUND_APPROVAL_MATRIX", "rtv"}
 )
 
 # Role tiers. A request resolved to a tier may be approved by any role at or
@@ -123,6 +130,60 @@ _TIER_ROLES: Dict[str, List[str]] = {
 # Roles that bypass store-scope (HQ). STORE_MANAGER / AREA_MANAGER are scoped to
 # their assigned stores; ADMIN/SUPERADMIN see every store.
 _HQ_ROLES: frozenset = frozenset({"SUPERADMIN", "ADMIN"})
+
+
+# Supplier-money approvals (owner ruling 2026-10-12, R1). An 'rtv' request is
+# the supplier credit recorded on a vendor RMA, so it goes to the accounts
+# roles -- ADMIN / SUPERADMIN / ACCOUNTANT -- at EVERY amount tier, and to no
+# one else: the payables rule (payables_mask.can_see_payables ->
+# cost_mask.can_see_cost(user, "payables")) decides who may act on one, and
+# the roles it is routed to are AP_ROLES plus SUPERADMIN. Store and area
+# managers neither see one in their inbox nor approve one. ACCOUNTANT becomes
+# an approver for these action types only. Every check reads the action type,
+# never the required_roles stored on the request, so a request raised before
+# the ruling (stored with the manager tier) routes the same way. Whoever raised
+# one cannot approve it ('rtv' is in MAKER_CHECKER_ACTIONS): a second accounts
+# person always does.
+def _is_supplier_money(doc: Optional[Dict[str, Any]]) -> bool:
+    return (doc or {}).get("action_type") in SUPPLIER_MONEY_ACTIONS
+
+
+def approver_roles_for(doc: Optional[Dict[str, Any]]) -> List[str]:
+    """The roles a request is routed to: the accounts roles for a supplier-money
+    request, else the roles its amount tier resolved to."""
+    if _is_supplier_money(doc):
+        return ["SUPERADMIN", *AP_ROLES]
+    return list((doc or {}).get("required_roles") or [])
+
+
+def _may_approve_supplier_money(roles) -> bool:
+    return can_see_payables({"roles": sorted(r for r in (roles or []) if r)})
+
+
+def may_approve(doc: Optional[Dict[str, Any]], roles) -> bool:
+    """True when a caller holding ``roles`` may approve / reject ``doc`` by role
+    (store scope and maker-checker are separate checks). A supplier-money
+    request asks the payables rule; any other asks its tier's roles, and
+    SUPERADMIN passes everything."""
+    if _is_supplier_money(doc):
+        return _may_approve_supplier_money(roles)
+    have = {r for r in (roles or []) if r}
+    return "SUPERADMIN" in have or bool(have & set((doc or {}).get("required_roles") or []))
+
+
+def _hidden_from(doc: Optional[Dict[str, Any]], roles) -> bool:
+    """A supplier-money request the caller may not approve answers them exactly
+    like a request that does not exist (404 not_found), never 'not your tier'."""
+    return _is_supplier_money(doc) and not may_approve(doc, roles)
+
+
+def _is_maker_checker(doc: Optional[Dict[str, Any]]) -> bool:
+    """Its maker may not approve it: stamped on the request when raised, or
+    read from its action type -- so an 'rtv' raised before it joined
+    MAKER_CHECKER_ACTIONS (stored maker_checker False) is held to it too."""
+    d = doc or {}
+    return bool(d.get("maker_checker")) or d.get("action_type") in MAKER_CHECKER_ACTIONS
+
 
 # PIN brute-force throttle (CORRECTIONS P1/E4).
 _PIN_MAX_ATTEMPTS = 5
@@ -483,7 +544,11 @@ class ApprovalEngine:
                 logger.debug("[APPROVALS] dedupe lookup failed: %s", e)
 
         tier = self._resolve_tier(amount, action_type, store_id, entity_id, required_tier)
-        required_roles = self._tier_to_roles(tier)
+        # A supplier-money request is routed to the accounts roles whatever its
+        # tier (R1); the tier itself is kept (consume's min_tier reads it).
+        required_roles = approver_roles_for(
+            {"action_type": action_type, "required_roles": self._tier_to_roles(tier)}
+        )
         now = _now()
         expires_at = now + timedelta(minutes=_validity_minutes())
         is_mc = action_type in MAKER_CHECKER_ACTIONS
@@ -657,11 +722,12 @@ class ApprovalEngine:
         # wrong-role caller can't burn an approver's attempts. The atomic guard
         # below is the only thing that flips the doc.
         roles = set(approver_roles or [])
-        required = set(req.get("required_roles") or [])
-        if "SUPERADMIN" not in roles and not (roles & required):
+        if _hidden_from(req, roles):
+            return {"ok": False, "http": 404, "error": "not_found"}
+        if not may_approve(req, roles):
             return {"ok": False, "http": 403, "error": "insufficient_tier"}
 
-        if req.get("maker_checker") and approver_user_id == req.get("requested_by"):
+        if _is_maker_checker(req) and approver_user_id == req.get("requested_by"):
             return {"ok": False, "http": 403, "error": "cannot_approve_own"}
 
         if not self._store_scope_ok(req.get("store_id"), roles, approver_store_ids):
@@ -772,8 +838,9 @@ class ApprovalEngine:
             return {"ok": False, "http": 404, "error": "not_found"}
 
         roles = set(approver_roles or [])
-        required = set(req.get("required_roles") or [])
-        if "SUPERADMIN" not in roles and not (roles & required):
+        if _hidden_from(req, roles):
+            return {"ok": False, "http": 404, "error": "not_found"}
+        if not may_approve(req, roles):
             return {"ok": False, "http": 403, "error": "insufficient_tier"}
         if not self._store_scope_ok(req.get("store_id"), roles, approver_store_ids):
             return {"ok": False, "http": 403, "error": "store_scope"}
@@ -832,6 +899,7 @@ class ApprovalEngine:
         expected_store_id: Optional[str] = None,
         expected_context: Optional[Dict[str, Any]] = None,
         min_tier: Optional[str] = None,
+        consumer_roles: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Spend an APPROVED approval EXACTLY ONCE. A SINGLE atomic
         find_one_and_update guards status==APPROVED, consumed==false, not
@@ -848,6 +916,11 @@ class ApprovalEngine:
         binding is OPT-IN: callers that pass neither (the historical refund /
         discount_override / journal_entry / leave consumers) are UNAFFECTED. Any
         mismatch is rolled back so the approval is not silently burned.
+
+        ``consumer_roles`` (opt-in, the generic /consume route passes the
+        caller's): a supplier-money approval ('rtv', R1) is spent only by a role
+        that may approve one -- anyone else gets "not_found", the answer a
+        missing request gets, and the approval is left untouched.
         """
         from pymongo import ReturnDocument
 
@@ -863,6 +936,14 @@ class ApprovalEngine:
             ident["request_id"] = request_id
         if approval_token:
             ident["approval_token"] = approval_token
+
+        if consumer_roles is not None:
+            try:
+                target = coll.find_one(ident, {"_id": 0, "action_type": 1})
+            except Exception:  # noqa: BLE001
+                target = None
+            if _hidden_from(target, consumer_roles):
+                return {"ok": False, "error": "not_found"}
 
         updated = coll.find_one_and_update(
             {
@@ -998,7 +1079,9 @@ class ApprovalEngine:
         limit: int = 100,
     ) -> List[Dict[str, Any]]:
         """Pending/history inbox for an approver. HQ roles (ADMIN/SUPERADMIN) see
-        every store; STORE/AREA managers are scoped to ``store_ids``."""
+        every store; STORE/AREA managers are scoped to ``store_ids``. A
+        supplier-money request ('rtv', R1) is listed only for a role that may
+        approve one -- a manager's inbox never holds one."""
         coll = self._coll()
         if coll is None:
             return []
@@ -1006,6 +1089,10 @@ class ApprovalEngine:
         if status and status.upper() != "ALL":
             q["status"] = status.upper()
         roles = set(approver_roles or [])
+        if not _may_approve_supplier_money(roles):
+            # Named positively (ACTION_TYPES is the closed set request() admits)
+            # so the filter is a plain $in.
+            q["action_type"] = {"$in": sorted(ACTION_TYPES - SUPPLIER_MONEY_ACTIONS)}
         if not (roles & _HQ_ROLES):
             scoped = list(store_ids or [])
             # A scoped approver sees their stores' requests plus store-less ones.
@@ -1099,6 +1186,25 @@ class ApprovalEngine:
             return True  # store-less request is org-wide
         return request_store_id in set(approver_store_ids or [])
 
+    def can_act(
+        self,
+        doc: Dict[str, Any],
+        *,
+        approver_user_id: Optional[str],
+        approver_roles: List[str],
+        approver_store_ids: Optional[List[str]] = None,
+    ) -> bool:
+        """Would approve / reject get past their role, maker-checker and store
+        gates for this caller? (The PIN and the live state are not checked.)
+        The inbox stamps it on each row so a screen offers the buttons only
+        where they work -- the same checks approve() runs, in one place."""
+        roles = set(approver_roles or [])
+        if not may_approve(doc, roles):
+            return False
+        if _is_maker_checker(doc) and approver_user_id == doc.get("requested_by"):
+            return False
+        return self._store_scope_ok(doc.get("store_id"), roles, approver_store_ids)
+
     def _set(self, request_id: str, fields: Dict[str, Any]) -> None:
         coll = self._coll()
         if coll is None or not fields:
@@ -1132,6 +1238,9 @@ class ApprovalEngine:
             return
 
         amount = doc.get("amount")
+        # An 'rtv' amount is supplier money (owner ruling 2026-10-01). Its bell
+        # rings only for the roles it is routed to -- the accounts roles, who
+        # may see it (R1, _eligible_approver_ids) -- so it names the amount.
         msg_amt = ("Rs " + format(amount, ".2f")) if amount is not None else "review"
         action = str(doc.get("action_type") or "")
         # Refund-matrix approvals land on the refund-only queue; everything else
@@ -1185,13 +1294,14 @@ class ApprovalEngine:
 
     def _eligible_approver_ids(self, doc: Dict[str, Any]) -> List[str]:
         """Active users who may approve this request: anyone holding one of the
-        required_roles, store-scoped for STORE/AREA managers (HQ roles see every
-        store). Excludes the requester (maker-checker / cannot-approve-own).
-        Fail-soft -> []."""
+        roles it is routed to (approver_roles_for: the accounts roles for an
+        'rtv', else its tier's), store-scoped for every non-HQ role (HQ roles
+        see every store). Excludes the requester (maker-checker /
+        cannot-approve-own). Fail-soft -> []."""
         users = self._users()
         if users is None:
             return []
-        required = list(doc.get("required_roles") or [])
+        required = approver_roles_for(doc)
         if not required:
             return []
         requester = doc.get("requested_by")

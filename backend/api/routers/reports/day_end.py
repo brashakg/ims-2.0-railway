@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import date, datetime
 from ..auth import require_roles
+from ...dependencies import store_in_view
 from ...dependencies import (
     get_audit_repository,
     get_db,
@@ -86,7 +87,7 @@ async def get_day_end_close(
     """Return the day-end close status for (store_id, date). `closed` is False
     with `close: null` when the day hasn't been closed yet (honest empty state,
     not a fabricated record)."""
-    sid = validate_store_access(store_id, current_user)
+    sid = store_in_view(store_id, current_user)
     db = get_db()
     if db is None or not getattr(db, "is_connected", False):
         # No DB -> we genuinely don't know; report not-closed rather than fake.

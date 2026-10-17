@@ -13,7 +13,7 @@ from ...utils.ist import ist_today
 from typing import Optional, List
 from fastapi import Depends, HTTPException, Query, UploadFile, File, Form
 from ..auth import get_current_user
-from ._shared import _get_db, _require_finance_admin, router
+from ._shared import _get_db, _require_org_finance, router
 
 # ============================================================================
 # FIND-5: Bank statement import + auto-reconciliation
@@ -274,7 +274,7 @@ async def import_bank_statement(
 
     ADMIN / ACCOUNTANT only (the rbac row), not the finance router's manager set.
     """
-    _require_finance_admin(current_user)
+    _require_org_finance(current_user)
     if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=422, detail="Only CSV files are accepted")
 
@@ -408,7 +408,7 @@ async def list_bank_statements(
     current_user: dict = Depends(get_current_user),
 ):
     """FIND-5: List previously imported bank statements. ADMIN / ACCOUNTANT."""
-    _require_finance_admin(current_user)
+    _require_org_finance(current_user)
     db = _get_db()
     if db is None:
         return {"statements": []}
@@ -444,7 +444,7 @@ async def get_bank_statement(
 ):
     """FIND-5: Retrieve an imported bank statement with all rows and matches.
     ADMIN / ACCOUNTANT."""
-    _require_finance_admin(current_user)
+    _require_org_finance(current_user)
     db = _get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")

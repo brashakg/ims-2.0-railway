@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, Depends, Query
 
 from .auth import require_roles
-from ..dependencies import get_product_repository, resolve_store_scope
+from ..dependencies import get_product_repository, is_no_shop_scope, resolve_store_scope
 from ..services import buy_desk as _bd
 from ..services.po_variance_engine import AWAITING_DELIVERY_STATUSES
 from ..services import product_master as _pm
@@ -161,6 +161,12 @@ async def buy_desk_rows(
     # foreign store); omitted -> the caller's own active store for store-level
     # roles, or None (all stores) for SUPERADMIN/ADMIN. Area/admin reach is kept.
     store_id = resolve_store_scope(store_id, current_user)
+    # R4 (owner ruling 2026-10-12): a non-admin login with NO shop sees no
+    # shop -- an empty desk. Its rows used to come back with every product,
+    # the chain's on-order and sales velocity, and the reserved scope id
+    # echoed as the shop.
+    if is_no_shop_scope(store_id):
+        return {"rows": [], "total": 0, "store_id": None}
     repo = get_product_repository()
     db = _get_db()
     if repo is None:

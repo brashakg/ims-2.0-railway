@@ -47,6 +47,11 @@ vi.mock('../../../context/AuthContext', () => ({
     hasRole: () => true,
   }),
 }));
+// The form names the accountant's own shop, read-only (owner ruling R9), so
+// it reads the store list.
+vi.mock('../../../hooks/usePOSQueries', () => ({
+  useStores: () => ({ data: [{ store_id: 'S1', store_name: 'Shop One' }] }),
+}));
 
 import { PurchaseInvoicesTab } from '../PurchaseInvoicesTab';
 import { InvoiceFormDrawer } from '../invoices/InvoiceFormDrawer';
@@ -147,8 +152,12 @@ describe('manual invoice bill-kind declaration', () => {
     fireEvent.change(screen.getByDisplayValue(/Choose: goods, or services/), {
       target: { value: 'GOODS' },
     });
-    // The accountant books here but cannot receive: the hint names who does.
-    expect(await screen.findByText(/Delivery Challan/)).toHaveTextContent(/store manager/);
+    const wall = await screen.findByText(/Delivery Challan/);
+    // D14: a walk-in buy is received as 'Bought without PO' (credit only from a
+    // registered dealer, G2), never steered into a challan, whose bill claims
+    // full credit.
+    expect(wall.textContent).toMatch(/Bought without PO/);
+    expect(wall.textContent).not.toMatch(/Log them as a Delivery Challan/);
     expect(screen.getByRole('button', { name: /Book invoice/i })).toBeDisabled();
     expect(apis.purchaseInvoicesApi.create).not.toHaveBeenCalled();
   });

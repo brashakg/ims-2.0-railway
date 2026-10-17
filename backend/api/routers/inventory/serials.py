@@ -1,5 +1,6 @@
 """Serialized inventory (feeds SerialNumberTracker.tsx)."""
 
+from ...dependencies import store_in_view
 from ._shared import (
     BaseModel,
     Depends,
@@ -159,7 +160,7 @@ async def list_serials(
     if db is None:
         return {"items": []}
 
-    active_store = validate_store_access(store_id, current_user)
+    active_store = store_in_view(store_id, current_user)
 
     try:
         serials_coll = db.get_collection("serial_numbers")

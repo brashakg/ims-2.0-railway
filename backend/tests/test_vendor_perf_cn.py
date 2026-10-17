@@ -136,7 +136,9 @@ def test_performance_includes_mtd_spend(monkeypatch):
     # bills under last month. Verified failing at 2026-09-01 01:40 IST before
     # this change.
     ist = business_now()
-    this_month = ist.strftime("%Y-%m-15")
+    # The 1st: never ahead of today. A bill keyed ahead (the 15th, read on the
+    # 8th) is not billed yet -- the supplier ledger's as-of rule (F56).
+    this_month = ist.strftime("%Y-%m-01")
     last_month_year, last_month = divmod(ist.month - 2, 12)
     old = f"{ist.year + last_month_year}-{last_month + 1:02d}-15"
     db = _FakeDB(

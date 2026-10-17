@@ -540,7 +540,11 @@ def test_d7_counter_role_cannot_read_the_mirror_bill(app, db, monkeypatch):
     manager = _user("STORE_MANAGER", "ST-BOK-1")
     assert "mtd_spend" not in _run(performance.vendor_performance("ENT-Z", 6, manager))
     books = _run(performance.vendor_performance("ENT-Z", 6, accountant))
-    assert books["mtd_spend"] == pytest.approx(bill["total_amount"])
+    # The accounts role gets the figure; it is the Purchases report's
+    # `billed` (one rule, F56), and the supplier ledger leaves a transfer's
+    # mirror bill out (ap_engine.supplier_rows, D13: a valued challan, not a
+    # supplier purchase) -- so nothing is billed by ENT-Z this month.
+    assert books["mtd_spend"] == 0.0
 
 
 def test_d7_workshop_staff_pick_ship_and_receive_replies_carry_no_cost(db):

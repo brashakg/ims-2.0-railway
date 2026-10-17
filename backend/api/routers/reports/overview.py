@@ -10,6 +10,7 @@ from ...utils.ist import (
     ist_today,
 )
 from ..auth import get_current_user, require_roles
+from ...dependencies import store_in_view
 from ...dependencies import (
     get_order_repository,
     get_stock_repository,
@@ -19,6 +20,7 @@ from ...dependencies import (
     get_db,
     validate_store_access,
 )
+from ...services import stock_value
 from ...services.cost_mask import mask_cost
 from ...services.name_resolver import order_actor_id, order_actor_name_map
 from ...services.reorder_policy import low_stock_rows
@@ -50,7 +52,7 @@ async def dashboard_stats(
     current_user: dict = Depends(get_current_user),
 ):
     """Get dashboard statistics for a store - fetched from database"""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
+    active_store = store_in_view(store_id, current_user) or "store-001"
 
     order_repo = get_order_repository()
     stock_repo = get_stock_repository()
@@ -160,17 +162,19 @@ async def inventory_report(
     current_user: dict = Depends(get_current_user),
 ):
     """Get inventory report for a store - fetched from database"""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
+    active_store = store_in_view(store_id, current_user) or "store-001"
     stock_repo = get_stock_repository()
 
     if stock_repo is not None:
-        all_stock = stock_repo.find_many({"store_id": active_store}, limit=0)
+        # F47: the one stock-value rule -- units physically on the shelf at what
+        # they cost (services/stock_value); the counter reads no cost figure.
+        all_stock = stock_value.shelf_units(
+            stock_repo, get_product_repository(), active_store
+        )
         low_stock = low_stock_rows(get_product_repository(), stock_repo, store_id=active_store)
 
         total_items = len(all_stock)
-        total_value = sum(
-            (s.get("quantity", 0) * s.get("cost_price", 0)) for s in all_stock
-        )
+        total_value = stock_value.total(all_stock)
         low_stock_count = len(low_stock) if low_stock else 0
         out_of_stock = len([s for s in all_stock if s.get("quantity", 0) <= 0])
 
@@ -181,22 +185,25 @@ async def inventory_report(
             if cat not in categories:
                 categories[cat] = {"name": cat, "count": 0, "value": 0}
             categories[cat]["count"] += 1
-            categories[cat]["value"] += item.get("quantity", 0) * item.get(
-                "cost_price", 0
-            )
+            categories[cat]["value"] += item["cost_value"]
+        for c in categories.values():
+            c["value"] = round(c["value"], 2)
 
-        # Stock value is at cost: the roles that see product cost only (D7).
+        # Stock value is at cost: the roles that see product cost only (D7);
+        # mask_cost drops the value keys for anyone else.
         return mask_cost(
             {
                 "totalItems": total_items,
-                "totalValue": round(total_value, 2),
+                "totalValue": total_value,
+                # Units with no cost add Rs 0 to totalValue; said, not hidden.
+                "uncostedUnits": stock_value.uncosted(all_stock),
                 "lowStock": low_stock_count,
                 "outOfStock": out_of_stock,
                 "categories": list(categories.values()),
             },
             current_user,
-            "product",
-            extra=("totalValue", "value"),
+            stock_value.COST_CONTEXT,
+            extra=("totalValue", "value", "uncostedUnits"),
         )
 
     return {
@@ -218,7 +225,7 @@ async def sales_summary(
     """Sales summary + daily trend + category breakdown for the
     requested window. Single endpoint that the frontend Reports page
     reads off the same response."""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     order_repo = get_order_repository()
     empty = {
         "summary": {
@@ -261,7 +268,7 @@ async def daily_sales(
     current_user: dict = Depends(get_current_user),
 ):
     """Daily sales for the last N days (chart data)."""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     order_repo = get_order_repository()
     if order_repo is None:
         return {"data": []}
@@ -289,7 +296,7 @@ async def sales_by_salesperson(
     current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
     """Get sales grouped by salesperson (management report; store-scoped)."""
-    active_store = validate_store_access(store_id, current_user)
+    active_store = store_in_view(store_id, current_user)
     order_repo = get_order_repository()
 
     if order_repo is None:
@@ -353,7 +360,7 @@ async def sales_by_category(
     current_user: dict = Depends(get_current_user),
 ):
     """Sales grouped by product category for the requested window."""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     order_repo = get_order_repository()
     if order_repo is None:
         return {"data": []}

@@ -439,7 +439,7 @@ def test_legacy_po_price_history_is_hidden_without_changing_the_record(client, b
 def test_every_read_follows_the_one_cost_rule(client, buying, monkeypatch):
     from api.services import cost_mask
 
-    for ctx in ("product", "purchase"):
+    for ctx in ("default", "product", "purchase", "payables"):
         monkeypatch.setitem(cost_mask._CONTEXT_ROLES, ctx, {"STORE_MANAGER"})
     for path, extra in ALL_READS:
         r = _get(client, "STORE_MANAGER", path)
@@ -494,32 +494,44 @@ def test_a_vendor_rma_run_end_to_end_reads_its_money_back_to_accounts_only(clien
     # pair, try to close (refused: a variance is still owed), then write it
     # off. Every reply, the refusal and the RMA read afterwards: the money (in
     # keys, or in the words a step writes into the history) is the accounts'.
-    def post(path, body):
-        return client.post(f"/api/v1/vendor-rma{path}", json=body, headers=_headers(role))
+    def post(path, body, actor=role):
+        return client.post(f"/api/v1/vendor-rma{path}", json=body, headers=_headers(actor))
+
+    def read_for_role(rid):
+        return client.get(f"/api/v1/vendor-rma/{rid}", headers=_headers(role))
 
     made = post("", {"vendor_id": "V1", "vendor_name": "Acme Optics", "store_id": STORE,
                      "lines": [{"product_id": "P1", "product_name": "Aviator",
-                                "quantity": QTY, "reason": "DEFECTIVE", "unit_cost": COST}]})
+                                "quantity": QTY, "reason": "DEFECTIVE", "unit_cost": COST}]}, "ACCOUNTANT")
     assert made.status_code == 201, made.text
     rid = made.json()["rma_id"]
-    steps = [made]
+    steps = [read_for_role(rid)]
     for path, body in (
         ("/authorize", {"vendor_rma_number": "VRMA-2"}),
         ("/dispatch", {"carrier": "Delhivery", "awb": "AWB-2"}),
         ("/credit-note", {"credit_note_number": "CN-2", "received_amount": COST}),
     ):
-        steps.append(post(f"/{rid}{path}", body))
-        assert steps[-1].status_code == 200, (path, steps[-1].text)
+        actor = "ACCOUNTANT" if path == "/credit-note" else role
+        if actor != role:
+            denied = post(f"/{rid}{path}", body)
+            assert denied.status_code == 403, denied.text
+        changed = post(f"/{rid}{path}", body, actor)
+        assert changed.status_code == 200, (path, changed.text)
+        steps.append(read_for_role(rid))
     refused = post(f"/{rid}/close", {})
     assert refused.status_code == 409, refused.text
     assert refused.json()["detail"]["error"] == "variance_outstanding"
-    closed = post(f"/{rid}/close", {"write_off_variance": True})
+    if not sees:
+        denied = post(f"/{rid}/close", {"write_off_variance": True})
+        assert denied.status_code == 403, denied.text
+    closed = post(f"/{rid}/close", {"write_off_variance": True}, "ACCOUNTANT")
     assert (closed.status_code, closed.json()["status"]) == (200, "CLOSED"), closed.text
     read = client.get(f"/api/v1/vendor-rma/{rid}", headers=_headers(role)).json()
     assert [s["status"] for s in read["status_history"]] == [
         "DRAFT", "AUTHORIZED", "DISPATCHED", "CREDIT_RECEIVED", "CLOSED"]
     assert [ln["quantity"] for ln in read["lines"]] == [QTY]
-    money = (made, steps[3], refused, closed)
+    closed = read_for_role(rid)
+    money = (steps[0], steps[3], refused, closed)
     if sees:
         assert all(_leaks(r.json(), _RMA_MONEY) for r in money), [r.json() for r in money]
         assert _leaks(read, _RMA_MONEY)
@@ -555,11 +567,13 @@ def test_return_status_door_cannot_bypass_accounts_price_rule(client, buying, ro
         "items.0.unit_price": None, "total_value": None,
     }})
     body = {"status": "approved", "unit_prices": [999]}
-    denied = client.patch("/api/v1/vendor-returns/VR1/status", json=body, headers=_headers(role))
-    assert denied.status_code == 403, denied.text
+    moved = client.patch("/api/v1/vendor-returns/VR1/status", json=body, headers=_headers(role))
+    assert moved.status_code == 200, moved.text
     unchanged = buying.vendor_returns.find_one({"return_id": "VR1"})
-    assert unchanged["status"] == "created" and unchanged["items"][0]["unit_price"] is None
-    accepted = client.patch("/api/v1/vendor-returns/VR1/status", json=body, headers=_headers("ACCOUNTANT"))
+    assert unchanged["status"] == "approved" and unchanged["items"][0]["unit_price"] is None
+    denied = client.put("/api/v1/vendor-returns/VR1/prices", json={"unit_prices": [999]}, headers=_headers(role))
+    assert denied.status_code == 403, denied.text
+    accepted = client.put("/api/v1/vendor-returns/VR1/prices", json={"unit_prices": [999]}, headers=_headers("ACCOUNTANT"))
     assert accepted.status_code == 200, accepted.text
     assert buying.vendor_returns.find_one({"return_id": "VR1"})["items"][0]["unit_price"] == 999
 
@@ -598,6 +612,10 @@ def test_issuing_a_debit_note_reads_its_money_back_to_accounts_only(client, note
     body = {"source_type": "vendor_return", "rtv_id": "VR1"}
     first = client.post("/api/v1/rtv-debit-notes/issue", json=body, headers=_headers(role))
     again = client.post("/api/v1/rtv-debit-notes/issue", json=body, headers=_headers(role))
+    if not sees:
+        assert (first.status_code, again.status_code) == (403, 403), first.text
+        assert notes.rtv_debit_notes.count_documents({}) == 0
+        return
     assert (first.status_code, again.status_code) == (201, 201), first.text
     assert again.json()["idempotent"] is True
     for r in (first, again):

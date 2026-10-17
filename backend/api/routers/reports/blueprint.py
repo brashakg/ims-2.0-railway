@@ -7,6 +7,7 @@ from ...utils.ist import (
     now_ist,
 )
 from ..auth import get_current_user
+from ...dependencies import store_in_view
 from ...dependencies import (
     get_db,
     validate_store_access,
@@ -159,7 +160,7 @@ async def growth_blueprint(
     import json as _json
     from agents import llm_provider  # local import — agents pkg may be optional
 
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
+    active_store = store_in_view(store_id, current_user) or "store-001"
     month_key = now_ist().strftime("%Y-%m")
     cache_key = f"{active_store}::{month_key}::{model_id or 'default'}"
     db = get_db()

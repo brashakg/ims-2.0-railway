@@ -17,6 +17,7 @@ from .auth import get_current_user
 from ..dependencies import (
     get_stock_repository,
     can_access_store_scoped,
+    no_shop_scope_for,
     user_store_scope,
     validate_store_access,
 )
@@ -1144,6 +1145,10 @@ async def list_transfers(
     if priority:
         transfers = [t for t in transfers if t.get("priority") == priority]
 
+    # R4 (owner ruling 2026-10-12): a non-admin login with NO shop that names
+    # a shop is refused (403 NO_SHOP_DETAIL); unnamed, _in_callers_stores
+    # below already gives it no transfers.
+    no_shop_scope_for(store_id or from_location_id or to_location_id, current_user)
     transfers = _in_callers_stores(transfers, current_user)
 
     # Sort by created date (newest first)
@@ -2652,6 +2657,8 @@ def _book_mirror_purchase(transfer: Dict) -> None:
             # the ITC lands ONLY in the RECEIVING store's GSTR-3B (to_store_id).
             "from_store_id": from_store_id,
             "to_store_id": to_store_id,
+            # The shop the goods landed in -- what every Purchase tab scopes on.
+            "store_id": to_store_id,
             # The "vendor" is the sending entity.
             "vendor_id": from_entity,
             "vendor_name": transfer.get("from_location_name") or from_entity,

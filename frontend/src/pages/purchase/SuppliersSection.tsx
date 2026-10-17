@@ -8,12 +8,16 @@
 
 import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Search, Loader2, AlertTriangle } from 'lucide-react';
-import { SupplierPanel } from './SupplierPanel';
+import { SupplierPanel, type SupplierBalance } from './SupplierPanel';
+import { financeApi } from '../../services/api/finance';
 import { SupplierFormModal } from './SupplierFormModal';
 import { useSuppliers, vendorsQueryKey } from './purchaseQueries';
 import type { Supplier } from './purchaseTypes';
+import { usePurchaseShop } from './purchaseShop';
+import { APPROVE_ROLES } from './invoices/shared';
+import { useAuth } from '../../context/AuthContext';
 
 export function SuppliersSection() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -28,6 +32,24 @@ export function SuppliersSection() {
   const suppliers = suppliersQ.data ?? [];
   const isLoading = suppliersQ.isPending;
   const loadError = suppliersQ.isError ? 'Failed to load purchase data' : null;
+
+  // Audit F56: what we owe each supplier is the supplier LEDGER (the server's
+  // one payable rule, ap_engine.build_ledger), for the shop the Purchase
+  // filter shows (F63). Only the accounts roles read supplier balances (owner
+  // ruling 2026-09-29; APPROVE_ROLES mirrors the server's _AP_ROLES): anyone
+  // else never asks, so gets no figure -- never a made-up Rs 0.
+  const { hasRole } = useAuth();
+  const { storeId } = usePurchaseShop();
+  const readsBalances = hasRole(APPROVE_ROLES);
+  const balancesQ = useQuery({
+    queryKey: ['purchase', 'supplier-balances', storeId ?? 'all'],
+    queryFn: async () => {
+      const rows = (await financeApi.getVendorPayments(storeId)) as Array<SupplierBalance & { vendor_id: string }>;
+      return Object.fromEntries((Array.isArray(rows) ? rows : []).map((r) => [r.vendor_id, r]));
+    },
+    enabled: readsBalances,
+    retry: false, // a 403 (no supplier balances for this login) is an answer
+  });
 
   // Cache writer for add/edit: the ledger updates in place, no refetch flash.
   const patchSuppliers = (fn: (old: Supplier[]) => Supplier[]) =>
@@ -91,7 +113,7 @@ export function SuppliersSection() {
           <Loader2 className="w-8 h-8 animate-spin text-blue-600" />
         </div>
       ) : (
-        <SupplierPanel suppliers={filteredSuppliers} onEdit={setEditingSupplier} />
+        <SupplierPanel suppliers={filteredSuppliers} onEdit={setEditingSupplier} balances={balancesQ.data} />
       )}
 
       {/* Add Supplier Modal */}

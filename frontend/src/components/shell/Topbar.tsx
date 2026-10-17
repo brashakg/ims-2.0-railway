@@ -8,6 +8,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { storeApi } from '../../services/api';
 import { isOnlineStore } from '../../utils/storeMode';
+import { userSeesAllStores } from '../../utils/storeAccess';
 import { Icon } from './Icon';
 import { NotificationBell } from './NotificationBell';
 import { CommandPalette } from './CommandPalette';
@@ -142,7 +143,7 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
     : user?.activeStoreId || '';
   const roleLabel = (user?.activeRole || '—').toString().replaceAll('_', ' ');
   const multiStore =
-    hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER']) ||
+    userSeesAllStores(user?.roles) ||
     ((user?.storeIds?.length ?? 0) > 1 && !hasRole(['OPTOMETRIST']));
 
   return (
@@ -239,12 +240,13 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
               }}
             >
               {/* Store options source (data-consistency fix): an all-stores role
-                  (SUPERADMIN/ADMIN/AREA_MANAGER) picks from the ORG store list
+                  (userSeesAllStores: SUPERADMIN/ADMIN -- the server's switch-store
+                  reach; an AREA_MANAGER picks his own shops) picks from the ORG store list
                   (GET /stores -> storeNames), not the per-user store_ids assignment
                   -- which for an all-stores admin is often empty, leaving "No store"
                   and a POS "No Store Selected" dead-end. Store-level roles still see
                   only their assigned stores. */}
-              {(hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER'])
+              {(userSeesAllStores(user?.roles)
                 ? (Object.keys(storeNames).length ? Object.keys(storeNames) : (user?.storeIds || []))
                 : (user?.storeIds?.length ? user.storeIds : Object.keys(storeNames))
               ).map((id) => (

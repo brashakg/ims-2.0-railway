@@ -54,3 +54,53 @@ def test_area_manager_in_region_ok_out_of_region_403():
 def test_area_manager_omitted_pins_to_own_store():
     # AREA_MANAGER is not HQ-all: omitting scopes to their active store.
     assert resolve_store_scope(None, AREA) == "BV-PUN-01"
+
+
+# Owner ruling 2026-10-12 (R4): a login that is not ADMIN / SUPERADMIN and has
+# no shop must NOT read every shop. It used to: no active store -> None -> no
+# filter -> all stores. Now it resolves to the reserved NO_SHOP_SCOPE (its
+# lists come back empty) and naming any shop is a 403 worded NO_SHOP_DETAIL.
+# The full matrix lives in test_no_shop_login_sees_nothing.py; these pin the
+# rule's own two answers next to the rest of resolve_store_scope.
+from api.dependencies import NO_SHOP_DETAIL, NO_SHOP_SCOPE  # noqa: E402
+
+
+@pytest.mark.parametrize("role", ["STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT", "CATALOG_MANAGER"])
+@pytest.mark.parametrize("token", [{}, {"store_ids": [], "active_store_id": None}])
+def test_r4_a_non_admin_with_no_shop_reads_no_shop(role, token):
+    assert resolve_store_scope(None, {"roles": [role], **token}) == NO_SHOP_SCOPE
+
+
+def test_r4_a_non_admin_with_no_shop_cannot_name_one_either():
+    with pytest.raises(HTTPException) as ei:
+        resolve_store_scope("BV-PUN-01", {"roles": ["ACCOUNTANT"], "store_ids": []})
+    assert (ei.value.status_code, ei.value.detail) == (403, NO_SHOP_DETAIL)
+
+
+@pytest.mark.parametrize("user", [{"roles": ["ADMIN"]}, {"roles": ["SUPERADMIN"]}])
+def test_admins_with_no_shop_still_read_every_shop(user):
+    assert resolve_store_scope(None, user) is None
+
+
+@pytest.mark.parametrize("name,kw", [
+    ("get_sell_through_analysis", {"days": 30}),
+    ("get_overstock_analysis", {"overstocking_threshold": 3.0, "days": 30}),
+])
+def test_a_catch_all_handler_passes_the_refusal_through(monkeypatch, name, kw):
+    """These two asked the rule inside `except Exception -> 500`: a login with
+    no shop naming one (or a login naming another shop) got a 500, not the
+    plain 403. Under R4 an implicit read resolves to no shop (empty), so the
+    refusal that must pass through is the explicit store_id's."""
+    import asyncio
+    from unittest.mock import MagicMock
+    from api.routers.inventory import analytics
+
+    monkeypatch.setattr(analytics, "_get_db", lambda: MagicMock())
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(getattr(analytics, name)(
+            store_id="BV-PUN-01", current_user={"roles": ["STORE_MANAGER"]}, **kw,
+        ))
+    assert (ei.value.status_code, ei.value.detail) == (403, NO_SHOP_DETAIL)
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(getattr(analytics, name)(store_id="BV-BOK-01", current_user=MGR, **kw))
+    assert ei.value.status_code == 403
