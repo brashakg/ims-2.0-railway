@@ -1613,6 +1613,8 @@ async def get_customer_credit_summary(
     from ..services.credit_limit import is_walkin
 
     repo = get_customer_repository()
+    if repo is None and not is_walkin(customer_id):
+        raise HTTPException(503, "Customer credit limit could not be verified. Please retry.")
     # Object-level store scope (cross-store IDOR fix): out-of-scope -> 404.
     customer = (
         _scoped_customer_or_404(customer_id, current_user)

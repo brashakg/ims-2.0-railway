@@ -199,6 +199,14 @@ def test_stale_lower_stored_balance_cannot_hide_the_exposure_to_be_written(env):
     assert db.orders.find_one({"order_id": "O1"})["payments"] == []
 
 
+@pytest.mark.parametrize("amount", ["NaN", "Infinity"])
+def test_unverifiable_existing_cash_never_clears_the_credit_balance(env, amount):
+    db, _, client = env
+    sale(db, total=150, balance_due=60, payments=[{"method": "CASH", "amount": amount}])
+    assert post(client).status_code == 503
+    assert len(db.orders.find_one({"order_id": "O1"})["payments"]) == 1
+
+
 def test_lost_write_reply_recovers_the_exact_payment(env, monkeypatch):
     db, _, client = env
     sale(db)
@@ -253,6 +261,17 @@ def test_walkin_summary_uses_the_same_saved_default(env):
     response = client.get("/customers/walk-in/credit-summary")
     assert response.status_code == 200
     assert response.json()["credit_limit"] == 100
+
+
+def test_named_summary_refuses_missing_customer_repository_but_walkin_still_uses_default(env, monkeypatch):
+    _, _, client = env
+    monkeypatch.setattr(customers, "get_customer_repository", lambda: None)
+    response = client.get("/customers/C1/credit-summary")
+    assert response.status_code == 503
+    assert "could not be verified" in response.json()["detail"]
+    walkin = client.get("/customers/walk-in/credit-summary")
+    assert walkin.status_code == 200
+    assert walkin.json()["credit_limit"] == 100
 
 
 @pytest.mark.parametrize("method", ["CREDIT", "CASH"])

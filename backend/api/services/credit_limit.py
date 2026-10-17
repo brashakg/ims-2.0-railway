@@ -136,6 +136,8 @@ amount written on the promise row. Repeating CREDIT cannot double-count a bill.
         limit = effective_credit_limit(customer, strict=True)
         cash = sum(float(p.get("amount") or 0) for p in order.get("payments") or []
                    if str(p.get("method", "")).upper() != "CREDIT")
+        if not isfinite(cash):
+            raise ValueError("Existing cash tenders could not be verified")
         # add_payment recomputes the ladder from tenders. A stale lower stored
         # balance must not approve less exposure than that write will create.
         exposure = _owed(order) if handover else max(
