@@ -300,11 +300,15 @@ def catalogue(buying):
             {"product_id": pid, "sku": f"SKU-{pid}", "name": pid, "category": "FRAME",
              "brand": "Ray-Ban", "mrp": 9999.0, "offer_price": 9999.0, "gst_rate": 12,
              "hsn_code": "900311", "cost_price": cost, "is_active": True,
+             "attributes": {"brand_name": "Ray-Ban", "model_no": f"M-{pid}", "colour_code": "BLK"},
              "provisional": True}
         )
     # P1's catalogue cost is not what was last paid for it (COST, receipt G1),
     # so a PO that took the catalogue cost over the last price paid shows.
-    buying.products.update_one({"product_id": "P1"}, {"$set": {"cost_price": 1234.5}})
+    buying.products.update_one({"product_id": "P1"}, {"$set": {
+        "cost_price": 1234.5, "hsn_code": "900311",
+        "attributes": {"brand_name": "Ray-Ban", "model_no": "M-P1", "colour_code": "BLK"},
+    }})
     return buying
 
 
