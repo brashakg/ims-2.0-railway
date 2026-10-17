@@ -1315,7 +1315,7 @@ def test_g2_a_walk_in_bill_is_never_reverse_charge_on_any_door(world):
         for door, book in doors.items():
             with pytest.raises(HTTPException) as refused:
                 book()
-            assert (refused.value.status_code, refused.value.detail) == (422, WALK_IN_REVERSE_CHARGE), (vendor, door)
+            assert (refused.value.status_code, refused.value.detail) == (400, WALK_IN_REVERSE_CHARGE), (vendor, door)
         assert db.vendor_bills.count_documents({}) == 0
     line.reverse_charge = False
     booked = _run(pi.create_purchase_invoice(line, current_user=ACCOUNTANT))

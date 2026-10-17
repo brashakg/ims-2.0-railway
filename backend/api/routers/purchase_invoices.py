@@ -141,8 +141,11 @@ class PurchaseInvoiceCreate(BaseModel):
     # supplier purchases, GTA freight, legal/advocate services.
     reverse_charge: bool = False
     notes: Optional[str] = None
-    # Client-computed grand total, if provided, is reconciled against the
-    # server-computed taxable+tax (Rs 1 slack) -- a tamper / drift guard.
+    # Client-computed total, if provided, is reconciled (Rs 1 slack) against
+    # what the server computes the supplier is owed (_supplier_owed: taxable +
+    # tax, the taxable value alone on a reverse-charge bill) -- the same
+    # `total` /preview and the /from-grn and /from-dcs drafts return. A tamper
+    # / drift guard.
     total: Optional[float] = Field(default=None, ge=0)
     # F9: grn_ids of the Delivery Challans this ONE consolidated invoice covers.
     # When present, the booking runs dc_bulk_match (DC-received vs billed qty)
@@ -1424,10 +1427,8 @@ def _vendor_gstin(db, vendor: Optional[dict], vendor_id: str) -> Optional[str]:
         return None
 
 
-WALK_IN_REVERSE_CHARGE = (
-    "Goods bought without a PO are not a reverse-charge purchase: the dealer "
-    "charges GST on the bill, or none if not registered. Book this bill with "
-    "reverse charge off."
+WALK_IN_REVERSE_CHARGE = ap_engine.reverse_charge_refusal(
+    True, {"grn_subtype": ap_engine.GRN_SUBTYPE_NO_PO}
 )
 
 
@@ -1435,10 +1436,11 @@ def refuse_walk_in_reverse_charge(reverse_charge, receipt) -> None:
     """A "Bought without PO" receipt's bill is never reverse charge (owner
     2026-10-13): spectacles bought from a dealer are not a reverse-charge
     supply. Every bill door -- this one (booking and /preview, through
-    _bill_math) and the header-only AP bill door -- refuses it here, 422, so
+    _bill_math) and the header-only AP bill door -- refuses it here, 400, so
     one bill has one GST outcome whichever door books it."""
-    if reverse_charge and (receipt or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO:
-        raise HTTPException(status_code=422, detail=WALK_IN_REVERSE_CHARGE)
+    refusal = ap_engine.reverse_charge_refusal(reverse_charge, receipt)
+    if refusal:
+        raise HTTPException(status_code=400, detail=refusal)
 
 
 def _bill_math(db, vendor, body, grn_doc, current_user):
@@ -1464,7 +1466,23 @@ def _bill_math(db, vendor, body, grn_doc, current_user):
         supplier_gstin,
         recipient.get("recipient_gstin"),
     )
+    computed["vendor_payable"] = _supplier_owed(computed, body.reverse_charge)
     return supplier_gstin, recipient, computed
+
+
+def _supplier_owed(computed, reverse_charge) -> float:
+    """THE `total` of every bill door -- the /from-grn and /from-dcs drafts,
+    /preview and the booking: what the supplier is owed on the computed bill
+    (ap_engine.vendor_payable). On a reverse-charge bill that is the taxable
+    value only -- its GST is the shop's own liability to the government
+    (GSTR-3B 3.1(d)), booked in the tax heads."""
+    return ap_engine.vendor_payable(
+        {
+            "reverse_charge": bool(reverse_charge),
+            "taxable_amount": computed["taxable_total"],
+            "total_amount": computed["total"],
+        }
+    )
 
 
 def _line_product_ids(lines) -> list:
@@ -1723,8 +1741,8 @@ async def create_purchase_invoice(
     current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
     """Create a first-class purchase invoice: compute the per-line CGST/SGST vs
-    IGST split from supplier-vs-recipient state, reconcile taxable+tax == total,
-    and book it as an AP payable (due date from the vendor's credit terms, with
+    IGST split from supplier-vs-recipient state, reconcile a client `total`
+    against what the supplier is owed (_supplier_owed), and book it as an AP payable (due date from the vendor's credit terms, with
     a per-vendor duplicate-invoice guard). Stores the tax heads every ITC
     reader reports as stored."""
     vendor_repo = get_vendor_repository()
@@ -1878,13 +1896,16 @@ async def create_purchase_invoice(
         db, vendor, body, grn_doc, current_user
     )
 
-    # Reconcile a client-supplied grand total against the server math.
-    if body.total is not None and abs(body.total - computed["total"]) > 1.0:
+    # Reconcile a client-supplied total against the server math. `total` means
+    # one thing at this door, the preview's and the booking's: what the supplier
+    # is owed (vendor_payable -- taxable value only on a reverse-charge bill).
+    if body.total is not None and abs(body.total - computed["vendor_payable"]) > 1.0:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Invoice total {body.total} does not reconcile with the "
-                f"computed taxable+tax {computed['total']}."
+                f"Invoice total {body.total} does not reconcile with what the supplier is "
+                f"owed, {computed['vendor_payable']} (taxable value plus GST; "
+                f"the taxable value alone on a reverse-charge bill)."
             ),
         )
 
@@ -1956,7 +1977,9 @@ async def create_purchase_invoice(
     invoice_id = str(uuid.uuid4())
     taxable_total = computed["taxable_total"]
     tax_total = computed["tax_total"]
-    total = computed["total"]
+    # The supplier's payable: total / total_amount / outstanding never carry
+    # a reverse-charge bill's GST (that stays in tax_amount and the heads).
+    total = computed["vendor_payable"]
 
     doc = {
         "bill_id": invoice_id,
@@ -2289,7 +2312,9 @@ async def preview_purchase_invoice(
         "sgst_total": computed["sgst_total"],
         "igst_total": computed["igst_total"],
         "tax_total": computed["tax_total"],
-        "total": computed["total"],
+        # The booking's total_amount: what the supplier is owed.
+        "reverse_charge": bool(body.reverse_charge),
+        "total": computed["vendor_payable"],
     }
 
 
@@ -2353,6 +2378,8 @@ async def list_purchase_invoices(
     )
     _stamp_bill_actor_names(db, rows)
     _stamp_receipt_numbers(db, rows)
+    for r in rows:
+        r["total_amount"] = ap_engine.vendor_payable(r)
     return {"purchase_invoices": rows, "total": len(rows)}
 
 
@@ -2388,7 +2415,10 @@ async def draft_invoice_from_grn(
     its PO (for unit_price + tax_rate per line), computes the place_of_supply +
     per-line CGST/SGST vs IGST split, and returns the prefilled draft for the
     user to review and POST. The returned `lines` + totals + place_of_supply are
-    ready to drop into POST / (the create body) after review.
+    ready to drop into POST / (the create body) after review. The draft is not
+    reverse charge; its `total` is what the supplier is owed (_supplier_owed),
+    the meaning POST / reconciles -- ticking reverse charge changes it, and
+    /preview gives the new one.
     """
     grn_repo = get_grn_repository()
     po_repo = get_purchase_order_repository()
@@ -2454,7 +2484,8 @@ async def draft_invoice_from_grn(
         "sgst_total": computed["sgst_total"],
         "igst_total": computed["igst_total"],
         "tax_total": computed["tax_total"],
-        "total": computed["total"],
+        "reverse_charge": False,
+        "total": _supplier_owed(computed, False),
     }
 
 
@@ -2478,7 +2509,9 @@ async def draft_invoice_from_dcs(
     invoice.
 
     The aggregated lines + totals are ready to drop into POST / (the create
-    body) after the accountant confirms / adjusts the billed quantities."""
+    body) after the accountant confirms / adjusts the billed quantities. Its
+    `total` means what POST / means: what the supplier is owed
+    (_supplier_owed; the draft is not reverse charge)."""
     ids = [d.strip() for d in (dc_ids or "").split(",") if d.strip()]
     if not ids:
         raise HTTPException(status_code=400, detail="No DC ids provided")
@@ -2545,7 +2578,8 @@ async def draft_invoice_from_dcs(
         "sgst_total": computed["sgst_total"],
         "igst_total": computed["igst_total"],
         "tax_total": computed["tax_total"],
-        "total": computed["total"],
+        "reverse_charge": False,
+        "total": _supplier_owed(computed, False),
     }
 
 
@@ -3269,4 +3303,7 @@ async def get_purchase_invoice(
     if not doc:
         raise HTTPException(status_code=404, detail="Purchase invoice not found")
     _stamp_bill_actor_names(db, [doc])
+    # What the supplier is owed, as every AP reader reads it (an RCM bill
+    # booked before vendor_payable stored its GST in total_amount).
+    doc["total_amount"] = ap_engine.vendor_payable(doc)
     return doc

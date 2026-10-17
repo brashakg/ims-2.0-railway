@@ -15,6 +15,32 @@ from ...services.purchase_invoice_engine import determine_place_of_supply
 _DEAD_BILL = ["CANCELLED", "cancelled", "VOID", "voided"]
 
 
+def net_cash_due(output_tax, credit, rcm_tax) -> tuple:
+    """THE GSTR-3B cash rule, per head. Each argument and the result is an
+    (igst, cgst, sgst) triple; the result is the cash due on each head.
+
+    Input credit sets off output tax as the CGST Act orders it (s.49(5), s.49A,
+    rule 88A): IGST credit pays IGST first, then CGST and SGST (CGST first here;
+    the law allows any order, the total is the same); CGST and SGST credit pay
+    their own head, then IGST -- never each other. Credit left over carries
+    forward (never refunded here). Reverse-charge tax is always paid in CASH on
+    top: credit never sets it off. GSTR-3B, the Cross-Check and the Finance GST
+    summary all call this -- none keeps its own copy."""
+    out_i, out_c, out_s = output_tax
+    itc_i, itc_c, itc_s = credit
+    igst_left = max(0.0, itc_i - out_i)
+    due_c = max(0.0, out_c - itc_c)
+    due_s = max(0.0, out_s - itc_s)
+    # IGST still due after IGST credit, less the CGST and SGST credit their own
+    # head did not need.
+    due_i = max(0.0, max(0.0, out_i - itc_i) - max(0.0, itc_c - out_c) - max(0.0, itc_s - out_s))
+    # IGST credit IGST did not need pays CGST, then SGST.
+    to_c = min(igst_left, due_c)
+    due_s = max(0.0, due_s - (igst_left - to_c))
+    due_c -= to_c
+    return due_i + rcm_tax[0], due_c + rcm_tax[1], due_s + rcm_tax[2]
+
+
 def _itc_store_scope(db, active_store):
     """(entity_id, gstin, shops) of the store whose return is being filed.
     `gstin` is THE shop's GSTIN (org_validation.shop_gstin -- the one the
@@ -72,7 +98,65 @@ def _dated(value) -> bool:
     return True
 
 
-def _placement(shops, entity_id, store_gstin, year, mon, last_day) -> dict:
+def _legacy_bill_ids(db, entity_id, store_gstin, year, mon, last_day) -> list:
+    """Legacy purchases without a stamped GSTIN that belong to this return.
+
+    Use verified receipt/shop ownership, or the company's sole registration.
+    Conflicting or missing evidence in a multi-registration company is left
+    unallocated; it must never create the same credit on two returns.
+    """
+    if db is None or not entity_id or not store_gstin:
+        return []
+    from ...services.org_validation import has_valid_gstin
+
+    entity = db["entities"].find_one({"entity_id": entity_id}) or {}
+    held = {
+        str(g.get("gstin") or "").strip().upper()
+        for g in entity.get("gstins") or []
+        if isinstance(g, dict) and has_valid_gstin(g.get("gstin"))
+    }
+    if store_gstin not in held:
+        return []
+    gstins = shop_gstins(db)
+    stores = {
+        s.get("store_id"): s.get("entity_id")
+        for s in db["stores"].find({}, {"store_id": 1, "entity_id": 1})
+    }
+    query = {
+        "recipient_entity_id": entity_id,
+        "recipient_gstin": {"$in": ["", None]},
+        "source_transfer_id": None,
+        "status": {"$nin": _DEAD_BILL},
+        "$or": _itc_month(year, mon, last_day),
+    }
+    result = []
+    for bill in db["vendor_bills"].find(query):
+        ids = {bill.get(k) for k in ("store_id", "to_store_id") if bill.get(k)}
+        receipt_ids = set(bill.get("linked_dc_ids") or [])
+        if bill.get("grn_id"):
+            receipt_ids.add(bill["grn_id"])
+        valid = True
+        for rid in receipt_ids:
+            receipt = db["grns"].find_one({"grn_id": rid}, {"store_id": 1})
+            if not receipt or not receipt.get("store_id"):
+                valid = False
+            else:
+                ids.add(receipt["store_id"])
+        candidates = set()
+        for sid in ids:
+            gstin = gstins.get(sid)
+            if stores.get(sid) != entity_id or gstin not in held:
+                valid = False
+            else:
+                candidates.add(gstin)
+        if not ids and not receipt_ids:
+            candidates = held
+        if valid and candidates == {store_gstin} and bill.get("bill_id"):
+            result.append(bill["bill_id"])
+    return result
+
+
+def _placement(shops, entity_id, store_gstin, year, mon, last_day, db=None) -> dict:
     """THE placement of a vendor bill on ONE GSTIN's GSTR-3B -- the single
     query Table 4 (input credit, _itc_match) and Table 3.1(d) (reverse charge,
     _rcm_from_vendor_bills) are both built from, so a reverse-charge bill's
@@ -94,7 +178,9 @@ def _placement(shops, entity_id, store_gstin, year, mon, last_day) -> dict:
         whichever shop it meets first. A shop with NO GSTIN keeps no mirror:
         it files no return, so that credit is left off every return and
         _itc_unplaced flags it;
-      * a legacy purchase bill that names no GSTIN stays company-wide.
+      * a legacy purchase bill that names no GSTIN is inferred only from a
+        verified receipt/shop or a company's sole registration. Ambiguous
+        bills stay off all returns and appear in the unallocated-credit check.
     Always scoped to the store's company (recipient_entity_id) when it has one,
     and to live bills dated in the month.
     """
@@ -122,15 +208,52 @@ def _placement(shops, entity_id, store_gstin, year, mon, last_day) -> dict:
     }
     if entity_id:
         vb_match["recipient_entity_id"] = entity_id
+    vb_match["$and"] = [{"$or": [
+        {"source_transfer_id": {"$exists": True, "$ne": None}},
+        {"recipient_gstin": {"$nin": ["", None]}},
+        {"bill_id": {"$in": _legacy_bill_ids(db, entity_id, store_gstin, year, mon, last_day)}},
+    ]}]
     return vb_match
 
 
-def _itc_match(shops, entity_id, store_gstin, year, mon, last_day) -> dict:
+def _unallocated_legacy_bills(db, entity_id, year, mon, last_day) -> dict:
+    """Bills needing an accountant's GSTIN allocation before portal export.
+
+    Includes credit-off RCM bills: their liability must not vanish merely
+    because they carry no claimable input credit.
+    """
+    out = {"count": 0, "tax": 0.0, "bill_numbers": []}
+    if db is None or not entity_id:
+        return out
+    try:
+        entity = db["entities"].find_one({"entity_id": entity_id}) or {}
+        placed = set()
+        for g in entity.get("gstins") or []:
+            if isinstance(g, dict) and g.get("gstin"):
+                placed.update(_legacy_bill_ids(db, entity_id, str(g["gstin"]).strip().upper(), year, mon, last_day))
+        for b in db["vendor_bills"].find({
+            "recipient_entity_id": entity_id,
+            "recipient_gstin": {"$in": ["", None]},
+            "source_transfer_id": None,
+            "status": {"$nin": _DEAD_BILL},
+            "$or": _itc_month(year, mon, last_day),
+        }):
+            if b.get("bill_id") not in placed:
+                out["count"] += 1
+                out["tax"] += float(b.get("tax_amount") or 0)
+                out["bill_numbers"].append(b.get("bill_number") or b.get("bill_id"))
+    except Exception:
+        return {**out, "failed": True}
+    out["tax"] = round(out["tax"], 2)
+    return out
+
+
+def _itc_match(shops, entity_id, store_gstin, year, mon, last_day, db=None) -> dict:
     """Table 4: the bills _placement puts on this GSTIN's return that carry
     input credit -- every ITC read (the return, its GSTIN slice, the
     Cross-Check's count of credit left off every return) is built from it."""
     return {
-        **_placement(shops, entity_id, store_gstin, year, mon, last_day),
+        **_placement(shops, entity_id, store_gstin, year, mon, last_day, db),
         "itc_eligible": {"$ne": False},
     }
 
@@ -187,7 +310,7 @@ def _itc_from_vendor_bills(db, active_store, year, mon, last_day):
     try:
         entity_id, store_gstin, shops = _itc_store_scope(db, active_store)
         return _sum_heads(
-            db, _itc_match(shops, entity_id, store_gstin, year, mon, last_day)
+            db, _itc_match(shops, entity_id, store_gstin, year, mon, last_day, db)
         )[:3]
     except Exception:
         pass
@@ -201,19 +324,17 @@ def _itc_gstin_from_vendor_bills(db, active_store, year, mon, last_day):
     when it has none). Returns (igst, cgst, sgst); fail-soft ->
     zeros.
 
-    The same _itc_match AND-ed with the GSTIN binding, so (this) + (the
-    company-wide remainder: legacy bills naming no GSTIN) ==
-    _itc_from_vendor_bills by construction. Sibling stores of one company with
-    DIFFERENT GSTINs return DIFFERENT slices, so gst_crosscheck.aggregate_gstr3b
-    dedupes this slice once per GSTIN and the remainder once per company: the
-    company figure is independent of store enumeration order and never counts
-    one bill on two registrations."""
+    Every placed bill, including inferred legacy purchases, belongs to one
+    GSTIN. This equals _itc_from_vendor_bills; the old company-wide remainder
+    is zero. The Cross-Check deduplicates it once per registration."""
     if db is None:
         return 0.0, 0.0, 0.0
     try:
         entity_id, store_gstin, shops = _itc_store_scope(db, active_store)
-        match = _itc_match(shops, entity_id, store_gstin, year, mon, last_day)
-        return _sum_heads(db, {"$and": [match, _gstin_bound(shops, store_gstin)]})[:3]
+        # Every placed bill now belongs to exactly one GSTIN, including an
+        # inferred legacy bill. There is no company-wide credit remainder.
+        match = _itc_match(shops, entity_id, store_gstin, year, mon, last_day, db)
+        return _sum_heads(db, match)[:3]
     except Exception:
         pass
     return 0.0, 0.0, 0.0
@@ -245,7 +366,7 @@ def _no_credit_inward(db, active_store, year, mon, last_day) -> dict:
     try:
         entity_id, store_gstin, shops = _itc_store_scope(db, active_store)
         placed = {
-            **_placement(shops, entity_id, store_gstin, year, mon, last_day),
+            **_placement(shops, entity_id, store_gstin, year, mon, last_day, db),
             "source_transfer_id": None,
         }
 
@@ -340,7 +461,7 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
                 continue  # one GSTIN, one filing: same placement
             filings.add(filing)
             match = _itc_match(
-                by_gstin.get(g) or [st.get("store_id")], eid, g, year, mon, last_day
+                by_gstin.get(g) or [st.get("store_id")], eid, g, year, mon, last_day, db
             )
             placed.update(
                 b.get("bill_id")
