@@ -44,6 +44,7 @@ import pytest  # noqa: E402
 from api.services import product_master as pm  # noqa: E402
 from api.services import shopify_live_sync as ls  # noqa: E402
 from api.services import shopify_push  # noqa: E402
+from shopify_answers import tracking_answer  # noqa: E402
 from api.services.shopify_push import PushResult  # noqa: E402
 
 # The sibling harnesses, not copies of them: the in-memory _DB whose $set nests
@@ -119,6 +120,9 @@ class _Shopify:
     async def __call__(self, db, query, variables):
         op = self._op(query)
         self.calls.append({"op": op, "variables": copy.deepcopy(variables)})
+        answer = tracking_answer(query, variables)
+        if answer:
+            return answer
         variant = {
             "id": "gid://shopify/ProductVariant/901",
             "title": "Default Title",
