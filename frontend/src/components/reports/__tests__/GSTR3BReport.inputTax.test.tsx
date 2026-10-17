@@ -1,14 +1,9 @@
 // ============================================================================
 // IMS 2.0 - GSTR-3B: input tax is for the accounts roles only (R5)
 // ============================================================================
-// Owner ruling 2026-10-12: GST input tax -- the credit taken on supplier bills
-// -- is shown only to ADMIN / SUPERADMIN / ACCOUNTANT (COST_ROLES). GET
-// /reports/gstr3b leaves Table 4 (ITC available / utilised), 3.1(d) and the
-// tax paid in cash out for a store / area manager, and the GST portal export
-// (the return itself, Table 4 included) answers them 403. So for a manager the
-// screen must draw the sales side only: no ITC card, no Table 4, no ITC /
-// cash rows in 6.1, no "net after ITC" figure, no portal-export button -- and
-// it must not crash on the keys the server left out. Accounts see it all.
+// All GST report routes are now Accounts/Admin only. The routed access tests
+// cover that rule; these direct component tests retain the additional ITC
+// display guard if a component is rendered with a non-Accounts user.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
@@ -55,6 +50,8 @@ const OUTPUT_SIDE = {
   zeroRatedSupplies: heads(0, 0, 0),
   exemptSupplies: 0,
   taxPayable: heads(0, 90, 90),
+  inwardSuppliesReverseChargeValue: 0,
+  inwardSuppliesReverseCharge: heads(0, 0, 0),
   interest: heads(0, 0, 0),
   lateFee: 0,
 };
