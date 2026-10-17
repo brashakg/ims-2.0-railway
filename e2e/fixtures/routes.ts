@@ -228,7 +228,6 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string; scrollTo?: st
   { path: '/settings/printers' },
   { path: '/settings/approvals' },
   { path: '/settings/agents' },
-  { path: '/settings/feature-toggles' },
   { path: '/settings/shopify-live-sync' },
   { path: '/settings/audit-logs' },
   { path: '/settings/rules' },
