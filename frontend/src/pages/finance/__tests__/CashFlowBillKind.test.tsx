@@ -229,7 +229,7 @@ describe('the goods/services declaration on the Record-Bill form', () => {
     // unpaid bill: a dealer quick-added at receiving has none, so the hint
     // names the screen that books any receipt's bill (round 8 panel: "record
     // the bill here, under that supplier" was a dead end).
-    expect(hint).toHaveTextContent(/adding it as a supplier/);
+    expect(hint).toHaveTextContent(/adding a new dealer if needed/);
     expect(hint).toHaveTextContent(/Purchase → Invoices → Create from GRN/);
     expect(hint).toHaveTextContent(/Book the bill/);
     expect(hint).not.toHaveTextContent(/record the\s+bill here/);
