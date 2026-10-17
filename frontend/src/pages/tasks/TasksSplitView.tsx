@@ -509,6 +509,14 @@ function TaskDetailPanel({
           </div>
         )}
 
+        {task.link && (
+          <div className="d-sec">
+            <Link to={task.link} className="btn sm">
+              Open where this is done
+            </Link>
+          </div>
+        )}
+
         {task.links && task.links.length > 0 && (
           <div className="d-sec">
             <h4>Open</h4>

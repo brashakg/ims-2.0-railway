@@ -43,7 +43,7 @@ from ..services.task_sla import (
     should_escalate,
     sla_for,
 )
-from ..services.task_escalation import resolve_escalation_target
+from ..services.task_escalation import merge_into_twin, resolve_escalation_target
 from ..services.task_notify import notify_escalation
 from ..services.task_visibility import (
     MANUAL,
@@ -392,7 +392,16 @@ def _escalate_and_reassign(
             user_repo.find_by_role,
             task.get("store_id"),
             assignee or {"user_id": task.get("assigned_to")},
+            category=task.get("category"),
         )
+
+    merged = merge_into_twin(repo.find_one, task, target, by=by, now=now)
+    if merged:
+        fields, entry = merged
+        repo.update(
+            task.get("task_id"), {**fields, "history": (task.get("history") or []) + [entry]}
+        )
+        return None
 
     new_level = task.get("escalation_level", 0) + 1
     history_entry = {
@@ -1329,6 +1338,17 @@ async def escalate_task(
     target = await _escalate_reassign_notify(
         repo, task, reason="manual", by=by, now=now
     )
+    # The person above already holds this task's twin (merge_into_twin): it
+    # was closed into that one -- say so, never "no higher owner" (R1-50).
+    after = repo.find_by_id(task_id) or {}
+    if canon_status(after.get("status")) == "COMPLETED":
+        return {
+            "task_id": task_id,
+            "status": "COMPLETED",
+            "escalation_level": int(task.get("escalation_level", 0) or 0),
+            "escalated_to": None,
+            "message": after.get("completion_notes") or "Task closed into the one already above it",
+        }
     return {
         "task_id": task_id,
         "status": "ESCALATED",
@@ -1454,16 +1474,25 @@ async def auto_escalate_overdue_tasks(
         truncated = True
 
     escalated_count = 0
+    merged_count = 0
     for task, reason in breached:
         # Resolve the next owner up the role ladder + reassign + notify.
         await _escalate_reassign_notify(repo, task, reason=reason, by="system", now=now)
-        escalated_count += 1
+        # The person above already held its twin: it was closed into that one
+        # (merge_into_twin) -- counted as such, never as an escalation (R1-50).
+        after = repo.find_by_id(task.get("task_id")) or {}
+        if canon_status(after.get("status")) == "COMPLETED":
+            merged_count += 1
+        else:
+            escalated_count += 1
 
     return {
         "escalated": escalated_count,
+        "merged": merged_count,
         "scanned": scanned,
         "truncated": truncated,
-        "message": f"Auto-escalated {escalated_count} overdue tasks",
+        "message": f"Auto-escalated {escalated_count} overdue tasks"
+        + (f"; {merged_count} closed into the one already above them" if merged_count else ""),
     }
 
 

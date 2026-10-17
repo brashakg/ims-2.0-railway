@@ -44,6 +44,9 @@ import pytest  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 
 from api.routers import vendors as vendors_mod  # noqa: E402
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from strict_fakes import matches  # noqa: E402
 from api.routers import purchase_invoices as pi_mod  # noqa: E402
 
 
@@ -73,7 +76,7 @@ class _FakeGRNRepo:
     def find_many(self, flt, limit=1000):
         out = []
         for d in self.docs.values():
-            if all(d.get(k) == v for k, v in (flt or {}).items()):
+            if matches(d, flt or {}):  # the PO refresh reads status $in
                 out.append(dict(d))
         return out[:limit]
 
@@ -82,6 +85,10 @@ class _FakeGRNRepo:
             self.docs[grn_id].update(fields)
             return True
         return False
+
+    def count(self, flt):
+        # The order cap counts the order's other receipts going into stock.
+        return len(self.find_many(flt))
 
 
 class _FakePORepo:
@@ -114,7 +121,7 @@ class _FakeStockRepo:
     def count(self, flt):
         n = 0
         for u in self.units:
-            if all(u.get(k) == v for k, v in (flt or {}).items()):
+            if matches(u, flt):  # the real matcher: the guard reads $or
                 n += 1
         return n
 

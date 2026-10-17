@@ -248,3 +248,19 @@ def _grn_stock_audit(
         )
     except Exception:  # noqa: BLE001
         pass
+
+
+def held_units(entry) -> int:
+    """The units an unresolved line really holds back: its `held_qty` -- the
+    line's accepted units less those already received on it by origin
+    (grn_accept_lock._receipt_units), recorded whenever the hold is written
+    (_put_on_shelf, 'Not received'). A hold written before held_qty existed
+    held nothing yet: its accepted_qty. THE one rule every reader of a hold
+    subtracts (the PO timeline, the tasks, the movements ledger); the order's
+    count of what arrived reads the units themselves
+    (po_detail._received_by_product)."""
+    entry = entry or {}
+    try:
+        return max(0, int(entry.get("held_qty", entry.get("accepted_qty")) or 0))
+    except (TypeError, ValueError):
+        return 0

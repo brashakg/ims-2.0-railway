@@ -80,6 +80,13 @@ class _Conn:
     def get_collection(self, name):
         return self.db[name]
 
+    def __getattr__(self, name):
+        # The DatabaseConnection shape (conn.<collection>): the archive's
+        # held-receipt check reads conn.grns (dependencies.get_grn_repository).
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return self.db[name]
+
 
 class _DelistSpy:
     """push_product_delist without the network: records the call, then does

@@ -19,6 +19,7 @@ import {
   productApi,
   DuplicateProductError,
   type DuplicateProductInfo,
+  type SimilarProductSummary,
 } from '../../../services/api/products';
 // Import the templates service DIRECTLY from its module (not the api barrel —
 // the barrel re-export fails to resolve for new services, TS2614).
@@ -60,7 +61,7 @@ import {
   writeReviewQueue,
   removeFromReviewQueue,
 } from '../reviewQueue';
-import { productListPath, sectionOfError, type EditMode, type SectionId } from './shared';
+import { existingProductPath, sectionOfError, type EditMode, type SectionId } from './shared';
 import { useProductImages } from './useProductImages';
 import { reorderApi } from '../../../services/api/inventory';
 import { REORDER_LEVEL_ROLES } from '../../inventory/inventoryRoles';
@@ -571,12 +572,12 @@ export function useQuickAddForm() {
     }
   }, [dupInfo, enterVariantMode, toast, reorderLevel]);
 
-  // Rescue popup: open the existing product in the stock ledger (see
-  // productListPath) pre-scoped to its SKU.
+  // Rescue popup: open the existing product (existingProductPath -- an
+  // ordered draft opens here to be finished, anything else the stock ledger).
   const handleDupOpenExisting = useCallback(() => {
-    const sku = dupInfo?.sku;
+    const target = existingProductPath(dupInfo);
     setDupInfo(null);
-    navigate(productListPath(sku));
+    navigate(target);
   }, [dupInfo, navigate]);
 
   // ---- Similar-products strip (Phase 2) -------------------------------------
@@ -597,8 +598,8 @@ export function useQuickAddForm() {
   );
 
   const handleSimilarOpen = useCallback(
-    (sku?: string | null) => {
-      navigate(productListPath(sku));
+    (existing?: SimilarProductSummary | null) => {
+      navigate(existingProductPath(existing));
     },
     [navigate]
   );
@@ -643,14 +644,17 @@ export function useQuickAddForm() {
       setIsSubmitting(true);
       try {
         if (editMode?.kind === 'spine') {
-          // EDIT-IN-PLACE: one validated PUT. SKU/barcode/category are never
-          // sent — immutable through this door; the shop's reorder level
+          // EDIT-IN-PLACE: one validated PUT. SKU/barcode are never sent —
+          // immutable through this door; nor is the category, except on an
+          // ordered draft (nothing of it shelved or sold yet), where the
+          // server re-derives its HSN, rate and identity. The shop's reorder level
           // follows as its own write. An edit that makes this product another
           // one's twin (an eye size, a CL power) is the server's 409, shown as
           // the error toast below (not the create's rescue popup).
           // (Review mode never reaches handleSubmit — it has its own fork.)
           const payload = buildProductPayload(values);
-          await productApi.updateProduct(editMode.id, {
+          const updated = await productApi.updateProduct(editMode.id, {
+            ...(editMode.orderedDraft ? { category: payload.category } : {}),
             brand: payload.brand,
             // A category with no model (Optical Lens) leaves the stored one alone.
             model: payload.model || undefined,
@@ -667,6 +671,8 @@ export function useQuickAddForm() {
               ? { discount_category: payload.discount_category }
               : {}),
           });
+          // Finishing a product releases the units receipts held for it.
+          const released = Number((updated as { released_units?: number })?.released_units) || 0;
           // Only a level the user changed: an untouched one sends nothing (it
           // could clear an unset level or overwrite a newer save by someone else).
           const loadedLevel = typedLevel(levelText(editLevels?.[reorderShop]));
@@ -674,7 +680,8 @@ export function useQuickAddForm() {
             await saveShopLevel(editMode.id);
           }
           toast.success(
-            editMode.sku ? `Updated ${editMode.sku} — same SKU, no new product.` : 'Product updated.'
+            (editMode.sku ? `Updated ${editMode.sku} — same SKU, no new product.` : 'Product updated.') +
+              (released ? ` ${released} held unit(s) are now on the shelf.` : '')
           );
           navigate(`/catalog?focus=${encodeURIComponent(editMode.id)}`);
           return;
@@ -827,6 +834,7 @@ export function useQuickAddForm() {
         const res = await catalogProductsApi.list({
           needs_review: true,
           is_active: 'all',
+          ordered_draft: false,
           // The queue's own order (the review list's Sort by), never a second one.
           sort: queueSort(readReviewQueue()),
           limit: 2,
@@ -1302,7 +1310,12 @@ export function useQuickAddForm() {
           setVariantCtx(null);
           setFlaggedFields(new Set());
           applyFormValues(productToFormValues(product));
-          setEditMode({ kind: 'spine', id: editId, sku: String(product.sku || '') });
+          setEditMode({
+            kind: 'spine',
+            id: editId,
+            sku: String(product.sku || ''),
+            orderedDraft: Boolean((product as { ordered_draft?: boolean }).ordered_draft),
+          });
           // THIS shop's level; not set here = blank (never another shop's,
           // never the old chain-wide reorder_point). See editLevels above.
           const levels = (product as { reorder_levels?: Record<string, unknown> }).reorder_levels;
@@ -1343,12 +1356,19 @@ export function useQuickAddForm() {
       try {
         const doc = await catalogProductsApi.get(reviewId);
         if (cancelled) return;
-        if (doc.pos_ready) {
+        if (doc.pos_ready || doc.spine_product_id) {
+          // Approved already, or ordered on a PO before it was catalogued
+          // (audit C1): either way it HAS its billing row, so it is edited --
+          // and an ordered draft finished -- in the standard editor.
           removeFromReviewQueue(reviewId);
-          toast.info('This item is already approved — opening the standard editor.');
+          toast.info(
+            doc.ordered_draft
+              ? 'This item was ordered before it was catalogued — finish it here; its held stock goes on the shelf when you save.'
+              : 'This item is already approved — opening the standard editor.'
+          );
           const next = new URLSearchParams(searchParams);
           next.delete('review');
-          next.set('edit', reviewId);
+          next.set('edit', String(doc.spine_product_id || reviewId));
           setSearchParams(next, { replace: true });
           return;
         }
@@ -1412,6 +1432,7 @@ export function useQuickAddForm() {
           const res = await catalogProductsApi.list({
             needs_review: true,
             is_active: 'all',
+            ordered_draft: false,
             sort: queueSort(readReviewQueue()),
             limit: 2,
           });

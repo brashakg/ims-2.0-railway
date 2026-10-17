@@ -13,15 +13,17 @@
 //     enterVariantMode) — the parent passes that path in via onPickSibling.
 //   * exact_match -> a warning line: the exact colour already exists, with an
 //     "Open it" link that follows the same product-open path the Phase 1
-//     duplicate-rescue popup uses (onOpenExisting).
+//     duplicate-rescue popup uses (onOpenExisting). A discarded draft gets no
+//     link: Save brings it back, and the popup after Save opens it.
+//   * eye_size_needed -> Save's EYE_SIZE_NEEDED answer, in the same words.
 //   * In VARIANT MODE the sibling line is suppressed (it would state the
 //     obvious about the locked model) but the exact-colour warning stays live.
 //   * No element of the strip participates in the Tab order (tabIndex=-1) —
 //     it must never interrupt heads-down keyboard entry.
 //
 // The trigger/debounce/abort logic lives in useSimilarProducts; the backend
-// matches through the SAME normaliser that builds the create door's duplicate
-// identity, so what this warns about is exactly what would 409 on save.
+// answers with the create door's own rule (identity_conflict), so what this
+// warns about is exactly what Save answers.
 
 import { AlertTriangle } from 'lucide-react';
 import { useSimilarProducts } from './useSimilarProducts';
@@ -39,8 +41,12 @@ export interface SimilarProductsHintProps {
   /** Chip click -> the Phase 1 variant path (fetch + enterVariantMode). */
   onPickSibling: (productId: string) => void;
   /** "Open it" on the exact-match warning -> the same product-open path the
-   *  Phase 1 duplicate-rescue popup uses. */
-  onOpenExisting: (sku: string | null | undefined) => void;
+   *  Phase 1 duplicate-rescue popup uses (existingProductPath). */
+  onOpenExisting: (existing: SimilarProductSummary) => void;
+  /** The product the editor has open (?edit=): never "similar" to itself. An
+   *  ordered draft being finished was told to "Finish it", and the link
+   *  reloaded the editor over the unsaved edits. */
+  selfId?: string | null;
 }
 
 function chipLabel(s: SimilarProductSummary): string {
@@ -56,6 +62,7 @@ export function SimilarProductsHint({
   variantMode = false,
   onPickSibling,
   onOpenExisting,
+  selfId = null,
 }: SimilarProductsHintProps) {
   const { data, armed } = useSimilarProducts({ category, attributes });
 
@@ -63,9 +70,10 @@ export function SimilarProductsHint({
   // debouncing, in-flight and error states — the hook's contract).
   if (!armed || !data) return null;
 
-  const exact = data.exact_match;
-  const siblings = variantMode ? [] : data.siblings || [];
-  if (!exact && siblings.length === 0) return null;
+  const exact = data.exact_match && data.exact_match.product_id !== selfId ? data.exact_match : null;
+  const eyeSizes = data.exact_match ? [] : data.eye_size_needed || [];
+  const siblings = variantMode ? [] : (data.siblings || []).filter((s) => s.product_id !== selfId);
+  if (!exact && eyeSizes.length === 0 && siblings.length === 0) return null;
 
   const colourCount = data.model_colour_count || siblings.length;
 
@@ -78,18 +86,56 @@ export function SimilarProductsHint({
       {exact && (
         <p className="flex items-start gap-1.5 text-xs text-red-600" role="alert">
           <AlertTriangle className="w-3.5 h-3.5 mt-px shrink-0" />
+          {exact.provisional ? (
+            // Audit C3 (R1-85): a manager already ordered this exact item before
+            // it was catalogued -- it is finished, never added a second time.
+            <span>
+              This exact item was ordered before it was catalogued — SKU{' '}
+              <span className="font-semibold">{exact.sku || 'unknown'}</span>.{' '}
+              <button
+                type="button"
+                tabIndex={-1}
+                onClick={() => onOpenExisting(exact)}
+                className="underline font-medium hover:text-red-700"
+              >
+                Finish it
+              </button>
+              {' '}instead of adding it again.
+            </span>
+          ) : exact.discarded_draft ? (
+            // Save brings a discarded draft back to be finished when it is typed
+            // as the kind it was ordered as (the door's revive) -- the popup
+            // after Save is the one way in, so no second destination here.
+            <span>
+              This exact item is a draft discarded earlier — SKU{' '}
+              <span className="font-semibold">{exact.sku || 'unknown'}</span>. Saving it as{' '}
+              {String(exact.category || 'its category').toLowerCase().replace(/_/g, ' ')} brings it
+              back to be finished.
+            </span>
+          ) : (
+            <span>
+              This exact colour already exists — SKU{' '}
+              <span className="font-semibold">{exact.sku || 'unknown'}</span>.{' '}
+              <button
+                type="button"
+                tabIndex={-1}
+                onClick={() => onOpenExisting(exact)}
+                className="underline font-medium hover:text-red-700"
+              >
+                Open it
+              </button>
+              , or enter a different colour.
+            </span>
+          )}
+        </p>
+      )}
+      {eyeSizes.length > 0 && (
+        // Save answers 422 EYE_SIZE_NEEDED for this: the same words before it.
+        <p className="flex items-start gap-1.5 text-xs text-red-600" role="alert">
+          <AlertTriangle className="w-3.5 h-3.5 mt-px shrink-0" />
           <span>
-            This exact colour already exists — SKU{' '}
-            <span className="font-semibold">{exact.sku || 'unknown'}</span>.{' '}
-            <button
-              type="button"
-              tabIndex={-1}
-              onClick={() => onOpenExisting(exact.sku)}
-              className="underline font-medium hover:text-red-700"
-            >
-              Open it
-            </button>
-            , or enter a different colour.
+            This item is in the catalogue by eye size ({eyeSizes.join(', ')}). Type the eye size,
+            or pick the item from the catalogue.
           </span>
         </p>
       )}
