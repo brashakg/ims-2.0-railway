@@ -460,10 +460,8 @@ def _widen_product_rule(monkeypatch, role):
     )
 
 
-# Every read above answers cost_mask's "product" context (owner ruling
-# 2026-10-12), not its own role set or another context: change the rule there
-# and every read must follow. Only "product" is widened, so a read asking the
-# wrong context or a written-out copy keeps hiding the cost and fails here.
+# Product reads answer cost_mask's "product" context. Stock valuation has
+# the narrower default context: widening product access must not widen it.
 @pytest.mark.parametrize("widened", ("STORE_MANAGER", "CATALOG_MANAGER"))
 def test_widening_the_product_rule_moves_every_shop_cost_read(
     client, shop, monkeypatch, widened
@@ -473,7 +471,12 @@ def test_widening_the_product_rule_moves_every_shop_cost_read(
     _widen_product_rule(monkeypatch, widened)
     for method, path, extra in [*READS, BLIND]:
         body = _get(client, widened, method, path)
-        assert _cost_keys(body, extra), (widened, path, body)
+        if path.split("?")[0] in _STOCK_AT_COST:
+            assert not _cost_keys(body, extra), (widened, path, body)
+            for account in _ACCOUNTS:
+                assert _cost_keys(_get(client, account, method, path), extra), (account, path)
+        else:
+            assert _cost_keys(body, extra), (widened, path, body)
         other = _get(client, "AREA_MANAGER", method, path)
         assert not _cost_keys(other, extra), (path, _cost_keys(other, extra))
 
