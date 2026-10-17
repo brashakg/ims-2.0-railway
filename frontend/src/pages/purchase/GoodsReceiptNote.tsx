@@ -17,7 +17,7 @@ import { istDayString } from '../../utils/datetime';
 import { SupplierFormModal } from './SupplierFormModal';
 import { productApi } from '../../services/api/products';
 import { useAuth } from '../../context/AuthContext';
-import { PURCHASE_PRICE_ROLES } from '../../components/common/CostCell';
+import { COST_ROLES } from '../../components/common/CostCell';
 import { useToast } from '../../context/ToastContext';
 import { reportGrnAccept } from './grnAcceptToast';
 import { GRNPrint } from '../../components/print/GRNPrint';
@@ -153,7 +153,7 @@ const qualityChip = (status: string): string => {
 
 export function GoodsReceiptNote() {
   const { user } = useAuth();
-  const canEnterPrice = (user?.roles || []).some((role) => PURCHASE_PRICE_ROLES.includes(role));
+  const canEnterPrice = (user?.roles || []).some((role) => COST_ROLES.includes(role));
   const toast = useToast();
   const [activeTab, setActiveTab] = useState<'create' | 'history' | 'discrepancies'>('create');
   // F26: after a receipt is posted, its units' labels (one per piece).

@@ -97,6 +97,7 @@ export function PurchaseInvoicesTab({ suppliers }: { suppliers: Supplier[] }) {
           po_number: draft.po_number,
           grn_id: draft.grn_id ?? grnId,
           grn_number: draft.grn_number,
+          grn_subtype: draft.grn_subtype,
           vendor_gstin: draft.vendor_gstin,
           recipient_gstin: draft.recipient_gstin,
           store_id: draft.store_id,

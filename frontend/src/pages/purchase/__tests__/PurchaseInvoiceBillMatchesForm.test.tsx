@@ -111,7 +111,7 @@ function routePosts(pv: Record<string, unknown> = preview(), other: unknown = {}
   );
 }
 // The booking form drawer only (the invoice list behind it has tax columns too).
-const form = () => within(screen.getByText('New purchase invoice').closest('.fixed') as HTMLElement);
+const form = () => within(screen.getByText(/^(New purchase invoice|Invoice from GRN .*)$/).closest('.fixed') as HTMLElement);
 const createCalls = () => mockPost.mock.calls.filter((c) => c[0] === '/vendors/purchase-invoices');
 const previewCalls = () => mockPost.mock.calls.filter((c) => String(c[0]).endsWith('/preview'));
 
@@ -311,6 +311,7 @@ describe('panel round 2 - every tax figure on the form is the server preview', (
     fireEvent.change(await screen.findByDisplayValue(/Choose: goods, or services/), { target: { value: 'SERVICES' } });
     fireEvent.change(screen.getByDisplayValue('Select supplier...'), { target: { value: 'V1' } });
     fireEvent.change(screen.getByPlaceholderText('Item description'), { target: { value: 'Freight' } });
+    fireEvent.change(form().getAllByRole('spinbutton')[1], { target: { value: '1000' } });
     fireEvent.change(screen.getByPlaceholderText(/GSTIN receiving the supply/), { target: { value: '20AAFCB6528A1ZD' } });
 
     expect(await screen.findByText(/the supplier's GSTIN names no state/)).toBeTruthy();
