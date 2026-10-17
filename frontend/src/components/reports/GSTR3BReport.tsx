@@ -17,7 +17,7 @@ import {
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { reportsApi } from '../../services/api';
-import { PAYABLES_ROLES } from '../common/CostCell';
+import { COST_ROLES } from '../common/CostCell';
 import { NoShopNotice, hasNoShop } from '../common/NoShopNotice';
 
 interface GSTR3BTaxLiability {
@@ -71,7 +71,7 @@ export function GSTR3BReport() {
   // R5: input tax (Table 4, 3.1(d), cash paid) and the portal upload, which IS
   // the return with its Table 4, are for the accounts roles alone. Drawn only
   // when the role may see them AND the server sent them -- never as a 0.
-  const canSeeInputTax = (user?.roles || []).some((r) => PAYABLES_ROLES.includes(r));
+  const canSeeInputTax = (user?.roles || []).some((r) => COST_ROLES.includes(r));
   // R4 (owner ruling 2026-10-12): a non-admin login with no shop sees no shop.
   // A GSTR-3B is one shop's return and the server refuses such a login in the
   // owner's words, so the screen does not ask -- it says why (NoShopNotice).

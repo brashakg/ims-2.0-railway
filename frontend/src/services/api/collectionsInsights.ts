@@ -46,7 +46,8 @@ export interface CollectionInsights {
   stock_value_mrp: number;
   sold: { d7: number; d30: number; d90: number };
   revenue_30d: number;
-  margin_30d: number | null;
+  // Absent for roles that may not see what we pay (owner ruling 2026-10-12).
+  margin_30d?: number | null;
   sell_through_30d: number | null;
   days_of_cover: number | null;
   membership_capped: boolean;

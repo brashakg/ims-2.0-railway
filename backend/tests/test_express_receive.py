@@ -44,6 +44,9 @@ import pytest  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 
 from api.routers import vendors as vendors_mod  # noqa: E402
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from strict_fakes import matches  # noqa: E402
 from api.routers import purchase_invoices as pi_mod  # noqa: E402
 
 
@@ -73,7 +76,7 @@ class _FakeGRNRepo:
     def find_many(self, flt, limit=1000):
         out = []
         for d in self.docs.values():
-            if all(d.get(k) == v for k, v in (flt or {}).items()):
+            if matches(d, flt or {}):  # the PO refresh reads status $in
                 out.append(dict(d))
         return out[:limit]
 
@@ -82,6 +85,10 @@ class _FakeGRNRepo:
             self.docs[grn_id].update(fields)
             return True
         return False
+
+    def count(self, flt):
+        # The order cap counts the order's other receipts going into stock.
+        return len(self.find_many(flt))
 
 
 class _FakePORepo:
@@ -114,7 +121,7 @@ class _FakeStockRepo:
     def count(self, flt):
         n = 0
         for u in self.units:
-            if all(u.get(k) == v for k, v in (flt or {}).items()):
+            if matches(u, flt):  # the real matcher: the guard reads $or
                 n += 1
         return n
 
@@ -296,14 +303,15 @@ def test_express_happy_path_full_chain(monkeypatch):
     assert res["po_status"] == "RECEIVED"
     assert po_repo.po["status"] == "RECEIVED"
 
-    # Invoice DRAFT computed (F3-gated path) but NOTHING booked.
+    # Invoice DRAFT computed (F3-gated path) but NOTHING booked. Its totals
+    # are what we pay: the receiving manager is not shown them (owner ruling
+    # 2026-10-12); accounts book the bill from the task.
     d = res["invoice_draft"]
     assert d is not None
     assert d["vendor_id"] == "V1"
     assert d["invoice_number"] == "INV-42"
     assert d["lines_count"] == 1
-    assert d["totals"]["taxable_total"] == 500.0
-    assert d["totals"]["total"] > 0
+    assert "totals" not in d
 
     # 3-way match preview: clean receipt at PO price -> MATCHED, 0 exceptions.
     assert res["match_preview"] == {"match_status": "MATCHED", "exception_count": 0}

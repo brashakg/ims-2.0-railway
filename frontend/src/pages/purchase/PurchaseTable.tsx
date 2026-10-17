@@ -16,8 +16,10 @@ import { getStatusBadge } from './statusBadge';
 import { PurchaseStatusChip } from '../../components/purchase/PurchaseStatusChip';
 import { POLifecycleDrawer } from '../../components/purchase/POLifecycleDrawer';
 import { useAuth } from '../../context/AuthContext';
+import { COST_ROLES } from '../../components/common/CostCell';
 import { RECEIVABLE_PO_STATUSES, RECEIVING_MANAGER_ROLES } from './purchaseTypes';
 import type { PurchaseOrder } from './purchaseTypes';
+import { PRICE_NEEDED, poMoney } from './purchaseMappers';
 
 interface PurchaseTableProps {
   purchaseOrders: PurchaseOrder[];
@@ -37,7 +39,9 @@ function receivingProgress(po: PurchaseOrder): { received: number; total: number
 // the progress chip is only meaningful once the PO has gone to the vendor.
 const RECEIVING_VISIBLE_STATUSES = new Set([...RECEIVABLE_PO_STATUSES, 'RECEIVED']);
 
-function downloadPO(po: PurchaseOrder) {
+// showPrices: COST_ROLES only (owner ruling 2026-10-12) -- anyone else's copy
+// lists products and quantities.
+function downloadPO(po: PurchaseOrder, showPrices: boolean) {
   const lines: string[] = [];
   lines.push('PURCHASE ORDER');
   lines.push('==============');
@@ -52,14 +56,20 @@ function downloadPO(po: PurchaseOrder) {
   po.items.forEach((item, idx) => {
     lines.push(
       `${idx + 1}. ${item.productName} (SKU: ${item.sku})` +
-      ` | Qty: ${item.quantity} | Unit: Rs.${item.unitCost.toLocaleString()}` +
-      ` | Total: Rs.${item.total.toLocaleString()}`
+      ` | Qty: ${item.quantity}` +
+      (showPrices
+        ? item.unitCost == null || item.total == null
+          ? ` | Unit: ${PRICE_NEEDED}`
+          : ` | Unit: Rs.${item.unitCost.toLocaleString()} | Total: Rs.${item.total.toLocaleString()}`
+        : '')
     );
   });
-  lines.push('');
-  lines.push(`Subtotal  : Rs.${po.subtotal.toLocaleString()}`);
-  lines.push(`Tax       : Rs.${po.taxAmount.toLocaleString()}`);
-  lines.push(`TOTAL     : Rs.${po.total.toLocaleString()}`);
+  if (showPrices) {
+    lines.push('');
+    lines.push(`Subtotal  : Rs.${po.subtotal.toLocaleString()}`);
+    lines.push(`Tax       : Rs.${po.taxAmount.toLocaleString()}`);
+    lines.push(`TOTAL     : Rs.${po.total.toLocaleString()}`);
+  }
   if (po.notes) {
     lines.push('');
     lines.push(`Notes     : ${po.notes}`);
@@ -79,6 +89,7 @@ function downloadPO(po: PurchaseOrder) {
 export function PurchaseTable({ purchaseOrders, onViewPO }: PurchaseTableProps) {
   const navigate = useNavigate();
   const { hasRole } = useAuth();
+  const showPrices = hasRole(COST_ROLES);
   // Mirrors the /purchase/receive route gate so a role is never handed a
   // button that lands on /unauthorized (receiving is managers only).
   const canReceive = hasRole([...RECEIVING_MANAGER_ROLES]);
@@ -153,7 +164,7 @@ export function PurchaseTable({ purchaseOrders, onViewPO }: PurchaseTableProps) 
                 <Eye className="w-5 h-5 text-gray-600" />
               </button>
               <button
-                onClick={() => downloadPO(po)}
+                onClick={() => downloadPO(po, showPrices)}
                 title="Download PO"
                 className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
               >
@@ -175,10 +186,12 @@ export function PurchaseTable({ purchaseOrders, onViewPO }: PurchaseTableProps) 
               <p className="text-xs text-gray-600 mb-1">Items</p>
               <p className="text-sm font-medium text-gray-900">{po.items.length} products</p>
             </div>
+            {showPrices && (
             <div>
               <p className="text-xs text-gray-600 mb-1">Total Amount</p>
               <p className="text-sm font-semibold text-gray-900">{'\u20B9'}{po.total.toLocaleString()}</p>
             </div>
+            )}
           </div>
 
           {/* Items Preview */}
@@ -188,7 +201,7 @@ export function PurchaseTable({ purchaseOrders, onViewPO }: PurchaseTableProps) 
               {po.items.map((item, idx) => (
                 <div key={idx} className="flex items-center justify-between text-sm">
                   <span className="text-gray-700">{item.productName} (x{item.quantity})</span>
-                  <span className="font-medium text-gray-900">{'\u20B9'}{item.total.toLocaleString()}</span>
+                  {showPrices && <span className={`font-medium ${item.total == null ? 'text-amber-700' : 'text-gray-900'}`}>{poMoney(item.total)}</span>}
                 </div>
               ))}
             </div>

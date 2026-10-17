@@ -14,14 +14,14 @@ import { ReportCardsGrid } from './ReportCardsGrid';
 import { useReportsContext } from './ReportsLayout';
 import { useDiscountAnalysis } from './reportsQueries';
 import { useAuth } from '../../context/AuthContext';
-import { PAYABLES_ROLES } from '../../components/common/CostCell';
+import { COST_ROLES } from '../../components/common/CostCell';
 
 export function ReportsGstPage() {
   const { storeId, startDate, endDate } = useReportsContext();
   const discQ = useDiscountAnalysis({ storeId, startDate, endDate });
   const discountAnalysis = discQ.data;
   // GSTR-3B (input tax from supplier bills) is the accounts roles' (R1).
-  const canSeeInputTax = useAuth().hasRole(PAYABLES_ROLES);
+  const canSeeInputTax = useAuth().hasRole(COST_ROLES);
 
   return (
     <>

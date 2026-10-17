@@ -1,7 +1,7 @@
 // ============================================================================
 // F35 - Cost masking (#35), frontend presentational guard.
-// A per-unit product cost renders ONLY for PRODUCT_COST_ROLES; every other role
-// sees a restrained "-" (no badge, no lock icon -- do not draw attention to the
+// A per-unit product cost renders ONLY for COST_ROLES; every other role sees a
+// restrained "-" (no badge, no lock icon -- do not draw attention to the
 // masking). The backend already strips the field for unauthorised roles; this
 // cell is the matching client-side render of null/absent values + a defensive
 // guard.
@@ -10,47 +10,24 @@
 import { useAuth } from '../../context/AuthContext';
 import type { UserRole } from '../../types';
 
-/** Who sees per-unit product cost (owner ruling 2026-09-28): the managers
- *  (store, area, catalogue) and the owner / accounts roles; counter staff never.
- *  It IS the backend's cost_mask "product" context -- a backend test
- *  (test_counter_roles_no_purchase_reads) holds the two sets equal. */
-export const PRODUCT_COST_ROLES: UserRole[] = [
-  'SUPERADMIN',
-  'ADMIN',
-  'ACCOUNTANT',
-  'AREA_MANAGER',
-  'STORE_MANAGER',
-  'CATALOG_MANAGER',
-];
-
-/** The purchase roles: who sees what was paid and to whom (owner ruling
- *  2026-09-29) and who moves a vendor return along (approve, ship, received).
- *  A vendor return's own price and total are stricter -- the accounts roles'
- *  alone, below (owner rulings 2026-10-12 R2 + R3). It IS the backend's cost_mask "purchase"
- *  context (PURCHASE_ROLES + SUPERADMIN); a backend test
- *  (test_counter_roles_no_cost_anywhere) holds the two sets equal. */
-export const PURCHASE_PRICE_ROLES: UserRole[] = [
-  'SUPERADMIN',
-  'ADMIN',
-  'ACCOUNTANT',
-  'AREA_MANAGER',
-  'STORE_MANAGER',
-];
-
-/** Who sees and books supplier payments -- bills, payments, balances, per
- *  vendor AND in total (owner ruling 2026-09-29): the accounts roles. It IS the
- *  backend's cost_mask "payables" context (AP_ROLES + SUPERADMIN); a backend
- *  test (test_counter_roles_no_purchase_reads) holds the two sets equal. */
-export const PAYABLES_ROLES: UserRole[] = ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'];
+/** Who sees EVERYTHING WE PAY (owner ruling 2026-10-12): product cost, landed
+ *  cost, margin, stock value at cost, purchase prices (PO lines and totals,
+ *  receiving, last price paid, cost at acceptance, vendor returns) and supplier
+ *  payments -- the owner and the accounts roles only. Area, store and catalogue
+ *  managers see MRP and selling price, never cost; counter staff never.
+ *  The ONE list every screen reads. It IS the backend's cost_mask
+ *  COST_VISIBLE_ROLES ("product", "purchase" and "payables" contexts); a
+ *  backend test (test_what_we_pay_accounts_only) holds the two sets equal. */
+export const COST_ROLES: UserRole[] = ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'];
 
 function Dash() {
   return <span className="text-gray-400 select-none" aria-label="not authorised">-</span>;
 }
 
-/** Renders a rupee cost value, masked to "-" outside PRODUCT_COST_ROLES. */
+/** Renders a rupee cost value, masked to "-" outside COST_ROLES. */
 export function CostCell({ value }: { value: number | null | undefined }) {
   const { hasRole } = useAuth();
-  if (!hasRole(PRODUCT_COST_ROLES)) return <Dash />;
+  if (!hasRole(COST_ROLES)) return <Dash />;
   if (value === null || value === undefined) return <Dash />;
   return <span className="font-mono">₹{value.toLocaleString('en-IN')}</span>;
 }

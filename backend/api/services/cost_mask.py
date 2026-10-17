@@ -5,47 +5,35 @@ sensitive. This is a PURE read-path filter: it strips `cost_price` and every
 derived margin figure from an API response dict for any role not authorised to
 see cost. No DB access, no engine imports, no schema change, no state mutation.
 
-Role policy (DECISIONS sec 9, owner rulings 2026-09-28 / D7 / 2026-09-29):
-  * SUPERADMIN / ADMIN / ACCOUNTANT -- always see cost + margin.
-  * Per-unit product cost (context="product"): every product read
-    (/products, /catalog/products, the product form) and the purchase
-    recommendations also admit the managers -- AREA_MANAGER / STORE_MANAGER
-    (the purchase roles) and CATALOG_MANAGER. ONE context, so every product
-    route answers alike, and the frontend CostCell's PRODUCT_COST_ROLES is
-    this set. The same context answers every figure worked out from that
-    cost at the shop (owner ruling 2026-10-12): an order line's cost_at_sale,
-    the till scan's unit and product, a serial and its warranty lookup, a
-    lens line, the below-cost and cost-floor price errors, stock counts,
-    stock alerts, transfers and workshop remake cost -- the managers keep
-    them, counter roles never get the key. Stock value at cost is narrower
-    (owner ruling 2026-10-12, what we pay): the accounts roles only, asked
-    through services/stock_value.COST_CONTEXT.
-  * What was paid and to whom (context="purchase"): PURCHASE_ROLES. An RTV
-    debit note shows anyone else the item, quantity and reason only, and a
-    vendor shows only VENDOR_NAME_KEYS (the vendor list, a debit note's vendor
-    block) -- both ask can_see_cost(user, "purchase"). A vendor return (and an
-    RMA) is stricter (owner ruling 2026-10-12, R3): its price is the basis of
-    the supplier's credit, so outside the accounts roles -- managers included
-    -- it shows the item, quantity and reason only; mask_vendor_return asks
-    can_see_cost(user, "payables"), and every return line, a vendor return's or
-    an RMA's, is cut by the one allow-list in return_line_for_reader.
-  * Operational aggregates (default context: analytics, P&L) -- cost + margin
-    stay with SUPERADMIN / ADMIN / ACCOUNTANT.
-  * Supplier payments (context="payables": bills, payments, balances, per
-    vendor AND in total -- owner ruling 2026-09-29) -- the same accounts roles,
-    AP_ROLES. The vendor AP and TDS gates ARE that tuple, the finance reads of
-    the same money (owner dashboard, forecast, survival, bank statements,
-    ITC / GST / Tally via finance _require_finance_admin, vendor-payments,
-    the cash-flow supplier totals -- paid POs and vendor payments, owner
-    ruling 2026-10-12 -- vendor rebates) ask can_see_cost(user, "payables"),
-    and their rbac_policy rows ARE rbac_policy._core.ACCOUNTS, built from it.
+Role policy (DECISIONS sec 9, owner rulings D7 / 2026-09-29 / 2026-10-12):
+  * EVERYTHING WE PAY (owner ruling 2026-10-12) -- product cost (cost_price,
+    landed cost, margin, stock value at cost and every figure worked out from
+    it: context="product") AND what was paid to suppliers (PO line prices and
+    totals, receiving prices, last price paid, cost at acceptance, a vendor
+    return's price and credit, a debit note's rates: context="purchase") --
+    is shown to SUPERADMIN / ADMIN / ACCOUNTANT (COST_VISIBLE_ROLES) only.
+    AREA_MANAGER, STORE_MANAGER and CATALOG_MANAGER see MRP / selling price,
+    never cost; a manager still raises and sends a PO, by quantity only (the
+    server prices it: vendors/cockpit.last_paid_prices). The frontend's ONE
+    role list, CostCell's COST_ROLES, IS this set.
+  * Operational aggregates (default context: analytics, P&L) and supplier
+    payments (context="payables": bills, payments, balances, per vendor AND in
+    total -- owner ruling 2026-09-29) -- the same accounts roles. The vendor
+    AP and TDS gates ARE AP_ROLES, the finance reads of the same money ask
+    can_see_cost(user, "payables"), and their rbac_policy rows ARE
+    rbac_policy._core.ACCOUNTS, built from it.
+  * Who we buy from (context="supplier"): PURCHASE_ROLES -- the people who
+    raise POs and receive -- see a vendor's GSTIN, contacts and terms; anyone
+    else sees VENDOR_NAME_KEYS only (the vendor list, a debit note's vendor
+    block). It is the supplier, not a price.
   * Counter roles (SALES_*, CASHIER, OPTOMETRIST, WORKSHOP_STAFF) see cost in
     no context (audit F46/F60, owner ruling D7). A router never keeps its own
     copy of this rule -- a role set, a key allow-list or a vendor-by-name
-    projection: it asks can_see_cost / mask_* here. Section 18 of
-    tests/test_counter_roles_no_purchase_reads.py changes this rule and fails
-    on any read that does not change with it; tests/test_cost_mask_f35.py
-    flags the common hand-made shapes.
+    projection: it asks can_see_cost / mask_* here.
+    tests/test_what_we_pay_accounts_only.py and section 18 of
+    tests/test_counter_roles_no_purchase_reads.py change this rule and fail on
+    any read that does not change with it; tests/test_cost_mask_f35.py flags
+    the common hand-made shapes.
 
 "Hidden" = the field is removed server-side so it never reaches the browser.
 No emoji (Windows cp1252).
@@ -61,27 +49,31 @@ from typing import Dict, Iterable, List
 # this tuple. SUPERADMIN passes every gate on its own.
 AP_ROLES = ("ADMIN", "ACCOUNTANT")
 COST_VISIBLE_ROLES = {"SUPERADMIN", *AP_ROLES}
-# The purchase roles: who buys, receives and pays suppliers, so who sees what
-# was paid and to whom. Defined ONCE, here: the purchase screens' route gate
-# (routers/vendors/_shared._VENDOR_ROLES) and the vendor-return, RTV debit-note
-# and RMA gates ARE this tuple, and the "purchase" context admits exactly it.
+# The purchase roles: who buys, receives and sends POs. Defined ONCE, here:
+# the purchase screens' route gate (routers/vendors/_shared._VENDOR_ROLES) and
+# the vendor-return, RTV debit-note and RMA gates ARE this tuple, and the
+# "supplier" context (a vendor's GSTIN, contacts, terms) admits exactly it.
+# Not what was paid: that is COST_VISIBLE_ROLES (owner ruling 2026-10-12).
 # SUPERADMIN passes every require_roles gate on its own.
 PURCHASE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT")
 # Who reads vendor returns and RTV debit notes: the purchase roles plus the
-# Vendor Returns screen's WORKSHOP_STAFF (logs the defective pair), who is shown
-# the item, quantity and reason only (mask_vendor_return / mask_debit_note).
-# Their read gates ARE this tuple.
+# Vendor Returns screen's WORKSHOP_STAFF (logs the defective pair). Outside
+# COST_VISIBLE_ROLES a reader is shown the item, quantity and reason only
+# (mask_vendor_return / mask_debit_note). Their read gates ARE this tuple.
 RETURN_READERS = (*PURCHASE_ROLES, "WORKSHOP_STAFF")
 # Who receives goods into stock (log, accept, express-receive, void or escalate
 # a receipt; the receiving screen): owner ruling 2026-09-28, RECEIVING IS
 # MANAGERS ONLY -- the purchase roles without the accountant. The receiving
 # gates (routers/vendors/_shared._RECEIVE_ROLES) ARE this tuple.
 RECEIVE_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER")
-# context -> the roles it admits on top of COST_VISIBLE_ROLES.
+# context -> the roles it admits on top of COST_VISIBLE_ROLES. Owner ruling
+# 2026-10-12: nobody past the accounts roles sees what we pay, so "product",
+# "purchase" and "payables" admit no one else.
 _CONTEXT_ROLES = {
-    "purchase": set(PURCHASE_ROLES),
-    "product": {*PURCHASE_ROLES, "CATALOG_MANAGER"},
-    "payables": set(),  # supplier payments: the accounts roles alone
+    "purchase": set(),
+    "product": set(),
+    "payables": set(),
+    "supplier": set(PURCHASE_ROLES),
 }
 
 # Raw cost fields that may appear on product / stock / order-line payloads.
@@ -113,6 +105,24 @@ _COST_DERIVED_FIELDS = {
     "variance_value_paise", "net_variance_value_paise",
 }
 _ALL_MASKED = _COST_FIELDS | _COST_DERIVED_FIELDS | _MARGIN_FIELDS
+# On a purchase document (a PO, a goods receipt, the receiving cockpit, a
+# vendor's purchase history) every money figure is a price paid: the line
+# price, its tax and the totals. Generic names that mean a SELLING price on an
+# order, so they are hidden on purchase reads only (mask_purchase).
+_PURCHASE_PRICE_FIELDS = {
+    "unit_price", "estimated_unit_price", "line_total", "line_tax",
+    "cgst", "sgst", "igst", "subtotal", "tax", "tax_amount", "total_amount",
+    "gst_summary", "totals", "spend", "total_spend", "mtd_spend",
+    # an edit's price changes on the order's history (po_detail.update_po)
+    "price_detail",
+}
+
+
+def is_cost_key(name) -> bool:
+    """True when `name` is a key this module hides as cost, margin or a figure
+    worked out from cost. For a reader that looks keys up by a caller-given
+    name (a smart-collection rule): matching on a hidden key is reading it."""
+    return name in _ALL_MASKED
 
 
 def _roles_of(user: dict) -> set:
@@ -169,6 +179,18 @@ def mask_fields(doc: Dict, user: dict, context: str = "default") -> Dict:
     return mask_cost(doc, user, context)
 
 
+def mask_purchase(doc, user: dict):
+    """A purchase document (or a list of them) without any price paid -- the
+    cost fields plus _PURCHASE_PRICE_FIELDS, at any depth -- unless the caller
+    may see what we pay (owner ruling 2026-10-12). Quantities, products,
+    statuses and dates stay."""
+    if can_see_cost(user, "purchase"):
+        return doc
+    if isinstance(doc, list):
+        return [mask_purchase(d, user) for d in doc]
+    return mask_cost(doc, user, "purchase", extra=_PURCHASE_PRICE_FIELDS)
+
+
 def _pick(doc, keys) -> Dict:
     return {k: doc[k] for k in keys if k in doc} if isinstance(doc, dict) else {}
 
@@ -184,16 +206,15 @@ VENDOR_NAME_KEYS = (
 
 def mask_vendor(doc: Dict, user: dict) -> Dict:
     """A vendor by name only, unless the caller is a purchase role."""
-    if not isinstance(doc, dict) or can_see_cost(user, "purchase"):
+    if not isinstance(doc, dict) or can_see_cost(user, "supplier"):
         return doc
     return _pick(doc, VENDOR_NAME_KEYS)
 
 
-# What a vendor return shows outside the accounts roles (owner rulings
-# 2026-09-29 and 2026-10-12 R3: mask_vendor_return asks "payables") and an RTV
-# debit note outside the purchase roles (mask_debit_note asks "purchase"): the
-# item, quantity and reason. Allow-lists, so a money field added later stays
-# hidden until someone lists it here.
+# What a vendor return / RTV debit note shows to anyone who may not see what we
+# pay: the item, quantity and reason (owner rulings 2026-09-29 / 2026-10-12).
+# Allow-lists, so a money field added later stays hidden until someone lists
+# it here.
 _RETURN_KEYS = (
     "return_id", "vendor_id", "vendor_name", "store_id", "return_type",
     "status", "notes", "status_history",
@@ -224,24 +245,46 @@ def return_line_for_reader(line: Dict) -> Dict:
 
 def mask_vendor_return(doc: Dict, user: dict) -> Dict:
     """A vendor return without the price paid, its total, the credit amount or
-    the supplier's credit-note / bill reference, unless the caller is an
-    accounts role. Owner ruling 2026-10-12 (R3): on a return every role outside
-    the accounts roles -- managers included -- reads the items, quantities and
-    reasons only (a return's price is the basis of the supplier's credit, i.e.
-    supplier money; the per-unit cost a manager reads on stock and POs is the
-    'product' / 'purchase' rule's and is unchanged). THE one projection for a
-    vendor return: list, detail and the status-change response."""
-    if not isinstance(doc, dict) or can_see_cost(user, "payables"):
+    the supplier's credit-note / bill reference, unless the caller may see
+    what we pay."""
+    if not isinstance(doc, dict) or can_see_cost(user, "purchase"):
         return doc
     out = _pick(doc, _RETURN_KEYS)
     out["items"] = [return_line_for_reader(it) for it in doc.get("items") or []]
     return out
 
 
+# A vendor RMA (routers/vendor_rma) or the reply to one of its steps: the
+# return's workflow without its unit costs, expected / received credit,
+# variance, write-off or the supplier's credit notes. Each step of its history
+# keeps who, when and the new status only: the notes the steps write carry the
+# credit and the write-off in words ("credit note CN-1 for 432177 paise").
+_RMA_KEYS = (
+    "ok", "error", "rma_id", "vendor_id", "vendor_name", "store_id", "po_id",
+    "grn_id", "return_id", "status", "vendor_rma_number", "courier", "notes",
+    "fully_reconciled", "created_at", "created_by", "updated_at",
+    "closed_at", "closed_by",
+)
+_RMA_STEP_KEYS = ("status", "at", "by")
+
+
+def mask_rma(doc: Dict, user: dict) -> Dict:
+    """A vendor RMA, a step's reply or a refused step's error without anything
+    we pay, unless the caller may see what we pay."""
+    if not isinstance(doc, dict) or can_see_cost(user, "purchase"):
+        return doc
+    out = _pick(doc, _RMA_KEYS)
+    if "lines" in doc:
+        out["lines"] = [_pick(ln, _RETURN_ITEM_KEYS) for ln in doc.get("lines") or []]
+    if "status_history" in doc:
+        out["status_history"] = [_pick(s, _RMA_STEP_KEYS) for s in doc.get("status_history") or []]
+    return out
+
+
 def mask_debit_note(doc: Dict, user: dict) -> Dict:
     """An RTV debit note without rates, taxable values, tax, totals, the
-    supplier's GSTIN / address / state or its bill number, unless the caller is
-    a purchase role. Our own (seller) block is on every invoice we print."""
+    supplier's GSTIN / address / state or its bill number, unless the caller
+    may see what we pay. Our own (seller) block is on every invoice we print."""
     if not isinstance(doc, dict) or can_see_cost(user, "purchase"):
         return doc
     out = _pick(doc, _DEBIT_NOTE_KEYS)

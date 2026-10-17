@@ -6,10 +6,11 @@
 // also open to STORE_MANAGER / AREA_MANAGER, so for them it must not call the
 // endpoint (a 403 swallowed into an empty list reads as "we owe nobody") and
 // must not show the Vendor Payments tab or the payment schedule.
-// Both directions: an accounts reader still gets all of it.
+// Both directions: an accounts reader still gets all of it. The same rule
+// (owner ruling 2026-10-12) holds the P&L by category's COGS and gross profit.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 vi.mock('../../../services/api/finance', () => ({
@@ -85,6 +86,18 @@ describe('FinanceDashboard - vendor payables follow the accounts rule', () => {
     },
   );
 
+  it('withheld purchase costs do not turn revenue into fabricated gross profit', async () => {
+    roles = ['STORE_MANAGER'];
+    api.getPnl.mockResolvedValue({ revenue: 9999, expenses: {} });
+    render(<FinanceDashboard />);
+    await waitFor(() => expect(screen.getByText('Total Revenue').parentElement).toHaveTextContent('9,999'));
+    for (const label of screen.getAllByText('Gross Profit')) {
+      expect(label.parentElement).toHaveTextContent('—');
+      expect(label.parentElement).not.toHaveTextContent('9,999');
+    }
+    expect(screen.getByText('Cost of Goods Sold').parentElement).toHaveTextContent('—');
+  });
+
   it.each([['ACCOUNTANT'], ['ADMIN'], ['SUPERADMIN']])(
     '%s: still sees the tab and the schedule',
     async (role) => {
@@ -94,6 +107,46 @@ describe('FinanceDashboard - vendor payables follow the accounts rule', () => {
       expect(screen.getByRole('button', { name: /vendor payments/i })).toBeInTheDocument();
       expect(await screen.findByText(/vendor payment schedule/i)).toBeInTheDocument();
       expect(await screen.findByText('Acme Optics')).toBeInTheDocument();
+    },
+  );
+});
+
+// Owner ruling 2026-10-12: cost of goods and gross profit are worked out from
+// what we pay. The default Revenue & P&L tab shows a manager revenue by
+// category only - even if a cost figure ever reached the browser.
+describe('FinanceDashboard - P&L by category follows the accounts rule', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    primeApi();
+    api.getPnlByCategory.mockResolvedValue({
+      categories: [{ category: 'FRAME', revenue: 9999, cogs: 4321.77, gross_profit: 5677.23 }],
+    });
+  });
+
+  it.each([['STORE_MANAGER'], ['AREA_MANAGER']])(
+    '%s: revenue by category, no COGS or gross profit',
+    async (role) => {
+      roles = [role];
+      render(<FinanceDashboard />);
+      const table = within((await screen.findByText('Revenue by category')).parentElement!);
+      expect(table.getByText('₹9,999')).toBeInTheDocument();
+      expect(table.queryByText('COGS')).toBeNull();
+      expect(table.queryByText('Gross profit')).toBeNull();
+      expect(screen.queryByText('₹4,322')).toBeNull();
+      expect(screen.queryByText('₹5,677')).toBeNull();
+    },
+  );
+
+  it.each([['ACCOUNTANT'], ['ADMIN'], ['SUPERADMIN']])(
+    '%s: the full P&L by category',
+    async (role) => {
+      roles = [role];
+      render(<FinanceDashboard />);
+      const table = within((await screen.findByText('P&L by category')).parentElement!);
+      expect(table.getByText('COGS')).toBeInTheDocument();
+      expect(table.getByText('Gross profit')).toBeInTheDocument();
+      expect(screen.getByText('₹4,322')).toBeInTheDocument();
+      expect(screen.getByText('₹5,677')).toBeInTheDocument();
     },
   );
 });

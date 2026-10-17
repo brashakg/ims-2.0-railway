@@ -104,12 +104,20 @@ export function QuickAddPage() {
       {editMode?.kind === 'spine' && (
         <div className="mb-3 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 flex flex-wrap items-center gap-3">
           <Pencil className="w-4 h-4 text-blue-600 shrink-0" />
-          <p className="text-sm text-blue-900 flex-1 min-w-[200px]">
-            You're editing <span className="font-semibold">{editMode.sku || 'this product'}</span>.
-            SKU, barcode and category are locked — saving updates the product, it will NOT create
-            a new SKU. Wrong category? Use <span className="font-medium">Clone as new SKU</span>{' '}
-            from the Catalog drawer instead.
-          </p>
+          {editMode.orderedDraft ? (
+            <p className="text-sm text-blue-900 flex-1 min-w-[200px]">
+              You're finishing <span className="font-semibold">{editMode.sku || 'this product'}</span>,
+              ordered before it was catalogued. If it was ordered under the wrong category, pick the
+              right one — saving updates this product, it will NOT create a new SKU.
+            </p>
+          ) : (
+            <p className="text-sm text-blue-900 flex-1 min-w-[200px]">
+              You're editing <span className="font-semibold">{editMode.sku || 'this product'}</span>.
+              SKU, barcode and category are locked — saving updates the product, it will NOT create
+              a new SKU. Wrong category? Use <span className="font-medium">Clone as new SKU</span>{' '}
+              from the Catalog drawer instead.
+            </p>
+          )}
           <button
             type="button"
             onClick={() => navigate(`/catalog?focus=${encodeURIComponent(editMode.id)}`)}

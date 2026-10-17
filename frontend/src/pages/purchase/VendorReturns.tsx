@@ -21,7 +21,8 @@ import { usePurchaseShop } from './purchaseShop';
 import { RowShop } from './invoices/pickers';
 import api from '../../services/api/client';
 import { rtvDebitNotesApi, type DebitNote } from '../../services/api/rtvDebitNotes';
-import { PAYABLES_ROLES, PURCHASE_PRICE_ROLES } from '../../components/common/CostCell';
+import { COST_ROLES } from '../../components/common/CostCell';
+import { PURCHASE_ROLES } from './purchaseRoles';
 import { errMsg } from './invoices/shared';
 
 // A return line. Its price per piece is the accounts roles' to enter and to
@@ -69,7 +70,7 @@ interface Vendor {
   mobile: string;
 }
 
-const rupees = (v?: number | null) => (v == null ? '-' : `₹${v.toLocaleString('en-IN')}`);
+const rupees = (v?: number | null) => (v == null ? '-' : `â‚¹${v.toLocaleString('en-IN')}`);
 
 const RETURN_REASONS = [
   { value: 'defective', label: 'Defective' },
@@ -106,7 +107,7 @@ const STATUS_LABELS: Record<string, string> = {
 
 // Supplier money (owner ruling 2026-10-01): the credit a supplier owes us on a
 // return (its value, the credit-note amount and number) and the GST debit
-// note's amounts are for PAYABLES_ROLES alone. The server already drops them
+// note's amounts are for COST_ROLES alone. The server already drops them
 // for anyone else; these copies keep them off the screen whatever it sends.
 // Owner ruling 2026-10-12 (R3): so are a return line's unit price, rate and
 // value -- anyone else reads the items, quantities and reasons only. An
@@ -141,13 +142,13 @@ export function VendorReturns() {
   // audit F63: lists read the one Purchase scope; a new return is raised at
   // the caller's own shop.
   const { storeId: listScope, ownStoreId, showShopOf } = usePurchaseShop();
-  // Supplier money is PAYABLES_ROLES' alone: everyone else reads the returns
+  // Supplier money is COST_ROLES' alone: everyone else reads the returns
   // (items, quantities, reasons, status) without what the supplier owes on them
   // or what a line is priced at, and RECORDING that money -- issuing the credit,
   // issuing the GST debit note -- is theirs too (owner ruling 2026-10-12). The
   // managers keep the goods side: raise, approve, ship, received by vendor, and
   // "replaced" on a replacement return.
-  const canSeePayables = (user?.roles || []).some((r) => PAYABLES_ROLES.includes(r));
+  const canSeePayables = (user?.roles || []).some((r) => COST_ROLES.includes(r));
   const shownReturn = (r: VendorReturn) => (canSeePayables ? r : withoutReturnCredit(r));
   const shownNote = (dn: DebitNote) => (canSeePayables ? dn : withoutDebitNoteMoney(dn));
   // F21: the Quarantine Queue "Create RTV" CTA deep-links here with ?stock_id=...
@@ -159,7 +160,7 @@ export function VendorReturns() {
   // (owner ruling 2026-10-12): moving it along -- approve, ship, received by
   // vendor -- is the purchase roles' (the server's _VENDOR_RETURN_ROLES), and
   // its price is the accounts roles' (canSeePayables, above).
-  const canMoveGoods = (user?.roles || []).some((r) => PURCHASE_PRICE_ROLES.includes(r));
+  const canMoveGoods = (user?.roles || []).some((r) => PURCHASE_ROLES.includes(r));
 
   const [activeTab, setActiveTab] = useState<'active' | 'history'>('active');
   const [isLoading, setIsLoading] = useState(true);
@@ -412,7 +413,7 @@ export function VendorReturns() {
             {returns.filter(r => r.status === 'received_by_vendor' || r.status === 'approved').length}
           </p>
         </div>
-        {/* What suppliers owe us across these returns: PAYABLES_ROLES only. */}
+        {/* What suppliers owe us across these returns: COST_ROLES only. */}
         {canSeePayables && (
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <div className="flex items-center justify-between mb-2">
@@ -575,7 +576,7 @@ export function VendorReturns() {
                         {debitNotes[ret.return_id] ? (
                           <p className="text-gray-900 font-semibold">
                             {debitNotes[ret.return_id].debit_note_number}
-                            {debitNotes[ret.return_id].totals_rupees && (
+                            {canPrice && debitNotes[ret.return_id].totals_rupees && (
                               <span className="ml-2 text-gray-500 font-normal text-sm">
                                 {rupees(debitNotes[ret.return_id].totals_rupees?.grand_total)}
                                 {debitNotes[ret.return_id].is_inter_state ? ' (IGST)' : ' (CGST+SGST)'}
@@ -589,7 +590,7 @@ export function VendorReturns() {
                       <div className="flex gap-2">
                         {debitNotes[ret.return_id] ? (
                           // Print + Export Tally are the note's amounts end to
-                          // end: PAYABLES_ROLES only (the server 403s the rest).
+                          // end: COST_ROLES only (the server 403s the rest).
                           canSeePayables && (
                           <>
                             <button
@@ -600,22 +601,26 @@ export function VendorReturns() {
                             >
                               Print
                             </button>
-                            <button
-                              onClick={() =>
-                                handleExportTally(
-                                  debitNotes[ret.return_id].debit_note_id,
-                                  debitNotes[ret.return_id].debit_note_number,
-                                )
-                              }
-                              className="border border-gray-300 hover:bg-gray-100 text-gray-700 px-3 py-1.5 rounded text-sm font-medium transition"
-                            >
-                              Export Tally
-                            </button>
+                            {/* The Tally voucher is nothing but the note's
+                                money: accounts only (owner ruling 2026-10-12). */}
+                            {canPrice && (
+                              <button
+                                onClick={() =>
+                                  handleExportTally(
+                                    debitNotes[ret.return_id].debit_note_id,
+                                    debitNotes[ret.return_id].debit_note_number,
+                                  )
+                                }
+                                className="border border-gray-300 hover:bg-gray-100 text-gray-700 px-3 py-1.5 rounded text-sm font-medium transition"
+                              >
+                                Export Tally
+                              </button>
+                            )}
                           </>
                           )
                         ) : canSeePayables ? (
                           // Issuing the note records what the supplier owes us:
-                          // PAYABLES_ROLES only (the server 403s the rest).
+                          // COST_ROLES only (the server 403s the rest).
                           <button
                             disabled={dnBusy === ret.return_id || !isPriced(ret)}
                             title={isPriced(ret) ? undefined : 'Set the prices first'}
@@ -663,7 +668,7 @@ export function VendorReturns() {
                       {ret.status === 'received_by_vendor' && (
                         <>
                           {/* Issuing the credit records the supplier's credit
-                              note and its amount: PAYABLES_ROLES only (owner
+                              note and its amount: COST_ROLES only (owner
                               ruling 2026-10-12; the server 403s the rest). */}
                           {canSeePayables ? (
                             // The credit is the priced lines' value: none to

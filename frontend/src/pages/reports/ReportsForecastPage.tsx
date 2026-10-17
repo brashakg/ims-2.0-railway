@@ -39,6 +39,9 @@ export function ReportsForecastPage() {
                 <p className="text-xs text-gray-500">Revenue</p>
                 <p className="text-lg font-bold text-green-600">₹{((expenseVsRevenue.revenue || 0) / 100000).toFixed(2)}L</p>
               </div>
+              {/* Cost, profit and margin come only to the roles that may see
+                  what we pay (server cost_mask, owner ruling 2026-10-12). */}
+              {expenseVsRevenue.cost != null && (<>
               <div className="bg-white rounded p-3">
                 <p className="text-xs text-gray-500">Cost</p>
                 <p className="text-lg font-bold text-red-600">₹{((expenseVsRevenue.cost || 0) / 100000).toFixed(2)}L</p>
@@ -51,6 +54,7 @@ export function ReportsForecastPage() {
                 <p className="text-xs text-gray-500">Margin</p>
                 <p className="text-lg font-bold text-bv-red-600">{expenseVsRevenue.margin_percent || 0}%</p>
               </div>
+              </>)}
             </div>
           </div>
         ) : (

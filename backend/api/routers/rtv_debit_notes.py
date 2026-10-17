@@ -250,9 +250,11 @@ async def issue_debit_note(
     # answer is never stripped: the caller may read every figure on it.
     if not res.get("ok"):
         raise _http_from_result(res)
+    # Masked as GET /{id} masks it: re-issuing returns an existing note, so an
+    # unmasked reply would read any note's money (owner ruling 2026-10-12).
     return {
         "idempotent": bool(res.get("idempotent")),
-        "debit_note": _with_rupees(res.get("debit_note")),
+        "debit_note": debit_note_for_reader(_with_rupees(res.get("debit_note")), current_user),
     }
 
 

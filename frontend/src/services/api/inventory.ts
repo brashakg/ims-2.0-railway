@@ -811,7 +811,8 @@ export const vendorsApi = {
         mrp: number;
       };
       quantity: number;
-      unit_price: number;
+      // Omitted by a role that may not see what we pay: the server prices it.
+      unit_price?: number;
     }>;
     expected_date?: string;
     notes?: string;
@@ -913,7 +914,8 @@ export const vendorsApi = {
         mrp: number;
       };
       quantity: number;
-      unit_price: number;
+      // Accounts only: anyone else's price is not taken (owner ruling 2026-10-12).
+      unit_price?: number;
       gst_rate?: number;
       hsn?: string;
     }>;
@@ -995,6 +997,19 @@ export const vendorsApi = {
   voidGRN: async (grnId: string) => {
     const response = await api.post(`/vendors/grn/${grnId}/void`);
     return response.data;
+  },
+
+  // 'Not received' for the units a held receipt holds beyond its order (the
+  // store manager's answer when the vendor sent nothing extra); the rest of
+  // the receipt stands.
+  dropOverOrder: async (grnId: string) => {
+    const response = await api.post(`/vendors/grn/${grnId}/drop-over-order`);
+    return response.data as {
+      dropped_units: number;
+      units_added?: number;
+      grn_status: string;
+      po_status?: string | null;
+    };
   },
 
   escalateGRN: async (grnId: string, note: string) => {

@@ -18,6 +18,7 @@ from .models import (
 )
 from .grn_create import _create_grn_impl
 from .grn_accept import _accept_grn_impl
+from ...services.cost_mask import mask_purchase
 
 
 @router.post("/grn/express", status_code=201)
@@ -156,7 +157,8 @@ async def express_receive_grn(
     grn_status = accept_res.get("grn_status")
     if grn_status is not None and grn_status != "ACCEPTED":
         # PARTIALLY_ACCEPTED: one or more lines were HELD (product not yet
-        # catalogued / incomplete catalog). The chain cannot finish (F3 blocks
+        # catalogued / incomplete catalog / beyond the order, which the store
+        # manager decides). The chain cannot finish (F3 blocks
         # the invoice draft on a non-ACCEPTED GRN), so surface the exact
         # recovery instead of a half-true success.
         # 409, not 500 -- same reason as above: this receipt already holds real
@@ -168,8 +170,9 @@ async def express_receive_grn(
                 "grn_status": grn_status,
                 "message": (
                     f"Receipt {grn_number} was created but only partially "
-                    "accepted (some lines are held for cataloguing) -- open "
-                    "the receiving screen to finish it."
+                    "accepted (some lines are held for cataloguing, or beyond "
+                    "what the order asked for) -- open the receiving screen "
+                    "to finish it."
                 ),
             },
         )
@@ -280,12 +283,16 @@ async def express_receive_grn(
             exc,
         )
 
-    return {
-        "grn_id": grn_id,
-        "grn_number": grn_number,
-        "accepted_units": accept_res.get("units_added"),
-        "po_status": accept_res.get("po_status"),
-        "invoice_draft": invoice_draft,
-        "match_preview": match_preview,
-        "accountant_task_id": accountant_task_id,
-    }
+    # The bill draft's totals are what we pay: the accounts roles' only.
+    return mask_purchase(
+        {
+            "grn_id": grn_id,
+            "grn_number": grn_number,
+            "accepted_units": accept_res.get("units_added"),
+            "po_status": accept_res.get("po_status"),
+            "invoice_draft": invoice_draft,
+            "match_preview": match_preview,
+            "accountant_task_id": accountant_task_id,
+        },
+        current_user,
+    )

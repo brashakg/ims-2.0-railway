@@ -16,6 +16,8 @@ import { rupees } from './PurchasesThisMonthSection';
  *  tiles' rule (review r3 #16). */
 const tileMoney = (n: number) =>
   Math.round(n) < 100000 ? rupees(n) : `\u20B9${(n / 100000).toFixed(1)}L`;
+import { useAuth } from '../../context/AuthContext';
+import { COST_ROLES } from '../../components/common/CostCell';
 
 interface PurchaseAnalyticsProps {
   /** The newest page of orders the server sent (newest first). */
@@ -32,6 +34,7 @@ export function PurchaseAnalytics({ purchaseOrders, totalOrders, suppliers }: Pu
   const shown = purchaseOrders.length;
   const total = Math.max(totalOrders ?? shown, shown);
   const cut = shown < total;
+  const showValue = useAuth().hasRole(COST_ROLES);
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-1 tablet:grid-cols-4 gap-4">
@@ -46,6 +49,7 @@ export function PurchaseAnalytics({ purchaseOrders, totalOrders, suppliers }: Pu
             </div>
           </div>
         </div>
+        {showValue && (
         <div className="card">
           <div className="flex items-center gap-3 mb-2">
             <div className="w-10 h-10 bg-green-100 rounded-lg flex items-center justify-center">
@@ -59,6 +63,7 @@ export function PurchaseAnalytics({ purchaseOrders, totalOrders, suppliers }: Pu
             </div>
           </div>
         </div>
+        )}
         <div className="card">
           <div className="flex items-center gap-3 mb-2">
             <div className="w-10 h-10 bg-purple-100 rounded-lg flex items-center justify-center">

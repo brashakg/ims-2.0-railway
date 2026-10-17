@@ -18,7 +18,7 @@ import { lazy } from 'react';
 import { Route, Navigate, useSearchParams } from 'react-router-dom';
 import { ProtectedRoute } from '../components/layout/ProtectedRoute';
 import { legacyTabTarget } from '../pages/reports/legacyTabRedirect';
-import { PAYABLES_ROLES } from '../components/common/CostCell';
+import { COST_ROLES } from '../components/common/CostCell';
 import type { UserRole } from '../types';
 
 const ReportsLayout = lazy(() => import('../pages/reports/ReportsLayout').then(m => ({ default: m.ReportsLayout })));
@@ -137,7 +137,7 @@ export const reportRoutes = (
     <Route
       path="reports/gstr3b"
       element={
-        <ProtectedRoute allowedRoles={PAYABLES_ROLES}>
+        <ProtectedRoute allowedRoles={COST_ROLES}>
           <GSTR3BPage />
         </ProtectedRoute>
       }

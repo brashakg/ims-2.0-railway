@@ -9,7 +9,7 @@ import { Loader2, ArrowUpDown } from 'lucide-react';
 import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { PAYABLES_ROLES } from '../../components/common/CostCell';
+import { COST_ROLES } from '../../components/common/CostCell';
 
 import type { TabType } from './financeTypes';
 import type {
@@ -46,8 +46,8 @@ function mapRevenue(d: any): RevenueData[] {
 function mapPnl(d: any, from: string, to: string): ProfitLossStatement | null {
   if (!d) return null;
   const revenue = Number(d.revenue || 0);
-  const cogs = Number(d.cogs || 0);
-  const grossProfit = Number(d.gross_profit ?? revenue - cogs);
+  const cogs = d.cogs == null ? null : Number(d.cogs);
+  const grossProfit = d.gross_profit == null ? null : Number(d.gross_profit);
   const opex = Number(d.total_expenses || 0);
   // net_profit is ABSENT for any role below ADMIN -- it is revenue - COGS -
   // expenses - PAYROLL, so the backend strips it as a payroll-derived figure.
@@ -62,7 +62,7 @@ function mapPnl(d: any, from: string, to: string): ProfitLossStatement | null {
     cost_of_goods: cogs,
     gross_profit: grossProfit,
     operating_expenses: opex,
-    operating_profit: grossProfit - opex,
+    operating_profit: grossProfit == null ? null : grossProfit - opex,
     tax_expense: 0,
     net_profit: netProfit,
     profit_margin:
@@ -81,7 +81,7 @@ function mapGst(d: any): GSTSummaryData | null {
   // OS-010: igst_collected was hardcoded to 0, so the "IGST (inter-state)"
   // card could never show the inter-state tax the backend computes.
   // finance.py splits output tax into cgst/sgst/igst precisely so these
-  // cards reconcile to gst_collected — map the real value and derive the
+  // cards reconcile to gst_collected â€” map the real value and derive the
   // type from it.
   const igst = Number(d.igst || 0);
   return {
@@ -156,7 +156,7 @@ function mapVendorPayments(d: any): VendorPaymentData[] {
 }
 
 // NOTE: the old mapReconciliation() fabricated bank_amount/system_amount/
-// difference as 0 from inter-store transfer rows — there is no bank-statement
+// difference as 0 from inter-store transfer rows â€” there is no bank-statement
 // reconciliation backend, so it has been removed (SYSTEM_INTENT: never show
 // fabricated money). The Reconciliation tab + the Cash Flow "Bank Reconciliation
 // Status" block that consumed it are gone too.
@@ -190,11 +190,12 @@ export default function FinanceDashboard() {
   const canSeeStorePayroll = (user?.roles || []).some(
     (r) => r === 'ADMIN' || r === 'SUPERADMIN',
   );
-  // F60 (2026-09-28): per-vendor payables (GET /finance/vendor-payments) answer
-  // the accounts roles only (PAYABLES_ROLES), the same as the vendor ledger and
-  // /ap-aging. A manager gets no tab and no schedule rather than an empty list
-  // that reads as "we owe nobody".
-  const canSeePayables = (user?.roles || []).some((r) => PAYABLES_ROLES.includes(r));
+  // What we pay is the accounts roles' only (COST_ROLES, owner rulings F60
+  // 2026-09-28 / 2026-10-12): per-vendor payables (GET /finance/vendor-payments,
+  // as the vendor ledger and /ap-aging) and the cost of goods and gross profit
+  // by category. A manager gets no payables tab and no schedule rather than an
+  // empty list that reads as "we owe nobody", and revenue by category only.
+  const canSeeWhatWePay = (user?.roles || []).some((r) => COST_ROLES.includes(r));
 
   // Tab management
   const [activeTab, setActiveTab] = useState<TabType>('revenue-pl');
@@ -262,11 +263,11 @@ export default function FinanceDashboard() {
         financeApi.getRevenue({ period: 'month', store_id: storeId }),
         financeApi.getPnl({ store_id: storeId, from_date: dateFrom, to_date: dateTo }),
         // Input tax from supplier bills: accounts only (R1), as the server.
-        canSeePayables ? financeApi.getGstSummary() : Promise.resolve(null),
+        canSeeWhatWePay ? financeApi.getGstSummary() : Promise.resolve(null),
         financeApi.getOutstanding({ store_id: storeId }),
         financeApi.getCashFlow({ period: 'month', store_id: storeId }),
         financeApi.getBudget(),
-        canSeePayables ? financeApi.getVendorPayments(storeId) : Promise.resolve([]),
+        canSeeWhatWePay ? financeApi.getVendorPayments(storeId) : Promise.resolve([]),
       ]);
 
       setRevenueData(rev.status === 'fulfilled' ? mapRevenue(rev.value) : []);
@@ -277,7 +278,7 @@ export default function FinanceDashboard() {
       setBudgets(bud.status === 'fulfilled' ? mapBudget(bud.value) : []);
       setVendorPayments(vend.status === 'fulfilled' ? mapVendorPayments(vend.value) : []);
       // A failed/absent call must NOT leave a stale "incomplete" banner up, and
-      // must not invent one either — default false on anything but an explicit
+      // must not invent one either â€” default false on anything but an explicit
       // true from the backend.
       setExpensesRestricted(
         pnl.status === 'fulfilled' && !!(pnl.value as any)?.expenses_partially_restricted,
@@ -314,7 +315,7 @@ export default function FinanceDashboard() {
             ? financeApi.getPnlByStore({ from_date: dateFrom, to_date: dateTo })
             : Promise.resolve({ stores: [] }),
           financeApi.getPnlByCategory({ from_date: dateFrom, to_date: dateTo, store_id: storeId }),
-          canSeePayables
+          canSeeWhatWePay
             ? financeApi.getGstReconciliation({ month: d.getMonth() + 1, year: d.getFullYear() })
             : Promise.resolve({ entities: [] }),
         ]);
@@ -398,7 +399,7 @@ export default function FinanceDashboard() {
   const handleUnlockPeriod = () => {
     // Locked periods are intentionally permanent (closed-book integrity); there
     // is no unlock endpoint. Surface that instead of faking a local toggle.
-    toast.info('Locked periods are permanent for audit integrity — no unlock.');
+    toast.info('Locked periods are permanent for audit integrity â€” no unlock.');
   };
 
   const handleTallyExport = async () => {
@@ -479,7 +480,7 @@ export default function FinanceDashboard() {
           onDateToChange={setDateTo}
           activeTab={activeTab}
           onTabChange={setActiveTab}
-          canSeePayables={canSeePayables}
+          canSeePayables={canSeeWhatWePay}
         />
 
         {/* Tab Content */}
@@ -512,7 +513,7 @@ export default function FinanceDashboard() {
                       clean and open, but nothing in the UI calls it, so naming
                       it here would send people somewhere that isn't there.) */}
                   <p className="text-sm text-gray-500 mt-2">
-                    Your own store's revenue, cost and profit — with no salary line —
+                    Your own store's revenue, cost and profit â€” with no salary line â€”
                     are on Reports &rsaquo; Forecast, under "Expense vs Revenue".
                   </p>
                 </div>
@@ -557,13 +558,13 @@ export default function FinanceDashboard() {
                       {pnlStoreRows.map((s) => (
                         <tr key={s.store_id} className="border-t border-gray-100">
                           <td className="px-3 py-2">{s.store_name || s.store_id}</td>
-                          <td className="px-3 py-2 text-right">₹{Math.round(s.revenue).toLocaleString('en-IN')}</td>
-                          <td className="px-3 py-2 text-right">₹{Math.round(s.cogs).toLocaleString('en-IN')}</td>
-                          <td className={clsx('px-3 py-2 text-right font-medium', s.gross_profit < 0 ? 'text-red-600' : 'text-gray-900')}>₹{Math.round(s.gross_profit).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2 text-right">â‚¹{Math.round(s.revenue).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2 text-right">â‚¹{Math.round(s.cogs).toLocaleString('en-IN')}</td>
+                          <td className={clsx('px-3 py-2 text-right font-medium', s.gross_profit < 0 ? 'text-red-600' : 'text-gray-900')}>â‚¹{Math.round(s.gross_profit).toLocaleString('en-IN')}</td>
                           <td className={clsx('px-3 py-2 text-right', s.margin < 0 ? 'text-red-600' : 'text-gray-600')}>{s.margin.toFixed(1)}%</td>
-                          <td className="px-3 py-2 text-right">₹{Math.round(s.expenses || 0).toLocaleString('en-IN')}</td>
-                          <td className="px-3 py-2 text-right">₹{Math.round(s.payroll || 0).toLocaleString('en-IN')}</td>
-                          <td className={clsx('px-3 py-2 text-right font-semibold', (s.net_profit || 0) < 0 ? 'text-red-600' : 'text-gray-900')}>₹{Math.round(s.net_profit || 0).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2 text-right">â‚¹{Math.round(s.expenses || 0).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2 text-right">â‚¹{Math.round(s.payroll || 0).toLocaleString('en-IN')}</td>
+                          <td className={clsx('px-3 py-2 text-right font-semibold', (s.net_profit || 0) < 0 ? 'text-red-600' : 'text-gray-900')}>â‚¹{Math.round(s.net_profit || 0).toLocaleString('en-IN')}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -572,21 +573,21 @@ export default function FinanceDashboard() {
               )}
               {pnlByCategory.length > 0 && (
                 <div className="card mt-4 overflow-x-auto">
-                  <div className="px-4 py-2 text-sm font-medium text-gray-700 border-b border-gray-100">P&amp;L by category</div>
+                  <div className="px-4 py-2 text-sm font-medium text-gray-700 border-b border-gray-100">{canSeeWhatWePay ? <>P&amp;L by category</> : 'Revenue by category'}</div>
                   <table className="min-w-full text-sm">
                     <thead className="bg-gray-50 text-gray-600"><tr>
                       <th className="px-3 py-2 text-left">Category</th>
                       <th className="px-3 py-2 text-right">Revenue</th>
-                      <th className="px-3 py-2 text-right">COGS</th>
-                      <th className="px-3 py-2 text-right">Gross profit</th>
+                      {canSeeWhatWePay && <th className="px-3 py-2 text-right">COGS</th>}
+                      {canSeeWhatWePay && <th className="px-3 py-2 text-right">Gross profit</th>}
                     </tr></thead>
                     <tbody>
                       {pnlByCategory.map((c) => (
                         <tr key={c.category} className="border-t border-gray-100">
                           <td className="px-3 py-2">{c.category}</td>
-                          <td className="px-3 py-2 text-right">₹{Math.round(c.revenue || 0).toLocaleString('en-IN')}</td>
-                          <td className="px-3 py-2 text-right">₹{Math.round(c.cogs || 0).toLocaleString('en-IN')}</td>
-                          <td className="px-3 py-2 text-right font-semibold">₹{Math.round(c.gross_profit || 0).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2 text-right">â‚¹{Math.round(c.revenue || 0).toLocaleString('en-IN')}</td>
+                          {canSeeWhatWePay && <td className="px-3 py-2 text-right">â‚¹{Math.round(c.cogs || 0).toLocaleString('en-IN')}</td>}
+                          {canSeeWhatWePay && <td className="px-3 py-2 text-right font-semibold">â‚¹{Math.round(c.gross_profit || 0).toLocaleString('en-IN')}</td>}
                         </tr>
                       ))}
                     </tbody>
@@ -595,7 +596,7 @@ export default function FinanceDashboard() {
               )}
             </>
           )}
-          {activeTab === 'gst' && canSeePayables && (
+          {activeTab === 'gst' && canSeeWhatWePay && (
             <>
               <GSTPanel gstSummary={gstSummary} />
               {gstRecon.length > 0 && (
@@ -612,9 +613,9 @@ export default function FinanceDashboard() {
                       {gstRecon.map((e, i) => (
                         <tr key={i} className="border-t border-gray-100">
                           <td className="px-3 py-2">{e.entity_name}</td>
-                          <td className="px-3 py-2 text-right">₹{Math.round(e.gst_collected || 0).toLocaleString('en-IN')}</td>
-                          <td className="px-3 py-2 text-right">₹{Math.round(e.input_credit || 0).toLocaleString('en-IN')}</td>
-                          <td className="px-3 py-2 text-right font-semibold">₹{Math.round(e.net_payable || 0).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2 text-right">â‚¹{Math.round(e.gst_collected || 0).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2 text-right">â‚¹{Math.round(e.input_credit || 0).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2 text-right font-semibold">â‚¹{Math.round(e.net_payable || 0).toLocaleString('en-IN')}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -626,7 +627,7 @@ export default function FinanceDashboard() {
           {activeTab === 'outstanding' && (
             <OutstandingPanel
               outstanding={outstanding}
-              vendorPayments={canSeePayables ? vendorPayments : null}
+              vendorPayments={canSeeWhatWePay ? vendorPayments : null}
             />
           )}
           {activeTab === 'cash-flow' && (
@@ -661,7 +662,7 @@ export default function FinanceDashboard() {
               <BudgetPanel budgets={budgets} selectedYear={selectedYear} />
             </>
           )}
-          {activeTab === 'vendor-payments' && canSeePayables && (
+          {activeTab === 'vendor-payments' && canSeeWhatWePay && (
             <VendorPayments vendorPayments={vendorPayments} />
           )}
           {activeTab === 'journal-entries' && <JournalEntriesPanel />}

@@ -113,8 +113,9 @@ export interface PromoReportRow {
   promo_type: string | null;
   orders_count: number;
   total_discount_given: number;
-  estimated_cogs: number;
-  net_margin_after_promo: number;
+  // Cost and margin: absent outside COST_ROLES (the server masks them).
+  estimated_cogs?: number;
+  net_margin_after_promo?: number;
   cogs_is_estimated: boolean;
 }
 
@@ -123,7 +124,7 @@ export interface PromoReport {
     total_discount_given: number;
     orders_with_promos: number;
     promos_fired: number;
-    net_margin_impact: number;
+    net_margin_impact?: number;
     any_cogs_estimated: boolean;
   };
   promos: PromoReportRow[];

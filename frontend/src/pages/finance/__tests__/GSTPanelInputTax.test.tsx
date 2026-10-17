@@ -2,7 +2,7 @@
 // IMS 2.0 - Finance > GST: input tax credit is for the accounts roles (R5, R1)
 // ============================================================================
 // Owner ruling 2026-10-12: GST input tax -- the credit from supplier bills --
-// is shown only to ADMIN / SUPERADMIN / ACCOUNTANT (PAYABLES_ROLES). GET
+// is shown only to ADMIN / SUPERADMIN / ACCOUNTANT (COST_ROLES). GET
 // /finance/gst/summary leaves gst_input_credit and net_gst_payable (collected
 // minus that credit) out for a store / area manager, and FinanceDashboard's
 // mapGst turns a missing figure into 0. So the panel must not draw the

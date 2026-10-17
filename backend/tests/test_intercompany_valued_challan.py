@@ -129,6 +129,9 @@ def _user(role, store="ST-DHN-1"):
 
 ADMIN = _user("ADMIN", None)
 SOURCE_MANAGER = _user("STORE_MANAGER", "ST-DHN-1")
+# The units' cost -- and so a VALUED challan -- is the owner's and the accounts
+# roles' only (owner ruling 2026-10-12): the sending shop's accountant prints it.
+SOURCE_ACCOUNTS = _user("ACCOUNTANT", "ST-DHN-1")
 
 
 class _Conn:
@@ -198,7 +201,7 @@ def _ship(tid, courier_name=None):
     )["transfer"]
 
 
-def _challan(tid, user=SOURCE_MANAGER):
+def _challan(tid, user=SOURCE_ACCOUNTS):
     resp = _run(print_documents.delivery_challan_for_transfer(tid, "ORIGINAL", False, user))
     return resp.body.decode("utf-8")
 
@@ -491,10 +494,12 @@ def test_d7_counter_role_reading_a_valued_transfer_sees_no_cost(db):
         text = json.dumps(payload, default=str)
         assert not _shows_amount(text, UNIT_COST)
         assert not _shows_amount(text, 2 * UNIT_COST)
-    # The stored doc is untouched, and a manager still sees per-unit cost
-    # (owner ruling 2026-09-28: managers yes, counter staff never).
+    # The stored doc is untouched; the manager sees no per-unit cost either,
+    # accounts do (owner ruling 2026-10-12: what we pay is accounts only).
     assert transfers._get_transfer(t["id"])["total_value"] == pytest.approx(2 * UNIT_COST)
     seen = json.dumps(_run(transfers.get_transfer(t["id"], SOURCE_MANAGER)), default=str)
+    assert not _shows_amount(seen, UNIT_COST) and not _shows_amount(seen, 2 * UNIT_COST)
+    seen = json.dumps(_run(transfers.get_transfer(t["id"], SOURCE_ACCOUNTS)), default=str)
     assert _shows_amount(seen, UNIT_COST) and _shows_amount(seen, 2 * UNIT_COST)
 
 
@@ -841,18 +846,27 @@ def test_d7_transfer_figures_are_the_callers_stores_only(db):
     """r4 #4-5: Dhanbad (Z) ships Bokaro (Y) 3700 at cost. A manager of
     another shop (Bank More), and an area manager of another region (Pune),
     see neither the transfer nor its value -- on the list, /pending and both
-    analytics (user_store_scope, like /pending). The sending shop's manager
-    sees the value on both analytics (D7, the 'product' cost context)."""
+    analytics (user_store_scope, like /pending). The sending shop's
+    accountant sees the value on both analytics (the 'product' cost context:
+    the accounts roles only, owner ruling 2026-10-12)."""
     _shipped("ST-BOK-1")
-    for outsider in (_user("STORE_MANAGER", "ST-DHN-2"), _user("AREA_MANAGER", "ST-PUN-1")):
+    # A manager sees no value at all (owner ruling 2026-10-12); an accountant
+    # of another shop sees a value -- of nothing of this shop's.
+    for outsider in (
+        _user("STORE_MANAGER", "ST-DHN-2"),
+        _user("AREA_MANAGER", "ST-PUN-1"),
+        _user("ACCOUNTANT", "ST-DHN-2"),
+    ):
         summary, incoming = _analytics(outsider)
-        assert (summary["total_transfers"], summary["total_value"]) == (0, 0)
-        assert (incoming["total"], incoming["value"]) == (0, 0)
+        assert (summary["total_transfers"], summary.get("total_value", 0)) == (0, 0)
+        assert (incoming["total"], incoming.get("value", 0)) == (0, 0)
         assert _listed(outsider) == []
         pending = _run(transfers.get_pending_transfers(None, outsider))
         assert not any(pending.values())
-    summary, incoming = _analytics(SOURCE_MANAGER)
+    summary, incoming = _analytics(SOURCE_ACCOUNTS)
     assert summary["total_value"] == incoming["value"] == pytest.approx(2 * UNIT_COST)
+    summary, incoming = _analytics(SOURCE_MANAGER)
+    assert "total_value" not in summary and "value" not in incoming
     assert [t["to_location_id"] for t in _listed(_user("AREA_MANAGER", "ST-DHN-1"))] == ["ST-BOK-1"]
 
 
@@ -888,7 +902,7 @@ def test_owner_the_challan_button_is_offered_exactly_to_whom_the_server_prints_i
             printers.add(role)
     managers_and_accounts = {"SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT"}
     assert printers == (
-        managers_and_accounts if to_store == "ST-BOK-1"
+        _VALUED_PRINTERS if to_store == "ST-BOK-1"
         else managers_and_accounts | {"SALES_STAFF", "SALES_CASHIER"}
     )
 
@@ -897,7 +911,10 @@ def test_owner_the_challan_button_is_offered_exactly_to_whom_the_server_prints_i
 # Panel round 5
 # ===========================================================================
 
-_MANAGERS_AND_ACCOUNTS = {"SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT"}
+# Who prints a VALUED challan: the owner and the accounts roles (owner ruling
+# 2026-10-12 narrowed 2026-10-08's managers and accounts).
+_VALUED_PRINTERS = {"SUPERADMIN", "ADMIN", "ACCOUNTANT"}
+_MANAGERS_AND_ACCOUNTS = _VALUED_PRINTERS
 
 
 def _prints(tid, user):
@@ -932,6 +949,8 @@ def test_d7_finance_reconciliation_lists_the_callers_stores_only(db, monkeypatch
     assert (outsider["pending_transfers"], outsider["transfers"]) == (0, [])
     mine = _run(budget.get_reconciliation(SOURCE_MANAGER))
     assert mine["pending_transfers"] == 1
+    assert "unit_cost" not in mine["transfers"][0]["items"][0]  # accounts only
+    mine = _run(budget.get_reconciliation(SOURCE_ACCOUNTS))
     assert mine["transfers"][0]["items"][0]["unit_cost"] == pytest.approx(UNIT_COST)
 
 
@@ -1058,9 +1077,14 @@ def test_owner_every_transfer_action_reply_carries_the_routes_answer(db):
             transfers.complete_transfer(tid, None, receiver)
         )["transfer"], True),
     ]
-    for name, user, act, expected in steps:
+    for name, user, act, _shipped_yet in steps:
         reply = act()
-        assert reply.get("can_print_challan") is _prints(tid, user) is expected, name
+        # A manager is never offered the valued challan (owner ruling
+        # 2026-10-12): every reply says so, as the route does.
+        assert reply.get("can_print_challan") is _prints(tid, user) is False, name
+    # ...and accounts are offered it once it has shipped.
+    seen = _run(transfers.get_transfer(tid, SOURCE_ACCOUNTS))["transfer"]
+    assert seen["can_print_challan"] is _prints(tid, SOURCE_ACCOUNTS) is True
     other = _create("ST-DHN-2")  # unvalued: the area manager prints it
     cancelled = _run(transfers.cancel_transfer(other["id"], "Not needed", area))["transfer"]
     assert cancelled.get("can_print_challan") is _prints(other["id"], area) is True

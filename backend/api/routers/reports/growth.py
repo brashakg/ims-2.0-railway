@@ -9,6 +9,7 @@ from ...utils.ist import (
 )
 from ..auth import get_current_user, require_roles
 from ...dependencies import store_in_view
+from ...services.cost_mask import mask_cost
 from ...dependencies import (
     get_order_repository,
     validate_store_access,
@@ -20,6 +21,10 @@ from ._shared import (
     _orders_in_window,
     router,
 )
+
+# Profit and margin are worked out from cost: the accounts roles' only (owner
+# ruling 2026-10-12). Anyone else keeps the revenue and order counts.
+_PROFIT_KEYS = ("cost", "profit", "total_profit", "margin_percent")
 
 # ============================================================================
 # SALES COMPARISON & GROWTH REPORTS
@@ -188,7 +193,9 @@ async def profit_by_category(
     order_repo = get_order_repository()
 
     if order_repo is None:
-        return {"data": [], "total_profit": 0}
+        return mask_cost(
+            {"data": [], "total_profit": 0}, current_user, "product", extra=_PROFIT_KEYS
+        )
 
     # BUG-104, BOUND rule: found in the round-3 closing sweep -- same
     # typed-IST-range defect as /sales/by-salesperson (see the comment there).
@@ -237,10 +244,12 @@ async def profit_by_category(
 
     total_profit = sum(c["profit"] for c in profit_by_cat.values())
 
-    return {
-        "data": list(profit_by_cat.values()),
-        "total_profit": round(total_profit, 2),
-    }
+    return mask_cost(
+        {"data": list(profit_by_cat.values()), "total_profit": round(total_profit, 2)},
+        current_user,
+        "product",
+        extra=_PROFIT_KEYS,
+    )
 
 
 @router.get("/profit/by-store")
@@ -253,7 +262,9 @@ async def profit_by_store(
     order_repo = get_order_repository()
 
     if order_repo is None:
-        return {"data": [], "total_profit": 0}
+        return mask_cost(
+            {"data": [], "total_profit": 0}, current_user, "product", extra=_PROFIT_KEYS
+        )
 
     # BUG-104, BOUND rule: found in the round-3 closing sweep -- same
     # typed-IST-range defect as /sales/by-salesperson (see the comment there).
@@ -307,10 +318,12 @@ async def profit_by_store(
 
     total_profit = sum(s["profit"] for s in profit_by_st.values())
 
-    return {
-        "data": list(profit_by_st.values()),
-        "total_profit": round(total_profit, 2),
-    }
+    return mask_cost(
+        {"data": list(profit_by_st.values()), "total_profit": round(total_profit, 2)},
+        current_user,
+        "product",
+        extra=_PROFIT_KEYS,
+    )
 
 
 @router.get("/discount/analysis")

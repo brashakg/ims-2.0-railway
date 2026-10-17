@@ -4,7 +4,7 @@
 
 import { Percent } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
-import { PAYABLES_ROLES } from '../../components/common/CostCell';
+import { COST_ROLES } from '../../components/common/CostCell';
 import type { GSTSummaryData } from './financeTypes';
 import { formatCurrency } from './financeUtils';
 import { PurchaseShopName, usePurchaseShop } from '../purchase/purchaseShop';
@@ -15,13 +15,13 @@ interface GSTPanelProps {
 }
 
 /** GST INPUT tax -- the credit taken on supplier bills -- is the accounts
- *  roles' (PAYABLES_ROLES): the tab is theirs alone (owner ruling 2026-10-07,
+ *  roles' (COST_ROLES): the tab is theirs alone (owner ruling 2026-10-07,
  *  R1), and for any other reader the input-credit and net tiles are not drawn
  *  (R5) -- never a 0 or a "net" that is really the gross. */
 
 export default function GSTPanel({ gstSummary }: GSTPanelProps) {
   const { user } = useAuth();
-  const canSeeInputTax = (user?.roles || []).some((r) => PAYABLES_ROLES.includes(r));
+  const canSeeInputTax = (user?.roles || []).some((r) => COST_ROLES.includes(r));
   // THE Purchase / Finance shop scope: who sees every shop, and the shop the
   // server scopes anyone else to.
   const { canPick: isAdmin, ownStoreId: ownShop } = usePurchaseShop();

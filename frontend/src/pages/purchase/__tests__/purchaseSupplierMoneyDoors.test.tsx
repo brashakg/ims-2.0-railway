@@ -113,7 +113,7 @@ describe('Purchase Invoices - supplier bills are the accounts roles only', () =>
 });
 
 // Purchases this month is supplier money end to end (ordered, billed, paid,
-// owed): its tab and its address are PAYABLES_ROLES', as its API row is.
+// owed): its tab and its address are COST_ROLES', as its API row is.
 describe('Purchases this month - the accounts roles only', () => {
   it.each([['STORE_MANAGER'], ['AREA_MANAGER']])(
     '%s: no This month tab, and the address bounces',

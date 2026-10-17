@@ -72,7 +72,10 @@ describe('VendorReturns create - who prices the return', () => {
     auth.role = 'WORKSHOP_STAFF';
   });
 
-  it('workshop staff log item, quantity and reason - no price field, no price sent', async () => {
+  // Owner ruling 2026-10-12: a store manager logs a return like the workshop.
+  it.each(['WORKSHOP_STAFF', 'STORE_MANAGER'])(
+    '%s log item, quantity and reason - no price field, no price sent', async (role) => {
+    auth.role = role;
     load();
     const body = await fillAndCreate();
     expect(screen.queryByText('Unit Price')).toBeNull();

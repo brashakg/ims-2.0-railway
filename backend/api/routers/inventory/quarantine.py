@@ -30,6 +30,7 @@ from .helpers import (
 from .accountability import (
     _STOCK_MANAGER_ROLES,
 )
+from ...services.cost_mask import mask_cost
 
 # ============================================================================
 # DEFECTIVE QUARANTINE  (F21 -- the E3-shim)
@@ -233,7 +234,7 @@ async def quarantine_stock_unit(
         logger.warning("[INVENTORY] stock.quarantined dispatch failed: %s", e)
 
     updated = stock_repo.find_by_id(stock_id) or {**unit, **update}
-    return {"stock_unit": updated, "message": "Stock unit quarantined"}
+    return mask_cost({"stock_unit": updated, "message": "Stock unit quarantined"}, current_user, "product")
 
 
 @router.patch("/stock/{stock_id}/lift-quarantine")
@@ -314,7 +315,7 @@ async def lift_quarantine_stock_unit(
         logger.warning("[INVENTORY] lift-quarantine ledger emit failed: %s", e)
 
     updated = stock_repo.find_by_id(stock_id) or {**unit, **update}
-    return {"stock_unit": updated, "message": "Quarantine lifted"}
+    return mask_cost({"stock_unit": updated, "message": "Quarantine lifted"}, current_user, "product")
 
 
 @router.get("/stock/quarantined")
@@ -414,4 +415,6 @@ async def list_quarantined_stock(
     except Exception:  # noqa: BLE001
         pass
 
-    return {"items": items, "total": len(items), "unlabeled_count": unlabeled}
+    return mask_cost(
+        {"items": items, "total": len(items), "unlabeled_count": unlabeled}, current_user, "product"
+    )

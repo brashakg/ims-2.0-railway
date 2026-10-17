@@ -2,7 +2,7 @@
 // IMS 2.0 - GSTR-3B: input tax is for the accounts roles only (R5)
 // ============================================================================
 // Owner ruling 2026-10-12: GST input tax -- the credit taken on supplier bills
-// -- is shown only to ADMIN / SUPERADMIN / ACCOUNTANT (PAYABLES_ROLES). GET
+// -- is shown only to ADMIN / SUPERADMIN / ACCOUNTANT (COST_ROLES). GET
 // /reports/gstr3b leaves Table 4 (ITC available / utilised), 3.1(d) and the
 // tax paid in cash out for a store / area manager, and the GST portal export
 // (the return itself, Table 4 included) answers them 403. So for a manager the

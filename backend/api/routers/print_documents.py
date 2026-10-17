@@ -69,7 +69,9 @@ _CHALLAN_ROLES = (
 def may_print_challan(current_user: dict, valued: bool = False) -> bool:
     """THE challan print rule by role: the challan roles print a delivery
     challan; a VALUED one (a move between two GST registrations, D13) carries
-    the units' cost, so only managers and accounts (D7; owner 2026-10-08)."""
+    the units' cost, so only whom the one cost rule admits -- the owner and
+    the accounts roles (owner ruling 2026-10-12, which narrowed 2026-10-08's
+    managers and accounts)."""
     roles = (current_user or {}).get("roles") or []
     return any(r in _CHALLAN_ROLES for r in roles) and (
         not valued or can_see_cost(current_user, "product")
@@ -106,7 +108,7 @@ def challan_gate(transfer: Dict[str, Any], current_user: dict) -> tuple:
             raise HTTPException(
                 status_code=403,
                 detail="This challan carries the stock's cost. "
-                "Ask the store manager to print it.",
+                "Ask accounts to print it.",
             )
         if not transfer.get("stock_shipped"):
             raise HTTPException(

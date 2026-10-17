@@ -9,7 +9,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Loader2, FileText, Copy, Check } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
-import { PAYABLES_ROLES } from '../../components/common/CostCell';
+import { COST_ROLES } from '../../components/common/CostCell';
 import { approvalsApi } from '../../services/api/approvals';
 import type { ApprovalRequest } from '../../services/api/approvals';
 import { formatDateTimeIST } from '../../utils/datetime';
@@ -23,7 +23,7 @@ import {
 export function MyRequestsPage() {
   const toast = useToast();
   const { hasRole } = useAuth();
-  const canSeePayables = hasRole(PAYABLES_ROLES);
+  const canSeePayables = hasRole(COST_ROLES);
   const [rows, setRows] = useState<ApprovalRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState<string | null>(null);

@@ -920,7 +920,10 @@ def test_d7b4_a_frames_eye_size_is_the_create_doors(call, mongo_db):
             attributes={"brand_name": "Oakley", "model_no": "OO9208", "colour_code": "BLK",
                         "lens_size": size},
         )
-        assert "size" not in doc, "the door keeps the eye size in attributes only"
+        # Since PR #1171 the door also copies the eye size to the top-level
+        # size; rows main's door made before it carry none, so the lookup
+        # must still read lens_size for them.
+        doc.pop("size", None)
         doc["product_id"] = doc["_id"] = f"P-OO9208-{size}"
         mongo_db["products"].insert_one(doc)
     items = _ok(call(_user("SALES_STAFF"), q="OO9208"))["items"]

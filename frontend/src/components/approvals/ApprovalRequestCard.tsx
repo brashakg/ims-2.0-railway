@@ -8,7 +8,7 @@
 
 import { useNow } from '../../hooks/useNow';
 import { useAuth } from '../../context/AuthContext';
-import { PAYABLES_ROLES } from '../common/CostCell';
+import { COST_ROLES } from '../common/CostCell';
 import { formatDateTimeIST, toDate } from '../../utils/datetime';
 import type { ApprovalRequest } from '../../services/api/approvals';
 
@@ -67,7 +67,7 @@ export function formatRupees(amount: number | null | undefined): string {
 const SUPPLIER_MONEY_ACTIONS = new Set(['rtv']);
 
 /** The amount this reader may see on a request: a supplier-money amount is
- *  PAYABLES_ROLES' alone, so anyone else gets null (formatRupees shows an
+ *  COST_ROLES' alone, so anyone else gets null (formatRupees shows an
  *  em-dash). The server already drops it for them; this keeps a stale or wider
  *  answer off the screen too. Every other action type keeps its amount. */
 export function shownAmount(
@@ -179,7 +179,7 @@ export function ApprovalRequestCard({
         </div>
         <div className="text-right shrink-0">
           <div className="font-mono text-sm text-gray-900">
-            {formatRupees(shownAmount(request, hasRole(PAYABLES_ROLES)))}
+            {formatRupees(shownAmount(request, hasRole(COST_ROLES)))}
           </div>
           {isRequested &&
             (remaining ? (

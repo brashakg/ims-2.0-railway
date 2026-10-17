@@ -28,6 +28,7 @@ from ._shared import (
     timedelta,
     uuid,
 )
+from ...services.cost_mask import mask_purchase
 from .models import GRN_SUBTYPE_DC, _GRN_SUBTYPES
 from .numbering import GRN_PLACEHOLDER_PREFIX, generate_grn_number, grn_number_pending
 
@@ -217,7 +218,7 @@ async def list_grns(
 
     _enrich_grn_names(grns)
 
-    return {"grns": grns, "total": total}
+    return {"grns": mask_purchase(grns, current_user), "total": total}
 
 
 # Received-at descending; the id breaks a tie so pages never overlap.

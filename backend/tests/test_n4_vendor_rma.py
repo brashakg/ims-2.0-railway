@@ -529,6 +529,12 @@ def test_router_raise_and_list(rt, db):
     # rupee display field present alongside the paise integer
     assert listed["rmas"][0]["expected_credit_rupees"] == 3000.0
     assert listed["rmas"][0]["expected_credit_paise"] == 300000
+    # The manager who raised it lists it without the credit (owner ruling
+    # 2026-10-12: what we pay is the accounts roles' only).
+    mine = _run(list_rmas(store_id=None, vendor_id=None, status=None, skip=0,
+                          limit=50, current_user=_user(["STORE_MANAGER"])))
+    assert mine["total"] == 1 and "expected_credit_paise" not in mine["rmas"][0]
+    assert "unit_cost_paise" not in str(mine)
 
 
 def test_router_cross_store_create_403(rt, db):

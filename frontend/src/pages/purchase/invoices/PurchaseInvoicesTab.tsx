@@ -140,7 +140,7 @@ export function PurchaseInvoicesTab({ suppliers }: { suppliers: Supplier[] }) {
         sku: l.sku ?? '',
         hsn_code: l.hsn_code ?? '',
         quantity: String(l.quantity ?? 1),
-        unit_price: String(l.unit_price ?? 0),
+        unit_price: l.unit_price == null ? '' : String(l.unit_price),
         gst_rate: String(l.gst_rate ?? 5),
       })),
     });

@@ -37,7 +37,9 @@ from .purchase_orders import (
     fill_cost_from_rate,
     price_po_lines,
 )
-from ...services.cost_mask import can_see_cost
+from ...services.cost_mask import can_see_cost, mask_purchase
+from ...services.purchase_match import is_unpriced_line
+from .numbering import held_units
 
 
 def _stamp_event_actors(events: list) -> None:
@@ -124,7 +126,7 @@ async def get_po_timeline(
                 "detail": po.get("cancellation_reason") or "PO cancelled",
             }
         )
-    events.extend(history)
+    events.extend(mask_purchase(history, current_user))
 
     # GRNs against this PO -> "Box received" (PENDING) + "On shelf" (ACCEPTED).
     grns_out: list = []
@@ -159,7 +161,17 @@ async def get_po_timeline(
                         "detail": f"Goods receipt logged ({g.get('total_received') or 0} units)",
                     }
                 )
-                if g.get("accepted_at"):
+                # "On shelf" counts only what reached the shelf: a receipt that
+                # is still HOLDING lines for the catalogue (PARTIALLY_ACCEPTED,
+                # the chip's "Box received") has accepted_at too, and often
+                # 0 units minted (audit C1 -- one rule with PurchaseStatusChip).
+                held = sum(
+                    held_units(ln)
+                    for ln in (g.get("unresolved_lines") or [])
+                    if isinstance(ln, dict)
+                )
+                shelved = max(int(g.get("total_accepted") or 0) - held, 0)
+                if g.get("accepted_at") and shelved:
                     events.append(
                         {
                             "kind": "on_shelf",
@@ -167,7 +179,8 @@ async def get_po_timeline(
                             "at": g.get("accepted_at"),
                             "ref": g.get("grn_number"),
                             "actor": g.get("accepted_by"),
-                            "detail": f"{g.get('total_accepted') or 0} units accepted into stock",
+                            "detail": f"{shelved} units accepted into stock"
+                            + (f"; {held} still held" if held else ""),
                         }
                     )
     except Exception as e:  # noqa: BLE001
@@ -283,7 +296,7 @@ async def get_po(
     if not can_access_store_scoped(po.get("delivery_store_id"), current_user):
         raise HTTPException(status_code=404, detail="Purchase order not found")
 
-    return po
+    return mask_purchase(po, current_user)
 
 
 @router.post("/purchase-orders/{po_id}/send")
@@ -371,9 +384,9 @@ async def send_po(
                 # send on its (inevitable) gaps would put the obstacle back at
                 # the front of the flow. The strictness now lives at the INVOICE
                 # (ruling 15), which refuses to settle an incomplete product.
-                if prod.get("provisional"):
+                if _pm.is_ordered_draft(prod):
                     continue
-                gaps = set(_pm.compute_catalog_status(prod)[1]) - {"cost_price"}
+                gaps = _pm.gaps_before_cost(prod)
                 if gaps:
                     blocked.append({"product_id": pid, "missing": sorted(gaps)})
             if blocked:
@@ -401,8 +414,49 @@ async def send_po(
             },
         ):
             raise HTTPException(status_code=409, detail=_CHANGED_MEANWHILE)
+        _flag_unpriced_lines(po)
 
     return {"message": "PO sent to vendor", "po_id": po_id}
+
+
+def _flag_unpriced_lines(po: dict) -> None:
+    """Owner ruling 2026-10-12: a PO sent with a line whose price nobody knew
+    (no price paid to this vendor before, no catalogue cost -- create_po leaves
+    it None, never a made-up 0) is flagged for accounts as a task at the
+    delivery shop, so the price is settled before the bill. Fail-soft: a task
+    never blocks the send."""
+    names = [
+        it.get("product_name") or it.get("sku") or it.get("product_id") or "an item"
+        for it in po.get("items") or []
+        if isinstance(it, dict)
+        and is_unpriced_line(it)
+        and it.get("line_status") != "CANCELLED"
+    ]
+    if not names:
+        return
+    try:
+        from ...dependencies import get_task_repository
+        from ...services.task_triggers import create_system_task
+
+        ref = po.get("po_number") or po.get("po_id")
+        create_system_task(
+            get_task_repository(),
+            title=f"Price needed on purchase order {ref}",
+            description=(
+                f"Purchase order {ref} was sent with no price for: "
+                f"{', '.join(str(n) for n in names)}. Nothing was paid to this "
+                "vendor for it before and it has no catalogue cost. Agree the "
+                "price with the vendor and enter it when you book the invoice "
+                "in Purchase Invoices."
+            ),
+            priority="P2",
+            category="Purchase",
+            store_id=po.get("delivery_store_id"),
+            dedupe_ref=f"po-price:{po.get('po_id')}",
+            assigned_to="ACCOUNTANT",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[VENDOR] unpriced-PO task skipped for %s: %s", po.get("po_id"), exc)
 
 
 # ============================================================================
@@ -629,16 +683,16 @@ def _refuse_if_box_waiting(po_id: str) -> None:
         )
 
 
-def _units_received(po_id: str, grn_id: str, product_id: str) -> int:
-    """Units receipt `grn_id` put in stock for this order and product,
-    wherever a transfer has moved them since (_receipt_units), whatever the
-    receipt's status is now. Fails CLOSED (503): an unreadable stock table
+def _units_received(po_id: str, grn: dict, product_id: str) -> int:
+    """Units receipt `grn` put in stock for this order and product, by their
+    ORIGIN -- wherever a transfer has moved them since (_receipt_units),
+    whatever the receipt's status is now. Fails CLOSED (503): an unreadable stock table
     must not make arrived stock look cancellable."""
     stock_repo = get_stock_repository()
     if stock_repo is None:
         return 0
     try:
-        return _receipt_units(stock_repo, grn_id, po_id=po_id, product_id=product_id)
+        return _receipt_units(stock_repo, grn, po_id=po_id, product_id=product_id)
     except Exception as exc:  # noqa: BLE001
         logger.error("[VENDOR] PO %s: could not count received units: %s", po_id, exc)
         raise HTTPException(
@@ -688,12 +742,12 @@ def _received_by_product(
             accepted[pid] = accepted.get(pid, 0) + _qty(line.get("accepted_qty"))
         for pid, qty in accepted.items():
             if mine or claimed:
-                aside[pid] = aside.get(pid, 0) + _units_received(po_id, gid, pid)
+                aside[pid] = aside.get(pid, 0) + _units_received(po_id, g, pid)
                 if claimed and not mine:
                     whole[pid] = whole.get(pid, 0) + qty
                 continue
             if status != "ACCEPTED":
-                qty = _units_received(po_id, gid, pid)
+                qty = _units_received(po_id, g, pid)
             out[pid] = out.get(pid, 0) + qty
     header = po.get("received_qty_by_product") or {}
     for it in po.get("items") or []:
@@ -871,11 +925,13 @@ def _money(v: float) -> str:
     return f"{v:.2f}".rstrip("0").rstrip(".")
 
 
-def _describe_edit(old_items: list, new_items: list) -> list:
-    """What changed on the lines, in the words the timeline shows. Empty means
-    the lines are as stored, which is how update_po knows an edit changed
-    nothing -- so every line is compared, not one per product: an order may
-    carry two lines of one product, and a change to either must count.
+def _describe_edit(old_items: list, new_items: list) -> tuple:
+    """What changed on the lines, in the words the timeline shows:
+    (changes, price changes). The price changes are what we pay, kept apart so
+    only the accounts roles read them. Both empty means the lines are as
+    stored, which is how update_po knows an edit changed nothing -- so every
+    line is compared, not one per product: an order may carry two lines of one
+    product, and a change to either must count.
 
     An unchanged line (same product, quantity and cost) is matched first; the
     rest are paired with the next line of the same product, in order."""
@@ -899,7 +955,7 @@ def _describe_edit(old_items: list, new_items: list) -> list:
             new_left.append(n)
         else:
             old_left.remove(same)
-    out = []
+    out, prices = [], []
     for n in new_left:
         o = next((x for x in old_left if x.get("product_id") == n.get("product_id")), None)
         if o is None:
@@ -912,7 +968,7 @@ def _describe_edit(old_items: list, new_items: list) -> list:
         old_price = float(o.get("unit_price") or 0)
         new_price = float(n.get("unit_price") or 0)
         if old_price != new_price:
-            out.append(f"{name(n)}: cost Rs {_money(old_price)} -> Rs {_money(new_price)}")
+            prices.append(f"{name(n)}: cost Rs {_money(old_price)} -> Rs {_money(new_price)}")
         old_rate = float(o.get("tax_rate") or 0)
         new_rate = float(n.get("tax_rate") or 0)
         if old_rate != new_rate:
@@ -921,7 +977,7 @@ def _describe_edit(old_items: list, new_items: list) -> list:
             out.append(f"{name(n)}: HSN {o.get('hsn') or 'none'} -> {n.get('hsn') or 'none'}")
     for o in old_left:
         out.append(f"removed {name(o)} x{_qty(o.get('quantity'))}")
-    return out
+    return out, prices
 
 
 _GST_KEYS = ("tax_rate", "gst_source", "gst_unresolved", "gst_missing", "hsn")
@@ -983,7 +1039,9 @@ def _settled_lines(po: dict, moved: dict, failed_ids: set, products: dict):
     return items, money, changes
 
 
-def settle_typed_in_lines(po_repo, po_id, typed_in, products, current_user) -> list:
+def settle_typed_in_lines(
+    po_repo, po_id, typed_in, products, current_user, po_number=None
+) -> list:
     """Write the typed-in products of an order that was just saved, then make
     the stored lines name what the spine really holds (see
     create_typed_in_products). The correction is a compare-and-set write of
@@ -992,7 +1050,9 @@ def settle_typed_in_lines(po_repo, po_id, typed_in, products, current_user) -> l
 
     Returns what the person must be told: [{product_id, product_name, reason}]
     for every typed-in line that is not on the order as typed."""
-    moved, failed = create_typed_in_products(typed_in, products, current_user)
+    moved, failed = create_typed_in_products(
+        typed_in, products, current_user, po_number=po_number
+    )
     dropped = [
         {**f, "reason": "could not be added to the catalogue and was taken off "
                         "this order - add it again"}
@@ -1156,11 +1216,17 @@ async def update_po(
             if value is not None:
                 setattr(line, field, value)
     computed, products, typed_in = price_po_lines(
-        body.items, vendor, po.get("delivery_store_id"), current_user
+        body.items,
+        vendor_id,
+        vendor,
+        po.get("delivery_store_id"),
+        current_user,
+        # A price agreed with one vendor is no price for another.
+        stored_items=old_items if vendor_id == po.get("vendor_id") else None,
     )
     new_items = computed["items"]
 
-    changes = _describe_edit(old_items, new_items)
+    changes, price_changes = _describe_edit(old_items, new_items)
     if vendor_id != po.get("vendor_id"):
         changes.append("vendor changed")
     if expected != (po.get("expected_date") or None):
@@ -1168,8 +1234,8 @@ async def update_po(
         changes.append(f"delivery date {was} -> {expected or 'none'}")
     if notes != (po.get("notes") or None):
         changes.append("notes changed")
-    if not changes:
-        return po
+    if not changes and not price_changes:
+        return mask_purchase(po, current_user)
 
     patch = {
         "vendor_id": vendor_id,
@@ -1191,7 +1257,16 @@ async def update_po(
         po_repo,
         po,
         patch,
-        [{"kind": "edited", "label": "Edited", "detail": "; ".join(changes)}],
+        [
+            {
+                "kind": "edited",
+                "label": "Edited",
+                "detail": "; ".join(changes) or "price changed",
+                # What we pay rides apart from the words everyone reads, so
+                # mask_purchase strips it from anyone else (ruling 2026-10-12).
+                **({"price_detail": "; ".join(price_changes)} if price_changes else {}),
+            }
+        ],
         current_user,
         "purchase_order.edit",
         before={"items": old_items, "total_amount": po.get("total_amount")},
@@ -1200,10 +1275,13 @@ async def update_po(
     # Only now that the edit is saved: a refused edit creates no typed-in
     # product and changes no product cost.
     not_created = settle_typed_in_lines(
-        po_repo, po_id, typed_in, products, current_user
+        po_repo, po_id, typed_in, products, current_user, po_number=po.get("po_number")
     )
     fill_cost_from_rate(po_id, po.get("po_number"), body.items, products, current_user)
-    return {**(po_repo.find_by_id(po_id) or {}), "products_not_created": not_created}
+    return mask_purchase(
+        {**(po_repo.find_by_id(po_id) or {}), "products_not_created": not_created},
+        current_user,
+    )
 
 
 @router.post("/purchase-orders/{po_id}/cancel")
@@ -1277,7 +1355,11 @@ async def cancel_po(
         before={"status": status, "total_amount": po.get("total_amount")},
         after={"status": new_status, "reason": reason},
     )
-    return {"message": "PO cancelled", "po_id": po_id, "po": po_repo.find_by_id(po_id)}
+    return {
+        "message": "PO cancelled",
+        "po_id": po_id,
+        "po": mask_purchase(po_repo.find_by_id(po_id), current_user),
+    }
 
 
 @router.post("/purchase-orders/{po_id}/items/{line_index}/cancel")
@@ -1386,4 +1468,4 @@ async def cancel_po_line(
             "reason": body.reason,
         },
     )
-    return po_repo.find_by_id(po_id)
+    return mask_purchase(po_repo.find_by_id(po_id), current_user)

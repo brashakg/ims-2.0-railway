@@ -58,7 +58,7 @@ export interface EditLine {
   gst_rate: string;
 }
 
-export const blankLine = (): EditLine => ({ product_name: '', sku: '', hsn_code: '', quantity: '1', unit_price: '0', gst_rate: '5' });
+export const blankLine = (): EditLine => ({ product_name: '', sku: '', hsn_code: '', quantity: '1', unit_price: '', gst_rate: '5' });
 
 const isBookable = (l: EditLine) => Boolean(l.product_name.trim()) && (parseFloat(l.quantity) || 0) > 0;
 
@@ -128,6 +128,7 @@ export function InvoiceFormDrawer({
   const removeLine = (i: number) => setLines((prev) => (prev.length > 1 ? prev.filter((_, idx) => idx !== i) : prev));
 
   const validLines = lines.filter(isBookable);
+  const missingPrice = validLines.some((l) => l.unit_price.trim() === '' || !Number.isFinite(Number(l.unit_price)));
   // THE body the Book button sends -- the preview is computed on exactly this.
   const linkedDcIds = (prefill as { linked_dc_ids?: string[] }).linked_dc_ids;
   const payload: PurchaseInvoiceCreate = {
@@ -159,8 +160,7 @@ export function InvoiceFormDrawer({
   // shop is in it: a bill with no receipt is booked for store_id's company.
   const taxKey = JSON.stringify([payload.vendor_id, payload.recipient_gstin, payload.grn_id, payload.linked_dc_ids, payload.store_id, payload.itc_eligible, payload.lines]);
   const [preview, setPreview] = useState<{ key: string; data?: PurchaseInvoicePreview; error?: string } | null>(null);
-  // An admin's bill with no shop yet has no company to work the tax out for.
-  const wantsPreview = Boolean(vendorId) && validLines.length > 0 && !shopMissing;
+  const wantsPreview = Boolean(vendorId) && validLines.length > 0 && !shopMissing && !missingPrice;
   useEffect(() => {
     if (!wantsPreview) return;
     let live = true;
@@ -190,6 +190,7 @@ export function InvoiceFormDrawer({
     if (!vendorInvoiceNo.trim()) { toast.error('Supplier invoice number is required'); return; }
     if (!vendorInvoiceDate) { toast.error('Supplier invoice date is required'); return; }
     if (validLines.length === 0) { toast.error('Add at least one line item with a name and quantity'); return; }
+    if (missingPrice) { toast.error('Enter the supplier price for every bill item'); return; }
     if (!receiptLinked && !billKind) {
       toast.error('Say what this bill is for: goods, or services/expenses');
       return;
@@ -221,10 +222,17 @@ export function InvoiceFormDrawer({
         // The accountant holds no products:write, so the refusal has to come
         // with a way forward: raise the task for the cataloguer.
         try {
-          await purchaseInvoicesApi.requestCataloguing(blocked);
-          toast.info('Asked the cataloguer to finish these items — the bill can be booked after that');
-        } catch {
-          /* the refusal above is the message that matters */
+          const ask = await purchaseInvoicesApi.requestCataloguing(
+            blocked,
+            undefined,
+            prefill.store_id ?? user?.activeStoreId ?? undefined,
+          );
+          // The server says who was asked: the catalogue manager, or -- with
+          // none for the shop -- the admins.
+          toast.info(ask.message);
+        } catch (askErr) {
+          // Never silent: the accountant must know nobody was asked.
+          toast.warning(errMsg(askErr, 'The catalogue manager could not be asked. Try again.'));
         }
       }
     } finally {
@@ -441,7 +449,7 @@ export function InvoiceFormDrawer({
             <button
               type="button"
               onClick={book}
-              disabled={saving || pending || (!receiptLinked && billKind === 'GOODS')}
+              disabled={saving || pending || missingPrice || (!receiptLinked && billKind === 'GOODS')}
               className="btn sm primary disabled:opacity-60"
             >
               {saving && <Loader2 className="w-4 h-4 animate-spin" />} Book invoice

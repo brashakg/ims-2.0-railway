@@ -61,7 +61,7 @@ Delivery Challan answers the same 404 for a receipt outside it
 import logging
 import uuid
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
@@ -77,6 +77,7 @@ from ..dependencies import (
     get_purchase_order_repository,
     get_grn_repository,
     get_audit_repository,
+    get_product_repository,
     validate_store_access,
 )
 from ..services import ap_engine
@@ -1047,6 +1048,10 @@ def _apply_valuation_trueup(db, invoice_doc, computed, config) -> Optional[list]
             if pid is None or new_cost is None:
                 continue
             try:
+                current = products.find_one({"product_id": pid})
+            except Exception:  # noqa: BLE001 - the pre-image never blocks the cost
+                current = None
+            try:
                 products.update_one(
                     {"product_id": pid},
                     {
@@ -1078,6 +1083,20 @@ def _apply_valuation_trueup(db, invoice_doc, computed, config) -> Optional[list]
                 )
             except Exception:
                 pass  # never roll back the products write on a catalog miss
+            # Rulings 11/12: the bill brings the cost, so it may be a draft's
+            # last gap. It finishes the product through the editor's own path
+            # (restamp, mirror, close the asks, release the held units) -- no
+            # second finish path. Fail-soft: the booking stands.
+            if current:
+                try:
+                    from .vendors.grn_accept import catalogue_write_done
+
+                    catalogue_write_done(
+                        pid, current, {"cost_price": new_cost},
+                        product_repo=get_product_repository(),
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.warning("[PI] finishing %s after the bill's cost failed", pid, exc_info=True)
         return applied or None
     except Exception:
         return None
@@ -1532,6 +1551,38 @@ def _vendor_gstin(db, vendor: Optional[dict], vendor_id: str) -> Optional[str]:
         return None
 
 
+def _assert_unpriced_po_bill(body, grn_doc):
+    """An unknown PO price must not silently become a zero-cost bill."""
+    zero_lines = [ln for ln in body.lines if ln.product_id and ln.qty > 0
+                  and ln.unit_price <= 0 and ln.taxable is None]
+    po_id = getattr(body, "po_id", None) or (grn_doc or {}).get("po_id")
+    if not zero_lines or not po_id:
+        return
+    try:
+        repo = get_purchase_order_repository()
+        po = repo.find_by_id(po_id) if repo is not None else None
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Could not verify purchase prices. Try again.") from exc
+    if po is None:
+        raise HTTPException(status_code=503, detail="Could not verify purchase prices. Try again.")
+    unpriced = {ln.get("product_id") for ln in po.get("items") or []
+                if pmatch.is_unpriced_line(ln)}
+    if any(ln.product_id in unpriced for ln in zero_lines):
+        raise HTTPException(status_code=422, detail={
+            "code": "INVOICE_PRICE_REQUIRED",
+            "message": "Enter the supplier's price for each unpriced purchase-order item before booking the bill.",
+        })
+
+
+def _compute_invoice_draft(raw_lines, supplier_gstin, recipient_gstin):
+    """Drafts retain missing prices instead of turning them into paid zeroes."""
+    computed = pinv.compute_invoice(raw_lines, supplier_gstin, recipient_gstin)
+    for raw, line in zip(raw_lines, computed["lines"]):
+        if raw.get("unit_price") is None:
+            line["unit_price"] = None
+    return computed
+
+
 def _bill_math(db, vendor, body, grn_doc, current_user):
     """Everything a booking stores about tax and shop: (supplier GSTIN,
     recipient, computed invoice, shop). POST / books it and POST /preview
@@ -1540,6 +1591,7 @@ def _bill_math(db, vendor, body, grn_doc, current_user):
     F40) -- nor another shop: the shop is _bill_shop's (the receipt's; else
     the form's own store_id -- required from an admin (R9), never whichever
     shop the token names by the time Book is pressed)."""
+    _assert_unpriced_po_bill(body, grn_doc)
     supplier_gstin = _vendor_gstin(db, vendor, body.vendor_id)
     shop, recipient = _bill_shop_and_recipient(
         db,
@@ -1636,7 +1688,7 @@ def _assert_products_catalogued(lines, found) -> None:
         # the product ends up WITH a cost precisely because the bill booked.
         # (list comprehension, not a set: the refusal message must keep
         # compute_catalog_status's field order.)
-        gaps = [g for g in _pm.compute_catalog_status(prod)[1] if g != "cost_price"]
+        gaps = _pm.gaps_before_cost(prod)
         if gaps:
             blocked.append(
                 {
@@ -1728,6 +1780,9 @@ class CataloguingRequest(BaseModel):
 
     product_ids: List[str] = Field(..., min_length=1)
     note: Optional[str] = None
+    # The BILL's shop (the drawer's prefill.store_id): the catalogue managers
+    # of ITS legal entity are told, never those of the asker's session shop.
+    store_id: Optional[str] = None
 
 
 @router.post("/request-cataloguing", status_code=201)
@@ -1747,8 +1802,49 @@ async def request_cataloguing(
     only exit is a developer is a wall.
     """
     db = _get_db()
+    # Only what still waits on the catalogue manager is asked: an item whose
+    # one gap is the cost waits on the bill itself (rulings 11/12), and a task
+    # for it would stay open until it escalated for nothing.
+    items = [i for i in _ask_items(db, body.product_ids) if i["missing"]]
+    if not items:
+        return {
+            "requested": [],
+            "asked": None,
+            "message": "Nothing on these items is left to catalogue - book the bill",
+        }
+    store_id = _shop_for_the_ask(db, body, current_user, items)
+    try:
+        told, to_cataloguers = ask_catalogue_managers(db, store_id, items, body.note)
+        if not told:
+            raise RuntimeError("no task was stored for the ask")
+    except Exception as exc:  # noqa: BLE001
+        # Never a 201 "Cataloguing requested" for an ask nobody received.
+        logger.error("[PI] could not raise the cataloguing task", exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="The catalogue manager could not be asked. Try again.",
+        ) from exc
+
+    # Says who was asked: with no catalogue manager for the shop the task
+    # went to the admins (tell_catalogue_managers), never "the cataloguer".
+    if to_cataloguers:
+        message = (
+            "Asked the catalogue manager to finish these items - "
+            "the bill can be booked after that"
+        )
+    else:
+        message = (
+            "No catalogue manager covers this shop - asked the admins to "
+            "finish these items; the bill can be booked after that"
+        )
+    return {"requested": items, "asked": "CATALOG_MANAGER" if to_cataloguers else "ADMIN",
+            "message": message}
+
+
+def _ask_items(db, product_ids) -> list:
+    """Each product an ask names, with what it is still missing."""
     items = []
-    for pid in dict.fromkeys(body.product_ids):
+    for pid in dict.fromkeys(product_ids):
         prod = None
         if db is not None:
             try:
@@ -1757,7 +1853,8 @@ async def request_cataloguing(
                 )
             except Exception:  # noqa: BLE001
                 prod = None
-        gaps = _pm.compute_catalog_status(prod)[1] if prod else []
+        # Cost is never asked of the catalogue manager: the bill brings it.
+        gaps = _pm.gaps_before_cost(prod) if prod else []
         items.append(
             {
                 "product_id": pid,
@@ -1770,34 +1867,101 @@ async def request_cataloguing(
             }
         )
 
-    lines = [
-        f"- {i['product']}: needs "
-        + (", ".join(i["missing"]) if i["missing"] else "review")
-        for i in items
-    ]
-    try:
-        from ..services.task_triggers import create_system_task
-        from ..dependencies import get_task_repository
+    return items
 
-        create_system_task(
-            get_task_repository(),
-            title=f"Finish cataloguing {len(items)} item(s) - a vendor bill is waiting",
-            description=(
-                "A purchase invoice cannot be booked until these products are "
-                "catalogue-complete:\n"
-                + "\n".join(lines)
-                + (f"\n\nNote: {body.note}" if body.note else "")
-            ),
-            priority="P2",
-            category="Catalog",
-            store_id=current_user.get("active_store_id"),
-            dedupe_ref="catalogue-for-bill:"
-            + ",".join(sorted(i["product_id"] for i in items)),
+
+def ask_catalogue_managers(db, store_id, items, note=None, *, reword=None) -> Tuple[int, bool]:
+    """THE ask for cataloguing: the catalogue managers BY NAME, through the
+    one door a held receipt uses too -- a task with no assignee is one no
+    catalogue manager's list shows. request_cataloguing runs it, and so does
+    scripts/raise_held_receipt_tasks.py for an ask raised before that door.
+
+    One ask per bill and person: an ask still open for this shop naming any
+    of these items is the same bill asked again (the next refused Book names
+    only what is left), so it is re-worded to everything it still waits on,
+    never a second task beside it. `reword` (grn_accept.close_catalogue_asks,
+    one of its items finished): only re-word that open ask to `items`,
+    telling nobody new.
+
+    Answers (how many people now hold the task, whether they are catalogue
+    managers -- False: the admins were told, nobody holds the job)."""
+    from .vendors.grn_accept import _TASK_OPEN, asks_still_waiting, tell_catalogue_managers
+
+    ask = reword
+    if ask is None and db is not None:
+        ask = db.get_collection("tasks").find_one(
+            {
+                "category": "Catalogue",
+                "source": "SYSTEM",
+                "status": {"$in": _TASK_OPEN},
+                "ask_store_id": store_id,
+                "product_ids": {"$in": [i["product_id"] for i in items]},
+            }
         )
-    except Exception:  # noqa: BLE001 - asking must never 500 the screen
-        logger.warning("[PI] could not raise the cataloguing task", exc_info=True)
+        if ask:
+            asked = {i["product_id"] for i in items}
+            more = [p for p in asks_still_waiting(db, ask.get("product_ids") or []) if p not in asked]
+            items = list(items) + [i for i in _ask_items(db, more) if i["missing"]]
+    note = note or (ask or {}).get("ask_note")
+    ids = [i["product_id"] for i in items]
+    lines = [f"- {i['product']}: needs " + ", ".join(i["missing"]) for i in items]
+    return tell_catalogue_managers(
+        db,
+        store_id,
+        dedupe=(ask or {}).get("escalation_group") or "catalogue-for-bill:" + ",".join(sorted(ids)),
+        title=f"Finish cataloguing {len(items)} item(s) - a vendor bill is waiting",
+        orphan_title=(
+            f"No catalogue manager for {store_id}: {len(items)} item(s) "
+            "block a vendor bill"
+        ),
+        # An ask: asking again once the last task was closed asks again.
+        ever=False,
+        refresh_only=reword is not None,
+        # Closed when the items are finished or discarded
+        # (grn_accept.close_catalogue_asks).
+        extra={"product_ids": ids, "ask_store_id": store_id, "ask_note": note},
+        description=(
+            "A purchase invoice cannot be booked until these products are "
+            "catalogue-complete:\n"
+            + "\n".join(lines)
+            + (f"\n\nNote: {note}" if note else "")
+        ),
+    )
 
-    return {"requested": items, "message": "Cataloguing requested"}
+
+def _shop_for_the_ask(db, body: "CataloguingRequest", current_user: dict, items) -> str:
+    """The shop whose catalogue managers a bill's ask goes to: the bill's
+    shop (checked against the asker's access), else the shop of the latest
+    receipt naming one of the products, else the asker's session shop. None
+    of them -> 422: an ask is never routed to 'No catalogue manager for None'
+    while a catalogue manager exists."""
+    if body.store_id:
+        return validate_store_access(body.store_id, current_user)
+    if db is not None:
+        try:
+            grn = db.get_collection("grns").find_one(
+                {
+                    "items.product_id": {"$in": [i["product_id"] for i in items]},
+                    "status": {"$ne": "VOID"},
+                },
+                {"_id": 0, "store_id": 1},
+                sort=[("created_at", -1)],
+            )
+            if (grn or {}).get("store_id") and can_access_store_scoped(
+                grn["store_id"], current_user
+            ):
+                return grn["store_id"]
+        except Exception:  # noqa: BLE001
+            logger.warning("[PI] receipt shop lookup for the ask failed", exc_info=True)
+    store_id = current_user.get("active_store_id") or next(
+        iter(current_user.get("store_ids") or []), None
+    )
+    if not store_id:
+        raise HTTPException(
+            status_code=422,
+            detail="Say which shop the bill is for, so its catalogue manager is asked.",
+        )
+    return store_id
 
 
 # ---------------------------------------------------------------------------
@@ -2557,9 +2721,7 @@ async def draft_invoice_from_grn(
     )
 
     raw_lines = _draft_lines(db, grn, po)
-    computed = pinv.compute_invoice(
-        raw_lines, supplier_gstin, recipient.get("recipient_gstin")
-    )
+    computed = _compute_invoice_draft(raw_lines, supplier_gstin, recipient.get("recipient_gstin"))
 
     return {
         "status": "DRAFT",
@@ -2665,9 +2827,7 @@ async def draft_invoice_from_dcs(
         db, _receipt_store_id(db, None, ids), current_user
     )
 
-    computed = pinv.compute_invoice(
-        raw_lines, supplier_gstin, recipient.get("recipient_gstin")
-    )
+    computed = _compute_invoice_draft(raw_lines, supplier_gstin, recipient.get("recipient_gstin"))
 
     return {
         "status": "DRAFT",

@@ -11,7 +11,7 @@ import { useEffect, useState } from 'react';
 import { Loader2, X } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
-import { PAYABLES_ROLES } from '../common/CostCell';
+import { COST_ROLES } from '../common/CostCell';
 import { approvalsApi } from '../../services/api/approvals';
 import type { ApprovalRequest } from '../../services/api/approvals';
 import { actionLabel, formatRupees, shownAmount } from './ApprovalRequestCard';
@@ -149,7 +149,7 @@ export function PINApproveModal({ request, mode, onClose, onDone }: Props) {
                 {actionLabel(request.action_type)}
               </span>
               <span className="font-mono text-gray-900">
-                {formatRupees(shownAmount(request, hasRole(PAYABLES_ROLES)))}
+                {formatRupees(shownAmount(request, hasRole(COST_ROLES)))}
               </span>
             </div>
             {request.reason && (

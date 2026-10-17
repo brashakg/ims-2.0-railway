@@ -11,7 +11,7 @@
 //       without the supplier's credit (forgoing supplier money), so a manager
 //       is not offered it there -- left with only that button, one click
 //       would strand the credit accounts still have to record.
-//   R3  On a vendor return a manager (and any role outside PAYABLES_ROLES)
+//   R3  On a vendor return a manager (and any role outside COST_ROLES)
 //       reads items, quantities and reasons only: no "@ Rs unit price", no
 //       line value, no rate -- even when an answer carries them -- and the
 //       screen renders cleanly when the server has already dropped them.

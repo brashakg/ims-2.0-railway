@@ -5,7 +5,7 @@
 
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { CostCell, PRODUCT_COST_ROLES } from '../common/CostCell';
+import { CostCell, COST_ROLES } from '../common/CostCell';
 import {
   TrendingDown,
   AlertTriangle,
@@ -115,7 +115,7 @@ export function ReorderDashboard() {
   // catalogue manager edits the product-wide fields only.
   const canSetShopLevel = hasRole(REORDER_LEVEL_ROLES);
   // Who reads a cost on this screen (the server sends it to them alone).
-  const canSeeCost = hasRole(PRODUCT_COST_ROLES);
+  const canSeeCost = hasRole(COST_ROLES);
   const toast = useToast();
   const navigate = useNavigate();
 

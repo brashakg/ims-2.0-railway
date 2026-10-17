@@ -28,6 +28,9 @@ from api.routers.inventory import get_low_stock_alerts, get_stock_alerts  # noqa
 
 _NOW = datetime.utcnow()
 _MGR = {"user_id": "m1", "roles": ["STORE_MANAGER"], "active_store_id": "S1", "store_ids": ["S1"]}
+# The money at cost on an alert is what we pay: the accounts roles read it
+# (owner ruling 2026-10-12), the shop manager reads the same alerts without it.
+_ACCT = {"user_id": "a1", "roles": ["ACCOUNTANT"], "active_store_id": "S1", "store_ids": ["S1"]}
 
 _PRODUCTS = [
     {
@@ -83,10 +86,10 @@ def _wire(mp, units=_UNITS, products=_PRODUCTS):
     return db
 
 
-def _alerts():
+def _alerts(user=_MGR):
     return asyncio.run(
         get_stock_alerts(
-            store_id=None, dead_days=90, lead_time_days=14, limit=200, current_user=_MGR
+            store_id=None, dead_days=90, lead_time_days=14, limit=200, current_user=user
         )
     )
 
@@ -155,11 +158,13 @@ def test_dead_stock_outranks_the_low_list(monkeypatch):
     products = [{**_PRODUCTS[0], "cost_price": 3000}]
     _wire(monkeypatch, units=_units("P-AV", 2, days_old=200), products=products)
     assert [r["_id"] for r in _low()["items"]] == ["P-AV"]  # it IS on the low list
-    res = _alerts()
+    res = _alerts(_ACCT)
     (alert,) = res["alerts"]
     assert alert["alertType"] == "DEAD_STOCK"
     assert alert["costImpact"] == 6000
     assert res["stats"]["deadStockValue"] == 6000
+    (mine,) = _alerts()["alerts"]  # the shop manager: the same alert, no cost
+    assert mine["alertType"] == "DEAD_STOCK" and "costImpact" not in mine
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +218,7 @@ def test_a_discontinued_product_still_selling_is_never_a_reorder(monkeypatch):
         }
         for d in range(20)
     ])
-    (alert,) = _alerts()["alerts"]
+    (alert,) = _alerts(_ACCT)["alerts"]
     assert alert["productName"] == "Ray-Ban RB3025 Aviator - Gold"
     assert alert["alertType"] == "LOW_STOCK"
     assert alert["recommendedOrder"] == 0 and alert["costImpact"] == 0
@@ -268,6 +273,14 @@ class _Conn:
         self.db = db
 
     def get_collection(self, name):
+        return self.db[name]
+
+    def __getattr__(self, name):
+        # conn.<collection>, as the real DatabaseConnection answers: the PO
+        # door's draft is read back by the receipts and orders a delete or a
+        # finish now checks (PR #1171).
+        if name.startswith("_"):
+            raise AttributeError(name)
         return self.db[name]
 
 
@@ -370,10 +383,20 @@ def test_a_po_door_product_catalogued_but_never_switched_on_is_new(monkeypatch, 
     db = mongomock.MongoClient().db
     pid, twin = _po_door_frame(monkeypatch, db, "RB3025", "Gold")
     if door == "put-products":
-        _put_products(pid, offer_price=8000)
+        # PR #1171 (audit C1): a plain finishing save switches the draft on, so
+        # "catalogued but never switched on" is a finish that switched it OFF
+        # in the same save -- the cataloguer's call wins.
+        _put_products(pid, offer_price=8000, is_active=False)
         assert _spine(db, pid)["catalog_status"] == "ACTIVE"  # the restamp ran
+        assert _spine(db, pid).get("provisional") is False  # finished
     else:
-        _drawer(twin, offer_price=8000)
+        # PR #1171: an ordered draft is finished in the product editor only
+        # (its save releases the units its receipts hold); the drawer refuses.
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException) as refused:
+            _drawer(twin, offer_price=8000)
+        assert refused.value.status_code == 409
     assert _spine(db, pid)["is_active"] is False  # still not switched on
     _wire_units(monkeypatch, db, _units(pid, 3))
     (row,) = _low()["items"]
@@ -398,7 +421,9 @@ def test_a_provisional_product_switched_on_sold_then_retired_is_never_a_reorder(
     db = mongomock.MongoClient().db
     pid, twin = _po_door_frame(monkeypatch, db, "RB3025", "Gold")
     if on_door == "catalog-drawer":
-        _drawer(twin, offer_price=8000)
+        # PR #1171: the draft is finished in the product editor (the drawer
+        # refuses an ordered draft); after that the drawer switches it.
+        _put_products(pid, offer_price=8000)
         _drawer(twin, is_active=True)
     else:
         _put_products(pid, offer_price=8000)
@@ -412,7 +437,7 @@ def test_a_provisional_product_switched_on_sold_then_retired_is_never_a_reorder(
         _put_products(pid, is_active=False)
     assert _spine(db, pid)["is_active"] is False
     _wire_units(monkeypatch, db, _units(pid, 3))
-    (alert,) = _alerts()["alerts"]
+    (alert,) = _alerts(_ACCT)["alerts"]
     assert alert["alertType"] == "LOW_STOCK"
     assert alert["recommendedOrder"] == 0 and alert["costImpact"] == 0
     (row,) = _low()["items"]
@@ -476,3 +501,52 @@ def test_the_shops_own_level_decides_on_both_screens(monkeypatch):
     _wire(monkeypatch, units=_units("P-AV", 4) + _units("P-WAY", 4), products=products)
     assert _low()["items"] == []
     assert not [a for a in _alerts()["alerts"] if a["alertType"] == "LOW_STOCK"]
+
+
+
+# ---------------------------------------------------------------------------
+# PR #1171 merged with F48: finishing an ordered draft clears `provisional`
+# (and a plain finish switches it on). The PO-door buy stays 'new' until it is
+# switched on or deleted, through `bought_before_catalogued`.
+# ---------------------------------------------------------------------------
+
+
+def test_a_draft_finished_by_a_plain_save_is_switched_on_and_retires_on_switch_off(monkeypatch):
+    """Finished in the editor (no is_active sent): switched on by the finish
+    itself, sold, then switched off -- 'Discontinued', never a reorder. The
+    finish writes around ProductRepository.update, so it stamps switched_on_at
+    itself."""
+    import mongomock
+
+    db = mongomock.MongoClient().db
+    pid, _twin = _po_door_frame(monkeypatch, db, "RB3025", "Gold")
+    _put_products(pid, offer_price=8000)
+    spine = _spine(db, pid)
+    assert spine["is_active"] is True and spine.get("switched_on_at")
+    _sold_20(db, pid)
+    _put_products(pid, is_active=False)
+    _wire_units(monkeypatch, db, _units(pid, 3))
+    (row,) = _low()["items"]
+    assert row["discontinued"] is True
+
+
+def test_a_finished_row_left_provisional_before_the_deploy_stays_new(monkeypatch):
+    """A PO-door frame catalogued on the old code (finishing switched nothing
+    on): ACTIVE, still provisional, never switched on. Its next save clears
+    `provisional` (PR #1171's repair) -- it must still read new, not
+    'Discontinued - not reordered'."""
+    import mongomock
+
+    db = mongomock.MongoClient().db
+    pid, _twin = _po_door_frame(monkeypatch, db, "RB3025", "Gold")
+    db.products.update_one(
+        {"product_id": pid},
+        {"$set": {"catalog_status": "ACTIVE", "done_gaps": [], "offer_price": 8000}},
+    )
+    _put_products(pid, offer_price=7900)
+    spine = _spine(db, pid)
+    assert spine.get("provisional") is False and spine["is_active"] is False
+    _wire_units(monkeypatch, db, _units(pid, 3))
+    (row,) = _low()["items"]
+    assert row["discontinued"] is False
+    assert row["auto_reorder_disabled"] is False

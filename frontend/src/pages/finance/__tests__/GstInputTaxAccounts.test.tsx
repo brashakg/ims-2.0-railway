@@ -3,7 +3,7 @@
 // ============================================================================
 // Owner ruling 2026-10-07 (R1): the GST summary and the GSTR-3B report show
 // input-tax totals summed from supplier bills -- managers do NOT need them;
-// ONLY SUPERADMIN, ADMIN and ACCOUNTANT see them (PAYABLES_ROLES; the server
+// ONLY SUPERADMIN, ADMIN and ACCOUNTANT see them (COST_ROLES; the server
 // answers a manager 403 on both). So a manager gets no Finance GST tab and no
 // summary call, no GSTR-3B menu entry, and /reports/gstr3b is the app's
 // not-allowed page; GSTR-1 (sales GST only) stays his. A routed test, because

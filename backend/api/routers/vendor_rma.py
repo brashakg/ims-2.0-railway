@@ -61,7 +61,7 @@ from ..dependencies import (
     validate_store_access,
     user_store_scope,
 )
-from ..services.cost_mask import PURCHASE_ROLES
+from ..services.cost_mask import PURCHASE_ROLES, mask_rma
 from ..services.vendor_rma import (
     PRICE_REQUIRED,
     VendorRMAEngine,
@@ -196,10 +196,17 @@ def _with_rupees(doc: dict) -> dict:
     return out
 
 
-def _http_from_result(res: dict) -> HTTPException:
-    """Map an engine fail result to an HTTPException, defaulting to 400."""
+def _masked(doc: dict, user: dict) -> dict:
+    # An RMA's unit costs, credits and write-off are what we pay: read back by
+    # the accounts roles only (owner ruling 2026-10-12, services/cost_mask).
+    return mask_rma(_with_rupees(doc), user)
+
+
+def _http_from_result(res: dict, user: dict) -> HTTPException:
+    """Map an engine fail result to an HTTPException, defaulting to 400. The
+    detail goes through the same mask: a refused close names the variance."""
     code = int(res.get("http", 400))
-    detail = {k: v for k, v in res.items() if k not in ("ok", "http")}
+    detail = mask_rma({k: v for k, v in res.items() if k not in ("ok", "http")}, user)
     return HTTPException(status_code=code, detail=detail or "request failed")
 
 
@@ -233,9 +240,10 @@ async def list_rmas(
         # Defensive: a store-role with no resolved store sees only its reach.
         rows = eng.list(store_ids=list(reach), vendor_id=vendor_id, status=status,
                         skip=skip, limit=limit)
-    return strip_rma_credit(
-        {"rmas": [_with_rupees(r) for r in rows], "total": len(rows)}, current_user
-    )
+    return {
+        "rmas": [_masked(r, current_user) for r in rows],
+        "total": len(rows),
+    }
 
 
 @router.post("", status_code=201)
@@ -277,7 +285,7 @@ async def raise_rma(
     )
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=res.get("error", "create failed"))
-    return strip_rma_credit(res, current_user)
+    return mask_rma(res, current_user)
 
 
 @router.get("/{rma_id}")
@@ -287,7 +295,7 @@ async def get_rma(
     """Get a single RMA. Another shop's is the 404 a missing one gets."""
     eng = _engine()
     doc = in_reach_or_404(eng.get(rma_id), current_user, "RMA not found")
-    return strip_rma_credit(_with_rupees(doc), current_user)
+    return _masked(doc, current_user)
 
 
 @router.post("/{rma_id}/authorize")
@@ -306,8 +314,8 @@ async def authorize_rma(
         notes=body.notes or "",
     )
     if not res.get("ok"):
-        raise _http_from_result(res)
-    return strip_rma_credit(res, current_user)
+        raise _http_from_result(res, current_user)
+    return mask_rma(res, current_user)
 
 
 @router.post("/{rma_id}/dispatch")
@@ -328,8 +336,8 @@ async def dispatch_rma(
         notes=body.notes or "",
     )
     if not res.get("ok"):
-        raise _http_from_result(res)
-    return strip_rma_credit(res, current_user)
+        raise _http_from_result(res, current_user)
+    return mask_rma(res, current_user)
 
 
 @router.post("/{rma_id}/credit-note")
@@ -349,7 +357,7 @@ async def record_credit_note(
     # priced first (PUT /{rma_id}/prices). Checked before the maker-checker
     # tier, which reads the expected credit.
     if not rma_is_priced(doc):
-        raise _http_from_result(dict(PRICE_REQUIRED))
+        raise _http_from_result(dict(PRICE_REQUIRED), current_user)
 
     recv_paise = rupees_to_paise(body.received_amount)
     expected = int(doc.get("expected_credit_paise") or 0)
@@ -399,8 +407,8 @@ async def record_credit_note(
         approval_token=(body.approval_token or "").strip() or None,
     )
     if not res.get("ok"):
-        raise _http_from_result(res)
-    return strip_rma_credit(res, current_user)
+        raise _http_from_result(res, current_user)
+    return mask_rma(res, current_user)
 
 
 @router.put("/{rma_id}/prices")
@@ -428,8 +436,8 @@ async def price_rma(
         actor=current_user.get("user_id"),
     )
     if not res.get("ok"):
-        raise _http_from_result(res)
-    return strip_rma_credit(res, current_user)
+        raise _http_from_result(res, current_user)
+    return mask_rma(res, current_user)
 
 
 # Before dispatch the goods are still in the shop: rejecting is the goods side.
@@ -469,8 +477,8 @@ async def reject_rma(
         # answers 409 invalid_transition with nothing written.
         res = eng.reject(rma_id, actor=actor, reason=body.reason or "")
     if not res.get("ok"):
-        raise _http_from_result(res)
-    return strip_rma_credit(res, current_user)
+        raise _http_from_result(res, current_user)
+    return mask_rma(res, current_user)
 
 
 @router.post("/{rma_id}/close")
@@ -495,9 +503,8 @@ async def close_rma(
         write_off_variance=bool(body.write_off_variance),
     )
     if not res.get("ok"):
-        # A refusal over an outstanding variance names the variance.
-        raise _http_from_result(strip_rma_credit(res, current_user))
-    return strip_rma_credit(res, current_user)
+        raise _http_from_result(res, current_user)
+    return mask_rma(res, current_user)
 
 
 # ============================================================================

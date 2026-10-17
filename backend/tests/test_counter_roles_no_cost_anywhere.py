@@ -5,13 +5,15 @@ OPTOMETRIST and WORKSHOP_STAFF see no cost price, landed cost or money worked
 out from cost, behind the screens too. 2026-10-12 -- the till's order lines,
 barcode scans and below-cost error hide it from them; workshop staff may log a
 vendor return but never see a price; the cash-flow supplier totals are ADMIN +
-ACCOUNTANT only.
+ACCOUNTANT only. 2026-10-12 (later) -- what we pay, product cost included, is the
+owner's and the accounts roles' only: the managers join the counter roles on
+every cost read here (tests/test_what_we_pay_accounts_only.py walks them).
 
 Every read below is driven over HTTP with a token per role against one shop
 whose every cost figure is COST (or COST_PAISE). A counter role's raw JSON must
 carry no cost-like key (``_cost_keys`` walks the whole body) and no cost figure
-under any name; a manager's must still carry them (the positive control that
-keeps the counter-role assertion from passing on an empty shop).
+under any name; an accounts role's must still carry them (the positive control
+that keeps the counter-role assertion from passing on an empty shop).
 """
 
 from __future__ import annotations
@@ -30,7 +32,8 @@ import pytest  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 
 COUNTER_ROLES = ("SALES_STAFF", "SALES_CASHIER", "CASHIER", "OPTOMETRIST", "WORKSHOP_STAFF")
-MANAGERS = ("STORE_MANAGER", "AREA_MANAGER", "CATALOG_MANAGER", "ADMIN", "ACCOUNTANT")
+# Who reads cost (cost_mask.COST_VISIBLE_ROLES, owner ruling 2026-10-12).
+COST_READERS = ("ADMIN", "ACCOUNTANT")
 STORE = "BV-TEST-01"
 OTHER = "BV-TEST-02"
 COST = 4321.77
@@ -377,9 +380,9 @@ _STOCK_AT_COST = (
 _ACCOUNTS = ("ADMIN", "ACCOUNTANT")
 
 
-@pytest.mark.parametrize("role", MANAGERS)
+@pytest.mark.parametrize("role", COST_READERS)
 @pytest.mark.parametrize("method,path,extra", READS)
-def test_managers_still_read_the_cost(client, shop, role, method, path, extra):
+def test_accounts_still_read_the_cost(client, shop, role, method, path, extra):
     body = _get(client, role, method, path)
     if path.split("?")[0] in _STOCK_AT_COST and role not in _ACCOUNTS:
         assert not _cost_keys(body, extra), (role, path, _cost_keys(body, extra))
@@ -446,32 +449,33 @@ def test_counter_roles_keep_the_order_lines(client, shop, role, path, orders_of,
         assert [ln[k] for k in _LINE_KEYS[case]] == ["Aviator", 9999.0, 1, 9999.0], ln
 
 
-def _narrow_product_rule(monkeypatch, role):
-    """cost_mask's "product" context without `role`: the one rule changed."""
+def _widen_product_rule(monkeypatch, role):
+    """cost_mask's "product" context WITH `role`: the one rule changed."""
     from api.services import cost_mask
 
     monkeypatch.setitem(
         cost_mask._CONTEXT_ROLES,
         "product",
-        cost_mask._CONTEXT_ROLES["product"] - {role},
+        cost_mask._CONTEXT_ROLES["product"] | {role},
     )
 
 
 # Every read above answers cost_mask's "product" context (owner ruling
 # 2026-10-12), not its own role set or another context: change the rule there
-# and every read must follow. STORE_MANAGER is in the "purchase" context too,
-# CATALOG_MANAGER only in "product", so a read asking either the wrong context
-# or a written-out copy keeps answering one of them and fails here.
-@pytest.mark.parametrize("dropped", ("STORE_MANAGER", "CATALOG_MANAGER"))
-def test_narrowing_the_product_rule_moves_every_shop_cost_read(
-    client, shop, monkeypatch, dropped
+# and every read must follow. Only "product" is widened, so a read asking the
+# wrong context or a written-out copy keeps hiding the cost and fails here.
+@pytest.mark.parametrize("widened", ("STORE_MANAGER", "CATALOG_MANAGER"))
+def test_widening_the_product_rule_moves_every_shop_cost_read(
+    client, shop, monkeypatch, widened
 ):
-    _narrow_product_rule(monkeypatch, dropped)
     for method, path, extra in [*READS, BLIND]:
-        body = _get(client, dropped, method, path)
-        assert not _cost_keys(body, extra), (dropped, path, _cost_keys(body, extra))
-        assert not _figures_in(body), (dropped, path, body)
-        assert _cost_keys(_get(client, "ADMIN", method, path), extra), path
+        assert not _cost_keys(_get(client, widened, method, path), extra), path
+    _widen_product_rule(monkeypatch, widened)
+    for method, path, extra in [*READS, BLIND]:
+        body = _get(client, widened, method, path)
+        assert _cost_keys(body, extra), (widened, path, body)
+        other = _get(client, "AREA_MANAGER", method, path)
+        assert not _cost_keys(other, extra), (path, _cost_keys(other, extra))
 
 
 # ---------------------------------------------------------------------------
@@ -521,9 +525,9 @@ def test_counter_roles_read_a_serial_without_cost(client, serials, role, path):
         assert body["order"]["items"][0]["product_name"] == "Aviator", body
 
 
-@pytest.mark.parametrize("role", MANAGERS)
+@pytest.mark.parametrize("role", COST_READERS)
 @pytest.mark.parametrize("path", _SERIAL_READS)
-def test_managers_read_a_serial_with_its_cost(client, serials, role, path):
+def test_accounts_read_a_serial_with_its_cost(client, serials, role, path):
     keys = _cost_keys(_get(client, role, "GET", path))
     assert keys, (role, path)
     if "warranty" in path:
@@ -538,18 +542,18 @@ _SERIAL_WRITES = (
 )
 
 
-@pytest.mark.parametrize("narrowed", (False, True))
+@pytest.mark.parametrize("widened", (False, True))
 @pytest.mark.parametrize("path,before,body", _SERIAL_WRITES)
 def test_a_serial_write_answers_cost_by_the_product_rule(
-    client, serials, monkeypatch, path, before, body, narrowed
+    client, serials, monkeypatch, path, before, body, widened
 ):
-    if narrowed:
-        _narrow_product_rule(monkeypatch, "STORE_MANAGER")
+    if widened:
+        _widen_product_rule(monkeypatch, "STORE_MANAGER")
     _serial_unit(serials, "SN-W", before)
     r = client.post(path, json=body, headers=_headers("STORE_MANAGER"))
     assert r.status_code == 200, r.text
     assert r.json()["serial"] == "SN-W" and r.json()["status"] != before, r.json()
-    assert bool(_cost_keys(r.json())) is not narrowed, r.json()
+    assert bool(_cost_keys(r.json())) is widened, r.json()
     assert serials.stock_units.find_one({"serial": "SN-W"})["cost_price"] == COST
 
 
@@ -561,8 +565,8 @@ def test_counter_role_reads_a_locked_blind_count_without_cost(client, shop, role
     assert not _figures_in(body), body
 
 
-@pytest.mark.parametrize("role", ("STORE_MANAGER", "CATALOG_MANAGER"))
-def test_managers_read_the_blind_count_value(client, shop, role):
+@pytest.mark.parametrize("role", ("SUPERADMIN", "ADMIN"))
+def test_accounts_read_the_blind_count_value(client, shop, role):
     assert _cost_keys(_get(client, role, *BLIND[:2]))
 
 
@@ -609,20 +613,20 @@ def _open_count(db, count_id):
     )
 
 
-# (role, sees cost, the product rule narrowed to leave that role out)
+# (role, sees cost, the product rule widened to take that role in)
 _WRITE_CASES = [
     ("WORKSHOP_STAFF", False, False),
-    ("STORE_MANAGER", True, False),
-    ("STORE_MANAGER", False, True),
+    ("STORE_MANAGER", False, False),
+    ("STORE_MANAGER", True, True),
 ]
 
 
-@pytest.mark.parametrize("role,sees,narrowed", _WRITE_CASES)
+@pytest.mark.parametrize("role,sees,widened", _WRITE_CASES)
 def test_completing_a_count_answers_cost_to_managers_only(
-    client, shop, monkeypatch, role, sees, narrowed
+    client, shop, monkeypatch, role, sees, widened
 ):
-    if narrowed:
-        _narrow_product_rule(monkeypatch, role)
+    if widened:
+        _widen_product_rule(monkeypatch, role)
     _open_count(shop, f"SC-{role}")
     r = client.post(
         f"/api/v1/inventory/stock-count/SC-{role}/complete", headers=_headers(role)
@@ -652,14 +656,14 @@ def _qc_failed_job(db, job_id):
     )
 
 
-@pytest.mark.parametrize("role,sees,narrowed", _WRITE_CASES)
+@pytest.mark.parametrize("role,sees,widened", _WRITE_CASES)
 def test_a_rework_answers_its_spoilage_cost_to_managers_only(
-    client, shop, monkeypatch, role, sees, narrowed
+    client, shop, monkeypatch, role, sees, widened
 ):
     from api.routers.workshop import qc as qc_mod
 
-    if narrowed:
-        _narrow_product_rule(monkeypatch, role)
+    if widened:
+        _widen_product_rule(monkeypatch, role)
     monkeypatch.setattr(qc_mod, "get_db", lambda: _Conn(shop))
     _qc_failed_job(shop, f"J-{role}")
     r = client.post(
@@ -709,7 +713,7 @@ def _below_cost_on_both_doors(client, doors, role):
     return [created.json()["detail"], added.json()["detail"]]
 
 
-@pytest.mark.parametrize("role", ("SALES_STAFF", "SALES_CASHIER"))
+@pytest.mark.parametrize("role", ("SALES_STAFF", "SALES_CASHIER", "STORE_MANAGER", "AREA_MANAGER"))
 def test_below_cost_error_names_no_figure_to_the_counter(client, doors, role):
     figure = str(int(_DOOR_COST))  # "12000"
     for detail in _below_cost_on_both_doors(client, doors, role):
@@ -717,8 +721,8 @@ def test_below_cost_error_names_no_figure_to_the_counter(client, doors, role):
         assert figure not in detail and "Rs" not in detail, detail
 
 
-@pytest.mark.parametrize("role", ("STORE_MANAGER", "AREA_MANAGER", "ADMIN"))
-def test_below_cost_error_still_names_the_cost_to_managers(client, doors, role):
+@pytest.mark.parametrize("role", ("ADMIN",))
+def test_below_cost_error_still_names_the_cost_to_accounts(client, doors, role):
     for detail in _below_cost_on_both_doors(client, doors, role):
         assert "below cost" in detail.lower(), detail
         assert str(_DOOR_COST) in detail, detail
@@ -726,11 +730,11 @@ def test_below_cost_error_still_names_the_cost_to_managers(client, doors, role):
 
 def test_the_below_cost_error_follows_the_product_rule(client, doors, monkeypatch):
     # The figure goes to whoever cost_mask's "product" context admits, not a
-    # copy of it or another context: narrow it and the manager gets the
-    # counter's words (the sale is still blocked, _below_cost_on_both_doors).
-    _narrow_product_rule(monkeypatch, "STORE_MANAGER")
+    # copy of it or another context: widen it and the manager is told the
+    # cost (the sale is still blocked, _below_cost_on_both_doors).
+    _widen_product_rule(monkeypatch, "STORE_MANAGER")
     for detail in _below_cost_on_both_doors(client, doors, "STORE_MANAGER"):
-        assert detail == _BELOW_COST_TO_COUNTER, detail
+        assert str(_DOOR_COST) in detail, detail
 
 
 # ---------------------------------------------------------------------------
@@ -996,18 +1000,18 @@ from tests.test_counter_roles_no_purchase_reads import (  # noqa: E402
 
 
 @pytest.mark.skipif(not os.path.exists(_COST_CELL), reason="frontend/ not shipped here")
-def test_frontend_purchase_price_roles_are_the_purchase_context():
+def test_frontend_cost_roles_are_the_purchase_context():
     from api.services import rbac_policy as rbac
     from api.services.cost_mask import can_see_cost
 
     with open(_COST_CELL, encoding="utf-8") as fh:
-        m = re.search(r"PURCHASE_PRICE_ROLES[^=]*=\s*\[([^\]]*)\]", fh.read())
-    assert m, "CostCell.tsx no longer declares PURCHASE_PRICE_ROLES"
+        m = re.search(r"COST_ROLES[^=]*=\s*\[([^\]]*)\]", fh.read())
+    assert m, "CostCell.tsx no longer declares COST_ROLES"
     want = {r for r in rbac.ALL_ROLES if can_see_cost({"roles": [r]}, "purchase")}
     assert set(re.findall(r"'([A-Z_]+)'", m.group(1))) == want
-    _assert_screens_read("PURCHASE_PRICE_ROLES", ("pages/purchase/VendorReturns.tsx",))
     _assert_screens_read(
-        "PRODUCT_COST_ROLES", ("components/inventory/StockAlertsOverview.tsx",)
+        "COST_ROLES",
+        ("pages/purchase/VendorReturns.tsx", "components/inventory/StockAlertsOverview.tsx"),
     )
 
 

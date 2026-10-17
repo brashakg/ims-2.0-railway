@@ -160,8 +160,10 @@ ROWS: List[Dict[str, object]] = [
     },
     # --- /api/v1/rtv-debit-notes (F20 GST debit note ON TOP of an RTV) ---
     # The GST-compliant debit-note DOCUMENT issued to a vendor when goods are
-    # returned. Issuing + Tally export are gated to the same vendor/AP role set
-    # vendor_returns / vendor_rma use (a cashier can NEVER issue a debit note).
+    # returned. Issuing is gated to the same purchase role set vendor_returns /
+    # vendor_rma use (a cashier can NEVER issue a debit note); the Tally export
+    # is nothing but the note's money, so it is the accounts' (ACCOUNTS, owner
+    # ruling 2026-10-12).
     # F60: GET list/detail/print carry the vendor GSTIN and the note total, so
     # they go to the Vendor Returns readers (cost_mask.RETURN_READERS),
     # store-scoped per object in the handler.
@@ -268,6 +270,13 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/vendors/grn/{grn_id}/void",
+        "allowed": RECEIVE,
+    },
+    # Audit C1 (R1-13): 'Not received' for a held receipt's units beyond its
+    # order -- the store manager's decision; receiving is MANAGERS ONLY.
+    {
+        "method": "POST",
+        "path": "/api/v1/vendors/grn/{grn_id}/drop-over-order",
         "allowed": RECEIVE,
     },
     {
