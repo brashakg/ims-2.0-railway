@@ -33,6 +33,7 @@ interface GSTR3BITCAvailable {
 }
 
 interface GSTR3BData {
+  unallocatedLegacyBills?: { count: number; tax: number; bill_numbers: string[]; failed?: boolean };
   period: string;
   gstin: string;
   legalName: string;
@@ -235,6 +236,13 @@ export function GSTR3BReport() {
         </div>
       ) : reportData ? (
         <>
+          {(reportData.unallocatedLegacyBills?.count || reportData.unallocatedLegacyBills?.failed) ? (
+            <div className="card border border-amber-300 bg-amber-50 text-amber-900" role="alert">
+              <p className="font-semibold">Purchase bills need a receiving GSTIN</p>
+              <p className="text-sm">These legacy bills are excluded from this return until their GSTIN is confirmed. GSTN JSON download is blocked to prevent an incorrect filing.</p>
+              <p className="text-sm">{reportData.unallocatedLegacyBills.bill_numbers.join(', ') || 'Bill allocation could not be verified. Retry or open the GST cross-check.'}</p>
+            </div>
+          ) : null}
           {/* Summary Cards */}
           <div className="grid grid-cols-1 tablet:grid-cols-4 gap-4">
             <div className="card">

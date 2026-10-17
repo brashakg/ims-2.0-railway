@@ -265,8 +265,9 @@ def aggregate_gstr3b(
     sets off on its own, so one GSTIN's spare credit (an IGST surplus on a Pune
     shop's out-of-state buying) never pays another GSTIN's tax, nor one
     company's another's. A return sets off its own shops' outward tax against
-    its own credit -- its GSTIN-bound slice plus the company-wide remainder, as
-    that GSTIN's GSTR-3B prints it -- so the entity's net cash is the sum of
+    its own credit -- its GSTIN-bound slice. Legacy company-wide credit from
+    older callers is set off only when there is one return; otherwise it is
+    reported as unallocated, never spent twice. The entity's net cash is the sum of
     each GSTIN's own taxPaidCash. RCM is always discharged in cash on top.
     Reports with no GSTIN share one return per company.
 
@@ -308,6 +309,10 @@ def aggregate_gstr3b(
     tot = _blank()
     regular_taken: set = set()  # company-wide ITC + RCM in tot: once per entity
     gstin_taken: set = set()    # GSTIN-bound ITC: once per (entity, GSTIN)
+    registrations: Dict[Any, set] = {}
+    for key, gstin in zip(keys, gstins):
+        registrations.setdefault(key, set()).add(gstin or "")
+    unallocated_credit = 0.0
 
     def _credit(dst, itc, rcm):
         for h in ("c", "s", "i"):
@@ -339,13 +344,17 @@ def aggregate_gstr3b(
         rcm_reg, rcm_bound = _rcm_parts(rep)
         reg = _itc_regular(rep)
 
-        # Company-wide ITC + RCM: on every return of the company (its GSTR-3B
-        # prints it), counted ONCE per entity in the totals.
-        if new_return:
+        # Current reports allocate every bill to one GSTIN. Older callers may
+        # still send company-wide credit: never spend that credit once per
+        # registration when no return owns it.
+        single_return = len(registrations[key]) == 1
+        if new_return and single_return:
             _credit(b, reg, rcm_reg)
         if key not in regular_taken:
             regular_taken.add(key)
             _credit(tot, reg, rcm_reg)
+            if not single_return:
+                unallocated_credit += sum(reg[h] for h in ("i", "c", "s"))
 
         # GSTIN-bound ITC + RCM -> count ONCE per company + GSTIN (legacy per-report path
         # or a report with no GSTIN sums it in, since those keys are already
@@ -394,6 +403,7 @@ def aggregate_gstr3b(
         # so build_crosscheck marks the 'Net GST payable (cash)' comparator
         # advisory (R2).
         "bucketCount": len(buckets),
+        "unallocatedCredit": _r(unallocated_credit),
         "itc": {
             "cgst": _r(itc_c),
             "sgst": _r(itc_s),

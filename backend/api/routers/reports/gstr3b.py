@@ -1,6 +1,6 @@
 """GSTR-3B (summary return): credit notes, RCM, computation, endpoints."""
 
-from fastapi import Depends, Query
+from fastapi import Depends, HTTPException, Query
 from typing import Optional
 from datetime import date
 from ...utils.ist import (
@@ -25,10 +25,10 @@ from .gst_base import (
 )
 from .gst_itc import (
     _cn_foreign_store,
-    _gstin_bound,
     _itc_from_vendor_bills,
     _itc_gstin_from_vendor_bills,
     _itc_match,
+    _unallocated_legacy_bills,
     _itc_store_scope,
     _placement,
     _sum_heads,
@@ -237,10 +237,10 @@ def _rcm_placed(db, active_store, year, mon, last_day):
     (match, bound match), or None when the store cannot be read."""
     entity_id, store_gstin, shops = _itc_store_scope(db, active_store)
     match = {
-        **_placement(shops, entity_id, store_gstin, year, mon, last_day),
+        **_placement(shops, entity_id, store_gstin, year, mon, last_day, db),
         "reverse_charge": True,
     }
-    return match, {"$and": [match, _gstin_bound(shops, store_gstin)]}
+    return match, match
 
 
 def _rcm_from_vendor_bills(db, active_store, year, mon, last_day):
@@ -285,7 +285,7 @@ def _rcm_credit_from_vendor_bills(db, active_store, year, mon, last_day):
         return 0.0, 0.0, 0.0
     try:
         entity_id, store_gstin, shops = _itc_store_scope(db, active_store)
-        match = _itc_match(shops, entity_id, store_gstin, year, mon, last_day)
+        match = _itc_match(shops, entity_id, store_gstin, year, mon, last_day, db)
         return _sum_heads(db, {**match, "reverse_charge": True})[:3]
     except Exception:
         pass
@@ -507,8 +507,11 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
     def _r(v: float) -> float:
         return round(v, 2)
 
+    entity_id = _itc_store_scope(db, active_store)[0] if db is not None else None
+    unallocated = _unallocated_legacy_bills(db, entity_id, year, mon, last_day)
     return {
         "period": month,
+        "unallocatedLegacyBills": unallocated,
         "gstin": store_gstin,
         "legalName": store_legal_name,
         "storeState": store_state,
@@ -651,6 +654,12 @@ async def gstr3b_gstn_json(
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
     period = _normalise_period(month, year)
     data = _compute_gstr3b(period, active_store)
+    unallocated = data.get("unallocatedLegacyBills") or {}
+    if unallocated.get("count") or unallocated.get("failed"):
+        raise HTTPException(
+            status_code=409,
+            detail="Assign each unallocated legacy purchase bill to its receiving GSTIN before downloading GSTN JSON. Open the GST cross-check and correct the bill allocation.",
+        )
     try:
         return to_gstr3b_json(data, gstin=data.get("gstin", ""), period=period)
     except Exception:

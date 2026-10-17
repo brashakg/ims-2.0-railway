@@ -42,11 +42,22 @@ vi.mock('../../../services/api', () => ({
 }));
 
 import { GSTR3BReport } from '../GSTR3BReport';
+import { reportsApi } from '../../../services/api';
 
 // The first element carrying the label (the summary card comes before the tables).
 const card = (label: string) => screen.getAllByText(label)[0].closest('.card')?.textContent ?? '';
 
 describe('GSTR-3B screen on a reverse-charge month', () => {
+  it('names unallocated legacy bills and explains the filing block', async () => {
+    const original = vi.mocked(reportsApi.getGSTR3BReport).getMockImplementation()!;
+    vi.mocked(reportsApi.getGSTR3BReport).mockImplementationOnce(async (...args) => ({
+      ...(await original(...args)),
+      unallocatedLegacyBills: { count: 1, tax: 1000, bill_numbers: ['LEGACY-77'] },
+    }));
+    render(<GSTR3BReport />);
+    expect(await screen.findByRole('alert')).toHaveTextContent('LEGACY-77');
+    expect(screen.getByRole('alert')).toHaveTextContent('GSTN JSON download is blocked');
+  });
   it('reads the net from the server cash figure, never tax payable less credit', async () => {
     render(<GSTR3BReport />);
     await screen.findByText('Net Tax Liability');

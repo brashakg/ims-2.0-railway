@@ -662,6 +662,64 @@ class TestTwoRegistrations:
         assert stored["gst_payable"] == 1000.0, out
 
 
+class TestLegacyCreditPlacement:
+    @staticmethod
+    def _two_returns():
+        db, _cli = _world()
+        db["entities"].update_one({"entity_id": "E1"}, {"$push": {"gstins": {"gstin": BUY_MH, "state_code": "27"}}})
+        db["stores"].insert_one({"store_id": "S2", "entity_id": "E1", "state_code": "27", "gstin": BUY_MH})
+        for sid in ("S1", "S2"):
+            db["orders"].insert_one({"order_id": "O-" + sid, "store_id": sid, "status": "COMPLETED", "tax_amount": 1000.0, "grand_total": 6000.0, "created_at": datetime(2026, 5, 10, 6)})
+        db["vendor_bills"].insert_one({"bill_id": "LEGACY", "bill_number": "LEGACY", "vendor_id": "V1", "vendor_gstin": SUP_MH, "recipient_entity_id": "E1", "bill_date": "2026-05-03", "taxable_amount": 20000.0, "tax_amount": 1000.0, "igst_total": 1000.0, "cgst_total": 0.0, "sgst_total": 0.0, "total_amount": 21000.0, "itc_eligible": True, "status": "OUTSTANDING"})
+        return db
+
+    def test_ambiguous_legacy_credit_is_not_spent_on_two_returns(self):
+        db = self._two_returns()
+        for sid in ("S1", "S2"):
+            report = reports._compute_gstr3b("2026-05", sid)
+            assert sum(report["taxPaidCash"].values()) == 1000.0
+            assert sum(report["itcAvailable"].values()) == 0.0
+            assert report["unallocatedLegacyBills"] == {"count": 1, "tax": 1000.0, "bill_numbers": ["LEGACY"]}
+            assert to_gstr3b_json(report)["itc_elg"]["itc_net"]["iamt"] == 0.0
+        cross = _run_gst_cross_check(db, 5, 2026, "E1")
+        assert cross["gstr3b"]["netCash"]["total"] == 2000.0
+        from api.routers.reports.gst_itc import _itc_unplaced
+        assert _itc_unplaced(db, 2026, 5, 31, "E1")["bill_numbers"] == ["LEGACY"]
+        from api.routers.reports.gstr3b import gstr3b_gstn_json
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as err:
+            asyncio.run(gstr3b_gstn_json(month="2026-05", year=None, store_id="S1", entity_id=None, current_user=dict(_ADMIN)))
+        assert err.value.status_code == 409
+        assert "GSTIN" in err.value.detail
+
+    @pytest.mark.parametrize("source", ["store", "receipt", "sole_company"])
+    def test_verified_legacy_credit_is_allocated_exactly_once(self, source):
+        db = self._two_returns()
+        if source == "store":
+            db["vendor_bills"].update_one({"bill_id": "LEGACY"}, {"$set": {"store_id": "S1"}})
+        elif source == "receipt":
+            db["grns"].insert_one({"grn_id": "G1", "store_id": "S1"})
+            db["vendor_bills"].update_one({"bill_id": "LEGACY"}, {"$set": {"grn_id": "G1"}})
+        else:
+            db["entities"].update_one({"entity_id": "E1"}, {"$pull": {"gstins": {"gstin": BUY_MH}}})
+            db["stores"].delete_one({"store_id": "S2"})
+            db["orders"].delete_one({"store_id": "S2"})
+        report = reports._compute_gstr3b("2026-05", "S1")
+        assert report["itcAvailable"]["integratedTax"] == 1000.0
+        assert report["itcAvailableGstin"]["integratedTax"] == 1000.0
+        assert report["unallocatedLegacyBills"]["count"] == 0
+        cross = _run_gst_cross_check(db, 5, 2026, "E1")
+        assert cross["gstr3b"]["itc"]["total"] == 1000.0
+        assert cross["gstr3b"]["netCash"]["total"] == (0.0 if source == "sole_company" else 1000.0)
+
+    def test_conflicting_receipt_and_shop_stay_unallocated_even_without_credit(self):
+        db = self._two_returns()
+        db["grns"].insert_one({"grn_id": "G1", "store_id": "S2"})
+        db["vendor_bills"].update_one({"bill_id": "LEGACY"}, {"$set": {"store_id": "S1", "grn_id": "G1", "reverse_charge": True, "itc_eligible": False}})
+        for sid in ("S1", "S2"):
+            assert reports._compute_gstr3b("2026-05", sid)["unallocatedLegacyBills"]["count"] == 1
+
+
 class TestCashRule:
     """THE set-off (gst_itc.net_cash_due), per head (igst, cgst, sgst)."""
 

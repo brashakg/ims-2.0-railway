@@ -314,11 +314,11 @@ def test_aggregate_gstr3b_empty_is_safe():
 
 def test_aggregate_gstr3b_r1_transfer_itc_order_independent():
     # R1: a multi-GSTIN entity in a same-entity cross-state transfer month.
-    # S1 (sender GSTIN) itc = 20000 regular; S2 (receiver GSTIN) itc = 20000
-    # regular + 9000 transfer. The entity ITC/net-cash must NOT depend on which
+    # S1 (sender GSTIN) owns 20000 credit; S2 owns 9000 transfer credit.
+    # The entity ITC/net-cash must NOT depend on which
     # store Mongo enumerates first.
-    s1 = _store_gstr3b_split(reg_i=20000.0, trf_i=0.0, out_i=25000.0, out_taxable=100000.0)
-    s2 = _store_gstr3b_split(reg_i=20000.0, trf_i=9000.0, out_i=0.0, out_taxable=0.0)
+    s1 = _store_gstr3b_split(trf_i=20000.0, out_i=25000.0, out_taxable=100000.0)
+    s2 = _store_gstr3b_split(trf_i=9000.0, out_i=0.0, out_taxable=0.0)
     fwd = aggregate_gstr3b([s1, s2], ["E1", "E1"], ["GSTIN-A", "GSTIN-B"])
     rev = aggregate_gstr3b([s2, s1], ["E1", "E1"], ["GSTIN-B", "GSTIN-A"])
     # ITC = regular once (20000) + transfer once for the RECEIVER GSTIN (9000).
@@ -331,6 +331,15 @@ def test_aggregate_gstr3b_r1_transfer_itc_order_independent():
     # own and never pays GSTIN-A's tax (each registration files on its own).
     assert fwd["netCash"]["total"] == rev["netCash"]["total"] == 5000.0
     assert fwd["bucketCount"] == rev["bucketCount"] == 2
+
+
+def test_aggregate_gstr3b_never_spends_unallocated_credit_twice():
+    a = _store_gstr3b_split(reg_i=1000.0, out_c=500.0, out_s=500.0)
+    b = _store_gstr3b_split(reg_i=1000.0, out_c=500.0, out_s=500.0)
+    result = aggregate_gstr3b([a, b], ["E1", "E1"], ["G-A", "G-B"])
+    assert result["itc"]["total"] == 1000.0
+    assert result["unallocatedCredit"] == 1000.0
+    assert result["netCash"]["total"] == 2000.0
 
 
 def test_aggregate_gstr3b_one_gstins_spare_igst_never_pays_anothers_cgst_sgst():
