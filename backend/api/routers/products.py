@@ -1288,12 +1288,10 @@ async def create_product(
             product, current_user, source="FORM", as_draft=as_draft
         )
         if created:
-            # Invalidate product cache for this store
-            from ..services.cache import cache
+            # A new product is shared by every shop.
+            from ..services.cache import invalidate_product_lists
 
-            cache.delete_pattern(
-                f"products:{current_user.get('active_store_id', '')}:*"
-            )
+            invalidate_product_lists()
             # Step-13: recompute SMART collections (fail-soft, never blocks).
             _refresh_collections_after_product(created)
             return {
@@ -1595,9 +1593,9 @@ async def bulk_create_products(
     # Invalidate the product list cache once if anything was actually created.
     if created_count and repo is not None:
         try:
-            from ..services.cache import cache
+            from ..services.cache import invalidate_product_lists
 
-            cache.delete_pattern("products:*")
+            invalidate_product_lists()
         except Exception:  # noqa: BLE001
             pass
 
@@ -1905,9 +1903,9 @@ async def bulk_price_update(
         _audit_bulk("BULK_PRICE_UPDATE", current_user, summary, committed)
         # Invalidate the product list cache so the catalog reflects new prices.
         try:
-            from ..services.cache import cache
+            from ..services.cache import invalidate_product_lists
 
-            cache.delete_pattern("products:*")
+            invalidate_product_lists()
         except Exception:  # noqa: BLE001
             pass
 
@@ -2044,9 +2042,9 @@ async def bulk_offer_update(
     if body.apply and committed:
         _audit_bulk("BULK_OFFER_UPDATE", current_user, summary, committed)
         try:
-            from ..services.cache import cache
+            from ..services.cache import invalidate_product_lists
 
-            cache.delete_pattern("products:*")
+            invalidate_product_lists()
         except Exception:  # noqa: BLE001
             pass
 
