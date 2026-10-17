@@ -1467,12 +1467,12 @@ def refuse_walk_in_reverse_charge(reverse_charge, receipt) -> None:
 def _assert_unpriced_po_bill(body, grn_doc, db=None):
     """Unknown prices on any receipt door must not become inferred zeroes.
 
-    Explicit taxable amounts retain their existing semantics. Otherwise a
+    Positive taxable amounts retain their existing semantics. Otherwise a
     positive-quantity line needs a supplier price if its PO or any underlying
     receipt was unpriced, including consolidated challans and no-PO buys.
     """
     zero_lines = [ln for ln in body.lines if ln.product_id and ln.qty > 0
-                  and ln.unit_price <= 0 and ln.taxable is None]
+                  and (ln.taxable <= 0 if ln.taxable is not None else ln.unit_price <= 0)]
     if not zero_lines:
         return
     receipts = [grn_doc] if grn_doc else []
