@@ -33,6 +33,9 @@ const products = vi.hoisted(() => ({ getProducts: vi.fn() }));
 vi.mock('../../../services/api', () => ({ vendorsApi: api }));
 vi.mock('../../../services/api/products', () => ({ productApi: products }));
 vi.mock('../../../context/ToastContext', () => ({ useToast: () => toastMock }));
+vi.mock('../../../hooks/usePOSQueries', () => ({
+  useStores: () => ({ data: [{ store_id: 'S1', store_name: 'Receiving shop' }] }),
+}));
 vi.mock('../../../context/AuthContext', () => ({
   useAuth: () => ({ user: { activeStoreId: 'S1', roles: ['STORE_MANAGER'] }, hasRole: () => true }),
 }));
