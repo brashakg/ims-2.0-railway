@@ -2434,15 +2434,22 @@ async def get_audit_logs_summary(current_user: dict = Depends(get_current_user))
 DEFAULT_CREDIT_LIMIT = 150000.0  # owner ruling 2026-10-08: Rs 1,50,000
 
 
-def chain_default_credit_limit() -> float:
+def chain_default_credit_limit(*, strict: bool = False) -> float:
     """Credit limit for a customer with none of their own: the value saved on
-    Settings > Operational Rules, else Rs 1,50,000. Never raises - a missing,
-    unreadable or infinite value falls back to the ruling, never to 'unlimited'."""
+    Settings > Operational Rules, else Rs 1,50,000. Display/settings reads retain
+    their fallback; credit approval and preview use strict=True so a failed read
+    cannot silently replace a smaller configured ceiling."""
     try:
         coll = _get_settings_collection("admin_controls")
+        if strict and coll is None:
+            raise RuntimeError("Credit settings unavailable")
         doc = coll.find_one({"_id": "default"}) if coll is not None else None
         value = float(((doc or {}).get("operational_rules") or {}).get("default_credit_limit") or 0)
+        if strict and value and not 0 < value < float("inf"):
+            raise ValueError("Stored credit limit is not usable")
     except Exception:  # noqa: BLE001
+        if strict:
+            raise HTTPException(status_code=503, detail="Credit limit could not be verified. Please retry.")
         value = 0.0
     return value if 0 < value < float("inf") else DEFAULT_CREDIT_LIMIT  # NaN fails both
 

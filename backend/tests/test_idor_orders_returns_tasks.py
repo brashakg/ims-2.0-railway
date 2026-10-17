@@ -254,12 +254,34 @@ def test_order_cancel_same_store_still_succeeds(monkeypatch):
 
 
 def test_order_deliver_same_store_still_succeeds(monkeypatch):
-    order = _seed_order(store_id=OWN_STORE, status="READY", payment_status="PARTIAL")
+    import importlib
+    import mongomock
+    from api.services import delivery_gate
+
+    settings = importlib.import_module("api.routers.settings")
+
+    order = _seed_order(
+        store_id=OWN_STORE, status="READY", payment_status="PARTIAL",
+        amount_paid=250.0, balance_due=750.0,
+        payments=[{"method": "CASH", "amount": 250.0}],
+    )
+    db = mongomock.MongoClient().db
+    db.orders.insert_one(dict(order))
+    db.admin_controls.insert_one({
+        "_id": "default", "operational_rules": {"default_credit_limit": 1000},
+    })
+    monkeypatch.setattr(delivery_gate, "_resolve_db", lambda supplied: db)
+    monkeypatch.setattr(settings, "_get_settings_collection", lambda name: db[name])
     client, repo = _orders_client(monkeypatch, order, ["STORE_MANAGER"], OWN_STORE)
     r = client.post("/api/v1/orders/ORD-1/deliver")
-    assert r.status_code == 200
+    assert r.status_code == 200, r.text
     assert r.json()["status"] == "DELIVERED"
     assert repo.status_updates == ["DELIVERED"]
+    stored = db.orders.find_one({"order_id": "ORD-1"})
+    assert [(p["method"], p["amount"]) for p in stored["payments"]] == [
+        ("CASH", 250.0), ("CREDIT", 750.0),
+    ]
+    assert (stored["amount_paid"], stored["balance_due"]) == (250.0, 750.0)
 
 
 def test_order_confirm_ready_same_store_still_succeed(monkeypatch):

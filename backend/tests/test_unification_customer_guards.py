@@ -418,17 +418,27 @@ class TestUpdateCustomerEndpoint:
         # The khata limit was NOT written.
         assert repo.updates == []
 
-    def test_manager_credit_limit_ok(self, monkeypatch):
+    @pytest.mark.parametrize("role", ["ADMIN", "SUPERADMIN"])
+    def test_admin_credit_limit_ok(self, monkeypatch, role):
         repo = self._seed(monkeypatch)
         res = asyncio.run(
             update_customer(
                 customer_id="C1",
                 customer=CustomerUpdate(credit_limit=50000),
-                current_user=_manager(),
+                current_user={**_manager(), "roles": [role]},
             )
         )
         assert res["customer_id"] == "C1"
         assert repo.docs["C1"]["credit_limit"] == 50000
+
+    @pytest.mark.parametrize("role", ["STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT", "CASHIER", "SALES_STAFF"])
+    def test_non_admin_credit_limit_is_refused(self, monkeypatch, role):
+        repo = self._seed(monkeypatch)
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(update_customer("C1", CustomerUpdate(credit_limit=50000),
+                                        current_user={**_manager(), "roles": [role]}))
+        assert exc.value.status_code == 403
+        assert repo.updates == []
 
     def test_cashier_non_credit_edit_still_allowed(self, monkeypatch):
         # The gate is ONLY on credit_limit; a cashier can still edit a name.

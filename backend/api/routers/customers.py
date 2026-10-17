@@ -466,7 +466,7 @@ class CustomerUpdate(BaseModel):
     patients: Optional[List[PatientCreate]] = None
     # POS-4: per-customer credit limit (khata). 0 or unset = no limit of
     # their own, so the chain default applies (effective_credit_limit).
-    credit_limit: Optional[float] = Field(default=None, ge=0)
+    credit_limit: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False, strict=True)
     # F39 note: `tags` are deliberately NOT a field here. The generic
     # PUT /{customer_id} is only AUTHENTICATED -- exposing tags on this model
     # would let any role set them, bypassing the STORE_MANAGER+ gate, the
@@ -1221,16 +1221,15 @@ async def update_customer(
 
         # GATE: credit_limit (khata) is a monetary control. The audit found a
         # cashier could raise a customer's credit ceiling through this only-
-        # AUTHENTICATED edit. Restrict credit_limit edits to manager+ roles
-        # (the same _CREDIT_ROLES that gate issuing store-credit / loyalty).
+        # AUTHENTICATED edit. Only ADMIN/SUPERADMIN may change this ceiling.
         if "credit_limit" in update_data:
             roles = current_user.get("roles", []) or []
-            if not any(r in roles for r in _CREDIT_ROLES):
+            if not any(r in roles for r in ("ADMIN", "SUPERADMIN")):
                 raise HTTPException(
                     status_code=403,
                     detail=(
                         "Setting a customer credit limit (khata) requires a "
-                        "Store Manager, Area Manager, Accountant or Admin role."
+                        "Admin or Superadmin role."
                     ),
                 )
 
@@ -1566,68 +1565,30 @@ async def get_customer_orders(
     return {"orders": mask_cost_list(orders, current_user, "product")}
 
 
-def effective_credit_limit(customer_doc: Optional[dict]) -> float:
+def effective_credit_limit(customer_doc: Optional[dict], *, strict: bool = False) -> float:
     """The credit limit that applies to a customer (owner ruling 2026-10-08):
     their own limit when they have one, else the chain default from
     Settings > Operational Rules (Rs 1,50,000 unless changed there). Read by
     the till's CREDIT check (orders/payments.py) and the credit summary."""
     own = float((customer_doc or {}).get("credit_limit") or 0)
+    if strict and (own < 0 or not own < float("inf")):
+        raise HTTPException(status_code=503, detail="Customer credit limit could not be verified.")
     if own > 0:
         return own
     from .settings import chain_default_credit_limit
 
-    return chain_default_credit_limit()
+    return chain_default_credit_limit(strict=True) if strict else chain_default_credit_limit()
 
 
 def _ar_outstanding(customer_id: str, customer_doc: Optional[dict]) -> float:
-    """Sum of CREDIT-tendered amounts still unpaid for a customer.
+    """The same uncapped, fail-closed exposure used by credit approval."""
+    from ..dependencies import get_order_repository
+    from ..services.credit_limit import outstanding_credit
 
-    Scans the customer's orders for any payment row with method=CREDIT and
-    accumulates the credited amounts. Subtracts any subsequent real-money
-    payments that reduced balance_due to approximate the true AR balance.
-
-    Fail-soft: returns 0.0 if the DB or order collection is unavailable.
-    """
-    try:
-        from ..dependencies import get_order_repository
-
-        order_repo = get_order_repository()
-        if order_repo is None:
-            return 0.0
-
-        # Match by customer_id (also by phone for TechCherry imports)
-        phone = None
-        if customer_doc is not None:
-            phone = customer_doc.get("phone") or customer_doc.get("mobile")
-        or_clauses: list = [{"customer_id": customer_id}]
-        if phone:
-            or_clauses.append({"customer_phone": phone})
-
-        orders = order_repo.find_many(
-            {
-                "$or": or_clauses,
-                "status": {"$nin": ["CANCELLED"]},
-            },
-            sort=[("created_at", -1)],
-            limit=500,
-        )
-        total = 0.0
-        for order in orders or []:
-            # balance_due on a CREDIT order is the outstanding amount the
-            # customer still owes. We sum balance_due only when the order
-            # has at least one CREDIT payment (meaning it was deliberately
-            # put on account), and the payment_status is not PAID.
-            pstatus = order.get("payment_status", "")
-            if pstatus == "PAID":
-                continue
-            has_credit = any(
-                p.get("method") == "CREDIT" for p in (order.get("payments") or [])
-            )
-            if has_credit:
-                total += float(order.get("balance_due") or 0)
-        return round(total, 2)
-    except Exception:  # noqa: BLE001
-        return 0.0
+    repo = get_order_repository()
+    if repo is None:
+        raise HTTPException(503, "Outstanding credit could not be verified. Please retry.")
+    return outstanding_credit(repo.collection, customer_id, customer_doc or {})
 
 
 @router.get("/{customer_id}/credit-summary")
@@ -1647,16 +1608,21 @@ async def get_customer_credit_summary(
         "limit_exceeded": false
       }
 
-    Fail-soft: all amounts default to 0 if the DB is unavailable.
+    Unreadable balances refuse the preview rather than displaying available credit.
     """
+    from ..services.credit_limit import is_walkin
+
     repo = get_customer_repository()
+    if repo is None and not is_walkin(customer_id):
+        raise HTTPException(503, "Customer credit limit could not be verified. Please retry.")
     # Object-level store scope (cross-store IDOR fix): out-of-scope -> 404.
     customer = (
-        _scoped_customer_or_404(customer_id, current_user) if repo is not None else None
+        _scoped_customer_or_404(customer_id, current_user)
+        if repo is not None and not is_walkin(customer_id) else None
     )
 
-    credit_limit = effective_credit_limit(customer)
-    ar_outstanding = _ar_outstanding(customer_id, customer)
+    credit_limit = effective_credit_limit(customer, strict=True)
+    ar_outstanding = 0.0 if is_walkin(customer_id) else _ar_outstanding(customer_id, customer)
     ar_available = (
         None if credit_limit == 0 else round(credit_limit - ar_outstanding, 2)
     )

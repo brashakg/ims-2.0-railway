@@ -20,6 +20,7 @@ import { useState } from 'react';
 import { X, Loader2, AlertTriangle } from 'lucide-react';
 import { customerApi } from '../../services/api/customers';
 import type { UserRole } from '../../types';
+import { useAuth } from '../../context/AuthContext';
 
 /** Who may open the customer-edit door. Owner ruling 2026-09-03 added
  *  CASHIER + SALES_STAFF to the manager tier. */
@@ -41,6 +42,7 @@ export interface EditableCustomer {
   billing_address?: { address?: string } | null;
   gstin?: string;
   gst_number?: string;
+  credit_limit?: number;
 }
 
 /** The fields the modal saved, exactly as sent (phone already normalised).
@@ -51,6 +53,7 @@ export interface SavedCustomerFields {
   email?: string;
   address?: string;
   gstin?: string;
+  credit_limit?: number;
 }
 
 export function EditCustomerModal({
@@ -62,6 +65,10 @@ export function EditCustomerModal({
   onClose: () => void;
   onSaved: (fields: SavedCustomerFields) => void;
 }) {
+  const { user } = useAuth();
+  const canEditCreditLimit = (user?.roles || []).some(role => role === 'ADMIN' || role === 'SUPERADMIN');
+  const [creditLimit, setCreditLimit] = useState(String(customer.credit_limit || 0));
+  const [creditLimitChanged, setCreditLimitChanged] = useState(false);
   const [form, setForm] = useState(() => ({
     name: customer.name || '',
     phone: customer.phone || customer.mobile || '',
@@ -84,6 +91,10 @@ export function EditCustomerModal({
       setError('Please enter a valid email address');
       return;
     }
+    if (canEditCreditLimit && creditLimitChanged && (!Number.isFinite(Number(creditLimit)) || Number(creditLimit) < 0)) {
+      setError('Enter a valid credit limit of zero or more');
+      return;
+    }
     setError(null);
     setSaving(true);
     const normalizedPhone = (form.phone || '').replace(/\D/g, '').slice(-10);
@@ -96,6 +107,7 @@ export function EditCustomerModal({
       // clearing a B2B customer's GSTIN is the server's refusal to give, not
       // this form's to bypass by omission.
       gstin: form.gstin.trim().toUpperCase() || undefined,
+      ...(canEditCreditLimit && creditLimitChanged ? { credit_limit: Number(creditLimit) } : {}),
     };
     try {
       await customerApi.updateCustomer(customer.id, fields as any);
@@ -184,6 +196,21 @@ export function EditCustomerModal({
                 placeholder="Street, city, state, pincode"
               />
             </div>
+            {canEditCreditLimit && (
+              <div>
+                <label htmlFor="customer-credit-limit" className="block text-sm font-medium text-gray-700 mb-1">Credit limit (Rs)</label>
+                <input
+                  id="customer-credit-limit"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={creditLimit}
+                  onChange={(e) => { setCreditLimit(e.target.value); setCreditLimitChanged(true); }}
+                  className="input-field"
+                />
+                <p className="text-xs text-gray-500 mt-1">Zero uses the chain default from Settings. Only Admin or Superadmin can change this limit.</p>
+              </div>
+            )}
             {error && (
               <div className="flex items-start gap-2 p-3 bg-red-50 border border-red-200 rounded-lg text-left text-xs text-red-700">
                 <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />

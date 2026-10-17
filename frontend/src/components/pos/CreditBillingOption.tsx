@@ -5,7 +5,7 @@
 //
 // Fetches the customer's credit summary (limit + AR outstanding) on mount
 // and enforces the limit before the operator can apply the CREDIT tender.
-// A limit of 0 means unlimited (the default for B2C customers).
+// Customers without an individual limit and walk-ins use the chain default.
 
 import { useEffect, useState } from 'react';
 import { usePOSStore } from '../../stores/posStore';
@@ -22,10 +22,11 @@ interface CreditSummary {
 export function CreditBillingOption() {
   const store = usePOSStore();
   const [summary, setSummary] = useState<CreditSummary | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [loadedFor, setLoadedFor] = useState<string | null>(null);
 
   const customerId = store.customer?.id;
-  const isWalkin = !customerId || customerId.startsWith('walkin-');
+  const creditCustomerId = customerId || 'walk-in';
 
   const hasCreditPayment = (store.payments || []).some(p => p.method === 'CREDIT');
   const creditAmount = (store.payments || [])
@@ -34,16 +35,14 @@ export function CreditBillingOption() {
 
   useEffect(() => {
     let alive = true;
-    if (isWalkin || !customerId) return;
-
+    setSummary(null);
     setLoading(true);
     customersApi
-      .getCreditSummary(customerId)
+      .getCreditSummary(creditCustomerId)
       .then((data) => {
-        if (alive) setSummary(data);
+        if (alive) { setSummary(data); setLoadedFor(creditCustomerId); }
       })
       .catch(() => {
-        // fail-soft: no limit enforced when summary unavailable
         if (alive) setSummary(null);
       })
       .finally(() => {
@@ -52,18 +51,22 @@ export function CreditBillingOption() {
 
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [customerId]);
+  }, [creditCustomerId]);
 
   const grandTotal = store.getGrandTotal();
+  const cashPaid = (store.payments || []).filter(p => p.method !== 'CREDIT').reduce((sum, p) => sum + p.amount, 0);
+  const unpaid = Math.max(0, Math.round((grandTotal - cashPaid) * 100) / 100);
+  const verified = summary !== null && loadedFor === creditCustomerId;
   const wouldExceed =
-    summary !== null &&
+    verified &&
     summary.credit_limit > 0 &&
-    summary.ar_outstanding + grandTotal > summary.credit_limit;
+    summary.ar_outstanding + unpaid > summary.credit_limit;
 
   const handleAddCredit = () => {
+    if (!verified || loading || wouldExceed || unpaid <= 0) return;
     store.addPayment({
       method: 'CREDIT',
-      amount: grandTotal,
+      amount: unpaid,
       reference: 'Account Credit',
     });
   };
@@ -92,12 +95,12 @@ export function CreditBillingOption() {
       </div>
 
       {/* Credit limit / AR summary */}
-      {!isWalkin && summary !== null && (
+      {verified && (
         <div className="mb-3 bg-white rounded-lg border border-blue-100 p-3 text-sm space-y-1">
           <div className="flex justify-between text-gray-600">
             <span>Credit limit</span>
             <span className="font-medium text-gray-900">
-              {summary.credit_limit === 0 ? 'Unlimited' : fc(summary.credit_limit)}
+              {fc(summary.credit_limit)}
             </span>
           </div>
           <div className="flex justify-between text-gray-600">
@@ -124,19 +127,20 @@ export function CreditBillingOption() {
             {summary && summary.credit_limit > 0
               ? ` of ${fc(summary.credit_limit)}`
               : ''}.
-            Get manager approval or collect cash/card.
+            Collect payment or ask an Admin to review the limit.
           </p>
         </div>
       )}
 
+      {!loading && !verified && <p role="alert" className="mb-3 text-sm text-red-700">Credit limit could not be checked. Reopen this option to retry, or collect payment.</p>}
       {!hasCreditPayment ? (
         <button
           type="button"
           onClick={handleAddCredit}
-          disabled={wouldExceed}
+          disabled={!verified || loading || wouldExceed || unpaid <= 0}
           className="btn-primary w-full text-sm disabled:opacity-50 disabled:cursor-not-allowed"
         >
-          {wouldExceed ? 'Credit Limit Exceeded' : 'Mark Full Amount as Credit'}
+          {loading ? 'Checking Credit Limit' : wouldExceed ? 'Credit Limit Exceeded' : 'Mark Unpaid Amount as Credit'}
         </button>
       ) : (
         <div className="space-y-3">

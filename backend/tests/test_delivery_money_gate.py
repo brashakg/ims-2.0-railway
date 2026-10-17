@@ -137,9 +137,20 @@ class RecordingApprovalEngine:
 
 
 @pytest.fixture(autouse=True)
-def _reset_approval_engine():
+def _reset_approval_engine(monkeypatch):
     RecordingApprovalEngine.outcome = {"ok": False, "error": "not configured"}
     RecordingApprovalEngine.calls = []
+    # These role/token tests use read-only router fakes. Supply a real isolated
+    # credit database for the new ceiling leg rather than bypassing that leg.
+    import mongomock
+    from api.services import credit_limit
+    original = credit_limit.record_handover_credit
+    def checked_credit(order, user, supplied_db):
+        db = mongomock.MongoClient().db
+        db.orders.insert_one(dict(order))
+        db.customers.insert_one({"customer_id": order.get("customer_id"), "credit_limit": 150000})
+        return original(order, user, db)
+    monkeypatch.setattr(credit_limit, "record_handover_credit", checked_credit)
     yield
 
 

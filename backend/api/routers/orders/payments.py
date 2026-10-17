@@ -112,44 +112,6 @@ async def add_payment(
                 detail=f"Payment amount exceeds balance due (Rs {balance_due})",
             )
 
-        # POS-4: credit-limit (khata) guard.
-        # When a CREDIT tender is used, enforce the customer's credit limit:
-        # their own, else the chain default (owner 2026-10-08,
-        # customers.effective_credit_limit). Over the limit stays BLOCKED.
-        # Fail-soft (unchanged): an error while reading skips the check.
-        if payment.method == PaymentMethod.CREDIT:
-            customer_id_for_limit = order.get("customer_id")
-            if customer_id_for_limit and not customer_id_for_limit.startswith(
-                "walkin-"
-            ):
-                try:
-                    from ..customers import _ar_outstanding, effective_credit_limit
-
-                    customer_repo = get_customer_repository()
-                    customer_doc = (
-                        customer_repo.find_by_id(customer_id_for_limit)
-                        if customer_repo is not None
-                        else None
-                    )
-                    credit_limit = effective_credit_limit(customer_doc)
-                    if credit_limit > 0:
-                        ar_now = _ar_outstanding(customer_id_for_limit, customer_doc)
-                        if ar_now + payment.amount > credit_limit:
-                            raise HTTPException(
-                                status_code=400,
-                                detail=(
-                                    f"Credit limit exceeded: customer limit is "
-                                    f"Rs {credit_limit:.2f}, current AR outstanding "
-                                    f"Rs {ar_now:.2f}. Adding Rs {payment.amount:.2f} "
-                                    f"would exceed by Rs "
-                                    f"{(ar_now + payment.amount - credit_limit):.2f}."
-                                ),
-                            )
-                except HTTPException:
-                    raise
-                except Exception as _exc:  # noqa: BLE001
-                    logger.warning("[ORDERS] credit-limit check skipped: %s", _exc)
-
         # Gift voucher: REDEEM (decrement the card) before recording the
         # payment, so an abandoned sale never burns a card and there is no
         # client-side double-spend. The atomic redeem is the single source
@@ -279,10 +241,26 @@ async def add_payment(
                 )
             )
 
-        if repo.add_payment(order_id, payment_data):
+        if payment.method == PaymentMethod.CREDIT:
+            from ...services.credit_limit import record_credit
+
+            recorded = record_credit(repo, order, payment_data, get_customer_repository())
+        else:
+            recorded = repo.add_payment(order_id, payment_data)
+        if recorded:
             # Auto-confirm DRAFT orders when first payment is received
             # This fixes the "stuck in DRAFT+PARTIAL" lifecycle issue
             refreshed = repo.find_by_id(order_id)
+            if idem_key and refreshed:
+                saved = next((p for p in refreshed.get("payments") or []
+                              if p.get("idempotency_key") == idem_key), None)
+                if saved and saved.get("payment_id") != payment_data["payment_id"]:
+                    return {
+                        "payment_id": saved.get("payment_id"), "message": "Payment recorded",
+                        "amount": saved.get("amount"), "order_status": refreshed.get("status", "DRAFT"),
+                        "payment_status": refreshed.get("payment_status", "UNPAID"),
+                        "_idempotent_replay": True,
+                    }
             auto_confirmed = False
             workshop_job_id = None
             if refreshed and refreshed.get("status") == "DRAFT":
@@ -348,4 +326,6 @@ async def add_payment(
 
         raise HTTPException(status_code=500, detail="Failed to add payment")
 
+    if payment.method == PaymentMethod.CREDIT:
+        raise HTTPException(503, "Credit could not be verified or recorded. Please retry.")
     return {"payment_id": str(uuid.uuid4()), "message": "Payment recorded"}
