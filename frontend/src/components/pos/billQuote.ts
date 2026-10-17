@@ -36,6 +36,7 @@ export function orderLinesOf(cart: any[]) {
   return (cart || []).map((item: any) => ({
     item_type: mapCategory(item.category),
     product_id: item.product_id,
+    stock_id: item.stock_id,
     product_name: item.name,
     sku: item.sku,
     brand: item.brand,
