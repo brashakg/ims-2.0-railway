@@ -45,6 +45,7 @@ The body also says what the screen must say about its own figures:
 """
 
 import re
+from collections import Counter
 from calendar import monthrange
 from datetime import date
 
@@ -62,6 +63,7 @@ from ._shared import (
 )
 from ...services import purchase_invoice_engine as pinv
 from ...utils.ist import ist_date_str_from_stored, now_ist_naive
+from .grn_accept_lock import _receipt_origin_filters
 
 _MONTH = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 _FIGURES = ("ordered", "received", "billed", "paid", "owed")
@@ -100,7 +102,7 @@ def _received_line(gi: dict, po: Optional[dict]) -> Optional[tuple]:
     if not lines:
         return None
     line = lines[0]
-    if line["unit_price"] > 0:
+    if _money(line["unit_price"]) > 0:
         return line["qty"], line["unit_price"], line["gst_rate"]
     rate = gi.get("tax_rate")
     if rate is None:
@@ -116,7 +118,7 @@ def _accepted_qty(gi: dict) -> int:
         return 0
 
 
-def _put_in_stock(grn: dict, units: list, month: str) -> dict:
+def _put_in_stock(grn: dict, units: list, month: str, *, allow_legacy_fallback: bool = True) -> dict:
     """{receipt line index: units that line put INTO STOCK in `month`}.
 
     The truth is the stock itself. grn_accept mints one stock_units row per
@@ -127,10 +129,11 @@ def _put_in_stock(grn: dict, units: list, month: str) -> dict:
     the month it went into this one's stock. A line
     HELD at receiving (product not yet catalogued: unresolved_lines) mints
     nothing, so it counts nothing until a re-accept adds it -- in the month
-    of that re-accept. The receipt's own accepted_at cannot say this: every
-    accept, the re-accept included, overwrites it, which used to move a
-    whole receipt (the lines received a month earlier too) into the
-    re-accept's month and change a closed month's Received.
+    of that re-accept. The receipt's own accepted_at cannot say this: the
+    first accept is preserved even when cataloguing later releases another
+    line. Older accept implementations overwrote it, which instead moved a
+    whole receipt into the re-accept's month. Neither timestamp can replace
+    each unit's own mint date.
 
     A unit minted before units carried their line (no grn_line_index) goes
     on that receipt's lines of the same product, in line order, up to each
@@ -138,10 +141,10 @@ def _put_in_stock(grn: dict, units: list, month: str) -> dict:
 
     A receipt with NO unit on record (one accepted before units named their
     receipt) falls back on its own word: every line not held back, in the
-    month it was accepted."""
+    month it was accepted, unless its legacy origin is ambiguous."""
     items = [gi if isinstance(gi, dict) else {} for gi in grn.get("items") or []]
     if not units:
-        if _month_of(grn.get("accepted_at")) != month:
+        if not allow_legacy_fallback or _month_of(grn.get("accepted_at")) != month:
             return {}
         held = {h.get("product_id") for h in grn.get("unresolved_lines") or [] if isinstance(h, dict)}
         return {i: _accepted_qty(gi) for i, gi in enumerate(items) if gi.get("product_id") not in held}
@@ -165,29 +168,19 @@ def _put_in_stock(grn: dict, units: list, month: str) -> dict:
     return {i: sorted(m)[: _accepted_qty(items[i])].count(month) for i, m in by_line.items()}
 
 
-def _minted_units(db, grns: list) -> dict:
-    """{grn_id: the stock_units its accepts minted} -- read from what the mint
-    wrote and nothing later rewrites (review round 3 #3).
+def _minted_units(db, grns: list, uncertain: Optional[set] = None, month: str = "") -> dict:
+    """Units by proven receipt origin, using the receiving engine's rule.
 
-    A unit is the receipt's when it still names it (source_type GRN,
-    source_id = grn_id) OR when it carries the receipt's grn_number. A
-    transfer between our shops re-homes the unit (transfers._rehome) and
-    OVERWRITES source_type / source_id with the transfer's, but never touches
-    grn_number, grn_line_index, product_id or created_at -- all stamped by
-    grn_accept's mint. grn_number is unique per receipt (the grns unique
-    index; RCPT/<shop>/<FY>/<serial>). Matching on the source alone dropped a
-    September receipt's units from September once they moved to another
-    shop in October, so a closed month's Received changed with the goods'
-    later moves.
-
-    A serial captured against a receipt (serial_tracking) is a row of its
-    own, not one the receipt's accept minted: never counted. Not narrowed to
-    a shop: a unit moved to another shop was still received by this one.
-    Narrowed to the receipts' products, which every unit they minted is (the
-    mint stamps the line's product and nothing rewrites it), so the read
-    walks the product index instead of every unit ever stocked."""
+    Numbers must be unique across ALL shops/months, not merely the current
+    report. An ambiguous legacy number never assigns a moved unit or enables
+    the accepted_at fallback. Report that uncertainty instead of inventing
+    a supplier, shop or month for the goods.
+    """
     ids = {g.get("grn_id") for g in grns if g.get("grn_id")}
-    by_number = {g.get("grn_number"): g.get("grn_id") for g in grns if g.get("grn_number") and g.get("grn_id")}
+    numbers = {g.get("grn_number") for g in grns if g.get("grn_number")}
+    number_receipts = _find(db, "grns", {"grn_number": {"$in": list(numbers)}}, {"grn_id": 1, "grn_number": 1})
+    counts = Counter(g.get("grn_number") for g in number_receipts)
+    by_number = {g["grn_number"]: g.get("grn_id") for g in number_receipts if counts[g["grn_number"]] == 1}
     products = {
         gi.get("product_id")
         for g in grns
@@ -196,15 +189,16 @@ def _minted_units(db, grns: list) -> dict:
     }
     if not ids or not products:
         return {}
-    named = [{"source_type": "GRN", "source_id": {"$in": list(ids)}}]
-    if by_number:
-        named.append({"grn_number": {"$in": list(by_number)}})
+    named = [flt for g in grns if g.get("grn_id") for flt in _receipt_origin_filters(
+        g, counts[g.get("grn_number")] == 1,
+    )]
     units: dict = {}
     for u in _find(
         db,
         "stock_units",
         {"product_id": {"$in": list(products)}, "$or": named},
         {
+            "grn_id": 1,
             "source_type": 1,
             "source_id": 1,
             "grn_number": 1,
@@ -216,10 +210,29 @@ def _minted_units(db, grns: list) -> dict:
     ):
         if u.get("serial_tracked"):
             continue
-        gid = u.get("source_id") if u.get("source_type") == "GRN" and u.get("source_id") in ids else None
-        gid = gid or by_number.get(u.get("grn_number"))
-        if gid:
+        gid = u.get("grn_id")
+        if gid is None:
+            gid = u.get("source_id") if u.get("source_type") == "GRN" and u.get("source_id") in ids else None
+            gid = gid or by_number.get(u.get("grn_number"))
+        if gid in ids:
             units.setdefault(gid, []).append(u)
+    if uncertain is not None:
+        duplicate_numbers = {n for n, count in counts.items() if count > 1}
+        known_ids = {g.get("grn_id") for g in number_receipts if g.get("grn_id")}
+        moved_months: dict = {}
+        for u in _find(db, "stock_units", {
+            "grn_id": None, "grn_number": {"$in": list(duplicate_numbers)},
+            "product_id": {"$in": list(products)},
+        }):
+            if u.get("serial_tracked") or (u.get("source_type") == "GRN" and u.get("source_id") in known_ids):
+                continue
+            moved_months.setdefault(u.get("grn_number"), set()).add(_month_of(u.get("created_at")))
+        for g in grns:
+            if g.get("grn_number") not in duplicate_numbers:
+                continue
+            if (not units.get(g.get("grn_id")) and _month_of(g.get("accepted_at")) == month
+                    or month in moved_months.get(g.get("grn_number"), ())):
+                uncertain.add(g.get("grn_id"))
     return units
 
 
@@ -335,6 +348,7 @@ async def purchases_this_month(
         # ahead (suppliers below 0), never taken off owed.
         "totals": {**dict.fromkeys(_FIGURES, 0.0), "advances": 0.0},
         "unpriced_receipt_lines": 0,
+        "uncertain_receipt_origins": 0,
         "unassigned_owed": None,
         "unassigned_advances": None,
     }
@@ -372,21 +386,21 @@ async def purchases_this_month(
     # escalated after it was accepted, or left PENDING by an accept that
     # stopped half-way, still put its units on the shelf (panel finding: an
     # escalate zeroed a closed receipt's Received while its units sat in
-    # stock). Only an ACCEPTED receipt's accepted_at bounds its units -- that
-    # accept finished last, after every mint -- so one ACCEPTED before this
-    # month is out; any other status is read for its units.
-    grns = [
-        g
-        for g in _find(db, "grns", shop)
-        if g.get("status") != "ACCEPTED" or _month_of(g.get("accepted_at")) >= month
-    ]
-    units = _minted_units(db, grns)
+    # stock). accepted_at is the first accept and does not bound later
+    # catalogue releases: read all receipts, then use each unit's mint date.
+    grns = _find(db, "grns", shop)
+    uncertain: set = set()
+    units = _minted_units(db, grns, uncertain, month)
+    body["uncertain_receipt_origins"] = len(uncertain)
     po_ids = list({g.get("po_id") for g in grns if g.get("po_id")})
     pos_by_id = {p.get("po_id"): p for p in _find(db, "purchase_orders", {"po_id": {"$in": po_ids}})}
     for g in grns:
         po = pos_by_id.get(g.get("po_id"))
         items = g.get("items") or []
-        for i, qty in _put_in_stock(g, units.get(g.get("grn_id")) or [], month).items():
+        for i, qty in _put_in_stock(
+            g, units.get(g.get("grn_id")) or [], month,
+            allow_legacy_fallback=g.get("grn_id") not in uncertain,
+        ).items():
             counted = _received_line(items[i], po) if qty > 0 else None
             if counted is None:
                 continue

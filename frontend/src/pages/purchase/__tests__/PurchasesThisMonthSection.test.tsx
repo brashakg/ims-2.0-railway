@@ -346,6 +346,15 @@ describe('Purchases this month says what its figures are', () => {
     expect(footnote()).toContain('count here under All stores only; in no shop: ₹500 owed, ₹1,000 paid ahead.');
   });
 
+  it('shows when duplicated legacy receipt numbers leave Received incomplete', async () => {
+    roles = ['ADMIN'];
+    serve({ ...REPORT, uncertain_receipt_origins: 2 });
+    open();
+    await screen.findByText('Jharkhand Optical');
+    expect(footnote()).toContain('Received may be incomplete for 2 old receipts sharing a receipt number');
+    expect(footnote()).toContain('Only stock with a proven receipt origin is counted');
+  });
+
   it('#4: nothing in no shop says nothing', async () => {
     roles = ['ADMIN'];
     serve({ ...REPORT, store_id: null, as_of: '2026-09-30', unassigned_owed: 0, unassigned_advances: 0 });

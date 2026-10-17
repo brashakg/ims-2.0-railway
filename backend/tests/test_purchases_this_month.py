@@ -1289,7 +1289,9 @@ def test_r5_received_is_what_went_into_stock_in_the_month_it_went_in(held):
     again = _accept(datetime(2026, 10, 2, 6, 0, 0))
     assert (again["grn_status"], again["units_added"]) == ("ACCEPTED", 2), again
     stored = db["grns"].find_one({"grn_id": "GRN-H"})
-    assert str(stored["accepted_at"]).startswith("2026-10-02") and stored["unresolved_lines"] == []
+    # Receiving preserves the first accept; the stock's mint dates place
+    # the later catalogue release in October without changing September.
+    assert str(stored["accepted_at"]).startswith("2026-09-25") and stored["unresolved_lines"] == []
     _open(
         (_received(world, "2026-09"), _received(world, "2026-10")) == (1120.0, 2240.0),
         "F56: after the re-accept September Received is "

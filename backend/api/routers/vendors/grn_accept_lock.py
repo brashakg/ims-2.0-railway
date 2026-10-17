@@ -513,6 +513,23 @@ def _grn_already_minted(stock_repo, flt: dict) -> int:
     raise RuntimeError("stock repository exposes no way to count minted units")
 
 
+def _receipt_origin_filters(grn: dict, number_unique: bool, **match) -> list:
+    """Disjoint origin filters for units minted by one receipt.
+
+    The immutable id is authoritative. Only units missing it can use their
+    old GRN source, or a globally unique receipt number after a transfer.
+    Callers decide how a failed uniqueness read must be handled.
+    """
+    grn_id = grn.get("grn_id")
+    origin = [{"source_type": "GRN", "source_id": grn_id}]
+    if grn.get("grn_number") and number_unique:
+        origin.append({"grn_number": grn["grn_number"]})
+    return [
+        {**match, "grn_id": grn_id},
+        {**match, "grn_id": None, "$or": origin},
+    ]
+
+
 def _receipt_units(stock_repo, grn: dict, **match) -> int:
     """Units goods receipt `grn` (the receipt doc) put in stock, narrowed by
     `match`, WHEREVER THEY ARE NOW: read by the unit's ORIGIN, never its
@@ -535,14 +552,9 @@ def _receipt_units(stock_repo, grn: dict, **match) -> int:
     ponytail: a unit minted before #310 (2026-05-28) AND transferred since
     matches nothing, nor does a pre-grn_id unit of a duplicated number that
     has been transferred; backfill its grn_id if prod ever has one."""
-    grn_id = grn.get("grn_id")
-    stamped = _grn_already_minted(stock_repo, {**match, "grn_id": grn_id})
-    origin = [{"source_type": "GRN", "source_id": grn_id}]
     number = grn.get("grn_number")
-    if number and _number_is_this_receipts_alone(number):
-        origin.append({"grn_number": number})
-    legacy = {**match, "grn_id": None, "$or": origin}
-    return stamped + _grn_already_minted(stock_repo, legacy)
+    filters = _receipt_origin_filters(grn, bool(number and _number_is_this_receipts_alone(number)), **match)
+    return sum(_grn_already_minted(stock_repo, flt) for flt in filters)
 
 
 def _stock_create_raises_on_duplicate(stock_repo) -> bool:

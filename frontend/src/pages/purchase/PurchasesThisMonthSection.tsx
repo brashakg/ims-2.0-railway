@@ -46,6 +46,8 @@ type Report = {
   totals: Totals;
   /** Accepted receipt lines with no price anywhere: Received counts them 0. */
   unpriced_receipt_lines?: number;
+  /** Legacy receipt history cannot safely be attributed to a shop/month. */
+  uncertain_receipt_origins?: number;
   /** All stores only: owed / paid ahead on rows the ledger puts in no shop. */
   unassigned_owed?: number | null;
   unassigned_advances?: number | null;
@@ -266,6 +268,7 @@ function Caption({ report }: { report: Report }) {
 function Footnote({ report, shown, canPick }: { report: Report; shown: Shown; canPick: boolean }) {
   const asOf = report.as_of;
   const unpriced = report.unpriced_receipt_lines ?? 0;
+  const uncertainOrigins = report.uncertain_receipt_origins ?? 0;
   // In no shop, by the same rule: what is owed there and what is paid ahead
   // there, each its own figure.
   const noShop = [
@@ -290,6 +293,12 @@ function Footnote({ report, shown, canPick }: { report: Report; shown: Shown; ca
       price incl. GST (an order line with no GST rate counts without GST, as its bill draft does), or at the
       receipt's own price for goods on no order; receipts with no price count 0
       {unpriced > 0 && ` (${unpriced} receipt line${unpriced === 1 ? '' : 's'} in this report)`}.{' '}
+      {uncertainOrigins > 0 && (
+        <strong className="text-amber-700">
+          Received may be incomplete for {uncertainOrigins} old receipt{uncertainOrigins === 1 ? '' : 's'} sharing
+          a receipt number. Only stock with a proven receipt origin is counted; the remaining history needs review.{' '}
+        </strong>
+      )}
       {report.store_id ? (
         <>
           Money paid without naming a bill counts at the shop it was recorded for, else at the shop of that
