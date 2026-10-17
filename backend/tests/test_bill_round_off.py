@@ -319,7 +319,15 @@ def test_rounded_down_bill_refuses_the_unrounded_amount(
     assert _saved(patched_orders, order_id)["payment_status"] == "PAID"
 
 
-def test_credit_sale_owes_the_rounded_total(client, auth_headers, patched_orders):
+def test_credit_sale_owes_the_rounded_total(client, auth_headers, patched_orders, monkeypatch):
+    # The real credit approval reserves the unpaid balance in the order's
+    # database. Give this rounding case a verifiable account at the exact
+    # rounded limit; do not bypass the approval or stub its money arithmetic.
+    db = patched_orders["db"]
+    monkeypatch.setattr(patched_orders["order_repo"].collection, "database", db, raising=False)
+    db.get_collection("customers").update_one(
+        {"customer_id": "cust-x"}, {"$set": {"credit_limit": 1001.0}}
+    )
     order_id = _post_order(client, auth_headers, [_frame_item(1000.51)]).json()["order_id"]
     r = _pay(client, auth_headers, order_id, "CREDIT", 1001)
     assert r.status_code in (200, 201), r.text

@@ -45,6 +45,7 @@ from api.routers.orders import PaymentCreate, add_payment  # noqa: E402
 from api.services import cash_denominations as cd  # noqa: E402
 from api.services import eod_tally as till  # noqa: E402
 from database.repositories.order_repository import OrderRepository  # noqa: E402
+from tests.strict_fakes import matches as _mongo_matches  # noqa: E402
 
 
 # ===========================================================================
@@ -62,35 +63,15 @@ class _OrdersColl:
 
     def find_one(self, query=None, projection=None):
         for d in self.docs:
-            if all(d.get(k) == v for k, v in (query or {}).items()):
+            if self._match(d, query or {}):
                 return copy.deepcopy(d)
         return None
 
     @staticmethod
     def _match(doc, query):
-        """The operators the real readers send: a dual-typed $or window, plus
-        the $ne the returns reader uses to exclude historical imports."""
-        for key, cond in (query or {}).items():
-            if key == "$or":
-                if not any(_OrdersColl._match(doc, sub) for sub in cond):
-                    return False
-                continue
-            actual = doc.get(key)
-            if isinstance(cond, dict) and any(str(k).startswith("$") for k in cond):
-                for op, exp in cond.items():
-                    try:
-                        if op == "$ne" and actual == exp:
-                            return False
-                        if op == "$gte" and not (actual is not None and actual >= exp):
-                            return False
-                        if op == "$lte" and not (actual is not None and actual <= exp):
-                            return False
-                    except TypeError:
-                        return False  # Mongo type-bracketing
-                continue
-            if actual != cond:
-                return False
-        return True
+        """Use the shared strict Mongo matcher, including the payment CAS's
+        missing-field predicates. Unknown operators must never match silently."""
+        return _mongo_matches(doc, query or {})
 
     def find(self, query=None, projection=None):
         return iter(
@@ -99,7 +80,7 @@ class _OrdersColl:
 
     def update_one(self, query, update, **_kw):
         for d in self.docs:
-            if all(d.get(k) == v for k, v in (query or {}).items()):
+            if self._match(d, query):
                 for key, val in (update.get("$push") or {}).items():
                     d.setdefault(key, []).append(copy.deepcopy(val))
                 for key, val in (update.get("$set") or {}).items():
