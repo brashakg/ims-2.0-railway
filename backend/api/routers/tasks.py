@@ -55,6 +55,7 @@ from ..services.task_visibility import (
     visible,
 )
 from ..services.user_roles import VALID_ROLES
+from ..services.task_requirements import requires_cashier
 from ..services.sop_checklist import (
     apply_item_toggle,
     completion_status,
@@ -905,6 +906,8 @@ async def complete_task(
 
     task = _visible_task(repo, task_id, current_user)
     _ensure_may_close(task, current_user)
+    if requires_cashier(task) and "CASHIER" not in task_roles(current_user):
+        raise HTTPException(status_code=403, detail="The Cashier role is required to complete this task")
 
     current_status = canon_status(task.get("status"))
 
@@ -1091,7 +1094,7 @@ async def auto_generate_daily_tasks(
                     continue
         return ids
 
-    def _make_task(title, description, category, items, template_id=None, assignee=None):
+    def _make_task(title, description, category, items, template_id=None, assignee=None, required_role=None):
         return {
             "task_id": generate_task_id(),
             "title": title,
@@ -1101,6 +1104,7 @@ async def auto_generate_daily_tasks(
             "status": "OPEN",
             "source": "SOP",
             "assigned_to": assignee or current_user.get("user_id"),
+            "required_role": required_role,
             # The SOP issued it, not the manager who pressed the button.
             "assigned_by": "system",
             "store_id": active_store,
@@ -1157,6 +1161,9 @@ async def auto_generate_daily_tasks(
                     items,
                     template_id=tpl.get("template_id"),
                     assignee=uid,
+                    required_role="CASHIER" if {
+                        str(role).strip().upper() for role in tpl.get("assigned_roles") or []
+                    } == {"CASHIER"} else None,
                 )
                 if repo.create(task_data):
                     generated_count += 1
