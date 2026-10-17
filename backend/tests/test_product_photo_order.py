@@ -367,7 +367,7 @@ def _reorder_fails(monkeypatch):
     # stock pass would stamp its own code on every result (that code has its
     # own file, test_shopify_online_stock.py).
     async def _stock_written(*_a, **_k):
-        return {"ok": True, "code": None, "error": None, "set": 1, "quantities": {}}
+        return {"ok": True, "code": None, "error": None, "set": 1, "quantities": {}, "tracking_confirmed": True}
 
     monkeypatch.setattr(product_mod, "sync_product_stock", _stock_written)
     return fake
@@ -512,7 +512,7 @@ def test_a_failed_delete_keeps_the_removed_photo_owned_until_the_retry_deletes_i
     monkeypatch.setattr(shopify_push, "_graphql", fake)
 
     async def _stock_written(*_a, **_k):
-        return {"ok": True, "code": None, "error": None, "set": 1, "quantities": {}}
+        return {"ok": True, "code": None, "error": None, "set": 1, "quantities": {}, "tracking_confirmed": True}
 
     monkeypatch.setattr(product_mod, "sync_product_stock", _stock_written)
     _seed(

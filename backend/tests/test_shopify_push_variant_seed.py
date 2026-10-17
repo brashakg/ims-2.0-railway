@@ -57,6 +57,7 @@ import pytest  # noqa: E402
 
 from database.connection import MockCollection  # noqa: E402
 from api.services import shopify_push  # noqa: E402
+from shopify_answers import tracking_answer  # noqa: E402
 
 # The push's other mechanics, for a brand that IS for the website (owner D6;
 # the brand rule has its own test in test_add_product_owner_rulings.py).
@@ -93,6 +94,9 @@ class _RouterSpy:
 
     async def __call__(self, db, query, variables):
         self.calls.append({"query": query, "variables": variables})
+        answer = tracking_answer(query, variables)
+        if answer:
+            return answer
         # LONGEST marker first: "productCreate" is a SUBSTRING of
         # "productCreateMedia", so first-match-wins would answer the
         # photograph mutation with the productCreate body and the engine
@@ -522,7 +526,10 @@ def test_live_create_creates_the_remaining_variants_and_writes_back_each_gid(
     assert created_call["variables"]["variants"][0]["optionValues"] == [
         {"optionName": "Color", "name": "Gold"}
     ]
-    assert created_call["variables"]["variants"][0]["inventoryItem"] == {"sku": "S-GLD"}
+    # Created tracked + stop-at-0 in the SAME call (a size made on a live
+    # listing is on sale the moment it exists).
+    assert created_call["variables"]["variants"][0]["inventoryItem"] == {"sku": "S-GLD", "tracked": True}
+    assert created_call["variables"]["variants"][0]["inventoryPolicy"] == "DENY"
 
     assert (
         db["catalog_variants"].find_one({"sku": "S-BLK"})["shopify_variant_id"]
@@ -775,8 +782,13 @@ def test_second_push_repairs_the_still_unseeded_row_without_retouching_seeded_on
                                 "selectedOptions": [
                                     {"name": "Color", "value": "Silver"}
                                 ],
+                                # The listing is PUBLISHED in IMS, so a size
+                                # created on it must come back confirmed
+                                # tracked + DENY (else it is taken down).
+                                "inventoryPolicy": "DENY",
                                 "inventoryItem": {
-                                    "id": "gid://shopify/InventoryItem/7003"
+                                    "id": "gid://shopify/InventoryItem/7003",
+                                    "tracked": True,
                                 },
                             }
                         ],
@@ -1289,13 +1301,14 @@ def test_node_inventory_item_gid_is_failsoft_and_normalising():
 
 def test_mutations_select_the_inventory_item_id():
     """The selection is the capture vehicle: every mutation the seeding flow
-    reads variants back from must ask for inventoryItem { id }."""
+    reads variants back from must ask for inventoryItem { id } (the bulk
+    create also asks for `tracked`, the confirmation of its own row)."""
     for q in (
         shopify_push._PRODUCT_CREATE,
         shopify_push._PRODUCT_UPDATE,
-        shopify_push._VARIANTS_BULK_CREATE,
     ):
         assert "inventoryItem { id }" in q
+    assert "inventoryItem { id tracked }" in shopify_push._VARIANTS_BULK_CREATE
 
 
 def test_live_create_stamps_the_inventory_item_on_a_no_variant_product(monkeypatch):

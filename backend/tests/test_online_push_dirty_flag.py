@@ -48,6 +48,7 @@ from api.routers import catalog  # noqa: E402
 from api.routers import online_store_push as push_router  # noqa: E402
 from api.services import product_master as pm  # noqa: E402
 from api.services import shopify_push  # noqa: E402
+from shopify_answers import tracking_answer  # noqa: E402
 
 # The push's other mechanics, for a brand that IS for the website (owner D6;
 # the brand rule has its own test in test_add_product_owner_rulings.py).
@@ -165,7 +166,7 @@ def _force_live(monkeypatch, graphql_response):
 
     async def _fake_graphql(db, query, variables):
         calls.append({"query": query, "variables": variables})
-        return graphql_response
+        return tracking_answer(query, variables) or graphql_response
 
     monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: True)
     monkeypatch.setattr(shopify_push, "shopify_dispatch_mode", lambda: "live")

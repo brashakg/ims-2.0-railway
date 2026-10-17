@@ -48,9 +48,11 @@ from .publish import _publish_to_online_store
 from .inventory import (
     STOCK_TRACKING_FAILED,
     _set_variant_tracking,
+    inventory_policy_for,
     listing_visible,
     plan_product_stock,
     push_skus_stock,
+    sku_by_variant_gid,
     sync_product_stock,
 )
 from .media import plan_product_media, product_photo_urls, sync_product_media
@@ -237,8 +239,21 @@ async def push_product(
 
     query = _PRODUCT_UPDATE if existing_gid else _PRODUCT_CREATE
     field_name = "productUpdate" if existing_gid else "productCreate"
+    # Asked BEFORE any write-back touches the row: is this listing on the
+    # website as the press starts? (A create never is.)
+    was_live = bool(existing_gid) and listing_visible(product)
+    # A listing NOT on the website goes on only once Shopify's answer has
+    # confirmed tracking on every size (the root rule below). A listing taken
+    # down is Draft on Shopify with its Online Store publication kept, so an
+    # ACTIVE in this first write would put it back on sale before the
+    # tracking re-send is even answered: it is written Draft here, and ACTIVE
+    # goes out with the publish, once everything is confirmed. (A create is on
+    # no sales channel until publishablePublish.)
+    hold_active = bool(existing_gid) and not was_live and payload.get("status") == "ACTIVE"
     try:
-        body = await _graphql(db, query, {"input": payload})
+        body = await _graphql(
+            db, query, {"input": {**payload, "status": "DRAFT"} if hold_active else payload}
+        )
         err = _user_errors(body, field_name)
         if err:
             return PushResult(
@@ -335,6 +350,21 @@ async def push_product(
                         "product_level_inventory_item_gid"
                     ),
                 )
+        # A SIZE CREATED ON A LIVE LISTING is on sale the moment it exists. Its
+        # create call carried tracked + the stop-at-0 policy; when Shopify's
+        # answer does not confirm both, the size may sell without limit, so the
+        # listing comes OFF the website (Draft) before anything else is written
+        # and the press says so. The take-down marks it taken down, so no sweep
+        # re-lists it; the next human press re-sends tracking to every size.
+        new_unconfirmed = list((seed_summary or {}).get("unconfirmed_variant_gids") or [])
+        take_down = None
+        if new_unconfirmed and was_live:
+            take_down = await push_product_delist(db, product)
+        # Off the website ONLY when the Draft went out LIVE and Shopify took
+        # it. A refused one -- or one that ran dark because a gate input (the
+        # creds) went soft mid-press, a SIMULATED ok with nothing sent --
+        # leaves the listing on the website.
+        taken_down = take_down is not None and take_down.ok and take_down.mode == MODE_LIVE
         # THE PHOTOGRAPHS, IN THIS SAME PRESS. "Has a photo in IMS" and "has a
         # photo on Shopify" are different questions, and only the second one
         # protects the storefront -- photographs used to push on a SEPARATE,
@@ -373,9 +403,32 @@ async def push_product(
                 variants,
                 new_gid,
                 extra_variant_gids=[n.get("id") for n in variant_nodes if isinstance(n, dict)]
-                + list((seed_summary or {}).get("variant_gids") or []),
-                minted_variant_gids=(seed_summary or {}).get("variant_gids"),
+                + list((seed_summary or {}).get("variant_gids") or [])
+                + new_unconfirmed,
+                answered=(seed_summary or {}).get("tracking_verdicts"),
             )
+        # THE ROOT RULE (owner, rounds 4 + 6) -- one rule for every press, first
+        # or re-press, new size or old: a listing is put or kept ON the website
+        # only when Shopify's answer confirmed tracked=true + the listing's
+        # policy on EVERY size. The stock pass re-sent both to every size and
+        # read each size's verdict, remembered per size: an answer echoing a
+        # size untracked / on another policy unconfirms it; a refused or
+        # throttled re-send keeps what Shopify last confirmed (the listing
+        # stays live, the next stock pass re-sends); a size never confirmed is
+        # not. Nothing below keeps a test of its own.
+        tracking_ok = bool((stock_summary or {}).get("tracking_confirmed"))
+        unconfirmed = new_unconfirmed + [
+            g for g in (stock_summary or {}).get("tracking_unconfirmed") or [] if g not in new_unconfirmed
+        ]
+        # Live and not confirmed -> OFF the website (Draft), whatever the size.
+        if was_live and not tracking_ok and take_down is None:
+            take_down = await push_product_delist(db, product)
+            taken_down = take_down.ok and take_down.mode == MODE_LIVE
+        # A take-down that did not land, while the re-send's answer confirmed
+        # every size after all: the listing is live AND tracked -- the normal
+        # path below, never "STILL LIVE".
+        if take_down is not None and not taken_down and tracking_ok:
+            take_down = None
         # SALES-CHANNEL PUBLISH -- the third shut door. An ACTIVE product
         # published to NO channel is invisible on bettervision.in. This used to
         # be gated behind SHOPIFY_PUBLISH_ON_CREATE (default OFF) AND restricted
@@ -394,35 +447,36 @@ async def push_product(
         #   * a press that needed NO seeding: every variant already carries the
         #     gid an earlier successful seed wrote, so its price is already on
         #     Shopify -- but IMS must still hold a positive price for every row.
-        #   * TRACKED + DENY BEFORE PUBLISH (design 4.2; recheck round 2, the
-        #     oversell direction): a variant whose tracking + policy call
-        #     FAILED is UNTRACKED -- Shopify sells it without limit whatever
-        #     the shelf holds, the worse failure, and one a code alone cannot
-        #     mend once the listing is visible. The quantities still go out
-        #     (they are true); the listing stays unpublished, invisible on
-        #     bettervision.in, until a press confirms tracking. The result is
-        #     then ok=False / publish_withheld with the stock pass's own code,
-        #     so the toast, the audit row, the tally and the sync page all say
-        #     so, and the row stays queued for the retry.
-        #   * ...and ONLY the first publish (recheck round 1). An already-live
-        #     listing keeps the tracking its first publish confirmed whatever a
-        #     refused re-send says (a refused bulk-update changes nothing on
-        #     Shopify), so it is reported live with a stock warning -- never
-        #     "NOT made visible" beside a catalog chip that reads "Live".
-        #     "First" is asked of the PUBLISH (`listing_visible`), not of the
-        #     baseline's tracked flag (recheck round 3): a size minted
-        #     untracked onto a live listing sets that flag False, and the
-        #     "press again" its own line asks for was then withheld as a first
-        #     publish -- "NOT made visible" about a listing that IS visible
-        #     with an untracked size, the opposite of the risk. Withholding an
-        #     idempotent re-publish un-publishes nothing; the truthful result
-        #     is ok + the code + the WITHOUT LIMIT line.
-        tracking_ok = (
-            (stock_summary or {}).get("code") != STOCK_TRACKING_FAILED
-            or listing_visible(product)
-        )
+        #   * TRACKED + THE POLICY BEFORE PUBLISH (design 4.2, the root rule
+        #     above): the listing is published only when `tracking_ok` --
+        #     Shopify's answer confirmed every size. Anything less and the
+        #     listing stays OFF the website (Draft, see `hold_active`); the
+        #     result is ok=False / publish_withheld with the stock pass's own
+        #     code and line, and the row stays queued for the retry. A LIVE
+        #     listing never reaches this branch unconfirmed: it is taken down.
         pub_summary = None
-        if new_gid and payload.get("status") == "ACTIVE":
+        if take_down is not None:
+            # Each size by its IMS SKU, never a Shopify id.
+            names_of = {**sku_by_variant_gid(product, variants), **((seed_summary or {}).get("size_names") or {})}
+            names = ", ".join(sorted({names_of.get(g) or "a new size" for g in unconfirmed})) or "its sizes"
+            rule = "stop selling at 0" if inventory_policy_for(product) == "DENY" else "keep selling at 0"
+            why = f"Shopify did not confirm stock tracking + {rule} on {names}"
+            pub_summary = {
+                "published": False,
+                "code": STOCK_TRACKING_FAILED,
+                "error": (
+                    f"{why} -- the listing was taken OFF the website (Draft) so they "
+                    f"cannot oversell; press Send to website again"
+                ) if taken_down else (
+                    f"{why}, and taking the listing off the website FAILED "
+                    f"({take_down.error or take_down.reason}) -- it is STILL LIVE and "
+                    f"they may sell without limit; set it to Draft in Shopify admin now"
+                ),
+                # Off the website = withheld; still live = a failure, never
+                # "not made visible".
+                "reason": "publish_withheld" if taken_down else None,
+            }
+        elif new_gid and payload.get("status") == "ACTIVE":
             if seed_summary is not None:
                 priced_ok = (
                     not seed_summary.get("errors")
@@ -436,6 +490,11 @@ async def push_product(
                 priced_ok = _has_publishable_price(product, variants)
             if priced_ok and photo_on_shopify and tracking_ok:
                 pub_summary = await _publish_to_online_store(db, new_gid)
+                if pub_summary.get("published") and hold_active:
+                    # The ACTIVE the first write held back -- only now, every
+                    # size confirmed, priced and photographed, and only after
+                    # the publication (a Draft stays off the website).
+                    pub_summary = await _set_active(db, new_gid, pub_summary)
                 if pub_summary.get("published") and pid:
                     # IMS must agree with the storefront (see _writeback_product
                     # `status`): the DRAFT/PUBLISHED cards and every
@@ -460,7 +519,10 @@ async def push_product(
                 pub_summary = {
                     "published": False,
                     "code": STOCK_TRACKING_FAILED,
-                    "error": f"publish withheld: {(stock_summary or {}).get('error')}",
+                    "error": (
+                        f"publish withheld -- the listing stays OFF the website (Draft): "
+                        f"{(stock_summary or {}).get('error')}"
+                    ),
                 }
         # The press reached Shopify but the product is NOT visible. Leave it in
         # the queue so pressing again retries it once the price / photograph is
@@ -587,7 +649,7 @@ async def push_product(
             reason=(
                 ("archived_not_listed" if archived_not_listed else None)
                 if published_ok
-                else "publish_withheld"
+                else (pub_summary or {}).get("reason", "publish_withheld")
             ),
             metafields=mf_summary,
             variant_prices=vp_summary,
@@ -607,6 +669,27 @@ async def push_product(
             payload=payload,
             error=str(e),
         )
+
+
+async def _set_active(db, product_gid: str, published: Dict[str, Any]) -> Dict[str, Any]:
+    """productUpdate {id, status: ACTIVE} after the publish: ``published`` when
+    Shopify took it, else a withheld publication saying the listing stayed
+    Draft. Never raises."""
+    try:
+        body = await _graphql(
+            db, _PRODUCT_UPDATE,
+            {"input": {"id": _as_shopify_gid(product_gid, "Product"), "status": "ACTIVE"}},
+        )
+        err = _user_errors(body, "productUpdate")
+    except Exception as exc:  # noqa: BLE001 -- fail-soft, reported on the result
+        err = str(exc)
+    if not err:
+        return published
+    return {
+        "published": False,
+        "error": f"publish withheld: setting the listing Active failed ({err}) -- it stays "
+        f"OFF the website (Draft); press Send to website again",
+    }
 
 
 async def push_product_delist(db, product: Dict[str, Any]) -> PushResult:
@@ -848,6 +931,11 @@ async def _delist_variant_row(db, product: Dict[str, Any]) -> PushResult:
         payload["rows"] = written.get("quantities") or {}
         payload["stores_mapped"] = written.get("stores_mapped", 0)
         own = list(tracked.get("errors") or [])
+        # DENY stuck only when Shopify's ANSWER says so (`tracking_verdicts`,
+        # the one rule) -- an accepted call that echoes the size untracked, on
+        # another policy or not at all confirms nothing.
+        if not own and variant_gid not in tracked["confirmed"]:
+            own.append(f"Shopify's answer did not confirm {sku} tracked + stop selling at 0")
         # A row above 0 is the rule saying the size is NOT off sale -- its
         # spine is still active -- and this door says so instead of reporting
         # a green take-down the next pass would undo.
