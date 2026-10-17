@@ -21,8 +21,8 @@ from ._shared import (
     router,
     uuid,
 )
-from ...services.cost_mask import mask_receipt
-from .models import GRNCreate, GRN_SUBTYPE_DC
+from ...services.cost_mask import can_see_cost, mask_receipt
+from .models import GRNCreate, GRN_SUBTYPE_DC, GRN_SUBTYPE_NO_PO
 from .numbering import (
     GRN_PLACEHOLDER_PREFIX,
     classify_grn_line_variance,
@@ -227,6 +227,11 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
 
     # F9: the vendor a DC is for -- from the PO when linked, else the body field.
     vendor_id = (po.get("vendor_id") if po else None) or grn.vendor_id
+    if grn.grn_subtype == GRN_SUBTYPE_NO_PO and not can_see_cost(current_user, "purchase"):
+        # Receiving confirms goods, not supplier prices. Ignore an injected
+        # price from a manager; accounts enter it when booking the bill.
+        for item in grn.items:
+            item.unit_price = None
 
     # A receipt with no PO names its supplier itself, so it must be one on
     # file: an invented or mistyped id put stock on the shelf under nobody

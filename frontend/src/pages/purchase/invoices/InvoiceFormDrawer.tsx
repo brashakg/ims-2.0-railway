@@ -82,7 +82,7 @@ export function InvoiceFormDrawer({
   // the GST is the shop's own to pay the government (the server's rule;
   // the form shows its preview).
   const [claimCredit, setClaimCredit] = useState(true);
-  const canReverseCharge = hasRole(APPROVE_ROLES);
+  const canReverseCharge = prefill.grn_subtype !== 'NO_PO' && hasRole(APPROVE_ROLES);
   const [reverseCharge, setReverseCharge] = useState(false);
   const [lines, setLines] = useState<EditLine[]>(initialLines);
   const [saving, setSaving] = useState(false);

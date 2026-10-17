@@ -195,7 +195,7 @@ def mask_receipt(grn: dict, user: dict) -> dict:
     if not isinstance(grn, dict):
         return grn
     paid = can_see_cost(user, "product")
-    if can_see_cost(user, "purchase"):
+    if can_see_cost(user, "supplier"):
         if paid:
             return grn
         out = mask_cost(grn, user, "product")

@@ -352,8 +352,9 @@ class GRNCreate(BaseModel):
                   contract -- a standard GRN is always against a PO + invoice).
         DELIVERY_CHALLAN: dc_number + dc_date are required; po_id +
                   vendor_invoice_no are optional (they come later).
-        NO_PO (D14): no po_id; the supplier (vendor_id); a cost on every
-                  line. The bill number/date stay optional.
+        NO_PO (D14): no po_id; the supplier (vendor_id). Accounts may record
+                  a price; a manager's receipt remains unpriced until billing.
+                  The bill number/date stay optional.
         """
         if self.grn_subtype != GRN_SUBTYPE_NO_PO:
             # A PO receipt is costed at the order's agreed price; a cost typed
@@ -389,12 +390,6 @@ class GRNCreate(BaseModel):
                 raise ValueError(
                     "Enter how many arrived on every line (none on line "
                     f"{', '.join(map(str, empty))})"
-                )
-            no_cost = [n for n, it in enumerate(self.items, 1) if not it.unit_price]
-            if no_cost:
-                raise ValueError(
-                    "Enter the cost paid per unit on every line (missing on "
-                    f"line {', '.join(map(str, no_cost))})"
                 )
         else:
             if not (self.po_id and str(self.po_id).strip()):

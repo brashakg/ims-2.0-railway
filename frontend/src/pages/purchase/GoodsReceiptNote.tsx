@@ -17,6 +17,7 @@ import { istDayString } from '../../utils/datetime';
 import { SupplierFormModal } from './SupplierFormModal';
 import { productApi } from '../../services/api/products';
 import { useAuth } from '../../context/AuthContext';
+import { PURCHASE_PRICE_ROLES } from '../../components/common/CostCell';
 import { useToast } from '../../context/ToastContext';
 import { GRNPrint } from '../../components/print/GRNPrint';
 import { UnitLabelsModal } from '../../components/labels/UnitLabelsModal';
@@ -151,6 +152,7 @@ const qualityChip = (status: string): string => {
 
 export function GoodsReceiptNote() {
   const { user } = useAuth();
+  const canEnterPrice = (user?.roles || []).some((role) => PURCHASE_PRICE_ROLES.includes(role));
   const toast = useToast();
   const [activeTab, setActiveTab] = useState<'create' | 'history' | 'discrepancies'>('create');
   // F26: after a receipt is posted, its units' labels (one per piece).
@@ -533,10 +535,6 @@ export function GoodsReceiptNote() {
       toast.error('DC Number is required for a Delivery Challan');
       return;
     }
-    if (isNoPo && receivedItems.some((i) => !(i.unit_price && i.unit_price > 0))) {
-      toast.error('Enter the cost paid per unit on every line');
-      return;
-    }
     if (isNoPo && !bill?.file_id) {
       toast.error("Attach a photo of the dealer's bill");
       return;
@@ -578,7 +576,7 @@ export function GoodsReceiptNote() {
           rejected_qty: rejectedOf(item),
           rejection_reason: rejectedOf(item) > 0 ? item.rejection_reason : undefined,
           tallied: item.tallied,
-          unit_price: isNoPo ? item.unit_price : undefined,
+          unit_price: isNoPo && canEnterPrice ? item.unit_price : undefined,
           expiry_date: isNoPo ? item.expiry_date || undefined : undefined,
         })),
         notes: qualityNotes || undefined,
@@ -1164,7 +1162,7 @@ export function GoodsReceiptNote() {
                           <th>Tally</th>
                           <th>Item</th>
                           <th className="right">Qty received</th>
-                          {isNoPo && <th className="right">Cost / unit before GST (₹)</th>}
+                          {isNoPo && canEnterPrice && <th className="right">Cost / unit before GST (₹)</th>}
                           {isNoPo && <th>Expiry</th>}
                           <th></th>
                         </tr>
@@ -1211,7 +1209,7 @@ export function GoodsReceiptNote() {
                                 style={{ width: 72, textAlign: 'right', height: 30, padding: '0 6px' }}
                               />
                             </td>
-                            {isNoPo && (
+                            {isNoPo && canEnterPrice && (
                               <td className="right">
                                 <input
                                   type="number"

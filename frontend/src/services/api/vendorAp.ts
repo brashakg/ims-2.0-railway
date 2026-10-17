@@ -37,7 +37,7 @@ export interface VendorBill {
 export interface VendorReceiptRow {
   grn_id: string;
   grn_number?: string;
-  grn_subtype?: string;      // 'STANDARD' | 'DELIVERY_CHALLAN'
+  grn_subtype?: string;      // 'STANDARD' | 'DELIVERY_CHALLAN' | 'NO_PO'
   status?: string;
   dc_number?: string;
   dc_date?: string;
@@ -108,6 +108,7 @@ export interface PurchaseInvoice {
   po_number?: string;
   grn_id?: string;
   grn_number?: string;
+  grn_subtype?: string;
   store_id?: string;
   place_of_supply?: string;       // 2-digit state code or "NN-StateName"
   recipient_gstin?: string;       // our GSTIN receiving the supply
