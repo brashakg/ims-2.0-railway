@@ -110,5 +110,8 @@ def _order_create_response(order: dict) -> dict:
         "order_number": order.get("order_number"),
         "status": order.get("status") or "DRAFT",
         "grand_total": order.get("grand_total"),
+        # The bill's round off, so the till can check the bill it collected
+        # against (POST /orders/quote) is the bill create made.
+        "round_off": order.get("round_off"),
         "message": "Order created successfully",
     }

@@ -10,6 +10,7 @@ import uuid
 from database.repositories.order_repository import derive_bill_type
 from datetime import datetime, timedelta
 from fastapi import Depends, HTTPException, Header
+from pydantic import BaseModel, Field
 from typing import Any, Dict, List, Optional
 from ..auth import get_current_user
 from ...dependencies import (
@@ -17,16 +18,20 @@ from ...dependencies import (
     get_order_repository,
     get_product_repository,
     get_walkin_counter_repository,
+    validate_store_access,
 )
 from ...services.stores_util import is_online_store
 from ._shared import (
     POS_WRITE_ROLES,
     _compute_per_category_gst,
     _get_db,
+    bill_line_value,
+    bills_round_off,
     logger,
     router,
 )
 from .pricing import (
+    OrderItemCreate,
     _enforce_line_pricing,
     assert_stack_within_cap,
     effective_line_discount_pct,
@@ -396,8 +401,6 @@ async def create_order(
         is_admin = any(r in user_roles for r in ["SUPERADMIN", "ADMIN"])
 
         for item in order.items:
-            item_total = item.unit_price * item.quantity
-
             # ---- Per-line price integrity + discount caps (SHARED gate) ----
             # BUG-119/BUG-118 ceiling / cost floor / HQ-offer rule / role +
             # category + luxury-brand cap / reason requirement all live in
@@ -415,8 +418,9 @@ async def create_order(
             )
             _loyalty_eff = _line_gate["loyalty_eff"]
 
-            discount_amount = item_total * (item.discount_percent / 100)
-            item_subtotal = item_total - discount_amount
+            discount_amount, item_subtotal = bill_line_value(
+                item.unit_price, item.quantity, item.discount_percent
+            )
 
             # ============================================================
             # INCENTIVE AUTO-TAGGING
@@ -756,7 +760,10 @@ async def create_order(
         cart_discount_amount = gst["cart_discount_amount"]
         total_discount = gst["total_discount"]
         tax_rate = gst["dominant_rate"]
-        grand_total = round(taxable_after_cart_discount + tax_amount, 2)
+        # The bill's payable, rounded to the nearest rupee ONCE by the engine
+        # (round_bill); round_off is its own line, outside taxable and tax.
+        grand_total = gst["grand_total"]
+        round_off = gst["round_off"]
 
         # Fcostfloor (DECISIONS sec 9, owner sign-off 2026-06-09): E2-flag-
         # gated post-discount cost+pct% floor on each DISCOUNTED line's
@@ -984,6 +991,9 @@ async def create_order(
             "tax_amount": tax_amount,
             "total_discount": total_discount,
             "grand_total": grand_total,
+            # Owner ruling 2026-10-08: the ONE stored round-off figure that
+            # reprints, refunds and reports read (never re-derive it).
+            "round_off": round_off,
             # Self-label the GST model this order was billed under, so any
             # deploy-skew / flag-flip order is identifiable + reports can trust
             # the stored per-line taxable/tax without guessing the era.
@@ -1218,4 +1228,74 @@ async def create_order(
         "order_number": generate_order_number(store_id or "STR"),
         "status": "DRAFT",
         "message": "Order created successfully",
+    }
+
+
+class BillQuoteLine(OrderItemCreate):
+    # Corrections may include a manual line and an explicit HSN, as accepted
+    # by the superadmin edit schema. New checkout still validates its own input.
+    product_id: str = ""
+    hsn_code: Optional[str] = None
+
+
+class BillQuoteRequest(BaseModel):
+    """The till's cart, exactly as it will POST it to create the order."""
+
+    items: List[BillQuoteLine]
+    cart_discount_percent: float = Field(default=0.0, ge=0.0, le=100.0)
+    # A saved order these lines would replace (the SUPERADMIN edit preview):
+    # priced exactly as the edit door will save it -- an order billed before
+    # the round-off rule keeps its exact paise (bills_round_off).
+    order_id: Optional[str] = None
+
+
+@router.post("/quote")
+async def quote_bill(
+    body: BillQuoteRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """The till's bill total, priced by order create's own line value
+    (bill_line_value) and GST engine (_compute_per_category_gst, which rounds
+    the payable to the rupee). Read-only: nothing is saved or reserved.
+
+    The cashier takes the money BEFORE the order exists, so the till shows and
+    collects THIS figure and never rounds a bill itself -- the same
+    server-quote pattern as POST /returns/quote.
+
+    ponytail: promotions (PROMO_ENGINE_ENABLED, dark by default) are not in the
+    quote; price them here too before that engine is switched on.
+    """
+    if not any(r in current_user.get("roles", []) for r in POS_WRITE_ROLES):
+        raise HTTPException(
+            status_code=403, detail="Your role is not permitted to create orders."
+        )
+    lines = []
+    for item in body.items:
+        discount_amount, item_total = bill_line_value(
+            item.unit_price, item.quantity, item.discount_percent
+        )
+        lines.append(
+            {
+                "item_type": item.item_type,
+                "category": item.category,
+                "discount_amount": discount_amount,
+                "item_total": item_total,
+            }
+        )
+    rounded = True
+    if body.order_id:
+        repo = get_order_repository()
+        order = repo.find_by_id(body.order_id) if repo is not None else None
+        if order is None:
+            raise HTTPException(status_code=404, detail="Order not found")
+        validate_store_access(order.get("store_id"), current_user)
+        rounded = bills_round_off(order)
+        # The edit keeps explicit HSNs and normalises lines through its own
+        # builder. Preview exactly that same representation for saved orders.
+        from ...services.order_superadmin_edit import rebuild_edited_line
+        lines = [rebuild_edited_line(item.model_dump()) for item in body.items]
+    gst = _compute_per_category_gst(lines, body.cart_discount_percent, rounded=rounded)
+    return {
+        k: gst[k]
+        for k in ("subtotal", "taxable", "tax", "total_discount", "grand_total", "round_off")
     }

@@ -1,6 +1,6 @@
 """GSTR-3B (summary return): credit notes, RCM, computation, endpoints."""
 
-from fastapi import Depends, Query
+from fastapi import Depends, HTTPException, Query
 from typing import Optional
 from datetime import date
 from ...utils.ist import (
@@ -29,11 +29,14 @@ from .gst_itc import (
     _gstin_bound,
     _itc_from_vendor_bills,
     _itc_gstin_from_vendor_bills,
+    _itc_match,
+    _unallocated_legacy_bills,
     _itc_store_scope,
     _placement,
     _sum_heads,
     _ledger_row_return_doc,
     _order_held_off_returns,
+    net_cash_due,
     _return_interstate_flag,
     _transfer_outward_bills,
 )
@@ -245,10 +248,10 @@ def _rcm_placed(db, active_store, year, mon, last_day):
     (match, bound match), or None when the store cannot be read."""
     entity_id, store_gstin, shops = _itc_store_scope(db, active_store)
     match = {
-        **_placement(shops, entity_id, store_gstin, year, mon, last_day),
+        **_placement(shops, entity_id, store_gstin, year, mon, last_day, db),
         "reverse_charge": True,
     }
-    return match, {"$and": [match, _gstin_bound(shops, store_gstin)]}
+    return match, match
 
 
 def _rcm_from_vendor_bills(db, active_store, year, mon, last_day):
@@ -281,6 +284,23 @@ def _rcm_gstin_from_vendor_bills(db, active_store, year, mon, last_day):
     except Exception:
         pass
     return 0.0, 0.0, 0.0, 0.0
+
+
+def _rcm_credit_from_vendor_bills(db, active_store, year, mon, last_day):
+    """Table 4(A)(3): the part of Table 4's credit that is reverse-charge tax
+    -- the reverse-charge bills Table 4 itself keeps (_itc_match: credit
+    cleared by org_validation.itc_claimable at booking, never a bill whose
+    credit was switched off). A slice of itcAvailable, never added to it.
+    Returns (igst, cgst, sgst); fail-soft -> zeros."""
+    if db is None:
+        return 0.0, 0.0, 0.0
+    try:
+        entity_id, store_gstin, shops = _itc_store_scope(db, active_store)
+        match = _itc_match(shops, entity_id, store_gstin, year, mon, last_day, db)
+        return _sum_heads(db, {**match, "reverse_charge": True})[:3]
+    except Exception:
+        pass
+    return 0.0, 0.0, 0.0
 
 
 def _compute_gstr3b(month: str, active_store: str) -> dict:
@@ -337,6 +357,8 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
     rcm_taxable = 0.0
     # ...and its GSTIN-bound slice (R1), counted once per GSTIN by the Cross-Check.
     t_rcm = (0.0, 0.0, 0.0, 0.0)
+    # Table 4(A)(3): the reverse-charge part of the ITC above.
+    itc_rcm = (0.0, 0.0, 0.0)
 
     # Credit-note totals + the per-head excess the zero-clamp would otherwise
     # swallow SILENTLY (filled below when a DB is present).
@@ -488,19 +510,25 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
             db, active_store, year, mon, last_day
         )
         t_rcm = _rcm_gstin_from_vendor_bills(db, active_store, year, mon, last_day)
+        itc_rcm = _rcm_credit_from_vendor_bills(db, active_store, year, mon, last_day)
 
-    # Net cash liability = (output tax - ITC) + reverse-charge tax. RCM is always
-    # discharged in CASH (it cannot be set off against ITC), so it adds on top of
-    # the output-minus-ITC cash. When there are no RCM bills these terms are 0.
-    cash_igst = max(0.0, out_igst - itc_igst) + rcm_igst
-    cash_cgst = max(0.0, out_cgst - itc_cgst) + rcm_cgst
-    cash_sgst = max(0.0, out_sgst - itc_sgst) + rcm_sgst
+    # Net cash liability = output tax less the ITC the law lets set it off
+    # (across heads: IGST credit also pays CGST/SGST), plus reverse-charge tax,
+    # always discharged in CASH. One rule: net_cash_due.
+    cash_igst, cash_cgst, cash_sgst = net_cash_due(
+        (out_igst, out_cgst, out_sgst),
+        (itc_igst, itc_cgst, itc_sgst),
+        (rcm_igst, rcm_cgst, rcm_sgst),
+    )
 
     def _r(v: float) -> float:
         return round(v, 2)
 
+    entity_id = _itc_store_scope(db, active_store)[0] if db is not None else None
+    unallocated = _unallocated_legacy_bills(db, entity_id, year, mon, last_day)
     return {
         "period": month,
+        "unallocatedLegacyBills": unallocated,
         "gstin": store_gstin,
         "legalName": store_legal_name,
         "storeState": store_state,
@@ -553,6 +581,14 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
             "stateTax": _r(itc_sgst),
             "cess": 0.0,
         },
+        # Table 4(A)(3): the reverse-charge part of itcAvailable (inside it,
+        # never on top); the portal upload files it apart from 4(A)(5).
+        "itcReverseCharge": {
+            "integratedTax": _r(itc_rcm[0]),
+            "centralTax": _r(itc_rcm[1]),
+            "stateTax": _r(itc_rcm[2]),
+            "cess": 0.0,
+        },
         # R1: itcAvailable split into the company-wide remainder (bills naming
         # no GSTIN) and the GSTIN-bound slice (remainder + slice ==
         # itcAvailable). The cross-check aggregator dedupes each at its true
@@ -577,10 +613,13 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
             "stateTax": _r(out_sgst),
             "cess": 0.0,
         },
+        # Table 6.1 "paid through ITC": the credit the cash rule actually used
+        # -- the liability less what net_cash_due leaves for cash. Never the
+        # whole credit: reverse-charge tax and unused credit are not set off.
         "itcUtilized": {
-            "integratedTax": _r(itc_igst),
-            "centralTax": _r(itc_cgst),
-            "stateTax": _r(itc_sgst),
+            "integratedTax": _r(out_igst + rcm_igst - cash_igst),
+            "centralTax": _r(out_cgst + rcm_cgst - cash_cgst),
+            "stateTax": _r(out_sgst + rcm_sgst - cash_sgst),
             "cess": 0.0,
         },
         "taxPaidCash": {
@@ -632,6 +671,12 @@ async def gstr3b_gstn_json(
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
     period = _normalise_period(month, year)
     data = _compute_gstr3b(period, active_store)
+    unallocated = data.get("unallocatedLegacyBills") or {}
+    if unallocated.get("count") or unallocated.get("failed"):
+        raise HTTPException(
+            status_code=409,
+            detail="Assign each unallocated legacy purchase bill to its receiving GSTIN before downloading GSTN JSON. Open the GST cross-check and correct the bill allocation.",
+        )
     try:
         return to_gstr3b_json(data, gstin=data.get("gstin", ""), period=period)
     except Exception:

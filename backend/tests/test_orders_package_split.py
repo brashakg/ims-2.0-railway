@@ -32,7 +32,8 @@ from api.routers.orders import admin_edit, create, delivery, items, release  # n
 def test_route_count_and_no_duplicate_paths():
     """The count is the tripwire: a lost route is otherwise a silent 404."""
     registered = [(tuple(sorted(r.methods)), r.path) for r in orders.router.routes]
-    assert len(registered) == 24, "orders.router route count changed: %d" % len(
+    # 25 = the split's 24 + POST /quote (the till's server-priced bill total).
+    assert len(registered) == 25, "orders.router route count changed: %d" % len(
         registered
     )
     assert len(set(registered)) == len(
