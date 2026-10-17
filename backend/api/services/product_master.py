@@ -1928,10 +1928,11 @@ def undo_catalogue_barcode_write(
             for name, value in old_attrs.items():
                 if name != "gtin" and manufacturer_barcode_key(name) == "gtin":
                     fields[f"attributes.{name}"] = value
-        elif "attributes" in before:
-            fields["attributes"] = old_attrs
         else:
-            unset["attributes"] = ""
+            # This request replaced a missing/null legacy bag with {gtin: ...}.
+            # Remove only its code: a later dotted-field update may have added
+            # an unrelated attribute without becoming a barcode writer.
+            unset["attributes.gtin"] = ""
     elif winner_changed_code:
         fields.update(twin_barcode_fields(winning["gtin"]))
         unset.pop("barcode", None)

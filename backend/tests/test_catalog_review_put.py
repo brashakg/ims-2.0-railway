@@ -1012,6 +1012,24 @@ def test_lost_catalogue_cas_restores_the_winners_code_when_it_saved_before_the_s
     assert gtin_env.find_by_id("spine-g1")["attributes"]["gtin"] == _UPC
 
 
+@pytest.mark.parametrize("legacy_attrs", [None, []])
+def test_lost_barcode_cas_preserves_an_unrelated_attribute_added_to_a_legacy_bag(
+    gtin_env, monkeypatch, legacy_attrs,
+):
+    gtin_env.collection.update_one({"product_id": "spine-g1"}, {"$set": {"attributes": legacy_attrs}})
+    loaded = catalog_mod.CATALOG_PRODUCTS["twin-g1"]["updated_at"]
+
+    def concurrent_copy_edit(_document, _expected):
+        gtin_env.update("spine-g1", {"attributes.colour_code": "RED"})
+        return False
+
+    monkeypatch.setattr(catalog_mod, "_save_catalog_product_cas", concurrent_copy_edit)
+    with pytest.raises(HTTPException) as exc:
+        _put("twin-g1", {"attributes": {"gtin": _GTIN}, "expected_updated_at": loaded})
+    assert exc.value.status_code == 409
+    assert gtin_env.find_by_id("spine-g1")["attributes"] == {"colour_code": "RED"}
+
+
 def test_a_failed_spine_lookup_on_a_barcode_save_saves_nothing(gtin_env, monkeypatch):
     """Round 14. The spine lookup that keys the gtin write was fail-soft: a
     transient error there read as 'no linked spine', so the twin took the new
