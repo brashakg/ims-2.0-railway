@@ -39,6 +39,7 @@ Role policy (DECISIONS sec 9, owner rulings D7 / 2026-09-29 / 2026-10-12):
 No emoji (Windows cp1252).
 """
 from typing import Dict, Iterable, List
+import re
 
 # The accounts roles. Defined ONCE, here: they see cost + margin, and they
 # alone see supplier payments -- the vendor ledger / bills / payments / debit
@@ -188,7 +189,23 @@ def mask_purchase(doc, user: dict):
         return doc
     if isinstance(doc, list):
         return [mask_purchase(d, user) for d in doc]
-    return mask_cost(doc, user, "purchase", extra=_PURCHASE_PRICE_FIELDS)
+    return _mask_legacy_purchase_history(mask_cost(doc, user, "purchase", extra=_PURCHASE_PRICE_FIELDS))
+
+
+def _mask_legacy_purchase_history(value):
+    """Old PO edits embedded paid prices in prose before price_detail existed."""
+    if isinstance(value, list):
+        return [_mask_legacy_purchase_history(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    result = {key: _mask_legacy_purchase_history(item) for key, item in value.items()}
+    detail = result.get("detail")
+    if result.get("kind") == "edited" and isinstance(detail, str):
+        parts = detail.split("; ")
+        safe = [part for part in parts if not re.search(r"\bcost\s+Rs\b", part, re.IGNORECASE)]
+        if len(safe) != len(parts):
+            result["detail"] = "; ".join(safe) or "price changed"
+    return result
 
 
 def _pick(doc, keys) -> Dict:

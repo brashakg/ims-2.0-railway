@@ -350,7 +350,9 @@ def test_sending_an_unpriced_po_raises_a_task_for_accounts(client, catalogue):
     assert "P3" in task["description"] and "Purchase Invoices" in task["description"]
 
 
-def test_an_unpriced_line_is_received_and_billed_its_cost_comes_with_the_bill(client, catalogue):
+@pytest.mark.parametrize("taxable", [None, 0])
+@pytest.mark.parametrize("consolidated_dc", [False, True])
+def test_an_unpriced_line_is_received_and_billed_its_cost_comes_with_the_bill(client, catalogue, taxable, consolidated_dc):
     # P4 is catalogued but for its cost (catalogue managers have no cost box,
     # nothing was paid to V1 for it). A manager orders it by quantity and sends
     # it, the goods arrive and are accepted: they go on the shelf without a
@@ -392,6 +394,15 @@ def test_an_unpriced_line_is_received_and_billed_its_cost_comes_with_the_bill(cl
         "lines": [{"product_id": "P4", "description": "P4", "qty": QTY,
                    "unit_price": 0, "gst_rate": 12}],
     }
+    if taxable is not None:
+        body["lines"][0]["taxable"] = taxable
+    if consolidated_dc:
+        # The same received goods can be billed through the DC consolidation
+        # door, whose request has no header PO or single GRN to inspect.
+        catalogue.grns.update_one({"grn_id": "G4"}, {"$set": {"grn_subtype": "DELIVERY_CHALLAN"}})
+        body.pop("po_id")
+        body.pop("grn_id")
+        body["linked_dc_ids"] = ["G4"]
     for path in ("/preview", ""):
         refused = client.post("/api/v1/vendors/purchase-invoices" + path,
                               json=body, headers=_headers("ACCOUNTANT"))
@@ -406,6 +417,20 @@ def test_sending_a_priced_po_raises_no_task(client, catalogue):
     r = client.post(f"/api/v1/vendors/purchase-orders/{po_id}/send", headers=_headers("STORE_MANAGER"))
     assert r.status_code == 200, r.text
     assert _price_tasks(catalogue) == []
+
+
+@pytest.mark.parametrize("path", ["", "/timeline"])
+def test_legacy_po_price_history_is_hidden_without_changing_the_record(client, buying, path):
+    history = [{"kind": "edited", "label": "Edited", "at": "2026-10-01",
+                "detail": "Aviator: quantity 1 -> 2; Aviator: cost Rs 4321.77 -> Rs 4500"}]
+    buying.purchase_orders.update_one({"po_id": "PO1"}, {"$set": {"history": history}})
+    manager = client.get(f"/api/v1/vendors/purchase-orders/PO1{path}", headers=_headers("STORE_MANAGER"))
+    assert manager.status_code == 200, manager.text
+    assert "quantity 1 -> 2" in manager.text
+    assert "4321.77" not in manager.text and "4500" not in manager.text
+    accounts = client.get(f"/api/v1/vendors/purchase-orders/PO1{path}", headers=_headers("ACCOUNTANT"))
+    assert accounts.status_code == 200 and "cost Rs 4321.77 -> Rs 4500" in accounts.text
+    assert buying.purchase_orders.find_one({"po_id": "PO1"})["history"] == history
 
 
 # ---------------------------------------------------------------------------

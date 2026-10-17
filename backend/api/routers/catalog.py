@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from enum import Enum
 import logging
 import uuid
+from copy import deepcopy
 
 logger = logging.getLogger(__name__)
 
@@ -1176,9 +1177,8 @@ class ShopifySyncInput(BaseModel):
     # The form's "Shopify tags" box -> the spine's governed `tags` + the twin's
     # ecom.seo.tags (product_master.set_twin_tags), the list the push sends.
     shopify_tags: List[str] = []
-    # publish_to_online_store removed in Phase 6.12 — we don't run our
-    # own storefront. Kept publish_to_pos for Shopify POS sync.
-    publish_to_pos: bool = True
+    # No POS channel flag: IMS is the till, a product never publishes to
+    # Shopify POS (owner ruling 2026-09-28).
 
 
 class SEOInput(BaseModel):
@@ -1446,6 +1446,12 @@ def _all_catalog_products() -> List[Dict]:
     return list(CATALOG_PRODUCTS.values())
 
 
+# The answer when a save that needs the linked spine could not read it.
+_SPINE_UNCHECKED = (
+    "The billing product could not be checked, so nothing was saved. Please save again."
+)
+
+
 def _spine_of(repo, catalog_doc: Optional[Dict]) -> Optional[Dict]:
     """The billing SPINE row of a catalog twin -- the ONE resolver both
     catalog doors' spine sync (PUT is_active / price / tier / hsn / gst,
@@ -1456,8 +1462,8 @@ def _spine_of(repo, catalog_doc: Optional[Dict]) -> Optional[Dict]:
     census, and every size variant) is keyed by the spine's pim_product_id
     -- a DIFFERENT uuid -- so it is found through that link (the mirror
     image of the spine PUT's pim_product_id-first twin lookup,
-    product_master.mirror_update_to_catalog_twin), else by sku (_spine_ids,
-    THE rule). Until this, both doors' `_pr.update(<catalog id>, ...)`
+    product_master.mirror_update_to_catalog_twin; _spine_ids is THE rule).
+    Until this, both doors' `_pr.update(<catalog id>, ...)`
     silently matched NO spine on a door-created product: the drawer's
     deactivate / the Delete button never reached the spine a soft-deleted
     product is sold from at POS, and for a size variant -- whose only
@@ -1468,7 +1474,7 @@ def _spine_of(repo, catalog_doc: Optional[Dict]) -> Optional[Dict]:
     Strict reads (the one rule, _spine_ids, then _pm.strict_find_many): a
     read error RAISES, never reads as "no spine" -- BaseRepository.find_by_id
     prints it and answers None, and DELETE would then discard an ordered
-    draft as an ordinary product. _spine_product_id is the fail-soft id."""
+    draft as an ordinary product."""
     if repo is None or not catalog_doc:
         return None
     sid = _spine_ids(repo, [catalog_doc])[0]
@@ -1478,15 +1484,11 @@ def _spine_of(repo, catalog_doc: Optional[Dict]) -> Optional[Dict]:
 
 def _spine_product_id(repo, catalog_doc: Optional[Dict]) -> Optional[str]:
     """The spine id of a catalog twin (_spine_of's, by the one rule
-    _spine_ids). None when there is no spine (a BVI-only twin) or the read
-    failed (fail-soft, as every caller's spine sync is)."""
+    _spine_ids). None when there is no spine (a BVI-only twin). Read errors
+    raise: a barcode save must refuse rather than silently skip its spine."""
     if repo is None or not catalog_doc:
         return None
-    try:
-        return _spine_ids(repo, [catalog_doc])[0]
-    except Exception:  # noqa: BLE001
-        logger.warning("[CATALOG] spine lookup failed", exc_info=True)
-        return None
+    return _spine_ids(repo, [catalog_doc])[0]
 
 
 def _spine_ids(repo, docs: List[Optional[Dict]]) -> List[Optional[str]]:
@@ -1494,35 +1496,27 @@ def _spine_ids(repo, docs: List[Optional[Dict]]) -> List[Optional[str]]:
     Added column and sort through _spine_facts), batched: for each twin (same
     order) the spine whose pim_product_id is the twin's id (the create door's
     own link, the one every spine -> twin lookup reads first), else the spine
-    whose product_id is the twin's id (a convergence twin shares it), else
-    the spine with the twin's sku; None when none. One read; raises when it
-    fails. _twins_of is this rule read the other way."""
+    whose product_id is the twin's id (a convergence twin shares it); None
+    when none. Never by sku alone: a review-queue twin can share a sku with
+    an UNRELATED product's spine (promote 409s on exactly that), and the sku
+    match wrote this twin's price, active flag and barcode onto the other
+    product and excused that product's barcode as this one's own in the
+    one-holder check. One read; raises when it fails. _twins_of is this rule
+    read the other way."""
     ids = [d["id"] for d in docs if d and d.get("id")]
-    skus = [d["sku"] for d in docs if d and d.get("sku")]
     by_pim: Dict[Any, str] = {}
     by_id: Dict[Any, str] = {}
-    by_sku: Dict[Any, str] = {}
-    if ids or skus:
+    if ids:
         for s in repo.collection.find(
-            {
-                "$or": [
-                    {"pim_product_id": {"$in": ids}},
-                    {"product_id": {"$in": ids}},
-                    {"sku": {"$in": skus}},
-                ]
-            },
-            {"_id": 0, "product_id": 1, "pim_product_id": 1, "sku": 1},
+            {"$or": [{"pim_product_id": {"$in": ids}}, {"product_id": {"$in": ids}}]},
+            {"_id": 0, "product_id": 1, "pim_product_id": 1},
         ):
             if s.get("product_id"):
                 by_id.setdefault(s["product_id"], s["product_id"])
                 if s.get("pim_product_id"):
                     by_pim.setdefault(s["pim_product_id"], s["product_id"])
-                if s.get("sku"):
-                    by_sku.setdefault(s["sku"], s["product_id"])
     return [
-        (by_pim.get(d.get("id")) or by_id.get(d.get("id")) or by_sku.get(d.get("sku")))
-        if d
-        else None
+        (by_pim.get(d.get("id")) or by_id.get(d.get("id"))) if d else None
         for d in docs
     ]
 
@@ -1532,17 +1526,16 @@ def _twins_of(repo, spines: List[Optional[Dict]]) -> List[Optional[Dict]]:
     _spine_ids read the other way, so the two directions can never disagree
     -- for each spine (same order) the twin whose spine _spine_ids picks IS
     this spine; None when no twin's is. A twin can only point at a spine
-    through the spine's pim_product_id, its product_id or its sku, so those
-    are the candidates (in that order). Two reads; raises when one fails."""
+    through the spine's pim_product_id or its product_id, so those are the
+    candidates (in that order). Two reads; raises when one fails."""
     keys = [k for s in spines if s for k in (s.get("pim_product_id"), s.get("product_id")) if k]
-    skus = [s["sku"] for s in spines if s and s.get("sku")]
     coll = _catalog_coll()
-    if not (keys or skus):
+    if not keys:
         found: List[Dict] = []
     elif coll is not None:
-        found = list(coll.find({"$or": [{"id": {"$in": keys}}, {"sku": {"$in": skus}}]}))
+        found = list(coll.find({"id": {"$in": keys}}))
     else:
-        found = [t for t in CATALOG_PRODUCTS.values() if t.get("id") in keys or t.get("sku") in skus]
+        found = [t for t in CATALOG_PRODUCTS.values() if t.get("id") in keys]
     found = [dict(t) for t in found if t.get("id")]
     owner = dict(zip((t["id"] for t in found), _spine_ids(repo, found)))
     out: List[Optional[Dict]] = []
@@ -2210,6 +2203,12 @@ async def create_catalog_product(
     # form AND catalog doors" flow. When there is no DB (_pr is None) the catalog
     # save below also falls back to in-memory, so there is no orphan to guard.
     _pr = get_product_repository()
+    # One product per manufacturer GTIN at this create door too (the same rule
+    # as the form and edit doors).
+    try:
+        _pm.assert_gtin_free((_spine.get("attributes") or {}).get("gtin"), _pr, None)
+    except _pm.ProductMasterError as err:
+        raise HTTPException(status_code=err.status, detail=err.message) from err
     if _pr is not None:
         try:
             _spine_created = _pr.create(_spine, raise_on_duplicate=True)
@@ -2445,11 +2444,13 @@ async def update_catalog_product(
                 existing["gst_rate"] = gst_rate_for_category(canonical)
 
     # Update fields
+    gtin_written = False
     if product.attributes:
         # Catalog Dictionary parity with the spine PUT (products.py): when the
         # owner configured allowed values for a field, an attributes patch must
         # match them (case-canonicalising). Fail-soft when no db.
-        merged_attrs = {**(existing.get("attributes") or {}), **product.attributes}
+        from ..dependencies import get_product_repository
+
         try:
             # Case ONLY what this submit carries. The merged dict below
             # holds every stored attribute, so casing that would rewrite
@@ -2457,13 +2458,40 @@ async def update_catalog_product(
             _typed = _pm.apply_field_casing(
                 product.attributes or {}, only=set((product.attributes or {}).keys())
             )
+            # The review editor's 'GTIN (mfr)' / 'UPC (mfr)' boxes are the
+            # manufacturer barcodes that reach Shopify and Google: the same
+            # strict guard and one-holder rule as the spine doors.
+            _typed = _pm._guard_gtin_attribute(
+                _typed, strict=True, category=existing.get("category")
+            )
             product.attributes = _typed
+            # Another stored spelling of a barcode key folds on and goes; a
+            # gtin the fold makes is checked like a sent one, and written.
+            _gtin_repo = get_product_repository()
+            try:
+                # A spineless twin (an import) is its own holder: its id.
+                _holder = _spine_product_id(_gtin_repo, existing) or existing.get("id")
+            except Exception as exc:  # noqa: BLE001
+                # The one-holder check excuses this product's own spine; not
+                # knowing it would excuse the wrong one. Refused, nothing saved.
+                raise HTTPException(status_code=503, detail=_SPINE_UNCHECKED) from exc
+            merged_attrs, gtin_written = _pm.merge_attributes_edit(
+                existing.get("attributes"),
+                _typed,
+                _gtin_repo,
+                _holder,
+                existing.get("category"),
+            )
             merged_attrs = _pm.enforce_dictionary_values(
                 existing.get("category"), merged_attrs, db=_get_db()
             )
         except _pm.ProductMasterError as err:
             raise HTTPException(status_code=err.status, detail=err.message) from err
         existing["attributes"] = merged_attrs
+        if gtin_written:
+            # The twin's top-level barcode fields follow (the same projection
+            # as the spine door's mirror).
+            existing.update(_pm.twin_barcode_fields(merged_attrs.get("gtin")))
         # Title regen is BEST-EFFORT: imported (BVI) docs store the canonical
         # long-form category ("FRAME"), which is not a ProductCategory short
         # code -- ProductCategory("FRAME") raises and previously 500'd any
@@ -2489,6 +2517,13 @@ async def update_catalog_product(
             existing["model"] = str(
                 merged_attrs.get("model_no") or merged_attrs.get("model_name") or ""
             ).strip()
+
+    # The code the spine (and a size variant's row) must take; None = this
+    # save moved no barcode, so it writes none: the twin is never "the newer
+    # copy" (a Manage Barcode edit lands on the spine first).
+    spine_gtin = (
+        (existing.get("attributes") or {}).get("gtin") or "" if gtin_written else None
+    )
 
     # Explicit operator name wins over the best-effort title regen for THIS
     # save (hence applied AFTER the attributes block; per-save only -- the
@@ -2584,6 +2619,104 @@ async def update_catalog_product(
     )
     existing.update(_edit)
 
+    # Spine and twin hold ONE GTIN (Manage Barcode, the till and the stock page
+    # read the spine's). Written FIRST, after every check: a refused write
+    # 503s with NOTHING saved, so the retry -- the same payload and updated_at
+    # -- redoes all of it, the take-down included. NOT fail-soft: a spine that
+    # silently kept its old code is worse than a save that says so. A twin
+    # with no LINKED spine keeps the code alone, and the answer says so.
+    _pr = _spine_id = None
+    try:
+        from ..dependencies import get_product_repository
+
+        _pr = get_product_repository()
+        _spine_id = _spine_product_id(_pr, existing)
+    except Exception as exc:  # noqa: BLE001 -- fail-soft unless a barcode moves
+        if spine_gtin is not None:
+            # "Could not look" is not "no linked spine": saving the twin alone
+            # would split the two copies for good. Refused, nothing saved.
+            raise HTTPException(status_code=503, detail=_SPINE_UNCHECKED) from exc
+        logger.warning(
+            "[CATALOG] spine lookup skipped for %s", product_id, exc_info=True
+        )
+    message = "Product updated successfully"
+    barcode_token = uuid.uuid4().hex
+    spine_before = size_before = None
+    size_collection = None
+
+    def undo_refused_barcode():
+        """A refused catalogue edit must not leave its barcode on the till
+        or the size row. Token guards preserve any newer barcode writer."""
+        try:
+            winner = _get_catalog_product(product_id)
+            if winner is None:
+                raise LookupError("catalogue winner could not be read")
+            copies = []
+            if spine_before is not None:
+                copies.append((_pr.collection, {"product_id": _spine_id}, spine_before, True))
+            if size_before is not None:
+                copies.append((size_collection, {"sku": existing.get("sku")}, size_before, False))
+            for collection, key, before, is_spine in copies:
+                _pm.undo_catalogue_barcode_write(
+                    collection, key, before, barcode_token, spine=is_spine,
+                    winning_attributes=winner.get("attributes"),
+                    previous_attributes=pre_edit.get("attributes"),
+                )
+        except Exception as exc:  # noqa: BLE001 - never claim clean refusal after failed repair
+            logger.error("[CATALOG] refused barcode edit could not be restored for %s", product_id, exc_info=True)
+            raise HTTPException(
+                status_code=503,
+                detail="This catalogue edit was not saved, but its barcode copies "
+                "could not be restored. Reload the item and check its barcode before retrying.",
+            ) from exc
+
+    if spine_gtin is not None:
+        # A size with no website row: refused BEFORE the spine write, or the
+        # spine would take the code while the twin (refused below) never can.
+        if _is_variant_of(existing):
+            try:
+                size_db = _get_db()
+                _pm.assert_size_row(existing.get("sku"), size_db)
+                size_collection = size_db.get_collection("catalog_variants")
+                size_before = deepcopy(size_collection.find_one({"sku": existing.get("sku")}))
+            except _pm.ProductMasterError as err:
+                raise HTTPException(status_code=err.status, detail=err.message) from err
+        if _spine_id:
+            try:
+                spine_before = deepcopy(_pr.find_by_id(_spine_id))
+                _pm.write_spine_gtin(_pr, _spine_id, spine_gtin, write_token=barcode_token)
+            except _pm.ProductMasterError as err:
+                undo_refused_barcode()
+                raise HTTPException(status_code=err.status, detail=err.message) from err
+        else:
+            message = (
+                "Saved on the catalogue copy only: no billing product is linked "
+                "to it, so the till and Manage Barcode do not have this barcode."
+            )
+        # A SIZE VARIANT's barcode reaches the website on its catalog_variants
+        # ROW (the parent's push), so it lands there too, before the twin save
+        # and NOT fail-soft -- as Manage Barcode: a size left on the old code is
+        # a failed save. Refused, the twin is not saved, so the retry (the same
+        # payload and updated_at) redoes it.
+        # A False here is a row deleted since the check above: a failed size
+        # write too.
+        if _is_variant_of(existing):
+            try:
+                if not _pm._mirror_variant_row_update(
+                    current=existing,
+                    patch={"attributes": {"gtin": spine_gtin}},
+                    db=_get_db(),
+                    write_token=barcode_token,
+                ):
+                    raise LookupError(f"no size row for {existing.get('sku')}")
+            except Exception as exc:  # noqa: BLE001
+                undo_refused_barcode()
+                raise HTTPException(
+                    status_code=503,
+                    detail="The website copy of this size could not take the "
+                    "barcode, so the catalogue copy was not saved. Please save again.",
+                ) from exc
+
     # Promote is the ONLY writer of the review/promote flags (see the stamp in
     # promote_catalog_product): strip them from the WRITE (a copy -- the
     # response below still returns them as loaded) so a PUT whose snapshot was
@@ -2600,6 +2733,8 @@ async def update_catalog_product(
         # another writer landed inside the check-to-write window (which
         # includes live DB round-trips) -- 409 instead of clobbering.
         if not _save_catalog_product_cas(to_write, raw_expected_ts):
+            if spine_gtin is not None:
+                undo_refused_barcode()
             raise HTTPException(
                 status_code=409,
                 detail=(
@@ -2698,11 +2833,7 @@ async def update_catalog_product(
     # PUT moves hsn / gst without naming them (re-derived above): it travels.
     # Fail-soft: a spine-sync error never breaks the catalog save.
     try:
-        from ..dependencies import get_product_repository
-
-        _pr = get_product_repository()
-        _spine_id = _spine_product_id(_pr, existing)
-        if _pr is not None and _spine_id:
+        if _spine_id:
             _sent = product.pricing.model_dump(exclude_none=True) if product.pricing else {}
             _pricing = existing.get("pricing") or {}
             _patch: Dict[str, Any] = {
@@ -2727,7 +2858,6 @@ async def update_catalog_product(
         logger.warning(
             "[CATALOG] spine sync on update skipped for %s", product_id, exc_info=True
         )
-
     # Sync audit gap #2 (owner, 2026-09-06): is_active off -> take it OFF
     # Shopify; back on -> queue it for the next press / live sync. The ONE
     # rule lives in services/online_delist; runs AFTER the save (the full-doc
@@ -2751,29 +2881,26 @@ async def update_catalog_product(
     # the PARENT's price push (product_input._resolve_variant_pricing reads the
     # row, never this twin), and the engine recompute below finds no rows for
     # a child twin (its row's parent_product_id is the PARENT). So the drawer's
-    # mrp / gtin edit goes through the ONE row writer -- the same one the spine
-    # PUT's mirror uses -- which also re-derives the online price and queues
-    # the PARENT. Without it the edit was silently inert on the website.
-    # Fail-soft: the catalog save stands.
-    if _is_variant_of(existing):
-        _row_patch: Dict[str, Any] = {}
-        if product.pricing is not None and product.pricing.mrp is not None:
-            _row_patch["mrp"] = product.pricing.mrp
-        if product.attributes and "gtin" in product.attributes:
-            _row_patch["attributes"] = {
-                "gtin": (existing.get("attributes") or {}).get("gtin")
-            }
-        if _row_patch:
-            try:
-                _pm._mirror_variant_row_update(
-                    current=existing, patch=_row_patch, db=_get_db()
-                )
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "[CATALOG] variant row mirror skipped for %s",
-                    product_id,
-                    exc_info=True,
-                )
+    # mrp edit goes through the ONE row writer -- the same one the spine PUT's
+    # mirror uses -- which also re-derives the online price and queues the
+    # PARENT. Without it the edit was silently inert on the website. (Its
+    # barcode went to the row above, before the save.) Fail-soft: the catalog
+    # save stands.
+    if (
+        _is_variant_of(existing)
+        and product.pricing is not None
+        and product.pricing.mrp is not None
+    ):
+        try:
+            _pm._mirror_variant_row_update(
+                current=existing, patch={"mrp": product.pricing.mrp}, db=_get_db()
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "[CATALOG] variant row mirror skipped for %s",
+                product_id,
+                exc_info=True,
+            )
 
     # Online discount engine: re-derive the ONLINE storefront price after an edit
     # (MRP / brand / category changes can move the winning rule). ADDITIVE +
@@ -2789,7 +2916,7 @@ async def update_catalog_product(
 
     return {
         "product": mask_cost(existing, current_user, "product"),
-        "message": "Product updated successfully",
+        "message": message,
     }
 
 
@@ -2990,6 +3117,10 @@ async def promote_catalog_product(
             product_repo=repo,
             db=db,
         )
+        # One product per manufacturer GTIN: Approve is a create door too.
+        _pm.assert_gtin_free(
+            (spine.get("attributes") or {}).get("gtin"), repo, product_id
+        )
     except _pm.ProductMasterError as err:
         if dry_run:
             return {
@@ -3071,6 +3202,21 @@ async def promote_catalog_product(
     }
     if minted_sku:
         stamp["sku"] = minted_sku
+    # The twin's manufacturer barcodes (gtin / upc, in any spelling) become
+    # EXACTLY what the spine stored through the door's guard -- folded,
+    # sanitised, junk with no box dropped -- in this same write: one value on
+    # both copies, so find_twin_by_barcode and the spine agree.
+    _doc_attrs = doc.get("attributes")
+    if isinstance(_doc_attrs, dict):
+        _spine_attrs = spine.get("attributes") or {}
+        _twin_attrs = {
+            k: v for k, v in _doc_attrs.items() if not _pm.manufacturer_barcode_key(k)
+        }
+        _twin_attrs.update(
+            {k: v for k, v in _spine_attrs.items() if _pm.manufacturer_barcode_key(k)}
+        )
+        if _twin_attrs != _doc_attrs:
+            stamp["attributes"] = _twin_attrs
     try:
         coll = _catalog_coll()
         if coll is not None:
@@ -3594,7 +3740,13 @@ async def bulk_restore_products(
         sid = _spine_product_id(repo, twin)
         return (repo.find_by_id(sid) if sid else None), (dict(twin) if twin else None)
 
-    pairs = {p: _pair(p) for p in ids}
+    try:
+        pairs = {p: _pair(p) for p in ids}
+    except Exception:  # noqa: BLE001 -- "could not look" is not "no spine"
+        logger.warning("[CATALOG] spine lookup for bulk restore failed", exc_info=True)
+        raise HTTPException(
+            status_code=503, detail="Could not read the catalogue right now. Try again in a minute."
+        ) from None
     if body.apply:  # a spine id: its twin by the same rule the drawer's twin id took
         bare = [p for p in ids if pairs[p][0] is not None and pairs[p][1] is None]
         for p, twin in zip(bare, _twins_or_503(repo, [pairs[p][0] for p in bare])):
@@ -3886,6 +4038,10 @@ async def import_products(
                         "gst_rate": product.gst_rate,
                     },
                     source="CATALOG",
+                )
+                # One product per manufacturer GTIN, as at every create door.
+                _pm.assert_gtin_free(
+                    (_row_spine.get("attributes") or {}).get("gtin"), _bulk_repo, None
                 )
             except _pm.ProductMasterError as req_exc:
                 errors.append({"index": i, "error": _catalog_pm_error(req_exc, product)[1]})

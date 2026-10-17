@@ -27,6 +27,7 @@ from ._shared import (
     validate_store_access,
 )
 from ...services.cost_mask import mask_cost_list
+from ...services.gtin import fold_barcode_spellings
 from ...services.product_master import main_photo
 from ...services.item_events import on_hand_match
 from ...utils.ist import ist_date_str_from_stored
@@ -267,7 +268,8 @@ def _build_store_ledger(
       - a representative location_code from any AVAILABLE unit. NOT a
         barcode: every unit carries its own, so one unit's code on the row
         read as the product's and changed when that unit shipped (F27). The
-        units live behind GET /inventory/units.
+        units live behind GET /inventory/units; the row only lists every
+        on-hand unit's code in `unit_barcodes`, for the search boxes.
 
     Joins to `products` so every row carries the catalog fields the
     frontend filters/renders. Products in the catalog with no stock_units
@@ -290,6 +292,7 @@ def _build_store_ledger(
                         "product_id": 1,
                         "status": 1,
                         "quantity": 1,
+                        "barcode": 1,
                         "location_code": 1,
                     }
                 },
@@ -300,6 +303,7 @@ def _build_store_ledger(
                             "status": "$status",
                         },
                         "qty": {"$sum": {"$ifNull": ["$quantity", 1]}},
+                        "barcodes": {"$push": "$barcode"},
                         "location_code": {"$first": "$location_code"},
                     }
                 },
@@ -319,11 +323,19 @@ def _build_store_ledger(
                 if is_on_hand(status):
                     on_hand_by_product[pid] = on_hand_by_product.get(pid, 0) + qty
                     # A sample location from any available unit for the
-                    # Location column on the ledger row.
-                    if pid not in sample_unit_by_product:
-                        sample_unit_by_product[pid] = {
+                    # Location column on the ledger row, and every on-hand
+                    # unit's code so the search boxes find a unit (search only;
+                    # the row's barcode stays the product's own, F27).
+                    sample = sample_unit_by_product.setdefault(
+                        pid,
+                        {
                             "location_code": row.get("location_code") or "",
-                        }
+                            "unit_barcodes": [],
+                        },
+                    )
+                    sample["unit_barcodes"].extend(
+                        b for b in row.get("barcodes") or [] if b
+                    )
                 elif canonical_state(status) is StockState.RESERVED:
                     reserved_by_product[pid] = reserved_by_product.get(pid, 0) + qty
         except (AttributeError, TypeError, ValueError) as exc:
@@ -478,6 +490,10 @@ def _ledger_row(
     name = product.get("name") or f"{brand} {model}".strip() or product.get("sku", "")
     mrp = float(product.get("mrp", 0) or 0)
     offer_price = float(product.get("offer_price", mrp) or mrp)
+    attrs = product.get("attributes")
+    # Read through THE fold the push reads (variant_barcode, ims.gtin), so a
+    # legacy 'GTIN' key shows here -- and can be removed -- as the code IMS sends.
+    gtin = (fold_barcode_spellings(attrs).get("gtin") if isinstance(attrs, dict) else None) or ""
     return {
         "id": pid,
         "product_id": pid,
@@ -501,6 +517,16 @@ def _ledger_row(
         "reserved_quantity": reserved,
         # The PRODUCT's own barcode only (F27) -- never a unit's.
         "barcode": product.get("barcode", "") or "",
+        # Every on-hand unit's IMS code at this shop (the search boxes match it).
+        "unit_barcodes": sample_unit.get("unit_barcodes", []),
+        # The manufacturer's GTIN -- what Inventory > Manage Barcode edits.
+        # A legacy row whose attributes are not a dict must not 500 the page.
+        "gtin": gtin,
+        # A legacy products.barcode is NOT the maker's: main's old Manage
+        # Barcode > Generate wrote random EAN-13s there (most pass the format
+        # check). Shown apart so it can be seen and removed, never as the gtin,
+        # so saving Manage Barcode untouched never sends it to Shopify.
+        "unverified_barcode": "" if gtin else (product.get("barcode") or ""),
         "location": sample_unit.get("location_code", "")
         or product.get("location_code", ""),
         "location_code": sample_unit.get("location_code", "")

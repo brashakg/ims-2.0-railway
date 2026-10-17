@@ -264,9 +264,10 @@ def test_seed_rows_carry_price_compare_at_sku_and_barcode():
 
 
 def test_seed_rows_publish_a_real_manufacturer_gtin():
-    """The counterpart to the guard above: a genuine GTIN still gets pushed."""
+    """The counterpart to the guard above: a genuine GTIN still gets pushed --
+    from the gtin attribute, the maker barcode's one home (decided 2026-10-01)."""
     rows = shopify_push.build_variant_seed_rows(
-        _product(gtin="8056597720373"), []
+        _product(attributes={"gtin": "8056597720373"}), []
     )
     assert rows[0]["row"]["barcode"] == "8056597720373"
 

@@ -1554,22 +1554,36 @@ def _vendor_gstin(db, vendor: Optional[dict], vendor_id: str) -> Optional[str]:
         return None
 
 
-def _assert_unpriced_po_bill(body, grn_doc):
+def _assert_unpriced_po_bill(body, grn_doc, db=None):
     """An unknown PO price must not silently become a zero-cost bill."""
     zero_lines = [ln for ln in body.lines if ln.product_id and ln.qty > 0
-                  and ln.unit_price <= 0 and ln.taxable is None]
-    po_id = getattr(body, "po_id", None) or (grn_doc or {}).get("po_id")
-    if not zero_lines or not po_id:
+                  and (ln.taxable <= 0 if ln.taxable is not None else ln.unit_price <= 0)]
+    if not zero_lines:
         return
+    # The receipts establish the purchases, including a consolidated set of
+    # DCs. An omitted/different header PO must not hide an unknown price.
+    po_ids = {getattr(body, "po_id", None), (grn_doc or {}).get("po_id")}
+    if getattr(body, "linked_dc_ids", None):
+        if db is None:
+            raise HTTPException(status_code=503, detail="Could not verify purchase prices. Try again.")
+        po_ids.update(dc.get("po_id") for dc in _load_linked_dcs(db, body.linked_dc_ids))
+    po_ids.discard(None)
+    po_ids.discard("")
+    if not po_ids:
+        return
+    unpriced = set()
     try:
         repo = get_purchase_order_repository()
-        po = repo.find_by_id(po_id) if repo is not None else None
+        for po_id in po_ids:
+            po = repo.find_by_id(po_id) if repo is not None else None
+            if po is None:
+                raise HTTPException(status_code=503, detail="Could not verify purchase prices. Try again.")
+            unpriced.update(ln.get("product_id") for ln in po.get("items") or []
+                            if pmatch.is_unpriced_line(ln))
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Could not verify purchase prices. Try again.") from exc
-    if po is None:
-        raise HTTPException(status_code=503, detail="Could not verify purchase prices. Try again.")
-    unpriced = {ln.get("product_id") for ln in po.get("items") or []
-                if pmatch.is_unpriced_line(ln)}
     if any(ln.product_id in unpriced for ln in zero_lines):
         raise HTTPException(status_code=422, detail={
             "code": "INVOICE_PRICE_REQUIRED",
@@ -1594,7 +1608,7 @@ def _bill_math(db, vendor, body, grn_doc, current_user):
     F40) -- nor another shop: the shop is _bill_shop's (the receipt's; else
     the form's own store_id -- required from an admin (R9), never whichever
     shop the token names by the time Book is pressed)."""
-    _assert_unpriced_po_bill(body, grn_doc)
+    _assert_unpriced_po_bill(body, grn_doc, db)
     refusal = ap_engine.reverse_charge_refusal(body.reverse_charge, grn_doc)
     if refusal:
         raise HTTPException(status_code=400, detail=refusal)
