@@ -47,6 +47,7 @@ def test_invoice_payload_and_pdf_show_round_off(
     from api.routers import orders as orders_module
     from api.routers.auth import get_current_user
     from api.services import invoice_pdf as pdf_module
+    from api.services import print_identity
 
     doc = {
         "order_id": "ORD-RO", "order_number": "ORD-RO-1", "store_id": "BV-TEST-01",
@@ -76,12 +77,15 @@ def test_invoice_payload_and_pdf_show_round_off(
     monkeypatch.setattr(orders_module, "get_customer_repository", lambda: _FakeCustomerRepo())
     monkeypatch.setattr(orders_module, "validate_store_access", lambda sid, user: sid)
     monkeypatch.setattr(deps_module, "get_store_repository", lambda: _FakeStoreRepo())
+    monkeypatch.setattr(print_identity, "load_entity_for_store", lambda store: {
+        "entity_id": store.get("entity_id"), "gstins": [{"gstin": store.get("gstin")}],
+    })
     monkeypatch.setattr(
         pdf_module,
         "resolve_issuing_identity",
         lambda store_id, key: {
-            "store": {"name": "BV", "gstin": "20AAAAA0000A1Z5", "address": "x"},
-            "entity": {"legal_name": "BV Opticals Pvt Ltd"},
+            "store": {"name": "BV", "entity_id": "entity-bv", "gstin": "20AAAAA0000A1Z5", "address": "x"},
+            "entity": {"entity_id": "entity-bv", "legal_name": "BV Opticals Pvt Ltd", "gstins": [{"gstin": "20AAAAA0000A1Z5"}]},
             "overrides": {},
         },
     )
@@ -92,13 +96,17 @@ def test_invoice_payload_and_pdf_show_round_off(
     }
     client = TestClient(app)
 
-    j = client.get("/orders/ORD-RO/invoice").json()
+    response = client.get("/orders/ORD-RO/invoice")
+    assert response.status_code == 200, response.text
+    j = response.json()
     assert j["roundOff"] == round_off
     assert j["grandTotal"] == grand
     # The tax summary is the lines' own figures -- the round off is not in it.
     assert j["taxTotals"]["taxable"] == taxable
 
-    text = _pdf_text(client.get("/orders/ORD-RO/invoice.pdf").content)
+    response = client.get("/orders/ORD-RO/invoice.pdf")
+    assert response.status_code == 200, response.text
+    text = _pdf_text(response.content)
     assert "Round off" in text
     # The signed line itself (a bare "0.50" also matches the unit price).
     assert printed in text
