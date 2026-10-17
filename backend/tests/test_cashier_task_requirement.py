@@ -97,10 +97,17 @@ def test_cashier_sop_checklist_and_legacy_named_task_enforce_the_same_role(world
 
 
 @pytest.mark.parametrize("automatic", [False, True])
-def test_escalation_never_completes_cashier_work_by_merging_a_twin(world, monkeypatch, automatic):
+@pytest.mark.parametrize("legacy_sop", [False, True])
+def test_escalation_never_completes_cashier_work_by_merging_a_twin(world, monkeypatch, automatic, legacy_sop):
     from api.routers import tasks
     as_role, db = world
     db.tasks.update_one({"task_id": "R-CASHIER"}, {"$set": {"escalation_group": "CASH-GROUP"}})
+    if legacy_sop:
+        db.sop_templates.insert_one({"template_id": "OLD-CASH-SOP", "assigned_roles": ["CASHIER"]})
+        monkeypatch.setattr(tasks, "_sop_collection", lambda: db.sop_templates)
+        db.tasks.update_one({"task_id": "R-CASHIER"}, {"$set": {
+            "assigned_to": uid("CASHIER"), "source": "SOP", "sop_template_id": "OLD-CASH-SOP",
+        }, "$unset": {"required_role": ""}})
     db.tasks.insert_one(_task("CASH-TWIN", USERS["STORE_MANAGER"]["user_id"], S1, escalation_group="CASH-GROUP"))
     monkeypatch.setattr(tasks, "resolve_escalation_target", lambda *args, **kwargs: USERS["STORE_MANAGER"])
     monkeypatch.setattr(tasks, "should_escalate", lambda task, **kwargs: (task["task_id"] == "R-CASHIER", "overdue"))
@@ -111,4 +118,8 @@ def test_escalation_never_completes_cashier_work_by_merging_a_twin(world, monkey
     response = as_role("STORE_MANAGER").post(path)
     assert response.status_code == 200, response.text
     saved = db.tasks.find_one({"task_id": "R-CASHIER"})
-    assert saved["status"] == "ESCALATED" and saved["required_role"] == "CASHIER"
+    assert saved["status"] == "ESCALATED"
+    if not legacy_sop:
+        assert saved["required_role"] == "CASHIER"
+    denied = as_role("STORE_MANAGER").patch("/api/v1/tasks/R-CASHIER/complete", json={"completion_notes": "finished"})
+    assert denied.status_code == 403, denied.text

@@ -140,6 +140,11 @@ def merge_into_twin(
     # the original open rather than marking it completed under a non-cashier.
     if requires_cashier(task):
         return None
+    # Older named SOP tasks have no stored requirement. Their source template
+    # is resolved at actual completion; automatic deduplication cannot safely
+    # declare that work completed before its cashier requirement is known.
+    if task.get("sop_template_id") and not task.get("required_role"):
+        return None
     group = task.get("escalation_group")
     uid = (target or {}).get("user_id")
     if not group or not uid:
