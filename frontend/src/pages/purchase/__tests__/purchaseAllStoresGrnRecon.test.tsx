@@ -68,13 +68,17 @@ const DHN_OPEN: Po = { po_id: 'po-dhn-3', po_number: 'PO-DHN-3', vendor_name: 'J
 let orders: Po[] = [];
 let grns: unknown[] = [];
 
-/** The list route as the server answers it: filter by shop and status, then
- *  the first 50 in the order they were raised (find_many, default limit). */
-function listOrders(params?: { store_id?: string; status?: string }) {
-  return orders
+type OrderListParams = { store_id?: string; status?: string; receipt_candidates?: boolean };
+
+/** Receiving candidates are filtered before pagination and returned in full.
+ *  Ordinary order reads retain their page size. Both use the same shop scope. */
+function listOrders(params?: OrderListParams) {
+  const scoped = orders
     .filter((p) => !params?.store_id || p.delivery_store_id === params.store_id)
-    .filter((p) => !params?.status || p.status === params.status)
-    .slice(0, 50);
+    .filter((p) => !params?.status || p.status === params.status);
+  return params?.receipt_candidates
+    ? scoped.filter((p) => ['SENT', 'ACKNOWLEDGED', 'PARTIAL', 'PARTIALLY_RECEIVED', 'RECEIVED'].includes(p.status))
+    : scoped.slice(0, 50);
 }
 
 beforeEach(() => {
@@ -83,7 +87,7 @@ beforeEach(() => {
   identity.resolveStoreIdentity.mockResolvedValue(null);
   orders = [...CLOSED, PUNE_OPEN, DHN_OPEN];
   grns = [];
-  http.get.mockImplementation((url: string, cfg?: { params?: { store_id?: string; status?: string } }) =>
+  http.get.mockImplementation((url: string, cfg?: { params?: OrderListParams }) =>
     Promise.resolve({
       data:
         url === '/vendors/purchase-orders'
@@ -148,6 +152,10 @@ describe('F63: Goods received on All stores -- the PO picker reads what the list
     open(<GoodsReceiptNote />, '');
     expect(await screen.findByText('PO-PUN-7 · Frames Wala · delivers to WizOpt Pune')).toBeInTheDocument();
     expect(screen.getByText('PO-DHN-3 · Jharkhand Optical · delivers to Better Vision Dhanbad')).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /PO-OLD-0.*count extra goods.*Better Vision Dhanbad/ })).toBeInTheDocument();
+    expect(http.get).toHaveBeenCalledWith('/vendors/purchase-orders', {
+      params: { store_id: undefined, receipt_candidates: true },
+    });
     // One scope for the tab: no read asks for his own shop, the list included.
     expect(new Set(scopes('/vendors/purchase-orders'))).toEqual(new Set([undefined]));
     expect(new Set(scopes('/vendors/grn'))).toEqual(new Set([undefined]));
@@ -169,7 +177,7 @@ describe('F63: Goods received on All stores -- the PO picker reads what the list
   });
 
   it('the empty picker says which shops it covers', async () => {
-    orders = [...CLOSED];
+    orders = CLOSED.map((po) => ({ ...po, status: 'DRAFT' }));
     roles = ['ADMIN'];
     open(<GoodsReceiptNote />, '');
     expect(await screen.findByText(/No open purchase orders to receive against in any store\./)).toBeInTheDocument();
