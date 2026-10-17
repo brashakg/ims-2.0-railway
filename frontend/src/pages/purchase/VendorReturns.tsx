@@ -70,7 +70,7 @@ interface Vendor {
   mobile: string;
 }
 
-const rupees = (v?: number | null) => (v == null ? '-' : `â‚¹${v.toLocaleString('en-IN')}`);
+const rupees = (v?: number | null) => (v == null ? '-' : `₹${v.toLocaleString('en-IN')}`);
 
 const RETURN_REASONS = [
   { value: 'defective', label: 'Defective' },

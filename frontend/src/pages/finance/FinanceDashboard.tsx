@@ -81,7 +81,7 @@ function mapGst(d: any): GSTSummaryData | null {
   // OS-010: igst_collected was hardcoded to 0, so the "IGST (inter-state)"
   // card could never show the inter-state tax the backend computes.
   // finance.py splits output tax into cgst/sgst/igst precisely so these
-  // cards reconcile to gst_collected â€” map the real value and derive the
+  // cards reconcile to gst_collected — map the real value and derive the
   // type from it.
   const igst = Number(d.igst || 0);
   return {
@@ -156,7 +156,7 @@ function mapVendorPayments(d: any): VendorPaymentData[] {
 }
 
 // NOTE: the old mapReconciliation() fabricated bank_amount/system_amount/
-// difference as 0 from inter-store transfer rows â€” there is no bank-statement
+// difference as 0 from inter-store transfer rows — there is no bank-statement
 // reconciliation backend, so it has been removed (SYSTEM_INTENT: never show
 // fabricated money). The Reconciliation tab + the Cash Flow "Bank Reconciliation
 // Status" block that consumed it are gone too.
@@ -278,7 +278,7 @@ export default function FinanceDashboard() {
       setBudgets(bud.status === 'fulfilled' ? mapBudget(bud.value) : []);
       setVendorPayments(vend.status === 'fulfilled' ? mapVendorPayments(vend.value) : []);
       // A failed/absent call must NOT leave a stale "incomplete" banner up, and
-      // must not invent one either â€” default false on anything but an explicit
+      // must not invent one either — default false on anything but an explicit
       // true from the backend.
       setExpensesRestricted(
         pnl.status === 'fulfilled' && !!(pnl.value as any)?.expenses_partially_restricted,
@@ -399,7 +399,7 @@ export default function FinanceDashboard() {
   const handleUnlockPeriod = () => {
     // Locked periods are intentionally permanent (closed-book integrity); there
     // is no unlock endpoint. Surface that instead of faking a local toggle.
-    toast.info('Locked periods are permanent for audit integrity â€” no unlock.');
+    toast.info('Locked periods are permanent for audit integrity — no unlock.');
   };
 
   const handleTallyExport = async () => {
@@ -513,7 +513,7 @@ export default function FinanceDashboard() {
                       clean and open, but nothing in the UI calls it, so naming
                       it here would send people somewhere that isn't there.) */}
                   <p className="text-sm text-gray-500 mt-2">
-                    Your own store's revenue, cost and profit â€” with no salary line â€”
+                    Your own store's revenue, cost and profit — with no salary line —
                     are on Reports &rsaquo; Forecast, under "Expense vs Revenue".
                   </p>
                 </div>
@@ -558,13 +558,13 @@ export default function FinanceDashboard() {
                       {pnlStoreRows.map((s) => (
                         <tr key={s.store_id} className="border-t border-gray-100">
                           <td className="px-3 py-2">{s.store_name || s.store_id}</td>
-                          <td className="px-3 py-2 text-right">â‚¹{Math.round(s.revenue).toLocaleString('en-IN')}</td>
-                          <td className="px-3 py-2 text-right">â‚¹{Math.round(s.cogs).toLocaleString('en-IN')}</td>
-                          <td className={clsx('px-3 py-2 text-right font-medium', s.gross_profit < 0 ? 'text-red-600' : 'text-gray-900')}>â‚¹{Math.round(s.gross_profit).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2 text-right">₹{Math.round(s.revenue).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2 text-right">₹{Math.round(s.cogs).toLocaleString('en-IN')}</td>
+                          <td className={clsx('px-3 py-2 text-right font-medium', s.gross_profit < 0 ? 'text-red-600' : 'text-gray-900')}>₹{Math.round(s.gross_profit).toLocaleString('en-IN')}</td>
                           <td className={clsx('px-3 py-2 text-right', s.margin < 0 ? 'text-red-600' : 'text-gray-600')}>{s.margin.toFixed(1)}%</td>
-                          <td className="px-3 py-2 text-right">â‚¹{Math.round(s.expenses || 0).toLocaleString('en-IN')}</td>
-                          <td className="px-3 py-2 text-right">â‚¹{Math.round(s.payroll || 0).toLocaleString('en-IN')}</td>
-                          <td className={clsx('px-3 py-2 text-right font-semibold', (s.net_profit || 0) < 0 ? 'text-red-600' : 'text-gray-900')}>â‚¹{Math.round(s.net_profit || 0).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2 text-right">₹{Math.round(s.expenses || 0).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2 text-right">₹{Math.round(s.payroll || 0).toLocaleString('en-IN')}</td>
+                          <td className={clsx('px-3 py-2 text-right font-semibold', (s.net_profit || 0) < 0 ? 'text-red-600' : 'text-gray-900')}>₹{Math.round(s.net_profit || 0).toLocaleString('en-IN')}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -585,9 +585,9 @@ export default function FinanceDashboard() {
                       {pnlByCategory.map((c) => (
                         <tr key={c.category} className="border-t border-gray-100">
                           <td className="px-3 py-2">{c.category}</td>
-                          <td className="px-3 py-2 text-right">â‚¹{Math.round(c.revenue || 0).toLocaleString('en-IN')}</td>
-                          {canSeeWhatWePay && <td className="px-3 py-2 text-right">â‚¹{Math.round(c.cogs || 0).toLocaleString('en-IN')}</td>}
-                          {canSeeWhatWePay && <td className="px-3 py-2 text-right font-semibold">â‚¹{Math.round(c.gross_profit || 0).toLocaleString('en-IN')}</td>}
+                          <td className="px-3 py-2 text-right">₹{Math.round(c.revenue || 0).toLocaleString('en-IN')}</td>
+                          {canSeeWhatWePay && <td className="px-3 py-2 text-right">₹{Math.round(c.cogs || 0).toLocaleString('en-IN')}</td>}
+                          {canSeeWhatWePay && <td className="px-3 py-2 text-right font-semibold">₹{Math.round(c.gross_profit || 0).toLocaleString('en-IN')}</td>}
                         </tr>
                       ))}
                     </tbody>
@@ -613,9 +613,9 @@ export default function FinanceDashboard() {
                       {gstRecon.map((e, i) => (
                         <tr key={i} className="border-t border-gray-100">
                           <td className="px-3 py-2">{e.entity_name}</td>
-                          <td className="px-3 py-2 text-right">â‚¹{Math.round(e.gst_collected || 0).toLocaleString('en-IN')}</td>
-                          <td className="px-3 py-2 text-right">â‚¹{Math.round(e.input_credit || 0).toLocaleString('en-IN')}</td>
-                          <td className="px-3 py-2 text-right font-semibold">â‚¹{Math.round(e.net_payable || 0).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2 text-right">₹{Math.round(e.gst_collected || 0).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2 text-right">₹{Math.round(e.input_credit || 0).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2 text-right font-semibold">₹{Math.round(e.net_payable || 0).toLocaleString('en-IN')}</td>
                         </tr>
                       ))}
                     </tbody>
