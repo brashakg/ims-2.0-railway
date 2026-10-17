@@ -986,8 +986,8 @@ def _bought_since(db, product_id, accepted_at) -> bool:
     """Whether a receipt accepted after `accepted_at` paid a price for this
     product -- the question /vendors/last-cost asks of each receipt, through
     the same helper (grn_accept_lock._receipt_price_paid): a receipt that
-    minted no unit of it at a price (accepted none, held the line, had no
-    price) or is voided paid none."""
+    minted no unit of it (accepted none, held the line), is still unpriced
+    at acceptance and billing, or is voided paid none."""
     from .vendors.grn_accept_lock import (
         _GRN_TERMINAL_ACCEPT_STATUSES,
         _receipt_price_paid,
@@ -997,14 +997,14 @@ def _bought_since(db, product_id, accepted_at) -> bool:
         return False
     stock = db.get_collection("stock_units")
     return any(
-        _receipt_price_paid(stock, g, product_id)
+        _receipt_price_paid(stock, g, product_id, db=db)
         for g in db.get_collection("grns").find(
             {
                 "status": {"$in": list(_GRN_TERMINAL_ACCEPT_STATUSES)},
                 "accepted_at": {"$gt": accepted_at},
                 "items.product_id": product_id,
             },
-            {"_id": 0, "grn_id": 1, "grn_number": 1},
+            {"_id": 0, "grn_id": 1, "grn_number": 1, "vendor_id": 1},
         )
     )
 

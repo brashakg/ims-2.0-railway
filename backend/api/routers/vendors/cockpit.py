@@ -193,8 +193,9 @@ def last_paid_prices(vendor_id, wanted, may_see_store) -> dict:
          BACK from the units the receipt minted (goods-receipt accept stamps
          each one with unit_cost; grn_accept_lock._receipt_price_paid, which the
          walk-in bill's cost true-up asks too), never re-derived here, so the
-         two can never disagree. A line that accepted nothing, was held or had
-         no price minted no price paid and never answers;
+         two can never disagree. If the units arrived unpriced, that helper
+         can use a unique live invoice price entered later by Accounts. A
+         line that accepted nothing, was held or is still unpriced never answers;
       2. only if there is none, the price on this vendor's newest order that was
          sent to it (sent, acknowledged, part- or fully received), dated when it
          was sent -- skipping a cancelled line, and an order whose receipts for
@@ -277,7 +278,7 @@ def last_paid_prices(vendor_id, wanted, may_see_store) -> dict:
             if not may_see_store(grn.get("store_id")):
                 continue
             for pid in (lines & wanted) - costs.keys():
-                paid = _receipt_price_paid(stock_repo, grn, pid)
+                paid = _receipt_price_paid(stock_repo, grn, pid, db=_get_db())
                 if paid:
                     _take(pid, paid, grn, grn.get("accepted_at"))
 

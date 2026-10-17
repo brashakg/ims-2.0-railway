@@ -565,6 +565,9 @@ def test_c7_a_manager_receives_without_prices_and_accounts_enters_them(world):
     booked = _run(pi.create_purchase_invoice(_invoice_body(grn_id, "CASH-77"), current_user=ACCOUNTANT))
     assert booked["match_status"] == "MATCHED", booked
     assert world["db"].products.find_one({"product_id": FRAME})["cost_price"] == 3100.0
+    last = world["as_"](ADMIN).get("/vendors/last-cost", params={"vendor_id": DEALER, "product_ids": FRAME})
+    assert last.json()["costs"][FRAME]["unit_price"] == 3100.0
+    assert pi._bought_since(world["db"], FRAME, "2020-01-01T00:00:00") is True
 
 
 def test_c7_a_cost_must_be_a_real_price(world):
@@ -2404,6 +2407,42 @@ def _minted(db, grn_id, cost, n=2):
             for i in range(n)
         ]
     )
+
+
+def test_unpriced_receipt_last_paid_uses_only_one_verified_booked_price(world):
+    from api.routers.vendors.grn_accept_lock import _receipt_price_paid
+
+    db = world["db"]
+    grn = _seed_receipt(db, grn_id="G-PRICE-LATER", subtype="NO_PO")
+    _minted(db, grn["grn_id"], 0)
+
+    def bill(identifier, *, price=3200, quantity=2, status="OUTSTANDING", kind="PURCHASE_INVOICE"):
+        return {"bill_id": identifier, "grn_id": grn["grn_id"], "vendor_id": DEALER, "doc_type": kind,
+                "status": status, "lines": [{"product_id": FRAME, "qty": quantity, "unit_price": price}]}
+
+    db.vendor_bills.insert_many([
+        bill("cancelled", status="CANCELLED"), bill("void", status="VOID"),
+        bill("draft", status="DRAFT"), bill("credit", kind="CREDIT_NOTE"),
+        bill("negative", quantity=-2), bill("zero", quantity=0),
+        bill("other-product") | {"lines": [{"product_id": LENS, "qty": 2, "unit_price": 100}]},
+        bill("other-receipt") | {"grn_id": "G-SOMEONE-ELSE"},
+        bill("other-vendor") | {"vendor_id": SHARMA},
+    ])
+    assert _receipt_price_paid(db.stock_units, grn, FRAME, db=db) is None
+    db.vendor_bills.insert_one(bill("booked"))
+    assert _receipt_price_paid(db.stock_units, grn, FRAME, db=db) == 3200
+    assert pi._bought_since(db, FRAME, "2026-09-01T00:00:00") is True
+    # Held stock has no paid receipt, even if a legacy bill claims it did.
+    db.stock_units.delete_many({"grn_id": grn["grn_id"]})
+    assert _receipt_price_paid(db.stock_units, grn, FRAME, db=db) is None
+    _minted(db, grn["grn_id"], 0)
+    db.vendor_bills.insert_one(bill("conflict", price=3300, status="PAID"))
+    with pytest.raises(ValueError, match="conflicting booked"):
+        _receipt_price_paid(db.stock_units, grn, FRAME, db=db)
+    with pytest.raises(ValueError, match="conflicting booked"):
+        pi._bought_since(db, FRAME, "2026-09-01T00:00:00")
+    quoted = world["as_"](ADMIN).get("/vendors/last-cost", params={"vendor_id": DEALER, "product_ids": FRAME})
+    assert quoted.json()["costs"] == {}
 
 
 def test_g1_a_later_receipt_that_paid_no_price_leaves_the_walk_in_the_latest(world):
