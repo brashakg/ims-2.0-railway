@@ -254,9 +254,11 @@ def test_order_cancel_same_store_still_succeeds(monkeypatch):
 
 
 def test_order_deliver_same_store_still_succeeds(monkeypatch):
+    import importlib
     import mongomock
-    from api.routers import settings
     from api.services import delivery_gate
+
+    settings = importlib.import_module("api.routers.settings")
 
     order = _seed_order(
         store_id=OWN_STORE, status="READY", payment_status="PARTIAL",

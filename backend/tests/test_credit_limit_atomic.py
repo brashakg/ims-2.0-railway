@@ -1,5 +1,6 @@
 """Real payment handler + Mongo CAS, with no external database or services."""
 import asyncio
+import importlib
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -39,7 +40,10 @@ def env(monkeypatch):
     monkeypatch.setattr(payments, "get_order_repository", lambda: repo)
     monkeypatch.setattr(payments, "get_customer_repository", lambda: customer_repo)
     monkeypatch.setattr(customers, "get_customer_repository", lambda: customer_repo)
-    monkeypatch.setattr(settings, "_get_settings_collection", lambda name: db[name])
+    # Credential-encryption tests reload settings. Patch both our collected
+    # reference and the live module used by the call-time credit-default read.
+    for module in {settings, importlib.import_module("api.routers.settings")}:
+        monkeypatch.setattr(module, "_get_settings_collection", lambda name: db[name])
     app = FastAPI()
     app.add_api_route("/orders/{order_id}/payments", payments.add_payment, methods=["POST"])
     app.include_router(customers.router, prefix="/customers")
@@ -127,7 +131,8 @@ def test_unverifiable_credit_never_fails_open(env, monkeypatch, failure):
     elif failure == "orders":
         monkeypatch.setattr(credit_limit, "_exposures", broken)
     elif failure == "settings":
-        monkeypatch.setattr(settings, "_get_settings_collection", broken)
+        for module in {settings, importlib.import_module("api.routers.settings")}:
+            monkeypatch.setattr(module, "_get_settings_collection", broken)
     elif failure == "missing_customer":
         db.customers.delete_many({})
     else:
