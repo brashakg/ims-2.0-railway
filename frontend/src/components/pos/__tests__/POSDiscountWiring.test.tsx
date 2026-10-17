@@ -15,6 +15,20 @@ import { render, screen, fireEvent } from '@testing-library/react';
 vi.mock('../../../context/AuthContext', () => ({
   useAuth: () => ({ user: { id: 'u1', discountCap: 10, roles: ['SALES_STAFF'] } }),
 }));
+// The bill total is the server's quote: a Rs 1,000 frame at 10% off bills 900.
+vi.mock('../../../services/api', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return {
+    ...actual,
+    orderApi: {
+      ...(actual.orderApi as object),
+      quoteBill: vi.fn(async () => ({
+        subtotal: 1000, taxable: 857.14, tax: 42.86, total_discount: 100,
+        grand_total: 900, round_off: 0,
+      })),
+    },
+  };
+});
 
 import { usePOSStore } from '../../../stores/posStore';
 import { CartSidebar } from '../POSCart';
