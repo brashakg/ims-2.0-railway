@@ -1136,6 +1136,7 @@ def _post_credit_and_restock(
         "return_id": return_id,
         "shopify_refund_id": refund_id,
         "order_id": order_id,
+        "historical": bool(order.get("historical")),
         "order_number": order.get("order_number"),
         "customer_id": customer_id,
         "customer_name": order.get("customer_name"),

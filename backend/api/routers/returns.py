@@ -1771,6 +1771,7 @@ def _reactivate_original_unit(
                     "returned_from_order_id": prior_order_id,
                     "prior_sold_order_id": prior_order_id,
                 },
+                id_field="stock_id" if unit.get("stock_id") else "_id",
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[RETURNS] stock reactivate failed: %s", exc)
@@ -1785,7 +1786,9 @@ def _reactivate_original_unit(
     return None
 
 
-def _flip_sold_unit(stock_repo: Any, sid: Any, fields: Dict[str, Any]) -> bool:
+def _flip_sold_unit(
+    stock_repo: Any, sid: Any, fields: Dict[str, Any], *, id_field: str = "stock_id",
+) -> bool:
     """Flip unit `sid` back to AVAILABLE only while it is still SOLD (a write
     filtered on status SOLD): True flipped, False no longer SOLD (another
     return took it first). RAISES when the write failed. A write that raised
@@ -1798,12 +1801,12 @@ def _flip_sold_unit(stock_repo: Any, sid: Any, fields: Dict[str, Any]) -> bool:
             raise RuntimeError("stock reactivate failed: the SOLD unit stays SOLD")
         return True
     try:
-        return coll.update_one({"stock_id": sid, "status": "SOLD"},
+        return coll.update_one({id_field: sid, "status": "SOLD"},
                                {"$set": {**fields, "updated_at": datetime.now()}}).matched_count > 0
     except Exception:  # noqa: BLE001
         # ponytail: a read-back that also fails leaves it open (a second unit
         # is possible only on two misses in a row).
-        if (coll.find_one({"stock_id": sid}) or {}).get("returned_at") == fields["returned_at"]:
+        if (coll.find_one({id_field: sid}) or {}).get("returned_at") == fields["returned_at"]:
             return True
         raise
 
@@ -1817,8 +1820,10 @@ def _find_stock(stock_repo: Any, query: Dict[str, Any]) -> List[Dict[str, Any]]:
     coll = getattr(stock_repo, "collection", None)
     if coll is None:
         return stock_repo.find_many(query) or []
-    clean = getattr(stock_repo, "_clean_id", None) or (lambda doc: doc)
-    return [clean(doc) for doc in coll.find(query)]
+    # These rows stay inside the restock engine. Preserve the exact BSON _id
+    # for legacy units without stock_id; stringifying it makes the guarded
+    # write miss the existing SOLD row and can mint a second unit.
+    return list(coll.find(query))
 
 
 def _audit_stock_transition(
@@ -1963,8 +1968,8 @@ def _order_fulfilment_stores(
 
 
 def _load_order_for_restock(order_id: Optional[str]) -> Optional[Dict[str, Any]]:
-    """Fetch the original order ONLY on the online-store branch (so the ordinary
-    in-store restock does no extra work). Fail-soft -> None."""
+    """Fetch the original sale for routing and historical-stock safeguards.
+    An unreadable parent is unknown, never proof of an ordinary stock sale."""
     if not order_id:
         return None
     try:
@@ -2209,6 +2214,7 @@ def _raise_restock_blocked_task(
     historical: Optional[bool] = False,
     order_number: Optional[str] = None,
     refund_id: Optional[str] = None,
+    stock_in_failed: bool = False,
 ) -> None:
     """Put a BLOCKED restock in front of a human, with its real cause and ONE
     action, naming the order staff can look up (its number) and only the
@@ -2249,7 +2255,11 @@ def _raise_restock_blocked_task(
                     "for the shop's store manager to add the frame(s) through "
                     "stock-in, and closes this task")
         never = "Never add these units by hand as well - IMS would count them twice."
-        if unread and historical:
+        if stock_in_failed:
+            cause = "IMS could not save the historical order's stock-in task"
+            action = (f"{rerun}. This order predates IMS stock, so the re-run {stock_in}")
+            never = "Add nothing by hand before that stock-in task."
+        elif unread and historical:
             cause = (f"IMS could not read {unread} just now, so it booked nothing "
                      "rather than guess")
             action = (f"{rerun}. This order was imported from Shopify's order "
@@ -2394,10 +2404,17 @@ def _restock_good_items(
     if (order or {}).get("historical"):
         from ..services.shopify_refund import raise_stock_in_task
 
-        return {**result, **raise_stock_in_task(
+        historical_result = raise_stock_in_task(
             order, len(units), {str(u.get("sku") or u.get("product_id")) for u in units},
             f"Return {return_id}", f"historical_stock_in:{return_id}",
-            processing_store_id, return_id=return_id)}
+            processing_store_id, return_id=return_id)
+        if not historical_result.get("applied"):
+            _raise_restock_blocked_task(
+                return_id, order_id, store_id, units, processing_store_id,
+                historical=True, order_number=order.get("order_number"),
+                stock_in_failed=True,
+            )
+        return {**result, **historical_result}
 
     stock_repo = None
     try:
@@ -3814,6 +3831,9 @@ async def create_return(
         "return_id": return_id,
         "order_id": resolved_order_id,
         "order_number": body.order_number or (order or {}).get("order_number"),
+        # The return retains the known history even if its order is later
+        # unreadable. None means unknown, never silently a current stock sale.
+        "historical": bool(order.get("historical")) if order is not None else None,
         "customer_id": customer_id,
         "customer_name": customer_name,
         "store_id": store_id,
@@ -4125,18 +4145,15 @@ async def retry_restock(
 
     # THIS DOOR IS THE RECOVERY PATH. _raise_restock_blocked_task and the refund
     # -review banner both send the operator here, so it must hold the SAME rule
-    # as the confirm door: when the return bills to a stockless ONLINE store and
-    # the order cannot be read, we do NOT know which shop shipped which unit --
-    # and the caller's active store is a guess, not an answer. Guessing here
-    # strands one shop's real unit SOLD forever and mints a phantom on another
-    # shop's LIVE shelf (POS-sellable, and it feeds the pooled Shopify on-hand),
-    # while reporting "Restock applied". Refuse, and keep it retryable.
-    if retry_order is None and is_online_store(_get_db(), claim_store):
+    # as the confirm door: without the order we cannot verify its historical
+    # flag, claimed units, or shipping shops. Even a physical billing shop is
+    # not evidence that IMS ever held stock for this sale. Refuse rather than
+    # minting an imported order's frame, and keep the return retryable.
+    if retry_order is None:
         logger.error(
             "[RETURNS] restock retry BLOCKED for %s: order %s could not be read "
-            "and the return bills to ONLINE store %s, so the fulfilling shop for "
-            "each unit is unknown. Nothing restocked (a guess would strand one "
-            "shop's unit and mint a phantom on another).",
+            "at store %s. Its stock history and unit claims cannot be verified. "
+            "Nothing restocked; the return stays retryable.",
             return_id,
             claim_order_id,
             claim_store,
@@ -4156,7 +4173,7 @@ async def retry_restock(
             blocked_units,
             current_user.get("active_store_id"),
             unread="the order",
-            historical=None,
+            historical=claim.get("historical") if isinstance(claim.get("historical"), bool) else None,
             order_number=claim.get("order_number"),
             refund_id=claim.get("shopify_refund_id"),
         )
@@ -4183,10 +4200,9 @@ async def retry_restock(
             "restock_store_ids": [],
             "message": (
                 "Could not restock: the original order could not be read, so "
-                "there is no way to tell which shop each returned item came "
-                "from. Nothing was added to any shop's stock. A task has been "
-                "raised -- retry once the order loads, or add the items at the "
-                "receiving shop."
+                "its stock history could not be verified. Nothing was added "
+                "to any shop's stock. Restock stays pending -- retry once the "
+                "order loads. Add nothing by hand before that retry."
             ),
         }
 
