@@ -108,7 +108,10 @@ class POItemCreate(BaseModel):
     # these bounds a negative quantity / price would persist a corrupt PO and
     # poison the subtotal/GST math (subtotal = sum(quantity * unit_price)).
     quantity: int = Field(..., ge=1)
-    unit_price: float = Field(..., ge=0)
+    # Optional (owner ruling 2026-10-12): a manager orders by quantity and the
+    # server prices the line (create_po); an accounts role may type it or
+    # leave it to the same rule.
+    unit_price: Optional[float] = Field(default=None, ge=0)
     # Per-line GST identity. All optional: when gst_rate is None the server
     # resolves it from hsn/category (falling back to the product's own
     # hsn/category), so a PO never silently bills the old flat 18%.

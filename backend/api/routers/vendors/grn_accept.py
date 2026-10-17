@@ -1129,16 +1129,19 @@ def _accept_grn_claimed(
                 )
 
             # Hub Phase 2: only mint sellable AVAILABLE stock for a CATALOG-
-            # COMPLETE product. After the cost backfill above, a product still
-            # missing catalogue fields beyond cost remains a non-purchasable
-            # DRAFT -- HOLD its line (like an uncatalogued line) instead of
-            # minting sellable stock POS could not lawfully price/sell. Fail-soft:
+            # COMPLETE product. A product missing catalogue fields beyond cost
+            # remains a non-purchasable DRAFT -- HOLD its line (like an
+            # uncatalogued line) instead of minting sellable stock POS could not
+            # lawfully price/sell. A missing cost alone never holds the goods:
+            # a line nobody priced (a manager's PO for a product never bought
+            # from this vendor, owner ruling 2026-10-12) mints without a cost
+            # and the vendor's bill brings it (_pm.gaps_before_cost). Fail-soft:
             # only when a product repo is available to verify completeness.
             if product_repo is not None and prod is not None:
                 merged_for_status = dict(prod)
                 if cost_fields:
                     merged_for_status["cost_price"] = cost_fields["cost_price"]
-                if _pm.compute_catalog_status(merged_for_status)[1]:
+                if _pm.gaps_before_cost(merged_for_status):
                     unresolved_lines.append({**held, "reason": "incomplete_catalog"})
                     continue
 

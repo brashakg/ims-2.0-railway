@@ -23,6 +23,7 @@ from ..dependencies import (
     get_store_repository,
 )
 
+from ..services.cost_mask import mask_cost
 from ..services.reorder_policy import low_stock_rows
 
 router = APIRouter(prefix="", tags=["Analytics"])
@@ -1000,50 +1001,57 @@ async def get_inventory_intelligence(
             and _safe_int(i.get("quantity")) <= _safe_int(i.get("reorder_point")) * 1.5
         ]
 
-        return {
-            "low_stock": {
-                "count": len(low_stock),
-                "items": [
-                    {
-                        "sku": _sku(i),
-                        "name": _name(i),
-                        "quantity": i.get("quantity", 0),
-                        "reorder_point": i.get("reorder_point"),
-                    }
-                    for i in low_stock[:10]
-                ],
-                "total_value": sum(_value(i) for i in low_stock),
+        # Stock values here are at cost (_stock_unit_value): the accounts
+        # roles' only (owner ruling 2026-10-12); the counts stay.
+        return mask_cost(
+            {
+                "low_stock": {
+                    "count": len(low_stock),
+                    "items": [
+                        {
+                            "sku": _sku(i),
+                            "name": _name(i),
+                            "quantity": i.get("quantity", 0),
+                            "reorder_point": i.get("reorder_point"),
+                        }
+                        for i in low_stock[:10]
+                    ],
+                    "total_value": sum(_value(i) for i in low_stock),
+                },
+                "dead_stock": {
+                    "count": len(dead_stock),
+                    "items": [
+                        {
+                            "sku": _sku(i),
+                            "name": _name(i),
+                            "quantity": i.get("quantity", 0),
+                            "value": _value(i),
+                        }
+                        for i in dead_stock[:10]
+                    ],
+                    "total_value": sum(_value(i) for i in dead_stock),
+                },
+                "fast_moving": {
+                    "count": len(fast_moving),
+                    "items": [
+                        {
+                            "sku": _sku(i),
+                            "name": _name(i),
+                            "quantity": i.get("quantity", 0),
+                            "velocity": "high",
+                        }
+                        for i in fast_moving[:10]
+                    ],
+                },
+                "total_inventory": {
+                    "items": len(inventory),
+                    "value": sum(_value(i) for i in inventory),
+                },
             },
-            "dead_stock": {
-                "count": len(dead_stock),
-                "items": [
-                    {
-                        "sku": _sku(i),
-                        "name": _name(i),
-                        "quantity": i.get("quantity", 0),
-                        "value": _value(i),
-                    }
-                    for i in dead_stock[:10]
-                ],
-                "total_value": sum(_value(i) for i in dead_stock),
-            },
-            "fast_moving": {
-                "count": len(fast_moving),
-                "items": [
-                    {
-                        "sku": _sku(i),
-                        "name": _name(i),
-                        "quantity": i.get("quantity", 0),
-                        "velocity": "high",
-                    }
-                    for i in fast_moving[:10]
-                ],
-            },
-            "total_inventory": {
-                "items": len(inventory),
-                "value": sum(_value(i) for i in inventory),
-            },
-        }
+            current_user,
+            "product",
+            extra=("value", "total_value"),
+        )
 
     except HTTPException:
         raise
@@ -1396,57 +1404,64 @@ async def get_enterprise_kpis(
             list(stores_by_id.values()), key=lambda x: x["revenue"], reverse=True
         )[:5]
 
-        return {
-            "period": period,
-            "timestamp": datetime.now().isoformat(),
-            "store_id": store_id,
-            # Revenue metrics
-            "revenue": {
-                "total": float(total_revenue),
-                "change_percent": float(revenue_change),
-                "avg_transaction_value": float(avg_transaction_value),
-                "total_orders": total_orders_count,
+        # Gross profit and margin come from COGS: the accounts roles' only
+        # (owner ruling 2026-10-12).
+        return mask_cost(
+            {
+                "period": period,
+                "timestamp": datetime.now().isoformat(),
+                "store_id": store_id,
+                # Revenue metrics
+                "revenue": {
+                    "total": float(total_revenue),
+                    "change_percent": float(revenue_change),
+                    "avg_transaction_value": float(avg_transaction_value),
+                    "total_orders": total_orders_count,
+                },
+                # Margin metrics.
+                # gross_margin is computed from real line-item COGS.
+                # net_margin is null (not a fabricated constant) because per-store
+                # opex is not yet recorded in the DB -- [RPT-3].
+                "margins": {
+                    "gross_margin_percent": float(gross_margin_percent),
+                    "net_margin_percent": net_margin_percent,
+                    "gross_profit": float(gross_profit),
+                    "net_profit": net_profit,
+                    "net_margin_note": (
+                        "Operating expenses not yet tracked per store; "
+                        "net margin is unavailable until opex is wired."
+                    ),
+                },
+                # Customer metrics
+                "customers": {
+                    "footfall": customer_footfall,
+                    "avg_order_value": float(avg_transaction_value),
+                },
+                # Inventory metrics
+                "inventory": {
+                    # turnover_ratio is null: needs a beginning-period snapshot to
+                    # compute a real average; emitting a fabricated number is worse
+                    # than null (frontend renders "—").
+                    "turnover_ratio": inventory_turnover,
+                    "low_stock_items": low_stock_count,
+                    "total_items": len(inventory),
+                },
+                # Top products
+                "top_products": top_products,
+                # Cash register
+                "cash_register": {
+                    "opening_balance": float(opening_balance),
+                    "sales": float(sales_amount),
+                    "expenses": float(expenses_amount),
+                    "closing_balance": float(closing_balance),
+                },
+                # Store comparison
+                "store_comparison": store_comparison,
             },
-            # Margin metrics.
-            # gross_margin is computed from real line-item COGS.
-            # net_margin is null (not a fabricated constant) because per-store
-            # opex is not yet recorded in the DB -- [RPT-3].
-            "margins": {
-                "gross_margin_percent": float(gross_margin_percent),
-                "net_margin_percent": net_margin_percent,
-                "gross_profit": float(gross_profit),
-                "net_profit": net_profit,
-                "net_margin_note": (
-                    "Operating expenses not yet tracked per store; "
-                    "net margin is unavailable until opex is wired."
-                ),
-            },
-            # Customer metrics
-            "customers": {
-                "footfall": customer_footfall,
-                "avg_order_value": float(avg_transaction_value),
-            },
-            # Inventory metrics
-            "inventory": {
-                # turnover_ratio is null: needs a beginning-period snapshot to
-                # compute a real average; emitting a fabricated number is worse
-                # than null (frontend renders "—").
-                "turnover_ratio": inventory_turnover,
-                "low_stock_items": low_stock_count,
-                "total_items": len(inventory),
-            },
-            # Top products
-            "top_products": top_products,
-            # Cash register
-            "cash_register": {
-                "opening_balance": float(opening_balance),
-                "sales": float(sales_amount),
-                "expenses": float(expenses_amount),
-                "closing_balance": float(closing_balance),
-            },
-            # Store comparison
-            "store_comparison": store_comparison,
-        }
+            current_user,
+            "product",
+            extra=("margins",),
+        )
 
     except HTTPException:
         raise

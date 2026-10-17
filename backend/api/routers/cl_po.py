@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field
 
 from .auth import require_roles
 from .vendors import build_po_gst, generate_po_number, po_gst_context
+from .vendors.cockpit import server_line_prices
 from ..dependencies import (
     get_audit_repository,
     get_purchase_order_repository,
@@ -46,6 +47,7 @@ from ..dependencies import (
     validate_store_access,
 )
 from ..services import cl_po_generator as gen
+from ..services.cost_mask import mask_purchase
 from ..services.lens_catalog_validation import compute_available
 
 logger = logging.getLogger(__name__)
@@ -407,6 +409,13 @@ async def generate_cl_po(
                     vendor_name = vendor.get("trade_name") or vendor.get("legal_name")
             except Exception:  # noqa: BLE001
                 vendor_name = None
+        # The one PO line price rule (server_line_prices): last paid to this
+        # vendor, else the lens line's catalogue cost, else None -- never 0.
+        prices = server_line_prices(
+            vendor_id, {ln["product_id"]: ln.get("unit_price") or None for ln in lines}
+        )
+        for ln in lines:
+            ln["unit_price"] = prices[ln["product_id"]]
         subtotal = round(
             sum(ln["quantity"] * float(ln.get("unit_price") or 0) for ln in lines), 2
         )
@@ -431,17 +440,22 @@ async def generate_cl_po(
     }
 
     if body.dry_run:
-        return {**base_response, "pos_created": 0, "created_pos": []}
+        return mask_purchase(
+            {**base_response, "pos_created": 0, "created_pos": []}, current_user
+        )
 
     po_repo = get_purchase_order_repository()
     if po_repo is None:
         # DB-absent fail-soft: report clearly that NOTHING was written.
-        return {
-            **base_response,
-            "pos_created": 0,
-            "created_pos": [],
-            "message": "Purchase-order storage unavailable; nothing was written",
-        }
+        return mask_purchase(
+            {
+                **base_response,
+                "pos_created": 0,
+                "created_pos": [],
+                "message": "Purchase-order storage unavailable; nothing was written",
+            },
+            current_user,
+        )
 
     created_pos: List[Dict[str, Any]] = []
     now_iso = datetime.now().isoformat()
@@ -521,4 +535,8 @@ async def generate_cl_po(
             },
         )
 
-    return {**base_response, "pos_created": len(created_pos), "created_pos": created_pos}
+    # The drafted lines' prices are what we pay: the accounts roles' only.
+    return mask_purchase(
+        {**base_response, "pos_created": len(created_pos), "created_pos": created_pos},
+        current_user,
+    )

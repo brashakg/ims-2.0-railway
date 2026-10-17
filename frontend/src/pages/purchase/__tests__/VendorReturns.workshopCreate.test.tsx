@@ -71,7 +71,10 @@ describe('VendorReturns create - who prices the return', () => {
     auth.role = 'WORKSHOP_STAFF';
   });
 
-  it('workshop staff log item, quantity and reason - no price field, no price sent', async () => {
+  // Owner ruling 2026-10-12: a store manager logs a return like the workshop.
+  it.each(['WORKSHOP_STAFF', 'STORE_MANAGER'])(
+    '%s log item, quantity and reason - no price field, no price sent', async (role) => {
+    auth.role = role;
     load();
     const body = await fillAndCreate();
     expect(screen.queryByText('Unit Price')).toBeNull();
@@ -80,8 +83,8 @@ describe('VendorReturns create - who prices the return', () => {
     expect(body.items[0]).toMatchObject({ product_name: 'RB Frame', quantity: 1, reason: 'defective' });
   });
 
-  it('a store manager still types the unit price and it is sent', async () => {
-    auth.role = 'STORE_MANAGER';
+  it('accounts still type the unit price and it is sent', async () => {
+    auth.role = 'ACCOUNTANT';
     load();
     render(
       <MemoryRouter>
@@ -105,8 +108,8 @@ describe('VendorReturns create - who prices the return', () => {
     expect(screen.queryByLabelText(/price paid for/i)).toBeNull();
   });
 
-  it('the approving manager enters the price paid for an unpriced line', async () => {
-    auth.role = 'STORE_MANAGER';
+  it('accounts enter the price paid for an unpriced line when they approve', async () => {
+    auth.role = 'ACCOUNTANT';
     load([unpriced]);
     apiMock.patch.mockResolvedValue({ data: { return: { ...unpriced, status: 'approved' } } });
     render(

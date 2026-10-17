@@ -25,8 +25,9 @@ interface POItem {
   product_id: string;
   product_name: string;
   quantity: number;
-  unit_price: number;
-  total: number;
+  /** null = nobody priced the line yet: printed as needing a price, never 0. */
+  unit_price: number | null;
+  total: number | null;
 }
 
 interface POPrintData {
@@ -64,10 +65,13 @@ interface POPrintProps {
   /** Issuing legal entity (legal_name, pan, cin, gstins[], invoice.logo_url). */
   entity?: EntityLike | null;
   overrides?: OverrideFields | null;
+  /** False for a role that may not see what we pay (COST_ROLES, owner ruling
+   *  2026-10-12): the printed order lists products and quantities only. */
+  showPrices?: boolean;
   onClose: () => void;
 }
 
-export function POPrint({ po, store, entity, overrides, onClose }: POPrintProps) {
+export function POPrint({ po, store, entity, overrides, showPrices = true, onClose }: POPrintProps) {
   const printRef = useRef<HTMLDivElement>(null);
 
   const handlePrint = () => {
@@ -176,8 +180,8 @@ export function POPrint({ po, store, entity, overrides, onClose }: POPrintProps)
                   <th style={{ ...tblHead, width: '6%' }}>#</th>
                   <th style={{ ...tblHead, textAlign: 'left' }}>Product</th>
                   <th style={{ ...tblHead, width: '12%' }}>Qty</th>
-                  <th style={{ ...tblHead, width: '18%' }}>Unit Price</th>
-                  <th style={{ ...tblHead, width: '18%' }}>Total</th>
+                  {showPrices && <th style={{ ...tblHead, width: '18%' }}>Unit Price</th>}
+                  {showPrices && <th style={{ ...tblHead, width: '18%' }}>Total</th>}
                 </tr>
               </thead>
               <tbody>
@@ -186,10 +190,11 @@ export function POPrint({ po, store, entity, overrides, onClose }: POPrintProps)
                     <td style={tblCell}>{index + 1}</td>
                     <td style={{ ...tblCell, textAlign: 'left' }}>{item.product_name}</td>
                     <td style={tblCell}>{item.quantity}</td>
-                    <td style={tblNum}>{inr(item.unit_price, { withPaise: true })}</td>
-                    <td style={{ ...tblNum, fontWeight: 600 }}>{inr(item.total, { withPaise: true })}</td>
+                    {showPrices && <td style={tblNum}>{item.unit_price == null ? 'Price needed' : inr(item.unit_price, { withPaise: true })}</td>}
+                    {showPrices && <td style={{ ...tblNum, fontWeight: 600 }}>{item.total == null ? 'Price needed' : inr(item.total, { withPaise: true })}</td>}
                   </tr>
                 ))}
+                {showPrices && <>
                 <tr>
                   <td colSpan={4} style={{ ...tblCell, textAlign: 'right', fontWeight: 700 }}>Subtotal</td>
                   <td style={{ ...tblNum, fontWeight: 700 }}>{inr(po.subtotal, { withPaise: true })}</td>
@@ -202,6 +207,7 @@ export function POPrint({ po, store, entity, overrides, onClose }: POPrintProps)
                   <td colSpan={4} style={{ ...tblCell, textAlign: 'right', fontWeight: 700, fontSize: 12.5 }}>Grand Total</td>
                   <td style={{ ...tblNum, fontWeight: 700, fontSize: 12.5 }}>{inr(po.grand_total, { withPaise: true })}</td>
                 </tr>
+                </>}
               </tbody>
             </table>
           </div>

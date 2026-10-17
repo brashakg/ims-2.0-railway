@@ -193,6 +193,26 @@ describe('F7 - the Approve doors reach the real bill', () => {
 });
 
 describe('F37 + F6 - invoice from a goods receipt', () => {
+  it('an unpriced receipt stays blank and cannot book until accounts enters the supplier price', async () => {
+    routeGets({ '/vendors/purchase-invoices/from-grn/G1': {
+      ...GRN_DRAFT,
+      lines: [{ ...GRN_DRAFT.lines[0], unit_price: null }],
+    } });
+    renderTab('/purchase/invoices?grn_id=G1');
+    await screen.findByDisplayValue('Carrera CA 8895 807');
+    const price = form().getAllByRole('spinbutton')[1] as HTMLInputElement;
+    expect(price.value).toBe('');
+    expect(form().getByRole('button', { name: /Book invoice/i })).toBeDisabled();
+    expect(createCalls()).toHaveLength(0);
+    expect(previewCalls()).toHaveLength(0);
+
+    fireEvent.change(price, { target: { value: '3100' } });
+    await waitFor(() => expect(form().getByRole('button', { name: /Book invoice/i })).toBeEnabled());
+    fireEvent.click(form().getByRole('button', { name: /Book invoice/i }));
+    await waitFor(() => expect(createCalls()).toHaveLength(1));
+    expect(createCalls()[0][1].lines[0].unit_price).toBe(3100);
+  });
+
   it('lines carry the receipt products, HSNs and accepted quantities; the booking sends them', async () => {
     routeGets({ '/vendors/purchase-invoices/from-grn/G1': GRN_DRAFT });
     renderTab('/purchase/invoices?grn_id=G1');

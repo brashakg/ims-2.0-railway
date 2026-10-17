@@ -8,6 +8,7 @@ from ...utils.ist import (
     ist_day_start_utc,
 )
 from ..auth import get_current_user, require_roles
+from ...services.cost_mask import mask_cost
 from ...dependencies import (
     get_order_repository,
     get_stock_repository,
@@ -39,8 +40,15 @@ async def expense_vs_revenue(
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
     order_repo = get_order_repository()
 
+    # Cost, profit and margin are the accounts roles' only (owner ruling
+    # 2026-10-12); anyone else keeps the revenue.
+    def _out(body):
+        return mask_cost(
+            body, current_user, "product", extra=("cost", "profit", "margin_percent")
+        )
+
     if order_repo is None:
-        return {"revenue": 0, "cost": 0, "profit": 0, "margin_percent": 0}
+        return _out({"revenue": 0, "cost": 0, "profit": 0, "margin_percent": 0})
 
     # BUG-104, BOUND rule: found in the round-3 closing sweep -- same
     # typed-IST-range defect as /sales/by-salesperson (see the comment there).
@@ -70,12 +78,14 @@ async def expense_vs_revenue(
     profit = revenue - cost
     margin_percent = (profit / revenue * 100) if revenue > 0 else 0
 
-    return {
-        "revenue": round(revenue, 2),
-        "cost": round(cost, 2),
-        "profit": round(profit, 2),
-        "margin_percent": round(margin_percent, 2),
-    }
+    return _out(
+        {
+            "revenue": round(revenue, 2),
+            "cost": round(cost, 2),
+            "profit": round(profit, 2),
+            "margin_percent": round(margin_percent, 2),
+        }
+    )
 
 
 @router.get("/customers/acquisition")

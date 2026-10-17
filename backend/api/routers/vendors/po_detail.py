@@ -38,7 +38,8 @@ from .purchase_orders import (
     fill_cost_from_rate,
     price_po_lines,
 )
-from ...services.cost_mask import can_see_cost
+from ...services.cost_mask import can_see_cost, mask_purchase
+from ...services.purchase_match import is_unpriced_line
 from .numbering import held_units
 
 
@@ -126,7 +127,7 @@ async def get_po_timeline(
                 "detail": po.get("cancellation_reason") or "PO cancelled",
             }
         )
-    events.extend(history)
+    events.extend(mask_purchase(history, current_user))
 
     # GRNs against this PO -> "Box received" (PENDING) + "On shelf" (ACCEPTED).
     grns_out: list = []
@@ -294,7 +295,7 @@ async def get_po(
     if not can_access_store_scoped(po.get("delivery_store_id"), current_user):
         raise HTTPException(status_code=404, detail="Purchase order not found")
 
-    return po
+    return mask_purchase(po, current_user)
 
 
 @router.post("/purchase-orders/{po_id}/send")
@@ -412,8 +413,49 @@ async def send_po(
             },
         ):
             raise HTTPException(status_code=409, detail=_CHANGED_MEANWHILE)
+        _flag_unpriced_lines(po)
 
     return {"message": "PO sent to vendor", "po_id": po_id}
+
+
+def _flag_unpriced_lines(po: dict) -> None:
+    """Owner ruling 2026-10-12: a PO sent with a line whose price nobody knew
+    (no price paid to this vendor before, no catalogue cost -- create_po leaves
+    it None, never a made-up 0) is flagged for accounts as a task at the
+    delivery shop, so the price is settled before the bill. Fail-soft: a task
+    never blocks the send."""
+    names = [
+        it.get("product_name") or it.get("sku") or it.get("product_id") or "an item"
+        for it in po.get("items") or []
+        if isinstance(it, dict)
+        and is_unpriced_line(it)
+        and it.get("line_status") != "CANCELLED"
+    ]
+    if not names:
+        return
+    try:
+        from ...dependencies import get_task_repository
+        from ...services.task_triggers import create_system_task
+
+        ref = po.get("po_number") or po.get("po_id")
+        create_system_task(
+            get_task_repository(),
+            title=f"Price needed on purchase order {ref}",
+            description=(
+                f"Purchase order {ref} was sent with no price for: "
+                f"{', '.join(str(n) for n in names)}. Nothing was paid to this "
+                "vendor for it before and it has no catalogue cost. Agree the "
+                "price with the vendor and enter it when you book the invoice "
+                "in Purchase Invoices."
+            ),
+            priority="P2",
+            category="Purchase",
+            store_id=po.get("delivery_store_id"),
+            dedupe_ref=f"po-price:{po.get('po_id')}",
+            assigned_to="ACCOUNTANT",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[VENDOR] unpriced-PO task skipped for %s: %s", po.get("po_id"), exc)
 
 
 # ============================================================================
@@ -882,11 +924,13 @@ def _money(v: float) -> str:
     return f"{v:.2f}".rstrip("0").rstrip(".")
 
 
-def _describe_edit(old_items: list, new_items: list) -> list:
-    """What changed on the lines, in the words the timeline shows. Empty means
-    the lines are as stored, which is how update_po knows an edit changed
-    nothing -- so every line is compared, not one per product: an order may
-    carry two lines of one product, and a change to either must count.
+def _describe_edit(old_items: list, new_items: list) -> tuple:
+    """What changed on the lines, in the words the timeline shows:
+    (changes, price changes). The price changes are what we pay, kept apart so
+    only the accounts roles read them. Both empty means the lines are as
+    stored, which is how update_po knows an edit changed nothing -- so every
+    line is compared, not one per product: an order may carry two lines of one
+    product, and a change to either must count.
 
     An unchanged line (same product, quantity and cost) is matched first; the
     rest are paired with the next line of the same product, in order."""
@@ -910,7 +954,7 @@ def _describe_edit(old_items: list, new_items: list) -> list:
             new_left.append(n)
         else:
             old_left.remove(same)
-    out = []
+    out, prices = [], []
     for n in new_left:
         o = next((x for x in old_left if x.get("product_id") == n.get("product_id")), None)
         if o is None:
@@ -923,7 +967,7 @@ def _describe_edit(old_items: list, new_items: list) -> list:
         old_price = float(o.get("unit_price") or 0)
         new_price = float(n.get("unit_price") or 0)
         if old_price != new_price:
-            out.append(f"{name(n)}: cost Rs {_money(old_price)} -> Rs {_money(new_price)}")
+            prices.append(f"{name(n)}: cost Rs {_money(old_price)} -> Rs {_money(new_price)}")
         old_rate = float(o.get("tax_rate") or 0)
         new_rate = float(n.get("tax_rate") or 0)
         if old_rate != new_rate:
@@ -932,7 +976,7 @@ def _describe_edit(old_items: list, new_items: list) -> list:
             out.append(f"{name(n)}: HSN {o.get('hsn') or 'none'} -> {n.get('hsn') or 'none'}")
     for o in old_left:
         out.append(f"removed {name(o)} x{_qty(o.get('quantity'))}")
-    return out
+    return out, prices
 
 
 _GST_KEYS = ("tax_rate", "gst_source", "gst_unresolved", "gst_missing", "hsn")
@@ -1171,11 +1215,17 @@ async def update_po(
             if value is not None:
                 setattr(line, field, value)
     computed, products, typed_in = price_po_lines(
-        body.items, vendor, po.get("delivery_store_id"), current_user
+        body.items,
+        vendor_id,
+        vendor,
+        po.get("delivery_store_id"),
+        current_user,
+        # A price agreed with one vendor is no price for another.
+        stored_items=old_items if vendor_id == po.get("vendor_id") else None,
     )
     new_items = computed["items"]
 
-    changes = _describe_edit(old_items, new_items)
+    changes, price_changes = _describe_edit(old_items, new_items)
     if vendor_id != po.get("vendor_id"):
         changes.append("vendor changed")
     if expected != (po.get("expected_date") or None):
@@ -1183,8 +1233,8 @@ async def update_po(
         changes.append(f"delivery date {was} -> {expected or 'none'}")
     if notes != (po.get("notes") or None):
         changes.append("notes changed")
-    if not changes:
-        return po
+    if not changes and not price_changes:
+        return mask_purchase(po, current_user)
 
     patch = {
         "vendor_id": vendor_id,
@@ -1206,7 +1256,16 @@ async def update_po(
         po_repo,
         po,
         patch,
-        [{"kind": "edited", "label": "Edited", "detail": "; ".join(changes)}],
+        [
+            {
+                "kind": "edited",
+                "label": "Edited",
+                "detail": "; ".join(changes) or "price changed",
+                # What we pay rides apart from the words everyone reads, so
+                # mask_purchase strips it from anyone else (ruling 2026-10-12).
+                **({"price_detail": "; ".join(price_changes)} if price_changes else {}),
+            }
+        ],
         current_user,
         "purchase_order.edit",
         before={"items": old_items, "total_amount": po.get("total_amount")},
@@ -1218,7 +1277,10 @@ async def update_po(
         po_repo, po_id, typed_in, products, current_user, po_number=po.get("po_number")
     )
     fill_cost_from_rate(po_id, po.get("po_number"), body.items, products, current_user)
-    return {**(po_repo.find_by_id(po_id) or {}), "products_not_created": not_created}
+    return mask_purchase(
+        {**(po_repo.find_by_id(po_id) or {}), "products_not_created": not_created},
+        current_user,
+    )
 
 
 @router.post("/purchase-orders/{po_id}/cancel")
@@ -1292,7 +1354,11 @@ async def cancel_po(
         before={"status": status, "total_amount": po.get("total_amount")},
         after={"status": new_status, "reason": reason},
     )
-    return {"message": "PO cancelled", "po_id": po_id, "po": po_repo.find_by_id(po_id)}
+    return {
+        "message": "PO cancelled",
+        "po_id": po_id,
+        "po": mask_purchase(po_repo.find_by_id(po_id), current_user),
+    }
 
 
 @router.post("/purchase-orders/{po_id}/items/{line_index}/cancel")
@@ -1401,4 +1467,4 @@ async def cancel_po_line(
             "reason": body.reason,
         },
     )
-    return po_repo.find_by_id(po_id)
+    return mask_purchase(po_repo.find_by_id(po_id), current_user)

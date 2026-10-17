@@ -9,7 +9,7 @@ import { Loader2, ArrowUpDown } from 'lucide-react';
 import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { PAYABLES_ROLES } from '../../components/common/CostCell';
+import { COST_ROLES } from '../../components/common/CostCell';
 
 import type { TabType } from './financeTypes';
 import type {
@@ -45,8 +45,8 @@ function mapRevenue(d: any): RevenueData[] {
 function mapPnl(d: any, from: string, to: string): ProfitLossStatement | null {
   if (!d) return null;
   const revenue = Number(d.revenue || 0);
-  const cogs = Number(d.cogs || 0);
-  const grossProfit = Number(d.gross_profit ?? revenue - cogs);
+  const cogs = d.cogs == null ? null : Number(d.cogs);
+  const grossProfit = d.gross_profit == null ? null : Number(d.gross_profit);
   const opex = Number(d.total_expenses || 0);
   // net_profit is ABSENT for any role below ADMIN -- it is revenue - COGS -
   // expenses - PAYROLL, so the backend strips it as a payroll-derived figure.
@@ -61,7 +61,7 @@ function mapPnl(d: any, from: string, to: string): ProfitLossStatement | null {
     cost_of_goods: cogs,
     gross_profit: grossProfit,
     operating_expenses: opex,
-    operating_profit: grossProfit - opex,
+    operating_profit: grossProfit == null ? null : grossProfit - opex,
     tax_expense: 0,
     net_profit: netProfit,
     profit_margin:
@@ -164,11 +164,12 @@ export default function FinanceDashboard() {
   const canSeeStorePayroll = (user?.roles || []).some(
     (r) => r === 'ADMIN' || r === 'SUPERADMIN',
   );
-  // F60 (2026-09-28): per-vendor payables (GET /finance/vendor-payments) answer
-  // the accounts roles only (PAYABLES_ROLES), the same as the vendor ledger and
-  // /ap-aging. A manager gets no tab and no schedule rather than an empty list
-  // that reads as "we owe nobody".
-  const canSeePayables = (user?.roles || []).some((r) => PAYABLES_ROLES.includes(r));
+  // What we pay is the accounts roles' only (COST_ROLES, owner rulings F60
+  // 2026-09-28 / 2026-10-12): per-vendor payables (GET /finance/vendor-payments,
+  // as the vendor ledger and /ap-aging) and the cost of goods and gross profit
+  // by category. A manager gets no payables tab and no schedule rather than an
+  // empty list that reads as "we owe nobody", and revenue by category only.
+  const canSeeWhatWePay = (user?.roles || []).some((r) => COST_ROLES.includes(r));
 
   // Tab management
   const [activeTab, setActiveTab] = useState<TabType>('revenue-pl');
@@ -236,7 +237,7 @@ export default function FinanceDashboard() {
         financeApi.getOutstanding({ store_id: storeId }),
         financeApi.getCashFlow({ period: 'month', store_id: storeId }),
         financeApi.getBudget(),
-        canSeePayables ? financeApi.getVendorPayments() : Promise.resolve([]),
+        canSeeWhatWePay ? financeApi.getVendorPayments() : Promise.resolve([]),
       ]);
 
       setRevenueData(rev.status === 'fulfilled' ? mapRevenue(rev.value) : []);
@@ -429,7 +430,7 @@ export default function FinanceDashboard() {
           onDateToChange={setDateTo}
           activeTab={activeTab}
           onTabChange={setActiveTab}
-          canSeePayables={canSeePayables}
+          canSeePayables={canSeeWhatWePay}
         />
 
         {/* Tab Content */}
@@ -522,21 +523,21 @@ export default function FinanceDashboard() {
               )}
               {pnlByCategory.length > 0 && (
                 <div className="card mt-4 overflow-x-auto">
-                  <div className="px-4 py-2 text-sm font-medium text-gray-700 border-b border-gray-100">P&amp;L by category</div>
+                  <div className="px-4 py-2 text-sm font-medium text-gray-700 border-b border-gray-100">{canSeeWhatWePay ? <>P&amp;L by category</> : 'Revenue by category'}</div>
                   <table className="min-w-full text-sm">
                     <thead className="bg-gray-50 text-gray-600"><tr>
                       <th className="px-3 py-2 text-left">Category</th>
                       <th className="px-3 py-2 text-right">Revenue</th>
-                      <th className="px-3 py-2 text-right">COGS</th>
-                      <th className="px-3 py-2 text-right">Gross profit</th>
+                      {canSeeWhatWePay && <th className="px-3 py-2 text-right">COGS</th>}
+                      {canSeeWhatWePay && <th className="px-3 py-2 text-right">Gross profit</th>}
                     </tr></thead>
                     <tbody>
                       {pnlByCategory.map((c) => (
                         <tr key={c.category} className="border-t border-gray-100">
                           <td className="px-3 py-2">{c.category}</td>
                           <td className="px-3 py-2 text-right">₹{Math.round(c.revenue || 0).toLocaleString('en-IN')}</td>
-                          <td className="px-3 py-2 text-right">₹{Math.round(c.cogs || 0).toLocaleString('en-IN')}</td>
-                          <td className="px-3 py-2 text-right font-semibold">₹{Math.round(c.gross_profit || 0).toLocaleString('en-IN')}</td>
+                          {canSeeWhatWePay && <td className="px-3 py-2 text-right">₹{Math.round(c.cogs || 0).toLocaleString('en-IN')}</td>}
+                          {canSeeWhatWePay && <td className="px-3 py-2 text-right font-semibold">₹{Math.round(c.gross_profit || 0).toLocaleString('en-IN')}</td>}
                         </tr>
                       ))}
                     </tbody>
@@ -576,7 +577,7 @@ export default function FinanceDashboard() {
           {activeTab === 'outstanding' && (
             <OutstandingPanel
               outstanding={outstanding}
-              vendorPayments={canSeePayables ? vendorPayments : null}
+              vendorPayments={canSeeWhatWePay ? vendorPayments : null}
             />
           )}
           {activeTab === 'cash-flow' && (
@@ -611,7 +612,7 @@ export default function FinanceDashboard() {
               <BudgetPanel budgets={budgets} selectedYear={selectedYear} />
             </>
           )}
-          {activeTab === 'vendor-payments' && canSeePayables && (
+          {activeTab === 'vendor-payments' && canSeeWhatWePay && (
             <VendorPayments vendorPayments={vendorPayments} />
           )}
           {activeTab === 'journal-entries' && <JournalEntriesPanel />}

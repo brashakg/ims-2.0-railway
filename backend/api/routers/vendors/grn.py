@@ -34,6 +34,7 @@ from ._shared import (
     uuid,
     validate_store_access,
 )
+from ...services.cost_mask import mask_purchase
 from .models import GRN_SUBTYPE_DC, _GRN_SUBTYPES
 from .numbering import GRN_PLACEHOLDER_PREFIX, generate_grn_number, grn_number_pending
 
@@ -221,7 +222,7 @@ async def list_grns(
     # The price paid on a line goes through the one cost rule (cost_mask).
     grns = [mask_receipt(g, current_user) for g in grns]
 
-    return {"grns": grns, "total": len(grns)}
+    return {"grns": mask_purchase(grns, current_user), "total": len(grns)}
 
 
 def _enrich_grn_names(grns: list) -> None:

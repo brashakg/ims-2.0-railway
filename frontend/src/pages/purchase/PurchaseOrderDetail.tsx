@@ -13,9 +13,11 @@ import {
 } from 'lucide-react';
 import { getStatusBadge } from './statusBadge';
 import type { PurchaseOrder } from './purchaseTypes';
+import { poMoney } from './purchaseMappers';
 import { POPrint } from '../../components/print/POPrint';
 import { POLifecycleDrawer } from '../../components/purchase/POLifecycleDrawer';
 import { useAuth } from '../../context/AuthContext';
+import { COST_ROLES } from '../../components/common/CostCell';
 import { resolveStoreIdentity, type StoreIdentity } from '../../components/print/storeIdentity';
 import { lineLabel } from './purchaseMappers';
 
@@ -43,7 +45,11 @@ function dueOn(item: PurchaseOrder['items'][number]): number {
 }
 
 export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDetailProps) {
-  const { user } = useAuth();
+  const { user, hasRole } = useAuth();
+  // What we pay: COST_ROLES only (owner ruling 2026-10-12). A manager sees
+  // the products and quantities he ordered.
+  const showPrices = hasRole(COST_ROLES);
+  const unpricedLines = po.items.filter((i) => i.unitCost == null).length;
   const [showPrint, setShowPrint] = useState(false);
   const [showTimeline, setShowTimeline] = useState(false);
   // The cancel being confirmed: the whole order, or one line (by position).
@@ -153,6 +159,7 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
         po={poPrintData}
         store={storeInfo}
         entity={identity?.entity ?? null}
+        showPrices={showPrices}
         onClose={() => setShowPrint(false)}
       />
     )}
@@ -244,9 +251,9 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
                     <th className="text-left py-2 px-3 text-xs font-medium text-gray-600">Product</th>
                     <th className="text-left py-2 px-3 text-xs font-medium text-gray-600">SKU</th>
                     <th className="text-right py-2 px-3 text-xs font-medium text-gray-600">Qty</th>
-                    <th className="text-right py-2 px-3 text-xs font-medium text-gray-600">Unit Cost</th>
+                    {showPrices && <th className="text-right py-2 px-3 text-xs font-medium text-gray-600">Unit Cost</th>}
                     <th className="text-right py-2 px-3 text-xs font-medium text-gray-600">Tax %</th>
-                    <th className="text-right py-2 px-3 text-xs font-medium text-gray-600">Total</th>
+                    {showPrices && <th className="text-right py-2 px-3 text-xs font-medium text-gray-600">Total</th>}
                     {anyLineCancellable && <th className="py-2 px-3" aria-label="Line actions" />}
                   </tr>
                 </thead>
@@ -261,9 +268,9 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
                           <span className="block text-xs text-red-600">{item.cancelledQty} cancelled</span>
                         )}
                       </td>
-                      <td className="py-2 px-3 text-right text-gray-900">{'\u20B9'}{item.unitCost.toLocaleString()}</td>
+                      {showPrices && <td className={`py-2 px-3 text-right ${item.unitCost == null ? 'text-amber-700 font-medium' : 'text-gray-900'}`}>{poMoney(item.unitCost)}</td>}
                       <td className="py-2 px-3 text-right text-gray-600">{item.taxRate}%</td>
-                      <td className="py-2 px-3 text-right font-medium text-gray-900">{'\u20B9'}{item.total.toLocaleString()}</td>
+                      {showPrices && <td className={`py-2 px-3 text-right font-medium ${item.total == null ? 'text-amber-700' : 'text-gray-900'}`}>{poMoney(item.total)}</td>}
                       {anyLineCancellable && (
                         <td className="py-2 px-3 text-right">
                           {canCancelLine(item) && (
@@ -286,6 +293,7 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
           </div>
 
           {/* Totals */}
+          {showPrices && (
           <div className="flex justify-end">
             <div className="w-64 space-y-2 p-4 bg-gray-50 rounded-lg">
               <div className="flex justify-between text-sm">
@@ -322,8 +330,15 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
                 <span className="text-gray-900">Total</span>
                 <span className="text-gray-900">{'\u20B9'}{po.total.toLocaleString()}</span>
               </div>
+              {unpricedLines > 0 && (
+                <p className="text-xs text-amber-700">
+                  Not counted: {unpricedLines} {unpricedLines === 1 ? 'line needs' : 'lines need'} a price.
+                  Enter it when you book the bill in Purchase Invoices.
+                </p>
+              )}
             </div>
           </div>
+          )}
         </div>
 
         {/* Cancel needs a reason: it goes on the order timeline beside the

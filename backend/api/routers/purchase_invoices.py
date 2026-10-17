@@ -1464,6 +1464,57 @@ def refuse_walk_in_reverse_charge(reverse_charge, receipt) -> None:
         raise HTTPException(status_code=400, detail=refusal)
 
 
+def _assert_unpriced_po_bill(body, grn_doc, db=None):
+    """Unknown prices on any receipt door must not become inferred zeroes.
+
+    Explicit taxable amounts retain their existing semantics. Otherwise a
+    positive-quantity line needs a supplier price if its PO or any underlying
+    receipt was unpriced, including consolidated challans and no-PO buys.
+    """
+    zero_lines = [ln for ln in body.lines if ln.product_id and ln.qty > 0
+                  and ln.unit_price <= 0 and ln.taxable is None]
+    if not zero_lines:
+        return
+    receipts = [grn_doc] if grn_doc else []
+    if body.linked_dc_ids:
+        if db is None:
+            raise HTTPException(status_code=503, detail="Could not verify purchase prices. Try again.")
+        receipts.extend(_load_linked_dcs(db, body.linked_dc_ids))
+    po_ids = {receipt.get("po_id") for receipt in receipts if receipt.get("po_id")}
+    if getattr(body, "po_id", None):
+        po_ids.add(body.po_id)
+    unpriced = {
+        ln.get("product_id")
+        for receipt in receipts if not receipt.get("po_id")
+        for ln in receipt.get("items") or []
+        if pmatch.is_unpriced_line(ln)
+    }
+    try:
+        repo = get_purchase_order_repository() if po_ids else None
+        for po_id in po_ids:
+            po = repo.find_by_id(po_id) if repo is not None else None
+            if po is None:
+                raise ValueError("Purchase order not available")
+            unpriced.update(ln.get("product_id") for ln in po.get("items") or []
+                            if pmatch.is_unpriced_line(ln))
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Could not verify purchase prices. Try again.") from exc
+    if any(ln.product_id in unpriced for ln in zero_lines):
+        raise HTTPException(status_code=422, detail={
+            "code": "INVOICE_PRICE_REQUIRED",
+            "message": "Enter the supplier's price for each unpriced item before booking the bill.",
+        })
+
+
+def _compute_invoice_draft(raw_lines, supplier_gstin, recipient_gstin):
+    """Drafts retain missing prices instead of turning them into paid zeroes."""
+    computed = pinv.compute_invoice(raw_lines, supplier_gstin, recipient_gstin)
+    for raw, line in zip(raw_lines, computed["lines"]):
+        if raw.get("unit_price") is None:
+            line["unit_price"] = None
+    return computed
+
+
 def _bill_math(db, vendor, body, grn_doc, current_user):
     """Everything a booking stores about tax: (supplier GSTIN, recipient,
     computed invoice). POST / books it and POST /preview shows it through this
@@ -1473,6 +1524,7 @@ def _bill_math(db, vendor, body, grn_doc, current_user):
     time Book is pressed. A receipt's shop decides a receipt's bill, so the
     form's shop is only checked (403) when it is the one that counts."""
     refuse_walk_in_reverse_charge(body.reverse_charge, grn_doc)
+    _assert_unpriced_po_bill(body, grn_doc, db)
     supplier_gstin = _vendor_gstin(db, vendor, body.vendor_id)
     receipt_store = _receipt_store_id(db, grn_doc, body.linked_dc_ids)
     recipient = _bill_recipient(
@@ -2585,9 +2637,7 @@ async def draft_invoice_from_grn(
     )
 
     raw_lines = _draft_lines(db, grn, po, supplier_gstin)
-    computed = pinv.compute_invoice(
-        raw_lines, supplier_gstin, recipient.get("recipient_gstin")
-    )
+    computed = _compute_invoice_draft(raw_lines, supplier_gstin, recipient.get("recipient_gstin"))
 
     return {
         "status": "DRAFT",
@@ -2671,6 +2721,8 @@ async def draft_invoice_from_dcs(
                 agg[key] = dict(ln)
                 order.append(key)
             else:
+                if agg[key].get("unit_price") != ln.get("unit_price"):
+                    agg[key]["unit_price"] = None
                 try:
                     agg[key]["qty"] = (agg[key].get("qty") or 0) + (ln.get("qty") or 0)
                 except (TypeError, ValueError):
@@ -2688,9 +2740,7 @@ async def draft_invoice_from_dcs(
         db, _receipt_store_id(db, None, ids), None, current_user.get("active_store_id")
     )
 
-    computed = pinv.compute_invoice(
-        raw_lines, supplier_gstin, recipient.get("recipient_gstin")
-    )
+    computed = _compute_invoice_draft(raw_lines, supplier_gstin, recipient.get("recipient_gstin"))
 
     return {
         "status": "DRAFT",

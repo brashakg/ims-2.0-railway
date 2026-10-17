@@ -1482,7 +1482,7 @@ export function GoodsReceiptNote() {
               {rejectOnly
                 ? `Posting logs ${totals.rec} rejected unit${totals.rec === 1 ? '' : 's'} against ${poNumber} · nothing goes into stock · the order stays closed.`
                 : isNoPo
-                ? `Posting adds ${totals.rec} unit${totals.rec === 1 ? '' : 's'} to this store's stock at the cost typed · accounts get a task to book the bill.`
+                ? `Posting adds ${totals.rec} unit${totals.rec === 1 ? '' : 's'} to this store's stock · accounts get a task to enter supplier prices and book the bill.`
                 : noPoDc
                 ? `Posting this Delivery Challan adds ${totals.rec} unit${totals.rec === 1 ? '' : 's'} to this store's stock · the receipt is what the vendor's bill will link to.`
                 : `Posting against ${poNumber || 'the selected PO'} adds ${totals.rec} unit${totals.rec === 1 ? '' : 's'} to this store's stock · the PO is marked partially / fully received · variance raises a debit note.`}

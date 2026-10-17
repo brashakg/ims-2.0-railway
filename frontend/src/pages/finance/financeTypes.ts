@@ -76,10 +76,10 @@ export interface RevenueData {
 
 export interface ProfitLossStatement {
   revenue: number;
-  cost_of_goods: number;
-  gross_profit: number;
+  cost_of_goods: number | null;
+  gross_profit: number | null;
   operating_expenses: number;
-  operating_profit: number;
+  operating_profit: number | null;
   tax_expense: number;
   // NULL when the caller is not allowed to see salary figures. Net profit is
   // revenue - COGS - expenses - PAYROLL, so it is a payroll-derived number and

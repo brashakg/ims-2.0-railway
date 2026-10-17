@@ -12,7 +12,7 @@ from ._shared import (
 from .helpers import (
     _get_db,
 )
-from ...services.cost_mask import mask_cost
+from ...services.cost_mask import mask_cost, mask_purchase
 
 # ============================================================================
 # INV-12: BARCODE LIFECYCLE TRACE
@@ -183,6 +183,8 @@ async def barcode_lifecycle_trace(
         logger.warning("[INV-12] returns lookup failed for barcode %s: %s", barcode, exc)
 
     # The unit's cost, a sale line's cost_at_sale, a transfer line's unit cost
-    # and the receipt's prices go to the roles that see product cost only
-    # (owner ruling D7).
+    # and the receipt's prices go to the roles that see what we pay only
+    # (owner rulings D7 / 2026-10-12). The receipt is a purchase document: its
+    # line prices and totals follow the same mask as GET /vendors/grn/{id}.
+    result["purchase"] = mask_purchase(result["purchase"], current_user)
     return mask_cost(result, current_user, "product")

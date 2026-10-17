@@ -9,6 +9,8 @@ import {
   Truck,
 } from 'lucide-react';
 import type { PurchaseOrder, Supplier } from './purchaseTypes';
+import { useAuth } from '../../context/AuthContext';
+import { COST_ROLES } from '../../components/common/CostCell';
 
 interface PurchaseAnalyticsProps {
   purchaseOrders: PurchaseOrder[];
@@ -16,6 +18,8 @@ interface PurchaseAnalyticsProps {
 }
 
 export function PurchaseAnalytics({ purchaseOrders, suppliers }: PurchaseAnalyticsProps) {
+  // What we pay: COST_ROLES only (owner ruling 2026-10-12).
+  const showValue = useAuth().hasRole(COST_ROLES);
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-1 tablet:grid-cols-4 gap-4">
@@ -30,6 +34,7 @@ export function PurchaseAnalytics({ purchaseOrders, suppliers }: PurchaseAnalyti
             </div>
           </div>
         </div>
+        {showValue && (
         <div className="card">
           <div className="flex items-center gap-3 mb-2">
             <div className="w-10 h-10 bg-green-100 rounded-lg flex items-center justify-center">
@@ -43,6 +48,7 @@ export function PurchaseAnalytics({ purchaseOrders, suppliers }: PurchaseAnalyti
             </div>
           </div>
         </div>
+        )}
         <div className="card">
           <div className="flex items-center gap-3 mb-2">
             <div className="w-10 h-10 bg-purple-100 rounded-lg flex items-center justify-center">

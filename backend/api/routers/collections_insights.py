@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field
 
 from .auth import require_roles
 from ..services import collection_insights as _svc
+from ..services.cost_mask import mask_cost
 
 router = APIRouter()
 
@@ -134,7 +135,7 @@ async def collections_insights_summary(
     rows = _svc.summary(db, docs, store_id=store)[:limit]
     envelope["collections"] = rows
     envelope["total"] = len(rows)
-    return envelope
+    return _masked(envelope, current_user)
 
 
 @router.post("/preview")
@@ -153,7 +154,7 @@ async def preview_collection_rules(
         db, payload.rules, disjunctive=payload.disjunctive, store_id=store
     )
     result["store_id"] = store
-    return result
+    return _masked(result, current_user)
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +170,13 @@ def _load_collection_or_404(db, collection_id: str) -> Dict:
             status_code=404, detail=f"Collection not found: {collection_id}"
         )
     return doc
+
+
+# Stock value (at cost where a cost is known -- value_basis) and the 30-day
+# margin are what we pay: the accounts roles' only (owner ruling 2026-10-12).
+# The MRP value, units and sales stay.
+def _masked(body: Dict, user: dict) -> Dict:
+    return mask_cost(body, user, "product", extra=("stock_value", "margin_30d"))
 
 
 def _zero_kpis() -> Dict:
@@ -210,22 +218,28 @@ async def collection_insights(
     store = _scope_store(current_user, store_id)
     db = _get_db()
     if db is None:
-        return {
-            "collection_id": collection_id,
-            "title": None,
-            **_zero_kpis(),
-            "store_id": store,
-            "window_days": days,
-        }
+        return _masked(
+            {
+                "collection_id": collection_id,
+                "title": None,
+                **_zero_kpis(),
+                "store_id": store,
+                "window_days": days,
+            },
+            current_user,
+        )
     doc = _load_collection_or_404(db, collection_id)
     block = _svc.kpis(db, doc, store_id=store)
-    return {
-        "collection_id": collection_id,
-        "title": doc.get("title") or doc.get("name") or doc.get("handle"),
-        **block,
-        "store_id": store,
-        "window_days": days,
-    }
+    return _masked(
+        {
+            "collection_id": collection_id,
+            "title": doc.get("title") or doc.get("name") or doc.get("handle"),
+            **block,
+            "store_id": store,
+            "window_days": days,
+        },
+        current_user,
+    )
 
 
 @router.get("/{collection_id}/insights/stores")
@@ -248,9 +262,12 @@ async def collection_insights_stores(
         }
     doc = _load_collection_or_404(db, collection_id)
     rows = _svc.store_breakdown(db, doc, store_id=store)
-    return {
-        "collection_id": collection_id,
-        "title": doc.get("title") or doc.get("name") or doc.get("handle"),
-        "stores": rows,
-        "store_id": store,
-    }
+    return _masked(
+        {
+            "collection_id": collection_id,
+            "title": doc.get("title") or doc.get("name") or doc.get("handle"),
+            "stores": rows,
+            "store_id": store,
+        },
+        current_user,
+    )

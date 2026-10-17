@@ -14,7 +14,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../../context/AuthContext';
 import { useToast } from '../../../context/ToastContext';
-import { PRODUCT_COST_ROLES } from '../../../components/common/CostCell';
+import { COST_ROLES } from '../../../components/common/CostCell';
 import {
   productApi,
   DuplicateProductError,
@@ -329,9 +329,10 @@ export function useQuickAddForm() {
   }, [editMode, selectedCategory, attributes]);
 
   const canAddProduct = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']);
-  // F35: cost price + margin follow the one product-cost rule (CostCell's
-  // PRODUCT_COST_ROLES = the backend's cost_mask "product" context).
-  const canSeeCost = hasRole(PRODUCT_COST_ROLES);
+  // Cost price + margin are what we pay: CostCell's COST_ROLES only (owner
+  // ruling 2026-10-12) -- the catalogue manager's form has no cost box (the
+  // cost comes at acceptance, owner 09-28).
+  const canSeeCost = hasRole(COST_ROLES);
 
   const currentValues = useCallback(
     (): ProductFormValues => ({
