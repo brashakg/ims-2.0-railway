@@ -419,6 +419,20 @@ def test_sending_a_priced_po_raises_no_task(client, catalogue):
     assert _price_tasks(catalogue) == []
 
 
+@pytest.mark.parametrize("path", ["", "/timeline"])
+def test_legacy_po_price_history_is_hidden_without_changing_the_record(client, buying, path):
+    history = [{"kind": "edited", "label": "Edited", "at": "2026-10-01",
+                "detail": "Aviator: quantity 1 -> 2; Aviator: cost Rs 4321.77 -> Rs 4500"}]
+    buying.purchase_orders.update_one({"po_id": "PO1"}, {"$set": {"history": history}})
+    manager = client.get(f"/api/v1/vendors/purchase-orders/PO1{path}", headers=_headers("STORE_MANAGER"))
+    assert manager.status_code == 200, manager.text
+    assert "quantity 1 -> 2" in manager.text
+    assert "4321.77" not in manager.text and "4500" not in manager.text
+    accounts = client.get(f"/api/v1/vendors/purchase-orders/PO1{path}", headers=_headers("ACCOUNTANT"))
+    assert accounts.status_code == 200 and "cost Rs 4321.77 -> Rs 4500" in accounts.text
+    assert buying.purchase_orders.find_one({"po_id": "PO1"})["history"] == history
+
+
 # ---------------------------------------------------------------------------
 # 3. ONE rule: widen cost_mask and every read above moves with it
 # ---------------------------------------------------------------------------
