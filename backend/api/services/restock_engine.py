@@ -128,6 +128,9 @@ def plan_restock(
                 units.append(
                     {
                         "product_id": line.get("product_id"),
+                        # Which order line it came off, so the router can put
+                        # back the unit that line names.
+                        "order_item_id": line.get("order_item_id"),
                         "sku": line.get("sku", ""),
                         "product_name": line.get("product_name", ""),
                         "condition": str(
