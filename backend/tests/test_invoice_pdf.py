@@ -86,6 +86,7 @@ class _FakeStoreRepo:
             "store_id": sid,
             "name": "Better Vision Bokaro",
             "gstin": "20AAAAA0000A1Z5",
+            "entity_id": "entity-bv",
             "state": "Jharkhand",
         }
 
@@ -112,6 +113,11 @@ def wired(monkeypatch):
     monkeypatch.setattr(
         deps_module, "get_store_repository", lambda: _FakeStoreRepo()
     )
+    from api.services import print_identity
+
+    monkeypatch.setattr(print_identity, "load_entity_for_store", lambda store: {
+        "entity_id": "entity-bv", "gstins": [{"gstin": "20AAAAA0000A1Z5"}],
+    })
     # Identity lookup inside the renderer needs no live DB.
     monkeypatch.setattr(
         pdf_module,
@@ -185,6 +191,33 @@ def test_pdf_blocked_for_draft(wired):
     repo._doc["status"] = "DRAFT"
     p = client.get("/orders/ORD-PDF-1/invoice.pdf")
     assert p.status_code == 400
+
+
+@pytest.mark.parametrize("suffix", ["invoice", "invoice.pdf"])
+@pytest.mark.parametrize("problem", ["different-company", "unreadable-company", "missing-company", "unreadable-store"])
+def test_invoice_refuses_gstin_not_owned_by_store_entity(wired, monkeypatch, suffix, problem):
+    client, repo = wired
+    from api import dependencies
+    from api.services import print_identity
+
+    if problem == "different-company":
+        monkeypatch.setattr(print_identity, "load_entity_for_store", lambda store: {
+            "entity_id": "entity-bv", "gstins": [{"gstin": "20WWWWW0000W1Z5"}],
+        })
+    elif problem == "unreadable-company":
+        monkeypatch.setattr(print_identity, "load_entity_for_store", lambda store: {})
+    else:
+        class BrokenStore:
+            def find_by_id(self, sid):
+                if problem == "unreadable-store":
+                    raise RuntimeError("store unavailable")
+                return {**_FakeStoreRepo().find_by_id(sid), "entity_id": None}
+
+        monkeypatch.setattr(dependencies, "get_store_repository", lambda: BrokenStore())
+    response = client.get(f"/orders/ORD-PDF-1/{suffix}")
+    assert response.status_code == 400, response.text
+    assert "GSTIN" in response.json()["detail"]
+    assert repo.minted == 0, "a refused document must not consume an invoice number"
 
 
 def test_pdf_contains_invoice_content(wired):

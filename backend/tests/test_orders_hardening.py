@@ -955,9 +955,16 @@ def test_c6_invoice_endpoint_includes_gst_split(
                 "store_id": sid,
                 "gstin": "20ABCDE1234F1Z5",
                 "state_code": "20",
+                "entity_id": "entity-bv",
             }
 
     monkeypatch.setattr(deps_module, "get_store_repository", lambda: _StoreRepo())
+
+    from api.services import print_identity
+
+    monkeypatch.setattr(print_identity, "load_entity_for_store", lambda store: {
+        "entity_id": "entity-bv", "gstins": [{"gstin": "20ABCDE1234F1Z5"}],
+    })
 
     # Create a normal mixed-rate order, then flip it out of DRAFT so the
     # invoice endpoint will serve it.

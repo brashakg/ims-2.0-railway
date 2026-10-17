@@ -108,6 +108,36 @@ def resolve_issuing_identity(
     return {"store": store, "entity": entity, "overrides": overrides}
 
 
+def assert_store_gstin(
+    store: Optional[Dict[str, Any]], entity: Optional[Dict[str, Any]] = None,
+) -> str:
+    """One GST-document gate for invoices and other statutory prints.
+
+    The GSTIN printed from the shop must belong to its configured legal
+    entity. Never substitute the entity's primary or another registration.
+    An unreadable entity cannot establish ownership and is refused.
+    """
+    from .org_validation import shop_gstin
+
+    gstin = str((store or {}).get("gstin") or "").strip().upper()
+    if not gstin:
+        raise HTTPException(
+            status_code=400,
+            detail="Store GSTIN is not configured for this state. "
+            "A GST document cannot be issued without it.",
+        )
+    if entity is None:
+        entity = load_entity_for_store(store)
+    if not (store or {}).get("entity_id") or shop_gstin(entity, store) != gstin:
+        raise HTTPException(
+            status_code=400,
+            detail="The store GSTIN does not belong to its configured legal entity, "
+            "or the entity's registrations could not be read. Correct the store's "
+            "company and GSTIN under Organization before issuing this GST document.",
+        )
+    return gstin
+
+
 def assert_issuing_identity(
     store: Optional[Dict[str, Any]],
     *,
@@ -118,9 +148,9 @@ def assert_issuing_identity(
 
     Raises HTTPException(404) when the store could not be resolved (no name) so
     a document never prints with a blank, identity-less header. When
-    require_gstin is True (a GST tax document), additionally raises
-    HTTPException(400) when no GSTIN resolved for the store's state -- mirroring
-    orders.py get_invoice's 'store GSTIN is not configured' guard.
+    require_gstin is True (a GST document), additionally raises
+    HTTPException(400) unless the store carries a GSTIN owned by its legal
+    entity. The tax-invoice door calls the same guard.
     """
     name = ""
     if isinstance(store, dict):
@@ -134,17 +164,4 @@ def assert_issuing_identity(
             "Configure the store under Organization before printing.",
         )
     if require_gstin:
-        from .print_legal import _gstin_for_state, _pick
-
-        state_code = _pick(store, "state_code")
-        gstin, _ = _gstin_for_state(entity, state_code)
-        # Fall back to a GSTIN persisted directly on the store doc (org module
-        # derives + stores it) before failing.
-        if not gstin:
-            gstin = _pick(store, "gstin")
-        if not gstin:
-            raise HTTPException(
-                status_code=400,
-                detail="Store GSTIN is not configured for this state. "
-                "A GST document cannot be issued without it.",
-            )
+        assert_store_gstin(store, entity)

@@ -714,6 +714,16 @@ def test_an_order_first_seen_through_a_status_topic_gets_its_real_status(swept):
         "CANCELLED", CANCELLED_AT, CANCELLED_AT)
     assert doc["status_history"][-1]["changed_by"] == "system:ONLINE_MAP"
 
+    # Multi-location PR 5: an order no shop is named for books HELD (goods
+    # must not leave), and a held order is never shipped. The rig reads no
+    # routing, so Shopify's routing names the shop here, as it does live.
+    from api.services import online_fulfillment_route as ofr
+
+    real_route = ofr.route_order
+    swept["mp"].setattr(ofr, "route_order", lambda db, items, routing: {
+        **real_route(db, items, routing), "store_id": "BV-GANGA-01", "reason": "ASSIGNED",
+        "problems": []})
+    swept["mp"].setattr(ofr, "seller_problem", lambda *a, **kw: None)
     swept["state"]["orders"] = [_pulled(60101, fulfillment_status="fulfilled")]
     p = swept["run"]().payload
     assert p["mapped"] == ["60101"] and swept["seen"] == ["60101"], "one mapper call"
@@ -1813,12 +1823,13 @@ def _stock_in(swept, oid):
 def _premark(monkeypatch):
     """A restock as it ran before the order-line marks (every refund confirmed
     on main): no booking, and no historical rule in the restock either, so a
-    historical frame is minted. Returns the undo."""
+    historical frame is minted -- nor multi-location PR 5's route (a frame a
+    routed order never claimed is never minted). Returns the undo."""
     real, real_restock = shopify_refund._restock_booked, returns_router._restock_good_items
     monkeypatch.setattr(shopify_refund, "_restock_booked",
                         lambda order, lines, rid, restock, **kw: restock(lines))
     monkeypatch.setattr(returns_router, "_restock_good_items", lambda *a, order=None, **kw: real_restock(
-        *a, order={**order, "historical": False} if order else order, **kw))
+        *a, order={**order, "historical": False, "fulfillment_route": None} if order else order, **kw))
 
     def undo():
         monkeypatch.setattr(shopify_refund, "_restock_booked", real)
@@ -2870,12 +2881,14 @@ def test_a_release_that_errors_never_leaves_a_booking_no_door_owns(swept, monkey
     lossy = _ReleaseFails(returns_router._orders_coll(), lands)
     monkeypatch.setattr(returns_router, "_orders_coll", lambda: lossy)
     real = returns_router._reactivate_original_unit
-    monkeypatch.setattr(returns_router, "_reactivate_original_unit", lambda *a, **kw: None)
-    undo_create = _create_fails_after(monkeypatch, swept["stock_repo"], 0)
+
+    def stock_write_down(*a, **kw):
+        raise RuntimeError("stock reactivate failed: the SOLD unit stays SOLD")
+
+    monkeypatch.setattr(returns_router, "_reactivate_original_unit", stock_write_down)
     assert shopify_refund.post_from_review(swept["db"], row)["restock_applied"] is False
     assert lossy.failed and _units(swept) == [("stk-1", "SOLD")]
     monkeypatch.setattr(returns_router, "_reactivate_original_unit", real)
-    undo_create()
     line = _doc(swept, oid)["items"][0]
     assert (line.get("returned_qty"), (line.get("restocked_refunds") or {}).get(rid)) == (0, 0)
 

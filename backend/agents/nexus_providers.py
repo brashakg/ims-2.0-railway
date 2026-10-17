@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List
 import copy
+import inspect
 import logging
 import os
 import re
@@ -246,7 +247,7 @@ def _booked_order(db, sid: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _catch_up_one(db, order: Dict[str, Any], sid: str, live: bool) -> tuple:
+async def _catch_up_one(db, order: Dict[str, Any], sid: str, live: bool) -> tuple:
     """One pulled order NOT yet in IMS -> (bucket, reason). Bucket is one of
     mapped / skipped_dark / failed / already_in_ims (booked between the
     caller's lookup and the mapper). Never raises."""
@@ -255,14 +256,15 @@ def _catch_up_one(db, order: Dict[str, Any], sid: str, live: bool) -> tuple:
     try:
         if not live:
             return "skipped_dark", None
-        from api.services.online_order_mapper import map_shopify_order
+        from api.services.online_fulfillment_route import map_routed_order
 
         # webhook_id stays None on purpose: ingest's layer-2 guard registers any
         # id on first sight and answers "replayed" forever after, so a pull-side
         # id would turn one transient booking failure into a permanent stall.
         # The hard layer-1 order-id guard (pre-checked above, re-checked inside)
-        # is what makes this idempotent against a later real webhook.
-        result = map_shopify_order(order, db, webhook_id=None, topic="orders/create")
+        # is what makes this idempotent against a later real webhook. The create
+        # goes through the routing door like the webhook (multi-location PR 5).
+        result = await map_routed_order(order, db, webhook_id=None, topic="orders/create")
         status = result.get("status")
         if status == "created":
             # The create path itself lands the body's lifecycle fact
@@ -285,7 +287,7 @@ def _catch_up_one(db, order: Dict[str, Any], sid: str, live: bool) -> tuple:
 # IMS doc and, for each one that moved, feeds the SAME payload through the SAME
 # handler NEXUS's webhook drain would have called:
 #   order facts (cancelled_at / financial_status / fulfillment_status)
-#       -> online_order_mapper.map_shopify_order(topic=orders/*)   (_dispatch_shopify_order)
+#       -> online_fulfillment_route.map_routed_order(topic=orders/*)   (_dispatch_shopify_order)
 #   the newest fulfillments[] entry
 #       -> shopify_fulfillment.reconcile_fulfillment(topic=fulfillments/update)
 #   each refunds[] entry the refund handler has not seen
@@ -396,7 +398,7 @@ def _order_topic(
     return "orders/updated" if (pay_moved or ful_moved) else None
 
 
-def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) -> tuple:
+async def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) -> tuple:
     """Status catch-up for ONE order IMS already booked -> (buckets, reason).
     `order` is the body the mapper may stamp; `raw` the untouched copy the inbox
     keeps and the child handlers read. buckets is a subset of {status_synced,
@@ -407,8 +409,8 @@ def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) -> tuple
         _derive_statuses,
         _recompute_money,
         _shopify_payload_stale,
-        map_shopify_order,
     )
+    from api.services.online_fulfillment_route import map_routed_order
     from api.services.shopify_fulfillment import (
         FULFILLMENT_WATERMARK,
         fulfilment_body_stale,
@@ -425,7 +427,7 @@ def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) -> tuple
     buckets: set = set()
     errors: List[str] = []
 
-    def feed(topic: str, payload: Dict[str, Any], call) -> bool:
+    async def feed(topic: str, payload: Dict[str, Any], call) -> Dict[str, Any]:
         """One handler call, recorded in the inbox like the delivery would be
         (source=shopify_pull, the synthesised topic, the handler's verdict on
         the row): the remap door replays the newest orders/* row on file, so
@@ -440,7 +442,8 @@ def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) -> tuple
         applied, error, res = False, None, {}
         if live:
             try:
-                res = call() or {}
+                res = call()  # the orders/* door is async, the others sync
+                res = (await res if inspect.isawaitable(res) else res) or {}
                 applied = (
                     bool(res.get("status_synced")) if family == "orders"
                     else res.get("status") in _SWEEP_OK[family]
@@ -498,7 +501,7 @@ def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) -> tuple
             if moved and existing.get(FULFILLMENT_WATERMARK) is None:
                 moved = [f for f in fs if f in moved or fulfilment_clock(existing, f) is None]
             for f in moved:
-                res = feed("fulfillments/update", f,
+                res = await feed("fulfillments/update", f,
                            lambda f=f: reconcile_fulfillment(db, f, topic="fulfillments/update"))
                 # The same transition table held the SHIPPED / DELIVERED flip back.
                 if res.get("terminal_withheld"):
@@ -510,7 +513,7 @@ def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) -> tuple
             )
             topic = _order_topic(st, money, existing, ful_stale)
             if topic:
-                res = feed(topic, raw, lambda: map_shopify_order(order, db, webhook_id=None, topic=topic))
+                res = await feed(topic, raw, lambda: map_routed_order(order, db, webhook_id=None, topic=topic))
                 # The transition table kept a finished status while the
                 # payment / fulfilment facts landed: reported, so the
                 # operator sees the order IMS and Shopify disagree on. Its
@@ -523,7 +526,7 @@ def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) -> tuple
             # The handler's own idempotency guard, asked up front so a refund
             # it already queued/credited costs nothing every hour.
             if rid and not _refund_already_processed(db, rid):
-                feed("refunds/create", r, lambda r=r: handle_shopify_refund(db, r, webhook_id=None, topic="refunds/create"))
+                await feed("refunds/create", r, lambda r=r: handle_shopify_refund(db, r, webhook_id=None, topic="refunds/create"))
     except Exception as e:  # noqa: BLE001 - one bad order never aborts the run
         errors.append(f"{type(e).__name__}: {e}")
     if errors:
@@ -537,7 +540,7 @@ async def shopify_pull_orders(db, since_hours: int = SHOPIFY_PULL_FLOOR_HOURS) -
     One not yet in IMS (and CREATED in the window -- an older order touched
     today is never booked, it would mint a GST invoice for a stale sale) is fed
     through the SAME mapper the webhook path uses (api.services.
-    online_order_mapper.map_shopify_order). One already in IMS is swept for
+    online_fulfillment_route.map_routed_order). One already in IMS is swept for
     STATUS changes IMS missed -- cancelled / paid / fulfilled / refunded -- each
     fed through the handler its webhook would have reached (see the status
     catch-up block above). Gated on shopify_dispatch_mode()=='live' exactly
@@ -610,7 +613,7 @@ async def shopify_pull_orders(db, since_hours: int = SHOPIFY_PULL_FLOOR_HOURS) -
         existing = _booked_order(db, sid)
         if existing:
             tally["already_in_ims"] += 1
-            buckets, reason = _sweep_booked_order(db, order, raw, existing, sid, live)
+            buckets, reason = await _sweep_booked_order(db, order, raw, existing, sid, live)
             for bucket in buckets:
                 tally[bucket].append(sid)
             if reason:
@@ -620,7 +623,7 @@ async def shopify_pull_orders(db, since_hours: int = SHOPIFY_PULL_FLOOR_HOURS) -
         if created is not None and created < since_naive:
             tally["outside_create_window"] += 1  # the #1130 create window, re-applied client-side
             continue
-        bucket, reason = _catch_up_one(db, order, sid, live)
+        bucket, reason = await _catch_up_one(db, order, sid, live)
         if bucket == "already_in_ims":
             tally[bucket] += 1
             continue
@@ -1532,8 +1535,11 @@ def tally_build_day_voucher_xml_checked(
 ) -> tuple:
     """Reshape -> GATE -> build. The ONLY entry point an unattended caller may use.
 
-    Three gates run per order BEFORE a single byte of that order's XML exists:
+    The gates run per order BEFORE a single byte of that order's XML exists:
 
+      S. SELLER HOLD -- a routed online order held off the GST returns on its
+         seller (GSTIN) check (reports.gst_itc._order_held_off_returns, the
+         rule GSTR-1/3B apply) is quarantined, never booked.
       0. SELF-CONSISTENCY -- `_order_tax_statements_disagree`: a header tax and
          a per-line tax sum that differ by more than 50 paise, in EITHER
          direction (over-stating fabricates liability; under-stating hides it).
@@ -1591,8 +1597,21 @@ def tally_build_day_voucher_xml_checked(
     priced: List[Dict[str, Any]] = []
     rejected: List[Dict[str, Any]] = []
 
+    from api.routers.reports.gst_itc import _order_held_off_returns
+
     for original in orders or []:
         oid = _order_identity(original)
+
+        # SELLER HOLD: a routed online order its seller (GSTIN) check holds
+        # off the GST returns (GSTR-1/3B skip it; the invoice door refuses it)
+        # is no sale of this GSTIN until Re-map re-routes it -- quarantined
+        # here, never booked into the books GSTR-1 disagrees with.
+        held = _order_held_off_returns(db, original)
+        if held:
+            rejected.append(
+                {"order_id": oid, "reason": f"held on its seller (GSTIN) check: {held['message']}"}
+            )
+            continue
 
         # TWO-SIDED tax-statement check, BEFORE pricing: max() below only sees
         # under-booking, so a header that OVER-states the lines fabricates

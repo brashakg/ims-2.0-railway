@@ -96,6 +96,10 @@ interface OrderRow {
    *  problem — the chip/confirm wording must not send staff after a
    *  prescription. */
   stock_hold: boolean;
+  /** Held on its seller (GSTIN) check or a failed fulfillment-order move —
+   *  released by Re-map, which re-reads Shopify's routing and re-claims the
+   *  stock (never changing the order's seller, invoice or tax). */
+  remap_hold: boolean;
   rx_hold_cleared: boolean;
   rx_hold_reasons: string[];
 }
@@ -139,6 +143,7 @@ function toRow(o: Record<string, any>): OrderRow {
     rx_hold: isHeld,
     rx_pending: !!o.rx_pending,
     stock_hold: isHeld && (!!o.stock_hold_reason || legacyStockReason),
+    remap_hold: !!o.remap_hold,
     rx_hold_cleared: !!o.rx_hold_cleared,
     rx_hold_reasons: reasons,
   };
@@ -214,7 +219,7 @@ async function fetchOrders(
 
 // Re-map outcomes the backend counts as "the order is in the books". Fallback
 // only -- the backend's explicit `ok` verdict wins when present.
-const REMAP_OK = ['created', 'duplicate', 'replayed', 'status_synced'];
+const REMAP_OK = ['created', 'duplicate', 'replayed', 'status_synced', 'rerouted'];
 
 // ---------------------------------------------------------------------------
 // Map-outcome presentation (drives the row badge + the Re-map affordance).
@@ -440,10 +445,15 @@ export default function OnlineOrdersPage() {
           typeof data.ok === 'boolean'
             ? data.ok
             : REMAP_OK.includes(String(result.status || ''));
-        if (ok) {
+        // A re-route of a seller-held order says in words what became of the hold.
+        if (ok && data.message) {
+          toast.success(String(data.message));
+        } else if (ok) {
           toast.success(
             `Order re-mapped into the books${result.invoice_number ? ` (invoice ${result.invoice_number})` : ''}.`,
           );
+        } else if (data.message) {
+          toast.warning(String(data.message));
         } else {
           const why = data.map_error || result.error || result.reason || '';
           toast.warning(`Re-map did not book this order${why ? `: ${why}` : '.'}`);
@@ -814,13 +824,17 @@ export default function OnlineOrdersPage() {
                     })()}
                   </div>
                   <div className="flex items-center gap-2">
-                    {order.map_status === 'FAILED' && canAct && order.shopify_order_id && (
+                    {(order.map_status === 'FAILED' || order.remap_hold) && canAct && order.shopify_order_id && (
                       <button
                         type="button"
                         onClick={() => handleRemap(order)}
                         disabled={isRemapping}
                         className="btn-outline inline-flex items-center gap-1.5 text-xs disabled:opacity-60"
-                        title="Re-run ingestion for this Shopify order"
+                        title={
+                          order.remap_hold
+                            ? "Re-read Shopify's routing and re-claim at the shop that ships it"
+                            : 'Re-run ingestion for this Shopify order'
+                        }
                       >
                         {isRemapping ? (
                           <Loader2 className="w-3.5 h-3.5 animate-spin" />

@@ -281,18 +281,6 @@ def normalize_state_code(value):
     return value
 
 
-def resolve_gstin_for_state(gstins, state_code: Optional[str]) -> Optional[dict]:
-    """From a list of {gstin, state_code, ...} entries, return the one matching
-    the given state code (the store's state). None if not found."""
-    sc = (state_code or "").strip()
-    if not sc or not gstins:
-        return None
-    for g in gstins:
-        if isinstance(g, dict) and (g.get("state_code") or "").strip() == sc:
-            return g
-    return None
-
-
 def shop_gstin(entity: Optional[dict], shop: Optional[dict]) -> Optional[str]:
     """THE answer to 'which GSTIN is this shop's' (owner, 2026-09-30: the
     registration decides the state). Its own GSTIN when its company holds it;
@@ -431,3 +419,14 @@ def resolve_state_code(*candidates) -> str:
             if code:
                 return code
     return ""
+
+
+def shop_state_code(store: Optional[dict]) -> str:
+    """THE state a shop supplies from: its state_code, else its state name,
+    else its GSTIN's state ("" when none resolves). ONE read for the sale's
+    GST split (orders._build_invoice_gst_split: CGST+SGST vs IGST) and the
+    online seller check (online_fulfillment_route.gstin_problem: the GSTIN
+    must be this state's) -- two reads let an order the check held be split
+    from the very GSTIN the check called wrong (money panel, 2026-09-30)."""
+    s = store if isinstance(store, dict) else {}
+    return resolve_state_code(s.get("state_code"), s.get("state"), s.get("gstin"))

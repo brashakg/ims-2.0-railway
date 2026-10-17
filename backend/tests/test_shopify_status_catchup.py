@@ -103,6 +103,18 @@ def _book(swept, order_id, **over):
     res = swept["real_map"](_pulled(order_id, **over), swept["db"], topic="orders/create")
     assert res["status"] == "created"
     swept["seen"].clear()
+    # Since multi-location PR 5 a booked online order ships from the shop
+    # Shopify's routing named; the rig reads no routing (the order would sit
+    # on hold with no shop), so the route names one and the hold is lifted.
+    swept["orders"].update_one(
+        {"shopify_order_id": str(order_id)},
+        {"$set": {
+            "fulfillment_route.store_id": "BV-GANGA-01",
+            "fulfillment_route.problems": [],
+            "stock_hold_reason": None,
+            "fulfillment_hold": False,
+        }},
+    )
     return swept["orders"].find_one({"shopify_order_id": str(order_id)})
 
 
@@ -162,11 +174,16 @@ def _fulfilment(order_id, fid, **over):
 
 def _claim_unit(swept, doc):
     """Make the booked order look like ingest claimed a serialized unit for it
-    (the stock decrement that runs when the sku resolves to an IMS product)."""
+    (the stock decrement that runs when the sku resolves to an IMS product)
+    at the shop the route named (_book)."""
     items = [{**doc["items"][0], "ims_product_id": "IMS-P-1"}]
     swept["orders"].update_one(
         {"shopify_order_id": doc["shopify_order_id"]},
-        {"$set": {"items": items, "fulfillment_stores": ["BV-GANGA-01"]}},
+        {"$set": {
+            "items": items,
+            "fulfillment_stores": ["BV-GANGA-01"],
+            "fulfillment_breakdown": [{"product_id": "IMS-P-1", "store_id": "BV-GANGA-01", "qty": 1}],
+        }},
     )
     swept["stock_repo"].units.append(
         {

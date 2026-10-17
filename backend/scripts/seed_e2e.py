@@ -4,7 +4,7 @@ IMS 2.0 - E2E test seed (deterministic, idempotent)
 Seeds the minimum fixed data the Playwright E2E suite asserts against:
 
   - Stores  : the bootstrap stores from database.seed_data (BV-BOK-01 etc.),
-              which carry a GSTIN so GST tax invoices generate. Users too
+              with fixture entities owning their GSTINs so GST invoices generate. Users too
               (admin / admin123, SUPERADMIN, geo-exempt).
   - Products: a 5% FRAME priced at exactly Rs 999 (the canonical GST-inclusive
               case) and an 18% SUNGLASS at Rs 1180, both with real product_ids,
@@ -203,6 +203,35 @@ def seed(db) -> dict:
             results[coll_name] = "SEEDED (%d)" % len(documents)
         else:
             results[coll_name] = "EMPTY"
+
+    # 1b) The bootstrap shops have GSTINs but no legal-entity registrations.
+    # Supply those relationships only in this E2E fixture; the production
+    # invoice guard must still refuse an unowned or unreadable GSTIN.
+    # Group by the PAN embedded in each GSTIN, never merge different taxpayers.
+    entities = {}
+    for shop in bootstrap["stores"]:
+        gstin = shop["gstin"]
+        pan = gstin[2:12]
+        entity_id = "e2e-entity-" + pan.lower()
+        entity = entities.setdefault(entity_id, {
+            "entity_id": entity_id, "legal_name": "E2E Test Entity " + pan,
+            "pan": pan, "is_active": True, "gstins": [],
+        })
+        if not any(row["gstin"] == gstin for row in entity["gstins"]):
+            entity["gstins"].append({
+                "gstin": gstin, "state_code": gstin[:2],
+                "state_name": shop["state"], "registration_type": "REGULAR",
+                "is_primary": not entity["gstins"],
+            })
+        db.get_collection("stores").update_one(
+            {"store_id": shop["store_id"], "gstin": gstin},
+            {"$set": {"entity_id": entity_id}},
+        )
+    for entity_id, entity in entities.items():
+        db.get_collection("entities").replace_one(
+            {"entity_id": entity_id}, entity, upsert=True,
+        )
+    results["entities_e2e"] = "UPSERTED (%d)" % len(entities)
 
     # 2) E2E products (upsert so re-runs converge on the fixed prices).
     products = db.get_collection("products")

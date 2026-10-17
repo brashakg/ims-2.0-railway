@@ -684,25 +684,29 @@ def failed_webhook_summary(db) -> Dict[str, Any]:
 
 
 def fulfillment_store_health(db) -> Dict[str, Any]:
-    """R6 guard: does the resolved ONLINE fulfillment store actually carry
+    """R6 guard: does the FALLBACK online fulfillment shop actually carry
     serialized stock_units?
 
-    An online order decrements physical stock at the fulfillment store
-    (shopify_ingest._mark_units_sold -> StockRepository on db.stock_units, status
-    "AVAILABLE"). If that resolves to the virtual billing bucket (BV-ONLINE-01)
-    or any store holding ZERO available units, every online-order decrement
-    SILENTLY no-ops -> the online listing can oversell physical stock. This
-    surfaces that misconfiguration BEFORE the cutover instead of after the first
-    lost sale.
+    Since multi-location PR 5 an online order ships from (and is billed and
+    claimed at) the shop mapped to the Shopify location Shopify assigned it to
+    (online_fulfillment_route.route_order). ONLINE_FULFILLMENT_STORE_ID is the
+    documented fallback used only while that assignment is unusable (the
+    location maps to no shop -- Pune until its opening stock lands -- or the
+    fulfillment orders could not be read). If the fallback is the virtual
+    billing bucket (BV-ONLINE-01) or a shop holding ZERO available units, every
+    order that falls back under-claims (loud, held) -- surfaced here first.
 
-    Resolution mirrors shopify_ingest._online_fulfillment_store_id: the
-    ONLINE_FULFILLMENT_STORE_ID env wins, else the resolved online billing store
-    (integration config / ONLINE_STORE_ID / settings / primary store / the
-    BV-ONLINE-01 default).
+    Resolution: route_order's own answer, online_fulfillment_route
+    .usable_fallback -- the env names an ACTIVE physical shop, else there is
+    no fallback. Unset or naming anything else (the online bucket, a closed
+    shop, a typo): no fallback, and the tile says so -- such an order is held
+    (SELLER_UNKNOWN) and claims nothing; the billing bucket is never reported
+    in its place.
 
     Read-only + fail-soft -> never raises, never 500s the status tile.
     """
-    import os
+    from .online_fulfillment_route import fallback_store_id, usable_fallback
+    from .stores_util import physical_stores
 
     out: Dict[str, Any] = {
         "checked": False,
@@ -713,46 +717,51 @@ def fulfillment_store_health(db) -> Dict[str, Any]:
         "warning": None,
     }
 
-    store_id = (os.getenv("ONLINE_FULFILLMENT_STORE_ID") or "").strip()
-    source = "ONLINE_FULFILLMENT_STORE_ID" if store_id else None
-    if not store_id:
-        try:
-            from .online_order_mapper import _resolve_online_store_id
-
-            store_id = _resolve_online_store_id({}, db)
-            source = "online_store_id (config/env/settings/primary/default)"
-        except Exception:  # noqa: BLE001
-            store_id = "BV-ONLINE-01"
-            source = "default"
-
+    store_id = fallback_store_id()
     out["store_id"] = store_id
-    out["source"] = source
+    out["source"] = "ONLINE_FULFILLMENT_STORE_ID" if store_id else None
     out["is_virtual_default"] = store_id == "BV-ONLINE-01"
+    if not store_id:
+        out["warning"] = (
+            "No fallback online fulfillment store is set (ONLINE_FULFILLMENT_STORE_ID): "
+            "an online order whose Shopify location maps to no shop, or whose routing "
+            "cannot be read, is held (seller unknown) and claims no stock. Map every "
+            "shop's Shopify location, or set the fallback to the shop that ships them."
+        )
+        return out
 
     if db is None:
         return out
 
     try:
+        if not usable_fallback(physical_stores(db)):
+            out["warning"] = (
+                f"ONLINE_FULFILLMENT_STORE_ID names '{store_id}', which is not an active "
+                "physical shop, so IMS never ships or bills an online order from it: "
+                "an order that falls back is held (seller unknown) and claims no "
+                "stock. Set it to the shop that ships those orders."
+            )
+            return out
         coll = _coll(db, "stock_units")
         if coll is not None:
-            count = int(
-                coll.count_documents({"store_id": store_id, **on_hand_match()})
-            )
+            # The CLAIM's own rule (StockRepository.sellable_filter, the one
+            # route_order counts with): a unit the claim refuses is no stock
+            # for an order that falls back here.
+            from database.repositories.product_repository import StockRepository
+
+            claimable = StockRepository(coll).sellable_filter(None, store_id)
+            claimable.pop("product_id")
+            count = int(coll.count_documents(claimable))
             out["available_units"] = count
             out["checked"] = True
             if count == 0:
                 out["warning"] = (
-                    f"Online fulfillment store '{store_id}' holds 0 AVAILABLE "
-                    f"serialized stock units -- every online-order stock decrement "
-                    f"will SILENTLY no-op (oversell risk). Set "
-                    f"ONLINE_FULFILLMENT_STORE_ID to the physical store that fulfils "
-                    f"online orders before go-live."
-                )
-            elif out["is_virtual_default"]:
-                out["warning"] = (
-                    "Online fulfillment store is the virtual default 'BV-ONLINE-01'. "
-                    "It currently has stock, but set ONLINE_FULFILLMENT_STORE_ID "
-                    "explicitly to the real fulfilling store to avoid ambiguity."
+                    f"Fallback online fulfillment store '{store_id}' holds 0 "
+                    f"AVAILABLE serialized stock units -- an online order routed "
+                    f"to an unmapped Shopify location will no-op its stock "
+                    f"decrement (oversell risk, held for a human). Set "
+                    f"ONLINE_FULFILLMENT_STORE_ID to the physical store that "
+                    f"fulfils those orders, or map the location to its shop."
                 )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SYNC_HEALTH] fulfillment-store check failed: %s", exc)

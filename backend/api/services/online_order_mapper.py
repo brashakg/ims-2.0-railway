@@ -1147,7 +1147,7 @@ def map_shopify_order(
            from this (possibly updated/cancelled) payload instead of re-creating.
 
     Returns the ingest result dict, augmented:
-      {... , "customer_id": <id or None>, "store_id": <bucket>,
+      {... , "customer_id": <id or None>, "store_id": <the order's shop>,
        "status_synced": <bool, only on a re-ingest>,
        "terminal_withheld": <bool, only on a re-ingest: the transition table
        kept a finished IMS status against a different fact>}.
@@ -1312,7 +1312,10 @@ def map_shopify_order(
             status_synced = _sync_existing_order_status(db, shopify_order_id, payload, verdict)
 
         result["customer_id"] = customer_id
-        result["store_id"] = store_id
+        # The booked order's own shop (ingest returns it: since multi-location
+        # PR 5 the shipping shop, not the bucket); the bucket only when ingest
+        # names none.
+        result["store_id"] = result.get("store_id") or store_id
         if status in ("duplicate", "replayed"):
             result["status_synced"] = status_synced
             result.update(verdict)
