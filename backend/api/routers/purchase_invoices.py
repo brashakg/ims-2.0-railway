@@ -2678,7 +2678,14 @@ def stamp_bills_as_of(db, bills: list) -> list:
     except Exception:
         money = [[], []]
     for b in bills:
+        stored_status = b.get("status")
         b.update(ap_engine.bill_as_of(b, *money))
+        if str(stored_status or "").upper() in {"CANCELLED", "CANCELED", "VOID", "VOIDED"}:
+            # Cancellation is a document state, not a payment state. Recomputing
+            # settlement must never revive it as a payable (or hide it from the
+            # list's cancelled/void filter) merely because it was never paid.
+            b["status"] = stored_status
+            b["outstanding"] = 0.0
     return bills
 
 
