@@ -5,6 +5,7 @@ from ._shared import (
     Query,
     _VENDOR_ROLES,
     _get_db,
+    ap_engine,
     datetime,
     get_vendor_repository,
     ist_date_str,

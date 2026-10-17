@@ -12,6 +12,7 @@ from ._shared import (
     _get_db,
     _pm,
     _po_catalog_gate_on,
+    ap_engine,
     can_access_store_scoped,
     datetime,
     get_audit_repository,
@@ -220,7 +221,9 @@ async def get_po_timeline(
                 detail = "Purchase invoice booked"
                 if show_bills:
                     inv["status"] = r.get("status")
-                    inv["total"] = r.get("total")
+                    # What the supplier is owed (an RCM bill's GST is the
+                    # shop's own, never the supplier's).
+                    inv["total"] = ap_engine.vendor_payable(r)
                     detail += f" ({r.get('status') or 'OUTSTANDING'})"
                 invoices_out.append(inv)
                 events.append(

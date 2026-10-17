@@ -35,6 +35,7 @@ interface GSTR3BITCAvailable {
 }
 
 interface GSTR3BData {
+  unallocatedLegacyBills?: { count: number; tax: number; bill_numbers: string[]; failed?: boolean };
   period: string;
   gstin: string;
   legalName: string;
@@ -42,6 +43,11 @@ interface GSTR3BData {
   // Table 3.1: Outward taxable supplies
   outwardTaxableSupplies: GSTR3BTaxLiability;
   outwardTaxableValue: number;
+
+  // Table 3.1(d): inward supplies liable to reverse charge -- the shop's own
+  // GST on reverse-charge bills, always paid in cash.
+  inwardSuppliesReverseCharge: GSTR3BTaxLiability;
+  inwardSuppliesReverseChargeValue: number;
 
   // Table 3.2: Outward taxable supplies (zero rated)
   zeroRatedSupplies: GSTR3BTaxLiability;
@@ -55,7 +61,9 @@ interface GSTR3BData {
   // Table 5: Exempt, Nil rated and Non-GST supplies
   exemptSupplies: number;
 
-  // Table 6.1: Payment of tax
+  // Table 6.1: Payment of tax. taxPayable is the tax other than reverse
+  // charge; taxPaidCash is the server's cash rule (net_cash_due) -- the screen
+  // never works out its own net.
   taxPayable: GSTR3BTaxLiability;
   itcUtilized?: GSTR3BITCAvailable;
   taxPaidCash?: GSTR3BTaxLiability;
@@ -259,6 +267,13 @@ export function GSTR3BReport() {
         </div>
       ) : reportData ? (
         <>
+          {(reportData.unallocatedLegacyBills?.count || reportData.unallocatedLegacyBills?.failed) ? (
+            <div className="card border border-amber-300 bg-amber-50 text-amber-900" role="alert">
+              <p className="font-semibold">Purchase bills need a receiving GSTIN</p>
+              <p className="text-sm">These legacy bills are excluded from this return until their GSTIN is confirmed. GSTN JSON download is blocked to prevent an incorrect filing.</p>
+              <p className="text-sm">{reportData.unallocatedLegacyBills.bill_numbers.join(', ') || 'Bill allocation could not be verified. Retry or open the GST cross-check.'}</p>
+            </div>
+          ) : null}
           {/* Summary Cards */}
           <div
             className={`grid grid-cols-1 ${itcAvailable && taxPaidCash ? 'tablet:grid-cols-4' : 'tablet:grid-cols-2'} gap-4`}
@@ -269,7 +284,7 @@ export function GSTR3BReport() {
             </div>
             <div className="card">
               <p className="text-sm text-gray-600">Tax Liability</p>
-              <p className="text-2xl font-bold text-red-600">₹{getTotalTax(reportData.taxPayable).toLocaleString('en-IN')}</p>
+              <p className="text-2xl font-bold text-red-600">₹{(getTotalTax(reportData.taxPayable) + getTotalTax(reportData.inwardSuppliesReverseCharge)).toLocaleString('en-IN')}</p>
             </div>
             {itcAvailable && (
               <div className="card">
@@ -332,6 +347,29 @@ export function GSTR3BReport() {
             </div>
           </div>
 
+          {/* Table 3.1(d): Inward supplies liable to reverse charge */}
+          <div className="card">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+              <FileText className="w-5 h-5" />
+              3.1(d) Inward Supplies Liable to Reverse Charge
+            </h3>
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse">
+                <thead>
+                  <tr className="bg-gray-100 border-b border-gray-200">
+                    <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">Description</th>
+                    <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">Tax Type</th>
+                    <th className="px-4 py-3 text-right text-sm font-medium text-gray-700">Amount</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {renderTaxRow('Taxable Value', reportData.inwardSuppliesReverseChargeValue, true)}
+                  {renderTaxLiabilityRow('Reverse Charge Tax', reportData.inwardSuppliesReverseCharge)}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
           {/* Table 4: Eligible ITC */}
           {itcAvailable && (
           <div className="card">
@@ -372,7 +410,8 @@ export function GSTR3BReport() {
                   </tr>
                 </thead>
                 <tbody>
-                  {renderTaxLiabilityRow('Tax Payable', reportData.taxPayable)}
+                  {renderTaxLiabilityRow('Tax Payable (other than reverse charge)', reportData.taxPayable)}
+                  {renderTaxLiabilityRow('Tax Payable (reverse charge, cash only)', reportData.inwardSuppliesReverseCharge)}
                   {itcUtilized && renderTaxLiabilityRow('ITC Utilized', itcUtilized, true)}
                   {taxPaidCash && renderTaxLiabilityRow('Tax Paid in Cash', taxPaidCash, true)}
                   {renderTaxRow('Interest (if any)', getTotalTax(reportData.interest))}
@@ -389,11 +428,13 @@ export function GSTR3BReport() {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm text-purple-700 font-medium">Net Tax Liability</p>
-                <p className="text-xs text-purple-600 mt-1">Total tax payable after ITC</p>
+                <p className="text-xs text-purple-600 mt-1">
+                  Tax payable in cash: tax after input credit (unused credit carries to next month), plus reverse charge tax
+                </p>
               </div>
               <div className="text-right">
                 <p className="text-3xl font-bold text-purple-900">
-                  ₹{(getTotalTax(reportData.taxPayable) - getTotalTax(itcAvailable)).toLocaleString('en-IN')}
+                  {taxPaidCash ? `₹${getTotalTax(taxPaidCash).toLocaleString('en-IN')}` : '—'}
                 </p>
               </div>
             </div>

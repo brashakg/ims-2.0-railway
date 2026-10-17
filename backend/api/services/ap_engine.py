@@ -21,6 +21,9 @@ reduces it. So:
 
     vendor balance = sum(bills) - sum(payments incl. TDS) - sum(debit notes)
 
+where a bill counts what it owes the supplier (vendor_payable: the taxable
+value on a reverse-charge bill, whose GST the shop owes the government).
+
 A payment discharges the bill by its GROSS value = cash paid + TDS withheld
 (the TDS is remitted to the government on the vendor's behalf, so from the
 vendor's ledger it still settles that much of the bill).
@@ -115,6 +118,25 @@ def normalize_bill_kind(value):
     if s in ("SERVICES", "SERVICE", "EXPENSE", "EXPENSES", "SERVICES_EXPENSES"):
         return BILL_KIND_SERVICES
     raise ValueError("bill_kind must be GOODS or SERVICES")
+
+
+# Owner ruling D14 (2026-09-29): goods bought from a local / walk-in dealer
+# without a purchase order arrive on a "Bought without PO" receipt (#1183).
+GRN_SUBTYPE_NO_PO = "NO_PO"
+
+
+def reverse_charge_refusal(reverse_charge, receipt) -> Optional[str]:
+    """THE rule (decided in #1183): a bill for goods bought without a purchase
+    order -- its receipt (``receipt``, the linked GRN doc) is a "Bought without
+    PO" one -- is never reverse charge. None when the bill may be booked as
+    sent, else the refusal the form shows. Every bill door asks this (POST /
+    and /preview through purchase_invoices._bill_math), so none can book one."""
+    if reverse_charge and (receipt or {}).get("grn_subtype") == GRN_SUBTYPE_NO_PO:
+        return (
+            "Goods bought without a purchase order are never reverse charge. "
+            "Turn off 'Reverse charge' on this bill to book it."
+        )
+    return None
 
 
 def _f(v) -> float:
@@ -497,6 +519,22 @@ def build_26q_export(
 # --- per-bill outstanding --------------------------------------------------
 
 
+def vendor_payable(bill: dict) -> float:
+    """THE amount a bill owes its supplier. On a reverse-charge (RCM) bill the
+    supplier is owed the TAXABLE value only: the GST on it is the shop's own
+    liability to the government (GSTR-3B Table 3.1(d)), never the supplier's.
+    Every reader of what a supplier is owed -- outstanding, aging, the ledger,
+    a payment's bill status, cash flow, the supplier balance, vendor spend,
+    the invoice list -- reads it here, so none can add the RCM tax back (a
+    bill booked before this rule stored the GST in total_amount; it still
+    reads right). The flag is read as GSTR-3B reads it: reverse_charge True."""
+    if not isinstance(bill, dict):
+        return 0.0
+    if bill.get("reverse_charge") is True:
+        return _f(bill.get("taxable_amount"))
+    return _f(bill.get("total_amount"))
+
+
 def _payment_gross(p: dict) -> float:
     """Gross value a payment discharges off a bill = cash + TDS withheld."""
     return round(_f(p.get("amount")) + _f(p.get("tds_amount")), 2)
@@ -515,7 +553,7 @@ def bill_status(bill: dict, outstanding: float) -> str:
     PARTIAL (part of its total), OUTSTANDING (all of it)."""
     if outstanding <= 0.01:
         return "PAID"
-    return "PARTIAL" if outstanding < _f(bill.get("total_amount")) else "OUTSTANDING"
+    return "PARTIAL" if outstanding < vendor_payable(bill) else "OUTSTANDING"
 
 
 def _bill_balance(bill: dict, payments: List[dict], debit_notes: List[dict]) -> float:
@@ -524,7 +562,7 @@ def _bill_balance(bill: dict, payments: List[dict], debit_notes: List[dict]) -> 
     if not isinstance(bill, dict):
         return 0.0
     bid = bill.get("bill_id")
-    total = _f(bill.get("total_amount"))
+    total = vendor_payable(bill)
     paid = sum(
         _payment_gross(p)
         for p in (payments or [])
@@ -536,6 +574,20 @@ def _bill_balance(bill: dict, payments: List[dict], debit_notes: List[dict]) -> 
         if isinstance(d, dict) and d.get("bill_id") == bid
     )
     return round(total - paid - dn, 2)
+
+
+def bill_settlement(
+    bill: dict, payments: List[dict], debit_notes: List[dict]
+) -> dict:
+    """THE stored settlement of a bill: what the supplier is owed
+    (vendor_payable), what is left of it (bill_outstanding) and the status
+    that follows -- PAID when nothing is left, PARTIAL when some of it was
+    settled, else OUTSTANDING. A payment's status write and the reverse-charge
+    repair script both stamp this, so they can never disagree."""
+    owed = vendor_payable(bill)
+    out = bill_outstanding(bill, payments, debit_notes)
+    status = bill_status(bill, out)
+    return {"owed": owed, "outstanding": out, "status": status}
 
 
 # --- aging -----------------------------------------------------------------
@@ -613,7 +665,7 @@ def build_aging(
                 "vendor_name": b.get("vendor_name"),
                 "bill_date": b.get("bill_date"),
                 "due_date": due_iso,
-                "total_amount": _f(b.get("total_amount")),
+                "total_amount": vendor_payable(b),
                 "outstanding": out,
                 # -1 signals "undatable" to the caller; 0 means current
                 "days_past_due": max(days_past, 0) if days_past >= 0 else -1,
@@ -952,7 +1004,7 @@ def build_ledger(
                 "ref": b.get("bill_number") or b.get("bill_id"),
                 "description": b.get("notes") or "Vendor bill",
                 "debit": 0.0,
-                "credit": _f(b.get("total_amount")),
+                "credit": vendor_payable(b),
             }
         )
 

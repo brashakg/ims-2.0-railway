@@ -589,11 +589,12 @@ def test_roundtrip_same_entity_cross_state_odd_paise(static_rates, monkeypatch):
 
 def test_regular_purchase_bill_itc_unaffected(static_rates, monkeypatch):
     """The receiver-store scoping ($nor on source_transfer_id/to_store_id) must
-    not disturb ordinary vendor purchase bills: entity-scoped ITC as before."""
+    not disturb ordinary vendor purchase bills with a known receiving shop."""
     db = _mini_db()
     db["vendor_bills"].insert_one(
         {
             "bill_id": "pi_1",
+            "store_id": "jh_store",
             "invoice_date": "2026-06-10",
             "bill_date": "2026-06-10",
             "recipient_entity_id": "ent_send",
