@@ -19,7 +19,7 @@ import {
 import { useToast } from '../../../context/ToastContext';
 import { useAuth } from '../../../context/AuthContext';
 import { byPerson } from '../purchaseTypes';
-import { inr, errMsg, APPROVE_ROLES } from './shared';
+import { inr, errMsg, APPROVE_ROLES, rcmNote } from './shared';
 
 // ============================================================================
 // Phase 2 - 3-way match: badge + valuation/tolerance note + detail drawer
@@ -271,12 +271,18 @@ export function InvoiceDetailDrawer({
               {invoice.itc_eligible === false && (
                 <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800" title="This bill claims no input credit">No credit</span>
               )}
+              {invoice.reverse_charge === true && (
+                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800" title="You pay this GST to the government; the supplier is owed the taxable value">Reverse charge</span>
+              )}
             </h3>
             <div className="text-xs text-gray-500 mt-0.5 flex flex-wrap gap-x-3">
               <span>{(invoice.vendor_invoice_date || '').slice(0, 10)}</span>
               {invoice.po_number && <span>PO {invoice.po_number}</span>}
               {invoice.grn_number && <span>GRN {invoice.grn_number}</span>}
               <span className="font-medium text-gray-700">{inr(invoice.total_amount)}</span>
+              {invoice.reverse_charge === true && (
+                <span className="font-medium text-blue-800">{rcmNote(invoice.tax_amount, invoice.total_amount)}</span>
+              )}
             </div>
           </div>
           <button type="button" onClick={onClose} className="text-gray-400 hover:text-gray-700"><X className="w-5 h-5" /></button>

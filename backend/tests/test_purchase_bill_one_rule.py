@@ -1326,14 +1326,22 @@ class TestReverseChargeLandsWithItsCredit:
             assert mh[key] == self.HALVES, (key, mh[key])
         assert (jh["inwardSuppliesReverseChargeValue"], mh["inwardSuppliesReverseChargeValue"]) == (0.0, 1000.0)
 
-        # A legacy reverse-charge bill naming no GSTIN is company-wide, like
-        # its credit: on both returns, counted ONCE by the Cross-Check.
+        # A legacy reverse-charge bill naming no GSTIN cannot be placed on
+        # both registrations. Its liability and credit wait for allocation.
         db["vendor_bills"].insert_one(
             {"bill_id": "old", "bill_number": "OLD-1", "vendor_id": "V1", "bill_date": "2026-05-04",
              "invoice_date": "2026-05-04", "reverse_charge": True, "recipient_entity_id": "E1",
              "recipient_gstin": None, "taxable_amount": 200.0, "tax_amount": 20.0,
              "cgst_total": 10.0, "sgst_total": 10.0, "igst_total": 0.0, "status": "OUTSTANDING"}
         )
+        legacy = reports._compute_gstr3b("2026-05", "S1")
+        assert legacy["inwardSuppliesReverseCharge"]["centralTax"] == 0.0
+        assert legacy["unallocatedLegacyBills"]["bill_numbers"] == ["OLD-1"]
+        xc = _crosscheck(db, "E1")["gstr3b"]
+        assert xc["rcm"] == {"taxableValue": 1000.0, "cgst": 25.0, "sgst": 25.0, "igst": 0.0, "total": 50.0}
+        assert xc["itc"]["total"] == 50.0
+        # Verified receipt/shop evidence then places both on exactly S1.
+        db["vendor_bills"].update_one({"bill_id": "old"}, {"$set": {"store_id": "S1"}})
         assert reports._compute_gstr3b("2026-05", "S1")["inwardSuppliesReverseCharge"]["centralTax"] == 10.0
         xc = _crosscheck(db, "E1")["gstr3b"]
         assert xc["rcm"] == {"taxableValue": 1200.0, "cgst": 35.0, "sgst": 35.0, "igst": 0.0, "total": 70.0}
