@@ -5,6 +5,7 @@ from ._shared import (
     Query,
     _VENDOR_ROLES,
     _get_db,
+    ap_engine,
     datetime,
     get_vendor_repository,
     ist_date_str,
@@ -14,7 +15,7 @@ from ._shared import (
     router,
     timedelta,
 )
-from ...services.cost_mask import can_see_cost
+from ...services.cost_mask import can_see_cost, mask_purchase
 
 
 # ============================================================================
@@ -51,15 +52,19 @@ def _vendor_mtd_spend(db, vendor_id: str) -> float:
     try:
         bills = db.get_collection("vendor_bills").find(
             {"vendor_id": vendor_id},
-            {"_id": 0, "total_amount": 1, "bill_date": 1, "created_at": 1},
+            {
+                "_id": 0,
+                "total_amount": 1,
+                "taxable_amount": 1,
+                "reverse_charge": 1,
+                "bill_date": 1,
+                "created_at": 1,
+            },
         )
         for b in bills:
             when = str(b.get("bill_date") or b.get("created_at") or "")[:7]
             if when == month_prefix:
-                try:
-                    total += float(b.get("total_amount") or 0)
-                except (TypeError, ValueError):
-                    pass
+                total += ap_engine.vendor_payable(b)
     except Exception:  # noqa: BLE001
         return 0.0
     return round(total, 2)
@@ -337,18 +342,23 @@ async def vendor_purchase_history(
     vendor_repo = get_vendor_repository()
     vendor = vendor_repo.find_by_id(vendor_id) if vendor_repo is not None else None
 
-    empty = {
-        "vendor_id": vendor_id,
-        "vendor_name": (
-            (vendor.get("trade_name") or vendor.get("legal_name")) if vendor else None
-        ),
-        "window_months": months,
-        "total_pos": 0,
-        "total_spend": 0.0,
-        "total_units_received": 0,
-        "monthly": [],
-        "top_products": [],
-    }
+    empty = mask_purchase(
+        {
+            "vendor_id": vendor_id,
+            "vendor_name": (
+                (vendor.get("trade_name") or vendor.get("legal_name"))
+                if vendor
+                else None
+            ),
+            "window_months": months,
+            "total_pos": 0,
+            "total_spend": 0.0,
+            "total_units_received": 0,
+            "monthly": [],
+            "top_products": [],
+        },
+        current_user,
+    )
     if db is None:
         return empty
 
@@ -458,20 +468,24 @@ async def vendor_purchase_history(
         total_spend = sum(b["spend"] for b in monthly_list)
         total_units = sum(b["units_received"] for b in monthly_list)
 
-        return {
-            "vendor_id": vendor_id,
-            "vendor_name": (
-                (vendor.get("trade_name") or vendor.get("legal_name"))
-                if vendor
-                else None
-            ),
-            "window_months": months,
-            "total_pos": len(pos),
-            "total_spend": round(total_spend, 2),
-            "total_units_received": total_units,
-            "monthly": monthly_list,
-            "top_products": top_products,
-        }
+        # What we spent with this vendor is the accounts roles' only.
+        return mask_purchase(
+            {
+                "vendor_id": vendor_id,
+                "vendor_name": (
+                    (vendor.get("trade_name") or vendor.get("legal_name"))
+                    if vendor
+                    else None
+                ),
+                "window_months": months,
+                "total_pos": len(pos),
+                "total_spend": round(total_spend, 2),
+                "total_units_received": total_units,
+                "monthly": monthly_list,
+                "top_products": top_products,
+            },
+            current_user,
+        )
 
     except Exception as exc:
         logger.warning(

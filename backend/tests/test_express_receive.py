@@ -245,7 +245,6 @@ def _wire(monkeypatch, *, po=None, file_store=None, product_repo=None):
         lambda: (file_store if file_store is not None else _FileStore()),
     )
     monkeypatch.setattr(vendors_mod, "generate_grn_number", lambda s: f"GRN-{s}")
-    monkeypatch.setattr(vendors_mod, "_grn_barcode", lambda s, p: "BC-TEST")
     monkeypatch.setattr(vendors_mod, "_get_db", lambda: None)
     # The accountant task is created via a call-time import of
     # api.dependencies.get_task_repository -- patch it at the source module.
@@ -303,14 +302,15 @@ def test_express_happy_path_full_chain(monkeypatch):
     assert res["po_status"] == "RECEIVED"
     assert po_repo.po["status"] == "RECEIVED"
 
-    # Invoice DRAFT computed (F3-gated path) but NOTHING booked.
+    # Invoice DRAFT computed (F3-gated path) but NOTHING booked. Its totals
+    # are what we pay: the receiving manager is not shown them (owner ruling
+    # 2026-10-12); accounts book the bill from the task.
     d = res["invoice_draft"]
     assert d is not None
     assert d["vendor_id"] == "V1"
     assert d["invoice_number"] == "INV-42"
     assert d["lines_count"] == 1
-    assert d["totals"]["taxable_total"] == 500.0
-    assert d["totals"]["total"] > 0
+    assert "totals" not in d
 
     # 3-way match preview: clean receipt at PO price -> MATCHED, 0 exceptions.
     assert res["match_preview"] == {"match_status": "MATCHED", "exception_count": 0}

@@ -359,7 +359,7 @@ export function InventoryLayout() {
           <div>
             <div className="l">Stock value</div>
             <div className="v">₹ {(totalValue / 100000).toFixed(1)}L</div>
-            <div className="d">total landed inventory</div>
+            <div className="d">at selling price</div>
           </div>
           <div>
             <div className="l">Low stock</div>

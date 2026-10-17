@@ -17,7 +17,7 @@ import {
   Target,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
-import { PRODUCT_COST_ROLES } from '../common/CostCell';
+import { COST_ROLES } from '../common/CostCell';
 import { inventoryApi } from '../../services/api/inventory';
 import clsx from 'clsx';
 
@@ -60,7 +60,7 @@ export function StockAlertsOverview() {
   const { user, hasRole } = useAuth();
   // Dead-stock / restock value and each alert's impact are at cost: the
   // managers only (counter staff -- workshop -- open this screen too).
-  const showCost = hasRole(PRODUCT_COST_ROLES);
+  const showCost = hasRole(COST_ROLES);
   const [alerts, setAlerts] = useState<StockAlert[]>([]);
   const [stats, setStats] = useState<AlertStats>({
     totalAlerts: 0,

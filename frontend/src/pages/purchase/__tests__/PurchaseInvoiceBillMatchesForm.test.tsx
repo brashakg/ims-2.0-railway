@@ -27,10 +27,16 @@ vi.mock('../../../services/api/client', async (orig) => ({
 }));
 const toastMock = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() }));
 vi.mock('../../../context/ToastContext', () => ({ useToast: () => toastMock }));
-// The accountant's shop (the top-bar picker); a test may switch it.
-const auth = vi.hoisted(() => ({ store: 'S1' }));
+// The accountant's shop (the top-bar picker) and role; a test may switch
+// either. hasRole is AuthContext's own rule (SUPERADMIN/ADMIN pass, else any
+// asked role held), so a test asks WHICH roles get a control, not a boolean.
+const auth = vi.hoisted(() => ({ store: 'S1', role: 'ACCOUNTANT' }));
 vi.mock('../../../context/AuthContext', () => ({
-  useAuth: () => ({ user: { activeStoreId: auth.store, roles: ['ACCOUNTANT'] }, hasRole: () => true }),
+  useAuth: () => ({
+    user: { activeStoreId: auth.store, roles: [auth.role] },
+    hasRole: (r: string | string[]) =>
+      ['SUPERADMIN', 'ADMIN'].includes(auth.role) || [r].flat().includes(auth.role),
+  }),
 }));
 
 import type { AxiosError } from 'axios';
@@ -105,7 +111,7 @@ function routePosts(pv: Record<string, unknown> = preview(), other: unknown = {}
   );
 }
 // The booking form drawer only (the invoice list behind it has tax columns too).
-const form = () => within(screen.getByText('New purchase invoice').closest('.fixed') as HTMLElement);
+const form = () => within(screen.getByText(/^(New purchase invoice|Invoice from GRN)/).closest('.fixed') as HTMLElement);
 const createCalls = () => mockPost.mock.calls.filter((c) => c[0] === '/vendors/purchase-invoices');
 const previewCalls = () => mockPost.mock.calls.filter((c) => String(c[0]).endsWith('/preview'));
 
@@ -128,6 +134,7 @@ const renderTab = (path?: string) => render(tab(path));
 beforeEach(() => {
   vi.clearAllMocks();
   auth.store = 'S1';
+  auth.role = 'ACCOUNTANT';
   routeGets();
   routePosts();
 });
@@ -186,6 +193,26 @@ describe('F7 - the Approve doors reach the real bill', () => {
 });
 
 describe('F37 + F6 - invoice from a goods receipt', () => {
+  it('an unpriced receipt stays blank and cannot book until accounts enters the supplier price', async () => {
+    routeGets({ '/vendors/purchase-invoices/from-grn/G1': {
+      ...GRN_DRAFT,
+      lines: [{ ...GRN_DRAFT.lines[0], unit_price: null }],
+    } });
+    renderTab('/purchase/invoices?grn_id=G1');
+    await screen.findByDisplayValue('Carrera CA 8895 807');
+    const price = form().getAllByRole('spinbutton')[1] as HTMLInputElement;
+    expect(price.value).toBe('');
+    expect(form().getByRole('button', { name: /Book invoice/i })).toBeDisabled();
+    expect(createCalls()).toHaveLength(0);
+    expect(previewCalls()).toHaveLength(0);
+
+    fireEvent.change(price, { target: { value: '3100' } });
+    await waitFor(() => expect(form().getByRole('button', { name: /Book invoice/i })).toBeEnabled());
+    fireEvent.click(form().getByRole('button', { name: /Book invoice/i }));
+    await waitFor(() => expect(createCalls()).toHaveLength(1));
+    expect(createCalls()[0][1].lines[0].unit_price).toBe(3100);
+  });
+
   it('lines carry the receipt products, HSNs and accepted quantities; the booking sends them', async () => {
     routeGets({ '/vendors/purchase-invoices/from-grn/G1': GRN_DRAFT });
     renderTab('/purchase/invoices?grn_id=G1');
@@ -284,6 +311,7 @@ describe('panel round 2 - every tax figure on the form is the server preview', (
     fireEvent.change(await screen.findByDisplayValue(/Choose: goods, or services/), { target: { value: 'SERVICES' } });
     fireEvent.change(screen.getByDisplayValue('Select supplier...'), { target: { value: 'V1' } });
     fireEvent.change(screen.getByPlaceholderText('Item description'), { target: { value: 'Freight' } });
+    fireEvent.change(form().getAllByRole('spinbutton')[1], { target: { value: '1000' } });
     fireEvent.change(screen.getByPlaceholderText(/GSTIN receiving the supply/), { target: { value: '20AAFCB6528A1ZD' } });
 
     expect(await screen.findByText(/the supplier's GSTIN names no state/)).toBeTruthy();
@@ -567,17 +595,72 @@ describe('round 14 - the credit verdict is visible and settable', () => {
     expect(createCalls()[0][1].itc_eligible).toBe(false);
   });
 
-  it('the form offers no Reverse charge tick and never sends reverse_charge true', async () => {
-    routePosts(preview({ itc_eligible: false }));
+  it('an accounts role ticks Reverse charge: asked, shown as what the supplier is owed, and booked', async () => {
+    auth.role = 'ACCOUNTANT';
+    // Freight Rs 1000 @ 18% under reverse charge, as the server answers it.
+    const rcm = preview({
+      reverse_charge: true,
+      lines: [{ taxable: 1000, gst_rate: 18, cgst: 0, sgst: 0, igst: 180, line_total: 1180 }],
+      taxable_total: 1000, igst_total: 180, tax_total: 180, total: 1000,
+    });
+    routePosts(preview());
     await openManualServicesBill({ name: 'Freight', qty: '1', price: '1000', rate: '18' });
-    await screen.findByText('No input credit: the supplier has no valid GSTIN');
-    expect(screen.queryByRole('checkbox', { name: /Reverse charge/ })).toBeNull();
-    expect(screen.queryByText(/Reverse charge/i)).toBeNull();
-    expect(previewCalls().at(-1)?.[1].reverse_charge).not.toBe(true);
+    await screen.findByText(/Inter-state supply:/);
+    expect(previewCalls().at(-1)?.[1].reverse_charge).toBe(false);
+    expect(screen.queryByText(/You pay this GST/)).toBeNull();
+
+    routePosts(rcm);
+    const before = previewCalls().length;
+    fireEvent.click(screen.getByRole('switch', { name: /Reverse charge/ }));
+    expect(
+      await screen.findByText('You pay this GST (₹180) to the government; the supplier is owed ₹1,000'),
+    ).toBeTruthy();
+    expect(previewCalls().length).toBeGreaterThan(before);
+    const asked = previewCalls().at(-1)?.[1];
+    expect(asked.reverse_charge).toBe(true);
+    expect(form().getByText('Supplier is owed')).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
     await waitFor(() => expect(createCalls()).toHaveLength(1));
-    expect(createCalls()[0][1].reverse_charge).not.toBe(true);
+    expect(createCalls()[0][1]).toEqual(asked);
+    expect(createCalls()[0][1].reverse_charge).toBe(true);
+  });
+
+  it.each(['STORE_MANAGER', 'AREA_MANAGER'])('%s (outside accounts) sees no Reverse charge option and never sends it', async (role) => {
+    auth.role = role;
+    routePosts(preview());
+    await openManualServicesBill({ name: 'Freight', qty: '1', price: '1000', rate: '18' });
+    await screen.findByText(/Inter-state supply:/);
+    expect(screen.queryByRole('switch', { name: /Reverse charge/ })).toBeNull();
+    expect(screen.queryByText(/Reverse charge/i)).toBeNull();
+    expect(previewCalls().at(-1)?.[1].reverse_charge).toBe(false);
+
+    fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
+    await waitFor(() => expect(createCalls()).toHaveLength(1));
+    expect(createCalls()[0][1].reverse_charge).toBe(false);
+  });
+
+  it('the list and the detail drawer badge a reverse-charge bill and show what the supplier is owed', async () => {
+    routeGets({
+      '/vendors/purchase-invoices': {
+        purchase_invoices: [
+          { ...HELD_BILL, reverse_charge: true, total_amount: 9300, tax_amount: 465 },
+          { ...HELD_BILL, bill_id: 'b-ok', invoice_id: 'b-ok', invoice_number: 'MLH-78' },
+        ],
+        total: 2,
+      },
+    });
+    renderTab();
+    expect(await screen.findAllByText('Reverse charge')).toHaveLength(1);
+    expect(screen.getAllByText('₹9,300').length).toBeGreaterThan(0);
+    // Visible text, not a tooltip (a touch tablet shows none): the row says
+    // what the shop pays the government and what the supplier is owed.
+    const note = 'You pay this GST (₹465) to the government; the supplier is owed ₹9,300';
+    expect(screen.getAllByText(note)).toHaveLength(1);
+    expect(screen.getAllByText('Supplier is owed')).toHaveLength(1);
+    fireEvent.click(screen.getAllByRole('button', { name: /View detail/ })[0]);
+    await waitFor(() => expect(screen.getAllByText('Reverse charge')).toHaveLength(2));
+    expect(screen.getAllByText(note)).toHaveLength(2);
   });
 
   it('the list and the detail drawer badge a stored itc_eligible=false bill "No credit"', async () => {

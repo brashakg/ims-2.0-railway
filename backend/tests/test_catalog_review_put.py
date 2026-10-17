@@ -694,3 +694,582 @@ def test_name_and_tags_survive_promote_to_spine(env):
     assert spine["name"] == "Vogue VO5051 Midnight"
     # The door normalises tags (trim + lower-case, first-seen order).
     assert spine["tags"] == ["aviator", "new arrival"]
+
+
+# ---------------------------------------------------------------------------
+# The review editor's 'GTIN (mfr)' box: the manufacturer barcode that goes to
+# Shopify and Google, so the same guard + one-holder rule as the spine doors,
+# and spine and twin hold one GTIN.
+# ---------------------------------------------------------------------------
+_GTIN = "4006381333931"
+_UPC = "036000291452"
+
+
+@pytest.fixture()
+def gtin_env(env, monkeypatch):
+    """`env` with the spine repo over mongomock (the real find_by_barcode
+    query and the dotted attributes.gtin write both run), a door-created
+    twin and its spine."""
+    import mongomock
+
+    repo = ProductRepository(mongomock.MongoClient().db.products)
+    monkeypatch.setattr(deps_mod, "get_product_repository", lambda: repo)
+    doc = _bvi_doc(doc_id="twin-g1", sku="GTSKU1", barcode="5901234123457")
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+    repo.create({"product_id": "spine-g1", "pim_product_id": "twin-g1",
+                 "sku": "GTSKU1", "attributes": {"colour_code": "BLK"}})
+    return repo
+
+
+def _pushed_barcode(gtin_env, twin):
+    """What the price push sends for `twin` over the SELF row the create door
+    writes for its spine (product_master._variant_row_for -> catalog_variants,
+    loaded as push_product loads it), once on Shopify. None = omitted."""
+    import mongomock
+
+    from api.services import product_master as pm
+    from api.services.online_catalog import variant_rows_for_product
+    from api.services.shopify_push.product_input import (
+        _variants_for_price_push,
+        build_variant_price_inputs,
+    )
+
+    db = mongomock.MongoClient().db
+    row = pm._variant_row_for(gtin_env.find_by_id("spine-g1"))
+    db.catalog_variants.insert_one(
+        {**row, "shopify_variant_id": "gid://shopify/ProductVariant/1"}
+    )
+    rows = variant_rows_for_product(db, twin)
+    assert [r["sku"] for r in rows] == ["GTSKU1"] and "gtin" not in rows[0]
+    out, _ = build_variant_price_inputs(twin, _variants_for_price_push(twin, rows))
+    return out[0].get("barcode")
+
+
+@pytest.mark.parametrize("junk", ["2000000000015", "TW003HG14", "4006381333932"])
+def test_review_editor_refuses_a_junk_gtin_or_upc(gtin_env, junk):
+    for key in ("gtin", "upc"):
+        with pytest.raises(HTTPException) as exc:
+            _put("twin-g1", {"attributes": {key: junk}})
+        assert exc.value.status_code == 422, key
+        twin = catalog_mod.CATALOG_PRODUCTS["twin-g1"]
+        assert key not in twin["attributes"] and not twin.get("gtin"), key
+
+
+def test_review_editor_gtin_lands_on_twin_and_spine_and_ships(gtin_env):
+    _put("twin-g1", {"attributes": {"gtin": "4006381 333931"}})
+    twin = catalog_mod.CATALOG_PRODUCTS["twin-g1"]
+    assert twin["attributes"]["gtin"] == _GTIN
+    assert twin["gtin"] == _GTIN  # the variant barcode the push sends
+    spine = gtin_env.find_by_id("spine-g1")
+    assert spine["attributes"] == {"colour_code": "BLK", "gtin": _GTIN}
+    assert _pushed_barcode(gtin_env, twin) == _GTIN
+
+
+def test_review_editor_refuses_a_gtin_another_product_holds(gtin_env):
+    gtin_env.create({"product_id": "spine-other", "sku": "OTHER-1",
+                     "attributes": {"gtin": _UPC}})
+    for typed in (_UPC, "0" + _UPC):
+        with pytest.raises(HTTPException) as exc:
+            _put("twin-g1", {"attributes": {"gtin": typed}})
+        assert exc.value.status_code == 409, typed
+        assert "OTHER-1" in str(exc.value.detail)
+    # Its own GTIN, re-saved, is no clash.
+    _put("twin-g1", {"attributes": {"gtin": _GTIN}})
+    _put("twin-g1", {"attributes": {"gtin": _GTIN, "colour_code": "RED"}})
+
+
+def test_review_editor_remove_clears_every_barcode_the_push_reads(gtin_env):
+    """The twin's legacy top-level `barcode` is the push's fallback: a removed
+    GTIN must take it along, or the push sends that code instead."""
+    _put("twin-g1", {"attributes": {"gtin": _GTIN}})
+    _put("twin-g1", {"attributes": {"gtin": ""}})
+    twin = catalog_mod.CATALOG_PRODUCTS["twin-g1"]
+    assert not twin.get("gtin") and not twin.get("barcode")
+    assert gtin_env.find_by_id("spine-g1")["attributes"]["gtin"] == ""
+    assert _pushed_barcode(gtin_env, twin) is None
+
+
+def test_review_editor_remove_drops_the_spines_legacy_barcode(gtin_env):
+    """A code in the spine's legacy `barcode` is held by the one-holder rule:
+    Remove must take it along, or no other product can ever be given it."""
+    gtin_env.collection.update_one(
+        {"product_id": "spine-g1"}, {"$set": {"barcode": _UPC}}
+    )
+    _put("twin-g1", {"attributes": {"gtin": ""}})
+    assert "barcode" not in gtin_env.find_by_id("spine-g1")
+    assert gtin_env.find_by_barcode(_UPC) is None
+
+
+@pytest.mark.parametrize("attrs", [None, ["x"]])
+def test_review_editor_gives_a_spine_with_no_attributes_dict_its_gtin(gtin_env, attrs):
+    """Round 9 item 1. A legacy spine whose attributes is null or a list cannot
+    take a $set on attributes.gtin (Mongo refuses it, BaseRepository.update
+    answers False), and the legacy barcode was dropped anyway: the spine lost
+    BOTH codes. It gets the dict in the same write; the barcode goes after."""
+    gtin_env.collection.update_one(
+        {"product_id": "spine-g1"}, {"$set": {"attributes": attrs, "barcode": _UPC}}
+    )
+    _put("twin-g1", {"attributes": {"gtin": _GTIN}})
+    spine = gtin_env.find_by_id("spine-g1")
+    assert spine["attributes"] == {"gtin": _GTIN}
+    assert "barcode" not in spine
+
+
+def test_review_editor_keeps_the_legacy_barcode_when_the_spine_write_fails(
+    gtin_env, monkeypatch
+):
+    """An unconfirmed spine gtin write never drops the legacy barcode, and the
+    save says so (503, plain words) instead of passing as done."""
+    gtin_env.collection.update_one(
+        {"product_id": "spine-g1"}, {"$set": {"barcode": _UPC}}
+    )
+    real_update = gtin_env.update
+
+    def _refuse_gtin(pid, data):
+        if any(k.startswith("attributes") for k in data):
+            return False
+        return real_update(pid, data)
+
+    monkeypatch.setattr(gtin_env, "update", _refuse_gtin)
+    with pytest.raises(HTTPException) as exc:
+        _put("twin-g1", {"attributes": {"gtin": _GTIN}})
+    assert exc.value.status_code == 503
+    assert "save again" in exc.value.detail
+    spine = gtin_env.find_by_id("spine-g1")
+    assert spine["barcode"] == _UPC
+    assert "gtin" not in spine["attributes"]
+
+
+def test_a_spine_gtin_write_that_changes_nothing_is_no_failure(gtin_env, monkeypatch):
+    """Round 9. BaseRepository.update answers modified_count > 0: re-saving the
+    gtin the spine already holds, in the same millisecond as the spine write
+    before it (BSON keeps ms), changed nothing and 503'd a save that worked.
+    Frozen clock = the same millisecond."""
+    import database.repositories.base_repository as base_repo
+
+    class _SameMs(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 10, 1, 12, 0, 0)
+
+    monkeypatch.setattr(base_repo, "datetime", _SameMs)
+    _put("twin-g1", {"attributes": {"gtin": _GTIN}})
+    gtin_env.collection.update_one({"product_id": "spine-g1"}, {"$set": {"barcode": _UPC}})
+    _put("twin-g1", {"attributes": {"gtin": _GTIN}, "pricing": {"mrp": 5200.0}})
+    spine = gtin_env.find_by_id("spine-g1")
+    assert spine["attributes"]["gtin"] == _GTIN and spine["mrp"] == 5200.0
+    assert "barcode" not in spine
+
+
+@pytest.mark.parametrize(
+    "later",
+    [
+        {"pricing": {"mrp": 5200.0}},
+        {"attributes": {"colour_code": "RED"}},
+        {"is_active": False},
+    ],
+)
+def test_a_save_that_moves_no_barcode_writes_none(gtin_env, later):
+    """Round 13 (the panel's probes). The one-way repair copied the twin's
+    gtin onto the spine on ANY save, taking the twin as the newer copy: a
+    stale twin overwrote the code Manage Barcode had just put on the spine,
+    and a price fix rewrote barcodes it never touched. A save that moves no
+    barcode writes none, whichever copy holds what."""
+    catalog_mod.CATALOG_PRODUCTS["twin-g1"]["attributes"]["gtin"] = _GTIN
+    gtin_env.collection.update_one(
+        {"product_id": "spine-g1"},
+        {"$set": {"attributes.gtin": _UPC, "is_active": True}},
+    )
+    _put("twin-g1", later)
+    assert gtin_env.find_by_id("spine-g1")["attributes"]["gtin"] == _UPC
+    assert catalog_mod.CATALOG_PRODUCTS["twin-g1"]["attributes"]["gtin"] == _GTIN
+    # A spine with no code is not given the twin's either, and keeps its
+    # legacy barcode (a gtin write drops it).
+    gtin_env.collection.update_one(
+        {"product_id": "spine-g1"},
+        {"$unset": {"attributes.gtin": ""}, "$set": {"barcode": "96385074"}},
+    )
+    _put("twin-g1", later)
+    spine = gtin_env.find_by_id("spine-g1")
+    assert "gtin" not in spine["attributes"] and spine["barcode"] == "96385074"
+
+
+def test_a_refused_spine_gtin_write_saves_nothing_and_save_again_lands_it(
+    gtin_env, monkeypatch
+):
+    """Round 13. With no repair, a gtin the review editor sends reaches the
+    spine in THAT save or not at all. The spine write runs before the twin's
+    and after every check: a refused one 503s with NOTHING saved, so the
+    client's retry or 'save again' -- the same payload and updated_at, no 409
+    and no reload that drops the gtin -- writes both copies, and the
+    take-down the save carried runs exactly once."""
+    gtin_env.collection.update_one(
+        {"product_id": "spine-g1"}, {"$set": {"is_active": True, "barcode": _UPC}}
+    )
+    real_update = gtin_env.update
+    refuse = {"on": True}
+
+    def _refuse_gtin(pid, data):
+        if refuse["on"] and any(k.startswith("attributes") for k in data):
+            return False
+        return real_update(pid, data)
+
+    flips = []
+
+    async def _flip(db, product, *, was_active, now_active, actor):
+        flips.append((was_active, now_active))
+
+    monkeypatch.setattr(gtin_env, "update", _refuse_gtin)
+    monkeypatch.setattr(catalog_mod._delist, "on_active_flip", _flip)
+    loaded = catalog_mod.CATALOG_PRODUCTS["twin-g1"]["updated_at"]
+    payload = {
+        "attributes": {"gtin": _GTIN},
+        "is_active": False,
+        "expected_updated_at": loaded,
+    }
+    with pytest.raises(HTTPException) as exc:
+        _put("twin-g1", payload)
+    assert exc.value.status_code == 503
+    assert "nothing was saved" in exc.value.detail
+    twin = catalog_mod.CATALOG_PRODUCTS["twin-g1"]
+    assert twin["updated_at"] == loaded and twin["is_active"] is True
+    assert "gtin" not in twin["attributes"] and not twin.get("gtin")
+    spine = gtin_env.find_by_id("spine-g1")
+    assert "gtin" not in spine["attributes"] and spine["is_active"] is True
+    assert spine["barcode"] == _UPC and flips == []
+
+    refuse["on"] = False
+    _put("twin-g1", payload)
+    twin = catalog_mod.CATALOG_PRODUCTS["twin-g1"]
+    assert twin["attributes"]["gtin"] == _GTIN and twin["gtin"] == _GTIN
+    assert twin["is_active"] is False
+    spine = gtin_env.find_by_id("spine-g1")
+    assert spine["attributes"]["gtin"] == _GTIN and spine["is_active"] is False
+    assert "barcode" not in spine and flips == [(True, False)]
+
+
+def test_a_lost_catalogue_cas_does_not_change_the_billing_barcode(gtin_env, monkeypatch):
+    """A stale catalogue save must not change the till's barcode before its
+    guarded catalogue write refuses the edit."""
+    before = gtin_env.find_by_id("spine-g1")
+    loaded = catalog_mod.CATALOG_PRODUCTS["twin-g1"]["updated_at"]
+
+    def concurrent_writer(category, attrs, db=None):
+        catalog_mod.CATALOG_PRODUCTS["twin-g1"].update(
+            {"updated_at": "2026-07-10T10:05:00", "description": "colleague's saved edit"}
+        )
+        return attrs
+
+    monkeypatch.setattr(catalog_mod._pm, "enforce_dictionary_values", concurrent_writer)
+    with pytest.raises(HTTPException) as exc:
+        _put("twin-g1", {"attributes": {"gtin": _GTIN}, "expected_updated_at": loaded})
+
+    assert exc.value.status_code == 409
+    assert catalog_mod.CATALOG_PRODUCTS["twin-g1"]["description"] == "colleague's saved edit"
+    after = gtin_env.find_by_id("spine-g1")
+    assert after.get("attributes") == before.get("attributes")
+    assert after.get("barcode") == before.get("barcode")
+
+
+def test_lost_catalogue_cas_preserves_a_later_billing_barcode_writer(gtin_env, monkeypatch):
+    loaded = catalog_mod.CATALOG_PRODUCTS["twin-g1"]["updated_at"]
+
+    def concurrent_winner(_document, _expected):
+        gtin_env.update("spine-g1", {"attributes.gtin": _UPC})
+        catalog_mod.CATALOG_PRODUCTS["twin-g1"].update(
+            {"updated_at": "2026-07-10T10:05:00", "attributes": {"gtin": _UPC}}
+        )
+        return False
+
+    monkeypatch.setattr(catalog_mod, "_save_catalog_product_cas", concurrent_winner)
+    with pytest.raises(HTTPException) as exc:
+        _put("twin-g1", {"attributes": {"gtin": _GTIN}, "expected_updated_at": loaded})
+    assert exc.value.status_code == 409
+    assert gtin_env.find_by_id("spine-g1")["attributes"]["gtin"] == _UPC
+
+
+def test_lost_catalogue_cas_restores_the_winners_code_when_it_saved_before_the_spine_write(
+    gtin_env, monkeypatch,
+):
+    loaded = catalog_mod.CATALOG_PRODUCTS["twin-g1"]["updated_at"]
+    original_update = gtin_env.update
+    raced = False
+
+    def concurrent_winner(pid, patch):
+        nonlocal raced
+        if not raced and patch.get("attributes.gtin") == _GTIN:
+            raced = True
+            original_update(pid, {"attributes.gtin": _UPC})
+            catalog_mod.CATALOG_PRODUCTS["twin-g1"].update(
+                {"updated_at": "2026-07-10T10:05:00", "attributes": {"gtin": _UPC}}
+            )
+        return original_update(pid, patch)
+
+    monkeypatch.setattr(gtin_env, "update", concurrent_winner)
+    with pytest.raises(HTTPException) as exc:
+        _put("twin-g1", {"attributes": {"gtin": _GTIN}, "expected_updated_at": loaded})
+    assert exc.value.status_code == 409
+    assert gtin_env.find_by_id("spine-g1")["attributes"]["gtin"] == _UPC
+
+
+@pytest.mark.parametrize("legacy_attrs", [None, []])
+def test_lost_barcode_cas_preserves_an_unrelated_attribute_added_to_a_legacy_bag(
+    gtin_env, monkeypatch, legacy_attrs,
+):
+    gtin_env.collection.update_one({"product_id": "spine-g1"}, {"$set": {"attributes": legacy_attrs}})
+    loaded = catalog_mod.CATALOG_PRODUCTS["twin-g1"]["updated_at"]
+
+    def concurrent_copy_edit(_document, _expected):
+        gtin_env.update("spine-g1", {"attributes.colour_code": "RED"})
+        return False
+
+    monkeypatch.setattr(catalog_mod, "_save_catalog_product_cas", concurrent_copy_edit)
+    with pytest.raises(HTTPException) as exc:
+        _put("twin-g1", {"attributes": {"gtin": _GTIN}, "expected_updated_at": loaded})
+    assert exc.value.status_code == 409
+    assert gtin_env.find_by_id("spine-g1")["attributes"] == {"colour_code": "RED"}
+
+
+def test_a_failed_spine_lookup_on_a_barcode_save_saves_nothing(gtin_env, monkeypatch):
+    """Round 14. The spine lookup that keys the gtin write was fail-soft: a
+    transient error there read as 'no linked spine', so the twin took the new
+    gtin, the spine kept the old one, and the answer said no billing product
+    was linked. A barcode save now 503s with nothing saved; any other save
+    stays fail-soft."""
+    real = catalog_mod._spine_product_id
+    calls = {"n": 0}
+
+    def _second_lookup_fails(repo, doc):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("db blip")
+        return real(repo, doc)
+
+    monkeypatch.setattr(catalog_mod, "_spine_product_id", _second_lookup_fails)
+    with pytest.raises(HTTPException) as exc:
+        _put("twin-g1", {"attributes": {"gtin": _GTIN}})
+    assert exc.value.status_code == 503 and "nothing was saved" in exc.value.detail
+    assert calls["n"] == 2
+    twin = catalog_mod.CATALOG_PRODUCTS["twin-g1"]
+    assert "gtin" not in twin["attributes"] and not twin.get("gtin")
+    assert "gtin" not in gtin_env.find_by_id("spine-g1")["attributes"]
+
+    calls["n"] = 1  # a save with no attributes makes one lookup: it fails
+    res = _put("twin-g1", {"description": "x"})
+    assert res["message"] == "Product updated successfully" and calls["n"] == 2
+
+
+def test_a_mongo_read_error_under_the_spine_lookup_refuses_a_barcode_save(
+    gtin_env, monkeypatch
+):
+    """Round 16 (the merge with #1192). The stub above raises from
+    _spine_product_id itself; a read error UNDER it must reach the save too.
+    The lookup read through find_by_id / find_one, which print and answer
+    None on any error, and #1192's resolver swallowed into None: either way
+    a read error was 'no linked spine', so the twin took the code alone
+    ('catalogue copy only') and the spine kept the old one. Every attributes
+    save runs the one-holder check, which needs the spine, so it refuses
+    too; a save with no attributes stays fail-soft."""
+    coll = gtin_env.collection
+    real_find, real_find_one = coll.find, coll.find_one
+
+    def _blip(real):
+        def _read(flt=None, *a, **kw):
+            if "twin-g1" in str(flt):  # the twin -> spine lookup, any shape
+                raise RuntimeError("db blip")
+            return real(flt, *a, **kw)
+
+        return _read
+
+    monkeypatch.setattr(coll, "find", _blip(real_find))
+    monkeypatch.setattr(coll, "find_one", _blip(real_find_one))
+    loaded = catalog_mod.CATALOG_PRODUCTS["twin-g1"]["updated_at"]
+    for attrs in ({"gtin": _GTIN}, {"colour_code": "RED"}):
+        with pytest.raises(HTTPException) as exc:
+            _put("twin-g1", {"attributes": attrs})
+        assert exc.value.status_code == 503 and "nothing was saved" in exc.value.detail
+    twin = catalog_mod.CATALOG_PRODUCTS["twin-g1"]
+    assert twin["updated_at"] == loaded and "gtin" not in twin["attributes"]
+    assert twin["attributes"]["colour_code"] == "BLK"
+    assert "gtin" not in gtin_env.find_by_id("spine-g1")["attributes"]
+    res = _put("twin-g1", {"description": "x"})
+    assert res["message"] == "Product updated successfully"
+
+
+def test_a_twin_sharing_only_a_sku_never_writes_or_excuses_that_spine(gtin_env):
+    """Round 13 (the panel's probe). A review-queue twin can share its sku
+    with an UNRELATED product's spine (promote 409s on exactly that). The
+    spine was resolved by sku alone, so this twin's saves wrote that
+    product's price and barcode, and that product's code passed the
+    one-holder check as this twin's own. Only a LINKED spine (its product_id
+    or pim_product_id is the twin's id) is the twin's."""
+    gtin_env.create({"product_id": "spine-other", "sku": "DUP1", "mrp": 9000.0,
+                     "attributes": {"gtin": _UPC}})
+    doc = _bvi_doc(doc_id="twin-imp", sku="DUP1")
+    doc["attributes"]["gtin"] = _GTIN
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+    _put("twin-imp", {"pricing": {"mrp": 5200.0}})
+    other = gtin_env.find_by_id("spine-other")
+    assert other["attributes"]["gtin"] == _UPC and other["mrp"] == 9000.0
+    # The other product's code is another holder's ...
+    with pytest.raises(HTTPException) as exc:
+        _put("twin-imp", {"attributes": {"gtin": _UPC}})
+    assert exc.value.status_code == 409 and "DUP1" in str(exc.value.detail)
+    # ... and a code nobody holds lands on the twin alone, saying so (a
+    # linked twin's answer does not).
+    res = _put("twin-imp", {"attributes": {"gtin": "96385074"}})
+    assert "catalogue copy only" in res["message"]
+    assert catalog_mod.CATALOG_PRODUCTS["twin-imp"]["gtin"] == "96385074"
+    assert gtin_env.find_by_id("spine-other")["attributes"]["gtin"] == _UPC
+    res = _put("twin-g1", {"attributes": {"gtin": _GTIN}})
+    assert "catalogue copy only" not in res["message"]
+    # The other way round: that spine's own edits see the twin as a holder.
+    gtin_env.collection.database["catalog_products"].insert_one(
+        {"id": "twin-imp", "sku": "DUP1", "attributes": {"gtin": "96385074"}}
+    )
+    clash = gtin_env.find_twin_by_barcode("96385074", exclude_product_id="spine-other")
+    assert clash["id"] == "twin-imp"
+
+
+@pytest.mark.parametrize("typed", ["", None])
+def test_review_editor_takes_an_old_spelling_out_of_twin_and_spine(gtin_env, typed):
+    """Twin and spine hold the code under the old spelling 'GTIN'. A Remove
+    ('') must take it out of both; an unrelated edit (None: gtin not sent)
+    folds it onto the one key. Either way 'GTIN' never survives the write."""
+    catalog_mod.CATALOG_PRODUCTS["twin-g1"]["attributes"]["GTIN"] = _GTIN
+    gtin_env.collection.update_one(
+        {"product_id": "spine-g1"}, {"$set": {"attributes.GTIN": _GTIN}}
+    )
+    patch = {"colour_code": "RED"} if typed is None else {"gtin": typed}
+    _put("twin-g1", {"attributes": patch})
+    twin = catalog_mod.CATALOG_PRODUCTS["twin-g1"]
+    want = _GTIN if typed is None else ""
+    assert "GTIN" not in twin["attributes"] and twin["attributes"]["gtin"] == want
+    # The fold wrote the gtin, so every barcode projection ran: the twin's
+    # top-level gtin, the spine (Manage Barcode and the stock page read it)
+    # and the push all hold the one code.
+    assert (twin.get("gtin") or "") == want
+    spine_attrs = gtin_env.find_by_id("spine-g1")["attributes"]
+    assert "GTIN" not in spine_attrs and spine_attrs["gtin"] == want
+    assert _pushed_barcode(gtin_env, twin) == (want or None)
+
+
+def test_review_editor_checks_a_gtin_the_fold_makes(gtin_env):
+    """The panel's probe (round 8). Twin and spine hold the code under 'GTIN'
+    and OTHER-1 holds it; the editor sends only the changed keys
+    (reviewMapping.formValuesToCatalogUpdate). The fold makes it the twin's
+    gtin, so the one-holder rule must see it: 409, nothing written."""
+    gtin_env.create({"product_id": "spine-other", "sku": "OTHER-1",
+                     "attributes": {"gtin": _GTIN}})
+    catalog_mod.CATALOG_PRODUCTS["twin-g1"]["attributes"]["GTIN"] = _GTIN
+    gtin_env.collection.update_one(
+        {"product_id": "spine-g1"}, {"$set": {"attributes.GTIN": _GTIN}}
+    )
+    with pytest.raises(HTTPException) as exc:
+        _put("twin-g1", {"attributes": {"colour_code": "RED"}})
+    assert exc.value.status_code == 409
+    assert "OTHER-1" in str(exc.value.detail)
+    twin = catalog_mod.CATALOG_PRODUCTS["twin-g1"]
+    assert "gtin" not in twin["attributes"] and not twin.get("gtin")
+    assert "gtin" not in gtin_env.find_by_id("spine-g1")["attributes"]
+
+
+def test_promote_folds_the_twins_old_spelling(env):
+    """Approve builds the spine through the door (the guard folds 'GTIN'),
+    and the twin's own copy of the old spelling goes in the stamp's write."""
+    doc = _bvi_doc(doc_id="clx0rvfold1", sku="RVFOLD1")
+    doc["attributes"]["GTIN"] = "4006381 333931"
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+    _promote(doc["id"])
+    assert env["repo"].find_by_id(doc["id"])["attributes"]["gtin"] == _GTIN
+    twin_attrs = catalog_mod.CATALOG_PRODUCTS[doc["id"]]["attributes"]
+    assert "GTIN" not in twin_attrs and twin_attrs["gtin"] == _GTIN
+
+
+def test_a_junk_upc_with_no_upc_box_never_blocks_a_save_or_an_approve(env):
+    """Round 9 item 3 (probes P1 / P6). A WATCH has no 'UPC (mfr)' box, so a
+    stored upc 'NA' 422'd every review-editor save that sent it back and every
+    Approve. It is dropped (and logged) instead -- on the twin, on the spine."""
+    doc = _bvi_doc(doc_id="clx0rvwatch1", sku="RVWT1", category="WATCH")
+    doc["attributes"]["upc"] = "NA"
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+    _put(doc["id"], {"attributes": {**doc["attributes"], "colour_code": "RED"}})
+    assert "upc" not in catalog_mod.CATALOG_PRODUCTS[doc["id"]]["attributes"]
+    # Approve of a twin nobody has saved since the junk landed.
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]]["attributes"]["upc"] = "NA"
+    _promote(doc["id"])
+    assert "upc" not in env["repo"].find_by_id(doc["id"])["attributes"]
+    assert "upc" not in catalog_mod.CATALOG_PRODUCTS[doc["id"]]["attributes"]
+    # A FRAME shows the box: there the junk is still refused, so it gets fixed.
+    frame = _bvi_doc(doc_id="clx0rvframe1", sku="RVFR1")
+    frame["attributes"]["upc"] = "NA"
+    catalog_mod.CATALOG_PRODUCTS[frame["id"]] = frame
+    with pytest.raises(HTTPException) as exc:
+        _promote(frame["id"])
+    assert exc.value.status_code == 422
+
+
+def test_promote_stores_the_sanitised_codes_on_both_copies(env):
+    """Round 9 item 4 (probe P4). Approve stored '4006381333931' on the spine
+    and left the twin's '4006381 333931': the one-holder twin lookup and the
+    spine disagreed. Both copies hold the guard's value after Approve."""
+    doc = _bvi_doc(doc_id="clx0rvsan1", sku="RVSAN1")
+    doc["attributes"].update({"gtin": "4006381 333931", "upc": " 0360-0029-1452"})
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+    _promote(doc["id"])
+    want = {"gtin": _GTIN, "upc": _UPC}
+    spine_attrs = env["repo"].find_by_id(doc["id"])["attributes"]
+    twin_attrs = catalog_mod.CATALOG_PRODUCTS[doc["id"]]["attributes"]
+    assert {k: spine_attrs.get(k) for k in want} == want
+    assert {k: twin_attrs.get(k) for k in want} == want
+    assert twin_attrs["colour_code"] == "BLK"  # the rest of the bag untouched
+
+
+def test_catalog_create_door_refuses_a_gtin_another_product_holds(gtin_env):
+    """POST /catalog/products is a create door too: one holder per GTIN."""
+    gtin_env.create({"product_id": "spine-other", "sku": "OTHER-1",
+                     "attributes": {"gtin": _UPC}})
+    inp = catalog_mod.ProductCreateInput(
+        category="FR",
+        attributes={"brand_name": "Ray-Ban", "model_no": "RB-G-001",
+                    "colour_code": "BLK", "gtin": "0" + _UPC},
+        pricing={"mrp": 4000, "offer_price": 3600, "discount_category": "MASS"},
+    )
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(catalog_mod.create_catalog_product(inp, _user()))
+    assert exc.value.status_code == 409
+    assert "OTHER-1" in str(exc.value.detail)
+
+
+def _frame_input(**attrs):
+    return catalog_mod.ProductCreateInput(
+        category="FR",
+        attributes={"brand_name": "Ray-Ban", "model_no": "RB-J-001",
+                    "colour_code": "BLK", **attrs},
+        pricing={"mrp": 4000, "offer_price": 3600, "discount_category": "MASS"},
+    )
+
+
+@pytest.mark.parametrize("key", ["upc", "gtin"])
+def test_catalog_create_and_import_name_a_junk_code_as_junk(gtin_env, key):
+    """A junk GTIN / UPC is not a missing field: the create and import doors
+    say what is wrong with it, not 'Missing required field: upc'."""
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(catalog_mod.create_catalog_product(
+            _frame_input(**{key: "2000000000015"}), _user()))
+    assert exc.value.status_code == 422
+    assert f"not a valid {key.upper()}" in exc.value.detail
+    res = asyncio.run(catalog_mod.import_products(
+        [_frame_input(**{key: "2000000000015"})], current_user=_user()))
+    assert f"not a valid {key.upper()}" in res["errors"][0]["error"]
+
+
+def test_catalog_create_and_import_keep_the_missing_field_answer(gtin_env):
+    inp = _frame_input()
+    del inp.attributes["colour_code"]
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(catalog_mod.create_catalog_product(inp, _user()))
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "Missing required field: colour_code"
+    res = asyncio.run(catalog_mod.import_products([inp], current_user=_user()))
+    assert res["errors"][0]["error"] == "Missing required field: colour_code"

@@ -760,27 +760,25 @@ def _floor_refusals(client, env, role):
     return [created.json()["detail"], added.json()["detail"]]
 
 
-@pytest.mark.parametrize("role", ("SALES_STAFF", "SALES_CASHIER"))
+# Owner ruling 2026-10-12: the cost (and the floor worked out from it) is the
+# accounts roles' only -- the managers get the counter's words too.
+@pytest.mark.parametrize("role", ("SALES_STAFF", "SALES_CASHIER", "STORE_MANAGER", "AREA_MANAGER"))
 def test_floor_refusal_names_no_figure_to_the_counter(client, floor_env, role):
     for detail in _floor_refusals(client, floor_env, role):
         assert detail == _FLOOR_TO_COUNTER, detail
 
 
-@pytest.mark.parametrize("role", ("STORE_MANAGER", "AREA_MANAGER", "ADMIN"))
-def test_floor_refusal_still_names_the_floor_to_managers(client, floor_env, role):
+@pytest.mark.parametrize("role", ("ADMIN",))
+def test_floor_refusal_still_names_the_floor_to_accounts(client, floor_env, role):
     for detail in _floor_refusals(client, floor_env, role):
         assert "cost+10.0% floor Rs104.5" in detail, detail
 
 
 def test_floor_refusal_follows_the_product_cost_rule(client, floor_env, monkeypatch):
     # The figure goes to whoever services/cost_mask "product" admits, not a
-    # copy of it: take STORE_MANAGER out there and it reads the counter's words.
+    # copy of it: put STORE_MANAGER in there and it is told the floor.
     from api.services import cost_mask
 
-    monkeypatch.setitem(
-        cost_mask._CONTEXT_ROLES,
-        "product",
-        cost_mask._CONTEXT_ROLES["product"] - {"STORE_MANAGER"},
-    )
+    monkeypatch.setitem(cost_mask._CONTEXT_ROLES, "product", {"STORE_MANAGER"})
     for detail in _floor_refusals(client, floor_env, "STORE_MANAGER"):
-        assert detail == _FLOOR_TO_COUNTER, detail
+        assert "cost+10.0% floor Rs104.5" in detail, detail

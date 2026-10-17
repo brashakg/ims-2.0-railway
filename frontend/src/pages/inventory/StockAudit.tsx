@@ -12,6 +12,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { Plus, BarChart3, CheckCircle, Clock, Loader2, RefreshCw, Printer, Barcode } from 'lucide-react';
 import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
+import { COST_ROLES } from '../../components/common/CostCell';
 import { useToast } from '../../context/ToastContext';
 import { inventoryApi } from '../../services/api';
 // Shop time: naive backend stamps are UTC (audit F53).
@@ -71,8 +72,10 @@ interface AuditVariance {
 }
 
 // Rupees, Indian grouping. A count is only useful when the answer is money.
+// The server sends these figures at cost to COST_ROLES only (owner ruling
+// 2026-10-12); a figure it did not send reads as a dash, never as Rs 0.
 const money = (n?: number) =>
-  `₹${Math.round(Math.abs(n || 0)).toLocaleString('en-IN')}`;
+  n == null ? '—' : `₹${Math.round(Math.abs(n)).toLocaleString('en-IN')}`;
 
 const statusChip = (status: string): string => {
   switch (status) {
@@ -117,7 +120,9 @@ const getStatusIcon = (status: string) => {
 const zoneLabel = (zone?: string) => (zone && zone.trim() ? zone.trim() : 'Unzoned · whole store');
 
 export function StockAudit() {
-  const { user } = useAuth();
+  const { user, hasRole } = useAuth();
+  // Money at cost (what we paid for the missing stock): COST_ROLES only.
+  const showCost = hasRole(COST_ROLES);
   const toast = useToast();
 
   const [audits, setAudits] = useState<StockAudit[]>([]);
@@ -368,7 +373,7 @@ export function StockAudit() {
         <div>
           <div className="l">Stock missing</div>
           <div className="v" style={{ color: missingUnits > 0 ? 'var(--err)' : 'var(--ink)' }}>
-            {money(missingValue)}
+            {showCost ? money(missingValue) : missingUnits}
           </div>
           <div className="d">
             {missingUnits} unit{missingUnits === 1 ? '' : 's'} found short
@@ -555,7 +560,7 @@ export function StockAudit() {
                             >
                               {audit.shrinkage_units || 0} unit{(audit.shrinkage_units || 0) === 1 ? '' : 's'} · {money(audit.shrinkage_value)}
                             </p>
-                            <p className="text-xs" style={{ color: 'var(--ink-4)' }}>at cost price</p>
+                            {showCost && <p className="text-xs" style={{ color: 'var(--ink-4)' }}>at cost price</p>}
                           </div>
                           <div className="rounded-lg p-3" style={{ background: 'var(--bg-sunk)' }}>
                             <p className="text-xs" style={{ color: 'var(--ink-4)' }}>Extra (over)</p>
@@ -569,7 +574,7 @@ export function StockAudit() {
                           </div>
                         </div>
 
-                        {(audit.lines_without_cost || 0) > 0 && (
+                        {showCost && (audit.lines_without_cost || 0) > 0 && (
                           <p className="text-sm" style={{ color: 'var(--warn)' }}>
                             {audit.lines_without_cost} line{(audit.lines_without_cost || 0) === 1 ? ' has' : 's have'} no
                             cost price on the product, so the rupee figure above is lower than the real loss.
@@ -651,7 +656,7 @@ export function StockAudit() {
                                 <th className="right">Expected</th>
                                 <th className="right">Counted</th>
                                 <th className="right">Δ</th>
-                                <th className="right">Value</th>
+                                {showCost && <th className="right">Value</th>}
                               </tr>
                             </thead>
                             <tbody>
@@ -683,12 +688,14 @@ export function StockAudit() {
                                             : v.variance}
                                       </span>
                                     </td>
+                                    {showCost && (
                                     <td
                                       className="right mono"
                                       style={{ color: v.moved_during_count ? 'var(--ink-4)' : v.variance < 0 ? 'var(--err)' : 'var(--ink-3)' }}
                                     >
                                       {v.moved_during_count ? '—' : v.unit_cost ? money(v.variance_value) : '—'}
                                     </td>
+                                    )}
                                   </tr>
                                 ))}
                             </tbody>

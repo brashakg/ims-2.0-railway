@@ -18,6 +18,7 @@ from .models import (
 )
 from .grn_create import _create_grn_impl
 from .grn_accept import _accept_grn_impl
+from ...services.cost_mask import mask_purchase
 
 
 @router.post("/grn/express", status_code=201)
@@ -282,12 +283,16 @@ async def express_receive_grn(
             exc,
         )
 
-    return {
-        "grn_id": grn_id,
-        "grn_number": grn_number,
-        "accepted_units": accept_res.get("units_added"),
-        "po_status": accept_res.get("po_status"),
-        "invoice_draft": invoice_draft,
-        "match_preview": match_preview,
-        "accountant_task_id": accountant_task_id,
-    }
+    # The bill draft's totals are what we pay: the accounts roles' only.
+    return mask_purchase(
+        {
+            "grn_id": grn_id,
+            "grn_number": grn_number,
+            "accepted_units": accept_res.get("units_added"),
+            "po_status": accept_res.get("po_status"),
+            "invoice_draft": invoice_draft,
+            "match_preview": match_preview,
+            "accountant_task_id": accountant_task_id,
+        },
+        current_user,
+    )

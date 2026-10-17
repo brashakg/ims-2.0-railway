@@ -274,7 +274,9 @@ export const reportsApi = {
       params: { from_date: fromDate, to_date: toDate, ...(storeId ? { store_id: storeId } : {}) },
     });
     return r.data as {
-      revenue: number; cost: number; profit: number; margin_percent: number;
+      revenue: number;
+      // Absent for roles that may not see what we pay (owner ruling 2026-10-12).
+      cost?: number; profit?: number; margin_percent?: number;
     };
   },
 

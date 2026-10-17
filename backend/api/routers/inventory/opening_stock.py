@@ -20,10 +20,10 @@ from ._shared import (
     router,
     uuid,
 )
+from ...services.cost_mask import mask_cost
 from .helpers import (
     _get_db,
     _reject_stock_mint_on_online_store,
-    generate_barcode,
 )
 
 # ============================================================================
@@ -212,7 +212,9 @@ async def opening_stock_preview(
             }
         )
 
-    return {
+    # A manager may type the cost of the stock he enters, but what we paid
+    # is read back by the accounts roles only (owner ruling 2026-10-12).
+    return mask_cost({
         "rows": results,
         "summary": {
             "total_rows": len(payload.rows),
@@ -224,7 +226,7 @@ async def opening_stock_preview(
             "total_value": round(total_value, 2),
             "skip_if_existing": payload.skip_if_existing,
         },
-    }
+    }, current_user, "product", extra=("total_value",))
 
 
 @router.post("/opening-stock/commit")
@@ -249,7 +251,6 @@ async def opening_stock_commit(
         raise HTTPException(status_code=503, detail="Inventory store not available")
 
     _db = _get_db()
-    _counter = _db.get_collection("counters") if _db is not None else None
 
     results = []
     units_added = 0
@@ -290,9 +291,7 @@ async def opening_stock_commit(
         cost_fields = _opening_stock_cost_fields(row)
         created_count = 0
         for _ in range(row.quantity):
-            barcode = barcode_svc.next_unit_ean13(_counter) or generate_barcode(
-                active_store or "STR", pid
-            )
+            barcode = barcode_svc.mint_unit_barcode(_db, active_store)
             stock_data = {
                 "product_id": pid,
                 "store_id": active_store,
@@ -362,14 +361,19 @@ async def opening_stock_commit(
         },
     )
 
-    return {
-        "rows": results,
-        "summary": {
-            "total_rows": len(payload.rows),
-            "units_added": units_added,
-            "rows_skipped": rows_skipped,
-            "rows_with_errors": rows_errored,
-            "total_value": round(total_value, 2),
-            "batch_id": batch_id,
+    return mask_cost(
+        {
+            "rows": results,
+            "summary": {
+                "total_rows": len(payload.rows),
+                "units_added": units_added,
+                "rows_skipped": rows_skipped,
+                "rows_with_errors": rows_errored,
+                "total_value": round(total_value, 2),
+                "batch_id": batch_id,
+            },
         },
-    }
+        current_user,
+        "product",
+        extra=("total_value",),
+    )

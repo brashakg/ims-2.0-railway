@@ -11,7 +11,8 @@ Every rule is reused, not re-typed:
                    GET /products?search= runs (its total counts the same
                    search_products_filter), plus an exact SKU, product
                    barcode or manufacturer GTIN (attributes.gtin or the legacy
-                   top-level gtin, read through gtin.sanitise_gtin) and the IMS
+                   top-level gtin, in every spelling gtin.gtin_spellings
+                   gives, the till's own GTIN rule) and the IMS
                    unit barcode via StockRepository.find_by_barcode (the till's
                    scan lookup), active products only;
   * the price   -- mrp + offer_price only; the screen shows the till's own
@@ -52,7 +53,7 @@ from ._shared import (
     router,
 )
 from .helpers import _get_db
-from ...services.gtin import sanitise_gtin
+from ...services.gtin import gtin_spellings
 from ...services.item_events import status_match
 from ...services.product_master import existing_product_summary, model_family_query
 from ...services.rbac_policy import policy_for
@@ -124,11 +125,12 @@ def _find(product_repo, stock_repo, q):
     first, ahead of the 50-hit search and the 200-row family caps, so a
     scanned contact-lens power is never cut from a 300-power family.
     Inactive (soft-deleted / draft) products never come back.
-    A code is matched as typed AND as the one GTIN rule reads it
-    (gtin.sanitise_gtin: '8 056597 054324' is 8056597054324), in the GTIN
+    A code is matched as typed AND in every spelling of the one GTIN
+    (gtin.gtin_spellings, the till's rule: '8 056597 054324' is
+    8056597054324, and a box's UPC-A is its 13-digit form), in the GTIN
     fields the catalogue reads (attributes.gtin, then the legacy top-level
     gtin -- product_master's `attrs.get("gtin") or spine.get("gtin")`)."""
-    codes = list({q, sanitise_gtin(q)} - {None})
+    codes = list({q, *gtin_spellings(q)})
     exact = [{"sku": q}] + [{f: {"$in": codes}} for f in ("barcode", "attributes.gtin", "gtin")]
     unit = stock_repo.find_by_barcode(q)
     if unit and unit.get("product_id"):

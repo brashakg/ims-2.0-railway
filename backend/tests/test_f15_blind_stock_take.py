@@ -599,9 +599,14 @@ def test_router_lock_real_cost_resolver_values_variance_in_paise(db, monkeypatch
     svc.BlindStockTakeEngine(db).submit_count(sid, [{"product_id": "P-A", "counted_qty": 7}],
                                               store_id="BV-1", actor=_counter())
     locked = asyncio.run(r.lock_count(sid, current_user=_manager()))
+    # The manager who locks reads it in units: the value at cost is the
+    # accounts' (owner ruling 2026-10-12). The stored count carries it.
+    assert locked["items"][0]["variance_units"] == -3
+    assert "net_variance_value_paise" not in locked["summary"]
+    stored = svc.BlindStockTakeEngine(db).get(sid)
     # short 3 units * Rs.250 (25000 paise) = -75000 paise (shrinkage).
-    assert locked["summary"]["net_variance_value_paise"] == -75000
-    assert locked["items"][0]["variance_value_paise"] == -75000
+    assert stored["summary"]["net_variance_value_paise"] == -75000
+    assert stored["items"][0]["variance_value_paise"] == -75000
 
 
 def test_cost_resolver_failsoft_only_on_db_error_not_programmer_error(db, monkeypatch):

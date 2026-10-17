@@ -86,14 +86,16 @@ export interface POItem {
   description?: string;
   sku: string;
   quantity: number;
-  unitCost: number;
+  /** null = nobody priced this line yet (owner ruling 2026-10-12: never a
+   *  blank 0). Accounts agree it with the vendor and it comes with the bill. */
+  unitCost: number | null;
   taxRate: number;
   /** The HSN stored on the line, and whether its GST rate was left unsettled
    *  (tax_rate 0 then means "unknown", not "0%"). An edit sends them back so
    *  saving never re-prices a line. */
   hsn?: string;
   gstUnresolved?: boolean;
-  total: number;
+  total: number | null;
   /** Units received so far (per-line received_qty, falling back to the PO
    *  header received_qty_by_product for pre-S1 POs). Drives the "N of M
    *  lines received" progress chip on the PO list. */

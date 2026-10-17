@@ -19,7 +19,7 @@ const toastMock = vi.hoisted(() => ({
 
 vi.mock('../../../context/ToastContext', () => ({ useToast: () => toastMock }));
 vi.mock('../../../context/AuthContext', () => ({
-  useAuth: () => ({ user: { activeStoreId: 'BV-TEST-01' } }),
+  useAuth: () => ({ user: { activeStoreId: 'BV-TEST-01' }, hasRole: () => true }),
 }));
 vi.mock('../../../services/api', () => ({
   vendorsApi: {

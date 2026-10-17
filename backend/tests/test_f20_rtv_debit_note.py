@@ -668,7 +668,8 @@ def test_rbac_policy_rows_present():
     assert set(issue["allowed"]) == {"ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"}
     assert issue.get("store_scoped") is True
     tally = by_path[("GET", "/api/v1/rtv-debit-notes/{debit_note_id}/tally")]
-    assert "SALES_CASHIER" not in tally["allowed"]
+    # The export is nothing but money: the accounts' (owner ruling 2026-10-12).
+    assert set(tally["allowed"]) == {"ACCOUNTANT", "ADMIN"}
     listing = by_path[("GET", "/api/v1/rtv-debit-notes")]
     assert set(listing["allowed"]) == {
         "ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "WORKSHOP_STAFF"

@@ -1,6 +1,7 @@
-// CostCell: per-unit product cost is shown to the managers and never to counter
-// staff (owner rulings 2026-09-28 / D7). The role list itself is held equal to
-// the backend's cost_mask "product" context by a backend test.
+// CostCell: what we pay is shown to the owner and the accounts roles only --
+// never to the managers or counter staff (owner ruling 2026-10-12). The role
+// list itself is held equal to the backend's cost_mask COST_VISIBLE_ROLES by a
+// backend test.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
@@ -19,7 +20,7 @@ describe('CostCell', () => {
     role = 'ADMIN';
   });
 
-  it.each<UserRole>(['STORE_MANAGER', 'AREA_MANAGER', 'CATALOG_MANAGER', 'ACCOUNTANT', 'ADMIN'])(
+  it.each<UserRole>(['SUPERADMIN', 'ACCOUNTANT', 'ADMIN'])(
     'shows the cost to %s',
     (r) => {
       role = r;
@@ -28,7 +29,10 @@ describe('CostCell', () => {
     },
   );
 
-  it.each<UserRole>(['SALES_STAFF', 'CASHIER', 'SALES_CASHIER', 'OPTOMETRIST', 'WORKSHOP_STAFF'])(
+  it.each<UserRole>([
+    'STORE_MANAGER', 'AREA_MANAGER', 'CATALOG_MANAGER',
+    'SALES_STAFF', 'CASHIER', 'SALES_CASHIER', 'OPTOMETRIST', 'WORKSHOP_STAFF',
+  ])(
     'hides the cost from %s',
     (r) => {
       role = r;

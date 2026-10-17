@@ -65,6 +65,7 @@ function renderComposer(over: Partial<PurchaseOrderComposerProps> = {}) {
   const props: PurchaseOrderComposerProps = {
     mode: 'modal',
     vendors: VENDORS,
+    showPrices: true,
     initialVendorId: 'v-1',
     initialLines: [LINE()],
     renderProductCell: ({ line }) => (
@@ -512,6 +513,7 @@ describe('PurchaseOrderComposer — a late last-cost answer never rewrites a tap
       <PurchaseOrderComposer
         mode="modal"
         vendors={VENDORS}
+        showPrices
         initialVendorId="v-1"
         initialLines={[LINE({ unitCost: 0 })]}
         renderProductCell={({ line }) => <div data-testid="product-cell">{line.productName}</div>}

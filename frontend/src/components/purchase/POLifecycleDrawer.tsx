@@ -36,7 +36,7 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { vendorsApi } from '../../services/api/inventory';
 import { useAuth } from '../../context/AuthContext';
-import { PAYABLES_ROLES } from '../common/CostCell';
+import { COST_ROLES } from '../common/CostCell';
 import { PurchaseStatusChip } from './PurchaseStatusChip';
 import { formatDateTimeIST } from '../../utils/datetime';
 import { RECEIVABLE_PO_STATUSES, RECEIVING_MANAGER_ROLES } from '../../pages/purchase/purchaseTypes';
@@ -62,6 +62,8 @@ export interface POTimelineEvent {
   at?: string | null;
   ref?: string | null;
   detail?: string | null;
+  /** An edit's price changes: the server sends them to the accounts roles only. */
+  price_detail?: string | null;
   /** WHO did it -- a person's display name, or the raw stamped user id when
    *  that id no longer resolves to a user. Absent when the event carries no
    *  actor at all; the drawer then names nobody rather than guessing. */
@@ -239,8 +241,8 @@ export function POLifecycleDrawer({ poId, poNumber, onClose, onSendToVendor }: P
     ? deriveNextStep(timeline, {
         canSend: Boolean(onSendToVendor),
         canReceive: hasRole([...RECEIVING_MANAGER_ROLES]),
-        // Booking a supplier bill is an accounts function (PAYABLES_ROLES).
-        canBookInvoice: hasRole(PAYABLES_ROLES),
+        // Booking a supplier bill is an accounts function (COST_ROLES).
+        canBookInvoice: hasRole(COST_ROLES),
       })
     : null;
 
@@ -348,7 +350,7 @@ export function POLifecycleDrawer({ poId, poNumber, onClose, onSendToVendor }: P
                           </div>
                           {(ev.ref || ev.detail || ev.by) && (
                             <p className="text-xs text-gray-500 mt-0.5">
-                              {[ev.ref, ev.detail, ev.by ? `by ${ev.by}` : null].filter(Boolean).join(' — ')}
+                              {[ev.ref, ev.detail, ev.price_detail, ev.by ? `by ${ev.by}` : null].filter(Boolean).join(' — ')}
                             </p>
                           )}
                         </li>

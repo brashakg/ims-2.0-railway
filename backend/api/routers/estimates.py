@@ -143,15 +143,15 @@ def _price_estimate(payload: EstimateCreate) -> Dict[str, Any]:
     order pricing engine. Returns (priced_items, totals). Never raises on a
     rate lookup -- resolve_gst_rate is fail-soft."""
     from .orders import _compute_per_category_gst
+    from .orders._shared import bill_line_value
 
     items: List[Dict[str, Any]] = []
     for it in payload.items:
         qty = max(1, int(it.quantity or 1))
         unit = float(it.offer_price or 0)
         disc_pct = max(0.0, min(100.0, float(it.discount_percent or 0)))
-        gross_unit = round(unit * (1.0 - disc_pct / 100.0), 2)
-        line_total = round(gross_unit * qty, 2)
-        discount_amount = round((unit - gross_unit) * qty, 2)
+        # THE till line value, so the estimate is the bill the till makes.
+        discount_amount, line_total = bill_line_value(unit, qty, disc_pct)
         items.append(
             {
                 "description": it.description,
@@ -177,9 +177,6 @@ def _price_estimate(payload: EstimateCreate) -> Dict[str, Any]:
     for it in items:
         it["line_total"] = it.get("item_total")
 
-    grand_total = round(
-        float(summary.get("taxable") or 0) + float(summary.get("tax") or 0), 2
-    )
     totals = {
         "subtotal": summary.get("subtotal", 0.0),
         "taxable": summary.get("taxable", 0.0),
@@ -188,7 +185,10 @@ def _price_estimate(payload: EstimateCreate) -> Dict[str, Any]:
         "total_discount": summary.get("total_discount", 0.0),
         "dominant_rate": summary.get("dominant_rate", 0.0),
         "pricing_model": summary.get("pricing_model", "inclusive"),
-        "grand_total": grand_total,
+        # The engine's payable, rounded to the rupee like every till bill,
+        # and its Round off line (never taxable value, never tax).
+        "grand_total": summary["grand_total"],
+        "round_off": summary["round_off"],
     }
     return {"items": items, "totals": totals}
 

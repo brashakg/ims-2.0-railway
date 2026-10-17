@@ -143,11 +143,21 @@ def resolve_config(settings_doc: Optional[dict]) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def is_unpriced_line(line: Optional[dict]) -> bool:
+    """A PO line nobody priced: None from create_po (owner ruling 2026-10-12:
+    never a made-up 0) or 0.0 from a CL / forecast draft. Its price is agreed
+    with the vendor and comes with the bill. The one rule behind the accounts
+    task at send (po_detail._flag_unpriced_lines) and the price check here."""
+    return not _f((line or {}).get("unit_price"))
+
+
 def _po_by_product(po: Optional[dict]) -> Dict[str, dict]:
     """{product_id: {ordered_qty, unit_price, description, hsn}} from a PO.
 
     Multiple PO lines for the same product roll up: quantities sum; the unit
     price is the quantity-weighted average so a split-line PO compares sensibly.
+    A product with any unpriced line (is_unpriced_line) has no PO price
+    (unit_price None): there is nothing to compare the bill's price with.
     """
     out: Dict[str, dict] = {}
     items = (po or {}).get("items") if isinstance(po, dict) else None
@@ -161,11 +171,12 @@ def _po_by_product(po: Optional[dict]) -> Dict[str, dict]:
         price = _f(it.get("unit_price"))
         cur = out.get(pid)
         if cur is None:
-            out[pid] = {
+            out[pid] = cur = {
                 "product_id": pid,
                 "ordered_qty": qty,
                 # running weighted price accumulator (value / qty)
                 "_value": qty * price,
+                "_unpriced": False,
                 "unit_price": price,
                 "description": it.get("product_name") or it.get("sku"),
                 "hsn": it.get("hsn"),
@@ -178,8 +189,11 @@ def _po_by_product(po: Optional[dict]) -> Dict[str, dict]:
                 if cur["ordered_qty"]
                 else price
             )
+        cur["_unpriced"] = cur["_unpriced"] or is_unpriced_line(it)
     for v in out.values():
         v.pop("_value", None)
+        if v.pop("_unpriced"):
+            v["unit_price"] = None
     return out
 
 
@@ -313,7 +327,8 @@ def three_way_match(
     for pid in product_ids:
         po_line = po_idx.get(pid)
         ordered_qty = _i(po_line.get("ordered_qty")) if po_line else None
-        po_unit_price = _f(po_line.get("unit_price")) if po_line else None
+        # None when nobody priced the line: the bill's price stands.
+        po_unit_price = po_line.get("unit_price") if po_line else None
         inv_line = inv_idx.get(pid)
         invoiced_qty = _f(inv_line.get("invoiced_qty")) if inv_line else 0.0
         invoice_unit_price = _f(inv_line.get("unit_price")) if inv_line else 0.0

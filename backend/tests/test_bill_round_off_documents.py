@@ -1,0 +1,276 @@
+"""
+IMS 2.0 - Bill round off on the invoice and in the GST returns (owner ruling
+2026-10-08). The invoice and the A4 receipt (the same server document) print a
+separate "Round off" line read off the order; GSTR-1 / GSTR-3B taxable value and
+tax, and the e-invoice taxable and tax figures, are exactly what the lines carry
+-- the round off is neither. The e-invoice carries it in its own RndOffAmt field.
+Anchors as in test_bill_round_off.py.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+import pytest
+from datetime import datetime
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
+os.environ.setdefault("MONGODB_URI", "")
+
+from tests.test_loyalty import patched_loyalty  # noqa: E402,F401  (fixture)
+
+
+# ============================================================================
+# 1. The invoice and the A4 receipt show the Round off line
+# ============================================================================
+
+
+@pytest.mark.parametrize(
+    "price, grand, round_off, taxable, tax, printed",
+    [
+        (1000.5, 1001.0, 0.5, 952.86, 47.64, "+ Rs 0.50"),
+        # Half of all bills round DOWN: their line must print a minus.
+        (1000.49, 1000.0, -0.49, 952.85, 47.64, "- Rs 0.49"),
+    ],
+)
+def test_invoice_payload_and_pdf_show_round_off(
+    monkeypatch, price, grand, round_off, taxable, tax, printed
+):
+    from tests.test_invoice_pdf import _FakeCustomerRepo, _FakeStoreRepo
+    from tests.test_invoice_pdf_statutory import _pdf_text
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from api import dependencies as deps_module
+    from api.routers import orders as orders_module
+    from api.routers.auth import get_current_user
+    from api.services import invoice_pdf as pdf_module
+
+    doc = {
+        "order_id": "ORD-RO", "order_number": "ORD-RO-1", "store_id": "BV-TEST-01",
+        "customer_id": "cust-pdf", "customer_name": "Asha Rao", "status": "CONFIRMED",
+        "grand_total": grand, "round_off": round_off, "amount_paid": grand,
+        "balance_due": 0.0, "tax_amount": tax, "cart_discount_amount": 0.0,
+        "items": [{"item_id": "l1", "item_type": "FRAME", "product_name": "Aviator",
+                   "hsn_code": "90031900", "quantity": 1, "unit_price": price,
+                   "item_total": price, "gst_rate": 5.0, "taxable_value": taxable,
+                   "tax_amount": tax}],
+    }
+
+    class _Repo:
+        def find_by_id(self, oid):
+            return dict(doc)
+
+        def ensure_invoice_index(self):
+            pass
+
+        def next_invoice_number(self, store_id, store_doc=None):
+            return "BV/TEST-01/26-27/0001"
+
+        def set_invoice(self, oid, number):
+            doc["invoice_number"] = number
+
+    monkeypatch.setattr(orders_module, "get_order_repository", lambda: _Repo())
+    monkeypatch.setattr(orders_module, "get_customer_repository", lambda: _FakeCustomerRepo())
+    monkeypatch.setattr(orders_module, "validate_store_access", lambda sid, user: sid)
+    monkeypatch.setattr(deps_module, "get_store_repository", lambda: _FakeStoreRepo())
+    monkeypatch.setattr(
+        pdf_module,
+        "resolve_issuing_identity",
+        lambda store_id, key: {
+            "store": {"name": "BV", "gstin": "20AAAAA0000A1Z5", "address": "x"},
+            "entity": {"legal_name": "BV Opticals Pvt Ltd"},
+            "overrides": {},
+        },
+    )
+    app = FastAPI()
+    app.include_router(orders_module.router, prefix="/orders")
+    app.dependency_overrides[get_current_user] = lambda: {
+        "user_id": "u1", "roles": ["STORE_MANAGER"], "active_store_id": "BV-TEST-01"
+    }
+    client = TestClient(app)
+
+    j = client.get("/orders/ORD-RO/invoice").json()
+    assert j["roundOff"] == round_off
+    assert j["grandTotal"] == grand
+    # The tax summary is the lines' own figures -- the round off is not in it.
+    assert j["taxTotals"]["taxable"] == taxable
+
+    text = _pdf_text(client.get("/orders/ORD-RO/invoice.pdf").content)
+    assert "Round off" in text
+    # The signed line itself (a bare "0.50" also matches the unit price).
+    assert printed in text
+    if grand == 1001.0:
+        assert "One Thousand One" in text  # amount in words is the rounded total
+
+
+# ============================================================================
+# 2. GSTR-1 / GSTR-3B / e-invoice: taxable value and tax unchanged
+# ============================================================================
+
+
+def _mixed_order(**over):
+    from api.routers.orders import _compute_per_category_gst
+
+    items = [
+        {"hsn_code": "900311", "item_type": "FRAME", "category": "FRAME", "item_total": 999.99},
+        {"hsn_code": "9004", "item_type": "SUNGLASSES", "category": "SUNGLASSES", "item_total": 500.50},
+    ]
+    gst = _compute_per_category_gst(items, 0)
+    doc = {
+        "order_id": "ORD-G1", "order_number": "ORD-G1", "invoice_number": "INV-1",
+        "store_id": "store-001", "customer_id": "", "status": "COMPLETED",
+        "created_at": datetime(2026, 4, 15, 10, 0, 0),
+        "grand_total": gst["grand_total"], "round_off": gst["round_off"],
+        "tax_amount": gst["tax"], "items": items,
+    }
+    doc.update(over)
+    return doc
+
+
+def test_gst_base_backs_round_off_out_of_taxable():
+    from api.routers.reports.gst_base import _order_taxable_and_tax
+
+    assert _order_taxable_and_tax(_mixed_order()) == (1376.52, 123.97)
+
+
+def _gstr1_for(monkeypatch, order):
+    import api.routers.reports as r
+    from api.routers.reports import _compute_gstr1
+    from tests.test_gstr1_b2cs_hsn import _DB, _STORE, _Coll
+
+    db = _DB({
+        "stores": _Coll([_STORE]),
+        "customers": _Coll([{"customer_id": "B2B-1", "gstin": "07AAAAA1111A1Z1",
+                             "name": "Acme", "state": "Delhi"}]),
+        "orders": _Coll([order]),
+        "credit_note_ledger": _Coll([]),
+    })
+    monkeypatch.setattr(r, "_get_raw_db", lambda: db)
+    return _compute_gstr1("2026-04", "store-001")
+
+
+def test_gstr1_consumer_buckets_unchanged_by_round_off(monkeypatch):
+    rounded = _gstr1_for(monkeypatch, _mixed_order())
+    unrounded = _gstr1_for(
+        monkeypatch, _mixed_order(grand_total=1500.49, round_off=None)
+    )
+    assert rounded["b2cs"] == unrounded["b2cs"]
+    by = {row["gstRate"]: row for row in rounded["b2cs"]}
+    assert (by[5]["taxableValue"], by[5]["totalTax"]) == (952.37, 47.62)
+    assert (by[18]["taxableValue"], by[18]["totalTax"]) == (424.15, 76.35)
+
+
+def test_gstr1_b2b_row_taxable_and_tax_unchanged(monkeypatch):
+    row = _gstr1_for(monkeypatch, _mixed_order(customer_id="B2B-1"))["b2b"][0]
+    assert row["taxableValue"] == 1376.52
+    assert row["totalTax"] == 123.97
+    # The invoice value is the invoice's own printed total.
+    assert row["invoiceValue"] == 1500.0
+
+
+def test_einvoice_carries_round_off_field():
+    from api.services.einvoice import _build_einvoice_json as build_einvoice_payload
+
+    payload = build_einvoice_payload(
+        {"invoice_number": "INV-1", "grand_total": 1500.0, "round_off": -0.49,
+         "taxable_amount": 1376.52, "cgst_amount": 61.98, "sgst_amount": 61.99,
+         "items": []}
+    )
+    val = payload["ValDtls"]
+    assert val["RndOffAmt"] == -0.49
+    assert val["TotInvVal"] == 1500.0
+    assert val["AssVal"] == 1376.52
+
+
+def test_loyalty_earn_basis_is_taxable_value_without_round_off(
+    client, auth_headers, patched_loyalty
+):
+    patched_loyalty["orders"].seed("ORD-L", "cust-l", 10001.0)
+    patched_loyalty["orders"]._orders["ORD-L"]["round_off"] = 0.5
+    r = client.post(
+        "/api/v1/loyalty/earn",
+        json={"customer_id": "cust-l", "order_id": "ORD-L"},
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    row = patched_loyalty["txns"].find_for_customer("cust-l")[0]
+    assert row["rupee_value"] == 10000.5
+
+
+
+
+def test_a_no_change_edit_keeps_points_earned_on_a_rounded_down_bill(
+    client, auth_headers, patched_loyalty, monkeypatch
+):
+    """/earn and the post-edit re-gate read ONE earn basis. Taxable 1000.30 +
+    GST 0.10 bills 1000 (round off -0.40). With a 1000 minimum the bill earns;
+    a superadmin edit that changes nothing must not then claw the points back
+    on a basis (1000 - 0.10 = 999.90) that forgot the round off."""
+    from api.routers import loyalty as loyalty_module
+    from api.routers.loyalty import regate_earn_after_edit
+    from database.repositories.loyalty_repository import DEFAULT_SETTINGS
+
+    monkeypatch.setattr(
+        loyalty_module, "_settings_safe",
+        lambda: {**DEFAULT_SETTINGS, "min_order_for_earn": 1000.0},
+    )
+    items = [{"category": "FRAME", "item_total": 1000.40}]
+    patched_loyalty["orders"].seed("ORD-RG", "cust-rg", 1000.0, 0.10, items)
+    order = patched_loyalty["orders"]._orders["ORD-RG"]
+    order["round_off"] = -0.40
+    r = client.post(
+        "/api/v1/loyalty/earn",
+        json={"customer_id": "cust-rg", "order_id": "ORD-RG"},
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    earned = patched_loyalty["accounts"].find_by_id("cust-rg")["balance_points"]
+    assert earned > 0
+    out = regate_earn_after_edit(dict(order), user_id="sa-1")
+    assert out["ok"] and out.get("clawed", 0) == 0, out
+    assert patched_loyalty["accounts"].find_by_id("cust-rg")["balance_points"] == earned
+
+
+# ============================================================================
+# 4. The estimate is the bill the till makes, Round off line and all
+# ============================================================================
+
+
+@pytest.mark.parametrize(
+    "price, line_pct, bill_pct, grand, printed",
+    [
+        (1000.5, 0.0, 0.0, 1001.0, "+ Rs 0.50"),
+        (1000.49, 0.0, 0.0, 1000.0, "- Rs 0.49"),
+        # A rounded line price reached 254.49 -> Rs 254; the till bills Rs 255.
+        (265.0, 1.5, 2.5, 255.0, "+ Rs 0.50"),
+    ],
+)
+def test_estimate_total_is_the_till_quote(
+    client, auth_headers, price, line_pct, bill_pct, grand, printed
+):
+    from api.routers.estimates import EstimateCreate, EstimateItem, _price_estimate
+    from api.services.print_render import render_estimate
+    from tests.test_orders_gst_recompute import _frame_item
+
+    q = client.post(
+        "/api/v1/orders/quote",
+        json={"items": [dict(_frame_item(price), discount_percent=line_pct)],
+              "cart_discount_percent": bill_pct},
+        headers=auth_headers,
+    )
+    assert q.status_code == 200, q.text
+    totals = _price_estimate(EstimateCreate(
+        items=[EstimateItem(description="Frame", category="FRAME",
+                            offer_price=price, discount_percent=line_pct)],
+        cart_discount_percent=bill_pct,
+    ))["totals"]
+    assert (totals["grand_total"], totals["round_off"]) == (
+        q.json()["grand_total"], q.json()["round_off"]
+    ) == (grand, round(grand - (q.json()["taxable"] + q.json()["tax"]), 2))
+    html = render_estimate(entity=None, store=None, estimate_number="EST-1",
+                           estimate_date="2026-10-13", totals=totals)
+    assert "Round off</td><td class=\"num\">" + printed in html
+    assert "Estimated Total</td><td class=\"num\">Rs " + f"{grand:,.2f}" in html

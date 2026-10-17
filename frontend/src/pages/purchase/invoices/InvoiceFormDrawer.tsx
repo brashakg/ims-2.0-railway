@@ -21,7 +21,7 @@ import {
 import { useToast } from '../../../context/ToastContext';
 import { useAuth } from '../../../context/AuthContext';
 import type { Supplier } from '../purchaseTypes';
-import { inr, GST_RATES, errMsg } from './shared';
+import { inr, GST_RATES, errMsg, APPROVE_ROLES, rcmNote } from './shared';
 import { istDayString } from '../../../utils/datetime';
 
 // The product ids a PRODUCT_NOT_CATALOGUED refusal names, so the accountant can
@@ -47,7 +47,7 @@ export interface EditLine {
   gst_rate: string;
 }
 
-export const blankLine = (): EditLine => ({ product_name: '', sku: '', hsn_code: '', quantity: '1', unit_price: '0', gst_rate: '5' });
+export const blankLine = (): EditLine => ({ product_name: '', sku: '', hsn_code: '', quantity: '1', unit_price: '', gst_rate: '5' });
 
 const isBookable = (l: EditLine) => Boolean(l.product_name.trim()) && (parseFloat(l.quantity) || 0) > 0;
 
@@ -64,7 +64,7 @@ export function InvoiceFormDrawer({
   onBooked: () => void;
 }) {
   const toast = useToast();
-  const { user } = useAuth();
+  const { user, hasRole } = useAuth();
   // The IST day (owner ruling): toISOString() is the UTC day, yesterday from
   // 00:00 to 05:30 IST -- a bill booked on it lands in the previous month's
   // GSTR-3B on the 1st, or under that month's lock.
@@ -77,10 +77,13 @@ export function InvoiceFormDrawer({
   const [vendorInvoiceDate, setVendorInvoiceDate] = useState((prefill.vendor_invoice_date || today).slice(0, 10));
   const [recipientGstin, setRecipientGstin] = useState(prefill.recipient_gstin ?? '');
   const [notes, setNotes] = useState('');
-  // One credit switch (it can only turn credit OFF). No reverse-charge tick:
-  // accounts payable does not handle reverse charge yet, so the form must not
-  // offer it (owner/CA ruling needed first).
+  // One credit switch (it can only turn credit OFF), and reverse charge for
+  // the accounts roles: the supplier is then owed the taxable value only and
+  // the GST is the shop's own to pay the government (the server's rule;
+  // the form shows its preview).
   const [claimCredit, setClaimCredit] = useState(true);
+  const canReverseCharge = hasRole(APPROVE_ROLES);
+  const [reverseCharge, setReverseCharge] = useState(false);
   const [lines, setLines] = useState<EditLine[]>(initialLines);
   const [saving, setSaving] = useState(false);
 
@@ -101,6 +104,7 @@ export function InvoiceFormDrawer({
   const removeLine = (i: number) => setLines((prev) => (prev.length > 1 ? prev.filter((_, idx) => idx !== i) : prev));
 
   const validLines = lines.filter(isBookable);
+  const missingPrice = validLines.some((l) => l.unit_price.trim() === '' || !Number.isFinite(Number(l.unit_price)));
   // THE body the Book button sends -- the preview is computed on exactly this.
   const linkedDcIds = (prefill as { linked_dc_ids?: string[] }).linked_dc_ids;
   const payload: PurchaseInvoiceCreate = {
@@ -126,13 +130,14 @@ export function InvoiceFormDrawer({
     linked_dc_ids: linkedDcIds && linkedDcIds.length ? linkedDcIds : undefined,
     bill_kind: receiptLinked ? 'GOODS' : (billKind || undefined),
     itc_eligible: claimCredit,
+    reverse_charge: canReverseCharge && reverseCharge,
   };
   // What the tax depends on (not the invoice no. or notes): a change here asks
   // the server again, and Book waits until the answer is for THIS form. The
   // shop is in it: a bill with no receipt is booked for store_id's company.
-  const taxKey = JSON.stringify([payload.vendor_id, payload.recipient_gstin, payload.grn_id, payload.linked_dc_ids, payload.store_id, payload.itc_eligible, payload.lines]);
+  const taxKey = JSON.stringify([payload.vendor_id, payload.recipient_gstin, payload.grn_id, payload.linked_dc_ids, payload.store_id, payload.itc_eligible, payload.reverse_charge, payload.lines]);
   const [preview, setPreview] = useState<{ key: string; data?: PurchaseInvoicePreview; error?: string } | null>(null);
-  const wantsPreview = Boolean(vendorId) && validLines.length > 0;
+  const wantsPreview = Boolean(vendorId) && validLines.length > 0 && !missingPrice;
   useEffect(() => {
     if (!wantsPreview) return;
     let live = true;
@@ -162,6 +167,7 @@ export function InvoiceFormDrawer({
     if (!vendorInvoiceNo.trim()) { toast.error('Supplier invoice number is required'); return; }
     if (!vendorInvoiceDate) { toast.error('Supplier invoice date is required'); return; }
     if (validLines.length === 0) { toast.error('Add at least one line item with a name and quantity'); return; }
+    if (missingPrice) { toast.error('Enter the supplier price for every bill item'); return; }
     if (!receiptLinked && !billKind) {
       toast.error('Say what this bill is for: goods, or services/expenses');
       return;
@@ -295,7 +301,18 @@ export function InvoiceFormDrawer({
                 <input type="checkbox" role="switch" checked={claimCredit} onChange={(e) => setClaimCredit(e.target.checked)} />
                 Claim input credit
               </label>
+              {canReverseCharge && (
+                <label className="inline-flex items-center gap-2 text-sm text-gray-700">
+                  <input type="checkbox" role="switch" checked={reverseCharge} onChange={(e) => setReverseCharge(e.target.checked)} />
+                  Reverse charge
+                </label>
+              )}
             </div>
+            {pv?.reverse_charge && (
+              <p className="text-xs font-medium text-blue-800">
+                {rcmNote(pv.tax_total, pv.total)}
+              </p>
+            )}
             {pv && pv.itc_eligible === false && (
               <p className="text-xs font-medium text-amber-800">
                 {claimCredit
@@ -368,7 +385,7 @@ export function InvoiceFormDrawer({
                 </>
               )}
               <div className="border-t border-gray-200 pt-1">
-                <Row label="Total" value={inr(pv?.total)} strong />
+                <Row label={pv?.reverse_charge ? 'Supplier is owed' : 'Total'} value={inr(pv?.total)} strong />
               </div>
             </div>
           </div>
@@ -388,7 +405,7 @@ export function InvoiceFormDrawer({
             <button
               type="button"
               onClick={book}
-              disabled={saving || pending || (!receiptLinked && billKind === 'GOODS')}
+              disabled={saving || pending || missingPrice || (!receiptLinked && billKind === 'GOODS')}
               className="btn sm primary disabled:opacity-60"
             >
               {saving && <Loader2 className="w-4 h-4 animate-spin" />} Book invoice

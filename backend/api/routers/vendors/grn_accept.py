@@ -24,6 +24,7 @@ from ._shared import (
     require_roles,
     router,
 )
+from ...services import barcode as barcode_svc
 from ...services.po_variance_engine import _ordered_by_product
 from .gst import _promote_cost_from_rate
 from .po_detail import (
@@ -37,7 +38,6 @@ from .po_detail import (
     puts_nothing_in_stock,
 )
 from .numbering import (
-    _grn_barcode,
     _grn_stock_audit,
     compute_po_receipt_state,
     held_units,
@@ -510,7 +510,7 @@ def release_finished_meanwhile(grn_repo, grn_id: str, also=()) -> None:
                 if ln.get("reason") != "incomplete_catalog":
                     continue
                 now_prod = product_repo.find_by_id(ln.get("product_id"))
-                if now_prod is not None and not _pm.compute_catalog_status(now_prod)[1]:
+                if now_prod is not None and not _pm.gaps_before_cost(now_prod):
                     pids.append(ln["product_id"])
     except Exception:  # noqa: BLE001
         logger.warning("[VENDOR] GRN %s: finished-meanwhile check failed", grn_id, exc_info=True)
@@ -1052,16 +1052,19 @@ def _accept_grn_claimed(
                 )
 
             # Hub Phase 2: only mint sellable AVAILABLE stock for a CATALOG-
-            # COMPLETE product. After the cost backfill above, a product still
-            # missing catalogue fields beyond cost remains a non-purchasable
-            # DRAFT -- HOLD its line (like an uncatalogued line) instead of
-            # minting sellable stock POS could not lawfully price/sell. Fail-soft:
+            # COMPLETE product. A product missing catalogue fields beyond cost
+            # remains a non-purchasable DRAFT -- HOLD its line (like an
+            # uncatalogued line) instead of minting sellable stock POS could not
+            # lawfully price/sell. A missing cost alone never holds the goods:
+            # a line nobody priced (a manager's PO for a product never bought
+            # from this vendor, owner ruling 2026-10-12) mints without a cost
+            # and the vendor's bill brings it (_pm.gaps_before_cost). Fail-soft:
             # only when a product repo is available to verify completeness.
             if product_repo is not None and prod is not None:
                 merged_for_status = dict(prod)
                 if cost_fields:
                     merged_for_status["cost_price"] = cost_fields["cost_price"]
-                if _pm.compute_catalog_status(merged_for_status)[1]:
+                if _pm.gaps_before_cost(merged_for_status):
                     unresolved_lines.append({**held, "reason": "incomplete_catalog"})
                     continue
 
@@ -1117,7 +1120,9 @@ def _accept_grn_claimed(
                     {
                         "store_id": store_id,
                         "product_id": product_id,
-                        "barcode": _grn_barcode(store_id, product_id),
+                        "barcode": barcode_svc.mint_unit_barcode(
+                            _get_db(), store_id
+                        ),
                         "location_code": location_code,
                         "quantity": 1,
                         "status": "AVAILABLE",
@@ -1525,7 +1530,8 @@ def asks_still_waiting(db, product_ids) -> List[str]:
 
 
 def catalogue_write_done(
-    product_id: str, current: dict, patch: dict, *, product_repo, deferred_releases=None
+    product_id: str, current: dict, patch: dict, *, product_repo, deferred_releases=None,
+    mirror_outcome=None,
 ) -> Tuple[dict, int]:
     """THE path after a write to a product, whichever door made it: the
     product editor's save (PUT /products/{id}), the cost an order's or a
@@ -1544,18 +1550,22 @@ def catalogue_write_done(
         accept, whose own claim is held.
 
     Answers (the status fields written, the units released). Fail-soft: the
-    write stands."""
+    write stands. A caller that requires a successful barcode mirror can read
+    mirror_outcome["saved"] without running the mirror a second time."""
     fields = _pm.apply_restamp_atomic(product_id, current, patch, product_repo=product_repo)
+    mirrored = False
     try:
         from api.dependencies import get_db
 
-        _pm.mirror_update_to_catalog_twin(
+        mirrored = _pm.mirror_update_to_catalog_twin(
             product_id=product_id, current=current, patch={**patch, **fields}, db=get_db()
         )
     except Exception:  # noqa: BLE001
         logger.warning("[CATALOGUE] catalog mirror after a write skipped for %s", product_id, exc_info=True)
+    if mirror_outcome is not None:
+        mirror_outcome["saved"] = mirrored
     close_catalogue_asks(product_id, "The item is catalogued.")
-    if _pm.compute_catalog_status({**(current or {}), **patch, **fields})[1]:
+    if _pm.gaps_before_cost({**(current or {}), **patch, **fields}):
         return fields, 0
     if deferred_releases is not None:
         deferred_releases.append(product_id)
