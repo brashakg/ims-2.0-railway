@@ -69,7 +69,7 @@ async def barcode_lifecycle_trace(
     # The code as typed finds the unit in any letter case; everything after
     # that is looked up by the unit's OWN code, the one other records carry.
     code = barcode
-    stock_id = ""
+    stock_id = ""  # a failed unit lookup still lets the sales and returns run
     sold_on = None
     try:
         # 1. Stock unit
@@ -107,12 +107,14 @@ async def barcode_lifecycle_trace(
         logger.warning("[INV-12] stock_unit lookup failed for barcode %s: %s", barcode, exc)
 
     try:
-        # 4. Sales: orders where an item carries this barcode, or the order
-        #    the unit was sold on.
+        # 4. Sales: the scanned unit on a line, its original barcode, or
+        #    the order stamped by a typed-item sale on the unit itself.
         sales_filter: list = [
             {"items.barcode": code},
             {"order_items.barcode": code},
         ]
+        if stock_id:
+            sales_filter.append({"items.stock_id": stock_id})
         if sold_on:
             sales_filter.append({"order_id": sold_on})
         orders = list(

@@ -248,7 +248,8 @@ def _assert_serialized_stock_available(
     NOTE: this is a pre-persist availability ASSERT -- a strict improvement over
     the silent oversell, but check-then-act, so two highly-concurrent orders for
     the last unit can still both pass. The atomic guards (claim_one_available /
-    the now-guarded mark_sold) are what actually make the WRITE safe.
+    the guarded mark_sold, which _claim_scanned_units runs before the save for
+    every scanned unit) are what actually make the WRITE safe.
     """
     if not store_id or not items_data:
         return
@@ -267,10 +268,22 @@ def _assert_serialized_stock_available(
             continue
         pid = line.get("product_id") or ""
         sid = line.get("stock_id")
+        qty = int(line.get("quantity") or 1)
         if sid:
-            explicit_units.append((str(sid), pid, line.get("product_name") or pid))
-            continue  # explicit unit -> validated by _assert_explicit_unit_sellable
-        need[pid] = need.get(pid, 0) + int(line.get("quantity") or 1)
+            sid, label = str(sid), line.get("product_name") or pid
+            if any(sid == u[0] for u in explicit_units):
+                # Else _mark_units_sold serves the repeat line first-available.
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"'{label}' (unit {sid}) is on this bill twice. One unit "
+                        f"can be sold once -- remove the extra line."
+                    ),
+                )
+            explicit_units.append((sid, pid, label))
+            qty -= 1  # the scanned unit; any extra quantity sells first-available
+        if qty > 0:
+            need[pid] = need.get(pid, 0) + qty
 
     for sid, pid, label in explicit_units:
         _assert_explicit_unit_sellable(stock_repo, sid, pid, label, store_id)
@@ -286,6 +299,15 @@ def _assert_serialized_stock_available(
             avail = stock_repo.find_available(pid, store_id)
         except Exception:  # noqa: BLE001
             continue  # availability lookup failed -> fail-soft
+        if explicit_units:
+            # A unit scanned onto this bill is its own line's: a first-available
+            # line of the same product needs ANOTHER unit.
+            try:
+                flt = stock_repo.sellable_filter(pid, store_id)
+                flt["stock_id"] = {"$in": [u[0] for u in explicit_units]}
+                avail -= stock_repo.count(flt)
+            except Exception:  # noqa: BLE001 -- old repo: count as before
+                pass
         if avail < qty:
             # F2: when the shortfall is caused by the EXPIRY FLOOR, say so --
             # "0 available" on a shelf with 6 visible boxes is not an actionable
@@ -473,17 +495,84 @@ def _legacy_lens_reservation_key(line: dict, fallback_position: int):
     return legacy
 
 
+def _claim_scanned_units(
+    order_id: str,
+    items_data: List[dict],
+    store_id: Optional[str],
+) -> set:
+    """Claim every unit a line names (atomic AVAILABLE -> SOLD) BEFORE the
+    order is saved, and return the claimed stock_ids.
+
+    The gate above is a read, so two tills billing the same scanned unit could
+    both pass it; the loser used to get a bill that took nothing off stock. The
+    claim is the atomic guarded mark_sold, so the loser gets a 409 here, before
+    any bill exists. A lost claim gives back this call's earlier claims first.
+    An unknown unit or a lookup failure stays fail-soft, as the gate is.
+    """
+    try:
+        stock_repo = get_stock_repository()
+    except Exception:  # noqa: BLE001
+        stock_repo = None
+    if stock_repo is None or not order_id:
+        return set()
+    claimed: set = set()
+    for line in items_data or []:
+        sid = line.get("stock_id")
+        if not sid or not _takes_serialized_stock(line):
+            continue
+        sid = str(sid)
+        try:
+            ok = stock_repo.mark_sold(sid, order_id)
+        except Exception:  # noqa: BLE001
+            ok = False
+        if ok:
+            claimed.add(sid)
+            continue
+        try:
+            # Lost the unit since the gate: re-read it for the reason.
+            pid = line.get("product_id") or ""
+            _assert_explicit_unit_sellable(
+                stock_repo, sid, pid, line.get("product_name") or pid, store_id
+            )
+        except HTTPException:
+            _release_claimed_units(order_id, claimed)
+            raise
+    return claimed
+
+
+def _release_claimed_units(order_id: str, stock_ids) -> None:
+    """Give back units _claim_scanned_units took for an order never saved."""
+    if not stock_ids:
+        return
+    try:
+        stock_repo = get_stock_repository()
+        for sid in stock_ids:
+            stock_repo.release_sold_units_for_order(
+                order_id, stock_id=sid, reason="ORDER_NOT_SAVED"
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "[STOCK] could not give back units %s claimed for unsaved order %s: "
+            "%s -- reconcile manually",
+            sorted(stock_ids),
+            order_id,
+            exc,
+        )
+
+
 def _mark_units_sold(
     order_id: str,
     items_data: List[dict],
     store_id: Optional[str],
+    claimed=(),
 ) -> List[str]:
     """For each serialized item on a created order, flip its stock_unit row to
     SOLD with the order_id stamped on it. Returns the list of stock_ids marked.
 
     Two paths:
       1. Item carries an explicit stock_id (POS knew the unit; barcode-scan
-         flow). Just call mark_sold(stock_id, order_id).
+         flow). Already SOLD to this order when `claimed` holds it (the
+         pre-save _claim_scanned_units); else mark_sold(stock_id, order_id).
       2. No stock_id but a real product_id + store_id. FIFO-allocate the first
          AVAILABLE unit via find_by_product_store and mark THAT sold.
 
@@ -528,7 +617,9 @@ def _mark_units_sold(
             if explicit_sid and explicit_sid not in used:
                 # Path 1: POS told us exactly which unit.
                 try:
-                    ok = stock_repo.mark_sold(explicit_sid, order_id)
+                    ok = str(explicit_sid) in claimed or stock_repo.mark_sold(
+                        explicit_sid, order_id
+                    )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "[STOCK] mark_sold(stock_id=%s) failed: %s",
@@ -542,9 +633,9 @@ def _mark_units_sold(
                     # F7: mark_sold is now an ATOMIC guarded write -- False means
                     # the unit was NOT AVAILABLE (already sold / transferred /
                     # quarantined / expired) and NOTHING was written, so a prior
-                    # sale's lineage is intact. The pre-persist gate
-                    # (_assert_explicit_unit_sellable) normally catches this, so
-                    # reaching here means we lost a real race. We deliberately do
+                    # sale's lineage is intact. The pre-save claim
+                    # (_claim_scanned_units) 409s a lost race, so reaching here
+                    # means it could not read the unit. We deliberately do
                     # NOT silently substitute a different unit: the scanned
                     # barcode IS the physical item handed over, and swapping in
                     # another serial would corrupt warranty-by-serial lineage.
@@ -569,7 +660,7 @@ def _mark_units_sold(
                 if not store_id:
                     continue
                 try:
-                    claimed = stock_repo.claim_one_available(
+                    got = stock_repo.claim_one_available(
                         pid, store_id, order_id, used
                     )
                 except Exception as exc:  # noqa: BLE001
@@ -579,9 +670,9 @@ def _mark_units_sold(
                         store_id,
                         exc,
                     )
-                    claimed = None
-                if claimed:
-                    sid = str(claimed)
+                    got = None
+                if got:
+                    sid = str(got)
                 else:
                     # No AVAILABLE unit to claim: genuinely out of stock (the
                     # pre-persist assert normally catches this) or we lost a
