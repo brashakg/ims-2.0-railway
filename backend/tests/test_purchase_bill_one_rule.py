@@ -841,13 +841,16 @@ class TestCreditFromAnUnregisteredSupplierIsFlagged:
             {"description": "Fitting", "qty": 1, "unit_price": 1000.11, "gst_rate": 5}]))
         assert r.status_code == 201, r.text
         # Booked before round 12 (when a bill with no valid supplier GSTIN
-        # began to be booked no-credit): the credit is still claimed.
+        # began to be booked no-credit): the books still claim it, but the
+        # return now excludes the invalid recorded supplier GSTIN.
         db["vendor_bills"].update_many({}, {"$set": {"itc_eligible": True}})
         xc = _crosscheck(db, "E1")
-        assert xc["gstr3b"]["itc"]["total"] == 50.01
+        assert xc["gstr3b"]["itc"]["total"] == 0.0
         row = _row(xc, "Input credit from suppliers with no GSTIN")
         assert row["status"] == "MISMATCH" and row["variance"] == 50.01
         assert "VN-1" in row["note"]
+        assert "already excludes this credit" in row["note"]
+        assert row["sources"]["Credit flagged in books"] == 50.01
 
     def test_a_gstin_given_to_the_supplier_later_does_not_clear_the_bill(self):
         """Panel MEDIUM (gst_itc._itc_unplaced): the row read the vendor
