@@ -834,7 +834,11 @@ def reroutable(order: Optional[Dict[str, Any]]) -> bool:
     """The holds Re-map releases (reroute_held_order): a seller hold, and a
     failed fulfillment-order move -- the move's only other door is a human
     move in Shopify admin, which Shopify may refuse for good."""
-    return seller_held(order) or _held_on(order, ("MOVE_FAILED",))
+    pending = (order or {}).get("fulfillment_route") or {}
+    return seller_held(order) or _held_on(order, ("MOVE_FAILED",)) or bool(
+        (order or {}).get("fulfillment_hold")
+        and any(m.get("status") == "SENDING" for m in pending.get("moves") or [])
+    )
 
 
 def remappable(order: Optional[Dict[str, Any]]) -> bool:
@@ -1394,7 +1398,10 @@ def _past_remap(db, order: Dict[str, Any]) -> Optional[str]:
     return refund_or_return(db, order)
 
 
-def _remap_refusal(db, order: Dict[str, Any], took_over: bool) -> Optional[str]:
+def _remap_refusal(
+    db, order: Dict[str, Any], took_over: bool, *,
+    before_routing: bool = False, routing: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
     """Why Re-map must not touch the order AS IT IS NOW (None: go on). Run
     once the lease is held, and again after the routing read -- a cancel, a
     refund or a fulfilment may land while Shopify answers. A Re-map that
@@ -1417,8 +1424,18 @@ def _remap_refusal(db, order: Dict[str, Any], took_over: bool) -> Optional[str]:
     # once it has): re-claiming now would claim the order twice.
     if "fulfillment_breakdown" not in order and not took_over:
         return "its booking is still claiming stock -- press Re-map again in a moment"
-    if any(m.get("status") == "SENDING" for m in (order.get("fulfillment_route") or {}).get("moves") or []):
-        return "a fulfillment-order move for it is on the wire -- press Re-map again in a moment"
+    sending = [m for m in (order.get("fulfillment_route") or {}).get("moves") or []
+               if m.get("status") == "SENDING"]
+    if sending and not before_routing:
+        # A crashed sender may have committed its Shopify move before losing
+        # the reply. Reconcile only a fresh proof for EVERY exact requested FO
+        # and target. A missing/closed/replaced FO or different location stays
+        # held; no uncertain move is sent again.
+        locations = {f.get("id"): f.get("location_id") for f in _open_fos(routing or {})}
+        if any(not m.get("to_location_id") or
+               locations.get(m.get("fulfillment_order_id")) != m["to_location_id"]
+               for m in sending):
+            return "a fulfillment-order move for it is on the wire -- press Re-map again in a moment"
     return None
 
 
@@ -1751,7 +1768,7 @@ async def reroute_held_order(db, order_id: str) -> Dict[str, Any]:
     # press carries on at once.
     settled = was_settled = not took_over
     try:
-        why = _remap_refusal(db, order, took_over)
+        why = _remap_refusal(db, order, took_over, before_routing=True)
         if why:
             return refused(why)
         routing = await read_routing(db, str(order.get("shopify_order_id") or ""))
@@ -1770,7 +1787,7 @@ async def reroute_held_order(db, order_id: str) -> Dict[str, Any]:
         # The order as it is NOW: the checks again, on what the write is
         # conditioned on.
         order = coll.find_one({"order_id": order_id}) or {}
-        why = _remap_refusal(db, order, took_over)
+        why = _remap_refusal(db, order, took_over, routing=routing)
         if why:
             return refused(why)
         old_route = order.get("fulfillment_route") or {}
@@ -1855,7 +1872,9 @@ async def reroute_held_order(db, order_id: str) -> Dict[str, Any]:
                 unset["stock_hold_reason"] = ""
             settled = False  # the write lifts the hold: unsettled until the claim is stamped
             written = coll.update_one(
-                {"order_id": order_id, "reroute_lease_at": mine, **{k: order.get(k) for k in HOLD_CAS}},
+                {"order_id": order_id, "reroute_lease_at": mine,
+                 "fulfillment_route.moves": old_route.get("moves"),
+                 **{k: order.get(k) for k in HOLD_CAS}},
                 {"$set": update, "$unset": unset},
             )
             if not getattr(written, "matched_count", 0):

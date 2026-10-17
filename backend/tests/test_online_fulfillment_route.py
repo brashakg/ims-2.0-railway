@@ -1460,11 +1460,8 @@ def _challan(world, monkeypatch, order_id, entity=None):
 
 
 def test_the_challan_and_the_invoice_give_a_pos_shop_one_answer(world, monkeypatch):
-    """[LOW-MEDIUM] Round 25, item 7: a POS order (no route) at BV Dhanbad,
-    whose store.gstin 20AAAAA... its company (moved to WizOpt) does not hold.
-    The tax-invoice door issued it from 20AAAAA...; the delivery challan
-    (POS roles, the Orders screen) refused it. One rule now: both issue,
-    both under 20AAAAA...."""
+    """Both GST-document doors refuse a shop's former company's GSTIN.
+    They issue only once the shop carries a registration its entity owns."""
     db = world["db"]
     _stock(db, "BV-BOK-01", "P-RB", 1)
     world["shop"].fo(FO_1, LOC_BOK)
@@ -1472,15 +1469,21 @@ def test_the_challan_and_the_invoice_give_a_pos_shop_one_answer(world, monkeypat
     _shop(db, "BV-DHN-01", "BV Dhanbad", "20AAAAA0000A1Z5", LOC_DHN)
     wizopt = {"entity_id": "ENT-WO", "legal_name": "WizOpt", "gstins": [
         {"gstin": "20WWWWW0000W1Z5", "state_code": "20"}]}
+    db.entities.insert_one(wizopt)
     db.stores.update_one({"store_id": "BV-DHN-01"}, {"$set": {"entity_id": "ENT-WO"}})
     pos = {k: v for k, v in booked.items() if not k.startswith(("fulfillment", "shopify"))}
     db.orders.insert_one({**pos, "order_id": "POS-59201", "store_id": "BV-DHN-01",
                           "channel": "POS", "source": "pos", "invoice_number": None})
 
+    assert "legal entity" in _invoice_refusal(world, monkeypatch, "POS-59201")
+    assert "legal entity" in _challan(world, monkeypatch, "POS-59201", entity=wizopt)
+    assert db.orders.find_one({"order_id": "POS-59201"})["invoice_number"] is None
+
+    db.stores.update_one({"store_id": "BV-DHN-01"}, {"$set": {"gstin": "20WWWWW0000W1Z5"}})
     assert _invoice_refusal(world, monkeypatch, "POS-59201") is None
     page = _challan(world, monkeypatch, "POS-59201", entity=wizopt)
     assert "Delivery Challan" in page, page
-    assert "20AAAAA0000A1Z5" in page and "20WWWWW0000W1Z5" not in page
+    assert "20WWWWW0000W1Z5" in page and "20AAAAA0000A1Z5" not in page
 
 
 def test_a_duplicate_delivery_mid_claim_keeps_the_move_and_writes_stock_after_the_claim(world, monkeypatch):
@@ -2179,7 +2182,7 @@ def test_a_shop_invoicing_from_a_gstin_its_company_does_not_hold_is_held(world, 
     [p] = order["fulfillment_route"]["problems"]
     assert p["code"] == "SHOP_GSTIN_MISSING" and "20BBBBB2222B1Z2" in p["message"], p
     assert order["fulfillment_hold"] is True and route_mod.seller_held(order)
-    assert "20BBBBB2222B1Z2" in _invoice_refusal(world, monkeypatch, res["order_id"])
+    assert "legal entity" in _invoice_refusal(world, monkeypatch, res["order_id"])
     assert getattr(_clear_hold(world, monkeypatch, res["order_id"]), "status_code", None) == 409
 
     db.stores.update_one({"store_id": "BV-DHN-01"}, {"$set": {"gstin": "20BBBBB2222B1Z2"}})
@@ -2271,7 +2274,9 @@ def test_remap_waits_for_the_bookings_claim_and_its_move(world, monkeypatch, sta
 
     out = _remap(world, monkeypatch, payload)
 
-    assert not out["ok"] and "press Re-map again in a moment" in out["message"], out
+    assert not out["ok"], out
+    assert ("press Re-map again in a moment" in out["message"] or
+            "which billed it" in out["message"]), out
     _untouched(world, res, order)
 
 
@@ -4290,17 +4295,9 @@ def test_a_half_claim_that_cannot_be_settled_keeps_the_lease(world, monkeypatch)
         assert_no_active_rx_hold(after)
 
 
-def test_a_remap_dead_with_its_move_on_the_wire_lets_go_once_its_claim_settled(world, monkeypatch):
-    """[LOW-MEDIUM] Round 17, item 2: MOVE_FAILED at Ranchi; Re-map writes,
-    claims, stamps its claim and dies with its move on the wire (SENDING),
-    its lease stale. Every later press refused ('on the wire') and kept the
-    lease, so once the human moved the order in Shopify admin and cleared the
-    hold, the dispatch gate refused it forever. Its claim settled, the
-    refused press lets the lease go."""
-    from api.routers.orders import assert_no_active_rx_hold
-
+def _crashed_sending_move(world, monkeypatch, shopify_id):
     db = world["db"]
-    payload, res, _o = _move_failed_at_ranchi(world, 61120)
+    payload, res, _o = _move_failed_at_ranchi(world, shopify_id)
     oid = res["order_id"]
     real = shopify_push._graphql
 
@@ -4317,14 +4314,69 @@ def test_a_remap_dead_with_its_move_on_the_wire_lets_go_once_its_claim_settled(w
     assert [m["status"] for m in crashed["fulfillment_route"]["moves"]] == ["SENDING"]
     assert "fulfillment_breakdown" in crashed and crashed["fulfillment_hold"] is True
     db.orders.update_one({"order_id": oid}, {"$set": {"reroute_lease_at": "2000-01-01T00:00:00+00:00"}})
+    return payload, oid
+
+
+def test_a_remap_dead_with_its_move_on_the_wire_releases_the_lease_but_keeps_the_route_hold(world, monkeypatch):
+    """A settled claim releases its stale lease, but an unproven Shopify move
+    stays held and offered for Re-map; Clear Hold cannot discard it."""
+    from fastapi import HTTPException
+    from api.routers.orders import assert_no_active_rx_hold
+
+    db = world["db"]
+    payload, oid = _crashed_sending_move(world, monkeypatch, 61120)
 
     out = _remap(world, monkeypatch, payload)
 
     assert not out["ok"] and "on the wire" in out["message"], out
     assert "reroute_lease_at" not in db.orders.find_one({"order_id": oid})
-    # The human moves it in Shopify admin and clears the hold, as its text says.
+    # Clear Hold has no verified routing result and cannot discard this hold.
     assert _clear_hold(world, monkeypatch, oid)["released"] == ["STOCK"]
-    assert_no_active_rx_hold(db.orders.find_one({"order_id": oid}, {"_id": 0}))
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert after["fulfillment_hold"] is True
+    assert after["fulfillment_route"]["hold_reason"]
+    assert route_mod.remappable(after)
+    with pytest.raises(HTTPException):
+        assert_no_active_rx_hold(after)
+
+
+@pytest.mark.parametrize("proof", ["exact", "wrong_location", "different_fo", "unread", "changed_before_write"])
+def test_a_crashed_sending_move_recovers_only_from_fresh_exact_target_proof(world, monkeypatch, proof):
+    from api.routers.orders import assert_no_active_rx_hold
+
+    db, shop = world["db"], world["shop"]
+    payload, oid = _crashed_sending_move(world, monkeypatch, 61121)
+    before_units = _units(db, oid)
+    shop.fos = []
+    shop.fo(FO_2 if proof == "different_fo" else FO_1,
+            LOC_BOK if proof == "wrong_location" else LOC_RAN)
+    if proof == "unread":
+        shop.read_error = "routing unavailable"
+    if proof == "changed_before_write":
+        route = route_mod.route_order
+
+        def changed(*args, **kwargs):
+            result = route(*args, **kwargs)
+            db.orders.update_one({"order_id": oid}, {
+                "$set": {"fulfillment_route.moves.0.status": "FAILED"},
+            })
+            return result
+
+        monkeypatch.setattr(route_mod, "route_order", changed)
+    moves_before = len([q for q, _ in shop.calls if "imsFulfillmentOrderMove" in q])
+
+    result = _remap(world, monkeypatch, payload)
+
+    assert len([q for q, _ in shop.calls if "imsFulfillmentOrderMove" in q]) == moves_before
+    assert _units(db, oid) == before_units
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    if proof == "exact":
+        assert result["ok"], result
+        assert not after["fulfillment_hold"] and not after["fulfillment_route"]["moves"]
+        assert_no_active_rx_hold(after)
+    else:
+        assert not result["ok"] and after["fulfillment_hold"], result
+        assert after["fulfillment_route"]["hold_reason"]
 
 
 @pytest.mark.parametrize("door", ["ims", "shopify"])
