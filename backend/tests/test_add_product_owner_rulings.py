@@ -1172,8 +1172,20 @@ def test_b_guard_an_edit_form_price_save_leaves_a_stale_key_alone(door):
         "identity_key": "carrera|ca8895|807", "name": "Carrera CA8895 Eyeglasses",
         "mrp": 1000.0, "offer_price": 900.0, "attributes": dict(_CARRERA),
     })
-    newer = door(_form_post("FR", _CARRERA))
-    assert newer["identity_key"] == "carrera|ca8895|807|54"
+    # The create door refuses that twin now (PR #1171: identity_conflict finds
+    # the frame keyed before eye size). Twins made before it are on prod, so
+    # the newer row is stored as they were.
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as refused:
+        door(_form_post("FR", _CARRERA))
+    assert refused.value.status_code == 409
+    door.repo.collection.insert_one({
+        "product_id": "P-NEW", "sku": "FR-CARRERA-CA8895-807-54", "category": "FRAME",
+        "is_active": True, "brand": "Carrera", "model": "CA8895", "color": "807",
+        "size": "54", "identity_key": "carrera|ca8895|807|54",
+        "mrp": 1000.0, "offer_price": 900.0, "attributes": dict(_CARRERA),
+    })
     _put("P-MAIN", brand="Carrera", model="CA8895", attributes=dict(_CARRERA), mrp=1200.0)
     after = door.repo.find_by_id("P-MAIN")
     assert (after["mrp"], after["identity_key"], after["name"]) == (

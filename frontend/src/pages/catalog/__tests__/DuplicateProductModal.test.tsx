@@ -101,6 +101,48 @@ describe('DuplicateProductModal', () => {
     expect(onAddVariant).toHaveBeenCalledTimes(1);
   });
 
+  // Audit C3: the match is a manager's typed-in draft a receipt is holding
+  // stock for. The default (Enter / primary) is to FINISH that draft.
+  it('an ordered draft leads the cataloguer to finish it', () => {
+    const { onAddVariant, onOpenExisting } = renderModal({
+      info: { ...INFO, is_active: false, catalog_status: 'DRAFT', provisional: true },
+    });
+    expect(screen.getByText(/Ordered before it was catalogued/)).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: 'Enter' });
+    expect(onOpenExisting).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: /Finish the ordered item/ }));
+    expect(onOpenExisting).toHaveBeenCalledTimes(2);
+    expect(onAddVariant).not.toHaveBeenCalled();
+  });
+
+  // R1-64: a draft an admin discarded, typed as another kind of product (the
+  // same kind is brought back by the server) -- never a dead "archived".
+  it('a discarded draft of another kind says how to bring it back', () => {
+    renderModal({
+      info: { ...INFO, category: 'FRAME', is_active: false, catalog_status: 'DRAFT', discarded_draft: true },
+    });
+    expect(screen.getByText(/A discarded draft, ordered before as Frame/)).toBeInTheDocument();
+    expect(screen.queryByText(/Inactive \(archived\)/)).toBeNull();
+  });
+
+  // One-rule review: it is in neither the catalogue nor the stock list, so a
+  // variant of it or "Open the existing product" lead nowhere (the hint offers
+  // no link for it either). The way on is back, to choose its kind -- named as
+  // the picker names it.
+  it('a discarded draft of another kind offers only the way back', () => {
+    const { onAddVariant, onOpenExisting, onClose } = renderModal({
+      info: { ...INFO, category: 'WATCH', is_active: false, catalog_status: 'DRAFT', discarded_draft: true },
+    });
+    expect(screen.getByText(/ordered before as Wrist Watch — choose Wrist Watch/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /new colour\/size/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Open the existing product/ })).toBeNull();
+    fireEvent.keyDown(window, { key: 'Enter' });
+    expect(onAddVariant).not.toHaveBeenCalled();
+    expect(onOpenExisting).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: /Go back and choose Wrist Watch/ })).toBeInTheDocument();
+  });
+
   it('busy disables the actions and suppresses the Enter shortcut', () => {
     const { onAddVariant } = renderModal({ busy: true });
     fireEvent.keyDown(window, { key: 'Enter' });

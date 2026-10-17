@@ -1885,3 +1885,16 @@ def test_every_money_router_gate_is_a_cost_mask_constant():
                 wrong.append(f"{mod.__name__}:{line}")
     assert found >= 70, found  # the scan reads the routers, not nothing
     assert not wrong, wrong
+
+
+def test_receiving_managers_are_the_purchase_roles_less_the_accountant(app):
+    # Receiving is managers only (owner 2026-09-28): the gate, its rbac row and
+    # the constant are one object/list, so they cannot drift apart.
+    from api.routers.vendors import grn_void
+    from api.services.rbac_policy._core import RECEIVE
+    from api.services.rbac_policy.rows_vendors import ROWS as VENDOR_ROWS
+
+    assert set(RECEIVE_ROLES) == set(PURCHASE_ROLES) - {"ACCOUNTANT"}
+    assert grn_void._RECEIVE_ROLES is RECEIVE_ROLES
+    (row,) = [r for r in VENDOR_ROWS if r["path"].endswith("/drop-over-order")]
+    assert row["allowed"] is RECEIVE

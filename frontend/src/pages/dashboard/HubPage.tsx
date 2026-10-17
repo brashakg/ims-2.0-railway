@@ -110,9 +110,10 @@ export default function HubPage() {
   // and the POS/Clinical cards are swapped for online-store surfaces below.
   // Display-only: no POS or billing logic changes.
   const isOnlineStoreActive = useIsOnlineStore();
+  const teamTasks = canSeeTeamTasks(user?.roles);
   // Where the Hub's task figure and list lead: a manager's count is the whole
   // shop's, so Team; everyone else's is their own, so Mine.
-  const tasksHome = canSeeTeamTasks(user?.roles) ? '/tasks/team' : '/tasks/mine';
+  const tasksHome = teamTasks ? '/tasks/team' : '/tasks/mine';
   const [meta, setMeta] = useState<HeroMeta>({
     salesToday: '—',
     salesDelta: '',
@@ -219,8 +220,11 @@ export default function HubPage() {
     // list can never disagree: open = not started yet + started.
     setLoadingWork(true);
     Promise.allSettled([
+      // Below manager the server lists only your OWN tasks (owner 09-03), so
+      // ask for them at every shop you reach: a catalogue manager's receipt
+      // task sits at the receipt's shop, not the one active here.
       tasksApi.getTasks(
-        user?.activeStoreId
+        user?.activeStoreId && teamTasks
           ? { store_id: user.activeStoreId, status: OPEN_WORK }
           : { status: OPEN_WORK }
       ),
@@ -269,7 +273,7 @@ export default function HubPage() {
     return () => {
       cancelled = true;
     };
-  }, [user?.activeStoreId, isOnlineStoreActive]);
+  }, [user?.activeStoreId, isOnlineStoreActive, teamTasks]);
 
   const today = useMemo(() => humanDate(), []);
   const firstName = (user?.name ?? '').split(/\s+/)[0] ?? '';

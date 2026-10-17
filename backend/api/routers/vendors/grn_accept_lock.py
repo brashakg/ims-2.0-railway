@@ -204,6 +204,22 @@ def _claim_grn_for_accept(grn_repo, grn_id: str, user_id) -> Optional[str]:
     return token
 
 
+def _claimed_receipt(grn_repo, grn_id: str, token: Optional[str]) -> dict:
+    """The receipt as it stands once this call holds its accept claim. A copy
+    read before the claim can predate a write another holder made under it --
+    'Not received' (drop_over_order) rewrites a receipt's lines -- so every
+    claim holder decides from this read, never from its caller's. Unreadable:
+    the claim is handed back and nothing is done (503)."""
+    doc = grn_repo.find_by_id(grn_id)
+    if not doc:
+        _release_grn_accept_claim(grn_repo, grn_id, token)
+        raise HTTPException(
+            status_code=503,
+            detail="Could not read this goods receipt again -- try again. Nothing was changed.",
+        )
+    return doc
+
+
 def _guarded_grn_write_retried(grn_repo, flt: dict, patch: dict, *, what, grn_id):
     """_guarded_grn_write, retried once on _GRN_WRITE_ERROR and LOUD if it still
     cannot be written.
@@ -455,6 +471,26 @@ def _grn_accept_heartbeat_tick(grn_repo, grn_id: str, token, state: dict) -> Non
     state["confirmed_at"] = now
 
 
+def _number_is_this_receipts_alone(number) -> bool:
+    """True when exactly one receipt carries `number`. A read error reads
+    True -- fail CLOSED: the number branch then still counts the units (at
+    worst one extra blocks a void or a mint, loudly), where dropping it would
+    let a moved legacy unit be received twice. No database reads False."""
+    try:
+        from ._shared import get_grn_repository
+
+        repo = get_grn_repository()
+        if repo is None:
+            return False
+        coll = getattr(repo, "collection", None)
+        if coll is not None and callable(getattr(coll, "count_documents", None)):
+            return int(coll.count_documents({"grn_number": number}) or 0) == 1
+        return len(repo.find_many({"grn_number": number}) or []) == 1
+    except Exception:  # noqa: BLE001
+        logger.error("[VENDOR] receipt-number uniqueness check failed for %s", number, exc_info=True)
+        return True
+
+
 def _grn_already_minted(stock_repo, flt: dict) -> int:
     """How many units this GRN LINE has already put into stock_units.
 
@@ -477,16 +513,35 @@ def _grn_already_minted(stock_repo, flt: dict) -> int:
     raise RuntimeError("stock repository exposes no way to count minted units")
 
 
-def _receipt_units(stock_repo, grn_id, **match) -> int:
-    """Units goods receipt `grn_id` put in stock (narrowed by `match`),
-    WHEREVER THEY ARE NOW. A stock transfer rewrites a unit's source_type and
-    source_id (transfers._rehome) but never its grn_id, which the mint
-    stamps; a unit minted before that stamp has no grn_id and is matched the
-    old way. No unit fits both counts. Raises like _grn_already_minted, so
-    every caller fails closed. The accept's mint, its refusal advice, the void
-    and the order's count of what arrived all ask this."""
+def _receipt_units(stock_repo, grn: dict, **match) -> int:
+    """Units goods receipt `grn` (the receipt doc) put in stock, narrowed by
+    `match`, WHEREVER THEY ARE NOW: read by the unit's ORIGIN, never its
+    current source (owner 2026-10-01). THE one count of "units already
+    received from this receipt / line" -- the accept's per-line repeat guard
+    and its refusal advice, the void's stock gate, 'Not received' and the
+    order's count of what arrived (po_detail._received_by_product) all ask
+    it.
+
+    A stock transfer rewrites a unit's source_type and source_id
+    (transfers._rehome) but never its grn_id, which the mint stamps. A unit
+    minted before that stamp has no grn_id: it is matched by its source, or
+    -- once a transfer has rewritten that -- by the receipt's grn_number,
+    stamped at mint since #310 and never rewritten. Receipt numbers are not
+    unique on prod (before #711 every BV-... shop shared one minute-stamped
+    series), so the number names a unit only when it belongs to this receipt
+    alone. No unit fits both counts. Raises like _grn_already_minted, so
+    every caller fails closed.
+
+    ponytail: a unit minted before #310 (2026-05-28) AND transferred since
+    matches nothing, nor does a pre-grn_id unit of a duplicated number that
+    has been transferred; backfill its grn_id if prod ever has one."""
+    grn_id = grn.get("grn_id")
     stamped = _grn_already_minted(stock_repo, {**match, "grn_id": grn_id})
-    legacy = {**match, "grn_id": None, "source_type": "GRN", "source_id": grn_id}
+    origin = [{"source_type": "GRN", "source_id": grn_id}]
+    number = grn.get("grn_number")
+    if number and _number_is_this_receipts_alone(number):
+        origin.append({"grn_number": number})
+    legacy = {**match, "grn_id": None, "$or": origin}
     return stamped + _grn_already_minted(stock_repo, legacy)
 
 
