@@ -253,7 +253,7 @@ async def get_last_purchase_cost(
             if not can_access_store_scoped(grn.get("store_id"), current_user):
                 continue
             for pid in (lines & wanted) - costs.keys():
-                paid = _receipt_price_paid(stock_repo, grn.get("grn_id"), pid)
+                paid = _receipt_price_paid(stock_repo, grn, pid)
                 if paid:
                     _take(pid, paid, grn, grn.get("accepted_at"))
 

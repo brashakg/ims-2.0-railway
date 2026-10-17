@@ -22,6 +22,7 @@ import { useEffect, useRef } from 'react';
 import { CopyPlus, ExternalLink, Undo2, ImageOff, AlertTriangle } from 'lucide-react';
 import type { DuplicateProductInfo } from '../../services/api/products';
 import { resolveApiAssetUrl } from '../../services/api/client';
+import { CANONICAL_TO_PICKER, CATEGORIES } from '../../domain/catalog/productAdd/categoryFields';
 
 export interface DuplicateProductModalProps {
   /** The 409 `existing` payload. */
@@ -43,8 +44,34 @@ function rupees(v: number | null | undefined): string {
     : `₹${Number(v).toLocaleString('en-IN')}`;
 }
 
+/** A category as the picker names it ('Wrist Watch', 'Clock'), so the popup,
+ *  the hint and the category tiles say one thing. */
+function pickerName(category: unknown): string {
+  const raw = String(category || '').toUpperCase();
+  const code = CANONICAL_TO_PICKER[raw] || raw;
+  return (
+    CATEGORIES.find((c) => c.code === code)?.name ||
+    (raw ? raw.toLowerCase().replace(/_/g, ' ') : 'another category')
+  );
+}
+
 /** Small active/draft/inactive status note for the existing row. */
 function statusNote(info: DuplicateProductInfo): { text: string; tone: 'ok' | 'warn' } {
+  if (info.provisional) {
+    return {
+      text: 'Ordered before it was catalogued — finish this one; its held stock goes on the shelf when you save',
+      tone: 'warn',
+    };
+  }
+  if (info.discarded_draft) {
+    // Same kind of product: the server already brought it back (provisional
+    // above). Another kind: say how to bring it back, never a dead "archived".
+    const kind = pickerName(info.category);
+    return {
+      text: `A discarded draft, ordered before as ${kind} — choose ${kind} as the category to bring it back`,
+      tone: 'warn',
+    };
+  }
   if (info.is_active === false) return { text: 'Inactive (archived)', tone: 'warn' };
   if (String(info.catalog_status || '').toUpperCase() === 'DRAFT') {
     return { text: 'Draft — in your catalog, not sellable yet', tone: 'warn' };
@@ -60,6 +87,14 @@ export function DuplicateProductModal({
   busy = false,
 }: DuplicateProductModalProps) {
   const primaryRef = useRef<HTMLButtonElement | null>(null);
+  // Audit C3: a manager's typed-in draft is not "a product to add a variant
+  // to" -- it is THE product, waiting to be finished. Lead there.
+  const finishDraft = Boolean(info.provisional);
+  // A discarded draft typed as another kind: neither a variant of it nor the
+  // stock list (it is in neither) -- the only way on is back, to choose its
+  // kind (the hint offers no link for it either).
+  const discardedOther = Boolean(info.discarded_draft) && !finishDraft;
+  const onPrimary = discardedOther ? onClose : finishDraft ? onOpenExisting : onAddVariant;
 
   // Keyboard contract: Enter = default action (add variant), Esc = go back.
   // Bound on window so it works no matter where focus sits; the parent form's
@@ -73,12 +108,12 @@ export function DuplicateProductModal({
       } else if (e.key === 'Enter' && !busy) {
         e.preventDefault();
         e.stopPropagation();
-        onAddVariant();
+        onPrimary();
       }
     };
     window.addEventListener('keydown', onKeyDown, true);
     return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [onAddVariant, onClose, busy]);
+  }, [onPrimary, onClose, busy]);
 
   // Land focus on the primary action so Enter/Tab flow starts there.
   useEffect(() => {
@@ -167,26 +202,44 @@ export function DuplicateProductModal({
           </div>
 
           {/* Actions */}
+          {discardedOther ? (
+            <div className="mt-4">
+              <button
+                ref={primaryRef}
+                type="button"
+                onClick={onClose}
+                className="btn-primary w-full flex items-center justify-center gap-2"
+              >
+                <Undo2 className="w-4 h-4" />
+                Go back and choose {pickerName(info.category)}
+                <kbd className="qa-kbd ml-1">Enter</kbd>
+              </button>
+            </div>
+          ) : (
           <div className="mt-4 space-y-2">
             <button
               ref={primaryRef}
               type="button"
               disabled={busy}
-              onClick={onAddVariant}
+              onClick={onPrimary}
               className="btn-primary w-full flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              <CopyPlus className="w-4 h-4" />
-              {busy ? 'Loading…' : 'Add a new colour/size of this model'}
+              {finishDraft ? <ExternalLink className="w-4 h-4" /> : <CopyPlus className="w-4 h-4" />}
+              {busy
+                ? 'Loading…'
+                : finishDraft
+                  ? 'Finish the ordered item'
+                  : 'Add a new colour/size of this model'}
               {!busy && <kbd className="qa-kbd ml-1">Enter</kbd>}
             </button>
             <button
               type="button"
               disabled={busy}
-              onClick={onOpenExisting}
+              onClick={finishDraft ? onAddVariant : onOpenExisting}
               className="btn-secondary w-full flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              <ExternalLink className="w-4 h-4" />
-              Open the existing product
+              {finishDraft ? <CopyPlus className="w-4 h-4" /> : <ExternalLink className="w-4 h-4" />}
+              {finishDraft ? 'Add a new colour/size of this model' : 'Open the existing product'}
             </button>
             <button
               type="button"
@@ -197,6 +250,7 @@ export function DuplicateProductModal({
               Go back <kbd className="qa-kbd ml-1">Esc</kbd>
             </button>
           </div>
+          )}
         </div>
       </div>
     </div>

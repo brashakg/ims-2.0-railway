@@ -1446,9 +1446,9 @@ def _all_catalog_products() -> List[Dict]:
     return list(CATALOG_PRODUCTS.values())
 
 
-def _spine_product_id(repo, catalog_doc: Optional[Dict]) -> Optional[str]:
-    """The billing SPINE's product_id for a catalog twin -- the ONE resolver
-    both catalog doors' spine sync (PUT is_active / price / tier / hsn / gst,
+def _spine_of(repo, catalog_doc: Optional[Dict]) -> Optional[Dict]:
+    """The billing SPINE row of a catalog twin -- the ONE resolver both
+    catalog doors' spine sync (PUT is_active / price / tier / hsn / gst,
     DELETE is_active) key their `products` write on.
 
     A legacy / convergence twin shares the spine id. A DOOR-created twin
@@ -1463,7 +1463,22 @@ def _spine_product_id(repo, catalog_doc: Optional[Dict]) -> Optional[str]:
     product is sold from at POS, and for a size variant -- whose only
     off-sale marker is the spine's is_active (online_stock_writeback lists
     an inactive spine at 0) -- the next stock pass put the size straight
-    back on sale. None when there is no spine (a BVI-only twin) or the read
+    back on sale. None when there is no spine (a BVI-only twin).
+
+    Strict reads (the one rule, _spine_ids, then _pm.strict_find_many): a
+    read error RAISES, never reads as "no spine" -- BaseRepository.find_by_id
+    prints it and answers None, and DELETE would then discard an ordered
+    draft as an ordinary product. _spine_product_id is the fail-soft id."""
+    if repo is None or not catalog_doc:
+        return None
+    sid = _spine_ids(repo, [catalog_doc])[0]
+    rows = _pm.strict_find_many(repo, {"product_id": sid}) if sid else []
+    return rows[0] if rows else None
+
+
+def _spine_product_id(repo, catalog_doc: Optional[Dict]) -> Optional[str]:
+    """The spine id of a catalog twin (_spine_of's, by the one rule
+    _spine_ids). None when there is no spine (a BVI-only twin) or the read
     failed (fail-soft, as every caller's spine sync is)."""
     if repo is None or not catalog_doc:
         return None
@@ -1537,6 +1552,41 @@ def _twins_of(repo, spines: List[Optional[Dict]]) -> List[Optional[Dict]]:
         mine.sort(key=lambda t: (t["id"] != s.get("pim_product_id"), t["id"] != sid))
         out.append(mine[0] if mine else None)
     return out
+
+
+
+def _products_coll():
+    """The `products` (spine) collection, or None when it cannot be reached --
+    then no spine is known, and no catalogue door can write one either (their
+    spine syncs go through the same store, fail-soft)."""
+    from ..dependencies import get_product_repository
+
+    try:
+        return getattr(get_product_repository(), "collection", None)
+    except Exception:  # noqa: BLE001
+        logger.warning("[CATALOG] products store unreachable", exc_info=True)
+        return None
+
+
+def _refuse_ordered_draft(doc: Optional[Dict]) -> None:
+    """An item a manager ordered on a PO before it was catalogued (audit C1)
+    already HAS its billing row. It is finished in the product editor
+    (PUT /products/{id}) -- the save that restamps it and puts the units its
+    receipts hold on the shelf. The import review's save / approve would write
+    around that door, so they refuse it and say where to go. The one rule
+    (product_master.is_ordered_draft) decides, read on a copy of the doc so
+    nothing stamped here is ever saved."""
+    probe = dict(doc or {})
+    _pm.stamp_ordered_drafts([probe], _products_coll())
+    if probe["ordered_draft"]:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This item was ordered on a purchase order before it was "
+                "catalogued. Finish it in the product editor (Catalogue > Needs "
+                "review > open it); its held stock goes on the shelf when you save."
+            ),
+        )
 
 
 def _next_sku_counter(prefix: str, db=None) -> int:
@@ -1862,6 +1912,14 @@ async def list_catalog_products(
     source: Optional[str] = Query(
         default=None, description="Filter by import source, e.g. 'bvi_import'."
     ),
+    ordered_draft: Optional[bool] = Query(
+        default=None,
+        description=(
+            "true = only items a manager ordered on a PO before they were "
+            "catalogued (they carry spine_product_id and open in the product "
+            "editor); false = none of them -- the import-review queue."
+        ),
+    ),
     photo: Optional[str] = Query(
         default=None,
         pattern="^(has|missing)$",
@@ -1893,6 +1951,8 @@ async def list_catalog_products(
     # an unsupplied `photo` arrives as its Query default object, not None.
     if not isinstance(photo, str):
         photo = None
+    if not isinstance(ordered_draft, bool):
+        ordered_draft = None
     if not isinstance(sort, str) or sort not in _IMPORTED_SORTS:
         sort = None
 
@@ -1935,12 +1995,16 @@ async def list_catalog_products(
             or search_lower in p.get("sku", "").lower()
             or search_lower in str(p.get("attributes", {})).lower()
         ]
+    # Needs review = an ordered draft (product_master.is_ordered_draft, read off
+    # its product) or an import awaiting review: the one rule the count and
+    # the badge read too (online_catalog.catalog_counts).
+    _pm.stamp_ordered_drafts(products, _products_coll())
     if needs_review is not None:
-        products = [
-            p for p in products if bool(p.get("needs_review", False)) == needs_review
-        ]
+        products = [p for p in products if _pm.in_needs_review(p) == needs_review]
     if source:
         products = [p for p in products if p.get("source") == source]
+    if ordered_draft is not None:
+        products = [p for p in products if p["ordered_draft"] == ordered_draft]
     # 'all' = no active filter; otherwise the legacy boolean equality match.
     if is_active != "all":
         active_bool = is_active in ("true", "True")
@@ -1958,6 +2022,14 @@ async def list_catalog_products(
         rows.sort(key=lambda t: key(*t), reverse=reverse)
         products = [p for p, _ in rows]
         facts = [f for _, f in rows]
+    elif needs_review is True:
+        # In the Needs-review list ONLY, an ordered draft (audit C1) leads:
+        # stock is, or soon will be, waiting on it. Everywhere else it sorts
+        # by date like any product.
+        products.sort(
+            key=lambda p: (p["ordered_draft"], _catalog_sort_key(p)),
+            reverse=True,
+        )
     else:
         # Sort by created date (imported docs coalesce to migrated_at)
         products.sort(key=_catalog_sort_key, reverse=True)
@@ -1996,7 +2068,9 @@ async def get_catalog_product(
         raise HTTPException(status_code=404, detail="Product not found")
 
     # F35: the one product-cost rule, as on the list and /products.
-    product = mask_cost(product, current_user, "product")
+    product = dict(mask_cost(product, current_user, "product"))
+    # The drawer's 'Ordered - finish it' reads the one rule, as the list does.
+    _pm.stamp_ordered_drafts([product], _products_coll())
     return {"product": product}
 
 
@@ -2292,6 +2366,7 @@ async def update_catalog_product(
     existing = _get_catalog_product(product_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Product not found")
+    _refuse_ordered_draft(existing)
     # Work on a COPY: in no-DB mode _get_catalog_product returns the LIVE
     # in-memory dict, so mutating it mid-handler would leak partial edits into
     # the store on a later 4xx AND defeat the compare-and-swap write below
@@ -2610,7 +2685,7 @@ async def update_catalog_product(
         )
 
     # Products-convergence: keep the billing SPINE in sync with this catalog edit
-    # (the spine resolved by _spine_product_id). Propagate price / tier / gst /
+    # (the spine resolved by _spine_of). Propagate price / tier / gst /
     # active so POS bills the updated values. discount_category is upper-cased to
     # match what the cap resolver expects. Keyed on what THIS PUT carried, never
     # on the merged twin: a door-created twin holds no is_active at all (71 of
@@ -2857,6 +2932,7 @@ async def promote_catalog_product(
     doc = _get_catalog_product(product_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Product not found")
+    _refuse_ordered_draft(doc)
     # Approving puts it on sale at the till: only Restore brings an archived
     # product back (catalog_list.switches_on_archived), dry run included.
     if _catalog_list.switches_on_archived(doc, True):
@@ -3068,24 +3144,133 @@ async def delete_catalog_product(
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
-    await _archive_product(product, current_user)
+    # The product it copies decides everything below (a receipt holding it,
+    # whether it is an ordered draft): unreadable, nothing is deleted -- a
+    # read error never passes for "no product" (fail loudly).
+    try:
+        from ..dependencies import get_product_repository
+
+        spine_doc = _spine_of(get_product_repository(), product)
+    except Exception:  # noqa: BLE001
+        logger.error("[CATALOG] spine lookup on delete failed for %s", product_id, exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="Could not read this item's product record, so it was not deleted. Try again.",
+        )
+    refused = _archive_refusal(spine_doc)
+    if refused is not None:
+        raise refused
+    await _archive_product(
+        product,
+        current_user,
+        spine_id=(spine_doc or {}).get("product_id"),
+        discarded_draft=_pm.is_ordered_draft(spine_doc),
+    )
     return {"message": "Product deleted successfully"}
 
 
+def _archive_refusal(spine_doc: Optional[Dict]) -> Optional[HTTPException]:
+    """Why a product cannot be archived now (audit C1), as the refusal to
+    raise -- None when it can. Both archive doors (the single Delete and the
+    Catalog page's bulk Delete) ask it, so neither discards an item behind a
+    receipt's back.
+
+      * A receipt holding units of it: its tasks, the receipt and the draft
+        would all be left pointing at a deleted product. The advice per
+        receipt follows why it holds the item.
+      * An ordered draft an open order line still expects, or a receipt still
+        waits on (draft_discard_blockers): discarded, the box would arrive
+        held behind a deleted product, its task pointing at a Needs-review
+        queue it has left. The refusal names, per blocker, only an action the
+        server allows; orders it cannot read refuse (503) -- fail loudly."""
+    spine_id = (spine_doc or {}).get("product_id")
+    if spine_id:
+        from .vendors.grn_accept import held_receipts
+
+        holding = held_receipts(spine_id)
+        if holding:
+            # A line beyond its order is settled by the store manager's 'Not
+            # received' (or 'Add to stock'), whatever else that receipt
+            # shelved -- finishing the item does nothing for it (R1-14).
+            def _why(g: dict) -> str:
+                number = g.get("grn_number") or g.get("grn_id")
+                reasons = {
+                    (ln or {}).get("reason")
+                    for ln in g.get("unresolved_lines") or []
+                    if (ln or {}).get("product_id") == spine_id
+                }
+                if reasons == {"over_order"}:
+                    return (
+                        f"Receipt {number} holds more of this item than its order "
+                        "asked for: the store manager presses 'Not received' in "
+                        "Receive Goods (or 'Add to stock' if the vendor really "
+                        "sent them)."
+                    )
+                return (
+                    f"Receipt {number} is holding units of this item. Finish the "
+                    "item in the product editor -- or, if none of that receipt's "
+                    "units went on the shelf and they are going back, void it in "
+                    "Receive Goods."
+                )
+
+            return HTTPException(
+                status_code=409,
+                detail=" ".join(_why(g) for g in holding) + " Then delete the item.",
+            )
+    if _pm.is_ordered_draft(spine_doc):
+        from .vendors.grn_accept import draft_discard_blockers
+
+        try:
+            blockers = draft_discard_blockers(spine_id) if spine_id else None
+        except Exception:  # noqa: BLE001 - unreadable reads as "cannot check"
+            logger.error("[CATALOG] discard check could not read for %s", spine_id, exc_info=True)
+            blockers = None
+        if blockers is None:
+            return HTTPException(
+                status_code=503,
+                detail=(
+                    "Could not check the purchase orders and receipts for this "
+                    "draft, so it was not deleted. Try again."
+                ),
+            )
+        if blockers:
+            return HTTPException(
+                status_code=409,
+                detail="This draft was not deleted. " + " ".join(blockers),
+            )
+    return None
+
+
 async def _archive_product(
-    product: Optional[Dict], actor: Dict, *, spine_id: Optional[str] = None
+    product: Optional[Dict],
+    actor: Dict,
+    *,
+    spine_id: Optional[str] = None,
+    discarded_draft: bool = False,
 ) -> None:
     """THE archive rule (soft delete), for the single Delete door and the
     Catalog page's bulk Delete (archive): the catalog twin and its spine go
     is_active False with deleted_at / deleted_by, and a live listing is taken
     down. Never a hard delete. `product` is the twin (None when the spine has
-    none); `spine_id` skips the twin -> spine lookup when the caller has it."""
+    none); `spine_id` skips the twin -> spine lookup when the caller has it.
+    Both doors ask _archive_refusal first.
+
+    `discarded_draft` (an ordered draft, product_master.is_ordered_draft):
+    it leaves the Needs-review queue and is no longer provisional -- finishing
+    a provisional draft switches it on (restamp_on_update), a deleted one must
+    stay off -- and carries the discard mark, so a manager typing the same
+    item on a new order gets THIS draft back (purchase_orders,
+    revive_discarded_draft): its identity key is unique, so a second row for
+    it can never be made. The asks for cataloguing naming it close, and an
+    audit row records who discarded it."""
     deleted_at = datetime.now(timezone.utc).isoformat()
     if product is not None:
         product.pop("_id", None)  # a twin read raw from Mongo; never $set _id
         if not product.get("deleted_at"):
             # Restore puts it back exactly as it was (_restore_product).
             product[ACTIVE_BEFORE_ARCHIVE] = product.get("is_active", True) is not False
+        if discarded_draft:
+            product["needs_review"] = False
         product["is_active"] = False
         product["deleted_at"] = deleted_at
         product["deleted_by"] = actor.get("user_id")
@@ -3113,6 +3298,8 @@ async def _archive_product(
                 "deleted_at": deleted_at,
                 "deleted_by": actor.get("user_id"),
             }
+            if discarded_draft:
+                _patch.update(provisional=False, discarded_draft=True, discarded_at=deleted_at)
             _before = _pr.find_by_id(spine_id) or {}
             if not _before.get("deleted_at"):
                 _patch[ACTIVE_BEFORE_ARCHIVE] = _before.get("is_active", True) is not False
@@ -3125,6 +3312,31 @@ async def _archive_product(
             (product or {}).get("id") or spine_id,
             exc_info=True,
         )
+    if discarded_draft and spine_id:
+        from .vendors.grn_accept import close_catalogue_asks
+
+        close_catalogue_asks(spine_id, "The item was discarded from the catalogue.")
+        # The discard is a decision a later re-order undoes
+        # (revive_discarded_draft audits that side): record who made it.
+        try:
+            from ..dependencies import get_audit_repository
+
+            _audit = get_audit_repository()
+            if _audit is not None:
+                _audit.create(
+                    {
+                        "action": "product.draft_discarded",
+                        "entity_type": "product",
+                        "entity_id": spine_id,
+                        "user_id": actor.get("user_id"),
+                        "detail": {
+                            "sku": (product or {}).get("sku"),
+                            "twin_id": (product or {}).get("id"),
+                        },
+                    }
+                )
+        except Exception:  # noqa: BLE001 - the audit never undoes the delete
+            logger.warning("[CATALOG] discard audit failed for %s", spine_id, exc_info=True)
 
     # Sync audit gap #2 (owner, 2026-09-06): a deleted product must stop being
     # SOLD ONLINE too. The ONE take-down rule (services/online_delist ->
@@ -3336,12 +3548,18 @@ async def bulk_archive_products(
             "in_stock_units": None if stock is None else stock.get(pid, 0),
             "live_online": pid in live,
         }
+        refused = _archive_refusal(spine) if spine and not spine.get("deleted_at") else None
         if spine is None:
             row.update(status="refused", reason="Product not found")
         elif spine.get("deleted_at"):
             row.update(status="refused", reason="Already archived")
+        elif refused is not None:
+            # The single Delete door's rule (audit C1): never behind a receipt.
+            row.update(status="refused", reason=refused.detail)
         elif body.apply:
-            await _archive_product(twin, current_user, spine_id=pid)
+            await _archive_product(
+                twin, current_user, spine_id=pid, discarded_draft=_pm.is_ordered_draft(spine)
+            )
             row["status"] = "done"
         else:
             row["status"] = "ready"

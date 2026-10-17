@@ -47,7 +47,7 @@ import re
 import uuid
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -101,6 +101,8 @@ class ProductMasterError(Exception):
         # existing row so the caller/FE can link to it ("add stock / a variant").
         self.code: Optional[str] = None
         self.conflict: Optional[Dict[str, Any]] = None
+        # EYE_SIZE_NEEDED (identity_conflict): the eye sizes already catalogued.
+        self.sizes: Optional[List[str]] = None
 
 
 # ===========================================================================
@@ -250,7 +252,10 @@ _CATEGORY_SPECS: Dict[str, CategorySpec] = {
         "RG",
         "Reading Glasses",
         required=("brand_name", "model_no", "colour_code"),
-        optional=("subbrand", "power"),
+        # lens_size / bridge_width / temple_length: the Add-Product form's RG
+        # fields (categoryFields.ts). The eye size is part of the identity like
+        # a frame's, so the PO line and the catalogue form key it alike.
+        optional=("subbrand", "power", "lens_size", "bridge_width", "temple_length"),
     ),
     "CONTACT_LENS": CategorySpec(
         "CONTACT_LENS",
@@ -1036,6 +1041,27 @@ def set_twin_tags(doc: Dict[str, Any], tags: Any) -> List[str]:
     return clean
 
 
+_EYE_SIZE = re.compile(r"\s*(\d{2,3})(?!\d)")
+_EYE_BRIDGE_TEMPLE = re.compile(r"\s*\d{2,3}\s*[-/xX]\s*\d{1,2}(\s*[-/xX]\s*\d{2,3})?\s*$")
+
+
+def eye_size_of(value: Any) -> Optional[str]:
+    """A stored size read as an EYE size, the number Add product's eye-size box
+    takes: the leading 2-3 digit number -- 52, "52", "52.0" and "52-18-140" all
+    read "52" -- or nothing for a value that is not one ("M", "Large")."""
+    found = _EYE_SIZE.match(str(value)) if value not in (None, "") else None
+    return str(int(found.group(1))) if found else None
+
+
+def frame_size_of(value: Any) -> Any:
+    """A frame's / sunglass's size as its identity reads it: a legacy
+    eye-bridge-temple text ("52-18-140", "52/18") is its eye size, "52" -- the
+    item typed with eye size 52 -- and any other value is kept as stored."""
+    if value not in (None, "") and _EYE_BRIDGE_TEMPLE.match(str(value)):
+        return eye_size_of(value)
+    return value
+
+
 _MODEL_KEYS = ("model_no", "model_name")
 
 
@@ -1059,10 +1085,18 @@ def _derive_brand_model_color_size(
     attributes: Dict[str, Any], category: Any = None
 ) -> Dict[str, Optional[str]]:
     """Map category attribute keys onto the spine identity columns, read as
-    the category's form shows them (_shown_attributes). A category with no
-    model (Optical Lens) names its sub-brand in the model's place, so the
-    model column and the display name say Crizal."""
+    the category's form shows them (_shown_attributes) -- THE one reading of
+    an item's brand, model, colour and size (identity_parts, the "already
+    exists" summary, the variant option and the identity migration all read
+    it). A category with no model (Optical Lens) names its sub-brand in the
+    model's place, so the model column and the display name say Crizal. An
+    eye-size category's size is its own key as typed, else its legacy `size`
+    read by frame_size_of."""
     attrs = _shown_attributes(attributes, category)
+    size_key = _size_attribute_key(category) or "size"
+    legacy = attrs.get("size")
+    if size_key == "lens_size":
+        legacy = frame_size_of(legacy)
     return {
         "brand": attrs.get("brand_name") or attrs.get("brand"),
         "model": attrs.get("model_no")
@@ -1073,7 +1107,13 @@ def _derive_brand_model_color_size(
         or attrs.get("color_code")
         or attrs.get("colour_name")
         or attrs.get("color"),
-        "size": attrs.get("size"),
+        # The category's OWN size key first: a frame's / sunglass's eye size
+        # is its registry's lens_size, and `size` (which left their registry)
+        # can still hold a legacy "52-18-140" beside it -- read first, it keyed
+        # the frame apart from the same frame typed with eye size 52 (C2).
+        # Each eye size is its own item (owner 09-28). A legacy row with only
+        # "52-18-140" is the 52 item; a typed eye size is kept as typed (F13).
+        "size": attrs.get(size_key) or legacy,
     }
 
 
@@ -1288,7 +1328,10 @@ def existing_product_summary(existing: Dict[str, Any]) -> Dict[str, Any]:
     colour = (
         attrs.get("colour_code") or attrs.get("colour_name") or existing.get("color")
     )
-    size = existing.get("size") or attrs.get("lens_size") or attrs.get("size")
+    size = (
+        _derive_brand_model_color_size(attrs, existing.get("category"))["size"]
+        or existing.get("size")
+    )
     # A contact lens or reading glass is one product per power (owner
     # 2026-09-28): the create door keeps it in attributes.power (the form also
     # sends a contact lens's as cl_power); a reader takes it from here, never
@@ -1321,6 +1364,14 @@ def existing_product_summary(existing: Dict[str, Any]) -> Dict[str, Any]:
         "offer_price": existing.get("offer_price"),
         "is_active": existing.get("is_active"),
         "catalog_status": existing.get("catalog_status"),
+        # Ordered before it was catalogued and not finished (is_ordered_draft):
+        # the popup leads the cataloguer to FINISH this draft (its held stock
+        # goes on the shelf when he does), not to add a second product or
+        # read it as archived. A finished row still marked reads finished.
+        "provisional": is_ordered_draft(existing),
+        # A draft an admin discarded: typed again as the SAME kind of product
+        # it comes back (revive_discarded_draft); the popup says so (R1-64).
+        "discarded_draft": revivable_discarded_draft(existing),
         "image_url": main_photo(existing),
     }
 
@@ -1422,9 +1473,12 @@ def rekey_on_edit(
 ) -> None:
     """An edit that changes what tells a product apart (any identity_parts
     input: an eye size, a contact lens's power or fit, a colour...) re-keys it
-    by the create rule, setting patch['identity_key'], and is refused (409
-    DUPLICATE_PRODUCT, the create door's error) when ANOTHER product already
-    has that identity. A name the create door minted says what the product is
+    by the create rule, setting patch['identity_key'], and is refused by the
+    create door's own "we already have this" rule (identity_conflict): 409
+    DUPLICATE_PRODUCT when ANOTHER product already has that identity (a frame
+    keyed before eye size joined the key included), 422 EYE_SIZE_NEEDED when
+    it leaves a frame without the eye size its siblings are catalogued by. A
+    name the create door minted says what the product is
     (a lens's power, a frame's colour), so it is re-minted with the key
     (patch['name']); a typed name stays. The SKU never moves: readable SKUs
     are for new products only (owner 2026-09-28). A stored value that is not a
@@ -1466,13 +1520,24 @@ def rekey_on_edit(
         return
     if new is None or new == old:
         return
-    other = (
-        product_repo.find_by_identity_key(new)
-        if hasattr(product_repo, "find_by_identity_key")
-        else None
-    )
-    if other is not None and other.get("product_id") != current.get("product_id"):
-        raise _duplicate_error(other)
+    if product_repo is not None:
+        brand, model, colour, size = identity_parts(
+            _identity_attributes(merged), merged.get("category")
+        )
+        err = identity_conflict(
+            {
+                "category": resolve_category(merged.get("category")),
+                "brand": brand,
+                "model": model,
+                "color": colour,
+                "size": size,
+                "identity_key": new,
+            },
+            product_repo,
+            self_id=current.get("product_id"),
+        )
+        if err is not None:
+            raise err
     patch["identity_key"] = new
     if "name" not in patch and name_was_minted(current):
         patch["name"] = minted_name(merged) or current["name"]
@@ -1536,10 +1601,12 @@ def find_similar_products(
     filter (spec: siblings are same-category). No new index is needed: the
     identity_key index serves the prefix scan.
 
-      * exact_match  -- the row whose identity_key equals compute_identity_key(
-                        brand, model, colour, size): the row a create would 409
-                        against. NOT category-filtered (the create-door dup
-                        check isn't either -- parity over prettiness).
+      * exact_match  -- the row a create would 409 against, by THE create
+                        door's rule (identity_conflict). NOT category-filtered
+                        (the door's check isn't either -- parity over
+                        prettiness).
+      * eye_size_needed -- the eye sizes the door's 422 EYE_SIZE_NEEDED names
+                        for an eye-size item typed without one, else [].
       * siblings     -- same category + brand + model, ANY colour/size, capped
                         at `limit`, exact match excluded (the warning line
                         already shows it).
@@ -1549,8 +1616,11 @@ def find_similar_products(
     FAIL-SOFT: any DB trouble returns the empty shape -- the strip simply does
     not render; it must never block or 5xx the Add-Product flow.
     """
+    # ONE shape for every answer, the empty one included (the hint reads
+    # eye_size_needed whatever the lookup found).
     empty: Dict[str, Any] = {
         "exact_match": None,
+        "eye_size_needed": [],
         "siblings": [],
         "model_colour_count": 0,
     }
@@ -1565,19 +1635,32 @@ def find_similar_products(
         if sibling_query is None:
             return empty
 
-        exact_key = compute_identity_key(brand, model, colour, size)
-        exact_doc = (
-            products_collection.find_one({"identity_key": exact_key})
-            if exact_key
-            else None
+        # "Exact" is THE create door's answer (identity_conflict), never a
+        # rule of its own: a frame keyed before eye size joined the key, a
+        # sizeless frame catalogued by eye size and a discarded draft get the
+        # same answer here as on Save.
+        from database.repositories.product_repository import ProductRepository
+
+        answer = identity_conflict(
+            {
+                "category": canonical,
+                "brand": brand,
+                "model": model,
+                "color": colour,
+                "size": size,
+                "identity_key": compute_identity_key(brand, model, colour, size),
+            },
+            ProductRepository(products_collection),
         )
+        code = getattr(answer, "code", None)
+        exact = answer.conflict if code == "DUPLICATE_PRODUCT" else None
 
         docs = list(
             products_collection.find(sibling_query)
             .sort("identity_key", 1)
             .limit(int(limit) + 1)
         )
-        exact_ident = (exact_doc or {}).get("identity_key")
+        exact_ident = (exact or {}).get("identity_key")
         siblings = [
             existing_product_summary(d)
             for d in docs
@@ -1605,7 +1688,9 @@ def find_similar_products(
             )
 
         return {
-            "exact_match": existing_product_summary(exact_doc) if exact_doc else None,
+            "exact_match": exact,
+            # Typed without the eye size it is catalogued by: Save asks for it.
+            "eye_size_needed": list(answer.sizes) if code == "EYE_SIZE_NEEDED" else [],
             "siblings": siblings,
             "model_colour_count": model_colour_count,
             # What decides this answer: the form keeps it while only other
@@ -2232,6 +2317,18 @@ def _build_pim_doc(
             "sku": parent.get("sku"),
         }
         doc["ecom"]["locally_modified"] = False
+    if is_ordered_draft(spine):
+        # Ordered before it was catalogued (ruling 13): the cataloguer's work.
+        # It sits in the Needs-review queue (count, badge and list read
+        # is_ordered_draft via in_needs_review; the catalog population
+        # excludes it) until it is
+        # finished, and names its spine so the queue opens the spine editor --
+        # it already HAS a billing row, so the import "approve" path does not
+        # apply. mirror_update_to_catalog_twin clears the flag when it is
+        # finished. No is_active here: a twin never carries a projected flag
+        # (the drawer's spine sync relies on that, test_variant_of_rule).
+        doc["needs_review"] = True
+        doc["spine_product_id"] = spine.get("product_id")
     return doc
 
 
@@ -2387,7 +2484,8 @@ def _variant_row_for(
         "sku": spine.get("sku"),
         "parent_product_id": parent.get("pim_product_id") or parent.get("product_id"),
         "parent_sku": parent.get("sku"),
-        "option_size": attrs.get("size") or spine.get("size"),
+        "option_size": _derive_brand_model_color_size(attrs, spine.get("category"))["size"]
+        or spine.get("size"),
         "mrp": spine.get("mrp"),
     }
     if attrs.get("gtin"):
@@ -2501,6 +2599,29 @@ _DOOR_IDENTITY_ALIASES = {
 }
 
 
+def _size_attribute_key(category: Any) -> Optional[str]:
+    """Where a flat top-level `size` lands: the category's OWN registry key --
+    or nowhere (None) for a category that records no size at all (WATCH,
+    CONTACT_LENS, ...): its catalogue form has no size field, so a size typed
+    on a PO line would key the draft apart from the catalogued item and mint
+    a hidden twin (audit C2/C3).
+
+    A frame's (and sunglass's) eye size lives in `lens_size` -- `size` was
+    REMOVED from their registry, and the Add-Product form saves lens_size. The
+    alias used to write `size` regardless, so the same Boss 1700 C2 52 got a
+    4-part identity_key off the PO's "not in the catalogue?" line and a 3-part
+    one off the catalogue form, the duplicate guard never matched the two, and
+    every typed-in frame became a hidden twin (audit C2/C3). Categories that do
+    keep `size` in their registry (ACCESSORIES) keep it."""
+    spec = category_spec(category)
+    if spec is not None:
+        fields = spec.required + spec.optional
+        if "size" in fields:
+            return "size"
+        return "lens_size" if "lens_size" in fields else None
+    return "size"
+
+
 def normalise_door_payload(payload: Dict[str, Any], *, source: str) -> Dict[str, Any]:
     """Fold a door's create payload into the canonical create kwargs.
 
@@ -2515,6 +2636,10 @@ def normalise_door_payload(payload: Dict[str, Any], *, source: str) -> Dict[str,
     for top_key, attr_key in _DOOR_IDENTITY_ALIASES.items():
         val = p.get(top_key)
         if val is not None and not (isinstance(val, str) and not val.strip()):
+            if top_key == "size":
+                attr_key = _size_attribute_key(p.get("category"))
+                if attr_key is None:
+                    continue
             attrs.setdefault(attr_key, val)
     # The model lands in the field its category's form shows: Model No and/or
     # Model Name (a frame shows both: both, as before), else an Optical Lens's
@@ -2781,33 +2906,6 @@ def clone_and_vary(
     return {"source_id": source_id, "created": created, "errors": errors}
 
 
-def find_existing_product(spine: Dict[str, Any], product_repo) -> Optional[Dict[str, Any]]:
-    """The product already on the spine that `spine` (a build_canonical_product
-    doc) would duplicate -- by SKU, by brand+model+colour identity, or by
-    barcode -- or None. The ONE duplicate rule: create_product refuses on it,
-    and a door that must know the answer before it writes (a PO line typed in
-    instead of picked) asks the same question here."""
-    if product_repo is None:
-        return None
-    existing = product_repo.find_by_sku(spine["sku"])
-    if (
-        existing is None
-        and spine.get("identity_key")
-        and hasattr(product_repo, "find_by_identity_key")
-    ):
-        existing = product_repo.find_by_identity_key(spine["identity_key"])
-    if (
-        existing is None
-        and spine.get("barcode")
-        and hasattr(product_repo, "find_by_barcode")
-    ):
-        try:
-            existing = product_repo.find_by_barcode(spine["barcode"])
-        except Exception:  # noqa: BLE001
-            existing = None
-    return existing
-
-
 def create_product(
     *,
     category: Any,
@@ -2904,13 +3002,12 @@ def create_product(
         return spine
 
     # --- Hub Phase 1: duplicate HARD-BLOCK (409 + show-existing) ---
-    # Refuse a product that already exists by SKU, by brand+model+colour identity,
-    # or by barcode (when one rides along). The DB unique indexes are the
-    # race-safe backstop (handled at the create below). Pre-check first so the
-    # common case returns the existing row for the FE to link to.
-    existing = find_existing_product(spine, product_repo)
-    if existing is not None:
-        raise _duplicate_error(existing)
+    # The DB unique indexes are the race-safe backstop (handled at the create
+    # below). Pre-check first so the common case returns the existing row for
+    # the FE to link to.
+    conflict = identity_conflict(spine, product_repo)
+    if conflict is not None:
+        raise conflict
 
     # --- STEP 1: spine FIRST + alone (single-document atomic create) ---
     # raise_on_duplicate=True so a race lost to the unique index surfaces as a
@@ -2984,6 +3081,280 @@ def create_product(
             logger.warning("[PM] audit write failed for %s: %s", product_id, exc)
 
     return created
+
+
+def strict_find_many(product_repo, flt: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """find_many that RAISES on a read error. BaseRepository.find_many prints
+    and returns [] -- for a duplicate check that is "nothing exists", a
+    licence to create a twin. Reads the raw collection when there is one; a
+    repo may offer its own `find_many_strict` (the PO's order-aware view)."""
+    own = getattr(product_repo, "find_many_strict", None)
+    if callable(own):
+        return list(own(flt))
+    coll = getattr(product_repo, "collection", None)
+    if coll is not None and callable(getattr(coll, "find", None)):
+        return list(coll.find(flt))
+    if callable(getattr(product_repo, "find_many", None)):
+        return list(product_repo.find_many(flt) or [])
+    # A minimal store with no list read: an exact identity key it can answer.
+    if set(flt) == {"identity_key"} and isinstance(flt["identity_key"], str):
+        row = product_repo.find_by_identity_key(flt["identity_key"])
+        return [row] if row else []
+    return []
+
+
+def _catalogue_unreadable() -> "ProductMasterError":
+    err = ProductMasterError(
+        "Could not check the catalogue for this item, so nothing was created. "
+        "Try again.",
+        status=503,
+        field="lens_size",
+    )
+    err.code = "CATALOGUE_UNREADABLE"
+    return err
+
+
+def _keyed_before_eye_size(
+    spine: Dict[str, Any], key: str, product_repo
+) -> Optional[Dict[str, Any]]:
+    """A frame catalogued before eye size joined the key (0cfb09d) still
+    carries the 3-part brand|model|colour key until
+    scripts/migrate_identity_key_tighten.py has re-keyed it. Typed WITH its
+    eye size, the same frame keys 4-part and would miss it -- a silent twin.
+    So an eye-size item also looks up its key without the size, and a row
+    found there is the same product when ITS eye size (derived the one way,
+    _derive_brand_model_color_size) is the one typed. A row there with no eye
+    size, or another one, is a different item."""
+    if _size_attribute_key(spine.get("category")) != "lens_size" or key.count("|") < 3:
+        return None
+    sizeless, typed_size = key.rsplit("|", 1)
+    # Strict: a read error raises (identity_conflict answers 503), never "no row".
+    # A store that offers no list read at all (a minimal stub) is asked by key.
+    for row in strict_find_many(product_repo, {"identity_key": sizeless}):
+        if row.get("identity_key") != sizeless:
+            continue
+        if _row_eye_size(row) == typed_size:
+            return row
+    return None
+
+
+def _row_eye_size(row: Dict[str, Any]) -> str:
+    """A stored row's EYE size, normalised: the derived size, else a legacy
+    top-level `size`, read by eye_size_of. A row keyed before eye size joined
+    the key that HAS one is a sized item: the migration re-keys it with it.
+    One whose size is no eye size ("M") is not -- Save never asks for a size
+    the eye-size box cannot take, and a sizeless line matches it by its key."""
+    attrs = row.get("attributes") if isinstance(row.get("attributes"), dict) else {}
+    derived = _derive_brand_model_color_size(attrs, row.get("category"))["size"] or row.get("size")
+    return normalise_identity_component(eye_size_of(derived))
+
+
+def identity_conflict(
+    spine: Dict[str, Any], product_repo, self_id: Optional[str] = None
+) -> Optional[ProductMasterError]:
+    """THE one "we already have this" rule. The create door's guard (above),
+    the PO's typed-line check (purchase_orders) and an edit's re-key
+    (rekey_on_edit, `self_id` the product being edited, which is never its
+    own twin) all run it, so no two doors answer the same item differently.
+
+    A product that exists by SKU, brand+model+colour(+size) identity or barcode
+    -> the 409 naming it. An eye-size category item WITHOUT its eye size whose
+    brand/model/colour is catalogued BY eye size (each eye size is its own item,
+    owner 09-28) -> 422 EYE_SIZE_NEEDED naming the sizes: it cannot be told
+    apart from them, so it is never created as a sizeless twin."""
+    def _other(row):
+        return None if row is not None and self_id and row.get("product_id") == self_id else row
+
+    # A blank SKU names no product (find_one({"sku": None}) would match any row
+    # without one).
+    existing = _other(product_repo.find_by_sku(spine["sku"])) if spine.get("sku") else None
+    key = spine.get("identity_key")
+    eye_item = _size_attribute_key(spine.get("category")) == "lens_size"
+    sizeless = not normalise_identity_component(spine.get("size"))
+    legacy_sized: List[Dict[str, Any]] = []
+    if existing is None and key and hasattr(product_repo, "find_by_identity_key"):
+        existing = _other(product_repo.find_by_identity_key(key))
+        # A frame keyed before eye size joined the key still carries the 3-part
+        # key a SIZELESS typed line makes -- but it has an eye size, so it is a
+        # sized item (the migration re-keys it so): EYE_SIZE_NEEDED below,
+        # never "use it?" (R2-15). One answer before and after the migration.
+        # (A discarded draft there stays the match: its key is the typed one,
+        # and a second row on one key is never made.)
+        if (
+            existing is not None
+            and eye_item
+            and sizeless
+            and _row_eye_size(existing)
+            and not revivable_discarded_draft(existing)
+        ):
+            legacy_sized, existing = [existing], None
+    if existing is None and key and hasattr(product_repo, "find_by_identity_key"):
+        try:
+            existing = _other(_keyed_before_eye_size(spine, key, product_repo))
+        except Exception as exc:  # noqa: BLE001 - fail loud, never a silent twin
+            logger.error("[PRODUCT_MASTER] legacy-key check could not read %s: %s", key, exc)
+            return _catalogue_unreadable()
+    if (
+        existing is None
+        and spine.get("barcode")
+        and hasattr(product_repo, "find_by_barcode")
+    ):
+        try:
+            existing = _other(product_repo.find_by_barcode(spine["barcode"]))
+        except Exception:  # noqa: BLE001
+            existing = None
+    if existing is not None:
+        return _duplicate_error(existing)
+    if not key or not sizeless or not eye_item:
+        return None
+    prefix = key + "|"
+    rows: List[Dict[str, Any]] = []
+    if hasattr(product_repo, "find_many"):
+        try:
+            rows = strict_find_many(
+                product_repo, {"identity_key": {"$regex": "^" + re.escape(prefix)}}
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Fail loud: a swallowed read would answer "no sized rows" and let a
+            # sizeless twin through.
+            logger.error("[PRODUCT_MASTER] eye-size check could not read %s*: %s", prefix, exc)
+            return _catalogue_unreadable()
+    # A discarded draft is not in the catalogue: it never names an eye size
+    # the catalogue "has" (R1-98).
+    sized = legacy_sized + [
+        p
+        for p in rows
+        if str(p.get("identity_key") or "").startswith(prefix)
+        and not revivable_discarded_draft(p)
+        and _other(p) is not None
+    ]
+    if not sized:
+        return None
+    # The eye sizes Add product can type (eye_size_of), never a legacy text.
+    sizes = sorted({_row_eye_size(p) or str(existing_product_summary(p).get("size")) for p in sized})
+    name = " ".join(
+        str(v) for v in (spine.get("brand"), spine.get("model"), spine.get("color")) if v
+    )
+    err = ProductMasterError(
+        f"{name} is in the catalogue by eye size ({', '.join(sizes)}). Type the "
+        "eye size, or pick the item from the catalogue.",
+        status=422,
+        field="lens_size",
+    )
+    err.code = "EYE_SIZE_NEEDED"
+    err.sizes = sizes
+    return err
+
+
+def revivable_discarded_draft(spine: Optional[Dict[str, Any]], category: Any = None) -> bool:
+    """A draft an admin discarded (catalog DELETE's `discarded_draft` mark)
+    that is STILL a discarded draft: switched off and unfinished
+    (catalog_status DRAFT). A row finished or switched on since is an ordinary
+    product, never quietly turned back into a draft. With `category`, the typed
+    item must be the same kind of product (a sunglass typed against a
+    discarded frame is not the same item -- tax and fields differ)."""
+    spine = spine or {}
+    if not (
+        spine.get("discarded_draft")
+        and spine.get("is_active") is False
+        and str(spine.get("catalog_status") or "").upper() == "DRAFT"
+    ):
+        return False
+    if category is None:
+        return True
+    return str(spine.get("category") or "").upper() == str(category or "").upper()
+
+
+def revive_discarded_draft(
+    product_id: str,
+    product_repo,
+    db=None,
+    actor: Optional[str] = None,
+    mrp: Any = None,
+    audit_repo=None,
+    po_number: Optional[str] = None,
+) -> bool:
+    """A discarded draft (revivable_discarded_draft) that a manager orders
+    AGAIN by typing it in comes back as the ordered draft it was: provisional
+    on the spine, in Needs review on its catalogue copy, never switched on, at
+    the MRP the manager typed this time. Its identity key is unique, so a
+    second row for the item can never be made -- without this the discarded
+    row would block every new order of it behind a product nobody can see.
+
+    Called AFTER the order (or the draft edit) that names it is saved
+    (purchase_orders.create_typed_in_products), so a refused order never
+    undoes an admin's discard. The catalogue copy is written
+    first: a failure there leaves the spine still discarded (the order's send
+    then refuses the line, loudly), never a provisional spine whose copy is
+    missing from Needs review. True when revived; False (nothing written) for
+    any other product."""
+    if product_repo is None or not product_id:
+        return False
+    spine = product_repo.find_by_id(product_id)
+    if not revivable_discarded_draft(spine):
+        return False
+    now = datetime.now().isoformat()
+    price: Dict[str, Any] = {}
+    if mrp not in (None, "") and mrp != spine.get("mrp"):
+        price = {"mrp": mrp}
+    # `db is not None`, never a truth test of an attribute: on a pymongo
+    # Database any attribute is a Collection, and bool() of one raises
+    # (the same trap services/online_delist._raw_db works around).
+    if db is not None:
+        cat = db.get_collection("catalog_products")
+        twin_id = spine.get("pim_product_id") or product_id
+        # Back as _build_pim_doc made it: in Needs review, naming its
+        # spine, with no projected is_active and no delete stamp.
+        cat.update_one(
+            {"id": twin_id},
+            {
+                "$set": {
+                    "needs_review": True,
+                    "spine_product_id": product_id,
+                    **price,
+                    **({"pricing.mrp": price["mrp"]} if price else {}),
+                },
+                "$unset": {"is_active": "", "deleted_at": "", "deleted_by": ""},
+            },
+        )
+    product_repo.update(
+        product_id,
+        {
+            "provisional": True,
+            "is_active": False,
+            # No longer deleted: a revived draft is a new buy again, not a
+            # discontinued product (reorder_policy.discontinued reads this).
+            "deleted_at": None,
+            "discarded_draft": False,
+            "revived_at": now,
+            "revived_by": actor,
+            **price,
+        },
+    )
+    logger.info(
+        "[PRODUCT_MASTER] discarded draft %s ordered again by %s: back in Needs review",
+        product_id,
+        actor,
+    )
+    if audit_repo is not None:
+        try:
+            audit_repo.create(
+                {
+                    "action": "product.discarded_draft_revived",
+                    "entity_type": "product",
+                    "entity_id": product_id,
+                    "user_id": actor,
+                    "detail": {
+                        "sku": spine.get("sku"),
+                        "po_number": po_number,
+                        "discarded_at": spine.get("discarded_at"),
+                        **({"mrp_was": spine.get("mrp"), "mrp": price["mrp"]} if price else {}),
+                    },
+                }
+            )
+        except Exception:  # noqa: BLE001 - the audit never undoes the revive
+            logger.warning("[PRODUCT_MASTER] revive audit failed for %s", product_id, exc_info=True)
+    return True
 
 
 def _resolve_variant_parent(
@@ -3167,6 +3538,20 @@ def mirror_update_to_catalog_twin(
         ):
             if key in patch:
                 cat_patch[key] = patch[key]
+        if patch.get("provisional") is False:
+            # A finished provisional draft leaves the Needs-review queue it
+            # entered at the PO door (_build_pim_doc).
+            cat_patch["needs_review"] = False
+        elif not (current or {}).get("provisional") and patch.get("provisional") is not True:
+            # A spine that is no longer an ordered draft (finished by another
+            # door -- the PO/GRN cost promote -- or before this rule) never
+            # leaves its copy in Needs review as "Ordered - finish it": any
+            # later save heals it. Only the ordered-draft mark (spine_product_id)
+            # is touched; an import awaiting review keeps its flag.
+            cat.update_one(
+                {"spine_product_id": product_id, "needs_review": True},
+                {"$set": {"needs_review": False}},
+            )
         if "tags" in patch:
             # The dot-path form of set_twin_tags: same field, same normaliser.
             cat_patch["ecom.seo.tags"] = normalise_tags(patch["tags"])
@@ -3491,6 +3876,14 @@ def missing_required_fields(category: Any, attributes: Dict[str, Any]) -> List[s
     return [fld for fld in spec.required if _is_blank(attrs.get(fld))]
 
 
+def gaps_before_cost(doc: Dict[str, Any]) -> List[str]:
+    """The catalogue gaps a purchase waits on: every gap but cost_price, which
+    the purchase itself brings (rulings 11-13 -- the PO rate, the receipt, the
+    vendor bill write it). THE one rule for the bill's booking gate, send_po
+    and the asks for cataloguing; compute_catalog_status's order is kept."""
+    return [g for g in compute_catalog_status(doc)[1] if g != "cost_price"]
+
+
 def compute_catalog_status(doc: Dict[str, Any]) -> tuple:
     """THE catalog-done chokepoint (write-side stamp).
 
@@ -3609,6 +4002,60 @@ def effective_catalog_status(doc: Dict[str, Any]) -> str:
     return normalised if normalised == CATALOG_STATUS_ACTIVE else CATALOG_STATUS_DRAFT
 
 
+def is_ordered_draft(spine: Optional[Dict[str, Any]]) -> bool:
+    """THE answer to 'is this an item ordered on a PO before it was
+    catalogued, still waiting for the cataloguer' (audit C1): marked at the PO
+    door (`provisional`) AND not finished (its catalogue status is not
+    ACTIVE). A row finished before the finishing save cleared the mark (main
+    never cleared it) is finished: POS-ready, never 'Ordered - finish it'.
+    Every reader asks this -- the catalogue chips and drawer (via the
+    `ordered_draft` the server stamps), Needs review's list / count / badge
+    (stamp_ordered_drafts), the import review's refusal, DELETE's discard
+    rule, the Add-product popup and the PO doors."""
+    return bool((spine or {}).get("provisional")) and (
+        effective_catalog_status(spine or {}) != CATALOG_STATUS_ACTIVE
+    )
+
+
+def stamp_ordered_drafts(copies: List[Dict[str, Any]], products_coll) -> List[Dict[str, Any]]:
+    """Stamp each catalogue copy with `ordered_draft` -- is_ordered_draft of
+    the product it copies -- and, on one, that product's id
+    (`spine_product_id`: a copy made before PR #1171 never carried it). One
+    read of the provisional products; a copy names its product by the
+    product's id (its own spine_product_id, or a shared legacy id), its
+    pim_product_id (a door-made copy's id) or its sku. Mutates and returns
+    `copies`; a read error raises (no queue answers from half the data)."""
+    drafts: Dict[str, str] = {}
+    if products_coll is not None:
+        for spine in products_coll.find({"provisional": True}):
+            if is_ordered_draft(spine):
+                for key in (spine.get("product_id"), spine.get("pim_product_id"), spine.get("sku")):
+                    if key:
+                        drafts[str(key)] = spine.get("product_id")
+    for doc in copies:
+        spine_id = next(
+            (
+                drafts[str(k)]
+                for k in (doc.get("spine_product_id"), doc.get("id"), doc.get("sku"))
+                if k and str(k) in drafts
+            ),
+            None,
+        )
+        doc["ordered_draft"] = spine_id is not None
+        if spine_id:
+            doc["spine_product_id"] = spine_id
+    return copies
+
+
+def in_needs_review(doc: Dict[str, Any]) -> bool:
+    """The Needs-review queue (its list, count and badge) over a stamped copy
+    (stamp_ordered_drafts): an ordered draft, or an import awaiting review. A
+    copy still marked for review whose product is finished is in neither."""
+    return bool(doc.get("ordered_draft")) or (
+        bool(doc.get("needs_review")) and not doc.get("spine_product_id")
+    )
+
+
 def assert_draft_floor(doc: Dict[str, Any]) -> None:
     """Reject (422) a payload below the as_draft FLOOR: even a draft must carry a
     resolvable category PLUS the identity its category actually keys on.
@@ -3671,10 +4118,12 @@ def apply_restamp_atomic(
     coll = getattr(product_repo, "collection", None)
     if coll is not None and hasattr(coll, "find_one_and_update"):
         try:
-            coll.find_one_and_update(
-                {"product_id": product_id, "catalog_status": CATALOG_STATUS_DRAFT},
-                {"$set": fields},
+            guard = (
+                {"catalog_status": CATALOG_STATUS_DRAFT}
+                if "catalog_status" in fields
+                else {"provisional": True}  # the finished-but-still-ordered repair
             )
+            coll.find_one_and_update({"product_id": product_id, **guard}, {"$set": fields})
             return fields
         except Exception as exc:  # noqa: BLE001 - a restamp must never break an edit
             logger.warning("[PM] atomic restamp failed for %s: %s", product_id, exc)
@@ -3711,11 +4160,36 @@ def restamp_on_update(current: Dict[str, Any], patch: Dict[str, Any]) -> Dict[st
     """
     prior = effective_catalog_status(current or {})
     if prior == CATALOG_STATUS_ACTIVE:
-        return {}  # forward-only: live rows are never demoted or re-judged.
+        # forward-only: live rows are never demoted or re-judged. One repair:
+        # a FINISHED row still marked as an ordered draft (finished while
+        # switched off before this rule) leaves the ordered-draft state --
+        # Needs review and the PIM doors' "finish it in the editor" refusal --
+        # on its next save; its is_active is the cataloguer's, untouched.
+        if (current or {}).get("provisional"):
+            # Still a PO-door buy for reorder_policy.discontinued: a finished
+            # row nobody switched on reads new, never 'Discontinued'.
+            return {"provisional": False, "bought_before_catalogued": True}
+        return {}
 
     # prior is an explicit DRAFT: complete -> ACTIVE (auto-flip), else refresh gaps.
     merged = {**(current or {}), **(patch or {})}
     status, gaps = compute_catalog_status(merged)
     if status == CATALOG_STATUS_ACTIVE:
-        return {"catalog_status": CATALOG_STATUS_ACTIVE, "done_gaps": []}
+        fields = {"catalog_status": CATALOG_STATUS_ACTIVE, "done_gaps": []}
+        if (current or {}).get("provisional"):
+            # Ordered before it was catalogued: born inactive ONLY because it
+            # was incomplete (normalise_payload), so finishing it is what makes
+            # it sellable. An is_active False sent in the same save wins -- but
+            # either way it is finished: no longer an ordered draft.
+            fields["provisional"] = False
+            # The PO-door mark reorder_policy.discontinued reads once
+            # `provisional` is gone: finished but never switched on is new.
+            fields["bought_before_catalogued"] = True
+            if (patch or {}).get("is_active") is not False:
+                fields["is_active"] = True
+                # The restamp writes around ProductRepository.update, which is
+                # what stamps this: switched on here, so a later switch-off
+                # reads 'Discontinued' (reorder_policy.discontinued).
+                fields["switched_on_at"] = datetime.now(timezone.utc)
+        return fields
     return {"catalog_status": CATALOG_STATUS_DRAFT, "done_gaps": gaps}
