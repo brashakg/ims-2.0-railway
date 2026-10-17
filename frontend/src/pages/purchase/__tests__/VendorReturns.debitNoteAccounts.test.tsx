@@ -22,6 +22,9 @@ vi.mock('../../../context/ToastContext', () => ({
 vi.mock('../../../context/AuthContext', () => ({
   useAuth: () => ({ user: { activeStoreId: 'BV-TEST-01', roles: [auth.role] } }),
 }));
+vi.mock('../../../hooks/usePOSQueries', () => ({
+  useStores: () => ({ data: [{ store_id: 'BV-TEST-01', name: 'Test shop' }], isLoading: false }),
+}));
 
 import { VendorReturns } from '../VendorReturns';
 
