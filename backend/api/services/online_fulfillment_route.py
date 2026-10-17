@@ -79,7 +79,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -1571,6 +1571,69 @@ def _settle_as_it_stands(db, order: Dict[str, Any]) -> bool:
     _answer_misses(db, oid, order.get("order_number") or oid, booked,
                    "Re-map stopped; its claim, settled as it stands, is whole.")
     return True
+
+
+def claim_the_missing(db, order: Dict[str, Any]) -> Tuple[Optional[str], int]:
+    """THE claim behind clear-hold's release of a stock miss: the units the
+    order's STORED route wants (``_wanted``) and does not hold, claimed with
+    THE claim (shopify_ingest._claim_online_units) at the shops that route
+    names -- never re-routed (Re-map's door), every unit it holds kept. A
+    miss is otherwise never claimed by any door: released as it stood, the
+    unit staff ship stayed AVAILABLE in IMS (sold again at the till, offered
+    on Shopify, a return counting it never claimed). Run under the order's
+    Re-map lease (clear-hold takes it): two presses, or a press and a
+    Re-map, never both claim.
+
+    Returns (why the stock hold must stand -- None: release it, units
+    claimed now). Nothing is claimed for a dead order, or one a refund or
+    return owns (their doors' rules; raises when those rows are unreadable),
+    or a route that names no shop. Still short -> the miss is recorded
+    again and answered as Re-map's own claim answers it (``_answer_misses``:
+    the task is the shop's that is short now)."""
+    from .shopify_ingest import _claim_online_units
+
+    oid = order.get("order_id")
+    if str(order.get("status") or "").upper() in _DEAD or refund_or_return(db, order):
+        return None, 0
+    if "fulfillment_breakdown" not in order:
+        return "its booking is still claiming stock -- try again in a moment", 0
+    route = order.get("fulfillment_route") or {}
+    items = order.get("items") or []
+    want = _wanted(items, route)
+    if not want:
+        return None, 0
+    kept: Dict[str, Dict[str, int]] = {}
+    for (shop, pid), ids in _sold_units(oid).items():
+        n = min(len(ids), want.get((shop, pid), 0))
+        if n:
+            kept.setdefault(shop, {})[pid] = n
+    had = sum(n for per in kept.values() for n in per.values())
+    booked = _open_misses(db, oid)
+    ref = order.get("order_number") or oid
+    breakdown, stores = _claim_online_units(db, oid, ref, items, route, held=kept)
+    _orders(db).update_one(
+        {"order_id": oid}, {"$set": {"fulfillment_breakdown": breakdown, "fulfillment_stores": stores}}
+    )
+    units = _dead_order_units(db, oid)
+    if units:
+        return f"the order was cancelled while the hold was being cleared -- {units}", 0
+    got: Dict[tuple, int] = {}
+    for r in breakdown:
+        key = (str(r["store_id"]), str(r["product_id"]))
+        got[key] = got.get(key, 0) + int(r.get("qty") or 0)
+    claimed = sum(got.values())
+    if claimed > had:
+        _stock_write_back(db, order)
+    _answer_misses(db, oid, ref, booked, "Stock resolved: the missing units were claimed and the hold cleared.")
+    short = sorted({s for (s, p), q in want.items() if got.get((s, p), 0) < q})
+    if short:
+        return (
+            f"{claimed} of {sum(want.values())} unit(s) are claimed; {', '.join(short)} "
+            "still holds none of the rest. Receive or transfer them into that shop "
+            "(the one Shopify routed the order to), then clear the hold again.",
+            claimed - had,
+        )
+    return None, claimed - had
 
 
 async def reroute_held_order(db, order_id: str) -> Dict[str, Any]:
