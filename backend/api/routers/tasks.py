@@ -194,6 +194,25 @@ def _ensure_may_close(task: dict, current_user: dict) -> None:
         )
 
 
+def _ensure_cashier_may_complete(task: dict, current_user: dict) -> None:
+    required = requires_cashier(task)
+    if not required and task.get("sop_template_id") and not task.get("required_role"):
+        # Daily tasks issued before required_role was stored still retain the
+        # source template, so naming a person cannot erase a cashier SOP rule.
+        collection = _sop_collection()
+        if collection is None:
+            raise HTTPException(status_code=503, detail="Could not verify this SOP's required role")
+        try:
+            template = collection.find_one({"template_id": task["sop_template_id"]})
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Could not verify this SOP's required role") from exc
+        if template is None:
+            raise HTTPException(status_code=503, detail="Could not verify this SOP's required role")
+        required = requires_cashier(template)
+    if required and "CASHIER" not in task_roles(current_user):
+        raise HTTPException(status_code=403, detail="The Cashier role is required to complete this task")
+
+
 # ============================================================================
 # SCHEMAS
 # ============================================================================
@@ -906,8 +925,7 @@ async def complete_task(
 
     task = _visible_task(repo, task_id, current_user)
     _ensure_may_close(task, current_user)
-    if requires_cashier(task) and "CASHIER" not in task_roles(current_user):
-        raise HTTPException(status_code=403, detail="The Cashier role is required to complete this task")
+    _ensure_cashier_may_complete(task, current_user)
 
     current_status = canon_status(task.get("status"))
 
@@ -1161,9 +1179,7 @@ async def auto_generate_daily_tasks(
                     items,
                     template_id=tpl.get("template_id"),
                     assignee=uid,
-                    required_role="CASHIER" if {
-                        str(role).strip().upper() for role in tpl.get("assigned_roles") or []
-                    } == {"CASHIER"} else None,
+                    required_role="CASHIER" if requires_cashier(tpl) else None,
                 )
                 if repo.create(task_data):
                     generated_count += 1
@@ -2155,6 +2171,9 @@ async def toggle_sop_checklist_item(
     tpl = tcol.find_one({"template_id": payload.template_id}, {"_id": 0})
     if not tpl:
         raise HTTPException(status_code=404, detail="SOP template not found")
+
+    if payload.completed:
+        _ensure_cashier_may_complete(tpl, current_user)
 
     active_store = payload.store_id or current_user.get("active_store_id")
     # IST audit: same IST day key as the GET above -- a tick at 23:30 IST must

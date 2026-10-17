@@ -74,3 +74,41 @@ def test_cashier_sop_resolves_to_a_person_and_retains_its_requirement(world, mon
     task = db.tasks.find_one({"sop_template_id": "CASH-SOP"})
     assert task["assigned_to"] == uid("CASHIER") and task["required_role"] == "CASHIER"
     assert as_role("CASHIER").patch(f"/api/v1/tasks/{task['task_id']}/complete", json={"completion_notes": "counted cash"}).status_code == 200
+
+
+@pytest.mark.parametrize("role", ["SALES_STAFF", "STORE_MANAGER", "ADMIN", "CASHIER"])
+def test_cashier_sop_checklist_and_legacy_named_task_enforce_the_same_role(world, monkeypatch, role):
+    from api.routers import tasks
+    as_role, db = world
+    db.sop_templates.insert_one({"template_id": "CASH-CHECK", "title": "Cash checklist",
+        "assigned_roles": ["CASHIER"], "steps": [{"step_number": 1, "instruction": "Count cash"}]})
+    monkeypatch.setattr(tasks, "_sop_collection", lambda: db.sop_templates)
+    monkeypatch.setattr(tasks, "_sop_completions_collection", lambda: db.sop_completions)
+    db.tasks.insert_one(_task("OLD-NAMED-SOP", USERS[role]["user_id"], S1, source="SOP", sop_template_id="CASH-CHECK"))
+    task_response = as_role(role).patch("/api/v1/tasks/OLD-NAMED-SOP/complete", json={"completion_notes": "finished"})
+    checklist_response = as_role(role).post("/api/v1/tasks/sop-checklist/item", json={
+        "template_id": "CASH-CHECK", "step_number": 1, "completed": True, "store_id": S1,
+    })
+    expected = 200 if role == "CASHIER" else 403
+    assert task_response.status_code == checklist_response.status_code == expected
+    if expected == 403:
+        assert db.sop_completions.count_documents({}) == 0
+        assert db.tasks.find_one({"task_id": "OLD-NAMED-SOP"})["status"] == "OPEN"
+
+
+@pytest.mark.parametrize("automatic", [False, True])
+def test_escalation_never_completes_cashier_work_by_merging_a_twin(world, monkeypatch, automatic):
+    from api.routers import tasks
+    as_role, db = world
+    db.tasks.update_one({"task_id": "R-CASHIER"}, {"$set": {"escalation_group": "CASH-GROUP"}})
+    db.tasks.insert_one(_task("CASH-TWIN", USERS["STORE_MANAGER"]["user_id"], S1, escalation_group="CASH-GROUP"))
+    monkeypatch.setattr(tasks, "resolve_escalation_target", lambda *args, **kwargs: USERS["STORE_MANAGER"])
+    monkeypatch.setattr(tasks, "should_escalate", lambda task, **kwargs: (task["task_id"] == "R-CASHIER", "overdue"))
+    async def no_notification(*args, **kwargs):
+        return None
+    monkeypatch.setattr(tasks, "notify_escalation", no_notification)
+    path = "/api/v1/tasks/auto-escalate-overdue" if automatic else "/api/v1/tasks/R-CASHIER/escalate"
+    response = as_role("STORE_MANAGER").post(path)
+    assert response.status_code == 200, response.text
+    saved = db.tasks.find_one({"task_id": "R-CASHIER"})
+    assert saved["status"] == "ESCALATED" and saved["required_role"] == "CASHIER"

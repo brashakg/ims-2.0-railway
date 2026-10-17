@@ -5,7 +5,8 @@ def requires_cashier(task: dict) -> bool:
     def cashier(value):
         return str(value or "").strip().upper() == "CASHIER"
 
-    if cashier(task.get("required_role")) or cashier(task.get("assigned_to")):
+    if (cashier(task.get("required_role")) or cashier(task.get("assigned_to"))
+            or {str(role).strip().upper() for role in task.get("assigned_roles") or []} == {"CASHIER"}):
         return True
     # Older reassignments replaced the role with a user id. Their recorded
     # provenance still identifies the work; no data migration is required.
