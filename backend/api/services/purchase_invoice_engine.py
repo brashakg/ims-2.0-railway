@@ -343,7 +343,10 @@ def lines_from_grn(grn: dict, po: Optional[dict]) -> List[dict]:
                 or po_line.get("sku"),
                 "hsn": gi.get("hsn") or po_line.get("hsn"),
                 "qty": accepted,
-                "unit_price": _f(po_line.get("unit_price")),
+                "unit_price": (
+                    _f(po_line.get("unit_price"))
+                    if _f(po_line.get("unit_price")) > 0 else None
+                ),
                 "gst_rate": _f(po_line.get("tax_rate")),
             }
         )

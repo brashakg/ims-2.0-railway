@@ -182,10 +182,18 @@ def buying(shop, monkeypatch):
         {"user_id": "u-acct", "username": "acct", "roles": ["ACCOUNTANT"],
          "store_ids": [STORE], "is_active": True}
     )
+    shop.promo_applications.insert_one({
+        "order_id": "O4", "store_id": STORE, "applied_at": now.isoformat(),
+        "total_discount_given": 100, "estimated_cogs": COST,
+        "net_margin_after_promo": 9999 - COST - 100, "cogs_is_estimated": True,
+        "applied_promos": [{"promo_id": "PROMO1", "promo_name": "Frame offer", "discount_given": 100}],
+    })
     return shop
 
 
-_DAY = datetime.now().date().isoformat()
+from tests.ist_business_day import business_day
+
+_DAY = business_day(datetime.now())
 _WINDOW = f"from_date={_DAY}&to_date={_DAY}"
 # (path, response-specific value-at-cost keys) -- purchase reads.
 PURCHASE_READS = [
@@ -205,6 +213,8 @@ PURCHASE_READS = [
 ]
 # Reports and dashboards worked out from cost.
 REPORT_READS = [
+    (f"/api/v1/analytics/enterprise-kpis?store_id={STORE}", ("gross_margin_percent", "gross_profit")),
+    (f"/api/v1/reports/promotions?store_id={STORE}", ("net_margin_impact", "estimated_cogs", "net_margin_after_promo")),
     (f"/api/v1/reports/inventory/valuation?store_id={STORE}", ("value", "total")),
     (f"/api/v1/reports/profit/by-category?store_id={STORE}&{_WINDOW}",
      ("cost", "profit", "total_profit")),
@@ -371,6 +381,20 @@ def test_an_unpriced_line_is_received_and_billed_its_cost_comes_with_the_bill(cl
         "/api/v1/vendors/purchase-invoices/from-grn/G4", headers=_headers("ACCOUNTANT")
     )
     assert bill.status_code == 200, bill.text
+    assert bill.json()["lines"][0]["unit_price"] is None
+    body = {
+        "vendor_id": "V1", "invoice_number": "UNPRICED-4", "invoice_date": _DAY,
+        "po_id": po_id, "grn_id": "G4",
+        "lines": [{"product_id": "P4", "description": "P4", "qty": QTY,
+                   "unit_price": 0, "gst_rate": 12}],
+    }
+    for path in ("/preview", ""):
+        refused = client.post("/api/v1/vendors/purchase-invoices" + path,
+                              json=body, headers=_headers("ACCOUNTANT"))
+        assert refused.status_code == 422, refused.text
+        assert refused.json()["detail"]["code"] == "INVOICE_PRICE_REQUIRED"
+    assert catalogue.vendor_bills.count_documents({"invoice_number": "UNPRICED-4"}) == 0
+    assert catalogue.products.find_one({"product_id": "P4"}).get("cost_price") is None
 
 
 def test_sending_a_priced_po_raises_no_task(client, catalogue):
@@ -486,7 +510,7 @@ def test_a_counter_role_reads_no_receipt_price_through_a_barcode(client, buying,
 
 @pytest.mark.parametrize("role,sees", (("STORE_MANAGER", False), ("ACCOUNTANT", True)))
 def test_moving_a_return_on_reads_its_price_back_to_accounts_only(client, buying, role, sees):
-    # A manager may move a return on (and type its price at approval) but no
+    # A manager may move an already priced return on, but no
     # manager reads what we paid back (owner ruling 2026-10-12).
     r = client.patch(
         "/api/v1/vendor-returns/VR1/status", json={"status": "approved"}, headers=_headers(role)
@@ -494,6 +518,29 @@ def test_moving_a_return_on_reads_its_price_back_to_accounts_only(client, buying
     assert r.status_code == 200, r.text
     assert r.json()["return"]["status"] == "approved"
     assert bool(_leaks(r.json(), _PRICE_KEYS + ("total_value",))) is sees, r.json()
+
+
+@pytest.mark.parametrize("role", ("STORE_MANAGER", "AREA_MANAGER"))
+def test_return_status_door_cannot_bypass_accounts_price_rule(client, buying, role):
+    buying.vendor_returns.update_one({"return_id": "VR1"}, {"$set": {
+        "items.0.unit_price": None, "total_value": None,
+    }})
+    body = {"status": "approved", "unit_prices": [999]}
+    denied = client.patch("/api/v1/vendor-returns/VR1/status", json=body, headers=_headers(role))
+    assert denied.status_code == 403, denied.text
+    unchanged = buying.vendor_returns.find_one({"return_id": "VR1"})
+    assert unchanged["status"] == "created" and unchanged["items"][0]["unit_price"] is None
+    accepted = client.patch("/api/v1/vendor-returns/VR1/status", json=body, headers=_headers("ACCOUNTANT"))
+    assert accepted.status_code == 200, accepted.text
+    assert buying.vendor_returns.find_one({"return_id": "VR1"})["items"][0]["unit_price"] == 999
+
+
+@pytest.mark.parametrize("role", ("STORE_MANAGER", "AREA_MANAGER"))
+def test_managers_cannot_issue_supplier_credit(client, buying, role):
+    buying.vendor_returns.update_one({"return_id": "VR1"}, {"$set": {"status": "received_by_vendor"}})
+    denied = client.patch("/api/v1/vendor-returns/VR1/status", json={"status": "credit_issued"}, headers=_headers(role))
+    assert denied.status_code == 403, denied.text
+    assert buying.vendor_returns.find_one({"return_id": "VR1"})["status"] == "received_by_vendor"
 
 
 # ---------------------------------------------------------------------------
@@ -683,7 +730,8 @@ def test_the_forecast_drafts_price_their_lines_by_the_one_rule(client, catalogue
     assert {it["product_id"]: it["unit_price"] for it in po["items"]} == {"P1": COST, "P3": None}
 
 
-def test_the_cl_drafts_price_their_lines_by_the_one_rule(client, catalogue, monkeypatch):
+@pytest.mark.parametrize("role", ("ADMIN", "STORE_MANAGER", "AREA_MANAGER"))
+def test_the_cl_drafts_price_their_lines_by_the_one_rule(client, catalogue, monkeypatch, role):
     from api.routers import cl_po
 
     needs = [
@@ -694,11 +742,15 @@ def test_the_cl_drafts_price_their_lines_by_the_one_rule(client, catalogue, monk
     monkeypatch.setattr(cl_po, "_make_vendor_resolver", lambda _db: (lambda _need: "V1"))
     r = client.post(
         "/api/v1/cl-po/generate", json={"store_id": STORE, "source": "gap-planner", "dry_run": True},
-        headers=_headers("ADMIN"),
+        headers=_headers(role),
     )
     assert r.status_code == 200, r.text
     (group,) = r.json()["groups"]
-    assert {ln["product_id"]: ln["unit_price"] for ln in group["lines"]} == {"P1": COST, "LL9": None}
+    if role == "ADMIN":
+        assert {ln["product_id"]: ln["unit_price"] for ln in group["lines"]} == {"P1": COST, "LL9": None}
+    else:
+        assert not _leaks(r.json(), _PRICE_KEYS), r.json()
+        assert {ln["product_id"] for ln in group["lines"]} == {"P1", "LL9"}
 
 
 @pytest.mark.parametrize("role,told", (("STORE_MANAGER", False), ("ACCOUNTANT", True)))
@@ -709,3 +761,22 @@ def test_only_the_roles_that_price_are_told_a_cost_was_recorded(client, buying, 
     reply = _po(client, role, ("P1", {}))
     assert bool(reply["cost_filled"]) is told, reply
     assert buying.products.find_one({"product_id": "P1"})["cost_price"] == COST
+
+
+@pytest.mark.parametrize("suffix", ("", "/stores"))
+@pytest.mark.parametrize("role", ("STORE_MANAGER", "AREA_MANAGER", "CATALOG_MANAGER", "ADMIN"))
+def test_collection_insight_routes_mask_computed_cost(client, buying, monkeypatch, suffix, role):
+    from api.routers import collections_insights as mod
+    monkeypatch.setattr(mod, "_get_db", lambda: buying)
+    monkeypatch.setattr(mod, "_load_collection_or_404", lambda *_a: {"id": "COST-COL", "title": "Frames"})
+    block = {"units_on_hand": 2, "stock_value": COST, "margin_30d": 52.5, "revenue_30d": 9999}
+    monkeypatch.setattr(mod._svc, "kpis", lambda *_a, **_k: dict(block))
+    monkeypatch.setattr(mod._svc, "store_breakdown", lambda *_a, **_k: [{"store_id": STORE, **block}])
+    reply = client.get("/api/v1/collections/COST-COL/insights" + suffix, headers=_headers(role))
+    assert reply.status_code == 200, reply.text
+    data = reply.json()["stores"][0] if suffix else reply.json()
+    assert data["units_on_hand"] == 2 and data["revenue_30d"] == 9999
+    if role == "ADMIN":
+        assert data["stock_value"] == COST and data["margin_30d"] == 52.5
+    else:
+        assert "stock_value" not in data and "margin_30d" not in data

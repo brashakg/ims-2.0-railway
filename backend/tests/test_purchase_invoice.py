@@ -249,9 +249,9 @@ class TestLinesFromGrn:
         assert inv["igst_total"] == 30.0
         assert inv["cgst_total"] == 0.0
 
-    def test_no_po_still_builds_lines_with_zero_price(self):
+    def test_no_po_keeps_draft_price_unknown(self):
         lines = pinv.lines_from_grn(self._grn(), None)
-        assert len(lines) == 1 and lines[0]["unit_price"] == 0.0
+        assert len(lines) == 1 and lines[0]["unit_price"] is None
 
 
 # ===========================================================================

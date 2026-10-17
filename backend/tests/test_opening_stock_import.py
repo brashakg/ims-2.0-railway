@@ -297,6 +297,23 @@ def test_preview_echoes_cost_and_total_value(client, auth_headers, patched):
     assert out["summary"]["total_value"] == pytest.approx(502.5)
 
 
+@pytest.mark.parametrize("path", (_PREVIEW, _COMMIT))
+@pytest.mark.parametrize("role", ("STORE_MANAGER", "AREA_MANAGER", "ADMIN"))
+def test_import_replies_follow_accounts_cost_visibility(client, patched, path, role):
+    from test_counter_roles_no_cost_anywhere import _headers
+    patched(*_TWO_PRODUCTS, {})
+    reply = client.post(path, json={"rows": [{"product_id": "P1", "quantity": 1, "unit_cost": 100.5}]},
+                        headers=_headers(role))
+    assert reply.status_code == 200, reply.text
+    body = reply.json()
+    if role == "ADMIN":
+        assert "100.5" in reply.text
+    else:
+        assert "100.5" not in reply.text
+        assert "total_value" not in body.get("summary", {})
+        assert all("unit_cost" not in row for row in body.get("rows", []))
+
+
 def test_preview_without_cost_has_zero_total_value(client, auth_headers, patched):
     patched(*_TWO_PRODUCTS, {})
     body = {"rows": [{"product_id": "P1", "quantity": 5}]}

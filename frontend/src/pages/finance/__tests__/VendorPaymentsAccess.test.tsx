@@ -84,6 +84,18 @@ describe('FinanceDashboard - vendor payables follow the accounts rule', () => {
     },
   );
 
+  it('withheld purchase costs do not turn revenue into fabricated gross profit', async () => {
+    roles = ['STORE_MANAGER'];
+    api.getPnl.mockResolvedValue({ revenue: 9999, expenses: {} });
+    render(<FinanceDashboard />);
+    await waitFor(() => expect(screen.getByText('Total Revenue').parentElement).toHaveTextContent('9,999'));
+    for (const label of screen.getAllByText('Gross Profit')) {
+      expect(label.parentElement).toHaveTextContent('—');
+      expect(label.parentElement).not.toHaveTextContent('9,999');
+    }
+    expect(screen.getByText('Cost of Goods Sold').parentElement).toHaveTextContent('—');
+  });
+
   it.each([['ACCOUNTANT'], ['ADMIN'], ['SUPERADMIN']])(
     '%s: still sees the tab and the schedule',
     async (role) => {

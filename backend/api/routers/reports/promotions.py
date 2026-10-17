@@ -26,7 +26,10 @@ from ._shared import (
 # at 60% otherwise -- estimated rows are flagged so the owner never mistakes
 # estimated margin for real margin (F11 business rule). Empty + fail-soft when
 # the engine is dark / no applications exist.
-_PROMO_COST_KEYS = ("estimated_cogs", "net_margin_after_promo", "net_margin_impact")
+_PROMO_COST_KEYS = (
+    "estimated_cogs", "net_margin_after_promo", "net_margin_impact",
+    "any_cogs_estimated", "cogs_is_estimated",
+)
 
 
 @router.get("/promotions")

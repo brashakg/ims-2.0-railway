@@ -44,8 +44,8 @@ function mapRevenue(d: any): RevenueData[] {
 function mapPnl(d: any, from: string, to: string): ProfitLossStatement | null {
   if (!d) return null;
   const revenue = Number(d.revenue || 0);
-  const cogs = Number(d.cogs || 0);
-  const grossProfit = Number(d.gross_profit ?? revenue - cogs);
+  const cogs = d.cogs == null ? null : Number(d.cogs);
+  const grossProfit = d.gross_profit == null ? null : Number(d.gross_profit);
   const opex = Number(d.total_expenses || 0);
   // net_profit is ABSENT for any role below ADMIN -- it is revenue - COGS -
   // expenses - PAYROLL, so the backend strips it as a payroll-derived figure.
@@ -60,7 +60,7 @@ function mapPnl(d: any, from: string, to: string): ProfitLossStatement | null {
     cost_of_goods: cogs,
     gross_profit: grossProfit,
     operating_expenses: opex,
-    operating_profit: grossProfit - opex,
+    operating_profit: grossProfit == null ? null : grossProfit - opex,
     tax_expense: 0,
     net_profit: netProfit,
     profit_margin:

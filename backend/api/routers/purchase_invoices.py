@@ -1293,6 +1293,38 @@ def _vendor_gstin(db, vendor: Optional[dict], vendor_id: str) -> Optional[str]:
         return None
 
 
+def _assert_unpriced_po_bill(body, grn_doc):
+    """An unknown PO price must not silently become a zero-cost bill."""
+    zero_lines = [ln for ln in body.lines if ln.product_id and ln.qty > 0
+                  and ln.unit_price <= 0 and ln.taxable is None]
+    po_id = getattr(body, "po_id", None) or (grn_doc or {}).get("po_id")
+    if not zero_lines or not po_id:
+        return
+    try:
+        repo = get_purchase_order_repository()
+        po = repo.find_by_id(po_id) if repo is not None else None
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Could not verify purchase prices. Try again.") from exc
+    if po is None:
+        raise HTTPException(status_code=503, detail="Could not verify purchase prices. Try again.")
+    unpriced = {ln.get("product_id") for ln in po.get("items") or []
+                if pmatch.is_unpriced_line(ln)}
+    if any(ln.product_id in unpriced for ln in zero_lines):
+        raise HTTPException(status_code=422, detail={
+            "code": "INVOICE_PRICE_REQUIRED",
+            "message": "Enter the supplier's price for each unpriced purchase-order item before booking the bill.",
+        })
+
+
+def _compute_invoice_draft(raw_lines, supplier_gstin, recipient_gstin):
+    """Drafts retain missing prices instead of turning them into paid zeroes."""
+    computed = pinv.compute_invoice(raw_lines, supplier_gstin, recipient_gstin)
+    for raw, line in zip(raw_lines, computed["lines"]):
+        if raw.get("unit_price") is None:
+            line["unit_price"] = None
+    return computed
+
+
 def _bill_math(db, vendor, body, grn_doc, current_user):
     """Everything a booking stores about tax: (supplier GSTIN, recipient,
     computed invoice). POST / books it and POST /preview shows it through this
@@ -1301,6 +1333,7 @@ def _bill_math(db, vendor, body, grn_doc, current_user):
     shop is the form's own store_id, never whichever the token names by the
     time Book is pressed. A receipt's shop decides a receipt's bill, so the
     form's shop is only checked (403) when it is the one that counts."""
+    _assert_unpriced_po_bill(body, grn_doc)
     supplier_gstin = _vendor_gstin(db, vendor, body.vendor_id)
     receipt_store = _receipt_store_id(db, grn_doc, body.linked_dc_ids)
     recipient = _bill_recipient(
@@ -2261,9 +2294,7 @@ async def draft_invoice_from_grn(
     )
 
     raw_lines = _draft_lines(db, grn, po)
-    computed = pinv.compute_invoice(
-        raw_lines, supplier_gstin, recipient.get("recipient_gstin")
-    )
+    computed = _compute_invoice_draft(raw_lines, supplier_gstin, recipient.get("recipient_gstin"))
 
     return {
         "status": "DRAFT",
@@ -2360,9 +2391,7 @@ async def draft_invoice_from_dcs(
         db, _receipt_store_id(db, None, ids), None, current_user.get("active_store_id")
     )
 
-    computed = pinv.compute_invoice(
-        raw_lines, supplier_gstin, recipient.get("recipient_gstin")
-    )
+    computed = _compute_invoice_draft(raw_lines, supplier_gstin, recipient.get("recipient_gstin"))
 
     return {
         "status": "DRAFT",

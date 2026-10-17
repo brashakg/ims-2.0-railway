@@ -20,6 +20,7 @@ import { useAuth } from '../../context/AuthContext';
 import api from '../../services/api/client';
 import { rtvDebitNotesApi, type DebitNote } from '../../services/api/rtvDebitNotes';
 import { COST_ROLES } from '../../components/common/CostCell';
+import { PURCHASE_ROLES } from './purchaseRoles';
 import { errMsg } from './invoices/shared';
 
 interface ReturnItem {
@@ -104,6 +105,7 @@ export function VendorReturns() {
   // Workshop staff log a return (item, quantity, reason) but never see or type
   // what was paid: a purchase role prices it (owner ruling 2026-10-12).
   const canPrice = (user?.roles || []).some((r) => COST_ROLES.includes(r));
+  const canMove = (user?.roles || []).some((r) => PURCHASE_ROLES.includes(r));
 
   const [activeTab, setActiveTab] = useState<'active' | 'history'>('active');
   const [isLoading, setIsLoading] = useState(true);
@@ -236,7 +238,7 @@ export function VendorReturns() {
     // A return the workshop logged has no price paid: it is priced at Approve.
     const ret = returns.find(r => r.return_id === returnId);
     const typed = approvePrices[returnId] || {};
-    const unpriced = newStatus === 'approved' && !!ret?.items.some(i => i.unit_price == null);
+    const unpriced = canPrice && newStatus === 'approved' && !!ret?.items.some(i => i.unit_price == null);
     const unitPrices = unpriced
       ? ret!.items.map((i, idx) => (i.unit_price != null ? i.unit_price : typed[idx] ? Number(typed[idx]) : null))
       : null;
@@ -557,7 +559,7 @@ export function VendorReturns() {
 
                   {/* Action Buttons: approve / ship / credit are the purchase
                       roles' (the server refuses anyone else). */}
-                  {activeTab === 'active' && canPrice && (
+                  {activeTab === 'active' && canMove && (
                     <div className="flex gap-2 pt-4 border-t border-gray-300">
                       {ret.status === 'created' && (
                         <button
@@ -585,12 +587,12 @@ export function VendorReturns() {
                       )}
                       {ret.status === 'received_by_vendor' && (
                         <>
-                          <button
+                          {canPrice && <button
                             onClick={() => handleUpdateStatus(ret.return_id, 'credit_issued')}
                             className="flex-1 bg-green-600 hover:bg-green-700 text-white px-3 py-2 rounded text-sm font-medium transition"
                           >
                             Issue Credit
-                          </button>
+                          </button>}
                           <button
                             onClick={() => handleUpdateStatus(ret.return_id, 'replaced')}
                             className="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded text-sm font-medium transition"

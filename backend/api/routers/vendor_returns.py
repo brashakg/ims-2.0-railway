@@ -405,9 +405,14 @@ async def update_return_status(
                 detail=f"Cannot transition from {current_status} to {status_update.status}",
             )
 
-        # A return the workshop logged has no price paid: whoever approves it
-        # prices it, so nothing after approval (ship, credit, the debit note)
-        # runs on an unknown amount.
+        # Moving physical goods and agreeing their price are separate rights.
+        # The same cost rule used by create controls prices at approval too.
+        if status_update.unit_prices is not None and not can_see_cost(
+            current_user, "purchase"
+        ):
+            raise HTTPException(status_code=403, detail="Only accounts or an administrator can set purchase prices.")
+        if status_update.status == "credit_issued" and not can_see_cost(current_user, "purchase"):
+            raise HTTPException(status_code=403, detail="Only accounts or an administrator can record supplier credit.")
         priced_items = None
         if status_update.status == "approved":
             priced_items = _price_unpriced_lines(
