@@ -111,7 +111,7 @@ function routePosts(pv: Record<string, unknown> = preview(), other: unknown = {}
   );
 }
 // The booking form drawer only (the invoice list behind it has tax columns too).
-const form = () => within(screen.getByText('New purchase invoice').closest('.fixed') as HTMLElement);
+const form = () => within(screen.getByText(/^(New purchase invoice|Invoice from GRN)/).closest('.fixed') as HTMLElement);
 const createCalls = () => mockPost.mock.calls.filter((c) => c[0] === '/vendors/purchase-invoices');
 const previewCalls = () => mockPost.mock.calls.filter((c) => String(c[0]).endsWith('/preview'));
 
@@ -193,6 +193,26 @@ describe('F7 - the Approve doors reach the real bill', () => {
 });
 
 describe('F37 + F6 - invoice from a goods receipt', () => {
+  it('an unpriced receipt stays blank and cannot book until accounts enters the supplier price', async () => {
+    routeGets({ '/vendors/purchase-invoices/from-grn/G1': {
+      ...GRN_DRAFT,
+      lines: [{ ...GRN_DRAFT.lines[0], unit_price: null }],
+    } });
+    renderTab('/purchase/invoices?grn_id=G1');
+    await screen.findByDisplayValue('Carrera CA 8895 807');
+    const price = form().getAllByRole('spinbutton')[1] as HTMLInputElement;
+    expect(price.value).toBe('');
+    expect(form().getByRole('button', { name: /Book invoice/i })).toBeDisabled();
+    expect(createCalls()).toHaveLength(0);
+    expect(previewCalls()).toHaveLength(0);
+
+    fireEvent.change(price, { target: { value: '3100' } });
+    await waitFor(() => expect(form().getByRole('button', { name: /Book invoice/i })).toBeEnabled());
+    fireEvent.click(form().getByRole('button', { name: /Book invoice/i }));
+    await waitFor(() => expect(createCalls()).toHaveLength(1));
+    expect(createCalls()[0][1].lines[0].unit_price).toBe(3100);
+  });
+
   it('lines carry the receipt products, HSNs and accepted quantities; the booking sends them', async () => {
     routeGets({ '/vendors/purchase-invoices/from-grn/G1': GRN_DRAFT });
     renderTab('/purchase/invoices?grn_id=G1');
@@ -291,6 +311,7 @@ describe('panel round 2 - every tax figure on the form is the server preview', (
     fireEvent.change(await screen.findByDisplayValue(/Choose: goods, or services/), { target: { value: 'SERVICES' } });
     fireEvent.change(screen.getByDisplayValue('Select supplier...'), { target: { value: 'V1' } });
     fireEvent.change(screen.getByPlaceholderText('Item description'), { target: { value: 'Freight' } });
+    fireEvent.change(form().getAllByRole('spinbutton')[1], { target: { value: '1000' } });
     fireEvent.change(screen.getByPlaceholderText(/GSTIN receiving the supply/), { target: { value: '20AAFCB6528A1ZD' } });
 
     expect(await screen.findByText(/the supplier's GSTIN names no state/)).toBeTruthy();

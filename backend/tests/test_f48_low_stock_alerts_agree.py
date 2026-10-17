@@ -28,6 +28,9 @@ from api.routers.inventory import get_low_stock_alerts, get_stock_alerts  # noqa
 
 _NOW = datetime.utcnow()
 _MGR = {"user_id": "m1", "roles": ["STORE_MANAGER"], "active_store_id": "S1", "store_ids": ["S1"]}
+# The money at cost on an alert is what we pay: the accounts roles read it
+# (owner ruling 2026-10-12), the shop manager reads the same alerts without it.
+_ACCT = {"user_id": "a1", "roles": ["ACCOUNTANT"], "active_store_id": "S1", "store_ids": ["S1"]}
 
 _PRODUCTS = [
     {
@@ -83,10 +86,10 @@ def _wire(mp, units=_UNITS, products=_PRODUCTS):
     return db
 
 
-def _alerts():
+def _alerts(user=_MGR):
     return asyncio.run(
         get_stock_alerts(
-            store_id=None, dead_days=90, lead_time_days=14, limit=200, current_user=_MGR
+            store_id=None, dead_days=90, lead_time_days=14, limit=200, current_user=user
         )
     )
 
@@ -155,11 +158,13 @@ def test_dead_stock_outranks_the_low_list(monkeypatch):
     products = [{**_PRODUCTS[0], "cost_price": 3000}]
     _wire(monkeypatch, units=_units("P-AV", 2, days_old=200), products=products)
     assert [r["_id"] for r in _low()["items"]] == ["P-AV"]  # it IS on the low list
-    res = _alerts()
+    res = _alerts(_ACCT)
     (alert,) = res["alerts"]
     assert alert["alertType"] == "DEAD_STOCK"
     assert alert["costImpact"] == 6000
     assert res["stats"]["deadStockValue"] == 6000
+    (mine,) = _alerts()["alerts"]  # the shop manager: the same alert, no cost
+    assert mine["alertType"] == "DEAD_STOCK" and "costImpact" not in mine
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +218,7 @@ def test_a_discontinued_product_still_selling_is_never_a_reorder(monkeypatch):
         }
         for d in range(20)
     ])
-    (alert,) = _alerts()["alerts"]
+    (alert,) = _alerts(_ACCT)["alerts"]
     assert alert["productName"] == "Ray-Ban RB3025 Aviator - Gold"
     assert alert["alertType"] == "LOW_STOCK"
     assert alert["recommendedOrder"] == 0 and alert["costImpact"] == 0
@@ -432,7 +437,7 @@ def test_a_provisional_product_switched_on_sold_then_retired_is_never_a_reorder(
         _put_products(pid, is_active=False)
     assert _spine(db, pid)["is_active"] is False
     _wire_units(monkeypatch, db, _units(pid, 3))
-    (alert,) = _alerts()["alerts"]
+    (alert,) = _alerts(_ACCT)["alerts"]
     assert alert["alertType"] == "LOW_STOCK"
     assert alert["recommendedOrder"] == 0 and alert["costImpact"] == 0
     (row,) = _low()["items"]

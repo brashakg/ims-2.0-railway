@@ -153,8 +153,10 @@ async def get_budget(
 @router.get("/reconciliation")
 async def get_reconciliation(current_user: dict = Depends(get_current_user)):
     # The one transfer store reach (transfers._in_callers_stores): a shop's
-    # manager never sees another region's transfers or their units' cost.
-    from ..transfers import _in_callers_stores
+    # manager never sees another region's transfers; and the units' cost on
+    # each line is read through the one transfer mask (transfers._for: the
+    # accounts roles only, owner ruling 2026-10-12).
+    from ..transfers import _for, _in_callers_stores
 
     db = _get_db()
     # Inter-store transfers needing reconciliation
@@ -179,5 +181,5 @@ async def get_reconciliation(current_user: dict = Depends(get_current_user)):
 
     return {
         "pending_transfers": len(pending),
-        "transfers": pending,
+        "transfers": [_for(current_user, t) for t in pending],
     }

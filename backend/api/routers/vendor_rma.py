@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 
 from .auth import require_roles
 from ..dependencies import get_db, resolve_store_scope, validate_store_access, user_store_scope
-from ..services.cost_mask import PURCHASE_ROLES
+from ..services.cost_mask import PURCHASE_ROLES, mask_rma
 from ..services.vendor_rma import (
     VendorRMAEngine,
     RMA_REASONS,
@@ -157,10 +157,17 @@ def _with_rupees(doc: dict) -> dict:
     return out
 
 
-def _http_from_result(res: dict) -> HTTPException:
-    """Map an engine fail result to an HTTPException, defaulting to 400."""
+def _masked(doc: dict, user: dict) -> dict:
+    # An RMA's unit costs, credits and write-off are what we pay: read back by
+    # the accounts roles only (owner ruling 2026-10-12, services/cost_mask).
+    return mask_rma(_with_rupees(doc), user)
+
+
+def _http_from_result(res: dict, user: dict) -> HTTPException:
+    """Map an engine fail result to an HTTPException, defaulting to 400. The
+    detail goes through the same mask: a refused close names the variance."""
     code = int(res.get("http", 400))
-    detail = {k: v for k, v in res.items() if k not in ("ok", "http")}
+    detail = mask_rma({k: v for k, v in res.items() if k not in ("ok", "http")}, user)
     return HTTPException(status_code=code, detail=detail or "request failed")
 
 
@@ -194,7 +201,10 @@ async def list_rmas(
         # Defensive: a store-role with no resolved store sees only its reach.
         rows = eng.list(store_ids=list(reach), vendor_id=vendor_id, status=status,
                         skip=skip, limit=limit)
-    return {"rmas": [_with_rupees(r) for r in rows], "total": len(rows)}
+    return {
+        "rmas": [_masked(r, current_user) for r in rows],
+        "total": len(rows),
+    }
 
 
 @router.post("", status_code=201)
@@ -232,7 +242,7 @@ async def raise_rma(
     )
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=res.get("error", "create failed"))
-    return res
+    return mask_rma(res, current_user)
 
 
 @router.get("/{rma_id}")
@@ -245,7 +255,7 @@ async def get_rma(
     if doc is None:
         raise HTTPException(status_code=404, detail="RMA not found")
     validate_store_access(doc.get("store_id"), current_user)
-    return _with_rupees(doc)
+    return _masked(doc, current_user)
 
 
 @router.post("/{rma_id}/authorize")
@@ -267,8 +277,8 @@ async def authorize_rma(
         notes=body.notes or "",
     )
     if not res.get("ok"):
-        raise _http_from_result(res)
-    return res
+        raise _http_from_result(res, current_user)
+    return mask_rma(res, current_user)
 
 
 @router.post("/{rma_id}/dispatch")
@@ -292,8 +302,8 @@ async def dispatch_rma(
         notes=body.notes or "",
     )
     if not res.get("ok"):
-        raise _http_from_result(res)
-    return res
+        raise _http_from_result(res, current_user)
+    return mask_rma(res, current_user)
 
 
 @router.post("/{rma_id}/credit-note")
@@ -357,8 +367,8 @@ async def record_credit_note(
         approval_token=(body.approval_token or "").strip() or None,
     )
     if not res.get("ok"):
-        raise _http_from_result(res)
-    return res
+        raise _http_from_result(res, current_user)
+    return mask_rma(res, current_user)
 
 
 @router.post("/{rma_id}/reject")
@@ -375,8 +385,8 @@ async def reject_rma(
     validate_store_access(doc.get("store_id"), current_user)
     res = eng.reject(rma_id, actor=current_user.get("user_id"), reason=body.reason or "")
     if not res.get("ok"):
-        raise _http_from_result(res)
-    return res
+        raise _http_from_result(res, current_user)
+    return mask_rma(res, current_user)
 
 
 @router.post("/{rma_id}/close")
@@ -400,8 +410,8 @@ async def close_rma(
         write_off_variance=bool(body.write_off_variance),
     )
     if not res.get("ok"):
-        raise _http_from_result(res)
-    return res
+        raise _http_from_result(res, current_user)
+    return mask_rma(res, current_user)
 
 
 # ============================================================================

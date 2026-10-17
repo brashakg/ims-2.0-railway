@@ -44,7 +44,9 @@ _ADMIN = {
 }
 
 
-def _user(roles=("STORE_MANAGER",), active="S1"):
+# The price paid reaches the accounts roles only (owner ruling 2026-10-12);
+# ACCOUNTANT is store-scoped, so the store-scope tests still bite.
+def _user(roles=("ACCOUNTANT",), active="S1"):
     return {
         "user_id": "u1",
         "username": "t",
@@ -307,7 +309,7 @@ def test_a_short_shipped_line_leaves_its_order_price_standing(monkeypatch, p2_li
 
 def test_cross_store_price_not_leaked(monkeypatch):
     # The only order and receipt carrying P1 are for STORE-B; a STORE-A
-    # manager must not see either.
+    # accountant must not see either.
     w = _World(monkeypatch)
     po9 = w.po(9, 420, sent_at="2026-06-12T10:00:00", store="STORE-B")
     w.po(8, 450, sent_at="2026-06-30T10:00:00", store="STORE-B")
@@ -332,6 +334,16 @@ def test_zero_and_missing_prices_skipped(monkeypatch):
         }
     )
     assert _costs("P1,P2,P3") == {}
+
+
+@pytest.mark.parametrize("role", ("STORE_MANAGER", "AREA_MANAGER"))
+def test_a_manager_is_told_no_price_paid(monkeypatch, role):
+    # Owner ruling 2026-10-12: a manager orders by quantity; the server prices
+    # his lines (create_po), the form is never handed what we paid.
+    w = _World(monkeypatch)
+    w.po(1, 420, sent_at="2026-06-12T10:00:00")
+    assert _costs()["P1"]["unit_price"] == 420.0
+    assert _costs(user=_user(roles=(role,))) == {}
 
 
 def test_empty_inputs_and_no_repo(monkeypatch):

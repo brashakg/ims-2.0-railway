@@ -6,7 +6,7 @@
 // ============================================================================
 
 import type { UserRole } from '../../../types';
-import { PAYABLES_ROLES } from '../../../components/common/CostCell';
+import { COST_ROLES } from '../../../components/common/CostCell';
 
 export const inr = (n?: number) => `₹${(Math.round((n || 0) * 100) / 100).toLocaleString('en-IN')}`;
 // Optical GST rates per business rules (5% frames/lenses/CL, 12% certain CL,
@@ -39,4 +39,4 @@ export function errMsg(e: unknown, fb: string) {
 // The accounts roles: they approve a 3-way-match exception (release an ON_HOLD
 // invoice for payment despite a variance) and alone see the bill form's
 // Reverse charge option. Mirrors the _AP_ROLES backend gate.
-export const APPROVE_ROLES: UserRole[] = PAYABLES_ROLES;
+export const APPROVE_ROLES: UserRole[] = COST_ROLES;

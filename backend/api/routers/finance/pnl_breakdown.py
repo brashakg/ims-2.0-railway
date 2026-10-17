@@ -8,6 +8,7 @@ or default was changed.
 from typing import Optional
 from fastapi import Depends, HTTPException
 from ..auth import get_current_user
+from ...services.cost_mask import mask_cost
 from ...services.salary_visibility import SALARY_RESTRICTED_MESSAGE, is_salary_admin
 from ._shared import (
     _REAL_ORDER_STATUS_FILTER,
@@ -23,6 +24,7 @@ from ._shared import (
     pnl_by_category,
     router,
 )
+from .pnl import COST_ONLY_PNL_FIELDS
 
 # === P&L breakdowns + period status ===
 
@@ -174,11 +176,19 @@ async def get_pnl_by_category(
 
     orders = list(db.get_collection("orders").find(match, {"_id": 0, "items": 1}))
     cats = pnl_by_category(orders, _cost_by_product(db))
-    return {
-        "categories": cats,
-        "total_revenue": round(sum(c["revenue"] for c in cats), 2),
-        "total_gross_profit": round(sum(c["gross_profit"] for c in cats), 2),
-    }
+    # COGS and gross profit are worked out from product cost: the accounts
+    # roles' only, as on GET /pnl and /reports/profit/by-category (owner ruling
+    # 2026-10-12). The managers keep the revenue.
+    return mask_cost(
+        {
+            "categories": cats,
+            "total_revenue": round(sum(c["revenue"] for c in cats), 2),
+            "total_gross_profit": round(sum(c["gross_profit"] for c in cats), 2),
+        },
+        current_user,
+        "product",
+        extra=(*COST_ONLY_PNL_FIELDS, "total_gross_profit"),
+    )
 
 
 @router.get("/period-status")

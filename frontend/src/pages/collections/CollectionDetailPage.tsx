@@ -264,10 +264,14 @@ export default function CollectionDetailPage() {
           </div>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
             <KpiCard label="Revenue (30d)" value={rupee(insights.revenue_30d)} />
-            <KpiCard
-              label="Margin (30d)"
-              value={insights.margin_30d === null ? 'needs cost data' : rupee(insights.margin_30d)}
-            />
+            {/* Margin comes only to the roles that may see what we pay
+                (server cost_mask, owner ruling 2026-10-12). */}
+            {insights.margin_30d !== undefined && (
+              <KpiCard
+                label="Margin (30d)"
+                value={insights.margin_30d === null ? 'needs cost data' : rupee(insights.margin_30d)}
+              />
+            )}
             <KpiCard label="Sell-through (30d)" value={pct(insights.sell_through_30d)} />
             <KpiCard label="Days of cover" value={daysOfCover(insights.days_of_cover)} />
           </div>

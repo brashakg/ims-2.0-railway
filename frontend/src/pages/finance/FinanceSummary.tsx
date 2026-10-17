@@ -109,14 +109,14 @@ export default function FinanceSummary({ revenueData, plStatement }: FinanceSumm
               <div className="bg-slate-50 p-4 rounded border border-gray-200">
                 <p className="text-slate-600 text-sm">Cost of Goods Sold</p>
                 <p className="text-red-600 text-lg font-semibold mt-1">
-                  {formatCurrency(plStatement.cost_of_goods)}
+                  {money(plStatement.cost_of_goods)}
                 </p>
               </div>
 
               <div className="col-span-2 bg-gray-100 p-4 rounded border border-gray-200">
                 <p className="text-slate-700 text-sm">Gross Profit</p>
                 <p className="text-green-600 text-xl font-semibold mt-1">
-                  {formatCurrency(plStatement.gross_profit)}
+                  {money(plStatement.gross_profit)}
                 </p>
               </div>
 

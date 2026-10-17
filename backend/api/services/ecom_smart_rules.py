@@ -34,9 +34,13 @@ and storefront tags under the optional `ecom.seo.tags`:
     price     -> doc["pricing"]["offer_price"] (fallbacks: offer_price, price,
                                                 pricing.mrp, mrp)
 
-Anything else is treated as a direct dotted/loose key lookup against the doc
+Anything else is treated as a direct loose key lookup against the doc
 (top-level then inside `attributes`), so a niche attribute like "shape" still
-works without a code change.
+works without a code change -- but never a cost key (services/cost_mask
+.is_cost_key) and never a nested object: a rule that matches on cost_price, or
+CONTAINS-searches a dict's text, is a cost oracle (a binary search on "cost >
+X" recovers the cost to the paisa), whoever runs the preview. Such a field
+extracts nothing, so it matches no product.
 
 MATCH SEMANTICS:
   - EQUALS        : case-insensitive exact match (for a list field: any element
@@ -67,6 +71,8 @@ No exceptions escape; all inputs are defensively coerced.
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
+
+from .cost_mask import is_cost_key
 
 # Logical field name -> the catalog_products read path, tried in order. Each path
 # is a tuple of keys to descend; the FIRST path that yields a non-None value wins.
@@ -243,18 +249,20 @@ def _extract_values(doc: Dict, field: str) -> List[str]:
             raw = _descend(doc, p)
             if raw is not None:
                 break
-    else:
+    elif not is_cost_key(norm):
         # Unknown field -> loose lookup: top-level key, then inside attributes.
         raw = doc.get(norm)
         if raw is None and isinstance(doc.get("attributes"), dict):
             raw = doc["attributes"].get(norm)
 
-    if raw is None:
+    # A nested object is never a rule value: its text carries every key in it
+    # (pricing.cost_price among them).
+    if raw is None or isinstance(raw, dict):
         return []
     if isinstance(raw, (list, tuple, set)):
         out: List[str] = []
         for item in raw:
-            if item is None:
+            if item is None or isinstance(item, (dict, list, tuple)):
                 continue
             out.append(str(item))
         return out

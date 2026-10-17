@@ -60,17 +60,6 @@ class _FakeDB:
         return self._coll
 
 
-class _Body:
-    """Stand-in for VendorReturnStatusUpdate (only the attrs the endpoint reads)."""
-
-    def __init__(self, status):
-        self.status = status
-        self.notes = None
-        self.courier_name = None
-        self.tracking_number = None
-        self.tracking_url = None
-
-
 def _seed():
     return {
         "return_id": "VR-1",
@@ -90,7 +79,9 @@ def test_concurrent_credit_issue_one_wins_one_409(monkeypatch):
     monkeypatch.setattr(vr, "_get_db", lambda: _FakeDB(coll))
 
     async def _call():
-        return await vr.update_return_status("VR-1", _Body("credit_issued"), _admin())
+        return await vr.update_return_status(
+            "VR-1", vr.VendorReturnStatusUpdate(status="credit_issued"), _admin()
+        )
 
     # First transition wins the CAS.
     out1 = asyncio.run(_call())
