@@ -108,6 +108,9 @@ class _Conn:
 
 def _seed(db):
     now = datetime.now()
+    db.stores.insert_one({"store_id": STORE, "store_name": "Test shop", "entity_id": "entity-test",
+                          "gstin": "20AAAAA0000A1Z5", "state_code": "20"})
+    db.entities.insert_one({"entity_id": "entity-test", "gstins": [{"gstin": "20AAAAA0000A1Z5"}]})
     db.products.insert_one(
         {
             "product_id": "P1",
