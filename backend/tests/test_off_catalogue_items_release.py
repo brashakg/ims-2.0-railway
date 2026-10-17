@@ -166,14 +166,19 @@ class World:
     def grn(self, grn_id):
         return self.db.grns.find_one({"grn_id": grn_id})
 
-    # -- the manager's day ---------------------------------------------------
+    # -- the agreed order, then the manager's receiving day ------------------
     def raise_po(self, lines):
         body = vd.POCreate(
             vendor_id=VENDOR,
             delivery_store_id=STORE,
             items=[vd.POItemCreate(**ln) for ln in lines],
         )
-        out = _run(vd.create_po(body, MANAGER))
+        # These catalogue-release scenarios specify an agreed purchase price.
+        # Only an accounts-authorised role may enter it; a manager's submitted
+        # price is deliberately discarded under the owner's cost-access rule.
+        # Keep the manager as the sender/receiver below. Unpriced-manager
+        # behaviour has its own assertions in test_what_we_pay_accounts_only.
+        out = _run(vd.create_po(body, ADMIN))
         po = self.db.purchase_orders.find_one({"po_id": out["po_id"]})
         assert po is not None, "the PO was not stored"
         _run(vd.send_po(po["po_id"], MANAGER))
@@ -2948,10 +2953,10 @@ def test_r5_the_eye_size_check_refuses_loudly_when_it_cannot_read(world, monkeyp
     assert len(world.products_named("Boss", "BOSS 1700")) == 1
 
 
-def test_r5_a_draft_finished_by_the_cost_promote_leaves_the_queue_and_releases(world):
-    # Review round 5, pass 3: a draft whose last gap was its cost was finished
-    # by the PO cost promote -- ACTIVE and on, yet its copy stayed "Ordered -
-    # finish it" in Needs review for good, and its held receipt kept 0 units.
+def test_r5_cost_promote_finishes_the_draft_without_receiving_its_goods_twice(world):
+    # Cost can remain pending after the catalogue work is finished. Receiving
+    # already shelves the goods; a later Accounts price must finish the cost
+    # metadata and clear Needs review without minting those units again.
     po = world.raise_po(
         [{"new_product": dict(BOSS_TYPED), "quantity": 2, "unit_price": 0}]
     )
@@ -2959,7 +2964,8 @@ def test_r5_a_draft_finished_by_the_cost_promote_leaves_the_queue_and_releases(w
     world.finish_draft(draft_id, offer=2790)  # cost is still missing
     assert world.product(draft_id)["provisional"] is True
     grn, accepted = world.receive_everything(po)
-    assert accepted["grn_status"] == "PARTIALLY_ACCEPTED"
+    assert accepted["grn_status"] == "ACCEPTED"
+    assert len(world.units(draft_id)) == 2
     sku = world.product(draft_id)["sku"]
     world.raise_po(
         [
@@ -4614,10 +4620,9 @@ def test_r7_a_unit_found_by_its_receipt_id_when_the_number_is_shared(world, monk
     finding(refused.value.status_code == 409, f"P4: the void got {refused.value.status_code}")
 
 
-def test_r7_a_rate_that_finishes_a_catalogue_draft_releases_its_held_receipt(world):
-    # P5: a draft saved from Add product (not ordered) missing only its cost.
-    # The rate on a later order finishes it -- the same rule as the editor's
-    # save: the units its receipt holds go on the shelf.
+def test_r7_a_later_rate_finishes_cost_without_duplicating_already_received_goods(world):
+    # A draft from Add product (not ordered) missing only cost is receivable.
+    # A later agreed order rate finishes that cost without adding its units again.
     body = _products.ProductCreate(
         category="FR",
         brand="Boss",
@@ -4641,7 +4646,8 @@ def test_r7_a_rate_that_finishes_a_catalogue_draft_releases_its_held_receipt(wor
     }
     po1 = world.raise_po([dict(line, unit_price=0)])
     grn, accepted = world.receive_everything(po1)
-    assert accepted["grn_status"] == "PARTIALLY_ACCEPTED"
+    assert accepted["grn_status"] == "ACCEPTED"
+    assert len(world.units(pid)) == 1
     world.raise_po([dict(line, unit_price=2100)])
     assert world.product(pid)["catalog_status"] == "ACTIVE"
     finding(
@@ -5318,7 +5324,9 @@ def test_r9_the_bills_cost_finishes_the_draft_as_the_editor_does(world, monkeypa
     # field but the cost -- which the bill brings (rulings 11/12). The ask
     # closes with the cataloguer's save; the bill's cost then finishes the
     # draft through the editor's own path: catalog status, Needs review, the
-    # held units on the shelf; and nothing escalates a day later.
+    # held units on the shelf; and no catalogue task escalates a day later.
+    # This calls valuation directly, not the booking door: the separate
+    # Accounts task for the unpriced order is still outstanding.
     from api.routers import purchase_invoices as _pi
 
     _seed_user(world, ADMIN)
@@ -5349,9 +5357,10 @@ def test_r9_the_bills_cost_finishes_the_draft_as_the_editor_does(world, monkeypa
         f"{len(world.units(draft_id))} of 2 on the shelf, receipt {world.grn(grn['grn_id'])['status']}",
     )
     _escalate_after(world, monkeypatch, "endpoint", hours=25)
+    catalogue_tasks = [t for t in _open_tasks(world) if t.get("category") == "Catalogue"]
     finding(
-        not _open_tasks(world),
-        f"Work already done escalated: {[(t.get('assigned_to'), t.get('title')) for t in _open_tasks(world)]}",
+        not catalogue_tasks,
+        f"Catalogue work already done escalated: {[(t.get('assigned_to'), t.get('title')) for t in catalogue_tasks]}",
     )
 
 
