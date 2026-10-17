@@ -29,6 +29,8 @@ from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from .cache import invalidate_product_lists
+
 logger = logging.getLogger(__name__)
 
 FLAG_TYPES: "OrderedDict[str, str]" = OrderedDict(
@@ -83,15 +85,6 @@ def _deps():
 def _products():
     repo = _deps().get_product_repository()
     return getattr(repo, "collection", None)
-
-
-def _bust_list_cache() -> None:
-    try:
-        from .cache import cache
-
-        cache.delete_pattern("products:*")
-    except Exception:  # noqa: BLE001
-        pass
 
 
 def _now() -> datetime:
@@ -273,7 +266,7 @@ def raise_flags(
         )
 
     if groups:
-        _bust_list_cache()
+        invalidate_product_lists()
     return {"results": results, "tasks": tasks}
 
 
@@ -344,7 +337,7 @@ def fix_flags(product_id: str, flag_ids: List[str], actor: Dict[str, Any]) -> Di
     wanted = set(flag_ids or [])
     task_ids = _fix(coll, doc, lambda f: f.get("flag_id") in wanted, actor)
     _settle(coll, task_ids, actor)
-    _bust_list_cache()
+    invalidate_product_lists()
     fresh = coll.find_one({"product_id": product_id}) or {}
     return {"product_id": product_id, "flags": fresh.get("flags") or []}
 
@@ -369,7 +362,7 @@ def on_task_closed(task: Dict[str, Any], actor: Dict[str, Any], status: str) -> 
             if _fix(coll, doc, lambda f: f.get("task_id") == tid, actor, flag_status):
                 changed += 1
         if changed:
-            _bust_list_cache()
+            invalidate_product_lists()
         return changed
     except Exception:  # noqa: BLE001 -- the task's close stands
         logger.warning("[FLAGS] closing flags of a closed task failed", exc_info=True)
