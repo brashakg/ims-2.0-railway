@@ -13,6 +13,8 @@ from enum import Enum
 import logging
 import uuid
 
+from ..services.cache import invalidate_product_lists
+
 logger = logging.getLogger(__name__)
 
 from .auth import get_current_user, require_roles
@@ -3115,9 +3117,7 @@ async def promote_catalog_product(
     # Bust the TTL_MEDIUM GET /products list cache so the newly sellable item
     # is immediately searchable at POS (same pattern as the bulk price ops).
     try:
-        from ..services.cache import cache
-
-        cache.delete_pattern("products:*")
+        invalidate_product_lists()
     except Exception:  # noqa: BLE001
         pass
 
@@ -3348,7 +3348,7 @@ async def _archive_product(
         await _delist.delist_if_live(_get_db(), product, reason="deleted", actor=actor)
     # Every archive door: a cached Catalog / till list page must not keep
     # listing it until the cache runs out.
-    _bust_products_cache()
+    invalidate_product_lists()
 
 
 # Whether the product was switched on when it was archived (archive writes
@@ -3451,7 +3451,7 @@ def _restore_product(
             )
     except Exception:  # noqa: BLE001
         logger.warning("[CATALOG] restore audit row skipped for %s", spine_id, exc_info=True)
-    _bust_products_cache()  # as _archive_product: no cached page keeps it hidden
+    invalidate_product_lists()  # as _archive_product: no cached page keeps it hidden
     if active:
         return None
     if not was_active:
@@ -3630,15 +3630,6 @@ async def bulk_restore_products(
                 row["note"] = note
             results.append(row)
     return {"applied": body.apply, "results": results}
-
-
-def _bust_products_cache() -> None:
-    try:
-        from ..services.cache import cache
-
-        cache.delete_pattern("products:*")
-    except Exception:  # noqa: BLE001
-        pass
 
 
 # ============================================================================

@@ -19,13 +19,14 @@ Usage:
 
     # Invalidate
     cache.delete("products:BV-BOK-01")
-    cache.delete_pattern("products:*")  # Redis only; no-op in memory mode
+    cache.delete_pattern("products:*")  # both Redis and memory mode
 """
 
 import json
 import time
 import os
 import logging
+from fnmatch import fnmatchcase
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -146,7 +147,7 @@ class CacheService:
             pass
 
     def delete_pattern(self, pattern: str):
-        """Delete keys matching a glob pattern (Redis only; no-op in memory)."""
+        """Delete matching keys on either backend, leaving unrelated keys alone."""
         try:
             if _redis_client:
                 cursor = 0
@@ -158,6 +159,10 @@ class CacheService:
                         _redis_client.delete(*keys)
                     if cursor == 0:
                         break
+            else:
+                for key in list(_memory._store):
+                    if fnmatchcase(key, pattern):
+                        _memory.delete(key)
         except Exception:
             pass
 
@@ -180,3 +185,8 @@ class CacheService:
 
 # Singleton
 cache = CacheService()
+
+
+def invalidate_product_lists() -> None:
+    """Products are shared across shops: every listing must see a saved edit."""
+    cache.delete_pattern("products:*")

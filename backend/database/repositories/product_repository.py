@@ -127,6 +127,22 @@ class ProductRepository(BaseRepository):
     def id_field(self) -> str:
         return "product_id"
 
+    def create(self, data: Dict, *, raise_on_duplicate: bool = False) -> Optional[Dict]:
+        created = super().create(data, raise_on_duplicate=raise_on_duplicate)
+        if created is not None:
+            from api.services.cache import invalidate_product_lists
+
+            invalidate_product_lists()
+        return created
+
+    def update_if(self, id: str, expected: Dict, data: Dict) -> bool:
+        saved = super().update_if(id, expected, data)
+        if saved:
+            from api.services.cache import invalidate_product_lists
+
+            invalidate_product_lists()
+        return saved
+
     def update(self, id: str, data: Dict) -> bool:
         """BaseRepository.update, plus: a write that switches the product on
         stamps `switched_on_at`. A provisional buy (ruling 13) is born
@@ -149,7 +165,12 @@ class ProductRepository(BaseRepository):
                     data["edited_at"] = doc["updated_at"]
             except Exception:  # noqa: BLE001 -- the write itself stands
                 pass
-        return super().update(id, data)
+        saved = super().update(id, data)
+        if saved:
+            from api.services.cache import invalidate_product_lists
+
+            invalidate_product_lists()
+        return saved
 
     def find_by_sku(self, sku: str) -> Optional[Dict]:
         return self.find_one({"sku": sku})

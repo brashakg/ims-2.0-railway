@@ -496,6 +496,10 @@ async def import_batch(
             resp.errors.append(f"{type(e).__name__}: {str(e)[:200]}")
 
     resp.sample_dedup_keys = dedup_samples
+    if req.type == "products" and (resp.inserted or resp.updated):
+        from ..services.cache import invalidate_product_lists
+
+        invalidate_product_lists()
     return resp
 
 
