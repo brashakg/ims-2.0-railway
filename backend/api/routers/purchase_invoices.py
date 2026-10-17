@@ -1388,9 +1388,13 @@ def _draft_lines(db, receipt: dict, po: Optional[dict], supplier_gstin=None) -> 
     from .vendors.gst import _po_line_gst_rate
 
     lines = pinv.lines_from_grn(receipt, po)
-    taxed_walk_in = (receipt or {}).get(
-        "grn_subtype"
-    ) == ap_engine.GRN_SUBTYPE_NO_PO and ov.has_valid_gstin(supplier_gstin)
+    no_po = (receipt or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO
+    taxed_walk_in = no_po and ov.has_valid_gstin(supplier_gstin)
+    if no_po and not taxed_walk_in:
+        # An unregistered dealer's cash memo charges no GST, even if a legacy
+        # receipt carries a catalogue rate. Preserve this before early returns.
+        for line in lines:
+            line["gst_rate"] = 0.0
     missing = {
         ln["product_id"]
         for ln in lines

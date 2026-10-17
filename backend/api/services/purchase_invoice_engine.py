@@ -355,7 +355,8 @@ def compute_invoice(
 
 def lines_from_grn(grn: dict, po: Optional[dict]) -> List[dict]:
     """Build draft invoice lines from a GRN's accepted quantities + the PO's
-    unit price / tax rate. Pure: takes the two docs, returns raw line dicts
+    unit price / tax rate, or the receipt's recorded values when no PO line
+    matches. Pure: takes the two docs, returns raw line dicts
     (description / hsn / qty / unit_price / gst_rate) ready for compute_invoice.
 
     Matching: a GRN line carries product_id (+ po_item_id); the PO line carries
@@ -397,6 +398,13 @@ def lines_from_grn(grn: dict, po: Optional[dict]) -> List[dict]:
         if po_line is None:
             po_line = by_item_id.get(gi.get("po_item_id"))
         po_line = po_line or {}
+        # A no-PO receipt may already record the supplier's rate. Keep it with
+        # its price; otherwise the invoice draft and receipt valuation lose
+        # tax that was recorded. A matched legacy PO still owns its rate (an
+        # absent rate is 0), and an explicit receipt zero is never replaced.
+        rate = po_line.get("tax_rate") if po_line else gi.get("tax_rate")
+        if not po_line and rate is None:
+            rate = gi.get("gst_rate")
         lines.append(
             {
                 "product_id": pid,
@@ -411,7 +419,7 @@ def lines_from_grn(grn: dict, po: Optional[dict]) -> List[dict]:
                     _f(po_line.get("unit_price", gi.get("unit_price")))
                     if _f(po_line.get("unit_price", gi.get("unit_price"))) > 0 else None
                 ),
-                "gst_rate": _f(po_line.get("tax_rate")),
+                "gst_rate": _f(rate),
             }
         )
     return lines
