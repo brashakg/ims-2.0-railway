@@ -14,6 +14,7 @@ from ...dependencies import get_order_repository, validate_store_access
 from ._shared import (
     _compute_per_category_gst,
     _get_db,
+    bills_round_off,
     logger,
     router,
 )
@@ -195,7 +196,11 @@ async def superadmin_edit_order(
         if body.cart_discount_percent is not None
         else float(order.get("cart_discount_percent") or 0.0)
     )
-    gst = recompute_totals(new_items, cart_discount_pct, _compute_per_category_gst)
+    # An order billed before the round-off rule keeps its exact paise total.
+    gst = recompute_totals(
+        new_items, cart_discount_pct, _compute_per_category_gst,
+        rounded=bills_round_off(order),
+    )
 
     update_data: Dict[str, Any] = {
         "items": new_items,
@@ -206,6 +211,7 @@ async def superadmin_edit_order(
         "tax_amount": gst["tax"],
         "total_discount": gst["total_discount"],
         "grand_total": gst["grand_total"],
+        "round_off": gst["round_off"],
         "pricing_model": gst.get("pricing_model", "inclusive"),
         "updated_by": current_user.get("user_id"),
         "superadmin_edited": True,
@@ -342,7 +348,11 @@ async def superadmin_invoice_change(
         if body.cart_discount_percent is not None
         else float(order.get("cart_discount_percent") or 0.0)
     )
-    gst = recompute_totals(new_items, cart_discount_pct, _compute_per_category_gst)
+    # An order billed before the round-off rule keeps its exact paise total.
+    gst = recompute_totals(
+        new_items, cart_discount_pct, _compute_per_category_gst,
+        rounded=bills_round_off(order),
+    )
 
     # The "after" money picture the correction targets.
     corrected = dict(order)
@@ -356,6 +366,7 @@ async def superadmin_invoice_change(
             "tax_amount": gst["tax"],
             "total_discount": gst["total_discount"],
             "grand_total": gst["grand_total"],
+            "round_off": gst["round_off"],
         }
     )
     if body.customer_id is not None:
@@ -397,6 +408,7 @@ async def superadmin_invoice_change(
             "tax_amount": gst["tax"],
             "total_discount": gst["total_discount"],
             "grand_total": gst["grand_total"],
+            "round_off": gst["round_off"],
             "pricing_model": gst.get("pricing_model", "inclusive"),
             "invoice_number": new_invoice_number,
             "invoice_date": datetime.now(),

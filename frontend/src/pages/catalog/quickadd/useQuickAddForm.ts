@@ -41,6 +41,7 @@ import {
   loadCategoryRegistry,
   modelFields,
   overlayChangedFormValues,
+  productToCloneValues,
   productToFormValues,
   productToVariantFormValues,
   promoteGapsToFormErrors,
@@ -51,6 +52,7 @@ import {
   validateReviewForm,
   variantFieldRule,
   variantFlaggedFormFields,
+  withoutManufacturerBarcodes,
 } from '../productAddShared';
 import {
   backToQueueAddress,
@@ -1169,7 +1171,8 @@ export function useQuickAddForm() {
       // A template load replaces the whole form — leave variant mode if active.
       setVariantCtx(null);
       setFlaggedFields(new Set());
-      applyFormValues(tpl.payload);
+      // A template starts a NEW SKU: never with a maker's barcode (same strip as Clone).
+      applyFormValues(withoutManufacturerBarcodes(tpl.payload));
       setTemplatesOpen(false);
       toast.success(`Loaded template "${tpl.name}". Edit and save as a new product.`);
       window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1220,7 +1223,7 @@ export function useQuickAddForm() {
       // A clone replaces the whole form — leave variant mode if active.
       setVariantCtx(null);
       setFlaggedFields(new Set());
-      applyFormValues(productToFormValues(product));
+      applyFormValues(productToCloneValues(product));
       toast.success('Cloned into the form. Tweak the details and save as a NEW SKU.');
       window.scrollTo({ top: 0, behavior: 'smooth' });
     },

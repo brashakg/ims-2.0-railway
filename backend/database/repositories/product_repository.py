@@ -6,9 +6,12 @@ Product and Stock data access operations
 
 import logging
 import re
+import uuid
 from typing import List, NamedTuple, Optional, Dict
 from datetime import datetime, date, timedelta, timezone
 
+from api.services.barcode import unit_barcode_match
+from api.services.gtin import gtin_spellings
 from api.utils.ist import ist_today
 
 from .base_repository import BaseRepository
@@ -91,6 +94,11 @@ class ProductRepository(BaseRepository):
     # Main's till rule before 2026-10-08: every word STARTS one of these.
     # What it finds is listed first, in main's order (search_products).
     LEGACY_SEARCH_FIELDS = ("brand", "model", "sku", "variant", "barcode")
+    # The maker's GTIN (attributes.gtin, where Manage Barcode now writes it,
+    # or the legacy top-level gtin) is NOT a prefix field here: the till finds
+    # it only on the EXACT, complete code (_till_query), so '890' never lists
+    # every Indian-made product.
+    TILL_GTIN_FIELDS = ("attributes.gtin", "gtin")
 
     # THE WIDE RULE, opt-in (`anywhere=True`; the purchase-order product box,
     # audit F21). NAME fields match ANYWHERE and ignore spaces/hyphens: the
@@ -151,6 +159,11 @@ class ProductRepository(BaseRepository):
         'switched on, sold, switched off'. Every spine door that writes
         is_active (catalog drawer, PUT /products, /products/master) writes
         through here."""
+        if "attributes.gtin" in data or "attributes" in data or "barcode" in data:
+            # A failed catalogue CAS may compensate its own barcode write.
+            # Every later billing-product barcode write takes ownership so
+            # that compensation cannot undo the later editor's code.
+            data.setdefault("_gtin_write_token", uuid.uuid4().hex)
         if data.get("is_active") is True:
             data["switched_on_at"] = datetime.now(timezone.utc)
         if "updated_by" not in data and "edited_at" not in data:
@@ -182,13 +195,55 @@ class ProductRepository(BaseRepository):
             return None
         return self.find_one({"identity_key": identity_key})
 
-    def find_by_barcode(self, barcode: str) -> Optional[Dict]:
-        """Find a product by scan-to-sell barcode (Hub Phase 1 duplicate guard).
-        Makes the create-path barcode arm functional whenever a barcode rides
-        along (e.g. a bulk/import row); returns None for a blank value."""
-        if not barcode:
+    def find_by_barcode(
+        self, barcode: str, exclude_product_id: Optional[str] = None
+    ) -> Optional[Dict]:
+        """Find the product holding this manufacturer barcode (Hub Phase 1
+        duplicate guard + the create and edit doors' uniqueness check). It can
+        live in `barcode` or in the `gtin` attribute (what Manage Barcode and the
+        Add Product form write), so both are read, in every spelling of the one
+        GTIN (a UPC-A and its 13-digit form are one code). None for a blank
+        value. `exclude_product_id` is excluded IN the query: a find_one that
+        returned the product being edited would hide another holder."""
+        spellings = gtin_spellings(barcode)
+        if not spellings:
             return None
-        return self.find_one({"barcode": barcode})
+        query: Dict = {
+            "$or": [
+                {"barcode": {"$in": spellings}},
+                {"attributes.gtin": {"$in": spellings}},
+            ]
+        }
+        if exclude_product_id:
+            query["product_id"] = {"$ne": exclude_product_id}
+        return self.find_one(query)
+
+    def find_twin_by_barcode(
+        self, barcode: str, exclude_product_id: Optional[str] = None
+    ) -> Optional[Dict]:
+        """A catalog_products twin holding this manufacturer barcode that is
+        not `exclude_product_id`'s own (a spine id, or a spineless twin's id).
+        The bulk import writes a twin with no spine, and the Shopify push sends
+        a twin's gtin as its variant barcode, so the one-holder rule reads twins
+        too: every field a twin carries a barcode in (the gtin attribute, its
+        top-level projection, the legacy barcode), in every spelling. A
+        spine's own twin is the one keyed on its id or pim_product_id -- never
+        one that merely shares its sku (an unrelated review-queue twin can)."""
+        spellings = gtin_spellings(barcode)
+        db = getattr(self.collection, "database", None)
+        if not spellings or db is None:
+            return None
+        query: Dict = {
+            "$or": [
+                {field: {"$in": spellings}}
+                for field in ("attributes.gtin", "gtin", "barcode")
+            ]
+        }
+        if exclude_product_id:
+            own = self.find_by_id(exclude_product_id) or {}
+            ids = [exclude_product_id, own.get("pim_product_id")]
+            query["id"] = {"$nin": [i for i in ids if i]}
+        return db["catalog_products"].find_one(query)
 
     def _category_filter(
         self,
@@ -332,6 +387,24 @@ class ProductRepository(BaseRepository):
             clauses.append(extra)
         return {"$and": clauses}
 
+    def _till_query(
+        self, text: str, extra: Dict, fields=None, word_fields=None
+    ) -> Dict:
+        """THE till's query: every word matches one of `fields` (default
+        SEARCH_FIELDS) by the word rule (_search_query; word_fields as there),
+        or the whole text, through the one GTIN normaliser, IS a stored maker's
+        GTIN (any spelling of that one code; never a prefix of one)."""
+        words = self._search_query(
+            text, list(fields or self.SEARCH_FIELDS), extra, word_fields=word_fields
+        )
+        spellings = gtin_spellings(text)
+        if not spellings:
+            return words
+        code: Dict = {
+            "$or": [{f: {"$in": spellings}} for f in self.TILL_GTIN_FIELDS]
+        }
+        return {"$or": [words, {"$and": [code, extra]} if extra else code]}
+
     def search_products(
         self,
         query: str,
@@ -353,7 +426,7 @@ class ProductRepository(BaseRepository):
         # sits inside search_products_filter, the query count_search_products
         # counts ('  ' is everything to the till, nothing to the wide rule).
         tiers = [
-            self._search_query(query, list(self.LEGACY_SEARCH_FIELDS), extra, word_fields=())
+            self._till_query(query, extra, self.LEGACY_SEARCH_FIELDS, word_fields=())
         ]
         if anywhere:
             tiers.append(self._product_search_query(query, extra, till=False))
@@ -381,7 +454,7 @@ class ProductRepository(BaseRepository):
         extra = self._search_extra_filter(category, is_active, created_by)
         if anywhere:
             return self._product_search_query(query, extra)
-        return self._search_query(query, list(self.SEARCH_FIELDS), extra)
+        return self._till_query(query, extra)
 
     def count_search_products(
         self,
@@ -481,7 +554,7 @@ class StockRepository(BaseRepository):
         return "stock_id"
 
     def find_by_barcode(self, barcode: str) -> Optional[Dict]:
-        return self.find_one({"barcode": barcode})
+        return self.find_one(unit_barcode_match(barcode))
 
     def find_by_product_store(self, product_id: str, store_id: str) -> List[Dict]:
         return self.find_many(

@@ -69,7 +69,7 @@ class FakeProductRepo:
     def find_by_identity_key(self, identity_key):
         return None
 
-    def find_by_barcode(self, barcode):
+    def find_by_barcode(self, barcode, exclude_product_id=None):
         return None
 
     def create(self, data, *, raise_on_duplicate=False):

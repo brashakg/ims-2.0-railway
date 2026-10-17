@@ -1197,6 +1197,47 @@ def test_an_imported_row_and_every_door_find_the_same_spine(env):
     assert (deleted("A"), deleted("T-X"), deleted("B")) == (True, True, False)
 
 
+def test_a_twin_sharing_only_a_sku_is_no_spine_s_twin(env):
+    """Round 16 (the merge with #1166): THE rule never links by sku alone --
+    a review-queue twin can share a sku with an UNRELATED product's spine
+    (promote 409s on exactly that). The Added column does not borrow that
+    product's adder, and archiving that product archives it alone."""
+    db = env["db"]
+    db.catalog_products.insert_one(
+        {"id": "T-ODD", "sku": "SKU-P3", "title": "Odd", "needs_review": True, "is_active": True}
+    )
+    rows = {r["id"]: r for r in _imported(ADMIN, "name_asc")}
+    assert rows["T-ODD"]["created_by"] is None  # P3 was added by u-akshay
+    assert _archive(env, ["P3"]).json()["results"][0]["status"] == "done"
+    assert db.products.find_one({"product_id": "P3"})["deleted_at"]
+    assert not db.catalog_products.find_one({"id": "T-ODD"}).get("deleted_at")
+
+
+def test_a_failed_spine_lookup_restores_nothing(env, monkeypatch):
+    """Round 16: the drawer's Restore on a twin id reads its spine first. A
+    read error there was 'no spine' (#1192's resolver swallowed it), so the
+    twin came back alone and the spine stayed archived. Now 503, nothing
+    restored; the retry restores both."""
+    db = env["db"]
+    assert _archive(env, ["P1"]).json()["results"][0]["status"] == "done"
+    real_find = db.products.find
+
+    def _find(flt=None, *a, **kw):
+        if "pim_product_id" in str(flt):
+            raise RuntimeError("db blip")
+        return real_find(flt, *a, **kw)
+
+    monkeypatch.setattr(db.products, "find", _find)
+    res = _restore(env, ["T-P1"])
+    assert res.status_code == 503, res.text
+    assert db.products.find_one({"product_id": "P1"})["deleted_at"]
+    assert db.catalog_products.find_one({"id": "T-P1"})["deleted_at"]
+    monkeypatch.setattr(db.products, "find", real_find)
+    assert _restore(env, ["T-P1"]).json()["results"][0]["status"] == "done"
+    assert not db.products.find_one({"product_id": "P1"})["deleted_at"]
+    assert not db.catalog_products.find_one({"id": "T-P1"})["deleted_at"]
+
+
 @pytest.mark.parametrize("role", ["AREA_MANAGER", "ACCOUNTANT", "STORE_MANAGER", "SALES_STAFF"])
 def test_a_flag_task_goes_only_to_someone_who_can_open_and_close_it(env, role):
     db = env["db"]

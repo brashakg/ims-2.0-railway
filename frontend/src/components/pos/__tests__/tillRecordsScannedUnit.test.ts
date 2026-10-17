@@ -31,6 +31,7 @@ vi.mock('../../../services/api', async (importOriginal) => {
       ...(actual.orderApi as object),
       createOrder: vi.fn(),
       addPayment: vi.fn(),
+      quoteBill: vi.fn(),
     },
     loyaltyApi: { ...(actual.loyaltyApi as object), redeem: vi.fn() },
     workshopApi: { ...(actual.workshopApi as object), createJob: vi.fn() },
@@ -86,6 +87,10 @@ function typeIntoCart(product: any) {
 /** Pay in full and press Complete sale; returns the order payload's lines. */
 async function completeSale(): Promise<any[]> {
   const total = usePOSStore.getState().getGrandTotal();
+  vi.mocked(orderApi.quoteBill).mockResolvedValue({
+    grand_total: total, subtotal: total, taxable: total, tax: 0,
+    total_discount: 0, round_off: 0,
+  });
   usePOSStore.setState({ payments: [{ method: 'CASH', amount: total, timestamp: '' }] as any });
   const res = await submitPosOrder(usePOSStore.getState() as any, 'idem-till-unit');
   expect(res.ok).toBe(true);

@@ -179,6 +179,8 @@ def _books_and_tally_for_stores(db, store_ids, start, end) -> tuple:
 
     sales_grand = 0.0
     sales_tax = 0.0
+    # Bill round off (owner ruling 2026-10-08): in the gross, not in taxable.
+    sales_round_off = 0.0
     payments_collected = 0.0
     t_cgst = t_sgst = t_igst = 0.0
 
@@ -190,6 +192,7 @@ def _books_and_tally_for_stores(db, store_ids, start, end) -> tuple:
             "customer_id": 1,
             "grand_total": 1,
             "total": 1,
+            "round_off": 1,
             "tax_amount": 1,
             "tax_total": 1,
             "payments": 1,
@@ -202,6 +205,7 @@ def _books_and_tally_for_stores(db, store_ids, start, end) -> tuple:
         tax = float(o.get("tax_amount") or o.get("tax_total") or 0)
         sales_grand += grand
         sales_tax += tax
+        sales_round_off += float(o.get("round_off") or 0)
         # OS-008: the order's own interstate flag wins (online orders carry it);
         # store-vs-customer state stays the fallback for docs without it.
         if _order_is_interstate(o, store_states, customer_states):
@@ -219,11 +223,11 @@ def _books_and_tally_for_stores(db, store_ids, start, end) -> tuple:
     books = {
         "sales_grand_total": round(sales_grand, 2),
         "sales_tax": round(sales_tax, 2),
-        "sales_taxable": round(sales_grand - sales_tax, 2),
+        "sales_taxable": round(sales_grand - sales_round_off - sales_tax, 2),
         "payments_collected": round(payments_collected, 2),
     }
     tally = {
-        "taxable": round(sales_grand - sales_tax, 2),
+        "taxable": round(sales_grand - sales_round_off - sales_tax, 2),
         "tax": round(sales_tax, 2),
         "cgst": round(t_cgst, 2),
         "sgst": round(t_sgst, 2),

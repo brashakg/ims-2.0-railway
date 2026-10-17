@@ -11,7 +11,7 @@ Three entity types, one endpoint:
             overwrite: true }       # if false, skip on dedupe; if true, $set fields
 
 Dedupe keys per type:
-  - products  : barcode (fallback: name+brand)
+  - products  : sku (TechCherry's item code, else the name)
   - customers : phone (10-digit normalised)
   - orders    : invoice_no
 
@@ -30,6 +30,7 @@ business data and can't be undone without a restore.
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 
@@ -37,7 +38,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from .auth import get_current_user
+from ..services.gtin import gtin_spellings, sanitise_gtin
 from ..services.phone import normalize_indian_mobile
+from ..services.product_master import (
+    ProductMasterError,
+    assert_gtin_free,
+    spine_holds_gtin,
+    write_spine_gtin,
+)
 
 router = APIRouter()
 
@@ -240,11 +248,9 @@ def _map_product(
     name = (
         row.get("name") or row.get("prod_name") or row.get("Prod Name") or ""
     ).strip()
-    barcode = (row.get("barcode") or row.get("Barcode") or "").strip()
+    barcode = _row_barcode(row)
     if not name and not barcode:
         return None
-    if barcode.upper() == "NA":
-        barcode = ""
 
     group = (
         row.get("group") or row.get("prod_grp") or row.get("Prod Grp") or ""
@@ -271,7 +277,7 @@ def _map_product(
         "name": name,
         "brand": brand,
         "category": category,
-        "barcode": barcode,
+        # TechCherry's own item code stays the SKU (and the re-import key).
         "sku": barcode or name[:60],
         "mrp": sale_price,
         "offer_price": sale_price,
@@ -284,6 +290,37 @@ def _map_product(
         "source": source,
         "techcherry_imported_at": datetime.now(timezone.utc),
     }
+
+
+def _row_barcode(row: Dict[str, Any]) -> str:
+    """The row's Barcode cell: mostly TechCherry's own item code ('2510647'),
+    now and then a maker's GTIN. 'NA' is none."""
+    code = (row.get("barcode") or row.get("Barcode") or "").strip()
+    return "" if code.upper() == "NA" else code
+
+
+def _gtin_refusal(code: str, existing: Optional[Dict[str, Any]], repo) -> Optional[str]:
+    """Why the row's maker GTIN `code` cannot go on its product, or None.
+    One product keeps ONE maker barcode: one that holds a different code
+    keeps it (Manage Barcode changes it), and a code another product holds
+    stays that product's (assert_gtin_free, excluding this one). The product's
+    code is its attributes.gtin, else its legacy products.barcode."""
+    ex = existing or {}
+    attrs = ex.get("attributes") if isinstance(ex.get("attributes"), dict) else {}
+    held = sanitise_gtin(attrs.get("gtin")) or sanitise_gtin(ex.get("barcode"))
+    if held in gtin_spellings(code):
+        return None
+    if held:
+        return (
+            f"this product already has the maker barcode {held} and the file "
+            f"gives {code}. A product keeps one maker barcode; change it in "
+            "Manage Barcode if the file is right."
+        )
+    try:
+        assert_gtin_free(code, repo, ex.get("product_id"))
+    except ProductMasterError as e:
+        return e.message
+    return None
 
 
 def _map_customer(
@@ -387,7 +424,7 @@ def _map_order(
     summary="One-time TechCherry → IMS batch upsert (SUPERADMIN)",
     description=(
         "Upserts a batch of products / customers / orders from TechCherry "
-        "into IMS. Dedupe key depends on `type`: barcode for products, "
+        "into IMS. Dedupe key depends on `type`: sku for products, "
         "phone for customers, invoice_no for orders. `overwrite=true` "
         "$set-updates existing docs; `overwrite=false` counts them as "
         "skipped. Stamps every row with `source='techcherry'` and "
@@ -405,7 +442,7 @@ async def import_batch(
 
     if req.type == "products":
         collection_name = "products"
-        dedup_field = "barcode"
+        dedup_field = "sku"
         mapper = _map_product
     elif req.type == "customers":
         collection_name = "customers"
@@ -478,7 +515,30 @@ async def import_batch(
             if req.type in ("products", "orders"):
                 query["store_id"] = req.store_id
 
-            existing = col.find_one(query, {"_id": 1})
+            existing = col.find_one(
+                query, {"_id": 1, "product_id": 1, "barcode": 1, "attributes": 1}
+            )
+            # A maker GTIN in the Barcode cell goes to the product's ONE home,
+            # attributes.gtin, through write_spine_gtin (keyed on product_id,
+            # so every product written here carries one): it lands as a
+            # Manage Barcode save does, the legacy products.barcode dropped,
+            # never written. Only on a row this call writes (overwrite=false
+            # skips an existing one).
+            code = repo = None
+            if req.type == "products" and (not existing or req.overwrite):
+                from database.repositories import ProductRepository
+
+                repo = ProductRepository(col)
+                code = sanitise_gtin(_row_barcode(raw_row))
+                refusal = code and _gtin_refusal(code, existing, repo)
+                if refusal:
+                    resp.errors.append(
+                        f"{doc['name'] or key_value}: {refusal} Not imported."
+                    )
+                    continue
+                doc["product_id"] = (existing or {}).get("product_id") or str(
+                    uuid.uuid4()
+                )
             if existing:
                 if req.overwrite:
                     col.update_one({"_id": existing["_id"]}, {"$set": doc})
@@ -488,6 +548,15 @@ async def import_batch(
             else:
                 col.insert_one(doc)
                 resp.inserted += 1
+            if code and not spine_holds_gtin(existing, code):
+                try:
+                    write_spine_gtin(repo, doc["product_id"], code)
+                except ProductMasterError:
+                    resp.errors.append(
+                        f"{doc['name'] or key_value}: imported, but its barcode "
+                        f"{code} could not be saved. Import it again with "
+                        "overwrite on."
+                    )
 
             if len(dedup_samples) < 5:
                 dedup_samples.append(key_value)
