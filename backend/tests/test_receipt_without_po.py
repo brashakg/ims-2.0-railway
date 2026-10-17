@@ -2241,7 +2241,8 @@ def _book_as_drafted(grn_id):
     return draft
 
 
-def test_g1_an_unregistered_dealers_walk_in_costs_what_was_paid(world):
+@pytest.mark.parametrize("recorded_rate", [None, 18.0])
+def test_g1_an_unregistered_dealers_walk_in_costs_what_was_paid(world, recorded_rate):
     """Panel probe (round 8): unregistered Sharma's cash memo (2 x 3100 +
     3 x 420 = Rs 7460) charges no GST, yet the units went on the shelf at
     3255 / 441 (+5% 'GST'), the product cost and the last price paid
@@ -2256,6 +2257,15 @@ def test_g1_an_unregistered_dealers_walk_in_costs_what_was_paid(world):
     cost = {u["product_id"]: u["unit_cost"] for u in db.stock_units.find({"source_id": sharma})}
     assert cost == {FRAME: 3100.0, LENS: 420.0}
     assert db.products.find_one({"product_id": FRAME})["cost_price"] == 3100.0
+
+    if recorded_rate is not None:
+        # Older receipt imports may carry a catalogue rate even though this
+        # supplier is unregistered. The draft must still match the cash memo.
+        receipt = db.grns.find_one({"grn_id": sharma})
+        for line in receipt["items"]:
+            line["tax_rate"] = recorded_rate
+            line["gst_rate"] = recorded_rate
+        db.grns.update_one({"grn_id": sharma}, {"$set": {"items": receipt["items"]}})
 
     draft = _book_as_drafted(sharma)
     assert {ln["product_id"]: ln["gst_rate"] for ln in draft["lines"]} == {FRAME: 0.0, LENS: 0.0}
