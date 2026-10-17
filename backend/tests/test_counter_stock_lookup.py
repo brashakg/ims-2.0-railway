@@ -490,7 +490,7 @@ _SEARCHES = [
     ("sku", "SG-CARRERA-CA8895-807-54", P54),
     ("manufacturer barcode (top-level)", GTIN_TOP, P54),
     ("manufacturer GTIN (attributes.gtin)", GTIN_ATTR, P54),
-    # Round 7: a code goes through the one GTIN rule (gtin.sanitise_gtin), so
+    # Round 7: a code goes through the one GTIN rule (gtin.gtin_spellings), so
     # one typed as printed under the bars, or with hyphens, is the same GTIN.
     ("manufacturer GTIN typed as printed, with spaces", "8 056597 054324", P54),
     ("manufacturer GTIN typed with hyphens", "805-6597-05432-4", P54),
@@ -506,6 +506,37 @@ def test_d7b2_the_counter_finds_the_frame_by(call, mongo_db, label, query, pid):
     found = _items(_ok(call(_user("SALES_STAFF"), q=query)))
     assert pid in found, f"searching by {label} ({query!r}) did not find {pid}: {sorted(found)}"
     assert RB not in found, f"searching by {label} ({query!r}) dragged in the Ray-Ban"
+
+
+_MAKER_ONLY = "P-TITAN-T1"
+_MAKER_GTIN = "8901234567893"  # held only as the maker's GTIN (attributes.gtin)
+
+
+@pytest.mark.parametrize(
+    "query,found",
+    [(_MAKER_GTIN, True), (" 890-1234 56789-3 ", True), ("0" + _MAKER_GTIN, True),
+     ("890", False), ("890123", False), (_MAKER_GTIN[:-1], False)],
+)
+def test_d7b2_a_makers_gtin_is_found_only_on_the_full_code_as_at_the_till(
+    call, mongo_db, query, found
+):
+    # The till's rule (ProductRepository._till_query): the maker's GTIN matches
+    # only the EXACT, complete code in any spelling of it, never a leading
+    # chunk -- '890' would list every Indian-made product. The lookup is the
+    # till's search plus exact codes, so it answers the same.
+    from database.repositories.product_repository import ProductRepository
+
+    _seed(mongo_db)
+    mongo_db["products"].insert_one(
+        _product(_MAKER_ONLY, "WT-TITAN-T1-BLK", "Titan T1 Watch - Black", "BLK", "40",
+                 brand="Titan", model="T1", attributes={"gtin": _MAKER_GTIN})
+    )
+    items = _items(_ok(call(_user("CASHIER"), q=query.strip())))
+    assert (_MAKER_ONLY in items) is found, (query, sorted(items))
+    if found:
+        assert items[_MAKER_ONLY]["exact"] is True
+    till = ProductRepository(mongo_db["products"]).search_products(query.strip())
+    assert (_MAKER_ONLY in {p["product_id"] for p in till}) is found, query
 
 
 def test_d7b2_the_search_is_the_product_search(call, mongo_db, monkeypatch):
@@ -604,7 +635,10 @@ def _seed_contact_lens_family(db, powers: int = _CL_POWERS) -> str:
 @pytest.mark.parametrize(
     "label,query",
     [("its sku", _CL_TARGET_SKU), ("its product barcode", _CL_TARGET_BARCODE),
-     ("its gtin", _CL_TARGET_GTIN), ("its unit barcode", _CL_TARGET_UNIT)],
+     ("its gtin", _CL_TARGET_GTIN), ("its unit barcode", _CL_TARGET_UNIT),
+     # One GTIN in another spelling: the UPC-A printed on the box of a code
+     # stored in its 13-digit form (gtin.gtin_spellings, the till's own rule).
+     ("its gtin as the box's UPC-A", _CL_TARGET_GTIN.lstrip("0"))],
 )
 def test_d7b2_a_scanned_power_is_never_cut_from_a_big_family(call, mongo_db, label, query):
     _seed(mongo_db)

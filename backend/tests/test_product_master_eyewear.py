@@ -124,7 +124,7 @@ _FRAME_RICH_ATTRS = {
     "gender": "Unisex",
     "country_of_origin": "Italy",
     "warranty": "1 year",
-    "upc": "805289126575",
+    "upc": "805289126577",  # a real UPC-A check digit: the upc attribute is validated as a GTIN
     "gtin": "8053672000009",
 }
 
@@ -313,7 +313,7 @@ def test_create_via_door_persists_rich_frame_to_the_spine(
     stored_attrs = stored.get("attributes") or {}
     assert stored_attrs.get("shape") == "Wayfarer"
     assert stored_attrs.get("blue_cut_lens") == "Yes"
-    assert stored_attrs.get("upc") == "805289126575"
+    assert stored_attrs.get("upc") == "805289126577"
     assert stored_attrs.get("gtin") == "8053672000009"
 
 

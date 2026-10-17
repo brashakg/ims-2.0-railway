@@ -242,53 +242,57 @@ def _assert_mrp_ge_offer(mrp, offer_price) -> None:
         raise HTTPException(status_code=400, detail="Offer price cannot exceed MRP")
 
 
-def _validate_product_barcode_or_400(barcode, repo, this_product_id: str) -> None:
-    """Validate a scan-to-sell product barcode, failing LOUDLY on a bad value.
+def _validate_product_barcode_or_400(barcode, repo, this_product_id: str):
+    """Validate the product's barcode -- the MANUFACTURER's UPC/EAN -- loudly.
 
-    A product master barcode must be a real, scannable code that resolves to
-    exactly one product, so:
-      - Format + check digit: it must be a valid 13-digit EAN-13 (the symbology
-        every other unit barcode in the system uses -- see services/barcode.py).
-        A malformed / wrong-check-digit value is rejected with HTTP 400 instead
-        of being silently persisted (a scanner would never decode it -> the
-        product becomes un-scannable, the exact Fail-Loudly violation this
-        guards against).
+    Owner ruling 2026-09-28: IMS keeps its own stock through the per-unit IMS
+    barcodes (services/barcode.mint_unit_barcode); the product-level barcode
+    holds only the manufacturer's GTIN. (What goes to Shopify/Google is the
+    `gtin` ATTRIBUTE -- mirrored to the catalog twin -- which Inventory >
+    Manage Barcode and the Add Product form edit; this field is not mirrored.)
+    So:
+      - Format: it must be a publishable GTIN (services/gtin.py -- 8, 12, 13 or
+        14 digits, valid check digit, NOT our own GS1 20-29 in-store range).
+        Anything else is rejected with HTTP 400 rather than saved.
       - Uniqueness: a barcode already on a DIFFERENT product is rejected with
         HTTP 409 (the DB also enforces this via the unique sparse index; this
         check gives a clear message before the write).
 
-    A blank / null barcode means "no change / clear it" and is intentionally
-    allowed (skipped) -- only a non-empty value is validated.
+    Returns the GTIN with spaces/hyphens dropped (store that, so one GTIN is one
+    value), or None for a blank / null barcode ("no change / clear it").
     """
     if barcode is None:
-        return
+        return None
     code = str(barcode).strip()
     if not code:
         # Explicit clear -- nothing to validate.
-        return
+        return None
 
-    from ..services import barcode as barcode_svc
+    from ..services.gtin import classify_gtin, sanitise_gtin
 
-    if not barcode_svc.validate_ean13(code):
+    reason = classify_gtin(code)
+    if reason:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Invalid barcode '{code}'. A product barcode must be a valid "
-                "13-digit EAN-13 (numeric, with a correct check digit)."
+                f"'{code[:40]}' is not a manufacturer barcode ({reason}). Enter the "
+                "UPC / EAN printed on the maker's box: 8, 12, 13 or 14 digits with "
+                "a valid check digit. IMS barcodes (and codes starting 20-29) "
+                "belong on units, not here."
             ),
         )
+    code = sanitise_gtin(code)
+    _refuse_barcode_held_by_another_product(code, repo, this_product_id)
+    return code
 
-    if repo is not None:
-        clash = repo.find_one({"barcode": code})
-        if clash is not None and clash.get("product_id") != this_product_id:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Barcode '{code}' is already assigned to another product "
-                    f"({clash.get('sku') or clash.get('product_id')}). "
-                    "Barcodes must be unique."
-                ),
-            )
+
+def _refuse_barcode_held_by_another_product(code: str, repo, this_product_id: str):
+    """HTTP 409 when another product already holds this manufacturer barcode
+    (the one rule: product_master.assert_gtin_free)."""
+    try:
+        _pm.assert_gtin_free(code, repo, this_product_id)
+    except _pm.ProductMasterError as err:
+        raise HTTPException(status_code=err.status, detail=err.message) from err
 
 
 # Fields persisted top-level on the product doc only when provided (additive).
@@ -360,6 +364,7 @@ def _clean_image_urls(v):
 # persisted {product_id, sku} response shape + the additive FORM-only identity
 # columns (CL/spectacle power, variant, discount_category) are preserved.
 from ..services import product_master as _pm
+from ..services.gtin import MANUFACTURER_BARCODE_ATTRIBUTES
 
 # FORM/BULK-only optional top-level columns the canonical core doesn't model but
 # this door has always persisted (POS power-grid reads cl_power/sph/base_curve
@@ -856,8 +861,10 @@ async def list_products(
             "model number anywhere in the model, brands spelt with or without "
             "spaces/hyphens, colour words, the GTIN (audit F21). Absent = the "
             "till's rule: every word STARTS a word of brand / model / name / "
-            "model name / subbrand, or the start of SKU / variant / barcode "
-            "(POS, goods receipt and every other search box)."
+            "model name / subbrand, or the start of SKU / variant / barcode, "
+            "or the search is the maker's complete GTIN, exactly, in any "
+            "spelling of the one code (POS, goods receipt and every other "
+            "search box)."
         ),
     ),
     tag: Optional[str] = Query(
@@ -3626,16 +3633,38 @@ async def update_product(
         # OPTICAL_LENS index/coating) can be filled and auto-promoted by the
         # restamp below. An explicit value in the patch wins; existing keys are
         # preserved. Persisted as the full merged attributes dict.
+        _gtin_written = _barcode_moved = False
         if "attributes" in update_data:
             # Case ONLY the keys this submit carries, BEFORE the merge. Casing
             # the merged bag would rewrite every stored attribute on every
             # save, including ones the owner had corrected by hand.
             _patch = update_data["attributes"] or {}
             _patch = _pm.apply_field_casing(_patch, only=set(_patch.keys()))
-            update_data["attributes"] = {
-                **(existing.get("attributes") or {}),
-                **_patch,
-            }
+            # The GTIN is the barcode that goes to Shopify and Google: the edit
+            # door refuses junk exactly like the create door (same guard, strict)
+            # in the keys this submit carries. A stored barcode key in another
+            # spelling ('GTIN') folds onto the one key and leaves storage in
+            # this write, so Remove removes it; a gtin the fold makes passes
+            # the one-holder check like a sent one.
+            try:
+                _category = update_data.get("category") or existing.get("category")
+                _patch = _pm._guard_gtin_attribute(
+                    _patch, strict=True, category=_category
+                )
+                update_data["attributes"], _gtin_written = _pm.merge_attributes_edit(
+                    existing.get("attributes"), _patch, repo, product_id, _category
+                )
+                # A gtin / upc this save sent or moved must land on the twin too.
+                _stored = existing.get("attributes") or {}
+                _barcode_moved = any(
+                    k in _patch
+                    or (update_data["attributes"].get(k) or "") != (_stored.get(k) or "")
+                    for k in MANUFACTURER_BARCODE_ATTRIBUTES
+                )
+            except _pm.ProductMasterError as err:
+                raise HTTPException(
+                    status_code=err.status, detail=_pm_error_detail(err)
+                ) from err
             # Catalog Dictionary: the update path must enforce the same
             # owner-configured value lists as the create door (create runs it
             # inside normalise_payload; PUT does not go through that path).
@@ -3663,13 +3692,16 @@ async def update_product(
                 detail=f"Invalid modality. Allowed: {', '.join(CL_MODALITIES)}",
             )
 
-        # Validate a scan-to-sell product barcode (EAN-13 format + check digit +
-        # uniqueness) the moment one is set, so a malformed/duplicate barcode is
-        # rejected loudly instead of silently saved (which would make the
-        # product un-scannable at POS). Only runs when `barcode` is in the
-        # payload; a blank value (clear) is allowed.
+        # The product barcode is the manufacturer's GTIN (format + check digit +
+        # uniqueness), validated the moment one is set and stored without
+        # separators. Only runs when `barcode` is in the payload; a blank value
+        # (clear) is allowed and left as sent.
         if "barcode" in update_data:
-            _validate_product_barcode_or_400(update_data["barcode"], repo, product_id)
+            _gtin = _validate_product_barcode_or_400(
+                update_data["barcode"], repo, product_id
+            )
+            if _gtin:
+                update_data["barcode"] = _gtin
 
         # Validate MRP >= Offer Price using the EFFECTIVE post-update values.
         # The old check only fired when BOTH fields were in the payload, so a
@@ -3711,7 +3743,21 @@ async def update_product(
             )
         )
 
+        # A size with no website row can never take the barcode on every copy:
+        # refused BEFORE the spine write (the same check as the review editor).
+        if _barcode_moved and existing.get("variant_of"):
+            try:
+                from ..dependencies import get_db as _gdb_row
+
+                _pm.assert_size_row(existing.get("sku"), _gdb_row())
+            except _pm.ProductMasterError as err:
+                raise HTTPException(
+                    status_code=err.status, detail=_pm_error_detail(err)
+                ) from err
+
         if repo.update(product_id, update_data):
+            if _gtin_written and "barcode" not in update_data:
+                _pm.drop_legacy_spine_barcode(repo, product_id)
             # Compact field-classified audit row (scorecard corrections): the
             # spine PUT is the primary FE edit door, and without this row an
             # other-user pricing-only edit would be (over-)counted as a
@@ -3786,8 +3832,10 @@ async def update_product(
             # same accept path "Add to stock" runs). Fail-soft: the save stands.
             from .vendors.grn_accept import catalogue_write_done
 
+            mirror_outcome = {}
             status_fields, released = catalogue_write_done(
-                product_id, existing, update_data, product_repo=repo
+                product_id, existing, update_data, product_repo=repo,
+                mirror_outcome=mirror_outcome,
             )
             # Sync audit gap #2 (owner, 2026-09-06): is_active off -> take the
             # twin OFF Shopify; back on -> queue it for the next live sync.
@@ -3809,6 +3857,15 @@ async def update_product(
             # so the resolver sees the post-update tags/category/brand + status.
             merged = {**existing, **update_data, **status_fields}
             _refresh_collections_after_product(merged)
+            # Manage Barcode: spine and twin hold ONE code (the twin's is the
+            # one the push sends). A twin that kept the old one is a failed
+            # save, never a success -- LAST, so the take-down above still ran.
+            if _barcode_moved and not mirror_outcome.get("saved"):
+                raise HTTPException(
+                    status_code=503,
+                    detail="Saved on the product but not on its catalogue copy "
+                    "- press Save again.",
+                )
             return {
                 "message": "Product updated",
                 "product_id": product_id,
