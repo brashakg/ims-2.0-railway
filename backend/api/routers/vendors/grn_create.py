@@ -152,7 +152,10 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
         # would sit in the accountant's unbilled-challan list for good.
         # Owner 2026-10-18: managers may count extra goods after full receipt.
         # The cancelled-product quantity guard below still applies to every line.
-        if po.get("status") not in (*_RECEIVABLE_PO_STATUSES, "RECEIVED") and not (
+        extra_receipt = po.get("status") == "RECEIVED" and (
+            not is_dc or any(item.accepted_qty > 0 for item in grn.items)
+        )
+        if po.get("status") not in _RECEIVABLE_PO_STATUSES and not extra_receipt and not (
             not is_dc
             and rejected_delivery_on_closed_order(po, [it.model_dump() for it in grn.items])
         ):

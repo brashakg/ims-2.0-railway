@@ -528,8 +528,8 @@ def puts_nothing_in_stock(lines) -> bool:
 
 def closed_by_cancel(po: dict) -> bool:
     """A cancel CLOSED the order: CANCELLED, or RECEIVED because the rest was
-    cancelled. Nothing on it is due. The PO list stamps it, so the receive
-    screen offers such an order only to log a rejected delivery."""
+    cancelled. Nothing on it is due. The PO list stamps this separately from
+    permission to receive extra goods on an uncancelled line."""
     status = po.get("status")
     return status == "CANCELLED" or (
         status == "RECEIVED" and bool(_cancelled_products(po))
@@ -539,10 +539,10 @@ def closed_by_cancel(po: dict) -> bool:
 def rejected_delivery_on_closed_order(po: dict, lines) -> bool:
     """Owner ruling 2026-10-08 (c): a delivery that brought cancelled items CAN
     be logged when every cancelled item on it is rejected. Once a cancel has
-    CLOSED the order nothing on it is due, so such a delivery is one that puts
+    CLOSED the order nothing on it is due, so this exception is for a delivery that puts
     nothing into stock. It is logged (receipt, discrepancy task, the paper
-    trail a debit note needs) though the order is no longer receivable; a
-    closed order still takes no unit into stock."""
+    trail a debit note needs) though the order is no longer receivable.
+    Extra goods against uncancelled RECEIVED lines have a separate gate."""
     return closed_by_cancel(po) and puts_nothing_in_stock(lines)
 
 
