@@ -53,6 +53,8 @@ const REPORT = {
   zeroRatedSupplies: heads(0, 0, 0),
   exemptSupplies: 0,
   taxPayable: heads(0, 90, 90),
+  inwardSuppliesReverseChargeValue: 0,
+  inwardSuppliesReverseCharge: heads(0, 0, 0),
   interest: heads(0, 0, 0),
   lateFee: 0,
 };
@@ -91,7 +93,7 @@ describe('GSTR-3B for a login with no shop (R4)', () => {
   });
 
   it('a login with a shop loads its return as before (no notice)', async () => {
-    user = { id: 'u-1', roles: ['STORE_MANAGER'], activeStoreId: 'S1', storeIds: ['S1'] };
+    user = { id: 'u-1', roles: ['ACCOUNTANT'], activeStoreId: 'S1', storeIds: ['S1'] };
     render(<GSTR3BReport />);
     expect(await screen.findByText('Outward Supplies')).toBeInTheDocument();
     expect(api.getGSTR3BReport).toHaveBeenCalledWith(expect.any(String), 'S1');
@@ -99,7 +101,7 @@ describe('GSTR-3B for a login with no shop (R4)', () => {
   });
 
   it('a multi-store login with no active shop still loads (the server reads its own shop)', async () => {
-    user = { id: 'u-1', roles: ['AREA_MANAGER'], storeIds: ['S1', 'S2'] };
+    user = { id: 'u-1', roles: ['ACCOUNTANT'], storeIds: ['S1', 'S2'] };
     render(<GSTR3BReport />);
     expect(await screen.findByText('Outward Supplies')).toBeInTheDocument();
     expect(screen.queryByTestId('no-shop-notice')).not.toBeInTheDocument();

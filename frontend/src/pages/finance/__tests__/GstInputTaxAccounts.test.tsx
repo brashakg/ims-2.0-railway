@@ -6,7 +6,8 @@
 // ONLY SUPERADMIN, ADMIN and ACCOUNTANT see them (COST_ROLES; the server
 // answers a manager 403 on both). So a manager gets no Finance GST tab and no
 // summary call, no GSTR-3B menu entry, and /reports/gstr3b is the app's
-// not-allowed page; GSTR-1 (sales GST only) stays his. A routed test, because
+// not-allowed page. GSTR-1 now follows the same approved Accounts-only rule.
+// A routed test, because
 // the component tests render GSTPanel / GSTR3BReport directly and stay green
 // whatever a route, a tab or a menu entry admits.
 
@@ -109,15 +110,16 @@ describe.each([['STORE_MANAGER'], ['AREA_MANAGER']])('%s: no GST summary, no GST
 
   it('GSTR-3B: no menu entry, and the page is the not-allowed page', async () => {
     expect(navIds(role)).not.toContain('gstr3b');
-    expect(navIds(role)).toContain('gstr1');
+    expect(navIds(role)).not.toContain('gstr1');
     openReport('/reports/gstr3b', role);
     expect(await screen.findByText('UNAUTHORIZED')).toBeInTheDocument();
     expect(screen.queryByText('GSTR-3B PAGE')).toBeNull();
   });
 
-  it('GSTR-1 (sales GST only) still opens', async () => {
+  it('GSTR-1 is also restricted to Accounts and administrators', async () => {
     openReport('/reports/gstr1', role);
-    expect(await screen.findByText('GSTR-1 PAGE')).toBeInTheDocument();
+    expect(await screen.findByText('UNAUTHORIZED')).toBeInTheDocument();
+    expect(screen.queryByText('GSTR-1 PAGE')).toBeNull();
   });
 });
 
@@ -146,5 +148,11 @@ describe.each([['ACCOUNTANT'], ['ADMIN'], ['SUPERADMIN']])('%s: keeps the input 
     expect(navIds(role)).toContain('gstr3b');
     openReport('/reports/gstr3b', role);
     expect(await screen.findByText('GSTR-3B PAGE')).toBeInTheDocument();
+  });
+
+  it('GSTR-1: menu entry and page', async () => {
+    expect(navIds(role)).toContain('gstr1');
+    openReport('/reports/gstr1', role);
+    expect(await screen.findByText('GSTR-1 PAGE')).toBeInTheDocument();
   });
 });

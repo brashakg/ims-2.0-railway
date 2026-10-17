@@ -47,7 +47,7 @@ describe('GSTPanel - input tax credit follows the accounts rule (R5)', () => {
       // Even handed the accounts figures, the panel draws none of them.
       for (const view of [MANAGER_VIEW, ACCOUNTS_VIEW]) {
         const { unmount } = render(<GSTPanel gstSummary={view} />);
-        expect(screen.queryByText('Input Tax Credit')).toBeNull();
+        expect(screen.queryByText(/Input Tax Credit/i)).toBeNull();
         expect(screen.queryByText('Net GST Payable')).toBeNull();
         expect(screen.queryByText('Total GST Payable')).toBeNull();
         expect(screen.queryByText('Less Input Tax Credit')).toBeNull();
@@ -65,7 +65,7 @@ describe('GSTPanel - input tax credit follows the accounts rule (R5)', () => {
     (role) => {
       roles = [role];
       render(<GSTPanel gstSummary={ACCOUNTS_VIEW} />);
-      expect(screen.getByText('Input Tax Credit')).toBeInTheDocument();
+      expect(screen.getByText('Less: Input Tax Credit')).toBeInTheDocument();
       expect(screen.getByText('Net GST Payable')).toBeInTheDocument();
       expect(screen.getByText('Total GST Payable')).toBeInTheDocument();
       expect(screen.getAllByText(/12,345/).length).toBeGreaterThan(0);
