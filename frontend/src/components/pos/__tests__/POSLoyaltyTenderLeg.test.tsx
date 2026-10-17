@@ -23,6 +23,11 @@ vi.mock('../../../services/api', async (importOriginal) => {
       ...(actual.orderApi as object),
       createOrder: vi.fn(),
       addPayment: vi.fn(),
+      // The bill total is the server's quote: a Rs 1,000 frame bills 1,000.
+      quoteBill: vi.fn(async () => ({
+        subtotal: 1000, taxable: 952.38, tax: 47.62, total_discount: 0,
+        grand_total: 1000, round_off: 0,
+      })),
     },
     loyaltyApi: {
       ...(actual.loyaltyApi as object),

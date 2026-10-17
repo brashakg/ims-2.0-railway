@@ -85,7 +85,14 @@ vi.mock('../../services/api', () => {
   const noop = () => Promise.resolve([]);
   return {
     customerApi: { search: noop, getCustomer: noop, getCustomers: noop },
-    orderApi: { createOrder: noop, addPayment: noop, getOrders: noop },
+    orderApi: {
+      quoteBill: async () => {
+        // POST /orders/quote stand-in: the server bills the till's own value here.
+        const v = (await import('../../stores/posStore')).usePOSStore.getState().getBillValue();
+        return { subtotal: v, taxable: v, tax: 0, total_discount: 0, grand_total: v, round_off: 0 };
+      },
+      createOrder: noop, addPayment: noop, getOrders: noop,
+    },
     prescriptionApi: { getPrescriptions: () => Promise.resolve({ prescriptions: [] }) },
     workshopApi: { createJob: noop, updateFittingDetails: noop },
     adminStoreApi: { listStores: noop, getStoreUsers: () => Promise.resolve([]), getStaff: () => Promise.resolve([]) },

@@ -12,7 +12,7 @@
 // The recomputed grand total + delta are shown live before submit. An issued
 // invoice is NEVER silently mutated.
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { XCircle, AlertTriangle } from 'lucide-react';
 import type { Order } from '../../types';
 import { orderApi } from '../../services/api/sales';
@@ -89,21 +89,26 @@ export function SuperadminOrderEditModal({ order, onClose, onSaved }: Props) {
   );
   const [saving, setSaving] = useState(false);
 
-  // Live, client-side estimate of the new grand total. The backend is the
-  // source of truth (GST-inclusive per-category); this preview just helps the
-  // operator see the direction + rough magnitude before submitting.
-  const newGrandTotal = useMemo(() => {
-    const sub = lines.reduce((acc, l) => {
-      const gross = (Number(l.unit_price) || 0) * (Number(l.quantity) || 0);
-      const disc = gross * ((Number(l.discount_percent) || 0) / 100);
-      return acc + (gross - disc);
-    }, 0);
-    const afterCart = sub * (1 - (Number(cartDiscountPct) || 0) / 100);
-    return Math.round(afterCart * 100) / 100;
-  }, [lines, cartDiscountPct]);
+  const quoteBody = useMemo(() => ({
+    order_id: order.id, items: lines, cart_discount_percent: cartDiscountPct,
+  }), [order.id, lines, cartDiscountPct]);
+  const quoteKey = JSON.stringify(quoteBody);
+  const [quote, setQuote] = useState<{ key: string; total?: number; error?: string } | null>(null);
+  useEffect(() => {
+    let live = true;
+    const timer = setTimeout(() => {
+      orderApi.quoteBill(quoteBody).then(
+        (reply) => { if (live) setQuote({ key: quoteKey, total: reply.grand_total }); },
+        () => { if (live) setQuote({ key: quoteKey, error: 'Could not price this edit. Change the item or reopen the order to try again.' }); },
+      );
+    }, 250);
+    return () => { live = false; clearTimeout(timer); };
+  }, [quoteBody, quoteKey]);
+  const currentQuote = quote?.key === quoteKey ? quote : null;
+  const newGrandTotal = currentQuote?.total ?? null;
 
   const originalGrandTotal = Number(order.grandTotal) || 0;
-  const delta = Math.round((newGrandTotal - originalGrandTotal) * 100) / 100;
+  const delta = newGrandTotal === null ? null : Math.round((newGrandTotal - originalGrandTotal) * 100) / 100;
 
   const updateLine = (idx: number, patch: Partial<EditLine>) => {
     setLines((prev) =>
@@ -130,6 +135,10 @@ export function SuperadminOrderEditModal({ order, onClose, onSaved }: Props) {
   };
 
   const submit = async () => {
+    if (newGrandTotal === null) {
+      toast.error(currentQuote?.error || 'Wait for the updated bill total.');
+      return;
+    }
     if (reason.trim().length < 4) {
       toast.error('A reason (at least 4 characters) is required.');
       return;
@@ -383,10 +392,11 @@ export function SuperadminOrderEditModal({ order, onClose, onSaved }: Props) {
               <span>{inr(originalGrandTotal)}</span>
             </div>
             <div className="flex justify-between font-semibold">
-              <span>New grand total (estimate)</span>
-              <span>{inr(newGrandTotal)}</span>
+              <span>New grand total</span>
+              <span>{newGrandTotal === null ? 'Pricing…' : inr(newGrandTotal)}</span>
             </div>
-            <div
+            {currentQuote?.error && <p role="alert" className="text-sm text-red-600">{currentQuote.error}</p>}
+            {delta !== null && <div
               className={
                 'flex justify-between text-sm font-medium ' +
                 (delta < 0
@@ -404,8 +414,8 @@ export function SuperadminOrderEditModal({ order, onClose, onSaved }: Props) {
                     : 'No change'}
               </span>
               <span>{inr(Math.abs(delta))}</span>
-            </div>
-            {hasInvoice && mode === 'CREDIT_NOTE' && delta !== 0 && (
+            </div>}
+            {hasInvoice && mode === 'CREDIT_NOTE' && delta !== null && delta !== 0 && (
               <p className="text-xs text-gray-500 pt-1">
                 A {delta < 0 ? 'credit' : 'debit'} note for{' '}
                 {inr(Math.abs(delta))} will be issued against invoice{' '}
@@ -440,7 +450,7 @@ export function SuperadminOrderEditModal({ order, onClose, onSaved }: Props) {
             <button
               onClick={submit}
               className="btn-primary flex-1"
-              disabled={saving}
+              disabled={saving || newGrandTotal === null}
             >
               {saving
                 ? 'Saving…'
