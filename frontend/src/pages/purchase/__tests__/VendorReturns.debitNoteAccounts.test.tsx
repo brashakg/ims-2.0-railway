@@ -2,9 +2,8 @@
 // A debit note's money is for the owner and accounts only (owner ruling 2026-10-12)
 // ============================================================================
 // Issuing the note, its total and its Tally voucher (nothing but money) are
-// shown to COST_ROLES only. A manager sees the note's number and can print it
-// (the server masks the print); he is shown no issue button, no total and no
-// Tally export.
+// shown to COST_ROLES only. A manager sees the note's number; the statutory
+// print, issue button, total and Tally export are for Accounts.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
@@ -69,7 +68,7 @@ describe('the GST debit note on Vendor Returns', () => {
   it.each(['STORE_MANAGER', 'AREA_MANAGER'])('shows %s the issued note without its money', async (role) => {
     await open(role, 'Acme');
     expect(screen.getByText('DN/26-27/0001')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Print' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Print' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Export Tally' })).toBeNull();
     expect(document.body.textContent).not.toContain('4,840');
   });
