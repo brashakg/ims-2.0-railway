@@ -9,7 +9,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 from typing import Optional, List, Dict
 from datetime import datetime, timedelta
 import uuid
@@ -247,7 +247,7 @@ class TaskUpdate(BaseModel):
     status: Optional[str] = None  # OPEN, IN_PROGRESS, COMPLETED, ESCALATED, CANCELLED
     notes: Optional[str] = None
     assigned_to: Optional[str] = None
-    due_at: Optional[datetime] = None
+    due_at: Optional[datetime] = Field(default=None, validation_alias=AliasChoices("due_at", "due_date"))
     # Allow attaching (or replacing) a file on an existing task.
     attachment_file_id: Optional[str] = Field(default=None, max_length=128)
     attachment_filename: Optional[str] = Field(default=None, max_length=255)
@@ -801,6 +801,10 @@ async def update_task(
         return {"task_id": task_id, "message": "Task updated"}
 
     existing = _visible_task(repo, task_id, current_user)
+    if "due_at" in update.model_fields_set:
+        # Includes the legacy due_date spelling and self-assigned tasks.
+        # Visibility never grants staff authority to postpone a deadline.
+        await _managers_only(current_user)
     if update.assigned_to or (update.status and canon_status(update.status) == "CANCELLED"):
         await _managers_only(current_user)
 
@@ -854,6 +858,12 @@ async def update_task(
         update_data["assigned_to"] = update.assigned_to
     if update.due_at is not None:
         update_data["due_at"] = update.due_at
+        if "due_date" in existing:
+            update_data["due_date"] = update.due_at
+        update_data["history"] = update_data.get("history", existing.get("history") or []) + [{
+            "action": "due_date_change", "from": existing.get("due_at") or existing.get("due_date"),
+            "to": update.due_at, "by": current_user.get("user_id"), "at": datetime.now(),
+        }]
     if update.attachment_file_id is not None:
         fid = str(update.attachment_file_id).strip()
         if fid:

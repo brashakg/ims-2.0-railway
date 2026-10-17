@@ -40,7 +40,6 @@ const IntegrationsHub = lazy(() => import('../components/settings/IntegrationsHu
 const PrinterSettingsPage = lazy(() => import('../pages/settings/SettingsPrinters').then(m => ({ default: m.PrinterSettingsPage })));
 const ApprovalWorkflows = lazy(() => import('../components/settings/ApprovalWorkflows').then(m => ({ default: m.ApprovalWorkflows })));
 const AgentControlPanel = lazy(() => import('../components/settings/AgentControlPanel').then(m => ({ default: m.AgentControlPanel })));
-const FeatureToggles = lazy(() => import('../components/settings/FeatureToggles').then(m => ({ default: m.FeatureToggles })));
 const ShopifyLiveSyncSection = lazy(() => import('../pages/settings/SettingsShopifyLiveSync').then(m => ({ default: m.ShopifyLiveSyncSection })));
 const AuditLogSettingsPage = lazy(() => import('../pages/settings/SettingsAuditLogs').then(m => ({ default: m.AuditLogSettingsPage })));
 const OperationalRulesSection = lazy(() => import('../pages/settings/SettingsAdminControls').then(m => ({ default: m.OperationalRulesSection })));
@@ -56,14 +55,10 @@ const GoLiveChecklistPage = lazy(() => import('../pages/settings/GoLiveChecklist
 const JarvisPage = lazy(() => import('../pages/jarvis/JarvisPage').then(m => ({ default: m.JarvisPage })));
 const ActivityLogPage = lazy(() => import('../pages/admin/ActivityLogPage'));
 
-// PolicySchemaForm + FeatureToggles take the active store id as a prop.
+// PolicySchemaForm takes the active store id as a prop.
 function PoliciesSectionPage() {
   const { user } = useAuth();
   return <PolicySchemaForm storeId={user?.activeStoreId || ''} />;
-}
-function FeatureTogglesSectionPage() {
-  const { user } = useAuth();
-  return <FeatureToggles storeId={user?.activeStoreId || ''} />;
 }
 
 // One element per section id — paired with SETTINGS_SECTIONS below, so a new
@@ -91,7 +86,6 @@ const SECTION_ELEMENTS: Record<SettingsTab, React.ReactElement> = {
   printers: <PrinterSettingsPage />,
   approvals: <ApprovalWorkflows />,
   agents: <AgentControlPanel />,
-  'feature-toggles': <FeatureTogglesSectionPage />,
   'shopify-live-sync': <ShopifyLiveSyncSection />,
   'audit-logs': <AuditLogSettingsPage />,
   rules: <OperationalRulesSection />,

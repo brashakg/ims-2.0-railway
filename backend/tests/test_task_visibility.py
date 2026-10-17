@@ -644,21 +644,56 @@ def test_a_lower_case_manager_issues_the_days_sop_tasks(world, monkeypatch):
         USERS.pop("LOWER")
 
 
-def test_a_sales_cashier_works_sales_and_cashier_tasks(world):
-    """Owner 2026-10-13: a sales cashier is both, so a task addressed to
-    SALES_CASHIER, SALES_STAFF or CASHIER at their shop is theirs to see and
-    to do. Another role's task, or the sales role's at another shop, is not."""
+@pytest.mark.parametrize("held_cashier", [False, True])
+def test_a_sales_cashier_needs_explicit_cashier_role_for_cashier_tasks(world, held_cashier):
+    """Owner 2026-10-18: the legacy sales name never grants cashier work."""
     as_role, db = world
-    theirs = {"R-SALES_CASHIER", "R-SALES_STAFF", "R-CASHIER"}
-    USERS["SALES_CASHIER"] = {"user_id": "u-sc", "roles": ["SALES_CASHIER"], "store_ids": [S1], "active_store_id": S1}
+    theirs = {"R-SALES_CASHIER", "R-SALES_STAFF"}
+    roles = ["SALES_CASHIER"]
+    if held_cashier:
+        roles.append("cashier")  # persisted legacy case still counts as explicit
+        theirs.add("R-CASHIER")
+    USERS["SALES_CASHIER"] = {"user_id": "u-sc", "roles": roles, "store_ids": [S1], "active_store_id": S1}
     try:
         c = as_role("SALES_CASHIER")
         assert _ids(c.get("/api/v1/tasks")) == theirs
         assert c.get("/api/v1/tasks/R-SALES-S2").status_code == 404
         assert c.get("/api/v1/tasks/R-OPTOMETRIST").status_code == 404
+        if not held_cashier:
+            for method, tail, kw, _ in TASK_ROUTES.values():
+                response = getattr(c, method)(f"/api/v1/tasks/R-CASHIER{tail}", **kw)
+                assert response.status_code == 404, (method, tail, response.text)
+            assert db.tasks.find_one({"task_id": "R-CASHIER"})["status"] == "IN_PROGRESS"
         for tid in sorted(theirs):
             r = c.patch(f"/api/v1/tasks/{tid}/complete", json={"completion_notes": "done it"})
             assert r.status_code == 200, (tid, r.text)
             assert db.tasks.find_one({"task_id": tid})["status"] == "COMPLETED", tid
     finally:
         USERS.pop("SALES_CASHIER")
+
+
+@pytest.mark.parametrize("method, field", [("patch", "due_at"), ("put", "due_date")])
+@pytest.mark.parametrize("self_created", [False, True])
+def test_staff_cannot_change_deadlines_even_on_self_created_tasks(world, method, field, self_created):
+    as_role, db = world
+    for role in STAFF_ROLES:
+        tid = f"P-{role}"
+        if self_created:
+            db.tasks.update_one({"task_id": tid}, {"$set": {"assigned_by": uid(role), "created_via": "manual"}})
+        before = db.tasks.find_one({"task_id": tid})
+        response = getattr(as_role(role), method)(f"/api/v1/tasks/{tid}", json={field: FUTURE.isoformat(), "notes": "postpone"})
+        assert response.status_code == 403, (role, response.text)
+        assert db.tasks.find_one({"task_id": tid}) == before
+
+
+@pytest.mark.parametrize("method, field", [("patch", "due_at"), ("put", "due_date")])
+def test_manager_changes_deadline_with_audit_and_legacy_date_in_sync(world, method, field):
+    as_role, db = world
+    for role in MANAGERS:
+        db.tasks.update_one({"task_id": "P-OPTOMETRIST"}, {"$set": {"due_at": PAST, "due_date": PAST, "history": []}})
+        response = getattr(as_role(role), method)("/api/v1/tasks/P-OPTOMETRIST", json={field: FUTURE.isoformat()})
+        assert response.status_code == 200, (role, response.text)
+        saved = db.tasks.find_one({"task_id": "P-OPTOMETRIST"})
+        assert saved["due_at"] == saved["due_date"] and saved["due_at"] > datetime.now()
+        assert saved["history"][-1]["action"] == "due_date_change"
+        assert saved["history"][-1]["by"] == USERS[role]["user_id"]
