@@ -18,7 +18,7 @@ from test_off_catalogue_items_release import (
 def test_manager_receives_extra_after_full_receipt_with_unit_audit(world):
     item = world.catalogue_frame("Carrera", "EXTRA 1", "C1", "52", 5000, 4500, 2000)
     pid = item["product_id"]
-    po = world.raise_po([{"product_id": pid, "quantity": 2, "unit_price": 2000}])
+    po = world.raise_po([{"product_id": pid, "product_name": "Carrera EXTRA 1", "quantity": 2, "unit_price": 2000}])
     world.receive_everything(po)
     assert world.db.purchase_orders.find_one({"po_id": po["po_id"]})["status"] == "RECEIVED"
 
@@ -35,7 +35,7 @@ def test_manager_receives_extra_after_full_receipt_with_unit_audit(world):
 def test_extra_on_uncancelled_product_is_allowed_when_other_line_closed_by_cancel(world):
     item = world.catalogue_frame("Carrera", "EXTRA 2", "C1", "52", 5000, 4500, 2000)
     pid = item["product_id"]
-    po = world.raise_po([{"product_id": pid, "quantity": 1, "unit_price": 2000}])
+    po = world.raise_po([{"product_id": pid, "product_name": "Carrera EXTRA 2", "quantity": 1, "unit_price": 2000}])
     world.receive_everything(po)
     po = world.db.purchase_orders.find_one({"po_id": po["po_id"]})
     po["items"].append({"product_id": "CANCELLED-ITEM", "quantity": 0,
