@@ -53,11 +53,13 @@ ALL_ROLES = (
 SUMMARY_INPUT_KEYS = {
     "gst_input_credit", "gst_input_credit_excluded", "net_gst_payable",
     "tax_paid", "net_gst_liability",
+    "gst_input_credit_carried_forward", "reverse_charge_tax",
 }
 GSTR3B_INPUT_KEYS = {
     "itcAvailable", "itcAvailableRegular", "itcAvailableGstin", "itcUtilized",
     "inwardSuppliesReverseChargeValue", "inwardSuppliesReverseCharge",
     "inwardSuppliesReverseChargeGstin", "taxPaidCash",
+    "itcReverseCharge",
 }
 # ...and by shape, so one added later under another name is caught too.
 _INPUTISH = re.compile(r"itc|input|reverse|inward|paidcash|tax_?paid|net_?gst", re.I)
@@ -94,7 +96,10 @@ def _user(role: str) -> Dict[str, Any]:
 
 def _world() -> Any:
     db = mongomock.MongoClient().db
-    db["entities"].insert_one({"entity_id": "E1", "legal_name": "BV Optics"})
+    db["entities"].insert_one({
+        "entity_id": "E1", "legal_name": "BV Optics",
+        "gstins": [{"gstin": "20AAACB1234C1Z5", "state_code": "20", "is_primary": True}],
+    })
     db["stores"].insert_one(
         {"store_id": "S1", "store_name": "Bokaro", "entity_id": "E1",
          "state": "Jharkhand", "gstin": "20AAACB1234C1Z5"}
@@ -107,7 +112,7 @@ def _world() -> Any:
          "tax_amount": 180.0}
     )
     # A purchase bill booked at Bokaro (F63: every bill carries its shop; it
-    # names no GSTIN, so GSTR-3B reads it company-wide) -- input credit 50 + 50.
+    # names no GSTIN, so its verified shop registration places it) -- 50 + 50.
     db["vendor_bills"].insert_one(
         {"bill_id": "B-1", "store_id": "S1", "bill_number": "PB-1", "vendor_id": "V1",
          "bill_date": "2026-05-04", "invoice_date": "2026-05-04",
@@ -175,7 +180,9 @@ class TestGstSummary:
         # B-1 + B-2 eligible (100 + 20); B-3 is 17(5)-blocked.
         assert body["gst_input_credit"] == 120.0
         assert body["gst_input_credit_excluded"] == 33.0
-        assert body["net_gst_payable"] == 60.0
+        # Output 180 - credit 120 + reverse-charge cash 20.
+        assert body["reverse_charge_tax"] == 20.0
+        assert body["net_gst_payable"] == 80.0
 
     @pytest.mark.parametrize("role", MANAGERS)
     def test_managers_are_refused_and_nothing_is_read(self, finance_db, role):
