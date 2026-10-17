@@ -623,7 +623,7 @@ def render_estimate(
     `items` rows accept: description/name, qty/quantity, mrp, offer_price,
     line_total/item_total, taxable_value, tax_amount, gst_rate, hsn_code.
     `totals` is the dict returned by the estimate's GST computation
-    (subtotal/taxable/tax/grand_total). The document header reads
+    (subtotal/taxable/tax/round_off/grand_total). The document header reads
     "ESTIMATE / QUOTATION - not a tax invoice"; it carries NO invoice serial
     and makes NO stock claim (it is non-binding).
 
@@ -753,11 +753,23 @@ def render_estimate(
             + "</td></tr>"
         )
 
+    try:
+        round_off = float(totals.get("round_off") or 0)
+    except (TypeError, ValueError):
+        round_off = 0.0
+    round_off_row = (
+        '<tr><td class="k">Round off</td><td class="num">'
+        + ("+ " if round_off > 0 else "- ") + _money(abs(round_off)) + "</td></tr>"
+        if round_off
+        else ""
+    )
+
     totals_table = (
         '<table class="totals">'
         + '<tr><td class="k">Subtotal</td><td class="num">' + _money(subtotal) + "</td></tr>"
         + '<tr><td class="k">Taxable Value</td><td class="num">' + _money(taxable) + "</td></tr>"
         + tax_rows
+        + round_off_row
         + '<tr class="grand"><td>Estimated Total</td><td class="num">' + _money(grand) + "</td></tr>"
         + "</table>"
     )
