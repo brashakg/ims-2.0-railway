@@ -47,8 +47,8 @@ SHOP_B = {**ADMIN, "active_store_id": "S2"}
 
 def _prime(cached):
     service, keys = cached
-    before = _rows(SHOP_A)
-    _rows(SHOP_B)
+    before = _rows(SHOP_A, is_active="true")
+    _rows(SHOP_B, is_active="true")
     service.set("customers:S1:all", {"keep": True})
     assert any("products:S1:" in key for key in keys)
     assert any("products:S2:" in key for key in keys)
@@ -72,7 +72,7 @@ def test_create_in_another_shop_is_visible_on_the_next_cached_list(env, cached):
         ), SHOP_B, as_draft=False,
     ))
     _assert_cleared(cached)
-    after = _rows(SHOP_A)
+    after = _rows(SHOP_A, is_active="true")
     assert created["product_id"] not in before
     assert created["product_id"] in after
 
@@ -116,7 +116,7 @@ def test_every_list_visible_edit_clears_both_shops(env, cached, door):
         assert _fix(env, "P1").status_code == 200
 
     _assert_cleared(cached)
-    after = _rows(SHOP_A)
+    after = _rows(SHOP_A, is_active="true")
     if door in ("edit", "review"):
         assert before["P1"]["mrp"] == 5000 and after["P1"]["mrp"] == 6400
     elif door == "photo_order":
@@ -128,3 +128,4 @@ def test_every_list_visible_edit_clears_both_shops(env, cached, door):
     else:
         expected = "open" if door == "flag" else "fixed"
         assert after["P1"]["flags"][0]["status"] == expected
+
