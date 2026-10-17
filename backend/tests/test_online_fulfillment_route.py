@@ -5437,6 +5437,31 @@ def test_clearing_a_short_split_leg_claims_it_at_the_leg_shop(world, monkeypatch
     assert db.online_stock_miss.count_documents({"order_id": oid, "resolved": False}) == 0
 
 
+def test_clear_hold_cannot_claim_received_stock_until_its_receiving_hold_is_released(world, monkeypatch):
+    db = world["db"]
+    oid = _short_whole_order_at_bokaro(world, 63004)
+    unit_id = "U-BV-RAN-01-P-OA-0"
+    db.stock_units.update_one({"stock_id": unit_id}, {"$set": {
+        "store_id": "BV-BOK-01", "status": "ON_HOLD", "hold_reason": "missing_barcode",
+    }})
+
+    held = _clear_hold(world, monkeypatch, oid)
+
+    assert getattr(held, "status_code", None) == 409
+    assert db.stock_units.find_one({"stock_id": unit_id})["status"] == "ON_HOLD"
+    assert _sold_at(db, oid) == ["BV-BOK-01"]
+    assert db.orders.find_one({"order_id": oid})["fulfillment_hold"] is True
+
+    db.stock_units.update_one({"stock_id": unit_id}, {
+        "$set": {"status": "AVAILABLE"}, "$unset": {"hold_reason": ""},
+    })
+    released = _clear_hold(world, monkeypatch, oid)
+    assert not isinstance(released, Exception)
+    assert released["fulfillment_hold"] is False
+    assert db.stock_units.find_one({"stock_id": unit_id})["status"] == "SOLD"
+    assert len(_units(db, oid)) == 2
+
+
 def test_clear_hold_never_claims_beside_a_running_remap(world, monkeypatch):
     """Round 26: the release's claim runs under Re-map's lease -- a Re-map
     running (or stopped mid-way) on the order is never claimed beside."""
