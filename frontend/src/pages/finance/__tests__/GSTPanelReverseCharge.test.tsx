@@ -6,8 +6,15 @@
 // The panel prints both, so Collected - credit + carried + reverse charge is
 // the Net GST Payable it shows. Fed through mapGst, the dashboard's mapper.
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
+
+vi.mock('../../../context/AuthContext', () => ({
+  useAuth: () => ({ user: { id: 'u-1', roles: ['ACCOUNTANT'], activeStoreId: 'S1' } }),
+}));
+vi.mock('../../../hooks/usePOSQueries', () => ({
+  useStores: () => ({ data: [{ store_id: 'S1', store_name: 'Test shop' }] }),
+}));
 
 import GSTPanel from '../GSTPanel';
 import { mapGst, formatCurrency } from '../financeUtils';
