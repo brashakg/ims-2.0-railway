@@ -79,6 +79,12 @@ export interface StockItem {
   discontinued?: boolean;
   barcode?: string;
   storeBarcode?: string;
+  /** The manufacturer GTIN (attributes.gtin) -- what Manage Barcode edits. */
+  gtin?: string;
+  /** A legacy product barcode with no gtin saved: UNVERIFIED (main's old Generate made random ones), never the GTIN. */
+  unverified_barcode?: string;
+  /** The IMS code of every unit on hand at this shop (the search box matches it). */
+  unit_barcodes?: string[];
   /** Procurement Phase 1 (additive from /inventory/stock): the latest ACCEPTED
    *  GRN that stocked this product at this store, or null/absent. */
   last_grn?: { grn_number?: string; qty?: number; date?: string } | null;
