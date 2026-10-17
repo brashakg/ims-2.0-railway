@@ -15,6 +15,8 @@ from ...dependencies import (
 )
 from ._shared import (
     _compute_per_category_gst,
+    bill_line_value,
+    bills_round_off,
     logger,
     router,
 )
@@ -143,9 +145,9 @@ async def add_order_item(
         # _enforce_line_pricing gate above -- one copy, no more lockstep.)
 
         # Calculate item totals
-        item_total = item.unit_price * item.quantity
-        discount_amount = item_total * (item.discount_percent / 100)
-        item_subtotal = item_total - discount_amount
+        discount_amount, item_subtotal = bill_line_value(
+            item.unit_price, item.quantity, item.discount_percent
+        )
 
         item_data = {
             "item_id": str(uuid.uuid4()),
@@ -201,7 +203,7 @@ async def add_order_item(
         item_data["line_index"] = len(_existing_items)
         items = _existing_items + [item_data]
         cart_discount_percent = order.get("cart_discount_percent", 0) or 0
-        gst = _compute_per_category_gst(items, cart_discount_percent)
+        gst = _compute_per_category_gst(items, cart_discount_percent, rounded=bills_round_off(order))
         grand_total = gst["grand_total"]
 
         # Fcostfloor (chair P1): the add-items path must honor the SAME
@@ -387,7 +389,7 @@ async def remove_order_item(
 
         # Recalculate totals (per-category GST, mirrors create_order).
         cart_discount_percent = order.get("cart_discount_percent", 0) or 0
-        gst = _compute_per_category_gst(items, cart_discount_percent)
+        gst = _compute_per_category_gst(items, cart_discount_percent, rounded=bills_round_off(order))
         grand_total = gst["grand_total"]
 
         # PERSIST FIRST, THEN RELEASE (panel must-fix 6). This used to release

@@ -347,7 +347,7 @@ def _b2b_fetch_orders(db, order_ids: List[str]) -> List[dict]:
         o["subtotal"] = (
             round(taxable, 2)
             if taxable
-            else round(grand - float(totals.get("tax") or 0.0), 2)
+            else round(grand - float(o.get("round_off") or 0.0) - float(totals.get("tax") or 0.0), 2)
         )
         o["cgst_amount"] = round(float(totals.get("cgst") or 0.0), 2)
         o["sgst_amount"] = round(float(totals.get("sgst") or 0.0), 2)

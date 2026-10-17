@@ -71,6 +71,7 @@ export const orderApi = {
   quoteBill: async (data: {
     items: unknown[];
     cart_discount_percent: number;
+    order_id?: string;
   }): Promise<{
     subtotal: number;
     taxable: number;

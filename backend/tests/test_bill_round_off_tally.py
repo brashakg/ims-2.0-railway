@@ -141,6 +141,19 @@ def test_b2b_tally_voucher_balances_with_round_off(db):
     assert round(sum(legs.values()), 2) == 0.0
 
 
+def test_b2b_split_fallback_never_counts_round_off_twice(db, monkeypatch):
+    from api.routers.finance import tally
+    db.get_collection("customers").insert_one({
+        "customer_id": "CUST-1", "customer_type": "B2B", "gstin": "20ABCDE1234F1Z5", "name": "Acme Optics",
+    })
+    db.get_collection("orders").insert_one(_rounded_order(up=False))
+    def unreadable(*_args, **_kwargs):
+        raise RuntimeError("tax split unavailable")
+    monkeypatch.setattr(tally, "_build_invoice_gst_split", unreadable)
+    orders = tally._b2b_fetch_orders(db, ["ORD-RO"])
+    assert orders[0]["subtotal"] + orders[0]["round_off"] == orders[0]["grand_total"]
+
+
 class _ProjectingDB(FakeDB):
     """FakeDB whose find() honours an INCLUSION projection, like Mongo does --
     so a reader that forgets to ask for `round_off` really does not get it."""

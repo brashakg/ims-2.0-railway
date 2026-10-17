@@ -1231,10 +1231,17 @@ async def create_order(
     }
 
 
+class BillQuoteLine(OrderItemCreate):
+    # Corrections may include a manual line and an explicit HSN, as accepted
+    # by the superadmin edit schema. New checkout still validates its own input.
+    product_id: str = ""
+    hsn_code: Optional[str] = None
+
+
 class BillQuoteRequest(BaseModel):
     """The till's cart, exactly as it will POST it to create the order."""
 
-    items: List[OrderItemCreate]
+    items: List[BillQuoteLine]
     cart_discount_percent: float = Field(default=0.0, ge=0.0, le=100.0)
     # A saved order these lines would replace (the SUPERADMIN edit preview):
     # priced exactly as the edit door will save it -- an order billed before
@@ -1283,6 +1290,10 @@ async def quote_bill(
             raise HTTPException(status_code=404, detail="Order not found")
         validate_store_access(order.get("store_id"), current_user)
         rounded = bills_round_off(order)
+        # The edit keeps explicit HSNs and normalises lines through its own
+        # builder. Preview exactly that same representation for saved orders.
+        from ...services.order_superadmin_edit import rebuild_edited_line
+        lines = [rebuild_edited_line(item.model_dump()) for item in body.items]
     gst = _compute_per_category_gst(lines, body.cart_discount_percent, rounded=rounded)
     return {
         k: gst[k]

@@ -82,6 +82,29 @@ describe('Pay checks the tenders against the server-rounded bill', () => {
     expect(mockedCreate).not.toHaveBeenCalled();
   });
 
+  it('refuses a cart changed while Pay is waiting for its quote', async () => {
+    rs265Cart(255);
+    let finish!: (value: typeof SERVER_BILL) => void;
+    mockedQuote.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const pending = submitPosOrder(usePOSStore.getState(), 'edited-during-pay');
+    usePOSStore.getState().setCartDiscount(3, 'updated offer');
+    finish(SERVER_BILL);
+    const result = await pending;
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/changed while it was being priced/);
+    expect(mockedCreate).not.toHaveBeenCalled();
+  });
+
+  it('preserves the scanned unit through the shared quote and create line builder', async () => {
+    rs265Cart(255);
+    const state = usePOSStore.getState();
+    usePOSStore.setState({ cart: state.cart.map((line) => ({ ...line, stock_id: 'SCANNED-UNIT-2' })) });
+    const result = await submitPosOrder(usePOSStore.getState(), 'scanned');
+    expect(result.ok).toBe(true);
+    expect(mockedQuote.mock.calls[0][0].items[0]).toMatchObject({ stock_id: 'SCANNED-UNIT-2' });
+    expect(mockedCreate.mock.calls[0][0].items[0]).toMatchObject({ stock_id: 'SCANNED-UNIT-2' });
+  });
+
   it("names the server's reason when it refuses to price the bill", async () => {
     rs265Cart(255);
     // A role that may open the till but not bill (the API client's message).

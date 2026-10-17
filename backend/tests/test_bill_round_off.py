@@ -165,6 +165,24 @@ def _quote(client, headers, items, bill_pct=0.0):
     )
 
 
+def test_legacy_draft_item_changes_keep_exact_paise(client, auth_headers, patched_orders):
+    made = _post_order(client, auth_headers, [_frame_item(1000.49)])
+    oid = made.json()["order_id"]
+    saved = _saved(patched_orders, oid)
+    saved.pop("round_off", None)
+    saved.update(grand_total=1000.49, balance_due=1000.49)
+    added = client.post(f"/api/v1/orders/{oid}/items", headers=auth_headers, json={
+        "product_id": "manual-legacy", "item_type": "FRAME", "quantity": 1, "unit_price": 0.25,
+    })
+    assert added.status_code in (200, 201), added.text
+    saved = _saved(patched_orders, oid)
+    assert saved["grand_total"] == 1000.74 and saved.get("round_off") is None
+    iid = next(it["item_id"] for it in saved["items"] if it["product_id"] == "manual-legacy")
+    removed = client.delete(f"/api/v1/orders/{oid}/items/{iid}", headers=auth_headers)
+    assert removed.status_code in (200, 204), removed.text
+    assert _saved(patched_orders, oid)["grand_total"] == 1000.49
+
+
 def _disc_frame(price, line_pct):
     return dict(_frame_item(price), discount_percent=line_pct,
                 discount_reason="regular customer")
@@ -538,3 +556,20 @@ def test_edit_preview_quote_of_an_old_bill_keeps_its_paise(client, auth_headers,
     till = _quote(client, auth_headers, [_frame_item(1000.49)])
     assert till.json()["grand_total"] == 1000.0
     assert _edit_quote(client, auth_headers, 1000.49, "no-such-order").status_code == 404
+
+
+def test_saved_order_quote_keeps_the_edits_explicit_hsn(client, auth_headers, wired, monkeypatch):
+    from api.routers.orders import _shared
+    _seed_old_paid_bill(wired["order_repo"])
+    monkeypatch.setenv("GST_PRICING_MODE", "exclusive")
+    monkeypatch.setattr(_shared, "resolve_gst_rate", lambda **kw: 18 if kw.get("hsn_code") == "TEST-HSN" else 5)
+    item = dict(_edit_item(unit_price=100), hsn_code="TEST-HSN", product_id="")
+    quoted = client.post("/api/v1/orders/quote", headers=auth_headers, json={
+        "order_id": "ord-16", "items": [item], "cart_discount_percent": 0,
+    })
+    assert quoted.status_code == 200, quoted.text
+    edited = client.put("/api/v1/orders/ord-16/superadmin-edit", headers=auth_headers, json={
+        "reason": "Correct tax classification", "items": [item],
+    })
+    assert edited.status_code == 200, edited.text
+    assert quoted.json()["grand_total"] == wired["order_repo"].find_by_id("ord-16")["grand_total"] == 118
