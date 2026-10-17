@@ -51,7 +51,6 @@ export function GrnPickerModal({
   onClose: () => void;
   onPick: (grnId: string) => Promise<void>;
 }) {
-  const toast = useToast();
   const { storeId, canPick } = usePurchaseShop(); // audit F63: the invoice list's scope
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [grns, setGrns] = useState<any[]>([]);

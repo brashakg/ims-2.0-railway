@@ -17,6 +17,7 @@ from ...dependencies import (
     validate_store_access,
 )
 from ...services.task_visibility import task_counts
+from ...services.cost_mask import AP_ROLES
 from ._shared import (
     _REPORT_FINANCE_ROLES,
     router,
@@ -186,7 +187,7 @@ async def gst_report(
     from_date: date = Query(...),
     to_date: date = Query(...),
     store_id: Optional[str] = Query(None),
-    current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
+    current_user: dict = Depends(require_roles(*AP_ROLES)),
 ):
     """GST report for a date range.
 

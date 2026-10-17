@@ -91,7 +91,7 @@ export const reportRoutes = (
       <Route
         path="gst"
         element={
-          <ProtectedRoute allowedRoles={REPORTS_ROLES}>
+          <ProtectedRoute allowedRoles={COST_ROLES}>
             <ReportsGstPage />
           </ProtectedRoute>
         }
@@ -122,11 +122,11 @@ export const reportRoutes = (
 
     {/* GST returns — full pages, outside the layout: no KPI strip and no
         second scroll container between the accountant and the figure he
-        types into the portal. Same gate as the rest of Reports. */}
+        types into the portal. All GST reports are for Accounts and admins. */}
     <Route
       path="reports/gstr1"
       element={
-        <ProtectedRoute allowedRoles={REPORTS_ROLES}>
+        <ProtectedRoute allowedRoles={COST_ROLES}>
           <GSTR1Page />
         </ProtectedRoute>
       }

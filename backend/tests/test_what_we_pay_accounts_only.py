@@ -414,7 +414,7 @@ def test_sending_a_priced_po_raises_no_task(client, catalogue):
 def test_every_read_follows_the_one_cost_rule(client, buying, monkeypatch):
     from api.services import cost_mask
 
-    for ctx in ("product", "purchase"):
+    for ctx in ("default", "product", "purchase", "payables"):
         monkeypatch.setitem(cost_mask._CONTEXT_ROLES, ctx, {"STORE_MANAGER"})
     for path, extra in ALL_READS:
         r = _get(client, "STORE_MANAGER", path)
