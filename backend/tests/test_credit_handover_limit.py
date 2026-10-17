@@ -93,3 +93,24 @@ def test_changed_handover_order_is_refused_before_writing_a_promise(handover, mo
         delivery_gate.assert_handover_payment(order, approval_token=None, current_user=USER, db=db)
     assert exc.value.status_code == 409
     assert db.orders.find_one({"order_id": "O1"})["payments"] == []
+
+
+@pytest.mark.parametrize("balance", [None, "", "  "])
+@pytest.mark.parametrize("door,role", [
+    ("counter", "STORE_MANAGER"), ("counter", "CASHIER"), ("workshop", "STORE_MANAGER"),
+])
+def test_unrecorded_balance_cannot_bypass_handover_credit_control(handover, balance, door, role):
+    db, _, client, jrepo = handover
+    sale(db, total=150, amount_paid=10, balance_due=balance,
+         status="READY", payment_status="PARTIAL")
+    client.app.dependency_overrides[get_current_user] = lambda: {**USER, "roles": [role]}
+    response = (
+        client.post("/orders/O1/deliver") if door == "counter"
+        else client.patch("/workshop/jobs/J1/status", json={"status": "DELIVERED"})
+    )
+    assert response.status_code == 400, response.text
+    assert "outstanding balance is not recorded" in response.text
+    order = db.orders.find_one({"order_id": "O1"})
+    assert order["status"] == "READY"
+    assert order["payments"] == []
+    assert jrepo.status_writes == []

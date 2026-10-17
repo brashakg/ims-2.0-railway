@@ -86,7 +86,12 @@ def gate_credit_delivery(
     counter and the COD door use. An inline float(order.get("balance_due"))
     here read a balance-less legacy row as Rs 0.00 and let a cashier Prepaid-
     ship an order owing the whole bill."""
-    balance_due = order_balance_due(order) or 0.0
+    balance_due = order_balance_due(order)
+    if balance_due is None:
+        raise HTTPException(
+            status_code=400,
+            detail="The outstanding balance is not recorded. Verify this order's payments before handover.",
+        )
     if balance_due <= 0.01:
         return
     roles = current_user.get("roles", [])
