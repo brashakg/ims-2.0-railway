@@ -24,6 +24,7 @@ from ._shared import (
     require_roles,
     router,
 )
+from ...services import barcode as barcode_svc
 from ...services.po_variance_engine import _ordered_by_product
 from .gst import _promote_cost_from_rate
 from .po_detail import (
@@ -37,7 +38,6 @@ from .po_detail import (
     puts_nothing_in_stock,
 )
 from .numbering import (
-    _grn_barcode,
     _grn_stock_audit,
     compute_po_receipt_state,
     held_units,
@@ -1117,7 +1117,9 @@ def _accept_grn_claimed(
                     {
                         "store_id": store_id,
                         "product_id": product_id,
-                        "barcode": _grn_barcode(store_id, product_id),
+                        "barcode": barcode_svc.mint_unit_barcode(
+                            _get_db(), store_id
+                        ),
                         "location_code": location_code,
                         "quantity": 1,
                         "status": "AVAILABLE",
@@ -1525,7 +1527,8 @@ def asks_still_waiting(db, product_ids) -> List[str]:
 
 
 def catalogue_write_done(
-    product_id: str, current: dict, patch: dict, *, product_repo, deferred_releases=None
+    product_id: str, current: dict, patch: dict, *, product_repo, deferred_releases=None,
+    mirror_outcome=None,
 ) -> Tuple[dict, int]:
     """THE path after a write to a product, whichever door made it: the
     product editor's save (PUT /products/{id}), the cost an order's or a
@@ -1544,16 +1547,20 @@ def catalogue_write_done(
         accept, whose own claim is held.
 
     Answers (the status fields written, the units released). Fail-soft: the
-    write stands."""
+    write stands. A caller that requires a successful barcode mirror can read
+    mirror_outcome["saved"] without running the mirror a second time."""
     fields = _pm.apply_restamp_atomic(product_id, current, patch, product_repo=product_repo)
+    mirrored = False
     try:
         from api.dependencies import get_db
 
-        _pm.mirror_update_to_catalog_twin(
+        mirrored = _pm.mirror_update_to_catalog_twin(
             product_id=product_id, current=current, patch={**patch, **fields}, db=get_db()
         )
     except Exception:  # noqa: BLE001
         logger.warning("[CATALOGUE] catalog mirror after a write skipped for %s", product_id, exc_info=True)
+    if mirror_outcome is not None:
+        mirror_outcome["saved"] = mirrored
     close_catalogue_asks(product_id, "The item is catalogued.")
     if _pm.compute_catalog_status({**(current or {}), **patch, **fields})[1]:
         return fields, 0

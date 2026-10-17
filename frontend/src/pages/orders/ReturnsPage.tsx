@@ -3,7 +3,7 @@
 // ============================================================================
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../../context/AuthContext';
-import { orderApi, productApi } from '../../services/api';
+import { inventoryApi, orderApi, productApi } from '../../services/api';
 import {
   returnsApi,
   type CreateReturnPayload,
@@ -208,13 +208,22 @@ export default function ReturnsPage() {
     if (!searchQuery.trim()) return;
     setIsLoading(true);
     setError(null);
+    const q = searchQuery.trim();
     try {
-      const response = await orderApi.getOrders({ storeId: user?.activeStoreId });
+      // The code on the returned frame's IMS label names ONE unit; the till
+      // stamps the sale on that unit (order_id), so the code finds its order.
+      // Any letter case; a name or number that is no unit code finds nothing.
+      const [response, unit] = await Promise.all([
+        orderApi.getOrders({ storeId: user?.activeStoreId }),
+        /^[A-Za-z0-9-]+$/.test(q) ? inventoryApi.getStockByBarcode(q).catch(() => null) : null,
+      ]);
+      const soldOn = unit?.order_id || unit?.orderId;
       const allOrders = response.orders || response || [];
       const filtered = allOrders.filter((o: any) =>
-        o.orderNumber?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        o.customerName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        o.customerPhone?.includes(searchQuery)
+        (soldOn && o.id === soldOn) ||
+        o.orderNumber?.toLowerCase().includes(q.toLowerCase()) ||
+        o.customerName?.toLowerCase().includes(q.toLowerCase()) ||
+        o.customerPhone?.includes(q)
       );
       setOrders(filtered);
     } catch {
