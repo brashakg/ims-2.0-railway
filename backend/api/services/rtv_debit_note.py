@@ -674,6 +674,13 @@ def next_debit_note_number(
     return f"DN/{prefix}/{fy_label}/{seq:06d}"
 
 
+def debit_note_issued(db, rtv_id: str) -> bool:
+    """True when the GST debit note was issued for this RTV (a vendor return
+    or an RMA; one note per RTV). The note carries the line rates it was
+    issued at, so a pricing door refuses to re-price the RTV under it."""
+    return DebitNoteEngine(db=db).get_by_rtv(str(rtv_id)) is not None
+
+
 class DebitNoteEngine:
     """Persistence + idempotency for issued debit notes. Fail-soft on db=None.
 
@@ -1017,19 +1024,16 @@ class DebitNoteEngine:
         # rate + HSN (the source RTV docs don't persist them). Fail loud on a
         # taxable line whose GST is unresolvable rather than emit a 0% tax doc.
         src_lines = lines if lines else (rtv_doc.get("lines") or rtv_doc.get("items") or [])
-        # A return workshop staff logged carries no price (owner ruling
-        # 2026-10-12). A tax document at Rs 0 for it would be wrong money, so
-        # refuse it -- never read a missing price as zero.
-        if any(
-            isinstance(ln, dict) and _rate_key(ln) is None for ln in src_lines
-        ):
+        # A line with no price would go out at a rate of 0: the RTV must be
+        # priced first, by an accounts role (its pricing door; owner rulings
+        # 2026-10-12 R2 + R3) -- never read a missing price as zero.
+        if any(isinstance(ln, dict) and _rate_key(ln) is None for ln in src_lines):
             return {
                 "ok": False,
                 "http": 422,
-                "error": "line_without_price",
-                "message": "An item on this return has no price paid yet, so no "
-                "debit note was issued. Approve the return first and enter the "
-                "price paid for each item.",
+                "error": "price_required",
+                "message": "This return's lines are not priced yet. Accounts "
+                "set each line's price first, then issue the debit note.",
             }
 
         # The note's total is what the returned goods' bill charged for them

@@ -139,23 +139,59 @@ def paise_to_rupees(paise: Any) -> float:
         return 0.0
 
 
-def _line_expected_paise(line: Dict[str, Any]) -> int:
-    """Expected credit for one RMA line = qty * unit_cost (paisa-exact).
-    ``unit_cost_paise`` is authoritative when present (already integer); else the
-    rupee ``unit_cost`` is converted at the edge."""
+def _unit_paise(line: Dict[str, Any]) -> Optional[int]:
+    """A line's price per piece in paise, or None while the line is unpriced
+    (a manager raised it; the accounts roles price it -- owner rulings
+    2026-10-12 R2 + R3). ``unit_cost_paise`` is authoritative when present;
+    else the rupee ``unit_cost`` is converted at the edge."""
+    if line.get("unit_cost_paise") is not None:
+        return int(line.get("unit_cost_paise"))
+    if line.get("unit_cost") is not None:
+        return rupees_to_paise(line.get("unit_cost"))
+    return None
+
+
+def _priced_line(line: Dict[str, Any], unit_paise: Optional[int]) -> Dict[str, Any]:
+    """``line`` carrying ``unit_paise`` and its share of the expected credit
+    (both None while unpriced)."""
     qty = int(line.get("quantity") or 0)
-    if "unit_cost_paise" in line and line.get("unit_cost_paise") is not None:
-        unit = int(line.get("unit_cost_paise") or 0)
-    else:
-        unit = rupees_to_paise(line.get("unit_cost"))
-    if qty <= 0 or unit < 0:
-        return 0
-    return qty * unit
+    out = dict(line)
+    out["unit_cost_paise"] = unit_paise
+    out["line_expected_paise"] = None if unit_paise is None else qty * unit_paise
+    return out
 
 
-def expected_credit_paise(lines: List[Dict[str, Any]]) -> int:
-    """Sum the per-line expected credit. Integer addition -- no float drift."""
-    return sum(_line_expected_paise(ln) for ln in (lines or []))
+def rma_expected_credit_paise(lines: List[Dict[str, Any]]) -> Optional[int]:
+    """THE expected credit of an RMA: the sum of its lines' shares once EVERY
+    line is priced; None while any is not -- never a partial sum. Integer
+    addition, no float drift."""
+    shares = [ln.get("line_expected_paise") for ln in (lines or [])]
+    if not shares or any(share is None for share in shares):
+        return None
+    return sum(int(share) for share in shares)
+
+
+def rma_is_priced(doc: Dict[str, Any]) -> bool:
+    """Whether an RMA's expected credit is known -- every line priced. A
+    credit cannot be reconciled against an unknown expectation."""
+    return (doc or {}).get("expected_credit_paise") is not None
+
+
+# The accounts roles price an RMA's lines until the first credit note is
+# recorded (price_lines): every credit reconciles against that expectation.
+_PRICEABLE = frozenset({
+    RMAStatus.DRAFT.value, RMAStatus.AUTHORIZED.value, RMAStatus.DISPATCHED.value,
+})
+
+# A credit note on an RMA whose lines are not priced yet: refused, nothing
+# written (rma_is_priced).
+PRICE_REQUIRED: Dict[str, Any] = {
+    "ok": False,
+    "http": 422,
+    "error": "price_required",
+    "message": "This RMA's lines are not priced yet. Accounts set each line's "
+               "price first; the credit is reconciled against it.",
+}
 
 
 # ============================================================================
@@ -300,23 +336,19 @@ class VendorRMAEngine:
             qty = int(ln.get("quantity") or 0)
             if qty <= 0:
                 return {"ok": False, "error": "bad_quantity"}
-            unit_paise = (
-                int(ln["unit_cost_paise"])
-                if ln.get("unit_cost_paise") is not None
-                else rupees_to_paise(ln.get("unit_cost"))
-            )
-            if unit_paise < 0:
+            unit_paise = _unit_paise(ln)
+            if unit_paise is not None and unit_paise < 0:
                 return {"ok": False, "error": "bad_unit_cost"}
-            norm_lines.append({
+            norm_lines.append(_priced_line({
                 "product_id": ln.get("product_id"),
                 "product_name": ln.get("product_name"),
                 "quantity": qty,
                 "reason": reason,
-                "unit_cost_paise": unit_paise,
-                "line_expected_paise": qty * unit_paise,
-            })
+            }, unit_paise))
 
-        exp_paise = sum(ln["line_expected_paise"] for ln in norm_lines)
+        # None while any line is unpriced: the accounts roles price it later
+        # (price_lines) and the expected credit is set then.
+        exp_paise = rma_expected_credit_paise(norm_lines)
         now = _now()
         rma_id = f"RMA-{now.strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
         doc: Dict[str, Any] = {
@@ -358,7 +390,7 @@ class VendorRMAEngine:
 
         self._audit("rma_raised", doc, actor=created_by,
                     before=None, after=self._snapshot(doc))
-        logger.info("[VENDOR_RMA] %s DRAFT raised (vendor=%s, expected=%d paise)",
+        logger.info("[VENDOR_RMA] %s DRAFT raised (vendor=%s, expected=%s paise)",
                     rma_id, vendor_id, exp_paise)
         return {"ok": True, "rma_id": rma_id, "status": doc["status"],
                 "expected_credit_paise": exp_paise}
@@ -514,6 +546,8 @@ class VendorRMAEngine:
         cur = self.get(rma_id)
         if cur is None:
             return {"ok": False, "http": 404, "error": "not_found"}
+        if not rma_is_priced(cur):
+            return dict(PRICE_REQUIRED)
 
         # NOTE (P1-1): the duplicate-credit-note guard is NOT a read-then-check
         # here -- it is enforced atomically inside the find_one_and_update filter
@@ -607,6 +641,66 @@ class VendorRMAEngine:
             "variance_paise": new_variance,
             "fully_reconciled": new_variance <= 0,
         }
+
+    # --- price (the accounts roles; before any credit) ----------------------
+
+    def price_lines(
+        self,
+        rma_id: str,
+        *,
+        unit_costs_paise: List[int],
+        actor: str,
+    ) -> Dict[str, Any]:
+        """Set each line's price per piece (in line order) and so the expected
+        credit -- the accounts roles' input (owner rulings 2026-10-12 R2 + R3;
+        the ROUTER gates the role). Allowed until the first credit note is
+        recorded: the expected credit is what every credit reconciles against.
+        Atomic on the status just read and on no credit received yet."""
+        from pymongo import ReturnDocument
+
+        coll = self._coll()
+        if coll is None:
+            return {"ok": False, "http": 503, "error": "no_db"}
+        cur = self.get(rma_id)
+        if cur is None:
+            return {"ok": False, "http": 404, "error": "not_found"}
+        lines = cur.get("lines") or []
+        if len(unit_costs_paise) != len(lines):
+            return {"ok": False, "http": 422, "error": "one_price_per_line",
+                    "lines": len(lines)}
+        if any(int(p) < 0 for p in unit_costs_paise):
+            return {"ok": False, "http": 400, "error": "bad_unit_cost"}
+        status = cur.get("status")
+        if status not in _PRICEABLE:
+            return {"ok": False, "http": 409, "error": "invalid_transition",
+                    "status": status}
+
+        priced = [_priced_line(ln, int(p)) for ln, p in zip(lines, unit_costs_paise)]
+        exp_paise = rma_expected_credit_paise(priced)
+        now = _now()
+        try:
+            updated = coll.find_one_and_update(
+                {"rma_id": rma_id, "status": status, "received_credit_paise": 0},
+                {"$set": {
+                    "lines": priced,
+                    "expected_credit_paise": exp_paise,
+                    "variance_paise": exp_paise,  # nothing received yet
+                    "priced_by": actor,
+                    "priced_at": now,
+                    "updated_at": now,
+                }},
+                return_document=ReturnDocument.AFTER,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[VENDOR_RMA] price_lines failed for %s: %s", rma_id, e)
+            return {"ok": False, "http": 500, "error": "write_failed"}
+        if updated is None:
+            return self._conflict(rma_id)
+        updated.pop("_id", None)
+        self._audit("rma_priced", updated, actor=actor,
+                    before=self._snapshot(cur), after=self._snapshot(updated))
+        return {"ok": True, "rma_id": rma_id, "status": updated.get("status"),
+                "expected_credit_paise": exp_paise}
 
     # --- close (CREDIT_RECEIVED -> CLOSED) ---------------------------------
 

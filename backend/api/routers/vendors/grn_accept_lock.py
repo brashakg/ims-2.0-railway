@@ -513,20 +513,32 @@ def _grn_already_minted(stock_repo, flt: dict) -> int:
     raise RuntimeError("stock repository exposes no way to count minted units")
 
 
+def _receipt_origin_filters(grn: dict, number_unique: bool, **match) -> list:
+    """Disjoint origin filters for units minted by one receipt.
+
+    The immutable id is authoritative. Only units missing it can use their
+    old GRN source, or a globally unique receipt number after a transfer.
+    Callers decide how a failed uniqueness read must be handled.
+    """
+    grn_id = grn.get("grn_id")
+    origin = [{"source_type": "GRN", "source_id": grn_id}]
+    if grn.get("grn_number") and number_unique:
+        origin.append({"grn_number": grn["grn_number"]})
+    return [
+        {**match, "grn_id": grn_id},
+        {**match, "grn_id": None, "$or": origin},
+    ]
+
+
 def _receipt_unit_filters(grn, **match):
     """The units goods receipt `grn_id` minted (narrowed by `match`), WHEREVER
     THEY ARE NOW: a stock transfer rewrites a unit's source_type and source_id
     (transfers._rehome) but never its grn_id, which the mint stamps; a unit
     minted before that stamp has no grn_id and is matched the old way. No unit
     fits both filters."""
-    grn_id = grn.get("grn_id")
-    origin = [{"source_type": "GRN", "source_id": grn_id}]
     number = grn.get("grn_number")
-    if number and _number_is_this_receipts_alone(number):
-        origin.append({"grn_number": number})
-    return (
-        {**match, "grn_id": grn_id},
-        {**match, "grn_id": None, "$or": origin},
+    return _receipt_origin_filters(
+        grn, bool(number and _number_is_this_receipts_alone(number)), **match
     )
 
 

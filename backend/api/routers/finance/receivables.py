@@ -10,6 +10,7 @@ from ...utils.ist import now_ist_naive
 from typing import Optional
 from fastapi import Depends, HTTPException
 from ..auth import get_current_user
+from ...dependencies import resolve_store_scope
 from ...services import ap_engine
 from ...services.cost_mask import can_see_cost
 from ._shared import (
@@ -17,7 +18,6 @@ from ._shared import (
     _REAL_ORDER_STATUS_FILTER,
     _get_db,
     _order_total,
-    _scope_store,
     router,
 )
 
@@ -105,7 +105,7 @@ async def get_outstanding(
     over 30 days as overdue even when the customer is within their NET-60
     terms. Real overdue = days past the due_date.
     """
-    store_id = _scope_store(store_id, current_user)
+    store_id = resolve_store_scope(store_id, current_user)
     db = _get_db()
     if db is None:
         return []
@@ -186,7 +186,10 @@ async def get_outstanding(
 
 
 @router.get("/vendor-payments")
-async def get_vendor_payments(current_user: dict = Depends(get_current_user)):
+async def get_vendor_payments(
+    store_id: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
     """Per-vendor accounts-payable summary from REAL bills / payments / debit
     notes (via ap_engine). `balance` is the true outstanding payable; PO totals
     are kept only as context. Sorted by largest payable first.
@@ -202,21 +205,33 @@ async def get_vendor_payments(current_user: dict = Depends(get_current_user)):
     db = _get_db()
     if db is None:
         return []
+    # The one supplier-ledger row rule (no transfer mirror bills), narrowed
+    # by the ONE Purchase shop rule (F63), applied whether or not a shop is
+    # asked for: ADMIN / SUPERADMIN read every shop and may narrow with
+    # ?store_id; every other login keeps its OWN shop -- dropping store_id
+    # gives its active shop, never every shop, and naming another 403s.
+    from .cash_flow import _ap_rows
+
+    scope = resolve_store_scope(store_id, current_user)
     vendors = list(
         db.get_collection("vendors").find(
             {}, {"_id": 0, "vendor_id": 1, "legal_name": 1, "trade_name": 1, "name": 1}
         )
     )
-
-    def _grouped(coll):
-        out: dict = {}
-        for row in db.get_collection(coll).find({}, {"_id": 0}):
+    bills_by_v: dict = {}
+    pays_by_v: dict = {}
+    dn_by_v: dict = {}
+    for rows, out in zip(_ap_rows(db, scope), (bills_by_v, pays_by_v, dn_by_v)):
+        for row in rows:
             out.setdefault(row.get("vendor_id"), []).append(row)
-        return out
-
-    bills_by_v = _grouped("vendor_bills")
-    pays_by_v = _grouped("vendor_payments")
-    dn_by_v = _grouped("vendor_debit_notes")
+    # A supplier with ledger rows but no vendor record still owes / is owed:
+    # every vendor id in the rows is a row, as on AP aging and the report.
+    known = {v["vendor_id"] for v in vendors}
+    vendors += [
+        {"vendor_id": vid}
+        for vid in dict.fromkeys([*bills_by_v, *pays_by_v, *dn_by_v])
+        if vid and vid not in known
+    ]
 
     def _po_total(p):
         return float(p.get("total_amount") or p.get("total") or 0)
@@ -229,7 +244,8 @@ async def get_vendor_payments(current_user: dict = Depends(get_current_user)):
         )
         pos = list(
             db.get_collection("purchase_orders").find(
-                {"vendor_id": vid}, {"_id": 0, "total_amount": 1, "total": 1}
+                {"vendor_id": vid, **({"delivery_store_id": scope} if scope else {})},
+                {"_id": 0, "total_amount": 1, "total": 1},
             )
         )
         po_total = round(sum(_po_total(p) for p in pos), 2)

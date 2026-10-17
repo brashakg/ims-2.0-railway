@@ -32,6 +32,9 @@ export function toCSV(data: Record<string, any>[], columns?: { key: string; labe
     cols.map(c => {
       const val = row[c.key];
       if (val === null || val === undefined) return '""';
+      // A number is a number, never a formula: written bare, so a negative
+      // (an advance, a refund) opens summable rather than as the text "'-1500".
+      if (typeof val === 'number') return Number.isFinite(val) ? String(val) : '""';
       // Neutralize formula injection BEFORE quote-escaping so the leading
       // single quote is preserved inside the quoted field.
       const str = neutralizeFormula(String(val)).replace(/"/g, '""');

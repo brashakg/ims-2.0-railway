@@ -22,6 +22,8 @@ import type {
   VendorPaymentData,
 } from './financeTypes';
 import { financeApi } from '../../services/api/finance';
+import { NoShopNotice, hasNoShop } from '../../components/common/NoShopNotice';
+import { PurchaseShopLabel, PurchaseShopPicker, usePurchaseShop } from '../purchase/purchaseShop';
 import { mapGst } from './financeUtils';
 
 // ---- Mappers: real finance.py responses -> dashboard panel types ----------
@@ -154,6 +156,11 @@ import JournalEntriesPanel from './JournalEntriesPanel';
 export default function FinanceDashboard() {
   const { user } = useAuth();
   const toast = useToast();
+  // The one shop scope of the Purchase and Finance screens (audit F63, owner
+  // ruling 2026-09-28 'admins see all stores'): an admin reads EVERY shop
+  // until he narrows it with the Shop picker in the header -- never his
+  // topbar (often HQ) shop -- and everyone else reads their own shop.
+  const { storeId } = usePurchaseShop();
 
   // OWNER DECISION 2026-08-13: the store-by-store profit table is ADMIN /
   // SUPERADMIN only, because every row carries that store's monthly wage bill
@@ -218,14 +225,17 @@ export default function FinanceDashboard() {
   const [periodLocked, setPeriodLocked] = useState(false);
 
   useEffect(() => {
+    // R4: a login with no shop is shown NoShopNotice below and reads nothing
+    // -- budgets and the period lock are not shop-scoped, so even they would
+    // hand it organisation data.
+    if (hasNoShop(user)) return;
     loadFinanceData();
-    // user?.activeStoreId is load-bearing — without it the topbar store-switch
-    // updates AuthContext but the finance data stays pinned to the old store.
-  }, [activeTab, dateFrom, dateTo, selectedYear, user?.activeStoreId]);
+    // storeId is load-bearing -- without it a shop pick (an admin's picker,
+    // anyone else's topbar store) leaves the figures on the old shop.
+  }, [activeTab, dateFrom, dateTo, selectedYear, storeId]);
 
   const loadFinanceData = async () => {
     setIsLoading(true);
-    const storeId = user?.activeStoreId;
     try {
       // Real finance.py endpoints, fetched in parallel. Each section
       // fail-soft independently so one slow/empty endpoint doesn't blank
@@ -233,11 +243,12 @@ export default function FinanceDashboard() {
       const [rev, pnl, gst, out, cf, bud, vend] = await Promise.allSettled([
         financeApi.getRevenue({ period: 'month', store_id: storeId }),
         financeApi.getPnl({ store_id: storeId, from_date: dateFrom, to_date: dateTo }),
-        financeApi.getGstSummary(),
+        // Input tax from supplier bills: accounts only (R1), as the server.
+        canSeeWhatWePay ? financeApi.getGstSummary() : Promise.resolve(null),
         financeApi.getOutstanding({ store_id: storeId }),
         financeApi.getCashFlow({ period: 'month', store_id: storeId }),
         financeApi.getBudget(),
-        canSeeWhatWePay ? financeApi.getVendorPayments() : Promise.resolve([]),
+        canSeeWhatWePay ? financeApi.getVendorPayments(storeId) : Promise.resolve([]),
       ]);
 
       setRevenueData(rev.status === 'fulfilled' ? mapRevenue(rev.value) : []);
@@ -285,7 +296,9 @@ export default function FinanceDashboard() {
             ? financeApi.getPnlByStore({ from_date: dateFrom, to_date: dateTo })
             : Promise.resolve({ stores: [] }),
           financeApi.getPnlByCategory({ from_date: dateFrom, to_date: dateTo, store_id: storeId }),
-          financeApi.getGstReconciliation({ month: d.getMonth() + 1, year: d.getFullYear() }),
+          canSeeWhatWePay
+            ? financeApi.getGstReconciliation({ month: d.getMonth() + 1, year: d.getFullYear() })
+            : Promise.resolve({ entities: [] }),
         ]);
         setPnlByStore(ps2.status === 'fulfilled' ? (ps2.value?.stores || []) : []);
         setPnlByCategory(pc2.status === 'fulfilled' ? (pc2.value?.categories || []) : []);
@@ -375,7 +388,7 @@ export default function FinanceDashboard() {
       const blob = await financeApi.downloadTallySalesJv({
         from_date: dateFrom,
         to_date: dateTo,
-        store_id: user?.activeStoreId,
+        store_id: storeId,
       });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -393,6 +406,22 @@ export default function FinanceDashboard() {
   // toast-only no-ops (no write path on /finance/*). They've been removed rather
   // than fake success. Budget planning lives in the dedicated Budgets module
   // (/budgets) and vendor payments in the Cash Flow vendor ledger.
+
+  // R4 (owner ruling 2026-10-12): a non-admin login with no shop sees no
+  // shop. Say so, and why, instead of a dashboard of empty panels.
+  if (hasNoShop(user)) {
+    return (
+      <div className="inv-body">
+        <div className="inv-head">
+          <div>
+            <div className="eyebrow mb-1.5">Finance &amp; Accounting</div>
+            <h1>The books, in real time.</h1>
+          </div>
+        </div>
+        <NoShopNotice />
+      </div>
+    );
+  }
 
   // Loading state
   if (isLoading) {
@@ -415,7 +444,9 @@ export default function FinanceDashboard() {
           <h1>The books, in real time.</h1>
           <div className="hint">Revenue, P&amp;L, GST collected / payable, outstanding aging, cash flow, period lock after month-end. Tally export on sync.</div>
         </div>
-        <div>
+        <div className="flex flex-wrap items-center gap-3">
+          <PurchaseShopPicker />
+          <PurchaseShopLabel />
           <button className="btn-secondary" onClick={handleTallyExport}>Export to Tally</button>
         </div>
       </div>
@@ -546,7 +577,7 @@ export default function FinanceDashboard() {
               )}
             </>
           )}
-          {activeTab === 'gst' && (
+          {activeTab === 'gst' && canSeeWhatWePay && (
             <>
               <GSTPanel gstSummary={gstSummary} />
               {gstRecon.length > 0 && (

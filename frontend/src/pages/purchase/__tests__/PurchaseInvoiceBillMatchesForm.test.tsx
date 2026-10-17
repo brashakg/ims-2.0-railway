@@ -27,6 +27,8 @@ vi.mock('../../../services/api/client', async (orig) => ({
 }));
 const toastMock = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() }));
 vi.mock('../../../context/ToastContext', () => ({ useToast: () => toastMock }));
+// The Purchase shop picker and shop names read the store list (react-query).
+vi.mock('../../../hooks/usePOSQueries', () => ({ useStores: () => ({ data: [] }) }));
 // The accountant's shop (the top-bar picker) and role; a test may switch
 // either. hasRole is AuthContext's own rule (SUPERADMIN/ADMIN pass, else any
 // asked role held), so a test asks WHICH roles get a control, not a boolean.

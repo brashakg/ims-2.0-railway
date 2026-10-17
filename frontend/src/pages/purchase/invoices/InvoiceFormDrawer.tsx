@@ -7,6 +7,16 @@
 // by the very code the booking stores with. Its own copy previewed CGST + SGST
 // on a manual bill the server booked as IGST, called a junk-prefix GSTIN
 // inter-state, and rounded a paisa differently (panel on F6/F40).
+//
+// It also says, for an admin, which shop the bill books to: the server books
+// it to the receipt's shop -- whatever shop his Purchase filter shows. A bill
+// no receipt places (rent, freight) is the shop he PICKS here, required (owner
+// ruling 2026-10-12, R9): it used to be his own topbar shop, so a manual bill
+// raised while he viewed Pune went to Dhanbad, on Dhanbad's GSTIN, and
+// vanished from the list (review r2 #19). Anyone else's is their own shop's.
+//
+// PurchaseShopField (below) is the ONE shop field of the supplier-money forms:
+// this one and the Cash Flow Bill / Payment / Debit-note form.
 // ============================================================================
 
 import { useEffect, useMemo, useState } from 'react';
@@ -20,6 +30,8 @@ import {
 } from '../../../services/api/vendorAp';
 import { useToast } from '../../../context/ToastContext';
 import { useAuth } from '../../../context/AuthContext';
+import { useStores } from '../../../hooks/usePOSQueries';
+import { PurchaseShopName, shopNameOf, usePurchaseShop } from '../purchaseShop';
 import type { Supplier } from '../purchaseTypes';
 import { inr, GST_RATES, errMsg, APPROVE_ROLES, rcmNote } from './shared';
 import { istDayString } from '../../../utils/datetime';
@@ -61,10 +73,13 @@ export function InvoiceFormDrawer({
   prefill: Partial<PurchaseInvoice>;
   initialLines: EditLine[];
   onClose: () => void;
-  onBooked: () => void;
+  /** `bookedAt`: the shop the server booked the bill to. */
+  onBooked: (bookedAt?: string) => void;
 }) {
   const toast = useToast();
-  const { user, hasRole } = useAuth();
+  const { canPick, ownStoreId, storeId: viewing } = usePurchaseShop();
+  const shopName = usePurchaseShopNamer();
+  const { hasRole } = useAuth();
   // The IST day (owner ruling): toISOString() is the UTC day, yesterday from
   // 00:00 to 05:30 IST -- a bill booked on it lands in the previous month's
   // GSTR-3B on the 1st, or under that month's lock.
@@ -75,7 +90,18 @@ export function InvoiceFormDrawer({
   // `||`, not `??`: a receipt with no supplier invoice date drafts '' -- the
   // box must still open on a date (the due date is counted from it).
   const [vendorInvoiceDate, setVendorInvoiceDate] = useState((prefill.vendor_invoice_date || today).slice(0, 10));
-  const [recipientGstin, setRecipientGstin] = useState(prefill.recipient_gstin ?? '');
+  // The shop the server books this bill to (purchase_invoices._bill_shop),
+  // sent as store_id: the receipt's shop (the draft names it). With no shop
+  // from a receipt an admin must PICK one (R9) -- no default, never his
+  // topbar shop; the server refuses the bill without it. Anyone else's bill
+  // is his own shop's. A linked receipt whose shop the form was not told is
+  // left to the server, which reads the receipt's.
+  const pickShop = canPick && !prefill.store_id;
+  // A draft's Recipient GSTIN is the shop the draft named. With no shop named
+  // the admin picks one, and the server fills in THAT shop's number -- a
+  // number left from the draft (a server still on the old rule sent his
+  // topbar shop's) would contradict the pick and be refused.
+  const [recipientGstin, setRecipientGstin] = useState(pickShop ? '' : prefill.recipient_gstin ?? '');
   const [notes, setNotes] = useState('');
   // One credit switch (it can only turn credit OFF), and reverse charge for
   // the accounts roles: the supplier is then owed the taxable value only and
@@ -94,6 +120,9 @@ export function InvoiceFormDrawer({
   // a receipt-less goods bill — GRN_LINK_REQUIRED); SERVICES books as before.
   const prefillDcIds = (prefill as { linked_dc_ids?: string[] }).linked_dc_ids;
   const receiptLinked = locked || Boolean(prefillDcIds && prefillDcIds.length);
+  const [pickedShop, setPickedShop] = useState('');
+  const bookedTo = prefill.store_id || (pickShop ? pickedShop || undefined : receiptLinked ? undefined : ownStoreId);
+  const shopMissing = pickShop && !pickedShop;
   const [billKind, setBillKind] = useState<'' | 'GOODS' | 'SERVICES'>('');
 
   const selectedVendor = useMemo(() => suppliers.find((s) => s.id === vendorId), [suppliers, vendorId]);
@@ -114,7 +143,7 @@ export function InvoiceFormDrawer({
     recipient_gstin: recipientGstin.trim() || undefined,
     po_id: prefill.po_id,
     grn_id: prefill.grn_id,
-    store_id: prefill.store_id ?? user?.activeStoreId,
+    store_id: bookedTo,
     lines: validLines.map((l): PurchaseInvoiceLine => ({
       product_id: l.product_id,
       product_name: l.product_name.trim(),
@@ -137,7 +166,7 @@ export function InvoiceFormDrawer({
   // shop is in it: a bill with no receipt is booked for store_id's company.
   const taxKey = JSON.stringify([payload.vendor_id, payload.recipient_gstin, payload.grn_id, payload.linked_dc_ids, payload.store_id, payload.itc_eligible, payload.reverse_charge, payload.lines]);
   const [preview, setPreview] = useState<{ key: string; data?: PurchaseInvoicePreview; error?: string } | null>(null);
-  const wantsPreview = Boolean(vendorId) && validLines.length > 0 && !missingPrice;
+  const wantsPreview = Boolean(vendorId) && validLines.length > 0 && !shopMissing && !missingPrice;
   useEffect(() => {
     if (!wantsPreview) return;
     let live = true;
@@ -178,12 +207,20 @@ export function InvoiceFormDrawer({
       toast.error('A goods bill starts from its goods receipt — see the note above the Book button');
       return;
     }
+    if (shopMissing) { toast.error('Pick the shop this bill is for'); return; }
 
     setSaving(true);
     try {
-      await purchaseInvoicesApi.create(payload);
-      toast.success('Purchase invoice booked');
-      onBooked();
+      const booked = await purchaseInvoicesApi.create(payload);
+      const bookedAt = booked?.store_id || bookedTo;
+      // An admin booking to a shop other than the one his list shows (or on
+      // All stores) is told where it went, by the shop's name.
+      toast.success(
+        canPick && bookedAt && bookedAt !== viewing
+          ? `Purchase invoice booked to ${shopName(bookedAt)}`
+          : 'Purchase invoice booked',
+      );
+      onBooked(bookedAt);
     } catch (e) {
       const blocked = blockedProductIds(e);
       toast.error(errMsg(e, 'Failed to book purchase invoice'));
@@ -194,7 +231,7 @@ export function InvoiceFormDrawer({
           const ask = await purchaseInvoicesApi.requestCataloguing(
             blocked,
             undefined,
-            prefill.store_id ?? user?.activeStoreId ?? undefined,
+            bookedTo ?? ownStoreId,
           );
           // The server says who was asked: the catalogue manager, or -- with
           // none for the shop -- the admins.
@@ -223,6 +260,28 @@ export function InvoiceFormDrawer({
         </div>
 
         <div className="p-5 space-y-5">
+          {/* F63: for an admin, whatever shop his filter shows, where a
+              receipt's bill books to -- the NewOrdersDeliverTo pattern for
+              bills. With no receipt shop he picks it (R9, required); anyone
+              else is shown, read-only, that a manual bill is his own shop's. */}
+          {pickShop || (!canPick && !receiptLinked) ? (
+            <PurchaseShopField
+              required
+              value={pickedShop}
+              onChange={setPickedShop}
+              label="Shop this bill is for"
+              emptyLabel="Pick the shop this bill is for…"
+              testId="bill-shop"
+            />
+          ) : canPick && bookedTo ? (
+            <p className="text-sm text-gray-600">
+              Bills booked here go to{' '}
+              <span className="font-medium text-gray-900">
+                <PurchaseShopName storeId={bookedTo} />
+              </span>
+            </p>
+          ) : null}
+
           {/* What is this bill for? (only asked when no receipt is linked) */}
           {!receiptLinked && (
             <div>
@@ -290,7 +349,9 @@ export function InvoiceFormDrawer({
                     ? <>{shown.error}</>
                     : pending
                       ? <>Working out the tax...</>
-                      : <>Pick the supplier and add a line to see the tax.</>}
+                      : shopMissing
+                        ? <>Pick the shop this bill is for to see the tax.</>
+                        : <>Pick the supplier and add a line to see the tax.</>}
               </div>
             </div>
           </div>
@@ -423,5 +484,72 @@ function Row({ label, value, strong }: { label: string; value: string; strong?: 
       <span className={strong ? 'font-semibold text-gray-900' : 'text-gray-500'}>{label}</span>
       <span className={strong ? 'font-semibold text-gray-900' : 'text-gray-700'}>{value}</span>
     </div>
+  );
+}
+
+// ============================================================================
+// The ONE shop field of the supplier-money forms (audit F63; owner ruling
+// 2026-10-12, R9): this booking form and the Cash Flow Bill / Payment /
+// Debit-note form. An admin picks one of the shops (the Purchase shop list);
+// anyone else is told, read-only, that it is their own shop's -- the server
+// stamps that whatever is sent. Nothing for a login with no shop.
+//   required (a bill no receipt places: rent, freight): there is no default --
+//     the server refuses the bill without a shop and never books it to the
+//     admin's own topbar shop;
+//   otherwise (a payment / debit note): the empty choice is `emptyLabel`,
+//     sent as nothing, and the server places the money (by the supplier's
+//     bills).
+// ============================================================================
+type ShopRow = { store_id?: string; store_name?: string; store_code?: string };
+
+/** A shop id -> its name from the store list (the PurchaseShopName rule: name,
+ *  else code, else the id until the list arrives), for text that cannot hold
+ *  a component -- a toast, an <option>. */
+export function usePurchaseShopNamer(): (storeId: string) => string {
+  const { data } = useStores();
+  return (storeId) => shopNameOf(storeId, data);
+}
+
+export function PurchaseShopField({ value, onChange, label, emptyLabel, required = false, className = '', testId }: {
+  value: string;
+  onChange: (shop: string) => void;
+  /** The admin's select's accessible name, e.g. 'Shop this bill is for'. */
+  label: string;
+  /** The empty choice: a prompt when `required`, else what nothing means. */
+  emptyLabel: string;
+  required?: boolean;
+  className?: string;
+  /** data-testid of the read-only line anyone else sees. */
+  testId?: string;
+}) {
+  const { canPick, ownStoreId } = usePurchaseShop();
+  const { data } = useStores();
+  if (!canPick) {
+    if (!ownStoreId) return null;
+    return (
+      <p className={`${className} text-xs text-gray-600`} data-testid={testId}>
+        Shop: <span className="font-medium text-gray-900"><PurchaseShopName storeId={ownStoreId} /></span>
+      </p>
+    );
+  }
+  const shops = ((Array.isArray(data) ? data : []) as ShopRow[]).filter((s) => s.store_id);
+  return (
+    <label className={`${className} flex items-center gap-2 text-xs text-gray-600`}>
+      Shop{required && <span className="text-red-600" aria-hidden="true">*</span>}
+      <select
+        className={`border rounded px-2 py-1 text-sm flex-1 bg-white ${required && !value ? 'border-amber-400' : 'border-gray-300'}`}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        aria-label={label}
+        required={required}
+      >
+        <option value="">{emptyLabel}</option>
+        {shops.map((s) => (
+          <option key={s.store_id} value={s.store_id}>
+            {s.store_name || s.store_code || s.store_id}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }

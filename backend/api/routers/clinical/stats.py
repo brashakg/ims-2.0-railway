@@ -9,6 +9,7 @@ from fastapi import HTTPException, Depends, Query
 from typing import Optional
 from datetime import date
 from ..auth import require_roles
+from ...dependencies import store_in_view
 from ...dependencies import (
     get_eye_test_repository,
     get_order_repository,
@@ -76,7 +77,7 @@ async def get_optometrist_stats(
                 if active and active not in scope:
                     scope.append(active)
         else:
-            resolved = validate_store_access(store_id, current_user)
+            resolved = store_in_view(store_id, current_user)
             scope = [resolved] if resolved else []
     else:
         # Optometrist is bounded to their active store.
@@ -152,7 +153,7 @@ async def get_conversion_dashboard(
         optometrist_filter = None
     else:
         # STORE_MANAGER: bounded to their own store.
-        resolved = validate_store_access(store_id, current_user)
+        resolved = store_in_view(store_id, current_user)
         store_ids = [resolved] if resolved else []
         optometrist_filter = None
 

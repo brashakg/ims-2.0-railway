@@ -226,13 +226,12 @@ def build_survival_view(
     optional ``vendor_critical``.
 
     Scope (P3-1) -- ``store_scoped`` records whether the caller filtered the
-    income + expense rows to a single store. AP bills carry no store_id (they
-    are entity-level liabilities) so they are ALWAYS org-wide. When a store
-    filter is on, the min-pay gap mixes ONE store's income/fixed-costs against
-    ORG-WIDE must-pay AP -- a real, intentional mix that is easy to misread.
-    The view self-documents it via ``ap_scope`` (always ``ORG_WIDE``) and
-    ``income_expense_scope`` (``STORE`` when filtered, else ``ORG_WIDE``), plus
-    a ``scope_note`` spelling out the mix when the two scopes disagree.
+    income + expense rows to a single store. This builder does not know
+    whether ``ap_bills`` were narrowed too, so it labels AP ``ORG_WIDE`` and,
+    when a store filter is on, a ``scope_note`` spelling out that mix. The
+    route (routers/finance/survival._build_survival_payload) narrows AP by the
+    same shop rule as income since bills carry their shop (F63), and then
+    relabels ``ap_scope`` ``STORE`` with a one-store note.
 
     Pro-ration basis (P3-2) -- ``projected_income_paise`` is a FULL-MONTH
     projection while booked expenses are MONTH-TO-DATE, so the raw gap is
@@ -308,7 +307,8 @@ def build_survival_view(
 
     # --- P3-1: self-documenting scope mix -----------------------------------
     income_expense_scope = "STORE" if store_scoped else "ORG_WIDE"
-    ap_scope = "ORG_WIDE"  # vendor bills carry no store_id, ever.
+    # The caller relabels it STORE when it narrowed the bills (the route does).
+    ap_scope = "ORG_WIDE"
     if store_scoped:
         scope_note = (
             "Income and fixed costs are scoped to ONE store; must-pay vendor "

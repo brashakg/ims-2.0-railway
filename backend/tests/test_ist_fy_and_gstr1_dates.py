@@ -190,6 +190,7 @@ class _Patched:
         for name in (
             "get_order_repository",
             "validate_store_access",
+            "store_in_view",
             "ist_today",
             "now_ist_naive",
             "fy_start_year_ist",
@@ -198,6 +199,9 @@ class _Patched:
             self._saved[name] = getattr(reports_mod, name)
         reports_mod.get_order_repository = lambda: self.repo
         reports_mod.validate_store_access = lambda s, u: STORE
+        # The validate-or-active rule the analytics reads now ask (one helper,
+        # api.dependencies.store_in_view): the same pinned shop.
+        reports_mod.store_in_view = lambda s, u, **_kw: STORE
         reports_mod.ist_today = lambda: self.today
         reports_mod.now_ist_naive = lambda: datetime(
             self.today.year, self.today.month, self.today.day, 12, 0, 0

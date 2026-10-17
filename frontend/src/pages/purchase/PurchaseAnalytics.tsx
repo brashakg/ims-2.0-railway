@@ -9,16 +9,31 @@ import {
   Truck,
 } from 'lucide-react';
 import type { PurchaseOrder, Supplier } from './purchaseTypes';
+import { rupees } from './PurchasesThisMonthSection';
+
+/** A money tile: whole rupees below a lakh (Rs 3,000, never "Rs 0.0L" -- the
+ *  F56 "Rs 0 on one screen" symptom), lakhs from there up. The Inventory value
+ *  tiles' rule (review r3 #16). */
+const tileMoney = (n: number) =>
+  Math.round(n) < 100000 ? rupees(n) : `\u20B9${(n / 100000).toFixed(1)}L`;
 import { useAuth } from '../../context/AuthContext';
 import { COST_ROLES } from '../../components/common/CostCell';
 
 interface PurchaseAnalyticsProps {
+  /** The newest page of orders the server sent (newest first). */
   purchaseOrders: PurchaseOrder[];
+  /** Every order in scope (review round 2, #18); defaults to the page. */
+  totalOrders?: number;
   suppliers: Supplier[];
 }
 
-export function PurchaseAnalytics({ purchaseOrders, suppliers }: PurchaseAnalyticsProps) {
-  // What we pay: COST_ROLES only (owner ruling 2026-10-12).
+export function PurchaseAnalytics({ purchaseOrders, totalOrders, suppliers }: PurchaseAnalyticsProps) {
+  // The count is the server's real total. The value and the pending count are
+  // summed over the page in hand, so when that page is a cut they say so
+  // instead of passing the latest N off as a total (review round 2, #18).
+  const shown = purchaseOrders.length;
+  const total = Math.max(totalOrders ?? shown, shown);
+  const cut = shown < total;
   const showValue = useAuth().hasRole(COST_ROLES);
   return (
     <div className="space-y-6">
@@ -30,7 +45,7 @@ export function PurchaseAnalytics({ purchaseOrders, suppliers }: PurchaseAnalyti
             </div>
             <div>
               <p className="text-sm text-gray-600">Total POs</p>
-              <p className="text-2xl font-bold text-gray-900">{purchaseOrders.length}</p>
+              <p className="text-2xl font-bold text-gray-900">{total}</p>
             </div>
           </div>
         </div>
@@ -41,9 +56,9 @@ export function PurchaseAnalytics({ purchaseOrders, suppliers }: PurchaseAnalyti
               <DollarSign className="w-5 h-5 text-green-600" />
             </div>
             <div>
-              <p className="text-sm text-gray-600">Total Value</p>
+              <p className="text-sm text-gray-600">{cut ? `Value of the latest ${shown} orders` : 'Total Value'}</p>
               <p className="text-2xl font-bold text-gray-900">
-                {'\u20B9'}{(purchaseOrders.reduce((sum, po) => sum + po.total, 0) / 100000).toFixed(1)}L
+                {tileMoney(purchaseOrders.reduce((sum, po) => sum + po.total, 0))}
               </p>
             </div>
           </div>
@@ -68,7 +83,7 @@ export function PurchaseAnalytics({ purchaseOrders, suppliers }: PurchaseAnalyti
             <div>
               {/* No approval step (owner 2026-09-28): what waits is a draft
                   nobody has sent to the vendor yet. */}
-              <p className="text-sm text-gray-600">Drafts not sent</p>
+              <p className="text-sm text-gray-600">{cut ? `Drafts not sent, latest ${shown}` : 'Drafts not sent'}</p>
               <p className="text-2xl font-bold text-gray-900">
                 {purchaseOrders.filter(po => po.status === 'DRAFT').length}
               </p>

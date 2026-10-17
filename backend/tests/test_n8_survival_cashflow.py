@@ -211,11 +211,44 @@ def routed(db, monkeypatch):
     return db
 
 
+# R4 (owner ruling 2026-10-12): a non-admin login with NO shop sees NO shop,
+# so this storeless accountant's survival view is empty (no shop's income,
+# expenses or supplier bills -- test_r4_a_storeless_accountant_reads_no_shops_survival).
+# The ORG view the route tests below read is ADMIN / SUPERADMIN's (_admin):
+# the same every-shop figures this accountant used to be handed.
 def _accountant(uid="ACC1"):
+    # A shop of its own (BV-1, where every fixture row below lives): a login
+    # that is not ADMIN / SUPERADMIN and has no shop reads no shop's figures
+    # (owner ruling 2026-10-12, R4 -- api.dependencies.resolve_store_scope);
+    # that login is _storeless_accountant() below. The org view is _admin()'s.
     return {
         "user_id": uid,
         "full_name": "Books",
         "roles": ["ACCOUNTANT"],
+        "store_ids": ["BV-1"],
+        "active_store_id": "BV-1",
+    }
+
+
+def _storeless_accountant(uid="ACC0"):
+    """An ACCOUNTANT whose login holds no shop at all (R4)."""
+    return {
+        "user_id": uid,
+        "full_name": "Books",
+        "roles": ["ACCOUNTANT"],
+        "store_ids": [],
+        "active_store_id": None,
+    }
+
+
+def _admin(uid="ADM1"):
+    # F63: only ADMIN / SUPERADMIN may name any shop; a storeless ACCOUNTANT
+    # naming BV-1 is refused (403) like any other login asking for a shop it
+    # does not hold.
+    return {
+        "user_id": uid,
+        "full_name": "Owner",
+        "roles": ["ADMIN"],
         "store_ids": [],
         "active_store_id": None,
     }
@@ -254,6 +287,7 @@ def _expense(category, amount, store="BV-1", day="2026-06-05", status="APPROVED"
 def _bill(bill_id, total, due, vendor_id="V-1", vendor_name="Lens Co", critical=False):
     return {
         "bill_id": bill_id,
+        "store_id": "BV-1",
         "bill_number": f"INV-{bill_id}",
         "vendor_id": vendor_id,
         "vendor_name": vendor_name,
@@ -481,7 +515,7 @@ def test_essential_heads_override_replaces_seed_list():
 def test_dedicated_route_end_to_end_numbers(routed):
     _seed_standard(routed)
     out = asyncio.run(
-        fin.get_survival_cashflow(store_id=None, current_user=_accountant())
+        fin.get_survival_cashflow(store_id=None, current_user=_admin())
     )
     sv = out["survival"]
     assert out["month"] == "2026-06"
@@ -503,7 +537,7 @@ def test_dedicated_route_shows_shortfall_when_income_collapses(routed):
     _seed_standard(routed)
     routed["orders"].docs.clear()  # zero revenue month
     out = asyncio.run(
-        fin.get_survival_cashflow(store_id=None, current_user=_accountant())
+        fin.get_survival_cashflow(store_id=None, current_user=_admin())
     )
     sv = out["survival"]
     assert sv["projected_income_paise"] == 0
@@ -511,22 +545,25 @@ def test_dedicated_route_shows_shortfall_when_income_collapses(routed):
     assert sv["surplus_paise"] == 0
 
 
-def test_store_id_filters_expenses_and_income_but_not_org_wide_ap(routed):
+def test_store_id_filters_expenses_income_and_ap_alike(routed):
     _seed_standard(routed)
     routed["expenses"].docs.append(_expense("Rent", 30000.0, store="BV-2"))
     routed["orders"].docs.append(_order(40000.0, store="BV-2"))
     sv_all = asyncio.run(
-        fin.get_survival_cashflow(store_id=None, current_user=_accountant())
+        fin.get_survival_cashflow(store_id=None, current_user=_admin())
     )["survival"]
     sv_bv1 = asyncio.run(
-        fin.get_survival_cashflow(store_id="BV-1", current_user=_accountant())
+        fin.get_survival_cashflow(store_id="BV-1", current_user=_admin())
     )["survival"]
     assert sv_all["fixed_costs_paise"] == 8000000  # both stores' rent
     assert sv_bv1["fixed_costs_paise"] == 5000000  # BV-1 only
     assert sv_all["projected_income_paise"] == 20000000  # (60k+40k) doubled
     assert sv_bv1["projected_income_paise"] == 12000000
-    # Vendor bills carry no store_id -- AP stays org-wide under the filter.
+    # AP follows the same shop rule (F63): every shop's for the org view, the
+    # picked shop's for an admin who picks one -- every bill here is BV-1's,
+    # so BV-1's AP is all of it (test_finance_ap_scope_round2 splits shops).
     assert sv_bv1["must_pay_ap_paise"] == sv_all["must_pay_ap_paise"] == 1000000
+    assert sv_bv1["ap_scope"] == "STORE" and sv_all["ap_scope"] == "ORG_WIDE"
 
 
 def test_e2_policy_override_flows_through_the_route(routed, monkeypatch):
@@ -566,12 +603,34 @@ def test_e2_policy_override_flows_through_the_route(routed, monkeypatch):
         ]
     )
     sv = asyncio.run(
-        fin.get_survival_cashflow(store_id=None, current_user=_accountant())
+        fin.get_survival_cashflow(store_id=None, current_user=_admin())
     )["survival"]
     assert sv["fixed_costs_paise"] == 100000  # software now essential
     assert sv["deferrable_expenses_paise"] == 200000  # rent now deferrable
     assert sv["must_pay_ap_paise"] == 50000  # ACME due-soon -> must pay
     assert sv["deferrable_ap_paise"] == 70000  # same due date, not critical
+
+
+def test_r4_a_storeless_accountant_reads_no_shops_survival(routed):
+    """R4: the same seeded month the admin reads as Rent 50k / AP 10k+5k /
+    120k projected is NOTHING for an accountant with no shop -- not every
+    shop's figures (resolve_store_scope used to hand it None = all shops)."""
+    _seed_standard(routed)
+    org = asyncio.run(
+        fin.get_survival_cashflow(store_id=None, current_user=_admin())
+    )["survival"]
+    assert org["min_pay_total_paise"] == 6000000  # the world is not empty
+    sv = asyncio.run(
+        fin.get_survival_cashflow(store_id=None, current_user=_storeless_accountant())
+    )["survival"]
+    assert sv["fixed_costs_paise"] == 0
+    assert sv["deferrable_expenses_paise"] == 0
+    assert sv["must_pay_ap_paise"] == 0 and sv["deferrable_ap_paise"] == 0
+    assert sv["projected_income_paise"] == 0
+    assert sv["essential_detail"] == [] and sv["deferrable_detail"] == []
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(fin.get_survival_cashflow(store_id="BV-1", current_user=_storeless_accountant()))
+    assert exc.value.status_code == 403
 
 
 def test_dedicated_route_403_for_store_manager_and_sales(routed):
@@ -611,7 +670,7 @@ def test_budget_mode_survival_returns_real_data_not_dead_skeleton(routed):
     _seed_standard(routed)
     out = asyncio.run(
         fin.get_budget(
-            mode="survival", month=None, year=None, current_user=_accountant()
+            mode="survival", month=None, year=None, current_user=_admin()
         )
     )
     assert "no_budget_set" not in out
@@ -695,15 +754,16 @@ def test_dedicated_route_stamps_scope_labels(routed):
     """End-to-end: the route passes store_scoped through from its store_id."""
     _seed_standard(routed)
     sv_all = asyncio.run(
-        fin.get_survival_cashflow(store_id=None, current_user=_accountant())
+        fin.get_survival_cashflow(store_id=None, current_user=_admin())
     )["survival"]
     sv_bv1 = asyncio.run(
-        fin.get_survival_cashflow(store_id="BV-1", current_user=_accountant())
+        fin.get_survival_cashflow(store_id="BV-1", current_user=_admin())
     )["survival"]
     assert sv_all["income_expense_scope"] == "ORG_WIDE"
     assert sv_bv1["income_expense_scope"] == "STORE"
-    # AP never narrows, regardless of the filter.
-    assert sv_all["ap_scope"] == sv_bv1["ap_scope"] == "ORG_WIDE"
+    # AP narrows with the filter, like income (one shop rule, F63).
+    assert sv_all["ap_scope"] == "ORG_WIDE"
+    assert sv_bv1["ap_scope"] == "STORE"
 
 
 # ============================================================================
@@ -776,7 +836,7 @@ def test_route_pro_rated_consistent_inverts_income_projection(routed):
     60k that was actually booked -- a true like-for-like vs MTD expenses."""
     _seed_standard(routed)
     sv = asyncio.run(
-        fin.get_survival_cashflow(store_id=None, current_user=_accountant())
+        fin.get_survival_cashflow(store_id=None, current_user=_admin())
     )["survival"]
     assert sv["projected_income_paise"] == 12000000  # full-month
     pc = sv["pro_rated_consistent"]
@@ -808,7 +868,7 @@ def test_budget_mode_survival_flags_historical_period_mismatch(routed):
     survival block is stamped with its real as-of date + an explicit note."""
     _seed_standard(routed)
     out = asyncio.run(
-        fin.get_budget(mode="survival", month=3, year=2026, current_user=_accountant())
+        fin.get_budget(mode="survival", month=3, year=2026, current_user=_admin())
     )
     # Envelope still carries the requested historical period for the skeleton.
     assert out["month"] == 3 and out["year"] == 2026

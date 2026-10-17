@@ -1,5 +1,6 @@
 """Unified stock alerts (feeds StockAlertsOverview.tsx)."""
 
+from ...dependencies import store_in_view
 from ._shared import (
     Depends,
     Dict,
@@ -357,7 +358,7 @@ async def get_stock_alerts(
             {"alerts": [], "stats": _empty_alert_stats()}, current_user, "product"
         )
 
-    active_store = validate_store_access(store_id, current_user)
+    active_store = store_in_view(store_id, current_user)
 
     try:
         products_coll = db.get_collection("products")

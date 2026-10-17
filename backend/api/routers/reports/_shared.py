@@ -33,6 +33,7 @@ from ...dependencies import (
     get_eye_test_repository,
     get_product_repository,
     get_db,
+    store_in_view,
     validate_store_access,
 )
 from ...services.name_resolver import order_actor_id, order_actor_name_map

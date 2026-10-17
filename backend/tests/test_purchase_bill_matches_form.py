@@ -204,7 +204,9 @@ class TestF40RecipientIsServerSide:
             "grn_subtype": "STANDARD",
             "items": [{"product_id": "P1", "accepted_qty": 10}],
         }
-        cli = _app(db)  # active shop S1
+        # An ADMIN sitting at S1: since F63 an accountant at S1 cannot reach
+        # S2's receipt at all (404, test_purchase_objects_by_id_scope).
+        cli = _app(db, roles=("ADMIN",))  # active shop S1
         pi_router.get_grn_repository = lambda: _StubRepo(grn)
         body = _fe_body(grn_id="G2")
         body.pop("recipient_gstin")

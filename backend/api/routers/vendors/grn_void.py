@@ -12,6 +12,7 @@ from ._shared import (
     get_grn_repository,
     get_purchase_order_repository,
     get_stock_repository,
+    in_reach_or_404,
     logger,
     require_roles,
     router,
@@ -447,6 +448,25 @@ async def escalate_grn(
             ),
         )
     try:
+        # A PENDING receipt may be an interrupted acceptance. Its minted
+        # units need that acceptance to resume; escalation would strand it.
+        # A settled PARTIALLY_ACCEPTED receipt keeps the existing HQ route.
+        if grn.get("status") == "PENDING":
+            stock_repo = get_stock_repository()
+            try:
+                if stock_repo is None:
+                    raise RuntimeError("stock repository unavailable")
+                already_minted = _receipt_units(stock_repo, grn)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Could not check this receipt's stock, so it was not escalated. Try again shortly.",
+                ) from exc
+            if already_minted:
+                raise HTTPException(
+                    status_code=409,
+                    detail="This pending receipt already put goods into stock. Finish accepting it before escalating the remaining goods.",
+                )
         _write_under_claim(
             grn_repo,
             grn,

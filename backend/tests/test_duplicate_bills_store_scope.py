@@ -158,16 +158,22 @@ def test_an_explicit_foreign_store_id_is_refused_not_honoured(role):
     assert "98765.25" not in r.text
 
 
-def test_a_store_level_session_with_no_store_fails_closed():
-    """A session we cannot pin to a store gets an error, never the unfiltered
-    list. Falling through to "no filter" is precisely the bug being fixed, and
-    it is the shape a careless refactor would reintroduce."""
-    r = _client(["STORE_MANAGER"], active_store=None, store_ids=[]).get(
-        "/expenses/duplicate-bills"
-    )
-    assert r.status_code == 400, r.text
+@pytest.mark.parametrize("role", ["STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT"])
+def test_a_session_with_no_shop_reads_no_shop(role):
+    """A login with no shop sees no shop (owner ruling 2026-10-12, R4): an
+    empty list -- never the unfiltered one, which is precisely the bug being
+    fixed and the shape a careless refactor would reintroduce -- and a shop it
+    names is refused. An ACCOUNTANT is an org-wide reviewer only while it
+    holds a shop. (It used to be a 400 'No active store' for a store manager.)"""
+    client = _client([role], active_store=None, store_ids=[])
+    r = client.get("/expenses/duplicate-bills")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"expenses": [], "total": 0}
     assert "Rupesh Patil" not in r.text
     assert "Asha Kumari" not in r.text
+    named = client.get("/expenses/duplicate-bills", params={"store_id": "BV-DHN-01"})
+    assert named.status_code == 403
+    assert named.json()["detail"] == "No shop is assigned to this login. Ask an admin to assign one."
 
 
 # ---------------------------------------------------------------------------

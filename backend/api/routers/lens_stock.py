@@ -46,6 +46,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .auth import get_current_user, require_roles
+from ..dependencies import store_in_view
 from ..dependencies import validate_store_access
 from ..services.lens_catalog_validation import (
     compute_available,
@@ -333,7 +334,7 @@ async def gap_planner(
     """Cells where (on_hand - reserved) < reorder_point. The FE shows this
     as a 'reorder these' tab. Mounted ABOVE /{lens_line_id} so a literal
     slug 'gap-planner' could not shadow it."""
-    active_store = validate_store_access(store_id, current_user)
+    active_store = store_in_view(store_id, current_user)
     coll = _stock_coll()
     if coll is None:
         return {"cells": [], "total": 0}
@@ -415,7 +416,7 @@ async def list_cells(
 ):
     """Full power matrix for a lens line at one store. Returns the raw
     cells -- the FE builds the (sph, cyl, add) grid."""
-    active_store = validate_store_access(store_id, current_user)
+    active_store = store_in_view(store_id, current_user)
     coll = _stock_coll()
     if coll is None:
         return {"cells": [], "total": 0, "lens_line_id": lens_line_id}

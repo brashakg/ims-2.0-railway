@@ -10,17 +10,25 @@ from ...utils.ist import now_ist, ist_day_start_utc
 from typing import Optional
 from fastapi import Depends
 from ..auth import get_current_user
+from ...dependencies import resolve_store_scope
 from ...services import ap_engine
+from ...services.payables_mask import can_see_payables, strip_input_tax
 from ._shared import (
     _REAL_ORDER_STATUS_FILTER,
     _customer_state_map,
     _get_db,
+    _require_finance_admin,
     _split_output_tax,
     _store_state_map,
     router,
 )
 
 # === GST Management ===
+
+# Owner ruling 2026-10-07 (R1): the GST summary carries input tax summed from
+# supplier bills, so it is the accounts roles' alone (_require_finance_admin);
+# a manager is refused. Its input-tax keys also pass services/payables_mask.
+# strip_input_tax (R5, keys and rule there) for a reader outside that rule.
 
 
 # Bill statuses that mean "not yet received / not bookable for ITC". A bill in
@@ -64,14 +72,36 @@ async def get_gst_summary(
     year: Optional[int] = None,
     current_user: dict = Depends(get_current_user),
 ):
+    # R1 (owner ruling 2026-10-07): ADMIN / SUPERADMIN / ACCOUNTANT only.
+    _require_finance_admin(current_user)
+    # The one shop rule (F63), as the ITC register and GSTR-2B books beside
+    # it: ADMIN / SUPERADMIN read every shop; any other login its own shop's
+    # sales tax (and, for an accounts role, input credit) -- never every
+    # shop's (panel 2026-10-08: one accountant read three input-credit totals
+    # for a month). A non-admin login with NO shop gets the reserved
+    # NO_SHOP_SCOPE (owner ruling 2026-10-12, R4), which matches no order and
+    # no bill: an empty summary, never every shop's GST (its Finance screen
+    # says why: NoShopNotice). GSTR-3B stays per GSTIN: it is the filing, and
+    # a GSTIN can cover more than one shop. A shop login reading its OWN
+    # shop's sales tax (not the company's, as before) waits on the owner: no
+    # 2026-10-12 ruling covers it (PLAN_STATUS section 5, OPEN 2026-10-12).
+    scope = resolve_store_scope(None, current_user)
+    at_shop = {"store_id": scope} if scope else {}
     db = _get_db()
     if db is None:
-        return {
-            "tax_collected": 0,
-            "tax_paid": 0,
-            "net_gst_liability": 0,
-            "gst_by_rate": {},
-        }
+        return strip_input_tax(
+            {
+                "tax_collected": 0,
+                "tax_paid": 0,
+                "net_gst_liability": 0,
+                "gst_by_rate": {},
+            },
+            current_user,
+        )
+    # R5 (owner ruling 2026-10-12): a caller outside the accounts rule never
+    # reads the supplier bills, and strip_input_tax drops the input-tax keys
+    # from what it returns (the R1 gate above admits none today).
+    show_input = can_see_payables(current_user)
     now = now_ist()
     m = month or now.month
     y = year or now.year
@@ -95,6 +125,7 @@ async def get_gst_summary(
     # uses _REVENUE_EXPR (grand_total) -- `$total` is a legacy field modern
     # orders don't carry, so summing it returned ~0.
     sales_match = {
+        **at_shop,
         "created_at": {"$gte": start, "$lt": end},
         "status": _REAL_ORDER_STATUS_FILTER,
     }
@@ -143,7 +174,7 @@ async def get_gst_summary(
 
     try:
         for _b in db.get_collection("vendor_bills").find(
-            {},
+            at_shop,
             {
                 "_id": 0,
                 "bill_date": 1,
@@ -157,7 +188,7 @@ async def get_gst_summary(
                 "cgst_total": 1,
                 "sgst_total": 1,
             },
-        ):
+        ) if show_input else ():
             _bd = ap_engine.parse_date(_b.get("bill_date"))
             if _bd is None or not (bill_start <= _bd < bill_end):
                 continue
@@ -214,7 +245,7 @@ async def get_gst_summary(
     gstr1_due = datetime(due_year, due_month, 11)
     gstr3b_due = datetime(due_year, due_month, 20)
 
-    return {
+    return strip_input_tax({
         "month": m,
         "year": y,
         "gst_collected": gst_collected,
@@ -232,4 +263,4 @@ async def get_gst_summary(
         "gstr3b_due_date": gstr3b_due.isoformat(),
         "gstr1_filed": False,
         "gstr3b_filed": False,
-    }
+    }, current_user)

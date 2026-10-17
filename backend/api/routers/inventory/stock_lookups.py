@@ -2,6 +2,7 @@
 
 import contextvars
 
+from ...dependencies import store_in_view
 from ._shared import (
     Depends,
     Dict,
@@ -55,7 +56,7 @@ async def get_low_stock_alerts(
     Stock Replenishment suggestions) decide whether to propose a PO.
     """
     repo = get_stock_repository()
-    active_store = validate_store_access(store_id, current_user)
+    active_store = store_in_view(store_id, current_user)
 
     if repo is None:
         return {"items": []}

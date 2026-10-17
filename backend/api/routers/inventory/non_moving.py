@@ -1,5 +1,6 @@
 """Non-moving stock identification (and the shared sold-status set)."""
 
+from ...dependencies import store_in_view
 from ._shared import (
     Depends,
     HTTPException,
@@ -44,7 +45,7 @@ async def get_non_moving_stock(
     if db is None:
         raise HTTPException(status_code=500, detail="Database connection error")
 
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
 
     try:
         products_coll = db.get_collection("products")

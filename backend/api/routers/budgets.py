@@ -37,6 +37,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .auth import require_roles
+from ..dependencies import store_in_view
 from ..dependencies import (
     get_db,
     get_order_repository,
@@ -294,7 +295,7 @@ async def list_budgets(
     current_user: dict = Depends(require_roles(*_BUDGET_ROLES)),
 ):
     """List the planned budget lines for a store + period (store-scoped)."""
-    store_id = validate_store_access(store_id, current_user)
+    store_id = store_in_view(store_id, current_user)
     if period:
         period = _validate_period(period)
 
@@ -377,7 +378,7 @@ async def budget_variance(
     totals shrink with them. The response then carries
     `heads_partially_restricted: true`. See the strip below.
     """
-    store_id = validate_store_access(store_id, current_user)
+    store_id = store_in_view(store_id, current_user)
     period = _validate_period(period)
 
     # ---- planned lines for this (store, period) -------------------------

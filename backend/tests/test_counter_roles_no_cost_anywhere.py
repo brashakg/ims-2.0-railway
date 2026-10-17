@@ -369,10 +369,24 @@ def test_counter_role_reads_no_cost(client, shop, role, method, path, extra):
     assert not _figures_in(body), (role, path, body)
 
 
+# Stock value AT COST (services/stock_value.COST_CONTEXT) is narrower than the
+# product's own cost: the accounts roles alone (owner ruling 2026-10-12, what we
+# pay) -- a store, area or catalogue manager reads these without the value.
+_STOCK_AT_COST = (
+    "/api/v1/reports/inventory",
+    "/api/v1/reports/inventory/summary",
+    "/api/v1/reports/stock/count",
+)
+_ACCOUNTS = ("ADMIN", "ACCOUNTANT")
+
+
 @pytest.mark.parametrize("role", COST_READERS)
 @pytest.mark.parametrize("method,path,extra", READS)
 def test_accounts_still_read_the_cost(client, shop, role, method, path, extra):
     body = _get(client, role, method, path)
+    if path.split("?")[0] in _STOCK_AT_COST and role not in _ACCOUNTS:
+        assert not _cost_keys(body, extra), (role, path, _cost_keys(body, extra))
+        return
     assert _cost_keys(body, extra), (role, path, body)
 
 
@@ -731,20 +745,31 @@ _PAID_VENDORS = 1234.56
 
 
 class _CashColl:
-    def __init__(self, rows):
+    def __init__(self, rows, found=()):
         self._rows = rows
+        self._found = found
 
     def aggregate(self, _pipeline):
         return list(self._rows)
 
+    def find(self, *_a, **_k):
+        return list(self._found)
+
 
 class _CashDb:
     def get_collection(self, name):
-        rows = {
-            "purchase_orders": [{"_id": None, "total": _PAID_POS}],
-            "vendor_payments": [{"_id": None, "total": _PAID_VENDORS}],
+        from api.utils.ist import ist_today
+
+        rows = {"purchase_orders": [{"_id": None, "total": _PAID_POS}]}.get(name, [])
+        # Cash paid to suppliers is the supplier ledger's payment rows
+        # (cash_flow._ap_rows): one payment at this shop, today.
+        found = {
+            "vendor_payments": [
+                {"payment_id": "VP1", "vendor_id": "V1", "amount": _PAID_VENDORS,
+                 "payment_date": ist_today().isoformat(), "store_id": STORE},
+            ],
         }.get(name, [])
-        return _CashColl(rows)
+        return _CashColl(rows, found)
 
 
 def _cash_flow(monkeypatch, role, store_id=None):
@@ -752,7 +777,9 @@ def _cash_flow(monkeypatch, role, store_id=None):
 
     monkeypatch.setattr(cash_flow_mod, "_get_db", lambda: _CashDb())
     user = _user(role)
-    if store_id is None:
+    # An admin with no shop picked reads the org view; a non-admin keeps its
+    # shop (one with NO shop reads none: R4, test_finance_supplier_money_*).
+    if store_id is None and role in ("ADMIN", "SUPERADMIN"):
         user = {**user, "active_store_id": None, "store_ids": []}
     return asyncio.run(
         cash_flow_mod.get_cash_flow(period="month", store_id=store_id, current_user=user)
@@ -768,11 +795,10 @@ def test_accounts_read_what_was_paid_to_suppliers(monkeypatch, role, store_id):
     body = _cash_flow(monkeypatch, role, store_id)
     assert body["purchase_outflow"] == _PAID_POS
     assert "vendor_payments_restricted" not in body
-    if store_id is None:
-        assert body["vendor_payment_outflow"] == _PAID_VENDORS
-        assert body["outflows"] == round(_PAID_POS + _PAID_VENDORS, 2)
-    else:
-        assert body["outflows"] == _PAID_POS
+    # The org view and the shop's own view both count the shop's payment
+    # (every payment carries its shop, F63).
+    assert body["vendor_payment_outflow"] == _PAID_VENDORS
+    assert body["outflows"] == round(_PAID_POS + _PAID_VENDORS, 2)
 
 
 @pytest.mark.parametrize("store_id", (None, STORE))
@@ -838,15 +864,16 @@ def test_workshop_staff_log_a_vendor_return_without_a_price(client, returns_db, 
     assert stored["created_by"] == "u-workshop_staff"
 
 
-def test_a_price_typed_by_workshop_staff_is_not_taken(client, returns_db):
+def test_a_price_sent_by_workshop_staff_is_refused(client, returns_db):
+    # A line's price is the accounts roles' (owner rulings 2026-10-12 R2 + R3):
+    # anyone else sending one is a 403 and nothing is written.
     r = client.post(
         "/api/v1/vendor-returns",
         json=_return_body(unit_price=999.0),
         headers=_headers("WORKSHOP_STAFF"),
     )
-    assert r.status_code == 201, r.text
-    stored = returns_db.vendor_returns.find_one({"return_id": r.json()["return_id"]})
-    assert stored["items"][0]["unit_price"] is None and stored["total_value"] is None
+    assert r.status_code == 403, r.text
+    assert returns_db.vendor_returns.count_documents({}) == 0
 
 
 def test_workshop_staff_read_their_return_without_a_price(client, returns_db):
@@ -865,40 +892,38 @@ def test_workshop_staff_read_their_return_without_a_price(client, returns_db):
     assert r.status_code == 403, r.text
 
 
-@pytest.mark.parametrize("role", ("ADMIN", "ACCOUNTANT"))
-def test_accounts_still_price_the_return(client, returns_db, role):
+@pytest.mark.parametrize("role", ("STORE_MANAGER", "ADMIN"))
+def test_only_the_accounts_roles_price_the_return(client, returns_db, role):
     h = _headers(role)
     r = client.post("/api/v1/vendor-returns", json=_return_body(), headers=h)
-    assert r.status_code == 422, r.text  # a buyer's line needs its price
-    r = client.post("/api/v1/vendor-returns", json=_return_body(unit_price=COST), headers=h)
-    assert r.status_code == 201, r.text
+    assert r.status_code == 201, r.text  # logged unpriced; accounts price it later
     stored = returns_db.vendor_returns.find_one({"return_id": r.json()["return_id"]})
-    assert stored["items"][0]["unit_price"] == COST and stored["total_value"] == COST
+    assert stored["items"][0]["unit_price"] is None and stored["total_value"] is None
+    r = client.post("/api/v1/vendor-returns", json=_return_body(unit_price=COST), headers=h)
+    if role == "ADMIN":
+        assert r.status_code == 201, r.text
+        stored = returns_db.vendor_returns.find_one({"return_id": r.json()["return_id"]})
+        assert stored["items"][0]["unit_price"] == COST and stored["total_value"] == COST
+    else:
+        assert r.status_code == 403, r.text
 
 
-# Who must price at the create door, and whose price it keeps, is cost_mask's
-# "purchase" rule, the one every return read answers (owner ruling 2026-10-12:
-# accounts only, so a manager logs unpriced like workshop staff and accounts
-# price it at approval). Widen it there and the widened role must price, while
-# a role it left out still logs unpriced. A written-out role set at the door
-# keeps answering the old way.
-def test_widening_the_purchase_rule_moves_the_return_create_door(
+# Whose price the create door takes is cost_mask's "payables" rule, the one
+# every return read answers: widen it there and the added role's price is
+# taken. A written-out role set at the door would keep refusing it.
+def test_widening_the_payables_rule_moves_the_return_pricing_door(
     client, returns_db, monkeypatch
 ):
     from api.services import cost_mask
 
-    def logs_unpriced(role):
-        for body in (_return_body(), _return_body(unit_price=COST)):
-            r = client.post("/api/v1/vendor-returns", json=body, headers=_headers(role))
-            assert r.status_code == 201, r.text
-            stored = returns_db.vendor_returns.find_one({"return_id": r.json()["return_id"]})
-            assert stored["items"][0]["unit_price"] is None and stored["total_value"] is None
-
-    logs_unpriced("STORE_MANAGER")
-    monkeypatch.setitem(cost_mask._CONTEXT_ROLES, "purchase", {"STORE_MANAGER"})
-    r = client.post("/api/v1/vendor-returns", json=_return_body(), headers=_headers("STORE_MANAGER"))
-    assert r.status_code == 422, r.text
-    logs_unpriced("AREA_MANAGER")
+    monkeypatch.setitem(cost_mask._CONTEXT_ROLES, "payables", {"STORE_MANAGER"})
+    r = client.post(
+        "/api/v1/vendor-returns", json=_return_body(unit_price=COST),
+        headers=_headers("STORE_MANAGER"),
+    )
+    assert r.status_code == 201, r.text
+    stored = returns_db.vendor_returns.find_one({"return_id": r.json()["return_id"]})
+    assert stored["items"][0]["unit_price"] == COST
 
 
 @pytest.mark.parametrize("role", COUNTER_ROLES[:4])
@@ -941,7 +966,7 @@ def _issue_debit_note(**price):
 def test_a_debit_note_is_refused_for_a_return_without_prices():
     res = _issue_debit_note(unit_price=None)
     assert res["ok"] is False and res["http"] == 422, res
-    assert res["error"] == "line_without_price", res
+    assert res["error"] == "price_required", res
     assert "price" in res["message"].lower()
 
 
@@ -991,7 +1016,7 @@ def test_frontend_cost_roles_are_the_purchase_context():
 
 
 # ---------------------------------------------------------------------------
-# Approving a return the workshop logged: the approver prices it
+# A return the workshop logged: a manager approves the goods, accounts price it
 # ---------------------------------------------------------------------------
 
 
@@ -1005,21 +1030,23 @@ def _workshop_return(client):
     return r.json()["return_id"]
 
 
-def test_an_unpriced_return_is_not_approved_without_its_prices(client, returns_db):
-    rid = _workshop_return(client)
-    h = _headers("ACCOUNTANT")
-    for body in ({"status": "approved"}, {"status": "approved", "unit_prices": [None]}):
-        r = client.patch(f"/api/v1/vendor-returns/{rid}/status", json=body, headers=h)
-        assert r.status_code == 422, r.text
-        assert "price paid" in r.json()["detail"], r.text
-    assert returns_db.vendor_returns.find_one({"return_id": rid})["status"] == "created"
-
-
-def test_the_approver_prices_an_unpriced_return(client, returns_db):
+def test_a_manager_approves_an_unpriced_return_and_accounts_price_it(client, returns_db):
     rid = _workshop_return(client)
     r = client.patch(
         f"/api/v1/vendor-returns/{rid}/status",
-        json={"status": "approved", "unit_prices": [COST]},
+        json={"status": "approved"},
+        headers=_headers("STORE_MANAGER"),
+    )
+    assert r.status_code == 200, r.text
+    r = client.put(
+        f"/api/v1/vendor-returns/{rid}/prices",
+        json={"unit_prices": [COST]},
+        headers=_headers("STORE_MANAGER"),
+    )
+    assert r.status_code == 403, r.text
+    r = client.put(
+        f"/api/v1/vendor-returns/{rid}/prices",
+        json={"unit_prices": [COST]},
         headers=_headers("ACCOUNTANT"),
     )
     assert r.status_code == 200, r.text
@@ -1027,27 +1054,13 @@ def test_the_approver_prices_an_unpriced_return(client, returns_db):
     assert stored["status"] == "approved"
     assert stored["items"][0]["unit_price"] == COST
     assert stored["total_value"] == round(2 * COST, 2)
-    # Workshop staff still read it without the price accounts entered.
-    r = client.get(f"/api/v1/vendor-returns/{rid}", headers=_headers("WORKSHOP_STAFF"))
-    assert not _cost_keys(r.json(), _PRICE_KEYS) and not _figures_in(r.json()), r.json()
+    # Workshop staff and the manager still read it without the price.
+    for role in ("WORKSHOP_STAFF", "STORE_MANAGER"):
+        r = client.get(f"/api/v1/vendor-returns/{rid}", headers=_headers(role))
+        assert not _cost_keys(r.json(), _PRICE_KEYS) and not _figures_in(r.json()), r.json()
 
 
-def test_a_priced_line_keeps_its_price_at_approval(client, returns_db):
-    h = _headers("ACCOUNTANT")
-    rid = client.post(
-        "/api/v1/vendor-returns", json=_return_body(unit_price=100.0), headers=h
-    ).json()["return_id"]
-    r = client.patch(
-        f"/api/v1/vendor-returns/{rid}/status",
-        json={"status": "approved", "unit_prices": [999.0]},
-        headers=h,
-    )
-    assert r.status_code == 200, r.text
-    stored = returns_db.vendor_returns.find_one({"return_id": rid})
-    assert stored["items"][0]["unit_price"] == 100.0 and stored["total_value"] == 100.0
-
-
-# The approval prices a line by the create door's own rule (one type): a crore
+# Both pricing doors (create and PUT /prices) take a price by one type: a crore
 # at most, never NaN / Infinity -- either would be stored and then break every
 # read of the Vendor Returns list. Raw JSON, since NaN / Infinity are not JSON
 # a client library will write.
@@ -1058,9 +1071,9 @@ _BAD_PRICES = ("20000000", "NaN", "Infinity", "-1")
 def test_both_return_doors_refuse_a_price_outside_the_one_rule(client, returns_db, bad):
     h = {**_headers("ACCOUNTANT"), "Content-Type": "application/json"}
     rid = _workshop_return(client)
-    r = client.patch(
-        f"/api/v1/vendor-returns/{rid}/status",
-        content=f'{{"status": "approved", "unit_prices": [{bad}]}}',
+    r = client.put(
+        f"/api/v1/vendor-returns/{rid}/prices",
+        content=f'{{"unit_prices": [{bad}]}}',
         headers=h,
     )
     assert r.status_code == 422, (bad, r.text)
@@ -1069,7 +1082,7 @@ def test_both_return_doors_refuse_a_price_outside_the_one_rule(client, returns_d
     assert r.status_code == 422, (bad, r.text)
     stored = returns_db.vendor_returns.find_one({"return_id": rid})
     assert stored["status"] == "created" and stored["items"][0]["unit_price"] is None
-    # The list still loads for the buyers.
+    # The list still loads for the accounts roles.
     r = client.get("/api/v1/vendor-returns", headers=h)
     assert r.status_code == 200 and r.json()["total"] == 1, r.text
 
@@ -1077,9 +1090,9 @@ def test_both_return_doors_refuse_a_price_outside_the_one_rule(client, returns_d
 def test_the_top_price_is_taken_at_both_doors(client, returns_db):
     h = _headers("ACCOUNTANT")
     rid = _workshop_return(client)  # 2 pieces
-    r = client.patch(
-        f"/api/v1/vendor-returns/{rid}/status",
-        json={"status": "approved", "unit_prices": [10_000_000]},
+    r = client.put(
+        f"/api/v1/vendor-returns/{rid}/prices",
+        json={"unit_prices": [10_000_000]},
         headers=h,
     )
     assert r.status_code == 200, r.text

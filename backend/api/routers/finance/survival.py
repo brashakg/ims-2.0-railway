@@ -11,6 +11,7 @@ from ...utils.ist import now_ist_naive, ist_day_start_utc
 from typing import Optional
 from fastapi import Depends, Query
 from ..auth import get_current_user
+from ...dependencies import resolve_store_scope
 from ...services import ap_engine
 from ...services import survival_cashflow
 from ...services import policy_engine
@@ -94,14 +95,14 @@ def _survival_month_expense_rows(db, now: datetime, store_id: Optional[str] = No
     ]
 
 
-def _survival_ap_items(db):
+def _survival_ap_items(db, store_id: Optional[str] = None):
     """Open AP bills as aging items (rupee `outstanding`, resolved `due_date`)
     + the raw bill's vendor_critical flag carried through.
 
-    Vendor bills carry no store_id (they are entity-level liabilities), so the
-    AP side of the survival view is always org-wide.
+    The supplier ledger's rows (_ap_rows): every shop when `store_id` is None,
+    else that shop's share (F63) -- see _survival_scope for who gets which.
     """
-    bills, payments, dn = _ap_rows(db)
+    bills, payments, dn = _ap_rows(db, store_id)
     ap = ap_engine.build_aging(bills, payments, dn)
     crit_by_bill = {}
     for b in bills:
@@ -138,14 +139,42 @@ def _survival_projected_income_paise(
     return int(round(projected * 100))
 
 
-def _build_survival_payload(db, now: datetime, store_id: Optional[str] = None) -> dict:
-    """Assemble inputs and run the pure builder. db=None -> all-zero view."""
+def _survival_scope(store_id: Optional[str], current_user: dict) -> dict:
+    """The shops a caller's survival view covers, as _build_survival_payload
+    keyword arguments: {"store_id": income + expenses, "ap_store_id": AP}.
+
+    The ONE shop rule (F63, api.dependencies.resolve_store_scope) for all
+    three, AP included: an explicit store_id another login does not hold
+    403s, and a dropped one is the caller's own shop for everyone but ADMIN /
+    SUPERADMIN, who read every shop until they pick one. Every bill carries
+    its shop (F63), and every other payable figure -- AP aging, the supplier
+    card, the ledger, the Purchases report -- narrows an admin's picked shop
+    through the same ledger rows (ap_engine.supplier_ledger_rows); so does
+    this view's must-pay AP, so one shop's AP is one number on every screen.
+    A Pune accountant never reads Dhanbad's supplier bills, income or
+    expenses, however the request is edited; a non-admin with no shop reads
+    none (R4).
+    """
+    scope = resolve_store_scope(store_id, current_user)
+    return {"store_id": scope, "ap_store_id": scope}
+
+
+def _build_survival_payload(
+    db,
+    now: datetime,
+    store_id: Optional[str] = None,
+    ap_store_id: Optional[str] = None,
+) -> dict:
+    """Assemble inputs and run the pure builder. db=None -> all-zero view.
+
+    `store_id` narrows income + expenses, `ap_store_id` the AP bills (None =
+    every shop); _survival_scope says which a caller gets."""
     essential, critical = _survival_policy_lists()
     if db is None:
         expenses, ap_items, income = [], [], 0
     else:
         expenses = _survival_month_expense_rows(db, now, store_id=store_id)
-        ap_items = _survival_ap_items(db)
+        ap_items = _survival_ap_items(db, ap_store_id)
         income = _survival_projected_income_paise(db, now, store_id=store_id)
     # P3-2: month-to-date fraction = elapsed days / days in month. The income
     # helper projects full-month from revenue-to-date by dividing by now.day,
@@ -153,26 +182,36 @@ def _build_survival_payload(db, now: datetime, store_id: Optional[str] = None) -
     # month-to-date booked revenue -- a true like-for-like vs MTD expenses.
     days_in_month = calendar.monthrange(now.year, now.month)[1]
     mtd_fraction = min(now.day, days_in_month) / days_in_month
-    return survival_cashflow.build_survival_view(
+    view = survival_cashflow.build_survival_view(
         expenses,
         ap_items,
         income,
         now=now,
         essential_heads=essential,
         critical_vendors=critical,
-        # P3-1: AP is always org-wide; income/expenses are store-scoped only
-        # when a store filter is supplied.
+        # P3-1: income/expenses are store-scoped only when a store filter is
+        # supplied; AP is org-wide unless ap_store_id narrows it (below).
         store_scoped=bool(store_id),
         month_to_date_fraction=mtd_fraction,
     )
+    if ap_store_id:
+        # The builder labels AP org-wide by default; this view's AP is one
+        # shop's share (the shop picked, or a shop login's own, F63), so say so.
+        view["ap_scope"] = "STORE"
+        view["scope_note"] = (
+            "Income, fixed costs and must-pay vendor bills (AP) are all "
+            "scoped to ONE store."
+        )
+    return view
 
 
 @router.get("/survival-cashflow")
 async def get_survival_cashflow(
     store_id: Optional[str] = Query(
         None,
-        description="Filter expenses + income to one store. AP bills are "
-        "entity-level liabilities and stay org-wide.",
+        description="Filter expenses + income to one store. For ADMIN / "
+        "SUPERADMIN, AP bills (entity-level liabilities) stay org-wide; every "
+        "other role reads its own shop only, AP included (F63).",
     ),
     current_user: dict = Depends(get_current_user),
 ):
@@ -210,11 +249,14 @@ async def get_survival_cashflow(
     cash-survival tool.
     """
     _require_finance_admin(current_user)
+    # F63: another shop's store_id 403s; a dropped one is the caller's own
+    # shop unless they are ADMIN / SUPERADMIN (see _survival_scope).
+    scope = _survival_scope(store_id, current_user)
     db = _get_db()
     now = now_ist_naive()
     return {
         "as_of": now.date().isoformat(),
         "month": f"{now.year:04d}-{now.month:02d}",
-        "store_id": store_id,
-        "survival": _build_survival_payload(db, now, store_id=store_id),
+        "store_id": scope["store_id"],
+        "survival": _build_survival_payload(db, now, **scope),
     }

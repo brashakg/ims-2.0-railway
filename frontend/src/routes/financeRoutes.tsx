@@ -3,6 +3,7 @@
 import { lazy } from 'react';
 import { Route, Navigate, useSearchParams } from 'react-router-dom';
 import { ProtectedRoute } from '../components/layout/ProtectedRoute';
+import { NoShopGate } from '../components/common/NoShopNotice';
 import { legacyTabTarget } from '../pages/finance/expenses/legacyTabRedirect';
 import {
   EXPENSE_APPROVER_ROLES,
@@ -135,7 +136,12 @@ export const financeRoutes = (
       path="finance/cash-flow"
       element={
         <ProtectedRoute allowedRoles={['SUPERADMIN', 'ADMIN', 'ACCOUNTANT']}>
-          <CashFlowPage />
+          {/* R4 (owner ruling 2026-10-12): a login with no shop is told so,
+              in place of payables it has none of and money buttons it may
+              not use. */}
+          <NoShopGate title="Cash Flow & Payables">
+            <CashFlowPage />
+          </NoShopGate>
         </ProtectedRoute>
       }
     />

@@ -47,6 +47,11 @@ vi.mock('../../../context/AuthContext', () => ({
     hasRole: () => true,
   }),
 }));
+// The form names the accountant's own shop, read-only (owner ruling R9), so
+// it reads the store list.
+vi.mock('../../../hooks/usePOSQueries', () => ({
+  useStores: () => ({ data: [{ store_id: 'S1', store_name: 'Shop One' }] }),
+}));
 
 import { PurchaseInvoicesTab } from '../PurchaseInvoicesTab';
 import { InvoiceFormDrawer } from '../invoices/InvoiceFormDrawer';

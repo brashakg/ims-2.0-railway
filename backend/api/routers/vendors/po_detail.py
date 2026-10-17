@@ -207,6 +207,10 @@ async def get_po_timeline(
                     {"_id": 0},
                 )
             )
+            if show_bills:  # a bill's status is the ledger's, as of today
+                from ..purchase_invoices import stamp_bills_as_of
+
+                stamp_bills_as_of(db, rows)
             for r in rows:
                 inv = {
                     "bill_id": r.get("bill_id"),

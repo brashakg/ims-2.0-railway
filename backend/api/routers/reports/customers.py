@@ -8,6 +8,7 @@ from ...utils.ist import (
     ist_day_start_utc,
 )
 from ..auth import get_current_user, require_roles
+from ...dependencies import store_in_view
 from ...services.cost_mask import mask_cost
 from ...dependencies import (
     get_order_repository,
@@ -37,7 +38,7 @@ async def expense_vs_revenue(
     current_user: dict = Depends(require_roles(*_REPORT_FINANCE_ROLES)),
 ):
     """Expense vs revenue comparison"""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     order_repo = get_order_repository()
 
     # Cost, profit and margin are the accounts roles' only (owner ruling
@@ -96,7 +97,7 @@ async def customer_acquisition(
     current_user: dict = Depends(get_current_user),
 ):
     """Customer acquisition/retention report"""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     customer_repo = get_customer_repository()
     order_repo = get_order_repository()
 
@@ -177,7 +178,7 @@ async def brand_sellthrough(
     current_user: dict = Depends(get_current_user),
 ):
     """Brand-wise sell-through report"""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     order_repo = get_order_repository()
     stock_repo = get_stock_repository()
 
@@ -263,7 +264,7 @@ async def get_targets(
     Get sales targets for a store (daily and monthly).
     Returns configurable defaults or targets from database.
     """
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
+    active_store = store_in_view(store_id, current_user) or "store-001"
 
     # Default targets
     targets = {

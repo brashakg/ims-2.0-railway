@@ -227,7 +227,9 @@ def _token(roles, store_ids=None):
 
 @pytest.fixture
 def acct_headers():
-    return {"Authorization": f"Bearer {_token(['ACCOUNTANT'])}"}
+    # An accountant who holds a shop; one with none is refused the org-wide
+    # B2B book (R4, finance._require_org_finance).
+    return {"Authorization": f"Bearer {_token(['ACCOUNTANT'], ['S-JH'])}"}
 
 
 @pytest.fixture

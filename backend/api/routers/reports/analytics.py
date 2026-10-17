@@ -11,6 +11,7 @@ from ...utils.ist import (
     ist_today,
 )
 from ..auth import get_current_user
+from ...dependencies import store_in_view
 from ...dependencies import (
     get_order_repository,
     get_db,
@@ -145,7 +146,7 @@ async def footfall_audit(
 
     Spec: docs/TECHCHERRY_PORT_SCOPE.md §5.1.
     """
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
+    active_store = store_in_view(store_id, current_user) or "store-001"
     db = get_db()
 
     now = now_ist_naive()
@@ -313,7 +314,7 @@ async def sales_price_bands(
 
     Spec: docs/TECHCHERRY_PORT_SCOPE.md §5.2.
     """
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
+    active_store = store_in_view(store_id, current_user) or "store-001"
     order_repo = get_order_repository()
     now = now_ist_naive()
     # Start of FY (fy_count - 1) years before the current FY.
@@ -490,7 +491,7 @@ async def sales_lens_deep_dive(
 
     Spec: docs/TECHCHERRY_PORT_SCOPE.md §5.3.
     """
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
+    active_store = store_in_view(store_id, current_user) or "store-001"
     order_repo = get_order_repository()
     db = get_db()
 
@@ -637,7 +638,7 @@ async def sales_seasonality(
 
     Spec: docs/TECHCHERRY_PORT_SCOPE.md §5.4.
     """
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id") or "store-001"
+    active_store = store_in_view(store_id, current_user) or "store-001"
     order_repo = get_order_repository()
     # BUG-104, BOUND rule (backward) for the window, VALUE rule (forward) for
     # the day-of-week / month-of-year buckets below. Both halves live in this

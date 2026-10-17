@@ -17,23 +17,35 @@ import clsx from 'clsx';
 import { useSearchParams } from 'react-router-dom';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
+import { usePurchaseShop } from './purchaseShop';
+import { RowShop } from './invoices/pickers';
 import api from '../../services/api/client';
 import { rtvDebitNotesApi, type DebitNote } from '../../services/api/rtvDebitNotes';
 import { COST_ROLES } from '../../components/common/CostCell';
 import { PURCHASE_ROLES } from './purchaseRoles';
 import { errMsg } from './invoices/shared';
 
+// A return line. Its price per piece is the accounts roles' to enter and to
+// read (owner rulings 2026-10-12 R2 + R3): a manager raises the return with
+// none, and anyone outside the accounts roles reads it without one -- the
+// key is simply absent -> shown as "-". An accounts role prices an unpriced
+// return with "Set prices" (PUT /vendor-returns/{id}/prices).
 interface ReturnItem {
   product_id: string;
   product_name: string;
   quantity: number;
   reason: string;
-  unit_price: number;
+  unit_price?: number | null;
 }
 
-// WORKSHOP_STAFF reads a return without its prices (server-side cost mask,
-// owner ruling 2026-09-29): the money keys are simply absent -> shown as "-".
-type ReturnLine = Omit<ReturnItem, 'unit_price'> & { unit_price?: number };
+type ReturnLine = ReturnItem;
+
+const newLine = (): ReturnItem => ({ product_id: '', product_name: '', quantity: 1, reason: 'defective' });
+
+// Settled returns keep the prices they were settled at (the server refuses).
+const SETTLED = ['credit_issued', 'replaced', 'cancelled'];
+const isPriced = (ret: VendorReturn) =>
+  ret.items.length > 0 && ret.items.every((it) => it.unit_price != null);
 
 interface VendorReturn {
   return_id: string;
@@ -93,19 +105,62 @@ const STATUS_LABELS: Record<string, string> = {
   cancelled: 'Cancelled',
 };
 
+// Supplier money (owner ruling 2026-10-01): the credit a supplier owes us on a
+// return (its value, the credit-note amount and number) and the GST debit
+// note's amounts are for COST_ROLES alone. The server already drops them
+// for anyone else; these copies keep them off the screen whatever it sends.
+// Owner ruling 2026-10-12 (R3): so are a return line's unit price, rate and
+// value -- anyone else reads the items, quantities and reasons only. An
+// allow-list, the server's own (cost_mask._RETURN_ITEM_KEYS, the one cut for
+// every return line), so a price under any name stays off the screen.
+const RETURN_LINE_KEYS = ['product_id', 'product_name', 'quantity', 'reason'] as const;
+
+function withoutLinePrice(line: ReturnLine): ReturnLine {
+  const out: Record<string, unknown> = {};
+  for (const key of RETURN_LINE_KEYS) if (key in line) out[key] = line[key];
+  return out as unknown as ReturnLine;
+}
+
+function withoutReturnCredit(ret: VendorReturn): VendorReturn {
+  const out = { ...ret };
+  delete out.total_value;
+  delete out.credit_note_amount;
+  delete out.credit_note_number;
+  if (Array.isArray(ret.items)) out.items = ret.items.map(withoutLinePrice);
+  return out;
+}
+
+function withoutDebitNoteMoney(dn: DebitNote): DebitNote {
+  const out = { ...dn };
+  delete out.totals_rupees;
+  return out;
+}
+
 export function VendorReturns() {
   const toast = useToast();
   const { user } = useAuth();
-  const activeStoreId = user?.activeStoreId || '';
+  // audit F63: lists read the one Purchase scope; a new return is raised at
+  // the caller's own shop.
+  const { storeId: listScope, ownStoreId, showShopOf } = usePurchaseShop();
+  // Supplier money is COST_ROLES' alone: everyone else reads the returns
+  // (items, quantities, reasons, status) without what the supplier owes on them
+  // or what a line is priced at, and RECORDING that money -- issuing the credit,
+  // issuing the GST debit note -- is theirs too (owner ruling 2026-10-12). The
+  // managers keep the goods side: raise, approve, ship, received by vendor, and
+  // "replaced" on a replacement return.
+  const canSeePayables = (user?.roles || []).some((r) => COST_ROLES.includes(r));
+  const shownReturn = (r: VendorReturn) => (canSeePayables ? r : withoutReturnCredit(r));
+  const shownNote = (dn: DebitNote) => (canSeePayables ? dn : withoutDebitNoteMoney(dn));
   // F21: the Quarantine Queue "Create RTV" CTA deep-links here with ?stock_id=...
   // so the new return physically links that quarantined unit (backend backfills
   // rtv_vendor_id). Without reading it, the advertised one-click linkage was dead.
   const [searchParams] = useSearchParams();
   const linkedStockId = searchParams.get('stock_id');
-  // Workshop staff log a return (item, quantity, reason) but never see or type
-  // what was paid: a purchase role prices it (owner ruling 2026-10-12).
-  const canPrice = (user?.roles || []).some((r) => COST_ROLES.includes(r));
-  const canMove = (user?.roles || []).some((r) => PURCHASE_ROLES.includes(r));
+  // Workshop staff log a return (item, quantity, reason) and nothing more
+  // (owner ruling 2026-10-12): moving it along -- approve, ship, received by
+  // vendor -- is the purchase roles' (the server's _VENDOR_RETURN_ROLES), and
+  // its price is the accounts roles' (canSeePayables, above).
+  const canMoveGoods = (user?.roles || []).some((r) => PURCHASE_ROLES.includes(r));
 
   const [activeTab, setActiveTab] = useState<'active' | 'history'>('active');
   const [isLoading, setIsLoading] = useState(true);
@@ -117,17 +172,16 @@ export function VendorReturns() {
   // physical return is unchanged; this is the formal debiting document layer.
   const [debitNotes, setDebitNotes] = useState<Record<string, DebitNote>>({});
   const [dnBusy, setDnBusy] = useState<string | null>(null);
-  // Prices typed at Approve for lines the workshop logged without one:
-  // return_id -> item index -> the typed price.
-  const [approvePrices, setApprovePrices] = useState<Record<string, Record<number, string>>>({});
 
   // Form state
   const [selectedVendor, setSelectedVendor] = useState('');
   const [returnType, setReturnType] = useState<'credit_note' | 'replacement'>('credit_note');
-  const [items, setItems] = useState<ReturnItem[]>([
-    { product_id: '', product_name: '', quantity: 1, reason: 'defective', unit_price: 0 },
-  ]);
+  const [items, setItems] = useState<ReturnItem[]>([newLine()]);
   const [notes, setNotes] = useState('');
+  // Accounts pricing an unpriced return (one input per line, in line order).
+  const [pricing, setPricing] = useState<VendorReturn | null>(null);
+  const [priceInputs, setPriceInputs] = useState<string[]>([]);
+  const [pricingBusy, setPricingBusy] = useState(false);
 
   // Load data on mount
   useEffect(() => {
@@ -138,24 +192,24 @@ export function VendorReturns() {
         // Fetch vendor returns and vendors in parallel
         const [returnsResp, vendorsResp] = await Promise.all([
           api.get('/vendor-returns/', {
-            params: { store_id: activeStoreId || undefined, limit: 100 },
+            params: { store_id: listScope, limit: 100 },
           }),
           api.get('/vendors/', { params: { limit: 100 } }),
         ]);
 
-        setReturns(returnsResp.data.returns || []);
+        setReturns((returnsResp.data.returns || []).map(shownReturn));
         setVendors(vendorsResp.data.vendors || vendorsResp.data.items || []);
 
         // F20: map any already-issued debit notes to their source return so the
         // row shows "Issued" + serial (fail-soft: a load error just hides them).
         try {
           const dnResp = await rtvDebitNotesApi.list({
-            store_id: activeStoreId || undefined,
+            store_id: listScope,
             limit: 100,
           });
           const map: Record<string, DebitNote> = {};
           for (const dn of dnResp.debit_notes || []) {
-            if (dn.rtv_ref_id) map[dn.rtv_ref_id] = dn;
+            if (dn.rtv_ref_id) map[dn.rtv_ref_id] = shownNote(dn);
           }
           setDebitNotes(map);
         } catch {
@@ -169,13 +223,10 @@ export function VendorReturns() {
     };
 
     loadData();
-  }, [activeStoreId]);
+  }, [listScope]);
 
   const handleAddItem = () => {
-    setItems([
-      ...items,
-      { product_id: '', product_name: '', quantity: 1, reason: 'defective', unit_price: 0 },
-    ]);
+    setItems([...items, newLine()]);
   };
 
   const handleRemoveItem = (idx: number) => {
@@ -200,11 +251,13 @@ export function VendorReturns() {
       await api.post('/vendor-returns/', {
         vendor_id: selectedVendor,
         vendor_name: vendor?.legal_name || selectedVendor,
-        store_id: activeStoreId,
+        store_id: ownStoreId ?? '',
+        // A line's price is sent only by an accounts role (the server refuses
+        // one from anyone else, R2 + R3); a blank price is left for later.
         items: items.map(({ unit_price, ...i }) => ({
           ...i,
-          ...(canPrice ? { unit_price } : {}),
           product_id: i.product_id || i.product_name.toLowerCase().replace(/\s+/g, '-'),
+          ...(canSeePayables && unit_price != null ? { unit_price } : {}),
         })),
         return_type: returnType,
         notes,
@@ -215,47 +268,66 @@ export function VendorReturns() {
       setShowModal(false);
       setSelectedVendor('');
       setReturnType('credit_note');
-      setItems([{ product_id: '', product_name: '', quantity: 1, reason: 'defective', unit_price: 0 }]);
+      setItems([newLine()]);
       setNotes('');
 
-      // Refresh the list
+      // Refresh the list -- an admin viewing another shop is shown the shop
+      // the return was raised at (the list reloads with it), so it never vanishes.
+      if (showShopOf(ownStoreId)) return;
       const refreshResp = await api.get('/vendor-returns/', {
-        params: { store_id: activeStoreId || undefined, limit: 100 },
+        params: { store_id: listScope, limit: 100 },
       });
-      setReturns(refreshResp.data.returns || []);
-    } catch {
-      toast.error('Failed to create vendor return');
+      setReturns((refreshResp.data.returns || []).map(shownReturn));
+    } catch (e) {
+      toast.error(errMsg(e, 'Failed to create vendor return'));
     }
   };
 
-  const totalValue = items.reduce((sum, item) => sum + item.quantity * item.unit_price, 0);
+  // The form's total, for an accounts role, once every line is priced.
+  const totalValue = items.every((item) => item.unit_price != null)
+    ? items.reduce((sum, item) => sum + item.quantity * (item.unit_price || 0), 0)
+    : null;
   const activeReturns = returns.filter(r => !['credit_issued', 'replaced', 'cancelled'].includes(r.status));
   const historyReturns = returns.filter(r => ['credit_issued', 'replaced', 'cancelled'].includes(r.status));
 
   const displayReturns = activeTab === 'active' ? activeReturns : historyReturns;
 
   const handleUpdateStatus = async (returnId: string, newStatus: string) => {
-    // A return the workshop logged has no price paid: it is priced at Approve.
-    const ret = returns.find(r => r.return_id === returnId);
-    const typed = approvePrices[returnId] || {};
-    const unpriced = canPrice && newStatus === 'approved' && !!ret?.items.some(i => i.unit_price == null);
-    const unitPrices = unpriced
-      ? ret!.items.map((i, idx) => (i.unit_price != null ? i.unit_price : typed[idx] ? Number(typed[idx]) : null))
-      : null;
-    if (unitPrices && unitPrices.some(p => p == null || !Number.isFinite(p) || p < 0)) {
-      toast.error('Enter the price paid for every item before approving this return.');
-      return;
-    }
     try {
-      const resp = await api.patch(`/vendor-returns/${returnId}/status`, {
-        status: newStatus,
-        ...(unitPrices ? { unit_prices: unitPrices } : {}),
-      });
-      const updated: VendorReturn = resp.data.return;
+      const resp = await api.patch(`/vendor-returns/${returnId}/status`, { status: newStatus });
+      const updated: VendorReturn = shownReturn(resp.data.return);
       setReturns(prev => prev.map(r => r.return_id === returnId ? updated : r));
       toast.success(`Status updated to ${STATUS_LABELS[newStatus] || newStatus}`);
     } catch (e) {
       toast.error(errMsg(e, 'Failed to update return status'));
+    }
+  };
+
+  const openPricing = (ret: VendorReturn) => {
+    setPricing(ret);
+    setPriceInputs(ret.items.map((it) => (it.unit_price == null ? '' : String(it.unit_price))));
+  };
+
+  const handleSavePrices = async () => {
+    if (!pricing) return;
+    const prices = priceInputs.map((v) => (v.trim() === '' ? NaN : Number(v)));
+    if (prices.some((p) => !Number.isFinite(p) || p < 0)) {
+      toast.error("Enter every line's price per piece");
+      return;
+    }
+    setPricingBusy(true);
+    try {
+      const resp = await api.put(`/vendor-returns/${pricing.return_id}/prices`, {
+        unit_prices: prices,
+      });
+      const updated: VendorReturn = shownReturn(resp.data.return);
+      setReturns((prev) => prev.map((r) => (r.return_id === updated.return_id ? updated : r)));
+      toast.success('Prices set');
+      setPricing(null);
+    } catch (e) {
+      toast.error(errMsg(e, 'Failed to set the prices'));
+    } finally {
+      setPricingBusy(false);
     }
   };
 
@@ -265,14 +337,14 @@ export function VendorReturns() {
     setDnBusy(returnId);
     try {
       const res = await rtvDebitNotesApi.issue(returnId, 'vendor_return');
-      setDebitNotes((prev) => ({ ...prev, [returnId]: res.debit_note }));
+      setDebitNotes((prev) => ({ ...prev, [returnId]: shownNote(res.debit_note) }));
       toast.success(
         res.idempotent
           ? `Debit note already issued: ${res.debit_note.debit_note_number}`
           : `Debit note ${res.debit_note.debit_note_number} issued`,
       );
     } catch (e) {
-      toast.error(errMsg(e, 'Failed to issue debit note (vendor/AP role required)'));
+      toast.error(errMsg(e, 'Failed to issue debit note (ADMIN / ACCOUNTANT only)'));
     } finally {
       setDnBusy(null);
     }
@@ -341,19 +413,18 @@ export function VendorReturns() {
             {returns.filter(r => r.status === 'received_by_vendor' || r.status === 'approved').length}
           </p>
         </div>
+        {/* What suppliers owe us across these returns: COST_ROLES only. */}
+        {canSeePayables && (
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <div className="flex items-center justify-between mb-2">
             <p className="text-gray-500 text-sm">Credit Value</p>
             <IndianRupee className="w-5 h-5 text-green-500" />
           </div>
           <p className="text-2xl font-bold text-green-600">
-            {rupees(
-              returns.every((r) => r.total_value != null)
-                ? returns.reduce((sum, r) => sum + (r.credit_note_amount || 0), 0)
-                : null
-            )}
+            {rupees(returns.reduce((sum, r) => sum + (r.credit_note_amount || 0), 0))}
           </p>
         </div>
+        )}
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <div className="flex items-center justify-between mb-2">
             <p className="text-gray-500 text-sm">This Month</p>
@@ -412,17 +483,23 @@ export function VendorReturns() {
                       )}>
                         {STATUS_LABELS[ret.status]}
                       </span>
+                      {/* Anything not typed 'replacement' is owed a credit --
+                          the server reads it so (update_return_status). */}
                       <span className={clsx(
                         'px-2 py-1 rounded text-xs font-semibold',
-                        ret.return_type === 'credit_note' ? 'bg-blue-50 text-blue-700' : 'bg-gray-100 text-gray-700'
+                        ret.return_type !== 'replacement' ? 'bg-blue-50 text-blue-700' : 'bg-gray-100 text-gray-700'
                       )}>
-                        {ret.return_type === 'credit_note' ? 'Credit Note' : 'Replacement'}
+                        {ret.return_type !== 'replacement' ? 'Credit Note' : 'Replacement'}
                       </span>
                     </div>
                     <p className="text-gray-500 text-sm">Return ID: {ret.return_id}</p>
+                    {/* On All stores each return names the shop it was raised at (r3 #10). */}
+                    {!listScope && <RowShop storeId={ret.store_id} />}
                   </div>
                   <div className="text-right">
-                    <p className="text-lg font-bold text-gray-900">{rupees(ret.total_value)}</p>
+                    <p className="text-lg font-bold text-gray-900">
+                      {canSeePayables && ret.total_value == null ? 'Not priced' : rupees(ret.total_value)}
+                    </p>
                     <p className="text-gray-500 text-sm">{ret.items.length} item(s)</p>
                   </div>
                 </div>
@@ -439,7 +516,21 @@ export function VendorReturns() {
                 <div className="border-t border-gray-200 px-6 py-4 bg-gray-50 space-y-4">
                   {/* Items */}
                   <div>
-                    <h4 className="font-semibold text-gray-900 mb-2">Items</h4>
+                    <div className="flex items-center justify-between mb-2">
+                      <h4 className="font-semibold text-gray-900">Items</h4>
+                      {/* Pricing the lines records the supplier money the
+                          credit and the debit note are built from: the
+                          accounts roles only, until the return is settled or
+                          its debit note issued (the server refuses after). */}
+                      {canSeePayables && !SETTLED.includes(ret.status) && !debitNotes[ret.return_id] && (
+                        <button
+                          onClick={() => openPricing(ret)}
+                          className="border border-gray-300 hover:bg-gray-100 text-gray-700 px-3 py-1.5 rounded text-sm font-medium transition"
+                        >
+                          {isPriced(ret) ? 'Edit prices' : 'Set prices'}
+                        </button>
+                      )}
+                    </div>
                     <div className="space-y-2">
                       {ret.items.map((item, idx) => (
                         <div key={idx} className="flex justify-between items-center text-sm">
@@ -449,25 +540,6 @@ export function VendorReturns() {
                               Qty: {item.quantity}
                               {item.unit_price != null && ` @ ${rupees(item.unit_price)}`}
                             </p>
-                            {canPrice && ret.status === 'created' && item.unit_price == null && (
-                              <label className="mt-1 flex items-center gap-2 text-xs text-gray-600">
-                                Price paid per piece
-                                <input
-                                  type="number"
-                                  min="0"
-                                  inputMode="decimal"
-                                  aria-label={`Price paid for ${item.product_name}`}
-                                  value={approvePrices[ret.return_id]?.[idx] ?? ''}
-                                  onChange={(e) =>
-                                    setApprovePrices((prev) => ({
-                                      ...prev,
-                                      [ret.return_id]: { ...(prev[ret.return_id] || {}), [idx]: e.target.value },
-                                    }))
-                                  }
-                                  className="w-28 px-2 py-1 bg-white border border-gray-300 rounded text-gray-900 text-sm outline-none focus:border-blue-500"
-                                />
-                              </label>
-                            )}
                           </div>
                           <div className="text-right">
                             <p className="text-gray-600 font-medium">
@@ -504,7 +576,7 @@ export function VendorReturns() {
                         {debitNotes[ret.return_id] ? (
                           <p className="text-gray-900 font-semibold">
                             {debitNotes[ret.return_id].debit_note_number}
-                            {canPrice && debitNotes[ret.return_id].totals_rupees && (
+                            {canSeePayables && debitNotes[ret.return_id].totals_rupees && (
                               <span className="ml-2 text-gray-500 font-normal text-sm">
                                 {rupees(debitNotes[ret.return_id].totals_rupees?.grand_total)}
                                 {debitNotes[ret.return_id].is_inter_state ? ' (IGST)' : ' (CGST+SGST)'}
@@ -517,6 +589,9 @@ export function VendorReturns() {
                       </div>
                       <div className="flex gap-2">
                         {debitNotes[ret.return_id] ? (
+                          // Print + Export Tally are the note's amounts end to
+                          // end: COST_ROLES only (the server 403s the rest).
+                          canSeePayables && (
                           <>
                             <button
                               onClick={() =>
@@ -528,7 +603,7 @@ export function VendorReturns() {
                             </button>
                             {/* The Tally voucher is nothing but the note's
                                 money: accounts only (owner ruling 2026-10-12). */}
-                            {canPrice && (
+                            {canSeePayables && (
                               <button
                                 onClick={() =>
                                   handleExportTally(
@@ -542,24 +617,29 @@ export function VendorReturns() {
                               </button>
                             )}
                           </>
-                        ) : (
-                          canPrice && (
-                            <button
-                              disabled={dnBusy === ret.return_id}
-                              onClick={() => handleIssueDebitNote(ret.return_id)}
-                              className="bg-gray-900 hover:bg-gray-800 disabled:opacity-50 text-white px-3 py-1.5 rounded text-sm font-medium transition"
-                            >
-                              {dnBusy === ret.return_id ? 'Issuing...' : 'Issue Debit Note'}
-                            </button>
                           )
+                        ) : canSeePayables ? (
+                          // Issuing the note records what the supplier owes us:
+                          // COST_ROLES only (the server 403s the rest).
+                          <button
+                            disabled={dnBusy === ret.return_id || !isPriced(ret)}
+                            title={isPriced(ret) ? undefined : 'Set the prices first'}
+                            onClick={() => handleIssueDebitNote(ret.return_id)}
+                            className="bg-gray-900 hover:bg-gray-800 disabled:opacity-50 text-white px-3 py-1.5 rounded text-sm font-medium transition"
+                          >
+                            {dnBusy === ret.return_id ? 'Issuing...' : 'Issue Debit Note'}
+                          </button>
+                        ) : (
+                          <p className="text-gray-500 text-xs">Accounts issue the debit note</p>
                         )}
                       </div>
                     </div>
                   </div>
 
-                  {/* Action Buttons: approve / ship / credit are the purchase
-                      roles' (the server refuses anyone else). */}
-                  {activeTab === 'active' && canMove && (
+                  {/* Action Buttons: approve / ship / received are the purchase
+                      roles' (the server refuses anyone else); the credit is the
+                      accounts roles' (below). */}
+                  {activeTab === 'active' && canMoveGoods && (
                     <div className="flex gap-2 pt-4 border-t border-gray-300">
                       {ret.status === 'created' && (
                         <button
@@ -587,18 +667,39 @@ export function VendorReturns() {
                       )}
                       {ret.status === 'received_by_vendor' && (
                         <>
-                          {canPrice && <button
-                            onClick={() => handleUpdateStatus(ret.return_id, 'credit_issued')}
-                            className="flex-1 bg-green-600 hover:bg-green-700 text-white px-3 py-2 rounded text-sm font-medium transition"
-                          >
-                            Issue Credit
-                          </button>}
-                          <button
-                            onClick={() => handleUpdateStatus(ret.return_id, 'replaced')}
-                            className="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded text-sm font-medium transition"
-                          >
-                            Mark as Replaced
-                          </button>
+                          {/* Issuing the credit records the supplier's credit
+                              note and its amount: COST_ROLES only (owner
+                              ruling 2026-10-12; the server 403s the rest). */}
+                          {canSeePayables ? (
+                            // The credit is the priced lines' value: none to
+                            // record until they are priced (the server 422s).
+                            <button
+                              disabled={!isPriced(ret)}
+                              title={isPriced(ret) ? undefined : 'Set the prices first'}
+                              onClick={() => handleUpdateStatus(ret.return_id, 'credit_issued')}
+                              className="flex-1 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white px-3 py-2 rounded text-sm font-medium transition"
+                            >
+                              Issue Credit
+                            </button>
+                          ) : (
+                            <p className="flex-1 self-center text-gray-500 text-xs">
+                              Accounts record the supplier's credit
+                            </p>
+                          )}
+                          {/* 'replaced' is the goods coming back only on a
+                              replacement return. On a credit-note return it
+                              closes the return for good WITHOUT the credit the
+                              supplier owes -- forgoing supplier money, so the
+                              accounts roles' call (the server refuses anyone
+                              else: vendor_returns.update_return_status). */}
+                          {(ret.return_type === 'replacement' || canSeePayables) && (
+                            <button
+                              onClick={() => handleUpdateStatus(ret.return_id, 'replaced')}
+                              className="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded text-sm font-medium transition"
+                            >
+                              Mark as Replaced
+                            </button>
+                          )}
                         </>
                       )}
                     </div>
@@ -708,17 +809,25 @@ export function VendorReturns() {
                         </div>
                       </div>
                       <div className="grid grid-cols-2 gap-3">
-                        {canPrice && (
-                          <div>
-                            <label className="block text-xs text-gray-500 mb-1">Unit Price</label>
-                            <input
-                              type="number"
-                              min="0"
-                              value={item.unit_price}
-                              onChange={(e) => handleItemChange(idx, 'unit_price', parseFloat(e.target.value) || 0)}
-                              className="w-full px-3 py-2 bg-white border border-gray-300 rounded text-gray-900 text-sm outline-none focus:border-blue-500"
-                            />
-                          </div>
+                        {/* The price per piece: the accounts roles' to enter
+                            (R2 + R3). A manager logs the goods only. */}
+                        {canSeePayables && (
+                        <div>
+                          <label className="block text-xs text-gray-500 mb-1">Unit Price</label>
+                          <input
+                            type="number"
+                            min="0"
+                            value={item.unit_price ?? ''}
+                            onChange={(e) =>
+                              handleItemChange(
+                                idx,
+                                'unit_price',
+                                e.target.value === '' ? undefined : parseFloat(e.target.value) || 0,
+                              )
+                            }
+                            className="w-full px-3 py-2 bg-white border border-gray-300 rounded text-gray-900 text-sm outline-none focus:border-blue-500"
+                          />
+                        </div>
                         )}
                         <div>
                           <label className="block text-xs text-gray-500 mb-1">Reason</label>
@@ -760,17 +869,20 @@ export function VendorReturns() {
                 />
               </div>
 
-              {/* Total */}
-              {canPrice ? (
+              {/* Total: the supplier money the return is worth -- the accounts
+                  roles' alone (R3). A manager is told who prices it. */}
+              {canSeePayables ? (
                 <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
                   <div className="flex justify-between items-center">
                     <p className="text-gray-600 font-medium">Total Return Value</p>
-                    <p className="text-2xl font-bold text-gray-900">₹{totalValue.toLocaleString('en-IN')}</p>
+                    <p className="text-2xl font-bold text-gray-900">
+                      {totalValue == null ? 'Not priced' : rupees(totalValue)}
+                    </p>
                   </div>
                 </div>
               ) : (
-                <p className="text-sm text-gray-500">
-                  Accounts enter the price paid when they approve this return.
+                <p className="text-gray-500 text-xs">
+                  Accounts set the price per piece and record the supplier's credit.
                 </p>
               )}
             </div>
@@ -788,6 +900,62 @@ export function VendorReturns() {
                 className="flex-1 px-4 py-2 bg-bv-red-600 hover:bg-bv-red-700 text-white rounded-lg font-medium transition"
               >
                 Create Return
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Set prices (accounts roles) */}
+      {pricing && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div
+            role="dialog"
+            aria-label="Set prices"
+            className="bg-white rounded-lg w-full max-w-lg max-h-[90dvh] overflow-y-auto border border-gray-200 shadow-2xl"
+          >
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+              <h2 className="text-xl font-bold text-gray-900">Set prices</h2>
+              <button onClick={() => setPricing(null)} className="text-gray-500 hover:text-gray-700 transition">
+                <XIcon className="w-6 h-6" />
+              </button>
+            </div>
+            <div className="p-6 space-y-3">
+              <p className="text-gray-500 text-sm">
+                Price per piece for each line of {pricing.return_id}. The credit and the GST debit note are
+                built from these.
+              </p>
+              {pricing.items.map((it, idx) => (
+                <label key={idx} className="flex items-center justify-between gap-3 text-sm">
+                  <span className="text-gray-700">
+                    {it.product_name} <span className="text-gray-500">x {it.quantity}</span>
+                  </span>
+                  <input
+                    type="number"
+                    min="0"
+                    aria-label={`Price per piece for ${it.product_name}`}
+                    value={priceInputs[idx] ?? ''}
+                    onChange={(e) =>
+                      setPriceInputs((prev) => prev.map((v, i) => (i === idx ? e.target.value : v)))
+                    }
+                    className="w-36 px-3 py-2 bg-white border border-gray-300 rounded text-gray-900 text-sm outline-none focus:border-blue-500"
+                  />
+                </label>
+              ))}
+            </div>
+            <div className="flex gap-3 px-6 py-4 border-t border-gray-200 bg-gray-50">
+              <button
+                onClick={() => setPricing(null)}
+                className="flex-1 px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg font-medium transition border border-gray-300"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={pricingBusy}
+                onClick={handleSavePrices}
+                className="flex-1 px-4 py-2 bg-bv-red-600 hover:bg-bv-red-700 disabled:opacity-50 text-white rounded-lg font-medium transition"
+              >
+                {pricingBusy ? 'Saving...' : 'Save prices'}
               </button>
             </div>
           </div>

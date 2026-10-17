@@ -18,6 +18,7 @@ import { lazy } from 'react';
 import { Route, Navigate, useSearchParams } from 'react-router-dom';
 import { ProtectedRoute } from '../components/layout/ProtectedRoute';
 import { legacyTabTarget } from '../pages/reports/legacyTabRedirect';
+import { COST_ROLES } from '../components/common/CostCell';
 import type { UserRole } from '../types';
 
 const ReportsLayout = lazy(() => import('../pages/reports/ReportsLayout').then(m => ({ default: m.ReportsLayout })));
@@ -90,7 +91,7 @@ export const reportRoutes = (
       <Route
         path="gst"
         element={
-          <ProtectedRoute allowedRoles={REPORTS_ROLES}>
+          <ProtectedRoute allowedRoles={COST_ROLES}>
             <ReportsGstPage />
           </ProtectedRoute>
         }
@@ -121,19 +122,22 @@ export const reportRoutes = (
 
     {/* GST returns — full pages, outside the layout: no KPI strip and no
         second scroll container between the accountant and the figure he
-        types into the portal. Same gate as the rest of Reports. */}
+        types into the portal. All GST reports are for Accounts and admins. */}
     <Route
       path="reports/gstr1"
       element={
-        <ProtectedRoute allowedRoles={REPORTS_ROLES}>
+        <ProtectedRoute allowedRoles={COST_ROLES}>
           <GSTR1Page />
         </ProtectedRoute>
       }
     />
+    {/* GSTR-3B's Table 4 ITC and RCM are summed from supplier bills: the
+        accounts roles' alone (owner ruling 2026-10-07, R1); a manager gets
+        the app's not-allowed page. */}
     <Route
       path="reports/gstr3b"
       element={
-        <ProtectedRoute allowedRoles={REPORTS_ROLES}>
+        <ProtectedRoute allowedRoles={COST_ROLES}>
           <GSTR3BPage />
         </ProtectedRoute>
       }
