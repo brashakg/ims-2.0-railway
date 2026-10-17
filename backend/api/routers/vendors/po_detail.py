@@ -38,6 +38,7 @@ from .purchase_orders import (
     price_po_lines,
 )
 from ...services.cost_mask import can_see_cost
+from .numbering import held_units
 
 
 def _stamp_event_actors(events: list) -> None:
@@ -159,7 +160,17 @@ async def get_po_timeline(
                         "detail": f"Goods receipt logged ({g.get('total_received') or 0} units)",
                     }
                 )
-                if g.get("accepted_at"):
+                # "On shelf" counts only what reached the shelf: a receipt that
+                # is still HOLDING lines for the catalogue (PARTIALLY_ACCEPTED,
+                # the chip's "Box received") has accepted_at too, and often
+                # 0 units minted (audit C1 -- one rule with PurchaseStatusChip).
+                held = sum(
+                    held_units(ln)
+                    for ln in (g.get("unresolved_lines") or [])
+                    if isinstance(ln, dict)
+                )
+                shelved = max(int(g.get("total_accepted") or 0) - held, 0)
+                if g.get("accepted_at") and shelved:
                     events.append(
                         {
                             "kind": "on_shelf",
@@ -167,7 +178,8 @@ async def get_po_timeline(
                             "at": g.get("accepted_at"),
                             "ref": g.get("grn_number"),
                             "actor": g.get("accepted_by"),
-                            "detail": f"{g.get('total_accepted') or 0} units accepted into stock",
+                            "detail": f"{shelved} units accepted into stock"
+                            + (f"; {held} still held" if held else ""),
                         }
                     )
     except Exception as e:  # noqa: BLE001
@@ -367,9 +379,9 @@ async def send_po(
                 # send on its (inevitable) gaps would put the obstacle back at
                 # the front of the flow. The strictness now lives at the INVOICE
                 # (ruling 15), which refuses to settle an incomplete product.
-                if prod.get("provisional"):
+                if _pm.is_ordered_draft(prod):
                     continue
-                gaps = set(_pm.compute_catalog_status(prod)[1]) - {"cost_price"}
+                gaps = _pm.gaps_before_cost(prod)
                 if gaps:
                     blocked.append({"product_id": pid, "missing": sorted(gaps)})
             if blocked:
@@ -625,16 +637,16 @@ def _refuse_if_box_waiting(po_id: str) -> None:
         )
 
 
-def _units_received(po_id: str, grn_id: str, product_id: str) -> int:
-    """Units receipt `grn_id` put in stock for this order and product,
-    wherever a transfer has moved them since (_receipt_units), whatever the
-    receipt's status is now. Fails CLOSED (503): an unreadable stock table
+def _units_received(po_id: str, grn: dict, product_id: str) -> int:
+    """Units receipt `grn` put in stock for this order and product, by their
+    ORIGIN -- wherever a transfer has moved them since (_receipt_units),
+    whatever the receipt's status is now. Fails CLOSED (503): an unreadable stock table
     must not make arrived stock look cancellable."""
     stock_repo = get_stock_repository()
     if stock_repo is None:
         return 0
     try:
-        return _receipt_units(stock_repo, grn_id, po_id=po_id, product_id=product_id)
+        return _receipt_units(stock_repo, grn, po_id=po_id, product_id=product_id)
     except Exception as exc:  # noqa: BLE001
         logger.error("[VENDOR] PO %s: could not count received units: %s", po_id, exc)
         raise HTTPException(
@@ -684,12 +696,12 @@ def _received_by_product(
             accepted[pid] = accepted.get(pid, 0) + _qty(line.get("accepted_qty"))
         for pid, qty in accepted.items():
             if mine or claimed:
-                aside[pid] = aside.get(pid, 0) + _units_received(po_id, gid, pid)
+                aside[pid] = aside.get(pid, 0) + _units_received(po_id, g, pid)
                 if claimed and not mine:
                     whole[pid] = whole.get(pid, 0) + qty
                 continue
             if status != "ACCEPTED":
-                qty = _units_received(po_id, gid, pid)
+                qty = _units_received(po_id, g, pid)
             out[pid] = out.get(pid, 0) + qty
     header = po.get("received_qty_by_product") or {}
     for it in po.get("items") or []:
@@ -979,7 +991,9 @@ def _settled_lines(po: dict, moved: dict, failed_ids: set, products: dict):
     return items, money, changes
 
 
-def settle_typed_in_lines(po_repo, po_id, typed_in, products, current_user) -> list:
+def settle_typed_in_lines(
+    po_repo, po_id, typed_in, products, current_user, po_number=None
+) -> list:
     """Write the typed-in products of an order that was just saved, then make
     the stored lines name what the spine really holds (see
     create_typed_in_products). The correction is a compare-and-set write of
@@ -988,7 +1002,9 @@ def settle_typed_in_lines(po_repo, po_id, typed_in, products, current_user) -> l
 
     Returns what the person must be told: [{product_id, product_name, reason}]
     for every typed-in line that is not on the order as typed."""
-    moved, failed = create_typed_in_products(typed_in, products, current_user)
+    moved, failed = create_typed_in_products(
+        typed_in, products, current_user, po_number=po_number
+    )
     dropped = [
         {**f, "reason": "could not be added to the catalogue and was taken off "
                         "this order - add it again"}
@@ -1196,7 +1212,7 @@ async def update_po(
     # Only now that the edit is saved: a refused edit creates no typed-in
     # product and changes no product cost.
     not_created = settle_typed_in_lines(
-        po_repo, po_id, typed_in, products, current_user
+        po_repo, po_id, typed_in, products, current_user, po_number=po.get("po_number")
     )
     fill_cost_from_rate(po_id, po.get("po_number"), body.items, products, current_user)
     return {**(po_repo.find_by_id(po_id) or {}), "products_not_created": not_created}

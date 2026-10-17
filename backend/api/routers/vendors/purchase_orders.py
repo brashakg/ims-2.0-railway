@@ -35,6 +35,148 @@ from .models import POCreate
 from .numbering import generate_po_number
 
 
+class _WithThisOrder:
+    """The product store as the create loop in create_po meets it, line by
+    line: the database plus the drafts this order's EARLIER typed lines will
+    have created by then (`planned`). identity_conflict reads through it, so
+    each typed line is judged against its own order as well, before anything
+    is written. Everything else is the database's."""
+
+    def __init__(self, repo):
+        self.repo, self.planned = repo, []
+
+    def __getattr__(self, name):
+        return getattr(self.repo, name)
+
+    def find_by_identity_key(self, key):
+        mine = [p for p in self.planned if p.get("identity_key") == key]
+        return mine[0] if mine else self.repo.find_by_identity_key(key)
+
+    def find_many(self, flt, *a, **k):
+        return list(self.planned) + list(self.repo.find_many(flt, *a, **k) or [])
+
+    def find_many_strict(self, flt):
+        return list(self.planned) + _pm.strict_find_many(self.repo, flt)
+
+
+def _refuse_items_we_already_have(built, product_repo) -> dict:
+    """Audit C2: a typed-in line that describes a product we ALREADY have
+    (active, or a draft somebody ordered earlier) never mints a hidden twin.
+
+    `built`: [(line index, the door's own build of the line)] for EVERY typed
+    line (price_po_lines), judged before anything is written -- against the
+    database and against the order's own earlier lines -- so a refused order
+    leaves no draft behind. The composer asks "already in the catalogue - use
+    it?" and resends the line with that product_id. The answer is the door's
+    own rule (product_master.identity_conflict): a 409 naming the product, or
+    a 422 asking a frame typed without its eye size for it (each eye size is
+    its own item, owner 09-28). Answers {line index: the discarded draft the
+    line brings back} (revive_discarded_draft, after the order is saved)."""
+    if product_repo is None or not hasattr(product_repo, "find_by_identity_key"):
+        return {}
+    order = _WithThisOrder(product_repo)
+    already = []
+    switched_off = []
+    need_size = []
+    revive = {}
+    built = list(built)
+    # Lines typed WITH a size are judged first, so a line typed without one is
+    # met by every sized line of this order whatever their order on the form
+    # ([sizeless, 52] and [52, sizeless] answer alike: EYE_SIZE_NEEDED).
+    built.sort(key=lambda b: (not _pm.normalise_identity_component(b[1].get("size")), b[0]))
+    for idx, spine in built:
+        err = _pm.identity_conflict(spine, order)
+        order.planned.append(spine)
+        if err is None:
+            continue
+        if err.status == 409 and err.conflict:
+            # No product_id: an earlier line of THIS order types the same
+            # item -- the create loop gives both lines its one draft.
+            pid = err.conflict.get("product_id")
+            if not pid:
+                continue
+            found = product_repo.find_by_id(pid) or {}
+            if _pm.revivable_discarded_draft(found, category=spine.get("category")):
+                # Round 5: a draft an admin discarded is ordered again -- the
+                # order gets that draft back once it is stored (create_po).
+                revive[idx] = found
+            elif _pm.revivable_discarded_draft(found):
+                # Discarded as another kind of product: typed as THAT kind it
+                # comes back; nobody can "switch it back on" (R2-17).
+                spec = _pm.category_spec(found.get("category"))
+                switched_off.append(
+                    {
+                        "line": idx,
+                        "existing": err.conflict,
+                        "discarded_as": spec.display if spec else found.get("category"),
+                    }
+                )
+            elif found.get("is_active") is False and not _pm.is_ordered_draft(found):
+                # Deleted or switched off: "use it?" would order stock of a
+                # product nobody can sell. A person switches it back on first.
+                switched_off.append({"line": idx, "existing": err.conflict})
+            else:
+                already.append({"line": idx, "existing": err.conflict})
+        elif err.code == "EYE_SIZE_NEEDED":
+            need_size.append({"line": idx, "sizes": err.sizes, "message": err.message})
+        else:
+            # The check itself failed (the catalogue could not be read): refuse.
+            raise HTTPException(
+                status_code=err.status,
+                detail={"code": err.code or "NEW_PRODUCT_INVALID", "message": err.message, "field": err.field},
+            )
+    def _named(e: dict) -> str:
+        size = f", size {e['size']}" if e.get("size") else ""
+        return f"{e.get('name') or e.get('sku')}{size} (SKU {e.get('sku')})"
+
+    def _way_back(m: dict) -> str:
+        if m.get("discarded_as"):
+            return (
+                f"{_named(m['existing'])} was ordered before as a "
+                f"{str(m['discarded_as']).lower()} and its draft was discarded: type "
+                f"it as a {str(m['discarded_as']).lower()} to order it again."
+            )
+        return (
+            f"In the catalogue but switched off: {_named(m['existing'])}. Ask the "
+            "catalogue manager to switch it back on, then order it."
+        )
+
+    if switched_off:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "SWITCHED_OFF_IN_CATALOGUE",
+                "message": " ".join(_way_back(m) for m in switched_off)
+                + " Nothing was ordered.",
+                "matches": switched_off,
+            },
+        )
+    if not already and need_size:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "EYE_SIZE_NEEDED",
+                "message": " ".join(n.pop("message") for n in need_size),
+                "lines": need_size,
+            },
+        )
+    if not already:
+        return revive
+
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "ALREADY_IN_CATALOGUE",
+            "message": (
+                "Already in the catalogue: "
+                + ", ".join(_named(m["existing"]) for m in already)
+                + ". Use the existing product instead of typing it in."
+            ),
+            "matches": already,
+        },
+    )
+
+
 # ============================================================================
 # PURCHASE ORDER ENDPOINTS
 # ============================================================================
@@ -413,7 +555,7 @@ def price_po_lines(items, vendor, delivery_store_id, current_user):
     # Nothing is written here. Every typed-in line passes the door's own
     # validation (build_canonical_product -> normalise_door_payload, the same
     # core create_via_door runs, minus the write) and the door's duplicate rule
-    # (find_existing_product) first, and a new one is given its product_id now
+    # (identity_conflict, _refuse_items_we_already_have) first, and a new one is given its product_id now
     # so the stored line can carry it. The product itself is written by
     # po_detail.settle_typed_in_lines, called only AFTER the order write: a
     # refused order or edit -- a later line the door refuses, a colleague who
@@ -423,9 +565,9 @@ def price_po_lines(items, vendor, delivery_store_id, current_user):
     typed_in = []  # typed-in products still to write, each with its line
     previews = {}  # product_id -> the doc the door built (GST reads it below)
     claimed = {}  # identity -> (product_id, name, sku) minted in this request
-    for it in items:
-        np = it.new_product
-        if np is None:
+    built = []
+    for idx, it in enumerate(items):
+        if it.new_product is None:
             continue
         payload = _typed_in_payload(it)
         try:
@@ -434,18 +576,26 @@ def price_po_lines(items, vendor, delivery_store_id, current_user):
             )
         except _pm.ProductMasterError as err:
             raise _new_product_invalid(err) from err
+        built.append((idx, it, payload, preview))
+    # Audit C2: a line describing a product we already have is refused (409
+    # ALREADY_IN_CATALOGUE, the composer asks "use it?") through the door's
+    # own rule, never silently reused or twinned; a discarded draft typed
+    # again comes back (revive).
+    revive = _refuse_items_we_already_have(
+        [(idx, preview) for idx, _it, _payload, preview in built], product_repo
+    )
+    for idx, it, payload, preview in built:
+        np = it.new_product
         key = preview.get("identity_key") or preview.get("sku")
-        # An identical brand+model+colour+size already exists: reuse it rather
-        # than refusing the order or minting a twin. The buyer has just typed a
-        # description of a product we already know. Two lines of one request
-        # that describe the same product share one new row.
-        existing = _pm.find_existing_product(preview, product_repo)
-        if existing is not None:
-            pid, name, sku = (
-                existing.get("product_id"), existing.get("name"), existing.get("sku")
-            )
-        elif key in claimed:
+        # Two lines of one request that describe the same product share one
+        # row.
+        if key in claimed:
             pid, name, sku = claimed[key]
+        elif idx in revive:
+            found = revive[idx]
+            pid, name, sku = found["product_id"], found.get("name"), found.get("sku")
+            claimed[key] = (pid, name, sku)
+            typed_in.append({"line": it, "product_id": pid, "revive_mrp": np.mrp})
         else:
             pid, name, sku = str(uuid.uuid4()), preview.get("name"), preview.get("sku")
             claimed[key] = (pid, name, sku)
@@ -493,10 +643,17 @@ def price_po_lines(items, vendor, delivery_store_id, current_user):
     return computed, products, typed_in
 
 
-def create_typed_in_products(typed_in, products, current_user):
+def create_typed_in_products(typed_in, products, current_user, po_number=None):
     """Write the typed-in products price_po_lines held back. Call it only
     AFTER the order that names them is saved (po_detail.settle_typed_in_lines
     does, and repairs the stored lines from what this returns).
+
+    A line that brings a discarded draft back (price_po_lines' revive) is
+    revived here (product_master.revive_discarded_draft) -- only now, so a
+    refused order never undoes an admin's discard. A revive that fails leaves
+    the line on the order, loudly (its receipt refuses it, DISCARDED_DRAFT),
+    and its cost is not filled: a cost on the still-discarded row would
+    restamp and strand it.
 
     Each product is written under the product_id and SKU its line already
     carries. Returns (moved, failed):
@@ -515,6 +672,29 @@ def create_typed_in_products(typed_in, products, current_user):
     moved, failed = {}, []
     for entry in typed_in:
         it, pid = entry["line"], entry["product_id"]
+        if "revive_mrp" in entry:
+            try:
+                revived = _pm.revive_discarded_draft(
+                    pid,
+                    product_repo,
+                    db=_get_db(),
+                    actor=current_user.get("user_id"),
+                    mrp=entry["revive_mrp"],
+                    audit_repo=get_audit_repository(),
+                    po_number=po_number,
+                )
+            except Exception:  # noqa: BLE001 - the order stands; logged loudly below
+                revived = False
+                logger.error("[VENDOR] PO %s: revive of %s raised", po_number, pid, exc_info=True)
+            if not revived:
+                logger.error(
+                    "[VENDOR] PO %s: could not bring discarded draft %s back to "
+                    "Needs review; its receipt will be refused until it is",
+                    po_number,
+                    pid,
+                )
+            products[pid] = product_repo.find_by_id(pid) if revived else None
+            continue
         pinned = entry["payload"]
         attempts = [pinned]
         if "sku" in pinned:
@@ -651,7 +831,6 @@ async def create_po(
         )
 
     po_id = str(uuid.uuid4())
-    po_number = generate_po_number(po.delivery_store_id)
 
     # Validate vendor exists
     if vendor_repo is not None:
@@ -665,6 +844,10 @@ async def create_po(
         po.delivery_store_id,
         current_user,
     )
+    # The number is taken only once every refusal above has passed (vendor,
+    # unknown product, already in the catalogue, eye size, an invalid typed
+    # line): a refused order never burns a consecutive PO number (R1-72).
+    po_number = generate_po_number(po.delivery_store_id)
     stored_items = computed["items"]
     subtotal = computed["subtotal"]
     tax = computed["tax"]
@@ -712,7 +895,7 @@ async def create_po(
     from .po_detail import settle_typed_in_lines  # po_detail imports this module
 
     not_created = settle_typed_in_lines(
-        po_repo, po_id, typed_in, products, current_user
+        po_repo, po_id, typed_in, products, current_user, po_number=po_number
     )
     if typed_in and po_repo is not None:
         # Settling may have corrected or removed lines: answer with the order

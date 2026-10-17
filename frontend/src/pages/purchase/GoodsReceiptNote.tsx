@@ -16,6 +16,7 @@ import { productApi } from '../../services/api/products';
 import { grnCockpitApi, type UploadDocResult } from '../../services/api/grnCockpit';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { reportGrnAccept } from './grnAcceptToast';
 import { GRNPrint } from '../../components/print/GRNPrint';
 import { UnitLabelsModal } from '../../components/labels/UnitLabelsModal';
 import { resolveStoreIdentity, type StoreIdentity } from '../../components/print/storeIdentity';
@@ -544,19 +545,10 @@ export function GoodsReceiptNote() {
         }
       }
 
-      const units = posted?.units_added ?? 0;
-      const poState =
-        posted?.po_status === 'RECEIVED'
-          ? 'PO fully received'
-          : posted?.po_status === 'PARTIALLY_RECEIVED'
-            ? 'PO partially received'
-            : '';
       if (rejectOnly) {
         toast.success('Rejected delivery logged · nothing added to stock · a discrepancy task follows');
       } else {
-        toast.success(
-          `GRN posted${units ? ` · ${units} unit${units === 1 ? '' : 's'} added to stock` : ''}${poState ? ` · ${poState}` : ''}`,
-        );
+        reportGrnAccept(toast, String(created?.grn_number || ''), posted);
         if (grnId) setLabelsFor(grnId);
       }
 

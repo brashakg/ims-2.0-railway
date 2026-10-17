@@ -156,7 +156,8 @@ async def express_receive_grn(
     grn_status = accept_res.get("grn_status")
     if grn_status is not None and grn_status != "ACCEPTED":
         # PARTIALLY_ACCEPTED: one or more lines were HELD (product not yet
-        # catalogued / incomplete catalog). The chain cannot finish (F3 blocks
+        # catalogued / incomplete catalog / beyond the order, which the store
+        # manager decides). The chain cannot finish (F3 blocks
         # the invoice draft on a non-ACCEPTED GRN), so surface the exact
         # recovery instead of a half-true success.
         # 409, not 500 -- same reason as above: this receipt already holds real
@@ -168,8 +169,9 @@ async def express_receive_grn(
                 "grn_status": grn_status,
                 "message": (
                     f"Receipt {grn_number} was created but only partially "
-                    "accepted (some lines are held for cataloguing) -- open "
-                    "the receiving screen to finish it."
+                    "accepted (some lines are held for cataloguing, or beyond "
+                    "what the order asked for) -- open the receiving screen "
+                    "to finish it."
                 ),
             },
         )

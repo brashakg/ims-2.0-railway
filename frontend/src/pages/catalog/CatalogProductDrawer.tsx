@@ -157,6 +157,16 @@ export function docOffer(doc: Record<string, unknown>): number | null {
   return Number.isFinite(num) ? num : null;
 }
 
+/** An item a manager ordered before it was catalogued, not finished yet (audit
+ *  C1), whichever doc the drawer holds (the product or its catalogue copy).
+ *  The server answers it with its one rule (product_master.is_ordered_draft:
+ *  marked at the PO door AND not finished) and stamps `ordered_draft` on every
+ *  doc it hands the catalogue; never re-derived here from `provisional`, which
+ *  a product finished before the mark was cleared still carries. */
+export function isOrderedDraft(doc: Record<string, unknown>): boolean {
+  return doc.ordered_draft === true;
+}
+
 // ---------------------------------------------------------------------------
 // Small presentational bits (module level — never nested components).
 // ---------------------------------------------------------------------------
@@ -316,6 +326,7 @@ export function CatalogProductDrawer({
 
   const needsReview = Boolean(doc.needs_review);
   const inactive = doc.is_active === false;
+  const orderedDraft = isOrderedDraft(doc);
   // Archived (deleted): only THE restore door brings it back -- as it was
   // before the archive, never re-published. Switched off with no archive
   // ("Not for POS") is an ordinary switch.
@@ -555,6 +566,10 @@ export function CatalogProductDrawer({
               {isImported && needsReview ? (
                 <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">
                   <AlertTriangle className="h-3 w-3" /> Needs review
+                </span>
+              ) : orderedDraft ? (
+                <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">
+                  <AlertTriangle className="h-3 w-3" /> Ordered — finish it
                 </span>
               ) : inactive ? (
                 <span className="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-500">
@@ -996,31 +1011,35 @@ export function CatalogProductDrawer({
         {!isImported && (
           <div className="border-t border-gray-200 px-5 py-3 flex items-center gap-2">
             {canEdit && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => navigate(`/catalog/add?edit=${encodeURIComponent(id)}`)}
-                  className="btn-primary flex items-center gap-1.5 text-sm"
-                >
-                  <Pencil className="w-3.5 h-3.5" /> Edit
-                </button>
-                <button
-                  type="button"
-                  onClick={() => navigate(`/catalog/add?clone=${encodeURIComponent(id)}`)}
-                  className="btn-secondary flex items-center gap-1.5 text-sm"
-                  title="Duplicate as a new SKU"
-                >
-                  <CopyPlus className="w-3.5 h-3.5" /> Clone
-                </button>
-              </>
+              <button
+                type="button"
+                onClick={() => navigate(`/catalog/add?edit=${encodeURIComponent(id)}`)}
+                className="btn-primary flex items-center gap-1.5 text-sm"
+              >
+                <Pencil className="w-3.5 h-3.5" /> Edit
+              </button>
             )}
-            <button
-              type="button"
-              onClick={() => navigate(`/catalog/buy-desk?add_product=${encodeURIComponent(id)}`)}
-              className="ml-auto flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
-            >
-              <ShoppingCart className="w-3.5 h-3.5" /> Order stock
-            </button>
+            {/* An unfinished draft is neither cloned (its gaps would copy) nor
+                ordered again (the Buy Desk cannot buy it): finish it first. */}
+            {canEdit && !orderedDraft && (
+              <button
+                type="button"
+                onClick={() => navigate(`/catalog/add?clone=${encodeURIComponent(id)}`)}
+                className="btn-secondary flex items-center gap-1.5 text-sm"
+                title="Duplicate as a new SKU"
+              >
+                <CopyPlus className="w-3.5 h-3.5" /> Clone
+              </button>
+            )}
+            {!orderedDraft && (
+              <button
+                type="button"
+                onClick={() => navigate(`/catalog/buy-desk?add_product=${encodeURIComponent(id)}`)}
+                className="ml-auto flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+              >
+                <ShoppingCart className="w-3.5 h-3.5" /> Order stock
+              </button>
+            )}
           </div>
         )}
       </div>

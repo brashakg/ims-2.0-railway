@@ -108,6 +108,12 @@ class _Conn:
     def get_collection(self, name):
         return self.db[name]
 
+    @property
+    def products(self):
+        # A connected DatabaseConnection's spine (get_product_repository):
+        # DELETE reads it, and an unreadable one refuses (503).
+        return self.db["products"]
+
 
 class _DelistSpy:
     """Stands in for shopify_push.push_product_delist. Records every call
