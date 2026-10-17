@@ -18,6 +18,24 @@ class TaskRepository(BaseRepository):
     @property
     def id_field(self) -> str:
         return "task_id"
+
+    def create(self, data: Dict, *, raise_on_duplicate: bool = False) -> Optional[Dict]:
+        from api.services.task_requirements import requires_cashier
+
+        if requires_cashier(data):
+            data = {**data, "required_role": "CASHIER"}
+        return super().create(data, raise_on_duplicate=raise_on_duplicate)
+
+    def update(self, id: str, data: Dict) -> bool:
+        # All assignment doors (manual, PATCH, escalation and scheduled jobs)
+        # retain the requirement when replacing a role with a named person.
+        if "assigned_to" in data:
+            from api.services.task_requirements import requires_cashier
+
+            previous = self.collection.find_one({self.id_field: id}) or {}
+            if requires_cashier(previous) or requires_cashier(data):
+                data = {**data, "required_role": "CASHIER"}
+        return super().update(id, data)
     
     def find_by_number(self, task_number: str) -> Optional[Dict]:
         return self.find_one({"task_number": task_number})

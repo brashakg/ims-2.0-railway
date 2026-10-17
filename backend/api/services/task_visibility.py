@@ -53,14 +53,14 @@ NOT_CANCELLED = {"status": {"$nin": ["CANCELLED", "cancelled", "CANCELED", "canc
 
 def task_roles(user: dict) -> list:
     """``user``'s roles as every task rule reads them. Upper case (a legacy row
-    or token may say "cashier"). A sales cashier is both a sales person and a
-    cashier (owner 2026-10-13). Sign-in folds SALES_CASHIER into SALES_STAFF
+    or token may say "cashier"). Cashier work requires an explicit CASHIER
+    role (owner 2026-10-18). Sign-in folds SALES_CASHIER into SALES_STAFF
     (user_roles.DEPRECATED_ROLE_ALIASES), so SALES_STAFF also answers to the
     old name a task may still be addressed to."""
     held = {str(r).strip().upper() for r in (user.get("roles") or []) if r}
     roles = set(held)
     if "SALES_CASHIER" in held:
-        roles |= {"SALES_STAFF", "CASHIER"}
+        roles.add("SALES_STAFF")
     roles |= {old for old, new in DEPRECATED_ROLE_ALIASES.items() if new in held}
     return sorted(roles)
 

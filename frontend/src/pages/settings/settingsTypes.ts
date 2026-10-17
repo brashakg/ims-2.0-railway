@@ -21,7 +21,6 @@ export type SettingsTab =
   | 'printers'
   | 'audit-logs'
   | 'approvals'
-  | 'feature-toggles'
   | 'agents'
   | 'loyalty'
   | 'lens-pricing'

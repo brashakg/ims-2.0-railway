@@ -227,15 +227,20 @@ describe('the removed screens are gone from routes and nav', () => {
     expect(mockGetAdminControls).not.toHaveBeenCalled();
   });
 
-  it('Feature Toggles no longer lists the eye-test and workshop switches', async () => {
+  it('Feature Toggles has no page or navigation entry', async () => {
     renderRoute('/settings/feature-toggles', ['SUPERADMIN']);
-    expect(await screen.findByText('POS Quick Sale', undefined, FIND)).toBeInTheDocument();
-    expect(screen.queryByText('Eye Test Module')).toBeNull();
-    expect(screen.queryByText('Workshop Module')).toBeNull();
+    expect(await screen.findByText('ZZ-NO-SUCH-PAGE', undefined, FIND)).toBeInTheDocument();
+    expect(SETTINGS_SECTIONS.some(section => section.label === 'Feature Toggles')).toBe(false);
+  });
+
+  it('an old Feature Toggles tab bookmark lands on profile', async () => {
+    renderRoute('/settings?tab=feature-toggles', ['SUPERADMIN']);
+    expect(await screen.findByRole('link', { name: /^My Profile$/ }, FIND)).toHaveAttribute('aria-current', 'page');
+    expect(screen.queryByRole('link', { name: /^Feature Toggles$/ })).toBeNull();
   });
 
   // Every remaining ['SUPERADMIN']-only row is strict.
-  it.each(['agents', 'feature-toggles', 'shopify-live-sync'])('ADMIN is refused /settings/%s, SUPERADMIN is admitted', async (section) => {
+  it.each(['agents', 'shopify-live-sync'])('ADMIN is refused /settings/%s, SUPERADMIN is admitted', async (section) => {
     const denied = renderRoute(`/settings/${section}`, ['ADMIN']);
     expect(await screen.findByText('ZZ-DENIED', undefined, FIND)).toBeInTheDocument();
     denied.unmount();

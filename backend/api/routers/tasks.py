@@ -9,7 +9,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 from typing import Optional, List, Dict
 from datetime import datetime, timedelta
 import uuid
@@ -55,6 +55,7 @@ from ..services.task_visibility import (
     visible,
 )
 from ..services.user_roles import VALID_ROLES
+from ..services.task_requirements import requires_cashier
 from ..services.sop_checklist import (
     apply_item_toggle,
     completion_status,
@@ -193,6 +194,25 @@ def _ensure_may_close(task: dict, current_user: dict) -> None:
         )
 
 
+def _ensure_cashier_may_complete(task: dict, current_user: dict) -> None:
+    required = requires_cashier(task)
+    if not required and task.get("sop_template_id") and not task.get("required_role"):
+        # Daily tasks issued before required_role was stored still retain the
+        # source template, so naming a person cannot erase a cashier SOP rule.
+        collection = _sop_collection()
+        if collection is None:
+            raise HTTPException(status_code=503, detail="Could not verify this SOP's required role")
+        try:
+            template = collection.find_one({"template_id": task["sop_template_id"]})
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Could not verify this SOP's required role") from exc
+        if template is None:
+            raise HTTPException(status_code=503, detail="Could not verify this SOP's required role")
+        required = requires_cashier(template)
+    if required and "CASHIER" not in task_roles(current_user):
+        raise HTTPException(status_code=403, detail="The Cashier role is required to complete this task")
+
+
 # ============================================================================
 # SCHEMAS
 # ============================================================================
@@ -247,7 +267,7 @@ class TaskUpdate(BaseModel):
     status: Optional[str] = None  # OPEN, IN_PROGRESS, COMPLETED, ESCALATED, CANCELLED
     notes: Optional[str] = None
     assigned_to: Optional[str] = None
-    due_at: Optional[datetime] = None
+    due_at: Optional[datetime] = Field(default=None, validation_alias=AliasChoices("due_at", "due_date"))
     # Allow attaching (or replacing) a file on an existing task.
     attachment_file_id: Optional[str] = Field(default=None, max_length=128)
     attachment_filename: Optional[str] = Field(default=None, max_length=255)
@@ -801,6 +821,10 @@ async def update_task(
         return {"task_id": task_id, "message": "Task updated"}
 
     existing = _visible_task(repo, task_id, current_user)
+    if "due_at" in update.model_fields_set:
+        # Includes the legacy due_date spelling and self-assigned tasks.
+        # Visibility never grants staff authority to postpone a deadline.
+        await _managers_only(current_user)
     if update.assigned_to or (update.status and canon_status(update.status) == "CANCELLED"):
         await _managers_only(current_user)
 
@@ -854,6 +878,12 @@ async def update_task(
         update_data["assigned_to"] = update.assigned_to
     if update.due_at is not None:
         update_data["due_at"] = update.due_at
+        if "due_date" in existing:
+            update_data["due_date"] = update.due_at
+        update_data["history"] = update_data.get("history", existing.get("history") or []) + [{
+            "action": "due_date_change", "from": existing.get("due_at") or existing.get("due_date"),
+            "to": update.due_at, "by": current_user.get("user_id"), "at": datetime.now(),
+        }]
     if update.attachment_file_id is not None:
         fid = str(update.attachment_file_id).strip()
         if fid:
@@ -895,6 +925,7 @@ async def complete_task(
 
     task = _visible_task(repo, task_id, current_user)
     _ensure_may_close(task, current_user)
+    _ensure_cashier_may_complete(task, current_user)
 
     current_status = canon_status(task.get("status"))
 
@@ -1081,7 +1112,7 @@ async def auto_generate_daily_tasks(
                     continue
         return ids
 
-    def _make_task(title, description, category, items, template_id=None, assignee=None):
+    def _make_task(title, description, category, items, template_id=None, assignee=None, required_role=None):
         return {
             "task_id": generate_task_id(),
             "title": title,
@@ -1091,6 +1122,7 @@ async def auto_generate_daily_tasks(
             "status": "OPEN",
             "source": "SOP",
             "assigned_to": assignee or current_user.get("user_id"),
+            "required_role": required_role,
             # The SOP issued it, not the manager who pressed the button.
             "assigned_by": "system",
             "store_id": active_store,
@@ -1147,6 +1179,7 @@ async def auto_generate_daily_tasks(
                     items,
                     template_id=tpl.get("template_id"),
                     assignee=uid,
+                    required_role="CASHIER" if requires_cashier(tpl) else None,
                 )
                 if repo.create(task_data):
                     generated_count += 1
@@ -2138,6 +2171,9 @@ async def toggle_sop_checklist_item(
     tpl = tcol.find_one({"template_id": payload.template_id}, {"_id": 0})
     if not tpl:
         raise HTTPException(status_code=404, detail="SOP template not found")
+
+    if payload.completed:
+        _ensure_cashier_may_complete(tpl, current_user)
 
     active_store = payload.store_id or current_user.get("active_store_id")
     # IST audit: same IST day key as the GET above -- a tick at 23:30 IST must

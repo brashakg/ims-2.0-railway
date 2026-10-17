@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from .task_requirements import requires_cashier
 
 # Ascending authority. Anyone not listed is a "worker" (rank 1).
 _RANK: Dict[str, int] = {
@@ -135,6 +136,15 @@ def merge_into_twin(
     usual). Both escalation engines -- TASKMASTER's tick and
     POST /tasks/auto-escalate-overdue -- call this. A failed lookup escalates:
     a duplicate beats a lost breach."""
+    # Escalation is administration, not performance of cashier work. Keep
+    # the original open rather than marking it completed under a non-cashier.
+    if requires_cashier(task):
+        return None
+    # Older named SOP tasks have no stored requirement. Their source template
+    # is resolved at actual completion; automatic deduplication cannot safely
+    # declare that work completed before its cashier requirement is known.
+    if task.get("sop_template_id") and not task.get("required_role"):
+        return None
     group = task.get("escalation_group")
     uid = (target or {}).get("user_id")
     if not group or not uid:
