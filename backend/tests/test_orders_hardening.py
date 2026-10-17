@@ -689,15 +689,39 @@ def _make_paid_order(client, auth_headers):
     return body["order_id"], body["grand_total"]
 
 
-def test_c9_credit_over_tender_allowed(client, auth_headers, hardening_orders):
+def _persist_credit_sale(monkeypatch, hardening_orders, order_id):
+    """Credit approval needs persisted account data and Mongo CAS semantics."""
+    import mongomock
+    from api.routers import orders as orders_module
+    from database.repositories.order_repository import OrderRepository
+    from database.repositories.customer_repository import CustomerRepository
+
+    db = mongomock.MongoClient().db
+    order = hardening_orders["order_repo"].find_by_id(order_id)
+    db.orders.insert_one(dict(order))
+    db.customers.insert_one({
+        "customer_id": "cust-x", "credit_limit": order["grand_total"],
+    })
+    repo = OrderRepository(db.orders)
+    customer_repo = CustomerRepository(db.customers)
+    monkeypatch.setattr(orders_module, "get_order_repository", lambda: repo)
+    monkeypatch.setattr(orders_module, "get_customer_repository", lambda: customer_repo)
+    return db
+
+
+def test_c9_credit_over_tender_allowed(client, auth_headers, hardening_orders, monkeypatch):
     """A CREDIT tender ABOVE balance_due is a pay-later promise -> allowed."""
     order_id, grand_total = _make_paid_order(client, auth_headers)
+    db = _persist_credit_sale(monkeypatch, hardening_orders, order_id)
     resp = client.post(
         f"/api/v1/orders/{order_id}/payments",
         json={"method": "CREDIT", "amount": grand_total + 5000.0},
         headers=auth_headers,
     )
     assert resp.status_code == 200, resp.text
+    order = db.orders.find_one({"order_id": order_id})
+    assert (order["amount_paid"], order["balance_due"]) == (0, grand_total)
+    assert order["payment_status"] == "CREDIT"
 
 
 @pytest.mark.parametrize("method", ["CASH", "UPI", "CARD"])
@@ -716,11 +740,12 @@ def test_c9_cash_like_over_tender_still_blocked(
 
 
 def test_c9_credit_exact_balance_marks_credit(
-    client, auth_headers, hardening_orders
+    client, auth_headers, hardening_orders, monkeypatch
 ):
     """Sanity: a CREDIT tender equal to balance leaves the order as a
     receivable (CREDIT), proving the tender was recorded, not rejected."""
     order_id, grand_total = _make_paid_order(client, auth_headers)
+    _persist_credit_sale(monkeypatch, hardening_orders, order_id)
     resp = client.post(
         f"/api/v1/orders/{order_id}/payments",
         json={"method": "CREDIT", "amount": grand_total},

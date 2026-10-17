@@ -50,6 +50,9 @@ def _order(**kw) -> Dict[str, Any]:
         "customer_id": "CUST-1",
         "status": "READY",
         "payment_status": "PAID",
+        "grand_total": 1000.0,
+        "amount_paid": 1000.0,
+        "balance_due": 0.0,
         "items": [{"item_type": "OPTICAL_LENS", "product_id": "L1"}],
     }
     doc.update(kw)

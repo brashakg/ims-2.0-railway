@@ -26,11 +26,11 @@ No emoji (Windows cp1252).
 
 from __future__ import annotations
 
-import copy
 import os
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
+import mongomock
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -43,31 +43,7 @@ from fastapi import HTTPException  # noqa: E402
 from api.routers import orders as orders_module  # noqa: E402
 from api.routers.orders import PaymentCreate, PaymentMethod, add_payment  # noqa: E402
 from database.repositories.order_repository import OrderRepository  # noqa: E402
-
-
-class _OrdersColl:
-    """Just enough Mongo for OrderRepository.add_payment: find_one plus
-    update_one with $push/$set. The repository's REAL money arithmetic
-    (amount_paid / balance_due / payment_status) runs on top of this."""
-
-    def __init__(self, docs: Optional[List[Dict[str, Any]]] = None):
-        self.docs: List[Dict[str, Any]] = [copy.deepcopy(d) for d in (docs or [])]
-
-    def find_one(self, query=None, projection=None):
-        for d in self.docs:
-            if all(d.get(k) == v for k, v in (query or {}).items()):
-                return copy.deepcopy(d)
-        return None
-
-    def update_one(self, query, update, **_kw):
-        for d in self.docs:
-            if all(d.get(k) == v for k, v in (query or {}).items()):
-                for key, val in (update.get("$push") or {}).items():
-                    d.setdefault(key, []).append(copy.deepcopy(val))
-                for key, val in (update.get("$set") or {}).items():
-                    d[key] = copy.deepcopy(val)
-                return type("R", (), {"modified_count": 1, "matched_count": 1})()
-        return type("R", (), {"modified_count": 0, "matched_count": 0})()
+from database.repositories.customer_repository import CustomerRepository  # noqa: E402
 
 
 def _order_doc(order_id="ORD-L1", grand_total=1000.0) -> Dict[str, Any]:
@@ -99,9 +75,16 @@ def _cashier() -> Dict[str, Any]:
 @pytest.fixture()
 def sale(monkeypatch):
     def _build(order_id="ORD-L1", grand_total=1000.0):
-        coll = _OrdersColl([_order_doc(order_id, grand_total)])
+        # Exercise the actual Mongo snapshot predicates and credit reservation,
+        # with a customer whose configured limit permits this differential.
+        db = mongomock.MongoClient().db
+        coll = db.orders
+        coll.insert_one(_order_doc(order_id, grand_total))
+        db.customers.insert_one({"customer_id": "cust-1", "credit_limit": grand_total})
         repo = OrderRepository(coll)
+        customer_repo = CustomerRepository(db.customers)
         monkeypatch.setattr(orders_module, "get_order_repository", lambda: repo)
+        monkeypatch.setattr(orders_module, "get_customer_repository", lambda: customer_repo)
         return {"coll": coll, "order_id": order_id}
 
     return _build
