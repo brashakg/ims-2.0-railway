@@ -430,12 +430,14 @@ def _l_untracked(gid):
 
 
 def _taken_down_with_size_l(monkeypatch):
-    """Press 1: the live listing gains L, Shopify's create answer leaves L
-    untracked, the listing is taken down (Draft, taken_down_at). Returns the
-    db and the size rows as IMS now holds them (L carries its gid)."""
+    """Press 1: the live listing gains L, Shopify's create answer AND the
+    tracking re-send's answer both leave L untracked (L was never confirmed),
+    the listing is taken down (Draft, taken_down_at). Returns the db and the
+    size rows as IMS now holds them (L carries its gid)."""
     db, variants, upd = _live_listing_gets_size_l()
     _live(monkeypatch, _Spy(_responses(**{"productUpdate(": upd,
-                                           "productVariantsBulkCreate": _created(tracked=False)})))
+                                           "productVariantsBulkCreate": _created(tracked=False),
+                                           "productVariantsBulkUpdate": _tracking_echoes(_l_untracked)})))
     first = _run(shopify_push.push_product(db, _cat(db), variants))
     ecom = _cat(db)["ecom"]
     assert first.ok is False and ecom["status"] == "DRAFT" and ecom.get("taken_down_at"), (first, ecom)
@@ -461,7 +463,8 @@ def test_1_a_re_press_after_a_take_down_stays_draft_until_shopify_confirms_every
     first write goes out Draft -- ACTIVE used to go out at call 0, before the
     tracking re-send was even answered, putting it back on sale. Shopify's
     re-send answer then confirms nothing (L echoed untracked + CONTINUE, or
-    the call THROTTLED): the listing stays Draft on Shopify AND in IMS, no
+    the call THROTTLED over an L Shopify never confirmed -- a throttle keeps
+    only a CONFIRMED size's state): the listing stays Draft on Shopify AND in IMS, no
     publish, the press is not green and says it stays off the website.
     Send the payload's ACTIVE in the first write -> fails; count the re-send
     as confirmed -> publish + ACTIVE -> fails."""
@@ -503,6 +506,94 @@ def test_1_a_re_press_after_a_take_down_that_shopify_confirms_goes_back_on_the_w
 
 def _active_sent(spy):
     return [c for c in spy.calls_for("productUpdate(") if c["variables"]["input"].get("status") == "ACTIVE"]
+
+
+def _confirmed_live_sizes(monkeypatch):
+    db, rows, upd = _live_listing_gets_size_l()
+    spy = _Spy(_responses(**{"productUpdate(": upd, "productVariantsBulkCreate": _created()}))
+    _live(monkeypatch, spy)
+    assert _run(shopify_push.push_product(db, _cat(db), rows)).ok
+    rows = list(db.get_collection("catalog_variants").find({"parent_product_id": "cat-1"}))
+    upd["data"]["productUpdate"]["product"]["variants"]["nodes"].append(
+        {"id": MINTED, "selectedOptions": [{"name": "Size", "value": "L"}], "inventoryItem": {"id": INV_L}}
+    )
+    return db, rows, upd
+
+
+def test_1_confirmed_sizes_survive_a_throttle_and_are_retried(monkeypatch):
+    db, rows, upd = _confirmed_live_sizes(monkeypatch)
+    assert _cat(db)["ecom"]["confirmed_sizes"][MINTED] == "DENY"
+    spy = _ThrottledTracking(_responses(**{"productUpdate(": upd}))
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.push_product(db, _cat(db), rows))
+    assert res.ok and res.stock["tracking_confirmed"], res
+    assert not res.stock["ok"] and not res.stock["sold_out"]
+    assert _drafts(spy) == [] and _cat(db)["ecom"]["status"] == "PUBLISHED"
+    assert _baseline(db)["tracked"] is False, "the next stock pass must retry the unanswered tracking write"
+    assert "stays on the website" in res.stock["error"]
+
+
+def test_1_a_negative_size_answer_clears_only_that_confirmation(monkeypatch):
+    db, rows, upd = _confirmed_live_sizes(monkeypatch)
+    spy = _Spy(_responses(**{"productUpdate(": upd, "productVariantsBulkUpdate": _tracking_echoes(_l_untracked)}))
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.push_product(db, _cat(db), rows))
+    record = _cat(db)["ecom"]["confirmed_sizes"]
+    assert MINTED not in record and record[VARIANT_GID] == "DENY"
+    assert not res.ok and len(_drafts(spy)) == 1
+    retry = _ThrottledTracking(_responses(**{"productUpdate(": upd}))
+    _live(monkeypatch, retry)
+    res = _run(shopify_push.push_product(db, _cat(db), rows))
+    assert not res.ok and not res.stock["tracking_confirmed"]
+    assert _active_sent(retry) == [] and _cat(db)["ecom"]["status"] == "DRAFT"
+
+
+def test_1_late_take_down_that_runs_simulated_never_claims_the_listing_is_off(monkeypatch):
+    db, rows, upd = _confirmed_live_sizes(monkeypatch)
+    spy = _Spy(_responses(**{"productUpdate(": upd, "productVariantsBulkUpdate": _tracking_echoes(_l_untracked)}))
+    _live(monkeypatch, spy)
+
+    async def simulated_delist(*_args, **_kwargs):
+        return shopify_push.PushResult(mode=shopify_push.MODE_SIMULATED, entity="product", action="delist",
+                                       ok=True, reason="creds unavailable")
+
+    monkeypatch.setattr(shopify_push, "push_product_delist", simulated_delist)
+    res = _run(shopify_push.push_product(db, _cat(db), rows))
+    assert not res.ok and res.reason != "publish_withheld", res
+    assert "STILL LIVE" in res.error and "taken OFF" not in res.error
+    assert _cat(db)["ecom"]["status"] == "PUBLISHED" and not _cat(db)["ecom"].get("taken_down_at")
+    assert spy.calls_for("productVariantsBulkCreate") == [], "this pins the late take-down, with no new size"
+
+
+def test_1_a_deleted_shopify_size_is_cleared_and_recreated_on_the_next_press(monkeypatch):
+    db, rows, upd = _confirmed_live_sizes(monkeypatch)
+
+    def missing_size(query, variables):
+        if "imsVariantInventoryUpdate" not in query:
+            return _ok_body("productVariantsBulkUpdate", productVariants=[])
+        missing = next(i for i, row in enumerate(variables["variants"]) if row["id"] == MINTED)
+        return {"data": {"productVariantsBulkUpdate": {"productVariants": [], "userErrors": [
+            {"field": ["variants", str(missing), "id"], "message": "Product variant does not exist"}
+        ]}}}
+
+    spy = _Spy(_responses(**{"productUpdate(": upd, "productVariantsBulkUpdate": missing_size}))
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.push_product(db, _cat(db), rows))
+    stored = db.get_collection("catalog_variants").find_one({"sku": "SP-1-L"})
+    assert not stored.get("shopify_variant_id") and not stored.get("shopify_inventory_item_id")
+    assert "SP-1-L" in res.stock["error"] and "re-created on the next" in res.stock["error"]
+    assert _drafts(spy) == [], "deleted sizes cannot oversell; remembered remaining sizes stay live"
+    upd["data"]["productUpdate"]["product"]["variants"]["nodes"] = [
+        n for n in upd["data"]["productUpdate"]["product"]["variants"]["nodes"] if n["id"] != MINTED
+    ]
+    retry = _Spy(_responses(**{"productUpdate(": upd, "productVariantsBulkCreate": _created()}))
+    _live(monkeypatch, retry)
+    rows = list(db.get_collection("catalog_variants").find({"parent_product_id": "cat-1"}))
+    res = _run(shopify_push.push_product(db, _cat(db), rows))
+    assert res.ok, res
+    (created,) = retry.calls_for("productVariantsBulkCreate")
+    assert created["variables"]["variants"][0]["inventoryItem"] == {"sku": "SP-1-L", "tracked": True}
+    assert db.get_collection("catalog_variants").find_one({"sku": "SP-1-L"})["shopify_variant_id"] == MINTED
 
 
 _THROTTLED = {"errors": [{"message": "Throttled", "extensions": {"code": "THROTTLED"}}]}

@@ -3,7 +3,7 @@
 The real productVariantsBulkUpdate echoes every row it updated with the fields
 the mutation selects (``inventoryPolicy inventoryItem { id tracked }``), and a
 press puts or keeps a listing on the website only on that answer
-(``shopify_push.tracking_confirmed``). A fake that answers the re-send with
+(``shopify_push.tracking_verdicts``). A fake that answers the re-send with
 nothing is a Shopify that confirmed nothing -- the press then withholds the
 listing, as it should. Fakes that model a working Shopify answer with this.
 """
