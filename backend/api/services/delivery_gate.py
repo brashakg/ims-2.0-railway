@@ -77,8 +77,8 @@ def gate_credit_delivery(
     """Owner ruling (POS Wave 4): handing goods over with money still owed is
     a credit decision. A manager may take it directly; anyone else must carry
     a manager's PIN-approved CREDIT_DELIVERY token, store-bound and bound to
-    THIS order. Raises 403 otherwise. PURE GATE except the single-use token
-    consume - no money math.
+    THIS order. After authorisation, the shared credit-limit reservation records
+    the unpaid balance as an actual CREDIT promise before goods can leave.
 
     Verbatim move of orders.py _gate_credit_delivery (the token is passed as a
     plain string instead of a request-body object so any door can call it).
@@ -91,9 +91,13 @@ def gate_credit_delivery(
         return
     roles = current_user.get("roles", [])
     if any(r in CREDIT_DELIVERY_MANAGER_ROLES for r in roles):
+        from .credit_limit import record_handover_credit
+
+        record_handover_credit(order, current_user, _resolve_db(db))
         return
     token = (approval_token or "").strip()
     if token:
+        approved = False
         try:
             from .approvals import ApprovalEngine
 
@@ -105,14 +109,20 @@ def gate_credit_delivery(
                 expected_store_id=order.get("store_id"),
                 expected_context={"order_id": order.get("order_id")},
             )
-            if res.get("ok"):
-                return
-            logger.warning(
-                "[DELIVERY-GATE] CREDIT_DELIVERY token refused for %s: %s",
-                order.get("order_id"), res.get("error"),
-            )
+            approved = bool(res.get("ok"))
+            if not approved:
+                logger.warning(
+                    "[DELIVERY-GATE] CREDIT_DELIVERY token refused for %s: %s",
+                    order.get("order_id"), res.get("error"),
+                )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[DELIVERY-GATE] CREDIT_DELIVERY consume failed: %s", exc)
+        if approved:
+            # Keep the write outside the token engine's exception wrapper.
+            from .credit_limit import record_handover_credit
+
+            record_handover_credit(order, current_user, _resolve_db(db))
+            return
     raise HTTPException(
         status_code=403,
         detail=(

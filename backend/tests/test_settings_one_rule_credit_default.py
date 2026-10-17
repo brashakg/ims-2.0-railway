@@ -139,7 +139,7 @@ def test_an_unreadable_default_falls_back_to_rs_150000_never_unlimited(unreadabl
     coll = till({"customer_id": "C1"})
     with pytest.raises(HTTPException) as exc:
         _credit(140001.0)  # 10,000 owed + 1,40,001 > 1,50,000
-    assert exc.value.status_code == 400
+    assert exc.value.status_code == 503  # billing cannot assume a ceiling on a failed read
     assert coll.find_one({"order_id": "ORD-1"})["payments"] == []
 
 
@@ -270,14 +270,15 @@ def test_credit_summary_reports_the_saved_default_not_a_copy(db, monkeypatch):
 
 @pytest.fixture()
 def till(db, monkeypatch):
-    """A Rs 3,00,000 order for customer C1 who already owes Rs 10,000."""
+    """A customer with Rs 10,000 already owed; each case sets the actual sale balance."""
 
-    def build(customer):
+    def build(customer, total=300000):
         coll = db["orders"]
+        coll.insert_one({"order_id": "PRIOR", "customer_id": customer["customer_id"], "status": "CONFIRMED", "balance_due": 10000, "payments": [{"method": "CREDIT", "amount": 10000}]})
         coll.insert_one({
             "order_id": "ORD-1", "order_number": "ORD-1", "store_id": "BV-PUN-01",
             "customer_id": customer["customer_id"], "status": "CONFIRMED",
-            "grand_total": 300000.0, "amount_paid": 0.0, "balance_due": 300000.0,
+            "grand_total": total, "amount_paid": 0.0, "balance_due": total,
             "payment_status": "UNPAID", "payments": [], "items": [],
             "created_at": "2026-10-08T10:00:00",
         })
@@ -303,13 +304,13 @@ def test_over_the_default_is_blocked_and_nothing_is_recorded(till):
 
 
 def test_up_to_the_default_goes_through(till):
-    coll = till({"customer_id": "C1", "credit_limit": 0})
+    coll = till({"customer_id": "C1", "credit_limit": 0}, total=140000)
     _credit(140000.0)  # exactly at the limit
     assert [p["method"] for p in coll.find_one({"order_id": "ORD-1"})["payments"]] == ["CREDIT"]
 
 
 def test_a_higher_limit_of_their_own_lets_the_sale_through(till):
-    coll = till({"customer_id": "C1", "credit_limit": 250000})
+    coll = till({"customer_id": "C1", "credit_limit": 250000}, total=200000)
     _credit(200000.0)
     assert len(coll.find_one({"order_id": "ORD-1"})["payments"]) == 1
 

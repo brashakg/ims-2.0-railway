@@ -255,7 +255,7 @@ class OrderRepository(BaseRepository):
             print(f"Error updating status: {e}")
             return False
     
-    def add_payment(self, order_id: str, payment: Dict) -> bool:
+    def add_payment(self, order_id: str, payment: Dict, *, expected_order=None) -> bool:
         """Add a tender to an order and recompute its AR (receivable) status.
 
         A CREDIT tender is a pay-later promise, NOT cash received: it is excluded
@@ -281,78 +281,88 @@ class OrderRepository(BaseRepository):
         Raises ValueError on over-tender so the POS layer surfaces it cleanly.
         """
         try:
-            order = self.find_by_id(order_id)
-            if not order:
-                return False
+            for attempt in range(12):
+                order = expected_order if expected_order is not None else self.find_by_id(order_id)
+                if not order or order.get("status") == "CANCELLED":
+                    return False
+                key = payment.get("idempotency_key")
+                if key and any(p.get("idempotency_key") == key for p in order.get("payments") or []):
+                    return True
 
-            def _is_credit(p):
-                return str((p or {}).get("method", "")).upper() == "CREDIT"
+                def _is_credit(p):
+                    return str((p or {}).get("method", "")).upper() == "CREDIT"
 
-            def _amt(p):
-                try:
-                    return float((p or {}).get("amount", 0) or 0)
-                except (TypeError, ValueError):
-                    return 0.0
+                def _amt(p):
+                    try:
+                        return float((p or {}).get("amount", 0) or 0)
+                    except (TypeError, ValueError):
+                        return 0.0
 
-            # Pre-validate against over-tender BEFORE recording. Cash collected
-            # (everything that is NOT a CREDIT promise) must not exceed
-            # grand_total. CREDIT rows don't count -- they're a pay-later flag,
-            # and adding "CASH 5000" to settle an earlier "CREDIT 5000" is a
-            # legitimate flow (not double-payment).
-            existing_payments = list(order.get("payments") or [])
-            all_payments = existing_payments + [payment]
-            grand_total = float(order.get("grand_total", 0) or 0)
-            cash_collected = round(
-                sum(_amt(p) for p in all_payments if not _is_credit(p)), 2
-            )
-            # 1-paisa rounding tolerance to absorb 5+5+0.01 float noise.
-            if cash_collected - grand_total > 0.01:
-                raise ValueError(
-                    f"Over-tender: cash collected {cash_collected} exceeds "
-                    f"grand_total {grand_total} on order {order_id}"
+                # Pre-validate against over-tender BEFORE recording. Cash collected
+                # (everything that is NOT a CREDIT promise) must not exceed
+                # grand_total. CREDIT rows don't count -- they're a pay-later flag,
+                # and adding "CASH 5000" to settle an earlier "CREDIT 5000" is a
+                # legitimate flow (not double-payment).
+                existing_payments = list(order.get("payments") or [])
+                all_payments = existing_payments + [payment]
+                grand_total = float(order.get("grand_total", 0) or 0)
+                cash_collected = round(
+                    sum(_amt(p) for p in all_payments if not _is_credit(p)), 2
                 )
+                # 1-paisa rounding tolerance to absorb 5+5+0.01 float noise.
+                if cash_collected - grand_total > 0.01:
+                    raise ValueError(
+                        f"Over-tender: cash collected {cash_collected} exceeds "
+                        f"grand_total {grand_total} on order {order_id}"
+                    )
 
-            # Record the tender now that we know it's valid.
-            self.collection.update_one(
-                {"order_id": order_id},
-                {"$push": {"payments": payment}}
-            )
+                # Recompute from the full tender list. CREDIT tenders never count
+                # toward cash received; cash tenders include refunds (negative
+                # amounts subtract from amount_paid).
+                amount_paid = round(
+                    sum(_amt(p) for p in all_payments if not _is_credit(p)),
+                    2,
+                )
+                has_credit_now = any(_is_credit(p) for p in all_payments)
+                # Sticky audit marker: once a credit sale, always flagged as one.
+                credit_sale = bool(order.get("credit_sale")) or has_credit_now
 
-            # Recompute from the full tender list. CREDIT tenders never count
-            # toward cash received; cash tenders include refunds (negative
-            # amounts subtract from amount_paid).
-            amount_paid = round(
-                sum(_amt(p) for p in all_payments if not _is_credit(p)),
-                2,
-            )
-            has_credit_now = any(_is_credit(p) for p in all_payments)
-            # Sticky audit marker: once a credit sale, always flagged as one.
-            credit_sale = bool(order.get("credit_sale")) or has_credit_now
+                balance_due = round(grand_total - amount_paid, 2)
 
-            balance_due = round(grand_total - amount_paid, 2)
+                if balance_due <= 0.01 and not has_credit_now:
+                    # Fully settled with cash/card/etc.
+                    payment_status = "PAID"
+                elif balance_due <= 0.01 and has_credit_now:
+                    # Has a CREDIT promise + balance cleared by cash -> PAID.
+                    # Treat the order as settled. credit_sale flag still True.
+                    payment_status = "PAID"
+                elif has_credit_now:
+                    payment_status = "CREDIT"
+                elif amount_paid > 0:
+                    payment_status = "PARTIAL"
+                else:
+                    payment_status = "UNPAID"
 
-            if balance_due <= 0.01 and not has_credit_now:
-                # Fully settled with cash/card/etc.
-                payment_status = "PAID"
-            elif balance_due <= 0.01 and has_credit_now:
-                # Has a CREDIT promise + balance cleared by cash -> PAID.
-                # Treat the order as settled. credit_sale flag still True.
-                payment_status = "PAID"
-            elif has_credit_now:
-                payment_status = "CREDIT"
-            elif amount_paid > 0:
-                payment_status = "PARTIAL"
-            else:
-                payment_status = "UNPAID"
-
-            return self.update(order_id, {
-                "amount_paid": amount_paid,
-                "balance_due": max(0.0, balance_due),
-                "payment_status": payment_status,
-                # Owner ruling 2026-08-30: bill type follows the money.
-                "bill_type": derive_bill_type(payment_status),
-                "credit_sale": credit_sale,
-            })
+                # Tender and resulting ladder land in ONE compare-and-set.
+                # Concurrent settlement retries from the new list; a CREDIT
+                # approval must retain its exact reserved snapshot instead.
+                from api.services.credit_limit import _snapshot
+                result = self.collection.update_one(
+                    {"order_id": order_id, **_snapshot(order)},
+                    {"$push": {"payments": payment}, "$set": {
+                    "amount_paid": amount_paid,
+                    "balance_due": max(0.0, balance_due),
+                    "payment_status": payment_status,
+                    # Owner ruling 2026-08-30: bill type follows the money.
+                    "bill_type": derive_bill_type(payment_status),
+                    "credit_sale": credit_sale,
+                    "updated_at": datetime.now(),
+                }})
+                if result.matched_count:
+                    return True
+                if expected_order is not None:
+                    return False
+            return False
         except ValueError:
             # Re-raise so the POS layer can surface it as 400 -- not a silent
             # False that the caller can't tell from a real DB error.

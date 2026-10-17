@@ -14,6 +14,7 @@ import sys
 import uuid
 
 import pytest
+import mongomock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
@@ -39,6 +40,9 @@ def _order(customer_id: str, payments: list, payment_status: str, balance_due: f
 class FakeOrderRepo:
     def __init__(self, orders):
         self._orders = orders
+        self.collection = mongomock.MongoClient().db.orders
+        if orders:
+            self.collection.insert_many(orders)
 
     def find_many(self, q, sort=None, limit=500):
         cid_filter = q.get("$or", [{}])[0].get("customer_id", "")
@@ -178,6 +182,9 @@ def test_credit_summary_no_limit_of_their_own_gets_chain_default(monkeypatch):
     """credit_limit=0 = no limit of their own -> the chain default (owner
     2026-10-08: Rs 1,50,000), not unlimited."""
     import api.routers.customers as cm
+    from api.routers import settings
+    db = mongomock.MongoClient().db
+    monkeypatch.setattr(settings, "_get_settings_collection", lambda name: db[name])
 
     customer = {"customer_id": "CX1", "credit_limit": 0}
     monkeypatch.setattr(cm, "get_customer_repository", lambda: FakeCustomerRepo([customer]))

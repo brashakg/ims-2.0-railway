@@ -24,9 +24,23 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 os.environ.setdefault("MONGODB_URI", "")
 
 from tests.test_order_rx_hold_deliver_guard import (  # noqa: E402,F401
-    wired_orders,
     _seed_order,
 )
+
+
+@pytest.fixture
+def wired_orders(monkeypatch):
+    import mongomock
+    from api.routers import orders as orders_module
+    from api.services import delivery_gate
+    from database.repositories.order_repository import OrderRepository
+
+    db = mongomock.MongoClient().db
+    db.customers.insert_one({"customer_id": "cust-x", "credit_limit": 150000})
+    repo = OrderRepository(db.orders)
+    monkeypatch.setattr(orders_module, "get_order_repository", lambda: repo)
+    monkeypatch.setattr(delivery_gate, "_resolve_db", lambda supplied: db)
+    return {"db": db, "order_repo": repo}
 
 
 def _cashier_headers():

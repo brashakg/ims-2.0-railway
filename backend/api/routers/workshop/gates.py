@@ -525,9 +525,10 @@ def evaluate_scan_transition_gate(
     scan-advance, which do carry the caller's roles/token.
 
     Near-pure decision: never mutates job state and never raises for a gate
-    failure. The ONE side effect is the money leg's single-use CREDIT_DELIVERY
-    token consume (same ordering hazard as the counter door: the token is
-    spent before the status write). This is
+    failure. The money leg consumes a single-use CREDIT_DELIVERY token and
+    records the unpaid CREDIT promise under the shared limit guard. Production
+    callers use this only when advancing a scan, never for a read-only preview.
+    As at the counter, the approval happens before the status write. This is
     the single source of truth for the scan-side patient-safety gates and mirrors
     the update_job_status PATCH gates by reusing the SAME rule sources (see the
     section comment above).
