@@ -56,8 +56,9 @@ def _order_taxable_and_tax(order: dict) -> tuple:
     Persisted order docs carry `subtotal` (the PRE-cart-discount GROSS sum,
     NOT the taxable base), `tax_amount` (total GST), and `grand_total` (what
     the customer actually pays). `orders._compute_per_category_gst` guarantees
-    `taxable + tax == grand_total` in BOTH inclusive and exclusive modes, so
-    the correct GST taxable value is `grand_total - tax_amount` -- NOT
+    `taxable + tax + round_off == grand_total` in BOTH inclusive and exclusive
+    modes, so the correct GST taxable value is
+    `grand_total - round_off - tax_amount` -- NOT
     `subtotal`, which overstates when a cart discount applies or under
     inclusive pricing.
 
@@ -104,6 +105,11 @@ def _order_taxable_and_tax(order: dict) -> tuple:
         if order.get("grand_total") is not None
         else _f(order.get("total_amount"))
     )
+    # Owner ruling 2026-10-08: a till bill's grand_total is rounded to the
+    # rupee and the paise it moved are stored as `round_off`. Round off is
+    # neither taxable value nor tax, so back it out before deriving taxable.
+    # (0 on bills made before the ruling and on online orders.)
+    grand_total = round(grand_total - _f(order.get("round_off")), 2)
 
     # Per-line fallback data.
     line_taxable = 0.0

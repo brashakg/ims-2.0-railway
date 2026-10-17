@@ -347,7 +347,7 @@ def _b2b_fetch_orders(db, order_ids: List[str]) -> List[dict]:
         o["subtotal"] = (
             round(taxable, 2)
             if taxable
-            else round(grand - float(totals.get("tax") or 0.0), 2)
+            else round(grand - float(o.get("round_off") or 0.0) - float(totals.get("tax") or 0.0), 2)
         )
         o["cgst_amount"] = round(float(totals.get("cgst") or 0.0), 2)
         o["sgst_amount"] = round(float(totals.get("sgst") or 0.0), 2)
@@ -625,7 +625,9 @@ async def get_tally_sales_jv(
             o["igst_amount"] = 0.0
             o["cgst_amount"] = cgst
             o["sgst_amount"] = sgst
-        o["subtotal"] = round(grand - tax, 2)
+        # Sales A/c = taxable: the bill's round_off goes on its own Round Off
+        # leg (the formatter reads it off the order), never into Sales.
+        o["subtotal"] = round(grand - float(o.get("round_off") or 0) - tax, 2)
         o["grand_total"] = grand
 
     store_meta = {}

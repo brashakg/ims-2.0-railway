@@ -32,6 +32,20 @@ ROWS: List[Dict[str, object]] = [
             "SUPERADMIN",
         ],
     },
+    # Read-only bill total for the till (no side effects): the rounded payable
+    # the cashier collects before the order exists. Same roles as creating one.
+    {
+        "method": "POST",
+        "path": "/api/v1/orders/quote",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "SALES_CASHIER",
+            "SALES_STAFF",
+            "STORE_MANAGER",
+            "SUPERADMIN",
+        ],
+    },
     {
         "method": "GET",
         "path": "/api/v1/orders/overdue/list",
