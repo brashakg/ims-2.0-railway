@@ -187,10 +187,17 @@ export function InvoiceFormDrawer({
         // The accountant holds no products:write, so the refusal has to come
         // with a way forward: raise the task for the cataloguer.
         try {
-          await purchaseInvoicesApi.requestCataloguing(blocked);
-          toast.info('Asked the cataloguer to finish these items — the bill can be booked after that');
-        } catch {
-          /* the refusal above is the message that matters */
+          const ask = await purchaseInvoicesApi.requestCataloguing(
+            blocked,
+            undefined,
+            prefill.store_id ?? user?.activeStoreId ?? undefined,
+          );
+          // The server says who was asked: the catalogue manager, or -- with
+          // none for the shop -- the admins.
+          toast.info(ask.message);
+        } catch (askErr) {
+          // Never silent: the accountant must know nobody was asked.
+          toast.warning(errMsg(askErr, 'The catalogue manager could not be asked. Try again.'));
         }
       }
     } finally {

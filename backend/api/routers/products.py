@@ -477,9 +477,44 @@ def _create_via_canonical_door(
             db=db,
         )
     except _pm.ProductMasterError as err:
+        if source == "FORM":
+            _revive_typed_discarded_draft(err, product, current_user, db)
         raise HTTPException(
             status_code=err.status, detail=_pm_error_detail(err)
         ) from err
+
+
+def _revive_typed_discarded_draft(err, product: "ProductCreate", current_user: dict, db) -> None:
+    """Add product meets the SAME answer the PO door gives (R1-64): an item
+    typed again as the same kind of product as a draft an admin discarded
+    gets that draft back (product_master.revive_discarded_draft) -- in Needs
+    review, provisional, at the MRP typed now -- and the 409 names it as the
+    ordered draft it is, so the popup leads to finishing it in the editor
+    instead of an "Inactive (archived)" dead end. Fail-soft: the 409 stands
+    as it was when the revive cannot run."""
+    conflict = getattr(err, "conflict", None) or {}
+    if err.status != 409 or not conflict.get("product_id"):
+        return
+    try:
+        from ..dependencies import get_audit_repository as _get_audit_repository
+
+        repo = get_product_repository()
+        found = repo.find_by_id(conflict["product_id"]) if repo is not None else None
+        if not _pm.revivable_discarded_draft(
+            found, category=_pm.resolve_category(product.category)
+        ):
+            return
+        if _pm.revive_discarded_draft(
+            conflict["product_id"],
+            repo,
+            db=db,
+            actor=current_user.get("user_id"),
+            mrp=product.mrp,
+            audit_repo=_get_audit_repository(),
+        ):
+            err.conflict = _pm.existing_product_summary(repo.find_by_id(conflict["product_id"]))
+    except Exception:  # noqa: BLE001 - the duplicate answer stands
+        logger.warning("[PRODUCTS] revive on Add product failed", exc_info=True)
 
 
 def _build_product_data(product: "ProductCreate", created_by, created_by_name=None) -> dict:
@@ -893,7 +928,7 @@ async def list_products(
     access to."""
     from ..services.cache import cache
     from ..services.online_catalog import stamp_online_state
-    from ..services.product_master import resolve_category
+    from ..services.product_master import is_ordered_draft, resolve_category
 
     # Direct-call safety: several unit suites invoke this handler as a plain
     # function WITHOUT the newer kwargs, so `created_by` arrives as its
@@ -959,6 +994,10 @@ async def list_products(
         except Exception:  # noqa: BLE001 - a listing must never fail on this
             live_db = None
         stamp_online_state(live_db, result.get("products") or [])
+        # The catalogue's 'Ordered - finish it' reads the one rule, never the
+        # raw mark (a row finished before the mark was cleared is finished).
+        for p in result.get("products") or []:
+            p["ordered_draft"] = is_ordered_draft(p)
         return result
 
     # Cataloguer-attribution posture (panel finding 4): attribution is a
@@ -2236,25 +2275,26 @@ async def get_similar_products(
     (council rule) -- so what this reports as an exact match is exactly what
     the create door would 409.
 
-    Shape: {"exact_match": {summary}|null, "siblings": [summary, ...] (cap 12),
-    "model_colour_count": N}. FAIL-SOFT: any DB trouble returns the empty
+    Shape: {"exact_match": {summary}|null, "eye_size_needed": [size, ...],
+    "siblings": [summary, ...] (cap 12), "model_colour_count": N}. FAIL-SOFT: any DB trouble returns the empty
     shape with 200 -- the FE strip simply doesn't render; never a 5xx.
     """
-    empty = {"exact_match": None, "siblings": [], "model_colour_count": 0}
+    coll = None
     try:
         from database.connection import get_db
 
         db = get_db()
-        if not (db and getattr(db, "is_connected", False)):
-            return empty
-        return _pm.find_similar_products(
-            db.db.get_collection("products"),
-            category=category,
-            attributes={k: v for k, v in request.query_params.items() if k != "category"},
-        )
+        if db and getattr(db, "is_connected", False):
+            coll = db.db.get_collection("products")
     except Exception as e:  # noqa: BLE001 - hint endpoint, never a blocker
         logger.warning("[SIMILAR] lookup failed: %s", e)
-        return empty
+    # One empty answer: the service's, which it gives when there is no
+    # collection (a second copy here drifted once already -- eye_size_needed).
+    return _pm.find_similar_products(
+        coll,
+        category=category,
+        attributes={k: v for k, v in request.query_params.items() if k != "category"},
+    )
 
 
 class DescriptionGenerateRequest(BaseModel):
@@ -3487,6 +3527,9 @@ async def get_product(product_id: str, current_user: dict = Depends(get_current_
             first = _pm.main_photo(product)
             if first:
                 product["image_url"] = first
+            # As list_products: the drawer's 'Ordered - finish it' reads the
+            # one rule (product_master.is_ordered_draft).
+            product["ordered_draft"] = _pm.is_ordered_draft(product)
             _strip_attribution([product], current_user)
             return mask_cost(product, current_user, "product")
         raise HTTPException(status_code=404, detail="Product not found")
@@ -3544,6 +3587,19 @@ async def update_product(
         # purchasable product's price. Mirrors the service-layer update_product
         # None-strip. A field is CLEARED with its empty value ("" / []), never null.
         update_data = {k: v for k, v in update_data.items() if v is not None}
+        # A category change (the editor offers one on an ordered draft, which
+        # nothing on the shelf or sold has used yet) re-derives what the
+        # category decides at the create door (normalise_payload): the
+        # canonical category, the HSN unless the edit names one -- and so the
+        # rate (below) -- and the identity (rekey_on_edit, below).
+        if "category" in update_data:
+            update_data["category"] = (
+                _pm.resolve_category(update_data["category"]) or update_data["category"]
+            )
+            if update_data["category"] != (
+                _pm.resolve_category(existing.get("category")) or existing.get("category")
+            ):
+                update_data.setdefault("hsn_code", hsn_for_category(update_data["category"]))
         if _catalog_list.switches_on_archived(existing, update_data.get("is_active")):
             raise HTTPException(status_code=409, detail=_catalog_list.USE_RESTORE)
         # Pre-write snapshot for the take-down / republish rule below: read
@@ -3716,41 +3772,23 @@ async def update_product(
                     product_id,
                     exc_info=True,
                 )
-            # Hub Phase 0: apply the catalog-done restamp as a GUARDED single-doc
-            # write -- NOT folded into the blind $set above. Auto-promotes a DRAFT
-            # the edit just completed (e.g. cost_price / CL power filled in ->
-            # catalog_status ACTIVE). The guard (find_one_and_update keyed on
-            # catalog_status=DRAFT) means a concurrent edit that already promoted
-            # the row is not clobbered, and a row that reads ACTIVE (incl. a
-            # legacy row with no catalog_status) is left untouched -- never
-            # demoted, never re-judged (forward-only, DECISION A).
-            status_fields = _pm.apply_restamp_atomic(
+            # Hub Phase 0 + products convergence + audit C1, through THE path
+            # every door that writes a product takes
+            # (grn_accept.catalogue_write_done): the catalog-done restamp as a
+            # GUARDED single-doc write -- NOT folded into the blind $set above;
+            # auto-promotes a DRAFT the edit just completed, never demotes,
+            # forward-only (DECISION A) -- then the ONE mirror onto the
+            # catalog_products twin (do not re-inline it here; a finished
+            # provisional draft turns active on its twin too and leaves Needs
+            # review), the asks for cataloguing that wait on nothing any more
+            # close, and an edit that leaves the product catalogue-complete
+            # puts the units receipts were holding for it on the shelf (the
+            # same accept path "Add to stock" runs). Fail-soft: the save stands.
+            from .vendors.grn_accept import catalogue_write_done
+
+            status_fields, released = catalogue_write_done(
                 product_id, existing, update_data, product_repo=repo
             )
-            # Products-convergence: mirror the edit onto the catalog_products
-            # twin so the storefront/PIM does not silently diverge from the
-            # billing spine. THE ONE rule lives in
-            # product_master.mirror_update_to_catalog_twin (which fields, both
-            # price spellings, what queues, pim-key-then-spine-key twin
-            # resolution, no upsert) -- this route used to carry its own copy,
-            # which drifted from the /products/master door's (PR #1029
-            # follow-up). Do not re-inline it here. Fail-soft: a mirror error
-            # never breaks the product save.
-            try:
-                from ..dependencies import get_db as _gdb
-
-                _pm.mirror_update_to_catalog_twin(
-                    product_id=product_id,
-                    current=existing,
-                    patch=update_data,
-                    db=_gdb(),
-                )
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "[PRODUCTS] catalog mirror on update skipped for %s",
-                    product_id,
-                    exc_info=True,
-                )
             # Sync audit gap #2 (owner, 2026-09-06): is_active off -> take the
             # twin OFF Shopify; back on -> queue it for the next live sync.
             # The ONE rule lives in services/online_delist (same call as the
@@ -3771,7 +3809,11 @@ async def update_product(
             # so the resolver sees the post-update tags/category/brand + status.
             merged = {**existing, **update_data, **status_fields}
             _refresh_collections_after_product(merged)
-            return {"message": "Product updated", "product_id": product_id}
+            return {
+                "message": "Product updated",
+                "product_id": product_id,
+                "released_units": released,
+            }
 
         raise HTTPException(status_code=500, detail="Failed to update product")
 

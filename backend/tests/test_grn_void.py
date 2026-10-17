@@ -106,6 +106,39 @@ def test_a_held_receipt_with_units_in_stock_is_not_voided(monkeypatch):
     assert repo.updated is None
 
 
+def test_void_partially_accepted_with_units_on_the_shelf_is_409(monkeypatch):
+    # A held receipt that DID put some lines on the shelf -- not voidable.
+    repo = _FakeGRNRepo(_grn(status="PARTIALLY_ACCEPTED"))
+    _patch(monkeypatch, repo)
+    monkeypatch.setattr(v, "get_stock_repository", lambda: _Stock(1))
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(void_grn("G1", current_user=_user()))
+    assert exc.value.status_code == 409
+    assert "vendor return" in str(exc.value.detail)
+    assert repo.updated is None
+
+
+def test_void_a_held_receipt_that_shelved_nothing(monkeypatch):
+    # Every line held for the catalogue (a second receipt of the same box):
+    # nothing reached the shelf, so the manager can void it.
+    repo = _FakeGRNRepo(_grn(status="PARTIALLY_ACCEPTED"))
+    _patch(monkeypatch, repo)
+    monkeypatch.setattr(v, "get_stock_repository", lambda: _Stock(0))
+    res = asyncio.run(void_grn("G1", current_user=_user()))
+    assert res["grn_status"] == "VOID"
+    assert repo.updated[1]["status"] == "VOID"
+
+
+def test_void_a_held_receipt_is_refused_when_stock_cannot_be_checked(monkeypatch):
+    repo = _FakeGRNRepo(_grn(status="PARTIALLY_ACCEPTED"))
+    _patch(monkeypatch, repo)
+    monkeypatch.setattr(v, "get_stock_repository", lambda: None)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(void_grn("G1", current_user=_user()))
+    assert exc.value.status_code == 503
+    assert repo.updated is None
+
+
 def test_a_held_receipt_with_nothing_in_stock_is_voided(monkeypatch):
     # Every line held for cataloguing: nothing on the shelf, so it can go.
     repo = _FakeGRNRepo(_grn(status="PARTIALLY_ACCEPTED"))

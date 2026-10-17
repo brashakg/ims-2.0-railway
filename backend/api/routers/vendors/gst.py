@@ -15,7 +15,9 @@ _PO_PROVISIONAL_COST_SOURCE = "PO_RATE"
 _COST_SOURCE_RANK = {_PO_PROVISIONAL_COST_SOURCE: 1, "GRN_PO": 2}
 
 
-def _promote_cost_from_rate(product_id, prod, unit_cost, source, product_repo) -> bool:
+def _promote_cost_from_rate(
+    product_id, prod, unit_cost, source, product_repo, deferred_releases=None
+) -> bool:
     """Fill a product's missing cost_price from an agreed line rate.
 
     ONE place for the two moments a purchase reveals a cost: the rate typed on
@@ -45,12 +47,21 @@ def _promote_cost_from_rate(product_id, prod, unit_cost, source, product_repo) -
             return False
     try:
         product_repo.update(product_id, {"cost_price": cost, "cost_source": source})
-        _pm.apply_restamp_atomic(
-            product_id, prod, {"cost_price": cost}, product_repo=product_repo
-        )
     except Exception as exc:  # noqa: BLE001 - a cost promote never blocks the PO/GRN
         logger.warning("[VENDOR] cost promote skipped for %s: %s", product_id, exc)
         return False
+    # The product editor's path (grn_accept.catalogue_write_done): restamp,
+    # mirror, close the asks, and -- the cost being its last gap -- release
+    # what receipts hold for it, ordered or not (panel P5).
+    try:
+        from .grn_accept import catalogue_write_done
+
+        catalogue_write_done(
+            product_id, prod, {"cost_price": cost}, product_repo=product_repo,
+            deferred_releases=deferred_releases,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("[VENDOR] finishing after cost promote failed for %s", product_id, exc_info=True)
     return True
 
 

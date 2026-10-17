@@ -290,8 +290,14 @@ export function buildApiError(
     // sits outside every server-side guard). So a STRING detail on a 503
     // survives; every other 5xx keeps the generic text so no internal error
     // message can leak to a user.
+    // A structured 503 ({code, message} -- e.g. CATALOGUE_UNREADABLE, "could
+    // not check the catalogue, so nothing was created") is the same deliberate
+    // stop: its message survives too, never "Server error" (R2-18).
+    const rawStop = error.response.status === 503 ? error.response?.data?.detail : undefined;
     const safeStopDetail =
-      error.response.status === 503 ? error.response?.data?.detail : undefined;
+      rawStop && typeof rawStop === 'object' && !Array.isArray(rawStop)
+        ? (rawStop as unknown as { message?: unknown }).message
+        : rawStop;
     message =
       typeof safeStopDetail === 'string' && safeStopDetail.trim()
         ? safeStopDetail
