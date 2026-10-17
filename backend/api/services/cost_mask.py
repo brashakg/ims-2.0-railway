@@ -197,7 +197,7 @@ _RECEIPT_LINE_COST_FIELDS = _ALL_MASKED | {"unit_price"}
 
 def mask_receipt(grn: dict, user: dict) -> dict:
     """The one rule on a goods receipt. To whom -- who sold it, the bill, the
-    bill photo, the accept lock -- is the "purchase" context: anyone else sees
+    bill photo, the accept lock -- is the "supplier" context: anyone else sees
     only _RECEIPT_KEYS / _RECEIPT_ITEM_KEYS. What was paid on each line (a
     "Bought without PO" receipt records it as `unit_price`) is the cost of the
     units it minted, so it is the "product" context, as every read of a unit's

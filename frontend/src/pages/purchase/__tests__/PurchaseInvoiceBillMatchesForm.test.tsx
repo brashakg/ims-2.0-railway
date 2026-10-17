@@ -385,6 +385,7 @@ describe('panel round 4 - every door hands its lines on, and the list follows th
         vendor_id: 'V1',
         po_id: null,
         grn_id: 'G9',
+        grn_subtype: 'NO_PO',
         grn_number: 'RCPT 0009',
         invoice_number: 'CASH-77',
         invoice_date: '2026-09-14',
@@ -408,6 +409,7 @@ describe('panel round 4 - every door hands its lines on, and the list follows th
       const drawer = within(screen.getByText('Invoice from GRN RCPT 0009').closest('.fixed') as HTMLElement);
       const supplier = drawer.getByDisplayValue('Mumbai Lens House') as HTMLSelectElement;
       expect(supplier.value).toBe('V1');
+      expect(drawer.queryByRole('switch', { name: /Reverse charge/ })).toBeNull();
       fireEvent.click(screen.getByRole('button', { name: /Book invoice/i }));
       await waitFor(() => expect(createCalls()).toHaveLength(1));
       expect(createCalls()[0][1]).toMatchObject({ vendor_id: 'V1', grn_id: 'G9', invoice_number: 'CASH-77' });

@@ -29,13 +29,14 @@ const api = vi.hoisted(() => ({
 
 const products = vi.hoisted(() => ({ getProducts: vi.fn() }));
 const cockpit = vi.hoisted(() => ({ uploadDoc: vi.fn() }));
+const auth = vi.hoisted(() => ({ role: 'ADMIN' }));
 
 vi.mock('../../../services/api', () => ({ vendorsApi: api }));
 vi.mock('../../../services/api/products', () => ({ productApi: products }));
 vi.mock('../../../services/api/grnCockpit', () => ({ grnCockpitApi: cockpit }));
 vi.mock('../../../context/ToastContext', () => ({ useToast: () => toastMock }));
 vi.mock('../../../context/AuthContext', () => ({
-  useAuth: () => ({ user: { activeStoreId: 'S1', roles: ['STORE_MANAGER'] } }),
+  useAuth: () => ({ user: { activeStoreId: 'S1', roles: [auth.role] } }),
 }));
 vi.mock('../../../components/print/GRNPrint', () => ({ GRNPrint: () => null }));
 vi.mock('../../../components/print/storeIdentity', () => ({
@@ -54,6 +55,7 @@ import { GoodsReceiptNote } from '../GoodsReceiptNote';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  auth.role = 'ADMIN';
   api.getGRNs.mockResolvedValue({ grns: [] });
   api.getPurchaseOrders.mockResolvedValue({ purchase_orders: [] });
   api.getVendors.mockResolvedValue({
@@ -73,6 +75,30 @@ beforeEach(() => {
 });
 
 describe('C7 / D14 - bought without a PO', () => {
+  it('a manager receives quantities with dealer and photo while accounts enters prices later', async () => {
+    auth.role = 'STORE_MANAGER';
+    render(<GoodsReceiptNote />);
+    await waitFor(() => expect(api.getGRNs).toHaveBeenCalled());
+    fireEvent.click(screen.getByLabelText(/Bought without (a )?PO/i, { selector: 'input' }));
+    await waitFor(() => expect(api.getVendors).toHaveBeenCalled());
+    fireEvent.change(screen.getByDisplayValue('Select the vendor…'), { target: { value: 'V-77' } });
+    fireEvent.change(screen.getByPlaceholderText(/Search a product to add/i), { target: { value: 'frame' } });
+    fireEvent.click(await screen.findByText('Acme Aviator'));
+    fireEvent.change(screen.getByLabelText('Quantity on line 1'), { target: { value: '2' } });
+    expect(screen.queryByLabelText(/Cost on line 1/i)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText(/Tally line 1/));
+    fireEvent.change(screen.getByLabelText(/Bill photo/i), {
+      target: { files: [new File(['memo'], 'cash-memo.png', { type: 'image/png' })] },
+    });
+    await screen.findByText(/Attached: cash-memo.png/);
+    fireEvent.click(screen.getByRole('button', { name: /Post GRN/i }));
+    await waitFor(() => expect(api.createGRN).toHaveBeenCalledTimes(1));
+    const body = api.createGRN.mock.calls[0][0];
+    expect(body).toMatchObject({ grn_subtype: 'NO_PO', vendor_id: 'V-77', attachment_file_id: 'F-BILL-1' });
+    expect(body.items[0].unit_price).toBeUndefined();
+    expect(body.items[0].received_qty).toBe(2);
+  });
+
   it('History names a walk-in purchase "Bought without PO", not "Unknown PO"', async () => {
     api.getGRNs.mockResolvedValue({
       grns: [

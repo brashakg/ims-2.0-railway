@@ -19,7 +19,7 @@ shared receiving gate, which #1165 narrows for every kind of receipt at once.)
 THE CONTRACT THESE TESTS PIN:
   * POST /vendors/grn with grn_subtype "NO_PO": no po_id; vendor_id (a supplier
     on file -- a typed dealer name alone is refused); vendor_invoice_no /
-    vendor_invoice_date optional; every line carries unit_price > 0 (the cost);
+    vendor_invoice_date optional; authorised receivers may enter unit_price > 0;
     expiry_date per line as on any receipt; the bill photo
     (attachment_file_id) is required, by the same document gate as a PO
     receipt. Stored as grn_subtype "NO_PO". A cost typed on a PO receipt's
@@ -347,7 +347,7 @@ def _seed_receipt(db, *, grn_id, subtype, status="ACCEPTED", vendor_id=DEALER, *
 
 
 def test_c7_bought_without_po_receipt_keeps_dealer_bill_photo_and_cost(world):
-    res = world["as_"](MANAGER).post("/vendors/grn", json=_no_po_body(world))
+    res = world["as_"](ADMIN).post("/vendors/grn", json=_no_po_body(world))
     assert res.status_code == 201, res.text
     grn = world["db"].grns.find_one({"grn_id": res.json()["grn_id"]}, {"_id": 0})
     assert grn["grn_subtype"] == "NO_PO"
@@ -525,17 +525,42 @@ def test_c7_every_supplier_the_quick_add_refuses_can_be_picked(world):
     assert {SHARMA, DEALER, "V-119"} <= ids and len(ids) == 122
 
 
-def test_c7_every_line_must_carry_its_cost(world):
+def test_c7_a_manager_receives_without_prices_and_accounts_enters_them(world):
     http = world["as_"](MANAGER)
     body = _no_po_body(world)
     del body["items"][0]["unit_price"]
-    refused = http.post("/vendors/grn", json=body)
-    assert refused.status_code == 422, refused.text
-    assert any(w in refused.text.lower() for w in ("cost", "price"))
-    assert world["db"].grns.count_documents({}) == 0
-
-    ok = http.post("/vendors/grn", json=_no_po_body(world))
+    # The other line injects a price a manager cannot enter; it is discarded.
+    ok = http.post("/vendors/grn", json=body)
     assert ok.status_code == 201, ok.text
+    grn_id = ok.json()["grn_id"]
+    stored = world["db"].grns.find_one({"grn_id": grn_id})
+    assert all(line.get("unit_price") is None for line in stored["items"])
+    assert stored["attachment_file_id"] and stored["vendor_id"] == DEALER
+    accepted = http.post(f"/vendors/grn/{grn_id}/accept")
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["grn_status"] == "ACCEPTED"
+    units = list(world["db"].stock_units.find({"grn_id": grn_id}))
+    assert len(units) == 5 and {u["status"] for u in units} == {"AVAILABLE"}
+    assert not any(u.get("unit_cost") for u in units)
+    visible = http.get(f"/vendors/grn/{grn_id}").json()
+    assert visible["vendor_id"] == DEALER and visible["attachment_file_id"]
+    assert all("unit_price" not in line for line in visible["items"])
+
+    draft = _run(pi.draft_invoice_from_grn(grn_id, current_user=ACCOUNTANT))
+    assert draft["grn_subtype"] == "NO_PO"
+    assert all(line["unit_price"] is None for line in draft["lines"])
+    unknown = _invoice_body(grn_id, "CASH-77")
+    for line in unknown.lines:
+        line.unit_price = 0
+    for door in (pi.preview_purchase_invoice, pi.create_purchase_invoice):
+        with pytest.raises(Exception) as err:
+            _run(door(unknown, current_user=ACCOUNTANT))
+        assert err.value.status_code == 422
+        assert err.value.detail["code"] == "INVOICE_PRICE_REQUIRED"
+    assert world["db"].vendor_bills.count_documents({}) == 0
+    booked = _run(pi.create_purchase_invoice(_invoice_body(grn_id, "CASH-77"), current_user=ACCOUNTANT))
+    assert booked["match_status"] == "MATCHED", booked
+    assert world["db"].products.find_one({"product_id": FRAME})["cost_price"] == 3100.0
 
 
 def test_c7_a_cost_must_be_a_real_price(world):
@@ -556,6 +581,43 @@ def test_c7_a_cost_must_be_a_real_price(world):
     assert res.status_code == 422, res.text
     assert world["db"].grns.count_documents({}) == 0
     assert http.get("/vendors/grn").status_code == 200
+
+
+@pytest.mark.parametrize("backed_by_po", [False, True])
+def test_consolidated_challans_require_unknown_supplier_prices(world, backed_by_po):
+    from fastapi import HTTPException
+
+    db = world["db"]
+    for index in (1, 2):
+        _seed_receipt(db, grn_id=f"DC-UNKNOWN-{index}", subtype="DELIVERY_CHALLAN",
+                      dc_number=f"DC-{index}", dc_matched=False,
+                      po_id=f"PO-DC-{index}" if backed_by_po else None,
+                      items=[{"product_id": FRAME, "received_qty": 2, "accepted_qty": 2,
+                              "unit_price": None}])
+        if backed_by_po:
+            db.purchase_orders.insert_one({
+                "po_id": f"PO-DC-{index}", "vendor_id": DEALER,
+                "items": [{"product_id": FRAME, "quantity": 2, "unit_price": None}],
+            })
+    draft = _run(pi.draft_invoice_from_dcs(
+        "DC-UNKNOWN-1,DC-UNKNOWN-2", vendor_id=DEALER, current_user=ACCOUNTANT))
+    assert draft["lines"][0]["qty"] == 4
+    assert draft["lines"][0]["unit_price"] is None
+    body = _invoice_body(None, "BULK-UNKNOWN")
+    body.linked_dc_ids = ["DC-UNKNOWN-1", "DC-UNKNOWN-2"]
+    body.lines[0].qty, body.lines[0].unit_price = 4, 0
+    for door in (pi.preview_purchase_invoice, pi.create_purchase_invoice):
+        with pytest.raises(HTTPException) as err:
+            _run(door(body, current_user=ACCOUNTANT))
+        assert err.value.status_code == 422
+        assert err.value.detail["code"] == "INVOICE_PRICE_REQUIRED"
+    assert db.vendor_bills.count_documents({}) == 0
+    # The pre-existing explicit taxable/free amount contract is preserved.
+    body.lines[0].taxable = 0
+    pi._assert_unpriced_po_bill(body, None, db)
+    body.lines[0].taxable, body.lines[0].unit_price = None, 3100
+    booked = _run(pi.create_purchase_invoice(body, current_user=ACCOUNTANT))
+    assert booked["total"] == 13020.0
 
 
 def _walk_in_body(world, **over):
@@ -996,7 +1058,7 @@ def test_c7_a_no_po_receipt_names_no_purchase_order(world):
 
 
 def test_c7_accept_puts_units_on_the_shelf_at_what_was_paid(world):
-    http = world["as_"](MANAGER)
+    http = world["as_"](ADMIN)
     created = http.post("/vendors/grn", json=_no_po_body(world))
     assert created.status_code == 201, created.text
     grn_id = created.json()["grn_id"]
@@ -1261,7 +1323,7 @@ def _bill_index(world):
 
 
 def _on_the_shelf(world, **over):
-    http = world["as_"](MANAGER)
+    http = world["as_"](ADMIN)
     created = http.post("/vendors/grn", json=_no_po_body(world, **over))
     assert created.status_code == 201, created.text
     grn_id = created.json()["grn_id"]
@@ -1686,21 +1748,21 @@ def test_c7_what_was_paid_has_one_visibility_rule(world, monkeypatch):
     roles = ("STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT", "ADMIN", "CATALOG_MANAGER", "SALES_STAFF")
     users = {role: {**MANAGER, "user_id": f"u-{role.lower()}", "roles": [role]} for role in roles}
     for role, user in users.items():
-        sees = expect(role, paid=can_see_cost(user, "product"), to_whom=can_see_cost(user, "purchase"))
+        sees = expect(role, paid=can_see_cost(user, "product"), to_whom=can_see_cost(user, "supplier"))
         assert prices(user) == sees, role
-    with monkeypatch.context() as narrowed:
-        narrowed.setitem(_CONTEXT_ROLES, "product", _CONTEXT_ROLES["product"] - {"STORE_MANAGER"})
-        assert prices(users["STORE_MANAGER"]) == expect("STORE_MANAGER", paid=False, to_whom=True)
-        assert prices(users["AREA_MANAGER"]) == expect("AREA_MANAGER", paid=True, to_whom=True)
-        assert prices(users["CATALOG_MANAGER"]) == expect("CATALOG_MANAGER", paid=True, to_whom=False)
-    monkeypatch.setitem(_CONTEXT_ROLES, "purchase", _CONTEXT_ROLES["purchase"] - {"STORE_MANAGER"})
-    assert prices(users["STORE_MANAGER"]) == expect("STORE_MANAGER", paid=True, to_whom=False)
+    # The one accounts-only policy controls both prices and product cost.
+    for context in ("product", "purchase"):
+        monkeypatch.setitem(_CONTEXT_ROLES, context, _CONTEXT_ROLES[context] - {"ACCOUNTANT"})
+    assert prices(users["ACCOUNTANT"]) == expect("ACCOUNTANT", paid=False, to_whom=True)
+    assert prices(users["ADMIN"]) == expect("ADMIN", paid=True, to_whom=True)
+    monkeypatch.setitem(_CONTEXT_ROLES, "supplier", _CONTEXT_ROLES["supplier"] - {"STORE_MANAGER"})
+    assert prices(users["STORE_MANAGER"]) == expect("STORE_MANAGER", paid=False, to_whom=False)
 
 
 def _walk_in_on_the_shelf(world):
     """A walk-in dealer's bill received and accepted; returns the receipt id
     and one minted frame unit's barcode."""
-    http = world["as_"](MANAGER)
+    http = world["as_"](ADMIN)
     created = http.post("/vendors/grn", json=_walk_in_body(world))
     assert created.status_code == 201, created.text
     grn_id = created.json()["grn_id"]
@@ -1751,7 +1813,7 @@ def test_c7_the_barcode_trace_shows_no_counter_what_was_paid(world):
         assert body["stock_unit"]["barcode"] == barcode
         assert body["purchase"][0]["grn_id"] == grn_id
         sees_unit_cost = can_see_cost(counter, "product")
-        assert sees_unit_cost == role.endswith("_MANAGER"), role  # owner ruling D7
+        assert sees_unit_cost is False, role  # all purchase costs are accounts-only
         assert bool({"unit_cost", "cost_price"} & set(body["stock_unit"])) == sees_unit_cost, (role, body)
         items = body["purchase"][0]["items"]
         assert items and all(("unit_price" in it) == sees_unit_cost for it in items), (role, body)
