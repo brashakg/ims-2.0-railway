@@ -90,9 +90,7 @@ async def accept_grn(
     wrapped so that a logging/secondary failure can never lose the stock that
     was already received.
     """
-    result = await _accept_grn_impl(grn_id, current_user)
-    _send_no_po_bill_to_accounts(grn_id, result)
-    return result
+    return await _accept_grn_impl(grn_id, current_user)
 
 
 def _raise_book_bill_task(grn_id, store_id, grn_number, kind, note, payload):
@@ -549,6 +547,7 @@ def _put_on_shelf(
     # The receipt's cost finished a draft mid-accept (gst._finished_by_the_promote):
     # its OTHER held receipts go on the shelf now that this claim is handed back.
     release_finished_meanwhile(grn_repo, grn_id, deferred_releases)
+    _send_no_po_bill_to_accounts(grn_id, result)
     return result
 
 

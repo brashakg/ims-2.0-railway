@@ -1192,8 +1192,13 @@ def test_c7_no_bill_task_until_the_receipt_put_something_on_the_shelf(world):
     assert part.json()["grn_status"] == "PARTIALLY_ACCEPTED", part.text
     assert world["db"].tasks.count_documents({}) == 0
     world["db"].products.insert_one({**_frame(new_frame, 900.0), "name": "Acme Round 1"})
-    rest = http.post(f"/vendors/grn/{grn_id}/accept")
-    assert rest.json()["grn_status"] == "ACCEPTED", rest.text
+    from api.routers.vendors.grn_accept import release_held_receipts
+
+    # Completing the catalogue releases the held line without another manual
+    # acceptance. That shared completion must still tell Accounts to bill it.
+    released = release_held_receipts(new_frame)
+    assert len(released) == 1 and released[0]["grn_status"] == "ACCEPTED", released
+    assert release_held_receipts(new_frame) == []
     assert [t.get("link") for t in world["db"].tasks.find({})] == [f"/purchase/invoices/book?grn_id={grn_id}"]
 
 
@@ -2443,6 +2448,11 @@ def test_unpriced_receipt_last_paid_uses_only_one_verified_booked_price(world):
         pi._bought_since(db, FRAME, "2026-09-01T00:00:00")
     quoted = world["as_"](ADMIN).get("/vendors/last-cost", params={"vendor_id": DEALER, "product_ids": FRAME})
     assert quoted.json()["costs"] == {}
+    _seed_receipt(db, grn_id="G-OLDER", subtype="NO_PO", accepted_at="2026-09-01T10:00:00")
+    _minted(db, "G-OLDER", 3100)
+    db.products.update_one({"product_id": FRAME}, {"$set": {"cost_price": 3300}})
+    _run(pi.create_purchase_invoice(_invoice_body("G-OLDER", "OLDER-LATE"), current_user=ACCOUNTANT))
+    assert db.products.find_one({"product_id": FRAME})["cost_price"] == 3300
 
 
 def test_g1_a_later_receipt_that_paid_no_price_leaves_the_walk_in_the_latest(world):
