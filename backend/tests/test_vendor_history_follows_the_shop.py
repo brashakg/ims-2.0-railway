@@ -95,7 +95,11 @@ def test_another_shops_orders_are_not_in_the_vendors_purchase_history(call, user
     r = call(user, "/vendors/V1/purchase-history")
     assert r.status_code == 200, r.text
     body = r.json()
-    assert (body["total_pos"], body["total_spend"]) == (0, 0.0), body
+    assert body["total_pos"] == 0, body
+    if user["roles"][0] == "ACCOUNTANT":
+        assert body["total_spend"] == 0.0
+    else:
+        assert "total_spend" not in body
     assert body["monthly"] == [] and body["top_products"] == []
 
 
@@ -111,7 +115,14 @@ def test_another_shops_receipts_and_qc_are_not_in_the_scorecard(call, user):
                          ids=lambda u: f"{u['roles'][0]}-{u['active_store_id']}")
 def test_the_own_shop_and_an_admin_read_it(call, user):
     hist = call(user, "/vendors/V1/purchase-history").json()
-    assert (hist["total_pos"], hist["total_spend"]) == (1, 1000.0), hist
+    assert hist["total_pos"] == 1, hist
+    if user["roles"][0] == "STORE_MANAGER":
+        assert "total_spend" not in hist
+        assert all("spend" not in row for row in hist["monthly"] + hist["top_products"])
+        assert hist["top_products"][0]["units"] == 2
+    else:
+        assert hist["total_spend"] == 1000.0
+        assert hist["monthly"][0]["spend"] == hist["top_products"][0]["spend"] == 1000.0
     perf = call(user, "/vendors/V1/performance").json()
     assert perf["grns_evaluated"] == 1 and perf["qc_sample_size"] == 3, perf
 
