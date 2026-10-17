@@ -1231,9 +1231,15 @@ def test_concurrent_retry_restock_mints_exactly_one_unit(monkeypatch):
 
         def __init__(self):
             self.db = self
+            self.orders = _FakeColl()
+            self.orders.insert_one({
+                "order_id": "ORD-1", "store_id": "BV-PUN-01",
+                "historical": False, "status": "DELIVERED",
+                "items": [{"item_id": "li1", "product_id": "PRD-1", "quantity": 1}],
+            })
 
         def get_collection(self, name):
-            return {"returns": returns_coll}.get(name, _FakeColl())
+            return {"returns": returns_coll, "orders": self.orders}.get(name, _FakeColl())
 
     fake_db = _FakeDB()
     monkeypatch.setattr(returns_router, "get_stock_repository", lambda: stock_repo)

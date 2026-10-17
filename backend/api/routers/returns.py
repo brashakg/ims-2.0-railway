@@ -1883,8 +1883,8 @@ def _order_fulfilment_stores(
 
 
 def _load_order_for_restock(order_id: Optional[str]) -> Optional[Dict[str, Any]]:
-    """Fetch the original order ONLY on the online-store branch (so the ordinary
-    in-store restock does no extra work). Fail-soft -> None."""
+    """Fetch the original sale for routing and historical-stock safeguards.
+    An unreadable parent is unknown, never proof of an ordinary stock sale."""
     if not order_id:
         return None
     try:
