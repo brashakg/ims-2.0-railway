@@ -1363,8 +1363,9 @@ def _admits(call):
 # card's month-to-date bill total (/{vendor_id}/performance). Their route gate
 # admits the store / area manager (a PO is theirs to chase); the bill money in
 # them is the payables rule's alone.
-_BILL_TOTAL = 8888.88
-_MTD_TOTAL = 6666.66
+# One figure: a bill's `total` and `total_amount` both mean what the supplier
+# is owed (ap_engine.vendor_payable), which every one of these reads prints.
+_BILL_TOTAL = _MTD_TOTAL = 8888.88
 
 
 class _Cursor(list):
