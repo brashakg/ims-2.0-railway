@@ -525,7 +525,8 @@ def test_c7_every_supplier_the_quick_add_refuses_can_be_picked(world):
     assert {SHARMA, DEALER, "V-119"} <= ids and len(ids) == 122
 
 
-def test_c7_a_manager_receives_without_prices_and_accounts_enters_them(world):
+@pytest.mark.parametrize("taxable", [None, 0])
+def test_c7_a_manager_receives_without_prices_and_accounts_enters_them(world, taxable):
     http = world["as_"](MANAGER)
     body = _no_po_body(world)
     del body["items"][0]["unit_price"]
@@ -552,6 +553,7 @@ def test_c7_a_manager_receives_without_prices_and_accounts_enters_them(world):
     unknown = _invoice_body(grn_id, "CASH-77")
     for line in unknown.lines:
         line.unit_price = 0
+        line.taxable = taxable
     for door in (pi.preview_purchase_invoice, pi.create_purchase_invoice):
         with pytest.raises(HTTPException) as err:
             _run(door(unknown, current_user=ACCOUNTANT))
@@ -591,7 +593,8 @@ def test_c7_a_cost_must_be_a_real_price(world):
 
 
 @pytest.mark.parametrize("backed_by_po", [False, True])
-def test_consolidated_challans_require_unknown_supplier_prices(world, backed_by_po):
+@pytest.mark.parametrize("taxable", [None, 0])
+def test_consolidated_challans_require_unknown_supplier_prices(world, backed_by_po, taxable):
     from fastapi import HTTPException
 
     db = world["db"]
@@ -613,14 +616,15 @@ def test_consolidated_challans_require_unknown_supplier_prices(world, backed_by_
     body = _invoice_body(None, "BULK-UNKNOWN")
     body.linked_dc_ids = ["DC-UNKNOWN-1", "DC-UNKNOWN-2"]
     body.lines[0].qty, body.lines[0].unit_price = 4, 0
+    body.lines[0].taxable = taxable
     for door in (pi.preview_purchase_invoice, pi.create_purchase_invoice):
         with pytest.raises(HTTPException) as err:
             _run(door(body, current_user=ACCOUNTANT))
         assert err.value.status_code == 422
         assert err.value.detail["code"] == "INVOICE_PRICE_REQUIRED"
     assert db.vendor_bills.count_documents({}) == 0
-    # The pre-existing explicit taxable/free amount contract is preserved.
-    body.lines[0].taxable = 0
+    # An explicitly entered positive line amount supplies the missing price.
+    body.lines[0].taxable = 12400
     pi._assert_unpriced_po_bill(body, None, db)
     body.lines[0].taxable, body.lines[0].unit_price = None, 3100
     booked = _run(pi.create_purchase_invoice(body, current_user=ACCOUNTANT))
