@@ -510,7 +510,7 @@ def release_finished_meanwhile(grn_repo, grn_id: str, also=()) -> None:
                 if ln.get("reason") != "incomplete_catalog":
                     continue
                 now_prod = product_repo.find_by_id(ln.get("product_id"))
-                if now_prod is not None and not _pm.compute_catalog_status(now_prod)[1]:
+                if now_prod is not None and not _pm.gaps_before_cost(now_prod):
                     pids.append(ln["product_id"])
     except Exception:  # noqa: BLE001
         logger.warning("[VENDOR] GRN %s: finished-meanwhile check failed", grn_id, exc_info=True)
@@ -1558,7 +1558,7 @@ def catalogue_write_done(
     except Exception:  # noqa: BLE001
         logger.warning("[CATALOGUE] catalog mirror after a write skipped for %s", product_id, exc_info=True)
     close_catalogue_asks(product_id, "The item is catalogued.")
-    if _pm.compute_catalog_status({**(current or {}), **patch, **fields})[1]:
+    if _pm.gaps_before_cost({**(current or {}), **patch, **fields}):
         return fields, 0
     if deferred_releases is not None:
         deferred_releases.append(product_id)

@@ -5864,6 +5864,32 @@ def _held(world, gid):
     ]
 
 
+@pytest.mark.parametrize("release_trigger", ["catalogue_save", "claim_returned"])
+def test_unpriced_catalogue_completion_releases_held_goods_within_po_cap(
+    world, monkeypatch, release_trigger
+):
+    from api.routers.vendors import grn_accept as _ga
+
+    po, first, pid = world.order_and_receive(BOSS_TYPED, qty=2, cost=0)
+    second, _ = _receive_some(world, po, {pid: 2}, "JOT/26-27/UNPRICED-SECOND")
+    if release_trigger == "claim_returned":
+        # The receipt's claim is busy when the catalogue save tries to release.
+        # Returning that claim must retry even though the vendor's cost is pending.
+        with monkeypatch.context() as busy:
+            busy.setattr(_ga, "release_held_receipts", lambda _pid: [])
+            world.finish_draft(pid, offer=2790)
+        assert world.units(pid) == []
+        _ga.release_finished_meanwhile(_deps.get_grn_repository(), first["grn_id"])
+    else:
+        world.finish_draft(pid, offer=2790)
+
+    assert _pm.compute_catalog_status(world.product(pid))[1] == ["cost_price"]
+    assert len(world.units(pid)) == 2
+    assert world.grn(first["grn_id"])["status"] == "ACCEPTED"
+    assert world.grn(second["grn_id"])["status"] == "PARTIALLY_ACCEPTED"
+    assert _held(world, second["grn_id"]) == [(pid, "over_order", 2)]
+
+
 @pytest.mark.parametrize("exit_", ["count_read_once", "heartbeat", "order_cap_read", "duplicate_key"])
 def test_r11_every_way_out_of_a_release_that_dies_records_what_it_holds(world, monkeypatch, exit_):
     # The panel's probe: D x2 and E x1 held on one receipt, D finished. The
