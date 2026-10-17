@@ -42,6 +42,8 @@ from api.services import shiprocket  # noqa: E402
 from api.services.delivery_gate import cod_collectable  # noqa: E402
 from tests.test_delivery_money_gate import (  # noqa: E402
     _order,
+    # Register the shared autouse fixture: prepaid credit uses real persistence.
+    _reset_approval_engine,  # noqa: F401
     _ship_client,
     _ship_token,
 )
