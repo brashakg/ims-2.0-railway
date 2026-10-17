@@ -294,6 +294,17 @@ async def create_vendor_bill(
             _dc_receipt = dc_docs[0] if dc_docs else None
         else:
             assert_grn_billable_header_only(db_early, bill.grn_id, vendor_id)
+        if (linked or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO:
+            from ...services.purchase_invoice_engine import lines_from_grn
+
+            if any(line.get("unit_price") is None for line in lines_from_grn(linked, None)):
+                raise HTTPException(status_code=422, detail={
+                    "code": "INVOICE_PRICE_REQUIRED",
+                    "message": (
+                        "This receipt has unpriced items. Open Purchase > Invoices > "
+                        "Create from GRN and enter each supplier price before booking the bill."
+                    ),
+                })
 
     # Duplicate bill guard: THE same-bill rule (purchase_invoices.
     # find_duplicate_bill -> purchase_invoice_engine.same_bill), the one the

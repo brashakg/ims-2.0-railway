@@ -58,7 +58,7 @@ os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("MONGODB_URI", "")
 
 import pytest  # noqa: E402
-from fastapi import FastAPI  # noqa: E402
+from fastapi import FastAPI, HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -553,10 +553,14 @@ def test_c7_a_manager_receives_without_prices_and_accounts_enters_them(world):
     for line in unknown.lines:
         line.unit_price = 0
     for door in (pi.preview_purchase_invoice, pi.create_purchase_invoice):
-        with pytest.raises(Exception) as err:
+        with pytest.raises(HTTPException) as err:
             _run(door(unknown, current_user=ACCOUNTANT))
         assert err.value.status_code == 422
         assert err.value.detail["code"] == "INVOICE_PRICE_REQUIRED"
+    with pytest.raises(HTTPException) as err:
+        _header_bill(grn_id, "CASH-77", "2026-09-14")
+    assert err.value.status_code == 422
+    assert err.value.detail["code"] == "INVOICE_PRICE_REQUIRED"
     assert world["db"].vendor_bills.count_documents({}) == 0
     booked = _run(pi.create_purchase_invoice(_invoice_body(grn_id, "CASH-77"), current_user=ACCOUNTANT))
     assert booked["match_status"] == "MATCHED", booked
@@ -1751,8 +1755,8 @@ def test_c7_what_was_paid_has_one_visibility_rule(world, monkeypatch):
         sees = expect(role, paid=can_see_cost(user, "product"), to_whom=can_see_cost(user, "supplier"))
         assert prices(user) == sees, role
     # The one accounts-only policy controls both prices and product cost.
-    for context in ("product", "purchase"):
-        monkeypatch.setitem(_CONTEXT_ROLES, context, _CONTEXT_ROLES[context] - {"ACCOUNTANT"})
+    from api.services import cost_mask
+    monkeypatch.setattr(cost_mask, "COST_VISIBLE_ROLES", cost_mask.COST_VISIBLE_ROLES - {"ACCOUNTANT"})
     assert prices(users["ACCOUNTANT"]) == expect("ACCOUNTANT", paid=False, to_whom=True)
     assert prices(users["ADMIN"]) == expect("ADMIN", paid=True, to_whom=True)
     monkeypatch.setitem(_CONTEXT_ROLES, "supplier", _CONTEXT_ROLES["supplier"] - {"STORE_MANAGER"})
