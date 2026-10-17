@@ -41,7 +41,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 # Every product field discontinued() reads. A reader that projects products
 # asks for all of these, or the rule judges a doc missing half its facts.
-DISCONTINUED_FIELDS = ("is_active", "provisional", "switched_on_at", "deleted_at")
+DISCONTINUED_FIELDS = (
+    "is_active", "provisional", "bought_before_catalogued", "switched_on_at", "deleted_at",
+)
 
 
 def discontinued(product: Any) -> bool:
@@ -54,16 +56,21 @@ def discontinued(product: Any) -> bool:
     inactive and must not read 'Discontinued'. `provisional` is never
     cleared, so the two facts that end 'new' are read instead: switched_on_at
     (ProductRepository.update stamps it whenever a door writes is_active True;
-    every spine door writes through it) and deleted_at (the catalog DELETE
-    stamps it on the spine). catalog_status is NOT one of them: the
+    every spine door writes through it; the restamp that switches a finished
+    draft on stamps it too) and deleted_at (the catalog DELETE stamps it on
+    the spine). Finishing an ordered draft clears `provisional` (PR #1171) and
+    stamps `bought_before_catalogued` instead, which this rule reads alike. catalog_status is NOT one of them: the
     catalogue restamp moves it without switching anything on.
     ponytail: a provisional product never switched on whose is_active False is
     merely re-sent still reads new (nothing tells that write from an edit
     that left the toggle alone); deleting it is what retires it."""
     if not isinstance(product, dict) or product.get("is_active") is not False:
         return False
+    # A PO-door buy: `provisional` while it is an ordered draft, and
+    # `bought_before_catalogued` once finishing it has cleared `provisional`
+    # (product_master.restamp_on_update, PR #1171) -- set once, never cleared.
     still_new = (
-        bool(product.get("provisional"))
+        bool(product.get("provisional") or product.get("bought_before_catalogued"))
         and not product.get("switched_on_at")
         and not product.get("deleted_at")
     )

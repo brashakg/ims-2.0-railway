@@ -49,6 +49,9 @@ from fastapi import HTTPException  # noqa: E402
 
 from api.routers import vendors as vd  # noqa: E402
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from strict_fakes import matches  # noqa: E402
+
 
 _ADMIN = {"user_id": "u-admin", "username": "admin", "roles": ["ADMIN"]}
 
@@ -137,6 +140,10 @@ class _FakeGrnColl:
             if self.doc.get(key) != val:
                 return False
         return True
+
+    def count_documents(self, flt):
+        # The order cap counts the order's OTHER receipts going into stock.
+        return 1 if self._matches(flt) else 0
 
     def find_one_and_update(self, flt, update):
         self.calls += 1
@@ -321,16 +328,12 @@ class _StockRepo:
         return row
 
     def count(self, flt):
-        return sum(
-            1 for r in self.rows if all(r.get(k) == v for k, v in (flt or {}).items())
-        )
+        # The real matcher: the router's counts use $or (_received_on), which
+        # a field-equality stand-in would silently answer 0 for.
+        return sum(1 for r in self.rows if matches(r, flt))
 
     def find_many(self, flt, *a, **k):
-        return [
-            dict(r)
-            for r in self.rows
-            if all(r.get(k) == v for k, v in (flt or {}).items())
-        ]
+        return [dict(r) for r in self.rows if matches(r, flt)]
 
 
 def _grn(status="PENDING", qty=5, **extra):
@@ -1816,7 +1819,8 @@ def test_accept_wedged_before_the_first_unit_mints_nothing_after_a_takeover(
                     seconds=vd._GRN_ACCEPT_LOCK_STALE_SECONDS + 100
                 )
                 voided["out"] = _run(vd.void_grn("GRN-1", _ADMIN))
-            return {"po_id": "PO-1", "items": []}
+            # The order the receipt was made against: P1 x24.
+            return {"po_id": "PO-1", "items": [{"product_id": "P1", "quantity": 24}]}
 
         def update(self, *a, **k):
             return True

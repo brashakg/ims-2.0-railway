@@ -78,6 +78,9 @@ export interface Task {
   category: string;
   completionNotes?: string;
   attachment?: { file_id?: string; filename?: string; mime_type?: string } | null;
+  /** In-app page where the work is done (a system task's `link`, e.g. a held
+   *  receipt's items in Catalogue > Needs review). Only a same-app path. */
+  link?: string;
   /** In-app pages the task points at (e.g. each flagged product's edit page). */
   links?: Array<{ label: string; to: string }>;
 }
@@ -136,13 +139,27 @@ export function normaliseTask(t: Record<string, any>): Task {
     category: t.category || 'ADHOC',
     completionNotes: t.completion_notes,
     attachment: t.attachment || null,
-    // Only in-app addresses: a link off the app is never rendered.
+    link: sameAppPath(t.link),
+    // Only in-app addresses (sameAppPath, the one rule): a link off the app
+    // is never rendered.
     links: Array.isArray(t.links)
       ? t.links
-          .filter((l: any) => l && typeof l.to === 'string' && l.to.startsWith('/') && !l.to.startsWith('//'))
+          .filter((l: any) => l && sameAppPath(l.to))
           .map((l: any) => ({ label: String(l.label || l.to), to: String(l.to) }))
       : [],
   };
+}
+
+/** A task's link is rendered only as a path inside this app: one leading
+ *  slash, then no second slash or backslash (browsers read `/\host` as
+ *  `//host`), and no control characters (which browsers strip). */
+function sameAppPath(link: unknown): string | undefined {
+  if (typeof link !== 'string' || !link.startsWith('/')) return undefined;
+  const second = link.charAt(1);
+  if (second === '/' || second === '\\') return undefined;
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(link)) return undefined;
+  return link;
 }
 
 // --- queries ---------------------------------------------------------------

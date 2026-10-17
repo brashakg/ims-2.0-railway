@@ -86,6 +86,7 @@ import {
   docImages,
   docMrp,
   docOffer,
+  isOrderedDraft,
   type CatalogDrawerItem,
 } from './CatalogProductDrawer';
 import { writeReviewQueue } from './reviewQueue';
@@ -428,7 +429,13 @@ export function CatalogManagerPage({
         });
         const docs = (res?.products || []) as unknown as Array<Record<string, unknown>>;
         show(
-          docs.map((doc) => ({ kind: 'imported' as const, doc })),
+          docs.map((doc) =>
+            // A manager's typed-in draft (audit C1) already HAS its billing
+            // row: it opens in the product editor, never the import approve.
+            isOrderedDraft(doc)
+              ? { kind: 'spine' as const, doc: { ...doc, product_id: doc.spine_product_id } }
+              : { kind: 'imported' as const, doc }
+          ),
           Number(res?.total ?? docs.length)
         );
       }
@@ -614,7 +621,10 @@ export function CatalogManagerPage({
 
   // On Needs review a tick is for Approve, and an archived row is never
   // approved (only Restore brings it back): it gets no tick box.
-  const canTick = (it: CatalogDrawerItem) => segment !== 'review' || !it.doc.deleted_at;
+  // In Needs review a tick is for the bulk approve: never an archived row,
+  // nor an ordered draft (finished in the product editor, never approved).
+  const canTick = (it: CatalogDrawerItem) =>
+    segment !== 'review' || (!it.doc.deleted_at && !isOrderedDraft(it.doc));
   const tickable = items.filter(canTick);
   const pageIds = tickable.map((it) => docId(it.doc)).filter(Boolean);
   const allOnPage = pageIds.length > 0 && pageIds.every((id) => selected.has(id));
@@ -851,8 +861,10 @@ export function CatalogManagerPage({
         >
           <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
           <span className="text-sm text-amber-800">
-            <span className="font-semibold">{reviewCount.toLocaleString('en-IN')}</span> imported
-            product{reviewCount === 1 ? ' is' : 's are'} waiting for review
+            {/* Imports AND items a manager ordered before they were catalogued
+                (audit C1, R1-99): the queue is not only imports any more. */}
+            <span className="font-semibold">{reviewCount.toLocaleString('en-IN')}</span> product
+            {reviewCount === 1 ? ' is' : 's are'} waiting for review
           </span>
           <span className="ml-auto text-sm font-medium text-amber-700 underline">Review now</span>
         </Link>
@@ -865,7 +877,7 @@ export function CatalogManagerPage({
             Catalog
           </NavLink>
           <NavLink to="/catalog/review" className={({ isActive }) => segmentLink(isActive)}>
-            Needs review — imported
+            Needs review
             {reviewCount > 0 && (
               <span className="inline-flex items-center justify-center rounded-full bg-amber-500 px-1.5 py-px text-[10px] font-semibold text-white min-w-[1.25rem]">
                 {reviewCount > 999 ? '999+' : reviewCount}
@@ -1010,7 +1022,8 @@ export function CatalogManagerPage({
                   const mrp = docMrp(doc);
                   const offer = docOffer(doc);
                   const hasDiscount = mrp !== null && offer !== null && offer < mrp;
-                  const inactive = doc.is_active === false;
+                  const orderedDraft = isOrderedDraft(doc);
+                  const inactive = doc.is_active === false && !orderedDraft;
                   const needsReview = it.kind === 'imported' && Boolean(doc.needs_review);
                   const hasPhoto = doc.has_photo as boolean | undefined;
                   const online = doc.online as OnlineState | undefined;
@@ -1065,6 +1078,10 @@ export function CatalogManagerPage({
                             {needsReview ? (
                               <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">
                                 <AlertTriangle className="h-3 w-3" /> Needs review
+                              </span>
+                            ) : orderedDraft ? (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700">
+                                <AlertTriangle className="h-3 w-3" /> Ordered — finish it
                               </span>
                             ) : doc.deleted_at ? (
                               <span className="inline-flex items-center rounded-full bg-gray-200 px-2 py-0.5 text-[10px] font-medium text-gray-700">
