@@ -252,10 +252,27 @@ def _itc_match(shops, entity_id, store_gstin, year, mon, last_day, db=None) -> d
     """Table 4: the bills _placement puts on this GSTIN's return that carry
     input credit -- every ITC read (the return, its GSTIN slice, the
     Cross-Check's count of credit left off every return) is built from it."""
-    return {
+    match = {
         **_placement(shops, entity_id, store_gstin, year, mon, last_day, db),
         "itc_eligible": {"$ne": False},
     }
+    if db is not None:
+        # Legacy bills may predate itc_eligible. A supplier GSTIN recorded as
+        # invalid is positive evidence that forward-charge credit is not
+        # claimable, even when that flag is absent. Use the shared validator;
+        # never replace a recorded value with today's vendor master. Bills
+        # predating the GSTIN field keep their existing legacy handling.
+        invalid = []
+        for bill in db["vendor_bills"].find(match, {"vendor_gstin": 1}):
+            if "vendor_gstin" in bill and not has_valid_gstin(bill["vendor_gstin"]):
+                if bill["vendor_gstin"] not in invalid:
+                    invalid.append(bill["vendor_gstin"])
+        if invalid:
+            match["$nor"].append({
+                "vendor_gstin": {"$exists": True, "$in": invalid},
+                "reverse_charge": {"$ne": True},
+            })
+    return match
 
 
 def _gstin_bound(shops, store_gstin) -> dict:

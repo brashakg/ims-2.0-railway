@@ -2590,6 +2590,29 @@ def _placed_bill(db, bill_id, **over):
     db.vendor_bills.insert_one(doc)
 
 
+@pytest.mark.parametrize("recorded_gstin", [None, "NA", "88ABCDE1234F1Z5"])
+def test_g3_legacy_invalid_supplier_credit_is_excluded_but_visible(world, recorded_gstin):
+    from api.routers.reports.gst_itc import _itc_unplaced
+
+    db = world["db"]
+    # The supplier master is registered: its current value must not replace
+    # an invalid GSTIN actually recorded on this old bill.
+    _placed_bill(db, "LEGACY-INVALID", vendor_gstin=recorded_gstin)
+    db.vendor_bills.update_one({"bill_id": "LEGACY-INVALID"}, {"$unset": {"itc_eligible": ""}})
+    _placed_bill(db, "VALID", itc_eligible=True)
+    _placed_bill(db, "RCM", vendor_gstin=recorded_gstin, reverse_charge=True, itc_eligible=True)
+
+    data, portal = _three_b(world)
+    assert data["itcAvailable"]["centralTax"] == 50.0
+    assert data["itcAvailable"]["stateTax"] == 50.0
+    assert data["inwardExemptNilNonGst"] == {"interState": 0.0, "intraState": 1050.0}
+    rows = {row["ty"]: row for row in portal["itc_elg"]["itc_avl"]}
+    assert (rows["OTH"]["camt"], rows["OTH"]["samt"]) == (25.0, 25.0)
+    assert (rows["ISRC"]["camt"], rows["ISRC"]["samt"]) == (25.0, 25.0)
+    flagged = _itc_unplaced(db, 2026, 9, 30, ENTITY)
+    assert (flagged["count"], flagged["tax"], flagged["bill_numbers"]) == (1, 50.0, ["LEGACY-INVALID"])
+
+
 def test_g3_each_bill_lands_in_one_table_on_its_own_return(world):
     """Panel mutants (round 8) the single-shop, single-GSTIN G3 tests let
     live: Table 5 / 4(D) read through a GSTIN-blind copy of the placement;
