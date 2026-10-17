@@ -708,7 +708,8 @@ def build_crosscheck(
                     "%d booked bill(s) carry input credit that IMS left off every "
                     "GSTIN's GSTR-3B: the bill has no company, no tax heads, no "
                     "date written YYYY-MM-DD (listed every month), or our GST "
-                    "number on it is no shop's. IMS cannot edit a booked bill. "
+                    "number on it is no shop's, or its recorded supplier GSTIN "
+                    "is invalid. IMS cannot edit a booked bill. "
                     "The GSTR-3B figures on this screen already exclude this "
                     "credit; on the GST portal, claim it in Table 4 only if "
                     "your accountant confirms it belongs on that month's return: %s"
@@ -724,7 +725,8 @@ def build_crosscheck(
             comparisons.append(
                 _cmp_row(
                     "Input credit from suppliers with no GSTIN",
-                    {"Claimed on GSTR-3B": _f(unreg.get("tax")), "Expected": 0.0},
+                    {("Credit flagged in books" if unreg.get("excluded_bill_numbers") else "Claimed on GSTR-3B"):
+                     _f(unreg.get("tax")), "Expected": 0.0},
                     0.0,
                     note=_unregistered_note(unreg) if k else "Every claimed bill names a registered supplier.",
                 )
@@ -794,29 +796,40 @@ def _unregistered_note(unreg: dict) -> str:
     mirrors = [str(x) for x in (unreg.get("transfer_bill_numbers") or [])]
     skip = set(mirrors)
     own = [str(x) for x in (unreg.get("bill_numbers") or []) if str(x) not in skip]
+    excluded = {str(x) for x in (unreg.get("excluded_bill_numbers") or [])}
+
+    def position(names):
+        omitted = [n for n in names if n in excluded]
+        if len(omitted) == len(names):
+            return "IMS already excludes this credit from GSTR-3B on this screen. "
+        if not omitted:
+            return "IMS counted this credit in the GSTR-3B figure on this screen. "
+        return ("IMS already excludes these bills from GSTR-3B: " + ", ".join(omitted[:20])
+                + ". The other listed bills still count in the return. ")
+
     parts = []
     if own:
         parts.append(
-            "%d bill(s) were booked before IMS refused input credit without a "
+            f"{len(own)} bill(s) were booked before IMS refused input credit without a "
             "valid supplier GSTIN: they name none, and an unregistered "
             "supplier's tax never reaches GSTR-2B, so it cannot be claimed. "
-            "IMS counted this credit in the GSTR-3B figure on this screen. "
+            + position(own) +
             "IMS cannot edit or cancel a booked bill, and booking the same "
             "supplier invoice again would claim its credit twice, so do not "
             "book it again. On the GST portal, leave this credit out of "
             "Table 4 of the GSTR-3B you file. Bills booked from now on with "
             "no valid supplier GSTIN are marked no-credit by IMS "
-            "automatically: %s" % (len(own), ", ".join(own[:20]))
+            f"automatically: {', '.join(own[:20])}"
         )
     if mirrors:
         parts.append(
-            "%d stock-transfer bill(s) were made by the system when a transfer "
+            f"{len(mirrors)} stock-transfer bill(s) were made by the system when a transfer "
             "was received, and the sending shop has no GST number of its "
             "company, so IMS set the head from the two shops' GST numbers "
-            "with no sender registration. They do not appear in Purchase "
+            "with no sender registration. " + position(mirrors) + "They do not appear in Purchase "
             "Invoices and cannot be booked again. Add the sending shop's "
             "company registration in Organization (left menu) so later transfers "
             "carry one; on the GST portal, leave this credit out of Table 4 "
-            "of the GSTR-3B you file: %s" % (len(mirrors), ", ".join(mirrors[:20]))
+            f"of the GSTR-3B you file: {', '.join(mirrors[:20])}"
         )
     return " ".join(parts)

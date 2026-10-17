@@ -535,24 +535,23 @@ _DOOR_COST_KEYS = {
     ],
     "TSC-2": ["cost_price", "unit_cost"],
 }
-# Who keeps cost on these replies: the accounts roles and the managers
-# (cost_mask's "product" context -- #1161), never the counter.
-COST_ROLES = ["ADMIN", "ACCOUNTANT", "STORE_MANAGER", "AREA_MANAGER", "CATALOG_MANAGER"]
+# The approved purchase-cost rule applies to unit and product scan replies.
+COST_ROLES = ["SUPERADMIN", "ADMIN", "ACCOUNTANT"]
+NON_COST_ROLES = COUNTER_ROLES + ["STORE_MANAGER", "AREA_MANAGER", "CATALOG_MANAGER"]
 
 
 @pytest.mark.parametrize("role", COST_ROLES)
 @pytest.mark.parametrize("url,finding", _SCAN_DOORS)
 def test_cost_roles_keep_every_cost_key_on_the_scan_reply(client, till, url, finding, role):
-    """Guard for the fix: only counter roles lose cost (the owner's ask);
-    admins, accountants and managers keep every key, unit AND product."""
+    """Administrators and Accounts keep every cost key, unit AND product."""
     r = client.get(url, headers=_token([role]))
     assert r.status_code == 200, r.text
     assert sorted(_cost_keys_in(r.json())) == sorted(_DOOR_COST_KEYS[finding]), finding
 
 
-@pytest.mark.parametrize("role", COUNTER_ROLES)
+@pytest.mark.parametrize("role", NON_COST_ROLES)
 @pytest.mark.parametrize("url,finding", _SCAN_DOORS)
-def test_counter_scan_reply_carries_no_cost_and_is_otherwise_unchanged(
+def test_non_cost_scan_reply_carries_no_cost_and_is_otherwise_unchanged(
     client, till, url, finding, role
 ):
     admin = client.get(url, headers=_token(["ADMIN"]))

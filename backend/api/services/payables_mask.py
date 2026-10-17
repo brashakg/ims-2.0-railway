@@ -194,6 +194,8 @@ INPUT_TAX_KEYS = frozenset({
     # GET /finance/gst/summary
     "gst_input_credit",
     "gst_input_credit_excluded",
+    "gst_input_credit_carried_forward",
+    "reverse_charge_tax",
     "net_gst_payable",
     "tax_paid",
     "net_gst_liability",
@@ -203,6 +205,9 @@ INPUT_TAX_KEYS = frozenset({
     "itcAvailable",
     "itcAvailableRegular",
     "itcAvailableGstin",
+    "itcReverseCharge",
+    "itcIneligible",
+    "inwardExemptNilNonGst",
     "itcUtilized",
     "inwardSuppliesReverseChargeValue",
     "inwardSuppliesReverseCharge",

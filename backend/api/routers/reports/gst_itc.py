@@ -435,7 +435,7 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
     Scoped to `entity_id` plus the company-less bills (they belong to nobody,
     so every view shows them).
 
-    Also `unregistered`: credit that IS on a return although the bill names no
+    Also `unregistered`: legacy books claiming credit although the bill names no
     supplier GSTIN and is not reverse charge -- an unregistered supplier's tax
     never reaches GSTR-2B, so that credit cannot be claimed. The bill's stored
     vendor_gstin judges it, never the vendor master: the head was decided
@@ -450,7 +450,7 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
     the Cross-Check would show as a green row."""
     out = {"count": 0, "tax": 0.0, "bill_numbers": []}
     denied: dict = {"transfers": []}
-    unreg = {"count": 0, "tax": 0.0, "bill_numbers": [], "transfer_bill_numbers": []}
+    unreg = {"count": 0, "tax": 0.0, "bill_numbers": [], "transfer_bill_numbers": [], "excluded_bill_numbers": []}
     if db is None:
         return {**out, "unregistered": unreg, "denied_transfers": []}
 
@@ -498,18 +498,20 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
             tax = round(float(b.get("tax_amount") or 0), 2)
             if tax <= 0:
                 continue
+            # Keep the supplier-specific explanation when the return now
+            # excludes a legacy bill with an invalid recorded GSTIN. Merely
+            # moving it to the generic placement warning loses that reason.
+            supplier_invalid = not itc_claimable(b.get("vendor_gstin"), b.get("reverse_charge"))
+            if supplier_invalid and ("vendor_gstin" in b or b.get("bill_id") in placed):
+                _add(unreg, b, tax)
+                number = b.get("bill_number") or b.get("bill_id")
+                if b.get("source_transfer_id"):
+                    unreg["transfer_bill_numbers"].append(number)
+                if b.get("bill_id") not in placed:
+                    unreg["excluded_bill_numbers"].append(number)
             has_heads = any(k in b for k in ("cgst_total", "sgst_total", "igst_total"))
             if b.get("bill_id") not in placed or not has_heads:
                 _add(out, b, tax)
-                continue
-            # The bill's own supplier GSTIN decided its head; the vendor
-            # master's current one did not, so it never clears the bill.
-            if not itc_claimable(b.get("vendor_gstin"), b.get("reverse_charge")):
-                _add(unreg, b, tax)
-                if b.get("source_transfer_id"):
-                    unreg["transfer_bill_numbers"].append(
-                        b.get("bill_number") or b.get("bill_id")
-                    )
         # Transfer mirrors whose credit IS denied (the sending shop has no valid
         # GSTIN): the right verdict, but the filer must be told, so they are
         # listed for the Cross-Check. Same scope and month window as above.
