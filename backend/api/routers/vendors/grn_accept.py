@@ -24,9 +24,9 @@ from ._shared import (
     require_roles,
     router,
 )
+from .gst import WALK_IN_COST_SOURCE, _promote_cost_from_rate
 from ...services import barcode as barcode_svc
 from ...services.po_variance_engine import _ordered_by_product
-from .gst import _promote_cost_from_rate
 from .po_detail import (
     _as_read,
     _order_or_503,
@@ -58,6 +58,7 @@ from .grn_accept_lock import (
     _release_grn_accept_claim,
     _stock_create_raises_on_duplicate,
 )
+from .models import GRN_SUBTYPE_NO_PO
 
 
 @router.post("/grn/{grn_id}/accept")
@@ -90,6 +91,65 @@ async def accept_grn(
     was already received.
     """
     return await _accept_grn_impl(grn_id, current_user)
+
+
+def _raise_book_bill_task(grn_id, store_id, grn_number, kind, note, payload):
+    """THE "book the bill for this receipt" task: one per receipt, to
+    accounts, P2 Purchase, opening the booking screen on it. Express receive
+    and a "Bought without PO" accept both raise it here, so who books, where
+    the link points and what the text says are said once. (The dedupe key
+    keeps the name the express receive gave it first.)
+
+    The text names the RECEIPT only, never the supplier or the bill number:
+    the task is stamped with the shop, so every role there lists it (GET
+    /tasks, the home screen's priority tasks), and who the shop bought from is
+    the purchase roles' -- accounts read both on the receipt the link opens.
+    Returns the task, or None."""
+    from ...services.task_triggers import create_system_task
+    from ...dependencies import get_task_repository
+
+    link = f"/purchase/invoices/book?grn_id={grn_id}"
+    return create_system_task(
+        get_task_repository(),
+        title=f"Book the bill for receipt {grn_number} ({kind})",
+        description=f"{note} Book it here: {link}",
+        priority="P2",
+        category="Purchase",
+        store_id=store_id,
+        dedupe_ref=f"express_invoice:{grn_id}",
+        assigned_to="ACCOUNTANT",
+        extra={"link": link, "payload": {"grn_id": grn_id, **payload}},
+    )
+
+
+def _send_no_po_bill_to_accounts(grn_id: str, result: dict) -> None:
+    """D14: goods bought without a PO have no order behind them, so nothing
+    else tells accounts a bill is waiting. Once the receipt is fully on the
+    shelf -- and put something there: a receipt whose every unit was
+    rejected has no bill to book (any bill line would be over-billed) --
+    raise one task to book it (credit only from a registered supplier, G2).
+    Fail-soft: a task failure never undoes the receipt."""
+    if result.get("grn_status") != "ACCEPTED":
+        return
+    try:
+        grn = get_grn_repository().find_by_id(grn_id) or {}
+        if grn.get("grn_subtype") != GRN_SUBTYPE_NO_PO:
+            return
+        if not any(int(it.get("accepted_qty") or 0) > 0 for it in grn.get("items") or []):
+            return
+        number = grn.get("grn_number") or grn_id
+        _raise_book_bill_task(
+            grn_id,
+            grn.get("store_id"),
+            number,
+            "bought without PO",
+            "Goods bought without a purchase order are on the shelf. Book "
+            "the bill against this receipt - it claims input tax credit only "
+            "when the supplier is GST-registered.",
+            {"grn_number": number},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[VENDOR] no-PO bill task failed for %s: %s", grn_id, exc)
 
 
 async def _accept_grn_impl(grn_id: str, current_user: dict) -> dict:
@@ -487,6 +547,7 @@ def _put_on_shelf(
     # The receipt's cost finished a draft mid-accept (gst._finished_by_the_promote):
     # its OTHER held receipts go on the shelf now that this claim is handed back.
     release_finished_meanwhile(grn_repo, grn_id, deferred_releases)
+    _send_no_po_bill_to_accounts(grn_id, result)
     return result
 
 
@@ -919,6 +980,12 @@ def _accept_grn_claimed(
         except Exception:  # noqa: BLE001
             po_unit_price = {}
 
+    # G1 (owner 2026-10-13) is decided at the BILL, not here: a walk-in unit
+    # goes on the shelf at the price paid, the GST an unclaimed bill adds to
+    # its cost is the GST that bill charged (purchase_invoices.
+    # _apply_valuation_trueup, on both bill doors). Receiving cannot know it:
+    # an unregistered dealer charges none, and a registered one's credit
+    # hangs on its bill and GSTR-2B.
     # The catalogue release's order cap (_order_cap), read under the claim.
     over_the_order = (
         _order_cap(po_repo, po_id, grn)
@@ -1037,17 +1104,26 @@ def _accept_grn_claimed(
                 line_cost = po_unit_price.get(product_id, 0.0)
             cost_fields = {}
             if line_cost and line_cost > 0:
+                # A walk-in buy's price is labelled as one (and, as that
+                # source, is the product's cost from now on -- the latest price
+                # paid wins); a PO receipt's is the PO price.
+                source = (
+                    WALK_IN_COST_SOURCE
+                    if grn.get("grn_subtype") == GRN_SUBTYPE_NO_PO
+                    else "GRN_PO"
+                )
                 cost_fields = {
                     "unit_cost": round(line_cost, 2),
                     "cost_price": round(line_cost, 2),
-                    "cost_source": "GRN_PO",
+                    "cost_source": source,
                 }
                 # Hub Phase 2 hero: receiving the goods is where the real cost
                 # is confirmed. Same shared promote the PO create path uses --
-                # fills only a MISSING cost, then atomically restamps so a DRAFT
-                # whose only gap was cost_price becomes ACTIVE right here.
+                # fills a MISSING cost (or one its source outranks), then
+                # atomically restamps so a DRAFT whose only gap was cost_price
+                # becomes ACTIVE right here.
                 _promote_cost_from_rate(
-                    product_id, prod, line_cost, "GRN_PO", product_repo,
+                    product_id, prod, line_cost, source, product_repo,
                     deferred_releases=deferred_releases,
                 )
 

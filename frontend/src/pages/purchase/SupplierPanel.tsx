@@ -24,6 +24,7 @@ import { usePoGstHeads } from '../../hooks/usePoGstHeads';
 import { useGstStateCodes } from '../../hooks/useGstStateCodes';
 import { gstinStateCode } from '../../constants/gst';
 import type { Supplier } from './purchaseTypes';
+import { owedText, rupees } from './PurchasesThisMonthSection';
 
 // How a purchase from this vendor is taxed: the SERVER's verdict
 // (GET /vendors/po-gst-heads -> usePoGstHeads: org_validation.shop_gstin +
@@ -48,13 +49,18 @@ const TAX_SPLIT_CLASS: Record<TaxSplit, string> = {
   unknown: 'bg-gray-100 text-gray-600',
 };
 
+/** One supplier's row of GET /finance/vendor-payments -- the supplier ledger. */
+export type SupplierBalance = { balance: number; total_billed: number };
+
 interface SupplierPanelProps {
   suppliers: Supplier[];
   /** Opens the supplier editor. Optional so the panel renders standalone. */
   onEdit?: (supplier: Supplier) => void;
+  /** Ledger figures by vendor id; absent (loading / not allowed) = no figure. */
+  balances?: Record<string, SupplierBalance>;
 }
 
-export function SupplierPanel({ suppliers, onEdit }: SupplierPanelProps) {
+export function SupplierPanel({ suppliers, onEdit, balances }: SupplierPanelProps) {
   // The "Generate vendor portal link" action used to live on the (now
   // retired) VendorManagement page. Re-homed here onto the real Suppliers
   // view so the feature isn't lost (PR #454 deleted the only UI for it).
@@ -78,6 +84,9 @@ export function SupplierPanel({ suppliers, onEdit }: SupplierPanelProps) {
         const inter: boolean | null = heads[supplier.id] ?? null;
         const split: TaxSplit =
           inter === null ? 'unknown' : inter ? 'igst' : 'cgst_sgst';
+        const ledger = balances?.[supplier.id];
+        const nearLimit =
+          !!ledger && supplier.creditLimit > 0 && ledger.balance > supplier.creditLimit * 0.8;
         return (
         <div key={supplier.id} className="card hover:shadow-lg transition-shadow">
           <div className="flex items-start justify-between mb-4">
@@ -180,15 +189,20 @@ export function SupplierPanel({ suppliers, onEdit }: SupplierPanelProps) {
             </div>
           </div>
 
+          {/* The supplier ledger's figures in the Purchases report's own words
+              and rupees (whole rupees; below 0 owed is an advance): lakh to
+              one decimal read Rs 4,999 owed as "Rs 0.0L" -- the F56 Rs 0.
+              Billed is every bill to date, so it says so: the report's
+              "Billed" is one month (review r2 #4/#23). */}
           <div className="grid grid-cols-2 gap-3 text-sm">
             <div>
-              <p className="text-xs text-gray-600">Total Purchases</p>
-              <p className="font-semibold text-gray-900">{'₹'}{(supplier.totalPurchases / 100000).toFixed(1)}L</p>
+              <p className="text-xs text-gray-600">Billed to date</p>
+              <p className="font-semibold text-gray-900">{ledger ? rupees(ledger.total_billed) : '—'}</p>
             </div>
             <div>
               <p className="text-xs text-gray-600">Outstanding</p>
-              <p className={`font-semibold ${supplier.currentOutstanding > supplier.creditLimit * 0.8 ? 'text-red-600' : 'text-gray-900'}`}>
-                {'₹'}{(supplier.currentOutstanding / 100000).toFixed(1)}L
+              <p className={`font-semibold ${nearLimit ? 'text-red-600' : 'text-gray-900'}`}>
+                {ledger ? owedText(ledger.balance) : '—'}
               </p>
             </div>
           </div>

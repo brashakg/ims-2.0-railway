@@ -9,7 +9,6 @@ from ._shared import (
     _RECEIVE_ROLES,
     _VENDOR_ROLES,
     _get_db,
-    _normalize_invoice_no,
     can_access_store_scoped,
     datetime,
     get_audit_repository,
@@ -17,12 +16,14 @@ from ._shared import (
     get_grn_repository,
     get_product_repository,
     get_purchase_order_repository,
+    get_vendor_repository,
     is_online_store,
     require_roles,
     router,
     uuid,
 )
-from .models import GRNCreate, GRN_SUBTYPE_DC
+from ...services.cost_mask import can_see_cost, mask_receipt
+from .models import GRNCreate, GRN_SUBTYPE_DC, GRN_SUBTYPE_NO_PO
 from .numbering import (
     GRN_PLACEHOLDER_PREFIX,
     classify_grn_line_variance,
@@ -31,14 +32,14 @@ from .numbering import (
     grn_number_pending,
 )
 from .grn import (
+    _bill_key,
     _duplicate_grn_detail,
     _enrich_grn_names,
-    _find_duplicate_standard_grn,
+    _find_duplicate_receipt,
     _number_receipt,
     _number_stranded_receipts,
     _receipt_numbered,
 )
-from ...services.cost_mask import mask_purchase
 from ...services.purchase_numbering import po_label
 
 
@@ -139,7 +140,9 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
     # no pre-logged PO) -- only validate when one was supplied.
     po = None
     if po_repo is not None and grn.po_id:
-        po = po_repo.find_by_id(grn.po_id)
+        from .po_detail import _order_or_503
+
+        po = _order_or_503(po_repo, grn.po_id)
         if not po:
             raise HTTPException(status_code=404, detail="Purchase order not found")
 
@@ -148,7 +151,12 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
         # A rejected delivery on a closed order is logged as a STANDARD
         # receipt, never a delivery challan: no bill is ever due on it, so a DC
         # would sit in the accountant's unbilled-challan list for good.
-        if po.get("status") not in _RECEIVABLE_PO_STATUSES and not (
+        # Owner 2026-10-18: managers may count extra goods after full receipt.
+        # The cancelled-product quantity guard below still applies to every line.
+        extra_receipt = po.get("status") == "RECEIVED" and (
+            not is_dc or any(item.accepted_qty > 0 for item in grn.items)
+        )
+        if po.get("status") not in _RECEIVABLE_PO_STATUSES and not extra_receipt and not (
             not is_dc
             and rejected_delivery_on_closed_order(po, [it.model_dump() for it in grn.items])
         ):
@@ -227,6 +235,26 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
 
     # F9: the vendor a DC is for -- from the PO when linked, else the body field.
     vendor_id = (po.get("vendor_id") if po else None) or grn.vendor_id
+    if grn.grn_subtype == GRN_SUBTYPE_NO_PO and not can_see_cost(current_user, "purchase"):
+        # Receiving confirms goods, not supplier prices. Ignore an injected
+        # price from a manager; accounts enter it when booking the bill.
+        for item in grn.items:
+            item.unit_price = None
+
+    # A receipt with no PO names its supplier itself, so it must be one on
+    # file: an invented or mistyped id put stock on the shelf under nobody
+    # (the receipts list showed no supplier) and its bill could never be
+    # booked (404 for that vendor, a vendor mismatch for any other).
+    if po is None and vendor_id:
+        vendor_repo = get_vendor_repository()
+        if vendor_repo is not None and not vendor_repo.find_by_id(vendor_id):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "That supplier is not on file - pick one from the "
+                    "supplier list."
+                ),
+            )
 
     # F9: DC-specific guards (uniqueness + period lock). Both are best-effort on
     # a DB error (fail-soft) but a found duplicate is a hard 409.
@@ -277,21 +305,23 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
 
     # P0-1 (launch gate): the STANDARD twin of the DC guard above. A vendor
     # invoice number identifies ONE physical delivery + ONE bill, so a second
-    # non-VOID receipt carrying it (per PO or per vendor, case/punctuation
-    # folded) is a double-submit -- which used to double-mint the stock AND
-    # open the payable to being booked twice. The comment at the express 409
-    # admitted this hole ("_create_grn_impl has no duplicate guard for
-    # STANDARD receipts"); this closes it for BOTH doors, since express
-    # creates through this shared impl. A legitimately split delivery arrives
-    # with DIFFERENT invoice numbers per shipment and passes untouched.
+    # non-VOID receipt carrying it is a double-submit -- which used to
+    # double-mint the stock AND open the payable to being booked twice. This
+    # closes it for BOTH doors, since express creates through this shared
+    # impl. A legitimately split delivery arrives with DIFFERENT invoice
+    # numbers per shipment and passes untouched. ONE rule for every kind of
+    # receipt and every shop (vendors.grn._find_duplicate_receipt): the same
+    # supplier and bill number in the same financial year, or (bought without
+    # PO, D14) the same bill photo by content hash.
+    photo_sha = None if is_dc else (_attachment_meta or {}).get("sha256")
     if not is_dc:
-        dup = _find_duplicate_standard_grn(
-            grn_repo, grn.po_id, vendor_id, grn.vendor_invoice_no
-        )
+        dup = _find_duplicate_receipt(grn_repo, grn, vendor_id, photo_sha=photo_sha)
         if dup is not None:
             raise HTTPException(
                 status_code=409,
-                detail=_duplicate_grn_detail(dup, grn.vendor_invoice_no),
+                detail=_duplicate_grn_detail(
+                    dup, grn.vendor_invoice_no or "(no number) with this bill photo"
+                ),
             )
 
     # Ruling 14 -- THE TALLY. Every line of a PO-backed receipt must be ticked
@@ -424,11 +454,12 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
         "vendor_name": po.get("vendor_name") if po else None,
         "store_id": store_id,
         "vendor_invoice_no": grn.vendor_invoice_no,
-        # Folded identity for the uniq_std_vendor_invoice_store partial unique
-        # index (the atomic backstop behind the racy check-then-insert guard
-        # above). None for a DC so DC rows never enter that index.
+        # The bill's identity -- financial year + folded number -- for the
+        # uniq_std_vendor_invoice_store partial unique index (the atomic
+        # backstop behind the racy check-then-insert guard above). None for a
+        # DC so DC rows never enter that index.
         "vendor_invoice_no_norm": (
-            (_normalize_invoice_no(grn.vendor_invoice_no) or None)
+            _bill_key(grn.vendor_invoice_no, grn.vendor_invoice_date, datetime.now())
             if not is_dc
             else None
         ),
@@ -442,6 +473,8 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
         "attachment_file_id": None if is_dc else grn.attachment_file_id,
         "attachment_filename": None if is_dc else grn.attachment_filename,
         "attachment_mime": None if is_dc else grn.attachment_mime,
+        # D14: the bill photo's sha256 -- the uniq_nopo_bill_hash key.
+        "attachment_sha256": photo_sha,
         "items": item_docs,
         "total_received": total_received,
         "total_accepted": total_accepted,
@@ -503,19 +536,17 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
         if created is None and not is_dc:
             dup = None
             try:
-                dup = _find_duplicate_standard_grn(
-                    grn_repo,
-                    grn.po_id,
-                    vendor_id,
-                    grn.vendor_invoice_no,
-                    exclude_grn_id=grn_id,
+                dup = _find_duplicate_receipt(
+                    grn_repo, grn, vendor_id, photo_sha=photo_sha, exclude_grn_id=grn_id
                 )
             except Exception:  # noqa: BLE001
                 dup = None
             if dup is not None:
                 raise HTTPException(
                     status_code=409,
-                    detail=_duplicate_grn_detail(dup, grn.vendor_invoice_no),
+                    detail=_duplicate_grn_detail(
+                        dup, grn.vendor_invoice_no or "(no number) with this bill photo"
+                    ),
                 )
             raise HTTPException(status_code=500, detail="Failed to save goods receipt")
 
@@ -652,4 +683,7 @@ async def get_grn(
 
     _enrich_grn_names([grn])
 
-    return mask_purchase(grn, current_user)
+    # What was paid (a "Bought without PO" line's cost) goes through the one
+    # cost rule, as on the barcode trace: managers receive, but only the roles
+    # that see cost read it back.
+    return mask_receipt(grn, current_user)

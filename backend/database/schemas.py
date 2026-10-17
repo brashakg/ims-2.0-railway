@@ -886,9 +886,10 @@ INDEXES = {
         },
         # P0-1 (launch gate): STANDARD twin of the DC index -- two live
         # (non-VOID) STANDARD receipts must never share one vendor invoice
-        # number per vendor + store. Keys on the folded number the create
-        # path stamps (vendor_invoice_no_norm); legacy rows without the
-        # field stay un-indexed (fail-soft, like the DC index). $in in the
+        # per vendor + store. Keys on the bill's identity the create path
+        # stamps (vendor_invoice_no_norm = purchase_invoice_engine.bill_key:
+        # financial year + folded number); legacy rows without the field
+        # stay un-indexed (fail-soft, like the DC index). $in in the
         # partial filter needs Mongo 8.0+ (prod 8.3; eod_tally precedent).
         {
             "keys": [
@@ -903,7 +904,40 @@ INDEXES = {
                 "status": {"$in": ["PENDING", "PARTIALLY_ACCEPTED", "ACCEPTED"]},
             },
             "name": "uniq_std_vendor_invoice_store",
-        }
+        },
+        # D14: one live "Bought without PO" receipt per bill photo, in ANY
+        # shop, keyed on the photo's sha256 -- a double-pressed post re-sends
+        # the same file, a retry after a reload uploads the same bytes under a
+        # new file id, and an unnumbered bill gives the index above nothing to
+        # key on. The atomic twin of the photo half of
+        # vendors.grn._find_duplicate_receipt, which matches in any shop. A
+        # VOID frees it.
+        {
+            "keys": [("attachment_sha256", 1)],
+            "unique": True,
+            "partialFilterExpression": {
+                "grn_subtype": "NO_PO",
+                "attachment_sha256": {"$type": "string"},
+                "status": {"$in": ["PENDING", "PARTIALLY_ACCEPTED", "ACCEPTED"]},
+            },
+            "name": "uniq_nopo_bill_hash",
+        },
+        # D14: one live "Bought without PO" receipt per supplier bill -- the
+        # supplier + the bill's identity (vendor_invoice_no_norm, financial
+        # year + folded number) in ANY shop, as the app rule reads it. The
+        # atomic twin of the number half of _find_duplicate_receipt for two
+        # walk-in receipts of one numbered bill (uniq_std_vendor_invoice_store
+        # is STANDARD-only and per shop). A VOID frees it.
+        {
+            "keys": [("vendor_id", 1), ("vendor_invoice_no_norm", 1)],
+            "unique": True,
+            "partialFilterExpression": {
+                "grn_subtype": "NO_PO",
+                "vendor_invoice_no_norm": {"$type": "string"},
+                "status": {"$in": ["PENDING", "PARTIALLY_ACCEPTED", "ACCEPTED"]},
+            },
+            "name": "uniq_nopo_vendor_bill",
+        },
     ],
     "tasks": [
         {"keys": [("task_number", 1)], "unique": True},
@@ -2261,6 +2295,14 @@ COLLECTIONS.update({
         "indexes": [
             {"keys": [("bill_id", 1)], "unique": True, "sparse": True},
             {"keys": [("vendor_id", 1), ("bill_number", 1)]},
+            # The same-bill rule's atomic twin (connection.ensure_indexes
+            # builds the same): supplier + financial year + folded number.
+            {
+                "keys": [("vendor_id", 1), ("bill_number_key", 1)],
+                "unique": True,
+                "partialFilterExpression": {"bill_number_key": {"$type": "string"}},
+                "name": "uniq_vendor_bill_number_key",
+            },
             {"keys": [("po_id", 1)], "sparse": True},
             {"keys": [("grn_id", 1)], "sparse": True},
             {"keys": [("status", 1)]},

@@ -328,7 +328,11 @@ def test_express_happy_path_full_chain(monkeypatch):
     assert task["payload"]["grn_id"] == res["grn_id"]
     assert task["payload"]["match_status"] == "MATCHED"
     assert "GRN-STORE-A" in task["title"]
-    assert "Acme" in task["title"]
+    # The task is stamped with the shop, so every role there lists it: it
+    # names the receipt, never the supplier or its bill number (accounts read
+    # both on the receipt the link opens).
+    assert "Acme" not in task["title"] + task["description"]
+    assert "INV-42" not in task["title"] + task["description"]
 
 
 def test_express_duplicate_accept_is_idempotent(monkeypatch):
@@ -410,9 +414,12 @@ def test_express_zero_received_is_not_clean(monkeypatch):
     _assert_nothing_persisted(grn_repo, stock_repo)
 
 
-def test_express_rejects_delivery_challan(monkeypatch):
+@pytest.mark.parametrize("subtype", ["DELIVERY_CHALLAN", "NO_PO"])
+def test_express_rejects_delivery_challan(monkeypatch, subtype):
+    """Only a PO receipt is express-received: a challan or a buy without a
+    PO (D14) is refused, never quietly posted as a STANDARD receipt."""
     grn_repo, _po, stock_repo, _t = _wire(monkeypatch)
-    body = _body(grn_subtype="DELIVERY_CHALLAN")
+    body = _body(grn_subtype=subtype)
     with pytest.raises(HTTPException) as e:
         _run(body, _user())
     assert e.value.status_code == 400
@@ -474,8 +481,8 @@ def test_express_books_to_po_store_not_active(monkeypatch):
     assert all(u["store_id"] == "STORE-B" for u in stock_repo.units)
 
 
-def test_express_unreceivable_po_400(monkeypatch):
-    grn_repo, _po_repo, stock_repo, _t = _wire(monkeypatch, po=_po(status="RECEIVED"))
+def test_express_unsent_draft_po_400(monkeypatch):
+    grn_repo, _po_repo, stock_repo, _t = _wire(monkeypatch, po=_po(status="DRAFT"))
     with pytest.raises(HTTPException) as e:
         _run(_body(), _user())
     assert e.value.status_code == 400

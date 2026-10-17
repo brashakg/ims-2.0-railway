@@ -16,6 +16,7 @@ from enum import Enum
 import uuid
 
 from .auth import get_current_user
+from ..dependencies import store_in_view
 from ..dependencies import get_db as _dep_get_db, validate_store_access
 from ..utils.dates import to_date_str
 
@@ -187,7 +188,7 @@ async def list_follow_ups(
 
     # BUG-062: reject cross-store reads -- a single-store manager must not pull
     # another store's follow-ups by passing ?store_id=<other store>.
-    store_id = validate_store_access(store_id, current_user)
+    store_id = store_in_view(store_id, current_user)
 
     collection = db.get_collection("follow_ups")
 
@@ -341,7 +342,7 @@ async def get_due_today(
         raise HTTPException(status_code=500, detail="Database connection failed")
 
     # BUG-062: reject cross-store reads.
-    store_id = validate_store_access(store_id, current_user)
+    store_id = store_in_view(store_id, current_user)
 
     collection = db.get_collection("follow_ups")
     today = date.today().isoformat()
@@ -569,7 +570,7 @@ async def get_follow_up_summary(
         raise HTTPException(status_code=500, detail="Database connection failed")
 
     # BUG-062: reject cross-store reads.
-    store_id = validate_store_access(store_id, current_user)
+    store_id = store_in_view(store_id, current_user)
 
     collection = db.get_collection("follow_ups")
     today = date.today().isoformat()

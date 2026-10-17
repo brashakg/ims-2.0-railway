@@ -13,6 +13,7 @@ from typing import Optional
 from datetime import date, datetime
 import uuid
 from .auth import get_current_user, require_roles
+from ..dependencies import no_shop_scope_for, store_in_view
 from ..dependencies import get_expense_repository, get_advance_repository, get_db
 from ..dependencies import validate_store_access
 from ..services import cash_denominations as cash_denom
@@ -1782,24 +1783,21 @@ async def list_duplicate_bills(
     #     an explicit store_id would 403 an accountant out of a store they are
     #     entitled to review.
     #   * STORE-LEVEL (AREA_MANAGER / STORE_MANAGER), who get their own store.
-    if _is_org_wide_reviewer(current_user):
+    #   * a non-admin login with NO shop -- an ACCOUNTANT too -- reads no
+    #     shop's rows (owner ruling 2026-10-12, R4: an empty list; a shop it
+    #     names is a 403 NO_SHOP_DETAIL), never the org-wide watch-list.
+    no_shop = no_shop_scope_for(store_id, current_user)
+    if no_shop:
+        filter_dict["store_id"] = no_shop
+    elif _is_org_wide_reviewer(current_user):
         if store_id:
             filter_dict["store_id"] = store_id
     else:
-        # Omitting store_id must not mean "every store". An explicit foreign
-        # store_id raises 403 inside validate_store_access.
-        scope = validate_store_access(store_id, current_user) or current_user.get(
-            "active_store_id"
-        )
-        if not scope:
-            # FAIL CLOSED. A store-level session we cannot pin to a store gets
-            # an error, never the unfiltered list -- that fallback is exactly
-            # the bug being fixed.
-            raise HTTPException(
-                status_code=400,
-                detail="No active store for this session. Pick a store, then reopen this list.",
-            )
-        filter_dict["store_id"] = scope
+        # Omitting store_id must not mean "every store": THE validate-or-active
+        # shop (store_in_view) -- an explicit foreign store_id is a 403, and a
+        # session is always pinned (its active shop, else its first own shop;
+        # a login with none was answered above).
+        filter_dict["store_id"] = store_in_view(store_id, current_user)
         # An AREA_MANAGER covering several shops sees their active store here
         # and passes ?store_id= for each of the others; validate_store_access
         # admits any store in their store_ids. That matches how the sibling
@@ -1914,7 +1912,7 @@ async def get_petty_cash_balance(
     """Current float balance, limit, low-balance flag, and recent ledger for a
     store. Store-scoped (an accountant/manager only sees their stores; admins see
     any). Fail-soft to a not-open envelope when no float exists."""
-    scoped = validate_store_access(store_id, current_user)
+    scoped = store_in_view(store_id, current_user)
     if not scoped:
         raise HTTPException(status_code=400, detail="store_id required")
     from ..services import petty_cash_service as pcs
@@ -1950,7 +1948,7 @@ async def get_petty_cash_settlement_position(
 
     Store-scoped (a manager/accountant only sees their stores; admins see any).
     Fail-soft to an exists=False envelope when no float / no DB."""
-    scoped = validate_store_access(store_id, current_user)
+    scoped = store_in_view(store_id, current_user)
     if not scoped:
         raise HTTPException(status_code=400, detail="store_id required")
     from ..services import petty_cash_settlement_service as pcss
@@ -2001,7 +1999,7 @@ async def list_petty_cash_settlements(
     current_user: dict = Depends(require_roles(*_PETTY_SETTLE_VIEW_ROLES)),
 ):
     """Settlement history for a store (newest first). Store-scoped; fail-soft."""
-    scoped = validate_store_access(store_id, current_user)
+    scoped = store_in_view(store_id, current_user)
     if not scoped:
         raise HTTPException(status_code=400, detail="store_id required")
     from ..services import petty_cash_settlement_service as pcss
@@ -2054,7 +2052,7 @@ async def list_advances(
     not at the door.
     """
     advance_repo = get_advance_repository()
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
 
     if advance_repo is None:
         return {"advances": [], "total": 0}
@@ -2245,7 +2243,7 @@ async def get_pending_approvals(
     """Get all pending expenses and advances for approval (approvers only)"""
     expense_repo = get_expense_repository()
     advance_repo = get_advance_repository()
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
 
     pending_expenses = []
     pending_advances = []

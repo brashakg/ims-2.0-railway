@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from .auth import get_current_user, require_roles
 from .points import self_only_rows
+from ..dependencies import store_in_view
 from ..dependencies import (
     validate_store_access,
     resolve_store_scope,
@@ -874,7 +875,7 @@ async def get_salary_sheet(
     if not db:
         return {"salaries": [], "total": 0, "store_id": store_id}
 
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
 
     try:
         query: dict = {"month": month, "year": year}
@@ -2199,7 +2200,7 @@ async def get_commission_summary(
             "status": {"$in": SALE_DONE_STATUSES},
             "created_at": {"$gte": from_dt, "$lte": to_dt},
         }
-        active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+        active_store = store_in_view(store_id, current_user)
         if active_store:
             order_query["store_id"] = active_store
         if employee_id:
@@ -2341,7 +2342,7 @@ async def get_commission_leaderboard(
             # IST-midnight of the 1st of this IST month
             from_dt = ist_day_start_utc(today.replace(day=1))
 
-        active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+        active_store = store_in_view(store_id, current_user)
         query: dict = {
             "status": {"$in": SALE_DONE_STATUSES},
             "created_at": {"$gte": from_dt},

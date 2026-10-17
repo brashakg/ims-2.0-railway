@@ -166,17 +166,6 @@ ALLOWED = {
         "shifting df/dt, which would break points_log MTD."
     ),
     (
-        "api/routers/vendors/performance.py",
-        'when = str(b.get("bill_date") or b.get("created_at") or "")[:7]',
-    ): (
-        "Vendor month-to-date spend. The primary source `bill_date` is already "
-        "an IST business-date STRING, and the created_at fallback on "
-        "vendor_bills is a naive-UTC ISO string that carries no shiftable "
-        "frame -- ist_date_str passes both through unchanged by design. The "
-        "half that WAS wrong here was the month PREFIX it is compared against, "
-        "which now reads the IST clock."
-    ),
-    (
         "api/services/nba_call_list.py",
         'sub_headlines.append(f"Last purchase {str(last_purchase)[:10]}")',
     ): (

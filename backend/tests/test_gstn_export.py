@@ -487,6 +487,14 @@ GSTN_ENDPOINTS = [
 
 
 class TestGstnEndpointGating:
+    @pytest.mark.parametrize("role", ["STORE_MANAGER", "AREA_MANAGER", "SALES_STAFF", "CASHIER", "SALES_CASHIER"])
+    @pytest.mark.parametrize("path", GSTN_ENDPOINTS + [
+        "/reports/gstr1?month=2026-04", "/reports/gstr3b?month=2026-04",
+        "/reports/finance/gst?from_date=2026-04-01&to_date=2026-04-30",
+    ])
+    def test_all_gst_reports_are_accounts_only(self, role, path):
+        assert _reports_client_as([role]).get(path).status_code == 403
+
     @pytest.mark.parametrize("path", GSTN_ENDPOINTS)
     def test_sales_staff_blocked(self, path):
         resp = _reports_client_as(["SALES_STAFF"]).get(path)

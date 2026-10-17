@@ -7,7 +7,13 @@
 // store manager does.
 
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render as rtlRender, screen } from '@testing-library/react';
+import type { ReactElement } from 'react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+
+// The empty states name the shop (ScopeWords reads the store list).
+const render = (ui: ReactElement) =>
+  rtlRender(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>{ui}</QueryClientProvider>);
 
 const apis = vi.hoisted(() => ({
   getGRNs: vi.fn().mockResolvedValue({ grns: [] }),

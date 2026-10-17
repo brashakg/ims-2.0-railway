@@ -1,5 +1,6 @@
 """Stock movements ledger (Movements tab) and its per-source collectors."""
 
+from ...dependencies import store_in_view
 from ._shared import (
     Depends,
     Dict,
@@ -16,6 +17,7 @@ from ._shared import (
     timedelta,
     validate_store_access,
 )
+from ...services.ap_engine import GRN_SUBTYPE_NO_PO
 from .helpers import (
     _get_db,
 )
@@ -95,6 +97,7 @@ def _collect_received_events(
                 "grn_id": 1,
                 "grn_number": 1,
                 "po_number": 1,
+                "grn_subtype": 1,
                 "store_id": 1,
                 "items": 1,
                 "accepted_at": 1,
@@ -146,7 +149,12 @@ def _collect_received_events(
                     "ref": ref,
                     "ref_id": grn.get("grn_id") or "",
                     "store_id": grn.get("store_id") or "",
-                    "detail": detail,
+                    # D14: a walk-in purchase reads as one, not as a PO delivery.
+                    "detail": (
+                        f"Bought without PO - {detail}"
+                        if grn.get("grn_subtype") == GRN_SUBTYPE_NO_PO
+                        else detail
+                    ),
                 }
             )
     return events
@@ -456,7 +464,7 @@ async def get_stock_movements(
     active store see all stores). Sorted newest-first; paged via skip/limit
     over the merged in-window ledger; `sources` reports per-source health.
     """
-    active_store = validate_store_access(store_id, current_user)
+    active_store = store_in_view(store_id, current_user)
 
     if movement_type:
         movement_type = movement_type.strip().upper()

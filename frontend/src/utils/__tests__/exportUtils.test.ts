@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { neutralizeFormula } from '../exportUtils';
+import { neutralizeFormula, toCSV } from '../exportUtils';
 
 describe('exportUtils - neutralizeFormula (BUG-139 CSV injection fix)', () => {
   describe('formula injection character detection and neutralization', () => {
@@ -55,5 +55,13 @@ describe('exportUtils - neutralizeFormula (BUG-139 CSV injection fix)', () => {
       expect(neutralizeFormula('-')).toBe("'-");
       expect(neutralizeFormula('@')).toBe("'@");
     });
+  });
+});
+
+describe('exportUtils - toCSV numbers', () => {
+  it('writes a number bare, a negative one too (summable, no stray apostrophe)', () => {
+    expect(toCSV([{ v: 'Advance Co', owed: -1500 }, { v: '-x', owed: 12.5 }])).toBe(
+      ['"v","owed"', '"Advance Co",-1500', `"'-x",12.5`].join('\n'),
+    );
   });
 });

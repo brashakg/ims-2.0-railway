@@ -69,13 +69,16 @@ describe('VendorReturns money display', () => {
     expect(document.body.textContent).not.toContain('₹');
   });
 
-  it('still shows the prices to a purchase role', async () => {
+  // Owner ruling 2026-10-12 (R3): outside ADMIN / SUPERADMIN / ACCOUNTANT a
+  // return line is items, quantities and reasons only -- even when sent a price.
+  it('never shows the prices to WORKSHOP_STAFF, even when the answer carries them', async () => {
     load(
       [{ ...ret, items: [{ ...line, unit_price: 3173.37 }], total_value: 6346.74, credit_note_amount: null }],
       []
     );
     await openReturn();
-    expect(document.body.textContent).toContain('₹3,173.37');
-    expect(document.body.textContent).toContain('₹6,346.74');
+    expect(screen.getByText(/Qty: 2/)).toBeTruthy();
+    expect(document.body.textContent).not.toContain('3,173.37');
+    expect(document.body.textContent).not.toContain('6,346.74');
   });
 });

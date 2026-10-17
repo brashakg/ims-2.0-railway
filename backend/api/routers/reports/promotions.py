@@ -7,6 +7,7 @@ from ...utils.ist import (
     ist_day_start_utc,
 )
 from ..auth import get_current_user, require_roles
+from ...dependencies import store_in_view
 from ...services.cost_mask import mask_cost
 from ...dependencies import (
     get_db,
@@ -61,7 +62,7 @@ async def promotions_report(
     # Store-scope: non-HQ callers are pinned to a store they can access.
     active_store = None
     if store_id:
-        active_store = validate_store_access(store_id, current_user)
+        active_store = store_in_view(store_id, current_user)
     elif not (set(current_user.get("roles", [])) & {"SUPERADMIN", "ADMIN"}):
         active_store = current_user.get("active_store_id")
 
@@ -222,7 +223,7 @@ async def non_moving_stock(
     """
     from datetime import timezone  # local import, keeps module-top imports minimal
 
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = store_in_view(store_id, current_user)
     db = get_db()
 
     if db is None or not getattr(db, "is_connected", True):

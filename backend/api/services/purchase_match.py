@@ -47,6 +47,10 @@ from typing import Dict, List, Optional
 VALUATION_MOVING_AVERAGE = "MOVING_AVERAGE"
 VALUATION_FIFO = "FIFO"
 VALID_VALUATION_METHODS = (VALUATION_MOVING_AVERAGE, VALUATION_FIFO)
+# Not a setting: a walk-in buy (a "Bought without PO" receipt) is costed at the
+# LATEST PRICE PAID at receiving and at booking alike (owner 2026-10-12), never
+# blended into what is on hand -- the bill's true-up passes this in.
+VALUATION_LATEST_PRICE = "LATEST_PRICE_PAID"
 
 DEFAULT_VALUATION_METHOD = VALUATION_MOVING_AVERAGE
 # Percentage tolerance for the qty + price 3-way match. 5% by default: a line is
@@ -658,7 +662,11 @@ def valuation_trueup_for_invoice(
     positive invoiced qty. The router persists these fail-soft (a valuation
     update must never block the booking).
     """
-    meth = normalize_valuation_method(method)
+    meth = (
+        VALUATION_LATEST_PRICE
+        if method == VALUATION_LATEST_PRICE
+        else normalize_valuation_method(method)
+    )
     inv_idx = _invoice_by_product(invoice_lines)
     updates: List[dict] = []
     for pid, line in inv_idx.items():
@@ -669,9 +677,9 @@ def valuation_trueup_for_invoice(
         cur = product_state.get(pid) if isinstance(product_state, dict) else None
         old_qty = _f((cur or {}).get("on_hand_qty"))
         old_cost = _f((cur or {}).get("cost_price"))
-        if meth == VALUATION_FIFO:
-            # FIFO: don't blend the product-level cost; record the latest layer
-            # cost. (The stock_units carry their own per-unit unit_cost.)
+        if meth != VALUATION_MOVING_AVERAGE:
+            # FIFO / a walk-in buy: don't blend the product-level cost; record
+            # the latest cost. (The stock_units carry their own unit_cost.)
             new_cost = recv_unit_cost if recv_unit_cost > 0 else old_cost
         else:
             new_cost = moving_average_cost(old_qty, old_cost, recv_qty, recv_unit_cost)

@@ -11,6 +11,7 @@ from typing import Optional, List
 from datetime import datetime, timedelta
 from ..auth import get_current_user
 from ...services import spoilage_analytics
+from ...dependencies import store_in_view
 from ...services.cost_mask import mask_cost
 from ...dependencies import get_db, get_workshop_repository, validate_store_access
 from ._shared import logger, router
@@ -129,9 +130,7 @@ async def get_spoilage_analytics(
         )
 
     repo = get_workshop_repository()
-    active_store = validate_store_access(store_id, current_user) or current_user.get(
-        "active_store_id"
-    )
+    active_store = store_in_view(store_id, current_user)
 
     jobs: List[dict] = []
     if repo is not None:

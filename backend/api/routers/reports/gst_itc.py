@@ -3,8 +3,9 @@
 import re
 from datetime import date
 
-from ...services.ap_engine import iso_bill_date
-from ...services.org_validation import itc_claimable, shop_gstins
+from ...services.ap_engine import bill_supplier_gstin, iso_bill_date
+from ...services.org_validation import has_valid_gstin, itc_claimable, shop_gstins
+from ...services.purchase_invoice_engine import determine_place_of_supply
 
 # ============================================================================
 # GST RETURNS - GSTR-3B (Summary Return)
@@ -251,10 +252,27 @@ def _itc_match(shops, entity_id, store_gstin, year, mon, last_day, db=None) -> d
     """Table 4: the bills _placement puts on this GSTIN's return that carry
     input credit -- every ITC read (the return, its GSTIN slice, the
     Cross-Check's count of credit left off every return) is built from it."""
-    return {
+    match = {
         **_placement(shops, entity_id, store_gstin, year, mon, last_day, db),
         "itc_eligible": {"$ne": False},
     }
+    if db is not None:
+        # Legacy bills may predate itc_eligible. A supplier GSTIN recorded as
+        # invalid is positive evidence that forward-charge credit is not
+        # claimable, even when that flag is absent. Use the shared validator;
+        # never replace a recorded value with today's vendor master. Bills
+        # predating the GSTIN field keep their existing legacy handling.
+        invalid = []
+        for bill in db["vendor_bills"].find(match, {"vendor_gstin": 1}):
+            if "vendor_gstin" in bill and not has_valid_gstin(bill["vendor_gstin"]):
+                if bill["vendor_gstin"] not in invalid:
+                    invalid.append(bill["vendor_gstin"])
+        if invalid:
+            match["$nor"].append({
+                "vendor_gstin": {"$exists": True, "$in": invalid},
+                "reverse_charge": {"$ne": True},
+            })
+    return match
 
 
 def _gstin_bound(shops, store_gstin) -> dict:
@@ -339,6 +357,70 @@ def _itc_gstin_from_vendor_bills(db, active_store, year, mon, last_day):
     return 0.0, 0.0, 0.0
 
 
+def _no_credit_inward(db, active_store, year, mon, last_day) -> dict:
+    """GSTR-3B Table 5 and Table 4(D) (owner 2026-10-13, G3), from the
+    purchase bills _placement puts on this GSTIN's return -- the placement
+    Table 4 reads, so every bill is on one return. A stock-transfer mirror is
+    not a purchase and stays out of both. Each bill lands in ONE of the two:
+      * Table 5 (exempt, nil-rated, non-GST and composition inward supplies):
+        a bill from an unregistered supplier (no valid GSTIN on the bill --
+        ap_engine.bill_supplier_gstin, the reconcile's reader -- and not
+        reverse charge, which is 3.1(d)) at its BILL TOTAL: whatever "tax" it
+        shows is no GST but part of the price, so it is not in 4(D) either.
+        Its supply is inter- or intra-state by THE place-of-supply rule
+        (purchase_invoice_engine.determine_place_of_supply) on the supplier's
+        recorded state (the quick-add records it) against the shop's -- it has
+        no GSTIN for the bill doors to place it by. A bill that charged no GST
+        (a composition dealer's, an exempt or nil-rated one) at its taxable
+        value, by the bill's stored head.
+      * Table 4(D) (ineligible ITC): the GST on every other bill that claims
+        no input credit -- paid, never claimed. Table 4 (_itc_match) counts
+        the claiming bills, so a bill's GST is in one of the two.
+    Returns {"inter", "intra", "igst", "cgst", "sgst"}; fail-soft zeros."""
+    out = dict.fromkeys(("inter", "intra", "igst", "cgst", "sgst"), 0.0)
+    if db is None:
+        return out
+    try:
+        entity_id, store_gstin, shops = _itc_store_scope(db, active_store)
+        placed = {
+            **_placement(shops, entity_id, store_gstin, year, mon, last_day, db),
+            "source_transfer_id": None,
+        }
+
+        suppliers: dict = {}
+
+        def supplier(vendor_id):
+            if vendor_id not in suppliers:
+                suppliers[vendor_id] = db["vendors"].find_one(
+                    {"vendor_id": vendor_id}, {"_id": 0, "gstin": 1, "state_code": 1, "state": 1}
+                ) or {}
+            return suppliers[vendor_id]
+
+        for b in db["vendor_bills"].find(placed, {"_id": 0}):
+            tax = b.get("tax_amount")
+            no_gst = tax is not None and float(tax or 0) <= 0
+            unregistered = not has_valid_gstin(
+                bill_supplier_gstin(b, lambda vid: supplier(vid).get("gstin"))
+            )
+            if not b.get("reverse_charge") and unregistered:
+                sup = supplier(b.get("vendor_id"))
+                _pos, inter = determine_place_of_supply(
+                    sup.get("state_code") or sup.get("state"),
+                    b.get("recipient_gstin") or store_gstin,
+                )
+                total = float(b.get("taxable_amount") or 0) + float(tax or 0)
+                out["inter" if inter else "intra"] += float(b.get("total_amount") or 0) or total
+            elif not b.get("reverse_charge") and no_gst:
+                side = "inter" if b.get("interstate") else "intra"
+                out[side] += float(b.get("taxable_amount") or 0)
+            elif b.get("itc_eligible") is False:
+                for head in ("igst", "cgst", "sgst"):
+                    out[head] += float(b.get(f"{head}_total") or 0)
+    except Exception:
+        return dict.fromkeys(out, 0.0)
+    return {k: round(v, 2) for k, v in out.items()}
+
+
 def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
     """Booked input credit that NO GSTIN's GSTR-3B counts this month: a bill
     with no company (recipient_entity_id null -- every screen bill before F40),
@@ -353,7 +435,7 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
     Scoped to `entity_id` plus the company-less bills (they belong to nobody,
     so every view shows them).
 
-    Also `unregistered`: credit that IS on a return although the bill names no
+    Also `unregistered`: legacy books claiming credit although the bill names no
     supplier GSTIN and is not reverse charge -- an unregistered supplier's tax
     never reaches GSTR-2B, so that credit cannot be claimed. The bill's stored
     vendor_gstin judges it, never the vendor master: the head was decided
@@ -368,7 +450,7 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
     the Cross-Check would show as a green row."""
     out = {"count": 0, "tax": 0.0, "bill_numbers": []}
     denied: dict = {"transfers": []}
-    unreg = {"count": 0, "tax": 0.0, "bill_numbers": [], "transfer_bill_numbers": []}
+    unreg = {"count": 0, "tax": 0.0, "bill_numbers": [], "transfer_bill_numbers": [], "excluded_bill_numbers": []}
     if db is None:
         return {**out, "unregistered": unreg, "denied_transfers": []}
 
@@ -416,18 +498,20 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
             tax = round(float(b.get("tax_amount") or 0), 2)
             if tax <= 0:
                 continue
+            # Keep the supplier-specific explanation when the return now
+            # excludes a legacy bill with an invalid recorded GSTIN. Merely
+            # moving it to the generic placement warning loses that reason.
+            supplier_invalid = not itc_claimable(b.get("vendor_gstin"), b.get("reverse_charge"))
+            if supplier_invalid and ("vendor_gstin" in b or b.get("bill_id") in placed):
+                _add(unreg, b, tax)
+                number = b.get("bill_number") or b.get("bill_id")
+                if b.get("source_transfer_id"):
+                    unreg["transfer_bill_numbers"].append(number)
+                if b.get("bill_id") not in placed:
+                    unreg["excluded_bill_numbers"].append(number)
             has_heads = any(k in b for k in ("cgst_total", "sgst_total", "igst_total"))
             if b.get("bill_id") not in placed or not has_heads:
                 _add(out, b, tax)
-                continue
-            # The bill's own supplier GSTIN decided its head; the vendor
-            # master's current one did not, so it never clears the bill.
-            if not itc_claimable(b.get("vendor_gstin"), b.get("reverse_charge")):
-                _add(unreg, b, tax)
-                if b.get("source_transfer_id"):
-                    unreg["transfer_bill_numbers"].append(
-                        b.get("bill_number") or b.get("bill_id")
-                    )
         # Transfer mirrors whose credit IS denied (the sending shop has no valid
         # GSTIN): the right verdict, but the filer must be told, so they are
         # listed for the Cross-Check. Same scope and month window as above.

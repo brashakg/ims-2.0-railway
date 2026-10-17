@@ -15,6 +15,7 @@ from ..utils.ist import now_ist, ist_today, now_ist_naive
 from calendar import monthrange
 import uuid
 from .auth import get_current_user, require_roles
+from ..dependencies import store_in_view
 from ..dependencies import (
     get_attendance_repository,
     get_audit_repository,
@@ -121,8 +122,8 @@ def _store_scope_filter(current_user: dict):
     resolves to the single ``active_store_id``, so an AREA_MANAGER holding
     three stores was silently narrowed to one; and when the value is None --
     ordinary for a store-scoped account with an empty ``store_ids``, since
-    ``auth._default_active_store`` only back-fills SUPERADMIN / ADMIN /
-    AREA_MANAGER -- the truthiness test dropped the filter ENTIRELY and
+    ``auth._default_active_store`` only back-fills SUPERADMIN / ADMIN --
+    the truthiness test dropped the filter ENTIRELY and
     returned every store's records.
 
     An empty reach now yields ``{"$in": []}``, which matches NOTHING: a
@@ -972,7 +973,11 @@ async def check_in(
     the operator UI works in demo mode.
     """
     roles = current_user.get("roles", []) or []
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    # Attendance is the person's own record, not a shop's list: the shop
+    # named (validated) or the active one -- None for a login with no shop,
+    # which still checks in (R4 is about what a login SEES, not about
+    # blocking a person's own attendance; the geo-fence rules apply).
+    active_store = validate_store_access(store_id, current_user)
     now = now_ist_naive()
 
     # --- Geo-fence enforcement (roles 4-7) ---
@@ -1121,7 +1126,7 @@ async def check_out(
     now = now_ist_naive()
     now_iso = now.isoformat()
     employee_id = current_user.get("user_id")
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+    active_store = validate_store_access(store_id, current_user)  # as check_in
     attendance_repo = get_attendance_repository()
     if attendance_repo is None or not employee_id:
         return {"message": "Check-out recorded", "checkOutTime": now_iso}
@@ -1944,7 +1949,7 @@ async def list_shifts(
     current_user: dict = Depends(require_roles(*_HR_READ_ROLES)),
 ):
     """List shifts for a store. Fail-soft -> empty list."""
-    active_store = validate_store_access(store_id, current_user)
+    active_store = store_in_view(store_id, current_user)
     try:
         db = _get_db()
     except Exception:
@@ -2153,7 +2158,7 @@ async def list_weekoff_swaps(
     if status:
         flt["status"] = status.upper()
     if is_manager:
-        active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id")
+        active_store = store_in_view(store_id, current_user)
         if active_store and "SUPERADMIN" not in roles and "ADMIN" not in roles:
             flt["store_id"] = active_store
         elif store_id:

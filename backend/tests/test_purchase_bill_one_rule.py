@@ -228,7 +228,10 @@ class TestTheShopsOwnRegistration:
             "items": [{"product_id": "P1", "product_name": "Frame X", "accepted_qty": 1}],
         }
         po = {"po_id": "POP", "items": [{"product_id": "P1", "unit_price": 1000.0, "tax_rate": 5.0}]}
-        cli = _app(db)  # the accountant sits at S1 (Jharkhand)
+        # The booker sits at S1 (Jharkhand) as an ADMIN: since F63 an
+        # accountant at S1 cannot reach PUNE's receipt (404,
+        # test_purchase_objects_by_id_scope).
+        cli = _app(db, roles=("ADMIN",))
         pi_router.get_grn_repository = lambda: _StubRepo(grn)
         pi_router.get_purchase_order_repository = lambda: _StubRepo(po)
 
@@ -242,6 +245,8 @@ class TestTheShopsOwnRegistration:
         doc = cli.post(_URL, json=body).json()
         assert doc["recipient_gstin"] == BUY_MH and doc["interstate"] is False
         assert (doc["cgst_total"], doc["sgst_total"], doc["igst_total"]) == (25.0, 25.0, 0.0)
+        # The draft names the shop the bill books to (the form says it).
+        assert draft["store_id"] == doc["store_id"] == "PUNE"
         po_verdict = _po_gst_parties(db.collections["vendors"][0], pune)["interstate"]
         assert po_verdict is doc["interstate"] is False
 
@@ -266,10 +271,16 @@ class TestTheRecipientIsNeverGuessed:
         assert db.collections["vendor_bills"] == []
 
     def test_no_shop_picked_is_refused_too(self):
+        """An accountant whose login holds no shop: no shop to book the bill
+        to (purchase_invoices._bill_shop asks the one shop rule) -- refused in
+        the owner's words (R4, 2026-10-12), nothing written."""
+        from api.dependencies import NO_SHOP_DETAIL
+
         db = _two_companies()
         r = _app_as(db, None).post(_URL, json=_services())
-        assert r.status_code == 422, r.text
-        assert r.json()["detail"]["code"] == "RECIPIENT_UNRESOLVED"
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"] == NO_SHOP_DETAIL
+        assert db.collections["vendor_bills"] == []
 
     def test_a_receipt_shop_without_a_company_is_never_the_users_shops(self):
         """P15: goods received at S3 (no company on its store record) while
@@ -284,7 +295,7 @@ class TestTheRecipientIsNeverGuessed:
             "status": "ACCEPTED",
             "items": [{"product_id": "P1", "accepted_qty": 10}],
         }
-        cli = _app(db)
+        cli = _app(db, roles=("ADMIN",))  # at S1; F63: only HQ reaches S3
         pi_router.get_grn_repository = lambda: _StubRepo(grn)
         draft = cli.get(f"{_URL}/from-grn/G3")
         booked = cli.post(_URL, json=_invoice_body(grn_id="G3"))
@@ -297,7 +308,10 @@ class TestTheRecipientIsNeverGuessed:
         """P15, the other half: the from-GRN draft called the recipient rule
         without the user's shop, the booking with it. On a receipt that names
         no shop at all the booking fell back to S1 while the draft did not.
-        Both now pass the same arguments, so they name the same company."""
+        Both now go through the one bill-shop rule, so they name the same
+        company. Owner ruling 2026-10-12 (R9): for such a receipt that is the
+        shop the ADMIN picks -- the draft names none (not his topbar S1), and
+        the form's preview and its booking, sent the pick, agree."""
         db = _two_companies()
         grn = {
             "grn_id": "G0",
@@ -305,13 +319,25 @@ class TestTheRecipientIsNeverGuessed:
             "status": "ACCEPTED",
             "items": [{"product_id": "P1", "accepted_qty": 10}],
         }
-        cli = _app(db)
+        # F63: a receipt with no shop is HQ's only, so an ADMIN at S1 books it.
+        cli = _app(db, roles=("ADMIN",))
         pi_router.get_grn_repository = lambda: _StubRepo(grn)
         draft = cli.get(f"{_URL}/from-grn/G0").json()
-        doc = cli.post(_URL, json=_invoice_body(grn_id="G0")).json()
-        assert draft["recipient_entity_id"] == doc["recipient_entity_id"] == "E1"
-        assert draft["recipient_gstin"] == doc["recipient_gstin"] == BUY_JH
-        assert draft["interstate"] is doc["interstate"] is True
+        # Nothing assumed: no shop, no company, no GSTIN for the form to send
+        # back against the shop the admin picks.
+        assert (draft["store_id"], draft["recipient_entity_id"], draft["recipient_gstin"]) == (None, None, None)
+        unpicked = cli.post(_URL, json=_invoice_body(grn_id="G0"))
+        assert unpicked.status_code == 422, unpicked.text
+        assert unpicked.json()["detail"]["code"] == "BILL_SHOP_REQUIRED"
+        assert db.collections["vendor_bills"] == []
+        pv = cli.post(f"{_URL}/preview", json=_invoice_body(grn_id="G0", store_id="S1"))
+        assert pv.status_code == 200, pv.text
+        pv = pv.json()
+        doc = cli.post(_URL, json=_invoice_body(grn_id="G0", store_id="S1")).json()
+        assert pv["recipient_entity_id"] == doc["recipient_entity_id"] == "E1"
+        assert pv["recipient_gstin"] == doc["recipient_gstin"] == BUY_JH
+        assert pv["interstate"] is doc["interstate"] is True
+        assert doc["store_id"] == "S1"
 
     def test_a_typed_gstin_is_checked_even_when_the_company_lists_none(self):
         """P16: a company with no registrations on file cannot vouch for a
@@ -360,7 +386,10 @@ class TestTheRecipientIsNeverGuessed:
                 "items": [{"product_id": "P1", "accepted_qty": 2}],
             }
         ]
-        r = _app(db).get(f"{_URL}/from-dcs", params={"dc_ids": "D1", "vendor_id": "V1"})
+        # An ADMIN at S1: since F63 an accountant at S1 cannot reach S2's DC.
+        r = _app(db, roles=("ADMIN",)).get(
+            f"{_URL}/from-dcs", params={"dc_ids": "D1", "vendor_id": "V1"}
+        )
         assert r.status_code == 200, r.text
         d = r.json()
         assert d["recipient_entity_id"] == "E2" and d["recipient_gstin"] == BUY_MH
@@ -496,6 +525,13 @@ class TestEveryDoorEveryReader:
         the Cash Flow '+ bill' door. Register 330, GSTR-3B (Cross-Check) 150
         before; every reader now says 330, in the same heads."""
         db, cli = self._world()
+
+        # The three screen bills land in S1 AND S2, so the booker is an ADMIN
+        # sitting at S1: since F63 an accountant at S1 cannot reach GC (S2).
+        async def _admin_at_s1():
+            return {"user_id": "u-admin", "roles": ["ADMIN"], "store_ids": [], "active_store_id": "S1"}
+
+        cli.app.dependency_overrides[get_current_user] = _admin_at_s1
         a = _book_from_grn(cli, "GA", "A-1")
         b = _book_from_grn(cli, "GB", "B-1")
         c = _book_from_grn(cli, "GC", "C-1")
@@ -506,8 +542,10 @@ class TestEveryDoorEveryReader:
         door.dependency_overrides[get_current_user] = cli.app.dependency_overrides[get_current_user]
         r = TestClient(door).post(
             "/api/v1/vendors/V1/bills",
+            # R9: an admin names the shop a services bill is for (S1 here).
             json={"bill_number": "FR-9", "bill_date": "2026-05-09", "taxable_amount": 1000,
-                  "tax_amount": 180, "total_amount": 1180, "bill_kind": "SERVICES"},
+                  "tax_amount": 180, "total_amount": 1180, "bill_kind": "SERVICES",
+                  "store_id": "S1"},
         )
         assert r.status_code == 201, r.text
         fr9 = r.json()
@@ -597,8 +635,16 @@ class TestTheReceiptsShopOnEveryDoor:
     the other company's GSTR-3B."""
 
     def test_cash_flow_goods_bill_is_the_receipts_company(self):
-        """Mutant M1 (ap_bills `_receipt_store = None`) survived every suite."""
+        """Mutant M1 (ap_bills `_receipt_store = None`) survived every suite.
+        The booker sits at S2 as an ADMIN: since F63 a shop-bound accountant
+        at S2 cannot reach S1's receipt at all (404, test_supplier_ledger_
+        rows_round2), so only a cross-shop booker can expose the mutant."""
         _, cli = TestEveryDoorEveryReader()._world("S2")
+
+        async def _admin_at_s2():
+            return {"user_id": "u-admin", "roles": ["ADMIN"], "store_ids": [], "active_store_id": "S2"}
+
+        cli.app.dependency_overrides[get_current_user] = _admin_at_s2
         r = _door(cli, "V1", bill_number="G-1", bill_date="2026-05-09", taxable_amount=1000,
                   tax_amount=50, total_amount=1050, bill_kind="GOODS", grn_id="GA")
         assert r.status_code == 201, r.text
@@ -608,8 +654,15 @@ class TestTheReceiptsShopOnEveryDoor:
 
     def test_the_preview_of_a_receipt_bill_is_the_booking(self):
         """Mutant M7 (preview `grn_doc = None`) survived: the preview named
-        WizOpt's number while the booking stored Better Vision's."""
+        WizOpt's number while the booking stored Better Vision's. The booker
+        sits at S2 as an ADMIN: since F63 an accountant at S2 cannot reach
+        S1's receipt (404, test_purchase_objects_by_id_scope)."""
         _, cli = TestEveryDoorEveryReader()._world("S2")
+
+        async def _admin_at_s2():
+            return {"user_id": "u-admin", "roles": ["ADMIN"], "store_ids": [], "active_store_id": "S2"}
+
+        cli.app.dependency_overrides[get_current_user] = _admin_at_s2
         body = {"vendor_id": "V1", "grn_id": "GA", "lines": [
             {"product_id": "P1", "description": "Frame", "qty": 1, "unit_price": 1000, "gst_rate": 5}]}
         pv = cli.post(f"{_URL}/preview", json=body)
@@ -644,7 +697,8 @@ class TestTheReceiptsShopOnEveryDoor:
                 for gid, extra in (("DX1", {}), ("DX2", {"store_id": "PUNE"}))
             ]
         )
-        cli = _app(db)
+        # An ADMIN at S1: since F63 a shop-less DC and PUNE's are HQ's to bill.
+        cli = _app(db, roles=("ADMIN",))
         draft = cli.get(f"{_URL}/from-dcs", params={"dc_ids": "DX1,DX2", "vendor_id": "V1"})
         assert draft.status_code == 200, draft.text
         assert draft.json()["recipient_gstin"] == BUY_MH and draft.json()["interstate"] is False
@@ -698,14 +752,17 @@ class TestNoCheckFailsOpen:
 
     def test_the_cash_flow_door_does_not_ask_for_a_gstin_it_has_no_box_for(self):
         """No shop picked, two companies: the refusal told the accountant to
-        'type our GSTIN', and the Cash Flow form has no such box."""
+        'type our GSTIN', and the Cash Flow form has no such box. A login with
+        no shop at all is now told why in the owner's words (R4: it holds no
+        shop to book to) -- still nothing about a GSTIN box."""
+        from api.dependencies import NO_SHOP_DETAIL
+
         _, cli = TestEveryDoorEveryReader()._world(None)
         r = _door(cli, "V1", bill_number="FR-1", bill_date="2026-05-09",
                   taxable_amount=1000, tax_amount=180, total_amount=1180, bill_kind="SERVICES")
-        assert r.status_code == 422, r.text
-        detail = r.json()["detail"]
-        assert detail["code"] == "RECIPIENT_UNRESOLVED"
-        assert "GSTIN" not in detail["message"] and "top bar" in detail["message"]
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"] == NO_SHOP_DETAIL
+        assert "GSTIN" not in r.json()["detail"]
 
     def test_an_unreadable_bill_list_never_reads_green(self, monkeypatch):
         """_itc_unplaced swallowed any read error and reported 0 bills, so the
@@ -784,13 +841,16 @@ class TestCreditFromAnUnregisteredSupplierIsFlagged:
             {"description": "Fitting", "qty": 1, "unit_price": 1000.11, "gst_rate": 5}]))
         assert r.status_code == 201, r.text
         # Booked before round 12 (when a bill with no valid supplier GSTIN
-        # began to be booked no-credit): the credit is still claimed.
+        # began to be booked no-credit): the books still claim it, but the
+        # return now excludes the invalid recorded supplier GSTIN.
         db["vendor_bills"].update_many({}, {"$set": {"itc_eligible": True}})
         xc = _crosscheck(db, "E1")
-        assert xc["gstr3b"]["itc"]["total"] == 50.01
+        assert xc["gstr3b"]["itc"]["total"] == 0.0
         row = _row(xc, "Input credit from suppliers with no GSTIN")
         assert row["status"] == "MISMATCH" and row["variance"] == 50.01
         assert "VN-1" in row["note"]
+        assert "already excludes this credit" in row["note"]
+        assert row["sources"]["Credit flagged in books"] == 50.01
 
     def test_a_gstin_given_to_the_supplier_later_does_not_clear_the_bill(self):
         """Panel MEDIUM (gst_itc._itc_unplaced): the row read the vendor
@@ -1161,6 +1221,9 @@ class TestTheFormsShopDecidesPreviewAndBooking:
         _same_split(pv, doc)
         assert doc["recipient_gstin"] == BUY_JH and doc["interstate"] is True
         assert doc["igst_total"] == 120.01
+        # ... and the bill is stored under that same shop, not the token's:
+        # one bill never names one shop for its tax and another for its tabs.
+        assert doc["store_id"] == "S1"
 
     def test_a_shop_the_user_cannot_act_for_is_refused(self):
         db = self._world()

@@ -9,6 +9,7 @@ from ._shared import (
     HTTPException,
     Optional,
     Query,
+    _RECEIVABLE_PO_STATUSES,
     _VENDOR_ROLES,
     _auto_reorder_disabled,
     _get_db,
@@ -22,6 +23,7 @@ from ._shared import (
     is_online_store,
     logger,
     require_roles,
+    resolve_store_scope,
     router,
     timedelta,
     uuid,
@@ -194,13 +196,14 @@ async def list_pos(
     store_id: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100),
+    receipt_candidates: bool = Query(False),
     current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
 ):
     """List purchase orders with filters"""
     po_repo = get_purchase_order_repository()
-    active_store = validate_store_access(store_id, current_user) or current_user.get(
-        "active_store_id"
-    )
+    # One shop scope for every Purchase tab (F63): no shop chosen = all shops
+    # for an admin, the caller's own shop for everyone else.
+    active_store = resolve_store_scope(store_id, current_user)
 
     if po_repo is None:
         return {"purchase_orders": [], "total": 0}
@@ -213,13 +216,35 @@ async def list_pos(
     if active_store:
         filter_dict["delivery_store_id"] = active_store
 
-    pos = po_repo.find_many(filter_dict, skip=skip, limit=limit) or []
-    from .po_detail import closed_by_cancel  # po_detail imports this module
+    if receipt_candidates is True:
+        # Filter before limiting: an old sent-then-cancelled order must not
+        # vanish behind the most recent 50 drafts. Receiving offers all matches.
+        filter_dict["$or"] = [
+            {"status": {"$in": [*_RECEIVABLE_PO_STATUSES, "RECEIVED"]}},
+            {"status": "CANCELLED", "sent_at": {"$exists": True, "$nin": [None, ""]}},
+        ]
+        pos = po_repo.find_many(
+            filter_dict, sort=_PO_NEWEST_FIRST, limit=0,
+        ) or []
+        total = len(pos)
+    else:
+        # Ordinary lists retain newest-first pagination and the full count.
+        pos = po_repo.find_many(filter_dict, sort=_PO_NEWEST_FIRST, skip=skip, limit=limit) or []
+        total = max(po_repo.count(filter_dict), skip + len(pos))
+    from .po_detail import _cancelled_products, closed_by_cancel  # po_detail imports this module
 
     for po in pos:
         po["closed_by_cancel"] = closed_by_cancel(po)
+        cancelled = _cancelled_products(po)
+        po["extra_receipt_allowed"] = po.get("status") == "RECEIVED" and any(
+            line.get("product_id") not in cancelled for line in po.get("items") or []
+        )
 
-    return {"purchase_orders": mask_purchase(pos, current_user), "total": len(pos)}
+    return {"purchase_orders": mask_purchase(pos, current_user), "total": total}
+
+
+# Raised-at descending; the id breaks a tie so pages never overlap.
+_PO_NEWEST_FIRST = [("created_at", -1), ("_id", -1)]
 
 
 # INV-9: Demand forecast -> nightly draft-PO suggestions

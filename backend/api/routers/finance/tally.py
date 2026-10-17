@@ -18,7 +18,7 @@ from ._shared import (
     _customer_state_map,
     _get_db,
     _order_is_interstate,
-    _require_finance_admin,
+    _require_org_finance,
     _store_maps,
     _store_state_map,
     logger,
@@ -394,7 +394,7 @@ async def list_b2b_invoices(
     needs_eway, tally_status, exported flag, and the PENDING-age reminder.
 
     Accountant material -- ADMIN / ACCOUNTANT / SUPERADMIN only."""
-    _require_finance_admin(current_user)
+    _require_org_finance(current_user)
     db = _get_db()
     rows = _b2b_invoices(
         db,
@@ -418,7 +418,7 @@ async def get_b2b_invoice_tally_xml(
 ):
     """Tally sales-voucher XML for ONE B2B invoice (downloadable). The
     accountant imports it into Tally, which then issues the e-invoice/e-way."""
-    _require_finance_admin(current_user)
+    _require_org_finance(current_user)
     db = _get_db()
     orders = _b2b_fetch_orders(db, [order_id])
     if not orders:
@@ -445,7 +445,7 @@ async def export_b2b_invoices_to_tally(
     invoice with party + per-rate tax ledgers). Optionally advances PENDING
     rows to IN_TALLY (they have been handed to Tally). Returns the XML so the
     accountant imports it into Tally (which issues the e-invoice/e-way bill)."""
-    _require_finance_admin(current_user)
+    _require_org_finance(current_user)
     db = _get_db()
     orders = _b2b_fetch_orders(db, body.order_ids)
     if not orders:
@@ -492,7 +492,7 @@ async def mark_b2b_invoices_exported(
     """Stamp the selected B2B invoices as handed to Tally: exported_to_tally =
     true + exported_at/exported_by, and advance PENDING -> IN_TALLY. The list
     then shows what has already been given to the accountant's Tally."""
-    _require_finance_admin(current_user)
+    _require_org_finance(current_user)
     db = _get_db()
     who = current_user.get("user_id") or current_user.get("username") or "system"
     now = now_ist_naive()
@@ -532,7 +532,7 @@ async def mark_b2b_invoice_done(
     """Confirm a B2B invoice has been created in Tally (with its e-invoice +
     e-way bill where required): tally_status = DONE + done_at/done_by. Clears it
     off the reminder worklist."""
-    _require_finance_admin(current_user)
+    _require_org_finance(current_user)
     db = _get_db()
     who = current_user.get("user_id") or current_user.get("username") or "system"
     try:
@@ -566,7 +566,7 @@ async def set_b2b_attention_note(
 ):
     """Set (or clear, with an empty string) the free-text attention note on a
     B2B invoice -- a reminder for the accountant about special Tally handling."""
-    _require_finance_admin(current_user)
+    _require_org_finance(current_user)
     db = _get_db()
     note = (body.note or "").strip()
     who = current_user.get("user_id") or current_user.get("username") or "system"
@@ -605,7 +605,7 @@ async def get_tally_sales_jv(
     # Org-wide sales-voucher export is an accounting function -- finance-admin
     # only (owner decision 2026-06-16); a store-level role can't export all
     # stores' sales JV. Mirror of the tender-receipt-jv sibling gate.
-    _require_finance_admin(current_user)
+    _require_org_finance(current_user)
     db = _get_db()
     # Never export DRAFT/CANCELLED orders to Tally -- they aren't real sales
     # vouchers. created_at is a BSON datetime so the range is built as datetimes

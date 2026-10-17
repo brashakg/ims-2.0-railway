@@ -322,7 +322,10 @@ def test_post_actually_reduces_net_payable_via_build_aging(db):
     assert round(before["net_payable"] - after["net_payable"], 2) == round(
         out["rebate_paise"] / 100.0, 2
     )
-    assert after["unallocated_credits"] == 3750.0
+    # The on-account credit note settles the open bill (ap_engine F56: credit
+    # with no bill pays the oldest due first), so the bill itself owes less.
+    assert after["items"][0]["outstanding"] == 150000.0 - 3750.0
+    assert after["unallocated_credits"] == 0.0
 
 
 def test_double_post_same_period_blocked(db):

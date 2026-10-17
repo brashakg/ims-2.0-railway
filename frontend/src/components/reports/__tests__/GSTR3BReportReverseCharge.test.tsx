@@ -15,7 +15,7 @@ vi.mock('../../../context/ToastContext', () => ({
   useToast: () => ({ success: vi.fn(), error: vi.fn() }),
 }));
 vi.mock('../../../context/AuthContext', () => ({
-  useAuth: () => ({ user: { activeStoreId: 'S1' } }),
+  useAuth: () => ({ user: { roles: ['ACCOUNTANT'], activeStoreId: 'S1' } }),
 }));
 vi.mock('../../../services/api', () => ({
   reportsApi: {

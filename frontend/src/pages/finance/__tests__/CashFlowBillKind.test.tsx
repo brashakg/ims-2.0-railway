@@ -38,6 +38,15 @@ const apis = vi.hoisted(() => ({
 
 vi.mock('../../../services/api/vendorAp', () => apis);
 vi.mock('../../../context/ToastContext', () => ({ useToast: () => toastMock }));
+// The form names shops (the receipt list's and the money's: review r3 #14),
+// so it reads the login and the store list. A shop accountant here: the
+// receipts are his own shop's, so they carry no shop name.
+vi.mock('../../../context/AuthContext', () => ({
+  useAuth: () => ({ user: { id: 'u-acct', roles: ['ACCOUNTANT'], activeRole: 'ACCOUNTANT', activeStoreId: 'BV-DHN-01' } }),
+}));
+vi.mock('../../../hooks/usePOSQueries', () => ({
+  useStores: () => ({ data: [{ store_id: 'BV-DHN-01', store_name: 'Better Vision Dhanbad' }] }),
+}));
 
 import CashFlowPage from '../CashFlowPage';
 
@@ -204,5 +213,26 @@ describe('the goods/services declaration on the Record-Bill form', () => {
       target: { value: 'GOODS' },
     });
     await screen.findByText(/Could not load this vendor/);
+  });
+
+  it('no unbilled receipt: a walk-in buy is sent to "Bought without PO", not to a challan (D14)', async () => {
+    apis.vendorApApi.listReceipts.mockResolvedValue([]);
+    await openBillForm();
+    fireEvent.change(screen.getByDisplayValue('This bill is for…'), {
+      target: { value: 'GOODS' },
+    });
+    const hint = await screen.findByText(/No unbilled goods receipts/);
+    expect(hint).toHaveTextContent(/Bought without PO/);
+    expect(hint).not.toHaveTextContent(/Log them as a Delivery Challan/);
+    // The dealer is a supplier (owner 2026-10-12). This form opens only for a
+    // supplier in the AP Aging list, which lists only suppliers with an
+    // unpaid bill: a dealer quick-added at receiving has none, so the hint
+    // names the screen that books any receipt's bill (round 8 panel: "record
+    // the bill here, under that supplier" was a dead end).
+    expect(hint).toHaveTextContent(/adding a new dealer if needed/);
+    expect(hint).toHaveTextContent(/Purchase → Invoices → Create from GRN/);
+    expect(hint).toHaveTextContent(/Book the bill/);
+    expect(hint).not.toHaveTextContent(/record the\s+bill here/);
+    expect(hint).not.toHaveTextContent(/typed by\s+name/);
   });
 });

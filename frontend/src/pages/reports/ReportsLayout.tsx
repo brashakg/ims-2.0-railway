@@ -29,6 +29,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { COST_ROLES } from '../../components/common/CostCell';
 import {
   resolveDateRange,
   useSalesGrowth,
@@ -224,7 +225,7 @@ export function ReportsLayout() {
           `.inv-tabs button, .inv-tabs a` in a follow-up and these become real
           anchors (middle-click, open-in-new-tab). */}
       <div className="inv-tabs">
-        {SECTIONS.map(({ path, label, icon: TabIcon }) => (
+        {SECTIONS.filter(({ path }) => path !== '/reports/gst' || hasRole(COST_ROLES)).map(({ path, label, icon: TabIcon }) => (
           <button
             key={path}
             onClick={() => navigate(path)}

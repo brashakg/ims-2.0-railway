@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 from .auth import get_current_user, require_roles
 from ..utils.dates import to_date_str
 from ..utils.ist import ist_date_str
+from ..dependencies import store_in_view
 from ..dependencies import (
     get_order_repository,
     get_stock_repository,
@@ -501,10 +502,7 @@ async def get_dashboard_summary(
         start_date, end_date = get_date_range(period)
         # BUG-062: 403 on cross-store access; validate_store_access returns the
         # caller's active store when store_id is omitted (admins/area-mgrs pass).
-        store_id = (
-            validate_store_access(store_id, current_user)
-            or current_user.get("active_store_id")
-        )
+        store_id = store_in_view(store_id, current_user)
         if not store_id:
             raise HTTPException(
                 status_code=422,
@@ -617,10 +615,7 @@ async def get_revenue_trends(
     try:
         # BUG-062: 403 on cross-store access; validate_store_access returns the
         # caller's active store when store_id is omitted (admins/area-mgrs pass).
-        store_id = (
-            validate_store_access(store_id, current_user)
-            or current_user.get("active_store_id")
-        )
+        store_id = store_in_view(store_id, current_user)
         if not store_id:
             raise HTTPException(
                 status_code=422,
@@ -927,10 +922,7 @@ async def get_inventory_intelligence(
     try:
         # BUG-062: 403 on cross-store access; validate_store_access returns the
         # caller's active store when store_id is omitted (admins/area-mgrs pass).
-        store_id = (
-            validate_store_access(store_id, current_user)
-            or current_user.get("active_store_id")
-        )
+        store_id = store_in_view(store_id, current_user)
         if not store_id:
             raise HTTPException(
                 status_code=422,
@@ -1076,10 +1068,7 @@ async def get_customer_insights(
         start_date, end_date = get_date_range(period)
         # BUG-062: 403 on cross-store access; validate_store_access returns the
         # caller's active store when store_id is omitted (admins/area-mgrs pass).
-        store_id = (
-            validate_store_access(store_id, current_user)
-            or current_user.get("active_store_id")
-        )
+        store_id = store_in_view(store_id, current_user)
         if not store_id:
             raise HTTPException(
                 status_code=422,
@@ -1236,10 +1225,7 @@ async def get_enterprise_kpis(
     try:
         # BUG-062: 403 on cross-store access; validate_store_access returns the
         # caller's active store when store_id is omitted (admins/area-mgrs pass).
-        store_id = (
-            validate_store_access(store_id, current_user)
-            or current_user.get("active_store_id")
-        )
+        store_id = store_in_view(store_id, current_user)
         if not store_id:
             raise HTTPException(
                 status_code=422,

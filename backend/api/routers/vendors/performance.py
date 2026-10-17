@@ -12,10 +12,23 @@ from ._shared import (
     logger,
     now_ist,
     require_roles,
+    resolve_store_scope,
     router,
     timedelta,
 )
+from typing import Optional
+
+from ...dependencies import is_no_shop_scope
 from ...services.cost_mask import can_see_cost, mask_purchase
+
+
+def _at_shop(scope: Optional[str], key: str = "store_id") -> dict:
+    """The shop filter for one collection, by THE shop rule's answer
+    (resolve_store_scope): None -> every shop (an admin with none picked); a
+    shop -> that shop; R4's reserved no-shop scope -> a filter no document
+    matches. POs carry their shop as delivery_store_id (the PO list's own
+    filter, purchase_orders.list); GRNs and workshop jobs as store_id."""
+    return {key: scope} if scope else {}
 
 
 # ============================================================================
@@ -34,43 +47,30 @@ from ...services.cost_mask import can_see_cost, mask_purchase
 # empty states.  No fabricated numbers (SYSTEM_INTENT).
 
 
-def _vendor_mtd_spend(db, vendor_id: str) -> float:
-    """Sum of this vendor's bills dated in the CURRENT calendar month (rupees).
+def _vendor_mtd_spend(db, vendor_id: str, current_user: dict) -> float:
+    """What this vendor billed us in the CURRENT IST month -- the Purchases
+    report's `billed`, from the same supplier ledger rows on the same as-of
+    day (F56, one rule: a bill keyed ahead to a later day is not billed yet).
+    Fail-soft: no DB -> 0.0 (an honest zero, never a fabricated number per
+    SYSTEM_INTENT).
 
-    Reads vendor_bills.total_amount where bill_date (fallback created_at) falls
-    in the current month. Fail-soft: missing DB / collection / parse error -> 0.0
-    (an honest zero, never a fabricated number per SYSTEM_INTENT)."""
+    Scope: EVERY shop. The scorecard is org-wide for an accountant (owner
+    ruling 2026-10-12, R8 -- as TDS and rebates), and only the accounts roles
+    read this figure at all (the caller gates it on cost_mask 'payables').
+    The one exception is R4's: a non-admin login with NO shop sees no shop, so
+    it reads the reserved no-shop scope -- Rs 0, never every shop's bills.
+
+    BUG-104: the month is the IST month (bill_date is an IST business date)."""
+    from .purchases_report import billed_in_month  # call time: route order
+
+    own = resolve_store_scope(None, current_user)
+    scope = own if is_no_shop_scope(own) else None
     if db is None:
         return 0.0
-    # BUG-104. The VALUE side (`bill_date`) is already an IST business-date
-    # string, so the month PREFIX it is matched against must be the IST month
-    # too. On the UTC clock, between 00:00 and 05:30 IST on the 1st this asked
-    # for LAST month and the vendor's month-to-date spend read as the previous
-    # month's total for five and a half hours every month.
-    month_prefix = now_ist().strftime("%Y-%m")  # "2026-06"
-    total = 0.0
-    try:
-        bills = db.get_collection("vendor_bills").find(
-            {"vendor_id": vendor_id},
-            {
-                "_id": 0,
-                "total_amount": 1,
-                "taxable_amount": 1,
-                "reverse_charge": 1,
-                "bill_date": 1,
-                "created_at": 1,
-            },
-        )
-        for b in bills:
-            when = str(b.get("bill_date") or b.get("created_at") or "")[:7]
-            if when == month_prefix:
-                total += ap_engine.vendor_payable(b)
-    except Exception:  # noqa: BLE001
-        return 0.0
-    return round(total, 2)
+    return billed_in_month(db, vendor_id, scope, now_ist().strftime("%Y-%m"))
 
 
-def _vendor_qc_pass_rate(db, vendor_id: str):
+def _vendor_qc_pass_rate(db, vendor_id: str, scope: Optional[str] = None):
     """Quality pass-rate for a vendor, joining GRN QC + workshop QC outcomes.
 
     Two QC signals are unioned into one pass-rate:
@@ -82,7 +82,11 @@ def _vendor_qc_pass_rate(db, vendor_id: str):
 
     Returns (pass_rate, sample_size). pass_rate is units+jobs passed / total
     units+jobs evaluated, rounded to 4 dp; None when there is NO QC signal at
-    all. Fail-soft: any error -> (None, 0). No fabricated numbers."""
+    all. Fail-soft: any error -> (None, 0). No fabricated numbers.
+
+    ``scope`` is the caller's shop (resolve_store_scope): both signals are
+    that shop's receipts and jobs -- every shop only for an admin with none
+    picked, no shop for R4's no-shop login (F63: a manager keeps his shop)."""
     if db is None:
         return None, 0
     passed = 0
@@ -90,7 +94,7 @@ def _vendor_qc_pass_rate(db, vendor_id: str):
     # --- GRN QC (goods-receipt inspection outcome) ---
     try:
         grns = db.get_collection("grns").find(
-            {"vendor_id": vendor_id, "status": "ACCEPTED"},
+            {"vendor_id": vendor_id, "status": "ACCEPTED", **_at_shop(scope)},
             {"_id": 0, "total_received": 1, "total_accepted": 1},
         )
         for g in grns:
@@ -107,7 +111,7 @@ def _vendor_qc_pass_rate(db, vendor_id: str):
     # --- Workshop QC (lens jobs routed to this lab/vendor) ---
     try:
         jobs = db.get_collection("workshop_jobs").find(
-            {"vendor_id": vendor_id},
+            {"vendor_id": vendor_id, **_at_shop(scope)},
             {"_id": 0, "qc_passed": 1, "qc_waived": 1, "qc_history": 1},
         )
         for j in jobs:
@@ -140,6 +144,9 @@ async def vendor_performance(
         description="Number of rolling months to include in the score window.",
     ),
     current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
+    # After current_user: callers that pass (vendor_id, months, user)
+    # positionally keep working.
+    store_id: Optional[str] = None,
 ):
     """Return a performance score for the vendor over the last `months` months (INV-13).
 
@@ -153,24 +160,31 @@ async def vendor_performance(
     ``insufficient_data: true`` so callers know the rating has low confidence.
     Honest empty state: if the vendor has no GRN history an honest zero is
     returned, not a fabricated average.
+
+    Shop scope (F63, R4): the receipts, QC and punctuality are the caller's
+    shop's -- resolve_store_scope, the rule every Purchase tab applies: every
+    shop for an admin with none picked (?store_id narrows it), his own shop
+    for anyone else, none for a non-admin login with no shop. Only the
+    accounts roles' MTD spend stays org-wide (R8, _vendor_mtd_spend).
     """
+    scope = resolve_store_scope(store_id, current_user)
     db = _get_db()
     vendor_repo = get_vendor_repository()
     vendor = vendor_repo.find_by_id(vendor_id) if vendor_repo is not None else None
 
     # MTD spend is independent of GRN history -- compute it up front so even a
     # vendor with no GRNs in the window still reports what we've billed this
-    # month. Fail-soft: any error -> 0.0 (honest, never fabricated). It sums
-    # supplier bills, so it is the one payables rule's (owner ruling
-    # 2026-09-29): anyone else gets no mtd_spend key at all.
+    # month. What a supplier billed us is supplier money (owner rulings
+    # 2026-09-29 / 2026-10-01): the one payables rule's -- the accounts roles
+    # alone get the key, and for anyone else the bills are not even read.
     bills = (
-        {"mtd_spend": _vendor_mtd_spend(db, vendor_id)}
+        {"mtd_spend": _vendor_mtd_spend(db, vendor_id, current_user)}
         if can_see_cost(current_user, "payables")
         else {}
     )
     # QC pass-rate joins GRN QC (accepted/received) + workshop QC (job pass/fail)
     # for this vendor. Fail-soft: returns None when there is no QC signal at all.
-    qc_pass_rate, qc_sample = _vendor_qc_pass_rate(db, vendor_id)
+    qc_pass_rate, qc_sample = _vendor_qc_pass_rate(db, vendor_id, scope)
 
     empty = {
         "vendor_id": vendor_id,
@@ -211,6 +225,7 @@ async def vendor_performance(
                     "vendor_id": vendor_id,
                     "status": "ACCEPTED",
                     "created_at": {"$gte": cutoff},
+                    **_at_shop(scope),
                 },
                 {
                     "_id": 0,
@@ -326,6 +341,7 @@ async def vendor_purchase_history(
         le=36,
         description="Rolling-months window for the purchase-history report.",
     ),
+    store_id: Optional[str] = None,
     current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
 ):
     """Return purchase-history analytics for one vendor (INV-13).
@@ -337,7 +353,13 @@ async def vendor_purchase_history(
 
     Honest empty state: no fabricated numbers; all fields are derived from real
     PO + GRN data or explicitly null.
+
+    Shop scope (F63, R4): the caller's shop's orders and receipts, by THE
+    shop rule (resolve_store_scope) -- every shop for an admin with none
+    picked (?store_id narrows it), his own shop for anyone else, none for a
+    non-admin login with no shop (an explicit shop from it is a 403).
     """
+    scope = resolve_store_scope(store_id, current_user)
     db = _get_db()
     vendor_repo = get_vendor_repository()
     vendor = vendor_repo.find_by_id(vendor_id) if vendor_repo is not None else None
@@ -380,6 +402,7 @@ async def vendor_purchase_history(
                     "vendor_id": vendor_id,
                     "status": {"$nin": ["CANCELLED", "DRAFT"]},
                     "created_at": {"$gte": cutoff},
+                    **_at_shop(scope, "delivery_store_id"),
                 },
                 {
                     "_id": 0,
@@ -401,6 +424,7 @@ async def vendor_purchase_history(
                     "vendor_id": vendor_id,
                     "status": "ACCEPTED",
                     "created_at": {"$gte": cutoff},
+                    **_at_shop(scope),
                 },
                 {
                     "_id": 0,

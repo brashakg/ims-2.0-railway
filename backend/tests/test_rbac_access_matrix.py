@@ -50,7 +50,7 @@ COVERAGE LIST (method, path, roles_tested)
   POST /api/v1/prescriptions               -> clinical roles (self-enforced); SALES_STAFF -> 403 clinical
   PUT  /api/v1/prescriptions/{id}          -> clinical roles; CASHIER -> 403
   GET  /api/v1/reports/inventory/valuation -> finance roles; SALES_CASHIER -> 403
-  GET  /api/v1/reports/gstr1               -> finance roles; SALES_STAFF -> 403
+  GET  /api/v1/reports/gstr1               -> accounts roles; managers/staff -> 403
   POST /api/v1/returns                     -> cashier/admin roles; OPTOMETRIST -> 403
   POST /api/v1/users                       -> ADMIN/SUPERADMIN; STORE_MANAGER -> 403
   GET  /api/v1/audit/verify                -> SUPERADMIN; ADMIN -> 403
@@ -64,6 +64,8 @@ COVERAGE LIST (method, path, roles_tested)
   POST /api/v1/transfers                   -> mgmt+super roles; CASHIER -> 403
   GET  /api/v1/inventory/accountability/shrinkage -> mgmt roles; SALES_STAFF -> 403
   GET  /api/v1/vendors/ap-aging            -> ACCOUNTANT/ADMIN; STORE_MANAGER -> 403
+  GET  /api/v1/vendors/purchases-this-month -> ACCOUNTANT/ADMIN; managers + counter -> 403
+  POST /api/v1/vendors/purchase-invoices/preview -> ACCOUNTANT/ADMIN; managers + counter -> 403
   POST /api/v1/vendors/{vid}/bills         -> ACCOUNTANT/ADMIN; AREA_MANAGER -> 403
   GET  /api/v1/expenses/aging              -> ACCOUNTANT/ADMIN; SALES_CASHIER -> 403
 
@@ -547,13 +549,16 @@ class TestFinancePayrollHrRoutes:
         ("GET", "/api/v1/finance/pnl"),
         ("GET", "/api/v1/hr/attendance"),
         ("GET", "/api/v1/hr/leaves"),
-        ("GET", "/api/v1/reports/gstr1"),
         ("GET", "/api/v1/reports/inventory/valuation"),
+    ]
+    # GST reports follow the approved Admin/Superadmin/Accounts-only rule.
+    _ACCOUNTS_GST_PATHS = [
+        ("GET", "/api/v1/reports/gstr1"),
         ("GET", "/api/v1/reports/finance/gst"),
     ]
 
     # All paths (including divergent ones) for the non-finance denial test
-    _FINANCE_PATHS = _FINANCE_PATHS_ALL_4_ALLOWED + [
+    _FINANCE_PATHS = _FINANCE_PATHS_ALL_4_ALLOWED + _ACCOUNTS_GST_PATHS + [
         ("POST", "/api/v1/payroll/run"),
         ("GET", "/api/v1/expenses/aging"),
         # OWNER RULING 2026-08-09: the salary-config LIST is every employee's
@@ -565,6 +570,18 @@ class TestFinancePayrollHrRoutes:
     @pytest.mark.parametrize("method,path", _FINANCE_PATHS_ALL_4_ALLOWED)
     @pytest.mark.parametrize("role", ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"])
     def test_finance_role_allowed(self, matrix_client, method, path, role):
+        r = matrix_client.request(method, path, headers=ALL_ROLE_HEADERS[role])
+        assert_route_allowed(r, role, method, path)
+
+    @pytest.mark.parametrize("method,path", _ACCOUNTS_GST_PATHS)
+    @pytest.mark.parametrize("role", ["AREA_MANAGER", "STORE_MANAGER"])
+    def test_gst_reports_deny_manager_roles(self, client, method, path, role):
+        r = client.request(method, path, headers=ALL_ROLE_HEADERS[role])
+        assert_middleware_403(r, method, path)
+
+    @pytest.mark.parametrize("method,path", _ACCOUNTS_GST_PATHS)
+    @pytest.mark.parametrize("role", ["ACCOUNTANT", "ADMIN", "SUPERADMIN"])
+    def test_gst_reports_allow_accounts_roles(self, matrix_client, method, path, role):
         r = matrix_client.request(method, path, headers=ALL_ROLE_HEADERS[role])
         assert_route_allowed(r, role, method, path)
 
@@ -1287,6 +1304,56 @@ class TestVendorFinanceRoutes:
         )
         assert_route_allowed(r, "ADMIN", "GET", "/api/v1/vendors/ap-aging")
 
+    # Purchases this month (audit F56): what we owe each supplier, so the same
+    # supplier-balance readers as ap-aging -- the policy row, not only the
+    # handler's require_roles, refuses a manager and the counter.
+    # Every role outside the accounts roles: the managers, the counter (incl.
+    # the retired SALES_CASHIER alias) and the catalogue / clinic / workshop.
+    _BELOW_ACCOUNTS = [
+        "STORE_MANAGER",
+        "AREA_MANAGER",
+        "SALES_STAFF",
+        "CASHIER",
+        "CATALOG_MANAGER",
+        "OPTOMETRIST",
+        "WORKSHOP_STAFF",
+        "SALES_CASHIER",
+    ]
+
+    @pytest.mark.parametrize("role", _BELOW_ACCOUNTS)
+    def test_purchases_this_month_denied_below_accounts(self, client, role):
+        r = client.get(
+            "/api/v1/vendors/purchases-this-month",
+            headers=ALL_ROLE_HEADERS[role],
+        )
+        assert_middleware_403(r, "GET", "/api/v1/vendors/purchases-this-month")
+
+    @pytest.mark.parametrize("role", ["ACCOUNTANT", "ADMIN"])
+    def test_purchases_this_month_allowed_for_accounts(self, matrix_client, role):
+        r = matrix_client.get(
+            "/api/v1/vendors/purchases-this-month",
+            headers=ALL_ROLE_HEADERS[role],
+        )
+        assert_route_allowed(r, role, "GET", "/api/v1/vendors/purchases-this-month")
+
+    # The purchase-invoice preview (#1167) returns the recipient company and
+    # every line's tax for a bill -- the booking's own math, so the booking's
+    # gate: the accounts roles only, by the policy row as well as the handler.
+    _PREVIEW = "/api/v1/vendors/purchase-invoices/preview"
+    _PREVIEW_BODY = {"vendor_id": _DUMMY_VENDOR, "lines": []}
+
+    @pytest.mark.parametrize("role", _BELOW_ACCOUNTS)
+    def test_purchase_invoice_preview_denied_below_accounts(self, client, role):
+        r = client.post(self._PREVIEW, headers=ALL_ROLE_HEADERS[role], json=self._PREVIEW_BODY)
+        assert_middleware_403(r, "POST", self._PREVIEW)
+
+    @pytest.mark.parametrize("role", ["ACCOUNTANT", "ADMIN"])
+    def test_purchase_invoice_preview_allowed_for_accounts(self, matrix_client, role):
+        r = matrix_client.post(
+            self._PREVIEW, headers=ALL_ROLE_HEADERS[role], json=self._PREVIEW_BODY
+        )
+        assert_route_allowed(r, role, "POST", self._PREVIEW)
+
 
 # ===========================================================================
 # SECTION 20: Returns -- cashier + admin (not optometrist/catalog)
@@ -1619,7 +1686,7 @@ class TestCrossStoreListIDOR:
 class TestFinanceCrossStoreIDOR:
     """BUG-062 direct-dict tail: live QA proved a Pune store manager read Bokaro's
     revenue / P&L (incl. COGS) / receivables (with customer PII) via the finance
-    aggregation endpoints, which trusted ?store_id directly. _scope_store now 403s
+    aggregation endpoints, which trusted ?store_id directly. resolve_store_scope now 403s
     a store-scoped role asking for another store; admins keep cross-store/all.
     """
 

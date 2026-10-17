@@ -17,6 +17,8 @@ import {
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { reportsApi } from '../../services/api';
+import { COST_ROLES } from '../common/CostCell';
+import { NoShopNotice, hasNoShop } from '../common/NoShopNotice';
 
 interface GSTR3BTaxLiability {
   integratedTax: number;
@@ -51,8 +53,10 @@ interface GSTR3BData {
   zeroRatedSupplies: GSTR3BTaxLiability;
   zeroRatedValue: number;
 
-  // Table 4: Eligible ITC
-  itcAvailable: GSTR3BITCAvailable;
+  // Table 4: Eligible ITC. Input tax -- the accounts roles' only (owner ruling
+  // 2026-10-12, R5): GET /reports/gstr3b leaves it, ITC utilised and the tax
+  // paid in cash out for everyone else, so these three may be absent.
+  itcAvailable?: GSTR3BITCAvailable;
 
   // Table 5: Exempt, Nil rated and Non-GST supplies
   exemptSupplies: number;
@@ -61,8 +65,8 @@ interface GSTR3BData {
   // charge; taxPaidCash is the server's cash rule (net_cash_due) -- the screen
   // never works out its own net.
   taxPayable: GSTR3BTaxLiability;
-  itcUtilized: GSTR3BITCAvailable;
-  taxPaidCash: GSTR3BTaxLiability;
+  itcUtilized?: GSTR3BITCAvailable;
+  taxPaidCash?: GSTR3BTaxLiability;
 
   // Interest & Late Fee
   interest: GSTR3BTaxLiability;
@@ -72,18 +76,27 @@ interface GSTR3BData {
 export function GSTR3BReport() {
   const toast = useToast();
   const { user } = useAuth();
+  // R5: input tax (Table 4, 3.1(d), cash paid) and the portal upload, which IS
+  // the return with its Table 4, are for the accounts roles alone. Drawn only
+  // when the role may see them AND the server sent them -- never as a 0.
+  const canSeeInputTax = (user?.roles || []).some((r) => COST_ROLES.includes(r));
+  // R4 (owner ruling 2026-10-12): a non-admin login with no shop sees no shop.
+  // A GSTR-3B is one shop's return and the server refuses such a login in the
+  // owner's words, so the screen does not ask -- it says why (NoShopNotice).
+  const noShop = hasNoShop(user);
 
   const [isLoading, setIsLoading] = useState(false);
   const [reportData, setReportData] = useState<GSTR3BData | null>(null);
   const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7)); // YYYY-MM
 
   useEffect(() => {
-    if (selectedMonth) {
+    if (selectedMonth && !noShop) {
       loadReportData();
     }
-  }, [selectedMonth]);
+  }, [selectedMonth, noShop]);
 
   const loadReportData = async () => {
+    if (noShop) return;
     setIsLoading(true);
     try {
       const data = await reportsApi.getGSTR3BReport(selectedMonth, user?.activeStoreId);
@@ -127,6 +140,10 @@ export function GSTR3BReport() {
       toast.error(error?.message || 'Failed to generate GSTN JSON');
     }
   };
+
+  const itcAvailable = canSeeInputTax ? reportData?.itcAvailable : undefined;
+  const itcUtilized = canSeeInputTax ? reportData?.itcUtilized : undefined;
+  const taxPaidCash = canSeeInputTax ? reportData?.taxPaidCash : undefined;
 
   const getTotalTax = (liability: GSTR3BTaxLiability): number => {
     return liability.integratedTax + liability.centralTax + liability.stateTax + liability.cess;
@@ -179,6 +196,18 @@ export function GSTR3BReport() {
     </>
   );
 
+  if (noShop) {
+    return (
+      <div className="space-y-4">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">GSTR-3B Summary</h1>
+          <p className="text-gray-500">Monthly summary return for GST compliance</p>
+        </div>
+        <NoShopNotice />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4">
       {/* Header */}
@@ -221,10 +250,12 @@ export function GSTR3BReport() {
                 <Download className="w-4 h-4" />
                 Download JSON
               </button>
-              <button onClick={downloadGstnJSON} className="btn-primary text-sm flex items-center gap-2">
-                <Download className="w-4 h-4" />
-                Download GSTN JSON
-              </button>
+              {canSeeInputTax && (
+                <button onClick={downloadGstnJSON} className="btn-primary text-sm flex items-center gap-2">
+                  <Download className="w-4 h-4" />
+                  Download GSTN JSON
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -244,7 +275,9 @@ export function GSTR3BReport() {
             </div>
           ) : null}
           {/* Summary Cards */}
-          <div className="grid grid-cols-1 tablet:grid-cols-4 gap-4">
+          <div
+            className={`grid grid-cols-1 ${itcAvailable && taxPaidCash ? 'tablet:grid-cols-4' : 'tablet:grid-cols-2'} gap-4`}
+          >
             <div className="card">
               <p className="text-sm text-gray-600">Outward Supplies</p>
               <p className="text-2xl font-bold text-gray-900">₹{reportData.outwardTaxableValue.toLocaleString('en-IN')}</p>
@@ -253,14 +286,18 @@ export function GSTR3BReport() {
               <p className="text-sm text-gray-600">Tax Liability</p>
               <p className="text-2xl font-bold text-red-600">₹{(getTotalTax(reportData.taxPayable) + getTotalTax(reportData.inwardSuppliesReverseCharge)).toLocaleString('en-IN')}</p>
             </div>
-            <div className="card">
-              <p className="text-sm text-gray-600">ITC Available</p>
-              <p className="text-2xl font-bold text-green-600">₹{getTotalTax(reportData.itcAvailable).toLocaleString('en-IN')}</p>
-            </div>
-            <div className="card">
-              <p className="text-sm text-gray-600">Cash Paid</p>
-              <p className="text-2xl font-bold text-purple-600">₹{getTotalTax(reportData.taxPaidCash).toLocaleString('en-IN')}</p>
-            </div>
+            {itcAvailable && (
+              <div className="card">
+                <p className="text-sm text-gray-600">ITC Available</p>
+                <p className="text-2xl font-bold text-green-600">₹{getTotalTax(itcAvailable).toLocaleString('en-IN')}</p>
+              </div>
+            )}
+            {taxPaidCash && (
+              <div className="card">
+                <p className="text-sm text-gray-600">Cash Paid</p>
+                <p className="text-2xl font-bold text-purple-600">₹{getTotalTax(taxPaidCash).toLocaleString('en-IN')}</p>
+              </div>
+            )}
           </div>
 
           {/* GSTIN Info */}
@@ -334,6 +371,7 @@ export function GSTR3BReport() {
           </div>
 
           {/* Table 4: Eligible ITC */}
+          {itcAvailable && (
           <div className="card">
             <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
               <IndianRupee className="w-5 h-5" />
@@ -349,11 +387,12 @@ export function GSTR3BReport() {
                   </tr>
                 </thead>
                 <tbody>
-                  {renderTaxLiabilityRow('ITC Available', reportData.itcAvailable, true)}
+                  {renderTaxLiabilityRow('ITC Available', itcAvailable, true)}
                 </tbody>
               </table>
             </div>
           </div>
+          )}
 
           {/* Table 6.1: Payment of Tax */}
           <div className="card">
@@ -373,8 +412,8 @@ export function GSTR3BReport() {
                 <tbody>
                   {renderTaxLiabilityRow('Tax Payable (other than reverse charge)', reportData.taxPayable)}
                   {renderTaxLiabilityRow('Tax Payable (reverse charge, cash only)', reportData.inwardSuppliesReverseCharge)}
-                  {renderTaxLiabilityRow('ITC Utilized', reportData.itcUtilized, true)}
-                  {renderTaxLiabilityRow('Tax Paid in Cash', reportData.taxPaidCash, true)}
+                  {itcUtilized && renderTaxLiabilityRow('ITC Utilized', itcUtilized, true)}
+                  {taxPaidCash && renderTaxLiabilityRow('Tax Paid in Cash', taxPaidCash, true)}
                   {renderTaxRow('Interest (if any)', getTotalTax(reportData.interest))}
                   {renderTaxRow('Late Fee', reportData.lateFee)}
                 </tbody>
@@ -382,7 +421,9 @@ export function GSTR3BReport() {
             </div>
           </div>
 
-          {/* Net Tax Liability */}
+          {/* Net Tax Liability -- output less ITC: without the ITC there is no
+              net to show, and the gross is already "Tax Liability" above. */}
+          {itcAvailable && (
           <div className="card bg-purple-50 border-purple-200">
             <div className="flex items-center justify-between">
               <div>
@@ -393,11 +434,12 @@ export function GSTR3BReport() {
               </div>
               <div className="text-right">
                 <p className="text-3xl font-bold text-purple-900">
-                  ₹{getTotalTax(reportData.taxPaidCash).toLocaleString('en-IN')}
+                  {taxPaidCash ? `₹${getTotalTax(taxPaidCash).toLocaleString('en-IN')}` : '—'}
                 </p>
               </div>
             </div>
           </div>
+          )}
 
           {/* Info Banner */}
           <div className="card bg-blue-50 border-blue-200">

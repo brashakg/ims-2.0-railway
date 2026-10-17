@@ -33,6 +33,7 @@ from . import ap_payments
 from . import performance
 from . import tds
 from . import variance
+from . import purchases_report
 from ._shared import router
 from .master import get_vendor
 
@@ -66,6 +67,7 @@ _SUBMODULES = (
     performance,
     tds,
     variance,
+    purchases_report,
 )
 
 # The flat module was ONE namespace: `from api.routers.vendors import X` and

@@ -50,6 +50,8 @@ from ..dependencies import (
     get_order_repository,
     get_product_repository,
     get_stock_repository,
+    no_shop_scope_for,
+    store_in_view,
     validate_store_access,
 )
 from ..services import barcode as barcode_svc
@@ -4015,7 +4017,18 @@ async def list_returns(
 
     roles = current_user.get("roles", []) or []
     is_hq = any(r in roles for r in ("SUPERADMIN", "ADMIN", "AREA_MANAGER"))
-    effective_store = store_id if is_hq else current_user.get("active_store_id")
+    # R4 (owner ruling 2026-10-12): a non-admin login with NO shop -- an
+    # AREA_MANAGER too -- sees no shop's returns (and naming one is a 403);
+    # it used to read every shop's refunds. A login that holds a shop keeps
+    # this route's rule: HQ roles any shop, lower roles their own (store_in_view:
+    # the active shop, else the first own shop).
+    no_shop = no_shop_scope_for(store_id, current_user)
+    if no_shop:
+        effective_store = no_shop
+    elif is_hq:
+        effective_store = store_id
+    else:
+        effective_store = store_in_view(None, current_user)
 
     query: Dict[str, Any] = {}
     if effective_store:

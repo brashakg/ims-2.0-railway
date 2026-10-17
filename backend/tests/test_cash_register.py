@@ -469,6 +469,31 @@ class TestCashRegisterEndpoints:
         # running expected = 1000 + 300 = 1300
         assert data["expected_preview"]["expected"] == 1300.0
 
+    @pytest.mark.parametrize("role", ["STORE_MANAGER", "AREA_MANAGER", "ACCOUNTANT"])
+    def test_sessions_of_a_login_with_no_shop_are_no_shops(self, role):
+        """R4 (owner ruling 2026-10-12): a non-admin login with no shop sees no
+        shop's sessions or open till -- it used to read every shop's."""
+        from api.dependencies import NO_SHOP_DETAIL
+
+        db = _FakeDB()
+        db.get_collection(finance._CASH_SESSIONS).docs.extend(
+            {"session_id": f"s-{shop}", "store_id": shop, "status": "OPEN",
+             "opened_at": "2026-10-13T04:00:00", "opening_float": 500}
+            for shop in ("store-001", "store-002")
+        )
+        url = "/finance/cash-register/sessions"
+        c = _client(db, roles=[role], active_store=None, store_ids=[])
+        data = c.get(url).json()
+        assert data == {"sessions": [], "open_session": None, "expected_preview": None}
+        r = c.get(url, params={"store_id": "store-002"})
+        assert (r.status_code, r.json()["detail"]) == (403, NO_SHOP_DETAIL)
+        # Controls: a shop's login reads its own; an admin with none, every shop.
+        own = _client(db, roles=[role]).get(url).json()
+        assert [s["store_id"] for s in own["sessions"]] == ["store-001"]
+        assert own["open_session"]["store_id"] == "store-001"
+        admin = _client(db, roles=["ADMIN"], active_store=None, store_ids=[]).get(url).json()
+        assert len(admin["sessions"]) == 2
+
     def test_close_missing_session_404(self):
         db = _FakeDB()
         c = _client(db)

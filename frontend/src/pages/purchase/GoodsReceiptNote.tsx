@@ -12,9 +12,16 @@ import { useState, useEffect, useMemo, startTransition } from 'react';
 import { Check, AlertCircle, Package, FileText, Printer, Loader2, Trash2 } from 'lucide-react';
 import clsx from 'clsx';
 import { vendorsApi } from '../../services/api';
-import { productApi } from '../../services/api/products';
 import { grnCockpitApi, type UploadDocResult } from '../../services/api/grnCockpit';
+import { istDayString } from '../../utils/datetime';
+import { SupplierFormModal } from './SupplierFormModal';
+import { productApi } from '../../services/api/products';
 import { useAuth } from '../../context/AuthContext';
+import { COST_ROLES } from '../../components/common/CostCell';
+import { PurchaseShopPicker, usePurchaseShop } from './purchaseShop';
+import { matchingTotal } from './purchaseQueries';
+import { RowShop } from './invoices/pickers';
+import { useStores } from '../../hooks/usePOSQueries';
 import { useToast } from '../../context/ToastContext';
 import { reportGrnAccept } from './grnAcceptToast';
 import { GRNPrint } from '../../components/print/GRNPrint';
@@ -36,6 +43,10 @@ interface GRNLineItem {
   // old all-or-nothing quality verdict.
   rejected_qty: number;
   rejection_reason?: string;
+  reject_only?: boolean;
+  // D14 "Bought without PO" lines: what was paid per unit, and the expiry.
+  unit_price?: number;
+  expiry_date?: string;
 }
 
 interface GRNDiscrepancyItem {
@@ -52,6 +63,8 @@ interface GRN {
   grn_number: string;
   po_id: string;
   po_number: string;
+  // What the receipt was against: "Against <PO>" or "Bought without PO · dealer".
+  source: string;
   received_at: string;
   items_received: number;
   total_received: number;
@@ -61,6 +74,7 @@ interface GRN {
   quality_status: 'passed' | 'failed' | 'conditional';
   created_by: string;
   created_by_name?: string;
+  store_id?: string;
 }
 
 interface POOption {
@@ -68,8 +82,13 @@ interface POOption {
   po_number: string;
   vendor_name?: string;
   status?: string;
+  // The shop the order delivers to: a standard receipt against it is booked there.
+  delivery_store_id?: string;
   closed_by_cancel?: boolean;
+  extra_receipt_allowed?: boolean;
   items?: Array<{
+    cancelled_qty?: number;
+    line_status?: string;
     po_item_id?: string;
     id?: string;
     product_id: string;
@@ -95,11 +114,17 @@ function transformGRN(grn: any): GRN {
     grn.total_accepted ?? items.reduce((s, i) => s + (i.accepted_qty || 0), 0);
   const totalRejected =
     grn.total_rejected ?? items.reduce((s, i) => s + (i.rejected_qty || 0), 0);
+  const noPo = grn.grn_subtype === 'NO_PO';
   return {
     id: grn.grn_id || grn.id || grn._id,
     grn_number: grn.grn_number,
     po_id: grn.po_id,
-    po_number: grn.po_number || 'Unknown PO',
+    po_number: grn.po_number || (noPo ? 'Bought without PO' : 'Unknown PO'),
+    source: grn.po_number
+      ? `Against ${grn.po_number}`
+      : noPo
+        ? `Bought without PO${grn.vendor_name ? ` · ${grn.vendor_name}` : ''}`
+        : 'Against Unknown PO',
     received_at: grn.received_at || grn.created_at,
     items_received: grn.items_received ?? totalReceived,
     total_received: totalReceived,
@@ -110,7 +135,41 @@ function transformGRN(grn: any): GRN {
       totalRejected === 0 ? 'passed' : totalAccepted === 0 ? 'failed' : 'conditional',
     created_by: grn.created_by || 'Unknown',
     created_by_name: grn.created_by_name,
+    store_id: grn.store_id,
   };
+}
+
+const poLabel = (p: POOption) =>
+  `${p.po_number}${p.vendor_name ? ` · ${p.vendor_name}` : ''}${
+    p.status === 'PARTIALLY_RECEIVED' || p.status === 'PARTIAL' ? ' · partially received'
+      : p.status === 'RECEIVED' && (!p.closed_by_cancel || p.extra_receipt_allowed)
+        ? ' · received — count extra goods' : ''
+  }`;
+
+/** On all stores the filter no longer says whose order it is, so each option
+ *  names the shop the order delivers to (where its receipt is booked). Only
+ *  mounted for an admin on all stores: nobody else reads the store list. */
+function PoOptionsNamingShop({ pos }: { pos: POOption[] }) {
+  const { data } = useStores();
+  const stores = (Array.isArray(data) ? data : []) as Array<{
+    store_id?: string;
+    store_name?: string;
+    store_code?: string;
+  }>;
+  const shopName = (id: string) => {
+    const row = stores.find((s) => s.store_id === id);
+    return row?.store_name || row?.store_code || id;
+  };
+  return (
+    <>
+      {pos.map((p) => (
+        <option key={p.po_id} value={p.po_id}>
+          {poLabel(p)}
+          {p.delivery_store_id ? ` · delivers to ${shopName(p.delivery_store_id)}` : ''}
+        </option>
+      ))}
+    </>
+  );
 }
 
 const INSPECTION_CHECKLIST = [
@@ -139,6 +198,7 @@ const qualityChip = (status: string): string => {
 
 export function GoodsReceiptNote() {
   const { user } = useAuth();
+  const canEnterPrice = (user?.roles || []).some((role) => COST_ROLES.includes(role));
   const toast = useToast();
   const [activeTab, setActiveTab] = useState<'create' | 'history' | 'discrepancies'>('create');
   // F26: after a receipt is posted, its units' labels (one per piece).
@@ -167,12 +227,28 @@ export function GoodsReceiptNote() {
     Array<{ product_id: string; name?: string; product_name?: string; sku?: string; hsn_code?: string }>
   >([]);
   const [dcSearching, setDcSearching] = useState(false);
+  // D14 — "Bought without PO": a cash buy from a local dealer. The supplier
+  // (a dealer not on the list is quick-added as one, owner 2026-10-12), each
+  // line's cost, the bill photo, the bill number/date if any. Posts a NO_PO
+  // receipt; its bill books under that supplier, claiming GST credit only
+  // when the supplier is GST-registered (owner 2026-10-13).
+  const [isNoPo, setIsNoPo] = useState(false);
+  const [addingDealer, setAddingDealer] = useState(false);
+  // Today in IST (toISOString is the UTC day -- yesterday before 05:30 IST).
+  // Reset whenever the mode is ticked, or the next walk-in receipt carried the
+  // previous bill's date into its receipt and, later, its bill draft.
+  const istToday = () => istDayString(new Date()) ?? '';
+  const [billDate, setBillDate] = useState(istToday);
   const [grns, setGrns] = useState<GRN[]>([]);
+  // Every receipt in scope, from the server -- not the length of the newest
+  // page it sends (review round 2, #18).
+  const [grnTotal, setGrnTotal] = useState(0);
   const [pos, setPos] = useState<POOption[]>([]);
   const [, setIsLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   // F-S3: a STANDARD receipt carries the vendor's bill (the server refuses one
-  // without it, 400 ATTACHMENT_REQUIRED); a Delivery Challan is exempt.
+  // without it, 400 ATTACHMENT_REQUIRED); so does a 'Bought without PO' receipt
+  // (the dealer's bill photo). A Delivery Challan is exempt.
   const [bill, setBill] = useState<UploadDocResult | null>(null);
   const [uploading, setUploading] = useState(false);
   // Print state: which GRN is currently being previewed (null = no print modal).
@@ -181,46 +257,60 @@ export function GoodsReceiptNote() {
   // GRN's own store_id (falls back to the active store) + its legal entity.
   const [grnIdentity, setGrnIdentity] = useState<StoreIdentity | null>(null);
 
-  const storeId = user?.activeStoreId || '';
+  // Audit F63: ONE scope for the whole tab -- the receipts list and the
+  // open-order picker both read it (an admin's pick, all stores when he picks
+  // none, else the caller's own shop; the server enforces the same rule). A
+  // standard receipt is booked at its order's shop (the server re-points it).
+  const { storeId: grnScope, canPick, ownStoreId } = usePurchaseShop();
+  // What the counts cover, said plainly (F63): never "all stores" for one shop.
+  const scopeLabel = !grnScope ? 'all stores' : canPick ? 'the shop picked above' : 'your shop';
+  const openPoWhere = !grnScope ? 'in any store' : canPick ? 'at the shop picked above' : 'at your shop';
+  const onAllStores = canPick && !grnScope;
 
-  // Resolve the GRN's issuing-store identity when the print modal opens.
+  // Resolve the GRN's issuing-store identity when the print modal opens: the
+  // GRN's own shop (on all stores the list mixes shops), else the shop shown.
   useEffect(() => {
-    const sid = (printGrn as any)?.store_id || storeId;
+    const sid = printGrn?.store_id || grnScope || ownStoreId;
     if (!printGrn || !sid) { setGrnIdentity(null); return; }
     let cancelled = false;
     resolveStoreIdentity(sid)
       .then((id) => { if (!cancelled) setGrnIdentity(id); })
       .catch(() => { if (!cancelled) setGrnIdentity(null); });
     return () => { cancelled = true; };
-  }, [printGrn, storeId]);
+  }, [printGrn, grnScope, ownStoreId]);
 
-  // Only POs that still have goods to receive belong in the receive picker.
-  // A DRAFT PO hasn't been sent; a RECEIVED/CANCELLED one is closed. Keep the
-  // legacy "PARTIAL" alias alongside the canonical "PARTIALLY_RECEIVED".
-  // An order a cancel CLOSED (the server stamps closed_by_cancel) is listed
-  // too, apart, only to log a delivery the vendor sent anyway: every unit on
-  // it is rejected, nothing goes into stock (owner ruling 2026-10-08 (c)).
+  // Managers can count extra goods after full receipt. Cancelled quantities
+  // are still rejected; the server returns the complete receiving worklist.
   const isReceivablePO = (status?: string) =>
     !status ||
-    ['SENT', 'ACKNOWLEDGED', 'PARTIAL', 'PARTIALLY_RECEIVED'].includes(status);
-
+    ['SENT', 'ACKNOWLEDGED', 'PARTIAL', 'PARTIALLY_RECEIVED', 'RECEIVED'].includes(status);
+  const isRejectedOrder = (p?: POOption) => !!p?.closed_by_cancel && !p.extra_receipt_allowed;
+  // One scoped candidate read includes older sent-then-cancelled orders and
+  // completed orders that can take an audited extra delivery.
   const fetchPurchaseOrders = async (): Promise<POOption[]> => {
     const poResp = await vendorsApi
-      .getPurchaseOrders({ store_id: storeId })
+      .getPurchaseOrders({ store_id: grnScope, receipt_candidates: true })
       .catch(() => null);
     const poList: any[] = Array.isArray(poResp)
       ? poResp
       : poResp?.purchase_orders || poResp?.pos || poResp?.data || [];
+    const seen = new Set<string>();
     return poList
       .map((p: any) => ({
         po_id: p.po_id || p.id || p._id || '',
         po_number: p.po_number || p.po_id || 'PO',
         vendor_name: p.vendor_name || p.vendor?.trade_name || p.vendor?.legal_name,
         status: p.status,
+        delivery_store_id: p.delivery_store_id,
         closed_by_cancel: !!p.closed_by_cancel,
+        extra_receipt_allowed: !!p.extra_receipt_allowed,
         items: p.items || p.line_items || [],
       }))
-      .filter((p: POOption) => p.closed_by_cancel || isReceivablePO(p.status));
+      .filter((p: POOption) => {
+        if (!(p.closed_by_cancel || isReceivablePO(p.status)) || seen.has(p.po_id)) return false;
+        seen.add(p.po_id);
+        return true;
+      });
   };
 
   // Load GRNs + open purchase orders on mount / store change.
@@ -229,11 +319,12 @@ export function GoodsReceiptNote() {
       try {
         setIsLoading(true);
         const [grnResp, poList] = await Promise.all([
-          vendorsApi.getGRNs({ store_id: storeId }),
+          vendorsApi.getGRNs({ store_id: grnScope }),
           fetchPurchaseOrders(),
         ]);
         const grnList = Array.isArray(grnResp) ? grnResp : grnResp.grns || grnResp.data || [];
         setGrns(grnList.map(transformGRN));
+        setGrnTotal(matchingTotal(grnResp, grnList.length));
         setPos(poList);
       } catch (error) {
         toast.error('Failed to load GRNs');
@@ -242,32 +333,50 @@ export function GoodsReceiptNote() {
       }
     };
     load();
-  }, [storeId]);
+  }, [grnScope]);
 
   const reloadGrns = async () => {
-    const response = await vendorsApi.getGRNs({ store_id: storeId });
+    const response = await vendorsApi.getGRNs({ store_id: grnScope });
     const grnList = Array.isArray(response) ? response : response.grns || response.data || [];
     setGrns(grnList.map(transformGRN));
+    setGrnTotal(matchingTotal(response, grnList.length));
   };
 
   const reloadPurchaseOrders = async () => {
     setPos(await fetchPurchaseOrders());
   };
 
+  // A new shop scope reloads the order picker, and an order picked under the
+  // old one may not be in it: drop the pick and its lines rather than post
+  // against an order the screen no longer shows. Typed no-PO lines stay.
+  useEffect(() => {
+    if (!poNumber) return;
+    setPoNumber('');
+    setReceivedItems([]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [grnScope]);
+
   // Receiving without a PO = DC mode with no PO picked. Lines are then typed
   // in from the product picker instead of hydrated from a PO.
   const noPoDc = isDcMode && !poNumber;
+  // Either way of receiving with no PO types its lines in from the catalogue.
+  const typedLines = noPoDc || isNoPo;
+  const noPoSeller = !!dcVendorId;
   const needsBill = !isDcMode && !!poNumber;
   // An order a cancel closed takes no unit: every unit that arrived is
   // rejected, whatever the Rejected box says.
-  const rejectOnly = !!pos.find((p) => p.po_id === poNumber)?.closed_by_cancel;
-  const rejectedOf = (i: GRNLineItem) => (rejectOnly ? i.received_qty : i.rejected_qty);
+  const selectedPO = pos.find((p) => p.po_id === poNumber);
+  const rejectOnly = isRejectedOrder(selectedPO);
+  const extraReceipt = selectedPO?.status === 'RECEIVED' && !rejectOnly;
+  const rejectedOf = (i: GRNLineItem) => (rejectOnly || i.reject_only ? i.received_qty : i.rejected_qty);
 
   const attachBill = async (file?: File) => {
     if (!file) return;
     setUploading(true);
     try {
-      setBill(await grnCockpitApi.uploadDoc(file));
+      const res = await grnCockpitApi.uploadDoc(file);
+      if (!res.file_id) throw new Error('not stored');
+      setBill(res);
     } catch {
       setBill(null);
       toast.error('Could not upload the bill - try again');
@@ -278,12 +387,15 @@ export function GoodsReceiptNote() {
 
   // Load the vendor list the first time DC mode is switched on. Fail-soft with
   // a visible error state — with no vendors the no-PO path cannot post, and a
-  // silent empty dropdown would read as "no vendors exist".
+  // silent empty dropdown would read as "no vendors exist". EVERY supplier,
+  // switched off or not, up to the server's 1000: the dealer quick-add refuses
+  // a name already on file, so every supplier on file must be pickable here
+  // (the server's default first 50 hid the newest walk-in dealers).
   useEffect(() => {
-    if (!isDcMode || dcVendors.length > 0) return;
+    if (!(isDcMode || isNoPo) || dcVendors.length > 0) return;
     let cancelled = false;
     vendorsApi
-      .getVendors({ is_active: true })
+      .getVendors({ limit: 1000 })
       .then((resp: any) => {
         if (cancelled) return;
         const rows: any[] = Array.isArray(resp) ? resp : resp?.vendors || [];
@@ -304,12 +416,12 @@ export function GoodsReceiptNote() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isDcMode]);
+  }, [isDcMode, isNoPo]);
 
   // Debounced product search for the no-PO DC lines (same pattern as the PO
   // composer's ProductSearchSelect).
   useEffect(() => {
-    if (!noPoDc) return;
+    if (!typedLines) return;
     const q = dcQuery.trim();
     if (q.length < 2) {
       setDcResults([]);
@@ -331,7 +443,7 @@ export function GoodsReceiptNote() {
       cancelled = true;
       clearTimeout(t);
     };
-  }, [dcQuery, noPoDc]);
+  }, [dcQuery, typedLines]);
 
   // Add a typed line for the no-PO DC. po_qty mirrors received_qty (nothing
   // was ordered, so there is no variance to show) and starts untallied —
@@ -368,9 +480,13 @@ export function GoodsReceiptNote() {
   const onSelectPO = (poId: string) => {
     setPoNumber(poId);
     const po = pos.find((p) => p.po_id === poId || p.po_number === poId);
+    const cancelledProducts = new Set((po?.items || [])
+      .filter((it) => it.line_status === 'CANCELLED' || (it.cancelled_qty || 0) > 0)
+      .map((it) => it.product_id));
     const lines = (po?.items || []).map((it) => {
-      // Nothing is due on an order a cancel closed: the receiver counts what came.
-      const qty = po?.closed_by_cancel ? 0 : it.quantity ?? it.qty ?? it.ordered_qty ?? 0;
+      // Nothing is due on a completed order: count only the new delivery.
+      const qty = po?.closed_by_cancel || po?.status === 'RECEIVED'
+        ? 0 : it.quantity ?? it.qty ?? it.ordered_qty ?? 0;
       return {
         po_item_id: it.po_item_id || it.id || it.product_id,
         product_id: it.product_id,
@@ -381,6 +497,7 @@ export function GoodsReceiptNote() {
         received_qty: qty,
         tallied: false,
         rejected_qty: 0,
+        reject_only: po?.status === 'RECEIVED' && cancelledProducts.has(it.product_id),
       };
     });
     setReceivedItems(lines);
@@ -408,7 +525,7 @@ export function GoodsReceiptNote() {
 
   // 4-step receive flow state: PO (or DC vendor) -> lines -> inspection -> post.
   const steps = useMemo(() => {
-    const hasSource = !!poNumber || (isDcMode && !!dcVendorId);
+    const hasSource = !!poNumber || (isDcMode && !!dcVendorId) || (isNoPo && noPoSeller);
     const hasLines = receivedItems.length > 0;
     const allTallied =
       receivedItems.length > 0 && receivedItems.every((i) => i.tallied);
@@ -417,8 +534,18 @@ export function GoodsReceiptNote() {
       {
         done: hasSource,
         active: !hasSource,
-        t: isDcMode && !poNumber ? 'Pick the vendor (DC, no PO)' : 'Match PO & vendor invoice',
-        s: poNumber || (isDcMode && dcVendorId ? 'Receiving without a PO' : 'Pick the order being received'),
+        t: isNoPo
+          ? 'Pick the supplier & attach the bill'
+          : isDcMode && !poNumber
+            ? 'Pick the vendor (DC, no PO)'
+            : 'Match PO & vendor invoice',
+        s:
+          poNumber ||
+          (hasSource
+            ? 'Receiving without a PO'
+            : isNoPo
+              ? 'Pick the supplier, or add the dealer'
+              : 'Pick the order being received'),
       },
       {
         done: hasSource && hasLines && allTallied,
@@ -426,17 +553,18 @@ export function GoodsReceiptNote() {
         t: 'Tally what arrived',
         s: hasLines
           ? `${receivedItems.filter((i) => i.tallied).length} / ${receivedItems.length} lines ticked`
-          : isDcMode && !poNumber
+          : typedLines
             ? 'Add the items received'
             : 'No lines on this PO',
       },
       { done: inspected, active: hasLines && !inspected, t: 'Quality inspection', s: `${checksComplete}/${INSPECTION_CHECKLIST.length} checks` },
       { done: false, active: inspected && hasLines, t: 'Post & close', s: 'Stock ledger updated' },
     ];
-  }, [poNumber, receivedItems, allChecksComplete, discrepancies, checksComplete, isDcMode, dcVendorId]);
+  }, [poNumber, receivedItems, allChecksComplete, discrepancies, checksComplete, isDcMode, dcVendorId, isNoPo, noPoSeller, typedLines]);
+
 
   const handleSubmit = async () => {
-    if (!poNumber && !isDcMode) {
+    if (!poNumber && !isDcMode && !isNoPo) {
       toast.error('Please select a Purchase Order');
       return;
     }
@@ -444,19 +572,39 @@ export function GoodsReceiptNote() {
       toast.error('Pick the vendor this Delivery Challan is from');
       return;
     }
-    if (receivedItems.length === 0) {
-      toast.error(noPoDc ? 'Add the items that arrived' : 'No line items to receive on this PO');
+    // A receipt with no order is recorded at the receiver's own shop (the
+    // server's rule) -- never let it vanish from a list showing another shop.
+    if (typedLines && (!ownStoreId || (!!grnScope && grnScope !== ownStoreId))) {
+      toast.error('A receipt without a PO is recorded at your own shop: pick it in Shop to receive it');
       return;
     }
-    if (noPoDc && receivedItems.some((i) => i.received_qty <= 0)) {
+    // A Delivery Challan stays at the receiver's own shop even when it names
+    // an order (the server re-points only a standard receipt to the order's
+    // shop): never book another shop's order -- its stock -- into this one.
+    const pickedPo = pos.find((p) => p.po_id === poNumber || p.po_number === poNumber);
+    if (isDcMode && pickedPo?.delivery_store_id && pickedPo.delivery_store_id !== ownStoreId) {
+      toast.error(
+        "This order delivers to another shop, but a Delivery Challan is booked at the shop you are signed in to: switch to the order's shop in the top bar to receive it",
+      );
+      return;
+    }
+    if (isNoPo && !noPoSeller) {
+      toast.error('Pick the supplier the goods were bought from, or add the dealer as one');
+      return;
+    }
+    if (receivedItems.length === 0) {
+      toast.error(typedLines ? 'Add the items that arrived' : 'No line items to receive on this PO');
+      return;
+    }
+    if (typedLines && receivedItems.some((i) => i.received_qty <= 0)) {
       toast.error('Every line needs a quantity of at least 1');
       return;
     }
     // A closed order's receipt carries only what arrived: a line at 0 would
     // read as a shortage on an order with nothing due.
-    const lines = rejectOnly ? receivedItems.filter((i) => i.received_qty > 0) : receivedItems;
+    const lines = rejectOnly || extraReceipt ? receivedItems.filter((i) => i.received_qty > 0) : receivedItems;
     if (lines.length === 0) {
-      toast.error('Enter the units that arrived - each one is logged as rejected');
+      toast.error(rejectOnly ? 'Enter the units that arrived - each one is logged as rejected' : 'Enter the extra units that arrived');
       return;
     }
     // Ruling 14 -- the tally. Mirrored server-side (LINES_NOT_TALLIED) for
@@ -485,7 +633,11 @@ export function GoodsReceiptNote() {
       toast.error('DC Number is required for a Delivery Challan');
       return;
     }
-    if (!isDcMode && !vendorInvoiceNo.trim()) {
+    if (isNoPo && !bill?.file_id) {
+      toast.error("Attach a photo of the dealer's bill");
+      return;
+    }
+    if (!isDcMode && !isNoPo && !vendorInvoiceNo.trim()) {
       toast.error('Enter the vendor invoice number');
       return;
     }
@@ -501,17 +653,19 @@ export function GoodsReceiptNote() {
         po_id: poNumber || undefined,
         // F9 — in DC mode the vendor invoice no. arrives later; send the
         // subtype + dc_number/dc_date so the bulk DC->invoice tally can pick it.
-        grn_subtype: isDcMode ? 'DELIVERY_CHALLAN' : 'STANDARD',
+        grn_subtype: isNoPo ? 'NO_PO' : isDcMode ? 'DELIVERY_CHALLAN' : 'STANDARD',
         dc_number: isDcMode ? dcNumber.trim() : undefined,
         dc_date: isDcMode ? dcDate : undefined,
         // No-PO DC: the vendor comes from the picker (a PO-backed receipt
         // derives it from the PO server-side).
-        vendor_id: noPoDc ? dcVendorId : undefined,
+        vendor_id: noPoDc || isNoPo ? dcVendorId : undefined,
         vendor_invoice_no: vendorInvoiceNo || undefined,
-        vendor_invoice_date: new Date().toISOString().split('T')[0],
-        attachment_file_id: needsBill ? bill?.file_id ?? undefined : undefined,
-        attachment_filename: needsBill ? bill?.filename : undefined,
-        attachment_mime: needsBill ? bill?.mime : undefined,
+        // The date printed on the supplier's bill (its financial year decides
+        // whether the number is a new bill); a challan's invoice comes later.
+        vendor_invoice_date: isDcMode ? istToday() : billDate || undefined,
+        attachment_file_id: isNoPo || needsBill ? bill?.file_id || undefined : undefined,
+        attachment_filename: isNoPo || needsBill ? bill?.filename : undefined,
+        attachment_mime: isNoPo || needsBill ? bill?.mime : undefined,
         items: lines.map((item) => ({
           po_item_id: item.po_item_id || undefined,
           product_id: item.product_id,
@@ -520,6 +674,8 @@ export function GoodsReceiptNote() {
           rejected_qty: rejectedOf(item),
           rejection_reason: rejectedOf(item) > 0 ? item.rejection_reason : undefined,
           tallied: item.tallied,
+          unit_price: isNoPo && canEnterPrice ? item.unit_price : undefined,
+          expiry_date: isNoPo ? item.expiry_date || undefined : undefined,
         })),
         notes: qualityNotes || undefined,
       });
@@ -561,6 +717,8 @@ export function GoodsReceiptNote() {
       setBill(null);
       setDiscrepancies('');
       setIsDcMode(false);
+      setIsNoPo(false);
+      setBillDate(istToday());
       setDcNumber('');
       setDcVendorId('');
       setDcQuery('');
@@ -580,13 +738,26 @@ export function GoodsReceiptNote() {
     }
   };
 
-  const tabs: Array<[typeof activeTab, string, number]> = [
-    ['create', 'Create GRN', 0],
-    ['history', 'History', grns.length],
+  // The list is the server's newest page. When that page is a cut, every
+  // count taken over it -- the Quality tiles, the tab badges, the discrepancy
+  // report -- says it covers the latest N, so it never sits beside the real
+  // Total GRNs as if it were a total of its own (review r3 #12).
+  const listCut = grns.length < grnTotal;
+  const ofLatest = (what: string) => (listCut ? `${what} · of latest ${grns.length}` : what);
+  const discrepantCount = grns.filter(
+    (g) => g.total_rejected > 0 || g.total_received !== g.total_accepted,
+  ).length;
+  const tabs: Array<[typeof activeTab, string, string | null]> = [
+    ['create', 'Create GRN', null],
+    [
+      'history',
+      'History',
+      grns.length === 0 ? null : listCut ? `latest ${grns.length} of ${grnTotal}` : String(grns.length),
+    ],
     [
       'discrepancies',
       'Discrepancies',
-      grns.filter((g) => g.total_rejected > 0 || g.total_received !== g.total_accepted).length,
+      discrepantCount === 0 ? null : listCut ? `${discrepantCount} in latest ${grns.length}` : String(discrepantCount),
     ],
   ];
 
@@ -664,48 +835,52 @@ export function GoodsReceiptNote() {
             Record item receipt against a PO with quality inspection and placement.
           </p>
         </div>
+        <PurchaseShopPicker />
       </div>
 
       {/* Summary stat strip */}
       <div className="stat-strip">
         <div>
           <div className="l">Total GRNs</div>
-          <div className="v">{grns.length}</div>
-          <div className="d">all stores in scope</div>
+          <div className="v">{Math.max(grnTotal, grns.length)}</div>
+          {/* The figure is the real count; the page below is the newest cut. */}
+          <div className="d">
+            {grns.length < grnTotal ? `${scopeLabel} · latest ${grns.length} shown` : scopeLabel}
+          </div>
         </div>
         <div>
           <div className="l">Quality passed</div>
           <div className="v" style={{ color: 'var(--ok)' }}>
             {grns.filter((g) => g.quality_status === 'passed').length}
           </div>
-          <div className="d good">clean receipts</div>
+          <div className="d good">{ofLatest('clean receipts')}</div>
         </div>
         <div>
           <div className="l">Conditional</div>
           <div className="v" style={{ color: 'var(--warn)' }}>
             {grns.filter((g) => g.quality_status === 'conditional').length}
           </div>
-          <div className="d warn">partial accept</div>
+          <div className="d warn">{ofLatest('partial accept')}</div>
         </div>
         <div>
           <div className="l">Failed quality</div>
           <div className="v" style={{ color: 'var(--err)' }}>
             {grns.filter((g) => g.quality_status === 'failed').length}
           </div>
-          <div className="d bad">debit note raised</div>
+          <div className="d bad">{ofLatest('debit note raised')}</div>
         </div>
       </div>
 
       {/* Tabs */}
       <div className="inv-tabs">
-        {tabs.map(([tab, label, count]) => (
+        {tabs.map(([tab, label, badge]) => (
           <button
             key={tab}
             className={activeTab === tab ? 'on' : ''}
             onClick={() => startTransition(() => setActiveTab(tab))}
           >
             {label}
-            {count > 0 && <span className="count">· {count}</span>}
+            {badge && <span className="count">· {badge}</span>}
           </button>
         ))}
       </div>
@@ -729,9 +904,13 @@ export function GoodsReceiptNote() {
           {/* PO selection */}
           <div className="card">
             <div className="card-head">
-              <h3>Select purchase order</h3>
+              <h3>{isNoPo ? 'Supplier & bill' : 'Select purchase order'}</h3>
               <span className="meta">
-                {isDcMode ? 'DC · invoice arrives later' : 'PO precedes GRN · GRN is the GST document'}
+                {isDcMode
+                  ? 'DC · invoice arrives later'
+                  : isNoPo
+                    ? 'No PO · GST credit only from a registered dealer'
+                    : 'PO precedes GRN · GRN is the GST document'}
               </span>
             </div>
             <div className="card-body">
@@ -747,6 +926,10 @@ export function GoodsReceiptNote() {
                   onChange={(e) => {
                     const on = e.target.checked;
                     setIsDcMode(on);
+                    if (on && isNoPo) {
+                      setIsNoPo(false);
+                      setReceivedItems([]);
+                    }
                     // Leaving DC mode with typed (no-PO) lines: those lines
                     // belong to no PO, so they cannot post as STANDARD.
                     if (!on && !poNumber) {
@@ -762,6 +945,119 @@ export function GoodsReceiptNote() {
                 />
                 This is a Delivery Challan (no invoice yet)
               </label>
+              <label
+                className="flex items-center gap-2 mb-4 text-sm cursor-pointer"
+                style={{ color: 'var(--ink-3)' }}
+              >
+                <input
+                  type="checkbox"
+                  checked={isNoPo}
+                  onChange={(e) => {
+                    setIsNoPo(e.target.checked);
+                    setIsDcMode(false);
+                    setPoNumber('');
+                    setReceivedItems([]);
+                    setDcVendorId('');
+                    setBill(null);
+                    setBillDate(istToday());
+                    setDcQuery('');
+                    setDcResults([]);
+                  }}
+                />
+                Bought without PO (local dealer, cash bill) — GST credit only from a GST-registered dealer
+              </label>
+              {isNoPo && (
+                <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4 mb-4">
+                  <div className="tablet:col-span-2">
+                    <label
+                      htmlFor="no-po-supplier"
+                      className="block text-xs font-medium mb-1"
+                      style={{ color: 'var(--ink-4)' }}
+                    >
+                      Supplier (the dealer)
+                    </label>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <select
+                        id="no-po-supplier"
+                        value={dcVendorId}
+                        onChange={(e) => setDcVendorId(e.target.value)}
+                        className="input flex-1"
+                      >
+                        <option value="">Select the vendor…</option>
+                        {dcVendors.map((v) => (
+                          <option key={v.vendor_id} value={v.vendor_id}>{v.name}</option>
+                        ))}
+                      </select>
+                      <button type="button" className="btn sm" onClick={() => setAddingDealer(true)}>
+                        Not on the list? Add the dealer
+                      </button>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium mb-1" style={{ color: 'var(--ink-4)' }}>
+                      Bill no. (if any)
+                    </label>
+                    <input
+                      type="text"
+                      value={vendorInvoiceNo}
+                      onChange={(e) => setVendorInvoiceNo(e.target.value)}
+                      className="input w-full"
+                    />
+                  </div>
+                  <div>
+                    <label
+                      htmlFor="no-po-bill-date"
+                      className="block text-xs font-medium mb-1"
+                      style={{ color: 'var(--ink-4)' }}
+                    >
+                      Bill date
+                    </label>
+                    <input
+                      id="no-po-bill-date"
+                      type="date"
+                      value={billDate}
+                      max={istToday()}
+                      onChange={(e) => setBillDate(e.target.value)}
+                      className="input w-full"
+                    />
+                  </div>
+                  <div className="tablet:col-span-2">
+                    <label
+                      htmlFor="no-po-bill-photo"
+                      className="block text-xs font-medium mb-1"
+                      style={{ color: 'var(--ink-4)' }}
+                    >
+                      Bill photo (required)
+                    </label>
+                    <input
+                      id="no-po-bill-photo"
+                      type="file"
+                      accept="image/*,application/pdf"
+                      onChange={(e) => attachBill(e.target.files?.[0])}
+                      className="text-sm"
+                    />
+                    <span className="text-xs ml-2" style={{ color: 'var(--ink-4)' }}>
+                      {uploading ? 'Uploading…' : bill ? `Attached: ${bill.filename}` : ''}
+                    </span>
+                    {dcVendorsFailed && (
+                      <p className="text-xs mt-1" style={{ color: 'var(--err)' }}>
+                        Could not load the vendor list — try again in a moment.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+              {addingDealer && (
+                <SupplierFormModal
+                  quick
+                  onClose={() => setAddingDealer(false)}
+                  onCreated={(dealer) => {
+                    setDcVendors((list) => [...list, { vendor_id: dealer.id, name: dealer.name }]);
+                    setDcVendorId(dealer.id);
+                    setAddingDealer(false);
+                  }}
+                />
+              )}
               {isDcMode && (
                 <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4 mb-4">
                   <div>
@@ -811,10 +1107,10 @@ export function GoodsReceiptNote() {
                   )}
                 </div>
               )}
-              {pos.length === 0 ? (
+              {isNoPo ? null : pos.length === 0 ? (
                 <div className="text-center py-6" style={{ color: 'var(--ink-4)', fontSize: 13 }}>
                   <Package className="w-8 h-8 mx-auto mb-2" style={{ color: 'var(--ink-5)' }} />
-                  No open purchase orders to receive against.
+                  No open purchase orders to receive against {openPoWhere}.
                   <div className="text-xs mt-1" style={{ color: 'var(--ink-5)' }}>
                     {isDcMode
                       ? 'A Delivery Challan needs no PO — pick the vendor above and add the items below.'
@@ -829,21 +1125,20 @@ export function GoodsReceiptNote() {
                     </label>
                     <select value={poNumber} onChange={(e) => onSelectPO(e.target.value)} className="input w-full">
                       <option value="">{isDcMode ? 'No PO — receiving over the counter' : 'Select a PO…'}</option>
-                      {pos.filter((p) => !p.closed_by_cancel).map((p) => (
-                        <option key={p.po_id} value={p.po_id}>
-                          {p.po_number}
-                          {p.vendor_name ? ` · ${p.vendor_name}` : ''}
-                          {p.status === 'PARTIALLY_RECEIVED' || p.status === 'PARTIAL'
-                            ? ' · partially received'
-                            : ''}
-                        </option>
-                      ))}
-                      {!isDcMode && pos.some((p) => p.closed_by_cancel) && (
+                      {onAllStores ? (
+                        <PoOptionsNamingShop pos={pos.filter((p) => !isRejectedOrder(p))} />
+                      ) : (
+                        pos.filter((p) => !isRejectedOrder(p)).map((p) => (
+                          <option key={p.po_id} value={p.po_id}>
+                            {poLabel(p)}
+                          </option>
+                        ))
+                      )}
+                      {!isDcMode && pos.some((p) => isRejectedOrder(p)) && (
                         <optgroup label="Log a rejected delivery">
-                          {pos.filter((p) => p.closed_by_cancel).map((p) => (
+                          {pos.filter((p) => isRejectedOrder(p)).map((p) => (
                             <option key={p.po_id} value={p.po_id}>
-                              {p.po_number}
-                              {p.vendor_name ? ` · ${p.vendor_name}` : ''}
+                              {poLabel(p)}
                               {' · closed by a cancel'}
                             </option>
                           ))}
@@ -855,6 +1150,12 @@ export function GoodsReceiptNote() {
                         This order was closed by a cancel. Count what the vendor sent: every unit
                         is logged as rejected, nothing goes into stock, and a discrepancy task
                         follows for the debit note.
+                      </p>
+                    )}
+                    {extraReceipt && (
+                      <p className="text-xs mt-1" style={{ color: 'var(--ink-3)' }}>
+                        This order is fully received. Count only the extra goods in this delivery.
+                        Cancelled items stay rejected. The receipt records who accepted the extra stock.
                       </p>
                     )}
                   </div>
@@ -870,6 +1171,25 @@ export function GoodsReceiptNote() {
                       className="input w-full"
                     />
                   </div>
+                  {!isDcMode && (
+                    <div>
+                      <label
+                        htmlFor="po-bill-date"
+                        className="block text-xs font-medium mb-1"
+                        style={{ color: 'var(--ink-4)' }}
+                      >
+                        Vendor invoice date
+                      </label>
+                      <input
+                        id="po-bill-date"
+                        type="date"
+                        value={billDate}
+                        max={istToday()}
+                        onChange={(e) => setBillDate(e.target.value)}
+                        className="input w-full"
+                      />
+                    </div>
+                  )}
                   {needsBill && (
                     <div className="tablet:col-span-2">
                       <label className="block text-xs font-medium mb-1" style={{ color: 'var(--ink-4)' }}>
@@ -895,7 +1215,7 @@ export function GoodsReceiptNote() {
           </div>
 
           {/* No-PO DC: type in what arrived (product picker + qty + tally) */}
-          {noPoDc && (
+          {typedLines && (
             <div className="card">
               <div className="card-head">
                 <h3 className="flex items-center gap-2">
@@ -953,6 +1273,8 @@ export function GoodsReceiptNote() {
                           <th>Tally</th>
                           <th>Item</th>
                           <th className="right">Qty received</th>
+                          {isNoPo && canEnterPrice && <th className="right">Cost / unit before GST (₹)</th>}
+                          {isNoPo && <th>Expiry</th>}
                           <th></th>
                         </tr>
                       </thead>
@@ -998,6 +1320,44 @@ export function GoodsReceiptNote() {
                                 style={{ width: 72, textAlign: 'right', height: 30, padding: '0 6px' }}
                               />
                             </td>
+                            {isNoPo && canEnterPrice && (
+                              <td className="right">
+                                <input
+                                  type="number"
+                                  min={0}
+                                  step="0.01"
+                                  value={item.unit_price ?? ''}
+                                  aria-label={`Cost on line ${idx + 1}`}
+                                  onChange={(e) => {
+                                    const v = parseFloat(e.target.value);
+                                    setReceivedItems((arr) =>
+                                      arr.map((r, j) =>
+                                        j === idx ? { ...r, unit_price: v > 0 ? v : undefined } : r,
+                                      ),
+                                    );
+                                  }}
+                                  className="input"
+                                  style={{ width: 96, textAlign: 'right', height: 30, padding: '0 6px' }}
+                                />
+                              </td>
+                            )}
+                            {isNoPo && (
+                              <td>
+                                <input
+                                  type="date"
+                                  value={item.expiry_date ?? ''}
+                                  aria-label={`Expiry on line ${idx + 1}`}
+                                  onChange={(e) => {
+                                    const v = e.target.value;
+                                    setReceivedItems((arr) =>
+                                      arr.map((r, j) => (j === idx ? { ...r, expiry_date: v } : r)),
+                                    );
+                                  }}
+                                  className="input"
+                                  style={{ height: 30, padding: '0 6px' }}
+                                />
+                              </td>
+                            )}
                             <td className="right">
                               <button
                                 type="button"
@@ -1021,7 +1381,7 @@ export function GoodsReceiptNote() {
           )}
 
           {/* Items reception */}
-          {receivedItems.length > 0 && !noPoDc && (
+          {receivedItems.length > 0 && !typedLines && (
             <div className="card">
               <div className="card-head">
                 <h3 className="flex items-center gap-2">
@@ -1104,7 +1464,7 @@ export function GoodsReceiptNote() {
                             min={0}
                             max={item.received_qty}
                             value={rejectedOf(item)}
-                            disabled={rejectOnly}
+                            disabled={rejectOnly || item.reject_only}
                             aria-label={`Rejected units on line ${idx + 1}`}
                             onChange={(e) =>
                               startTransition(() => {
@@ -1240,9 +1600,11 @@ export function GoodsReceiptNote() {
             <span className="text-xs" style={{ color: 'var(--ink-4)' }}>
               {rejectOnly
                 ? `Posting logs ${totals.rec} rejected unit${totals.rec === 1 ? '' : 's'} against ${poNumber} · nothing goes into stock · the order stays closed.`
+                : isNoPo
+                ? `Posting adds ${totals.rec} unit${totals.rec === 1 ? '' : 's'} to this store's stock · accounts get a task to enter supplier prices and book the bill.`
                 : noPoDc
-                ? `Posting this Delivery Challan adds ${totals.rec} unit${totals.rec === 1 ? '' : 's'} to this store's stock · the receipt is what the vendor's bill will link to.`
-                : `Posting against ${poNumber || 'the selected PO'} adds ${totals.rec} unit${totals.rec === 1 ? '' : 's'} to this store's stock · the PO is marked partially / fully received · variance raises a debit note.`}
+                ? `Posting this Delivery Challan adds ${totals.rec} unit${totals.rec === 1 ? '' : 's'} to your own shop's stock · the receipt is what the vendor's bill will link to.`
+                : `Posting against ${poNumber || 'the selected PO'} adds ${totals.rec} unit${totals.rec === 1 ? '' : 's'} to the stock of the shop it delivers to · the PO is marked partially / fully received · variance raises a debit note.`}
             </span>
             <span className="flex-1" />
             <button
@@ -1260,7 +1622,7 @@ export function GoodsReceiptNote() {
                 submitting ||
                 uploading ||
                 receivedItems.length === 0 ||
-                (!poNumber && !(isDcMode && dcVendorId))
+                (!poNumber && !(isDcMode && dcVendorId) && !(isNoPo && noPoSeller))
               }
               className="btn accent"
             >
@@ -1274,6 +1636,11 @@ export function GoodsReceiptNote() {
       {/* ─────────────────────────── HISTORY ─────────────────────────── */}
       {activeTab === 'history' && (
         <div className="space-y-3">
+          {grns.length < grnTotal && (
+            <p className="text-xs" style={{ color: 'var(--ink-4)' }} data-testid="grn-list-cut">
+              Latest {grns.length} of {grnTotal} receipts, newest first.
+            </p>
+          )}
           {grns.length === 0 ? (
             <div className="card text-center py-12" style={{ color: 'var(--ink-4)' }}>
               <FileText className="w-10 h-10 mx-auto mb-3" style={{ color: 'var(--ink-5)' }} />
@@ -1288,7 +1655,8 @@ export function GoodsReceiptNote() {
                 <div className="flex items-start justify-between mb-3">
                   <div>
                     <p className="font-semibold mono" style={{ color: 'var(--ink)' }}>{grn.grn_number}</p>
-                    <p className="text-sm" style={{ color: 'var(--ink-4)' }}>Against {grn.po_number}</p>
+                    <p className="text-sm" style={{ color: 'var(--ink-4)' }}>{grn.source}</p>
+                    {!grnScope && <RowShop storeId={grn.store_id} />}
                   </div>
                   <div className="flex items-center gap-2">
                     <span className={clsx('chip', qualityChip(grn.quality_status))}>
@@ -1345,6 +1713,7 @@ export function GoodsReceiptNote() {
               <p className="font-semibold" style={{ color: 'var(--ink)' }}>Discrepancy report</p>
               <p className="text-sm mt-1" style={{ color: 'var(--ink-3)' }}>
                 Items with variance between PO quantity and received quantity, or quality inspection failures.
+                {listCut && ` Checked over the latest ${grns.length} of ${grnTotal} receipts only.`}
               </p>
             </div>
           </div>
@@ -1356,7 +1725,9 @@ export function GoodsReceiptNote() {
             if (discrepant.length === 0) {
               return (
                 <div className="card text-center py-8" style={{ color: 'var(--ink-4)' }}>
-                  No discrepancies — all received goods matched their POs and passed inspection.
+                  {listCut
+                    ? `No discrepancies in the latest ${grns.length} receipts.`
+                    : 'No discrepancies — all received goods matched their POs and passed inspection.'}
                 </div>
               );
             }
@@ -1368,7 +1739,8 @@ export function GoodsReceiptNote() {
                   <div className="flex items-start justify-between mb-2">
                     <div>
                       <p className="font-semibold mono" style={{ color: 'var(--ink)' }}>{g.grn_number}</p>
-                      <p className="text-sm" style={{ color: 'var(--ink-4)' }}>Against {g.po_number}</p>
+                      <p className="text-sm" style={{ color: 'var(--ink-4)' }}>{g.source}</p>
+                      {!grnScope && <RowShop storeId={g.store_id} />}
                     </div>
                     <span className={clsx('chip', isQualityFail ? 'err' : 'warn')}>
                       {isQualityFail ? 'Quality rejection' : 'Quantity variance'}

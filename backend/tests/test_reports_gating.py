@@ -4,8 +4,9 @@ IMS 2.0 — reports router financial-report gating
 Financial reports (P&L by store/category, GST returns, outstanding payments,
 discount analysis, expense-vs-revenue) had NO server-side role check — any
 authenticated user could read company financials by hitting /reports/* directly.
-The 8 financial endpoints are now gated to (ADMIN, AREA_MANAGER, STORE_MANAGER,
-ACCOUNTANT; SUPERADMIN auto-passes), mirroring the frontend Reports route.
+General financial endpoints admit ADMIN, AREA_MANAGER, STORE_MANAGER and
+ACCOUNTANT (SUPERADMIN auto-passes). GST reports are Admin/Superadmin/Accounts
+only, including sales-side GST reports as well as input-tax returns.
 
 CRITICAL: /reports/dashboard and /reports/targets MUST stay open — the Hub
 calls them for every role. These tests assert that explicitly.
@@ -43,13 +44,16 @@ def _headers(roles):
 
 FINANCIAL = [
     "/api/v1/reports/finance/outstanding",
-    "/api/v1/reports/finance/gst",
     "/api/v1/reports/profit/by-category",
     "/api/v1/reports/profit/by-store",
     "/api/v1/reports/discount/analysis",
     "/api/v1/reports/finance/expense-vs-revenue",
-    "/api/v1/reports/gstr1",
-    "/api/v1/reports/gstr3b",
+]
+
+# The GST permission is narrower than the general financial-report permission.
+GST_REPORTS = [
+    "/api/v1/reports/finance/gst", "/api/v1/reports/gstr1",
+    "/api/v1/reports/gstr3b", "/api/v1/reports/gstr3b/gstn-json",
 ]
 
 BLOCKED_ROLES = [["SALES_STAFF"], ["CASHIER"], ["OPTOMETRIST"]]
@@ -73,6 +77,18 @@ class TestFinancialReportGating:
     @pytest.mark.parametrize("path", FINANCIAL)
     def test_superadmin_allowed(self, client, auth_headers, path):
         assert client.get(path, headers=auth_headers).status_code != 403
+
+
+class TestGstReportsAreAccountsOnly:
+    @pytest.mark.parametrize("path", GST_REPORTS)
+    @pytest.mark.parametrize("roles", BLOCKED_ROLES + [["STORE_MANAGER"], ["AREA_MANAGER"]])
+    def test_managers_and_counter_blocked(self, client, path, roles):
+        assert client.get(path, headers=_headers(roles)).status_code == 403
+
+    @pytest.mark.parametrize("path", GST_REPORTS)
+    @pytest.mark.parametrize("role", ["ACCOUNTANT", "ADMIN", "SUPERADMIN"])
+    def test_accounts_allowed(self, client, path, role):
+        assert client.get(path, headers=_headers([role])).status_code not in (401, 403)
 
 
 class TestHubReportsStayOpen:

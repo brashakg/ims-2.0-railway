@@ -207,6 +207,10 @@ async def get_po_timeline(
                     {"_id": 0},
                 )
             )
+            if show_bills:  # a bill's status is the ledger's, as of today
+                from ..purchase_invoices import stamp_bills_as_of
+
+                stamp_bills_as_of(db, rows)
             for r in rows:
                 inv = {
                     "bill_id": r.get("bill_id"),
@@ -528,8 +532,8 @@ def puts_nothing_in_stock(lines) -> bool:
 
 def closed_by_cancel(po: dict) -> bool:
     """A cancel CLOSED the order: CANCELLED, or RECEIVED because the rest was
-    cancelled. Nothing on it is due. The PO list stamps it, so the receive
-    screen offers such an order only to log a rejected delivery."""
+    cancelled. Nothing on it is due. The PO list stamps this separately from
+    permission to receive extra goods on an uncancelled line."""
     status = po.get("status")
     return status == "CANCELLED" or (
         status == "RECEIVED" and bool(_cancelled_products(po))
@@ -539,10 +543,10 @@ def closed_by_cancel(po: dict) -> bool:
 def rejected_delivery_on_closed_order(po: dict, lines) -> bool:
     """Owner ruling 2026-10-08 (c): a delivery that brought cancelled items CAN
     be logged when every cancelled item on it is rejected. Once a cancel has
-    CLOSED the order nothing on it is due, so such a delivery is one that puts
+    CLOSED the order nothing on it is due, so this exception is for a delivery that puts
     nothing into stock. It is logged (receipt, discrepancy task, the paper
-    trail a debit note needs) though the order is no longer receivable; a
-    closed order still takes no unit into stock."""
+    trail a debit note needs) though the order is no longer receivable.
+    Extra goods against uncancelled RECEIVED lines have a separate gate."""
     return closed_by_cancel(po) and puts_nothing_in_stock(lines)
 
 
@@ -606,12 +610,16 @@ def _order_or_503(
     checked against the RAW collection, and a read that fails there answers
     503. Only a minimal mock whose collection has no find_one takes the None
     as is. The receipt accept and every PO change read the order here."""
-    po = po_repo.find_by_id(po_id)
-    finder = getattr(getattr(po_repo, "collection", None), "find_one", None)
-    if po or not callable(finder):
-        return po
     try:
-        return finder({"po_id": po_id})
+        po = po_repo.find_by_id(po_id)
+        finder = getattr(getattr(po_repo, "collection", None), "find_one", None)
+        if po or not callable(finder):
+            return po
+        po = finder({"po_id": po_id})
+        if po is not None:
+            po = dict(po)
+            po.pop("_id", None)
+        return po
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=detail) from exc
 

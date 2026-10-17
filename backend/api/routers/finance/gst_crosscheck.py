@@ -12,6 +12,7 @@ from typing import Optional
 from fastapi import Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from ..auth import get_current_user
+from ...dependencies import resolve_store_scope
 from ...services.org_validation import shop_gstins
 from ._shared import (
     _REAL_ORDER_STATUS_FILTER,
@@ -19,7 +20,7 @@ from ._shared import (
     _get_db,
     _iso_now,
     _order_is_interstate,
-    _require_finance_admin,
+    _require_org_finance,
     _store_maps,
     _store_state_map,
     gst_reconciliation,
@@ -39,10 +40,10 @@ async def get_gst_reconciliation(
 ):
     """GST output (sales tax) vs input credit (purchase tax), grouped by entity.
     You file the actual returns through Tally; this is the cross-check."""
-    # Org-wide, entity-grouped GST reconciliation is a filing/accounting view --
+    # Entity-grouped GST reconciliation is a filing/accounting view --
     # finance-admin only (owner decision 2026-06-16), so a single-store
-    # STORE_MANAGER/AREA_MANAGER cannot read every entity's GST position.
-    _require_finance_admin(current_user)
+    # STORE_MANAGER/AREA_MANAGER cannot read any entity's GST position.
+    _require_org_finance(current_user)
     db = _get_db()
     now = now_ist()
     m = month or now.month
@@ -56,6 +57,14 @@ async def get_gst_reconciliation(
     store_ids = None
     if entity_id:
         store_ids = [sid for sid, eid in s2e.items() if eid == entity_id]
+    # THE shop rule the GST summary cards above this table read
+    # (resolve_store_scope): ADMIN / SUPERADMIN every shop, an accountant
+    # his own shop -- so one tab never shows one login two scopes (a Pune
+    # accountant read Pune's input credit on the cards and every entity's in
+    # this table, round 4).
+    scope = resolve_store_scope(None, current_user)
+    if scope:
+        store_ids = [scope] if store_ids is None or scope in store_ids else []
 
     # Orders persist created_at as a BSON datetime; the previous .isoformat()
     # string bound matched nothing, so GST-collected per entity read zero.
@@ -431,7 +440,7 @@ async def get_gst_cross_check(
     books (orders / payments / Tally / purchase-side ITC), side by side, with
     per-rate breakup, CDNR + deemed-supply detail, and mismatch flags. A review
     aid only -- it changes no figure and locks no period."""
-    _require_finance_admin(current_user)
+    _require_org_finance(current_user)
     db = _get_db()
 
     now = now_ist()
@@ -462,7 +471,7 @@ async def gst_cross_check_signoff(
     Idempotent upsert keyed on (year, month, entity_id). Audit-logged. This is a
     review marker only -- it does NOT lock the accounting period (that is the
     separate /period-lock action) and changes no GST figure."""
-    _require_finance_admin(current_user)
+    _require_org_finance(current_user)
     db = _get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")

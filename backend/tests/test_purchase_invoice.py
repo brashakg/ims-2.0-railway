@@ -253,6 +253,36 @@ class TestLinesFromGrn:
         lines = pinv.lines_from_grn(self._grn(), None)
         assert len(lines) == 1 and lines[0]["unit_price"] is None
 
+    @pytest.mark.parametrize("po", [None, {"items": [{"product_id": "OTHER", "tax_rate": 18}]}])
+    @pytest.mark.parametrize("recorded,expected", [
+        ({"tax_rate": 5}, 5),
+        ({"gst_rate": 18}, 18),
+        ({"tax_rate": None, "gst_rate": 5}, 5),
+        ({"tax_rate": 0, "gst_rate": 18}, 0),
+        ({}, 0),
+    ])
+    def test_unmatched_receipt_price_and_recorded_tax_reach_the_invoice(self, po, recorded, expected):
+        grn = {"items": [{
+            "product_id": "P1", "accepted_qty": 4, "unit_price": 500, **recorded,
+        }]}
+        lines = pinv.lines_from_grn(grn, po)
+        assert (lines[0]["unit_price"], lines[0]["gst_rate"]) == (500, expected)
+        invoice = pinv.compute_invoice(lines, SUP_MH, BUY_JH)
+        assert invoice["taxable_total"] == 2000
+        assert invoice["igst_total"] == 2000 * expected / 100
+        assert invoice["total"] == 2000 * (1 + expected / 100)
+
+    @pytest.mark.parametrize("recorded,expected", [
+        ({}, 0), ({"tax_rate": None}, 0), ({"tax_rate": 0}, 0), ({"tax_rate": 5}, 5),
+    ])
+    def test_matched_po_keeps_its_rate_even_when_receipt_disagrees(self, recorded, expected):
+        po = {"items": [{"product_id": "P1", "unit_price": 120, **recorded}]}
+        grn = {"items": [{
+            "product_id": "P1", "accepted_qty": 4, "unit_price": 500, "tax_rate": 18,
+        }]}
+        line = pinv.lines_from_grn(grn, po)[0]
+        assert (line["unit_price"], line["gst_rate"]) == (120, expected)
+
 
 # ===========================================================================
 # ROUTER - standalone app + fake DB
@@ -607,7 +637,9 @@ class TestListAndGet:
         it too; a stock-transfer mirror is not a supplier bill."""
         db = _FakeDB()
         db.collections["vendor_bills"] += [
-            {"bill_id": "legacy1", "vendor_id": "V1", "bill_number": "OLD-1", "total_amount": 500},
+            # The accountant's own shop: F63 lists a shop-less bill to admins only.
+            {"bill_id": "legacy1", "vendor_id": "V1", "bill_number": "OLD-1", "total_amount": 500,
+             "store_id": "S1"},
             {"bill_id": "m1", "bill_number": "TRF/T1", "source_transfer_id": "T1", "total_amount": 900},
         ]
         cli = _app(db)

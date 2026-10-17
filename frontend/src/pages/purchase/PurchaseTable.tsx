@@ -10,6 +10,8 @@ import {
   Truck,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import { usePurchaseShop } from './purchaseShop';
+import { RowShop } from './invoices/pickers';
 import { getStatusBadge } from './statusBadge';
 import { PurchaseStatusChip } from '../../components/purchase/PurchaseStatusChip';
 import { POLifecycleDrawer } from '../../components/purchase/POLifecycleDrawer';
@@ -94,6 +96,9 @@ export function PurchaseTable({ purchaseOrders, onViewPO }: PurchaseTableProps) 
   // Phase 2: clicking the PO number opens the lifecycle drawer (timeline +
   // GRNs + invoices + one derived next-step action).
   const [timelinePO, setTimelinePO] = useState<PurchaseOrder | null>(null);
+  // On All stores each card names the shop its order delivers to; with one
+  // shop in scope the filter already says it (review r3 #10).
+  const { storeId } = usePurchaseShop();
 
   return (
     <div className="space-y-4">
@@ -133,6 +138,7 @@ export function PurchaseTable({ purchaseOrders, onViewPO }: PurchaseTableProps) 
                   </span>
                 </div>
               )}
+              {!storeId && <RowShop storeId={po.deliveryStoreId} />}
             </div>
             <div className="flex items-center gap-2">
               {receivable && canReceive && (

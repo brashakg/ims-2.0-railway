@@ -28,12 +28,29 @@ export function useSuppliers() {
   });
 }
 
+/** One page of a Purchase list: the server answers its NEWEST rows first and
+ *  `total` = every row matching the same shop scope and filters (review round
+ *  2, #18). A screen holding fewer rows than that says "latest N of M" -- it
+ *  never calls N a total. */
+export interface PurchaseOrderPage {
+  orders: PurchaseOrder[];
+  total: number;
+}
+
+/** The count of every matching row from a list response, never less than the
+ *  rows in hand (a server that sends no count = just those rows). */
+export function matchingTotal(resp: unknown, shown: number): number {
+  const total = (resp as { total?: unknown } | null | undefined)?.total;
+  return typeof total === 'number' && Number.isFinite(total) && total > shown ? total : shown;
+}
+
 export function usePurchaseOrdersQuery(storeId: string | undefined) {
-  return useQuery<PurchaseOrder[]>({
+  return useQuery<PurchaseOrderPage>({
     queryKey: purchaseOrdersQueryKey(storeId),
     queryFn: async () => {
       const resp = await vendorsApi.getPurchaseOrders(storeId ? { store_id: storeId } : {});
-      return ((resp?.purchase_orders ?? []) as unknown[]).map(mapPOtoPurchaseOrder);
+      const orders = ((resp?.purchase_orders ?? []) as unknown[]).map(mapPOtoPurchaseOrder);
+      return { orders, total: matchingTotal(resp, orders.length) };
     },
   });
 }

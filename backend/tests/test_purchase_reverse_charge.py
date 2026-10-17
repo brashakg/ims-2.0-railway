@@ -373,7 +373,7 @@ class TestNormalAndMixed:
         normal = _book(cli, _bill("FR-1", rcm=False))
         # A legacy RCM bill booked before this fix, with the GST in its total.
         db["vendor_bills"].insert_one(
-            {"bill_id": "LEG-1", "vendor_id": "V1", "bill_number": "GTA-0", "bill_date": "2026-05-02",
+            {"bill_id": "LEG-1", "vendor_id": "V1", "store_id": "S1", "bill_number": "GTA-0", "bill_date": "2026-05-02",
              "invoice_date": "2026-05-02", "due_date": "2026-06-01", "reverse_charge": True,
              "itc_eligible": True, "recipient_entity_id": "E1", "recipient_gstin": BUY_JH,
              "taxable_amount": 1000.0, "tax_amount": 180.0, "igst_total": 180.0, "cgst_total": 0.0,
@@ -402,7 +402,7 @@ class TestNormalAndMixed:
         db, cli = _world()
         _book(cli, _bill("GTA-1", rcm=True))
         db["vendor_bills"].insert_one(
-            {"bill_id": "LEG-1", "vendor_id": "V1", "bill_number": "GTA-0", "bill_date": "2026-05-02",
+            {"bill_id": "LEG-1", "vendor_id": "V1", "store_id": "S1", "bill_number": "GTA-0", "bill_date": "2026-05-02",
              "reverse_charge": True, "taxable_amount": 1000.0, "tax_amount": 180.0, "total_amount": 1180.0}
         )
         rows = cli.get(_PI).json()["purchase_invoices"]
@@ -421,13 +421,13 @@ class TestOtherReaders:
         month = now_ist().strftime("%Y-%m")
         db["vendor_bills"].insert_many(
             [
-                {"bill_id": "R", "vendor_id": "V1", "bill_date": f"{month}-01", "reverse_charge": True,
+                {"bill_id": "R", "vendor_id": "V1", "store_id": "S1", "bill_date": f"{month}-01", "reverse_charge": True,
                  "taxable_amount": 1000.0, "tax_amount": 180.0, "total_amount": 1180.0},
-                {"bill_id": "N", "vendor_id": "V1", "bill_date": f"{month}-01",
+                {"bill_id": "N", "vendor_id": "V1", "store_id": "S1", "bill_date": f"{month}-01",
                  "taxable_amount": 1000.0, "tax_amount": 180.0, "total_amount": 1180.0},
             ]
         )
-        assert performance._vendor_mtd_spend(db, "V1") == 2180.0
+        assert performance._vendor_mtd_spend(db, "V1", dict(_ADMIN)) == 2180.0
 
     def test_gst_summary_owes_the_rcm_tax_in_cash_whatever_the_credit(self):
         """No sales in May, one RCM freight bill of 1000 @ 18% with credit on.
@@ -539,7 +539,7 @@ class TestOtherReaders:
         cash (a plain total would read 0)."""
         db, _cli = _world()
         db["vendor_bills"].insert_one(
-            {"bill_id": "C", "vendor_id": "V1", "bill_date": "2026-05-04", "status": "RECEIVED",
+            {"bill_id": "C", "vendor_id": "V1", "store_id": "S1", "bill_date": "2026-05-04", "status": "RECEIVED",
              "taxable_amount": 1000.0, "tax_amount": 100.0, "cgst_total": 100.0, "sgst_total": 0.0}
         )
         db["orders"].insert_one(
@@ -802,7 +802,7 @@ class TestLegacyRepair:
     screen must read it PAID once the repair runs."""
 
     def _legacy(self, db, **extra):
-        doc = {"bill_id": "LEG-1", "doc_type": "PURCHASE_INVOICE", "vendor_id": "V1",
+        doc = {"bill_id": "LEG-1", "doc_type": "PURCHASE_INVOICE", "vendor_id": "V1", "store_id": "S1",
                "bill_number": "GTA-0", "bill_date": "2026-05-02", "due_date": "2026-06-01",
                "reverse_charge": True, "taxable_amount": 1000.0, "tax_amount": 180.0,
                "igst_total": 180.0, "total_amount": 1180.0, "total": 1180.0,

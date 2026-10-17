@@ -16,8 +16,10 @@ from ._shared import (
     get_vendor_repository,
     logger,
     require_roles,
+    resolve_store_scope,
     router,
     uuid,
+    can_access_store_scoped,
 )
 from .models import GRN_SUBTYPE_DC
 
@@ -52,6 +54,15 @@ class VendorBillCreate(BaseModel):
     # handler can refuse with a stable, plain-English 422 (BILL_KIND_REQUIRED)
     # instead of a raw pydantic error, and so stored legacy rows re-read fine.
     bill_kind: Optional[str] = None
+    # This door books no reverse charge (the line-detail door does). Read only
+    # so a walk-in bill sent with it is refused in words, as on that door
+    # (purchase_invoices.refuse_walk_in_reverse_charge), never booked quietly.
+    reverse_charge: bool = False
+    # The shop the bill is for (owner ruling 2026-10-12, R9). REQUIRED from
+    # ADMIN / SUPERADMIN when no goods receipt places the bill (rent,
+    # freight): never his topbar shop. A receipt's bill keeps the receipt's
+    # shop; anyone else's is their own. See purchase_invoices._bill_shop.
+    store_id: Optional[str] = None
 
     @field_validator("bill_kind", mode="before")
     @classmethod
@@ -74,6 +85,9 @@ class VendorPaymentCreate(BaseModel):
     tds_amount: Optional[float] = Field(default=None, ge=0)  # explicit override
     reference: Optional[str] = None  # UTR / cheque no / txn id
     notes: Optional[str] = None
+    # The shop the money is paid for (F63) when no bill is named; a named
+    # bill's shop wins. See ap_payments._money_shop.
+    store_id: Optional[str] = None
 
 
 # Recognized vendor credit-note / debit-note types. Every type lands in the
@@ -99,6 +113,9 @@ class DebitNoteCreate(BaseModel):
     # Credit-note category. Defaults to RETURN_CN (the historical behaviour --
     # debit notes here were created for rejected/returned goods).
     cn_type: str = "RETURN_CN"
+    # The shop the note is for (F63) when no bill is named; a named bill's
+    # shop wins. See ap_payments._money_shop.
+    store_id: Optional[str] = None
 
     @field_validator("cn_type")
     @classmethod
@@ -115,8 +132,18 @@ def _clean(doc: dict) -> dict:
 
 
 def _recompute_bill_status(db, bill_id: Optional[str]) -> None:
-    """Re-derive a bill's status (OUTSTANDING / PARTIAL / PAID) from its
-    allocated payments + debit notes. Fail-soft."""
+    """Re-derive a bill's stored status (OUTSTANDING / PARTIAL / PAID) and
+    outstanding from its allocated payments + debit notes. Fail-soft.
+
+    The STORED pair counts every RECORDED payment and note, a post-dated
+    cheque included ('what is left once what is recorded clears'), so it is
+    never stale -- nothing has to rewrite it on the cheque's day. It is NEVER
+    served: every reader that hands a bill to a screen (the Purchase Invoices
+    list and detail, /vendors/{id}/bills, the PO timeline) restrikes status and
+    outstanding on today through purchase_invoices.stamp_bills_as_of
+    (ap_engine.bill_as_of) -- the supplier ledger's as-of rule, so a bill a
+    post-dated cheque covers reads PARTIAL / OUTSTANDING until the cheque's
+    day, as AP aging, the Purchases report and Cash Flow count it."""
     if db is None or not bill_id:
         return
     try:
@@ -145,27 +172,67 @@ def _recompute_bill_status(db, bill_id: Optional[str]) -> None:
 @router.get("/ap-aging")
 async def ap_aging(
     as_of: Optional[str] = Query(None, description="ISO date; defaults to today"),
+    store_id: Optional[str] = Query(None),
     current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
-    """Org-wide accounts-payable aging, grouped by vendor + grand totals.
+    """Accounts-payable aging, grouped by vendor + grand totals.
 
     Buckets each outstanding bill by days past its due date (current / 1-30 /
-    31-60 / 61-90 / 90+). ADMIN / ACCOUNTANT only.
+    31-60 / 61-90 / 90+). ADMIN / ACCOUNTANT only, in the caller's shop scope.
     """
+    # The one Purchase shop scope (F63), as the vendor ledger and the Suppliers
+    # card apply it: ADMIN / SUPERADMIN every shop or the one asked for; a Pune
+    # accountant ages Pune's share, so each row here is the ledger it opens.
+    scope = resolve_store_scope(store_id, current_user)
     db = _get_db()
     if db is None:
         return {"as_of": as_of, "totals": {}, "vendors": []}
+    from ..finance import _ap_rows  # the one AP row loader (call time: no cycle)
+
+    return ap_engine.build_aging_by_vendor(*_ap_rows(db, scope, as_of=as_of), as_of)
+
+
+def _billed_elsewhere_unnamed(
+    db, grn_id: str, linked: Optional[dict], exc: HTTPException, current_user: dict
+) -> HTTPException:
+    """The 409 'this receipt is already billed' names the bill that billed it
+    (assert_grn_billable_header_only: 'already billed by <bill>'; a Delivery
+    Challan: 'already matched to invoice <id>'). When that bill is outside the
+    caller's shop scope -- a legacy bill with no shop, or one booked to another
+    shop -- the refusal still says the receipt is billed (the receipt is the
+    caller's), but never names the other bill. Every other refusal passes
+    through unchanged."""
+    if exc.status_code != 409:
+        return exc
+    detail = exc.detail
+    if isinstance(detail, dict) and detail.get("code") == "grn_already_billed":
+        flt = {"grn_id": grn_id}
+    elif (
+        isinstance(detail, str)
+        and (linked or {}).get("linked_bulk_invoice_id")
+        and str(linked["linked_bulk_invoice_id"]) in detail
+    ):
+        flt = {"bill_id": linked["linked_bulk_invoice_id"]}
+    else:
+        return exc
     try:
-        bills = list(
-            db.get_collection("vendor_bills").find(
-                {"status": {"$ne": "PAID"}}, {"_id": 0}
-            )
+        other = (
+            db.get_collection("vendor_bills").find_one(flt, {"_id": 0, "store_id": 1})
+            if db is not None
+            else None
         )
-        payments = list(db.get_collection("vendor_payments").find({}, {"_id": 0}))
-        debit_notes = list(db.get_collection("vendor_debit_notes").find({}, {"_id": 0}))
-    except Exception:
-        bills, payments, debit_notes = [], [], []
-    return ap_engine.build_aging_by_vendor(bills, payments, debit_notes, as_of)
+    except Exception:  # noqa: BLE001 - unknown: do not name it
+        other = None
+    if other is not None and can_access_store_scoped(other.get("store_id"), current_user):
+        return exc
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": "grn_already_billed",
+            "message": f"Goods receipt {grn_id} is already billed. Nothing was recorded.",
+            "grn_id": grn_id,
+        },
+    )
 
 
 @router.post("/{vendor_id}/bills", status_code=201)
@@ -251,15 +318,18 @@ async def create_vendor_bill(
                 },
             )
 
+    linked = None  # the goods receipt this bill names, read below
     # This door accepts a grn_id but validated NOTHING about it -- so the same
     # two money leaks the first-class purchase-invoice door had were reachable
     # here too: bill another vendor's receipt, or bill one receipt again and
     # again. Reuse the purchase-invoice guards (imported at call time, like
     # check_period_locked above, so no cross-router import cycle).
     #
-    # A DELIVERY CHALLAN receipt is billable here too (the whole point of the
-    # no-PO receive path: goods bought over the counter get a DC receipt, and
-    # THIS is the screen the accountant records the bill on). The DC takes the
+    # A DELIVERY CHALLAN receipt is billable here too (a supplier's goods that
+    # came on a challan, often with no PO -- THIS is the screen the accountant
+    # records the bill on; a walk-in buy has its own "Bought without
+    # PO" receipt, D14 - credit only from a registered supplier, G2 - billed
+    # like a PO receipt below). The DC takes the
     # same one-bill-per-receipt stance as the STANDARD header guard, enforced
     # by CLAIMING the DC (dc_matched) before the bill is written -- so neither
     # a second header bill nor a later consolidated /from-dcs invoice can bill
@@ -275,50 +345,69 @@ async def create_vendor_bill(
 
         grn_repo = get_grn_repository()
         linked = grn_repo.find_by_id(bill.grn_id) if grn_repo is not None else None
+        # F63: another shop's receipt (or one with no shop, for a non-admin)
+        # is not there for the caller -- the SAME 404 a missing receipt gets
+        # (_load_standard_grn's words), before anything is claimed or written.
+        # Without this a Pune accountant booked a bill on Dhanbad's receipt
+        # into Dhanbad's books and read it back in the 201.
+        if linked is not None and not can_access_store_scoped(
+            linked.get("store_id"), current_user
+        ):
+            raise HTTPException(status_code=404, detail=f"GRN {bill.grn_id} not found")
         _receipt_store = (linked or {}).get("store_id")
-        if linked is not None and linked.get("grn_subtype") == GRN_SUBTYPE_DC:
-            # 404 missing / 400 not-ACCEPTED / 409 already-matched.
-            dc_docs = _load_linked_dcs(db_early, [bill.grn_id])
-            # 409 mixed_vendors when the DC belongs to another vendor.
-            _assert_dcs_single_vendor_store(dc_docs, expected_vendor_id=vendor_id)
-            _dc_receipt = dc_docs[0] if dc_docs else None
-        else:
-            assert_grn_billable_header_only(db_early, bill.grn_id, vendor_id)
+        from ..purchase_invoices import refuse_walk_in_reverse_charge
 
-    # Duplicate bill guard: the same vendor invoice number must not be recorded
-    # twice for the same vendor. A double-entry would double the outstanding
-    # payable and produce a duplicate payment row in the ledger.
-    # Compared case/punctuation-FOLDED through the ONE normaliser
-    # (purchase_invoice_engine.normalize_invoice_no -- the same fold the GRN
-    # duplicate guard and the line-detail invoice door use): the exact-string
-    # check here let 'GO-INV/9007' book the payable a second time next to
-    # 'GO-INV-9007'. ponytail: linear scan over one vendor's bills; index a
-    # normalised column if a vendor ever holds thousands.
+        refuse_walk_in_reverse_charge(bill.reverse_charge, linked)
+        try:
+            if linked is not None and linked.get("grn_subtype") == GRN_SUBTYPE_DC:
+                # 404 missing / 400 not-ACCEPTED / 409 already-matched.
+                dc_docs = _load_linked_dcs(db_early, [bill.grn_id])
+                # 409 mixed_vendors when the DC belongs to another vendor.
+                _assert_dcs_single_vendor_store(dc_docs, expected_vendor_id=vendor_id)
+                _dc_receipt = dc_docs[0] if dc_docs else None
+            else:
+                assert_grn_billable_header_only(db_early, bill.grn_id, vendor_id, current_user)
+        except HTTPException as exc:
+            unnamed = _billed_elsewhere_unnamed(db_early, bill.grn_id, linked, exc, current_user)
+            if unnamed is exc:
+                raise
+            raise unnamed from None
+        if (linked or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO:
+            from ...services.purchase_invoice_engine import lines_from_grn
+
+            if any(line.get("unit_price") is None for line in lines_from_grn(linked, None)):
+                raise HTTPException(status_code=422, detail={
+                    "code": "INVOICE_PRICE_REQUIRED",
+                    "message": (
+                        "This receipt has unpriced items. Open Purchase > Invoices > "
+                        "Create from GRN and enter each supplier price before booking the bill."
+                    ),
+                })
+
+    # Duplicate bill guard: THE same-bill rule (purchase_invoices.
+    # find_duplicate_bill -> purchase_invoice_engine.same_bill), the one the
+    # receiving door and the line-detail invoice door use. A double entry
+    # would double the outstanding payable and the ledger's payment row; a
+    # number the supplier reuses in a new financial year is a new bill.
+    from ..purchase_invoices import find_duplicate_bill
+    from ...services.purchase_invoice_engine import bill_key
+
     if db_early is not None:
         try:
-            from ...services.purchase_invoice_engine import normalize_invoice_no
-
-            _target = normalize_invoice_no(bill.bill_number)
-            _rows = db_early.get_collection("vendor_bills").find(
-                {"vendor_id": vendor_id},
-                {"_id": 0, "bill_id": 1, "bill_number": 1},
+            dup = find_duplicate_bill(
+                db_early,
+                vendor_id,
+                bill.bill_number,
+                bill.bill_date,
+                po_id=bill.po_id,
             )
-            dup = None
-            if _target:
-                dup = next(
-                    (
-                        r
-                        for r in _rows
-                        if normalize_invoice_no(r.get("bill_number")) == _target
-                    ),
-                    None,
-                )
             if dup:
                 raise HTTPException(
                     status_code=409,
                     detail=(
                         f"Bill number '{bill.bill_number}' is already recorded "
-                        f"for this vendor. Duplicate vendor invoices are not allowed."
+                        f"for this vendor in this financial year. Duplicate "
+                        f"vendor invoices are not allowed."
                     ),
                 )
         except HTTPException:
@@ -331,16 +420,22 @@ async def create_vendor_bill(
     # _bill_recipient + the engine's classify_supply). This door used to write
     # none of them, so its credit counted in the ITC register and in no
     # GSTR-3B. Refused (422) before anything is claimed or written.
-    from ..purchase_invoices import _bill_recipient, _vendor_gstin
+    #
+    # R9: the shop is THE bill-shop rule's (purchase_invoices._bill_shop): the
+    # receipt's; with none an admin must name it (422 BILL_SHOP_REQUIRED) --
+    # it used to be his topbar shop, so a Pune rent bill keyed at HQ sat in
+    # HQ's books on HQ's GSTIN; anyone else's own shop, as before.
+    from ..purchase_invoices import _bill_shop_and_recipient, _vendor_gstin
     from ...services.purchase_invoice_engine import split_header_tax
     from ...services.org_validation import itc_claimable
 
     supplier_gstin = _vendor_gstin(db_early, vendor, vendor_id)
-    recipient = _bill_recipient(
+    bill_shop, recipient = _bill_shop_and_recipient(
         db_early,
         _receipt_store,
+        bill.store_id,
         None,
-        current_user.get("active_store_id"),
+        current_user,
         gstin_box=False,
     )
     heads = split_header_tax(
@@ -353,10 +448,17 @@ async def create_vendor_bill(
     doc = {
         "bill_id": bill_id,
         "vendor_id": vendor_id,
+        # The receipt's shop; else the admin's pick (R9), else the booker's
+        # own -- the shop the recipient was read off: every Purchase tab
+        # scopes on it (F63).
+        "store_id": bill_shop,
         "vendor_name": (vendor or {}).get("trade_name")
         or (vendor or {}).get("legal_name"),
         "bill_number": bill.bill_number,
         "bill_date": bill.bill_date,
+        # The bill's identity for the uniq_vendor_bill_number_key index (the
+        # same-bill rule's atomic twin, shared with the line-detail door).
+        "bill_number_key": bill_key(bill.bill_number, bill.bill_date),
         "due_date": due_date,
         "credit_days": credit_days,
         "vendor_gstin": supplier_gstin,
@@ -373,8 +475,9 @@ async def create_vendor_bill(
         "igst_total": heads["igst_total"],
         "total_amount": round(bill.total_amount, 2),
         "outstanding": round(bill.total_amount, 2),
-        # No valid supplier GSTIN, no input credit (purchase_invoices does the
-        # same on its doors): one rule, org_validation.itc_claimable.
+        # No valid supplier GSTIN, no input credit (a bill for goods bought
+        # without a PO, G2, the same) -- purchase_invoices does the same on
+        # its doors: one rule, org_validation.itc_claimable.
         "itc_eligible": itc_claimable(supplier_gstin),
         "po_id": bill.po_id,
         "grn_id": bill.grn_id,
@@ -431,27 +534,68 @@ async def create_vendor_bill(
                         bill.grn_id,
                         bill_id,
                     )
+            # The same-bill rule's atomic twin (uniq_vendor_bill_number_key):
+            # a rival booking of this bill won the race -- the guard's 409.
+            if exc.__class__.__name__ == "DuplicateKeyError":
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Bill number '{bill.bill_number}' is already recorded "
+                        f"for this vendor in this financial year. Duplicate "
+                        f"vendor invoices are not allowed."
+                    ),
+                ) from exc
             raise HTTPException(status_code=500, detail="Failed to save bill") from exc
+    # G1 on this door too: a walk-in receipt's bill costs its goods by THE
+    # true-up the line-detail door runs (purchase_invoices.
+    # _apply_valuation_trueup: the price paid, plus the bill's GST when it
+    # claims no credit). This form names no lines, so each receipt line
+    # carries the bill's tax share as its rate.
+    # ponytail: one share for every line; a mixed-rate walk-in bill wants the
+    # line-detail door (Purchase -> Invoices -> Create from GRN).
+    if db is not None and (linked or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO:
+        from ..purchase_invoices import _apply_valuation_trueup, _resolved_purchase_config
+        from ...services.purchase_invoice_engine import lines_from_grn
+
+        share = ap_engine.header_bill_gst_rate(bill.tax_amount, bill.taxable_amount) or 0.0
+        _apply_valuation_trueup(
+            db,
+            {**doc, "invoice_id": bill_id},
+            {"lines": [{**ln, "gst_rate": share} for ln in lines_from_grn(linked, None)]},
+            _resolved_purchase_config(db),
+        )
     return _clean(doc)
 
 
 @router.get("/{vendor_id}/bills")
 async def list_vendor_bills(
     vendor_id: str,
+    store_id: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
-    """List a vendor's bills (newest first)."""
+    """List a vendor's bills (newest first), in the caller's shop scope."""
     db = _get_db()
     if db is None:
         return {"bills": [], "total": 0}
+    from ..purchase_invoices import stamp_bills_as_of
+
     flt: dict = {"vendor_id": vendor_id}
-    if status:
-        flt["status"] = status
+    # The one Purchase shop scope (F63), as the purchase-invoice list applies
+    # it: a supplier who serves two shops must not hand a Pune login Dhanbad's
+    # bill ids to open. Admins see every shop (or the one asked for).
+    scope = resolve_store_scope(store_id, current_user)
+    if scope:
+        flt["store_id"] = scope
     try:
         bills = list(db.get_collection("vendor_bills").find(flt, {"_id": 0}))
     except Exception:
         bills = []
+    # Status and outstanding on the supplier ledger's as-of rule (today): a
+    # post-dated cheque is not paid until its day, so it is noted
+    # (post_dated_money / post_dated_until) instead of counted -- this list and
+    # the ledger owe the same. The status filter reads that same status.
+    bills = [b for b in stamp_bills_as_of(db, bills) if not status or b["status"] == status]
     bills.sort(key=lambda b: b.get("bill_date") or "", reverse=True)
     # What the supplier is owed, as the invoice list reads it (an RCM bill
     # booked before vendor_payable stored its GST in total_amount; its stored
