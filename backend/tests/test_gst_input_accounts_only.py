@@ -60,6 +60,7 @@ GSTR3B_INPUT_KEYS = {
     "inwardSuppliesReverseChargeValue", "inwardSuppliesReverseCharge",
     "inwardSuppliesReverseChargeGstin", "taxPaidCash",
     "itcReverseCharge",
+    "itcIneligible", "inwardExemptNilNonGst",
 }
 # ...and by shape, so one added later under another name is caught too.
 _INPUTISH = re.compile(r"itc|input|reverse|inward|paidcash|tax_?paid|net_?gst", re.I)
