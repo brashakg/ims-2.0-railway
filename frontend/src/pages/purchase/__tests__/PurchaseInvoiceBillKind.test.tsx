@@ -96,6 +96,7 @@ function fillManualHeaderAndLine() {
     'input[type="number"].w-16',
   ) as HTMLInputElement;
   fireEvent.change(qty, { target: { value: '21' } });
+  fireEvent.change(screen.getAllByRole('spinbutton')[1], { target: { value: '1000' } });
 }
 
 // Book waits for the server's tax preview of the form as it stands.

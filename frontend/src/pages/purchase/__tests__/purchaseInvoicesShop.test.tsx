@@ -303,6 +303,7 @@ async function fillManualServicesBill() {
   fireEvent.change(screen.getByDisplayValue('Select supplier...'), { target: { value: 'V1' } });
   fireEvent.change(screen.getByPlaceholderText(/As printed on the supplier's bill/), { target: { value: 'FW-1' } });
   fireEvent.change(screen.getByPlaceholderText('Item description'), { target: { value: 'Freight' } });
+  fireEvent.change(screen.getAllByRole('spinbutton')[1], { target: { value: '1000' } });
 }
 
 /** Fills a manual services bill; an admin then picks `shop` (R9). */

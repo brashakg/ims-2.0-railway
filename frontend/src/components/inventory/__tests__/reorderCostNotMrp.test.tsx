@@ -17,7 +17,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 
-const auth = vi.hoisted(() => ({ role: 'STORE_MANAGER' }));
+const auth = vi.hoisted(() => ({ role: 'ADMIN' }));
 const toast = vi.hoisted(() => ({
   success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn(),
 }));
@@ -91,7 +91,7 @@ function estimateCard(): string {
 
 beforeEach(() => {
   for (const fn of [...Object.values(http), ...Object.values(toast)]) fn.mockClear();
-  auth.role = 'STORE_MANAGER';
+  auth.role = 'ADMIN';
   feed.rows = [low('P-NOCOST')];
   feed.ledger = [NOCOST];
 });
@@ -103,7 +103,7 @@ describe('review r2 #24: a reorder line with no cost is never priced at its MRP'
     expect(orderQtyCell('Uncosted frame')).toMatch(/^5/);
   });
 
-  it('a manager reads "no cost" in the cost cell, never MRP x qty (Rs 15,000)', async () => {
+  it('an admin reads "no cost" in the cost cell, never MRP x qty (Rs 15,000)', async () => {
     renderDashboard();
     await screen.findByText('Uncosted frame');
     expect(orderQtyCell('Uncosted frame')).toBe('5no cost');
@@ -145,8 +145,8 @@ describe('review r2 #24: a reorder line with no cost is never priced at its MRP'
     expect(orderQtyCell('Uncosted frame')).toBe('5no cost');
   });
 
-  it('a counter role sees a dash in both, and no "no cost" hint', async () => {
-    auth.role = 'SALES_STAFF';
+  it.each(['SALES_STAFF', 'STORE_MANAGER', 'AREA_MANAGER', 'CATALOG_MANAGER'])('%s sees a dash in both, and no "no cost" hint', async (role) => {
+    auth.role = role;
     feed.rows = [low('P-NOCOST'), low('P-COSTED')];
     feed.ledger = [NOCOST, COSTED];
     renderDashboard();

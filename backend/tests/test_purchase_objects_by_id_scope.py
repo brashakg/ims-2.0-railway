@@ -458,6 +458,11 @@ class TestOtherShopsObjectsById:
         cli = world.as_(user)
         other = cli.post("/api/v1/vendors/grn/GRN-D1/escalate", params={"note": "box damaged"})
         ghost = cli.post("/api/v1/vendors/grn/GRN-NOPE/escalate", params={"note": "box damaged"})
+        if user["roles"] == ["ACCOUNTANT"]:
+            # Receiving actions require a manager even in the caller's own shop.
+            assert other.status_code == ghost.status_code == 403
+            assert "GRN-D1" not in other.text
+            return
         assert _same_404(other, ghost) == ("GRN not found",) * 2
         assert world.db["grns"].find_one({"grn_id": "GRN-D1"})["status"] == "ACCEPTED"
 

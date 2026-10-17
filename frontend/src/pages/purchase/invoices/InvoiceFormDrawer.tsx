@@ -225,7 +225,7 @@ export function InvoiceFormDrawer({
           const ask = await purchaseInvoicesApi.requestCataloguing(
             blocked,
             undefined,
-            prefill.store_id ?? user?.activeStoreId ?? undefined,
+            bookedTo ?? ownStoreId,
           );
           // The server says who was asked: the catalogue manager, or -- with
           // none for the shop -- the admins.

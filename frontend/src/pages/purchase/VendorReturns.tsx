@@ -576,7 +576,7 @@ export function VendorReturns() {
                         {debitNotes[ret.return_id] ? (
                           <p className="text-gray-900 font-semibold">
                             {debitNotes[ret.return_id].debit_note_number}
-                            {canPrice && debitNotes[ret.return_id].totals_rupees && (
+                            {canSeePayables && debitNotes[ret.return_id].totals_rupees && (
                               <span className="ml-2 text-gray-500 font-normal text-sm">
                                 {rupees(debitNotes[ret.return_id].totals_rupees?.grand_total)}
                                 {debitNotes[ret.return_id].is_inter_state ? ' (IGST)' : ' (CGST+SGST)'}
@@ -603,7 +603,7 @@ export function VendorReturns() {
                             </button>
                             {/* The Tally voucher is nothing but the note's
                                 money: accounts only (owner ruling 2026-10-12). */}
-                            {canPrice && (
+                            {canSeePayables && (
                               <button
                                 onClick={() =>
                                   handleExportTally(
