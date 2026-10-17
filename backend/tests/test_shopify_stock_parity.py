@@ -1763,7 +1763,7 @@ _LIVE_STATES = {
     "still_live": (False, lambda db: None, True),
     # Round 17: a live listing a stock pass recorded untracked (a size minted
     # untracked: Shopify sells it without limit) is live -- listing_visible,
-    # never listing_already_live.
+    # never "visible AND recorded tracked".
     "live_but_untracked": (False, lambda db: _set(
         db, "catalog_products", {"id": "c2"}, **{"ecom.online_stock": {"tracked": False, "quantities": {"BV-A": 0}}}),
         True),
@@ -1791,7 +1791,7 @@ def test_parity_compares_only_skus_on_a_live_listing(state):
     stays compared; drop the retired SKU check -> a retired size stays
     compared; put back a second 'taken down' computation (the retired
     product's twin found by _resolve_twin) -> the size on a still-PUBLISHED
-    listing is dropped; judge live by listing_already_live -> the untracked
+    listing is dropped; judge live by "visible AND recorded tracked" -> the untracked
     listing is dropped -> fails."""
     size, change, compared = _LIVE_STATES[state]
     db = _db({"SKU-1": {"BV-A": 1, "BV-B": 1}, "SKU-2": {"BV-A": 0, "BV-B": 0}})
