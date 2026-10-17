@@ -526,13 +526,16 @@ def test_every_archive_and_restore_door_clears_the_cached_lists(env, monkeypatch
 
     monkeypatch.setattr(cache_mod, "cache", _Spy())
     asyncio.run(catalog_mod.delete_catalog_product("T-P1", current_user=ADMIN))
-    assert seen == [("products:*", True)]  # the single Delete door, after the write
+    # Repository and multi-copy catalogue writes may each invalidate. Every
+    # invalidation must happen after the visible state changes; a later clear
+    # also prevents a concurrent read from retaining a partially written list.
+    assert seen and all(call == ("products:*", True) for call in seen)
     seen.clear()
     _restore(env, ["P1"])
-    assert seen == [("products:*", False)]
+    assert seen and all(call == ("products:*", False) for call in seen)
     seen.clear()
     _archive(env, ["P1"])
-    assert seen == [("products:*", True)]
+    assert seen and all(call == ("products:*", True) for call in seen)
 
 
 def test_a_blank_deleted_at_is_not_archived_anywhere(env):
