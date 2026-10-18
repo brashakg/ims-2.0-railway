@@ -151,14 +151,16 @@ class ProductRepository(BaseRepository):
             invalidate_product_lists()
         return saved
 
-    def update(self, id: str, data: Dict) -> bool:
+    def update(self, id: str, data: Dict, *, expected: Optional[Dict] = None) -> bool:
         """BaseRepository.update, plus: a write that switches the product on
         stamps `switched_on_at`. A provisional buy (ruling 13) is born
         inactive and keeps `provisional` for good, so this stamp is how
         reorder_policy.discontinued() tells 'not switched on yet' from
         'switched on, sold, switched off'. Every spine door that writes
         is_active (catalog drawer, PUT /products, /products/master) writes
-        through here."""
+        through here. An optional preimage fences the write without bypassing
+        these stamps or cache invalidation; database failures still raise on
+        that conditional path rather than masquerading as a lost race."""
         if "attributes.gtin" in data or "attributes" in data or "barcode" in data:
             # A failed catalogue CAS may compensate its own barcode write.
             # Every later billing-product barcode write takes ownership so
@@ -178,7 +180,10 @@ class ProductRepository(BaseRepository):
                     data["edited_at"] = doc["updated_at"]
             except Exception:  # noqa: BLE001 -- the write itself stands
                 pass
-        saved = super().update(id, data)
+        saved = (
+            super().update_if(id, expected, data)
+            if expected is not None else super().update(id, data)
+        )
         if saved:
             from api.services.cache import invalidate_product_lists
 
