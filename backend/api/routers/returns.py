@@ -4020,7 +4020,9 @@ async def list_returns(
     roles = current_user.get("roles", []) or []
     is_admin, own_stores = user_store_scope(current_user)
     if not store_id and "AREA_MANAGER" in roles and not is_admin:
-        effective_store = {"$in": sorted(own_stores)}
+        # Legacy membership can contain null/blank entries. Mongo's $in:[None]
+        # also matches unattributed rows, so only actual shop IDs may be queried.
+        effective_store = {"$in": sorted(s for s in own_stores if isinstance(s, str) and s)}
     else:
         effective_store = resolve_store_scope(store_id, current_user)
 

@@ -23,6 +23,8 @@ def world(monkeypatch):
         {"return_id": "R2", "store_id": "S2", "return_type": "RETURN", "created_at": "2026-10-11"},
         {"return_id": "R3", "store_id": "S3", "return_type": "RETURN", "created_at": "2026-10-12"},
         {"return_id": "OLD", "return_type": "RETURN", "created_at": "2026-10-09"},
+        {"return_id": "NULL-SHOP", "store_id": None, "return_type": "RETURN", "created_at": "2026-10-08"},
+        {"return_id": "BLANK-SHOP", "store_id": "", "return_type": "RETURN", "created_at": "2026-10-07"},
     ])
     actor = {"user_id": "area", "roles": ["AREA_MANAGER"], "store_ids": ["S1", "S2"], "active_store_id": "S1"}
     app = FastAPI()
@@ -41,6 +43,26 @@ def test_area_manager_default_list_and_count_include_only_assigned_shops(world):
     page = client.get("/api/v1/returns?skip=1&limit=1&return_type=RETURN").json()
     assert page["total"] == 2
     assert [r["return_id"] for r in page["returns"]] == ["R1"]
+
+
+@pytest.mark.parametrize("shops,expected_ids", [
+    ([None], []),
+    ([""], []),
+    ([None, ""], []),
+    ([None, "", "S2"], ["R2"]),
+])
+def test_area_manager_ignores_invalid_shop_assignments(world, shops, expected_ids):
+    client, actor = world
+    actor.update(store_ids=shops, active_store_id=None)
+    response = client.get("/api/v1/returns")
+    assert response.status_code == 200
+    assert [row["return_id"] for row in response.json()["returns"]] == expected_ids
+    assert response.json()["total"] == len(expected_ids)
+    assert client.get("/api/v1/returns?store_id=S1").status_code == 403
+    for rid in ("OLD", "NULL-SHOP", "BLANK-SHOP"):
+        hidden = client.get(f"/api/v1/returns/{rid}")
+        assert hidden.status_code == 404
+        assert hidden.json() == {"detail": "Return not found"}
 
 
 @pytest.mark.parametrize("role", ["AREA_MANAGER", "STORE_MANAGER", "SALES_STAFF", "ACCOUNTANT"])
@@ -71,7 +93,7 @@ def test_no_shop_reads_empty_and_cannot_name_one(world, role):
 def test_admin_keeps_all_shops_and_unattributed_records(world, role):
     client, actor = world
     actor["roles"] = [role]
-    assert client.get("/api/v1/returns").json()["total"] == 4
+    assert client.get("/api/v1/returns").json()["total"] == 6
     assert client.get("/api/v1/returns?store_id=S3").json()["total"] == 1
     assert client.get("/api/v1/returns/OLD").status_code == 200
 
