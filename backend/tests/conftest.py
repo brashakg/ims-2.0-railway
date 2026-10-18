@@ -407,3 +407,17 @@ def pytest_unconfigure(config):
     freezer = getattr(config, "_ims_ist_clock", None)
     if freezer is not None:
         freezer.stop()
+
+
+@pytest.fixture(autouse=True)
+def _shopify_identity_definition_in_place(monkeypatch):
+    """The Shopify identity definition (ims.ims_product_id, unique values --
+    audit SF-02) counts as already in place for every test, the state the
+    store is in after the one-time ensure step. Otherwise the per-process
+    ensure call would add Shopify calls to the FIRST create a test happens to
+    make (order-dependent call counts). The ensure step itself is tested in
+    test_shopify_create_recovery_and_edit_revision.py, which resets this."""
+    from api.services.shopify_push import create_claim
+
+    monkeypatch.setitem(create_claim._identity, "ready", True)
+    monkeypatch.setitem(create_claim._identity, "retry_at", None)

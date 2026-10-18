@@ -48,4 +48,7 @@ export type EditMode = {
   id: string;
   sku: string;
   orderedDraft?: boolean;
+  /** G1: the model's lead when the product is a colour/size of a model --
+   *  its model-level fields are edited on the model. */
+  variantOf?: string;
 } | null;

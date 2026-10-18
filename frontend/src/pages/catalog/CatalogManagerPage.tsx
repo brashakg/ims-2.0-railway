@@ -44,7 +44,7 @@
 //
 // POS is untouched.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, NavLink, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   RefreshCw,
@@ -56,6 +56,8 @@ import {
   ImagePlus,
   Pencil,
   Flag,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useToast } from '../../context/ToastContext';
@@ -69,6 +71,7 @@ import {
   catalogApi,
   type CatalogCounts,
   type CatalogFacets,
+  type FamilyMember,
 } from '../../services/api/products';
 import {
   catalogBulkApi,
@@ -272,6 +275,9 @@ export function CatalogManagerPage({
   const filters: CatalogFilters = useMemo(() => JSON.parse(filtersKey), [filtersKey]);
   const pageSize = filters.rows;
   const photo: PhotoFilter | undefined = photoPreset ?? (filters.photo || undefined);
+  // G1: the catalogue lists one row per MODEL -- except a photo work list,
+  // where every colour/size needs its own photo, so each is its own row.
+  const grouped = segment === 'catalog' && !photo;
   const archivedView = segment === 'catalog' && filters.flag === 'archived';
 
   const setPage = useCallback(
@@ -406,6 +412,8 @@ export function CatalogManagerPage({
       if (segment === 'catalog') {
         const res = await productApi.getProducts({
           ...toProductParams(filters),
+          // G1 (owner 2026-10-18): one row per model, its colours/sizes folded in.
+          group: grouped ? 'model' : undefined,
           photo,
           skip: (page - 1) * pageSize,
           limit: pageSize,
@@ -449,7 +457,7 @@ export function CatalogManagerPage({
       // newer request owns the spinner.
       if (!pastEnd && !stale()) setLoading(false);
     }
-  }, [segment, filters, photo, page, pageSize, setPage]);
+  }, [segment, filters, photo, grouped, page, pageSize, setPage]);
 
   useEffect(() => {
     void load();
@@ -606,6 +614,30 @@ export function CatalogManagerPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
 
+  // ---- Model families (G1): a model row expands to its colours/sizes --------
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const toggleExpanded = useCallback((leadId: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(leadId)) next.delete(leadId);
+      else next.add(leadId);
+      return next;
+    });
+  }, []);
+  // A variant opens in the same drawer (the ?focus deep link's path).
+  const openMember = useCallback(
+    async (productId: string) => {
+      try {
+        const doc = (await productApi.getProduct(productId)) as Record<string, unknown>;
+        setDrawerIdx(null);
+        setFocusItem({ kind: 'spine', doc });
+      } catch {
+        toast.error('Could not open that colour/size.');
+      }
+    },
+    [toast]
+  );
+
   // ---- Selection ------------------------------------------------------------
   const toggleSelect = useCallback((pid: string) => {
     setSelected((prev) => {
@@ -626,23 +658,27 @@ export function CatalogManagerPage({
   const canTick = (it: CatalogDrawerItem) =>
     segment !== 'review' || (!it.doc.deleted_at && !isOrderedDraft(it.doc));
   const tickable = items.filter(canTick);
-  const pageIds = tickable.map((it) => docId(it.doc)).filter(Boolean);
+  // G1: a model row stands for ALL its colours/sizes -- ticking it ticks
+  // every one of them (the bar and the dialogs count items, not rows).
+  const rowIds = (it: CatalogDrawerItem): string[] => {
+    const fam = it.kind === 'spine' ? (it.doc.family as { members?: FamilyMember[] } | undefined) : undefined;
+    const ids = fam?.members?.length ? fam.members.map((m) => m.product_id) : [docId(it.doc)];
+    return ids.filter(Boolean);
+  };
+  const pageIds = tickable.flatMap(rowIds);
   const allOnPage = pageIds.length > 0 && pageIds.every((id) => selected.has(id));
-  const toggleAllOnPage = () => {
+  const toggleIds = useCallback((ids: string[]) => {
     setSelected((prev) => {
       const next = new Set(prev);
-      if (allOnPage) {
-        for (const it of tickable) next.delete(docId(it.doc));
+      if (ids.every((id) => next.has(id))) {
+        for (const id of ids) next.delete(id);
       } else {
-        for (const it of tickable) {
-          const id = docId(it.doc);
-          if (!id || next.size >= BULK_CAP) continue;
-          next.add(id);
-        }
+        for (const id of ids) if (next.size < BULK_CAP) next.add(id);
       }
       return next;
     });
-  };
+  }, []);
+  const toggleAllOnPage = () => toggleIds(pageIds);
 
   const afterBulk = useCallback(
     (message: string, ok: boolean) => {
@@ -795,7 +831,7 @@ export function CatalogManagerPage({
     segment === 'review' ? 'Needs review' : isMissingPhotos ? 'Missing photos' : 'Catalog';
   const subtitle = loading
     ? 'Loading…'
-    : `${total.toLocaleString('en-IN')} product${total === 1 ? '' : 's'}${
+    : `${total.toLocaleString('en-IN')} ${grouped ? 'model' : 'product'}${total === 1 ? '' : 's'}${
         segment === 'review'
           ? ' waiting for review'
           : isMissingPhotos
@@ -929,7 +965,7 @@ export function CatalogManagerPage({
 
       {!loading && !error && (
         <p className="text-sm text-gray-700" data-testid="result-line">
-          {resultLine(total, scopeTotal, filters.sort)}
+          {resultLine(total, scopeTotal, filters.sort, grouped ? 'model' : 'product')}
         </p>
       )}
 
@@ -1034,12 +1070,22 @@ export function CatalogManagerPage({
                     setFocusItem(null);
                     setDrawerIdx(idx);
                   };
+                  // G1: a model with more than one item (the grouped list).
+                  const family =
+                    it.kind === 'spine'
+                      ? (doc.family as { lead_id: string; count: number; members: FamilyMember[] } | undefined)
+                      : undefined;
+                  const isOpen = Boolean(family && expanded.has(family.lead_id));
+                  const ids = rowIds(it);
+                  const ticked = ids.filter((id) => selected.has(id)).length;
+                  const memberLabel = (m: FamilyMember) =>
+                    [m.color, m.size].filter(Boolean).join(' · ') || m.sku || 'variant';
                   return (
+                    <Fragment key={pid || idx}>
                     <tr
-                      key={pid || idx}
                       className={clsx(
                         'border-t border-gray-100 hover:bg-gray-50',
-                        selected.has(pid) && 'bg-amber-50',
+                        ticked > 0 && 'bg-amber-50',
                         inactive && 'opacity-60'
                       )}
                     >
@@ -1048,10 +1094,13 @@ export function CatalogManagerPage({
                           {canTick(it) && (
                             <input
                               type="checkbox"
-                              checked={selected.has(pid)}
-                              onChange={() => toggleSelect(pid)}
+                              checked={ticked > 0 && ticked === ids.length}
+                              ref={(el) => {
+                                if (el) el.indeterminate = ticked > 0 && ticked < ids.length;
+                              }}
+                              onChange={() => (ids.length > 1 ? toggleIds(ids) : toggleSelect(pid))}
                               className="h-3.5 w-3.5 accent-amber-500"
-                              aria-label={`Select ${name}`}
+                              aria-label={ids.length > 1 ? `Select all ${ids.length} items of ${name}` : `Select ${name}`}
                             />
                           )}
                         </td>
@@ -1071,6 +1120,19 @@ export function CatalogManagerPage({
                         </button>
                       </td>
                       <td className="px-3 py-2 align-middle">
+                        <div className="flex items-start gap-1">
+                        {family && (
+                          <button
+                            type="button"
+                            onClick={() => toggleExpanded(family.lead_id)}
+                            className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded text-gray-500 hover:bg-gray-100"
+                            aria-expanded={isOpen}
+                            aria-label={`${isOpen ? 'Hide' : 'Show'} the ${family.count} colours and sizes of ${name}`}
+                            data-testid="family-toggle"
+                          >
+                            {isOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                          </button>
+                        )}
                         <button type="button" onClick={openRow} className="text-left">
                           <div className="font-medium text-gray-900 leading-snug">{name}</div>
                           <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-gray-500">
@@ -1119,7 +1181,26 @@ export function CatalogManagerPage({
                               Note from {noted.by_name || 'a manager'}: {noted.note}
                             </div>
                           )}
+                          {family && (
+                            <div className="mt-1 flex flex-wrap items-center gap-1" data-testid="family-chips">
+                              <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-semibold text-gray-700">
+                                {family.count} variants
+                              </span>
+                              {family.members.slice(0, 6).map((m) => (
+                                <span
+                                  key={m.product_id}
+                                  className="rounded border border-gray-200 bg-white px-1.5 py-0.5 text-[10px] text-gray-600"
+                                >
+                                  {memberLabel(m)}
+                                </span>
+                              ))}
+                              {family.members.length > 6 && (
+                                <span className="text-[10px] text-gray-500">+{family.members.length - 6} more</span>
+                              )}
+                            </div>
+                          )}
                         </button>
+                        </div>
                       </td>
                       <td className="px-3 py-2 align-middle font-mono text-xs text-gray-700">
                         {String(doc.sku || doc.parent_sku || '—')}
@@ -1164,6 +1245,51 @@ export function CatalogManagerPage({
                         )}
                       </td>
                     </tr>
+                    {isOpen &&
+                      family!.members.map((m) => (
+                        <tr
+                          key={`${family!.lead_id}:${m.product_id}`}
+                          className={clsx('border-t border-gray-50 bg-gray-50/60 text-xs', !m.is_active && 'opacity-60')}
+                          data-testid="family-member-row"
+                        >
+                          {showChecks && (
+                            <td className="px-3 py-1.5">
+                              {canTick(it) && (
+                                <input
+                                  type="checkbox"
+                                  checked={selected.has(m.product_id)}
+                                  onChange={() => toggleSelect(m.product_id)}
+                                  className="h-3.5 w-3.5 accent-amber-500"
+                                  aria-label={`Select ${memberLabel(m)}`}
+                                />
+                              )}
+                            </td>
+                          )}
+                          <td />
+                          <td className="px-3 py-1.5">
+                            <button
+                              type="button"
+                              onClick={() => void openMember(m.product_id)}
+                              className="pl-6 text-left text-gray-800 hover:underline"
+                            >
+                              {memberLabel(m)}
+                              {m.is_lead && (
+                                <span className="ml-1.5 rounded-full bg-bv-50 px-1.5 py-0.5 text-[10px] font-medium text-bv">
+                                  model
+                                </span>
+                              )}
+                              {!m.is_active && <span className="ml-1.5 text-gray-500">(off)</span>}
+                            </button>
+                          </td>
+                          <td className="px-3 py-1.5 font-mono text-gray-700">{m.sku || '—'}</td>
+                          <td />
+                          <td className="px-3 py-1.5 text-right tabular-nums text-gray-900">
+                            {fmtINR(m.offer_price ?? m.mrp ?? null)}
+                          </td>
+                          <td colSpan={4} />
+                        </tr>
+                      ))}
+                    </Fragment>
                   );
                 })}
               </tbody>

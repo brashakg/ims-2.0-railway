@@ -869,10 +869,11 @@ async def unblock_collection(
                 pid = member.get("id") or member.get("product_id")
                 if not pid:
                     continue
-                ecom = dict(member.get("ecom") or {})
-                ecom["locally_modified"] = True
-                db["catalog_products"].update_one({"id": pid}, {"$set": {"ecom": ecom}})
-                requeued += 1
+                from api.services.catalog_ecom import dirty_marks, update_ecom
+
+                # Compare-and-set + a fresh edit revision (SF-04).
+                if update_ecom(db, pid, lambda ecom: {**ecom, **dirty_marks()}) is not None:
+                    requeued += 1
             except Exception:  # noqa: BLE001 -- one bad doc never aborts the rest
                 continue
     _write_block_audit(

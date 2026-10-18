@@ -14,6 +14,7 @@ import os
 import re
 
 from agents.nexus_providers import _as_shopify_gid
+from ..catalog_ecom import update_ecom
 
 from ._shared import (
     MODE_LIVE,
@@ -466,17 +467,17 @@ def _writeback_media_map(db, product_id: str, media_map: List[Dict[str, str]]) -
     _writeback_product idiom). NEVER touches locally_modified. Fail-soft;
     True when the twin now holds ``media_map``, False when it could not be
     located or written (the adoption runbook reports on it)."""
-    try:
-        coll = db["catalog_products"]
-        doc = coll.find_one({"id": product_id})
-        if doc is None:
-            return False
-        ecom = dict(doc.get("ecom") or {})
+    held: Dict[str, bool] = {}
+
+    def _apply(ecom: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if ecom.get("media_map") == media_map:
-            return True
-        ecom["media_map"] = media_map
-        coll.update_one({"id": product_id}, {"$set": {"ecom": ecom}})
-        return True
+            held["same"] = True
+            return None
+        return {**ecom, "media_map": media_map}
+
+    try:
+        # Compare-and-set (SF-04): never drops a sibling ecom field.
+        return update_ecom(db, product_id, _apply) is not None or bool(held)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SHOPIFY_PUSH] media_map write-back failed %s: %s", product_id, exc)
         return False

@@ -279,6 +279,69 @@ def page(collection, query: Dict[str, Any], sort: str, skip: int, limit: int) ->
     return out
 
 
+# ponytail: grouping reads the whole filtered result (the catalogue is ~600
+# rows); a $group stage takes over if it ever nears this cap.
+GROUP_SCAN_CAP = 5000
+
+
+def group_page(
+    collection, query: Dict[str, Any], sort: str, skip: int, limit: int, *, archived: bool = False
+) -> Tuple[List[Dict], int]:
+    """One page of MODELS (owner 2026-10-18, G1): every filter matches the
+    variants, then the matching rows fold into one row per model -- the
+    model's lead when it matched, else its best-placed variant -- in the
+    order the sort put the model's first match. Each folded row carries
+    `family` {lead_id, count, members[]} (the whole model -- its archived
+    items only in the `archived` view, never in the catalogue: product_id,
+    sku, name, colour, size, prices, on/off, is_lead) when the model has more
+    than one item. Returns (rows, number of models)."""
+    from .product_master import family_option_values, lead_order
+
+    order: List[Any] = []
+    heads: Dict[Any, Dict[str, Any]] = {}
+    for doc in page(collection, query, sort, 0, GROUP_SCAN_CAP):
+        lead_id = doc.get("variant_of") or doc.get("product_id")
+        if lead_id not in heads:
+            order.append(lead_id)
+            heads[lead_id] = doc
+        elif doc.get("product_id") == lead_id:
+            heads[lead_id] = doc
+    page_ids = order[skip : skip + limit] if limit else order[skip:]
+    families: Dict[Any, List[Dict[str, Any]]] = defaultdict(list)
+    if page_ids:
+        for m in collection.find(
+            {"$or": [{"product_id": {"$in": page_ids}}, {"variant_of": {"$in": page_ids}}]}
+        ):
+            if bool(m.get("deleted_at")) == archived:
+                families[m.get("variant_of") or m.get("product_id")].append(m)
+    rows = []
+    for lead_id in page_ids:
+        row = heads[lead_id]
+        members = sorted(families.get(lead_id) or [], key=lead_order)
+        if len(members) > 1:
+            options, _ = family_option_values(members)
+            row["family"] = {
+                "lead_id": lead_id,
+                "count": len(members),
+                "members": [
+                    {
+                        "product_id": m.get("product_id"),
+                        "sku": m.get("sku"),
+                        "name": m.get("name"),
+                        "color": options.get(m.get("sku"), {}).get("option_color", ""),
+                        "size": options.get(m.get("sku"), {}).get("option_size", ""),
+                        "mrp": m.get("mrp"),
+                        "offer_price": m.get("offer_price"),
+                        "is_active": m.get("is_active", True) is not False,
+                        "is_lead": m.get("product_id") == lead_id,
+                    }
+                    for m in members
+                ],
+            }
+        rows.append(row)
+    return rows, len(order)
+
+
 def stamp_people(db, docs: Iterable[Dict[str, Any]]) -> None:
     """THE name of who added (created_by) and who last edited (updated_by)
     each product, in place on created_by_name / updated_by_name: the live

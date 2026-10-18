@@ -28,6 +28,7 @@ from datetime import datetime
 import uuid
 
 from .base_repository import BaseRepository
+from api.services.catalog_ecom import new_edit_rev
 
 
 class EcomCollectionRepository(BaseRepository):
@@ -122,6 +123,8 @@ class EcomCollectionRepository(BaseRepository):
         doc.setdefault("online_sync_blocked", False)
         # Dirty from birth -- not yet synced to Shopify.
         doc.setdefault("locally_modified", True)
+        if doc["locally_modified"] is True:
+            doc["edit_rev"] = new_edit_rev()  # SF-04: the push clears only this
         # base_repository.create assigns _id + created_at/updated_at and inserts.
         return super().create(doc)
 
@@ -141,6 +144,8 @@ class EcomCollectionRepository(BaseRepository):
         if not patch:
             return False
         patch.setdefault("locally_modified", True)
+        if patch["locally_modified"] is True:
+            patch["edit_rev"] = new_edit_rev()  # SF-04: the push clears only this
         # Keep products_count consistent if the manual list was replaced wholesale.
         if "products" in patch and isinstance(patch["products"], list):
             patch["products_count"] = len(patch["products"])
@@ -274,6 +279,7 @@ class EcomCollectionRepository(BaseRepository):
                         "products": products,
                         "products_count": len(products),
                         "locally_modified": True,
+                        "edit_rev": new_edit_rev(),
                         "updated_at": datetime.now(),
                     }
                 },

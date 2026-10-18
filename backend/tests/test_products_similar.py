@@ -409,6 +409,8 @@ def test_endpoint_returns_shape_for_any_authenticated_role(client, staff_headers
         "siblings": [],
         "model_colour_count": 0,
         "identity_fields": ["brand_name", "colour_code", "lens_size", "model_no"],
+        # G1: the model the item would join on Save -- none here.
+        "family": None,
     }
 
 

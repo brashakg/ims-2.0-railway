@@ -97,6 +97,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from agents.nexus_providers import _as_shopify_gid
+from ..catalog_ecom import update_ecom
 
 from ._shared import (
     MODE_LIVE,
@@ -687,25 +688,32 @@ def _remember_tracking(db, product: Dict[str, Any], verdicts: Dict[str, bool], p
     idiom); a failed read falls back to what ``product`` carried, a failed
     write is logged."""
     pid = product.get("id") or product.get("product_id")
-    coll = db["catalog_products"]
-    try:
-        doc = coll.find_one({"id": pid}) if pid else None
-    except Exception as exc:  # noqa: BLE001 -- the record falls back to the press's copy
-        logger.warning("[SHOPIFY_STOCK] confirmed-sizes read failed for %s: %s", pid, exc)
-        doc = None
-    held = dict(((doc or product).get("ecom") or {}).get("confirmed_sizes") or {})
-    record = dict(held)
-    for g, ok in verdicts.items():
-        if ok:
-            record[g] = policy
-        else:
-            record.pop(g, None)
-    if doc is not None and record != held:
+
+    def _merged(held: Dict[str, Any]) -> Dict[str, Any]:
+        record = dict(held)
+        for g, ok in verdicts.items():
+            if ok:
+                record[g] = policy
+            else:
+                record.pop(g, None)
+        return record
+
+    box: Dict[str, Any] = {}
+
+    def _apply(ecom: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        held = dict(ecom.get("confirmed_sizes") or {})
+        box["record"] = _merged(held)
+        return None if box["record"] == held else {**ecom, "confirmed_sizes": box["record"]}
+
+    if pid:
         try:
-            coll.update_one({"id": pid}, {"$set": {"ecom": {**(doc.get("ecom") or {}), "confirmed_sizes": record}}})
-        except Exception as exc:  # noqa: BLE001
+            # Compare-and-set (SF-04): never drops a sibling ecom field.
+            update_ecom(db, pid, _apply)
+        except Exception as exc:  # noqa: BLE001 -- the record falls back to the press's copy
             logger.warning("[SHOPIFY_STOCK] confirmed-sizes write failed for %s: %s", pid, exc)
-    return record
+    if "record" in box:
+        return box["record"]
+    return _merged(dict((product.get("ecom") or {}).get("confirmed_sizes") or {}))
 
 
 def _forget_deleted_sizes(db, product: Dict[str, Any], deleted: Iterable[str]) -> None:
@@ -723,12 +731,16 @@ def _forget_deleted_sizes(db, product: Dict[str, Any], deleted: Iterable[str]) -
             {"$unset": {"shopify_variant_id": "", "shopify_inventory_item_id": ""}},
         )
         pid = product.get("id") or product.get("product_id")
-        doc = db["catalog_products"].find_one({"id": pid}) if pid else None
-        ecom = dict((doc or {}).get("ecom") or {})
-        if doc is not None and str(ecom.get("shopify_variant_id") or "") in wanted:
+
+        def _drop(ecom: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            if str(ecom.get("shopify_variant_id") or "") not in wanted:
+                return None
             ecom.pop("shopify_variant_id", None)
             ecom.pop("shopify_inventory_item_id", None)
-            db["catalog_products"].update_one({"id": pid}, {"$set": {"ecom": ecom}})
+            return ecom
+
+        if pid:
+            update_ecom(db, pid, _drop)  # compare-and-set (SF-04)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SHOPIFY_STOCK] clearing deleted size ids failed: %s", exc)
 
@@ -1082,12 +1094,7 @@ def _writeback_stock(
     when that shop's location is removed. A shop no longer in ``mapped``
     leaves the row (kept, the listing would read "changed" on every pass).
     NEVER touches locally_modified. Fail-soft."""
-    try:
-        coll = db["catalog_products"]
-        doc = coll.find_one({"id": product_id})
-        if doc is None:
-            return
-        ecom = dict(doc.get("ecom") or {})
+    def _apply(ecom: Dict[str, Any]) -> Dict[str, Any]:
         prev = ecom.get("online_stock") if isinstance(ecom.get("online_stock"), dict) else {}
         # Only nested rows survive the merge: a flat pre-per-store number is
         # not a per-shop fact and must not masquerade as one.
@@ -1109,7 +1116,10 @@ def _writeback_stock(
             "tracked": bool(prev.get("tracked")) if tracked is None else bool(tracked),
             "synced_at": _now(),
         }
-        coll.update_one({"id": product_id}, {"$set": {"ecom": ecom}})
+        return ecom
+
+    try:
+        update_ecom(db, product_id, _apply)  # compare-and-set (SF-04)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SHOPIFY_STOCK] stock write-back failed %s: %s", product_id, exc)
 
@@ -2070,20 +2080,31 @@ def _forget_store_baseline(db, store_id: str) -> int:
     docs = list(coll.find({"ecom.online_stock.quantities": {"$exists": True}}))
     for doc in docs:
         pid = doc.get("id")
-        ecom = dict(doc.get("ecom") or {})
-        stock = ecom.get("online_stock")
-        if pid is None or not isinstance(stock, dict):
+        if pid is None:
             continue
-        quantities = {
-            sku: {sid: q for sid, q in dict(rows).items() if sid != store_id}
-            for sku, rows in dict(stock.get("quantities") or {}).items()
-            if isinstance(rows, dict)
-        }
-        if quantities == dict(stock.get("quantities") or {}):
-            continue
-        ecom["online_stock"] = {**stock, "quantities": quantities}
-        coll.update_one({"id": pid}, {"$set": {"ecom": ecom}})
-        touched += 1
+        box: Dict[str, bool] = {}
+
+        def _strip(ecom: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            box.clear()
+            stock = ecom.get("online_stock")
+            if not isinstance(stock, dict):
+                return None
+            quantities = {
+                sku: {sid: q for sid, q in dict(rows).items() if sid != store_id}
+                for sku, rows in dict(stock.get("quantities") or {}).items()
+                if isinstance(rows, dict)
+            }
+            if quantities == dict(stock.get("quantities") or {}):
+                return None
+            box["change"] = True
+            return {**ecom, "online_stock": {**stock, "quantities": quantities}}
+
+        # Compare-and-set (SF-04); STRICT, like every write here: a reset that
+        # kept losing the race raises instead of answering ok.
+        if update_ecom(db, pid, _strip) is not None:
+            touched += 1
+        elif box.get("change"):
+            raise RuntimeError(f"online stock baseline of {pid} kept changing -- not reset")
     return touched
 
 

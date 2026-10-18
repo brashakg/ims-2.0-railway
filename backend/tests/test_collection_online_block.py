@@ -315,6 +315,9 @@ def test_unblock_endpoint_reverses_flag_and_requeues(
     # The synced member is re-queued (dirty) so a later push re-publishes it.
     prod = conn.db["catalog_products"].find_one({"id": "P-A"})
     assert prod["ecom"]["locally_modified"] is True
+    # ...with a fresh edit revision (SF-04) and its Shopify id kept.
+    assert prod["ecom"].get("edit_rev")
+    assert prod["ecom"]["shopify_product_id"] == "gid://shopify/Product/1"
 
 
 def test_block_unknown_collection_is_404(client, auth_headers, patched_db):

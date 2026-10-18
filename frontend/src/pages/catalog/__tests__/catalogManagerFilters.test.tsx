@@ -191,7 +191,7 @@ describe('the address is the state', () => {
     expect(screen.getByText('Mansi Kumari (319)')).toBeTruthy();
     expect(await screen.findByTestId('result-line')).toHaveProperty(
       'textContent',
-      '38 of 481 products, recently edited first'
+      '38 models of 481 products, recently edited first'
     );
     const chips = screen.getByTestId('filter-chips');
     expect(within(chips).getByText('Frame colour: Black')).toBeTruthy();
@@ -256,7 +256,7 @@ describe('who sees which bulk button', () => {
   it('an admin can flag and archive', async () => {
     renderAt('');
     const bar = await tickFirstRow();
-    expect(within(bar).getByText(/Flag 1 product/)).toBeTruthy();
+    expect(within(bar).getByText(/Flag 1 item/)).toBeTruthy();
     expect(within(bar).getByText('Delete (archive)')).toBeTruthy();
   });
 
@@ -264,7 +264,7 @@ describe('who sees which bulk button', () => {
     auth.roles = ['STORE_MANAGER'];
     renderAt('');
     const bar = await tickFirstRow();
-    expect(within(bar).getByText(/Flag 1 product/)).toBeTruthy();
+    expect(within(bar).getByText(/Flag 1 item/)).toBeTruthy();
     expect(within(bar).queryByText('Delete (archive)')).toBeNull();
     expect(screen.queryByText('Add product')).toBeNull();
   });
@@ -287,7 +287,7 @@ describe('who sees which bulk button', () => {
     expect(await screen.findByText('Archived (deleted) (3)')).toBeTruthy();
     const bar = await tickFirstRow();
     expect(within(bar).getByText('Restore')).toBeTruthy();
-    expect(within(bar).queryByText(/Flag 1 product/)).toBeNull();
+    expect(within(bar).queryByText(/Flag 1 item/)).toBeNull();
   });
 });
 
@@ -385,7 +385,7 @@ describe('the Flag dialog names who gets the tasks from the server', () => {
     renderAt('');
     await screen.findByTestId('catalog-table');
     fireEvent.click(screen.getByLabelText('Select Carrera 8035 Black'));
-    fireEvent.click(within(await screen.findByTestId('selection-bar')).getByText(/Flag 1 product/));
+    fireEvent.click(within(await screen.findByTestId('selection-bar')).getByText(/Flag 1 item/));
     await waitFor(() =>
       expect(screen.getByTestId('tasks-go-to').textContent).toBe('Tasks go to: Akshay Ovhal (1 product)')
     );
@@ -509,7 +509,7 @@ describe('a page past the end is never a dead end', () => {
     expect(screen.queryByText('No products found')).toBeNull();
     expect(screen.getByLabelText('Rows per page')).toBeTruthy();
     expect(screen.getByTestId('result-line').textContent).toBe(
-      '60 of 481 products, recently edited first'
+      '60 models of 481 products, recently edited first'
     );
   });
 
@@ -533,7 +533,7 @@ describe('a page past the end is never a dead end', () => {
     await screen.findByTestId('catalog-table');
     fireEvent.click(screen.getByLabelText('Select Carrera 8035 Black'));
     fireEvent.click(within(await screen.findByTestId('selection-bar')).getByText('Delete (archive)'));
-    fireEvent.click(await screen.findByRole('button', { name: /Delete \(archive\) 1 product/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Delete \(archive\) 1 item/ }));
     await waitFor(() => expect(where().get('page')).toBeNull());
     await waitFor(() =>
       expect(getProducts.mock.calls.at(-1)?.[0]).toMatchObject({ skip: 0, limit: 25 })
@@ -585,7 +585,7 @@ describe('a page past the end is never a dead end', () => {
     expect(screen.queryByText('Unfiltered old row')).toBeNull();
     expect(screen.getByText('Ray-Ban 3025 Black')).toBeTruthy();
     expect(within(screen.getByTestId('filter-chips')).getByText('Frame colour: Black')).toBeTruthy();
-    expect(screen.getByTestId('result-line').textContent).toMatch(/^179 of /);
+    expect(screen.getByTestId('result-line').textContent).toMatch(/^179 models of /);
   });
 
   it('the pages and Rows per page stay whenever the list has rows to page through', async () => {
@@ -652,5 +652,60 @@ describe('the Needs review queue follows rows per page', () => {
     fireEvent.click(screen.getAllByRole('button', { name: /Edit/ })[1]);
     await screen.findByTestId('editor');
     expect([readReviewQueue()?.index, readReviewQueue()?.offset]).toEqual([1, 25]);
+  });
+});
+
+describe('G1 - one row per model (owner 2026-10-18)', () => {
+  const MODEL = {
+    ...ROW,
+    flags: [],
+    family: {
+      lead_id: 'P1',
+      count: 3,
+      members: [
+        { product_id: 'P1', sku: 'SG-CAR-1', color: 'Black (807)', size: '55', mrp: 12990, is_active: true, is_lead: true },
+        { product_id: 'P2', sku: 'SG-CAR-2', color: 'Gold (J5G)', size: '55', mrp: 13990, is_active: true, is_lead: false },
+        { product_id: 'P3', sku: 'SG-CAR-3', color: 'Gold (J5G)', size: '58', mrp: 13990, is_active: false, is_lead: false },
+      ],
+    },
+  };
+
+  it('asks for models, shows the colour/size chips, and expands to the variants', async () => {
+    getProducts.mockResolvedValue({ products: [MODEL], total: 1, total_count: 1 });
+    renderAt('?brand=Carrera');
+    await screen.findByText('Carrera 8035 Black');
+    // every filter still travels; the list is grouped by model
+    expect(getProducts).toHaveBeenCalledWith(expect.objectContaining({ group: 'model', brand: 'Carrera' }));
+    const chips = screen.getByTestId('family-chips');
+    expect(chips).toHaveTextContent('3 variants');
+    expect(chips).toHaveTextContent('Gold (J5G) · 58');
+    expect(screen.queryAllByTestId('family-member-row')).toHaveLength(0);
+    fireEvent.click(screen.getByTestId('family-toggle'));
+    const rows = screen.getAllByTestId('family-member-row');
+    expect(rows).toHaveLength(3);
+    expect(rows[2]).toHaveTextContent('SG-CAR-3');
+    expect(rows[2]).toHaveTextContent('(off)');
+    expect(within(rows[0]).getByText('model')).toBeTruthy();
+    expect(screen.getByTestId('result-line').textContent).toMatch(/^1 model of 481 products/);
+  });
+
+  it('ticking a model selects all its colours/sizes; each variant has its own tick', async () => {
+    getProducts.mockResolvedValue({ products: [MODEL], total: 1, total_count: 1 });
+    renderAt();
+    await screen.findByText('Carrera 8035 Black');
+    fireEvent.click(screen.getByLabelText('Select all 3 items of Carrera 8035 Black'));
+    const bar = await screen.findByTestId('selection-bar');
+    expect(bar).toHaveTextContent('3 items selected');
+    expect(within(bar).getByText(/Flag 3 items/)).toBeTruthy();
+    fireEvent.click(screen.getByTestId('family-toggle'));
+    const rows = screen.getAllByTestId('family-member-row');
+    fireEvent.click(within(rows[1]).getByRole('checkbox'));
+    expect(screen.getByTestId('selection-bar')).toHaveTextContent('2 items selected');
+    const modelBox = screen.getByLabelText('Select all 3 items of Carrera 8035 Black') as HTMLInputElement;
+    expect(modelBox.checked).toBe(false);
+    expect(modelBox.indeterminate).toBe(true);
+    // the page box counts items too
+    fireEvent.click(screen.getByLabelText('Select all on this page'));
+    expect(screen.getByTestId('selection-bar')).toHaveTextContent('3 items selected');
   });
 });

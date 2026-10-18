@@ -389,10 +389,20 @@ export function clearFilters(f: CatalogFilters): CatalogFilters {
 }
 
 /** The result line: '38 of 481 products, recently edited first'. */
-export function resultLine(shown: number, total: number | null, sort: SortKey): string {
+export function resultLine(
+  shown: number,
+  total: number | null,
+  sort: SortKey,
+  unit: 'product' | 'model' = 'product',
+): string {
   const phrase = SORT_OPTIONS.find((o) => o.value === sort)?.phrase ?? '';
   const n = shown.toLocaleString('en-IN');
   const of = total !== null && total >= shown ? ` of ${total.toLocaleString('en-IN')}` : '';
+  if (unit === 'model') {
+    // G1: the list counts MODELS; the "of" is the catalogue's products.
+    const products = of ? `${of} product${total === 1 ? '' : 's'}` : '';
+    return `${n} model${shown === 1 ? '' : 's'}${products}, ${phrase}`;
+  }
   return `${n}${of} product${(total ?? shown) === 1 ? '' : 's'}, ${phrase}`;
 }
 

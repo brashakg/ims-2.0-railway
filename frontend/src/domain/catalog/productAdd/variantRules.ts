@@ -1,4 +1,4 @@
-import { CATEGORY_FIELDS, getCategoryFields, modelOf } from './categoryFields';
+import { CATEGORY_FIELDS, getCategoryFields, modelLevelFields, modelOf } from './categoryFields';
 import type { ProductFormValues } from './formModel';
 import type { ProductDoc } from './cloneMapping';
 import { isManufacturerBarcodeKey, productToFormValues, str } from './cloneMapping';
@@ -144,6 +144,9 @@ export interface VariantSeed {
    *  Dictionary options for their field (operator re-picks from dropdown). */
   dictionaryDropped: string[];
   sourceProductId: string;
+  /** G1: the model's LEAD (the sibling's own variant_of, else the sibling):
+   *  what the save sends as variant_of. */
+  leadId: string;
   sourceSku: string;
   /** "Brand Model" display label of the sibling. */
   sourceLabel: string;
@@ -170,6 +173,9 @@ export function productToVariantFormValues(
     base.category;
 
   const fields = getCategoryFields(category);
+  // Locked = the identity (brand + model) and, once the registry has loaded,
+  // every MODEL-LEVEL field (G1: shape, gender ...) -- the model's own values.
+  const lockedKeys = Array.from(new Set([...VARIANT_LOCKED_IDENTITY, ...modelLevelFields(category)]));
   const optionsByField = new Map<string, string[]>();
   fields.forEach((f) => {
     if (f.type === 'select' && Array.isArray(f.options) && f.options.length > 0) {
@@ -185,7 +191,7 @@ export function productToVariantFormValues(
   Object.entries(base.attributes).forEach(([k, v]) => {
     const val = String(v ?? '').trim();
     if (!val) return;
-    const isLockedIdentity = VARIANT_LOCKED_IDENTITY.includes(k);
+    const isLockedIdentity = lockedKeys.includes(k);
     const rule = variantFieldRule(category, k);
     if (rule === 'never' && !isLockedIdentity) {
       dropped.push(k);
@@ -215,7 +221,7 @@ export function productToVariantFormValues(
     .map((f) => f.name)
     .filter(
       (n) =>
-        !VARIANT_LOCKED_IDENTITY.includes(n) &&
+        !lockedKeys.includes(n) &&
         variantFieldRule(category, n) === 'never'
     );
 
@@ -236,7 +242,7 @@ export function productToVariantFormValues(
     images: [],
   };
 
-  const locked = VARIANT_LOCKED_IDENTITY.filter((n) => attributes[n]);
+  const locked = lockedKeys.filter((n) => attributes[n]);
   const sourceLabel = [attributes.brand_name, modelOf(category, attributes)]
     .filter(Boolean)
     .join(' ');
@@ -250,6 +256,7 @@ export function productToVariantFormValues(
     dropped,
     dictionaryDropped,
     sourceProductId: str(product.product_id ?? product.id),
+    leadId: str((product as { variant_of?: unknown }).variant_of) || str(product.product_id ?? product.id),
     sourceSku: str(product.sku),
     sourceLabel,
     sourceImages: Array.isArray(base.images) ? base.images : [],
