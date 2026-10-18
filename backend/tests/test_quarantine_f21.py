@@ -564,3 +564,163 @@ def test_invalid_reason_rejected_422(env):
     with pytest.raises(HTTPException) as exc:
         _run(quarantine_stock_unit("STO-BR", QuarantineRequest(reason="NONSENSE"), _MANAGER))
     assert exc.value.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# A02: a competing write must win over a stale quarantine / lift request.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def transition_effects(monkeypatch):
+    """Observe successful-transition hooks without any external dispatch."""
+    from unittest.mock import AsyncMock, Mock
+    from agents import registry
+    from api.services import item_events, online_stock_writeback
+
+    effects = {
+        "online": Mock(),
+        "ledger": Mock(),
+        "dispatch": AsyncMock(),
+    }
+    monkeypatch.setattr(online_stock_writeback, "writeback_after_units_left", effects["online"])
+    monkeypatch.setattr(item_events, "record_post_write_event", effects["ledger"])
+    monkeypatch.setattr(registry, "dispatch_event", effects["dispatch"])
+    return effects
+
+
+def _compete_at_write(env, monkeypatch, stock_id, target_status, competing_values):
+    """Land another writer immediately before the route's real Mongo update.
+
+    This exercises both the old unconditional write and the conditional fix;
+    it does not assume which repository method the route uses.
+    """
+    collection = env["stock_repo"].collection
+    original = collection.update_one
+    competed = []
+
+    def race(query, update, *args, **kwargs):
+        if (not competed and query.get("stock_id") == stock_id
+                and update.get("$set", {}).get("status") == target_status):
+            competed.append(True)
+            original({"stock_id": stock_id}, {"$set": competing_values})
+        return original(query, update, *args, **kwargs)
+
+    monkeypatch.setattr(collection, "update_one", race)
+    return competed
+
+
+def _assert_no_transition_effects(env, effects):
+    assert _audit_rows(env) == []
+    for effect in effects.values():
+        effect.assert_not_called()
+
+
+@pytest.mark.parametrize("competing_values", [
+    {"status": "SOLD", "order_id": "ORDER-WON"},
+    {"status": "AVAILABLE", "store_id": "S-B"},
+    {"status": "QUARANTINED", "quarantine_reason": "DAMAGED_IN_TRANSIT"},
+])
+def test_stale_quarantine_refuses_competing_write(
+    env, monkeypatch, transition_effects, competing_values,
+):
+    from fastapi import HTTPException
+    from api.routers.inventory import quarantine_stock_unit, QuarantineRequest
+
+    env["add_unit"]("STO-RACE")
+    competed = _compete_at_write(
+        env, monkeypatch, "STO-RACE", "QUARANTINED", competing_values,
+    )
+    with pytest.raises(HTTPException) as exc:
+        _run(quarantine_stock_unit("STO-RACE", QuarantineRequest(reason="DEFECTIVE"), _MANAGER))
+
+    assert competed
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "stock_changed"
+    unit = env["stock_repo"].find_by_id("STO-RACE")
+    assert all(unit[key] == value for key, value in competing_values.items())
+    assert "quarantine_by" not in unit
+    _assert_no_transition_effects(env, transition_effects)
+
+
+@pytest.mark.parametrize("competing_values", [
+    {"status": "SOLD", "order_id": "ORDER-WON"},
+    {"status": "AVAILABLE", "quarantine_lifted_by": "OTHER-MANAGER"},
+    {"store_id": "S-B"},
+    {"quarantine_at": "2026-10-18T12:00:01+05:30"},
+    {"quarantine_generation": "new-cycle-same-timestamp"},
+    {"last_event_seq": 2},
+])
+def test_stale_lift_refuses_competing_write_or_new_quarantine_cycle(
+    env, monkeypatch, transition_effects, competing_values,
+):
+    from fastapi import HTTPException
+    from api.routers.inventory import lift_quarantine_stock_unit, LiftQuarantineRequest
+
+    env["add_unit"]("STO-LIFT-RACE", status="QUARANTINED")
+    env["stock_repo"].collection.update_one({"stock_id": "STO-LIFT-RACE"}, {"$set": {
+        "quarantine_at": "2026-10-18T12:00:00+05:30",
+        "quarantine_generation": "original-cycle",
+        "last_event_seq": 1,
+    }})
+    competed = _compete_at_write(
+        env, monkeypatch, "STO-LIFT-RACE", "AVAILABLE", competing_values,
+    )
+    with pytest.raises(HTTPException) as exc:
+        _run(lift_quarantine_stock_unit(
+            "STO-LIFT-RACE", LiftQuarantineRequest(lift_reason="Found undamaged"), _MANAGER,
+        ))
+
+    assert competed
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "stock_changed"
+    unit = env["stock_repo"].find_by_id("STO-LIFT-RACE")
+    assert all(unit[key] == value for key, value in competing_values.items())
+    assert "quarantine_lift_reason" not in unit
+    _assert_no_transition_effects(env, transition_effects)
+
+
+@pytest.mark.parametrize("status", ["AVAILABLE", " available ", "DAMAGED", " damaged ", "", None, "MISSING"])
+def test_quarantine_preserves_eligible_legacy_statuses(env, transition_effects, status):
+    from api.routers.inventory import quarantine_stock_unit, QuarantineRequest
+
+    env["add_unit"]("STO-LEGACY", status=status)
+    if status == "MISSING":
+        env["stock_repo"].collection.update_one({"stock_id": "STO-LEGACY"}, {"$unset": {"status": ""}})
+    _run(quarantine_stock_unit("STO-LEGACY", QuarantineRequest(reason="DEFECTIVE"), _MANAGER))
+    assert env["stock_repo"].find_by_id("STO-LEGACY")["status"] == "QUARANTINED"
+    assert len(_audit_rows(env, "STOCK_QUARANTINED")) == 1
+
+
+def test_lift_preserves_legacy_quarantine_without_generation(env, transition_effects):
+    from api.routers.inventory import lift_quarantine_stock_unit, LiftQuarantineRequest
+
+    env["add_unit"]("STO-LEGACY-LIFT", status=" quarantined ")
+    _run(lift_quarantine_stock_unit(
+        "STO-LEGACY-LIFT", LiftQuarantineRequest(lift_reason="Found undamaged"), _MANAGER,
+    ))
+    assert env["stock_repo"].find_by_id("STO-LEGACY-LIFT")["status"] == "AVAILABLE"
+    assert len(_audit_rows(env, "QUARANTINE_LIFTED")) == 1
+
+
+def test_quarantine_cycles_have_distinct_generations_even_at_same_time(
+    env, monkeypatch, transition_effects,
+):
+    from datetime import datetime, timezone
+    from api.routers import inventory as inv
+
+    monkeypatch.setattr(inv, "_now_ist", lambda: datetime(2026, 10, 18, tzinfo=timezone.utc))
+    env["add_unit"]("STO-CYCLE")
+    _run(inv.quarantine_stock_unit("STO-CYCLE", inv.QuarantineRequest(reason="DEFECTIVE"), _MANAGER))
+    first = env["stock_repo"].find_by_id("STO-CYCLE")
+    _run(inv.lift_quarantine_stock_unit(
+        "STO-CYCLE", inv.LiftQuarantineRequest(lift_reason="Found undamaged"), _MANAGER,
+    ))
+    _run(inv.quarantine_stock_unit("STO-CYCLE", inv.QuarantineRequest(reason="SCRATCHED"), _MANAGER))
+    second = env["stock_repo"].find_by_id("STO-CYCLE")
+
+    assert first["quarantine_at"] == second["quarantine_at"]
+    assert first.get("quarantine_generation")
+    assert second.get("quarantine_generation") != first["quarantine_generation"]
+    assert len(_audit_rows(env, "STOCK_QUARANTINED")) == 2
+    assert len(_audit_rows(env, "QUARANTINE_LIFTED")) == 1
