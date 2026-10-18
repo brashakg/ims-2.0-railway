@@ -807,7 +807,9 @@ def test_hq_je_not_readable_by_store_roles():
             asyncio.run(fin.get_journal_entry("JE-HQ1", current_user=acct))
             raise AssertionError("store-scoped role read an HQ JE")
         except HTTPException as e:
-            assert e.status_code == 403
+            # The same 404 as a missing voucher since 2026-10-18 (a guessed id
+            # never confirms an HQ voucher exists): test_visibility_sweep_1018.
+            assert e.status_code == 404
         admin = {"roles": ["ADMIN"], "user_id": "ad"}
         out = asyncio.run(fin.get_journal_entry("JE-HQ1", current_user=admin))
         assert out["je_id"] == "JE-HQ1"

@@ -314,12 +314,13 @@ ROWS: List[Dict[str, object]] = [
         "allowed": RECEIVE,
     },
     # P1/S3: stream the attached goods-receipt document (accountant recon links
-    # here). Store-scoped object access inside the handler; the role gate is the
-    # receiving managers + the accountant, who reads it to match the bill.
+    # here). Store-scoped object access inside the handler. The bill shows what
+    # we pay, so the accounts roles only (owner decision 2026-10-18, FU-02);
+    # the managers still upload it at receiving (upload-doc above).
     {
         "method": "GET",
         "path": "/api/v1/vendors/grn/{grn_id}/document",
-        "allowed": PURCHASE,
+        "allowed": ACCOUNTS,
     },
     # Purchases this month (F56): per-vendor ordered / received / billed / paid /
     # owed from the supplier ledger -- the supplier-balance readers only, the

@@ -655,7 +655,7 @@ export default function FinanceDashboard() {
           {activeTab === 'vendor-payments' && canSeeWhatWePay && (
             <VendorPayments vendorPayments={vendorPayments} />
           )}
-          {activeTab === 'journal-entries' && <JournalEntriesPanel />}
+          {activeTab === 'journal-entries' && canSeeWhatWePay && <JournalEntriesPanel />}
         </div>
       </div>
     </div>

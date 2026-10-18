@@ -15,7 +15,7 @@
 
 ✅ **Authentication & Security**
 - JWT token management (8-hour tokens)
-- 2FA with TOTP/QR codes
+- 2FA: not built (no TOTP / QR / backup codes; corrected 2026-10-18)
 - Password management & reset flow
 - Session management across 6 stores
 - Multi-store user switching
@@ -273,15 +273,11 @@
 ```
 
 ### 6. Security Hardening (100% Complete)
-**2FA, RBAC, Encryption, Audit Logging**
+**RBAC, Encryption, Audit Logging**
 
-✅ **Two-Factor Authentication (2FA)**
-- TOTP implementation (Time-based One-Time Password)
-- QR code generation (Google Authenticator compatible)
-- Backup codes for account recovery (10 codes)
-- 6 API endpoints (enable, verify, disable, regenerate)
-- Database encryption for secrets
-- Rate limiting on verification (5 attempts/minute)
+**Two-Factor Authentication (2FA)** - NOT BUILT (corrected 2026-10-18): IMS has no two-factor sign-in -
+no TOTP, no QR codes, no backup codes and no `/auth/2fa/*` endpoints. Sign-in
+is username + password (JWT); staff sign in only on SUPERADMIN-approved devices.
 
 ✅ **Role-Based Access Control (RBAC)**
 - 7 role hierarchy (SUPERADMIN → ADMIN → MANAGER → STAFF → READ_ONLY)
@@ -321,7 +317,7 @@
 
 **Security Statistics**:
 ```
-- Authentication methods: 2 (JWT + 2FA)
+- Authentication methods: 1 (JWT; 2FA not built)
 - RBAC roles: 7
 - Permissions: 45+
 - Audit events: 25+
@@ -451,7 +447,7 @@
 
 ### Security
 ✅ **Authentication & Authorization**
-- 2FA implementation: ✅ Complete
+- 2FA implementation: not built
 - RBAC: 7 roles, 45+ permissions
 - Audit logging: 25+ events tracked
 - Encryption: TLS 1.3 + AES-256
@@ -514,7 +510,7 @@
 
 1. **Scalability**: Designed for 10,000+ concurrent users with auto-scaling
 2. **Reliability**: 99.9% uptime SLA with multi-AZ failover
-3. **Security**: 2FA, RBAC, encryption, audit logging, compliance-ready
+3. **Security**: RBAC, encryption, audit logging (2FA not built)
 4. **Maintainability**: Comprehensive documentation, clear code structure
 5. **Operability**: Monitoring, alerting, automated deployments, runbooks
 6. **Testability**: 65+ test cases, load testing, security testing
@@ -585,7 +581,7 @@
 4. ✅ Frontend Implementation (22 pages, 50+ components)
 5. ✅ Testing & QA (65+ tests, 10K load test)
 6. ✅ DevOps & Deployment (blue-green, zero downtime)
-7. ✅ Security Hardening (2FA, RBAC, encryption, audit)
+7. ✅ Security Hardening (RBAC, encryption, audit; 2FA not built)
 8. ✅ Documentation & Training (7,000+ LOC, 2-week program)
 
 **Ready for production deployment on February 9, 2026.**

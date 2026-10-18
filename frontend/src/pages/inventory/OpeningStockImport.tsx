@@ -12,6 +12,8 @@ import {
   UploadCloud, Eye, CheckCircle2, AlertTriangle, Loader2, ArrowRight, ShieldCheck,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
+import { useAuth } from '../../context/AuthContext';
+import { COST_ROLES } from '../../components/common/CostCell';
 import { inventoryApi } from '../../services/api';
 import type {
   OpeningStockInputRow, OpeningStockResultRow, OpeningStockResponse,
@@ -21,14 +23,23 @@ const SAMPLE = `sku,quantity,unit_cost,location_code
 RB3025-001,12,3450,Counter-A
 ZEISS-15-HMC,8,1120,Shelf-2
 CL-ACUVUE-OASYS,20,780,`;
+// What we paid is entered by the accounts roles only (owner 2026-10-18,
+// FU-23): everyone else enters quantities, and the cost comes with the bill.
+const SAMPLE_NO_COST = `sku,quantity,location_code
+RB3025-001,12,Counter-A
+ZEISS-15-HMC,8,Shelf-2
+CL-ACUVUE-OASYS,20,`;
 
 /** Minimal CSV parser (no quoted-comma support) -> import rows. First line is
  *  the header; recognized columns: product_id, sku, quantity, unit_cost,
  *  location_code, batch_code, expiry_date. A row needs product_id OR sku, and
  *  quantity > 0; unit_cost (per unit, optional) drives the valuation. */
-function parseCsv(text: string): { rows: OpeningStockInputRow[]; skipped: number } {
+function parseCsv(
+  text: string,
+  withCost: boolean,
+): { rows: OpeningStockInputRow[]; skipped: number; costLeftOut: boolean } {
   const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  if (lines.length < 2) return { rows: [], skipped: 0 };
+  if (lines.length < 2) return { rows: [], skipped: 0, costLeftOut: false };
   const headers = lines[0].split(',').map((h) => h.trim().toLowerCase());
   const rows: OpeningStockInputRow[] = [];
   let skipped = 0;
@@ -45,7 +56,7 @@ function parseCsv(text: string): { rows: OpeningStockInputRow[]; skipped: number
       skipped += 1;
       continue;
     }
-    const unitCost = Number(get('unit_cost') || 0);
+    const unitCost = withCost ? Number(get('unit_cost') || 0) : 0;
     rows.push({
       ...(product_id ? { product_id } : {}),
       ...(sku ? { sku } : {}),
@@ -56,7 +67,7 @@ function parseCsv(text: string): { rows: OpeningStockInputRow[]; skipped: number
       ...(get('expiry_date') ? { expiry_date: get('expiry_date') } : {}),
     });
   }
-  return { rows, skipped };
+  return { rows, skipped, costLeftOut: !withCost && headers.includes('unit_cost') };
 }
 
 const STATUS_STYLE: Record<OpeningStockResultRow['status'], string> = {
@@ -70,6 +81,9 @@ const STATUS_STYLE: Record<OpeningStockResultRow['status'], string> = {
 
 export function OpeningStockImport() {
   const toast = useToast();
+  const { user } = useAuth();
+  const canSeeCost = (user?.roles || []).some((r) => COST_ROLES.includes(r));
+  const sample = canSeeCost ? SAMPLE : SAMPLE_NO_COST;
   const [csvText, setCsvText] = useState('');
   const [skipIfExisting, setSkipIfExisting] = useState(true);
   const [preview, setPreview] = useState<OpeningStockResponse | null>(null);
@@ -89,12 +103,13 @@ export function OpeningStockImport() {
   };
 
   const runPreview = async () => {
-    const { rows, skipped } = parseCsv(csvText);
+    const { rows, skipped, costLeftOut } = parseCsv(csvText, canSeeCost);
     if (rows.length === 0) {
       toast.error('No valid rows. Need a header line plus rows with sku/product_id and quantity.');
       return;
     }
     if (skipped > 0) toast.info(`${skipped} row(s) skipped (missing product or quantity).`);
+    if (costLeftOut) toast.info('The unit_cost column was left out: cost prices are entered by the accounts team.');
     setBusy(true);
     setCommitted(null);
     try {
@@ -108,7 +123,7 @@ export function OpeningStockImport() {
   };
 
   const runCommit = async () => {
-    const { rows } = parseCsv(csvText);
+    const { rows } = parseCsv(csvText, canSeeCost);
     if (rows.length === 0) return;
     setBusy(true);
     try {
@@ -147,7 +162,7 @@ export function OpeningStockImport() {
           </label>
           <button
             type="button"
-            onClick={() => { setCsvText(SAMPLE); setPreview(null); setCommitted(null); }}
+            onClick={() => { setCsvText(sample); setPreview(null); setCommitted(null); }}
             className="text-xs text-bv-red-600 hover:text-bv-red-700"
           >
             Load sample
@@ -158,13 +173,14 @@ export function OpeningStockImport() {
           value={csvText}
           onChange={(e) => { setCsvText(e.target.value); setPreview(null); setCommitted(null); }}
           rows={8}
-          placeholder={SAMPLE}
+          placeholder={sample}
           className="input-field w-full font-mono text-xs"
         />
         <p className="text-xs text-gray-500">
           First line is the header. Columns: <code>product_id</code> or <code>sku</code> (one
-          required), <code>quantity</code>, and optional <code>unit_cost</code> (per-unit cost,
-          for valuation), <code>location_code</code>, <code>batch_code</code>,{' '}
+          required), <code>quantity</code>, and optional{' '}
+          {canSeeCost && <><code>unit_cost</code> (per-unit cost, for valuation), </>}
+          <code>location_code</code>, <code>batch_code</code>,{' '}
           <code>expiry_date</code> (YYYY-MM-DD).
         </p>
 
@@ -252,7 +268,7 @@ export function OpeningStockImport() {
                   <th className="text-left py-2 px-2 font-medium">Product</th>
                   <th className="text-right py-2 px-2 font-medium">Existing</th>
                   <th className="text-right py-2 px-2 font-medium">Qty</th>
-                  <th className="text-right py-2 px-2 font-medium">Cost</th>
+                  {canSeeCost && <th className="text-right py-2 px-2 font-medium">Cost</th>}
                   <th className="text-left py-2 px-2 font-medium">Result</th>
                 </tr>
               </thead>
@@ -266,9 +282,11 @@ export function OpeningStockImport() {
                     </td>
                     <td className="py-1.5 px-2 text-right tabular-nums text-gray-500">{r.existing ?? '—'}</td>
                     <td className="py-1.5 px-2 text-right tabular-nums">{r.added ?? r.quantity ?? '—'}</td>
-                    <td className="py-1.5 px-2 text-right tabular-nums text-gray-500">
-                      {r.unit_cost != null ? `₹${r.unit_cost.toLocaleString('en-IN')}` : '—'}
-                    </td>
+                    {canSeeCost && (
+                      <td className="py-1.5 px-2 text-right tabular-nums text-gray-500">
+                        {r.unit_cost != null ? `₹${r.unit_cost.toLocaleString('en-IN')}` : '—'}
+                      </td>
+                    )}
                     <td className="py-1.5 px-2">
                       <span className={`inline-block text-[10px] font-semibold px-1.5 py-0.5 rounded mr-1 ${STATUS_STYLE[r.status]}`}>
                         {r.status.replace(/_/g, ' ')}

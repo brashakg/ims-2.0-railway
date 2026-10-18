@@ -69,8 +69,8 @@ manager gets 404).
 |---|---|
 | PUBLIC (no IMS role gate) | 46 |
 | AUTHENTICATED | 394 |
-| Role-gated (one or more roles) | 871 |
-| **Total `/api/v1` (method x path)** | **1311** |
+| Role-gated (one or more roles) | 870 |
+| **Total `/api/v1` (method x path)** | **1310** |
 | ...of which `store_scoped` | 240 |
 | ...of which `self_enforced` | 47 |
 
@@ -324,7 +324,6 @@ entry exactly; see the manual interpretation notes above.
 | `POST` | `/api/v1/catalog/products/bulk-archive` | ADMIN, SUPERADMIN |  |  |
 | `POST` | `/api/v1/catalog/products/bulk-restore` | ADMIN, SUPERADMIN |  |  |
 | `POST` | `/api/v1/catalog/products/bulk-sync-shopify` | ADMIN, SUPERADMIN |  |  |
-| `GET` | `/api/v1/catalog/products/export` | ADMIN, CATALOG_MANAGER, SUPERADMIN |  |  |
 | `DELETE` | `/api/v1/catalog/products/{product_id}` | ADMIN, SUPERADMIN |  |  |
 | `GET` | `/api/v1/catalog/products/{product_id}` | AUTH |  |  |
 | `PUT` | `/api/v1/catalog/products/{product_id}` | ADMIN, CATALOG_MANAGER, SUPERADMIN |  |  |
@@ -605,9 +604,9 @@ entry exactly; see the manual interpretation notes above.
 | `POST` | `/api/v1/finance/gstr2b-reconcile` | ACCOUNTANT, ADMIN |  |  |
 | `POST` | `/api/v1/finance/itc-export` | ACCOUNTANT, ADMIN |  |  |
 | `GET` | `/api/v1/finance/itc-register` | ACCOUNTANT, ADMIN |  |  |
-| `GET` | `/api/v1/finance/journal-entries` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/finance/journal-entries` | ACCOUNTANT, ADMIN | S |  |
 | `POST` | `/api/v1/finance/journal-entries` | ACCOUNTANT, ADMIN, SUPERADMIN | S |  |
-| `GET` | `/api/v1/finance/journal-entries/{je_id}` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/finance/journal-entries/{je_id}` | ACCOUNTANT, ADMIN | S |  |
 | `POST` | `/api/v1/finance/journal-entries/{je_id}/approve` | ADMIN, SUPERADMIN |  |  |
 | `POST` | `/api/v1/finance/journal-entries/{je_id}/post` | ADMIN, SUPERADMIN |  |  |
 | `POST` | `/api/v1/finance/journal-entries/{je_id}/reject` | ADMIN, SUPERADMIN |  |  |
@@ -629,7 +628,7 @@ entry exactly; see the manual interpretation notes above.
 | `GET` | `/api/v1/finance/revenue` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
 | `GET` | `/api/v1/finance/summary-month` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
 | `GET` | `/api/v1/finance/survival-cashflow` | ACCOUNTANT, ADMIN |  |  |
-| `GET` | `/api/v1/finance/tally/journal-jv` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/finance/tally/journal-jv` | ACCOUNTANT, ADMIN | S |  |
 | `GET` | `/api/v1/finance/tally/sales-jv` | ACCOUNTANT, ADMIN |  |  |
 | `GET` | `/api/v1/finance/tally/tender-receipt-jv` | ACCOUNTANT, ADMIN |  |  |
 | `GET` | `/api/v1/finance/target-ticker` | AUTH |  |  |
@@ -1647,7 +1646,7 @@ entry exactly; see the manual interpretation notes above.
 | `POST` | `/api/v1/vendors/grn/upload-doc` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
 | `GET` | `/api/v1/vendors/grn/{grn_id}` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
 | `POST` | `/api/v1/vendors/grn/{grn_id}/accept` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
-| `GET` | `/api/v1/vendors/grn/{grn_id}/document` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/vendors/grn/{grn_id}/document` | ACCOUNTANT, ADMIN |  |  |
 | `POST` | `/api/v1/vendors/grn/{grn_id}/drop-over-order` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
 | `POST` | `/api/v1/vendors/grn/{grn_id}/escalate` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
 | `POST` | `/api/v1/vendors/grn/{grn_id}/void` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |

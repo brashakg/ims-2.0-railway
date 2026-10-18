@@ -404,10 +404,12 @@ def _without_cost_keys(body):
 
 # The till bills from the scan reply: a counter role's must be the manager's
 # with only the cost keys gone -- the joined product (name, MRP, offer price,
-# GST rate), the barcode, the status and the other-shop flag all kept.
+# GST rate), the barcode, the status and the other-shop flag all kept. (A scan
+# scoped to a shop the login does not hold is a 403 since 2026-10-18, F11:
+# tests/test_visibility_sweep_1018.py.)
 _SCANS = (
     ("/api/v1/inventory/barcode/2900000000017", False),
-    (f"/api/v1/inventory/barcode/2900000000017?store_id={OTHER}", True),
+    (f"/api/v1/inventory/barcode/2900000000017?store_id={STORE}", False),
     ("/api/v1/inventory/stock/barcode/2900000000017", None),  # no product join
 )
 

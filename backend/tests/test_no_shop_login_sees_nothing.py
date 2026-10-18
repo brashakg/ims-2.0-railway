@@ -540,8 +540,10 @@ def test_an_area_manager_reads_his_own_shop_on_revenue_pnl_receivables_and_journ
     assert world.ok("/finance/revenue", area_dhn, period="month")["total_revenue"] == 2000.0
     due = {i["order_id"] for i in world.ok("/finance/outstanding", area_dhn)["items"]}
     assert due == {"O-DHN-DUE"}
-    ids = {j["je_id"] for j in world.ok("/finance/journal-entries", area_dhn)["journal_entries"]}
-    assert "JE-DHN" in ids and not ids & {"JE-PUN", "JE-HQ"}
+    # Journal vouchers are the accounts roles' only since the owner decision of
+    # 2026-10-18 (FU-17) -- his own shop's too; an accountant's shop scope on
+    # them is test_the_storeless_accountant_lists_no_journal_entries.
+    assert world.get("/finance/journal-entries", area_dhn).status_code == 403
     for path in ("/finance/pnl", "/finance/revenue", "/finance/outstanding", "/finance/journal-entries"):
         assert world.get(path, area_dhn, store_id=PUN).status_code == 403, path
 

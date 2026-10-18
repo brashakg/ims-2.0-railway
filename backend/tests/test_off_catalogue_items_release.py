@@ -74,6 +74,10 @@ CATALOGUER = {
     "store_ids": [STORE],
     "active_store_id": STORE,
 }
+# The same desk with an accounts role: a product catalogued WITH its cost.
+# A cost price is the accounts roles' to set (owner 2026-10-18, FU-23); the
+# CATALOG_MANAGER's form carries none.
+CATALOGUER_WITH_COST = {**CATALOGUER, "roles": ["ADMIN"]}
 
 # What the manager typed on the audit's PO (notes/critic/s2_po_new_item.mjs).
 BOSS_TYPED = {
@@ -247,12 +251,13 @@ class World:
             offer_price=offer,
             cost_price=cost,
         )
-        return _run(_products.create_product(body, CATALOGUER, as_draft=False))
+        return _run(_products.create_product(body, CATALOGUER_WITH_COST, as_draft=False))
 
     def finish_draft(self, pid, offer):
         """The cataloguer finishes the manager's draft in the Edit screen
         (useQuickAddForm spine edit: one PUT /products/{id}; it never sends
-        is_active)."""
+        is_active, nor the cost price, which a cataloguer neither sees nor
+        sets -- owner 2026-10-18, FU-23)."""
         cur = self.product(pid)
         body = _products.ProductUpdate(
             brand=cur["brand"],
@@ -260,7 +265,6 @@ class World:
             attributes=dict(cur.get("attributes") or {}),
             mrp=cur["mrp"],
             offer_price=offer,
-            cost_price=cur.get("cost_price"),
         )
         _run(_products.update_product(pid, body, CATALOGUER))
         return self.product(pid)
@@ -425,7 +429,6 @@ def test_c1_finishing_never_reactivates_what_the_cataloguer_switched_off(world):
         attributes=dict(cur.get("attributes") or {}),
         mrp=cur["mrp"],
         offer_price=2790,
-        cost_price=cur.get("cost_price"),
         is_active=False,
     )
     _run(_products.update_product(draft_id, body, CATALOGUER))
@@ -1110,7 +1113,7 @@ def test_c2_a_size_typed_for_a_watch_is_not_a_second_watch(world):
         offer_price=4495,
         cost_price=2600,
     )
-    watch = _run(_products.create_product(body, CATALOGUER, as_draft=False))
+    watch = _run(_products.create_product(body, CATALOGUER_WITH_COST, as_draft=False))
     typed = {
         "category": "WT",
         "brand": "Titan",
@@ -1829,7 +1832,7 @@ def _catalogue_rg(world, lens_size):
         offer_price=1290,
         cost_price=600,
     )
-    return _run(_products.create_product(body, CATALOGUER, as_draft=False))
+    return _run(_products.create_product(body, CATALOGUER_WITH_COST, as_draft=False))
 
 
 def test_c2_reading_glasses_typed_with_their_eye_size_use_the_catalogued_one(world):
@@ -1925,7 +1928,7 @@ def test_c2_a_frame_still_carrying_an_old_size_is_found_by_its_eye_size(world):
         offer_price=2790,
         cost_price=1200,
     )
-    made = _run(_products.create_product(body, CATALOGUER, as_draft=False))
+    made = _run(_products.create_product(body, CATALOGUER_WITH_COST, as_draft=False))
     stored = world.product(made["product_id"])
     finding(
         stored["identity_key"] == "boss|boss1700|c2|52",
@@ -3664,7 +3667,7 @@ def test_r6_add_product_of_a_discarded_draft_of_another_kind_says_so(world):
         cost_price=1200,
     )
     with pytest.raises(HTTPException) as added:
-        _run(_products.create_product(body, CATALOGUER, as_draft=False))
+        _run(_products.create_product(body, CATALOGUER_WITH_COST, as_draft=False))
     existing = (added.value.detail or {}).get("existing") or {}
     assert existing.get("discarded_draft") is True and existing.get("provisional") is False
     assert world.product(draft_id)["discarded_draft"] is True
@@ -6263,7 +6266,6 @@ def test_r11_an_ordered_frame_draft_is_finished_as_the_sunglass_it_is(world):
         attributes=dict(cur.get("attributes") or {}),
         mrp=cur["mrp"],
         offer_price=2790,
-        cost_price=cur.get("cost_price"),
     )
     _run(_products.update_product(draft_id, body, CATALOGUER))
     now = world.product(draft_id)

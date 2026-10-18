@@ -39,7 +39,7 @@ from pydantic import BaseModel, Field
 
 from .auth import get_current_user, require_roles
 from ..dependencies import get_audit_repository
-from ..services.cost_mask import mask_cost, mask_cost_list
+from ..services.cost_mask import mask_cost, mask_cost_list, refuse_cost_write
 from ..services.lens_catalog_validation import (
     DEFAULT_ENUM_ITEMS,
     ENUM_TYPES,
@@ -373,6 +373,7 @@ async def create_lens_line(
     the identity tuple -- two creates with the same (brand, series, index,
     material, lens_type, coating) will conflict on the unique index, which
     we lift to 409 with a useful message."""
+    refuse_cost_write(current_user, payload.cost_price)  # FU-23
     coll = _catalog_coll()
     if coll is None:
         raise HTTPException(status_code=503, detail="Database not available")
@@ -433,6 +434,7 @@ async def update_lens_line(
     """PATCH a lens line. Identity fields are NOT patchable -- the LensLine
     Update model doesn't include them, so this enforces it at the API
     surface. Returns the updated doc."""
+    refuse_cost_write(current_user, payload.cost_price)  # FU-23
     coll = _catalog_coll()
     if coll is None:
         raise HTTPException(status_code=503, detail="Database not available")

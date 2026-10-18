@@ -78,8 +78,15 @@ ASSIGNABLE_ROLES = frozenset(
 
 
 def normalize_role(role: str) -> str:
-    """Map a single deprecated role alias to its survivor; pass through unknown /
-    current roles unchanged. SALES_CASHIER -> SALES_STAFF."""
+    """Canonical casing first (' accountant ' -> 'ACCOUNTANT': a hand-edited
+    user record or token would otherwise fail every role check, which compares
+    exact upper-case names), then map a deprecated role alias to its survivor;
+    pass through unknown / current roles otherwise. SALES_CASHIER ->
+    SALES_STAFF. Login and token decode both pass through here; the user
+    screens still validate what is typed BEFORE normalising, so they keep
+    rejecting a mis-cased role."""
+    if isinstance(role, str):
+        role = role.strip().upper()
     return DEPRECATED_ROLE_ALIASES.get(role, role)
 
 

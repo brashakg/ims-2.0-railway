@@ -269,19 +269,22 @@ def test_policy_for_resolves_multi_param():
 def test_policy_for_prefers_most_specific_literal():
     """A literal segment must beat a {param} sibling at the same depth.
 
-    /api/v1/catalog/products/export (literal) and
-    /api/v1/catalog/products/{product_id} (param) co-exist at the same depth.
-    A request for .../export must resolve to the literal entry, not the param.
+    /api/v1/vendors/ap-aging (literal) and /api/v1/vendors/{vendor_id}
+    (param) co-exist at the same depth. A request for .../ap-aging must resolve
+    to the literal entry, not the param. (The pair used to be the catalog
+    export, a dead handler shadowed by GET /catalog/products/{id} -- deleted,
+    audit FU-06.)
     """
-    literal = rbac.policy_for("GET", "/api/v1/catalog/products/export")
+    literal = rbac.policy_for("GET", "/api/v1/vendors/ap-aging")
     assert literal is not None
-    assert literal["path"] == "/api/v1/catalog/products/export"
+    assert literal["path"] == "/api/v1/vendors/ap-aging"
     # ...while a real id resolves to the param entry.
-    param = rbac.policy_for("GET", "/api/v1/catalog/products/SKU-123")
+    param = rbac.policy_for("GET", "/api/v1/vendors/V-123")
     assert param is not None
-    assert param["path"] == "/api/v1/catalog/products/{product_id}"
+    assert param["path"] == "/api/v1/vendors/{vendor_id}"
     # and the two gates genuinely differ, proving the specificity tie-break
-    # picked the right row (export drops STORE roles; {id} read is open).
+    # picked the right row (ap-aging is the accounts' only; a vendor's read
+    # admits the purchase managers too).
     assert literal["allowed"] != param["allowed"]
 
 
