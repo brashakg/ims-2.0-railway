@@ -92,7 +92,11 @@ NON_ADMIN_FINANCE = ("ACCOUNTANT",)
 
 def _world() -> Any:
     db = mongomock.MongoClient().db
-    db["entities"].insert_one({"entity_id": "E1", "legal_name": "BV Optics"})
+    db["entities"].insert_one({
+        "entity_id": "E1", "legal_name": "BV Optics",
+        # The return resolves a shop's registration through its legal entity.
+        "gstins": [{"gstin": S1_GSTIN}, {"gstin": S0_GSTIN}],
+    })
     db["stores"].insert_many([
         {"store_id": S1, "store_name": "Bokaro", "entity_id": "E1",
          "state": "Jharkhand", "gstin": S1_GSTIN},
@@ -297,7 +301,10 @@ def test_shop_logins_and_admins_are_unchanged(reports_world):
 
 def test_a_shop_assignment_does_not_allow_unallocated_bill_portal_export(reports_world):
     reports._get_raw_db()["vendor_bills"].update_one(
-        {"bill_id": "B-1"}, {"$set": {"recipient_gstin": None}}
+        {"bill_id": "B-1"},
+        # No stamped registration or verified receiving shop: two held
+        # registrations make this genuinely unallocated, regardless of login.
+        {"$set": {"recipient_gstin": None}, "$unset": {"store_id": ""}},
     )
     for user in (_user("ACCOUNTANT", S1, (S1,)), _user("ADMIN")):
         portal = _get(GSTN, user)

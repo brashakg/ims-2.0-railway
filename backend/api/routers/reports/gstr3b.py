@@ -407,17 +407,20 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
         "taxableValue": 0.0,
     }
 
+    entity_id = None
     store_gstin = ""
     store_legal_name = ""
     store_state = ""
 
     db = _get_raw_db()
     if db is not None:
+        # The header/export must name the same resolved registration that
+        # receives Table 4 credit, including the entity/state fallback.
+        entity_id, store_gstin, _shops = _itc_store_scope(db, active_store)
         try:
             stores_col = db["stores"]
             store_doc = stores_col.find_one({"store_id": active_store})
             if store_doc:
-                store_gstin = str(store_doc.get("gstin", "") or "")
                 store_legal_name = str(
                     store_doc.get("store_name") or store_doc.get("name", "") or ""
                 )
@@ -563,7 +566,6 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
     def _r(v: float) -> float:
         return round(v, 2)
 
-    entity_id = _itc_store_scope(db, active_store)[0] if db is not None else None
     unallocated = _unallocated_legacy_bills(db, entity_id, year, mon, last_day)
     return {
         "period": month,
