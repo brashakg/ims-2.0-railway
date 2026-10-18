@@ -85,7 +85,7 @@ class _FakeExpenseRepo:
         self.updated = data
         return True
 
-    def update_if(self, _id, expected, data):
+    def update_if(self, _id, expected, data, unset=None):
         if any(self._doc.get(k) != v for k, v in expected.items()):
             return False
         self.updated = data

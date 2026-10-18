@@ -251,8 +251,9 @@ class FakeExpenseRepo:
     def update(self, expense_id, fields):
         return self.coll.update_one({"expense_id": expense_id}, {"$set": fields})
 
-    def update_if(self, expense_id, expected, fields):
-        res = self.coll.update_one({**expected, "expense_id": expense_id}, {"$set": fields})
+    def update_if(self, expense_id, expected, fields, unset=None):
+        update = {"$set": fields, **({"$unset": {f: "" for f in unset}} if unset else {})}
+        res = self.coll.update_one({**expected, "expense_id": expense_id}, update)
         return bool(res.matched_count)
 
     def create(self, doc):
@@ -765,8 +766,9 @@ def test_double_approve_of_an_ordinary_expense_is_one_approval(wired, monkeypatc
     assert repo.coll.find_one({"expense_id": "E2"})["approved_by"] == "mgr1"
 
 
-def test_an_approval_that_loses_to_a_reject_hands_the_payout_back(claim, monkeypatch):
-    """The reject lands between the float debit and the APPROVED stamp."""
+def test_an_approval_that_loses_to_a_reject_hands_the_payout_back(claim, monkeypatch, caplog):
+    """A raw REJECTED write lands between the float debit and the APPROVED
+    stamp: the approval hands its payout back, and logs that it did."""
     db, repo, _ = claim
     real = expenses._do_petty_debit
 
@@ -781,6 +783,7 @@ def test_an_approval_that_loses_to_a_reject_hands_the_payout_back(claim, monkeyp
     doc = repo.find_by_id("E1")
     assert doc["status"] == "REJECTED" and "approved_by" not in doc
     assert _float(db) == 5000.0
+    assert "hand-back: done" in caplog.text
 
 
 # B1 -- a reject racing an approval: exactly one wins, and money follows it.
@@ -804,16 +807,46 @@ def test_a_reject_that_wins_first_leaves_no_debit(claim, monkeypatch):
     assert _approve(db, repo, "mgr1").status_code == 409
     assert repo.coll.find_one({"expense_id": "E1"})["status"] == "REJECTED"
     assert _float(db) == 5000.0
+    assert "DEBIT" not in [r["type"] for r in _ledger(db)]  # the claim failed: no money moved
+
+
+def test_a_reject_before_the_payout_strands_nothing_even_if_the_approver_dies(claim, monkeypatch):
+    """The approver read PENDING; a reject lands; the approver's worker is
+    then killed right after paying out. The claim (PENDING -> APPROVING) comes
+    before the payout, so it fails on the REJECTED expense and nothing is paid."""
+    db, repo, _ = claim
+    real_live, real_debit, fired = pcs.live_payout_for, expenses._do_petty_debit, []
+
+    def reject_lands(*a, **k):
+        if not fired:
+            fired.append(None)  # once: the reject's own read must not re-fire it
+            fired[0] = _reject(db, repo, "mgr2")
+        return real_live(*a, **k)
+
+    def debit_then_killed(*a, **k):
+        real_debit(*a, **k)
+        raise RuntimeError("worker killed")
+
+    monkeypatch.setattr(pcs, "live_payout_for", reject_lands)
+    monkeypatch.setattr(expenses, "_do_petty_debit", debit_then_killed)
+    try:
+        _approve(db, repo, "mgr1")
+    except RuntimeError:
+        pass
+    assert fired[0].status_code == 200
+    assert repo.coll.find_one({"expense_id": "E1"})["status"] == "REJECTED"
+    assert _float(db) == 5000.0 and "DEBIT" not in [r["type"] for r in _ledger(db)]
 
 
 def _stamp_fails_once(repo, monkeypatch):
+    """The APPROVED stamp write fails once (the claim write goes through)."""
     real, left = repo.update_if, [1]
 
-    def update_if(*a, **k):
-        if left[0]:
+    def update_if(expense_id, expected, fields, *a, **k):
+        if left[0] and fields.get("status") == "APPROVED":
             left[0] = 0
             raise RuntimeError("write timed out")
-        return real(*a, **k)
+        return real(expense_id, expected, fields, *a, **k)
 
     monkeypatch.setattr(repo, "update_if", update_if)
 
@@ -823,21 +856,68 @@ def test_approving_again_finishes_an_approval_whose_stamp_failed(claim, monkeypa
     _stamp_fails_once(repo, monkeypatch)
     cut = _approve(db, repo, "mgr1")
     assert cut.status_code == 503 and "Approve again" in cut.json()["detail"]
-    assert _float(db) == 4700.0 and repo.find_by_id("E1")["status"] == "PENDING"
+    assert _float(db) == 4700.0 and repo.find_by_id("E1")["status"] == "APPROVING"
     done = _approve(db, repo, "mgr1")
     assert done.status_code == 200, done.text
     doc = repo.find_by_id("E1")
     assert doc["status"] == "APPROVED" and doc["petty_cash_txn_id"] == _ledger(db)[-1]["txn_id"]
+    assert "approving_claim" not in doc
     assert _float(db) == 4700.0 and [r["type"] for r in _ledger(db)].count("DEBIT") == 1
 
 
-def test_a_reject_hands_back_a_payout_whose_approval_never_stamped(claim, monkeypatch):
+def test_a_reject_cannot_land_while_an_approval_holds_its_payout(claim, monkeypatch):
+    """A worker cut off after the payout leaves APPROVING with the money paid
+    out. A reject is refused (it would strand the payout on a REJECTED
+    expense); the next approval finishes on that payout."""
     db, repo, _ = claim
     _stamp_fails_once(repo, monkeypatch)
     assert _approve(db, repo, "mgr1").status_code == 503
-    assert _reject(db, repo, "mgr2").status_code == 200
-    assert repo.find_by_id("E1")["status"] == "REJECTED"
-    assert _float(db) == 5000.0
+    refused = _reject(db, repo, "mgr2")
+    assert refused.status_code == 409 and "being approved" in refused.json()["detail"]
+    assert repo.find_by_id("E1")["status"] == "APPROVING" and _float(db) == 4700.0
+    assert _approve(db, repo, "mgr2").status_code == 200
+    assert repo.find_by_id("E1")["status"] == "APPROVED" and _float(db) == 4700.0
+
+
+@pytest.mark.parametrize("age_seconds,code,balance", [(5, 409, 5000.0), (600, 200, 4700.0)])
+def test_a_claim_with_no_payout_is_taken_over_only_once_stale(claim, age_seconds, code, balance):
+    """A worker that claimed and died before paying out: a fresh claim makes
+    the next approval wait; a stale one is taken over and approved."""
+    from datetime import datetime, timedelta, timezone
+
+    db, repo, _ = claim
+    at = (datetime.now(timezone.utc) - timedelta(seconds=age_seconds)).isoformat()
+    repo.update("E1", {"status": "APPROVING", "approving_claim": "dead", "approving_by": "mgr9", "approving_at": at})
+    assert _approve(db, repo, "mgr1").status_code == code
+    assert _float(db) == balance
+
+
+def test_a_claim_lets_go_when_no_money_moves(claim):
+    """An empty float refuses the payout: the claim goes back to PENDING."""
+    db, repo, _ = claim
+    db.get_collection("petty_cash_floats").update_one({"store_id": "S1"}, {"$set": {"balance": 100.0}})
+    assert _approve(db, repo, "mgr1").status_code == 409
+    doc = repo.find_by_id("E1")
+    assert doc["status"] == "PENDING" and "approving_claim" not in doc
+
+
+@pytest.mark.parametrize("landed,status,balance", [(True, "REJECTED", 5000.0), (False, "APPROVED", 4700.0)])
+def test_a_failed_reversal_restores_approved_only_while_the_payout_stands(claim, monkeypatch, landed, status, balance):
+    db, repo, _ = claim
+    assert _approve(db, repo, "mgr1").status_code == 200
+    real = pcs.reverse_payout
+
+    def reports_failure(*a, **k):
+        if landed:
+            real(*a, **k)  # the hand-back happened, but its answer was lost
+        return {"ok": False, "http": 503, "error": "timeout"}
+
+    monkeypatch.setattr(pcs, "reverse_payout", reports_failure)
+    _reject(db, repo, "mgr2")
+    doc = repo.find_by_id("E1")
+    assert doc["status"] == status and _float(db) == balance
+    if status == "APPROVED":
+        assert "rejected_by" not in doc
 
 
 def test_a_colleague_who_finishes_the_approval_keeps_the_payout(claim, monkeypatch):
