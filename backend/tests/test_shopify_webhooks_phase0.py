@@ -83,6 +83,9 @@ def _match(doc, filter_) -> bool:
                 elif op == "$gt":
                     if actual is None or actual <= op_val:
                         return False
+                elif op == "$lt":
+                    if actual is None or actual >= op_val:
+                        return False
                 elif op == "$not":
                     if _match({k: actual} if k in doc else {}, {k: op_val}):
                         return False
@@ -1199,3 +1202,82 @@ def test_refund_drain_failed_after_posting_is_retried_without_double_credit(wire
     assert len(calls) == 1, "the retry must not post the refund again"
     assert wired["ledger"].count_documents({"customer_id": "CUST-1"}) == 1
     assert wired["returns"].count_documents({"shopify_refund_id": "700001"}) == 1
+
+
+def test_refund_drain_stopped_mid_post_is_finished_on_a_later_retry(wired, monkeypatch):
+    """F2a: the run posts the credit note and stops before restock/finalize,
+    leaving the returns doc PENDING. A retry while that claim is fresh is a
+    failure (not 'duplicate'); once the claim is stale the retry FINISHES it
+    under the same claim: no second credit note, the unit restocked once,
+    the doc COMPLETED."""
+    import mongomock
+    from datetime import datetime, timedelta, timezone
+
+    from agents.implementations.nexus import NexusAgent
+    from api.routers import returns as returns_router
+    from api.services import shopify_refund as sr
+
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    _seed_online_order(wired)
+    wired["stock_repo"].units.append(
+        {"stock_id": "stk-1", "product_id": "IMS-P-1", "store_id": "BV-GANGA-01",
+         "order_id": "ord-abc", "status": "SOLD"}
+    )
+    wired["customer_repo"].create(
+        {"customer_id": "CUST-1", "name": "Ravi", "mobile": "9876543210", "store_credit": 0.0}
+    )
+    real = returns_router._issue_store_credit
+    calls = []
+
+    def counted_post(*a, **k):
+        calls.append(1)
+        return real(*a, **k)
+
+    monkeypatch.setattr(returns_router, "_issue_store_credit", counted_post)
+    real_cap = sr._cap_restock_to_returnable
+    stops = []
+
+    def stop_after_the_credit(*a, **k):
+        stops.append(1)
+        if len(stops) == 2:  # the 1st cap is the handler's preview, the 2nd the post's
+            raise RuntimeError("stopped between the credit note and the restock")
+        return real_cap(*a, **k)
+
+    # Runs after the credit note posts and before restock + finalize, outside
+    # the post's own try blocks: the run ends mid-post with the doc PENDING.
+    monkeypatch.setattr(sr, "_cap_restock_to_returnable", stop_after_the_credit)
+    inbox = mongomock.MongoClient()["sf03r"].webhook_inbox
+    inbox.insert_one({
+        "webhook_id": "inbox-mid", "vendor": "shopify", "processed": False,
+        "status": "received", "attempts": 0, "received_at": datetime.now(timezone.utc),
+        "payload": _refund_payload(),
+        "headers": {"x-shopify-topic": "refunds/create", "x-shopify-webhook-id": "WH-MID"},
+    })
+    agent = NexusAgent(db=wired["db"])
+    real_get = agent.get_collection
+    monkeypatch.setattr(agent, "get_collection",
+                        lambda name: inbox if name == "webhook_inbox" else real_get(name))
+
+    _run(agent._handle_inbox_webhook("inbox-mid", "shopify"))
+    doc = wired["returns"].find_one({"shopify_refund_id": "700001"})
+    assert doc["status"] == "PENDING", "the first run stopped mid-post"
+    assert wired["ledger"].count_documents({"customer_id": "CUST-1"}) == 1
+    assert inbox.find_one({"webhook_id": "inbox-mid"})["status"] == "failed"
+
+    _run(agent._handle_inbox_webhook("inbox-mid", "shopify"))
+    row = inbox.find_one({"webhook_id": "inbox-mid"})
+    assert row["status"] == "failed", "a fresh claim may still be in flight: not done"
+    assert "not finalized" in row["handler_error"]
+
+    stale = (datetime.now(timezone.utc)
+             - timedelta(seconds=sr._CLAIM_STALE_SECONDS + 60)).isoformat()
+    wired["returns"].update_one({"shopify_refund_id": "700001"}, {"$set": {"created_at": stale}})
+    _run(agent._handle_inbox_webhook("inbox-mid", "shopify"))
+    row = inbox.find_one({"webhook_id": "inbox-mid"})
+    assert row["status"] == "succeeded" and row["processed"] is True
+    doc = wired["returns"].find_one({"shopify_refund_id": "700001"})
+    assert doc["status"] == "COMPLETED" and doc["credit_note_issued"] is True
+    assert wired["returns"].count_documents({"shopify_refund_id": "700001"}) == 1
+    assert wired["ledger"].count_documents({"customer_id": "CUST-1"}) == 1, "never a second credit note"
+    assert len(calls) == 1, "the finish found the posted note instead of posting again"
+    assert wired["stock_repo"].units[0]["status"] == "AVAILABLE"

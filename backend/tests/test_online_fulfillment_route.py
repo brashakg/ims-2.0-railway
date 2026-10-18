@@ -5577,3 +5577,126 @@ def test_order_drain_that_failed_after_booking_is_retried_without_a_second_booki
     orders = list(db.orders.find({"shopify_order_id": "53001"}))
     assert len(orders) == 1, "the retry must not book a second order"
     assert _sold_at(db, orders[0]["order_id"]) == ["BV-BOK-01"], "one unit claimed once"
+
+
+def _sf03_inbox(db, wid, payload, topic="orders/create"):
+    from datetime import datetime, timezone
+
+    db.webhook_inbox.insert_one({
+        "webhook_id": wid, "vendor": "shopify", "processed": False,
+        "status": "received", "attempts": 0, "received_at": datetime.now(timezone.utc),
+        "payload": payload,
+        "headers": {"x-shopify-topic": topic, "x-shopify-webhook-id": f"WH-{wid}"},
+    })
+
+
+def _sf03_drain(db, wid):
+    from agents.implementations.nexus import NexusAgent
+
+    asyncio.run(NexusAgent(db=db)._handle_inbox_webhook(wid, "shopify"))
+    return db.webhook_inbox.find_one({"webhook_id": wid})
+
+
+def _fail_once(monkeypatch, module, name, message):
+    real = getattr(module, name)
+    calls = []
+
+    def wrapper(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError(message)
+        return real(*a, **k)
+
+    monkeypatch.setattr(module, name, wrapper)
+    return calls
+
+
+def test_order_drain_that_failed_before_booking_books_on_retry(world, monkeypatch):
+    """F1: the webhook id is recorded BEFORE the build. A crash after that
+    record and before the insert used to make the retry answer 'replayed'
+    with NO order, and the row read as done. The retry must book it, once."""
+    from api.services import shopify_ingest
+
+    db = world["db"]
+    _stock(db, "BV-BOK-01", "P-RB", 2)
+    world["shop"].fo(FO_1, LOC_BOK)
+    _sf03_inbox(db, "pre-book", _order(53101))
+    _fail_once(monkeypatch, shopify_ingest, "_map_line_items", "crash before booking")
+
+    row = _sf03_drain(db, "pre-book")
+    assert row["status"] == "failed" and row["processed"] is False
+    assert db.orders.count_documents({"shopify_order_id": "53101"}) == 0
+
+    row = _sf03_drain(db, "pre-book")
+    assert row["status"] == "succeeded" and row["processed"] is True
+    orders = list(db.orders.find({"shopify_order_id": "53101"}))
+    assert len(orders) == 1, "the retry books the order exactly once"
+    assert _sold_at(db, orders[0]["order_id"]) == ["BV-BOK-01"]
+
+
+def test_order_drain_that_failed_before_its_stock_claim_finishes_the_claim(world, monkeypatch):
+    """F2b: inserted, then the creator stopped before claiming units. A retry
+    while the creator may still be running is a failure (not done); once the
+    booking is past the settle window, the retry claims the units -- once."""
+    from datetime import datetime, timedelta
+
+    from api.services import online_fulfillment_route, shopify_ingest
+
+    db = world["db"]
+    _stock(db, "BV-BOK-01", "P-RB", 2)
+    world["shop"].fo(FO_1, LOC_BOK)
+    _sf03_inbox(db, "pre-claim", _order(53102))
+    _fail_once(monkeypatch, shopify_ingest, "_claim_online_units", "crash before the claim")
+
+    row = _sf03_drain(db, "pre-claim")
+    assert row["status"] == "failed"
+    order = db.orders.find_one({"shopify_order_id": "53102"})
+    assert "fulfillment_breakdown" not in order and _sold_at(db, order["order_id"]) == []
+
+    row = _sf03_drain(db, "pre-claim")
+    assert row["status"] == "failed", "a creator inside the settle window may still be running"
+    assert "booking not settled" in row["handler_error"]
+
+    aged = datetime.utcnow() - timedelta(seconds=online_fulfillment_route._BOOKING_SETTLE_SECONDS + 60)
+    db.orders.update_one({"order_id": order["order_id"]}, {"$set": {"created_at": aged}})
+    row = _sf03_drain(db, "pre-claim")
+    assert row["status"] == "succeeded" and row["processed"] is True
+    order = db.orders.find_one({"shopify_order_id": "53102"})
+    assert db.orders.count_documents({"shopify_order_id": "53102"}) == 1
+    assert _sold_at(db, order["order_id"]) == ["BV-BOK-01"], "claimed once"
+    assert [r["qty"] for r in order["fulfillment_breakdown"]] == [1]
+    assert "reroute_lease_at" not in order, "the lease is let go"
+
+    _sf03_drain(db, "pre-claim")  # a later replay changes nothing
+    assert _sold_at(db, order["order_id"]) == ["BV-BOK-01"]
+
+
+def test_status_sync_that_did_not_land_is_a_failure(world, monkeypatch):
+    """F3: an orders/cancelled body for a booked order whose status claim did
+    not land used to read as done (skipped no_line_items)."""
+    from api.services import online_order_status
+
+    db = world["db"]
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK)
+    _book(world, _order(53103))
+    real = online_order_status.apply_fact
+    calls = []
+
+    def fail_once(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            return {"to": None, "from": None, "why": None, "terminal_withheld": False,
+                    "failed": True}
+        return real(*a, **k)
+
+    monkeypatch.setattr(online_order_status, "apply_fact", fail_once)
+    _sf03_inbox(db, "cancel", {"id": 53103, "cancelled_at": "2026-10-18T10:00:00Z",
+                               "financial_status": "paid", "updated_at": "2026-10-18T10:00:00Z"},
+                topic="orders/cancelled")
+    row = _sf03_drain(db, "cancel")
+    assert row["status"] == "failed" and "status claim did not land" in row["handler_error"]
+
+    row = _sf03_drain(db, "cancel")
+    assert row["status"] == "succeeded"
+    assert db.orders.find_one({"shopify_order_id": "53103"}).get("shopify_cancelled_at")

@@ -1653,6 +1653,98 @@ def claim_the_missing(db, order: Dict[str, Any]) -> Tuple[Optional[str], int]:
     return None, claimed - had
 
 
+# SF03: how long a booking may sit inserted but unclaimed before its creator
+# is taken for dead -- the inbox drain's own lease (NexusAgent
+# WEBHOOK_PROCESSING_LEASE); a live creator settles in seconds.
+_BOOKING_SETTLE_SECONDS = 15 * 60
+
+
+def finish_crashed_booking(db, order: Dict[str, Any]) -> Optional[str]:
+    """SF03: finish a live booking whose creator stopped between the order
+    insert and its stamped claim (``fulfillment_breakdown``): claim its units
+    with THE claim, stamp the breakdown, raise its Rx and route tasks and
+    write stock back -- the tail shopify_ingest runs after its insert. Its
+    webhook's retry reaches here through the replay guards; before, it was
+    answered "replayed" and the units were never claimed.
+
+    None: the claim is settled (already, or now). Else why not yet -- the
+    caller reports a failure so the inbox retries later. Nothing to settle
+    for a historical import or an order with no route (claims nothing). A
+    creator younger than ``_BOOKING_SETTLE_SECONDS`` may still be running:
+    not yet. Under Re-map's lease (clear-hold and Re-map take it too), so no
+    two of them claim; units already SOLD to the order are kept, never
+    claimed again. A dead order, or one a refund or return owns, is settled
+    as it stands (their doors' rules)."""
+    from datetime import datetime, timedelta, timezone
+
+    from .shopify_ingest import _claim_online_units
+
+    if (
+        "fulfillment_breakdown" in order
+        or not order.get("fulfillment_route")
+        or order.get("historical")
+        # Re-map unsets the breakdown while it runs, under its lease; a Re-map
+        # (running, or stopped with its lease left stale) is settled by Re-map's
+        # own door -- never here. A booking never takes that lease.
+        or order.get("reroute_lease_at")
+    ):
+        return None
+    oid = order.get("order_id")
+    now = datetime.now(timezone.utc)
+    created = order.get("created_at")
+    if isinstance(created, datetime) and created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    if not isinstance(created, datetime) or (now - created).total_seconds() < _BOOKING_SETTLE_SECONDS:
+        return "its booking is still claiming stock"
+    coll = _orders(db)
+    mine = now.isoformat()
+    stale = (now - timedelta(seconds=_REROUTE_LEASE_SECONDS)).isoformat()
+    taken = coll.find_one_and_update(
+        {"order_id": oid, "fulfillment_breakdown": {"$exists": False},
+         "reroute_lease_at": None},
+        {"$set": {"reroute_lease_at": mine}},
+    )
+    if taken is None:
+        if "fulfillment_breakdown" in (coll.find_one({"order_id": oid}) or {}):
+            return None
+        return "another run holds the order"
+    try:
+        if str(taken.get("status") or "").upper() in _DEAD or refund_or_return(db, taken):
+            return None if _settle_as_it_stands(db, taken) else "its claim could not be settled"
+        route = taken.get("fulfillment_route") or {}
+        items = taken.get("items") or []
+        want = _wanted(items, route)
+        kept: Dict[str, Dict[str, int]] = {}
+        for (shop, pid), ids in _sold_units(oid).items():
+            n = min(len(ids), want.get((shop, pid), 0))
+            if n:
+                kept.setdefault(shop, {})[pid] = n
+        ref = taken.get("order_number") or oid
+        breakdown, stores = _claim_online_units(db, oid, ref, items, route, held=kept)
+        coll.update_one(
+            {"order_id": oid},
+            {"$set": {"fulfillment_breakdown": breakdown, "fulfillment_stores": stores}},
+        )
+        if taken.get("rx_pending"):
+            from .online_rx_hold import raise_rx_hold_task  # idempotent per order
+
+            raise_rx_hold_task(
+                db, order_id=oid, order_ref=ref, store_id=taken.get("store_id"),
+                channel="shopify",
+                evaluation={"rx_pending": True, "reasons": taken.get("rx_hold_reasons") or [],
+                            "detail": taken.get("rx_hold_reason") or ""},
+            )
+        raise_problem_tasks(db, taken)  # deduped per (order, problem)
+        if not any(m.get("status") == "PLANNED" for m in route.get("moves") or []):
+            _stock_write_back(db, taken)
+        logger.warning("[ONLINE_ROUTE] finished the crashed booking of %s: %s unit(s) held",
+                       oid, sum(int(r.get("qty") or 0) for r in breakdown))
+        return None
+    finally:
+        coll.update_one({"order_id": oid, "reroute_lease_at": mine},
+                        {"$unset": {"reroute_lease_at": ""}})
+
+
 async def reroute_held_order(db, order_id: str) -> Dict[str, Any]:
     """Re-route ONE booked online order held on its seller check
     (SELLER_UNKNOWN, SPLIT_SELLERS, SHOP_GSTIN_MISSING) or on a failed

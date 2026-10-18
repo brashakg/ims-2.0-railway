@@ -70,6 +70,12 @@ def _raise_if_failed(result: Any) -> None:
     reason = str(r.get("reason") or "")
     if r.get("status") == "error" or reason.startswith("exception:"):
         raise RuntimeError(f"handler reported failure: {r.get('error') or reason or 'error'}")
+    if r.get("sync_failed"):
+        # The order mapper's status sync did not land (online_order_mapper).
+        raise RuntimeError(f"order status sync failed: {r['sync_failed']}")
+    if r.get("booking_unsettled"):
+        # A booked order whose stock claim is not stamped (shopify_ingest).
+        raise RuntimeError(f"booking not settled: {r['booking_unsettled']}")
 
 
 class NexusAgent(JarvisAgent):
@@ -810,8 +816,9 @@ class NexusAgent(JarvisAgent):
     # receiver). A handler failure leaves processed=False with status=failed,
     # the error and the attempt count, so a vendor redelivery
     # (webhooks._duplicate_response) or the hourly retry sweep re-runs it; after
-    # WEBHOOK_MAX_ATTEMPTS it parks as status=dead (dead letter, counted on the
-    # SUPERADMIN online-store sync-health card) and nothing re-runs it again.
+    # WEBHOOK_MAX_ATTEMPTS it parks as status=dead (dead letter: counted in the
+    # failed-webhooks number on the SUPERADMIN sync-health card and listed in
+    # that route's webhooks.dead_letters) and nothing re-runs it again.
     WEBHOOK_MAX_ATTEMPTS = 5
     # A drain that died mid-run (worker killed) leaves status=processing; after
     # this lease another drain may claim it. Business handlers keep their own
@@ -832,9 +839,15 @@ class NexusAgent(JarvisAgent):
             logger.warning(f"[NEXUS] webhook_inbox collection unavailable — cannot drain {webhook_id}")
             return
 
+        import uuid
+
         from pymongo import ReturnDocument
 
         now = datetime.now(timezone.utc)
+        # This drain's fence: the outcome write lands only while the row still
+        # carries it, so a drain that outlived its lease (another took the row
+        # over) can never overwrite the newer run's outcome.
+        claim = uuid.uuid4().hex
         try:
             # Atomic claim: only a row that is not done, not dead and not
             # freshly in flight elsewhere. Terminal skips carry processed=True,
@@ -849,7 +862,7 @@ class NexusAgent(JarvisAgent):
                         {"processing_at": {"$lt": now - self.WEBHOOK_PROCESSING_LEASE}},
                     ],
                 },
-                {"$set": {"status": "processing", "processing_at": now},
+                {"$set": {"status": "processing", "processing_at": now, "claim": claim},
                  "$inc": {"attempts": 1}},
                 return_document=ReturnDocument.AFTER,
             )
@@ -905,7 +918,12 @@ class NexusAgent(JarvisAgent):
                     f"[NEXUS] {vendor} webhook {webhook_id} DEAD after {attempts} attempts: {handler_error}"
                 )
         try:
-            coll.update_one({"webhook_id": webhook_id}, update)
+            res = coll.update_one({"webhook_id": webhook_id, "claim": claim}, update)
+            if not getattr(res, "matched_count", 1):
+                logger.warning(
+                    f"[NEXUS] {webhook_id}: outcome not written -- another drain took "
+                    f"the row over after this one's lease ran out"
+                )
         except Exception as e:
             logger.warning(f"[NEXUS] outcome update failed on {webhook_id}: {e}")
 
@@ -1082,6 +1100,9 @@ class NexusAgent(JarvisAgent):
                 result.get("store_id"),
             )
             _raise_if_failed(result)
+            if result.get("status") in ("duplicate", "replayed") and not result.get("order_id"):
+                # Backstop: "already booked" with no order behind it is not done.
+                raise RuntimeError(f"order {result.get('status')} with no IMS order")
         except Exception as e:  # noqa: BLE001 - logged here, recorded by the inbox drain
             logger.warning(f"[NEXUS] shopify order mapping failed: {e}")
             raise  # SF03: the inbox row records the failure

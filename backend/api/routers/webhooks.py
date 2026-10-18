@@ -53,18 +53,17 @@ Fail-soft contract:
   written (or it's a verified duplicate whose original row is the record).
 - Event dispatch failure → still 200 (the inbox row is ALREADY durable, and
   re-acking would make the vendor resend a delivery we already persisted).
-  NOTE, because an earlier version of this docstring claimed otherwise:
-  NOTHING SWEEPS `webhook_inbox` FOR `processed=false`.
-  `NexusAgent._handle_inbox_webhook` is reachable only from
-  `on_event("webhook.received")`; `_do_background_work` iterates
-  INTEGRATION_SCHEDULES and never touches this collection. A dispatch failure
-  is therefore logged at ERROR, and the only automatic recovery is a later
-  vendor retry, which the duplicate path re-dispatches.
+  NOTE: the only background sweep of `webhook_inbox` is NEXUS's hourly retry
+  of rows whose HANDLER FAILED (status=failed, below). A row whose dispatch
+  never reached NEXUS stays status=received, and nothing sweeps those: a
+  dispatch failure is logged at ERROR, and its only automatic recovery is a
+  later vendor retry, which the duplicate path re-dispatches.
 - Handler failure (SF03) -> the row is NOT marked processed. NEXUS records
   status=failed + handler_error + attempts; a vendor redelivery re-runs it at
   once and NEXUS's hourly tick retries status=failed rows, until
-  NexusAgent.WEBHOOK_MAX_ATTEMPTS parks it as status=dead (dead letter, shown
-  on the SUPERADMIN online-store sync-health card).
+  NexusAgent.WEBHOOK_MAX_ATTEMPTS parks it as status=dead (dead letter: counted
+  in the failed-webhooks number on the SUPERADMIN sync-health card, and listed
+  in GET /admin/online-store/sync-health -> webhooks.dead_letters).
 
 The inbox doc shape:
 
@@ -643,9 +642,9 @@ async def _dispatch_webhook_received(webhook_id: str, vendor: str) -> bool:
     except Exception as e:  # noqa: BLE001
         logger.error(
             "[WEBHOOKS] dispatch_event failed for %s webhook_id=%s: %s — the row "
-            "is durable but UNPROCESSED. Nothing sweeps webhook_inbox for "
-            "processed=false, so it will only be drained if the vendor retries "
-            "(which now re-dispatches) or an operator replays it by hand.",
+            "is durable but UNPROCESSED (status=received). The hourly sweep "
+            "retries only failed handlers, so it will only be drained if the "
+            "vendor retries (which re-dispatches) or an operator replays it.",
             vendor,
             webhook_id,
             e,
@@ -1243,7 +1242,8 @@ async def _ingest(
     # resend a delivery we already persisted, and the resend would now be
     # rejected as a duplicate anyway). It is logged at ERROR, and a later
     # vendor retry re-dispatches the still-unprocessed row via
-    # _duplicate_response — there is NO background sweep to fall back on.
+    # _duplicate_response — the hourly sweep retries only rows whose handler
+    # FAILED, never one that was never dispatched.
     await _dispatch_webhook_received(webhook_id, vendor)
 
     return {
