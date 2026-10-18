@@ -238,27 +238,37 @@ async def issue_debit_note(
 
     rtv = in_reach_or_404(_load_rtv(db, body.source_type, body.rtv_id), current_user, "source RTV not found")
 
-    vendor = _load_vendor(db, rtv.get("vendor_id"))
-    seller = _load_seller(db, rtv.get("store_id"), rtv.get("entity_id"))
-    res = eng.issue(
-        rtv,
-        vendor,
-        actor=current_user.get("user_id"),
-        seller=seller,
-    )
+    token = None
+    existing = None
+    if rtv.get("receipt_rejection"):
+        from ..services.receipt_return_issue import claim_issue
+        token, rtv, existing = claim_issue(db, rtv)
+    try:
+        if existing is not None:
+            res = {"ok": True, "idempotent": True, "debit_note": existing}
+        else:
+            vendor = _load_vendor(db, rtv.get("vendor_id"))
+            seller = _load_seller(db, rtv.get("store_id"), rtv.get("entity_id"))
+            res = eng.issue(rtv, vendor, actor=current_user.get("user_id"), seller=seller)
+    except Exception as exc:
+        if token:
+            from ..services.receipt_return_issue import finish_failed_issue
+            finish_failed_issue(db, rtv["return_id"], token, retry_required=True)
+            raise HTTPException(status_code=503, detail="Debit-note issue is incomplete. Retry issuing the same return; cancellation and prices remain locked.") from exc
+        raise
     # Only an accounts role gets this far (require_payables above), so the
     # answer is never stripped: the caller may read every figure on it.
     if not res.get("ok"):
+        if token:
+            from ..services.receipt_return_issue import finish_failed_issue
+            # Only known input validation occurs before serial/persistence.
+            finish_failed_issue(db, rtv["return_id"], token,
+                                retry_required=bool(rtv.get("debit_note_issue_uncertain"))
+                                or int(res.get("http", 500)) not in (400, 422))
         raise _http_from_result(res)
     if rtv.get("receipt_rejection"):
-        # Metadata only: this draft never enters the posted AP-note collection.
-        # If this write fails after issue, retry finds the same issued note and
-        # repairs the handoff without allocating a second serial.
-        db.get_collection("vendor_returns").update_one(
-            {"return_id": rtv.get("return_id")},
-            {"$set": {"debit_note_draft_status": "ISSUED",
-                      "issued_debit_note_id": (res.get("debit_note") or {}).get("debit_note_id")}},
-        )
+        from ..services.receipt_return_issue import finish_issued
+        finish_issued(db, rtv["return_id"], res.get("debit_note") or {})
     # Masked as GET /{id} masks it: re-issuing returns an existing note, so an
     # unmasked reply would read any note's money (owner ruling 2026-10-12).
     return {

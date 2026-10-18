@@ -432,6 +432,8 @@ async def update_return_status(
             "replaced": [],
             "cancelled": [],
         }
+        if return_doc.get("receipt_rejection"):
+            valid_transitions["cancelled"] = ["draft"]
 
         if status_update.status not in valid_transitions.get(current_status, []):
             raise HTTPException(
@@ -454,6 +456,8 @@ async def update_return_status(
             update_dict["return_type"] = status_update.return_type
         if return_doc.get("receipt_rejection") and status_update.status == "cancelled":
             update_dict["debit_note_draft_status"] = "CANCELLED"
+        if return_doc.get("receipt_rejection") and status_update.status == "draft":
+            update_dict["debit_note_draft_status"] = "DRAFT"
 
         # N9: persist courier/AWB tracking on the "shipped" transition (and allow
         # a later correction while still in transit). Surfaced on GET so staff
@@ -492,8 +496,13 @@ async def update_return_status(
         # loser matches zero docs -> 409, so a credit note is issued (and the
         # status advanced) exactly once. The credit-note number generated above is
         # pure (no side effect) and is simply discarded by the loser.
+        expected = {"return_id": return_id, "status": current_status}
+        if return_doc.get("receipt_rejection") and status_update.status in ("cancelled", "draft"):
+            from ..services.receipt_return_issue import require_unissued, unissued_filter
+            require_unissued(db, return_doc)
+            expected.update(unissued_filter())
         result = collection.update_one(
-            {"return_id": return_id, "status": current_status},
+            expected,
             {"$set": update_dict},
         )
         # A real pymongo UpdateResult exposes matched_count; treat the CAS as LOST
@@ -577,7 +586,12 @@ async def price_vendor_return(
             status_code=409,
             detail=f"A return that is {current_status} keeps the prices it was settled at.",
         )
-    if debit_note_issued(db, return_id):
+    expected = {"return_id": return_id, "status": current_status}
+    if return_doc.get("receipt_rejection"):
+        from ..services.receipt_return_issue import require_unissued, unissued_filter
+        require_unissued(db, return_doc)
+        expected.update(unissued_filter())
+    elif debit_note_issued(db, return_id):
         raise HTTPException(
             status_code=409,
             detail="The GST debit note was issued at this return's prices; they stay.",
@@ -588,7 +602,7 @@ async def price_vendor_return(
     # Compare-and-swap on the status just read: a credit issued in between
     # makes this a 409, never a re-price under a recorded credit.
     result = collection.update_one(
-        {"return_id": return_id, "status": current_status},
+        expected,
         {"$set": {
             "items": priced,
             "total_value": _priced_total(priced),

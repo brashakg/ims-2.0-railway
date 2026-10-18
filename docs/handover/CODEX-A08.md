@@ -30,6 +30,11 @@ through the existing status route. Accounts alone can enter prices. Drafts
 can remain unpriced and cannot issue a note; confirmed returns continue
 through the existing approval/shipping/pricing/issue actions.
 
+A cancelled receipt-generated return can reopen as the SAME draft from this
+page. Its identifier, physical links, prices, chosen type and history stay;
+fresh confirmation is required before issue. Ordinary manual returns retain
+their existing transitions.
+
 The draft is stored on `vendor_returns` with `status=draft`,
 `debit_note_draft_status=DRAFT`, a stable draft identifier, and exact source
 references. It is NOT a record in either posted-note collection. It has no
@@ -63,6 +68,15 @@ between formal documents and AP accounting.
   conflicting choices, only the first can change `draft` to `created`; the
   other receives 409 and cannot replace the saved choice. The chosen type is
   recorded in status history alongside the actor and time.
+- Cancellation, reopening and repricing share an atomic fence with formal
+  note issue. The issue claim reads a fresh return document, preventing a
+  stale price/type snapshot. An authoritative posted-note lookup fails closed
+  when unreadable; lagging return metadata cannot make a real note disappear.
+- A known initial validation failure releases its own issue claim so Accounts
+  can correct the input. A handled uncertain write becomes `RETRY_ISSUE`:
+  only issue retry is permitted, and even a later validation failure preserves
+  the price/cancellation fence. A persisted note repairs the return link on
+  retry without allocating a second note.
 - `quarantined_units` in acceptance results is the total rejected quantity
   whose custody/draft handoff is confirmed for this receipt, including prior
   attempts. `units_added` and `stock_ids` retain their existing accepted-stock
@@ -74,18 +88,30 @@ can therefore show its return identifier in the supplier column. Its View
 return action uses that identifier correctly. Broader name-resolution cleanup
 is outside A08.
 
+Explicit recovery limit accepted during coordination: a process that dies
+after persisting `ISSUING` but before persisting a note leaves the return locked.
+Without a real note to recover, that case requires technical reconciliation
+after proving the old issuer stopped. There is deliberately no automatic
+timeout takeover: a delayed old worker must never issue after a new worker
+cancels or changes its prices. Ordinary handled errors remain retryable as
+described above. This is not advertised as automatic recovery from process death.
+
 ## Verification status
 
-- Related backend regression run: **386 passed**, covering receipt acceptance
-  and atomic claims, void/recovery, no-PO purchases, receiving/catalogue holds,
-  quarantine, vendor-return role/status controls, formal debit notes and the
-  shared on-hand/label rule. This includes the first 17 new A08 regressions.
-- Final focused A08 suite: **19 passed**, including the two additional guards
-  that retry preserves a confirmed/priced draft and dropping unreceived extras
-  preserves rejected custody. Application source did not change after the
-  successful broad run. A supplementary run of existing last-cost,
-  receipt-after-cancel and off-catalogue release suites is pending.
-- Pinned CI **Pylint 3.0.3**, errors/fatal only, all 11 changed application
+- Final combined backend regression run is in progress. Its union covers
+  receipt acceptance/claims, void/recovery, no-PO purchases, catalogue holds,
+  cancelled orders, last cost, quarantine, return roles/statuses, formal debit
+  notes and the shared on-hand/label rule. Earlier related run: 386 passed.
+- Recovery and corrected legacy fixture run: **152 passed**, including all
+  **31 A08 cases** (19 custody/handoff plus 12 issue/cancel/reopen cases).
+  Legacy last-cost/cancel tests now provide required in-memory draft storage;
+  all existing accepted-count and monetary assertions remain, with explicit
+  rejected-quarantine counts added. No production behavior was weakened to
+  accommodate their old database-unavailable fixtures.
+- Independent reviewer also ran the 31 A08 cases and two additional late-CAS
+  race probes: **all passed**, with no source blocker found. Exact committed
+  head sign-off will follow the final commit.
+- Pinned CI **Pylint 3.0.3**, errors/fatal only, all 12 changed application
   modules: **passed, 10.00/10**. Backend import smoke: **1,314 routes**.
 - Frontend: forced `tsc -b --force` and `vite build` **passed**. Existing CSS
   comment parsing warnings remain in unchanged styles. Initial related tests
@@ -93,12 +119,16 @@ is outside A08.
   without changing the old fallback. Related first run: 85 passed/1 failed;
   corrected follow-up: **28 passed** across the affected return/cockpit suites,
   including the new draft test. Other initially passing suites were unchanged.
+  Reopen-draft UI follow-up: **8 passed**. Final forced TypeScript and Vite build
+  after that follow-up also passed.
 - Tests run through the external sanitized runner with only loopback MongoDB
   and in-memory mocks, synthetic test credentials and external writes disabled.
   Logs are under `C:/Users/avina/OneDrive/Desktop/IMS 2-0 ChatGpt/fixes-2026-10-18/`:
-  `a08-related-final.log`, `a08-focused-final.log`, `a08-ci-lint-second.log`,
-  `a08-backend-smoke.log`, `a08-frontend-build.log`,
-  `a08-frontend-tests.log`, `a08-frontend-followup.log`.
+  `a08-combined-final.log`, `a08-recovery-focused.log`, `a08-recovery-lint.log`,
+  `a08-final-smoke.log`, `a08-final-frontend-build.log`,
+  `a08-frontend-tests.log`, `a08-frontend-followup.log`,
+  `a08-recovery-frontend.log`, `a08-independent-recovery.log`,
+  `a08-independent-late-cas.log`.
 
 Independent review and PR CI remain pending. The PR is to remain a draft until
 those checks and the coordinator's review complete. No merge or deployment was
