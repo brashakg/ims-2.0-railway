@@ -259,7 +259,7 @@ def _dashboard_payables(world, user) -> float:
 
 
 @pytest.mark.parametrize("admin", [ADMIN_HQ, SUPER_HQ], ids=["admin", "superadmin"])
-def test_r3_1_an_admin_at_hq_pays_a_pune_supplier_on_account_and_pune_owes_nothing(world, admin):
+def test_r3_1_hq_advance_reduces_pune_supplier_net_but_not_invoice_aging(world, admin):
     """The HIGH probe: an admin sitting on HQ records Rs 5,000 on account for
     V-PUN, which has only ever billed Pune. The payment was stamped BV-HQ-01,
     so Pune's ledger, report, AP aging, owner dashboard and Suppliers card
@@ -279,13 +279,16 @@ def test_r3_1_an_admin_at_hq_pays_a_pune_supplier_on_account_and_pune_owes_nothi
     assert stored["store_id"] == PUN, "#1: not stamped with the supplier's shop"
 
     after = _pune_owes(world, V_PUN)
-    assert after == {"ledger": 0.0, "report_owed": 0.0, "report_paid": 5000.0, "aging": 0.0, "card": 0.0}, (
+    assert after == {"ledger": 0.0, "report_owed": 0.0, "report_paid": 5000.0, "aging": 5000.0, "card": 0.0}, (
         f"#1: Pune still owes a supplier the admin paid: {after}"
     )
-    assert _dashboard_payables(world, ACCT_PUNE) == pytest.approx(pune_dash_before - 5000.0)
-    assert _dashboard_payables(world, ACCT_PUNE) == pytest.approx(1000.0)  # only V-BOTH's B-P is left
+    assert _dashboard_payables(world, ACCT_PUNE) == pytest.approx(pune_dash_before)
+    assert _dashboard_payables(world, ACCT_PUNE) == pytest.approx(6000.0)
+    dash = _ok(world.get("/finance/owner-dashboard", ACCT_PUNE))
+    assert dash["payables"]["advances"] == 5000.0
+    assert dash["net_position"] == dash["receivables"]["total"] - 1000.0
 
-    # The payment is listed for the Pune accountant -- he sees why it is settled.
+    # The Pune accountant sees the unapplied payment in the correct shop.
     listed = _ok(world.get(f"/vendors/{V_PUN}/payments", ACCT_PUNE))["payments"]
     assert [p["payment_id"] for p in listed] == [made["payment_id"]]
 

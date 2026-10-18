@@ -286,7 +286,7 @@ def test_post_writes_ledger_credit_note_and_reduces_ap(db):
     assert rebate_leg["debit_paise"] == 375_000
     assert out["tally_voucher"]["dispatched"] is False
     # AP REDUCTION: the credit note lands in the collection AP readers consume
-    # (vendor_debit_notes), with NO bill_id so build_aging nets it off net_payable.
+    # (vendor_debit_notes), with NO bill_id: unapplied credit reduces supplier net.
     cn = db.get_collection(svc.CREDIT_NOTES_COLLECTION).find_one(
         {"rebate_id": out["rebate_id"]}
     )
@@ -295,10 +295,8 @@ def test_post_writes_ledger_credit_note_and_reduces_ap(db):
     assert cn["amount"] == 3750.0  # rupees, reduces what we owe the vendor
 
 
-def test_post_actually_reduces_net_payable_via_build_aging(db):
-    """The whole point: after posting, the vendor's AP net_payable drops by the
-    rebate. Feed the SAME vendor_debit_notes the credit note lands in to
-    ap_engine.build_aging and assert net_payable fell by the rupee rebate."""
+def test_post_reduces_supplier_net_without_implicitly_settling_an_invoice(db):
+    """The rebate is real supplier credit, but has no invoice allocation."""
     from api.services import ap_engine
 
     _seed_bills(db)  # 3 x Rs 50,000 = Rs 1,50,000 owed to V-1
@@ -318,14 +316,13 @@ def test_post_actually_reduces_net_payable_via_build_aging(db):
         {"vendor_id": "V-1"}
     )
     after = ap_engine.build_aging(bills, [], list(debit_notes), as_of_iso="2026-06-15")
-    # rebate = Rs 3,750 -> net_payable drops by exactly that
-    assert round(before["net_payable"] - after["net_payable"], 2) == round(
+    # Gross invoices stay open; the supplier's net drops by exactly Rs 3,750.
+    assert before["net_payable"] == after["net_payable"] == 150000.0
+    assert round(before["owed"] - (after["owed"] - after["advances"]), 2) == round(
         out["rebate_paise"] / 100.0, 2
     )
-    # The on-account credit note settles the open bill (ap_engine F56: credit
-    # with no bill pays the oldest due first), so the bill itself owes less.
-    assert after["items"][0]["outstanding"] == 150000.0 - 3750.0
-    assert after["unallocated_credits"] == 0.0
+    assert after["items"][0]["outstanding"] == 150000.0
+    assert after["unallocated_credits"] == 3750.0
 
 
 def test_double_post_same_period_blocked(db):

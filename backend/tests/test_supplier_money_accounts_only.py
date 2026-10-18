@@ -494,24 +494,27 @@ def _aging(world, user, **params) -> dict:
     return {v["vendor_id"]: v["net_payable"] for v in body["vendors"]}, body["totals"]
 
 
-def test_ap_aging_is_the_callers_shop_and_each_row_is_the_ledger_it_opens(world):
+def test_ap_aging_is_the_callers_shop_with_unapplied_money_separate(world):
     """The Cash Flow page lists AP aging and opens a supplier's ledger from a
-    row: the two must be the same shop's figures. Pune owes V-BOTH 580 and
+    row: both use the same shop, while gross invoices and supplier net remain
+    distinct. Pune has V-BOTH invoices 750 and unapplied 170 (net 580), plus
     V-PUN 250; the no-shop V-OLD bill is an admin's only."""
     rows, totals = _aging(world, ACCT_PUNE)
-    assert rows == {V_BOTH: pytest.approx(580.0), V_PUN: pytest.approx(250.0)}, (
+    assert rows == {V_BOTH: pytest.approx(750.0), V_PUN: pytest.approx(250.0)}, (
         f"F63: a Pune accountant's AP aging carries another shop's money: {rows}"
     )
-    assert totals["net_payable"] == pytest.approx(830.0)
-    assert rows[V_BOTH] == pytest.approx(_ledger(world, ACCT_PUNE)["closing_balance"])
-    assert _aging(world, ACCT_DHN)[0] == {V_BOTH: pytest.approx(550.0)}
+    assert totals["net_payable"] == pytest.approx(1000.0)
+    assert totals["advances"] == 170.0
+    assert rows[V_BOTH] - totals["advances"] == pytest.approx(_ledger(world, ACCT_PUNE)["closing_balance"])
+    assert _aging(world, ACCT_DHN)[0] == {V_BOTH: pytest.approx(600.0)}
     everyone, all_totals = _aging(world, ADMIN)
     assert everyone == {
-        V_BOTH: pytest.approx(1130.0),
+        V_BOTH: pytest.approx(1350.0),
         V_PUN: pytest.approx(250.0),
         V_OLD: pytest.approx(300.0),
     }
-    assert all_totals["net_payable"] == pytest.approx(1680.0)
+    assert all_totals["net_payable"] == pytest.approx(1900.0)
+    assert all_totals["advances"] == 220.0
     assert _aging(world, ADMIN, store_id=PUN)[0] == rows
     resp = world.get("/vendors/ap-aging", ACCT_PUNE, store_id=DHN)
     assert resp.status_code == 403, resp.text

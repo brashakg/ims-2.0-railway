@@ -157,30 +157,34 @@ def test_a_transfer_mirror_bill_carries_the_receiving_shop():
 
 
 # ============================================================================
-# 2. AP aging owes what the ledger owes, whatever the payments look like
+# 2. Gross invoice aging less unapplied money equals the signed supplier ledger
 # ============================================================================
 
 
 @pytest.mark.parametrize(
-    "payments,owed",
+    "payments,unapplied,net",
     [
-        # 1200 paid against a 1000 bill: the extra 200 still reduces what we owe
-        ([{"vendor_id": "V", "bill_id": "A", "amount": 1200.0}], 300.0),
-        # on-account money (no bill) nets the same way
+        # Excess 200 reduces supplier net but does not settle bill B.
+        ([{"vendor_id": "V", "bill_id": "A", "amount": 1200.0}], 200.0, 300.0),
+        # On-account money has the same net effect, with no inferred allocation.
         ([{"vendor_id": "V", "bill_id": "A", "amount": 1000.0},
-          {"vendor_id": "V", "bill_id": None, "amount": 200.0}], 300.0),
-        # paid in full and then some: we owe nothing (aging floors at 0)
-        ([{"vendor_id": "V", "bill_id": "A", "amount": 1600.0}], 0.0),
+          {"vendor_id": "V", "bill_id": None, "amount": 200.0}], 200.0, 300.0),
+        # Supplier net is negative; bill B still has no settlement allocation.
+        ([{"vendor_id": "V", "bill_id": "A", "amount": 1600.0}], 600.0, -100.0),
     ],
 )
-def test_ap_aging_owes_exactly_what_the_supplier_ledger_owes(payments, owed):
+def test_ap_aging_separates_unapplied_money_and_preserves_supplier_net(payments, unapplied, net):
     bills = [
         {"bill_id": "A", "vendor_id": "V", "total_amount": 1000.0, "bill_date": "2026-09-01", "due_date": "2026-09-30"},
         {"bill_id": "B", "vendor_id": "V", "total_amount": 500.0, "bill_date": "2026-09-02", "due_date": "2026-10-02"},
     ]
     ledger = ap_engine.build_ledger(bills, payments, [])["closing_balance"]
-    assert max(ledger, 0.0) == owed
-    assert ap_engine.build_aging(bills, payments, [])["net_payable"] == owed
+    assert ledger == net
+    aging = ap_engine.build_aging(bills, payments, [])
+    assert aging["net_payable"] == 500.0
+    assert aging["advances"] == unapplied
+    assert aging["owed"] - aging["advances"] == ledger
     by_vendor = ap_engine.build_aging_by_vendor(bills, payments, [])
-    assert by_vendor["vendors"][0]["net_payable"] == owed
-    assert by_vendor["totals"]["net_payable"] == owed
+    assert by_vendor["vendors"][0]["net_payable"] == 500.0
+    assert by_vendor["vendors"][0]["balance"] == net
+    assert by_vendor["totals"]["net_payable"] == 500.0

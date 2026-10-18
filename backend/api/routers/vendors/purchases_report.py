@@ -414,16 +414,20 @@ async def purchases_this_month(
     # as in the closing balance). A row's month is its ledger day's month.
     ledgers = _by_vendor((bills, payments, notes))
     next_due: dict = {}
+    open_invoices: set = set()
     for vid in set(ledgers) | set(rows):
         v_bills, v_pays, v_notes = ledgers.get(vid, ([], [], []))
         r = row(vid)
         for k, v in _month_figures((v_bills, v_pays, v_notes), month).items():
             r[k] += v
-        # The earliest due date of a bill still owed at the month's end, after
-        # on-account money has settled the oldest (ap_engine.build_aging).
+        # The earliest unsettled invoice at month end. An unapplied advance
+        # changes the supplier's net balance, not the invoice's due date.
+        aging = ap_engine.build_aging(v_bills, v_pays, v_notes, as_of)
+        if aging["items"]:
+            open_invoices.add(vid)
         dues = [
             str(it["due_date"])[:10]  # a stored datetime and a string both compare
-            for it in ap_engine.build_aging(v_bills, v_pays, v_notes, as_of)["items"]
+            for it in aging["items"]
             if it.get("due_date")
         ]
         next_due[vid] = min(dues) if dues else None
@@ -434,7 +438,7 @@ async def purchases_this_month(
     }
     for vid, r in rows.items():
         figures = {k: round(r[k], 2) for k in _FIGURES}
-        if not any(figures.values()):
+        if not any(figures.values()) and vid not in open_invoices:
             continue
         body["vendors"].append(
             {

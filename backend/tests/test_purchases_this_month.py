@@ -491,34 +491,37 @@ def test_the_supplier_ledger_owes_5540_and_2240(world):
 # ============================================================================
 
 
-def test_f56_ap_aging_owes_what_the_ledger_owes(world):
+def test_f56_ap_aging_keeps_unapplied_money_apart_from_gross_invoices(world):
     resp = world.get("/vendors/ap-aging", ADMIN)
     assert resp.status_code == 200, resp.text
     body = resp.json()
     per_vendor = {v["vendor_id"]: v["net_payable"] for v in body["vendors"]}
     assert set(per_vendor) == {VA, VB}, per_vendor
     _open(
-        per_vendor[VA] == pytest.approx(5540.0),
-        f"F56: AP aging says Jharkhand Optical is owed {per_vendor[VA]}, the ledger 5540",
+        per_vendor[VA] == pytest.approx(6040.0),
+        f"A12: AP aging invoices {per_vendor[VA]}, expected 6040 before the 500 advance",
     )
     _open(
-        body["totals"]["net_payable"] == pytest.approx(7780.0),
-        f"F56: AP aging total {body['totals']['net_payable']}, the ledgers 7780",
+        body["totals"]["net_payable"] == pytest.approx(8280.0),
+        f"A12: AP aging total {body['totals']['net_payable']}, gross invoices 8280",
     )
+    rows = {v["vendor_id"]: v for v in body["vendors"]}
+    assert (rows[VA]["advances"], rows[VA]["balance"]) == (500.0, 5540.0)
 
 
-def test_f56_cash_flow_payables_headline_owes_what_the_ledger_owes(world):
+def test_f56_cash_flow_payables_are_gross_but_net_position_stays_net(world):
     resp = world.get("/finance/owner-dashboard", ADMIN)
     assert resp.status_code == 200, resp.text
     body = resp.json()
     total = body["payables"]["total"]
     _open(
-        total == pytest.approx(7780.0),
-        f"F56: Cash Flow payables headline {total}, the supplier ledgers 7780",
+        total == pytest.approx(8280.0),
+        f"A12: Cash Flow payables headline {total}, gross invoices 8280",
     )
     assert body["net_position"] == pytest.approx(
         body["receivables"]["total"] - 7780.0
-    ), "net position must be AR minus the same payable"
+    ), "net position must retain the supplier net balance"
+    assert body["payables"]["advances"] == 500.0
 
 
 # ============================================================================
@@ -687,16 +690,14 @@ def _paid_ahead_everywhere(w) -> dict:
     }
 
 
-def test_f56_every_screen_owes_one_figure_with_a_transfer_and_an_advance(probe):
-    """A transfer mirror bill read 10,930 on three screens and 7,780 on Vendor
-    Payments; an advance to a vendor with no bills read 7,780 on AP aging and
-    6,780 elsewhere. The ledgers owe 5540 + 700 = 6240 and so does every
-    screen; V-NEW's 1000 is paid ahead, shown apart and never taken off
-    (round 3 #1: round 2 netted it to 5240 everywhere)."""
+def test_f56_reports_separate_gross_invoices_and_net_suppliers_without_mirrors(probe):
+    """A12: invoices 8980, unapplied 3740; positive supplier nets 6240
+    and negative supplier net 1000. Transfer mirrors count in none of them."""
     figures = _payables_everywhere(probe)
-    _open(set(figures.values()) == {6240.0}, f"F56: 'we owe' differs by screen: {figures}")
+    assert figures == {"cash_flow": 8980.0, "ap_aging": 8980.0,
+                       "vendor_payments": 6240.0, "report": 6240.0}
     ahead = _paid_ahead_everywhere(probe)
-    _open(set(ahead.values()) == {1000.0}, f"F56: 'paid ahead' differs by screen: {ahead}")
+    assert ahead == {"cash_flow": 3740.0, "ap_aging": 3740.0, "vendor_payments": 1000.0}
 
 
 def test_f56_a_transfer_mirror_bill_is_not_a_supplier_purchase(probe):
@@ -711,15 +712,13 @@ def test_f56_a_transfer_mirror_bill_is_not_a_supplier_purchase(probe):
 
 
 def test_f56_cash_flow_card_reconciles_to_its_headline(probe):
-    """Headline, overdue and the aging bars are one figure: what is still owed
-    on bills after each supplier's own on-account money. An advance beyond a
-    supplier's bills is a figure apart, never taken off the headline (round 3
-    #1: round 2 pinned bars - advances == headline)."""
+    """Headline and aging bars describe gross unsettled invoices. Unapplied
+    money stays separate even when the same supplier has open invoices."""
     p = probe.get("/finance/owner-dashboard", ADMIN).json()["payables"]
     bars = round(sum(p["buckets"].values()), 2)
-    assert bars == pytest.approx(p["total"]) == 6240.0
+    assert bars == pytest.approx(p["total"]) == 8980.0
     assert p["overdue"] <= bars
-    assert p["advances"] == p["unallocated_credits"] == pytest.approx(1000.0)  # V-NEW's advance
+    assert p["advances"] == p["unallocated_credits"] == pytest.approx(3740.0)
 
 
 def test_f56_shop_view_is_the_supplier_ledger_and_shops_add_up(world):
@@ -750,8 +749,9 @@ def test_f56_an_advance_to_a_never_billed_supplier_is_all_stores_only(probe):
 def test_f56_next_due_is_as_at_the_month_end(probe):
     """(a) BX was the bill still owed on 31 August (paid 2 Sep): August's next
     due is its 5 Sep, not yet overdue. (b) BY, dated 1 Sep, did not exist in
-    August. (c) Pune Lens Co's bill is settled by money paid on account: no
-    next due. September: BY (1 Sep) is the one left, and overdue."""
+    August. (c) Pune Lens Co's supplier net is zero after money paid on
+    account, but its invoice still has a due date until explicitly settled.
+    September: BY (1 Sep) is the one left, and overdue."""
     aug = _rows(_report(probe, ADMIN, month="2026-08"))
     _open(aug[V_BX]["next_due_date"] == "2026-09-05", f"F56: August next due {aug[V_BX]['next_due_date']}, 2026-09-05")
     assert aug[V_BX]["next_due_overdue"] is False
@@ -759,7 +759,7 @@ def test_f56_next_due_is_as_at_the_month_end(probe):
     sep = _rows(_report(probe, ADMIN, month="2026-09"))
     assert (sep[V_BX]["next_due_date"], sep[V_BX]["next_due_overdue"]) == ("2026-09-01", True)
     _open(
-        (sep[VB]["owed"], sep[VB]["next_due_date"]) == (0.0, None),
+        (sep[VB]["owed"], sep[VB]["next_due_date"]) == (0.0, "2026-09-23"),
         f"F56: Pune Lens Co owed {sep[VB]['owed']}, next due {sep[VB]['next_due_date']} (paid on account)",
     )
     assert (sep[VA]["next_due_date"], sep[VA]["next_due_overdue"]) == ("2026-09-09", True)
@@ -938,7 +938,8 @@ def test_r3_a_post_dated_cheque_is_unpaid_on_every_screen_until_its_day(round3, 
     figures = everywhere(round3, "2026-10")
     _open(set(figures.values()) == {5000.0}, f"F56: a post-dated cheque splits 'we owe': {figures}")
     totals = _payables_everywhere_r3(round3, "2026-10")
-    _open(len(set(totals.values())) == 1, f"F56: all-store 'we owe' differs by screen: {totals}")
+    assert totals == {"cash_flow": 14280.0, "ap_aging": 14280.0,
+                      "vendor_payments": 13680.0, "report": 13680.0}
 
     # On 20 Nov the cheque has been paid: every screen says 0, and September's
     # report (as at 30 Sep) still says 5000 was owed then.

@@ -350,9 +350,9 @@ async def owner_dashboard(current_user: dict = Depends(get_current_user)):
     Shop scope (F63), one rule for every figure on it: ADMIN / SUPERADMIN read
     every shop; any other login (a shop's accountant) reads its OWN shop --
     resolve_store_scope, the rule AP aging, /finance/vendor-payments and the
-    Purchases report apply -- so its payables equal theirs and AR, revenue,
-    expenses and 'Paid to vendors' are the same shop's (net_position and
-    net_cash_flow never mix two scopes)."""
+    Purchases report apply. Invoice aging is gross unsettled bills; supplier
+    net balances also subtract unapplied money. AR, revenue, expenses and
+    'Paid to vendors' share this shop scope."""
     _require_finance_admin(current_user)
     db = _get_db()
     now = now_ist_naive()
@@ -364,6 +364,12 @@ async def owner_dashboard(current_user: dict = Depends(get_current_user)):
 
     bills, payments, dn = _ap_rows(db, scope)
     ap = ap_engine.build_aging(bills, payments, dn)
+    # Preserve the net-position meaning while invoice aging stays gross.
+    # One supplier's advance cannot reduce another supplier's positive debt.
+    supplier_net_owed = sum(
+        max(v["balance"], 0.0)
+        for v in ap_engine.build_aging_by_vendor(bills, payments, dn)["vendors"]
+    )
     ap_overdue = round(ap["total_outstanding"] - ap["buckets"]["current"], 2)
     due_7d = 0.0
     due_30d = 0.0
@@ -476,24 +482,19 @@ async def owner_dashboard(current_user: dict = Depends(get_current_user)):
         "store_id": scope,
         "receivables": ar,
         "payables": {
-            # THE ONE 'WE OWE' RULE (F56, ap_engine.build_aging): per supplier,
-            # its ledger balance (bills - payments - debit notes; its own
-            # on-account money settles its own oldest bills). `total` = what
-            # we owe = the sum of each supplier's balance above 0 = the
-            # buckets added up; overdue / due_*d are parts of it.
+            # Gross unsettled invoices = buckets added up; overdue / due_*d
+            # are parts of it. Unapplied advances do not settle an invoice.
             "total": ap["owed"],
             "buckets": ap["buckets"],
             "overdue": ap_overdue,
             "due_7d": due_7d,
             "due_30d": due_30d,
-            # Money paid ahead to suppliers (the sum of each supplier's balance
-            # below 0): a figure apart, never taken off `total` -- one
-            # supplier's advance does not pay another's bills.
+            # Unapplied money, including excess allocations, stays separate.
             "advances": ap["advances"],
             # Older key, same figure as `advances`.
             "unallocated_credits": ap["advances"],
         },
-        "net_position": round(ar["total"] - ap["owed"], 2),
+        "net_position": round(ar["total"] - supplier_net_owed, 2),
         "this_month": {
             "revenue": revenue,
             "expenses": expenses,
