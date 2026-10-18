@@ -388,8 +388,28 @@ def _has_publishable_price(
     product with no catalog_variants rows is judged on its single implied
     default variant, which _resolve_variant_pricing resolves from the product /
     ecom pricing."""
+    return not unpriced_size_names(product, variants)
+
+
+def unpriced_size_names(
+    product: Dict[str, Any], variants: Optional[List[Dict[str, Any]]]
+) -> List[str]:
+    """THE ONE PRICE RULE (audit SF-05, owner 18 Oct 2026): every size of a
+    listing must resolve to a positive selling price (its own, else the
+    parent's fallback -- _resolve_variant_pricing). Returns the sizes that do
+    NOT, each named by its IMS SKU (never a Shopify id) so the refusal can say
+    which size to price. [] means every size is priced. Pure."""
     rows = list(variants or []) or [{}]
-    return all(_resolve_variant_pricing(product, v)[0] > 0 for v in rows)
+    return [
+        str(
+            v.get("sku")
+            or (f"size {v['option_size']}" if v.get("option_size") else "")
+            or product.get("sku")
+            or "a size with no SKU"
+        )
+        for v in rows
+        if _resolve_variant_pricing(product, v)[0] <= 0
+    ]
 
 
 def _variants_for_price_push(

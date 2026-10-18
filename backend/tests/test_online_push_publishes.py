@@ -66,6 +66,9 @@ _DENIED_PUBLISH_MSG = (
 # ---------------------------------------------------------------------------
 
 
+_BROKEN_HOST = "broken-host.example.com"
+
+
 class _Shopify:
     def __init__(self, media_on_existing=0, product_id="gid://shopify/Product/900"):
         self.calls = []
@@ -142,6 +145,13 @@ class _Shopify:
                 }
             }
         if op == "imsProductCreateMedia":
+            if any(_BROKEN_HOST in str(m.get("originalSource"))
+                   for m in (variables.get("media") or [])):
+                # A broken image host: Shopify refuses the photograph, so the
+                # product exists but its publish is withheld (a row that can
+                # reach Shopify yet never go live).
+                return {"data": {"productCreateMedia": {"media": [], "mediaUserErrors": [
+                    {"field": ["media"], "message": "Image URL is invalid"}]}}}
             return {
                 "data": {
                     "productCreateMedia": {
@@ -335,9 +345,10 @@ def test_ims_records_the_product_as_published(db, shopify):
     assert saved["ecom"]["shopify_product_id"] == shopify.product_id
 
 
-def test_publish_is_withheld_when_the_variant_could_not_be_priced(db, shopify):
-    """A 0.00 listing is worse than no listing. The product may be created, but
-    it must not become visible."""
+def test_an_unpriced_product_is_refused_before_anything_is_sent(db, shopify):
+    """A 0.00 listing is worse than no listing. Owner rule 18 Oct 2026
+    (audit SF-05): a first publish with any unpriced size is REFUSED -- no
+    product is created, nothing goes live, the size is named by its IMS SKU."""
     doc = _product()
     doc.pop("mrp", None)
     doc.pop("offer_price", None)
@@ -347,8 +358,10 @@ def test_publish_is_withheld_when_the_variant_could_not_be_priced(db, shopify):
 
     assert res.ok is False, "an invisible product was reported as pushed"
     assert res.reason == "publish_withheld"
-    assert shopify.calls_of("imsPublishablePublish") == []
-    assert (res.publication or {}).get("published") is not True
+    assert res.code == shopify_push.UNPRICED_SIZE
+    assert "SKU-P1" in res.error and "gid://" not in res.error
+    assert shopify.calls == [], "an unpriced product reached the Shopify API"
+    assert db["catalog_products"].find_one({"id": "P1"})["ecom"]["locally_modified"] is True
 
 
 # ===========================================================================
@@ -504,10 +517,9 @@ def test_a_live_product_missing_its_photo_gets_one_on_the_next_press(db, shopify
 
 
 def _withheld(db, shopify, pid="P1"):
-    """A press that creates the product but cannot publish it: no price."""
-    doc = _product(pid=pid)
-    doc.pop("mrp", None)
-    doc.pop("offer_price", None)
+    """A press that creates the product but cannot publish it: its photograph
+    is refused by Shopify. (An unpriced one is refused before any write.)"""
+    doc = _stuck(pid)
     _seed(db, doc)
     return _run(shopify_push.push_product(db, doc, []))
 
@@ -788,7 +800,7 @@ def test_a_press_that_published_nothing_is_not_ok(db, no_publication):
     assert no_publication.calls_of("imsPublishablePublish") == []
 
 
-def test_an_unpriced_withheld_press_is_not_ok_either(db, shopify):
+def test_a_photo_withheld_press_is_not_ok_either(db, shopify):
     """Same rule on the other withholding branch -- the product exists on
     Shopify, is invisible, and the press must say so."""
     res = _withheld(db, shopify)
@@ -926,10 +938,15 @@ def test_a_photograph_shopify_could_not_fetch_is_not_a_photograph(db, shopify):
 # ===========================================================================
 
 
-def _unpriced(pid):
+def _stuck(pid):
     """A row that can NEVER publish: it reaches Shopify (so it is stamped and
-    burns a cap slot) but has no provable price, so the publish is withheld and
-    the row is re-queued -- forever."""
+    burns a cap slot) but its photograph's host is broken, so the publish is
+    withheld and the row is re-queued -- forever."""
+    return _product(pid=pid, images=["https://%s/x.jpg" % _BROKEN_HOST])
+
+
+def _unpriced(pid):
+    """A row refused before any write: no size has a price (SF-05)."""
     doc = _product(pid=pid)
     doc.pop("mrp", None)
     doc.pop("offer_price", None)
@@ -946,7 +963,7 @@ def test_the_queue_drains_even_when_the_stuck_rows_are_at_the_front(
     says 'run again to continue'. Repeated presses must publish all 15."""
     monkeypatch.setattr(push_router, "_get_db", lambda: db)
     for i in range(25):
-        _seed(db, _unpriced("STUCK%02d" % i))
+        _seed(db, _stuck("STUCK%02d" % i))
     good = ["GOOD%02d" % i for i in range(15)]
     for pid in good:
         _seed(db, _product(pid=pid))
@@ -969,7 +986,7 @@ def test_a_press_that_published_nothing_never_promises_progress(db, shopify, mon
     keys its 'run again to continue' sentence off."""
     monkeypatch.setattr(push_router, "_get_db", lambda: db)
     for i in range(30):
-        _seed(db, _unpriced("STUCK%02d" % i))
+        _seed(db, _stuck("STUCK%02d" % i))
 
     out = _run(push_router.push_all_pending(entities="products", current_user=_admin()))
 
@@ -1307,3 +1324,22 @@ def test_an_update_never_sends_productOptions_but_a_create_still_does(db, shopif
     res = _run(shopify_push.push_product(db, doc, variants))
     assert "productOptions" not in _input_of(shopify, "imsProductUpdate")
     assert "productOptions" not in (res.payload or {})
+
+
+def test_unpriced_refusals_never_burn_the_batch_cap(db, shopify, monkeypatch):
+    """SF-05: a pre-write refusal never reached Shopify, so -- like the
+    photo-less refusal -- it must not spend a cap slot, or 25 unpriced rows
+    would starve every priced product behind them."""
+    monkeypatch.setattr(push_router, "_get_db", lambda: db)
+    for i in range(30):
+        _seed(db, _unpriced("NOPRICE%02d" % i))
+    good = ["GOOD%02d" % i for i in range(5)]
+    for pid in good:
+        _seed(db, _product(pid=pid))
+
+    out = _run(push_router.push_all_pending(entities="products", current_user=_admin()))
+
+    assert out["summary"]["products"].get("publish_withheld") == 30
+    assert out["summary"]["products"]["failed"] == 0
+    assert len(shopify.calls_of("imsPublishablePublish")) == 5
+    assert out["pushed_count"] == 5

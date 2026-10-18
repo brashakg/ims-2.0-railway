@@ -101,7 +101,7 @@ def _seed_products(db):
     db.seed(
         "catalog_products",
         [
-            {"id": "P-live", "sku": "S1", "title": "Live edited", "brand": "RB", "images": PHOTO,
+            {"id": "P-live", "sku": "S1", "title": "Live edited", "brand": "RB", "mrp": 1000, "images": PHOTO,
              "ecom": {"shopify_product_id": "gid://shopify/Product/1", "locally_modified": True}},
             {"id": "P-new", "sku": "S2", "title": "Never pushed", "brand": "RB", "images": PHOTO,
              "ecom": {"locally_modified": True, "status": "PUBLISHED"}},

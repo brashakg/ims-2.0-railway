@@ -209,7 +209,7 @@ def test_push_product_not_skipped_when_unblocked(monkeypatch):
         {"collection_id": "C-OK", "collection_type": "CUSTOM", "online_sync_blocked": False,
          "products": [{"sku": "SKU-Y", "position": 0}]}
     )
-    product = {"id": "P2", "sku": "SKU-Y", "title": "Fine", "images": ["https://cdn.example.com/p.jpg"], "ecom": {"status": "PUBLISHED"}}
+    product = {"id": "P2", "sku": "SKU-Y", "title": "Fine", "mrp": 1000, "images": ["https://cdn.example.com/p.jpg"], "ecom": {"status": "PUBLISHED"}}
     res = _run(shopify_push.push_product(db, product, []))
     assert res.mode == shopify_push.MODE_SIMULATED  # normal dry-run, not blocked
     assert res.ok is True
@@ -572,10 +572,10 @@ def test_all_pending_sweep_excludes_blocked_products(monkeypatch):
          "products": [{"sku": "SKU-BAD", "position": 0}]}
     )
     conn.db["catalog_products"].insert_one(
-        {"id": "P-BAD", "sku": "SKU-BAD", "images": ["https://cdn.example.com/p.jpg"], "ecom": {"status": "PUBLISHED", "locally_modified": True}}
+        {"id": "P-BAD", "sku": "SKU-BAD", "mrp": 1000, "images": ["https://cdn.example.com/p.jpg"], "ecom": {"status": "PUBLISHED", "locally_modified": True}}
     )
     conn.db["catalog_products"].insert_one(
-        {"id": "P-OK", "sku": "SKU-OK", "images": ["https://cdn.example.com/p.jpg"], "ecom": {"status": "PUBLISHED", "locally_modified": True}}
+        {"id": "P-OK", "sku": "SKU-OK", "mrp": 1000, "images": ["https://cdn.example.com/p.jpg"], "ecom": {"status": "PUBLISHED", "locally_modified": True}}
     )
 
     out = _run(osp.push_all_pending(entities="products", limit=500,
