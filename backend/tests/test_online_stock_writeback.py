@@ -102,8 +102,12 @@ class _Spy:
         """Every call that is not the READ-ONLY locations list. A LIVE sale
         carries the last sweep's location verdict, and makes that ONE
         read-only query itself when no pass has ever recorded one (invariant 2
-        on the sale door), so "one call" pins are about WRITES."""
-        return [c for c in self.calls if "imsLocationList" not in c["query"]]
+        on the sale door), so "one call" pins are about WRITES. The re-read
+        after an unanswered write (audit SF01) is a READ too."""
+        return [
+            c for c in self.calls
+            if "imsLocationList" not in c["query"] and "imsInventoryLevelsRead" not in c["query"]
+        ]
 
     def rows(self):
         out = set()
@@ -518,6 +522,8 @@ def test_transport_exception_does_not_propagate(monkeypatch):
     assert summary["failed"] == 1   # recorded, not raised
     assert summary["pushed"] == 0
     assert len(spy.writes()) == 1
+    # no answer is never assumed: Shopify was re-read before calling it failed (SF01)
+    assert len([c for c in spy.calls if "imsInventoryLevelsRead" in c["query"]]) == 1
 
 
 def test_after_sale_never_raises_into_sale_path(monkeypatch):

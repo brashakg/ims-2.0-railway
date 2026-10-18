@@ -569,7 +569,7 @@ def test_T7_item_not_stocked_activates_per_item_at_the_chunks_locations_then_ret
     ok = _ok_body("inventorySetQuantities", inventoryAdjustmentGroup={"createdAt": "now", "reason": "correction"})
     spy = _Spy(_responses(**{"inventorySetQuantities": [_set_error("ITEM_NOT_STOCKED_AT_LOCATION"), ok]}))
     _live(monkeypatch, spy)
-    out = _run(shopify_push.set_inventory_quantities(None, _rows3()))
+    out = _run(shopify_push.set_inventory_quantities(StrictDB(), _rows3()))
     assert out["errors"] == [] and out["set"] == 3 and out["activated"] == 1 and out["code"] is None
     assert spy.order("inventorySetQuantities", "inventoryBulkToggleActivation") == [
         "inventorySetQuantities", "inventoryBulkToggleActivation", "inventorySetQuantities",
@@ -595,7 +595,7 @@ def test_T7b_a_failed_activation_is_retried_split_per_location_and_coded(monkeyp
     run, one recovery per location."""
     spy = _Spy(_responses(**{"inventorySetQuantities": _set_error("ITEM_NOT_STOCKED_AT_LOCATION")}))
     _live(monkeypatch, spy)
-    out = _run(shopify_push.set_inventory_quantities(None, _rows3()))
+    out = _run(shopify_push.set_inventory_quantities(StrictDB(), _rows3()))
     assert out["set"] == 0 and out["written"] == []
     assert out["code"] == shopify_push.STOCK_ACTIVATION_FAILED
     assert len(out["errors"]) == 1, "a split never inflates the caller's failure count"
@@ -687,7 +687,7 @@ def test_T7c_an_unrelated_user_error_never_activates(monkeypatch):
     it IS retried split per location (round-3 P1) and it IS coded."""
     spy = _Spy(_responses(**{"inventorySetQuantities": _set_error("INVALID_QUANTITY", "bad")}))
     _live(monkeypatch, spy)
-    out = _run(shopify_push.set_inventory_quantities(None, _rows3()))
+    out = _run(shopify_push.set_inventory_quantities(StrictDB(), _rows3()))
     assert out["set"] == 0 and out["code"] == shopify_push.STOCK_WRITE_FAILED
     assert len(out["errors"]) == 1, "a split never inflates the caller's failure count"
     assert spy.calls_for("inventoryBulkToggleActivation") == []
@@ -700,7 +700,7 @@ def test_writer_chunks_at_shopifys_cap_and_records_only_accepted_rows(monkeypatc
     spy = _Spy(_responses(**{"inventorySetQuantities": [ok, _set_error("INVALID_QUANTITY")]}))
     _live(monkeypatch, spy)
     rows = [(f"gid://shopify/InventoryItem/{i}", LOC_A, 1) for i in range(251)]
-    out = _run(shopify_push.set_inventory_quantities(None, rows))
+    out = _run(shopify_push.set_inventory_quantities(StrictDB(), rows))
     assert len(spy.calls_for("inventorySetQuantities")) == 2
     assert out["set"] == 250 and len(out["written"]) == 250 and len(out["errors"]) == 1
 

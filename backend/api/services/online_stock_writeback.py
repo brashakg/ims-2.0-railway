@@ -518,7 +518,7 @@ async def writeback_skus(
     # sibling service is broken.
     try:
         from . import online_catalog
-        from .shopify_push.inventory import push_skus_stock
+        from .shopify_push.inventory import push_skus_stock, stock_write_ticket
     except Exception as exc:  # noqa: BLE001
         logger.debug("[STOCK_WRITEBACK] deps unavailable: %s", exc)
         return summary
@@ -543,7 +543,9 @@ async def writeback_skus(
         _record_run(db, summary)
         return summary
 
-    # 2. THE ONE rule, per shop, for the targeted SKUs.
+    # 2. THE ONE rule, per shop, for the targeted SKUs -- stamped BEFORE the
+    #    read, so an older reading can never overwrite this one (audit SF01).
+    ticket = stock_write_ticket(db)
     quantities = online_quantities_for_skus(
         db, list(targets.keys()), safety_buffer=safety_buffer
     )
@@ -572,7 +574,9 @@ async def writeback_skus(
 
     # 3. THE ONE writer: one row per (mapped shop, SKU), explicit 0 included
     #    (a SUPERADMIN-blocked SKU arrives from the rule as 0 everywhere).
-    res = await push_skus_stock(db, list(targets.keys()), quantities=quantities, source=source)
+    res = await push_skus_stock(
+        db, list(targets.keys()), quantities=quantities, source=source, ticket=ticket
+    )
     summary["unmapped_stores"] = list(res.get("unmapped_stores") or [])
     summary["unknown_stores"] = list(res.get("unknown_stores") or [])
     summary["skipped_no_onhand"] = sum(1 for s in targets if s not in quantities)
