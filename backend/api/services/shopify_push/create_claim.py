@@ -354,11 +354,10 @@ async def prepare_identity(db) -> None:
 
 async def _search_window(db, pid: str, claim: Dict[str, Any]) -> List[str]:
     at = _utc(claim.get("at"))
-    fmt = "%Y-%m-%dT%H:%M:%SZ"
-    q = (
-        f"created_at:>='{(at - _WINDOW_BEFORE).strftime(fmt)}' "
-        f"AND created_at:<='{(at + _WINDOW_AFTER).strftime(fmt)}'"
-    )
+    # Full UTC instants for Shopify's search syntax (no calendar day derived).
+    lo = (at - _WINDOW_BEFORE).strftime("%Y-%m-%dT%H:%M:%SZ")
+    hi = (at + _WINDOW_AFTER).strftime("%Y-%m-%dT%H:%M:%SZ")
+    q = f"created_at:>='{lo}' AND created_at:<='{hi}'"
     hits: List[str] = []
     after: Optional[str] = None
     for _ in range(_MAX_PAGES):
