@@ -538,11 +538,13 @@ _SEEDED_RETURN = {
 }
 
 
-def test_get_return_cross_store_403(monkeypatch):
+def test_get_return_cross_store_404_matches_missing_id(monkeypatch):
     app, _, _ = _returns_ctx(monkeypatch, seed_return=_SEEDED_RETURN)
     client = _returns_client(app, ["STORE_MANAGER"], OWN_STORE)
     r = client.get(f"/api/v1/returns/{_SEEDED_RETURN['return_id']}")
-    assert r.status_code == 403
+    missing = client.get("/api/v1/returns/RET-DOES-NOT-EXIST")
+    assert r.status_code == missing.status_code == 404
+    assert r.json() == missing.json() == {"detail": "Return not found"}
 
 
 def test_get_return_same_store_ok(monkeypatch):

@@ -228,11 +228,16 @@ def test_a_login_that_holds_a_shop_keeps_its_list(world):
     sm = _user("STORE_MANAGER", [DHN])
     for path in ("/returns", "/workshop/jobs", "/expenses/pending-approval", "/customers"):
         assert _ids(world(sm, path).json()) == [DHN], path
-    # An AREA_MANAGER holding a shop keeps the HQ reach the returns list gives
-    # him; stock transfers are his own shops' (transfers._in_callers_stores,
-    # user_store_scope -- #1185).
+    # An AREA_MANAGER sees assigned shops in returns and stock transfers.
+    # Check the status explicitly: searching the error text for a shop ID
+    # would mistake "No access to store ..." for a returned shop record.
     am = _user("AREA_MANAGER", [PUN])
-    assert _ids(world(am, "/returns", store_id=DHN).json()) == [DHN]
+    refused = world(am, "/returns", store_id=DHN)
+    assert refused.status_code == 403
+    assert refused.json() == {"detail": f"No access to store {DHN}"}
+    allowed = world(am, "/returns")
+    assert allowed.status_code == 200
+    assert _ids(allowed.json()) == [PUN]
     assert _ids(world(am, "/transfers").json()) == [PUN]
 
 
