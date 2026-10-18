@@ -601,7 +601,7 @@ def current_authority(payload: dict, request: Request = None) -> dict:
     if not user_id:
         return payload
     cached = getattr(request.state, "_current_authority", None) if request else None
-    if cached is not None and cached[0] == user_id:
+    if isinstance(cached, tuple) and len(cached) == 2 and cached[0] == user_id:
         return {**payload, **cached[1]}
 
     from ..dependencies import get_user_repository
