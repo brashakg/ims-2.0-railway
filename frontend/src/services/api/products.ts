@@ -21,6 +21,10 @@ export interface CategoryRegistryField {
   // When present the form renders a select restricted to these values — the
   // backend enforces the same list at create/update.
   options?: string[];
+  /** Model families (G1): 'model' = shared by every colour/size of a model
+   *  (filled from the model, edited only on it); 'variant' = per item. The
+   *  ONE list is the server's product_master.MODEL_LEVEL_FIELDS. */
+  level?: 'model' | 'variant';
 }
 
 export interface CategoryRegistryEntry {
@@ -31,6 +35,43 @@ export interface CategoryRegistryEntry {
   optional_fields: string[];
   fields: CategoryRegistryField[];
   forced_discount_category: string | null;
+  /** G1: same-model items of this category are one product's colours/sizes. */
+  has_families?: boolean;
+  /** G1: this category's model-level fields (shared by the whole model). */
+  model_fields?: string[];
+}
+
+/** G1: one item of a model (GET /products/{id}/family, the grouped list). */
+export interface FamilyMember {
+  product_id: string;
+  sku?: string;
+  name?: string;
+  color: string;
+  size: string;
+  mrp?: number | null;
+  offer_price?: number | null;
+  is_active: boolean;
+  is_lead: boolean;
+  archived?: boolean;
+}
+
+/** G1: a product's model as the drawer shows it. */
+export interface ProductFamily {
+  product_id: string;
+  lead_id: string | null;
+  family_category: boolean;
+  opted_out: boolean;
+  candidate_lead: { product_id: string; sku?: string; name?: string } | null;
+  members: FamilyMember[];
+}
+
+/** G1: the model a new item joins on Save (GET /products/similar `family`). */
+export interface FamilyHint {
+  lead_id: string;
+  lead_sku?: string;
+  label: string;
+  count: number;
+  chips: string[];
 }
 
 export interface CategoryRegistryResponse {
@@ -91,6 +132,10 @@ export interface CreateProductPayload {
   cost_price?: number;
   discount_category?: string;
   images?: string[];
+  /** G1: the model's lead product_id -- this is a new colour/size of it. */
+  variant_of?: string;
+  /** G1: 'This is a different model' -- never link it automatically. */
+  family_opt_out?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +210,8 @@ export interface SimilarProductsResponse {
    *  rule, product_master.identity_inputs): a change to any other one leaves
    *  it true. Absent = every attribute decides. */
   identity_fields?: string[];
+  /** G1: the model this item joins on Save (null: no model yet). */
+  family?: FamilyHint | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -416,6 +463,8 @@ export const productApi = {
     date_to?: string;
     /** 'any' | 'mine' | a flag type | 'archived' (admins only). */
     flag?: string;
+    /** 'model' = one row per model, its colours/sizes in `family` (G1). */
+    group?: 'model';
   }) => {
     const response = await api.get('/products', { params });
     return response.data;
@@ -526,6 +575,25 @@ export const productApi = {
   ): Promise<SimilarProductsResponse> => {
     const response = await api.get('/products/similar', { params, signal });
     return response.data as SimilarProductsResponse;
+  },
+
+  // ---- Model families (G1, owner 2026-10-18) ----
+  getFamily: async (productId: string): Promise<ProductFamily> => {
+    const response = await api.get(`/products/${encodeURIComponent(productId)}/family`);
+    return response.data as ProductFamily;
+  },
+
+  /** Catalogue review's "Link to model": no leadId = the model's own lead. */
+  linkToModel: async (productId: string, leadId?: string) => {
+    const response = await api.post(`/products/${encodeURIComponent(productId)}/link-to-model`, {
+      lead_id: leadId ?? null,
+    });
+    return response.data;
+  },
+
+  unlinkFromModel: async (productId: string) => {
+    const response = await api.post(`/products/${encodeURIComponent(productId)}/unlink-from-model`);
+    return response.data;
   },
 
   createProduct: async (data: CreateProductPayload) => {

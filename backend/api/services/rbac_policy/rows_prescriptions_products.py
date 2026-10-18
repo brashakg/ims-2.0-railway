@@ -365,4 +365,21 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/products/{product_id}",
         "allowed": ["ADMIN", "CATALOG_MANAGER"],
     },
+    # Model families (G1, owner 2026-10-18): the drawer reads a product's
+    # model (its colours and sizes); catalogue review links / unlinks.
+    {
+        "method": "GET",
+        "path": "/api/v1/products/{product_id}/family",
+        "allowed": "AUTHENTICATED",
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/products/{product_id}/link-to-model",
+        "allowed": ["ADMIN", "CATALOG_MANAGER"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/products/{product_id}/unlink-from-model",
+        "allowed": ["ADMIN", "CATALOG_MANAGER"],
+    },
 ]

@@ -25,6 +25,7 @@ import {
   CAPS_ENTRY_FIELDS,
   CATEGORIES,
   getCategoryFields,
+  modelLevelFields,
   type CategoryField,
 } from '../productAddShared';
 import { SimilarProductsHint } from '../SimilarProductsHint';
@@ -40,7 +41,7 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
     reviewTags, setReviewTags, subbrandsByBrand, errors, showAdvanced,
     setShowAdvanced, openSections, toggleSection, liveErrors, sectionIssues,
     firstFieldRef, editMode, isReviewMode, variantCtx, flaggedFields, clearFlag,
-    reviewSnapshot, handleSimilarPick, handleSimilarOpen,
+    reviewSnapshot, handleSimilarPick, handleSimilarOpen, handleFamilyFound,
   } = form;
   // "Auto-fill with AI" (description) round-trip in flight.
   const [generatingDesc, setGeneratingDesc] = useState(false);
@@ -85,7 +86,13 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
   const renderField = (field: CategoryField, autoFocus = false) => {
     // Variant mode: brand/model are LOCKED (the variant shares them); copied
     // sizes stay amber-flagged until the operator confirms (touches) them.
-    const isLocked = Boolean(variantCtx?.locked.has(field.name));
+    // G1: editing a colour/size of a model, its model-level fields are the
+    // model's (the server refuses a change here: "Edit on the model").
+    const onModel =
+      editMode?.kind === 'spine' &&
+      Boolean(editMode.variantOf) &&
+      modelLevelFields(selectedCategory).includes(field.name);
+    const isLocked = Boolean(variantCtx?.locked.has(field.name)) || onModel;
     const isFlagged = !isLocked && flaggedFields.has(field.name);
     // CAPS while typing, on the fields the SERVER re-cases on save. This is a
     // CSS transform only: e.target.value still carries exactly what was typed,
@@ -106,7 +113,7 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
       <label className="block text-xs font-medium text-gray-700 mb-1" htmlFor={fieldId}>
         {field.label}
         {field.required && <span className="text-red-500 ml-1">*</span>}
-        {isLocked && <LockChip text="locked · same as the model" />}
+        {isLocked && <LockChip text={onModel ? 'edit on the model' : 'locked · same as the model'} />}
         {isFlagged && <ConfirmChip />}
       </label>
       {field.type === 'select' ? (
@@ -402,6 +409,7 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
                       onPickSibling={handleSimilarPick}
                       onOpenExisting={handleSimilarOpen}
                       selfId={editMode?.kind === 'spine' ? editMode.id : null}
+                      onFamily={handleFamilyFound}
                     />
                   </Fragment>
                 );

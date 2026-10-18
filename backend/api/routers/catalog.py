@@ -2319,6 +2319,19 @@ async def create_catalog_product(
 
     _save_catalog_product(product_data)
 
+    # Model families (G1): a model that already exists takes this product as
+    # a new colour/size -- the same link_to_family every door uses. Fail-soft:
+    # an unlinked product is still a product (catalogue review links it).
+    if _pr is not None:
+        try:
+            _fdb = _get_db()
+            _lead = _pm.find_family_lead(_fdb.get_collection("products"), _spine, exclude_id=product_id)
+            if _lead is not None:
+                _pm.link_to_family(_fdb, product_id, _lead["product_id"], actor=current_user.get("user_id"))
+                product_data = _get_catalog_product(product_id) or product_data
+        except Exception:  # noqa: BLE001
+            logger.warning("[CATALOG] model link skipped for %s", product_id, exc_info=True)
+
     # Online discount engine (rebuild of BVI DiscountRule): compute + store the
     # ONLINE storefront price from the active rules onto product_data.ecom.*
     # (and any variants). ADDITIVE + FAIL-SOFT -- it must NEVER block a save, and
@@ -2514,6 +2527,31 @@ async def update_catalog_product(
             existing["model"] = str(
                 merged_attrs.get("model_no") or merged_attrs.get("model_name") or ""
             ).strip()
+
+    # Model families (G1): THE variant guard (product_master) on what this
+    # save carries -- a colour/size's model-level fields and category are
+    # edited on its model. Read before any write; an unreadable spine is not
+    # waved through.
+    if product.attributes or category_changed:
+        try:
+            from ..dependencies import get_product_repository
+
+            _frepo = get_product_repository()
+            _fspine = _spine_of(_frepo, pre_edit) if _frepo is not None else None
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=503, detail=_SPINE_UNCHECKED) from exc
+        if _fspine:
+            _carried = {
+                k: (existing.get("attributes") or {}).get(k) for k in (product.attributes or {})
+            }
+            try:
+                _pm.assert_variant_model_fields(
+                    _fspine,
+                    _carried,
+                    category=existing.get("category") if category_changed else None,
+                )
+            except _pm.ProductMasterError as err:
+                raise HTTPException(status_code=err.status, detail=err.message) from err
 
     # The code the spine (and a size variant's row) must take; None = this
     # save moved no barcode, so it writes none: the twin is never "the newer
@@ -3404,6 +3442,35 @@ async def _archive_product(
     revive_discarded_draft): its identity key is unique, so a second row for
     it can never be made. The asks for cataloguing naming it close, and an
     audit row records who discarded it."""
+    # Model families (G1): a model's LEAD that is on the website is taken off
+    # it FIRST -- its other colours and sizes move to a new lead only once
+    # the listing is down. Refused (nothing written) when the take-down did
+    # not land, so no variant is ever left under a listing still on sale.
+    delisted_first = False
+    try:
+        from ..dependencies import get_product_repository as _lead_repo
+
+        spine_id = spine_id or _spine_product_id(_lead_repo(), product)
+        leads_variants = bool(spine_id) and (
+            _get_db().get_collection("products").find_one({"variant_of": spine_id}) is not None
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("[CATALOG] model check on delete skipped for %s", spine_id, exc_info=True)
+        leads_variants = False
+    if leads_variants and product is not None and (product.get("ecom") or {}).get("shopify_product_id"):
+        taken = await _delist.delist_if_live(_get_db(), product, reason="deleted", actor=actor)
+        if not (taken and taken.get("ok")):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This model is on the website and its listing could not be taken "
+                    "down, so nothing was deleted (its other colours and sizes would "
+                    "be left under it). Try again in a minute."
+                ),
+            )
+        product = _get_catalog_product(product.get("id")) or product
+        delisted_first = True
+
     deleted_at = datetime.now(timezone.utc).isoformat()
     if product is not None:
         product.pop("_id", None)  # a twin read raw from Mongo; never $set _id
@@ -3485,8 +3552,21 @@ async def _archive_product(
     # AFTER the write above on purpose: the soft delete keeps the row and its
     # gid, and the full-doc $set would clobber the take-down's own ecom
     # write-back. Fail-soft: the delete stands even if Shopify says no.
-    if product is not None:
+    if product is not None and not delisted_first:
         await _delist.delist_if_live(_get_db(), product, reason="deleted", actor=actor)
+    # Model families (G1): an archived LEAD hands the model to its next
+    # first-catalogued variant -- after the take-down above (a lead on the
+    # website was taken down first, or nothing was deleted). Fail-soft: the
+    # archive stands.
+    if spine_id:
+        try:
+            from ..dependencies import get_audit_repository
+
+            _pm.promote_new_lead(
+                _get_db(), spine_id, actor=actor.get("user_id"), audit_repo=get_audit_repository()
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("[CATALOG] model lead hand-over skipped for %s", spine_id, exc_info=True)
     # Every archive door: a cached Catalog / till list page must not keep
     # listing it until the cache runs out.
     invalidate_product_lists()
@@ -3698,10 +3778,14 @@ async def bulk_archive_products(
             # The single Delete door's rule (audit C1): never behind a receipt.
             row.update(status="refused", reason=refused.detail)
         elif body.apply:
-            await _archive_product(
-                twin, current_user, spine_id=pid, discarded_draft=_pm.is_ordered_draft(spine)
-            )
-            row["status"] = "done"
+            try:
+                await _archive_product(
+                    twin, current_user, spine_id=pid, discarded_draft=_pm.is_ordered_draft(spine)
+                )
+                row["status"] = "done"
+            except HTTPException as exc:
+                # A model on the website whose listing did not come down (G1).
+                row.update(status="refused", reason=exc.detail)
         else:
             row["status"] = "ready"
         if spine is not None:

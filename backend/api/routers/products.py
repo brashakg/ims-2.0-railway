@@ -421,6 +421,8 @@ def _canonical_door_payload(
         "model": product.model,
         "color": product.color,
         "size": product.size,
+        "variant_of": getattr(product, "variant_of", None) or None,
+        "family_opt_out": bool(getattr(product, "family_opt_out", False)),
     }
 
 
@@ -582,6 +584,11 @@ class ProductCreate(BaseModel):
     brand: str
     model: str
     variant: Optional[str] = None
+    # Model families (G1, owner 2026-10-18): the model's lead product_id when
+    # this is a new colour/size of it (Add Product's same-model banner), and
+    # 'This is a different model' (no automatic link).
+    variant_of: Optional[str] = Field(None, max_length=120)
+    family_opt_out: bool = False
     color: Optional[str] = None
     size: Optional[str] = None
     mrp: float = Field(..., gt=0)
@@ -901,6 +908,11 @@ async def list_products(
         None, pattern=_catalog_list.DATE_PATTERN, description="India day, included."
     ),
     flag: Optional[str] = Query(None, pattern=_FLAG_FILTER_PATTERN),
+    group: Optional[str] = Query(
+        None,
+        pattern="^model$",
+        description="'model' = one row per model (its colours and sizes folded in, G1).",
+    ),
     current_user: dict = Depends(get_current_user),
 ):
     """List active catalog products with optional search / brand / category
@@ -935,6 +947,7 @@ async def list_products(
         "date_from": _opt(date_from),
         "date_to": _opt(date_to),
         "flag": _opt(flag),
+        "group": _opt(group),
         "attributes": {
             k: _opt(v)
             for k, v in (
@@ -1080,10 +1093,16 @@ async def list_products(
                     if anywhere
                     else repo._search_query(search, list(repo.SEARCH_FIELDS), query)
                 )
-            products = _catalog_list.page(
-                repo.collection, query, new["sort"] or "edited", _skip, _limit
-            )
-            total_count = repo.count(query)
+            if new["group"]:
+                products, total_count = _catalog_list.group_page(
+                    repo.collection, query, new["sort"] or "edited", _skip, _limit,
+                    archived=new["flag"] == "archived",
+                )
+            else:
+                products = _catalog_list.page(
+                    repo.collection, query, new["sort"] or "edited", _skip, _limit
+                )
+                total_count = repo.count(query)
             if can_see_attribution:
                 from ..dependencies import get_db as _people_db
 
@@ -3236,6 +3255,84 @@ async def get_product(product_id: str, current_user: dict = Depends(get_current_
     return {"product_id": product_id}
 
 
+def _family_db_or_503():
+    from ..dependencies import get_db as _gdb
+
+    conn = _gdb()
+    if conn is None or not getattr(conn, "is_connected", False):
+        raise HTTPException(status_code=503, detail="The catalogue is not reachable. Try again.")
+    return conn
+
+
+@router.get("/{product_id}/family")
+async def get_product_family(product_id: str, current_user: dict = Depends(get_current_user)):
+    """The product's model: its lead, every colour/size (SKU, colour, size,
+    MRP, on/off) and, for a product in no model, the lead it can join."""
+    try:
+        return _pm.family_summary(_family_db_or_503(), product_id)
+    except _pm.ProductMasterError as err:
+        raise HTTPException(status_code=err.status, detail=err.message) from err
+
+
+class LinkToModelBody(BaseModel):
+    # The model to join; absent = the model's lead found by brand + model number.
+    lead_id: Optional[str] = Field(None, max_length=120)
+
+
+@router.post("/{product_id}/link-to-model")
+async def link_product_to_model(
+    product_id: str,
+    body: LinkToModelBody,
+    current_user: dict = Depends(require_roles(*_CATALOG_ROLES)),
+):
+    """Catalogue review's 'Link to model' (G1): make this product a colour/size
+    of its model. A lead_id naming a variant joins that variant's model."""
+    from ..dependencies import get_audit_repository as _audit_repo
+    from ..services.cache import invalidate_product_lists
+
+    conn = _family_db_or_503()
+    products = conn.get_collection("products")
+    lead_id = body.lead_id
+    if lead_id:
+        target = products.find_one({"product_id": lead_id}) or {}
+        lead_id = target.get("variant_of") or lead_id
+    else:
+        doc = products.find_one({"product_id": product_id})
+        if doc is None:
+            raise HTTPException(status_code=404, detail="Product not found")
+        lead = _pm.find_family_lead(products, doc, exclude_id=product_id)
+        if lead is None:
+            raise HTTPException(status_code=422, detail="No other product has this brand and model number.")
+        lead_id = lead["product_id"]
+    try:
+        out = _pm.link_to_family(
+            conn, product_id, lead_id, actor=current_user.get("user_id"), audit_repo=_audit_repo()
+        )
+    except _pm.ProductMasterError as err:
+        raise HTTPException(status_code=err.status, detail=err.message) from err
+    invalidate_product_lists()
+    return out
+
+
+@router.post("/{product_id}/unlink-from-model")
+async def unlink_product_from_model(
+    product_id: str,
+    current_user: dict = Depends(require_roles(*_CATALOG_ROLES)),
+):
+    """Catalogue review's 'Unlink' (G1): this is a different model."""
+    from ..dependencies import get_audit_repository as _audit_repo
+    from ..services.cache import invalidate_product_lists
+
+    try:
+        out = _pm.unlink_from_family(
+            _family_db_or_503(), product_id, actor=current_user.get("user_id"), audit_repo=_audit_repo()
+        )
+    except _pm.ProductMasterError as err:
+        raise HTTPException(status_code=err.status, detail=err.message) from err
+    invalidate_product_lists()
+    return out
+
+
 @router.put("/{product_id}")
 async def update_product(
     product_id: str,
@@ -3427,6 +3524,26 @@ async def update_product(
         if "tags" in update_data:
             update_data["tags"] = _pm.normalise_tags(update_data["tags"])
 
+        # Model families (G1): a variant's model-level fields are edited on
+        # its model; the model's edit reaches every variant (after the save).
+        _model_changes: Dict[str, Any] = {}
+        try:
+            _pm.assert_variant_model_fields(
+                existing,
+                update_data.get("attributes"),
+                brand=update_data.get("brand"),
+                model=update_data.get("model"),
+                category=update_data.get("category"),
+            )
+        except _pm.ProductMasterError as err:
+            raise HTTPException(
+                status_code=err.status, detail=_pm_error_detail(err)
+            ) from err
+        if "attributes" in update_data:
+            _model_changes = _pm.model_field_changes(
+                existing.get("attributes") or {}, update_data["attributes"]
+            )
+
         # An identity edit (eye size, CL power...) re-keys the product by the
         # create rule; a clash with another product is the create door's 409.
         try:
@@ -3581,10 +3698,25 @@ async def update_product(
                     detail="Saved on the product but not on its catalogue copy "
                     "- press Save again.",
                 )
+            family_not_updated: List[str] = []
+            if _model_changes and not existing.get("variant_of"):
+                from ..dependencies import get_audit_repository as _family_audit_repo
+                from ..dependencies import get_db as _family_db
+
+                family_not_updated = _pm.propagate_model_fields(
+                    lead={**existing, **update_data},
+                    changes=_model_changes,
+                    actor=current_user.get("user_id"),
+                    actor_name=current_user.get("username"),
+                    product_repo=repo,
+                    audit_repo=_family_audit_repo(),
+                    db=_family_db(),
+                )
             return {
                 "message": "Product updated",
                 "product_id": product_id,
                 "released_units": released,
+                "family_not_updated": family_not_updated,
             }
 
         raise HTTPException(status_code=500, detail="Failed to update product")

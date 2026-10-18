@@ -25,9 +25,10 @@
 // answers with the create door's own rule (identity_conflict), so what this
 // warns about is exactly what Save answers.
 
+import { useEffect, useRef } from 'react';
 import { AlertTriangle } from 'lucide-react';
 import { useSimilarProducts } from './useSimilarProducts';
-import type { SimilarProductSummary } from '../../services/api/products';
+import type { FamilyHint, SimilarProductSummary } from '../../services/api/products';
 
 export interface SimilarProductsHintProps {
   /** CATEGORIES picker code (SG/FR/...). */
@@ -47,6 +48,9 @@ export interface SimilarProductsHintProps {
    *  ordered draft being finished was told to "Finish it", and the link
    *  reloaded the editor over the unsaved edits. */
   selfId?: string | null;
+  /** G1: every fresh answer's model (null: none / not armed) -> the form
+   *  joins it (handleFamilyFound). */
+  onFamily?: (family: FamilyHint | null) => void;
 }
 
 function chipLabel(s: SimilarProductSummary): string {
@@ -63,8 +67,15 @@ export function SimilarProductsHint({
   onPickSibling,
   onOpenExisting,
   selfId = null,
+  onFamily,
 }: SimilarProductsHintProps) {
   const { data, armed } = useSimilarProducts({ category, attributes });
+  const onFamilyRef = useRef(onFamily);
+  onFamilyRef.current = onFamily;
+  useEffect(() => {
+    if (!armed) onFamilyRef.current?.(null);
+    else if (data) onFamilyRef.current?.(data.family ?? null);
+  }, [armed, data]);
 
   // Render NOTHING unless armed with a completed response (null covers idle,
   // debouncing, in-flight and error states — the hook's contract).

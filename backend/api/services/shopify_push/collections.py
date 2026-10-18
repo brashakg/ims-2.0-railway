@@ -155,10 +155,17 @@ def _member_product_gids(db, collection: Dict[str, Any]) -> Tuple[List[str], int
         gid = None
         try:
             doc = db["catalog_products"].find_one({"sku": sku}) if db is not None else None
+            # A colour/size of a model (G1) is on its MODEL's listing: the
+            # collection holds that listing (once).
+            link = ((doc or {}).get("ecom") or {}).get("variant_of")
+            if isinstance(link, dict) and link.get("twin_id"):
+                doc = db["catalog_products"].find_one({"id": link["twin_id"]})
             if doc is not None:
                 gid = (doc.get("ecom") or {}).get("shopify_product_id")
         except Exception:  # noqa: BLE001 -- one bad lookup never blocks the rest
             gid = None
+        if gid and _as_shopify_gid(gid, "Product") in gids:
+            continue
         if gid:
             gids.append(_as_shopify_gid(gid, "Product"))
         else:
