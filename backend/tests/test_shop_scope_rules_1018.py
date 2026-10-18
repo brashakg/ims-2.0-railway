@@ -31,11 +31,12 @@ import mongomock  # noqa: E402
 import pytest  # noqa: E402
 
 from api.dependencies import NO_SHOP_DETAIL  # noqa: E402
+from api.utils.ist import ist_today  # noqa: E402
 
 DHN, BOK = "BV-DHN-01", "BV-BOK-01"
 PUNE, PUNE_CODE = "4dc49c44-08a1-46e1-85fb-8b7eca55f560", "BV-PUN-01"
 GSTIN = "20ABCDE1234F1Z5"
-TODAY = datetime.now().date().isoformat()
+TODAY = ist_today().isoformat()
 
 
 def _user(role, shops=(), active="first"):
