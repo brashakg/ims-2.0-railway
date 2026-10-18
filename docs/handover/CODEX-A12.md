@@ -1,9 +1,14 @@
 # A12 - supplier advances and explicit invoice settlement
 
-Prepared in `codex/a12-unallocated-advances`, isolated checkout `C:/ims-codex-a12`,
-from reviewed integration `7158e53ae1317abb74327c19bf9e3b03a45141bf`.
-Release ordering remains A01/A03 first, then only these A12 commits transplanted
-onto the resulting main. No deployment or live database verification is claimed.
+Release branch `codex/a12-advance-allocation-release` uses isolated checkout
+`C:/ims-codex-a12`, based on merged A01/A03 main
+`ad1cff2f5442db757fee7e2771dc94cd3ac0ec08`. Only the approved A12 preparation
+commit was transplanted, producing source commit
+`fdb1aa15413c49b573aab41650ed64b83187e3e5`. Git range-diff confirms the patch is
+identical to its reviewed preparation. The original preparation branch
+`codex/a12-unallocated-advances` remains at
+`cb5d7aad350276777581994deb007b23d714b5e3` for traceability. No deployment or live
+database verification is claimed.
 
 ## Owner decision and resulting behavior
 
@@ -83,10 +88,33 @@ synthetic/mongomock; no production services or application lifespan.
   no dependency manifests changed.
 
 The first expanded run on the older integration base also exposed five existing
-direct-credit test fixtures that still defaulted to RETURN_CN. A01's final head
-`1f3e037859fe60bb2573f51c46bded88ddc5535a` already changes those fixtures to the
-permitted QUALITY_CN. That separate correction is not duplicated in A12; it
-must be present after transplant before final PR checks.
+direct-credit test fixtures that still defaulted to RETURN_CN. The merged A01
+dependency changes those fixtures to the permitted QUALITY_CN. The transplant
+preserved that correction and the later `itcReversed` exact-key-set test update;
+the old direct-credit failures are resolved in the final related run below.
 
-Independent exact-head review and final post-transplant checks remain release
-gates. Local tests establish synthetic behavior, not live ledger reconciliation.
+The independent reviewer verified all three production files and frontend API
+comments are identical after transplant and reran a separate integer-paise
+oracle: **200 scenarios passed** at `fdb1aa15`, retaining input immutability and
+signed supplier-net controls (`a12-root-allocation-release.json`). The earlier
+independent preparation review also passed 57 scoped tests.
+
+## Final checks after transplant
+
+- **1,053 passed, two skipped**, 1,687 warnings, 263.36 seconds across 15 affected
+  modules (`a12-release-related.log`). Includes all new A12 cases, shared AP
+  arithmetic, bill/shop and supplier-ledger rules, money entry, monthly
+  Purchases, owner dashboard, survival priorities, Accounts-only access and
+  canonical supplier-credit readers. Both skips require optional real Mongo;
+  no test service was started. No application change followed this run.
+- Pinned Pylint **3.0.3** CI E/F check: **10.00/10**
+  (`a12-release-ci-lint.log`).
+- Sanitized backend smoke: **1,317 routes** (`a12-release-smoke.log`).
+- Forced TypeScript check and Vite production build: **passed**, 2,999 modules,
+  Vite 61 seconds (`a12-release-frontend-build.log`). The existing CSS-comment
+  warning remains. No dependency manifest or lock change.
+- Git range-diff reports the preparation and release source patch identical;
+  `git diff --check` passes. This handover update changes documentation only.
+
+Hosted CI and root's exact-head/CLEAN merge gate remain required. Local tests
+establish synthetic behavior, not live ledger reconciliation or deployment.
