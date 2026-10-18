@@ -219,7 +219,20 @@ def test_only_a_manager_takes_a_piece_off_the_shelf(w, user):
 
 
 def test_the_same_form_submitted_twice_is_one_return(w):
-    body = dict(notes=NOTE, client_request_id="form-1")
+    unit(w, "U1")
+    first = create(w, line(stock_ids=["U1"]), client_request_id="form-1")
+    again = create(w, line(stock_ids=["U1"]), client_request_id="form-1")
+    assert first.status_code == 201 and again.status_code == 201, again.text
+    assert first.json()["return_id"] == again.json()["return_id"]
+    assert w["db"].vendor_returns.count_documents({}) == 1
+    assert state(w, "U1")["rtv_vendor_id"] == first.json()["return_id"]
+
+
+def test_two_submissions_racing_past_the_lookup_still_make_one_return(w, monkeypatch):
+    real = w["db"].vendor_returns.find_one
+    monkeypatch.setattr(w["db"].vendor_returns, "find_one",
+                        lambda flt=None, *a, **k: None if "client_request_id" in (flt or {}) else real(flt, *a, **k))
+    body = dict(notes=NOTE, client_request_id="form-2")
     first = create(w, line(product="made-to-order-lens", name="Lens"), **body)
     again = create(w, line(product="made-to-order-lens", name="Lens"), **body)
     assert first.status_code == 201 and again.status_code == 201
