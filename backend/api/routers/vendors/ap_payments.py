@@ -385,14 +385,41 @@ async def apply_advance_to_bill(
     if ap_engine._has_bill_id(adv.get("bill_id")):
         raise HTTPException(status_code=409, detail="This payment is already applied to a bill.")
     bill = _named_bill_in_scope_or_404(db, vendor_id, body.bill_id, current_user)
-    if adv.get("store_id") and adv["store_id"] != bill.get("store_id"):
+    # The advance's shop: the one stamped on it, else (a legacy row with none)
+    # the shop the ledger's old rule counts it under today. Applying it to
+    # another shop's bill would move the money between shops' books.
+    adv_shop = adv.get("store_id") or _shop_by_the_suppliers_bills(
+        db, vendor_id, {"payment_date": adv.get("payment_date"), "created_at": adv.get("created_at")}
+    )
+    if adv_shop != bill.get("store_id"):
         raise HTTPException(
             status_code=422,
-            detail="This advance was paid for another shop. Apply it to a bill of the same shop.",
+            detail=(
+                "This advance was paid for another shop. Apply it to a bill of the same shop."
+                if adv.get("store_id") else
+                "This advance has no shop on record and is counted under another shop's "
+                "books. Apply it to a bill of that shop."
+            ),
         )
     _refuse_held_bill(db, body.bill_id)
+    # A closed month stays closed: the advance's payment day and the bill's
+    # day are both read in that month's books (aging, the supplier ledger).
+    from ..finance import check_period_locked
+
+    for day in (adv.get("payment_date"), bill.get("bill_date")):
+        if day:
+            try:
+                check_period_locked(db, str(day)[:10])
+            except HTTPException as exc:
+                if exc.status_code == 423:
+                    raise HTTPException(
+                        status_code=423, detail="That month is closed - ask an admin to reopen it."
+                    ) from exc
+                raise
 
     applied = round(body.amount, 2)
+    if applied <= 0:
+        raise HTTPException(status_code=422, detail="Enter an amount to apply.")
     cash, tds = round(float(adv.get("amount") or 0), 2), round(float(adv.get("tds_amount") or 0), 2)
     gross = round(cash + tds, 2)
     if applied > gross:
@@ -407,8 +434,6 @@ async def apply_advance_to_bill(
             detail="TDS was withheld on this advance, so it can only be applied whole, to one bill.",
         )
     _refuse_more_than_bill_left(db, bill, applied)
-    # No period-lock check: nothing is paid or dated anew, so no month's cash
-    # or supplier balance moves -- only which bill the money settles.
     # ponytail: two racing applies of DIFFERENT money to one bill can both
     # pass the bill-left check; the excess stays visible as unapplied credit.
 
@@ -430,9 +455,9 @@ async def apply_advance_to_bill(
             try:
                 coll.insert_one(dict(row))
             except Exception as exc:
-                coll.update_one(  # give the advance back its amount
+                coll.update_one(  # give the advance back what this call took
                     {"payment_id": payment_id},
-                    {"$set": {"amount": adv.get("amount")},
+                    {"$inc": {"amount": applied},
                      "$pull": {"applications": {"payment_id": row["payment_id"]}}},
                 )
                 raise HTTPException(status_code=500, detail="Failed to apply the advance") from exc

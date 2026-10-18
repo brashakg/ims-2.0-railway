@@ -457,6 +457,10 @@ const RECORD_TITLES: Record<RecordKind, string> = {
   bill: 'Bill', payment: 'Payment', debit: 'Debit note', apply: 'Apply an advance to a bill',
 };
 const gross = (p: VendorPayment) => Math.round(((p.amount || 0) + (p.tds_amount || 0)) * 100) / 100;
+// What can still be paid on a bill: the server's left_to_pay -- the figure its
+// over-payment refusal tests (a post-dated cheque already counted) -- so the form
+// never offers an amount the server then refuses. Older servers: outstanding.
+const billLeft = (b: VendorBill) => b.left_to_pay ?? b.outstanding ?? 0;
 
 function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: RecordKind; vendorId: string; onClose: () => void; onSaved: () => void }) {
   const toast = useToast();
@@ -524,7 +528,7 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: RecordKind; ve
     (async () => {
       try {
         const res = await vendorApApi.listBills(vendorId);
-        if (!cancelled) setBills((res?.bills ?? []).filter((b) => (b.outstanding ?? 0) > 0));
+        if (!cancelled) setBills((res?.bills ?? []).filter((b) => billLeft(b) > 0));
       } catch {
         if (!cancelled) { setBills([]); setBillsFailed(true); }
       }
@@ -544,7 +548,7 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: RecordKind; ve
     setAdvanceId(advId); setApplyTo(billId);
     const adv = (advances ?? []).find((p) => p.payment_id === advId);
     const bill = (bills ?? []).find((b) => b.bill_id === billId);
-    if (adv && bill) setApplyAmount(String(Math.min(gross(adv), bill.outstanding ?? 0)));
+    if (adv && bill) setApplyAmount(String(Math.min(gross(adv), billLeft(bill))));
   };
 
   const save = async () => {
@@ -789,7 +793,7 @@ function BillPicker({ bills, failed, value, onChange, className, shopName, canPi
         <option value="">{bills === null ? 'Loading bills…' : placeholder}</option>
         {(bills ?? []).map((b) => (
           <option key={b.bill_id} value={b.bill_id}>
-            Bill {b.bill_number} · {(b.bill_date || '').slice(0, 10)} · {inr(b.outstanding)} left
+            Bill {b.bill_number} · {(b.bill_date || '').slice(0, 10)} · {inr(billLeft(b))} left
             {canPick ? ` · ${b.store_id ? `for ${shopName(b.store_id)}` : 'no shop on record'}` : ''}
           </option>
         ))}

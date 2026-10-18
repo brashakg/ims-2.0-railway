@@ -32,8 +32,12 @@ import CashFlowPage from '../CashFlowPage';
 
 const ACCOUNTANT = { id: 'u-acct', roles: ['ACCOUNTANT'], activeRole: 'ACCOUNTANT', activeStoreId: 'WO-PUN-01' };
 const BILLS = [
-  { bill_id: 'B1', vendor_id: 'V-PUN', bill_number: 'INV-101', bill_date: '2026-10-01', total_amount: 1000, outstanding: 1000, status: 'OUTSTANDING', store_id: 'WO-PUN-01' },
-  { bill_id: 'B2', vendor_id: 'V-PUN', bill_number: 'INV-102', bill_date: '2026-10-05', total_amount: 500, outstanding: 0, status: 'PAID', store_id: 'WO-PUN-01' },
+  // A 400 post-dated cheque is on INV-101: 1,000 still reads outstanding today,
+  // but only 600 is left to pay -- the figure the server's refusal tests.
+  { bill_id: 'B1', vendor_id: 'V-PUN', bill_number: 'INV-101', bill_date: '2026-10-01', total_amount: 1000, outstanding: 1000, left_to_pay: 600, status: 'OUTSTANDING', store_id: 'WO-PUN-01' },
+  { bill_id: 'B2', vendor_id: 'V-PUN', bill_number: 'INV-102', bill_date: '2026-10-05', total_amount: 500, outstanding: 0, left_to_pay: 0, status: 'PAID', store_id: 'WO-PUN-01' },
+  // Fully covered by a post-dated cheque: nothing left to pay, so not offered.
+  { bill_id: 'B3', vendor_id: 'V-PUN', bill_number: 'INV-103', bill_date: '2026-10-07', total_amount: 300, outstanding: 300, left_to_pay: 0, status: 'OUTSTANDING', store_id: 'WO-PUN-01' },
 ];
 const PAYMENTS = [
   { payment_id: 'P-ADV', vendor_id: 'V-PUN', bill_id: null, amount: 400, payment_date: '2026-09-20', mode: 'BANK', reference: 'UTR9', store_id: 'WO-PUN-01' },
@@ -69,7 +73,7 @@ beforeEach(() => {
     ledger: { entries: [], closing_balance: 600, total_billed: 1500, total_paid: 900, total_tds: 0, total_debit_notes: 0 },
     aging: { as_of: '2026-10-18', buckets: {}, total_outstanding: 1000, unallocated_credits: 400, net_payable: 1000 },
   });
-  apis.vendorApApi.listBills.mockResolvedValue({ bills: BILLS, total: 2 });
+  apis.vendorApApi.listBills.mockResolvedValue({ bills: BILLS, total: 3 });
   apis.vendorApApi.listPayments.mockResolvedValue({ payments: PAYMENTS, total: 2 });
   apis.vendorApApi.createPayment.mockResolvedValue({ store_id: 'WO-PUN-01' });
   apis.vendorApApi.applyAdvance.mockResolvedValue({ payment: {}, advance_left: 0 });
@@ -81,7 +85,7 @@ describe('a payment picks its bill', () => {
     const picker = await screen.findByLabelText('Apply this payment to') as HTMLSelectElement;
     await waitFor(() => expect(picker.options.length).toBe(3));
     expect(Array.from(picker.options).map((o) => o.text)).toEqual([
-      'Apply this payment to…', 'Bill INV-101 · 2026-10-01 · ₹1,000 left', 'Advance (no bill yet)',
+      'Apply this payment to…', 'Bill INV-101 · 2026-10-01 · ₹600 left', 'Advance (no bill yet)',
     ]);
     fireEvent.change(screen.getByPlaceholderText('Amount paid'), { target: { value: '1000' } });
     fireEvent.click(screen.getByRole('button', { name: /Save/ }));

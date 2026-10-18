@@ -20,6 +20,10 @@ export interface VendorBill {
   tax_amount: number;
   total_amount: number;
   outstanding?: number;
+  // What can still be paid on it once every recorded payment clears (a
+  // post-dated cheque included): GET /vendors/{id}/bills, the figure the
+  // server's over-payment refusal (MORE_THAN_BILL_LEFT) tests.
+  left_to_pay?: number;
   status?: string;
   po_id?: string;
   grn_id?: string;

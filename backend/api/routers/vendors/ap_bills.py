@@ -133,16 +133,19 @@ def _clean(doc: dict) -> dict:
     return {k: v for k, v in doc.items() if k != "_id"}
 
 
-def _bill_settlement(db, bill: dict) -> dict:
-    """ap_engine.bill_settlement of one bill over EVERY recorded payment and
-    credit naming it (a post-dated cheque included). Raises when unreadable."""
-    from ...services.supplier_credit_reads import payable_credit_rows
+def _left_to_pay(stamped: dict) -> float:
+    """What can still be paid on a bill stamped by stamp_bills_as_of: today's
+    outstanding less the money recorded for later days (a post-dated cheque),
+    i.e. what is left once everything recorded clears. THE figure: the
+    payment form shows it (list_vendor_bills' left_to_pay) and
+    _refuse_more_than_bill_left tests money against it."""
+    out = float(stamped.get("outstanding") or 0) - float(stamped.get("post_dated_money") or 0)
+    return round(max(out, 0.0), 2)
 
-    bill_id = bill.get("bill_id")
-    payments = list(
-        db.get_collection("vendor_payments").find({"bill_id": bill_id}, {"_id": 0})
-    )
-    return ap_engine.bill_settlement(bill, payments, payable_credit_rows(db, bill_id=bill_id))
+
+# A payment may pass what is left on its bill by up to Re 1 (rounding on the
+# supplier's side or ours); beyond that it is refused.
+_LEFT_TOLERANCE = 1.0
 
 
 def _refuse_more_than_bill_left(db, bill: Optional[dict], gross: float) -> None:
@@ -152,13 +155,15 @@ def _refuse_more_than_bill_left(db, bill: Optional[dict], gross: float) -> None:
     what is left, before anything is written; 503 when unreadable."""
     if bill is None or db is None:
         return
+    from ..purchase_invoices import stamp_bills_as_of
+
     try:
-        left = _bill_settlement(db, bill)["outstanding"]
+        left = _left_to_pay(stamp_bills_as_of(db, [dict(bill)])[0])
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(
             status_code=503, detail="What is left on this bill could not be read. Try again."
         ) from exc
-    if round(gross - left, 2) > 0:
+    if round(gross - left, 2) > _LEFT_TOLERANCE:
         number = bill.get("bill_number") or bill.get("bill_id")
         raise HTTPException(
             status_code=422,
@@ -194,7 +199,12 @@ def _recompute_bill_status(db, bill_id: Optional[str]) -> None:
         )
         if not bill:
             return
-        st = _bill_settlement(db, bill)
+        payments = list(
+            db.get_collection("vendor_payments").find({"bill_id": bill_id}, {"_id": 0})
+        )
+        from ...services.supplier_credit_reads import payable_credit_rows
+        debit_notes = payable_credit_rows(db, bill_id=bill_id)
+        st = ap_engine.bill_settlement(bill, payments, debit_notes)
         db.get_collection("vendor_bills").update_one(
             {"bill_id": bill_id},
             {"$set": {"outstanding": st["outstanding"], "status": st["status"]}},
@@ -636,6 +646,7 @@ async def list_vendor_bills(
     # outstanding/status are restamped by scripts/repair_rcm_bill_payable.py).
     for b in bills:
         b["total_amount"] = ap_engine.vendor_payable(b)
+        b["left_to_pay"] = _left_to_pay(b)
     return {"bills": bills, "total": len(bills)}
 
 

@@ -176,3 +176,86 @@ def test_two_racing_applications_of_one_advance_apply_once(ap, monkeypatch, seco
     assert sum(p["amount"] for p in memory.vendor_payments.find({})) == 400
     assert memory.vendor_payments.count_documents({"applied_from": adv}) == 1
     assert memory.vendor_payments.find_one({"payment_id": adv})["amount"] == 100
+
+
+# --- review round 2 (B2 + the cheap items) ---------------------------------
+
+
+def test_an_advance_with_no_shop_applies_only_to_the_shop_the_ledger_counts_it_under(ap):
+    """A legacy advance with no shop is counted under the shop of the
+    supplier's latest bill on or before it (B1, Pune); a Dhanbad bill would
+    move it between shops' books."""
+    memory, world = ap
+    memory.vendor_bills.insert_one(bill("B2", store_id=DHN, bill_date="2026-10-01"))
+    memory.vendor_payments.insert_one(payment(400, payment_id="LEGACY", payment_date="2026-09-15"))
+    wrong = _apply(world, "LEGACY", "B2", 100, ADMIN)
+    assert wrong.status_code == 422 and "no shop on record" in wrong.json()["detail"]
+    assert _apply(world, "LEGACY", "B1", 100, ADMIN).status_code == 200
+
+
+@pytest.mark.parametrize("advance_day,bill_day", [("2026-09-15", "2026-10-01"), ("2026-10-02", "2026-09-01")])
+def test_a_closed_month_stays_closed(ap, advance_day, bill_day):
+    memory, world = ap
+    memory.vendor_bills.update_one({}, {"$set": {"bill_date": bill_day}})
+    memory.vendor_payments.insert_one(payment(400, store_id=PUN, payment_id="ADV", payment_date=advance_day))
+    memory.period_locks.insert_one({"month": 9, "year": 2026})
+    closed = _apply(world, "ADV", "B1", 100)
+    assert closed.status_code == 423
+    assert closed.json()["detail"] == "That month is closed - ask an admin to reopen it."
+    assert memory.vendor_payments.count_documents({}) == 1
+    memory.period_locks.delete_many({})
+    assert _apply(world, "ADV", "B1", 100).status_code == 200
+
+
+def test_an_amount_that_rounds_to_nothing_is_refused(ap):
+    memory, world = ap
+    adv = _pay(world, {"amount": 400}).json()["payment_id"]
+    assert _apply(world, adv, "B1", 0.004).status_code == 422
+    assert memory.vendor_payments.count_documents({}) == 1
+
+
+def test_a_bill_takes_up_to_re_1_over_what_is_left(ap):
+    memory, world = ap
+    assert _pay(world, {"amount": 1001.5, "bill_id": "B1"}).status_code == 422
+    assert _pay(world, {"amount": 1000.5, "bill_id": "B1"}).status_code == 201
+
+
+def test_the_form_is_offered_exactly_what_the_refusal_allows(ap):
+    """A post-dated cheque on the bill: today it still reads 1,000 outstanding,
+    but only 600 is left to pay once the cheque clears -- the list says 600
+    and the server takes 600, never more."""
+    memory, world = ap
+    memory.vendor_payments.insert_one(payment(400, "B1", store_id=PUN, payment_date="2026-10-20"))
+    listed = world.ok("/vendors/V1/bills", ACCT_PUNE)["bills"][0]
+    assert (listed["outstanding"], listed["left_to_pay"]) == (1000, 600)
+    assert _pay(world, {"amount": 700, "bill_id": "B1"}).json()["detail"]["left"] == 600
+    assert _pay(world, {"amount": 600, "bill_id": "B1"}).status_code == 201
+
+
+class _InsertFailsAfterRival:
+    """vendor_payments whose next insert fails -- after a rival application
+    of the same advance has taken its own share in between."""
+
+    def __init__(self, real, adv):
+        self._real, self._adv = real, adv
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def insert_one(self, doc, *a, **k):
+        left = self._real.find_one({"payment_id": self._adv})["amount"]
+        self._real.update_one({"payment_id": self._adv}, {"$set": {"amount": left - 50}})
+        self._real.insert_one({**doc, "payment_id": "RIVAL", "amount": 50})
+        raise OSError("insert failed")
+
+
+def test_a_failed_apply_gives_back_only_what_it_took(ap, monkeypatch):
+    memory, world = ap
+    adv = _pay(world, {"amount": 400}).json()["payment_id"]
+    proxy = SimpleNamespace(get_collection=lambda name: (
+        _InsertFailsAfterRival(memory[name], adv) if name == "vendor_payments" else memory[name]))
+    monkeypatch.setattr(vendors_pkg, "_get_db", lambda: proxy)
+    assert _apply(world, adv, "B1", 300).status_code == 500
+    # The rival's 50 stands; the failed 300 went back: 350 + 50 = 400 paid.
+    assert memory.vendor_payments.find_one({"payment_id": adv})["amount"] == 350
+    assert sum(p["amount"] for p in memory.vendor_payments.find({})) == 400
