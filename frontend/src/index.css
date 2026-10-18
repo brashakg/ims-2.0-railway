@@ -692,7 +692,7 @@
 /* Footer */
 .nt-foot {
   padding: 14px 24px; border-top: 1px solid var(--line, #e6e6e0); background: var(--bg-sunk, #f1f1ec);
-  display: flex; gap: 10px; align-items: center; font-size: 11.5px; color: var(--ink-4, #6b6b65);
+  display: flex; flex-wrap: wrap; gap: 10px; align-items: center; font-size: 11.5px; color: var(--ink-4, #6b6b65);
 }
 .nt-foot .kbd {
   font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-4, #6b6b65);

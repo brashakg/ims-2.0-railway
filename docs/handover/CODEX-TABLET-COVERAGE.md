@@ -39,3 +39,29 @@ Verification:
 External evidence: fixes-2026-10-18/tablet-ci-failure.log,
 tablet-traces/layout/popup-layout-popup-tasks-new-task-layout/, and
 task-modal-width-probe.json. Root owns exact-head review and CLEAN/CI gates.
+
+Follow-up from browser run `39105516986` at `6ffbcf7e`: 213 layout tests
+passed, but New task still overflowed its 320px inner width by 4px on the
+360px phone. The original isolated probe blocked font requests and used
+fallback fonts; the full application loaded Inter and JetBrains Mono.
+
+The remaining fix is `flex-wrap: wrap` on the existing `.nt-foot`. Its
+unchanged shortcut hints, Cancel and Create buttons can wrap when they do
+not fit. No field, label, action, workflow, breakpoint or test exemption was
+added. Desktop placement stays unchanged.
+
+The follow-up offline probe embeds the exact font resources saved in the CI
+trace, waits for fonts to load, and renders the real component. It reproduces
+the same 324px/320px overflow, then verifies 320px/320px after the footer
+correction. The existing `auditLayout` reports zero violations at all eight
+sizes; 1180/1440 desktop geometry is identical. Before/after 360px screenshots
+were visually checked. Forced TypeScript and Vite production build pass
+(2,997 modules; existing unrelated CSS-comment warning). The isolated backend
+import smoke passes with 1,314 routes. Fresh full browser CI is still required
+before merge.
+
+External follow-up evidence: `tablet-ci-39105516986-failure.log`,
+`tablet-ci-39105516986-traces/`, `check-task-modal-footer.cjs`,
+`task-modal-footer-probe.json`, and `task-modal-footer-{before,after}-360.png`.
+The coordinator independently reviews this one-declaration follow-up because
+the prior independent reviewer implemented it.
