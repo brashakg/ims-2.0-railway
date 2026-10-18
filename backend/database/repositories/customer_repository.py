@@ -96,27 +96,6 @@ class CustomerRepository(BaseRepository):
                 if patient.get("patient_id") == patient_id:
                     return patient
         return None
-    
-    # Loyalty
-    def add_loyalty_points(self, customer_id: str, points: int) -> bool:
-        try:
-            self.collection.update_one(
-                {"customer_id": customer_id},
-                {"$inc": {"loyalty_points": points}}
-            )
-            return True
-        except Exception:
-            return False
-    
-    def add_store_credit(self, customer_id: str, amount: float) -> bool:
-        try:
-            self.collection.update_one(
-                {"customer_id": customer_id},
-                {"$inc": {"store_credit": amount}}
-            )
-            return True
-        except Exception:
-            return False
 
     # Sentinel: the collection had no atomic-guard support (minimal/mock coll),
     # so the caller must fall back to the legacy snapshot path rather than treat
@@ -175,15 +154,3 @@ class CustomerRepository(BaseRepository):
             return True
         except Exception:
             return False
-
-    def increment_loyalty_points(self, customer_id: str, delta: int) -> dict | None:
-        """Atomically add (or subtract) loyalty points. Returns updated doc or None."""
-        from bson import ObjectId
-        try:
-            return self.collection.find_one_and_update(
-                {"_id": ObjectId(customer_id)},
-                {"$inc": {"loyalty_points": delta}},
-                return_document=True,
-            )
-        except Exception:
-            return None

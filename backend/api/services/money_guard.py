@@ -40,7 +40,9 @@ Contract:
   * Idempotency: a credit/debit carrying an idempotency_key is de-duplicated via a
     money_ledger marker on the same document, so a retried call does not double-apply.
     The marker is written whenever an idempotency_key is supplied -- independent of
-    record_ledger -- so the dedup guarantee can never silently no-op.
+    record_ledger -- so the dedup guarantee can never silently no-op. It is pushed IN
+    the same guarded write as the balance change (BRD-E1): written afterwards, two
+    overlapping same-key calls both passed the 'key absent' filter and both applied.
 
 This module has NO FastAPI router and makes NO engine calls in Phase A (it is
 tier-agnostic -- the caller enforces refund/discount tiers from E2). E6 OTP verbs
@@ -344,12 +346,22 @@ def debit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
     if guard_extra:
         filt.update(guard_extra)
 
+    # The ledger entry (and with it the idempotency marker) rides IN the guarded
+    # write below, never after it: a same-key call overlapping this one then
+    # fails the 'key absent' filter instead of applying a second time.
+    entry = (
+        _ledger_entry(txn_id, "DEBIT", -amt, reason, ref, actor, store_id, idempotency_key)
+        if record_ledger or idempotency_key else None
+    )
+
     if spec.mechanism == "update_reread":
         if not callable(getattr(coll, "update_one", None)):
             return GuardResult(ok=False, reason="no_atomic")
         update: Dict[str, Any] = {"$inc": {spec.balance_field: -amt}}
         if set_extra:
             update.setdefault("$set", {}).update(set_extra)
+        if entry:
+            update["$push"] = {"money_ledger": entry}
         try:
             res = coll.update_one(filt, update)
         except Exception:  # noqa: BLE001
@@ -369,9 +381,8 @@ def debit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
         except Exception:  # noqa: BLE001
             post = None
         bal = float((post or {}).get(spec.balance_field) or 0.0)
-        if record_ledger or idempotency_key:
-            _append_ledger(coll, spec, account_key, txn_id, "DEBIT", -amt, bal,
-                           reason, ref, actor, store_id, idempotency_key)
+        if entry:
+            _stamp_balance_after(coll, spec, account_key, txn_id, bal)
         _audit("money.debit", account_type, account_key, delta=-amt, balance_after=bal,
                reason=reason, ref=ref, actor=actor, store_id=store_id,
                idempotency_key=idempotency_key)
@@ -390,8 +401,11 @@ def debit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
     if "updated_at" not in sets:
         sets["updated_at"] = _now_iso()
     update["$set"] = sets
-    if push_extra:
-        update["$push"] = dict(push_extra)
+    pushes = dict(push_extra or {})
+    if entry:
+        pushes["money_ledger"] = entry
+    if pushes:
+        update["$push"] = pushes
     try:
         post = coll.find_one_and_update(filt, update, return_document=_AFTER)
     except Exception:  # noqa: BLE001
@@ -405,9 +419,8 @@ def debit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
                 return GuardResult(ok=True, balance=prior[1], txn_id=prior[0], reason="duplicate")
         return GuardResult(ok=False, reason=_classify_debit_failure(coll, spec, account_key, amt))
     bal = float(post.get(spec.balance_field) or 0.0)
-    if record_ledger or idempotency_key:
-        _append_ledger(coll, spec, account_key, txn_id, "DEBIT", -amt, bal,
-                       reason, ref, actor, store_id, idempotency_key)
+    if entry:
+        _stamp_balance_after(coll, spec, account_key, txn_id, bal)
     _audit("money.debit", account_type, account_key, delta=-amt, balance_after=bal,
            reason=reason, ref=ref, actor=actor, store_id=store_id,
            idempotency_key=idempotency_key)
@@ -470,9 +483,17 @@ def credit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
     update["$set"] = sets
     # push_extra symmetry with debit(): a caller that keeps its own in-document
     # ledger array (e.g. petty_cash_floats.ledger) can append a row in the SAME
-    # guarded write. Defaults to None -> no existing caller is affected.
-    if push_extra:
-        update["$push"] = dict(push_extra)
+    # guarded write. Defaults to None -> no existing caller is affected. The
+    # money_ledger entry (the idempotency marker) rides in that write too.
+    entry = (
+        _ledger_entry(txn_id, "CREDIT", amt, reason, ref, actor, store_id, idempotency_key)
+        if record_ledger or idempotency_key else None
+    )
+    pushes = dict(push_extra or {})
+    if entry:
+        pushes["money_ledger"] = entry
+    if pushes:
+        update["$push"] = pushes
 
     if callable(getattr(coll, "find_one_and_update", None)):
         try:
@@ -488,9 +509,8 @@ def credit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
                     return GuardResult(ok=True, balance=prior[1], txn_id=prior[0], reason="duplicate")
             return GuardResult(ok=False, reason="not_found")
         bal = float(post.get(spec.balance_field) or 0.0)
-        if record_ledger or idempotency_key:
-            _append_ledger(coll, spec, account_key, txn_id, "CREDIT", amt, bal,
-                           reason, ref, actor, store_id, idempotency_key)
+        if entry:
+            _stamp_balance_after(coll, spec, account_key, txn_id, bal)
         _audit("money.credit", account_type, account_key, delta=amt, balance_after=bal,
                reason=reason, ref=ref, actor=actor, store_id=store_id,
                idempotency_key=idempotency_key)
@@ -518,28 +538,27 @@ def credit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
     except Exception:  # noqa: BLE001
         post = None
     bal = float((post or {}).get(spec.balance_field) or 0.0)
-    if record_ledger or idempotency_key:
-        _append_ledger(coll, spec, account_key, txn_id, "CREDIT", amt, bal,
-                       reason, ref, actor, store_id, idempotency_key)
+    if entry:
+        _stamp_balance_after(coll, spec, account_key, txn_id, bal)
     _audit("money.credit", account_type, account_key, delta=amt, balance_after=bal,
            reason=reason, ref=ref, actor=actor, store_id=store_id,
            idempotency_key=idempotency_key)
     return GuardResult(ok=True, balance=bal, txn_id=txn_id, detail={"post_doc": post})
 
 
-def _append_ledger(coll, spec: AccountSpec, account_key: str, txn_id: str, ltype: str,
-                   delta: float, balance_after: float, reason: str, ref: Optional[str],
-                   actor: Optional[str], store_id: Optional[str],
-                   idempotency_key: Optional[str]) -> None:
-    """Append one signed entry to the document's money_ledger array (the unified
-    in-document ledger for the new verbs). Fail-soft. Only the NEW credit/debit
-    verbs record this; the Phase-A shims pass record_ledger=False so existing
-    documents are not reshaped."""
-    entry = {
+def _ledger_entry(txn_id: str, ltype: str, delta: float, reason: str,
+                  ref: Optional[str], actor: Optional[str], store_id: Optional[str],
+                  idempotency_key: Optional[str]) -> Dict[str, Any]:
+    """One signed money_ledger entry (the unified in-document ledger for the new
+    verbs), pushed IN the guarded balance write. Its balance_after is not known
+    until that write lands, so _stamp_balance_after fills it in. The Phase-A
+    shims pass record_ledger=False (and no key) so existing documents are not
+    reshaped."""
+    return {
         "txn_id": txn_id,
         "type": ltype,
         "delta": delta,
-        "balance_after": balance_after,
+        "balance_after": None,
         "reason": reason,
         "ref": ref,
         "actor": actor,
@@ -547,10 +566,19 @@ def _append_ledger(coll, spec: AccountSpec, account_key: str, txn_id: str, ltype
         "idempotency_key": idempotency_key,
         "created_at": _now_iso(),
     }
+
+
+def _stamp_balance_after(coll, spec: AccountSpec, account_key: str, txn_id: str,
+                         balance_after: float) -> None:
+    """Stamp the post-write balance onto the entry the guarded write pushed.
+    Fail-soft: the money move and its idempotency marker are already durable."""
     try:
         updater = getattr(coll, "update_one", None)
         if callable(updater):
-            updater({spec.key_field: account_key}, {"$push": {"money_ledger": entry}})
+            updater(
+                {spec.key_field: account_key, "money_ledger.txn_id": txn_id},
+                {"$set": {"money_ledger.$.balance_after": balance_after}},
+            )
     except Exception:  # noqa: BLE001
         return
 

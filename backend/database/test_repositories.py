@@ -120,11 +120,7 @@ def test_repositories():
         "mobile": "9123456789"
     })
     print(f"  Added patient")
-    
-    # Add loyalty
-    customer_repo.add_loyalty_points(customer["customer_id"], 100)
-    print(f"  Added 100 loyalty points")
-    
+
     # =========================================================================
     # Test Order Repository
     # =========================================================================
