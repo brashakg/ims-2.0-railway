@@ -324,10 +324,14 @@ async def create_vendor_payment(
         tds_amount = 0.0
 
     # A retried request (the client retries a 5xx; a 504 may come after the
-    # save) answers the payment it already recorded.
+    # save) answers the payment it already recorded -- the same payment only.
     db = _get_db()
+    sent = {
+        "vendor_id": vendor_id, "amount": round(payment.amount, 2), "bill_id": payment.bill_id,
+        "payment_date": payment.payment_date, "tds_amount": tds_amount, "reference": payment.reference,
+    }
     if payment.request_id and db is not None:
-        done = _payment_by_request(db, vendor_id, payment.request_id)
+        done = _replayed_payment(db, payment.request_id, sent, current_user)
         if done is not None:
             return done
 
@@ -389,8 +393,8 @@ async def create_vendor_payment(
             db.get_collection("vendor_payments").insert_one(dict(doc))
         except Exception as exc:
             # The same request racing itself: the unique request_id index let
-            # one through -- answer with that one.
-            done = _payment_by_request(db, vendor_id, payment.request_id) if payment.request_id else None
+            # one through -- answer with that one (or refuse, as above).
+            done = _replayed_payment(db, payment.request_id, sent, current_user) if payment.request_id else None
             if done is not None:
                 return done
             raise HTTPException(
@@ -400,15 +404,32 @@ async def create_vendor_payment(
     return _clean(doc)
 
 
-def _payment_by_request(db, vendor_id: str, request_id: str) -> Optional[dict]:
-    """The payment this request already recorded, else None."""
+def _replayed_payment(db, request_id: str, sent: dict, current_user: dict) -> Optional[dict]:
+    """The payment this request id already recorded, answered again -- only
+    to a caller who can see it (in_reach_or_404, as any payment read) and only
+    when it is the same payment: supplier, amount, bill, date, TDS, reference.
+    The same id with anything else is a stale form saved twice with different
+    details: 409, never the earlier payment passed off as this one. None when
+    the id recorded nothing."""
     try:
-        row = db.get_collection("vendor_payments").find_one(
-            {"vendor_id": vendor_id, "request_id": request_id}, {"_id": 0}
-        )
+        row = db.get_collection("vendor_payments").find_one({"request_id": request_id}, {"_id": 0})
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Database unavailable") from exc
-    return _clean(row) if row else None
+    if row is None:
+        return None
+    in_reach_or_404(row, current_user, "Payment not found")
+
+    def same(recorded, value) -> bool:
+        if isinstance(value, float):
+            return round(float(recorded or 0), 2) == round(value, 2)
+        return (recorded or None) == (value or None)
+
+    if not all(same(row.get(k), v) for k, v in sent.items()):
+        raise HTTPException(
+            status_code=409,
+            detail="This form was already saved with different details - refresh.",
+        )
+    return _clean(row)
 
 
 def _ensure_request_index(db) -> None:
@@ -519,7 +540,9 @@ async def apply_advance_to_bill(
         moved = coll.update_one(unchanged, {"$set": stamp})
         row = {**adv, **stamp}
     else:
-        row = {**{k: v for k, v in adv.items() if k != "applications"}, **stamp,
+        # The split row is a new payment row: not the advance's applications
+        # log, nor its form's request_id (unique -- the copy would be refused).
+        row = {**{k: v for k, v in adv.items() if k not in ("applications", "request_id")}, **stamp,
                "payment_id": str(uuid.uuid4()), "amount": applied, "applied_from": payment_id}
         moved = coll.update_one(unchanged, {
             "$set": {"amount": round(cash - applied, 2)},

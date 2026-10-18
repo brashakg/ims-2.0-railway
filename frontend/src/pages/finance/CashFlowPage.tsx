@@ -606,7 +606,10 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: RecordKind; ve
           request_id: requestId,
           store_id: pickedBill ? undefined : moneyShop || undefined,
         });
-        toast.success(bookedTo(pickedBill ? `Payment against bill ${pickedBill.bill_number}` : 'Payment', saved, shopName));
+        // What the server recorded, not what the form holds (a replayed
+        // request answers the payment it saved the first time).
+        const paidBill = saved?.bill_id ? (bills ?? []).find((b) => b.bill_id === saved.bill_id) : undefined;
+        toast.success(bookedTo(saved?.bill_id ? `Payment against bill ${paidBill?.bill_number ?? saved.bill_id}` : 'Payment', saved, shopName));
       } else if (kind === 'apply' && pickedAdvance && pickedBill) {
         const out = await vendorApApi.applyAdvance(vendorId, pickedAdvance.payment_id, {
           bill_id: pickedBill.bill_id, amount: Number(applyAmount) || 0, advance_left: gross(pickedAdvance),

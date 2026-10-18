@@ -110,6 +110,22 @@ describe('a payment picks its bill', () => {
     expect(payload.request_id.length).toBeGreaterThanOrEqual(8);
   });
 
+  it.each([
+    [{ bill_id: 'B1', store_id: 'WO-PUN-01' }, 'Payment against bill INV-101 recorded for WizOpt Pune'],
+    // A replay answers what was saved the first time -- here an advance --
+    // whatever this form now holds: the toast says what was recorded.
+    [{ bill_id: null, store_id: 'WO-PUN-01' }, 'Payment recorded for WizOpt Pune'],
+  ])('the saved toast reads what the server recorded (%o)', async (answer, words) => {
+    apis.vendorApApi.createPayment.mockResolvedValueOnce(answer);
+    await openForm('Payment');
+    const picker = await screen.findByLabelText('Apply this payment to');
+    await waitFor(() => expect((picker as HTMLSelectElement).options.length).toBe(3));
+    fireEvent.change(picker, { target: { value: 'B1' } });
+    fireEvent.change(screen.getByPlaceholderText('Amount paid'), { target: { value: '600' } });
+    fireEvent.click(screen.getByRole('button', { name: /Save/ }));
+    await waitFor(() => expect(toastMock.success).toHaveBeenCalledWith(words));
+  });
+
   it('a second Save on the same form sends the same request id', async () => {
     apis.vendorApApi.createPayment.mockRejectedValueOnce(new Error('504'));
     await openForm('Payment');

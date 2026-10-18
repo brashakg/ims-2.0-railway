@@ -333,17 +333,18 @@ def test_the_same_payment_request_racing_itself_records_one(ap, monkeypatch):
     from api.routers.vendors import ap_payments
 
     memory, world = ap
-    real, seen = ap_payments._payment_by_request, []
+    real, seen = ap_payments._replayed_payment, []
 
-    def missed_once(db, vendor_id, request_id):
+    def missed_once(db, request_id, sent, user):
         if not seen:
             seen.append(1)
             memory.vendor_payments.insert_one(  # the twin saved in between
-                payment(300, "B1", store_id=PUN, payment_id="TWIN", request_id=request_id))
+                payment(300, "B1", store_id=PUN, payment_id="TWIN", request_id=request_id,
+                        payment_date="2026-10-15", tds_amount=0.0))
             return None
-        return real(db, vendor_id, request_id)
+        return real(db, request_id, sent, user)
 
-    monkeypatch.setattr(vendors_pkg, "_payment_by_request", missed_once)
+    monkeypatch.setattr(vendors_pkg, "_replayed_payment", missed_once)
     resp = _pay(world, {"amount": 300, "bill_id": "B1", "request_id": "req-race-0001"})
     assert resp.status_code == 201 and resp.json()["payment_id"] == "TWIN"
     assert memory.vendor_payments.count_documents({}) == 1
@@ -407,3 +408,61 @@ def test_a_legacy_advance_dated_by_timestamp_is_read_in_its_ist_month(ap):
         payment(400, store_id=PUN, payment_id="OLD", payment_date="2026-09-30T20:00:00+00:00"))
     memory.period_locks.insert_one({"month": 9, "year": 2026})
     assert _apply(world, "OLD", "B1", 100).status_code == 200  # part-apply: the split row is October's
+
+
+# --- review round 5 -----------------------------------------------------------
+
+
+def test_a_form_made_advance_can_be_part_applied_and_a_retry_is_refused(ap):
+    """An advance recorded through the form carries its request_id; the split
+    row of a part-apply must not copy it (the unique index refused the copy:
+    500)."""
+    memory, world = ap
+    adv = _pay(world, {"amount": 1000, "request_id": "form-adv-0001"}).json()["payment_id"]
+    assert _apply(world, adv, "B1", 300, left=1000).status_code == 200
+    split = memory.vendor_payments.find_one({"applied_from": adv})
+    assert split["amount"] == 300 and "request_id" not in split
+    assert memory.vendor_payments.find_one({"payment_id": adv})["request_id"] == "form-adv-0001"
+    again = _apply(world, adv, "B1", 300, left=1000)
+    assert again.status_code == 409
+    assert memory.vendor_payments.count_documents({"applied_from": adv}) == 1
+    assert _owed_and_advances(world) == (700, 700)
+
+
+@pytest.mark.parametrize("change", [
+    {"amount": 900}, {"bill_id": None}, {"payment_date": "2026-10-14"},
+    {"tds_amount": 10, "tds_section": "194C_OTHER"}, {"reference": "UTR-OTHER"},
+])
+def test_the_same_request_id_with_other_details_is_refused(ap, change):
+    """A stale form saved again with different details: never the earlier
+    payment passed off as this one."""
+    memory, world = ap
+    body = {"amount": 1000, "bill_id": "B1", "request_id": "form-0001-same", "reference": "UTR-1"}
+    assert _pay(world, body).status_code == 201
+    other = _pay(world, {**body, **change})
+    assert other.status_code == 409 and "different details" in other.json()["detail"]
+    assert memory.vendor_payments.count_documents({}) == 1
+
+
+def test_the_same_request_id_for_another_supplier_is_refused_not_a_crash(ap):
+    memory, world = ap
+    memory.vendor_bills.insert_one(bill("B2", vendor="V2", store_id=PUN))
+    assert _pay(world, {"amount": 100, "request_id": "form-0001-twov"}).status_code == 201
+    other = world.post("/vendors/V2/payments", ACCT_PUNE,
+                       {"payment_date": "2026-10-15", "amount": 100, "request_id": "form-0001-twov"})
+    assert other.status_code == 409
+    assert memory.vendor_payments.count_documents({}) == 1
+
+
+def test_a_replay_answers_only_a_caller_who_can_see_the_payment(ap):
+    """Dhanbad's payment, replayed by a Pune login: the same 404 as any
+    payment out of reach -- before anything else is compared."""
+    from test_finance_ap_scope_round2 import _user
+
+    memory, world = ap
+    memory.vendor_bills.insert_one(bill("B2", store_id=DHN))
+    acct_dhn = _user("ACCOUNTANT", DHN, (DHN,))
+    body = {"payment_date": "2026-10-15", "amount": 100, "bill_id": "B2", "request_id": "form-0001-dhn"}
+    assert world.post("/vendors/V1/payments", acct_dhn, body).status_code == 201
+    assert world.post("/vendors/V1/payments", ACCT_PUNE, body).status_code == 404
+    assert memory.vendor_payments.count_documents({}) == 1
