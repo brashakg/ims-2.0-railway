@@ -41,6 +41,7 @@ from typing import Any, Dict, Optional
 
 from . import shopify_push
 from .shopify_live_sync import write_push_audit
+from .catalog_ecom import dirty_marks
 
 logger = logging.getLogger(__name__)
 
@@ -116,18 +117,19 @@ def _stamp(db, twin_id: Optional[str], **fields: Any) -> None:
     Fail-soft."""
     if db is None or not twin_id:
         return
-    try:
-        coll = db["catalog_products"]
-        doc = coll.find_one({"id": twin_id})
-        if doc is None:
-            return
-        ecom = dict(doc.get("ecom") or {})
+    from .catalog_ecom import update_ecom
+
+    def _apply(ecom: Dict[str, Any]) -> Dict[str, Any]:
         for key, value in fields.items():
             if value is None:
                 ecom.pop(key, None)
             else:
                 ecom[key] = value
-        coll.update_one({"id": twin_id}, {"$set": {"ecom": ecom}})
+        return ecom
+
+    try:
+        # Compare-and-set (SF-04): never drops a sibling written meanwhile.
+        update_ecom(db, twin_id, _apply)
     except Exception:  # noqa: BLE001
         logger.warning("[DELIST] ecom stamp failed for %s", twin_id, exc_info=True)
 
@@ -213,7 +215,7 @@ def mark_for_republish(db, product: Dict[str, Any]) -> bool:
         _stamp(
             db,
             twin.get("id") or twin.get("product_id"),
-            locally_modified=True,
+            **dirty_marks(),
             taken_down_at=None,
             **{k: None for k in DELIST_KEYS},
         )

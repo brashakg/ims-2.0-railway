@@ -726,10 +726,14 @@ async def shopify_push_product(db, product: Dict[str, Any]) -> SyncResult:
         return SyncResult(ok=False, provider="shopify", kind="push", error=str(e))
 
 
-# Shopify GraphQL Admin API version. inventorySetQuantities (absolute set) has
-# been GA since 2023-10; pin a known-good version so a Shopify default bump
-# can't silently change the contract. Override via SHOPIFY_API_VERSION if needed.
-SHOPIFY_API_VERSION = os.getenv("SHOPIFY_API_VERSION", "2024-10")
+# Shopify GraphQL Admin API version. Pinned to 2026-01 (audit SF-06, 18 Oct
+# 2026): 2024-10 is retired and Shopify already answered every 2024-10 request
+# as 2026-01 (fall-forward), so this changes nothing on the wire -- it makes the
+# code say what Shopify actually runs. 2026-01 also carries productByIdentifier
+# (customId), the first-publish identity lookup (SF-02). Moving past 2026-01
+# needs its own migration (inventorySetQuantities @idempotent is required from
+# 2026-04). Override via SHOPIFY_API_VERSION if needed.
+SHOPIFY_API_VERSION = os.getenv("SHOPIFY_API_VERSION", "2026-01")
 
 def _as_shopify_gid(value: Any, kind: str) -> str:
     """Normalize a Shopify id to a GID. Accepts an existing GID

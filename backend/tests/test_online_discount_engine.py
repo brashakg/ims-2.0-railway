@@ -583,6 +583,9 @@ def test_recompute_price_change_marks_locally_modified():
     a = db["catalog_products"].find_one({"id": "A"})
     assert a["ecom"]["online_offer_price"] == 1800.0
     assert a["ecom"]["locally_modified"] is True
+    # ...with a fresh edit revision (SF-04): a push already holding the old
+    # price can never take this one off the queue.
+    assert a["ecom"].get("edit_rev")
 
 
 def test_recompute_idempotent_rerun_does_not_redirty():

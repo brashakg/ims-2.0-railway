@@ -68,6 +68,7 @@ from .gtin import (
     sanitise_gtin,
 )
 from .pricing_caps import evaluate_offer_price
+from .catalog_ecom import dirty_marks
 from .product_naming import (
     build_handle,
     build_product_name,
@@ -3744,7 +3745,10 @@ def _mirror_variant_row_update(
             recompute_online_price(parent_twin, db=raw_db)
         except Exception:  # noqa: BLE001 -- the engine is fail-soft by contract
             logger.warning("[PM] online price recompute skipped for %s", sku, exc_info=True)
-    cat.update_one({"id": parent_twin_id}, {"$set": {"ecom.locally_modified": True}})
+    cat.update_one(
+        {"id": parent_twin_id},
+        {"$set": {f"ecom.{k}": v for k, v in dirty_marks().items()}},
+    )
     return True
 
 
@@ -3876,7 +3880,7 @@ def mirror_update_to_catalog_twin(
                 "brand", "category", "attributes", "tags",
             )
         ):
-            cat_patch["ecom.locally_modified"] = True
+            cat_patch.update({f"ecom.{k}": v for k, v in dirty_marks().items()})
         twin_id = current.get("pim_product_id") or product_id
         # THE NAME (sync audit gap #3, owner 2026-09-06: "renaming updates
         # Shopify"). The twin's name/title is what build_product_input sends
@@ -3896,7 +3900,7 @@ def mirror_update_to_catalog_twin(
                 cat_patch["name"] = new_name
                 cat_patch["title"] = new_name
                 if mark_dirty:
-                    cat_patch["ecom.locally_modified"] = True
+                    cat_patch.update({f"ecom.{k}": v for k, v in dirty_marks().items()})
         row_ok = True
         if current.get("variant_of"):
             # A SIZE VARIANT owns no listing: its twin is NEVER queued (a
@@ -3905,6 +3909,7 @@ def mirror_update_to_catalog_twin(
             # catalog_variants row on the PARENT's next push. No row for its
             # sku is a failed mirror (False), as a refused row write is.
             cat_patch.pop("ecom.locally_modified", None)
+            cat_patch.pop("ecom.edit_rev", None)
             row_ok = _mirror_variant_row_update(
                 current=current, patch=patch, db=db, mark_dirty=mark_dirty
             )

@@ -887,6 +887,10 @@ def test_both_doors_write_the_identical_twin(db, monkeypatch):
 
     spine_twin = _load(db, "P1")
     master_twin = copy.deepcopy(db2["catalog_products"].find_one({"id": "P1"}))
+    # Each queueing write stamps its OWN fresh edit revision (SF-04): both
+    # doors must stamp one, and they can never be equal.
+    revs = [t.get("ecom", {}).pop("edit_rev", None) for t in (spine_twin, master_twin)]
+    assert all(revs) and revs[0] != revs[1]
     # The doors stamp no door-specific keys on the twin; compare whole docs.
     assert spine_twin == master_twin, (
         "the two edit doors produced DIFFERENT twins -- the mirror rule has "

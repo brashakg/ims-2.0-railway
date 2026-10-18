@@ -93,7 +93,8 @@ async def push_menu(db, menu: Dict[str, Any]) -> PushResult:
         new_gid = menu_obj.get("id") or existing_gid
         if new_gid and mid:
             _writeback_simple(
-                db, "ecom_menus", "menu_id", mid, "shopify_menu_id", new_gid
+                db, "ecom_menus", "menu_id", mid, "shopify_menu_id", new_gid,
+                sent_rev=menu.get("edit_rev"),
             )
         return PushResult(
             mode=MODE_LIVE,

@@ -261,6 +261,7 @@ async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
                 cid,
                 "shopify_collection_id",
                 new_gid,
+                sent_rev=collection.get("edit_rev"),
             )
         # CUSTOM manual membership rides AFTER the collection upsert (the gid must
         # exist to attach products to). Fail-soft side channel: reported in

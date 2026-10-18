@@ -109,6 +109,7 @@ from . import (
     menus,
     media,
     writeback,
+    create_claim,
     inventory,
     tags,
     product,
@@ -162,6 +163,7 @@ from ._shared import (  # noqa: F401
     _PHOTOS_NOT_SYNCED_MSG,
 )
 from .transport import (  # noqa: F401
+    ShopifyOutcomeUnknown,
     _MAX_RETRIES,
     _RETRY_BASE_DELAY,
     _RETRY_MAX_DELAY,
@@ -319,6 +321,12 @@ from .media import (  # noqa: F401
     _image_writeback_filter,
     _writeback_image,
 )
+from .create_claim import (  # noqa: F401
+    CREATE_ID_NOT_SAVED,
+    CREATE_IN_PROGRESS,
+    CREATE_UNCERTAIN,
+    ensure_identity_definition,
+)
 from .writeback import (  # noqa: F401
     _writeback_product,
     _requeue_unpublished,
@@ -355,6 +363,7 @@ _SUBMODULES = (
     menus,
     media,
     writeback,
+    create_claim,
     inventory,
     tags,
     product,

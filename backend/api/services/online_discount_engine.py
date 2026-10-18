@@ -76,6 +76,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional
 
 from .pricing_caps import evaluate_offer_price
+from .catalog_ecom import dirty_marks, update_ecom
 
 try:  # resolve_category makes rule<->product category matching alias-proof.
     from .product_master import resolve_category
@@ -460,13 +461,8 @@ def _persist_product_ecom(db, product_id: str, ecom_updates: Dict[str, Any]) -> 
     like shopify_product_id / handle / seo). Mirrors shopify_push._writeback_product
     so it also works on the in-memory MockCollection. Fail-soft."""
     try:
-        coll = db["catalog_products"]
-        doc = coll.find_one({"id": product_id})
-        if doc is None:
-            return
-        ecom = dict(doc.get("ecom") or {})
-        ecom.update(ecom_updates)
-        coll.update_one({"id": product_id}, {"$set": {"ecom": ecom}})
+        # Compare-and-set (SF-04): never drops a sibling written meanwhile.
+        update_ecom(db, product_id, lambda ecom: {**ecom, **ecom_updates})
     except Exception as exc:  # noqa: BLE001
         logger.warning("[ODE] product ecom persist failed %s: %s", product_id, exc)
 
@@ -685,13 +681,15 @@ def recompute_online_price(
         # ACTUAL change marks dirty: an idempotent re-run re-stamps the same
         # numbers and adds nothing to the queue.
         if price_changed:
+            # Flag + a fresh edit revision (SF-04, catalog_ecom.dirty_marks).
+            marks = dirty_marks()
             ecom_now = product.get("ecom")
             if isinstance(ecom_now, dict):
-                ecom_now["locally_modified"] = True
+                ecom_now.update(marks)
             else:
-                product["ecom"] = {"locally_modified": True}
+                product["ecom"] = dict(marks)
             if persist and db is not None and pid:
-                _persist_product_ecom(db, pid, {"locally_modified": True})
+                _persist_product_ecom(db, pid, marks)
 
         return {
             "ok": True,
