@@ -5,8 +5,8 @@ Owner rulings 12-15 (2026-08-26) plus the two audit findings they ride on:
   * F2  -- the 3-way match never compared the BILL against the RECEIPT, so a
            delivery partly rejected inside the 5% tolerance was billed in full
            and paid silently.
-  * R7  -- a purchase bill may not be passed for payment while goods were
-           rejected and no debit note has been raised.
+  * R7 / A01 -- billed rejected goods need actual confirmed supplier credit;
+           accepted-only bills need a confirmed internal custody request.
   * R13 -- a PO may carry a product that does not exist in the catalogue yet;
            the buyer types its identity and prices inline. It must NOT become
            sellable until someone finishes cataloguing it.
@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from uuid import uuid4
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 os.environ.setdefault("ENVIRONMENT", "test")
@@ -28,6 +29,7 @@ os.environ.setdefault("MONGODB_URI", "")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: E402
+import mongomock  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 
 from api.services import purchase_match as pmatch  # noqa: E402
@@ -89,7 +91,7 @@ class TestBillAgainstReceipt:
 
 
 # =========================================================================== #
-# R7 -- rejected goods hold the bill until a debit note exists
+# R7 / A01 -- rejected goods need verified custody and billed-credit evidence
 # =========================================================================== #
 
 
@@ -154,108 +156,94 @@ class _DB:
         return self.colls.setdefault(name, _Coll([]))
 
 
-def _pay_db(debit_notes=None, rejected=2):
-    return _DB(
-        vendor_bills=[
-            {"bill_id": "B1", "bill_number": "INV-9", "grn_id": "G1", "vendor_id": "V1", "store_id": "S1"}
-        ],
-        grns=[
-            {
-                "grn_id": "G1",
-                "grn_number": "GRN-7",
-                "items": [
-                    {
-                        "product_id": "P1",
-                        "received_qty": 20,
-                        "accepted_qty": 20 - rejected,
-                        "rejected_qty": rejected,
-                    }
-                ],
-            }
-        ],
-        vendor_debit_notes=debit_notes or [],
-        vendor_payments=[],
-    )
+def _receipt_pay_db(receipts, *, dc=False, accepted_only=False, debit_notes=None):
+    """Actual booked quantities and immutable rejected custody, in memory only.
+
+    A01 needs $or/$in/$exists and atomic writer claims, so payment evidence uses
+    Mongo-compatible semantics rather than the small catalogue fake above.
+    """
+    db = mongomock.MongoClient().get_database("purchase_lifecycle_payment")
+    lines = []
+    for gid, number, pid, received, rejected in receipts:
+        accepted = received - rejected
+        db.grns.insert_one({
+            "grn_id": gid, "grn_number": number, "vendor_id": "V1", "store_id": "S1",
+            "status": "ACCEPTED", "grn_subtype": "DELIVERY_CHALLAN" if dc else "PO",
+            "items": [{"product_id": pid, "received_qty": received,
+                       "accepted_qty": accepted, "rejected_qty": rejected}],
+        })
+        qty = accepted if accepted_only else received
+        lines.append({"product_id": pid, "qty": qty, "unit_price": 100,
+                      "taxable": qty * 100, "gst_rate": 5, "hsn": "9003",
+                      "cgst": qty * 2.5, "sgst": qty * 2.5, "igst": 0,
+                      "line_total": qty * 105})
+        if rejected:
+            rid = f"RETURN-{gid}"
+            stock_ids = [f"REJECTED-{gid}-{index}" for index in range(rejected)]
+            db.vendor_returns.insert_one({
+                "return_id": rid, "vendor_id": "V1", "store_id": "S1",
+                "receipt_rejection": True, "grn_id": gid, "grn_line_index": 0,
+                "status": "received_by_vendor", "return_type": "credit_note",
+                "stock_ids": stock_ids, "total_value": rejected * 100,
+                "items": [{"product_id": pid, "quantity": rejected, "unit_price": 100}],
+            })
+            db.stock_units.insert_many([{
+                "stock_id": sid, "product_id": pid, "quantity": 1, "store_id": "S1",
+                "grn_id": gid, "grn_line_index": 0, "receipt_disposition": "REJECTED",
+                "rtv_vendor_id": rid, "status": "RETURNED_TO_VENDOR",
+            } for sid in stock_ids])
+    total_qty = sum(line["qty"] for line in lines)
+    db.vendor_bills.insert_one({
+        "bill_id": "B1", "bill_number": "INV-9", "bill_date": "2026-08-26",
+        "grn_id": None if dc else receipts[0][0],
+        "linked_dc_ids": [r[0] for r in receipts] if dc else [],
+        "vendor_id": "V1", "store_id": "S1", "status": "UNPAID", "received": True,
+        "doc_type": "PURCHASE_INVOICE", "recipient_entity_id": "E1",
+        "recipient_gstin": "20AAAAA0000A1Z5", "vendor_gstin": "20BBBBB0000B1Z5",
+        "lines": lines, "taxable_amount": total_qty * 100, "tax_amount": total_qty * 5,
+        "cgst_total": total_qty * 2.5, "sgst_total": total_qty * 2.5, "igst_total": 0,
+        "total_amount": total_qty * 105,
+    })
+    db.entities.insert_one({"entity_id": "E1", "gstins": [{"gstin": "20AAAAA0000A1Z5"}]})
+    if debit_notes:
+        db.vendor_debit_notes.insert_many(debit_notes)
+    return db
 
 
-def _dc_pay_db(debit_notes=None, rejected=2):
-    """The SAME delivery billed the Delivery-Challan way: the bill stores
-    grn_id None and carries its receipts in linked_dc_ids instead."""
-    return _DB(
-        vendor_bills=[
-            {
-                "bill_id": "B1",
-                "bill_number": "INV-9",
-                "grn_id": None,
-                "linked_dc_ids": ["DC1"],
-                "vendor_id": "V1",
-                "store_id": "S1",
-            }
-        ],
-        grns=[
-            {
-                "grn_id": "DC1",
-                "grn_number": "DC-4",
-                "grn_subtype": "DELIVERY_CHALLAN",
-                "items": [
-                    {
-                        "product_id": "P1",
-                        "received_qty": 20,
-                        "accepted_qty": 20 - rejected,
-                        "rejected_qty": rejected,
-                    }
-                ],
-            }
-        ],
-        vendor_debit_notes=debit_notes or [],
-        vendor_payments=[],
-    )
+def _pay_db(debit_notes=None, rejected=2, *, accepted_only=False):
+    return _receipt_pay_db([("G1", "GRN-7", "P1", 20, rejected)],
+                           debit_notes=debit_notes, accepted_only=accepted_only)
 
 
-def _two_dc_pay_db(debit_notes=None):
-    """ONE bill consolidating TWO delivery challans, rejections on BOTH."""
-    return _DB(
-        vendor_bills=[
-            {
-                "bill_id": "B1",
-                "bill_number": "INV-9",
-                "grn_id": None,
-                "linked_dc_ids": ["DC1", "DC2"],
-                "vendor_id": "V1",
-                "store_id": "S1",
-            }
-        ],
-        grns=[
-            {
-                "grn_id": "DC1",
-                "grn_number": "DC-4",
-                "grn_subtype": "DELIVERY_CHALLAN",
-                "items": [
-                    {
-                        "product_id": "P1",
-                        "received_qty": 20,
-                        "accepted_qty": 18,
-                        "rejected_qty": 2,
-                    }
-                ],
-            },
-            {
-                "grn_id": "DC2",
-                "grn_number": "DC-5",
-                "grn_subtype": "DELIVERY_CHALLAN",
-                "items": [
-                    {
-                        "product_id": "P2",
-                        "received_qty": 10,
-                        "accepted_qty": 7,
-                        "rejected_qty": 3,
-                    }
-                ],
-            },
-        ],
-        vendor_debit_notes=debit_notes or [],
-        vendor_payments=[],
-    )
+def _dc_pay_db(debit_notes=None, rejected=2, *, accepted_only=False):
+    return _receipt_pay_db([("DC1", "DC-4", "P1", 20, rejected)], dc=True,
+                           debit_notes=debit_notes, accepted_only=accepted_only)
+
+
+def _two_dc_pay_db(*, accepted_only=False):
+    return _receipt_pay_db([("DC1", "DC-4", "P1", 20, 2), ("DC2", "DC-5", "P2", 10, 3)],
+                           dc=True, accepted_only=accepted_only)
+
+
+def _confirm_rejection(db, gid):
+    """Exercise the real canonical writer: never plant a fabricated POSTED row."""
+    from api.services.supplier_credit_confirmation import record_supplier_confirmation
+    from api.services.supplier_credit_evidence import resolve_credit_evidence
+
+    request = db.vendor_returns.find_one({"grn_id": gid})
+    source, = resolve_credit_evidence(db, request)
+    qty = request["items"][0]["quantity"]
+    event, repeated = record_supplier_confirmation(db, request, {
+        "idempotency_key": str(uuid4()), "credit_note_number": f"SUPPLIER-CN-{gid}",
+        "credit_note_date": "2026-08-26", "received_amount": qty * 105,
+        "source_selections": [], "allocations": [{"source_key": source["source_key"],
+            "taxable": qty * 100, "cgst": qty * 2.5, "sgst": qty * 2.5, "igst": 0}],
+    }, actor_id="ACCOUNTS", allowed_store_ids={"S1"})
+    assert not repeated and event["posting_status"] == "POSTED"
+    assert event["sources"][0]["grn_id"] == gid
+    assert event["sources"][0]["receipt_disposition"] == "REJECTED"
+    assert event["allocations"][0]["bill_id"] == "B1"
+    return event
 
 
 class _VendorRepo:
@@ -285,29 +273,38 @@ def _record_payment(db):
 
 
 class TestRejectedGoodsHoldTheBill:
-    def test_payment_refused_while_no_debit_note_covers_the_rejection(self):
+    def test_payment_refused_while_no_actual_credit_covers_billed_rejections(self):
         db = _pay_db()
         with pytest.raises(HTTPException) as exc:
             _record_payment(db)
         assert exc.value.status_code == 409
         detail = exc.value.detail
         assert detail["code"] == "REJECTED_GOODS_NO_DEBIT_NOTE"
-        assert "2 unit(s)" in detail["message"]
-        assert "GRN-7" in detail["message"]
+        assert "supplier's actual credit against this bill" in detail["message"]
         # and nothing was written
-        assert db.get_collection("vendor_payments").rows == []
+        assert db.vendor_payments.count_documents({}) == 0
 
-    def test_payment_allowed_once_the_debit_note_is_raised(self):
+    def test_internal_debit_note_does_not_release_billed_rejections(self):
         db = _pay_db(debit_notes=[{"debit_note_id": "DN1", "grn_id": "G1"}])
+        with pytest.raises(HTTPException) as exc:
+            _record_payment(db)
+        assert exc.value.status_code == 409
+        assert "actual credit" in exc.value.detail["message"]
+        assert db.vendor_payments.count_documents({}) == 0
+        assert db.supplier_credit_confirmations.count_documents({}) == 0
+
+    def test_payment_allowed_once_actual_supplier_credit_covers_billed_rejections(self):
+        db = _pay_db()
+        _confirm_rejection(db, "G1")
         out = _record_payment(db)
         assert out["amount"] == 1000.0
-        assert len(db.get_collection("vendor_payments").rows) == 1
+        assert db.vendor_payments.count_documents({}) == 1
 
     def test_a_clean_receipt_is_never_held(self):
         db = _pay_db(rejected=0)
         out = _record_payment(db)
         assert out["amount"] == 1000.0
-        assert len(db.get_collection("vendor_payments").rows) == 1
+        assert db.vendor_payments.count_documents({}) == 1
 
     def test_a_dc_consolidated_bill_with_rejections_is_held_the_same_way(self):
         """Ruling 7 must follow the Delivery-Challan path too. A DC-consolidated
@@ -320,48 +317,45 @@ class TestRejectedGoodsHoldTheBill:
         assert exc.value.status_code == 409
         detail = exc.value.detail
         assert detail["code"] == "REJECTED_GOODS_NO_DEBIT_NOTE"
-        assert "2 unit(s)" in detail["message"]
-        assert "DC-4" in detail["message"]
+        assert "supplier's actual credit against this bill" in detail["message"]
         # and nothing was written
-        assert db.get_collection("vendor_payments").rows == []
+        assert db.vendor_payments.count_documents({}) == 0
 
-    def test_a_debit_note_against_the_dc_releases_the_payment(self):
-        """The discriminator for the DC hold: cover the rejection and the same
-        payment goes through."""
-        db = _dc_pay_db(debit_notes=[{"debit_note_id": "DN1", "grn_id": "DC1"}])
+    def test_actual_supplier_credit_against_the_dc_releases_the_payment(self):
+        """Single linked DC proves all accepted and rejected units were billed."""
+        db = _dc_pay_db()
+        _confirm_rejection(db, "DC1")
         out = _record_payment(db)
         assert out["amount"] == 1000.0
-        assert len(db.get_collection("vendor_payments").rows) == 1
+        assert db.vendor_payments.count_documents({}) == 1
 
-    def test_every_linked_dc_is_walked_not_just_the_first(self):
-        """One bill consolidates TWO challans, both carrying rejections. A
-        debit note covering only the FIRST must not release the bill -- the
-        refusal must name the still-uncovered SECOND challan by number. A walk
-        that stops at linked_dc_ids[0] pays for DC-5's 3 rejected units
-        silently."""
-        db = _two_dc_pay_db(debit_notes=[{"debit_note_id": "DN1", "grn_id": "DC1"}])
+    @pytest.mark.parametrize("pending_gid", ["DC1", "DC2"])
+    def test_every_linked_dc_is_walked_not_just_the_first(self, pending_gid):
+        """Accepted-only billing still needs confirmed custody for EVERY DC.
+
+        One request is confirmed; the other's draft must hold payment.
+        Confirming just that remaining request releases the same bill, without
+        pretending a consolidated bill proves a rejected unit's credit origin.
+        """
+        db = _two_dc_pay_db(accepted_only=True)
+        db.vendor_returns.update_one({"grn_id": pending_gid}, {"$set": {"status": "draft"}})
         with pytest.raises(HTTPException) as exc:
             _record_payment(db)
         assert exc.value.status_code == 409
         detail = exc.value.detail
         assert detail["code"] == "REJECTED_GOODS_NO_DEBIT_NOTE"
-        assert "DC-5" in detail["message"]  # the UNCOVERED challan, by name
-        assert "DC-4" not in detail["message"]  # the covered one is not blamed
-        assert "3 unit(s)" in detail["message"]
-        assert db.get_collection("vendor_payments").rows == []
-        # cover the second challan too -> the same payment goes through
-        db.get_collection("vendor_debit_notes").insert_one(
-            {"debit_note_id": "DN2", "grn_id": "DC2"}
-        )
+        assert "Confirm the rejected goods' credit or replacement request" in detail["message"]
+        other_gid = "DC1" if pending_gid == "DC2" else "DC2"
+        assert db.vendor_returns.find_one({"grn_id": other_gid})["status"] == "received_by_vendor"
+        assert db.vendor_payments.count_documents({}) == 0
+        # Only the pending request changes. Cover both possible iteration orders.
+        db.vendor_returns.update_one({"grn_id": pending_gid}, {"$set": {"status": "created"}})
         out = _record_payment(db)
         assert out["amount"] == 1000.0
-        assert len(db.get_collection("vendor_payments").rows) == 1
+        assert db.vendor_payments.count_documents({}) == 1
+        assert db.supplier_credit_confirmations.count_documents({}) == 0
 
-    def test_a_debit_note_allocated_to_the_bill_releases_the_hold(self):
-        """DebitNoteCreate.bill_id says "allocate to a bill", and the hold
-        promises to honour a note referencing either the receipt or the BILL
-        itself. A note allocated to B1 -- no grn_id at all -- must release the
-        payment."""
+    def test_a_legacy_debit_note_allocated_to_the_bill_does_not_release_the_hold(self):
         db = _pay_db()
         with pytest.raises(HTTPException) as exc:
             _record_payment(db)  # rejections held while nothing covers them
@@ -370,9 +364,41 @@ class TestRejectedGoodsHoldTheBill:
         db.get_collection("vendor_debit_notes").insert_one(
             {"debit_note_id": "DN1", "bill_id": "B1"}
         )
+        with pytest.raises(HTTPException) as exc:
+            _record_payment(db)
+        assert exc.value.status_code == 409
+        assert "actual credit" in exc.value.detail["message"]
+        assert db.vendor_payments.count_documents({}) == 0
+        _confirm_rejection(db, "G1")
         out = _record_payment(db)
         assert out["amount"] == 1000.0
-        assert len(db.get_collection("vendor_payments").rows) == 1
+        assert db.vendor_payments.count_documents({}) == 1
+
+    @pytest.mark.parametrize("factory", [_pay_db, _dc_pay_db])
+    def test_accepted_only_bill_needs_internal_confirmation_but_no_accounting_credit(self, factory):
+        db = factory(accepted_only=True)
+        db.vendor_returns.update_one({}, {"$set": {"status": "draft"}})
+        with pytest.raises(HTTPException) as exc:
+            _record_payment(db)
+        assert exc.value.status_code == 409
+        assert db.vendor_payments.count_documents({}) == 0
+        db.vendor_returns.update_one({}, {"$set": {"status": "created"}})
+        assert _record_payment(db)["amount"] == 1000.0
+        assert db.supplier_credit_confirmations.count_documents({}) == 0
+        assert db.vendor_debit_notes.count_documents({}) == 0
+
+    def test_consolidated_billed_rejects_stay_held_without_provable_credit_allocation(self):
+        from api.services.supplier_credit_evidence import credit_preview
+
+        db = _two_dc_pay_db()
+        for request in db.vendor_returns.find({}):
+            assert credit_preview(db, request)["source_status"] == "PENDING_EVIDENCE"
+        with pytest.raises(HTTPException) as exc:
+            _record_payment(db)
+        assert exc.value.status_code == 409
+        assert "actual credit" in exc.value.detail["message"]
+        assert db.vendor_payments.count_documents({}) == 0
+        assert db.supplier_credit_confirmations.count_documents({}) == 0
 
 # =========================================================================== #
 # R13 -- a PO for a product that does not exist yet

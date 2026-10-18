@@ -14,8 +14,8 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from typing import Any, Dict, List, Optional
 
+import mongomock
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -25,40 +25,10 @@ os.environ.setdefault("ENVIRONMENT", "test")
 from api.routers import vendor_returns as vr  # noqa: E402
 
 
-class FakeCollection:
-    def __init__(self):
-        self.docs: List[Dict[str, Any]] = []
-
-    def insert_one(self, doc):
-        self.docs.append(dict(doc))
-
-    def find_one(self, query):
-        for d in self.docs:
-            if all(d.get(k) == v for k, v in query.items()):
-                return dict(d)
-        return None
-
-    def update_one(self, query, update):
-        for d in self.docs:
-            if all(d.get(k) == v for k, v in query.items()):
-                d.update(update.get("$set", {}))
-                return type("R", (), {"modified_count": 1})()
-        return type("R", (), {"modified_count": 0})()
-
-
-class FakeDB:
-    def __init__(self):
-        self._c: Dict[str, FakeCollection] = {}
-
-    def get_collection(self, name):
-        if name not in self._c:
-            self._c[name] = FakeCollection()
-        return self._c[name]
-
-
 @pytest.fixture()
 def db(monkeypatch):
-    fake = FakeDB()
+    # Exercise Mongo's status + absent-credit-fence CAS, including $exists.
+    fake = mongomock.MongoClient().get_database("rma_courier_tracking")
     monkeypatch.setattr(vr, "_get_db", lambda: fake)
     monkeypatch.setattr(vr, "validate_store_access", lambda sid, u: sid)
     return fake
@@ -135,6 +105,33 @@ def test_blank_tracking_values_not_persisted(db):
     doc = out["return"]
     assert "courier_name" not in doc and "tracking_number" not in doc
     assert doc["status"] == "shipped"  # the transition itself still lands
+
+
+@pytest.mark.parametrize("concurrent", [
+    {"credit_confirmation_fence": "other-confirmation"},
+    {"status": "cancelled"},
+])
+def test_concurrent_confirmation_or_transition_keeps_courier_write_out(db, monkeypatch, concurrent):
+    from fastapi import HTTPException
+
+    rid = _seed_return(db)
+    collection = db.get_collection("vendor_returns")
+    original = collection.update_one
+
+    def race(query, update):
+        original({"return_id": rid}, {"$set": concurrent})
+        return original(query, update)
+
+    monkeypatch.setattr(collection, "update_one", race)
+    with pytest.raises(HTTPException) as exc:
+        _update(rid, status="shipped", tracking_number="STALE-AWB")
+    assert exc.value.status_code == 409
+    row = collection.find_one({"return_id": rid})
+    assert row["status"] == concurrent.get("status", "approved")
+    assert row["status_history"] == []
+    assert "tracking_number" not in row and "shipped_at" not in row
+    if "credit_confirmation_fence" in concurrent:
+        assert row["credit_confirmation_fence"] == "other-confirmation"
 
 
 def test_invalid_transition_still_400(db):
