@@ -123,3 +123,21 @@ def test_multiple_partial_notes_export_distinct_actual_vouchers_and_unconfirmed_
     assert len(vouchers) == 2
     assert {v.findtext("VOUCHERNUMBER") for v in vouchers} == {"SUP-CN-1", "SECOND"}
     assert len({v.findtext("GUID") for v in vouchers}) == 2
+
+
+def test_export_escapes_supplier_and_note_text_once_without_parsing_generated_xml(db, return_doc, monkeypatch):
+    supplier = 'Supplier & <West> "Branch"'
+    number = '<CN & "1">'
+    post(db, return_doc, payload(db, return_doc, number=number))
+    request = {"rtv_ref_id": "R1", "vendor": {"name": supplier}}
+    # Export itself must not invoke an XML parser even for its own output.
+    parse = ElementTree.fromstring
+    def no_parser(*_args, **_kwargs):
+        raise AssertionError("export must render structured values without parsing XML")
+    monkeypatch.setattr(ElementTree, "fromstring", no_parser)
+    output = confirmed_tally_xml(db, request)
+    voucher = parse(output).find(".//VOUCHER")
+    assert voucher.findtext("PARTYLEDGERNAME") == supplier
+    assert voucher.findtext("VOUCHERNUMBER") == number
+    assert voucher.findtext("ALLLEDGERENTRIES.LIST/LEDGERNAME") == supplier
+    assert float(voucher.findtext("ALLLEDGERENTRIES.LIST/AMOUNT")) == -84

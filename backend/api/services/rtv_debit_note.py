@@ -523,7 +523,7 @@ def _ledger_entry(name: str, xml_amount: float) -> str:
     </ALLLEDGERENTRIES.LIST>"""
 
 
-def tally_build_debit_note_xml(
+def _tally_debit_note_voucher(
     note: Dict[str, Any],
     *,
     purchase_ledger: str = "Purchase Returns",
@@ -531,9 +531,7 @@ def tally_build_debit_note_xml(
     input_sgst_ledger: str = "Input SGST",
     input_igst_ledger: str = "Input IGST",
 ) -> str:
-    """Build a Tally import XML carrying ONE ``VCHTYPE="Debit Note"`` voucher for
-    the debit note. Mirrors the Receipt-voucher builder's sign convention +
-    envelope; emits a SEPARATE voucher stream (never modifies sales vouchers).
+    """Render ONE confirmed voucher using the Receipt-voucher sign convention.
 
     Accounting (a debit note returning goods to a vendor):
       * DEBIT  the vendor party ledger by the grand total (reduces payable) ->
@@ -557,7 +555,7 @@ def tally_build_debit_note_xml(
     igst = paise_to_rupees(totals.get("igst_paise"))
     grand = paise_to_rupees(totals.get("grand_total_paise"))
 
-    party = escape(str((note.get("vendor") or {}).get("name") or "Vendor"))
+    party = str((note.get("vendor") or {}).get("name") or "Vendor")
     dn_number = escape(str(note.get("debit_note_number") or ""))
     issue = str(note.get("issue_date") or _now().date().isoformat())
     vch_date = issue.replace("-", "")[:8]  # yyyymmdd
@@ -586,10 +584,22 @@ def tally_build_debit_note_xml(
     <DATE>{vch_date}</DATE>
     <VOUCHERTYPENAME>Debit Note</VOUCHERTYPENAME>
     <VOUCHERNUMBER>{dn_number}</VOUCHERNUMBER>
-    <PARTYLEDGERNAME>{party}</PARTYLEDGERNAME>
+    <PARTYLEDGERNAME>{escape(party)}</PARTYLEDGERNAME>
     <NARRATION>Return to vendor debit note {dn_number}</NARRATION>{entries}
   </VOUCHER>"""
 
+    return voucher
+
+
+def tally_build_debit_notes_xml(notes, *, purchase_ledger="Purchase Returns",
+                               input_cgst_ledger="Input CGST", input_sgst_ledger="Input SGST",
+                               input_igst_ledger="Input IGST") -> str:
+    """Assemble escaped confirmed vouchers directly; never parse input XML."""
+    vouchers = "".join(_tally_debit_note_voucher(note, purchase_ledger=purchase_ledger,
+        input_cgst_ledger=input_cgst_ledger, input_sgst_ledger=input_sgst_ledger,
+        input_igst_ledger=input_igst_ledger) for note in notes)
+    if not vouchers:
+        raise ValueError("supplier_confirmation_required")
     return f"""<ENVELOPE>
   <HEADER>
     <TALLYREQUEST>Import Data</TALLYREQUEST>
@@ -599,11 +609,22 @@ def tally_build_debit_note_xml(
       <REQUESTDESC>
         <REPORTNAME>Vouchers</REPORTNAME>
       </REQUESTDESC>
-      <REQUESTDATA>{voucher}
+      <REQUESTDATA>{vouchers}
       </REQUESTDATA>
     </IMPORTDATA>
   </BODY>
 </ENVELOPE>"""
+
+
+def tally_build_debit_note_xml(
+    note: Dict[str, Any], *, purchase_ledger: str = "Purchase Returns",
+    input_cgst_ledger: str = "Input CGST", input_sgst_ledger: str = "Input SGST",
+    input_igst_ledger: str = "Input IGST",
+) -> str:
+    """Keep the single-note API using the same confirmed-voucher renderer."""
+    return tally_build_debit_notes_xml([note], purchase_ledger=purchase_ledger,
+        input_cgst_ledger=input_cgst_ledger, input_sgst_ledger=input_sgst_ledger,
+        input_igst_ledger=input_igst_ledger)
 
 
 # ============================================================================

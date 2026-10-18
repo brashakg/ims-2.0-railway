@@ -102,15 +102,14 @@ def confirmed_itc_heads(db, *, store_id=None, entity_id=None, gstin=None, period
 
 def confirmed_tally_xml(db, request_doc):
     """Export actual posted supplier notes, never the internal requested sum."""
-    from xml.etree import ElementTree
-    from .rtv_debit_note import tally_build_debit_note_xml
+    from .rtv_debit_note import tally_build_debit_notes_xml
 
     rid = (request_doc.get("rtv_ref") or {}).get("id") or request_doc.get("rtv_ref_id")
     kind = "RMA" if (request_doc.get("rtv_ref") or {}).get("type") == "vendor_rma" else "VENDOR_RETURN"
     events = list(db.get_collection(EVENTS).find({**return_event_query({"return_id": rid, "return_kind": kind}), "posting_status": "POSTED"}))
     if not rid or not events:
         raise ValueError("supplier_confirmation_required")
-    envelope = None
+    documents = []
     for event in events:
         heads = {h: sum(a["itc_reversal_paise"][h] for a in event["allocations"]) for h in HEADS}
         # RCM tax was self-paid, never owed to the supplier. The balancing
@@ -120,9 +119,5 @@ def confirmed_tally_xml(db, request_doc):
                   "tax_paise": sum(heads.values()), "grand_total_paise": event["received_paise"]}
         document = {**request_doc, "accounting_status": "POSTED", "confirmation_id": event["confirmation_id"],
                     "debit_note_number": event["credit_note_number"], "issue_date": event["credit_note_date"], "totals": totals}
-        parsed = ElementTree.fromstring(tally_build_debit_note_xml(document))
-        if envelope is None:
-            envelope = parsed
-        else:
-            envelope.find("./BODY/IMPORTDATA/REQUESTDATA").extend(parsed.findall("./BODY/IMPORTDATA/REQUESTDATA/VOUCHER"))
-    return ElementTree.tostring(envelope, encoding="unicode")
+        documents.append(document)
+    return tally_build_debit_notes_xml(documents)
