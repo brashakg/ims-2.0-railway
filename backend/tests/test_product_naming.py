@@ -14,6 +14,10 @@ os.environ.setdefault("ENVIRONMENT", "test")
 from api.services.product_naming import (  # noqa: E402
     MAX_NAME_LEN,
     build_handle,
+    build_model_handle,
+    build_model_seo_description,
+    build_model_seo_title,
+    build_model_title,
     build_product_name,
     build_seo_description,
     build_seo_title,
@@ -292,3 +296,82 @@ def test_needs_name():
     assert needs_name({"name": ""}) is True
     assert needs_name({"name": "   "}) is True
     assert needs_name({"name": "Ray-Ban RB3025 Sunglasses"}) is False
+
+
+# ---------------------------------------------------------------------------
+# Brand repeated inside the model number / name (real Carrera data)
+# ---------------------------------------------------------------------------
+
+
+def _m(brand, no="", name="", category="SUNGLASSES"):
+    a = {"brand_name": brand}
+    if no:
+        a["model_no"] = no
+    if name:
+        a["model_name"] = name
+    return {"category": category, "attributes": a}
+
+
+import pytest  # noqa: E402
+
+CARRERA_CASES = [
+    # (brand, model_no, model_name, expected model title)
+    ("Carrera", "Carrera Victory C 02/S", "", "Carrera Victory C 02/S"),
+    ("Carrera", "Carrera 3044/S", "", "Carrera 3044/S"),
+    ("Carrera", "Carrera Carduc 037/S", "Ducati", "Carrera Carduc 037/S Ducati"),
+    ("Carrera", "Victory C 01/S", "Victory", "Carrera Victory C 01/S"),
+    ("Carrera", "Carrera 333/S", "", "Carrera 333/S"),
+    ("Carrera", "Carrera 8031/S", "Carrera", "Carrera 8031/S"),
+    ("Carrera", "CARRERA 5046/S", "", "Carrera 5046/S"),
+    ("Carrera", "Carrera-2006", "Flag", "Carrera 2006 Flag"),
+    ("Carrera", "Hyperfit 10/S", "Hyperfit", "Carrera Hyperfit 10/S"),
+    ("Carrera", "Carrera Champion", "Champion", "Carrera Champion"),
+]
+
+
+@pytest.mark.parametrize("brand,no,name,expected", CARRERA_CASES)
+def test_model_title_no_doubled_brand(brand, no, name, expected):
+    assert build_model_title(_m(brand, no, name)) == expected
+
+
+def test_model_handle_and_seo_follow_the_clean_title():
+    p = _m("Carrera", "Carrera 3044/S")
+    assert build_model_handle(p) == "carrera-3044-s"
+    assert "Carrera Carrera" not in build_model_seo_title(p)
+    assert build_model_seo_title(p).startswith("Carrera 3044/S Sunglasses")
+    assert "Carrera Carrera" not in build_model_seo_description(p, 3, 2)
+
+
+def test_brand_only_prefix_of_a_word_is_not_stripped():
+    assert build_model_title(_m("Ray", "Rayon 3025")) == "Ray Rayon 3025"
+    assert build_model_title(_m("Ray", "Ray 3025")) == "Ray 3025"
+
+
+def test_model_name_equal_to_number_not_repeated():
+    assert build_model_title(_m("Oakley", "Holbrook", "holbrook")) == "Oakley Holbrook"
+
+
+def test_number_empty_after_strip_is_dropped_name_kept():
+    assert build_model_title(_m("Carrera", "Carrera", "Ducati")) == "Carrera Ducati"
+    assert build_model_title(_m("Carrera", "Carrera")) == "Carrera"
+
+
+def test_name_partly_inside_number_is_kept():
+    # 'Ducati' is not in the number; 'Victory D' is not an in-order subset.
+    assert build_model_title(_m("Carrera", "Victory C 01/S", "Victory D")) == "Carrera Victory C 01/S Victory D"
+
+
+def test_brands_with_spaces_and_hyphens():
+    assert build_model_title(_m("Ray-Ban", "Ray-Ban RB3025")) == "Ray-Ban RB3025"
+    assert build_model_title(_m("Ray-Ban", "Ray Ban RB3025")) == "Ray-Ban RB3025"
+    assert build_model_title(_m("Ray-Ban", "RB3025", "Aviator")) == "Ray-Ban RB3025 Aviator"
+    assert build_model_title(_m("Emporio Armani", "Emporio Armani EA4137")) == "Emporio Armani EA4137"
+    assert build_model_title(_m("Emporio Armani", "EA4137", "Emporio Armani")) == "Emporio Armani EA4137"
+
+
+def test_per_item_name_has_no_doubled_brand_either():
+    doc = {
+        "category": "SUNGLASSES",
+        "attributes": {"brand_name": "Carrera", "model_no": "Carrera 3044/S", "frame_color": "Black"},
+    }
+    assert build_product_name(doc) == "Carrera 3044/S Sunglasses - Black"

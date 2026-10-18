@@ -405,7 +405,7 @@ def build_product_name(product: Dict[str, Any], detail: str = "") -> str:
 
     a = _attrs(product)
     brand = _brand(product)
-    model = _model(product)
+    model = _strip_brand(_model(product), brand)
     shape = _first(a.get("shape"), a.get("frame_type"))
     gender = _gender_qualifier(product)
     category_word = resolve_category_word(product.get("category"))
@@ -494,20 +494,44 @@ def build_seo_description(product: Dict[str, Any]) -> str:
 # bill line of ONE item (it carries its colour), so it is never read here.
 
 
+def _strip_brand(piece: str, brand: str) -> str:
+    """Drop a leading brand from a model number / name ("Carrera 3044/S" with
+    brand "Carrera" -> "3044/S"). Only at a word boundary, so brand "Ray" never
+    cuts "Rayban...", and a brand with a space or hyphen ("Ray-Ban") also
+    matches its other spelling ("Ray Ban 3025")."""
+    words = re.findall(r"[0-9A-Za-z]+", brand)
+    if not piece or not words:
+        return piece
+    pat = r"[^0-9A-Za-z]+".join(re.escape(w) for w in words)
+    return re.sub(rf"^{pat}(?![0-9A-Za-z])[^0-9A-Za-z]*", "", piece, flags=re.I).strip()
+
+
+def _words_inside(piece: str, earlier: str) -> bool:
+    """True when every word of `piece` appears in `earlier`, in order, on word
+    boundaries ('Victory' inside 'Victory C 01/S'; 'Ducati' is not)."""
+    words = re.findall(r"[0-9A-Za-z]+", piece)
+    pos = 0
+    for w in words:
+        m = re.compile(rf"(?<![0-9A-Za-z]){re.escape(w)}(?![0-9A-Za-z])", re.I).search(earlier, pos)
+        if not m:
+            return False
+        pos = m.end()
+    return bool(words)
+
+
 def _model_pieces(product: Dict[str, Any]) -> list:
-    """Brand, model number, model name -- de-duplicated case-insensitively
-    (a model name equal to the number, or to the shape, is not repeated)."""
+    """Brand, model number, model name. The brand is stripped from the front of
+    the number and name (real data keeps it there: "Carrera 3044/S"), and a
+    model name already contained in what came before is not repeated."""
     a = _attrs(product)
-    pieces: list = []
-    seen: set = set()
+    brand = _brand(product)
+    pieces: list = [brand] if brand else []
     for piece in (
-        _brand(product),
         _first(a.get("model_no"), product.get("model")),
         _first(a.get("model_name")),
     ):
-        low = piece.lower()
-        if piece and low not in seen:
-            seen.add(low)
+        piece = _strip_brand(piece, brand)
+        if piece and not _words_inside(piece, " ".join(pieces)):
             pieces.append(piece)
     return pieces
 
