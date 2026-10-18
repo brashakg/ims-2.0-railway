@@ -8,7 +8,10 @@ rounding or validation was changed.
 from datetime import datetime
 from fastapi import Depends, HTTPException
 from typing import Optional
-from database.repositories.order_repository import InvoiceNumberError
+from database.repositories.order_repository import (
+    InvoiceNumberError,
+    historical_order_problem,
+)
 from ..auth import get_current_user
 from ...dependencies import (
     get_customer_repository,
@@ -257,25 +260,31 @@ def _assemble_invoice(order_id: str, current_user: dict):
         # shop's own series, SHOPCODE/FYFY/NNNNN (e.g. BOK01/2627/00001, 16
         # chars), allocated atomically by next_invoice_number -- store_doc was
         # loaded above for the GSTIN check, so it goes straight to the mint. A
-        # refused mint (no valid shop code, a code clash, no counter) is a 400
-        # naming the reason, never a guessed number. OLD orders keep whatever
-        # invoice_number they already carry; a stored number is never rewritten.
+        # refused mint (a historical import, no valid shop code, a code clash,
+        # no counter) is a 400 naming the reason, never a guessed number.
+        # set_invoice is compare-and-set: a double tap gets the first tap's
+        # number back. OLD orders keep whatever invoice_number they already
+        # carry; a stored number is never rewritten.
         invoice_number = order.get("invoice_number")
         if not invoice_number:
+            historical = historical_order_problem(order)
+            if historical:
+                raise HTTPException(
+                    status_code=400, detail=f"Cannot generate invoice: {historical}"
+                )
             # Best-effort unique index (idempotent; no-op if already present).
             try:
                 repo.ensure_invoice_index()
             except Exception:  # noqa: BLE001 - index is defense-in-depth only
                 pass
             try:
-                invoice_number = repo.next_invoice_number(
-                    store_id, store_doc=store_doc
+                invoice_number = repo.set_invoice(
+                    order_id, repo.next_invoice_number(store_id, store_doc=store_doc)
                 )
             except InvoiceNumberError as exc:
                 raise HTTPException(
                     status_code=400, detail=f"Cannot generate invoice: {exc}"
                 ) from exc
-            repo.set_invoice(order_id, invoice_number)
         # Convert items to camelCase
         items_formatted = [item_to_frontend(item, current_user) for item in order.get("items", [])]
 

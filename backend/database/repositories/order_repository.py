@@ -8,7 +8,7 @@ from api.utils.event_time import utc_event_iso, utc_now, utc_now_iso
 import logging
 import re
 from typing import Iterable, List, Optional, Dict, Tuple
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from api.utils.ist import IST, now_ist, ist_today, ist_day_start_utc
 from api.utils.dates import iso_date_window
 from decimal import Decimal
@@ -29,11 +29,12 @@ logger = logging.getLogger(__name__)
 # BOK01/2627/00001 -- exactly 16 characters, the most Rule 46(b) allows (letters,
 # digits, '-' or '/'). The IRP e-invoice schema is stricter (capitals; the first
 # character a letter or 1-9), so ONE pattern serves the mint, GSTR-1 and IRP.
-_GST_INVOICE_NUMBER_RE = re.compile(r"^[A-Z1-9][A-Z0-9/-]{0,15}$")
+_GST_INVOICE_NUMBER_RE = re.compile(r"[A-Z1-9][A-Z0-9/-]{0,15}")
 # A store's 5-character shop code: derived, or the store's own invoice_code.
-INVOICE_CODE_RE = re.compile(r"^[A-Z1-9][A-Z0-9]{4}$")
+INVOICE_CODE_RE = re.compile(r"[A-Z1-9][A-Z0-9]{4}")
 # CHAIN-TOWN-NN store codes the shop code is derived from.
-_STORE_CODE_PARTS_RE = re.compile(r"^(BV|BVO|WO|WIZ)-([A-Z]{3})[A-Z]*-(\d+)$")
+_STORE_CODE_PARTS_RE = re.compile(r"(BV|BVO|WO|WIZ)-([A-Z]{3})[A-Z]*-(\d+)")
+# (Every pattern is used with fullmatch: "$" would let a trailing newline in.)
 
 
 class InvoiceNumberError(ValueError):
@@ -45,10 +46,23 @@ def gst_invoice_number_problem(number: object) -> Optional[str]:
     s = str(number or "")
     if len(s) > 16:
         return f"{s} is {len(s)} characters; GST allows at most 16"
-    if not _GST_INVOICE_NUMBER_RE.match(s):
+    if not _GST_INVOICE_NUMBER_RE.fullmatch(s):
         return (
             f"{s or '(blank)'} may use only capital letters, digits, '-' and '/' "
             "and must start with a letter or 1-9"
+        )
+    return None
+
+
+def historical_order_problem(order: Optional[Dict]) -> Optional[str]:
+    """Why ``order`` may never take a number from the live invoice series, else
+    None: a historical import (``historical`` / the order-history import) was
+    billed before IMS, so no door mints for it (CGST Rule 46(b))."""
+    o = order or {}
+    if o.get("historical") or o.get("import_source") == "shopify_order_history":
+        return (
+            "this is a historical imported order -- it was billed before IMS "
+            "and never takes a number from this year's invoice series"
         )
     return None
 
@@ -62,7 +76,7 @@ def derive_invoice_code(store_code: object) -> Optional[str]:
     shop apart from a Better Vision shop in the same town. A code that does not
     fit (no chain, a town under 3 letters, WizOpt number over 9) -> None: the
     store then needs an ``invoice_code``, never a squeezed guess."""
-    m = _STORE_CODE_PARTS_RE.match(str(store_code or "").strip().upper())
+    m = _STORE_CODE_PARTS_RE.fullmatch(str(store_code or "").strip().upper())
     if not m:
         return None
     chain, town, n = m.group(1), m.group(2), int(m.group(3))
@@ -71,17 +85,17 @@ def derive_invoice_code(store_code: object) -> Optional[str]:
     return f"{town}{n:02d}" if n <= 99 else None
 
 
-def store_invoice_code(
-    store_doc: Optional[Dict], store_id: Optional[str] = None
-) -> Optional[str]:
-    """The shop code a store's tax invoices carry: its ``invoice_code`` when set
-    (None if that is malformed), else derived from its store_code -- the prod
-    store_id can be a UUID (Pune), so the code comes first."""
-    doc = store_doc or {}
-    override = str(doc.get("invoice_code") or "").strip().upper()
+def store_invoice_code(store_doc: Optional[Dict]) -> Optional[str]:
+    """The shop code a store RECORD's tax invoices carry: its ``invoice_code``
+    when set (None if that is malformed), else derived from its store_code --
+    the prod store_id can be a UUID (Pune), so the code comes first. No record,
+    no code: a bare store_id string never yields one."""
+    if not store_doc:
+        return None
+    override = str(store_doc.get("invoice_code") or "").strip().upper()
     if override:
-        return override if INVOICE_CODE_RE.match(override) else None
-    return derive_invoice_code(doc.get("store_code") or doc.get("store_id") or store_id)
+        return override if INVOICE_CODE_RE.fullmatch(override) else None
+    return derive_invoice_code(store_doc.get("store_code") or store_doc.get("store_id"))
 
 
 def invoice_code_clash(
@@ -96,6 +110,48 @@ def invoice_code_clash(
             continue
         if store_invoice_code(d) == code:
             return str(d.get("store_code") or d.get("store_id") or "another store")
+    return None
+
+
+def invoice_fy_start(when: Optional[datetime] = None) -> int:
+    """FY start year of ``when`` on the IST calendar (default: now). A NAIVE
+    ``when`` is UTC -- the frame every stored instant is in -- never an IST
+    wall clock."""
+    now = when or now_ist()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return fy_start_year(now.astimezone(IST))
+
+
+def invoice_series_key(code: str, fy: int) -> str:
+    """The ``counters`` _id of one shop code's series in one FY."""
+    return f"invoice:{code}:{fy}"
+
+
+def invoice_series_problem(counters, code: str, store_id: str, fy: int) -> Optional[str]:
+    """Why ``store_id`` may not issue under ``code`` in FY ``fy``, else None.
+
+    ONE series per shop per financial year, never shared: the counter doc
+    records the store that opened it, so a code another store issued under
+    this FY stays theirs (even after they moved off it), and a shop that issued
+    under one code cannot open a second series before 1 April. The mint and
+    the store form both ask this one question."""
+    key = invoice_series_key(code, fy)
+    held = counters.find_one({"_id": key})
+    if held and held.get("store_id") != store_id:
+        return (
+            f"invoice code {code} was already used this financial year by store "
+            f"{held.get('store_code') or held.get('store_id')}"
+        )
+    other = counters.find_one(
+        {"store_id": store_id, "fy": fy, "seq": {"$gt": 0}, "_id": {"$ne": key}}
+    )
+    if other:
+        used = str(other.get("_id") or "").split(":")
+        return (
+            f"this store already issued invoices as {used[1] if len(used) > 2 else '?'} "
+            "this financial year -- its invoice code can change only from 1 April"
+        )
     return None
 
 
@@ -423,12 +479,26 @@ class OrderRepository(BaseRepository):
             print(f"Error adding payment: {e}")
             return False
     
-    def set_invoice(self, order_id: str, invoice_number: str) -> bool:
-        """Set invoice number"""
-        return self.update(order_id, {
-            "invoice_number": invoice_number,
-            "invoice_date": datetime.now()
-        })
+    def set_invoice(self, order_id: str, invoice_number: str) -> str:
+        """Record the order's tax invoice number ONCE; return the number the
+        order now carries. Compare-and-set on "no number yet": of two taps on
+        one sale the loser gets the WINNER's number back -- one sale, one
+        number. The loser's own serial is a gap (logged for the CA), never a
+        second printed number."""
+        if self.update_if(
+            order_id,
+            {"invoice_number": {"$in": [None, ""]}},
+            {"invoice_number": invoice_number, "invoice_date": datetime.now()},
+        ):
+            return invoice_number
+        stored = (self.find_by_id(order_id) or {}).get("invoice_number")
+        if not stored:
+            raise InvoiceNumberError("the invoice number could not be saved -- try again")
+        logger.warning(
+            "invoice serial %s unused: order %s already carries %s",
+            invoice_number, order_id, stored,
+        )
+        return stored
 
     # =========================================================================
     # GST invoice numbering (consecutive serial per store + financial year)
@@ -467,72 +537,83 @@ class OrderRepository(BaseRepository):
         THE one mint -- the counter, online and admin-edit doors all call it.
         Format (owner ruling 2026-10-18): ``SHOPCODE/FYFY/NNNNN``, e.g.
         ``BOK01/2627/00001`` -- 16 characters, Rule 46(b)'s cap.
-          * SHOPCODE -- the store's 5-character code (``store_invoice_code``),
-            refused if ANOTHER store carries it, so shops sharing a GSTIN can
-            never print the same number.
-          * FYFY -- the Indian financial year in IST: Apr 2026-Mar 2027 = 2627.
-          * NNNNN -- consecutive per (shop code, FY) from ONE atomic
-            ``find_one_and_update($inc)`` on ``counters`` doc
-            ``invoice:{code}:{fy_start}``; restarts at 00001 each FY. Mongo
+          * SHOPCODE -- the store RECORD's 5-character code
+            (``store_invoice_code``), refused if another store carries it, so
+            shops sharing a GSTIN can never print the same number.
+          * FYFY -- the Indian financial year in IST (``invoice_fy_start``):
+            Apr 2026-Mar 2027 = 2627.
+          * NNNNN -- consecutive in the shop's ONE series for the FY: the
+            ``counters`` doc ``invoice:{code}:{fy}``, opened by and owned by
+            this store (``invoice_series_problem``), claimed with ONE atomic
+            ``find_one_and_update($inc)``; restarts at 00001 each FY. Mongo
             serialises the $inc, so concurrent bills get distinct serials.
 
         REFUSES with InvoiceNumberError -- never guesses, never truncates: no
-        valid shop code, a code another store uses, no atomic counter (DB-less),
-        or a number that breaks the GST rule (serial 100000 is 17 chars).
-        Callers mint only for an order with no stored number; an issued number
-        (old format included) is never rewritten.
+        store record, no valid shop code, a code another store carries or
+        issued under this FY, a second series for the shop this FY, an
+        unreadable stores/counters collection (fail CLOSED), or a number that
+        breaks the GST rule (serial 100000 is 17 chars). Callers mint only for
+        an order with no stored number (``set_invoice`` keeps the first);
+        an issued number (old format included) is never rewritten.
         """
-        now = when or now_ist()
-        if now.tzinfo is not None:
-            now = now.astimezone(IST)
-        start = fy_start_year(now)
+        start = invoice_fy_start(when)
         fy = f"{start % 100:02d}{(start + 1) % 100:02d}"
         try:
             db = getattr(self.collection, "database", None)
         except Exception:  # noqa: BLE001
             db = None
-        if store_doc is None and db is not None and store_id:
-            try:
-                store_doc = db.get_collection("stores").find_one({"store_id": store_id})
-            except Exception:  # noqa: BLE001 - derive from the store_id instead
-                logger.warning("invoice mint: store lookup failed", exc_info=True)
-        code = store_invoice_code(store_doc, store_id)
-        name = (store_doc or {}).get("store_code") or store_id
+        if db is None:  # DB-less: no atomic counter, so no number
+            raise InvoiceNumberError("invoice counter unavailable -- try again in a minute")
+        try:
+            stores = db.get_collection("stores")
+            if store_doc is None and store_id:
+                store_doc = stores.find_one({"store_id": store_id}) or stores.find_one(
+                    {"store_code": store_id}
+                )
+            docs = list(
+                stores.find({}, {"_id": 0, "store_id": 1, "store_code": 1, "invoice_code": 1})
+            )
+        except Exception as exc:  # noqa: BLE001 - fail CLOSED
+            raise InvoiceNumberError(
+                "store records unreadable -- try again in a minute"
+            ) from exc
+        if not store_doc:
+            raise InvoiceNumberError(f"store {store_id} has no store record")
+        name = store_doc.get("store_code") or store_id
+        owner = store_doc.get("store_id") or store_id
+        code = store_invoice_code(store_doc)
         if not code:
             raise InvoiceNumberError(
                 f"store {name} has no valid invoice code -- set a 5-character "
                 "invoice code (capital letters/digits) on the store"
             )
-        if db is not None:
-            try:
-                docs = list(
-                    db.get_collection("stores").find(
-                        {}, {"_id": 0, "store_id": 1, "store_code": 1, "invoice_code": 1}
-                    )
-                )
-            except Exception:  # noqa: BLE001 - the counter below still never repeats
-                logger.warning("invoice mint: clash check skipped", exc_info=True)
-                docs = []
-            own = (store_id, (store_doc or {}).get("store_id"), name)
-            other = invoice_code_clash(code, own, docs)
-            if other:
-                raise InvoiceNumberError(
-                    f"invoice code {code} of store {name} is also store {other}'s "
-                    "-- give one of them a different invoice code"
-                )
-        try:
-            from pymongo import ReturnDocument
-
-            doc = db.get_collection("counters").find_one_and_update(
-                {"_id": f"invoice:{code}:{start}"},
-                {"$inc": {"seq": 1}},
-                upsert=True,
-                return_document=ReturnDocument.AFTER,
+        other = invoice_code_clash(code, (store_id, owner, name), docs)
+        if other:
+            raise InvoiceNumberError(
+                f"invoice code {code} of store {name} is also store {other}'s "
+                "-- give one of them a different invoice code"
             )
-        except Exception as exc:  # noqa: BLE001 - incl. DB-less (db None)
+        counters = db.get_collection("counters")
+        doc = None
+        try:
+            problem = invoice_series_problem(counters, code, owner, start)
+            if problem is None:
+                from pymongo import ReturnDocument
+
+                # The filter names the owner: a series another store opened in
+                # a race is a duplicate _id on upsert -- refused, not shared.
+                doc = counters.find_one_and_update(
+                    {"_id": invoice_series_key(code, start), "store_id": owner, "fy": start},
+                    {"$inc": {"seq": 1}, "$setOnInsert": {"store_code": name}},
+                    upsert=True,
+                    return_document=ReturnDocument.AFTER,
+                )
+        except Exception as exc:  # noqa: BLE001
             raise InvoiceNumberError(
                 "invoice counter unavailable -- try again in a minute"
             ) from exc
+        if problem:
+            raise InvoiceNumberError(problem)
         seq = (doc or {}).get("seq")
         if not isinstance(seq, int) or seq < 1:
             raise InvoiceNumberError(f"invoice counter returned {seq!r}")

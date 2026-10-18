@@ -20,6 +20,15 @@ Revert-proof map (revert the named piece -> the named test goes red):
   * the invoice door keeps a stored number -> test_door_keeps_an_old_number
   * GSTR-1 uses the mint's rule -> test_gstr1_flags_old_and_bad_numbers
   * the store validator -> test_store_invoice_code_*
+  Review round 2 (2026-10-19):
+  * one series per shop per FY (invoice_series_problem, mint + store form)
+    -> test_series_*
+  * historical imports never mint -> test_door_refuses_a_historical_order
+  * compare-and-set number write -> test_double_tap_*
+  * stores read fails closed -> test_unreadable_stores_fail_closed
+  * a naive datetime is UTC -> test_naive_datetime_is_utc
+  * fullmatch -> test_trailing_newline_is_a_problem
+  * no store record, no number -> test_uuid_store_id_uses_the_store_code
 
 Run: JWT_SECRET_KEY=test ENVIRONMENT=test python -m pytest backend/tests/test_gst_invoice_number_16.py -q
 """
@@ -128,10 +137,12 @@ def test_uuid_store_id_uses_the_store_code():
     assert repo.next_invoice_number(_sid("BV-PUN-01"), MAY_2026) == "PUN01/2627/00001"
     # An order carrying the CODE instead still lands in Pune's one series.
     assert repo.next_invoice_number("BV-PUN-01", MAY_2026) == "PUN01/2627/00002"
-    # A UUID with no store doc is refused -- never a code cut from the UUID.
+    # No store record -> refused: never a code cut from the UUID, and never
+    # one derived from a bare store_id string either.
     bare, _db2 = _world([])
-    with pytest.raises(InvoiceNumberError, match="no valid invoice code"):
-        bare.next_invoice_number(_sid("BV-PUN-01"), MAY_2026)
+    for sid in (_sid("BV-PUN-01"), "BV-BOK-02"):
+        with pytest.raises(InvoiceNumberError, match="has no store record"):
+            bare.next_invoice_number(sid, MAY_2026)
 
 
 def test_invoice_code_overrides_the_derived_code():
@@ -192,6 +203,15 @@ def test_fy_boundary_on_a_utc_instant():
     assert repo.next_invoice_number("BV-BOK-02", after).split("/")[1] == "2627"
 
 
+def test_naive_datetime_is_utc():
+    # A stored instant is naive UTC: 18:30 on 31 March is already 1 April IST.
+    repo, _db = _world()
+    late = repo.next_invoice_number("BV-BOK-02", datetime(2026, 3, 31, 18, 29, 59))
+    assert late.split("/")[1] == "2526"
+    first = repo.next_invoice_number("BV-BOK-02", datetime(2026, 3, 31, 18, 30))
+    assert first.split("/")[1] == "2627"
+
+
 def test_default_clock_is_ist(monkeypatch):
     repo, _db = _world()
     monkeypatch.setattr(
@@ -201,13 +221,17 @@ def test_default_clock_is_ist(monkeypatch):
 
 
 def test_serial_restarts_each_fy():
-    repo, _db = _world()
+    repo, db = _world()
     fy25 = datetime(2026, 2, 1, tzinfo=IST)
     assert [repo.next_invoice_number("BV-BOK-02", fy25) for _ in range(3)][-1] == (
         "BOK02/2526/00003"
     )
     assert repo.next_invoice_number("BV-BOK-02", MAY_2026) == "BOK02/2627/00001"
     assert repo.next_invoice_number("BV-BOK-02", fy25) == "BOK02/2526/00004"
+    # One counter doc per (code, FY), each owned by the shop.
+    got = {(d["_id"], d["seq"], d["store_id"], d["fy"]) for d in db.get_collection("counters").docs}
+    assert got == {("invoice:BOK02:2025", 4, "BV-BOK-02", 2025),
+                   ("invoice:BOK02:2026", 1, "BV-BOK-02", 2026)}
 
 
 def test_old_format_counter_is_not_continued():
@@ -217,7 +241,7 @@ def test_old_format_counter_is_not_continued():
     repo, db = _world()
     counters = db.get_collection("counters")
     counters.insert_one({"_id": "invoice:BV-BOK:BOK-02:2026", "seq": 41})
-    counters.insert_one({"_id": "invoice:DHN02:2026", "seq": 7})
+    counters.insert_one({"_id": "invoice:DHN02:2026", "seq": 7, "store_id": "BV-DHN-02", "fy": 2026})
     assert repo.next_invoice_number("BV-BOK-02", MAY_2026) == "BOK02/2627/00001"
     assert repo.next_invoice_number("BV-DHN-02", MAY_2026) == "DHN02/2627/00008"
     assert counters.find_one({"_id": "invoice:BV-BOK:BOK-02:2026"})["seq"] == 41
@@ -251,10 +275,30 @@ def test_concurrent_mints_are_unique_and_consecutive():
 
 def test_serial_100000_is_refused_not_truncated():
     repo, db = _world()
-    db.get_collection("counters").insert_one({"_id": "invoice:BOK02:2026", "seq": 99998})
+    db.get_collection("counters").insert_one(
+        {"_id": "invoice:BOK02:2026", "seq": 99998, "store_id": "BV-BOK-02", "fy": 2026}
+    )
     assert repo.next_invoice_number("BV-BOK-02", MAY_2026) == "BOK02/2627/99999"
     with pytest.raises(InvoiceNumberError, match="17 characters"):
         repo.next_invoice_number("BV-BOK-02", MAY_2026)
+
+
+def test_trailing_newline_is_a_problem():
+    assert gst_invoice_number_problem("BOK01/2627/00001\n")
+    assert gst_invoice_number_problem("BOK01/2627/0001\n")  # 16 with the newline
+
+
+def test_unreadable_stores_fail_closed():
+    repo, db = _world()
+    stores = db.get_collection("stores")
+
+    def boom(*_a, **_k):
+        raise RuntimeError("stores down")
+
+    stores.find = boom
+    with pytest.raises(InvoiceNumberError, match="store records unreadable"):
+        repo.next_invoice_number("BV-BOK-02", MAY_2026)
+    assert db.get_collection("counters").docs == []
 
 
 def test_over_16_and_bad_characters_are_problems():
@@ -352,6 +396,55 @@ def test_door_mints_a_16_char_number_once(door):
     assert db.get_collection("orders").find_one({"order_id": "O-NEW"})["invoice_number"] == first
 
 
+@pytest.mark.parametrize("flag", [{"historical": True},
+                                  {"import_source": "shopify_order_history"}])
+def test_door_refuses_a_historical_order(door, flag):
+    client, db = door
+    db.get_collection("orders").insert_one(_order("O-HIST", invoice_number=None, **flag))
+    r = client.get("/orders/O-HIST/invoice")
+    assert r.status_code == 400
+    assert "historical imported order" in r.json()["detail"]
+    assert db.get_collection("counters").docs == []  # the live series untouched
+    assert db.get_collection("orders").find_one({"order_id": "O-HIST"})["invoice_number"] is None
+
+
+def test_double_tap_set_invoice_keeps_the_first_number():
+    repo, db = _world()
+    db.get_collection("orders").insert_one(_order("O-TAP", invoice_number=None))
+    first = repo.next_invoice_number("BV-BOK-02", MAY_2026)
+    second = repo.next_invoice_number("BV-BOK-02", MAY_2026)
+    assert repo.set_invoice("O-TAP", first) == first
+    assert repo.set_invoice("O-TAP", second) == first  # the loser gets the winner's
+    assert db.get_collection("orders").find_one({"order_id": "O-TAP"})["invoice_number"] == first
+
+
+def test_double_tap_on_the_door_prints_one_number(door, monkeypatch):
+    """Two taps at once: both mint (the barrier holds them until both have a
+    serial), one write lands, both screens get THAT number. The other serial
+    is a gap, never a second printed number."""
+    client, db = door
+    db.get_collection("orders").insert_one(_order("O-2TAP"))
+    from api.routers import orders as orders_module
+
+    repo = orders_module.get_order_repository()
+    barrier = threading.Barrier(2, timeout=20)
+    mint = repo.next_invoice_number
+
+    def slow_mint(*a, **k):
+        n = mint(*a, **k)
+        barrier.wait()
+        return n
+
+    monkeypatch.setattr(repo, "next_invoice_number", slow_mint)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        got = list(pool.map(lambda _i: client.get("/orders/O-2TAP/invoice"), range(2)))
+    assert [r.status_code for r in got] == [200, 200]
+    numbers = {r.json()["invoiceNumber"] for r in got}
+    stored = db.get_collection("orders").find_one({"order_id": "O-2TAP"})["invoice_number"]
+    assert numbers == {stored}
+    assert db.get_collection("counters").find_one({"_id": "invoice:BOK02:2026"})["seq"] == 2
+
+
 def test_door_refusal_is_a_400_naming_the_reason(door):
     client, db = door
     db.get_collection("stores").update_one(
@@ -404,6 +497,7 @@ def store_api(monkeypatch):
     db = StrictDB()
     db.seed("stores", [dict(s) for s in PROD_STORES])
     coll = db.get_collection("stores")
+    coll.db = db  # lets a test mint on the same database
 
     class _Repo:
         def find_by_id(self, sid):
@@ -423,6 +517,13 @@ def store_api(monkeypatch):
 
     app.dependency_overrides[get_current_user] = _u
     return TestClient(app), coll
+
+
+def _mint_on(coll, store_id):
+    """Mint through the real repo over the store API's own database."""
+    orders = coll.db.get_collection("orders")
+    orders.database = coll.db
+    return OrderRepository(orders).next_invoice_number(store_id, MAY_2026)
 
 
 def test_store_invoice_code_is_saved_in_capitals(store_api):
@@ -450,3 +551,58 @@ def test_store_invoice_code_taken_is_409(store_api):
         assert r.status_code == 409 and holder in r.json()["detail"]
     # Re-saving a store's own derived code is not a clash.
     assert client.put("/stores/BV-BOK-02", json={"invoice_code": "BOK02"}).status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# One series per shop per financial year, never shared
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def this_fy(monkeypatch):
+    """Pin 'now' inside FY 2026-27 for the store form's series check."""
+    monkeypatch.setattr(repo_module, "now_ist", lambda: MAY_2026)
+
+
+def test_series_code_change_after_minting_is_refused(store_api, this_fy):
+    client, coll = store_api
+    assert _mint_on(coll, "BV-BOK-02") == "BOK02/2627/00001"
+    r = client.put("/stores/BV-BOK-02", json={"invoice_code": "BKS02"})
+    assert r.status_code == 409
+    assert "already issued invoices as BOK02" in r.json()["detail"]
+    assert "invoice_code" not in coll.find_one({"store_id": "BV-BOK-02"})
+    # Re-saving the code it already issues under is fine.
+    assert client.put("/stores/BV-BOK-02", json={"invoice_code": "BOK02"}).status_code == 200
+
+
+def test_series_clearing_an_override_after_minting_is_refused(store_api, this_fy):
+    client, coll = store_api
+    assert client.put("/stores/BV-BOK-02", json={"invoice_code": "BKS02"}).status_code == 200
+    assert _mint_on(coll, "BV-BOK-02") == "BKS02/2627/00001"
+    r = client.put("/stores/BV-BOK-02", json={"invoice_code": ""})
+    assert r.status_code == 409 and "BKS02" in r.json()["detail"]
+
+
+def test_series_pune_taking_a_freed_code_is_refused(store_api, this_fy):
+    client, coll = store_api
+    assert _mint_on(coll, "BV-BOK-02") == "BOK02/2627/00001"
+    # Bokaro is moved off BOK02 behind the form's back: the code is "free".
+    coll.update_one({"store_id": "BV-BOK-02"}, {"$set": {"invoice_code": "BKS02"}})
+    pune = _sid("BV-PUN-01")
+    r = client.put(f"/stores/{pune}", json={"invoice_code": "BOK02"})
+    assert r.status_code == 409
+    assert "already used this financial year by store BV-BOK-02" in r.json()["detail"]
+    # ...and the mint refuses both shops whatever the records say.
+    coll.update_one({"store_id": pune}, {"$set": {"invoice_code": "BOK02"}})
+    with pytest.raises(InvoiceNumberError, match="already used this financial year"):
+        _mint_on(coll, pune)
+    with pytest.raises(InvoiceNumberError, match="already issued invoices as BOK02"):
+        _mint_on(coll, "BV-BOK-02")
+
+
+def test_series_a_new_fy_frees_the_code_change(store_api, this_fy):
+    client, coll = store_api
+    coll.db.get_collection("counters").insert_one(
+        {"_id": "invoice:BOK02:2025", "seq": 900, "store_id": "BV-BOK-02", "fy": 2025}
+    )
+    assert client.put("/stores/BV-BOK-02", json={"invoice_code": "BKS02"}).status_code == 200

@@ -33,6 +33,8 @@ from ..services import org_validation as ov
 from database.repositories.order_repository import (
     INVOICE_CODE_RE,
     invoice_code_clash,
+    invoice_fy_start,
+    invoice_series_problem,
     store_invoice_code,
 )
 from ..services.stores_util import ONLINE_STORE_TYPE, is_online_store, physical_stores
@@ -237,13 +239,17 @@ def _validate_invoice_code(
     ``invoice_code`` when set, else derived from the store code. A set code is
     NORMALISED in place ("" clears it back to the derived one) and must be 5
     capital letters/digits (400). On a create, or whenever the payload names
-    an invoice_code, the code the store will carry must not be ANOTHER store's
-    (409) -- the mint refuses a clash too, so this only catches it at the desk."""
+    an invoice_code, the code the store will carry (409):
+      * must not be ANOTHER store's (invoice_code_clash);
+      * must keep the shop on its ONE series this financial year -- no move off
+        a code it already issued under, no code another store issued under
+        (invoice_series_problem, the same question the mint asks).
+    An unreadable stores/counters collection is a 503: fail closed."""
     declared = "invoice_code" in data
     if declared:
         code = str(data.get("invoice_code") or "").strip().upper()
         data["invoice_code"] = code or None
-        if code and not INVOICE_CODE_RE.match(code):
+        if code and not INVOICE_CODE_RE.fullmatch(code):
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -255,18 +261,29 @@ def _validate_invoice_code(
         return
     merged = {**(existing or {}), **data}
     merged["store_code"] = ov.normalize_store_code(merged.get("store_code")) or None
-    code = store_invoice_code(merged, store_id)
-    if not code:
-        return  # no code yet (e.g. HQ): the mint refuses until one is set
+    owner = (existing or {}).get("store_id") or store_id or merged["store_code"]
+    merged["store_id"] = owner
+    code = store_invoice_code(merged)
     try:
         docs = list(
             db.get_collection("stores").find(
                 {}, {"_id": 0, "store_id": 1, "store_code": 1, "invoice_code": 1}
             )
         )
-    except Exception:  # noqa: BLE001 - the mint re-checks on every invoice
-        return
-    other = invoice_code_clash(code, (store_id, merged["store_code"]), docs)
+        # code None (no derivable code): any series the shop owns this FY is
+        # one it would be moving off, so ask with a key no series has.
+        series = invoice_series_problem(
+            db.get_collection("counters"), code or "", owner, invoice_fy_start()
+        )
+    except Exception as exc:  # noqa: BLE001 - fail closed
+        raise HTTPException(
+            status_code=503, detail="Could not check the invoice code -- try again"
+        ) from exc
+    if series:
+        raise HTTPException(status_code=409, detail=series[0].upper() + series[1:])
+    other = code and invoice_code_clash(
+        code, (store_id, owner, merged["store_code"]), docs
+    )
     if other:
         raise HTTPException(
             status_code=409,

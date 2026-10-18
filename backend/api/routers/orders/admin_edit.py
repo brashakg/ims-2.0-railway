@@ -10,6 +10,7 @@ from api.utils.event_time import utc_now_iso
 from database.repositories.order_repository import (
     InvoiceNumberError,
     derive_bill_type,
+    historical_order_problem,
 )
 from datetime import datetime
 from fastapi import Depends, HTTPException
@@ -391,6 +392,11 @@ async def superadmin_invoice_change(
 
     if body.mode == "REVISED_INVOICE":
         # Allocate a fresh GST serial for the revised invoice.
+        historical = historical_order_problem(order)
+        if historical:
+            raise HTTPException(
+                status_code=400, detail=f"Cannot issue a revised invoice: {historical}"
+            )
         try:
             new_invoice_number = repo.next_invoice_number(
                 order.get("store_id"), store_doc=store_doc
@@ -466,9 +472,17 @@ async def superadmin_invoice_change(
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[ORDERS] revised_invoices insert failed: %s", exc)
 
-        if not repo.update(order_id, update_data):
+        # Compare-and-set on the number this request superseded: of two
+        # presses only one replaces it -- never two revised numbers printed.
+        if not repo.update_if(
+            order_id, {"invoice_number": original_invoice}, update_data
+        ):
             raise HTTPException(
-                status_code=500, detail="Failed to issue revised invoice"
+                status_code=409,
+                detail=(
+                    "This invoice was already revised by another request -- "
+                    "reload the order"
+                ),
             )
 
         # Same earn re-gate as the pre-invoice edit door (the CREDIT_NOTE
