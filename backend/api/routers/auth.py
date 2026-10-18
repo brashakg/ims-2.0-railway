@@ -600,9 +600,9 @@ def current_authority(payload: dict, request: Request = None) -> dict:
     user_id = payload.get("user_id")
     if not user_id:
         return payload
-    cached = getattr(request.state, "_current_authority", None) if request else None
-    if isinstance(cached, tuple) and len(cached) == 2 and cached[0] == user_id:
-        return {**payload, **cached[1]}
+    cached = getattr(request.state, "_current_authority", {}) if request else {}
+    if isinstance(cached, dict) and cached.get("user_id") == user_id:
+        return {**payload, **cached.get("claims", {})}
 
     from ..dependencies import get_user_repository
 
@@ -621,7 +621,7 @@ def current_authority(payload: dict, request: Request = None) -> dict:
         raise HTTPException(status_code=401, detail="Account is disabled")
     claims = _resolve_refresh_claims(payload, record) if record is not None else {}
     if request is not None:
-        request.state._current_authority = (user_id, claims)
+        request.state._current_authority = {"user_id": user_id, "claims": claims}
     return {**payload, **claims}
 
 

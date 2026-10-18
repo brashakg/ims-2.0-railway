@@ -41,10 +41,14 @@ Independent source/test review found no blocker. No live database was inspected.
   loaded in memory from `git show 169b501f`: **11 failed, one passed**. The
   unchanged missing-account/outage behavior is the passing control.
 - Errors-only Pylint passed for all three application files.
-- GitHub's full-package Pylint run initially inferred the request-state cache
-  as unsubscriptable. The cache lookup now explicitly verifies its tuple shape
-  before indexing; no lint suppression or permission rule changed. The final
-  12 regression cases and the repository CI lint flags pass after this fix.
+- GitHub's Pylint 3.0.3 inferred the request-state tuple cache as
+  unsubscriptable, including after an explicit tuple guard. The local venv had
+  Pylint 4.0.5. The cache now uses named dictionary fields, preserving the same
+  request scope and claims precedence without suppressions. Independent review
+  found no behavior change. The final 12 regression cases pass, as does Pylint
+  3.0.3 with the repository CI flags on all three changed application files,
+  installed in a separate tooling directory without changing the shared venv.
+  Local Python is 3.14; GitHub's Python 3.11 full-package check still must pass.
 - Backend import smoke loaded **1,320 routes**; `git diff --check` passed.
 - No frontend files changed. The identical frontend source passed forced
   TypeScript checking and Vite build in the parallel A02 checkout.
