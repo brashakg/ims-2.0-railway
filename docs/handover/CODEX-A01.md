@@ -2,7 +2,7 @@
 
 ## Delivery state
 
-Backend application adapters are connected in this integration checkpoint. A03/A01 will ship in one coordinated draft PR after the approved frontend and parallel RMA adapter are integrated, final tests pass and an independent reviewer checks the exact head. This is not a merge or deployment claim. A12 aging remains separate.
+The approved Vendor Returns/Cash Flow frontend, RMA adapter and shared accounting readers are integrated. A03/A01 are delivered together for draft review; this is not a merge or deployment claim. A12 aging remains separate. Application source at `7158e53ae1317abb74327c19bf9e3b03a45141bf` passed independent canonical/frontend review and a second GST/RMA adapter review; final hosted CI and merge approval remain with the coordinator.
 
 ## Owner decisions implemented
 
@@ -28,12 +28,20 @@ Review regressions cover a PREPARING retry after a different-origin partial note
 - `return_request_document.py`, `rtv_debit_note.py`, `rtv_debit_notes.py`: original-bill internal request, explicit unverified-tax description, canonical-only Tally export. Multiple actual notes export distinct UUID vouchers at their actual dates/amounts. RCM supplier amounts exclude self-paid tax; blocked input tax has no reversal.
 - `supplier_credit_reads.py`: one POSTED source feeds bill-allocated AP, negative ITC register rows and original GST heads in the actual note period.
 - Finance Cash Flow, supplier ledger/AP, invoice settlement stamps and Purchases report use the same canonical credit rows. GST summary, ITC register/reconciliation and GSTR-3B/portal output consume the same confirmed original heads. A later-month reversal is not zero-clamped when that month has no purchases. Each GST registration remains isolated. Canonical read failure produces an error rather than a partial figure.
-- Dedicated confirmation capabilities preserve Accounts-only access and existing parent/module denies. New input-tax totals remain masked for other roles. RBAC matrix regeneration follows the RMA route integration.
+- Dedicated confirmation capabilities preserve Accounts-only access and existing parent/module denies. New input-tax totals remain masked for other roles. The generated RBAC matrix includes all three new routes (1,308 policy rows).
 
 The exact frontend API contract is saved externally in `fixes-2026-10-18/A01-CREDIT-CONFIRMATION-API-CONTRACT.md`. PREPARING history exposes `retry_unchanged` plus an exact `retry_payload`; normal pending evidence remains editable with immutable note identity.
 
 ## Verification and limits
 
-Before the final review refinements: 446 related tests passed, covering original-bill issue, supplier ledger/roles/scopes, GST summary/register/portal and canonical writer/readers. A subsequent 107 focused cases passed after recovery and real AP reader probes. The final exact integrated run and lint/smoke results will be recorded before PR review. Tests use the external sanitized runner, in-memory data and explicit test environment; no live database, financial operation, POS or deployment was used.
+At the integrated application head, 787 backend cases across 28 related modules passed (139.78 seconds), including original provenance, confirmations/recovery, RMA, internal requests, payment holds, ledger/report readers, pricing/masking and RBAC parity. The integrated frontend passed 88 cases across nine files, forced TypeScript checking and the Vite production build (2,999 modules). Focused ESLint reported zero errors and four existing page warnings. The production build retained the existing CSS-comment warning. Application smoke imported 1,317 routes.
+
+Independent verification at that same application head passed 36 canonical cases and five separate recovery/identity/export/transfer probes, plus 52 GST/RMA cases and three external report-arithmetic probes. One review correction explicitly includes reversal liability when deriving credit utilisation: no negative utilisation, and positive credit used from another head is counted fully. Cash and reversal calculations remain unchanged.
+
+Tests use the external sanitized runner, in-memory data and explicit test environment; no live database, financial operation, POS or deployment was used. Older compatibility fixtures now provide original receipts/bills and actual supplier confirmations. Shop/date/role/value assertions remain; permitted quality adjustments cannot release rejected-goods payment holds. Full repository CI is still required.
+
+The full API errors/fatal lint gate passed with pinned Pylint 3.0.3 and the exact CI exclusions/configuration. The local environment lacked the repository-pinned `redis==5.3.1`; it was installed only into the external lint runtime, not a repository or deployment environment. A later message-only change restores the existing Organization guidance on missing shop registration; the error condition/code are unchanged and the coordinator reviewed its exact source delta.
+
+A further direct-caller sweep exposed obsolete default-return-credit, unlinked request and old RMA/Tally test payloads. Their repaired affected modules passed 645 cases and 429 cases respectively, retaining permission, shop, price and amount checks; unconfirmed internal Tally export now has an explicit 409 control. The broad sweep's other cases passed before these test/message-only corrections. Evidence logs are `a01-final-integrated-backend.log`, `a01-directcaller-repaired.log`, `a01-what-we-pay-compat.log`, `a01-ci-lint-final.log` and `a01-integrated-smoke.log` in the external `fixes-2026-10-18` folder.
 
 No historical data repair or tax filing has been performed. Original evidence gaps are visible pending records, not automatically repaired invoices. Unknown write outcomes keep their fences until same-request recovery; unsupported contradictory legacy records may need technical reconciliation. Existing manual historical credits are not retrospectively reclassified. This is software and data-scoping work, not tax-filing certification.

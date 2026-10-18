@@ -961,9 +961,12 @@ def _issue_debit_note(**price):
 
     line = {"product_id": "P1", "product_name": "Aviator", "quantity": 2,
             "reason": "defective", "gst_rate": 5, "hsn": "9003", **price}
-    return DebitNoteEngine(mongomock.MongoClient().db).issue(
-        {"return_id": "VR-1", "store_id": STORE, "items": [line]},
-        {"name": "Luxottica"},
+    db = mongomock.MongoClient().db
+    db.grns.insert_one({"grn_id": "G1", "vendor_id": "V1", "store_id": STORE,
+                        "status": "ACCEPTED", "items": [{"product_id": "P1", "accepted_qty": 2}]})
+    return DebitNoteEngine(db).issue(
+        {"return_id": "VR-1", "vendor_id": "V1", "store_id": STORE, "grn_id": "G1", "items": [line]},
+        {"vendor_id": "V1", "name": "Luxottica"},
         actor="u-1",
         seller={"gstin": "20AAAAA0000A1Z5", "name": "Better Vision"},
     )

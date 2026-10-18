@@ -7,8 +7,9 @@ merge. It prints an internal RETURN REQUEST, using original stored tax evidence
 where verified, or clearly unverified tax for accepted-unbilled/rejected custody.
 It never guesses the newest receipt or today's catalogue rate. A01 confirmation
 uses the same strict original-bill evidence for financial posting. This branch
-is still an integration candidate pending the coordinated frontend/RMA delivery,
-final checks and independent review; it is not a merged or deployed fix.
+includes the coordinated frontend/RMA delivery and independently reviewed
+accounting adapters; it is not a merged or deployed fix. See CODEX-A01.md for
+the integrated test results and exact reviewed application head.
 
 A03 and A01 will be reviewed as separate scoped commits in one coordinated
 draft PR. Merge only when the approved supplier-confirmation path and its
@@ -77,9 +78,10 @@ Run with the external sanitized `run_checks.py` using the owned test checkout:
 python run_checks.py C:/ims-codex-a10 <external-log> -m pytest backend/tests/test_return_provenance.py -q --disable-warnings --tb=short
 ```
 
-All 62 foundation cases passed in 10.76 seconds. Pinned Pylint 3.0.3 with the
+At the earlier foundation checkpoint, all 62 cases passed in 10.76 seconds. Pinned Pylint 3.0.3 with the
 repository errors/fatal gate passed. No live database, POS,
-deployment, or financial posting was used. No frontend source changed.
+deployment, or financial posting was used. That foundation phase changed no frontend source;
+the approved confirmation UI is now integrated as documented in CODEX-A01-FRONTEND.md.
 
 ## Integration and limitations
 
@@ -98,5 +100,5 @@ Eight application-level issue regressions cover original versus newer receipts,
 master-tax changes, missing bill evidence, exact original invoice reference and
 the explicit unbooked internal request. A01 keeps the internal request
 separate from the supplier-confirmed accounting event. See its handover for
-the coordinated verification and outstanding integration gates. This is a
+the coordinated verification and remaining hosted CI/merge gates. This is a
 software/data-scoping review, not tax-filing certification.

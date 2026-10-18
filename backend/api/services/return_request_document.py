@@ -23,7 +23,11 @@ def prepare_request(db, return_doc, vendor, seller, src_lines):
         vendor["gstin"] = origin.get("vendor_gstin") or ""
         seller.update(gstin=origin.get("recipient_gstin") or "", entity_id=origin.get("recipient_entity_id"))
     elif not seller.get("gstin"):
-        raise ReturnProvenanceError("seller_has_no_gstin", "The issuing shop's legal-entity registration must be corrected before issuing the request.")
+        raise ReturnProvenanceError("seller_has_no_gstin",
+            f"{seller.get('name') or 'The company'} has no GST number for shop {return_doc.get('store_id')}, so no "
+            "return request was issued. Add the company's registration for the "
+            "shop's state in Organization (left menu) or correct the shop's state "
+            "or GSTIN in Organization (left menu).")
     normalized = []
     for source in sources:
         raw = src_lines[source["return_line_index"]]

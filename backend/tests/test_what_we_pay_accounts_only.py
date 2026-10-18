@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: E402
+from rma_credit_fixtures import credit_payload  # noqa: E402
 
 from test_counter_roles_no_cost_anywhere import (  # noqa: E402,F401
     BLIND,
@@ -520,6 +521,8 @@ def test_a_vendor_rma_run_end_to_end_reads_its_money_back_to_accounts_only(clien
         ("/credit-note", {"credit_note_number": "CN-2", "received_amount": COST}),
     ):
         actor = "ACCOUNTANT" if path == "/credit-note" else role
+        if path == "/credit-note":
+            body = credit_payload(buying, rid, amount=COST, number="CN-2")
         if actor != role:
             denied = post(f"/{rid}{path}", body)
             assert denied.status_code == 403, denied.text
@@ -641,9 +644,32 @@ def test_the_debit_note_tally_export_is_for_accounts_only(client, notes, role, s
     )
     assert issued.status_code == 201, issued.text
     dn = issued.json()["debit_note"]["debit_note_id"]
+    # The internal request is not accounting evidence. The read/masking
+    # assertion uses the supplier's actual POSTED confirmation, at the same
+    # amount, rather than granting export to an unconfirmed request.
+    notes.supplier_credit_confirmations.insert_one({
+        "confirmation_id": "CONFIRMED-VR1", "return_id": "VR1",
+        "return_kind": "VENDOR_RETURN", "posting_status": "POSTED",
+        "credit_note_number": "SUPPLIER-CN-1", "credit_note_date": "2026-10-18",
+        "received_paise": COST_PAISE,
+        "allocations": [{"itc_reversal_paise": {"cgst": 0, "sgst": 0, "igst": 0}}],
+    })
     r = client.get(f"/api/v1/rtv-debit-notes/{dn}/tally", headers=_headers(role))
     assert r.status_code == status, r.text[:300]
     assert (str(COST) in r.text) is (status == 200)
+
+
+@pytest.mark.parametrize("role", ("ACCOUNTANT", "ADMIN"))
+def test_unconfirmed_internal_debit_note_has_no_tally_export(client, notes, role):
+    issued = client.post(
+        "/api/v1/rtv-debit-notes/issue", json={"rtv_id": "VR1"}, headers=_headers("ACCOUNTANT")
+    )
+    assert issued.status_code == 201, issued.text
+    dn = issued.json()["debit_note"]["debit_note_id"]
+    reply = client.get(f"/api/v1/rtv-debit-notes/{dn}/tally", headers=_headers(role))
+    assert reply.status_code == 409, reply.text
+    assert reply.json()["detail"]["error"] == "supplier_confirmation_required"
+    assert notes.supplier_credit_confirmations.count_documents({}) == 0
 
 
 @pytest.mark.parametrize("role,sees", (("STORE_MANAGER", False), ("AREA_MANAGER", False), ("ADMIN", True)))

@@ -1831,8 +1831,10 @@ class TestTheDebitNoteHasOurGstinOrIsRefused:
         db = _mongo([({"entity_id": "E1", "name": "Better Vision", **entity}, [{**shop, "entity_id": "E1"}])])
         r = _app_as(db, sid).post(_URL, json=_services(store_id=sid))
         assert r.status_code == 422, r.text
+        db["grns"].insert_one({"grn_id": "UNBILLED-G1", "store_id": sid, "vendor_id": "V1",
+                               "status": "ACCEPTED", "items": [{"product_id": "P1", "accepted_qty": 1}]})
         db["vendor_returns"].insert_one(
-            {"return_id": "VR-1", "store_id": sid, "vendor_id": "V1", "entity_id": "E1",
+            {"return_id": "VR-1", "store_id": sid, "vendor_id": "V1", "entity_id": "E1", "grn_id": "UNBILLED-G1",
              "lines": [{"product_id": "P1", "product_name": "Frame", "hsn": "9003", "quantity": 1,
                         "rate_paise": 100000, "gst_rate": 12.0}]}
         )
@@ -2423,9 +2425,9 @@ class TestRound13NotesNameTheRealScreen:
 
     def test_the_debit_note_refusal_names_organization(self):
         import inspect
-        from api.services import rtv_debit_note
+        from api.services import return_request_document
 
-        src = inspect.getsource(rtv_debit_note)
+        src = inspect.getsource(return_request_document)
         assert "shop's state in Organization (left menu) or correct the shop's state" in src
         assert "Settings, companies" not in src
 
