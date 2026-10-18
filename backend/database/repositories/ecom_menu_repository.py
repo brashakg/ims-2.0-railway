@@ -32,6 +32,7 @@ from datetime import datetime
 import uuid
 
 from .base_repository import BaseRepository
+from api.services.catalog_ecom import new_edit_rev
 
 
 # The presentation / linkage fields a MenuItem node may carry, beyond the
@@ -130,6 +131,8 @@ class EcomMenuRepository(BaseRepository):
         doc["items"] = self._normalize_tree(doc.get("items") or [], parent_id=None)
         # Dirty from birth -- not yet synced to Shopify.
         doc.setdefault("locally_modified", True)
+        if doc["locally_modified"] is True:
+            doc["edit_rev"] = new_edit_rev()  # SF-04: the push clears only this
         # base_repository.create assigns _id + created_at/updated_at and inserts.
         return super().create(doc)
 
@@ -154,6 +157,8 @@ class EcomMenuRepository(BaseRepository):
         if "items" in patch:
             patch["items"] = self._normalize_tree(patch.get("items") or [], parent_id=None)
         patch.setdefault("locally_modified", True)
+        if patch["locally_modified"] is True:
+            patch["edit_rev"] = new_edit_rev()  # SF-04: the push clears only this
         return super().update(menu_id, patch)
 
     def delete(self, menu_id: str) -> bool:

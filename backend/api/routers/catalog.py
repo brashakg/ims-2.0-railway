@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, field_validator
 from typing import Optional, Dict, Any, List, Tuple, Union
 from datetime import datetime, timezone
 from enum import Enum
+import copy
 import logging
 import uuid
 from copy import deepcopy
@@ -1368,6 +1369,36 @@ def _mark_online_dirty(product: Dict) -> None:
     ecom.update(dirty_marks())
 
 
+# The ecom keys a catalogue edit OWNS (review of PR #1227). Everything else
+# under ecom -- the Shopify ids, the first-publish claim, the stock / photo /
+# tag ledgers, the take-down marks -- belongs to the push and the online
+# services, and an edit's copy of them may be minutes old (a page read before
+# a press, saved after it). So an existing row is written WITHOUT ecom and only
+# these keys are merged onto the CURRENT ecom (compare-and-set); status only
+# when the row has none. A save that is not a catalogue edit writes no ecom.
+_CATALOG_ECOM_KEYS = ("locally_modified", "edit_rev", "seo")
+
+
+def _without_ecom(product: Dict) -> Dict:
+    return {k: v for k, v in product.items() if k not in ("ecom", "_id")}
+
+
+def _merge_catalog_ecom(coll, product: Dict) -> None:
+    from api.services.catalog_ecom import update_ecom_in
+
+    mine = product.get("ecom") if isinstance(product.get("ecom"), dict) else {}
+
+    def _merge(ecom: Dict) -> Dict:
+        for key in _CATALOG_ECOM_KEYS:
+            if key in mine:
+                ecom[key] = copy.deepcopy(mine[key])
+        if "status" in mine:
+            ecom.setdefault("status", mine["status"])
+        return ecom
+
+    update_ecom_in(coll, product["id"], _merge)
+
+
 def _save_catalog_product(product: Dict, *, mark_dirty: bool = True) -> None:
     # Dirty by DEFAULT: every save through this door is a human catalogue edit
     # unless it says otherwise. Writes that are NOT a catalogue edit -- a stock
@@ -1385,7 +1416,9 @@ def _save_catalog_product(product: Dict, *, mark_dirty: bool = True) -> None:
         # 2-arg update_one / insert_one signatures that BOTH backends support,
         # and is functionally identical to an upsert on real Mongo.
         if coll.find_one({"id": product["id"]}) is not None:
-            coll.update_one({"id": product["id"]}, {"$set": product})
+            coll.update_one({"id": product["id"]}, {"$set": _without_ecom(product)})
+            if mark_dirty:
+                _merge_catalog_ecom(coll, product)
         else:
             coll.insert_one(dict(product))
     else:
@@ -1420,12 +1453,14 @@ def _save_catalog_product_cas(
     if coll is not None:
         res = coll.update_one(
             {"id": product["id"], "updated_at": expected_raw_updated_at},
-            {"$set": product},
+            {"$set": _without_ecom(product)},
         )
         matched = getattr(res, "matched_count", None)
         if matched is None:
             # MockCollection's update_one result only carries modified_count.
             matched = getattr(res, "modified_count", 0)
+        if matched and mark_dirty:
+            _merge_catalog_ecom(coll, product)
         return bool(matched)
     stored = CATALOG_PRODUCTS.get(product["id"])
     if stored is None or stored.get("updated_at") != expected_raw_updated_at:

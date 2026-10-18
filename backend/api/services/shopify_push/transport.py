@@ -76,6 +76,26 @@ def _outcome_unknown(what: str) -> ShopifyOutcomeUnknown:
     )
 
 
+_VERSION_SEEN: Dict[str, bool] = {}
+
+
+def _note_api_version(resp: Any) -> None:
+    """Say ONCE per process when Shopify answers in a version other than the
+    pinned one (it falls forward from a retired version) -- the drift the
+    audit found silent (SF-06). Never raises."""
+    try:
+        served = str((getattr(resp, "headers", None) or {}).get("X-Shopify-API-Version") or "")
+        if served and served != SHOPIFY_API_VERSION and not _VERSION_SEEN.get(served):
+            _VERSION_SEEN[served] = True
+            logger.warning(
+                "[SHOPIFY_PUSH] Shopify answered in API version %s, IMS asked for %s",
+                served,
+                SHOPIFY_API_VERSION,
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _is_throttled_body(body: Any) -> bool:
     """True when a transport-200 GraphQL body carries a top-level THROTTLED
     error (Shopify's cost-based rate limiter). Fail-soft -> False."""
@@ -178,6 +198,7 @@ async def _graphql(db, query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
             continue
 
         status = resp.status_code
+        _note_api_version(resp)
         if status in (200, 201):
             try:
                 body = resp.json() or {}

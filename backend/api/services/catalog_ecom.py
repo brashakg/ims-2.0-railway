@@ -48,6 +48,17 @@ def update_ecom(
     *,
     attempts: int = 5,
 ) -> Optional[Dict[str, Any]]:
+    """update_ecom_in over db["catalog_products"]."""
+    return update_ecom_in(db["catalog_products"], product_id, mutate, attempts=attempts)
+
+
+def update_ecom_in(
+    coll,
+    product_id: str,
+    mutate: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]],
+    *,
+    attempts: int = 5,
+) -> Optional[Dict[str, Any]]:
     """Compare-and-set the product's `ecom`: `mutate` gets a private copy of
     the stored ecom ({} when absent) and returns the new ecom, or None to
     write nothing. The write's filter carries the ecom that was read, so it
@@ -55,7 +66,6 @@ def update_ecom(
     and re-applies `mutate`. Returns the ecom written, else None (no doc,
     `mutate` declined, or every attempt lost the race -- logged). Raises
     only what the database raises."""
-    coll = db["catalog_products"]
     for _ in range(attempts):
         doc = coll.find_one({"id": product_id})
         if doc is None:

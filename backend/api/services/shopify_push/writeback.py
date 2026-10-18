@@ -194,20 +194,22 @@ def _writeback_simple(
     doc_id: str,
     shopify_field: str,
     shopify_id: str,
+    *,
+    sent_rev: Optional[str] = None,
 ) -> None:
     """Generic gid write-back for collection/menu docs: set the shopify id field,
-    clear locally_modified, stamp last_synced_at. Fail-soft."""
+    stamp last_synced_at, and clear locally_modified ONLY while the doc still
+    carries the edit revision the push sent (`sent_rev`, SF-04) -- an edit
+    saved during the push stays queued. Fail-soft."""
     try:
         coll = db[collection_name]
         coll.update_one(
             {id_field: doc_id},
-            {
-                "$set": {
-                    shopify_field: shopify_id,
-                    "locally_modified": False,
-                    "last_synced_at": _now(),
-                }
-            },
+            {"$set": {shopify_field: shopify_id, "last_synced_at": _now()}},
+        )
+        coll.update_one(
+            {id_field: doc_id, EDIT_REV: sent_rev},
+            {"$set": {"locally_modified": False}},
         )
     except Exception as e:  # noqa: BLE001
         logger.warning(

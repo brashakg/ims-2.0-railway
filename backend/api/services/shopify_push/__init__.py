@@ -325,6 +325,7 @@ from .create_claim import (  # noqa: F401
     CREATE_ID_NOT_SAVED,
     CREATE_IN_PROGRESS,
     CREATE_UNCERTAIN,
+    ensure_identity_definition,
 )
 from .writeback import (  # noqa: F401
     _writeback_product,

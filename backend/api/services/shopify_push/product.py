@@ -30,7 +30,9 @@ from .transport import ShopifyOutcomeUnknown, _graphql, _user_errors
 from .create_claim import (
     CREATE_ID_NOT_SAVED,
     CREATE_UNCERTAIN,
+    adopt_if_on_shopify,
     identity_metafield,
+    prepare_identity,
     resolve_held,
     settle_claim,
     take_claim,
@@ -299,6 +301,9 @@ async def push_product(
     # product, ever, unless Shopify is shown not to have it.
     claim = None
     if not existing_gid and pid:
+        # The unique identity definition goes in before the first value does
+        # (once per process; never raises).
+        await prepare_identity(db)
         got = None
         try:
             verdict, claim = take_claim(db, pid)
@@ -364,8 +369,32 @@ async def push_product(
             settle_claim(db, pid, claim, uncertain=False)
             raise
         err = _user_errors(body, field_name)
+        made = ((body.get("data") or {}).get(field_name) or {}).get("product")
+        if err and not existing_gid and body.get("errors") and not made:
+            # A 200 carrying top-level errors and no product: Shopify may
+            # still have run it. Keep the claim -- the next press looks first.
+            settle_claim(db, pid, claim, uncertain=True)
+            return PushResult(
+                mode=MODE_LIVE,
+                entity="product",
+                action=action,
+                target_id=pid,
+                ok=False,
+                payload=payload,
+                code=CREATE_UNCERTAIN,
+                error=(
+                    f"Shopify answered with errors and no product ({err}), so IMS "
+                    "cannot tell whether it was created. Nothing was sent again; the "
+                    "next press looks for it on Shopify first"
+                ),
+            )
         if err:
             settle_claim(db, pid, claim, uncertain=False)
+            if not existing_gid and pid and await adopt_if_on_shopify(db, pid):
+                # Refused because this product IS already on Shopify (the
+                # unique identity says so): link it and carry on as an update.
+                fresh = db["catalog_products"].find_one({"id": pid}) or product
+                return await push_product(db, fresh, variants, blocked=blocked)
             return PushResult(
                 mode=MODE_LIVE,
                 entity="product",
