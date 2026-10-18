@@ -119,6 +119,60 @@ def test_known_validation_failure_releases_own_claim_for_accounts_correction(app
     assert issue(app_world, rid).status_code == 201
 
 
+@pytest.mark.parametrize("prior_uncertainty", [False, True])
+def test_lost_claim_reply_preserves_only_prior_issue_uncertainty(app_world, monkeypatch, prior_uncertainty):
+    db = app_world["db"]
+    rid = ready(app_world, priced=False)
+    if prior_uncertainty:
+        db.vendor_returns.update_one({"return_id": rid}, {"$set": {
+            "debit_note_draft_status": "RETRY_ISSUE", "debit_note_issue_uncertain": True}})
+    real = db.vendor_returns.find_one_and_update
+
+    def lose_claim_reply(flt, patch, **kwargs):
+        result = real(flt, patch, **kwargs)
+        if patch.get("$set", {}).get("debit_note_draft_status") == "ISSUING":
+            assert result is not None
+            raise RuntimeError("claim committed but reply lost")
+        return result
+
+    monkeypatch.setattr(db.vendor_returns, "find_one_and_update", lose_claim_reply)
+    assert issue(app_world, rid).status_code == 503
+    expected_state = "RETRY_ISSUE" if prior_uncertainty else "DRAFT"
+    saved = db.vendor_returns.find_one({})
+    assert saved["debit_note_draft_status"] == expected_state
+    assert saved["debit_note_issue_uncertain"] is prior_uncertainty
+    assert not saved.get("debit_note_issue_token")
+    assert db.debit_notes.count_documents({}) == 0
+    monkeypatch.setattr(db.vendor_returns, "find_one_and_update", real)
+    assert issue(app_world, rid).status_code == 422
+    assert db.vendor_returns.find_one({})["debit_note_draft_status"] == expected_state
+    if prior_uncertainty:
+        assert price(app_world, rid, 123).status_code == 409
+        assert status(app_world, rid, "cancelled").status_code == 409
+    else:
+        assert price(app_world, rid, 123).status_code == 200
+        assert issue(app_world, rid).status_code == 201
+
+
+def test_stale_uncertainty_snapshot_cannot_claim_or_clear_a_later_issue_fence(app_world, monkeypatch):
+    db = app_world["db"]
+    rid = ready(app_world, priced=False)
+    real = db.vendor_returns.find_one_and_update
+
+    def uncertainty_first(flt, patch, **kwargs):
+        db.vendor_returns.update_one({"return_id": rid}, {"$set": {
+            "debit_note_draft_status": "RETRY_ISSUE", "debit_note_issue_uncertain": True}})
+        return real(flt, patch, **kwargs)
+
+    monkeypatch.setattr(db.vendor_returns, "find_one_and_update", uncertainty_first)
+    assert issue(app_world, rid).status_code == 409
+    saved = db.vendor_returns.find_one({})
+    assert saved["debit_note_draft_status"] == "RETRY_ISSUE"
+    assert saved["debit_note_issue_uncertain"] is True
+    assert not saved.get("debit_note_issue_token")
+    assert db.debit_notes.count_documents({}) == 0
+
+
 def test_persisted_note_blocks_cancellation_even_if_metadata_write_failed_and_retry_repairs(app_world, monkeypatch):
     db = app_world["db"]
     rid = ready(app_world)

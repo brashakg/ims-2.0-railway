@@ -55,13 +55,17 @@ def claim_issue(db, doc):
             {"return_id": doc["return_id"], "receipt_rejection": True,
              "status": doc.get("status"), "return_type": doc.get("return_type"),
              "debit_note_draft_status": {"$nin": ["ISSUING", "ISSUED"]},
+             "debit_note_issue_uncertain": doc.get("debit_note_issue_uncertain"),
              "issued_debit_note_id": None},
             {"$set": {"debit_note_draft_status": "ISSUING", "debit_note_issue_token": token,
                       "debit_note_issue_at": datetime.now(timezone.utc).isoformat()}},
             return_document=ReturnDocument.AFTER,
         )
     except Exception as exc:
-        finish_failed_issue(db, doc["return_id"], token, retry_required=True)
+        # The engine has not run. Preserve only uncertainty that existed
+        # before this claim; the CAS above prevents a stale uncertainty read.
+        finish_failed_issue(db, doc["return_id"], token,
+                            retry_required=bool(doc.get("debit_note_issue_uncertain")))
         raise HTTPException(status_code=503, detail="Could not reserve this return for issue. Retry issuing it.") from exc
     if current is None:
         raise HTTPException(status_code=409, detail="The return changed or its debit note is already being issued. Refresh before retrying.")

@@ -77,6 +77,9 @@ between formal documents and AP accounting.
   only issue retry is permitted, and even a later validation failure preserves
   the price/cancellation fence. A persisted note repairs the return link on
   retry without allocating a second note.
+- A lost claim reply before the issue engine runs releases only that call's
+  claim and preserves any earlier uncertainty. The claim compares the saved
+  uncertainty value so a stale request cannot clear a newer issue fence.
 - `quarantined_units` in acceptance results is the total rejected quantity
   whose custody/draft handoff is confirmed for this receipt, including prior
   attempts. `units_added` and `stock_ids` retain their existing accepted-stock
@@ -98,16 +101,22 @@ described above. This is not advertised as automatic recovery from process death
 
 ## Verification status
 
-- Final combined backend regression run is in progress. Its union covers
+- Final combined backend regression run is in progress on the source preceding
+  the final lost-claim-reply correction. Its union covers
   receipt acceptance/claims, void/recovery, no-PO purchases, catalogue holds,
   cancelled orders, last cost, quarantine, return roles/statuses, formal debit
   notes and the shared on-hand/label rule. Earlier related run: 386 passed.
-- Recovery and corrected legacy fixture run: **152 passed**, including all
-  **31 A08 cases** (19 custody/handoff plus 12 issue/cancel/reopen cases).
+- Recovery and corrected legacy fixture run: **152 passed**, including the
+  then-existing **31 A08 cases** (19 custody/handoff plus 12 issue/cancel/reopen cases).
   Legacy last-cost/cancel tests now provide required in-memory draft storage;
   all existing accepted-count and monetary assertions remain, with explicit
   rejected-quarantine counts added. No production behavior was weakened to
   accommodate their old database-unavailable fixtures.
+- Final source focused run: **34 passed** (19 custody/handoff plus 15 recovery
+  cases), including lost claim replies with and without prior uncertainty and
+  a stale uncertainty race. Pinned CI lint was rerun after this correction and
+  passed at **10.00/10**. The final broad result will be recorded on the PR and
+  external execution handover, without changing source just to restart CI.
 - Independent reviewer also ran the 31 A08 cases and two additional late-CAS
   race probes: **all passed**, with no source blocker found. Exact committed
   head sign-off will follow the final commit.
@@ -128,7 +137,8 @@ described above. This is not advertised as automatic recovery from process death
   `a08-final-smoke.log`, `a08-final-frontend-build.log`,
   `a08-frontend-tests.log`, `a08-frontend-followup.log`,
   `a08-recovery-frontend.log`, `a08-independent-recovery.log`,
-  `a08-independent-late-cas.log`.
+  `a08-independent-late-cas.log`, `a08-claim-reply-final.log`,
+  `a08-claim-reply-lint.log`.
 
 Independent review and PR CI remain pending. The PR is to remain a draft until
 those checks and the coordinator's review complete. No merge or deployment was
