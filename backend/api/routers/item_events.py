@@ -224,6 +224,13 @@ async def quarantine_release(
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
     _stock_repo, unit = _require_unit(stock_id, current_user)
+    # A piece rejected at receiving or on an open supplier return is held by
+    # that return -- the ONE check every release door asks.
+    from ..services.quarantine_hold import release_refusal
+
+    held = release_refusal(db, unit)
+    if held:
+        raise HTTPException(status_code=409, detail=held)
     disp = (req.disposition or "").strip().upper()
     if disp not in _RELEASE_DISPOSITIONS:
         raise HTTPException(status_code=422,

@@ -30,7 +30,7 @@ from api.utils.event_time import utc_now_iso
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Path, Query
@@ -2694,8 +2694,8 @@ def _quarantine_damaged_units(
     a line whose sold unit cannot be found (a historical import) moves
     nothing. Fail-soft per unit. Returns the units set aside.
 
-    ponytail: the unit keeps the shop it was sold from; an online order's
-    damaged piece handed in at another counter is moved with a transfer."""
+    The unit stays quarantined at the shop it was sold from (an online
+    order's damaged piece handed in at another counter is not moved)."""
     lines = [it for it in items or [] if it.condition == "DAMAGED" and it.product_id]
     if not order_id or not lines:
         return []
@@ -2719,7 +2719,7 @@ def _quarantine_damaged_units(
                     set_aside={
                         "status": "QUARANTINED",
                         "quarantine_reason": "CUSTOMER_RETURN_DAMAGED",
-                        "quarantine_at": datetime.now(),
+                        "quarantine_at": datetime.now(timezone.utc),
                         "quarantine_by": user_id,
                         "quarantine_generation": uuid.uuid4().hex,
                         "quarantine_notes": f"Damaged, customer return {return_id}"[:200],
@@ -3885,7 +3885,7 @@ async def create_return(
 
             await dispatch_event(
                 "stock.quarantined",
-                {"stock_id": unit["stock_id"], "store_id": unit["store_id"],
+                {"stock_id": unit["stock_id"], "store_id": unit["store_id"] or store_id,
                  "reason": "CUSTOMER_RETURN_DAMAGED", "actor_id": current_user.get("user_id")},
                 source="returns_router",
             )

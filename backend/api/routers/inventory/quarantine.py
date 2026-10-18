@@ -294,35 +294,17 @@ async def lift_quarantine_stock_unit(
         raise HTTPException(status_code=404, detail="Stock unit not found")
 
     current_status = (unit.get("status") or "").strip().upper()
-    if unit.get("receipt_disposition") == "REJECTED":
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "receipt_rejected",
-                "message": "This piece was rejected at receiving. Follow its supplier return; "
-                           "lifting quarantine cannot accept it into sellable stock.",
-            },
-        )
+    # A piece rejected at receiving or on an open supplier return is held by
+    # that return -- the ONE check every release door asks.
+    from ...services.quarantine_hold import release_refusal
+
+    held = release_refusal(_get_db(), unit)
+    if held:
+        raise HTTPException(status_code=409, detail=held)
     if current_status != STOCK_STATUS_QUARANTINED:
         raise HTTPException(
             status_code=409,
             detail={"code": "not_quarantined", "message": "Unit is not quarantined."},
-        )
-    # A piece set aside on a supplier return leaves with it or comes back on
-    # the return's cancel -- never by a lift that would let it be sold while
-    # the return still names it.
-    from ..vendor_returns import _open_return_of
-
-    db = _get_db()
-    on_return = _open_return_of(db, unit) if db is not None else None
-    if on_return:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "on_supplier_return",
-                "message": f"This piece is on supplier return {on_return}. "
-                           "Cancel that return to put it back on the shelf.",
-            },
         )
 
     now = _now_ist()

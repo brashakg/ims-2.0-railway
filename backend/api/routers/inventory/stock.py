@@ -673,6 +673,11 @@ async def list_units(
                 d.get("received_at") or d.get("created_at")
             ),
             "barcode_printed": bool(d.get("barcode_printed")),
+            # The supplier-return form picks from these: a piece rejected at
+            # receiving belongs to its own return draft; dated stock goes
+            # earliest expiry first.
+            "rejected": d.get("receipt_disposition") == "REJECTED",
+            "expiry_date": d.get("expiry_date"),
             "location_code": d.get("location_code") or "",
             "name": p.get("name") or "",
             "brand": p.get("brand") or "",

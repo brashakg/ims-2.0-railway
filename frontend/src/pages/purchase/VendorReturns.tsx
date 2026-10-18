@@ -47,11 +47,14 @@ interface Piece {
   stock_id: string;
   barcode: string;
   status?: string;
+  expiry_date?: string | null;
+  rejected?: boolean;
+  no_receipt?: boolean;
 }
 
 /** A line on the create form: the pieces named, and the shop's pieces of the
  *  product found by SKU that can be picked. Owner decision 2026-10-18: a frame
- *  (anything with its own unit barcode) goes back piece by piece; the server
+ *  (every piece IMS holds has its own unit barcode) goes back piece by piece; the server
  *  (vendor_returns._pieces_for_lines) is the one rule, this only helps name
  *  them. */
 interface FormLine extends ReturnItem {
@@ -73,8 +76,18 @@ interface ScannedUnit {
   product?: { name?: string };
 }
 
-// A piece that can go back: on the shelf or already set aside.
+// A piece that can go back: on the shelf or already set aside. The status in
+// the server's own spellings: none / IN_STOCK / any case = on the shelf.
 const RETURNABLE = ['AVAILABLE', 'QUARANTINED'];
+const pieceState = (raw?: string | null) => {
+  const s = String(raw ?? '').trim().toUpperCase();
+  return !s || s === 'IN_STOCK' ? 'AVAILABLE' : s;
+};
+// Dated stock (contact lenses, solutions): the pieces already set aside
+// first, then the earliest expiry -- the order the form pre-ticks them in.
+const pickOrder = (a: Piece, b: Piece) =>
+  Number(a.status !== 'QUARANTINED') - Number(b.status !== 'QUARANTINED')
+  || String(a.expiry_date || '9999').localeCompare(String(b.expiry_date || '9999'));
 
 // Settled returns keep the prices they were settled at (the server refuses).
 const SETTLED = ['credit_issued', 'replaced', 'cancelled'];
@@ -98,6 +111,8 @@ interface VendorReturn {
   created_at: string;
   created_by: string;
   notes: string;
+  /** The pieces going back (barcodes; flagged when they have no receipt). */
+  pieces?: Piece[];
 }
 
 interface Vendor {
@@ -223,6 +238,8 @@ export function VendorReturns() {
   const [returnType, setReturnType] = useState<'credit_note' | 'replacement'>('credit_note');
   const [items, setItems] = useState<FormLine[]>([newLine()]);
   const [scanText, setScanText] = useState<Record<number, string>>({});
+  // One id per form: a double click names the same return (server dedupe).
+  const [requestId, setRequestId] = useState('');
   const [notes, setNotes] = useState('');
   // Accounts pricing an unpriced return (one input per line, in line order).
   const [pricing, setPricing] = useState<VendorReturn | null>(null);
@@ -339,7 +356,7 @@ export function VendorReturns() {
       const piece: Piece = {
         stock_id: unit.stock_id,
         barcode: unit.barcode || text,
-        status: String(unit.status || 'AVAILABLE').toUpperCase(),
+        status: pieceState(unit.status),
       };
       const line = items[idx];
       if (found.cross_store) return toast.error(`Piece ${text} belongs to another shop.`);
@@ -368,13 +385,17 @@ export function VendorReturns() {
       const units = (await api.get('/inventory/units', {
         params: { product_id: product.product_id, store_id: ownStoreId ?? undefined },
       })).data?.units || [];
-      setPieces(idx, () => ({
+      const options: Piece[] = units
+        .map((u: Piece) => ({ ...u, status: pieceState(u.status) }))
+        .filter((u: Piece) => RETURNABLE.includes(u.status as string) && !u.rejected)
+        .sort(pickOrder);
+      const dated = options.some((u) => u.expiry_date);
+      setPieces(idx, (l) => ({
         product_id: product.product_id,
         product_name: product.name || product.product_id,
-        pieces: [],
-        options: units
-          .filter((u: Piece) => RETURNABLE.includes(String(u.status).toUpperCase()))
-          .map((u: Piece) => ({ stock_id: u.stock_id, barcode: u.barcode, status: u.status })),
+        // Dated stock: pre-tick in pick order for the user to confirm/change.
+        pieces: dated ? options.slice(0, Math.max(1, l.quantity)) : [],
+        options,
       }));
     } catch (e) {
       toast.error(errMsg(e, 'Could not look that product up'));
@@ -384,6 +405,7 @@ export function VendorReturns() {
   // The Quarantine Queue's "Create RTV" names its piece: start the form with it.
   const openCreate = () => {
     setShowModal(true);
+    setRequestId(globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`);
     if (linkedBarcode && !items[0].pieces.length && !items[0].product_id) {
       void scanLine(0, linkedBarcode);
     }
@@ -392,6 +414,10 @@ export function VendorReturns() {
   const handleCreateReturn = async () => {
     if (!selectedVendor || items.some(i => !i.product_name.trim() || i.quantity <= 0)) {
       toast.error('Please fill all required fields');
+      return;
+    }
+    if (items.some((i) => !i.pieces.length) && !notes.trim()) {
+      toast.error('An item with no piece scanned needs a note: say what it is and why it has no barcode.');
       return;
     }
 
@@ -412,6 +438,7 @@ export function VendorReturns() {
         })),
         return_type: returnType,
         notes,
+        client_request_id: requestId || undefined,
         // An older link without the barcode: the server joins the piece to
         // the line of its product.
         ...(linkedStockId && !items.some((l) => l.pieces.some((p) => p.stock_id === linkedStockId))
@@ -797,6 +824,11 @@ export function VendorReturns() {
                         </div>
                       ))}
                     </div>
+                    {!!ret.pieces?.length && (
+                      <p className="mt-2 text-xs text-gray-600">
+                        Pieces: {ret.pieces.map((p) => `${p.barcode || p.stock_id}${p.no_receipt ? ' (no receipt - supplier not checked)' : ''}`).join(', ')}
+                      </p>
+                    )}
                   </div>
 
                   {/* Notes & Credit Info */}

@@ -92,6 +92,7 @@ async function submitOneLine(price?: string) {
   fireEvent.change(screen.getByPlaceholderText('Enter product name'), {
     target: { value: 'RB Frame' },
   });
+  fireEvent.change(screen.getByPlaceholderText('Add any additional notes...'), { target: { value: 'Made-to-order lens, never in stock' } });
   if (price !== undefined) {
     const priceInput = screen.getByText('Unit Price').parentElement!.querySelector('input')!;
     fireEvent.change(priceInput, { target: { value: price } });

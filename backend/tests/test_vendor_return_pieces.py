@@ -1,19 +1,29 @@
 """Owner decision 2026-10-18: a supplier return names the exact pieces.
 
-A frame (anything whose pieces carry their own unit barcode) goes back piece by
-piece; a piece on the shelf is set aside (QUARANTINED, off sale and off the
-website) when it is added; shipping moves every piece to RTV; cancelling before
-shipping puts back what the return took off the shelf. A piece that cannot go
-is a plain 422, never skipped. Contact lenses / solutions (dated pieces) go by
-count, earliest expiry first. Real routes, one mongomock database.
+Every piece IMS holds carries its own unit barcode, so every piece going back
+is named. A piece on the shelf is set aside (QUARANTINED, off sale and off the
+website) when it is added -- a manager's act; shipping moves every piece to
+RTV BEFORE the status changes; cancelling before shipping puts back what the
+return took off the shelf and restores each piece's earlier link. A piece
+that cannot go is a plain 422, never skipped. A line naming no piece is only
+for something the shop holds no piece of, with a note. Real routes, one
+mongomock database.
 """
 import pytest
 
 from tests.test_receipt_rejection_handoff_a08 import app_world, world  # noqa: F401
-from tests.test_receipt_without_po import MANAGER, STORE, FRAME, LENS, DEALER
+from tests.test_receipt_without_po import (
+    ACCOUNTANT, DEALER, FRAME, LENS, MANAGER, SHARMA, STORE,
+)
+from api.routers import item_events as items_router
 from api.routers import vendor_returns as vr
 from api.services import item_events as ie
 from api.services import online_stock_writeback as osw
+from scripts.count_stuck_return_pieces import stuck_pieces
+
+WORKSHOP = {"user_id": "u-ws", "username": "ws", "roles": ["WORKSHOP_STAFF"],
+            "store_ids": [STORE], "active_store_id": STORE}
+NOTE = "Made-to-order lens, never held in stock"
 
 
 @pytest.fixture
@@ -22,6 +32,7 @@ def w(app_world, monkeypatch):  # noqa: F811
     monkeypatch.setattr(osw, "writeback_after_units_left",
                         lambda db, pids, store, source: calls.append((list(pids), store, source)))
     app_world["website"] = calls
+    app_world["as_"](MANAGER).app.include_router(items_router.router, prefix="/items")
     return app_world
 
 
@@ -30,12 +41,12 @@ def unit(w, sid, product=FRAME, status="AVAILABLE", store=STORE, **extra):
                                     "status": status, "barcode": f"BC{sid}", "quantity": 1, **extra})
 
 
-def create(w, *lines, stock_ids=None):
+def create(w, *lines, user=MANAGER, stock_ids=None, **extra):
     body = {"vendor_id": DEALER, "vendor_name": "Bank More", "store_id": STORE,
-            "return_type": "credit_note", "items": list(lines)}
+            "return_type": "credit_note", "items": list(lines), **extra}
     if stock_ids is not None:
         body["stock_ids"] = stock_ids
-    return w["as_"](MANAGER).post("/vendor-returns/", json=body)
+    return w["as_"](user).post("/vendor-returns/", json=body)
 
 
 def line(qty=1, product=FRAME, name="Acme Aviator 5420", stock_ids=None):
@@ -67,6 +78,18 @@ def events(w, sid):
             for e in w["db"].item_events.find({"stock_id": sid}).sort("event_seq", 1)]
 
 
+def approved(w, *sids, product=FRAME):
+    for sid in sids:
+        unit(w, sid, product=product)
+    rid = create(w, line(qty=len(sids), product=product, stock_ids=list(sids))).json()["return_id"]
+    assert move(w, rid, "approved").status_code == 200
+    return rid
+
+
+# --------------------------------------------------------------------------
+# Create: name the pieces, take them off sale
+# --------------------------------------------------------------------------
+
 def test_a_shelf_piece_is_set_aside_then_shipped_to_rtv_and_leaves_stock_and_website(w):
     unit(w, "U1")
     unit(w, "U2")
@@ -77,13 +100,18 @@ def test_a_shelf_piece_is_set_aside_then_shipped_to_rtv_and_leaves_stock_and_web
     assert state(w, "U1")["status"] == "QUARANTINED" and state(w, "U1")["rtv_vendor_id"] == rid
     assert state(w, "U2")["status"] == "AVAILABLE"  # only the named piece
     assert on_hand(w) == 1
-    assert (["P-FR-NOPO"], STORE, "ledger:quarantine.in") in w["website"]  # website count goes down
+    assert ([FRAME], STORE, "ledger:quarantine.in") in w["website"]  # website count goes down
     doc = returned(w, rid)
     assert doc["stock_ids"] == ["U1"] and doc["set_aside_stock_ids"] == ["U1"]
+    # The manager reads the piece list (no money in it).
+    seen = w["as_"](MANAGER).get(f"/vendor-returns/{rid}").json()
+    assert seen["pieces"] == [{"stock_id": "U1", "barcode": "BCU1", "product_id": FRAME,
+                               "no_receipt": True}]
     assert move(w, rid, "approved").status_code == 200
     shipped = move(w, rid, "shipped")
     assert shipped.status_code == 200, shipped.text
     assert state(w, "U1")["status"] == "RTV"
+    assert "ship_fence" not in returned(w, rid)
     assert on_hand(w) == 1
     assert events(w, "U1") == [("quarantine.in", "AVAILABLE", "QUARANTINED", "VENDOR_RETURN"),
                                ("quarantine.out", "QUARANTINED", "RTV", "VENDOR_RETURN")]
@@ -116,14 +144,37 @@ def test_an_unknown_piece_and_a_piece_named_twice_are_refused(w):
     assert twice.status_code == 422 and "named twice" in twice.json()["detail"]
 
 
-def test_a_frame_must_be_named_piece_by_piece(w):
+def test_a_named_piece_of_a_different_product_is_refused(w):
+    unit(w, "OTHER", product=LENS)
+    wrong = create(w, line(stock_ids=["OTHER"]))
+    assert wrong.status_code == 422 and "is not Acme Aviator 5420" in wrong.json()["detail"]
+    assert state(w, "OTHER")["status"] == "AVAILABLE"
+
+
+def test_every_piece_is_named_dated_stock_included(w):
     unit(w, "U1")
-    refused = create(w, line(qty=1))
-    assert refused.status_code == 422
-    assert "tracked piece by piece" in refused.json()["detail"]
+    unit(w, "CL1", product=LENS, expiry_date="2026-11-30")
+    for product, name in ((FRAME, "Acme Aviator 5420"), (LENS, "Acme Daily -2.00")):
+        refused = create(w, line(product=product, name=name), notes=NOTE)
+        assert refused.status_code == 422, refused.text
+        assert "holds pieces of: scan or pick" in refused.json()["detail"]
     mismatch = create(w, line(qty=2, stock_ids=["U1"]))
     assert mismatch.status_code == 422 and "1 piece(s) named" in mismatch.json()["detail"]
-    assert state(w, "U1")["status"] == "AVAILABLE"
+    assert state(w, "U1")["status"] == "AVAILABLE" and state(w, "CL1")["status"] == "AVAILABLE"
+
+
+def test_a_typed_name_of_a_held_product_cannot_bypass_the_pieces(w):
+    unit(w, "U1")
+    typed = create(w, line(product="acme-aviator-5420", name="acme aviator 5420"), notes=NOTE)
+    assert typed.status_code == 422 and "scan or pick" in typed.json()["detail"]
+
+
+def test_a_typed_line_for_something_not_held_needs_a_note_and_moves_nothing(w):
+    bare = create(w, line(qty=3, product="made-to-order-lens", name="Made-to-order lens"))
+    assert bare.status_code == 422 and "needs a note" in bare.json()["detail"]
+    made = create(w, line(qty=3, product="made-to-order-lens", name="Made-to-order lens"), notes=NOTE)
+    assert made.status_code == 201, made.text
+    assert returned(w, made.json()["return_id"])["stock_ids"] == []
 
 
 def test_a_piece_already_on_another_open_return_is_refused(w):
@@ -133,65 +184,47 @@ def test_a_piece_already_on_another_open_return_is_refused(w):
     assert again.status_code == 422 and first in again.json()["detail"]
 
 
-def test_dated_stock_goes_by_count_earliest_expiry_first(w):
-    unit(w, "CL-LATE", product=LENS, expiry_date="2028-01-31")
-    unit(w, "CL-SOON", product=LENS, expiry_date="2026-11-30")
-    unit(w, "CL-MID", product=LENS, expiry_date="2027-03-31")
-    unit(w, "CL-SOLD", product=LENS, status="SOLD", expiry_date="2026-01-31")
-    short = create(w, line(qty=4, product=LENS, name="Acme Daily"))
-    assert short.status_code == 422 and "holds only 3" in short.json()["detail"]
-    made = create(w, line(qty=2, product=LENS, name="Acme Daily"))
+def test_a_piece_rejected_at_receiving_stays_with_its_own_draft(w):
+    unit(w, "REJ", status="QUARANTINED", receipt_disposition="REJECTED", rtv_vendor_id="VR-GRN-X")
+    refused = create(w, line(stock_ids=["REJ"]))
+    assert refused.status_code == 409
+    assert state(w, "REJ")["rtv_vendor_id"] == "VR-GRN-X"
+
+
+def test_a_piece_from_another_supplier_is_refused_and_one_without_a_receipt_is_flagged(w):
+    w["db"].grns.insert_many([{"grn_id": "GRN-SH", "vendor_id": SHARMA},
+                              {"grn_id": "GRN-DL", "vendor_id": DEALER}])
+    unit(w, "SH1", grn_id="GRN-SH")
+    unit(w, "DL1", grn_id="GRN-DL")
+    unit(w, "OPEN1")  # opening stock: no receipt
+    other = create(w, line(stock_ids=["SH1"]))
+    assert other.status_code == 422 and "different supplier" in other.json()["detail"]
+    assert state(w, "SH1")["status"] == "AVAILABLE"
+    made = create(w, line(qty=2, stock_ids=["DL1", "OPEN1"]))
     assert made.status_code == 201, made.text
-    rid = made.json()["return_id"]
-    assert sorted(returned(w, rid)["stock_ids"]) == ["CL-MID", "CL-SOON"]
-    assert on_hand(w, LENS) == 1
-    assert move(w, rid, "approved").status_code == 200
-    assert move(w, rid, "shipped").status_code == 200
-    assert [state(w, s)["status"] for s in ("CL-SOON", "CL-MID", "CL-LATE")] == ["RTV", "RTV", "AVAILABLE"]
+    flags = {p["stock_id"]: p["no_receipt"] for p in returned(w, made.json()["return_id"])["pieces"]}
+    assert flags == {"DL1": False, "OPEN1": True}
 
 
-def test_something_the_shop_holds_no_piece_of_moves_nothing(w):
-    made = create(w, line(qty=3, product="made-to-order-lens", name="Made-to-order lens"))
-    assert made.status_code == 201, made.text
-    assert returned(w, made.json()["return_id"])["stock_ids"] == []
-
-
-def test_cancel_before_shipping_puts_back_only_what_the_return_took_off_the_shelf(w):
+@pytest.mark.parametrize("user", [WORKSHOP, ACCOUNTANT])
+def test_only_a_manager_takes_a_piece_off_the_shelf(w, user):
     unit(w, "SHELF")
     unit(w, "ASIDE", status="QUARANTINED", quarantine_reason="DEFECTIVE")
-    made = create(w, line(qty=2, stock_ids=["SHELF", "ASIDE"]))
-    assert made.status_code == 201, made.text
-    rid = made.json()["return_id"]
-    assert on_hand(w) == 0
-    w["website"].clear()
-    assert move(w, rid, "cancelled").status_code == 200
-    assert state(w, "SHELF")["status"] == "AVAILABLE" and state(w, "SHELF")["rtv_vendor_id"] is None
-    # The defective piece was set aside before the return: it stays set aside.
-    assert state(w, "ASIDE")["status"] == "QUARANTINED" and state(w, "ASIDE")["rtv_vendor_id"] is None
-    assert on_hand(w) == 1
-    assert w["website"] == [([FRAME], STORE, "vendor_return_release")]
-    assert events(w, "SHELF")[-1] == ("quarantine.out", "QUARANTINED", "AVAILABLE", "VENDOR_RETURN")
+    refused = create(w, line(stock_ids=["SHELF"]), user=user)
+    assert refused.status_code == 403
+    assert state(w, "SHELF")["status"] == "AVAILABLE"
+    named = create(w, line(stock_ids=["ASIDE"]), user=user)
+    assert named.status_code == 201, named.text
+    assert state(w, "ASIDE")["rtv_vendor_id"] == named.json()["return_id"]
 
 
-def test_shipping_is_refused_while_a_named_piece_is_no_longer_set_aside(w):
-    unit(w, "U1")
-    rid = create(w, line(stock_ids=["U1"])).json()["return_id"]
-    assert move(w, rid, "approved").status_code == 200
-    w["db"].stock_units.update_one({"stock_id": "U1"}, {"$set": {"status": "SOLD"}})
-    refused = move(w, rid, "shipped")
-    assert refused.status_code == 409 and "BCU1" in refused.json()["detail"]
-    assert w["db"].vendor_returns.find_one({"return_id": rid})["status"] == "approved"
-    assert state(w, "U1")["status"] == "SOLD"
-
-
-def test_a_piece_on_an_open_return_cannot_be_lifted_back_onto_the_shelf(w):
-    unit(w, "U1")
-    rid = create(w, line(stock_ids=["U1"])).json()["return_id"]
-    lifted = w["as_"](MANAGER).patch("/inventory/stock/U1/lift-quarantine",
-                                     json={"lift_reason": "Looks fine now"})
-    assert lifted.status_code == 409 and lifted.json()["detail"]["code"] == "on_supplier_return"
-    assert rid in lifted.json()["detail"]["message"]
-    assert state(w, "U1")["status"] == "QUARANTINED"
+def test_the_same_form_submitted_twice_is_one_return(w):
+    body = dict(notes=NOTE, client_request_id="form-1")
+    first = create(w, line(product="made-to-order-lens", name="Lens"), **body)
+    again = create(w, line(product="made-to-order-lens", name="Lens"), **body)
+    assert first.status_code == 201 and again.status_code == 201
+    assert first.json()["return_id"] == again.json()["return_id"]
+    assert w["db"].vendor_returns.count_documents({}) == 1
 
 
 def test_the_quarantine_queue_link_joins_its_piece_to_the_line_of_its_product(w):
@@ -208,14 +241,16 @@ def test_the_quarantine_queue_link_joins_its_piece_to_the_line_of_its_product(w)
     assert stray.status_code == 422
 
 
+# --------------------------------------------------------------------------
+# All or nothing
+# --------------------------------------------------------------------------
+
 def test_a_piece_lost_to_a_race_undoes_the_pieces_already_set_aside(w, monkeypatch):
     unit(w, "U1")
     unit(w, "U2")
     real = vr._ie.record_event_atomic
-    calls = []
 
     def second_loses(db, **kw):
-        calls.append(kw["stock_id"])
         if kw["stock_id"] == "U2" and kw["to_state"] is ie.StockState.QUARANTINED:
             return False, None  # sold at the till between the check and the write
         return real(db, **kw)
@@ -226,3 +261,159 @@ def test_a_piece_lost_to_a_race_undoes_the_pieces_already_set_aside(w, monkeypat
     assert state(w, "U1")["status"] == "AVAILABLE" and state(w, "U1")["rtv_vendor_id"] is None
     assert state(w, "U2")["status"] == "AVAILABLE"
     assert w["db"].vendor_returns.count_documents({}) == 0
+
+
+def test_a_link_lost_after_the_ledger_move_never_strands_the_piece_off_sale(w, monkeypatch):
+    unit(w, "U1")
+    real = w["db"].stock_units.update_one
+
+    class _Missed:
+        matched_count = 0
+        modified_count = 0
+
+    def link_misses(flt, change, *a, **k):
+        if "rtv_vendor_id" in change.get("$set", {}) and str(change["$set"]["rtv_vendor_id"]).startswith("VR-"):
+            return _Missed()
+        return real(flt, change, *a, **k)
+
+    monkeypatch.setattr(w["db"].stock_units, "update_one", link_misses)
+    lost = create(w, line(stock_ids=["U1"]))
+    assert lost.status_code == 409
+    assert state(w, "U1")["status"] == "AVAILABLE"  # not left QUARANTINED and unlinked
+    assert on_hand(w) == 1
+
+
+def test_an_unexpected_failure_while_setting_aside_undoes_it(w, monkeypatch):
+    unit(w, "U1")
+    unit(w, "U2")
+    real = vr._ie.record_event_atomic
+
+    def blows_up(db, **kw):
+        if kw["stock_id"] == "U2":
+            raise RuntimeError("ledger offline")
+        return real(db, **kw)
+
+    monkeypatch.setattr(vr._ie, "record_event_atomic", blows_up)
+    with pytest.raises(RuntimeError):
+        create(w, line(qty=2, stock_ids=["U1", "U2"]))
+    assert state(w, "U1")["status"] == "AVAILABLE" and state(w, "U1")["rtv_vendor_id"] is None
+
+
+def test_a_return_that_could_not_be_saved_gives_its_pieces_back(w, monkeypatch):
+    unit(w, "U1")
+
+    def offline(*_a, **_k):
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr(w["db"].vendor_returns, "insert_one", offline)
+    failed = create(w, line(stock_ids=["U1"]))
+    assert failed.status_code == 500
+    assert state(w, "U1")["status"] == "AVAILABLE" and state(w, "U1")["rtv_vendor_id"] is None
+
+
+# --------------------------------------------------------------------------
+# Ship: the pieces leave first, the status follows
+# --------------------------------------------------------------------------
+
+def test_shipping_is_refused_while_a_named_piece_is_no_longer_set_aside(w):
+    rid = approved(w, "U1")
+    w["db"].stock_units.update_one({"stock_id": "U1"}, {"$set": {"status": "SOLD"}})
+    refused = move(w, rid, "shipped")
+    assert refused.status_code == 409 and "BCU1" in refused.json()["detail"]
+    assert returned(w, rid)["status"] == "approved"
+    assert state(w, "U1")["status"] == "SOLD"
+
+
+def test_a_piece_that_will_not_move_holds_the_ship_and_ship_again_finishes(w, monkeypatch):
+    rid = approved(w, "U1", "U2")
+    real = vr._ie.record_event_atomic
+
+    def u2_stuck(db, **kw):
+        if kw["stock_id"] == "U2" and kw["to_state"] is ie.StockState.RTV:
+            return False, None
+        return real(db, **kw)
+
+    monkeypatch.setattr(vr._ie, "record_event_atomic", u2_stuck)
+    held = move(w, rid, "shipped")
+    assert held.status_code == 409 and "BCU2" in held.json()["detail"]
+    doc = returned(w, rid)
+    assert doc["status"] == "approved" and "ship_fence" not in doc
+    assert (state(w, "U1")["status"], state(w, "U2")["status"]) == ("RTV", "QUARANTINED")
+    # Part of it left: it cannot be cancelled back onto the shelf.
+    refused = move(w, rid, "cancelled")
+    assert refused.status_code == 409 and "BCU1" in refused.json()["detail"]
+    monkeypatch.setattr(vr._ie, "record_event_atomic", real)
+    done = move(w, rid, "shipped")
+    assert done.status_code == 200, done.text
+    assert returned(w, rid)["status"] == "shipped"
+    assert state(w, "U2")["status"] == "RTV"
+
+
+def test_ship_again_on_a_shipped_return_finishes_a_stuck_piece(w):
+    rid = approved(w, "U1", "U2")
+    assert move(w, rid, "shipped").status_code == 200
+    w["db"].stock_units.update_one({"stock_id": "U2"}, {"$set": {"status": "QUARANTINED"}})
+    assert [(r[0], r[2], r[5]) for r in stuck_pieces(w["db"])] == [(rid, "U2", True)]
+    again = move(w, rid, "shipped")
+    assert again.status_code == 200, again.text
+    assert returned(w, rid)["status"] == "shipped"
+    assert state(w, "U2")["status"] == "RTV"
+    assert stuck_pieces(w["db"]) == []
+
+
+def test_a_cancel_cannot_land_while_a_ship_is_moving_the_pieces(w, monkeypatch):
+    rid = approved(w, "U1")
+    real = vr._ship_pieces
+    raced = []
+
+    def cancel_mid_ship(db, doc, actor):
+        raced.append(move(w, rid, "cancelled").status_code)
+        return real(db, doc, actor)
+
+    monkeypatch.setattr(vr, "_ship_pieces", cancel_mid_ship)
+    assert move(w, rid, "shipped").status_code == 200
+    assert raced == [409]
+    assert returned(w, rid)["status"] == "shipped" and state(w, "U1")["status"] == "RTV"
+
+
+# --------------------------------------------------------------------------
+# Cancel and the doors out of quarantine
+# --------------------------------------------------------------------------
+
+def test_cancel_before_shipping_puts_back_only_what_the_return_took_and_restores_links(w):
+    unit(w, "SHELF")
+    unit(w, "ASIDE", status="QUARANTINED", quarantine_reason="DEFECTIVE", rtv_vendor_id=DEALER)
+    made = create(w, line(qty=2, stock_ids=["SHELF", "ASIDE"]))
+    assert made.status_code == 201, made.text
+    rid = made.json()["return_id"]
+    assert on_hand(w) == 0
+    w["website"].clear()
+    assert move(w, rid, "cancelled").status_code == 200
+    assert state(w, "SHELF")["status"] == "AVAILABLE" and state(w, "SHELF")["rtv_vendor_id"] is None
+    # The defective piece was set aside before the return: it stays set aside,
+    # with the supplier the Quarantine screen named for it.
+    assert state(w, "ASIDE")["status"] == "QUARANTINED" and state(w, "ASIDE")["rtv_vendor_id"] == DEALER
+    assert on_hand(w) == 1
+    assert w["website"] == [([FRAME], STORE, "vendor_return_release")]
+    assert events(w, "SHELF")[-1] == ("quarantine.out", "QUARANTINED", "AVAILABLE", "VENDOR_RETURN")
+
+
+@pytest.mark.parametrize("door", ["lift", "release"])
+def test_a_piece_on_an_open_return_cannot_leave_quarantine_by_hand(w, door):
+    unit(w, "U1")
+    rid = create(w, line(stock_ids=["U1"])).json()["return_id"]
+    http = w["as_"](MANAGER)
+    if door == "lift":
+        out = http.patch("/inventory/stock/U1/lift-quarantine", json={"lift_reason": "Looks fine now"})
+    else:
+        out = http.post("/items/U1/quarantine/release", json={"disposition": "RESTOCK"})
+    assert out.status_code == 409 and out.json()["detail"]["code"] == "on_supplier_return"
+    assert rid in out.json()["detail"]["message"]
+    assert state(w, "U1")["status"] == "QUARANTINED"
+
+
+def test_the_ledger_release_also_refuses_a_piece_rejected_at_receiving(w):
+    unit(w, "REJ", status="QUARANTINED", receipt_disposition="REJECTED")
+    out = w["as_"](MANAGER).post("/items/REJ/quarantine/release", json={"disposition": "RTV"})
+    assert out.status_code == 409 and out.json()["detail"]["code"] == "receipt_rejected"
+    assert state(w, "REJ")["status"] == "QUARANTINED"

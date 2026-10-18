@@ -855,6 +855,8 @@ def _return_body(**item_over):
         "store_id": STORE,
         "items": [item],
         "return_type": "credit_note",
+        # No piece of P1 at the shop: a typed line, with its note (PR #1234).
+        "notes": "Made-to-order lens, never held in stock",
     }
 
 

@@ -959,20 +959,26 @@ class TaskmasterAgent(JarvisAgent):
             self._quarantine_follow_up(payload)
 
     def _quarantine_follow_up(self, event: Dict[str, Any]):
-        """F21: a piece set aside off sale is chased: one task per piece, due in
-        7 days, to the shop's store manager -- send it back to the supplier
-        (Purchase > Vendor Returns) or clear it on the Quarantine screen."""
+        """F21: a piece set aside off sale is chased: one task per piece per
+        quarantine, due in 7 days, to the shop's store manager -- send it back
+        to the supplier (Purchase > Vendor Returns) or clear it on the
+        Quarantine screen. The task id is derived from the piece and its
+        quarantine generation, so every worker that hears the event raises the
+        SAME task and the database keeps one."""
         coll = self.get_collection("tasks")
         stock_id = event.get("stock_id")
         if coll is None or not stock_id:
             return
         try:
+            import hashlib
+
             from api.services.task_triggers import create_system_task
             from database.repositories.task_repository import TaskRepository
 
             units = self.get_collection("stock_units")
             unit = (units.find_one({"stock_id": stock_id}) if units is not None else None) or {}
             piece = unit.get("barcode") or stock_id
+            key = f"quarantine_follow_up:{stock_id}:{unit.get('quarantine_generation') or ''}"
             create_system_task(
                 TaskRepository(coll),
                 title=f"Quarantined piece {piece}: send it back to the supplier or clear it",
@@ -983,12 +989,13 @@ class TaskmasterAgent(JarvisAgent):
                 ),
                 priority="P2",
                 category="Inventory",
-                store_id=event.get("store_id"),
-                dedupe_ref=f"quarantine_follow_up:{stock_id}",
+                store_id=event.get("store_id") or unit.get("store_id"),
+                dedupe_ref=key,
                 assigned_to="STORE_MANAGER",
                 due_at=datetime.now() + timedelta(days=7),
                 extra={"auto_created_by": self.agent_id, "link": "/inventory/quarantine",
                        "payload": {"stock_id": stock_id}},
+                task_id="TSK-Q" + hashlib.sha256(key.encode()).hexdigest()[:12].upper(),
             )
         except Exception as e:
             logger.warning(f"[TASKMASTER] Failed to create quarantine follow-up: {e}")
