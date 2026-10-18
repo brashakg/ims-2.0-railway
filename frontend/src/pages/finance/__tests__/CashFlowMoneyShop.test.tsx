@@ -12,6 +12,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { MemoryRouter, Route, Routes, useSearchParams } from 'react-router-dom';
 
 const toastMock = vi.hoisted(() => ({
   success: vi.fn(),
@@ -54,6 +55,7 @@ vi.mock('../../../hooks/usePOSQueries', () => ({
 }));
 
 import CashFlowPage from '../CashFlowPage';
+import { PurchaseShopPicker, usePurchaseShop } from '../../purchase/purchaseShop';
 
 const ADMIN = { id: 'u-admin', roles: ['ADMIN'], activeRole: 'ADMIN', activeStoreId: 'BV-HQ-01' };
 const PUNE_ACCOUNTANT = { id: 'u-acct', roles: ['ACCOUNTANT'], activeRole: 'ACCOUNTANT', activeStoreId: 'WO-PUN-01' };
@@ -89,7 +91,7 @@ const LEDGER = {
 const SHOP_SELECT = 'Shop this money is for';
 
 async function openForm(kind: 'Payment' | 'Debit note' | 'Bill') {
-  render(<CashFlowPage />);
+  render(<MemoryRouter><CashFlowPage /></MemoryRouter>);
   fireEvent.click(await screen.findByRole('button', { name: 'AP Aging' }));
   fireEvent.click(await screen.findByText('Pune Lens Co'));
   await waitFor(() => expect(apis.vendorApApi.ledger).toHaveBeenCalledWith('V-PUN'));
@@ -184,6 +186,27 @@ describe('an admin picks the shop a payment or debit note is for, or leaves it t
     fireEvent.change(screen.getByPlaceholderText('Amount'), { target: { value: '25' } });
     save();
     await waitFor(() => expect(apis.vendorApApi.createDebitNote).toHaveBeenCalledWith('V-PUN', expect.objectContaining({ amount: 25, cn_type: 'QUALITY_CN' })));
+  });
+
+  it('keeps the selected purchase shop when following the supplier return link', async () => {
+    function ReturnDestination() {
+      const { storeId, setShop } = usePurchaseShop();
+      const [params] = useSearchParams();
+      return <><output data-testid="return-destination">{storeId}:{params.get('vendor_id')}</output>
+        <button onClick={() => setShop('')}>Reset shop after check</button></>;
+    }
+    render(<MemoryRouter initialEntries={['/finance']}><Routes>
+      <Route path="/finance" element={<><PurchaseShopPicker /><CashFlowPage /></>} />
+      <Route path="/purchase/vendor-returns" element={<ReturnDestination />} />
+    </Routes></MemoryRouter>);
+    fireEvent.change(screen.getByLabelText('Purchase shop'), { target: { value: 'WO-PUN-01' } });
+    fireEvent.click(await screen.findByRole('button', { name: 'AP Aging' }));
+    fireEvent.click(await screen.findByText('Pune Lens Co'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Debit note' }));
+    fireEvent.change(screen.getByLabelText('Credit type'), { target: { value: 'RETURN_CN' } });
+    fireEvent.click(screen.getByRole('link', { name: 'Open Vendor Returns' }));
+    expect(await screen.findByTestId('return-destination')).toHaveTextContent('WO-PUN-01:V-PUN');
+    fireEvent.click(screen.getByRole('button', { name: 'Reset shop after check' }));
   });
 
   it('asks no shop on a bill (a bill is booked to its goods receipt’s shop)', async () => {

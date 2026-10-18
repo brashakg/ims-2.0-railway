@@ -155,6 +155,52 @@ describe('supplier-confirmed credit, separate from internal return notes', () =>
     expect(calls.confirm).toHaveBeenCalledTimes(1);
   });
 
+  it('restores the saved note identity after its first lookup fails and the bill refresh succeeds', async () => {
+    const existing = { ...posted.confirmation, confirmation_id: 'saved-note-id',
+      credit_note_number: 'SAVED-CN', credit_note_date: '2026-10-16', received_amount: 52.5,
+      posting_status: 'PENDING_EVIDENCE' as const,
+      allocations: [{ source_key: 'source1', taxable: 50, cgst: 1.25, sgst: 1.25, igst: 0 }] };
+    calls.preview.mockResolvedValueOnce({ ...resolved(), confirmations: [existing] })
+      .mockRejectedValueOnce({ response: { status: 503 } })
+      .mockResolvedValueOnce({ ...resolved(), confirmations: [existing], confirmation: existing });
+    setup();
+    await enterNote();
+    fireEvent.change(screen.getByLabelText('Supplier note to complete'), { target: { value: existing.confirmation_id } });
+    fireEvent.click(await screen.findByRole('button', { name: 'Refresh original bills' }));
+    await waitFor(() => expect(screen.getByLabelText('Supplier note number')).toHaveValue('SAVED-CN'));
+    expect(screen.getByLabelText('Supplier note date')).toHaveValue('2026-10-16');
+    expect(screen.getByLabelText('Actual credited amount (₹)')).toHaveValue('52.5');
+    expect(screen.getByLabelText('Supplier note number')).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm supplier credit' }));
+    await waitFor(() => expect(calls.confirm).toHaveBeenCalled());
+    expect(calls.confirm.mock.calls[0][1]).toMatchObject({ idempotency_key: existing.confirmation_id,
+      credit_note_number: 'SAVED-CN', credit_note_date: '2026-10-16', received_amount: 52.5,
+      allocations: existing.allocations });
+  });
+
+  it('discards the saved note identity when switching back to a new note needs a refresh', async () => {
+    const existing = { ...posted.confirmation, confirmation_id: 'saved-note-id', posting_status: 'PENDING_EVIDENCE' as const };
+    calls.preview.mockResolvedValueOnce({ ...resolved(), confirmations: [existing] })
+      .mockResolvedValueOnce({ ...resolved(), confirmations: [existing], confirmation: existing })
+      .mockRejectedValueOnce({ response: { status: 503 } })
+      .mockResolvedValueOnce({ ...resolved(), confirmations: [existing] });
+    setup();
+    await screen.findByLabelText('Supplier note to complete');
+    fireEvent.change(screen.getByLabelText('Supplier note to complete'), { target: { value: existing.confirmation_id } });
+    await waitFor(() => expect(screen.getByLabelText('Supplier note number')).toBeDisabled());
+    await waitFor(() => expect(screen.queryByRole('status')).not.toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText('Supplier note to complete'), { target: { value: '' } });
+    fireEvent.click(await screen.findByRole('button', { name: 'Refresh original bills' }));
+    await waitFor(() => expect(screen.getByLabelText('Supplier note number')).toBeEnabled());
+    expect(screen.getByLabelText('Supplier note number')).toHaveValue('');
+    expect(screen.getByLabelText('Supplier note date')).toHaveValue('');
+    await enterNote();
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm supplier credit' }));
+    await waitFor(() => expect(calls.confirm).toHaveBeenCalled());
+    expect(calls.confirm.mock.calls[0][1].idempotency_key).not.toBe(existing.confirmation_id);
+    expect(calls.confirm.mock.calls[0][1].idempotency_key).toMatch(/^[a-f0-9-]{36}$/i);
+  });
+
   it('uses the checked bill and physical units only after the server verifies them', async () => {
     const ambiguous: SupplierCreditPreview = { ...resolved(), source_status: 'PENDING_EVIDENCE', sources: [],
       source_selections: [], pending_reasons: [{ code: 'AMBIGUOUS', message: 'Select the original units.' }],

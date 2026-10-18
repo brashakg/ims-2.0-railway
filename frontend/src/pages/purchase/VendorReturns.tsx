@@ -14,7 +14,7 @@ import {
   Clock,
 } from 'lucide-react';
 import clsx from 'clsx';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { usePurchaseShop } from './purchaseShop';
@@ -472,7 +472,7 @@ export function VendorReturns() {
 
       {linkedVendorId && <p className="rounded border border-blue-100 bg-blue-50 p-3 text-sm text-blue-900">
         Showing this supplier’s returns. Open the relevant return and use Issue Credit to record the supplier’s confirmed note.{' '}
-        <a href="/purchase/vendor-returns" className="underline">Show all suppliers</a>
+        <Link to="/purchase/vendor-returns" className="underline">Show all suppliers</Link>
       </p>}
 
       {/* Summary Stats */}

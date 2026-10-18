@@ -105,7 +105,10 @@ function SupplierCreditForm({ returnId, canRecord, onClose, onSaved }: SupplierC
         ...(selection ? { source_selections: selection } : {}),
         ...(confirmationId ? { confirmation_id: confirmationId } : {}),
       });
-      if (version === requestVersion.current) applyPreview(next, resetNote || !preview);
+      if (version === requestVersion.current) {
+        const identityChanged = next.confirmation?.confirmation_id !== preview?.confirmation?.confirmation_id;
+        applyPreview(next, resetNote || !preview || identityChanged);
+      }
     } catch (cause) {
       if (version === requestVersion.current) {
         setVerificationFailed(true);
