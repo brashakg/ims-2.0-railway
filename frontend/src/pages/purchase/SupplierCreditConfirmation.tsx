@@ -65,21 +65,22 @@ function SupplierCreditForm({ returnId, canRecord, onClose, onSaved }: SupplierC
 
   const applyPreview = useCallback((next: SupplierCreditPreview, resetNote: boolean) => {
     setPreview(next);
+    setResumeId(next.confirmation?.confirmation_id ?? '');
     setVerificationFailed(false);
     setAmounts(Object.fromEntries(next.sources.map(source => {
       const saved = next.confirmation?.allocations?.find(row => row.source_key === source.source_key);
       return [source.source_key, Object.fromEntries(HEADS.map(head => [head, String(saved?.[head] ?? source.suggested[head])])) as AmountInputs];
     })));
     setChoices(next.source_selections.map(selection => ({ ...selection, key: choiceKey(selection) })));
-    if (resetNote) {
+    if (resetNote || next.confirmation?.retry_unchanged) {
       const existing = next.confirmation;
       setNumber(existing?.credit_note_number ?? '');
       setDate(existing?.credit_note_date ?? '');
       setAmount(existing ? String(existing.received_amount) : next.remaining_amount == null ? '' : String(next.remaining_amount));
       setNotes(existing?.notes ?? '');
       requestId.current = existing?.confirmation_id ?? crypto.randomUUID();
-      submitted.current = null;
-      setUncertain(false);
+      submitted.current = existing?.retry_unchanged ? existing.retry_payload ?? null : null;
+      setUncertain(!!existing?.retry_unchanged);
     }
   }, []);
 
@@ -96,7 +97,7 @@ function SupplierCreditForm({ returnId, canRecord, onClose, onSaved }: SupplierC
     return invalidateRequests;
   }, [returnId, canRecord, applyPreview, invalidateRequests]);
 
-  async function refresh(selection?: CreditSourceSelection[], confirmationId = resumeId, resetNote = false) {
+  async function refresh(selection?: CreditSourceSelection[], confirmationId = resumeId || (uncertain ? requestId.current : ''), resetNote = false) {
     const version = ++requestVersion.current;
     setLoading(true);
     setError('');
@@ -107,7 +108,9 @@ function SupplierCreditForm({ returnId, canRecord, onClose, onSaved }: SupplierC
       });
       if (version === requestVersion.current) {
         const identityChanged = next.confirmation?.confirmation_id !== preview?.confirmation?.confirmation_id;
-        applyPreview(next, resetNote || !preview || identityChanged);
+        const recoveryChanged = !!next.confirmation?.retry_unchanged !== !!preview?.confirmation?.retry_unchanged ||
+          (uncertain && next.confirmation?.retry_unchanged === false);
+        applyPreview(next, resetNote || !preview || identityChanged || recoveryChanged);
       }
     } catch (cause) {
       if (version === requestVersion.current) {
@@ -131,6 +134,10 @@ function SupplierCreditForm({ returnId, canRecord, onClose, onSaved }: SupplierC
     if (!canRecord || !preview || loading || verificationFailed || submitBusy.current) return;
     setError('');
     let payload = uncertain ? submitted.current : null;
+    if (uncertain && !payload) {
+      setError('The original request could not be recovered. Close and reopen this note before retrying.');
+      return;
+    }
     if (!payload) {
       const received = paise(amount);
       if (!number.trim() || !date || received == null || received <= 0) {
@@ -178,7 +185,7 @@ function SupplierCreditForm({ returnId, canRecord, onClose, onSaved }: SupplierC
       const status = (cause as { response?: { status?: number } })?.response?.status;
       // A lost reply may already have posted. Keep this exact request until
       // the server confirms its outcome; never make a second note on retry.
-      setUncertain(!status || status >= 500);
+      setUncertain(wasUncertain => wasUncertain || !status || status >= 500);
       if (status === 409) setVerificationFailed(true);
       setError(errMsg(cause, 'Could not confirm the result. Retry this same note to check its status.'));
     } finally {

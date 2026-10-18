@@ -59,3 +59,15 @@ passes 47 tests. Independent offline browser probes confirm both recovery
 directions submit the correct existing or fresh request identity.
 Forced TypeScript checking, Vite production build and focused ESLint also
 pass after these corrections; the pre-existing CSS-comment warning remains.
+
+The server's interrupted-confirmation contract also exposes retry_unchanged
+and the exact retry_payload. Reopening such a note locks edits and resends
+that payload, preserving originally empty automatic bill selections instead
+of replacing them with normalized preview selections. Missing recovery data
+cannot fabricate a new request. Two regressions cover reopened interrupted
+notes and a missing retry payload. Exact retry locking also survives 401/403
+replies; a fresh preview must explicitly confirm editable pending state before
+evidence controls unlock, including a locally uncertain retry of the same
+already-pending note. The focused suite now passes 53 tests. Independent
+offline browser probes reproduced the old authorization-retry mismatch and
+confirmed that the corrected form retains identical requests.

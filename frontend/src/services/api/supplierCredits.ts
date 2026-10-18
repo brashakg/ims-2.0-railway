@@ -24,6 +24,8 @@ export interface SupplierCreditConfirmation {
   posting_status: 'POSTED' | 'PENDING_EVIDENCE';
   source_selections?: CreditSourceSelection[];
   allocations?: CreditAllocation[];
+  retry_unchanged?: boolean;
+  retry_payload?: ConfirmSupplierCredit | null;
   pending_reasons: CreditPendingReason[];
 }
 export interface CreditSource {
@@ -77,7 +79,7 @@ export interface ConfirmSupplierCredit {
   credit_note_number: string;
   credit_note_date: string;
   received_amount: number;
-  notes?: string;
+  notes?: string | null;
   source_selections: CreditSourceSelection[];
   allocations: CreditAllocation[];
 }
