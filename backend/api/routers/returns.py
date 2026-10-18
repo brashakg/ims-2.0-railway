@@ -50,8 +50,9 @@ from ..dependencies import (
     get_order_repository,
     get_product_repository,
     get_stock_repository,
-    no_shop_scope_for,
-    store_in_view,
+    in_reach_or_404,
+    resolve_store_scope,
+    user_store_scope,
     validate_store_access,
 )
 from ..services import barcode as barcode_svc
@@ -4008,27 +4009,20 @@ async def list_returns(
 ):
     """List returns, store-scoped, newest first.
 
-    HQ roles (SUPERADMIN/ADMIN/AREA_MANAGER) may pass any store_id; lower
-    roles are pinned to their active store.
+    Admins may read every shop; area managers may read their assigned shops.
+    Other roles default to their active shop. Explicit shop filters are checked
+    by the shared store-access rule.
     """
     coll = _returns_coll()
     if coll is None:
         return {"returns": [], "total": 0}
 
     roles = current_user.get("roles", []) or []
-    is_hq = any(r in roles for r in ("SUPERADMIN", "ADMIN", "AREA_MANAGER"))
-    # R4 (owner ruling 2026-10-12): a non-admin login with NO shop -- an
-    # AREA_MANAGER too -- sees no shop's returns (and naming one is a 403);
-    # it used to read every shop's refunds. A login that holds a shop keeps
-    # this route's rule: HQ roles any shop, lower roles their own (store_in_view:
-    # the active shop, else the first own shop).
-    no_shop = no_shop_scope_for(store_id, current_user)
-    if no_shop:
-        effective_store = no_shop
-    elif is_hq:
-        effective_store = store_id
+    is_admin, own_stores = user_store_scope(current_user)
+    if not store_id and "AREA_MANAGER" in roles and not is_admin:
+        effective_store = {"$in": sorted(own_stores)}
     else:
-        effective_store = store_in_view(None, current_user)
+        effective_store = resolve_store_scope(store_id, current_user)
 
     query: Dict[str, Any] = {}
     if effective_store:
@@ -4063,15 +4057,9 @@ async def get_return(
     except Exception as exc:  # noqa: BLE001
         logger.warning("[RETURNS] get failed: %s", exc)
         raise HTTPException(status_code=404, detail="Return not found")
-    if not doc:
-        raise HTTPException(status_code=404, detail="Return not found")
-    # IDOR guard: a return carries customer identity + refund amounts. Only a
-    # caller with access to the return's store may read it (mirrors the
-    # store-pinned list above; SUPERADMIN/ADMIN pass through). A legacy doc
-    # with no store_id falls back to the caller's active store (allowed) --
-    # same semantics as GET /orders/{order_id}.
-    validate_store_access(doc.get("store_id"), current_user)
-    return doc
+    # Missing, foreign-shop and unattributed rows have the same response to a
+    # store-scoped caller, so guessing an ID cannot reveal customer/refund data.
+    return in_reach_or_404(doc, current_user, "Return not found")
 
 
 @router.post("/{return_id}/restock")
