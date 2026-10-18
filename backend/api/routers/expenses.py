@@ -1279,9 +1279,7 @@ async def approve_expense(
         )
 
     if existing.get("status") != "PENDING":
-        raise HTTPException(
-            status_code=400, detail="Expense is not pending approval"
-        )
+        raise HTTPException(status_code=409, detail=_NOT_PENDING)
 
     ed = existing.get("expense_date", "") or ""
     try:
@@ -1320,18 +1318,30 @@ async def approve_expense(
     # PETTY_CASH; every other category keeps the exact prior approve behavior.
     # _petty_cash_approve RAISES HTTPException(202) when an E4 approval is still
     # pending (no debit yet); otherwise it returns the debit envelope.
+    # E4-4: the APPROVED stamp lands only while the expense is still PENDING
+    # (compare-and-set), so of two racing approvals -- or an approval racing a
+    # reject -- exactly one wins and the other gets a plain 409.
+    stamp = {
+        "status": "APPROVED",
+        "approved_by": current_user.get("user_id"),
+        "approved_at": utc_now_iso(),
+    }
     if is_petty:
         approved = _petty_cash_approve(existing, current_user)
         # approved is the debit result envelope; the float is already debited.
-        expense_repo.update(
-            expense_id,
-            {
-                "status": "APPROVED",
-                "approved_by": current_user.get("user_id"),
-                "approved_at": utc_now_iso(),
-                "petty_cash_txn_id": approved.get("txn_id"),
-            },
-        )
+        stamp["petty_cash_txn_id"] = approved.get("txn_id")
+        if not expense_repo.update_if(expense_id, {"status": "PENDING"}, stamp):
+            # A reject won between the debit and this stamp: hand the payout
+            # back (idempotent), never keep money for an expense not approved.
+            from ..services import petty_cash_service as pcs
+
+            db = get_db()
+            pcs.reverse_payout(
+                getattr(db, "db", db), store_id=existing.get("store_id"),
+                txn_id=approved.get("txn_id"), actor=current_user.get("user_id"),
+                reason="approval lost to another decision",
+            )
+            raise HTTPException(status_code=409, detail=_NOT_PENDING)
         return {
             "message": "Petty-cash expense approved; float debited",
             "expense_id": expense_id,
@@ -1339,16 +1349,15 @@ async def approve_expense(
             "float_balance": approved.get("balance"),
         }
 
-    expense_repo.update(
-        expense_id,
-        {
-            "status": "APPROVED",
-            "approved_by": current_user.get("user_id"),
-            "approved_at": utc_now_iso(),
-        },
-    )
+    if not expense_repo.update_if(expense_id, {"status": "PENDING"}, stamp):
+        raise HTTPException(status_code=409, detail=_NOT_PENDING)
 
     return {"message": "Expense approved", "expense_id": expense_id}
+
+
+# The one answer for an approval that is no longer possible (E4-4): already
+# approved or rejected -- by an earlier click, or a colleague's racing one.
+_NOT_PENDING = "This expense is no longer pending approval: it was already approved or rejected."
 
 
 def _petty_cash_approve(existing: dict, current_user: dict):
@@ -1463,6 +1472,8 @@ def _do_petty_debit(db, store_id: str, amount: float, expense_id: str, actor: st
     )
     if not res.get("ok"):
         err = res.get("error")
+        if err == "duplicate":  # a racing approval of this expense paid it out
+            raise HTTPException(status_code=409, detail=_NOT_PENDING)
         if err == "insufficient":
             raise HTTPException(
                 status_code=409,

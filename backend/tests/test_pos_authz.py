@@ -85,6 +85,12 @@ class _FakeExpenseRepo:
         self.updated = data
         return True
 
+    def update_if(self, _id, expected, data):
+        if any(self._doc.get(k) != v for k, v in expected.items()):
+            return False
+        self.updated = data
+        return True
+
 
 def _expenses_client(roles, uid, repo, monkeypatch):
     monkeypatch.setattr(expenses, "get_expense_repository", lambda: repo)

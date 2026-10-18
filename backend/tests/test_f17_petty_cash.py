@@ -251,6 +251,10 @@ class FakeExpenseRepo:
     def update(self, expense_id, fields):
         return self.coll.update_one({"expense_id": expense_id}, {"$set": fields})
 
+    def update_if(self, expense_id, expected, fields):
+        res = self.coll.update_one({**expected, "expense_id": expense_id}, {"$set": fields})
+        return bool(res.matched_count)
+
     def create(self, doc):
         self.coll.insert_one(doc)
         return doc
@@ -696,3 +700,60 @@ def test_t16_topup_not_found_after_float_deleted_is_not_ceiling(db, monkeypatch)
     assert r.get("ok") is False
     assert r.get("http") == 404
     assert r.get("error") == "float_not_open"
+
+
+# ============================================================================
+# E4-4 -- an approval lands only while the expense is still PENDING
+# ============================================================================
+
+
+def _stale_reads(repo, monkeypatch, expense_id="E1"):
+    """The second approver read the expense while it was still PENDING (two
+    managers clicking at once): every later read returns that stale copy."""
+    snap = repo.find_by_id(expense_id)
+    monkeypatch.setattr(repo, "find_by_id", lambda _id: dict(snap))
+
+
+def test_double_approve_of_a_petty_claim_debits_once(wired, monkeypatch):
+    db, repo = wired
+    _open(db, amount=5000.0)
+    _seed_expense(repo, expense_id="E1", amount=300.0, bill="file-1")
+    _stale_reads(repo, monkeypatch)
+    first = _client(db, repo, ["STORE_MANAGER"], user_id="mgr1").post("/api/v1/expenses/E1/approve")
+    second = _client(db, repo, ["STORE_MANAGER"], user_id="mgr2").post("/api/v1/expenses/E1/approve")
+    assert first.status_code == 200, first.text
+    assert second.status_code == 409 and isinstance(second.json()["detail"], str)
+    assert db.get_collection("petty_cash_floats").find_one({"store_id": "S1"})["balance"] == 4700.0
+    assert [r["type"] for r in _ledger(db)].count("DEBIT") == 1
+    assert repo.coll.find_one({"expense_id": "E1"})["approved_by"] == "mgr1"
+
+
+def test_double_approve_of_an_ordinary_expense_is_one_approval(wired, monkeypatch):
+    db, repo = wired
+    _seed_expense(repo, expense_id="E2", amount=900.0, category="TRAVEL")
+    _stale_reads(repo, monkeypatch, "E2")
+    first = _client(db, repo, ["STORE_MANAGER"], user_id="mgr1").post("/api/v1/expenses/E2/approve")
+    second = _client(db, repo, ["STORE_MANAGER"], user_id="mgr2").post("/api/v1/expenses/E2/approve")
+    assert first.status_code == 200, first.text
+    assert second.status_code == 409 and isinstance(second.json()["detail"], str)
+    assert repo.coll.find_one({"expense_id": "E2"})["approved_by"] == "mgr1"
+
+
+def test_an_approval_that_loses_to_a_reject_hands_the_payout_back(wired, monkeypatch):
+    """The reject lands between the float debit and the APPROVED stamp."""
+    db, repo = wired
+    _open(db, amount=5000.0)
+    _seed_expense(repo, expense_id="E1", amount=300.0, bill="file-1")
+    real = expenses._do_petty_debit
+
+    def debit_then_rejected(*a, **k):
+        out = real(*a, **k)
+        repo.update("E1", {"status": "REJECTED", "rejected_by": "mgr3"})
+        return out
+
+    monkeypatch.setattr(expenses, "_do_petty_debit", debit_then_rejected)
+    resp = _client(db, repo, ["STORE_MANAGER"], user_id="mgr1").post("/api/v1/expenses/E1/approve")
+    assert resp.status_code == 409, resp.text
+    doc = repo.find_by_id("E1")
+    assert doc["status"] == "REJECTED" and "approved_by" not in doc
+    assert db.get_collection("petty_cash_floats").find_one({"store_id": "S1"})["balance"] == 5000.0
