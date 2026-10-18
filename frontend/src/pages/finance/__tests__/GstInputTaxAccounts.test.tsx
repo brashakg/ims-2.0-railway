@@ -57,6 +57,7 @@ vi.mock('../../reports/GSTR1Page', () => ({ GSTR1Page: () => <div>GSTR-1 PAGE</d
 
 import FinanceDashboard from '../FinanceDashboard';
 import { financeApi } from '../../../services/api/finance';
+import { ApiError } from '../../../services/api/client';
 import { reportRoutes } from '../../../routes/reportRoutes';
 import { filterVisibleGroups } from '../../../components/shell/navConfig';
 import type { UserRole } from '../../../types';
@@ -124,6 +125,17 @@ describe.each([['STORE_MANAGER'], ['AREA_MANAGER']])('%s: no GST summary, no GST
 });
 
 describe.each([['ACCOUNTANT'], ['ADMIN'], ['SUPERADMIN']])('%s: keeps the input tax', (role) => {
+  it('shows the registration refusal instead of an empty or zero GST summary', async () => {
+    roles = [role];
+    const message = 'GST summary cannot be calculated. Accounts must correct the receiving registration.';
+    api.getGstSummary.mockRejectedValue(new ApiError(message, { status: 409 }));
+    render(<FinanceDashboard />);
+    await waitFor(() => expect(api.getGstSummary).toHaveBeenCalled());
+    await userEvent.setup().click(screen.getByRole('button', { name: /gst management/i }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(message);
+    expect(screen.queryByText('Net GST Payable')).toBeNull();
+  });
+
   it('Finance dashboard: the GST tab and its summary', async () => {
     roles = [role];
     render(<FinanceDashboard />);

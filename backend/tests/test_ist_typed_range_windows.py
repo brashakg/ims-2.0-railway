@@ -355,7 +355,11 @@ def test_gst_report_agrees_with_finance_gst_summary_for_june():
     report must select the SAME planted orders and report the SAME total."""
     with _PatchAttrs(reports_mod, _get_raw_db=lambda: None):
         report = _june(reports_mod.gst_report, store_id=STORE)
-    db = _DB(orders=JUNE_CAST, vendor_bills=[], stores=[], customers=[])
+    db = _DB(
+        orders=JUNE_CAST, vendor_bills=[], customers=[],
+        stores=[{"store_id": STORE, "entity_id": "E1", "gstin": "20ABCDE1234F1Z5"}],
+        entities=[{"entity_id": "E1", "gstins": [{"gstin": "20ABCDE1234F1Z5"}]}],
+    )
     with _PatchAttrs(finance_mod, _get_db=lambda: db):
         summary = asyncio.run(
             finance_mod.get_gst_summary(
