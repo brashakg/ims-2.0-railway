@@ -63,6 +63,16 @@ const newLine = (): FormLine => ({
   product_id: '', product_name: '', quantity: 1, reason: 'defective', pieces: [], options: [],
 });
 
+/** GET /inventory/barcode/{code}: the scanned piece and its product. */
+interface ScannedUnit {
+  stock_id?: string;
+  barcode?: string;
+  status?: string;
+  product_id: string;
+  cross_store?: boolean;
+  product?: { name?: string };
+}
+
 // A piece that can go back: on the shelf or already set aside.
 const RETURNABLE = ['AVAILABLE', 'QUARANTINED'];
 
@@ -313,34 +323,39 @@ export function VendorReturns() {
     const text = code.trim();
     if (!text) return;
     setScanText((s) => ({ ...s, [idx]: '' }));
-    let unit: any = null;
+    let unit: ScannedUnit | null = null;
     try {
       unit = (await api.get(`/inventory/barcode/${encodeURIComponent(text)}`, {
         params: { store_id: ownStoreId ?? undefined },
       })).data;
-    } catch (e: any) {
-      if (e?.response?.status !== 404) {
+    } catch (e) {
+      if ((e as { response?: { status?: number } })?.response?.status !== 404) {
         toast.error(errMsg(e, 'Could not look that barcode up'));
         return;
       }
     }
     if (unit?.stock_id) {
-      const status = String(unit.status || 'AVAILABLE').toUpperCase();
+      const found = unit;
+      const piece: Piece = {
+        stock_id: unit.stock_id,
+        barcode: unit.barcode || text,
+        status: String(unit.status || 'AVAILABLE').toUpperCase(),
+      };
       const line = items[idx];
-      if (unit.cross_store) return toast.error(`Piece ${text} belongs to another shop.`);
-      if (!RETURNABLE.includes(status)) {
-        return toast.error(`Piece ${text} is ${status.toLowerCase()} - only a piece on the shelf or set aside can go back.`);
+      if (found.cross_store) return toast.error(`Piece ${text} belongs to another shop.`);
+      if (!RETURNABLE.includes(piece.status as string)) {
+        return toast.error(`Piece ${text} is ${String(piece.status).toLowerCase()} - only a piece on the shelf or set aside can go back.`);
       }
-      if (items.some((l) => l.pieces.some((p) => p.stock_id === unit.stock_id))) {
+      if (items.some((l) => l.pieces.some((p) => p.stock_id === piece.stock_id))) {
         return toast.error(`Piece ${text} is already on this return.`);
       }
-      if (line.pieces.length && line.product_id !== unit.product_id) {
+      if (line.pieces.length && line.product_id !== found.product_id) {
         return toast.error('That piece is a different product - add it on a new line.');
       }
       setPieces(idx, (l) => ({
-        product_id: unit.product_id,
-        product_name: unit.product?.name || l.product_name || unit.product_id,
-        pieces: [...l.pieces, { stock_id: unit.stock_id, barcode: unit.barcode || text, status }],
+        product_id: found.product_id,
+        product_name: found.product?.name || l.product_name || found.product_id,
+        pieces: [...l.pieces, piece],
       }));
       return;
     }
@@ -358,8 +373,8 @@ export function VendorReturns() {
         product_name: product.name || product.product_id,
         pieces: [],
         options: units
-          .filter((u: any) => RETURNABLE.includes(String(u.status).toUpperCase()))
-          .map((u: any) => ({ stock_id: u.stock_id, barcode: u.barcode, status: u.status })),
+          .filter((u: Piece) => RETURNABLE.includes(String(u.status).toUpperCase()))
+          .map((u: Piece) => ({ stock_id: u.stock_id, barcode: u.barcode, status: u.status })),
       }));
     } catch (e) {
       toast.error(errMsg(e, 'Could not look that product up'));
@@ -367,12 +382,12 @@ export function VendorReturns() {
   };
 
   // The Quarantine Queue's "Create RTV" names its piece: start the form with it.
-  useEffect(() => {
-    if (showModal && linkedBarcode && !items[0].pieces.length && !items[0].product_id) {
+  const openCreate = () => {
+    setShowModal(true);
+    if (linkedBarcode && !items[0].pieces.length && !items[0].product_id) {
       void scanLine(0, linkedBarcode);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showModal, linkedBarcode]);
+  };
 
   const handleCreateReturn = async () => {
     if (!selectedVendor || items.some(i => !i.product_name.trim() || i.quantity <= 0)) {
@@ -575,7 +590,7 @@ export function VendorReturns() {
           <p className="text-gray-500">Manage defective products and debit notes</p>
         </div>
         <button
-          onClick={() => setShowModal(true)}
+          onClick={openCreate}
           className="flex items-center gap-2 bg-bv-red-600 hover:bg-bv-red-700 text-white px-4 py-2 rounded-lg transition"
         >
           <Plus className="w-5 h-5" />
