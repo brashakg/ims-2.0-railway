@@ -509,3 +509,15 @@ export function modelFields(code: string | null | undefined): string[] {
 export function modelOf(code: string | null | undefined, attributes: Record<string, unknown>): string {
   return modelFields(code).map((k) => String(attributes[k] ?? '').trim()).find(Boolean) ?? '';
 }
+
+// Model families (G1, owner 2026-10-18): the category's MODEL-LEVEL fields --
+// shared by every colour/size of a model, filled from the model and edited
+// only on it. Read off the server registry (product_master.MODEL_LEVEL_FIELDS,
+// the ONE list); [] until the registry has loaded, so nothing is locked on a
+// guess. Everything else is per variant.
+export function modelLevelFields(code: string | null | undefined): string[] {
+  const entry = registryEntryForCode(code);
+  if (!entry) return [];
+  if (Array.isArray(entry.model_fields)) return entry.model_fields;
+  return (entry.fields || []).filter((f) => f.level === 'model').map((f) => f.name);
+}

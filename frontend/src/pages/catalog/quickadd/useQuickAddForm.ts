@@ -19,6 +19,7 @@ import {
   productApi,
   DuplicateProductError,
   type DuplicateProductInfo,
+  type FamilyHint,
   type SimilarProductSummary,
 } from '../../../services/api/products';
 // Import the templates service DIRECTLY from its module (not the api barrel —
@@ -140,6 +141,10 @@ export function useQuickAddForm() {
   const [dupBusy, setDupBusy] = useState(false);
   const [variantCtx, setVariantCtx] = useState<{
     sourceProductId: string;
+    /** G1: the model's lead -- the save sends it as variant_of. */
+    leadId: string;
+    /** G1: the model as the similar-products lookup counted it (banner). */
+    family: FamilyHint | null;
     sourceSku: string;
     sourceLabel: string;
     locked: Set<string>;
@@ -147,6 +152,12 @@ export function useQuickAddForm() {
     firstClearedField: string | null;
     dictionaryNote: string;
   } | null>(null);
+  // G1 model families: the latest model the typed brand + model joins on
+  // Save (GET /products/similar `family`), and the model the cataloguer said
+  // this is NOT ('This is a different model') -- never re-joined automatically.
+  const [familyHint, setFamilyHint] = useState<FamilyHint | null>(null);
+  const [optedOutLeadId, setOptedOutLeadId] = useState<string | null>(null);
+  const autoFamilyRef = useRef<string | null>(null);
   // Copied-but-unconfirmed fields (attribute names + form-level keys like
   // 'mrp'/'offer_price'). Amber ring until the operator touches the field.
   const [flaggedFields, setFlaggedFields] = useState<Set<string>>(new Set());
@@ -465,7 +476,14 @@ export function useQuickAddForm() {
   const enterVariantMode = useCallback(
     (
       product: ProductDoc,
-      keep?: { attributes: Record<string, string>; weight: string; reorderLevel: string },
+      keep?: {
+        attributes: Record<string, string>;
+        weight: string;
+        reorderLevel: string;
+        /** Prices already typed win over the model's (the automatic join). */
+        prices?: { mrp: string; offerPrice: string; costPrice: string };
+      },
+      family: FamilyHint | null = null,
     ) => {
       const seed = productToVariantFormValues(product);
       if (!seed.category) {
@@ -478,10 +496,18 @@ export function useQuickAddForm() {
         ),
       );
       const typedWeight = String(keep?.weight ?? '').trim();
+      const typedPrices = {
+        mrp: String(keep?.prices?.mrp ?? '').trim(),
+        offerPrice: String(keep?.prices?.offerPrice ?? '').trim(),
+        costPrice: String(keep?.prices?.costPrice ?? '').trim(),
+      };
       applyFormValues({
         ...seed.values,
         attributes: { ...seed.values.attributes, ...typed },
         weight: typedWeight || seed.values.weight,
+        mrp: typedPrices.mrp || seed.values.mrp,
+        offerPrice: typedPrices.offerPrice || seed.values.offerPrice,
+        costPrice: typedPrices.costPrice || seed.values.costPrice,
       });
       // The level copies like the rest of the model (F69): the sibling's level
       // at THIS shop (D12); typed wins. Only for a role whose save writes it --
@@ -494,6 +520,8 @@ export function useQuickAddForm() {
       );
       setVariantCtx({
         sourceProductId: seed.sourceProductId,
+        leadId: seed.leadId,
+        family,
         sourceSku: seed.sourceSku,
         sourceLabel: seed.sourceLabel || seed.sourceSku || 'this model',
         locked: new Set(seed.locked),
@@ -509,7 +537,13 @@ export function useQuickAddForm() {
             : '',
       });
       // A value the operator typed is theirs, never 'copied - confirm'.
-      const typedKeys = new Set([...Object.keys(typed), ...(typedWeight ? ['weight'] : [])]);
+      const typedKeys = new Set([
+        ...Object.keys(typed),
+        ...(typedWeight ? ['weight'] : []),
+        ...(typedPrices.mrp ? ['mrp'] : []),
+        ...(typedPrices.offerPrice ? ['offer_price'] : []),
+        ...(typedPrices.costPrice ? ['cost_price'] : []),
+      ]);
       setFlaggedFields(new Set(seed.flagged.filter((k) => !typedKeys.has(k))));
       focusAttrField(seed.cleared.find((k) => !typedKeys.has(k)) || null);
       window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -521,9 +555,19 @@ export function useQuickAddForm() {
   const exitVariantMode = useCallback(() => {
     setVariantCtx(null);
     setFlaggedFields(new Set());
+    setOptedOutLeadId(null);
+    autoFamilyRef.current = null;
     resetForm(false);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }, [resetForm]);
+
+  // G1 "This is a different model": leave variant mode KEEPING what is on
+  // the form; the save sends family_opt_out so the server never links it.
+  const leaveFamily = useCallback(() => {
+    if (variantCtx) setOptedOutLeadId(variantCtx.leadId);
+    setVariantCtx(null);
+    setFlaggedFields(new Set());
+  }, [variantCtx]);
 
   // VARIANT STREAK: after a successful save in variant mode, stay in variant
   // mode — keep the model-level (copy/flag) fields, clear the variant-defining
@@ -596,6 +640,34 @@ export function useQuickAddForm() {
       }
     },
     [enterVariantMode, toast, attributes, weight, reorderLevel]
+  );
+
+  // G1: brand + model typed match a model that exists -> join it, no extra
+  // step: the form flips into variant mode on the model's LEAD (its
+  // model-level fields filled and locked, what was typed kept) and the save
+  // links it. Never while editing, never twice for one model, never for the
+  // model the cataloguer said this is not.
+  const handleFamilyFound = useCallback(
+    async (family: FamilyHint | null) => {
+      setFamilyHint(family);
+      if (!family || editMode || variantCtx || isSubmitting) return;
+      if (family.lead_id === optedOutLeadId || autoFamilyRef.current === family.lead_id) return;
+      autoFamilyRef.current = family.lead_id;
+      try {
+        const lead = (await productApi.getProduct(family.lead_id)) as ProductDoc;
+        enterVariantMode(
+          lead,
+          { attributes, weight, reorderLevel, prices: { mrp, offerPrice, costPrice } },
+          family,
+        );
+      } catch {
+        autoFamilyRef.current = null; // the server still links it on Save
+      }
+    },
+    [
+      editMode, variantCtx, isSubmitting, optedOutLeadId, enterVariantMode, attributes, weight,
+      reorderLevel, mrp, offerPrice, costPrice,
+    ]
   );
 
   const handleSimilarOpen = useCallback(
@@ -687,7 +759,16 @@ export function useQuickAddForm() {
           navigate(`/catalog?focus=${encodeURIComponent(editMode.id)}`);
           return;
         }
-        const created = await productApi.createProduct(buildProductPayload(values));
+        // G1: a new colour/size names its model; 'This is a different model'
+        // tells the server not to link it (only for the model it was said of).
+        const created = await productApi.createProduct({
+          ...buildProductPayload(values),
+          ...(variantCtx
+            ? { variant_of: variantCtx.leadId }
+            : optedOutLeadId && familyHint?.lead_id === optedOutLeadId
+              ? { family_opt_out: true }
+              : {}),
+        });
         // A TYPED level is this shop's, written for the new product_id. The
         // SKU is auto-minted by the backend and our internal barcode is assigned
         // at Goods Receipt — neither is entered here.
@@ -745,6 +826,7 @@ export function useQuickAddForm() {
     },
     [
       currentValues, toast, resetForm, navigate, variantCtx, startNextVariant,
+      optedOutLeadId, familyHint,
       editMode, editLevels, reorderLevel, reorderBadInput, canSetReorderLevel, reorderShop,
       focusAttrField,
     ]
@@ -1316,6 +1398,7 @@ export function useQuickAddForm() {
             id: editId,
             sku: String(product.sku || ''),
             orderedDraft: Boolean((product as { ordered_draft?: boolean }).ordered_draft),
+            variantOf: String((product as { variant_of?: string }).variant_of || '') || undefined,
           });
           // THIS shop's level; not set here = blank (never another shop's,
           // never the old chain-wide reorder_point). See editLevels above.
@@ -1542,7 +1625,7 @@ export function useQuickAddForm() {
     openSections, toggleSection, liveErrors, sectionIssues, jumpToField,
     firstFieldRef,
     // modes
-    editMode, isReviewMode, variantCtx, exitVariantMode,
+    editMode, isReviewMode, variantCtx, exitVariantMode, leaveFamily,
     flaggedFields, clearFlag,
     // templates + clone
     templatesOpen, setTemplatesOpen, templates, templatesLoading,
@@ -1552,7 +1635,7 @@ export function useQuickAddForm() {
     // duplicate rescue
     dupInfo, setDupInfo, dupBusy, handleDupAddVariant, handleDupOpenExisting,
     // similar products
-    handleSimilarPick, handleSimilarOpen,
+    handleSimilarPick, handleSimilarOpen, handleFamilyFound,
     // submit
     isSubmitting, handleSubmit,
     // review mode

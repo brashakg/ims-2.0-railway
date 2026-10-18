@@ -191,7 +191,7 @@ describe('the address is the state', () => {
     expect(screen.getByText('Mansi Kumari (319)')).toBeTruthy();
     expect(await screen.findByTestId('result-line')).toHaveProperty(
       'textContent',
-      '38 of 481 products, recently edited first'
+      '38 models of 481 products, recently edited first'
     );
     const chips = screen.getByTestId('filter-chips');
     expect(within(chips).getByText('Frame colour: Black')).toBeTruthy();
@@ -509,7 +509,7 @@ describe('a page past the end is never a dead end', () => {
     expect(screen.queryByText('No products found')).toBeNull();
     expect(screen.getByLabelText('Rows per page')).toBeTruthy();
     expect(screen.getByTestId('result-line').textContent).toBe(
-      '60 of 481 products, recently edited first'
+      '60 models of 481 products, recently edited first'
     );
   });
 
@@ -585,7 +585,7 @@ describe('a page past the end is never a dead end', () => {
     expect(screen.queryByText('Unfiltered old row')).toBeNull();
     expect(screen.getByText('Ray-Ban 3025 Black')).toBeTruthy();
     expect(within(screen.getByTestId('filter-chips')).getByText('Frame colour: Black')).toBeTruthy();
-    expect(screen.getByTestId('result-line').textContent).toMatch(/^179 of /);
+    expect(screen.getByTestId('result-line').textContent).toMatch(/^179 models of /);
   });
 
   it('the pages and Rows per page stay whenever the list has rows to page through', async () => {
@@ -652,5 +652,40 @@ describe('the Needs review queue follows rows per page', () => {
     fireEvent.click(screen.getAllByRole('button', { name: /Edit/ })[1]);
     await screen.findByTestId('editor');
     expect([readReviewQueue()?.index, readReviewQueue()?.offset]).toEqual([1, 25]);
+  });
+});
+
+describe('G1 - one row per model (owner 2026-10-18)', () => {
+  const MODEL = {
+    ...ROW,
+    flags: [],
+    family: {
+      lead_id: 'P1',
+      count: 3,
+      members: [
+        { product_id: 'P1', sku: 'SG-CAR-1', color: 'Black (807)', size: '55', mrp: 12990, is_active: true, is_lead: true },
+        { product_id: 'P2', sku: 'SG-CAR-2', color: 'Gold (J5G)', size: '55', mrp: 13990, is_active: true, is_lead: false },
+        { product_id: 'P3', sku: 'SG-CAR-3', color: 'Gold (J5G)', size: '58', mrp: 13990, is_active: false, is_lead: false },
+      ],
+    },
+  };
+
+  it('asks for models, shows the colour/size chips, and expands to the variants', async () => {
+    getProducts.mockResolvedValue({ products: [MODEL], total: 1, total_count: 1 });
+    renderAt('?brand=Carrera');
+    await screen.findByText('Carrera 8035 Black');
+    // every filter still travels; the list is grouped by model
+    expect(getProducts).toHaveBeenCalledWith(expect.objectContaining({ group: 'model', brand: 'Carrera' }));
+    const chips = screen.getByTestId('family-chips');
+    expect(chips).toHaveTextContent('3 variants');
+    expect(chips).toHaveTextContent('Gold (J5G) · 58');
+    expect(screen.queryAllByTestId('family-member-row')).toHaveLength(0);
+    fireEvent.click(screen.getByTestId('family-toggle'));
+    const rows = screen.getAllByTestId('family-member-row');
+    expect(rows).toHaveLength(3);
+    expect(rows[2]).toHaveTextContent('SG-CAR-3');
+    expect(rows[2]).toHaveTextContent('(off)');
+    expect(within(rows[0]).getByText('model')).toBeTruthy();
+    expect(screen.getByTestId('result-line').textContent).toMatch(/^1 model of 481 products/);
   });
 });

@@ -69,6 +69,7 @@ import {
   type CategoryField,
 } from './productAddShared';
 import { writeReviewQueue } from './reviewQueue';
+import { ModelFamilyPanel } from './ModelFamilyPanel';
 
 // ---------------------------------------------------------------------------
 // Shared item shape with CatalogManagerPage.
@@ -681,6 +682,9 @@ export function CatalogProductDrawer({
               }
             />
           </dl>
+
+          {/* G1: the model's colours and sizes (+ Link to model / Unlink). */}
+          {!isImported && id && <ModelFamilyPanel productId={id} canEdit={canEdit} />}
 
           {/* Pricing */}
           <GroupTitle>Pricing</GroupTitle>

@@ -43,7 +43,7 @@ export function QuickAddPage() {
   const {
     canAddProduct, queueClear, setQueueClear, setSearchParams, navigate,
     editMode, isReviewMode, reviewSnapshot, handleBackToQueue,
-    variantCtx, exitVariantMode,
+    variantCtx, exitVariantMode, leaveFamily,
     dupInfo, setDupInfo, dupBusy, handleDupAddVariant, handleDupOpenExisting,
   } = form;
 
@@ -182,30 +182,68 @@ export function QuickAddPage() {
             <div className="rounded-xl border border-bv-50 bg-bv-soft px-4 py-3 text-sm">
               <div className="flex items-start gap-2.5">
                 <CopyPlus className="w-4 h-4 text-bv mt-0.5 shrink-0" />
-                <div className="min-w-0 flex-1 space-y-1">
+                <div className="min-w-0 flex-1 space-y-1" data-testid="model-family-banner">
+                  {/* G1 (owner 2026-10-18): the model this item joins on Save. */}
                   <p className="text-gray-800">
-                    <span className="font-semibold">Variant mode</span> — adding a new
-                    colour/size of <span className="font-semibold">{variantCtx.sourceLabel}</span>
-                    {variantCtx.sourceSku ? (
+                    <span className="font-semibold">This model already exists:</span>{' '}
+                    <span className="font-semibold">{variantCtx.family?.label || variantCtx.sourceLabel}</span>
+                    {variantCtx.family ? (
+                      <span className="text-gray-500">
+                        {' '}— {variantCtx.family.count} variant{variantCtx.family.count === 1 ? '' : 's'}
+                      </span>
+                    ) : variantCtx.sourceSku ? (
                       <span className="text-gray-500"> (SKU {variantCtx.sourceSku})</span>
                     ) : null}
-                    . Brand &amp; model are locked; <span className="text-amber-700 font-medium">amber</span> fields
-                    were copied — confirm or edit them. Each save stays in variant mode
-                    for the next colour/size.
+                    . This will be added as a new colour/size of it.
+                  </p>
+                  {variantCtx.family && variantCtx.family.chips.length > 0 && (
+                    <div className="flex flex-wrap gap-1">
+                      {variantCtx.family.chips.map((c, i) => (
+                        <span
+                          key={`${c}-${i}`}
+                          className="rounded border border-gray-200 bg-white px-1.5 py-0.5 text-[11px] text-gray-700"
+                        >
+                          {c}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <p className="text-xs text-gray-600">
+                    Model fields are locked (shared by every colour/size) —{' '}
+                    <button
+                      type="button"
+                      onClick={() => navigate(`/catalog/add?edit=${encodeURIComponent(variantCtx.leadId)}`)}
+                      className="font-medium text-bv underline"
+                    >
+                      Edit on the model
+                    </button>
+                    . Enter this item&apos;s colour, size, price, barcode and photos;{' '}
+                    <span className="text-amber-700 font-medium">amber</span> fields were copied — confirm
+                    or edit them.
                   </p>
                   {variantCtx.dictionaryNote && (
                     <p className="text-xs text-amber-700">{variantCtx.dictionaryNote}</p>
                   )}
                 </div>
-                <button
-                  type="button"
-                  onClick={exitVariantMode}
-                  className="shrink-0 btn-secondary !py-1 !px-2.5 text-xs flex items-center gap-1.5"
-                  title="Exit variant mode and start a fresh blank form (Esc)"
-                >
-                  <X className="w-3.5 h-3.5" />
-                  New model <kbd className="qa-kbd">Esc</kbd>
-                </button>
+                <div className="flex shrink-0 flex-col gap-1.5">
+                  <button
+                    type="button"
+                    onClick={leaveFamily}
+                    className="btn-secondary !py-1 !px-2.5 text-xs"
+                    title="Keep what is typed and save it as its own model"
+                  >
+                    This is a different model
+                  </button>
+                  <button
+                    type="button"
+                    onClick={exitVariantMode}
+                    className="btn-secondary !py-1 !px-2.5 text-xs flex items-center gap-1.5"
+                    title="Start a fresh blank form (Esc)"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                    New model <kbd className="qa-kbd">Esc</kbd>
+                  </button>
+                </div>
               </div>
             </div>
           )}
