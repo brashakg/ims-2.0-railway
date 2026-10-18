@@ -2,7 +2,7 @@
 
 import contextvars
 
-from ...dependencies import store_in_view
+from ...dependencies import in_reach_or_404, store_in_view
 from ._shared import (
     Depends,
     Dict,
@@ -234,7 +234,15 @@ async def get_stock_by_barcode_short(
         without a second round-trip.
       - A barcode that matches NOTHING is a hard 404 (fail loudly), never a
         soft empty body that the caller might mistake for a hit.
+      - Another shop's unit answers exactly like a missing one -- the same 404
+        -- for a login outside that shop (audit F11, owner 2026-10-18); a
+        named store_id must be one of the caller's shops. `cross_store` is
+        left for the logins that reach several shops (admins, an area
+        manager), so the till still refuses to sell a unit of another of
+        their shops.
     """
+    # 403 for a shop the caller does not hold (NO_SHOP_DETAIL for none).
+    store_id = validate_store_access(store_id, current_user) if store_id else None
     repo = get_stock_repository()
 
     if repo is None:
@@ -242,9 +250,9 @@ async def get_stock_by_barcode_short(
         # caller can fall through without treating it as a real unit.
         return {"barcode": barcode}
 
-    stock = repo.find_by_barcode(barcode)
-    if not stock:
-        raise HTTPException(status_code=404, detail="Stock item not found")
+    stock = in_reach_or_404(
+        repo.find_by_barcode(barcode), current_user, "Stock item not found"
+    )
 
     # Determine the scope store (explicit param > active store).
     scope_store = store_id or current_user.get("active_store_id")
@@ -287,14 +295,15 @@ async def get_expiring_stock(
 async def get_stock_by_barcode(
     barcode: str, current_user: dict = Depends(get_current_user)
 ):
-    """Get stock item by barcode (alternate path)"""
+    """Get stock item by barcode (alternate path). Another shop's unit is the
+    same 404 as a missing one for a login outside that shop (audit F11)."""
     repo = get_stock_repository()
 
     if repo is not None:
-        stock = repo.find_by_barcode(barcode)
-        if stock:
-            return mask_cost(stock, current_user, "product")
-        raise HTTPException(status_code=404, detail="Stock item not found")
+        stock = in_reach_or_404(
+            repo.find_by_barcode(barcode), current_user, "Stock item not found"
+        )
+        return mask_cost(stock, current_user, "product")
 
     return {"barcode": barcode}
 

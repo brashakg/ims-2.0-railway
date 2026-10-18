@@ -289,14 +289,6 @@ On first run, the database is automatically initialized with:
 - Indexes for performance
 - Default admin user
 
-### Manual Database Initialization
-
-If needed, you can manually initialize:
-
-```bash
-docker compose exec mongodb mongosh ims_2_0 /docker-entrypoint-initdb.d/init-mongo.js
-```
-
 ### Database Backup
 
 **Create Backup:**

@@ -715,13 +715,17 @@ def test_writing_a_lens_line_echoes_its_cost_to_accounts_only(client, buying, ro
         buying.lens_enum_config.insert_one({"enum_id": enum_id, "items": items})
     buying.lens_catalog.update_one({"lens_line_id": "LL1"}, {"$set": {"mrp": 9999.0}})
     h = _headers(role)
+    # Only the accounts roles SET a cost (owner 2026-10-18, FU-23: a sent cost
+    # from a catalogue manager is a 403, tests/test_visibility_sweep_1018.py);
+    # the catalogue manager's form sends none.
+    cost = {"cost_price": COST} if sees else {}
     replies = [
         client.patch("/api/v1/lens-catalog/LL1", json={}, headers=h),
         client.patch("/api/v1/lens-catalog/LL1", json={"notes": "re-checked"}, headers=h),
         client.post(
             "/api/v1/lens-catalog",
             json={"brand": "Zeiss", "series": "Clear", "index": 1.6, "material": "POLY",
-                  "lens_type": "SV", "coating": "AR", "mrp": 9999.0, "cost_price": COST},
+                  "lens_type": "SV", "coating": "AR", "mrp": 9999.0, **cost},
             headers=h,
         ),
     ]

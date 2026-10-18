@@ -22,7 +22,7 @@ from ._shared import (
     router,
     uuid,
 )
-from ...services.cost_mask import mask_cost
+from ...services.cost_mask import mask_cost, refuse_cost_write
 from .helpers import (
     _get_db,
     _reject_stock_mint_on_online_store,
@@ -158,6 +158,8 @@ async def opening_stock_preview(
     """Dry-run an opening-stock import: validate every row and report what COMMIT
     would do. Never writes. Flags rows whose product already holds stock (the
     re-import / double-count risk) so the owner decides before committing."""
+    # A unit cost is what we paid: the accounts roles' to enter (FU-23).
+    refuse_cost_write(current_user, *(r.unit_cost for r in payload.rows))
     stock_repo = get_stock_repository()
     product_repo = get_product_repository()
     active_store = current_user.get("active_store_id")
@@ -214,8 +216,8 @@ async def opening_stock_preview(
             }
         )
 
-    # A manager may type the cost of the stock he enters, but what we paid
-    # is read back by the accounts roles only (owner ruling 2026-10-12).
+    # What we paid is the accounts roles' to enter (refused above) and to read
+    # back (owner rulings 2026-10-12 / 2026-10-18).
     return mask_cost({
         "rows": results,
         "summary": {
@@ -239,7 +241,11 @@ async def opening_stock_commit(
     """Commit an opening-stock import: mint serialized stock_units rows (same as
     /stock/add) for every valid row. Per-row errors never abort the batch. With
     skip_if_existing=True (default) a product that already holds stock is left
-    untouched, so a double-submit can't double inventory."""
+    untouched, so a double-submit can't double inventory. The quantities are
+    open to every inventory role; a unit cost only to the roles that see cost
+    (FU-23) -- anyone else's units mint without one, the cost coming with the
+    bill."""
+    refuse_cost_write(current_user, *(r.unit_cost for r in payload.rows))
     stock_repo = get_stock_repository()
     product_repo = get_product_repository()
     active_store = current_user.get("active_store_id")

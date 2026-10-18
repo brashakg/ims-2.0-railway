@@ -528,11 +528,12 @@ async def dead_stock(
             }
         )
 
-    dead_items.sort(key=lambda x: x["cost_value"], reverse=True)
-
     # F35: strip per-item cost_value + the aggregate total inventory cost for roles
     # that may not see cost (SALES/STORE_MANAGER/AREA_MANAGER); total_skus stays.
     _cost_ok = can_see_cost(current_user)
+    # The ORDER (and so which 100 rows make the cut) must not give the cost
+    # ranking back either (FU-04): those roles get the most units first.
+    dead_items.sort(key=lambda x: x["cost_value"] if _cost_ok else x["qty"], reverse=True)
     return {
         "dead_stock": mask_cost_list(dead_items[:100], current_user),
         "total_value": round(total_value, 2) if _cost_ok else None,

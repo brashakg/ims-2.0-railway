@@ -22,7 +22,7 @@ from ..services.cache import invalidate_product_lists
 logger = logging.getLogger(__name__)
 
 from .auth import get_current_user, require_roles
-from api.services.cost_mask import mask_cost, mask_cost_list
+from api.services.cost_mask import mask_cost, mask_cost_list, refuse_cost_write
 from ..services.online_catalog import (
     online_status_for_skus,
     online_summary,
@@ -2173,6 +2173,7 @@ async def create_catalog_product(
         for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
+    refuse_cost_write(current_user, product.pricing.cost_price)  # FU-23
 
     # Validate the category is one this door accepts.
     category_config = CATEGORY_FIELDS.get(product.category)
@@ -2371,6 +2372,9 @@ async def update_catalog_product(
         for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
+    refuse_cost_write(  # FU-23
+        current_user, product.pricing.cost_price if product.pricing else None
+    )
 
     existing = _get_catalog_product(product_id)
     if existing is None:
@@ -4081,34 +4085,4 @@ async def bulk_sync_products_to_shopify(
         "retired": True,
         "message": "Shopify is managed by the Online Store app (BVI). "
         "IMS product->Shopify sync is retired; manage listings there.",
-    }
-
-
-# ============================================================================
-# ENDPOINTS - Import/Export
-# ============================================================================
-
-
-@router.get("/products/export")
-async def export_products(
-    category: Optional[ProductCategory] = None,
-    format: str = "json",
-    current_user: dict = Depends(get_current_user),
-):
-    """Export products"""
-    if not any(
-        role in current_user.get("roles", [])
-        for role in ["SUPERADMIN", "ADMIN", "CATALOG_MANAGER"]
-    ):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
-    products = _all_catalog_products()
-
-    if category:
-        products = [p for p in products if p.get("category") == category.value]
-
-    return {
-        "products": products,
-        "total": len(products),
-        "exported_at": datetime.now().isoformat(),
     }

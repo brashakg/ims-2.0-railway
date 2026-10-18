@@ -8,6 +8,8 @@ This document covers the complete security hardening of IMS 2.0, including advan
 
 ## 1. Two-Factor Authentication (2FA)
 
+> **NOT BUILT (corrected 2026-10-18).** Nothing in this section exists in IMS: there are no `/auth/2fa/*` endpoints and no TOTP, QR or backup-code sign-in. It was a plan, never a build.
+
 ### Implementation: `two_factor_auth.py` (350 LOC)
 
 **Features**:

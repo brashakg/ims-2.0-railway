@@ -16,6 +16,7 @@ from ._shared import (
     Query,
     StreamingResponse,
     UploadFile,
+    _AP_ROLES,
     _GRN_DOCUMENT_KIND,
     _RECEIVE_ROLES,
     _VENDOR_ROLES,
@@ -342,13 +343,16 @@ async def upload_grn_doc(
 @router.get("/grn/{grn_id}/document")
 async def download_grn_doc(
     grn_id: str,
-    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
     """F-S3: stream the goods-receipt document attached to a GRN.
 
     The accountant reconciliation console links here to view the source invoice/
-    challan the ops user uploaded at receipt. Store-scoped: a GRN outside the
-    caller's store scope reads as 404 (no cross-store document leak)."""
+    challan the ops user uploaded at receipt. The supplier's bill shows what we
+    pay, so reading it back is the accounts roles' only (owner decision
+    2026-10-18, audit FU-02); the managers still UPLOAD it at receiving
+    (POST /grn/upload-doc). Store-scoped: a GRN outside the caller's store
+    scope reads as 404 (no cross-store document leak)."""
     grn_repo = get_grn_repository()
     if grn_repo is None:
         raise HTTPException(status_code=503, detail="Database not available")
