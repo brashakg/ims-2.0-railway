@@ -545,6 +545,8 @@ async def writeback_skus(
 
     # 2. THE ONE rule, per shop, for the targeted SKUs -- stamped BEFORE the
     #    read, so an older reading can never overwrite this one (audit SF01).
+    #    No ticket (counter unreachable) -> the writer refuses the rows as
+    #    STOCK_WRITE_FAILED; one is never taken after the read.
     ticket = stock_write_ticket(db)
     quantities = online_quantities_for_skus(
         db, list(targets.keys()), safety_buffer=safety_buffer

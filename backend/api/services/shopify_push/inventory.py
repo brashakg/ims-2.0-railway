@@ -107,7 +107,15 @@ from ._shared import (
     is_variant_of,
     logger,
 )
-from .transport import _MAX_RETRIES, _RETRY_MAX_DELAY, _graphql, _now, _user_error_codes, _user_errors
+from .transport import (
+    _MAX_RETRIES,
+    _RETRY_MAX_DELAY,
+    ShopifyRequestRefused,
+    _graphql,
+    _now,
+    _user_error_codes,
+    _user_errors,
+)
 from .queries import (
     _INVENTORY_ACTIVATE,
     _INVENTORY_LEVELS_READ,
@@ -749,7 +757,10 @@ _LEASE_S = 2 * _CALL_WORST_S + 60.0
 _FENCE_S = _CALL_WORST_S
 # A newer writer waits out at most one dead holder's lease plus its fence.
 _WAIT_S = _LEASE_S + _FENCE_S + 30.0
+# Asking again for a busy key backs off 0.1 s, 0.2 s, ... capped at 2 s: a
+# long wait is a few hundred reads, not thousands.
 _POLL_S = 0.1
+_POLL_MAX_S = 2.0
 STOCK_WRITE_GUARD_FAILED = "the stock write-order guard could not be read -- nothing written"
 
 
@@ -767,6 +778,10 @@ def stock_write_ticket(db) -> Optional[int]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SHOPIFY_STOCK] write ticket unavailable: %s", exc)
         return None
+
+
+def _poll_delay(attempt: int) -> float:
+    return min(_POLL_S * (2 ** min(attempt, 16)), _POLL_MAX_S)
 
 
 def _guard_key(row: Dict[str, Any]) -> str:
@@ -802,6 +817,7 @@ async def _claim_rows(coll, chunk: List[Dict[str, Any]], ticket: int, token: str
     to send, in chunk order. Raises TimeoutError when a key stays busy past
     ``_WAIT_S`` -- named as a refused write, never sent unguarded."""
     deadline = time.monotonic() + _WAIT_S
+    attempt = 0
     while True:
         held: List[str] = []
         busy = False
@@ -817,7 +833,8 @@ async def _claim_rows(coll, chunk: List[Dict[str, Any]], ticket: int, token: str
         _release(coll, held, token)
         if time.monotonic() > deadline:
             raise TimeoutError("another stock write for the same item and shop is still running")
-        await asyncio.sleep(_POLL_S)
+        await asyncio.sleep(_poll_delay(attempt))
+        attempt += 1
 
 
 def _release(coll, keys: Iterable[str], token: str, *, hold_s: Optional[float] = None) -> None:
@@ -884,7 +901,12 @@ async def _set_chunk(
     }
     try:
         body = await _graphql(db, _INVENTORY_SET_QUANTITIES, variables)
-    except Exception as exc:  # noqa: BLE001 -- fail-soft side channel
+    except ShopifyRequestRefused as exc:
+        # Definitely NOT applied (never sent, or a deterministic refusal):
+        # nothing to re-read, nothing that could land late -- no fence.
+        _release(coll, keys, token)
+        return held, str(exc), {_TRANSPORT_FAILURE}
+    except Exception as exc:  # noqa: BLE001 -- UNCERTAIN: a timeout / 5xx may have applied it
         _release(coll, keys, token, hold_s=_LEASE_S)  # still ours while we re-read
         if await _landed(db, held):
             _release(coll, keys, token)
@@ -951,14 +973,13 @@ async def set_inventory_quantities(
     STOCK_WRITE_FAILED; see ``_write_chunk``. No "activated" bookkeeping, so
     it self-heals when the owner adds or re-enables a location by hand and
     costs zero extra calls in steady state. EVERY send goes through the
-    write-order guard (``_set_chunk``): ``ticket`` is the stamp taken before
-    the on-hand read the rows came from; None takes one now, which is right
-    only for rows read from nothing (the release door's zeros). A row a newer
-    reading has claimed is dropped -- neither written nor an error. Fail-soft
-    ``{set, written, activated, errors, code}`` -- ``written`` is the rows
-    Shopify accepted."""
-    if ticket is None:
-        ticket = stock_write_ticket(db)
+    write-order guard (``_set_chunk``): ``ticket`` is the stamp the CALLER
+    took before the on-hand read the rows came from. The writer never takes
+    one itself -- a ticket taken after the read could rank a stale reading
+    above a newer one -- so a None ticket (the counter could not be reached)
+    REFUSES every row as STOCK_WRITE_FAILED. A row a newer reading has claimed
+    is dropped -- neither written nor an error. Fail-soft ``{set, written,
+    activated, errors, code}`` -- ``written`` is the rows Shopify accepted."""
     out: Dict[str, Any] = {"set": 0, "written": [], "activated": 0, "errors": [], "code": None}
     entries = [
         {
@@ -1769,8 +1790,9 @@ async def push_skus_stock(
 
     ``ticket`` (audit SF01): the write-order stamp of the on-hand reading the
     rows come from. A caller that passes ``quantities`` MUST pass the ticket
-    it took before reading them; otherwise one is taken here, immediately
-    before this door's own read."""
+    it took before reading them -- none is ever taken here for a reading made
+    elsewhere, so a missing one refuses the write (STOCK_WRITE_FAILED). Only
+    when this door does the read itself is the ticket taken here, before it."""
     from ..online_catalog import inventory_items_for_skus, listings_for_skus
     from ..online_stock_writeback import online_quantities_for_skus, orphan_stock_stores
 
@@ -1813,9 +1835,9 @@ async def push_skus_stock(
     summary["stores_mapped"] = len(mapped)
     conflicts = _location_conflicts(stores)
 
-    if ticket is None and not dry_run:
-        ticket = stock_write_ticket(db)  # BEFORE the read it stamps
     if quantities is None:
+        if ticket is None and not dry_run:
+            ticket = stock_write_ticket(db)  # BEFORE the read it stamps; None refuses the write
         quantities = online_quantities_for_skus(db, distinct)
     if not quantities:
         # STRICT: an absolute writer never fails soft to 0 for a whole batch.
@@ -2211,7 +2233,8 @@ async def release_store_location(db, store_id: str, location_gid: str) -> Dict[s
             if inv
         ]
         if rows:
-            written = await set_inventory_quantities(db, rows)
+            # Zeros read from nothing: a ticket taken now ranks them correctly.
+            written = await set_inventory_quantities(db, rows, ticket=stock_write_ticket(db))
             out["set"] = written["set"]
             if written["errors"]:
                 out["ok"] = False

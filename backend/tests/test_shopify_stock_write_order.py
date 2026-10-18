@@ -41,6 +41,13 @@ def _fast_poll(monkeypatch):
     monkeypatch.setattr(inventory, "_POLL_S", 0.01, raising=False)
 
 
+def _t(db):
+    """THE caller's ticket, taken now (before the 'reading' these rows stand
+    for). Empty on the pre-fix writer, which had no ticket, so the audit
+    probe still RUNS there -- and fails on its assertion, not a TypeError."""
+    return {"ticket": inventory.stock_write_ticket(db)} if hasattr(inventory, "stock_write_ticket") else {}
+
+
 class _Shopify:
     """A fake Shopify: remembers the available quantity per (item, location)
     and the order of every set it applied. ``hold`` = a quantity whose send is
@@ -91,9 +98,9 @@ def test_audit_probe_older_held_write_can_no_longer_restore_a_sold_unit(monkeypa
         db = StrictDB()
         shop = _Shopify(start=1, hold=1)
         monkeypatch.setattr(inventory, "_graphql", shop)
-        stale = asyncio.create_task(inventory.set_inventory_quantities(db, [(ITEM, LOC, 1)]))
+        stale = asyncio.create_task(inventory.set_inventory_quantities(db, [(ITEM, LOC, 1)], **_t(db)))
         await shop.held.wait()
-        sold = asyncio.create_task(inventory.set_inventory_quantities(db, [(ITEM, LOC, 0)]))
+        sold = asyncio.create_task(inventory.set_inventory_quantities(db, [(ITEM, LOC, 0)], **_t(db)))
         await asyncio.sleep(0.1)  # the newer write is under way while the old send is in flight
         shop.release.set()
         old, new = await stale, await sold
@@ -228,7 +235,7 @@ def test_timeout_after_send_that_did_land_is_confirmed_by_rereading(monkeypatch)
         return body
 
     monkeypatch.setattr(inventory, "_graphql", fake)
-    out = asyncio.run(inventory.set_inventory_quantities(db, [(ITEM, LOC, 0)]))
+    out = asyncio.run(inventory.set_inventory_quantities(db, [(ITEM, LOC, 0)], **_t(db)))
     assert out["set"] == 1 and out["written"] == [(ITEM, LOC, 0)] and out["errors"] == []
     guard = db.get_collection(inventory._GUARD_COLLECTION).find_one({"_id": f"{ITEM}|{LOC}"})
     assert guard["lease"] is None
@@ -250,27 +257,30 @@ def test_timeout_after_send_not_confirmed_is_refused_and_fenced(monkeypatch):
     monkeypatch.setattr(inventory, "_graphql", fake)
     monkeypatch.setattr(inventory, "_FENCE_S", 0.3)
     monkeypatch.setattr(inventory, "_WAIT_S", 0.05)
-    out = asyncio.run(inventory.set_inventory_quantities(db, [(ITEM, LOC, 1)]))
+    out = asyncio.run(inventory.set_inventory_quantities(db, [(ITEM, LOC, 1)], **_t(db)))
     assert out["set"] == 0 and out["written"] == []
     assert out["code"] == inventory.STOCK_WRITE_FAILED and "no answer" in out["errors"][0]
     # a newer write during the fence is refused, never sent around it
-    blocked = asyncio.run(inventory.set_inventory_quantities(db, [(ITEM, LOC, 0)]))
+    blocked = asyncio.run(inventory.set_inventory_quantities(db, [(ITEM, LOC, 0)], **_t(db)))
     assert blocked["set"] == 0 and shop.applied == []
     assert inventory.STOCK_WRITE_GUARD_FAILED in blocked["errors"][0]
     time.sleep(0.35)
-    after = asyncio.run(inventory.set_inventory_quantities(db, [(ITEM, LOC, 0)]))
+    after = asyncio.run(inventory.set_inventory_quantities(db, [(ITEM, LOC, 0)], **_t(db)))
     assert after["set"] == 1 and shop.applied == [0]
 
 
 def test_an_unreadable_reread_is_unconfirmed_never_success(monkeypatch):
     db = StrictDB()
+    reads = []
 
     async def fake(db_, query, variables):  # noqa: ARG001
+        reads.append(query)
         raise httpx.ReadTimeout("down")
 
     monkeypatch.setattr(inventory, "_graphql", fake)
-    out = asyncio.run(inventory.set_inventory_quantities(db, [(ITEM, LOC, 1)]))
+    out = asyncio.run(inventory.set_inventory_quantities(db, [(ITEM, LOC, 1)], **_t(db)))
     assert out["set"] == 0 and out["written"] == [] and out["code"] == inventory.STOCK_WRITE_FAILED
+    assert any("imsInventoryLevelsRead" in q for q in reads), "the re-read was attempted"
 
 
 def test_no_guard_no_write(monkeypatch):
@@ -282,3 +292,127 @@ def test_no_guard_no_write(monkeypatch):
     assert out["set"] == 0 and shop.applied == []
     assert out["code"] == inventory.STOCK_WRITE_FAILED
     assert inventory.STOCK_WRITE_GUARD_FAILED in out["errors"][0]
+
+
+def test_a_missing_ticket_is_refused_never_minted_late(monkeypatch):
+    """Review blocker: rows READ before a counter blip must never be stamped
+    after it (a stale reading would outrank a newer one). The writer takes
+    no ticket itself: none passed -> nothing sent, STOCK_WRITE_FAILED."""
+    db = StrictDB()
+    shop = _Shopify()
+    monkeypatch.setattr(inventory, "_graphql", shop)
+    out = asyncio.run(inventory.set_inventory_quantities(db, [(ITEM, LOC, 0)]))
+    assert out["set"] == 0 and shop.applied == []
+    assert out["code"] == inventory.STOCK_WRITE_FAILED and "no write ticket" in out["errors"][0]
+
+
+def test_a_refused_request_is_not_uncertain_no_reread_no_fence(monkeypatch):
+    """A deterministic refusal (4xx, credentials missing) definitely did not
+    apply: no read-back, no fence -- the next write goes straight out."""
+    from api.services.shopify_push.transport import ShopifyRequestRefused
+
+    db = StrictDB()
+    shop = _Shopify(start=3)
+    calls = []
+
+    async def fake(db_, query, variables):
+        calls.append(query)
+        if len(calls) == 1:
+            raise ShopifyRequestRefused("status 401: bad token")
+        return await shop(db_, query, variables)
+
+    monkeypatch.setattr(inventory, "_graphql", fake)
+    monkeypatch.setattr(inventory, "_WAIT_S", 0.05)
+    out = asyncio.run(inventory.set_inventory_quantities(db, [(ITEM, LOC, 1)], **_t(db)))
+    assert out["set"] == 0 and out["code"] == inventory.STOCK_WRITE_FAILED and "401" in out["errors"][0]
+    assert not any("imsInventoryLevelsRead" in q for q in calls), "a refusal is never re-read"
+    nxt = asyncio.run(inventory.set_inventory_quantities(db, [(ITEM, LOC, 0)], **_t(db)))
+    assert nxt["set"] == 1 and shop.applied == [0], "a refusal must not fence the key"
+
+
+def test_a_busy_key_is_asked_again_with_capped_exponential_backoff(monkeypatch):
+    """A waiting writer backs off 0.1, 0.2, 0.4 ... capped at 2 s, so a long
+    wait is a few hundred Mongo reads, not one every 0.1 s for minutes."""
+    db = StrictDB()
+    db.get_collection(inventory._GUARD_COLLECTION).insert_one(
+        {"_id": f"{ITEM}|{LOC}", "seq": 0, "lease": "someone-else", "lease_until": time.time() + 600}
+    )
+    monkeypatch.setattr(inventory, "_POLL_S", 0.1)
+    slept = []
+
+    class _Stop(Exception):
+        pass
+
+    class _Asyncio:
+        @staticmethod
+        async def sleep(s):
+            slept.append(round(s, 3))
+            if len(slept) == 8:
+                raise _Stop()
+
+    monkeypatch.setattr(inventory, "asyncio", _Asyncio)
+    monkeypatch.setattr(inventory, "_graphql", _Shopify())
+    out = asyncio.run(inventory.set_inventory_quantities(db, [(ITEM, LOC, 0)], **_t(db)))
+    assert out["set"] == 0
+    assert slept == [0.1, 0.2, 0.4, 0.8, 1.6, 2.0, 2.0, 2.0]
+
+
+class _Resp:
+    def __init__(self, status):
+        self.status_code, self.headers, self.text = status, {}, "x"
+
+    def json(self):
+        return {}
+
+
+def _wire(monkeypatch, responses):
+    from api.services import shopify_push
+
+    n = {"i": 0}
+
+    async def post_once(url, headers, payload):  # noqa: ARG001
+        r = responses[min(n["i"], len(responses) - 1)]
+        n["i"] += 1
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    async def no_sleep(_s):
+        return None
+
+    monkeypatch.setattr(shopify_push, "_post_once", post_once)
+    monkeypatch.setattr(shopify_push.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(
+        shopify_push, "resolve_shopify_credentials",
+        lambda db, storefront_id="BV": {"shop_url": "x.myshopify.com", "access_token": "t"},
+    )
+    return shopify_push
+
+
+@pytest.mark.parametrize(
+    "answers, refused",
+    [
+        (["401"], True),  # bad token: never applied
+        (["429", "429", "429", "429"], True),  # throttled every time: never applied
+        (["429", "400"], True),
+        (["timeout", "400"], False),  # the timed-out attempt may have applied
+        (["503", "503", "503", "503"], False),  # a 5xx may have applied
+        (["timeout"] * 4, False),
+    ],
+)
+def test_transport_says_refused_only_when_no_attempt_could_have_applied(monkeypatch, answers, refused):
+    from api.services.shopify_push.transport import ShopifyRequestRefused
+
+    sp = _wire(monkeypatch, [httpx.ReadTimeout("t") if a == "timeout" else _Resp(int(a)) for a in answers])
+    with pytest.raises(ValueError) as exc:
+        asyncio.run(sp._graphql(None, "mutation { x }", {}))
+    assert isinstance(exc.value, ShopifyRequestRefused) is refused
+
+
+def test_transport_missing_credentials_is_a_refusal(monkeypatch):
+    from api.services import shopify_push
+    from api.services.shopify_push.transport import ShopifyRequestRefused
+
+    monkeypatch.setattr(shopify_push, "resolve_shopify_credentials", lambda db, storefront_id="BV": None)
+    with pytest.raises(ShopifyRequestRefused):
+        asyncio.run(shopify_push._graphql(None, "mutation { x }", {}))
