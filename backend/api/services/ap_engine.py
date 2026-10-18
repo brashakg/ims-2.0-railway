@@ -588,6 +588,11 @@ def bill_status(bill: dict, outstanding: float) -> str:
     return "PARTIAL" if outstanding < vendor_payable(bill) else "OUTSTANDING"
 
 
+def _has_bill_id(value) -> bool:
+    """An absent/blank identifier cannot prove an explicit allocation."""
+    return value is not None and (not isinstance(value, str) or bool(value.strip()))
+
+
 def _bill_balance(bill: dict, payments: List[dict], debit_notes: List[dict]) -> float:
     """bill_outstanding before the floor: negative = money allocated to the
     bill beyond its total (an over-payment the ledger still counts)."""
@@ -595,6 +600,8 @@ def _bill_balance(bill: dict, payments: List[dict], debit_notes: List[dict]) -> 
         return 0.0
     bid = bill.get("bill_id")
     total = vendor_payable(bill)
+    if not _has_bill_id(bid):
+        return round(total, 2)
     paid = sum(
         _payment_gross(p)
         for p in (payments or [])
@@ -636,25 +643,16 @@ def build_aging(
     Buckets what is still owed on each bill by how far past its due date it is
     as of `as_of_iso` (default: today).
 
-    Money that names no bill in this set (an advance, an on-account payment, a
-    debit note with no bill) and money paid on a bill beyond its total settle
-    the SAME vendor's open bills, oldest due date first -- what an accountant
-    does with on-account money (F56). So `items`, every bucket and
-    `total_outstanding` are what is still owed after it, and an 'overdue' figure
-    can never exceed what we owe that vendor. Credit left over once all of a
-    vendor's bills are settled is that vendor's advance (paid ahead of its
-    bills).
+    Only explicit bill allocations settle an invoice. Money naming no bill
+    in this set (an advance, an on-account payment or an unallocated credit)
+    and money allocated beyond a bill's total remain unapplied. They never
+    implicitly settle this supplier's other bills (owner ruling A12).
 
-    THE ONE 'WE OWE' RULE (F56): per supplier, its ledger closing balance on
-    the as-of day is either owed (> 0: its open bills after its own credit) or
-    an advance (< 0: its credit beyond its bills) -- never both. So, over any
-    set of suppliers:
-      owed     = SUM of max(balance, 0) = total_outstanding = SUM(buckets)
-      advances = SUM of max(-balance, 0) = unallocated_credits
-    An advance is its own figure ('paid ahead to suppliers'). It is NEVER taken
-    off owed: one supplier's advance does not settle another supplier's bills,
-    so netting them (and flooring the difference at 0) hid what we owe.
-    `net_payable` is kept for older readers and is owed, nothing else.
+    `items`, buckets, `total_outstanding`, `owed` and legacy `net_payable`
+    describe gross outstanding invoices. `advances` / `unallocated_credits`
+    describe unapplied money, which may coexist with open invoices. The
+    supplier's signed net balance is owed minus advances; the chronological
+    ledger and grouped aging's `balance` retain that separate meaning.
     """
     as_of = parse_date(as_of_iso) or now_ist_naive()
     items: List[dict] = []
@@ -663,7 +661,10 @@ def build_aging(
     def _credit(vendor_id, amount: float) -> None:
         credit[vendor_id] = round(credit.get(vendor_id, 0.0) + amount, 2)
 
-    bill_ids = {b.get("bill_id") for b in (bills or []) if isinstance(b, dict)}
+    bill_ids = {
+        b.get("bill_id") for b in (bills or [])
+        if isinstance(b, dict) and _has_bill_id(b.get("bill_id"))
+    }
 
     for b in bills or []:
         if not isinstance(b, dict):
@@ -713,20 +714,6 @@ def build_aging(
         if isinstance(d, dict) and d.get("bill_id") not in bill_ids:
             _credit(d.get("vendor_id"), _f(d.get("amount")))
 
-    # Each vendor's credit settles its own bills: undatable first (they bucket
-    # as 90+), then by due date, oldest first.
-    def _due_order(it):
-        due = parse_date(it["due_date"])
-        return (due is not None, due.date() if due else date.min)
-
-    for it in sorted(items, key=_due_order):
-        have = credit.get(it["vendor_id"], 0.0)
-        if have > 0:
-            used = min(have, it["outstanding"])
-            it["outstanding"] = round(it["outstanding"] - used, 2)
-            credit[it["vendor_id"]] = round(have - used, 2)
-    items = [it for it in items if it["outstanding"] > 0]
-
     buckets = {k: 0.0 for k in AGING_BUCKETS}
     for it in items:
         buckets[it["bucket"]] = round(buckets[it["bucket"]] + it["outstanding"], 2)
@@ -737,7 +724,7 @@ def build_aging(
         "as_of": as_of.date().isoformat(),
         "buckets": buckets,
         "total_outstanding": total_out,
-        # THE 'we owe' figure and the money paid ahead, apart (see above).
+        # Gross invoice balances and unapplied money are separate figures.
         "owed": total_out,
         "advances": unallocated,
         # Older key, same figure as `advances`.
@@ -766,11 +753,10 @@ def build_aging_by_vendor(
     signed ledger `balance` (owed - advances; below 0 = paid ahead). Every
     vendor in the rows is a row -- one holding only an advance too.
 
-    The totals follow THE ONE 'WE OWE' RULE (build_aging): `owed` (= the
-    buckets added up = total_outstanding) is the sum of each supplier's
-    positive balance, and `advances` the sum of each supplier's money paid
-    ahead, a figure apart. One supplier's advance is never taken off what we
-    owe another (F56); `net_payable` (older key) is owed.
+    `owed` (= buckets added up = total_outstanding) is gross unsettled
+    invoices; `advances` is unapplied money. They can both be positive for
+    one supplier. `net_payable` retains its older alias of `owed`; callers
+    needing the supplier's signed net position must read `balance`.
     """
     bills, payments, debit_notes = (
         [d for d in docs or [] if isinstance(d, dict)]
@@ -991,7 +977,7 @@ def bill_as_of(
     """
     bid = bill.get("bill_id")
     mine = tuple(
-        [d for d in docs or [] if isinstance(d, dict) and d.get("bill_id") == bid]
+        [d for d in docs or [] if _has_bill_id(bid) and isinstance(d, dict) and d.get("bill_id") == bid]
         for docs in (payments, debit_notes)
     )
     (pays, notes), (later_pays, later_notes) = split_as_of(mine, as_of)

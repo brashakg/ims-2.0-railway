@@ -150,25 +150,22 @@ def test_build_aging_buckets_by_due_date():
     assert ag["total_outstanding"] == 1500.0
 
 
-def test_build_aging_unallocated_credit_nets_off():
+def test_build_aging_unallocated_credit_stays_separate():
     bills = [_bill(bid="b1", total=1000, due="2026-01-01")]
     # An on-account payment (no bill_id) is an unallocated credit.
     pays = [{"vendor_id": "v1", "amount": 300, "tds_amount": 0}]
     ag = build_aging(bills, pays, [], as_of_iso="2026-02-01")
-    # F56: on-account money settles the vendor's oldest bill, so the buckets,
-    # the items and total_outstanding owe what the headline owes.
-    assert ag["total_outstanding"] == 700.0
-    assert sum(ag["buckets"].values()) == 700.0
-    assert [it["outstanding"] for it in ag["items"]] == [700.0]
-    assert ag["unallocated_credits"] == 0.0
-    assert ag["net_payable"] == 700.0
+    # A12: an advance reduces supplier net, but never implicitly settles a bill.
+    assert ag["total_outstanding"] == 1000.0
+    assert sum(ag["buckets"].values()) == 1000.0
+    assert [it["outstanding"] for it in ag["items"]] == [1000.0]
+    assert ag["unallocated_credits"] == 300.0
+    assert ag["net_payable"] == 1000.0
 
 
-def test_build_aging_on_account_money_settles_oldest_due_first_and_never_another_vendor():
-    """F56 (Cash Flow card): a Rs 1,77,896 bill due 2026-08-15 and a Rs 33,440
-    on-account payment once read 'Payables Rs 1,44,456' over 'Rs 1,77,896
-    overdue' with aging bars summing Rs 1,77,896. Now every figure is 1,44,456.
-    The credit settles the OLDEST due bill first and only its own vendor's."""
+def test_build_aging_on_account_money_preserves_each_invoice_and_vendor():
+    """A12: invoice buckets agree with gross unpaid bills. An advance stays
+    separate, rather than being spent on the oldest invoice or another vendor."""
     bills = [
         _bill(bid="new", total=1000, due="2026-09-30"),
         _bill(bid="old", total=177896, due="2026-08-15"),
@@ -177,11 +174,12 @@ def test_build_aging_on_account_money_settles_oldest_due_first_and_never_another
     pays = [{"vendor_id": "v1", "amount": 33440, "tds_amount": 0}]
     ag = build_aging(bills, pays, [], as_of_iso="2026-09-29")
     out = {it["bill_id"]: it["outstanding"] for it in ag["items"]}
-    assert out == {"old": 144456.0, "new": 1000.0, "other": 500.0}
-    assert ag["total_outstanding"] == ag["net_payable"] == 145956.0
-    assert sum(ag["buckets"].values()) == 145956.0
+    assert out == {"old": 177896.0, "new": 1000.0, "other": 500.0}
+    assert ag["total_outstanding"] == ag["net_payable"] == 179396.0
+    assert sum(ag["buckets"].values()) == 179396.0
+    assert ag["advances"] == 33440.0
     overdue = ag["total_outstanding"] - ag["buckets"]["current"]
-    assert overdue == 144956.0 and overdue <= ag["net_payable"]
+    assert overdue == 178396.0 and overdue <= ag["net_payable"]
 
 
 def test_build_aging_credit_beyond_the_bills_is_an_advance():

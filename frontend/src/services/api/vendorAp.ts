@@ -355,13 +355,11 @@ export interface VendorLedger {
   aging: AgingResult;
 }
 
-// THE ONE 'WE OWE' RULE (audit F56): per supplier, its ledger balance. `owed`
-// = the sum of each supplier's balance above 0 (= the buckets added up = what
-// we owe); `advances` = the sum of each supplier's balance below 0 (money paid
-// ahead to suppliers), a figure APART -- never taken off `owed`: one
-// supplier's advance does not pay another's bills. The older keys stay:
-// `net_payable` is owed, `unallocated_credits` is advances. `owed` /
-// `advances` are optional only for an older server.
+// A12: `owed` is gross unsettled invoices (= buckets = total_outstanding).
+// `advances` is unapplied money; both can be positive for one supplier.
+// The supplier's signed net balance is owed minus advances. Older aliases
+// stay: net_payable = owed, unallocated_credits = advances. Optional keys
+// support older servers; no advance implicitly settles an invoice.
 export interface AgingResult {
   as_of: string;
   buckets: Record<string, number>;
@@ -403,8 +401,8 @@ export interface OwnerDashboard {
   // else the caller's own shop. AP aging and the forecast use the same scope.
   store_id?: string | null;
   receivables: { total: number; buckets: Record<string, number>; overdue: number };
-  // total = what we owe (THE ONE 'WE OWE' RULE above); advances = money paid
-  // ahead to suppliers, apart (unallocated_credits is its older name).
+  // total = gross unsettled invoices; advances = unapplied supplier money.
+  // net_position separately uses positive supplier net balances.
   payables: { total: number; buckets: Record<string, number>; overdue: number; due_7d: number; due_30d: number; advances?: number; unallocated_credits: number };
   net_position: number;
   this_month: { revenue: number; expenses: number; vendor_payments: number; net_cash_flow: number };
