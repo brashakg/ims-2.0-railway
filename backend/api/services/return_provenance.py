@@ -84,6 +84,7 @@ def _snapshot(bill, line, line_index, quantity, receipt_id, stock_ids, return_in
     }
     fingerprint = hashlib.sha256(json.dumps(evidence, sort_keys=True).encode()).hexdigest()
     return {
+        "origin_status": "BOOKED",
         "return_line_index": return_index,
         "product_id": line.get("product_id"), "quantity": quantity,
         "description": line.get("description"), "hsn": line.get("hsn"),
@@ -103,7 +104,7 @@ def _snapshot(bill, line, line_index, quantity, receipt_id, stock_ids, return_in
     }
 
 
-def _bill_line(db, receipt, product_id, choice):
+def _bill_line(db, receipt, product_id, choice, *, allow_unbooked=False):
     from api.routers.finance.gst import _bill_booked
 
     gid = receipt["grn_id"]
@@ -133,6 +134,8 @@ def _bill_line(db, receipt, product_id, choice):
                 continue
             candidates.append((bill, line, line_index))
     if not candidates:
+        if allow_unbooked and not choice:
+            return None
         _pending("UNBOOKED_ORIGIN", "No matching booked original bill line is identified.")
     if len(candidates) != 1:
         _pending("AMBIGUOUS_BILL_LINE", "Accounts must identify the original bill line.")
@@ -169,7 +172,7 @@ def _set_caps(origins):
         )
 
 
-def resolve_return_provenance(db, return_doc, *, selections=None):
+def _resolve_origins(db, return_doc, *, selections=None, allow_unbooked=False):
     """Resolve every returned unit to its own booked bill/line, or stay pending.
 
     Optional selections carry return_line_index, grn_id, quantity, bill_id and
@@ -287,14 +290,26 @@ def resolve_return_provenance(db, return_doc, *, selections=None):
                 used_units.update(ids)
             elif ids:
                 _pending("INVALID_UNIT_SELECTION", "Selected physical units are not linked to this return.")
-            bill, line, line_index = _bill_line(db, receipt, pid, choice if choice.get("bill_id") else None)
-            result.append(_snapshot(bill, line, line_index, qty, gid, ids or [], index))
+            matched = _bill_line(db, receipt, pid, choice if choice.get("bill_id") else None,
+                                 allow_unbooked=allow_unbooked)
+            if matched is None:
+                result.append({
+                    "origin_status": "UNBOOKED", "return_line_index": index,
+                    "product_id": pid, "quantity": qty, "grn_id": gid,
+                    "stock_ids": sorted(ids or []), "store_id": receipt["store_id"],
+                    "vendor_id": vendor_id,
+                })
+            else:
+                bill, line, line_index = matched
+                result.append(_snapshot(bill, line, line_index, qty, gid, ids or [], index))
     if used_units != unit_ids:
         _pending("INCOMPLETE_UNIT_LINKS", "Selections do not cover all linked physical units.")
     # Multiple receipt origins can share one consolidated bill line. Its cap
     # applies to the whole resolved quantity, not separately to each receipt.
     bill_lines = defaultdict(list)
     for origin in result:
+        if origin["origin_status"] != "BOOKED":
+            continue
         key = (origin["bill_id"], origin["bill_line_index"])
         bill_lines[key].append(origin)
     for origins in bill_lines.values():
@@ -302,3 +317,61 @@ def resolve_return_provenance(db, return_doc, *, selections=None):
             _pending("ORIGINAL_BILL_CHANGED", "The original bill changed during source verification. Retry the confirmation.")
         _set_caps(origins)
     return result
+
+
+def resolve_return_provenance(db, return_doc, *, selections=None):
+    """Strict original-bill evidence required for supplier-credit posting.
+
+    Missing or rejected/unbilled origins are pending, never proof of claimed
+    tax. An internal request uses the separate resolver below; its output must
+    never be passed off as this financial evidence.
+    """
+    return _resolve_origins(db, return_doc, selections=selections)
+
+
+def resolve_request_provenance(db, return_doc, *, selections=None):
+    """Custody evidence for an internal return request, not a posted credit.
+
+    Unique accepted but unbilled origins can describe goods being returned;
+    A08 rejected units use their exact rejected receipt line instead. Neither
+    establishes GST eligibility, a tax rate, or an amount owed by the supplier.
+    Ambiguity, corrupt links and database failures do not become a fallback.
+    """
+    if not return_doc.get("receipt_rejection"):
+        return _resolve_origins(db, return_doc, selections=selections, allow_unbooked=True)
+
+    gid, index = return_doc.get("grn_id"), return_doc.get("grn_line_index")
+    receipt = db.get_collection("grns").find_one({"grn_id": gid}) if gid else None
+    items = return_doc.get("items") or []
+    if (not receipt or receipt.get("status") not in {"ACCEPTED", "PARTIALLY_ACCEPTED"}
+            or receipt.get("vendor_id") != return_doc.get("vendor_id")
+            or receipt.get("store_id") != return_doc.get("store_id")
+            or not return_doc.get("vendor_id") or not return_doc.get("store_id")
+            or type(index) is not int or not 0 <= index < len(receipt.get("items") or [])
+            or len(items) != 1):
+        _pending("INVALID_REJECTED_ORIGIN", "The rejected goods' original receipt line is not verified.")
+    item, receipt_line = items[0], receipt["items"][index]
+    quantity = _quantity(item.get("quantity"))
+    pid = item.get("product_id")
+    if (not pid or receipt_line.get("product_id") != pid
+            or quantity != _quantity(receipt_line.get("rejected_qty"))):
+        _pending("INVALID_REJECTED_ORIGIN", "The return does not match its rejected receipt quantity.")
+    wanted = return_doc.get("stock_ids") or []
+    rid = return_doc.get("return_id")
+    units = list(db.get_collection("stock_units").find({"rtv_vendor_id": rid})) if rid else []
+    if (len(wanted) != quantity or len(set(wanted)) != quantity or len(units) != quantity
+            or set(wanted) != {unit.get("stock_id") for unit in units}):
+        _pending("INCOMPLETE_UNIT_LINKS", "The rejected return's physical unit links are incomplete.")
+    for unit in units:
+        if (unit.get("receipt_disposition") != "REJECTED" or unit.get("grn_id") != gid
+                or unit.get("grn_line_index") != index or unit.get("product_id") != pid
+                or unit.get("store_id") != return_doc["store_id"] or unit.get("quantity") != 1):
+            _pending("INVALID_REJECTED_ORIGIN", "A linked unit does not match the rejected receipt line.")
+    if selections:
+        _pending("REJECTED_ORIGIN_UNBILLED", "Rejected custody cannot be assigned to an accepted-goods bill.")
+    return [{
+        "origin_status": "REJECTED_CUSTODY", "return_line_index": 0,
+        "product_id": pid, "quantity": quantity, "grn_id": gid,
+        "grn_line_index": index, "stock_ids": sorted(wanted),
+        "store_id": return_doc["store_id"], "vendor_id": return_doc["vendor_id"],
+    }]

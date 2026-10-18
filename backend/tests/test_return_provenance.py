@@ -10,7 +10,9 @@ from unittest.mock import Mock
 import mongomock
 import pytest
 
-from api.services.return_provenance import ReturnProvenanceError, resolve_return_provenance
+from api.services.return_provenance import (
+    ReturnProvenanceError, resolve_request_provenance, resolve_return_provenance,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -353,3 +355,72 @@ def test_invalid_return_quantity_is_never_coerced_to_one(db, qty):
     bill(db)
     with pytest.raises(ReturnProvenanceError):
         resolve_return_provenance(db, returned(qty))
+
+
+def test_unique_unbilled_request_has_custody_but_no_invented_financial_evidence(db):
+    receipt(db)
+    result = resolve_request_provenance(db, returned())
+    assert result == [{
+        "origin_status": "UNBOOKED", "return_line_index": 0, "product_id": "P1",
+        "quantity": 1, "grn_id": "G1", "stock_ids": [], "store_id": "S1", "vendor_id": "V1",
+    }]
+    pending("UNBOOKED_ORIGIN", db)
+
+
+def test_internal_request_does_not_guess_between_accepted_origins(db):
+    receipt(db)
+    receipt(db, "G2")
+    with pytest.raises(ReturnProvenanceError) as exc:
+        resolve_request_provenance(db, returned())
+    assert exc.value.code == "AMBIGUOUS_RECEIPT"
+
+
+def test_internal_request_cannot_turn_a_wrong_explicit_bill_into_unbilled_goods(db):
+    receipt(db)
+    with pytest.raises(ReturnProvenanceError) as exc:
+        resolve_request_provenance(db, returned(), selections=[selection(bid="MISSING")])
+    assert exc.value.code == "UNBOOKED_ORIGIN"
+
+
+def rejected(db):
+    receipt(db, qty=0, items=[{"product_id": "P1", "accepted_qty": 0, "rejected_qty": 1}])
+    unit(db, receipt_disposition="REJECTED", grn_line_index=0, quantity=1)
+    return returned(receipt_rejection=True, grn_id="G1", grn_line_index=0, stock_ids=["U1"])
+
+
+def test_a08_rejected_goods_can_have_internal_request_without_accepted_quantity_or_bill(db):
+    ret = rejected(db)
+    result = resolve_request_provenance(db, ret)
+    assert result == [{
+        "origin_status": "REJECTED_CUSTODY", "return_line_index": 0, "product_id": "P1", "quantity": 1,
+        "grn_id": "G1", "grn_line_index": 0, "stock_ids": ["U1"], "store_id": "S1", "vendor_id": "V1",
+    }]
+    pending("REJECTED_ORIGIN_UNBILLED", db, ret)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("receipt_disposition", "ACCEPTED"), ("grn_id", "WRONG"), ("grn_line_index", 1),
+    ("product_id", "WRONG"), ("store_id", "WRONG"), ("quantity", 2),
+])
+def test_a08_request_requires_exact_rejected_custody_identity(db, field, value):
+    ret = rejected(db)
+    db.stock_units.update_one({}, {"$set": {field: value}})
+    with pytest.raises(ReturnProvenanceError) as exc:
+        resolve_request_provenance(db, ret)
+    assert exc.value.code == "INVALID_REJECTED_ORIGIN"
+
+
+def test_a08_request_cannot_borrow_accepted_goods_bill_tax(db):
+    ret = rejected(db)
+    bill(db)
+    assert resolve_request_provenance(db, ret)[0]["origin_status"] == "REJECTED_CUSTODY"
+    with pytest.raises(ReturnProvenanceError) as exc:
+        resolve_request_provenance(db, ret, selections=[selection()])
+    assert exc.value.code == "REJECTED_ORIGIN_UNBILLED"
+
+
+def test_a08_request_fails_closed_if_receipt_read_is_unavailable(db, monkeypatch):
+    ret = rejected(db)
+    monkeypatch.setattr(db.grns, "find_one", Mock(side_effect=RuntimeError("receipt unavailable")))
+    with pytest.raises(RuntimeError, match="receipt unavailable"):
+        resolve_request_provenance(db, ret)
