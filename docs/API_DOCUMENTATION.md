@@ -102,32 +102,15 @@ Response (200):
     "full_name": "John Doe",
     "roles": ["ADMIN"],
     "store_id": "store-1",
-    "is_2fa_enabled": true,
     "created_at": "2026-01-01T10:00:00Z"
   }
 }
 ```
 
-### Enable 2FA
-**POST** `/auth/2fa/enable`
-
-Headers: `Authorization: Bearer <token>`
-
-Request:
-```json
-{
-  "password": "current_password"
-}
-```
-
-Response (200):
-```json
-{
-  "qr_code": "data:image/png;base64,...",
-  "secret_key": "JBSWY3DPEBLW64TMMQ",
-  "backup_codes": ["abc12345", "def67890", "ghi34567", ...]
-}
-```
+### Two-factor sign-in (2FA)
+Not built. IMS has no `/auth/2fa/*` endpoints and no authenticator-app or
+backup-code sign-in; sign-in is username + password (JWT), with the
+SUPERADMIN-approved device gate for staff.
 
 ---
 

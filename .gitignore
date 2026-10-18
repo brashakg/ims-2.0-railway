@@ -83,3 +83,12 @@ mig_*_out.txt
 
 # backfill audit artefacts (prod row ids, no secrets) - never commit
 backfill_pim_sku_audit_*.json
+
+# TLS keys and certificates - never commit (the nginx/ssl README explains
+# where they come from; only that README is tracked).
+*.pem
+*.key
+*.p12
+*.pfx
+nginx/ssl/*
+!nginx/ssl/README.md
