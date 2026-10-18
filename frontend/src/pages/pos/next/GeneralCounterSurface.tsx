@@ -55,6 +55,10 @@ import {
 import { PosWidgets } from './PosWidgets';
 import { CounterCompleteScreen } from './SaleCompleteScreen';
 import { ProductCard, MAX_PRODUCT_RESULTS } from './ProductResultsStrip';
+import {
+  DiscountApprovalPanel,
+  type DiscountApprovalNeed,
+} from '../../../components/pos/DiscountApprovalPanel';
 import { submitPosOrder } from '../../../components/pos/submitOrder';
 import { orderApi } from '../../../services/api/sales';
 import {
@@ -128,6 +132,10 @@ export function GeneralCounterSurface() {
     delivered?: boolean;
   } | null>(null);
   const idempotencyKeyRef = useRef<string | null>(null);
+  // A discount over the seller's limit: the server's refusal (shown as the
+  // ask-a-manager panel) and, once approved, the E4 request id the retry carries.
+  const [approvalNeed, setApprovalNeed] = useState<DiscountApprovalNeed | null>(null);
+  const approvalIdRef = useRef<string | null>(null);
 
   const { data: products = [], isLoading } = useProducts({
     search: search || undefined,
@@ -222,12 +230,24 @@ export function GeneralCounterSurface() {
       store.setCartNote(withFulfilmentTag(store.cart_note, homeDelivery));
       // Read the LIVE store, not this render's snapshot — the writes above
       // landed in the store, while `store` is the value from render time.
-      const res = await submitPosOrder(usePOSStore.getState(), idempotencyKeyRef.current);
+      const res = await submitPosOrder(
+        usePOSStore.getState(),
+        idempotencyKeyRef.current,
+        approvalIdRef.current,
+      );
       if (!res.ok) {
+        if (res.discountApproval) {
+          setApprovalNeed(res.discountApproval);
+          return;
+        }
+        // An approval the server would not take is dropped: the next try asks again.
+        if (res.discountApprovalRejected) approvalIdRef.current = null;
         setErrorMsg(res.error || 'Failed to create order');
         return;
       }
       idempotencyKeyRef.current = null;
+      approvalIdRef.current = null;
+      setApprovalNeed(null);
       // Owner ruling 2026-09-04: a completed take-away counter sale IS the
       // handover -- the goods leave with the customer and the tax invoice is
       // issued -- so it ends DELIVERED with the CASHIER (the signed-in user,
@@ -311,6 +331,20 @@ export function GeneralCounterSurface() {
             <X className="w-3.5 h-3.5" />
           </button>
         </div>
+      )}
+
+      {/* A discount over the seller's own limit: ask a manager (E4), then the
+          sale is resubmitted with the approval (owner 2026-10-18). */}
+      {approvalNeed && (
+        <DiscountApprovalPanel
+          need={approvalNeed}
+          onApproved={(requestId) => {
+            approvalIdRef.current = requestId;
+            setApprovalNeed(null);
+            void handleCompleteSale();
+          }}
+          onClose={() => setApprovalNeed(null)}
+        />
       )}
 
       {/* Owner rule: an optical item belongs on the optical POS (Rx, pair

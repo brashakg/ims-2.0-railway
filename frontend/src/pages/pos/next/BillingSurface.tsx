@@ -40,6 +40,10 @@ import {
   createAndSelectCustomer,
   selectCustomerHit,
 } from '../../../components/pos/CustomerSearchBar';
+import {
+  DiscountApprovalPanel,
+  type DiscountApprovalNeed,
+} from '../../../components/pos/DiscountApprovalPanel';
 import { submitPosOrder, workshopItemsOf } from '../../../components/pos/submitOrder';
 import SaleCompleteScreen from './SaleCompleteScreen';
 import ProductResultsStrip from './ProductResultsStrip';
@@ -74,6 +78,10 @@ export function BillingSurface() {
     fittingCoating?: string;
   } | null>(null);
   const idempotencyKeyRef = useRef<string | null>(null);
+  // A discount over the seller's limit: the server's refusal (shown as the
+  // ask-a-manager panel) and, once approved, the E4 request id the retry carries.
+  const [approvalNeed, setApprovalNeed] = useState<DiscountApprovalNeed | null>(null);
+  const approvalIdRef = useRef<string | null>(null);
   // F46: this shop's sellable count for each cart line -- the oversell
   // guard's own number -- so a line warns the moment it is added, not at
   // Complete sale. A hook, so above the guards.
@@ -148,12 +156,24 @@ export function BillingSurface() {
       );
       // Read the LIVE store, not this render's snapshot -- the write above
       // landed in the store, while `store` is the value from render time.
-      const res = await submitPosOrder(usePOSStore.getState(), idempotencyKeyRef.current);
+      const res = await submitPosOrder(
+        usePOSStore.getState(),
+        idempotencyKeyRef.current,
+        approvalIdRef.current,
+      );
       if (!res.ok) {
+        if (res.discountApproval) {
+          setApprovalNeed(res.discountApproval);
+          return;
+        }
+        // An approval the server would not take is dropped: the next try asks again.
+        if (res.discountApprovalRejected) approvalIdRef.current = null;
         setErrorMsg(res.error || 'Failed to create order');
         return;
       }
       idempotencyKeyRef.current = null;
+      approvalIdRef.current = null;
+      setApprovalNeed(null);
       if (res.warning) setErrorMsg(res.warning);
       // EVERY successful sale lands on the completion screen now. Until this
       // wiring, only a sale that happened to spawn a workshop job showed
@@ -199,6 +219,20 @@ export function BillingSurface() {
             <X className="w-3.5 h-3.5" />
           </button>
         </div>
+      )}
+
+      {/* A discount over the seller's own limit: ask a manager (E4), then the
+          sale is resubmitted with the approval (owner 2026-10-18). */}
+      {approvalNeed && (
+        <DiscountApprovalPanel
+          need={approvalNeed}
+          onApproved={(requestId) => {
+            approvalIdRef.current = requestId;
+            setApprovalNeed(null);
+            void handleCompleteSale();
+          }}
+          onClose={() => setApprovalNeed(null)}
+        />
       )}
 
       {/* Bill strip — slim context row. The salesperson lives here as a CHIP

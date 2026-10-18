@@ -90,10 +90,10 @@ export interface CartLineItem {
     coatings: string[];          // AR / Blue-cut / Photochromic
   };
 
-  // Discount (validated server-side)
+  // Discount (validated server-side; WHO approved it is the server's
+  // decision, never sent from here -- owner 2026-10-18)
   discount_percent: number;
   discount_amount: number;
-  discount_approved_by?: string;
   discount_reason?: string;
 
   // Calculated
@@ -166,13 +166,12 @@ export interface POSState {
   delivery_priority: 'NORMAL' | 'EXPRESS' | 'URGENT';
 
   // Order-level discount (applied AFTER per-item discounts, on the
-  // taxable subtotal). Capped at the user's role discount cap when the
-  // Review step validates; caller must pass approved_by for any value
-  // above a junior staff's cap. 0% by default.
+  // taxable subtotal). Over the seller's own limit the server refuses with
+  // DISCOUNT_NEEDS_APPROVAL and the till asks a manager (E4 approval).
+  // 0% by default.
   cart_discount_percent: number;
   cart_discount_amount: number;
   cart_discount_reason: string | null;
-  cart_discount_approved_by: string | null;
 
   // Order result
   order_id: string | null;
@@ -220,7 +219,7 @@ export interface POSState {
   addToCart: (item: Omit<CartLineItem, 'id' | 'line_total' | 'discount_percent' | 'discount_amount'>) => void;
   removeFromCart: (lineId: string) => void;
   updateQuantity: (lineId: string, qty: number) => void;
-  applyDiscount: (lineId: string, percent: number, reason?: string, approvedBy?: string) => void;
+  applyDiscount: (lineId: string, percent: number, reason?: string) => void;
   /** Group cart lines into a PAIR (frame + its lenses). Pass pairId=null to
       unlink. The pair's Rx is whatever the member lines carry. */
   setLinePair: (lineId: string, pairId: string | null) => void;
@@ -238,7 +237,7 @@ export interface POSState {
 
   // Cart-level discount — applied to subtotal after per-item discounts.
   // Passing percent=0 clears the discount.
-  setCartDiscount: (percent: number, reason?: string, approvedBy?: string) => void;
+  setCartDiscount: (percent: number, reason?: string) => void;
 
   // The server's bill quote (components/pos/billQuote.ts keeps it fresh).
   setBillQuote: (quote: BillQuote | null) => void;
@@ -385,7 +384,6 @@ const initialState = {
   cart_discount_percent: 0,
   cart_discount_amount: 0,
   cart_discount_reason: null,
-  cart_discount_approved_by: null,
   order_id: null,
   order_number: null,
   is_processing: false,
@@ -472,7 +470,7 @@ export const usePOSStore = create<POSState>()(
         });
       },
 
-      applyDiscount: (lineId: string, percent: number, reason?: string, approvedBy?: string) => {
+      applyDiscount: (lineId: string, percent: number, reason?: string) => {
         set((state: POSState) => {
           const newCart = (state.cart || []).map((item: CartLineItem) => {
             if (item.id !== lineId) return item;
@@ -482,7 +480,6 @@ export const usePOSStore = create<POSState>()(
               discount_percent: percent,
               discount_amount: Math.round(discountAmt * 100) / 100,
               discount_reason: reason,
-              discount_approved_by: approvedBy,
               line_total: calcLineTotal({ ...item, discount_percent: percent }),
             };
           });
@@ -541,7 +538,7 @@ export const usePOSStore = create<POSState>()(
       setDeliveryTimeSlot: (slot: string | null) => set({ delivery_time_slot: slot }),
       setDeliveryPriority: (priority: 'NORMAL' | 'EXPRESS' | 'URGENT') => set({ delivery_priority: priority }),
 
-      setCartDiscount: (percent: number, reason?: string, approvedBy?: string) => {
+      setCartDiscount: (percent: number, reason?: string) => {
         // Recompute cart_discount_amount from the current taxable subtotal
         // (post item-discount) so it re-evaluates when items change.
         set((state: POSState) => {
@@ -555,7 +552,6 @@ export const usePOSStore = create<POSState>()(
             cart_discount_percent: clamped,
             cart_discount_amount: amt,
             cart_discount_reason: reason ?? null,
-            cart_discount_approved_by: approvedBy ?? null,
           };
         });
       },
@@ -630,7 +626,6 @@ export const usePOSStore = create<POSState>()(
             cart_discount_percent: state.cart_discount_percent,
             cart_discount_amount: state.cart_discount_amount,
             cart_discount_reason: state.cart_discount_reason,
-            cart_discount_approved_by: state.cart_discount_approved_by,
             delivery_date: state.delivery_date,
             delivery_time_slot: state.delivery_time_slot,
             delivery_priority: state.delivery_priority,
@@ -649,7 +644,7 @@ export const usePOSStore = create<POSState>()(
       // into whatever was already in the cart -> two customers' sales could
       // fuse) and dropped the cart-level discount + delivery fields entirely.
       // This sets everything in ONE atomic write: cart verbatim (per-item
-      // discount_amount/approved_by/reason intact), cart-discount recomputed
+      // discount_amount/reason intact), cart-discount recomputed
       // from the restored cart, delivery + advance flags restored.
       restoreHeldSale: (snapshot: any) => {
         const { store_id, salesperson_id, salesperson_name } = get();
@@ -675,7 +670,6 @@ export const usePOSStore = create<POSState>()(
           cart_discount_percent: percent,
           cart_discount_amount: recalcCartDiscountAmount(cart, percent),
           cart_discount_reason: snap.cart_discount_reason ?? null,
-          cart_discount_approved_by: snap.cart_discount_approved_by ?? null,
           current_step: cart.length > 0 ? 'review' : 'customer',
         });
       },
@@ -854,7 +848,6 @@ export const usePOSStore = create<POSState>()(
           if (state.cart_discount_percent === undefined) state.cart_discount_percent = 0;
           if (state.cart_discount_amount === undefined) state.cart_discount_amount = 0;
           if (state.cart_discount_reason === undefined) state.cart_discount_reason = null;
-          if (state.cart_discount_approved_by === undefined) state.cart_discount_approved_by = null;
         }
       },
     }

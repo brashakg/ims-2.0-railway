@@ -7,10 +7,11 @@
 // two would drift into applying different caps to the same money - this
 // repo's dominant defect class.
 //
-// The percent is capped at the user's role cap here for immediate feedback.
-// It is NOT the authority: the server re-checks against canonical pricing_caps
-// (role AND category AND brand, lowest wins), so a tampered client cannot
-// widen a cap. Deliberately no new money logic on this path.
+// Over the user's own role cap is allowed here and flagged: the server refuses
+// it with DISCOUNT_NEEDS_APPROVAL and the till asks a manager (owner decision
+// 2026-10-18). The server is the authority on every cap (role AND category
+// AND brand, lowest wins), so a tampered client cannot widen one.
+// Deliberately no new money logic on this path.
 
 import { usePOSStore } from '../../stores/posStore';
 import { useAuth } from '../../context/AuthContext';
@@ -33,11 +34,11 @@ export function BillDiscountCard() {
           <input
             type="number"
             min={0}
-            max={cap}
+            max={100}
             step={0.5}
             value={store.cart_discount_percent || 0}
             onChange={(e) => {
-              const pct = Math.max(0, Math.min(cap, parseFloat(e.target.value) || 0));
+              const pct = Math.max(0, Math.min(100, parseFloat(e.target.value) || 0));
               store.setCartDiscount(pct, store.cart_discount_reason || undefined);
             }}
             onFocus={(e) => e.target.select()}
@@ -56,13 +57,7 @@ export function BillDiscountCard() {
           <input
             type="text"
             value={store.cart_discount_reason || ''}
-            onChange={(e) =>
-              store.setCartDiscount(
-                store.cart_discount_percent,
-                e.target.value,
-                store.cart_discount_approved_by || undefined,
-              )
-            }
+            onChange={(e) => store.setCartDiscount(store.cart_discount_percent, e.target.value)}
             placeholder="Reason (loyal customer, damaged box, festival offer...)"
             aria-label="Overall discount reason"
             className="w-full min-h-[44px] px-2 border border-gray-300 rounded text-xs text-gray-900"
@@ -72,8 +67,13 @@ export function BillDiscountCard() {
               Required — at least 4 characters. No reason, no discount.
             </p>
           )}
+          {store.cart_discount_percent > cap && (
+            <p className="text-xs text-amber-700">
+              Over your {cap}% limit. A manager approves it when you complete the sale.
+            </p>
+          )}
           <div className="flex items-center justify-between text-xs">
-            <span className="text-gray-500">Max allowed: {cap}% (role cap)</span>
+            <span className="text-gray-500">Your limit: {cap}% (role cap)</span>
             <span className="text-green-600 font-medium">
               -{fc(store.cart_discount_amount || 0)}
             </span>

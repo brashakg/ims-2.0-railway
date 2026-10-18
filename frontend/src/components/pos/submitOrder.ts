@@ -15,6 +15,7 @@ import { canonicalCategory } from '../../utils/categoryNormalize';
 import type { CashTenderCapture } from '../../stores/posStore';
 import { buildPaymentBody } from './paymentBody';
 import { orderLinesOf, refreshBillQuote } from './billQuote';
+import type { DiscountApprovalNeed } from './DiscountApprovalPanel';
 
 // The order-line vocabulary lives with the line builder the quote shares.
 export { mapCategory } from './billQuote';
@@ -31,6 +32,13 @@ export interface SubmitPosOrderResult {
   warning?: string;
   /** Fatal — order was NOT created. */
   error?: string;
+  /** Fatal, and actionable: the discount is over the seller's own limit. The
+      caller asks a manager (DiscountApprovalPanel) and resubmits with the
+      approved request's id. */
+  discountApproval?: DiscountApprovalNeed;
+  /** Fatal: the approval sent with this try cannot be used (already spent,
+      expired, or for another bill) -- the caller drops it. */
+  discountApprovalRejected?: boolean;
 }
 
 /** The cart lines a workshop job is built from. ONE predicate: the job
@@ -53,6 +61,9 @@ export function workshopItemsOf(cart: any[]): { frameItem?: any; lensItem?: any 
 export async function submitPosOrder(
   store: any,
   idempotencyKey: string,
+  /** The request id of a manager-approved discount_override approval, when a
+      refused sale is retried after one (owner 2026-10-18). */
+  discountApprovalId?: string | null,
 ): Promise<SubmitPosOrderResult> {
   if (store.sale_type === 'prescription_order') {
     const hasLens = (store.cart || []).some((i: any) =>
@@ -138,7 +149,9 @@ export async function submitPosOrder(
       cart_discount_percent: store.cart_discount_percent || 0,
       cart_discount_amount: store.cart_discount_amount || 0,
       cart_discount_reason: store.cart_discount_reason || undefined,
-      cart_discount_approved_by: store.cart_discount_approved_by || undefined,
+      // WHO approved the discount is the server's decision -- never a name
+      // sent from here. Over the seller's limit it needs this approval id.
+      discount_approval_id: discountApprovalId || undefined,
     } as any, idempotencyKey || undefined);
 
     if (!result?.order_id) {
@@ -318,6 +331,13 @@ export async function submitPosOrder(
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    const { code, detail } = (err || {}) as { code?: string; detail?: unknown };
+    if (code === 'DISCOUNT_NEEDS_APPROVAL') {
+      return { ok: false, error: msg, discountApproval: detail as DiscountApprovalNeed };
+    }
+    if (code === 'DISCOUNT_APPROVAL_INVALID' || code === 'DISCOUNT_APPROVAL_USED') {
+      return { ok: false, error: msg, discountApprovalRejected: true };
+    }
     return { ok: false, error: 'Failed to create order: ' + (msg || 'Network error') };
   }
 }

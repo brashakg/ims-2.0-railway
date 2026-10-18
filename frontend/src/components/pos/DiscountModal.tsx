@@ -1,7 +1,9 @@
 // ============================================================================
 // IMS 2.0 - Discount Modal Component
 // ============================================================================
-// Role-based discount limits enforced by user.discountCap
+// The seller's own limit is user.discountCap. More than that is allowed here
+// and flagged: completing the sale then asks a manager to approve it (the
+// server refuses it otherwise -- owner decision 2026-10-18).
 
 import { useState, useMemo } from 'react';
 import { X, Percent, AlertTriangle, Tag } from 'lucide-react';
@@ -106,7 +108,7 @@ export function DiscountModal({
     calculations.discountPercent > 0 && reason.trim().length < 4;
 
   const handleApply = () => {
-    if (calculations.exceedsLimit || reasonMissing) return;
+    if (reasonMissing) return;
     onApply(
       Math.round(calculations.discountPercent * 100) / 100,
       calculations.discountAmount,
@@ -223,7 +225,7 @@ export function DiscountModal({
               <div className="flex items-center gap-2 mt-2 text-red-600 text-sm">
                 <AlertTriangle className="w-4 h-4" />
                 <span>
-                  Exceeds your discount limit ({maxDiscountPercent}%). Request manager approval.
+                  Over your {maxDiscountPercent}% limit. A manager approves it when you complete the sale.
                 </span>
               </div>
             )}
@@ -334,7 +336,7 @@ export function DiscountModal({
             </button>
             <button
               onClick={handleApply}
-              disabled={calculations.exceedsLimit || reasonMissing || parseFloat(inputValue) < 0}
+              disabled={reasonMissing || parseFloat(inputValue) < 0}
               className="btn-primary"
             >
               Apply Discount
