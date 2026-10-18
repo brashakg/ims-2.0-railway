@@ -1,5 +1,7 @@
 # IMS 2.0 — live plan status
 
+Updated **2026-10-18** (evening). The largest day so far: Codex finished the paused wave and the 13-finding audit, and Claude took over as lead. **35 PRs merged since 2026-10-13** (section 4w): the paused procurement/online wave (#1163, #1166, #1171, #1181, #1196-#1204), all 13 original audit findings (#1205-#1220), and today's batch (#1221 collections push, #1222 failed Shopify notifications retried, #1223 GSTR-3B month-end, #1224 stock-write ordering, #1225 every size priced before publish, #1228 status page inside Shopify admin). On prod (owner approved): Pune linked to its Shopify location (all 4 shops linked); the IMS Shopify app's permissions fixed (menus and pages now readable); the live-data checks needed no change (barcodes 0, reorder levels 0, customers over Rs 1,50,000 credit 0). A full sweep of all 295 audit documents (2,801 items) was reconciled against the code; its confirmed open items are in section 4y. **The agreed order of work is section 4x.** Still nothing sells online: all 601 ready products have 0 stock in IMS until it is received through purchasing.
+
 Updated **2026-10-13** (evening). Seven more merged 2026-10-13 (section 4v): the owner's Catalog page asks (**#1192**: recently-edited first, filters incl. who added it and a date range, rows per page, tick-select to flag or archive), photo order (**#1189**), cost hidden from counter staff everywhere incl. the 3 approved till places (**#1191**), the counter stock lookup (**#1180**), the valued inter-company challan (**#1185**), Add product follows the owner rulings (**#1174**) and the design-photo publish rebuild (**#1193**, replaces #1152). On prod (owner approved): the product identity keys were rebuilt (499 of 499, a fresh trial run finds nothing left) and the Brand Master website switch is ON for all 22 product brands (19 switched today). Still in build, none merged: #1153, #1163, #1165, #1166, #1171, #1181, #1183, #1184, #1188, own-task list #1194, what-we-pay admin/accounts only, round-off, reverse charge.
 
 Updated **2026-10-13**. Three more merged 2026-10-08 .. 10-12 (section 4u): the purchase-order form (**#1170**), counter staff locked out of supplier and purchase data (**#1161**), and the till / counter lookup finding multi-word names (**#1187**, owner-approved POS change). In build, none merged: the 2026-10-12 owner asks - Catalog page sort / filters / who added it / select to flag or archive / rows per page / date range, photo order (#1189), cost hidden from counter staff everywhere (incl. 3 approved till places), each person sees only their own tasks - and the procurement-audit PRs #1165, #1166, #1171, #1174, #1180, #1183, #1184, #1185, #1188, plus #1153, #1163, #1181. Owner rulings 2026-10-12 recorded: what we pay (purchase prices and product cost) is admin / superadmin / accounts only; PO line prices fill in from the last price paid; walk-in dealers are added as suppliers; the catalog opens recently-edited first.
@@ -404,6 +406,67 @@ What the five page-split waves left, measured 2026-09-27 (owner page "Wave Six")
 | **#1174** | Add product follows the owner rulings: the brand default decides the website, readable SKUs, reorder level starts as not set, Save + New keeps what was typed. |
 | **#1193** | Pressing Publish on a design photo twice puts it up once; replacing a photo swaps it (simple rebuild of #1152, which is closed). |
 
+## 4w. Merged 2026-10-14 .. 2026-10-18 (all squash-merged to main)
+
+| PR | What it does |
+|---|---|
+| **#1171** | Items ordered outside the catalogue reach the shelf: the cataloguer is told, finishing the product releases the units, no hidden duplicates. |
+| **#1166** | New unit barcodes are letters and digits only; a product barcode is only the maker's UPC/GTIN. |
+| **#1181** | The till records the exact frame it scanned; sale and return keep that unit. |
+| **#1196** | A new size on a live listing is never sold untracked (simple rebuild of #1172). |
+| **#1197** | Reverse-charge purchase bills: the supplier is owed the taxable value, the shop pays the GST itself. |
+| **#1198** | Every bill rounds to the nearest rupee with a Round off line. |
+| **#1163** | Multi-location PR 5 of 6: an online order is claimed, fulfilled and invoiced by the shop Shopify assigned, from that shop's own GSTIN. |
+| **#1199** | Purchase cost and prices are for accounts and admins only. |
+| **#1200** | Product lists refresh across shops after a write. |
+| **#1201** | Purchasing completed: shop-scoped reports, bought-without-PO receipts, extra deliveries (replaces #1183 and #1184). |
+| **#1202** | Historical returns can never create stock without evidence. |
+| **#1203** | Manager deadline controls, an explicit Cashier role, unused Feature Toggles removed. |
+| **#1204** | Credit limits enforced on every sale and unpaid handover. |
+| **#1205-#1220** | All 13 original audit findings: quarantine race (A02), GSTR-3B registration (A10), live session authority (A06), customer-return scope (A07), last price paid (A11), catalogue identity + product-import retirement (A05), task recipients, GST cards per registration (A04), RBAC document parity, finished-product category guard, rejected-goods custody (A08), landscape-tablet checks, unknown supplier cost (A09), original-bill provenance + supplier-confirmed credits (A03/A01), advances kept separate (A12), explicit event times (A13). |
+| **#1221** | Collections reach Shopify (91 of 95 had failed on the sort order). |
+| **#1222** | A failed Shopify notification is retried and finished, never marked done; nothing is recorded twice. |
+| **#1223** | GSTR-3B counts the last moment of the month; one month rule for GST-1/3B, payroll commission, budgets, growth. |
+| **#1224** | An older stock count can never overwrite a newer one on Shopify. |
+| **#1225** | A first publish is refused until every size has a price (the message names the SKUs). |
+| **#1228** | The IMS 2.0 SYNC page inside Shopify admin shows a welcome and the connection status (Shopify-signed loads only). |
+
+## 4x. The agreed order of work (owner 2026-10-18)
+
+| Step | Work | State |
+|---|---|---|
+| **A** | In-flight fixes: one product per model in IMS (**#1226**, draft); no duplicate products on Shopify + catalogue saves never wipe the Shopify link (**#1227**, draft); tax invoice numbers fit GST's 16 characters, format **BOK01/2627/00001**; supplier payments pick their bill + advances applied later + a payment can never apply twice; shop scope on the category P&L, cost writes for accounts only, bill scans and journal entries for accounts only, other shops' frames hidden from scans; stock (supplier returns name their frames and leave stock when shipped, damaged returns set aside, stock-count write-offs per frame); till discount approver from the manager's own login + an over-limit approval step; "who sees which shop" (accountant own shop on four finance views, no-shop login sees no sales at the till, admin with no shop picked sees all shops everywhere) | in build / review |
+| **B1-5** | Products live on bettervision.in: grouped website listings (one per model with colour/size choices, model-level title, description and SEO, all photos, new colours added to the 25 live listings); set up the unique product id on Shopify; move the 601 products into model families (dry run shown to the owner first); publish ~451 listings, then collections, then rebuild the menu; one real test order end to end | next |
+| **C (Batch 2)** | Loyalty redemption and its record saved together (also adjustments, expiry, referrals); promotional messages re-check opt-out and quiet hours just before sending | approved |
+| **B6-8** | Look and buying: theme check, mock-ups, home / collection / product pages, checkout; traffic: Google Shopping, Facebook and Instagram shop, SEO, WhatsApp order updates; a daily visitors / carts / orders dashboard | after C |
+| **Rest of C** | Shopify housekeeping (5 unused notifications after a safety check, remove the dead old key, prepare the next API version); recovery tools for rare stuck states; audit leftovers (section 4y) | later |
+| **F** | Features planned in June but never built - owner picks: consignment, spare parts, cannibalisation report, ageing auto-clearance, network-restricted attendance, own-use ledger, B2B bulk orders, lookbooks, profile merge, benefits-expiry campaign; screens missing for endless aisle, repair portal, bank reconciliation, rebate tracker, landed cost | owner to choose |
+| **G** | This file kept current; Wave 6 tidy-up; ~40 stale work folders; 994 advisory type warnings | last |
+
+**Owner and team tasks (not code):** stock for the best sellers through purchasing (nothing sells online until it is in); the accountant's "Round Off" ledger in each Tally company and one real supplier return -> credit note -> payment -> Tally import; label printer and scanner on a tablet in a shop; a backup restore drill; staff sign-in by approved devices (built, off - arm after the web address is final); WhatsApp template approval (DLT) before messaging is switched on.
+
+**For the CA:** the new invoice-number series starting mid-year; services bills whose credit cannot be claimed (section 17(5)); GST added to stock cost when credit is not claimed on PO bills; place of supply, credit-note timing, 2B matching, reverse charge on unregistered purchases, GSTIN-to-GSTIN transfers, set-off; hearing-aid GST.
+
+## 4y. Audit sweep 2026-10-18 - confirmed open items (all 295 documents, 2,801 items reconciled against main)
+
+Independently verified with tests on the real code. Items in step A above are not repeated.
+
+| Item | What is wrong | Plan |
+|---|---|---|
+| GST table on the Finance dashboard | Input credit taken from purchase-order tax, pooled per company, so "net payable" can be wrong | step A (with the payments fix) or remove the wrong columns |
+| Unclaimable GST into stock cost | Only walk-in bills add it; PO bills booked with credit off do not | CA first |
+| Services bills (food, vehicles) | No switch to mark section 17(5) credit as not claimable on the Cash Flow bill | CA first |
+| Recovery tools | A rejected-goods return that crashed mid-issue, and a supplier-credit confirmation stuck mid-save, have no clean-up tool | rest of C |
+| Time-zone leftovers | Three reports, AP date fallback and manual prescription dates strip the zone | rest of C |
+| Stock-cost edge cases | Old stock with no recorded cost; partial/unprovable bill allocations; a fail-soft valuation write | rest of C |
+| Category fields | A few contact-lens fields differ between screen and server | rest of C |
+| Pending POs | Legacy "partly received" status not counted | rest of C |
+| Free items | A free-of-charge purchase line cannot be entered at Rs 0 | rest of C |
+| Shopify | Products with more than 100 sizes; a hand-uploaded Shopify photo can outrank IMS photo 1; collection/menu/photo creates have no automatic lookup after a lost reply | rest of C |
+| Not a problem (tested) | A cashier cannot approve their own big discount; payroll "lock" marks paid by design; GST "blocked credit" flag is never set; the purchase-recommendations report is protected; the old setup script is not used by any deploy | closed |
+
+The full table is kept with the handover (`audit_master_1018.csv`).
+
 ## 5. Waiting on the owner
 
 | Question | Why it matters |
@@ -421,10 +484,10 @@ What the five page-split waves left, measured 2026-09-27 (owner page "Wave Six")
 | **Apply-for-leave has no screen** — nobody in the company can request leave | **BUILT — MERGED #1088**: apply form on `/my-work` (open to every operational role), feeding the approve/reject chain that was already running |
 | **Thermal or A4** receipts at the counter? | **RULED 09-03: A4 + WhatsApp, not thermal** — this unblocked the POS switchover; the thermal renderers went in #1095 |
 | Is *"every bill needs a customer"* deliberate? | **RULED 09-03: yes** — no anonymous walk-in sale, no amount threshold; the till already assumed it |
-| **GST summary: own shop or the whole company?** (purchases-report branch #1184, 2026-10-12) — Finance > GST summary now shows a store manager or accountant who holds a shop that shop's sales tax (admins still see every shop). Before, every role read the whole company's figure. The 2026-10-12 rulings (R1-R9) do not cover this | **OPEN 2026-10-12.** Built as own-shop (the one shop rule) for the accountant. Managers: on draft #1184 (not merged) they see neither the GST summary nor GSTR-3B at all (owner ruling 2026-10-07, R1: both carry supplier-bill input tax; admins + accountant only). The owner was asked 2026-10-13 whether managers should instead keep the sales side (A/B, no answer yet); the stricter R1 stands until he says otherwise |
-| **Org-wide finance views for an accountant who holds a shop** — the Tally sales JV, B2B invoice book, GST cross-check and bank statements read every shop for any accountant; only a login with NO shop is refused (R4). (The per-entity GST reconciliation is no longer one of them: on draft #1184 (not merged) it reads the accountant's own shop, the same scope as the GST summary cards above it.) | **OPEN 2026-10-12.** Like R8 (TDS / rebates / scorecard org-wide): keep these four org-wide, or narrow them to the accountant's own shop? |
-| **A login with no shop at the till** — `GET /orders` still lists every shop's sales for a non-admin login with no shop (naming a shop is already a 403). Outside the till, the reads #1184 touched give such a login no shop (Purchase, Finance, GST, stock, reports, HR, tasks, workshop, the Hub widgets). Routers #1184 did not touch (analytics v2, marketing, campaigns) still keep their own copy of the shop rule and are not checked for a login with no shop | **OPEN 2026-10-12.** POS router: ask-first, not changed on #1184 |
-| **"No shop picked" means two things for an admin** — Purchase and Finance read every shop (with a shop filter); reports, HR, tasks, workshop and inventory read the admin's topbar shop (`store_in_view`) | **OPEN 2026-10-12.** One rule each today; unifying them changes what an admin sees on those screens |
+| **GST summary: own shop or the whole company?** (purchases-report branch #1184, 2026-10-12) — Finance > GST summary now shows a store manager or accountant who holds a shop that shop's sales tax (admins still see every shop). Before, every role read the whole company's figure. The 2026-10-12 rulings (R1-R9) do not cover this | **DECIDED 2026-10-18:** the stricter R1 of 2026-10-07 stands (managers: no GST summary, no GSTR-3B; admins + accountant only). On main the GSTR-3B menu entry is accounts-only; the server gate is re-checked in step A. Accountants: own shop. |
+| **Org-wide finance views for an accountant who holds a shop** — the Tally sales JV, B2B invoice book, GST cross-check and bank statements read every shop for any accountant; only a login with NO shop is refused (R4). (The per-entity GST reconciliation is no longer one of them: on draft #1184 (not merged) it reads the accountant's own shop, the same scope as the GST summary cards above it.) | **DECIDED 2026-10-18: ONLY THEIR SHOP** on the Tally sales JV, B2B invoice book, GST cross-check and bank statements; company-wide needs an admin. In build (section 4x step A). |
+| **A login with no shop at the till** — `GET /orders` still lists every shop's sales for a non-admin login with no shop (naming a shop is already a 403). Outside the till, the reads #1184 touched give such a login no shop (Purchase, Finance, GST, stock, reports, HR, tasks, workshop, the Hub widgets). Routers #1184 did not touch (analytics v2, marketing, campaigns) still keep their own copy of the shop rule and are not checked for a login with no shop | **DECIDED 2026-10-18: FIX IT** (owner approved this till change): a non-admin login with no shop sees no sales. In build (section 4x step A). |
+| **"No shop picked" means two things for an admin** — Purchase and Finance read every shop (with a shop filter); reports, HR, tasks, workshop and inventory read the admin's topbar shop (`store_in_view`) | **DECIDED 2026-10-18: ALL SHOPS WHEN NONE PICKED** on every screen, with a shop filter. In build (section 4x step A). |
 
 ---
 
