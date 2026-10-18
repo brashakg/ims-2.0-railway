@@ -1361,7 +1361,11 @@ def _mark_online_dirty(product: Dict) -> None:
     # "The count was the lie" is this change's whole thesis; do not reintroduce
     # it one card over.
     ecom.setdefault("status", "DRAFT")
-    ecom["locally_modified"] = True
+    # Flag + a fresh edit revision (SF-04): a push already holding the older
+    # payload can then never take this edit off the queue.
+    from api.services.catalog_ecom import dirty_marks
+
+    ecom.update(dirty_marks())
 
 
 def _save_catalog_product(product: Dict, *, mark_dirty: bool = True) -> None:

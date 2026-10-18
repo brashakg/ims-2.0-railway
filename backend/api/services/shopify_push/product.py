@@ -25,7 +25,16 @@ from ._shared import (
     price_on_update_enabled,
     product_push_refusal,
 )
-from .transport import _graphql, _user_errors
+from ..catalog_ecom import EDIT_REV
+from .transport import ShopifyOutcomeUnknown, _graphql, _user_errors
+from .create_claim import (
+    CREATE_ID_NOT_SAVED,
+    CREATE_UNCERTAIN,
+    identity_metafield,
+    resolve_held,
+    settle_claim,
+    take_claim,
+)
 from .queries import _PRODUCT_CREATE, _PRODUCT_UPDATE
 from .product_input import (
     _has_publishable_price,
@@ -250,12 +259,81 @@ async def push_product(
     # goes out with the publish, once everything is confirmed. (A create is on
     # no sales channel until publishablePublish.)
     hold_active = bool(existing_gid) and not was_live and payload.get("status") == "ACTIVE"
+    send_input = {**payload, "status": "DRAFT"} if hold_active else payload
+    # The edit revision this press is sending (SF-04): the write-backs clear
+    # the queue flag only while the row still carries it.
+    sent_rev = ecom.get(EDIT_REV)
+    # THE FIRST-PUBLISH CLAIM (SF-02, create_claim.py): one create per
+    # product, ever, unless Shopify is shown not to have it.
+    claim = None
+    if not existing_gid and pid:
+        got = None
+        try:
+            verdict, claim = take_claim(db, pid)
+            if verdict == "held":
+                verdict, got = await resolve_held(db, pid, claim)
+        except Exception as exc:  # noqa: BLE001 -- no claim, no create
+            return PushResult(
+                mode=MODE_LIVE,
+                entity="product",
+                action=action,
+                target_id=pid,
+                ok=False,
+                payload=payload,
+                error=f"could not record the send before creating it ({exc}) -- nothing was sent",
+            )
+        adopted = got if verdict == "adopted" else None
+        if verdict == "refuse":
+            return PushResult(
+                mode=MODE_LIVE,
+                entity="product",
+                action=action,
+                target_id=pid,
+                ok=False,
+                payload=payload,
+                code=got[0],
+                error=got[1],
+            )
+        if verdict == "send" and got is not None:
+            claim = got  # a settled claim this press took over
+        if verdict in ("has_id", "adopted"):
+            # The listing exists (another press made it, or an earlier send
+            # whose answer was lost): carry on as an UPDATE of that listing.
+            fresh = db["catalog_products"].find_one({"id": pid}) or product
+            res = await push_product(db, fresh, variants, blocked=blocked)
+            if adopted and adopted[1] > 1:
+                res.error = (
+                    (res.error + " -- ALSO: ") if res.error else ""
+                ) + (
+                    f"Shopify holds {adopted[1]} copies of this product from earlier "
+                    "sends; IMS linked the first -- delete the others in Shopify admin"
+                )
+            return res
+        send_input = {**send_input, "metafields": [identity_metafield(pid)]}
     try:
-        body = await _graphql(
-            db, query, {"input": {**payload, "status": "DRAFT"} if hold_active else payload}
-        )
+        try:
+            body = await _graphql(db, query, {"input": send_input})
+        except ShopifyOutcomeUnknown as exc:
+            settle_claim(db, pid, claim, uncertain=True)
+            return PushResult(
+                mode=MODE_LIVE,
+                entity="product",
+                action=action,
+                target_id=pid,
+                ok=False,
+                payload=payload,
+                code=CREATE_UNCERTAIN,
+                error=(
+                    f"{exc}. The product stays queued; the next press looks for "
+                    "it on Shopify first and links it if it is there"
+                ),
+            )
+        except Exception:
+            settle_claim(db, pid, claim, uncertain=False)
+            raise
         err = _user_errors(body, field_name)
         if err:
+            settle_claim(db, pid, claim, uncertain=False)
             return PushResult(
                 mode=MODE_LIVE,
                 entity="product",
@@ -268,6 +346,7 @@ async def push_product(
         prod = ((body.get("data") or {}).get(field_name) or {}).get("product") or {}
         new_gid = prod.get("id") or existing_gid
         if not new_gid:
+            settle_claim(db, pid, claim, uncertain=False)
             # A 200 with no errors, no userErrors AND no product id. Outside
             # Shopify's documented contract, but everything downstream is gated
             # on the gid -- metafields, variant seeding, the photo attach and
@@ -291,7 +370,27 @@ async def push_product(
                 ),
             )
         if new_gid and pid:
-            _writeback_product(db, pid, new_gid)
+            saved = _writeback_product(
+                db, pid, new_gid, sent_rev=sent_rev, clear_claim=claim is not None
+            )
+            if claim and not saved:
+                # Made on Shopify, link not saved: the claim stays, so the next
+                # press finds this listing and links it -- never a second one.
+                return PushResult(
+                    mode=MODE_LIVE,
+                    entity="product",
+                    action=action,
+                    target_id=pid,
+                    ok=False,
+                    shopify_id=new_gid,
+                    payload=payload,
+                    code=CREATE_ID_NOT_SAVED,
+                    error=(
+                        "created on Shopify, but IMS could not save the link to it. "
+                        "Nothing more was sent; the next press finds this listing on "
+                        "Shopify and links it instead of creating another"
+                    ),
+                )
         # TAGS, RIGHT AFTER THE WRITE. The update sent no `tags`, so the
         # response's tag list is what Shopify holds now; the pass adds /
         # removes only the tags IMS itself sent and records the ledger.
@@ -341,6 +440,7 @@ async def push_product(
                     db,
                     pid,
                     new_gid,
+                    sent_rev=sent_rev,
                     variant_gid=seed_summary["default_variant_gid"],
                     # Only ever set for the product-level pseudo-variant (the
                     # product has NO catalog_variants rows) -- the resolver's
@@ -499,7 +599,7 @@ async def push_product(
                     # IMS must agree with the storefront (see _writeback_product
                     # `status`): the DRAFT/PUBLISHED cards and every
                     # storefront-visibility helper read ecom.status.
-                    _writeback_product(db, pid, new_gid, status="PUBLISHED")
+                    _writeback_product(db, pid, new_gid, status="PUBLISHED", sent_rev=sent_rev)
             elif not photo_on_shopify:
                 # The attach is fail-soft, so a media error must not leave the
                 # product VISIBLE without its photograph -- that is exactly the
@@ -793,7 +893,10 @@ async def push_product_delist(db, product: Dict[str, Any]) -> PushResult:
                 error=err,
             )
         if pid:
-            _writeback_product(db, pid, existing_gid, status="DRAFT")
+            _writeback_product(
+                db, pid, existing_gid, status="DRAFT",
+                sent_rev=(product.get("ecom") or {}).get(EDIT_REV),
+            )
         return PushResult(
             mode=MODE_LIVE,
             entity="product",

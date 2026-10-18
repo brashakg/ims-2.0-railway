@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional
 import asyncio
 import httpx
 import random
+import re
 
 from agents.nexus_providers import SHOPIFY_API_VERSION
 from api.services.shopify_auth import resolve_shopify_credentials
@@ -33,6 +34,37 @@ from ._shared import PROVIDER_TIMEOUT, logger
 _MAX_RETRIES = 4
 _RETRY_BASE_DELAY = 1.0  # seconds; doubles per attempt
 _RETRY_MAX_DELAY = 30.0  # cap, also applied to a vendor Retry-After
+
+
+class ShopifyOutcomeUnknown(ValueError):
+    """A CREATE mutation was sent and Shopify's answer never arrived (a read
+    timeout, a 5xx, a dropped connection): it may or may not have made the
+    thing. Never repeated automatically (audit SF-02) -- the caller must look
+    on Shopify before any retry. A ValueError so every existing fail-soft
+    handler still catches it."""
+
+
+# A mutation whose field creates something (productCreate, collectionCreate,
+# menuCreate, productCreateMedia, productVariantsBulkCreate,
+# fulfillmentCreateV2, webhookSubscriptionCreate, ...). Repeating one after an
+# unknown outcome can make a second copy. Reads and idempotent updates/sets
+# keep the retry.
+_CREATE_FIELD = re.compile(r"\b[a-z]\w*Create\w*\s*\(")
+
+# Failures that prove the request never reached Shopify -- safe to resend.
+_NOT_SENT = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+
+
+def _is_create_mutation(query: str) -> bool:
+    q = (query or "").lstrip()
+    return q.startswith("mutation") and bool(_CREATE_FIELD.search(q))
+
+
+def _outcome_unknown(what: str) -> ShopifyOutcomeUnknown:
+    return ShopifyOutcomeUnknown(
+        f"Shopify did not answer ({what}), so IMS cannot tell whether it was "
+        "created. It was NOT sent again -- check Shopify before retrying"
+    )
 
 
 def _is_throttled_body(body: Any) -> bool:
@@ -84,6 +116,11 @@ async def _graphql(db, query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
     THROTTLED / 5xx / timeout with exponential backoff (+ Retry-After when
     present). Non-retryable 4xx raises immediately.
 
+    EXCEPT A CREATE (audit SF-02): a create mutation whose request was sent but
+    whose answer is unknown (read/write timeout, 5xx, dropped connection) is
+    NEVER repeated -- ShopifyOutcomeUnknown is raised instead. 429/THROTTLED
+    (Shopify did not run it) and a failed connect (never sent) still retry.
+
     Returns the raw GraphQL response dict ({"data": ...} and/or {"errors": ...}).
     Raises httpx/ValueError on a transport-level failure; the caller catches and
     converts to a fail-soft PushResult.
@@ -102,12 +139,18 @@ async def _graphql(db, query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
         "content-type": "application/json",
     }
     payload = {"query": query, "variables": variables}
+    create = _is_create_mutation(query)
 
     last_error = "unknown"
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             resp = await _post_once(url, headers, payload)
-        except httpx.TimeoutException as e:
+        except httpx.TransportError as e:
+            if create and not isinstance(e, _NOT_SENT):
+                # SF-02: sent, answer lost -- never a blind second create.
+                raise _outcome_unknown(f"{type(e).__name__}: {e}") from e
+            if not isinstance(e, httpx.TimeoutException):
+                raise
             last_error = f"timeout: {e}"
             if attempt >= _MAX_RETRIES:
                 raise ValueError(
@@ -123,7 +166,12 @@ async def _graphql(db, query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
 
         status = resp.status_code
         if status in (200, 201):
-            body = resp.json() or {}
+            try:
+                body = resp.json() or {}
+            except ValueError:
+                if create:
+                    raise _outcome_unknown("an unreadable answer")
+                raise
             if _is_throttled_body(body):
                 last_error = "graphql THROTTLED"
                 if attempt >= _MAX_RETRIES:
@@ -141,6 +189,9 @@ async def _graphql(db, query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
                 continue
             return body
 
+        if status >= 500 and create:
+            # A 5xx after the request arrived: it may have committed.
+            raise _outcome_unknown(f"status {status}")
         if status == 429 or status >= 500:
             last_error = f"status {status}: {resp.text[:200]}"
             if attempt >= _MAX_RETRIES:

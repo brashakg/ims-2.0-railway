@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from ..catalog_ecom import EDIT_REV, update_ecom
 from ._shared import logger
 from .transport import _now
 
@@ -25,9 +26,23 @@ def _writeback_product(
     inventory_item_gid: Optional[str] = None,
     status: Optional[str] = None,
     tags_sent: Optional[List[str]] = None,
-) -> None:
+    *,
+    sent_rev: Optional[str] = None,
+    clear_claim: bool = False,
+) -> bool:
     """Persist ecom.shopify_product_id (+ stamps) on the catalog_products doc and
-    clear the dirty flag, for idempotent re-push.
+    clear the dirty flag, for idempotent re-push. Returns True when written.
+
+    THE DIRTY FLAG IS CLEARED ONLY FOR WHAT WAS SENT (audit SF-04).
+    `sent_rev` is the ecom.edit_rev of the push's payload snapshot. Every
+    queueing write stamps a fresh one (catalog_ecom.dirty_marks), so a
+    catalogue edit saved after the snapshot leaves a different revision here
+    and the flag stays True: the newer edit goes out on the next run. The
+    whole write is a compare-and-set (catalog_ecom.update_ecom), so a sibling
+    ecom field written meanwhile is never lost either.
+
+    `clear_claim` drops ecom.create_claim (the durable first-publish claim,
+    SF-02) in the SAME write that stores the Shopify id.
 
     `tags_sent` (optional) records ecom.shopify_tags_sent -- the exact tag list
     IMS last put on the Shopify product (sync audit gap #4). It is the
@@ -64,20 +79,15 @@ def _writeback_product(
     was written "PUBLISHED" in ZERO -- so IMS said DRAFT about a product that was
     live. Set-only: None leaves the stored value alone.
 
-    We READ-MERGE-WRITE the whole `ecom` sub-doc (read the doc, mutate the ecom
-    dict in Python, $set ecom back) rather than `$set {"ecom.shopify_product_id":
-    ...}`. Both are correct on real Mongo, but the merge-write also works on the
-    in-memory MockCollection (which doesn't model dot-notation $set) AND keeps the
-    sibling ecom fields intact (status/handle/seo) because the merge is explicit.
-    Fail-soft: any error is logged, never raised (the Shopify write already
+    The whole `ecom` sub-doc is merged and written back (the in-memory
+    MockCollection does not model dot-notation $set), but only through the
+    compare-and-set above, never unconditionally. Fail-soft: any error is
+    logged and returns False, never raised (the Shopify write already
     succeeded)."""
-    try:
-        coll = db["catalog_products"]
-        doc = coll.find_one({"id": product_id})
-        if doc is None:
-            return
-        ecom = dict(doc.get("ecom") or {})
+    def _merge(ecom: Dict[str, Any]) -> Dict[str, Any]:
         ecom["shopify_product_id"] = shopify_id
+        if clear_claim:
+            ecom.pop("create_claim", None)
         if variant_gid:
             ecom["shopify_variant_id"] = variant_gid
         if inventory_item_gid:
@@ -102,10 +112,15 @@ def _writeback_product(
                 for key in ("online_state", "delisted_at", "delist_reason", "delist_error"):
                     ecom.pop(key, None)
         ecom["last_pushed_at"] = _now()
-        ecom["locally_modified"] = False
-        coll.update_one({"id": product_id}, {"$set": {"ecom": ecom}})
+        if ecom.get(EDIT_REV) == sent_rev:
+            ecom["locally_modified"] = False
+        return ecom
+
+    try:
+        return update_ecom(db, product_id, _merge) is not None
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[SHOPIFY_PUSH] product write-back failed {product_id}: {e}")
+        return False
 
 
 def _requeue_unpublished(db, product_id: str) -> None:
@@ -123,16 +138,10 @@ def _requeue_unpublished(db, product_id: str) -> None:
     drains the queue (the control test), and the batch cap bounds how often a
     stubbornly-unpublishable row can be retried per press.
 
-    Read-merge-write of the whole ecom sub-doc (the _writeback_product idiom).
+    Compare-and-set of the ecom sub-doc (catalog_ecom.update_ecom).
     Fail-soft: any error is logged, never raised."""
     try:
-        coll = db["catalog_products"]
-        doc = coll.find_one({"id": product_id})
-        if doc is None:
-            return
-        ecom = dict(doc.get("ecom") or {})
-        ecom["locally_modified"] = True
-        coll.update_one({"id": product_id}, {"$set": {"ecom": ecom}})
+        update_ecom(db, product_id, lambda ecom: {**ecom, "locally_modified": True})
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[SHOPIFY_PUSH] re-queue failed {product_id}: {e}")
 

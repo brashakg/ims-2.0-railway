@@ -33,6 +33,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from .queries import _TAGS_ADD, _TAGS_REMOVE
+from ..catalog_ecom import EDIT_REV
 from .transport import _graphql, _user_errors
 from .writeback import _writeback_product
 
@@ -132,5 +133,8 @@ async def sync_product_tags(
                 return summary
             summary[counter] = len(plan[key])
     if pid:
-        _writeback_product(db, pid, product_gid, tags_sent=_norm(ims_tags))
+        _writeback_product(
+            db, pid, product_gid, tags_sent=_norm(ims_tags),
+            sent_rev=(product.get("ecom") or {}).get(EDIT_REV),
+        )
     return summary
