@@ -35,7 +35,7 @@ class PayoutSnapshotRepository(BaseRepository):
     def _generate_snapshot_id(
         self, store_id: str, year: int, month: int, status: str
     ) -> str:
-        # LOCKED snapshots get the canonical PAY-{STORE3}-{YYYY-MM} id
+        # LOCKED snapshots get the canonical PAY-{STORE_CODE}-{YYYY-MM} id
         # so the human refs in audit logs are stable. DRAFTs get a
         # unique suffix because multiple DRAFTs may coexist.
         base = f"PAY-{self._store_code(store_id)}-{year:04d}-{month:02d}"

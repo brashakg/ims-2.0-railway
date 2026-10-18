@@ -330,14 +330,18 @@ def test_payout_and_points_ids_print_punes_code(world):
     from database.repositories.payout_snapshot_repository import PayoutSnapshotRepository
     from database.repositories.points_log_repository import PointsLogRepository
 
+    # The FULL code: two online shops never share one (both cut to ONL).
+    world.stores.insert_many([{"store_id": "BV-ONLINE-01", "store_code": "BV-ONLINE-01"},
+                              {"store_id": "WO-ONLINE-01", "store_code": "WO-ONLINE-01"}])
     for repo in (PayoutSnapshotRepository(world.payout_snapshots),
                  PointsLogRepository(world.points_log)):
-        assert repo._store_code(PUNE) == "PUN"
-        assert repo._store_code(DHN) == "DHN"
+        assert repo._store_code(PUNE) == PUNE_CODE
+        assert repo._store_code(DHN) == DHN
+        assert repo._store_code("BV-ONLINE-01") != repo._store_code("WO-ONLINE-01")
     assert PayoutSnapshotRepository(world.payout_snapshots)._generate_snapshot_id(
-        PUNE, 2026, 10, "LOCKED") == "PAY-PUN-2026-10"
+        PUNE, 2026, 10, "LOCKED") == "PAY-BV-PUN-01-2026-10"
     assert PointsLogRepository(world.points_log)._generate_log_id(
-        PUNE, "2026-10-18", "USER-AB12").startswith("PL-PUN-2026-10-18-AB12-")
+        PUNE, "2026-10-18", "USER-AB12").startswith("PL-BV-PUN-01-2026-10-18-AB12-")
 
 
 def test_audit_log_filter_finds_pune_by_its_id_or_its_code(client, world):
@@ -374,3 +378,249 @@ def test_trace_skips_every_query_for_a_login_with_no_shop(client, world, monkeyp
     # A shop login still traces its own unit.
     r = _get(client, _user("STORE_MANAGER", [BOK]), f"/api/v1/inventory/barcode/{unit}/trace")
     assert r.json()["stock_unit"]["store_id"] == BOK and touched
+
+
+# ===========================================================================
+# Review round 1 (coordinator, 2026-10-19)
+# ===========================================================================
+
+# -- 1. Every order list, not only GET /orders: a login with no shop sees none
+
+_ORDER_LISTS = [
+    ("/api/v1/orders/pending/delivery", "orders"),
+    ("/api/v1/orders/unpaid/list", "orders"),
+    ("/api/v1/orders/overdue/list", "orders"),
+    ("/api/v1/orders/search?q=INV", "orders"),
+    ("/api/v1/orders/status/counts", "statusCounts"),
+]
+
+
+@pytest.fixture
+def open_orders(world):
+    """One open, part-paid, overdue order per Jharkhand shop: every list holds it."""
+    for code in (DHN, BOK):
+        world.orders.insert_one({
+            "order_id": f"OPEN-{code}", "order_number": f"INV-OPEN-{code}",
+            "store_id": code, "status": "READY", "payment_status": "PARTIAL",
+            "balance_due": 100.0, "expected_delivery": "2026-01-01",
+            "created_at": datetime.now(), "grand_total": 500.0,
+        })
+    return world
+
+
+@pytest.mark.parametrize("path,key", _ORDER_LISTS)
+@pytest.mark.parametrize("role", ("SALES_STAFF", "CASHIER"))
+def test_every_order_list_is_empty_for_a_login_with_no_shop(client, open_orders, path, key, role):
+    r = _get(client, _user(role), path)
+    assert r.status_code == 200, (path, r.text[:300])
+    assert not r.json()[key], (path, r.json()[key])
+    # The same list still answers a shop login with its own shop.
+    r = _get(client, _user(role, [BOK]), path)
+    assert r.status_code == 200 and r.json()[key], (path, r.text[:300])
+    assert DHN not in r.text
+
+
+def test_crm_customer_lists_hold_a_login_with_no_shop(client, world, monkeypatch):
+    from api.routers import crm
+
+    customers = [{"customer_id": f"C-{c}", "store_ids": [c], "primary_store_id": c}
+                 for c in (DHN, BOK)]
+    seen = []
+
+    class _Db:
+        def query_customers_by_store(self, store_id):
+            seen.append(store_id)
+            return [c for c in customers if store_id in c["store_ids"]]
+
+        def query_all_customers(self):
+            seen.append("ALL")
+            return list(customers)
+
+    monkeypatch.setattr(crm, "db", _Db())
+    for path in ("/api/v1/crm/customers/segment/rfm", "/api/v1/crm/customers/churn-risk/list"):
+        seen.clear()
+        r = _get(client, _user("STORE_MANAGER"), path)
+        assert r.status_code == 200, (path, r.text[:300])
+        assert "ALL" not in seen and DHN not in seen and BOK not in seen, (path, seen)
+
+
+def test_promotions_report_holds_a_login_with_no_shop(client, world, monkeypatch):
+    from api.routers.reports import promotions as promo_report
+
+    world.promo_applications.insert_one({
+        "promo_id": "PR-1", "store_id": DHN, "order_id": "O-x",
+        "total_discount_given": 50.0, "applied_at": f"{TODAY}T10:00:00",
+    })
+    monkeypatch.setattr(promo_report, "get_db", lambda: _Conn(world))
+
+    def given(user):
+        r = _get(client, user, "/api/v1/reports/promotions")
+        assert r.status_code == 200, r.text[:300]
+        return r.json()["summary"]["total_discount_given"]
+
+    assert given(_user("STORE_MANAGER")) == 0
+    assert given(_user("STORE_MANAGER", [DHN])) == 50.0
+    assert given(_user("STORE_MANAGER", [BOK])) == 0
+
+
+# -- 2 + 3. The cross-check: the accountant's shops' bills only, and a GSTIN
+#    he shares with other shops is withheld (admin view)
+
+GST_20, GST_27 = "20AAAAA0000A1Z5", "27AAAAA0000A1Z5"
+
+
+@pytest.fixture
+def gst_world(world):
+    """DHN and BOK file on one Jharkhand GSTIN; Pune on its own. One booked
+    bill per Jharkhand shop whose credit no return places (no company)."""
+    world.entities.insert_one({"entity_id": "E1", "name": "BV",
+                               "gstins": [{"gstin": GST_20}, {"gstin": GST_27}]})
+    month = TODAY[:7]
+    for code in (DHN, BOK):
+        world.vendor_bills.insert_one({
+            "bill_id": f"VB-{code}", "bill_number": f"BILL-{code}", "store_id": code,
+            "status": "BOOKED", "tax_amount": 180.0, "invoice_date": f"{month}-01",
+            "vendor_gstin": "20BBBBB0000B1Z5",
+        })
+    return world
+
+
+def _xc(client, user, query=""):
+    r = _get(client, user, "/api/v1/finance/gst/cross-check" + query)
+    assert r.status_code == 200, r.text[:300]
+    return r.json()
+
+
+def test_cross_check_unplaced_credit_is_the_accountants_shop_bills_only(client, gst_world):
+    own = _xc(client, ACCOUNTANT_BOK)["itc_unplaced"]["bill_numbers"]
+    assert own == [f"BILL-{BOK}"], own
+    every = _xc(client, ADMIN_TOPBAR_DHN)["itc_unplaced"]["bill_numbers"]
+    assert set(every) == {f"BILL-{DHN}", f"BILL-{BOK}"}, every
+
+
+def test_a_shared_gstin_withholds_the_returns_input_credit(client, gst_world):
+    body = _xc(client, ACCOUNTANT_BOK)
+    assert body["gstin_note"] and body["store_count"] == 1
+    assert body["summary"]["gst_payable"] is None
+    assert body["gstr3b"]["itc"] is None and body["gstr3b"]["netCash"] is None
+    rows = {c["metric"]: c for c in body["comparisons"]}
+    for metric in ("Input tax credit (ITC)", "Net GST payable (cash)"):
+        assert rows[metric]["status"] == "INFO", rows[metric]
+        assert all(k.startswith("Books") for k in rows[metric]["sources"]), rows[metric]
+    # Holding every shop on the GSTIN: the whole filing, nothing withheld.
+    both = _xc(client, _user("ACCOUNTANT", [BOK, DHN]))
+    assert both["gstin_note"] is None and both["store_count"] == 2
+    assert both["gstr3b"]["itc"] is not None
+    # store_id picks one of his shops; another's is a 403.
+    assert _xc(client, _user("ACCOUNTANT", [BOK, DHN]), f"?store_id={DHN}")["store_id"] == DHN
+    assert _get(client, ACCOUNTANT_BOK, f"/api/v1/finance/gst/cross-check?store_id={DHN}").status_code == 403
+
+
+# -- 10. An accountant's company must be his shop's
+
+def test_an_accountant_naming_another_company_is_refused(client, world):
+    for path in (_JV + "&entity_id=E2", "/api/v1/finance/b2b-invoices?entity_id=E2"):
+        r = _get(client, ACCOUNTANT_BOK, path)
+        assert r.status_code == 403, (path, r.text[:300])
+        assert _get(client, ADMIN_TOPBAR_DHN, path).status_code == 200
+
+
+# -- 4, 5, 9. Every screen of one shop's own (and the escalation write) keeps
+#    the admin's top-bar shop when none is named -- pinned at each call site
+
+_ONE_SHOP_MODULES = (
+    "api.routers.analytics", "api.routers.dashboard_widgets", "api.routers.finance.cash_drawer",
+    "api.routers.inventory.accountability", "api.routers.inventory.stock", "api.routers.lens_stock",
+    "api.routers.reports.analytics", "api.routers.reports.blueprint", "api.routers.reports.customers",
+    "api.routers.reports.day_end", "api.routers.reports.finance_ops", "api.routers.reports.gstr1",
+    "api.routers.reports.purchase", "api.routers.tasks", "api.routers.workshop.lab_stations",
+)
+
+_ONE_SHOP_ROUTES = [
+    ("GET", "/api/v1/analytics/dashboard-summary"),
+    ("GET", "/api/v1/analytics/revenue-trends"),
+    ("GET", "/api/v1/analytics/inventory-intelligence"),
+    ("GET", "/api/v1/analytics/customer-insights"),
+    ("GET", "/api/v1/analytics/enterprise-kpis"),
+    ("GET", "/api/v1/clinical/patient-queue"),
+    ("GET", "/api/v1/analytics/store-target-today"),
+    ("GET", "/api/v1/finance/cash-register/sessions"),
+    ("GET", "/api/v1/inventory/transfer-recommendations"),
+    ("GET", "/api/v1/inventory/stock?product_id=P1"),
+    ("GET", "/api/v1/inventory/units?product_id=P1"),
+    ("GET", "/api/v1/lens-stock/LL1"),
+    ("GET", "/api/v1/reports/walkouts/footfall-audit"),
+    ("GET", "/api/v1/reports/blueprint"),
+    ("GET", "/api/v1/reports/targets"),
+    ("GET", f"/api/v1/reports/day-end-close?date={TODAY}"),
+    ("GET", f"/api/v1/reports/finance/gst?from_date={TODAY}&to_date={TODAY}"),
+    ("GET", f"/api/v1/reports/gstr1?month={TODAY[:7]}"),
+    ("GET", f"/api/v1/reports/gstr1/gstn-json?month={TODAY[:7]}"),
+    ("GET", "/api/v1/reports/purchase/recommendations"),
+    ("GET", "/api/v1/tasks/checklists?type=opening"),
+    ("POST", "/api/v1/tasks/scan/payment-variance"),
+    ("GET", "/api/v1/tasks/sop-checklist?template_id=SOP1"),
+    ("POST", "/api/v1/tasks/auto-escalate-overdue"),
+    ("GET", "/api/v1/workshop/stations"),
+    ("GET", "/api/v1/workshop/stations/EDGING/queue"),
+]
+
+
+@pytest.mark.parametrize("method,path", _ONE_SHOP_ROUTES)
+def test_a_screen_of_one_shops_own_reads_the_admins_topbar_shop(client, world, monkeypatch, method, path):
+    import importlib
+
+    from api import dependencies as deps
+
+    world.sop_templates.insert_one({"template_id": "SOP1", "title": "Open", "steps": []})
+    got = []
+
+    def _spy(store_id, current_user, **kw):
+        shop = deps.store_in_view(store_id, current_user, **kw)
+        got.append(shop)
+        return shop
+
+    for name in _ONE_SHOP_MODULES:
+        monkeypatch.setattr(importlib.import_module(name), "store_in_view", _spy)
+    # The SOP template the checklist route reads before the shop.
+    monkeypatch.setattr(importlib.import_module("api.routers.tasks"), "get_db", lambda: _Conn(world))
+    try:
+        client.request(method, path, headers=_hdr(_user("SUPERADMIN", [DHN])))
+    except Exception:  # noqa: BLE001 -- the shop is decided before any later failure
+        pass
+    # His top-bar shop -- never every shop, and never the store-001 fallback.
+    assert got and got[0] == DHN, (path, got)
+
+
+# -- 12. The admin's all-shops dashboard counts every order, not the last 500
+
+def test_all_shops_dashboard_counts_every_order(client, world):
+    world.orders.insert_many([
+        {"order_id": f"BULK-{i}", "store_id": BOK, "status": "DELIVERED",
+         "grand_total": 1.0, "created_at": datetime.now()} for i in range(520)
+    ])
+    r = _get(client, _user("ADMIN"), "/api/v1/reports/dashboard")
+    assert r.status_code == 200, r.text[:300]
+    assert r.json()["totalSales"] == pytest.approx(520 + 3 * 1050.0), r.json()
+
+
+# -- 13. A stores read that fails refuses the number (never the UUID series)
+
+def test_numbering_refuses_when_the_shop_cannot_be_read(monkeypatch):
+    from fastapi import HTTPException as _HTTP
+
+    from api.routers.vendors import numbering
+
+    class _Stores:
+        def find_one(self, *a, **k):
+            raise RuntimeError("stores unreadable")
+
+    class _Broken:
+        def get_collection(self, name):
+            return _Stores()
+
+    monkeypatch.setattr(numbering, "_get_db", lambda: _Broken())
+    for mint in (numbering.generate_po_number, numbering.generate_grn_number):
+        with pytest.raises(_HTTP) as err:
+            mint(PUNE)
+        assert err.value.status_code == 503

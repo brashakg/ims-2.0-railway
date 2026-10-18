@@ -410,7 +410,7 @@ async def list_b2b_invoices(
 
     Accountant material -- ADMIN / ACCOUNTANT / SUPERADMIN only; an
     accountant reads his own shop's book (owner 2026-10-18)."""
-    store_id = _require_org_finance(current_user, store_id)
+    store_id = _require_org_finance(current_user, store_id, entity_id)
     db = _get_db()
     rows = _b2b_invoices(
         db,
@@ -628,7 +628,7 @@ async def get_tally_sales_jv(
     # only (owner decision 2026-06-16); company-wide needs an admin, an
     # accountant exports his own shop's (owner 2026-10-18). Mirror of the
     # tender-receipt-jv sibling gate.
-    store_id = _require_org_finance(current_user, store_id)
+    store_id = _require_org_finance(current_user, store_id, entity_id)
     db = _get_db()
     # Never export DRAFT/CANCELLED orders to Tally -- they aren't real sales
     # vouchers. created_at is a BSON datetime so the range is built as datetimes

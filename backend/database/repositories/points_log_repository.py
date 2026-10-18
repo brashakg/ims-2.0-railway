@@ -7,7 +7,7 @@ Append-only points log with controlled soft-delete. The DB-level
 backend/database/connection.py::ensure_indexes.
 
 Design notes (docs/PUNE_INCENTIVE_BUILD_PLAN.md §Module ii):
-  - log_id format: PL-{STORE3}-{YYYY-MM-DD}-{STAFF}-{6HEX}
+  - log_id format: PL-{STORE_CODE}-{YYYY-MM-DD}-{STAFF}-{6HEX}
   - eligibility + eligibility_thresholds_used are SNAPSHOTTED at
     write-time (settings change later doesn't rewrite history)
   - visufit_gate_applied + visufit_usage_pct_mtd are stamped on the

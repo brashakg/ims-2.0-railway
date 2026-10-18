@@ -453,7 +453,7 @@ def test_lock_creates_locked_snapshot(client, auth_headers, patched_payout):
     assert resp.status_code == 201, resp.text
     body = resp.json()
     assert body["status"] == "LOCKED"
-    assert body["snapshot_id"] == "PAY-TES-2026-05"
+    assert body["snapshot_id"] == "PAY-BV-TEST-01-2026-05"
     assert body["locked_by"] == "test-admin-001"
     assert body["paid_at"] is None
     audits = patched_payout["audit_repo"].collection.docs

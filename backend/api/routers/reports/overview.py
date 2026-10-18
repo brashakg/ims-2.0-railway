@@ -79,11 +79,14 @@ async def dashboard_stats(
 
     # Fetch orders data
     if order_repo is not None:
-        # Get all orders for store (every shop's when none is in view)
+        # Get all orders for store; every shop's, uncapped (limit=0), when none
+        # is in view. ponytail: reads every order so _order_revenue stays the
+        # ONE revenue rule (an aggregation would be its second copy); move to
+        # a projected aggregation if order volume makes this slow.
         all_orders = (
             order_repo.find_by_store(active_store)
             if active_store
-            else order_repo.find_many({}, sort=[("created_at", -1)], limit=500)
+            else order_repo.find_many({}, limit=0)
         )
 
         # Calculate totals

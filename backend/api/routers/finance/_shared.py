@@ -48,6 +48,7 @@ from ...dependencies import (
     NO_SHOP_DETAIL,
     is_no_shop_scope,
     resolve_store_scope,
+    user_store_scope,
     validate_store_access,
 )
 from ...services import ap_engine, cashflow, itc_reconcile, cash_register, csv_safe
@@ -631,7 +632,9 @@ def _require_finance_admin(current_user: dict) -> None:
         )
 
 
-def _require_org_finance(current_user: dict, store_id: Optional[str] = None) -> Optional[str]:
+def _require_org_finance(
+    current_user: dict, store_id: Optional[str] = None, entity_id: Optional[str] = None
+) -> Optional[str]:
     """THE gate AND the shop of the accounts' book views (the Tally sales JV
     and B2B invoice book, the GST cross-check and its sign-off, the per-entity
     GST reconciliation, bank statements): the accounts roles
@@ -645,11 +648,17 @@ def _require_org_finance(current_user: dict, store_id: Optional[str] = None) -> 
       these views have no empty, one-shop form to hand it -- a blank JV or
       reconciliation would read as a nil period -- so it is refused in the
       owner's words, as GSTR-3B is (reports/gstr3b._return_shop), named shop
-      or not."""
+      or not;
+    - a company (`entity_id`) an accountant names must be his shop's (403):
+      his shop is never relabelled under another company's name."""
     _require_finance_admin(current_user)
     shop = resolve_store_scope(store_id, current_user)
     if is_no_shop_scope(shop):
         raise HTTPException(status_code=403, detail=NO_SHOP_DETAIL)
+    if entity_id and shop and not user_store_scope(current_user)[0]:
+        s2e, _ = _store_maps(_get_db())
+        if s2e.get(shop) != entity_id:
+            raise HTTPException(status_code=403, detail="That company is not your shop's.")
     return shop
 
 

@@ -79,8 +79,11 @@ export interface GstCrossCheck {
     mismatch_count: number;
     mismatch_metrics: string[];
     all_matched: boolean;
-    gst_payable: number;
+    /** null: filed for the whole GSTIN, which other shops share - admin view. */
+    gst_payable: number | null;
   };
+  /** Set when the GSTIN-wide GSTR-3B figures are withheld from this check. */
+  gstin_note?: string | null;
   gstr1: { totalTaxableValue: number; totalTax: number; cgst: number; sgst: number; igst: number };
   gstr3b: {
     outwardTaxableValue: number;

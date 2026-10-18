@@ -11,7 +11,7 @@ statements) apply no shop rule, so they now share ONE gate,
 finance._require_org_finance: the accounts roles AND a login that holds a
 shop. ADMIN / SUPERADMIN pass with or without one; a shop-holding accountant
 reads his own shop only (owner 2026-10-18 -- company-wide needs an admin;
-test_accountant_shop_scope.py).
+test_shop_scope_rules_1018.py).
 """
 import os
 import re

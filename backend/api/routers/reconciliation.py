@@ -263,7 +263,7 @@ async def get_tally_tender_receipt_jv(
     # sibling gate.
     from .finance import _require_org_finance
 
-    store_id = _require_org_finance(current_user, store_id)
+    store_id = _require_org_finance(current_user, store_id, entity_id)
     if not tender_receipt_policy_enabled(store_id=store_id, entity_id=entity_id):
         raise HTTPException(
             status_code=403,

@@ -1468,7 +1468,9 @@ async def auto_escalate_overdue_tasks(
     if repo is None:
         return {"escalated": 0, "message": "Auto-escalation failed"}
 
-    active_store = store_in_view(store_id, current_user)
+    # A write (it escalates and reassigns): the shop it acts on, never the
+    # reserved no-shop id -- an admin's top-bar shop when none is named.
+    active_store = store_in_view(store_id, current_user, writing=True)
 
     # Only the tasks the caller can see: a press from the floor must not
     # escalate (and reassign) a colleague's task it may not even open.

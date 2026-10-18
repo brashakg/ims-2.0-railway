@@ -59,12 +59,9 @@ async def promotions_report(
     if db is None:
         return empty
 
-    # Store-scope: non-HQ callers are pinned to a store they can access.
-    active_store = None
-    if store_id:
-        active_store = store_in_view(store_id, current_user)
-    elif not (set(current_user.get("roles", [])) & {"SUPERADMIN", "ADMIN"}):
-        active_store = current_user.get("active_store_id")
+    # THE shop rule (store_in_view): an admin every shop or the one named;
+    # anyone else their own shop, a login with no shop none (R4).
+    active_store = store_in_view(store_id, current_user)
 
     flt: dict = {}
     if active_store:

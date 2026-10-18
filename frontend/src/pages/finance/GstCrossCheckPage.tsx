@@ -123,7 +123,7 @@ export default function GstCrossCheckPage() {
         entity_id: entityId || undefined,
         note: note || undefined,
         mismatch_count: data.summary.mismatch_count,
-        gst_payable: data.summary.gst_payable,
+        gst_payable: data.summary.gst_payable ?? undefined,
       });
       toast.success('Month marked CHECKED');
       setData({ ...data, signoff: res.signoff });
@@ -224,10 +224,18 @@ export default function GstCrossCheckPage() {
               {data.entity_name} · {data.store_count} store
               {data.store_count === 1 ? '' : 's'} · net payable{' '}
               <span className="font-semibold text-gray-900">
-                {inr(data.summary.gst_payable)}
+                {data.summary.gst_payable == null
+                  ? 'filed for the whole GSTIN - admin view'
+                  : inr(data.summary.gst_payable)}
               </span>
             </div>
           </div>
+
+          {data.gstin_note && (
+            <div className="mb-5 px-4 py-3 rounded-lg border border-gray-200 bg-gray-50 text-sm text-gray-700">
+              {data.gstin_note}
+            </div>
+          )}
 
           {/* Partial-data warning: some stores failed to compute, so the GSTR
               columns are understated. Sign-off is blocked until it clears. */}
