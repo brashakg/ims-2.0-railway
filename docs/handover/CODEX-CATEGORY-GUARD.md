@@ -23,7 +23,8 @@ Validation:
 - Final related run: 292 passed, 10 skipped. Includes the real ordered-draft
   finishing flow that reclassifies a frame to a sunglass, updates tax/identity,
   and releases two held pieces; barcode, catalogue owner rules, HSN/rates and
-  price-edit controls also pass. Skips cover retired import doors.
+  price-edit controls also pass. Ten optional database-backed checks skipped
+  because no local real MongoDB is available; mock-data checks passed.
 - CI-pinned Pylint 3.0.3 errors/fatal check passed. Backend smoke: 1,314 routes.
 - Forced frontend TypeScript and Vite build passed. The pre-existing CSS comment
   warning remains; no frontend source changed.
