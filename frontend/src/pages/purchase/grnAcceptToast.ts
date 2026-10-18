@@ -11,6 +11,8 @@
 
 export interface GrnAcceptResult {
   units_added?: number;
+  quarantined_units?: number;
+  rejection_return_ids?: string[];
   po_status?: string | null;
   grn_status?: string;
   unresolved_lines?: unknown[];
@@ -28,10 +30,14 @@ export function reportGrnAccept(
   fallbackUnits = 0,
 ): void {
   const units = res?.units_added ?? fallbackUnits;
+  const rejected = res?.quarantined_units ?? 0;
+  const quarantineSummary = rejected > 0
+    ? ` · ${rejected} rejected unit(s) quarantined; draft returns for Accounts review`
+    : '';
   if (res?.grn_status === 'PARTIALLY_ACCEPTED') {
     const held = heldLinesSummary(res.unresolved_lines);
     toast.warning(
-      `GRN ${grnNumber}: ${units} unit(s) added to stock; held: ${held.text}.` +
+      `GRN ${grnNumber}: ${units} unit(s) added to stock; held: ${held.text}.` + quarantineSummary +
         (held.catalogue
           ? ' Lines waiting to be catalogued go on the shelf by themselves once their product is finished.'
           : ''),
@@ -40,7 +46,7 @@ export function reportGrnAccept(
     return;
   }
   toast.success(
-    `GRN ${grnNumber} accepted — ${units} units added to stock` +
+    `GRN ${grnNumber} ${rejected > 0 ? 'posted' : 'accepted'} — ${units} units added to stock` + quarantineSummary +
       (res?.po_status ? ` · PO ${res.po_status}` : ''),
   );
 }

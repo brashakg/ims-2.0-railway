@@ -530,12 +530,16 @@ def _receipt_origin_filters(grn: dict, number_unique: bool, **match) -> list:
     ]
 
 
-def _receipt_unit_filters(grn, **match):
+def _receipt_unit_filters(grn, *, include_rejected=False, **match):
     """The units goods receipt `grn_id` minted (narrowed by `match`), WHEREVER
     THEY ARE NOW: a stock transfer rewrites a unit's source_type and source_id
     (transfers._rehome) but never its grn_id, which the mint stamps; a unit
     minted before that stamp has no grn_id and is matched the old way. No unit
     fits both filters."""
+    # Receipt rejection is custody, never an accepted purchase. An accepted
+    # unit quarantined LATER still counts, so status is deliberately irrelevant.
+    if not include_rejected:
+        match["receipt_disposition"] = {"$ne": "REJECTED"}
     number = grn.get("grn_number")
     return _receipt_origin_filters(
         grn, bool(number and _number_is_this_receipts_alone(number)), **match
@@ -595,7 +599,7 @@ def _receipt_price_paid(stock, grn, product_id, db=None) -> Optional[float]:
     return None
 
 
-def _receipt_units(stock_repo, grn: dict, **match) -> int:
+def _receipt_units(stock_repo, grn: dict, *, include_rejected=False, **match) -> int:
     """Units goods receipt `grn` (the receipt doc) put in stock, narrowed by
     `match`, WHEREVER THEY ARE NOW: read by the unit's ORIGIN, never its
     current source (owner 2026-10-01). THE one count of "units already
@@ -617,7 +621,9 @@ def _receipt_units(stock_repo, grn: dict, **match) -> int:
     ponytail: a unit minted before #310 (2026-05-28) AND transferred since
     matches nothing, nor does a pre-grn_id unit of a duplicated number that
     has been transferred; backfill its grn_id if prod ever has one."""
-    return sum(_grn_already_minted(stock_repo, flt) for flt in _receipt_unit_filters(grn, **match))
+    return sum(_grn_already_minted(stock_repo, flt) for flt in _receipt_unit_filters(
+        grn, include_rejected=include_rejected, **match
+    ))
 
 
 def _stock_create_raises_on_duplicate(stock_repo) -> bool:

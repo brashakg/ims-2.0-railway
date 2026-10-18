@@ -618,6 +618,9 @@ async def list_units(
     if grn_id:
         flt["source_type"] = "GRN"
         flt["source_id"] = grn_id
+        # Receipt labels cover accepted goods. Rejected physical custody has
+        # its own quarantine label and must not inflate this receipt list.
+        flt["receipt_disposition"] = {"$ne": "REJECTED"}
     # "In the shop" (the only units a label is for) is the ONE physical rule,
     # item_events.on_hand_match / is_on_hand with include_reserved=True: on the
     # shelf or reserved for an order. The ledger's "N units" (stock + reserved)

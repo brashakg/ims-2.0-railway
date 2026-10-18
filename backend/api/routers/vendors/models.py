@@ -1,5 +1,7 @@
 """Request models for vendors, purchase orders and goods receipts."""
 
+from typing import Literal
+
 from ._shared import (
     BaseModel,
     Field,
@@ -216,6 +218,9 @@ class GRNItemCreate(BaseModel):
     accepted_qty: int = Field(..., ge=0)
     rejected_qty: int = Field(0, ge=0)
     rejection_reason: Optional[str] = None
+    # Older pending receipts have no choice; their return remains a draft
+    # until a manager explicitly chooses credit or replacement.
+    rejection_disposition: Optional[Literal["credit_note", "replacement"]] = None
     # Ruling 14 -- THE TALLY TICK. The receiver ticks each line to say "I have
     # counted this one against what was ordered". Defaults to False so the tick
     # is a real act: a clerk who touches nothing can no longer post a perfect

@@ -523,6 +523,7 @@ export interface StockMovementsResponse {
 }
 
 export interface QuarantineUnit {
+  receipt_disposition?: 'REJECTED';
   stock_id: string;
   product_id?: string;
   product_name?: string;
@@ -960,6 +961,7 @@ export const vendorsApi = {
       accepted_qty: number;
       rejected_qty?: number;
       rejection_reason?: string;
+      rejection_disposition?: 'credit_note' | 'replacement' | null;
       // Ruling 14: the receiver's per-line tally tick. A PO-backed receipt is
       // refused (422 LINES_NOT_TALLIED) until every line carries it.
       tallied?: boolean;
