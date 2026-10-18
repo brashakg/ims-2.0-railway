@@ -1,5 +1,7 @@
 """Defective quarantine (F21 -- the E3-shim)."""
 
+from uuid import uuid4
+
 from ._shared import (
     Depends,
     Dict,
@@ -44,6 +46,33 @@ from ...services.cost_mask import mask_cost
 # transition writes ONE hash-chained audit row via AuditRepository.create (never
 # append_audit_entry directly) and dispatches a fail-soft stock.quarantined
 # event. Standalone Mongo: every write is a single-document op (no transactions).
+
+
+def _quarantine_snapshot(unit: Dict) -> Dict:
+    """Only change the unit version the caller checked and was allowed to see.
+
+    Keep raw status spellings so existing blank/null/padded legacy rows retain
+    their eligibility. Mongo's null match also accepts an absent legacy field.
+    The generation and ledger sequence distinguish a new quarantine cycle from
+    one a stale lift read, even when its status is QUARANTINED again.
+    """
+    return {
+        field: unit.get(field)
+        for field in (
+            "status", "store_id", "updated_at", "quarantine_at",
+            "quarantine_generation", "last_event_seq",
+        )
+    }
+
+
+def _stock_changed() -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": "stock_changed",
+            "message": "Stock unit changed while this request was being processed. Refresh and try again.",
+        },
+    )
 
 
 def _now_ist():
@@ -152,6 +181,9 @@ async def quarantine_stock_unit(
 
     update = {
         "status": STOCK_STATUS_QUARANTINED,
+        # Mongo timestamps have millisecond precision; a unique generation
+        # prevents a stale lift releasing a same-tick replacement quarantine.
+        "quarantine_generation": uuid4().hex,
         "quarantine_reason": reason,
         "quarantine_at": now,
         "quarantine_by": actor,
@@ -162,8 +194,8 @@ async def quarantine_stock_unit(
     if req.rtv_vendor_id:
         update["rtv_vendor_id"] = req.rtv_vendor_id
 
-    if not stock_repo.update(stock_id, update):
-        raise HTTPException(status_code=500, detail="Failed to quarantine stock unit")
+    if not stock_repo.update_if(stock_id, _quarantine_snapshot(unit), update):
+        raise _stock_changed()
 
     # Per-store online stock (owner ruling 2026-09-06): an AVAILABLE unit just
     # left this shop's shelf, so its Shopify location goes down now, like a
@@ -189,7 +221,7 @@ async def quarantine_stock_unit(
     )
 
     # E3w: converge this legacy F21 write-path onto the item-event ledger. The
-    # status write + audit above already succeeded; this is a PURELY ADDITIVE
+    # conditional status write + audit above already succeeded; this is a PURELY ADDITIVE
     # ledger row (no CAS, no projection) recording the AVAILABLE/DAMAGED ->
     # QUARANTINED transition so /items/{id}/events sees it. Fail-soft: any error
     # is logged and swallowed -- it can never undo the quarantine just written.
@@ -278,8 +310,8 @@ async def lift_quarantine_stock_unit(
         "quarantine_lift_reason": req.lift_reason,
         "quarantine_label_printed": False,
     }
-    if not stock_repo.update(stock_id, update):
-        raise HTTPException(status_code=500, detail="Failed to lift quarantine")
+    if not stock_repo.update_if(stock_id, _quarantine_snapshot(unit), update):
+        raise _stock_changed()
 
     _quarantine_audit(
         "QUARANTINE_LIFTED",
