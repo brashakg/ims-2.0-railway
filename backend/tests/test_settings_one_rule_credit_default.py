@@ -431,10 +431,18 @@ def test_the_second_doors_are_gone_from_the_app_and_the_policy(gone, kept):
 
 
 def test_the_rbac_matrix_doc_says_what_the_policy_says():
-    # docs/reference/RBAC_MATRIX.md is the hand-kept copy of the policy rows.
+    import re
+
+    # Compare role membership, independent of the generated policy's ordering.
     doc = open(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
                             "docs", "reference", "RBAC_MATRIX.md"), encoding="utf-8").read()
+    rows = {
+        (method, path): {role.strip() for role in roles.split(",")}
+        for method, path, roles in re.findall(
+            r"^\| `(\w+)` \| `([^`]+)` \| ([^|]*)\|", doc, re.M
+        )
+    }
     for method in ("GET", "PUT"):
-        assert f"| `{method}` | `/api/v1/settings/admin-controls` | SUPERADMIN, ADMIN |" in doc
+        assert rows[(method, "/api/v1/settings/admin-controls")] == {"SUPERADMIN", "ADMIN"}
     for gone in ("/api/v1/admin/discounts/role-caps", "/api/v1/admin/system/settings"):
         assert f"`{gone}`" not in doc
