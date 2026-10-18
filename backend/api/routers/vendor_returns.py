@@ -9,7 +9,8 @@ from api.utils.event_time import utc_now_iso
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from typing import Annotated, List, Optional, Literal
-from datetime import date, datetime
+from datetime import date, datetime, timezone
+import logging
 import uuid
 from .auth import require_roles
 from ..dependencies import (
@@ -22,6 +23,9 @@ from ..dependencies import (
 from ..services.cost_mask import AP_ROLES, PURCHASE_ROLES, RETURN_READERS, mask_vendor_return
 from ..services.payables_mask import require_payables
 from ..services.rtv_debit_note import debit_note_issued
+from ..services import item_events as _ie
+
+logger = logging.getLogger(__name__)
 
 # The transitions that RECORD supplier money: credit_issued writes the
 # credit-note number and amount. Owner ruling 2026-10-12: the accounts roles
@@ -76,6 +80,11 @@ class ReturnItemCreate(BaseModel):
     # 2026-10-12 R2 + R3). A manager or the workshop logs the return without
     # it; an accounts role prices it here or later (PUT /{return_id}/prices).
     unit_price: Optional[UnitPricePaid] = None
+    # The exact pieces going back (stock_units.stock_id, scanned or picked).
+    # Owner decision 2026-10-18: a frame -- anything whose pieces carry their
+    # own unit barcode -- is named piece by piece; the line's quantity is the
+    # number of pieces named (_pieces_for_lines).
+    stock_ids: Optional[List[str]] = Field(default=None, max_length=1000)
 
 
 class ReturnPrices(BaseModel):
@@ -122,10 +131,10 @@ class VendorReturnCreate(BaseModel):
     items: List[ReturnItemCreate]
     return_type: Literal["credit_note", "replacement"]
     notes: Optional[str] = None
-    # F21: optional physical-unit linkage. When supplied, the matched QUARANTINED
-    # stock_units are backfilled with rtv_vendor_id = this return's id, tying the
-    # defective units physically shipped back to the RTV record.
-    stock_ids: Optional[List[str]] = None
+    # F21: pieces named for the whole return (the Quarantine Queue's "Create
+    # RTV" link). Each joins the first line of its product, exactly as if that
+    # line had named it.
+    stock_ids: Optional[List[str]] = Field(default=None, max_length=1000)
 
 
 class VendorReturnStatusUpdate(BaseModel):
@@ -166,43 +175,252 @@ def generate_return_id() -> str:
     return f"VR-{timestamp}-{unique_part}"
 
 
-def _link_stock_units_to_rtv(db, stock_ids, return_id, store_id, actor_id) -> None:
-    """F21: backfill rtv_vendor_id on QUARANTINED stock_units + audit each link.
+# ============================================================================
+# THE PIECES (owner decision 2026-10-18: a return names the exact pieces)
+# ============================================================================
+# Adding a piece takes it off sale: an AVAILABLE piece is quarantined through
+# the item-event ledger, so it leaves the shop's stock and its website count.
+# Shipping moves every piece on the return to RTV (returned to vendor).
+# Cancelling before shipping puts back on the shelf the pieces the return
+# took off it. stock_units.rtv_vendor_id holds the return's id -- the
+# quarantine screen writes a VENDOR id into the same field, so a link is only
+# ever believed through _open_return_of.
 
-    Only units currently in QUARANTINED status are matched/updated (the status
-    filter silently skips anything else). Each match is a single-document update
-    (standalone Mongo -- no transactions). One QUARANTINE_LINKED_RTV audit row is
-    written per linked unit via the hash-chained AuditRepository.create facade.
-    Fail-soft: a backfill error never undoes the vendor-return write."""
+_STATE = _ie.StockState
+_PIECE_WORDS = {
+    _STATE.SOLD: "sold",
+    _STATE.RESERVED: "reserved for an order",
+    _STATE.TRANSFERRED: "in transit to another shop",
+    _STATE.RTV: "already returned to a supplier",
+    _STATE.VOID: "written off",
+    _STATE.DAMAGED: "marked damaged: set it aside on the Quarantine screen first",
+    _STATE.UNDER_AUDIT: "in a stock count",
+    _STATE.BLIND_COUNT: "in a stock count",
+}
+
+
+def _refuse(message: str):
+    raise HTTPException(status_code=422, detail=message)
+
+
+def _label(unit, sid) -> str:
+    return str((unit or {}).get("barcode") or sid)
+
+
+def _is_set_aside(unit) -> bool:
+    return _ie.canonical_state(unit.get("status")) is _STATE.QUARANTINED
+
+
+def _open_return_of(db, unit) -> Optional[str]:
+    """The open (not cancelled) vendor return a piece is on, if any."""
+    rid = unit.get("rtv_vendor_id")
+    if not rid:
+        return None
+    ret = db.get_collection("vendor_returns").find_one({"return_id": rid})
+    return rid if ret and ret.get("status") != "cancelled" else None
+
+
+def _not_returnable(db, unit) -> Optional[str]:
+    """Why a piece cannot go on a return; None when it can: it is on the shelf
+    (AVAILABLE) or set aside (QUARANTINED) and on no other open return."""
+    raw = unit.get("status")
+    if _ie.is_on_hand(raw):
+        return None
+    state = _ie.canonical_state(raw)
+    if state is not _STATE.QUARANTINED:
+        return "is " + _PIECE_WORDS.get(state, f"in status {raw}")
+    other = _open_return_of(db, unit)
+    return f"is already on supplier return {other}" if other else None
+
+
+def _pieces_by_count(db, item, store_id, used) -> List[dict]:
+    """A line that names no piece. A product the shop holds no piece of is not
+    stock here (a made-to-order lens): nothing moves, as the till's own
+    'not tracked here' rule. A product whose pieces carry an expiry date
+    (contact lenses, solutions) goes back by count -- the pieces already set
+    aside first, then the earliest expiry. Anything else (frames and every
+    piece good) is named piece by piece."""
+    held = list(db.get_collection("stock_units").find(
+        {"product_id": item.product_id, "store_id": store_id}))
+    if not held:
+        return []
+    if not any(u.get("expiry_date") for u in held):
+        _refuse(f"{item.product_name} is tracked piece by piece: scan or pick the "
+                f"{item.quantity} piece(s) going back.")
+    free = [u for u in held if u.get("stock_id") and u["stock_id"] not in used
+            and u.get("receipt_disposition") != "REJECTED" and _not_returnable(db, u) is None]
+    free.sort(key=lambda u: (not _is_set_aside(u), str(u.get("expiry_date") or "9999")))
+    if len(free) < item.quantity:
+        _refuse(f"This shop holds only {len(free)} of {item.product_name} that can go back.")
+    picked = free[: item.quantity]
+    used.update(u["stock_id"] for u in picked)
+    return picked
+
+
+def _pieces_for_lines(db, data: "VendorReturnCreate") -> List[List[dict]]:
+    """Per line, the stock units it sends back. Checks everything and writes
+    nothing; a piece that cannot go is a 422 naming it -- never skipped."""
+    named = [list(item.stock_ids or []) for item in data.items]
+    loose = list(data.stock_ids or [])
+    every = [sid for ids in named for sid in ids] + loose
+    twice = sorted({sid for sid in every if every.count(sid) > 1})
+    if twice:
+        _refuse(f"Piece {twice[0]} is named twice on this return.")
+    units = {u.get("stock_id"): u for u in db.get_collection("stock_units").find(
+        {"stock_id": {"$in": every}})} if every else {}
+    for sid in every:
+        unit = units.get(sid)
+        if unit is None or unit.get("store_id") != data.store_id:
+            _refuse(f"Piece {sid} is not in this shop's stock.")
+        why = _not_returnable(db, unit)
+        if why:
+            _refuse(f"Piece {_label(unit, sid)} {why}.")
+    for sid in loose:
+        at = next((i for i, item in enumerate(data.items)
+                   if item.product_id == units[sid].get("product_id")), None)
+        if at is None:
+            _refuse(f"Piece {_label(units[sid], sid)} is not one of this return's items.")
+        named[at].append(sid)
+    used = set(every)
+    lines = []
+    for item, ids in zip(data.items, named):
+        pieces = [units[sid] for sid in ids]
+        wrong = next((u for u in pieces if u.get("product_id") != item.product_id), None)
+        if wrong is not None:
+            _refuse(f"Piece {_label(wrong, wrong.get('stock_id'))} is not {item.product_name}.")
+        if pieces and len(pieces) != item.quantity:
+            _refuse(f"{item.product_name}: {item.quantity} to send back but {len(pieces)} "
+                    f"piece(s) named. Scan each piece going back.")
+        lines.append(pieces or _pieces_by_count(db, item, data.store_id, used))
+    return lines
+
+
+def _audit_link(sid, store_id, actor_id, before, after) -> None:
+    """One hash-chained STOCK_UNIT row per link change. Fail-soft."""
     try:
         from ..dependencies import get_audit_repository
 
         audit = get_audit_repository()
+        if audit is not None:
+            audit.create({
+                "action": "QUARANTINE_LINKED_RTV", "entity_type": "STOCK_UNIT",
+                "entity_id": sid, "store_id": store_id, "user_id": actor_id,
+                "before_state": {"rtv_vendor_id": before},
+                "after_state": {"rtv_vendor_id": after},
+                "detail": {"return_id": after or before},
+            })
     except Exception:  # noqa: BLE001
-        audit = None
-    stock_coll = db.get_collection("stock_units")
-    for sid in stock_ids:
+        pass
+
+
+def _ledger_move(db, unit, frm, to, event_type, return_id, actor_id, payload) -> bool:
+    ok, _ = _ie.record_event_atomic(
+        db, event_type=event_type, actor_id=actor_id or "", stock_id=unit["stock_id"],
+        from_state=frm, to_state=to, store_id=unit.get("store_id"),
+        product_id=unit.get("product_id"), source_type="VENDOR_RETURN",
+        source_id=return_id, payload=payload,
+    )
+    return ok
+
+
+def _set_aside(db, lines, return_id, store_id, actor_id):
+    """Put every piece on the return, all or nothing. An AVAILABLE piece is
+    first quarantined through the ledger; each piece is then linked. A piece
+    that changed since it was checked undoes the rest and 409s.
+    Returns (linked ids, ids taken off the shelf, earlier links)."""
+    stock = db.get_collection("stock_units")
+    linked, taken, prior = [], [], {}
+    for unit in (u for pieces in lines for u in pieces):
+        sid = unit["stock_id"]
+        prior[sid] = unit.get("rtv_vendor_id")
+        aside = {}
+        if not _is_set_aside(unit):
+            if not _ledger_move(db, unit, _STATE.AVAILABLE, _STATE.QUARANTINED,
+                                _ie.ItemEventType.QUARANTINE_IN, return_id, actor_id,
+                                {"quarantine_reason": "OTHER"}):
+                _release_pieces(db, return_id, set(taken), actor_id, prior)
+                raise HTTPException(status_code=409, detail=(
+                    f"Piece {_label(unit, sid)} changed while the return was being saved. "
+                    "Check it and try again."))
+            taken.append(sid)
+            aside = {"quarantine_at": datetime.now(timezone.utc), "quarantine_by": actor_id,
+                     "quarantine_generation": uuid.uuid4().hex,
+                     "quarantine_notes": f"On supplier return {return_id}",
+                     "quarantine_label_printed": False}
+        res = stock.update_one(
+            {"stock_id": sid, "rtv_vendor_id": prior[sid],
+             **_ie.status_match(_STATE.QUARANTINED)},
+            {"$set": {"rtv_vendor_id": return_id, **aside}},
+        )
+        if not getattr(res, "matched_count", 0):
+            _release_pieces(db, return_id, set(taken), actor_id, prior)
+            raise HTTPException(status_code=409, detail=(
+                f"Piece {_label(unit, sid)} changed while the return was being saved. "
+                "Check it and try again."))
+        linked.append(sid)
+        _audit_link(sid, store_id, actor_id, prior[sid], return_id)
+    return linked, taken, prior
+
+
+def _release_pieces(db, return_id, taken, actor_id, prior=None) -> List[str]:
+    """Take every piece off the return: each is unlinked (to its earlier link
+    when undoing a create), and a piece this return took off the shelf goes
+    back on it through the ledger. Returns the ids put back on the shelf."""
+    stock = db.get_collection("stock_units")
+    back = []
+    for unit in list(stock.find({"rtv_vendor_id": return_id})):
+        sid = unit.get("stock_id")
+        if sid in taken and _ledger_move(
+                db, unit, _STATE.QUARANTINED, _STATE.AVAILABLE,
+                _ie.ItemEventType.QUARANTINE_OUT, return_id, actor_id,
+                {"disposition": "RESTOCK"}):
+            back.append(unit)
+        before = (prior or {}).get(sid)
+        stock.update_one({"stock_id": sid, "rtv_vendor_id": return_id},
+                         {"$set": {"rtv_vendor_id": before}})
+        _audit_link(sid, unit.get("store_id"), actor_id, return_id, before)
+    if back:
+        # Back on the shelf: the website count goes up now, not at 01:00.
         try:
-            result = stock_coll.update_one(
-                {"stock_id": sid, "status": "QUARANTINED", "store_id": store_id},
-                {"$set": {"rtv_vendor_id": return_id}},
-            )
-            if getattr(result, "modified_count", 0) and audit is not None:
-                audit.create(
-                    {
-                        "action": "QUARANTINE_LINKED_RTV",
-                        "entity_type": "STOCK_UNIT",
-                        "entity_id": sid,
-                        "store_id": store_id,
-                        "user_id": actor_id,
-                        "before_state": {"rtv_vendor_id": None},
-                        "after_state": {"rtv_vendor_id": return_id},
-                        "detail": {"return_id": return_id},
-                    }
-                )
+            from ..services.online_stock_writeback import writeback_after_units_left
+
+            writeback_after_units_left(db, [u.get("product_id") for u in back],
+                                       back[0].get("store_id"), source="vendor_return_release")
         except Exception:  # noqa: BLE001
-            # One bad id never blocks the rest / the return itself.
+            pass
+    return [u.get("stock_id") for u in back]
+
+
+def _not_ready_to_ship(db, return_doc) -> Optional[str]:
+    """Why the return cannot ship: a piece it names is no longer set aside
+    for it (sold, lifted, moved). None when every named piece is ready."""
+    named = return_doc.get("stock_ids") or []
+    rid = return_doc.get("return_id")
+    units = {u.get("stock_id"): u for u in db.get_collection("stock_units").find(
+        {"stock_id": {"$in": named}})} if named else {}
+    for sid in named:
+        unit = units.get(sid) or {}
+        if unit.get("rtv_vendor_id") != rid or not _is_set_aside(unit):
+            return (f"Piece {_label(unit, sid)} is no longer set aside for this return. "
+                    "Check it before shipping.")
+    return None
+
+
+def _ship_pieces(db, return_id, actor_id) -> List[str]:
+    """Every piece on the return leaves stock for good: QUARANTINED -> RTV
+    through the ledger. Returns the ids that did not move (logged)."""
+    stuck = []
+    for unit in list(db.get_collection("stock_units").find({"rtv_vendor_id": return_id})):
+        if _ie.canonical_state(unit.get("status")) is _STATE.RTV:
             continue
+        if not _ledger_move(db, unit, _STATE.QUARANTINED, _STATE.RTV,
+                            _ie.ItemEventType.QUARANTINE_OUT, return_id, actor_id,
+                            {"disposition": "RTV"}):
+            stuck.append(unit.get("stock_id"))
+    if stuck:
+        logger.error("[VENDOR_RETURN] %s shipped but pieces did not move to RTV: %s",
+                     return_id, stuck)
+    return stuck
 
 
 def _priced_total(items) -> Optional[float]:
@@ -314,17 +532,25 @@ async def create_vendor_return(
     # the accounts roles' alone (R2 + R3). A manager sends none.
     if any(item.unit_price is not None for item in return_data.items):
         require_payables(current_user, "Pricing a vendor return")
-    if return_data.stock_ids and db.get_collection("stock_units").find_one({
-        "stock_id": {"$in": return_data.stock_ids},
+    named = [sid for item in return_data.items for sid in item.stock_ids or []]
+    named += return_data.stock_ids or []
+    if named and db.get_collection("stock_units").find_one({
+        "stock_id": {"$in": named},
         "store_id": return_data.store_id,
         "receipt_disposition": "REJECTED",
         "rtv_vendor_id": {"$ne": None},
     }):
         raise HTTPException(status_code=409, detail="Rejected receipt pieces already have a return draft. Open that return instead.")
 
+    # The pieces each line sends back (422 for any that cannot go), then set
+    # aside for this return before it is saved -- all or nothing.
+    actor = current_user.get("user_id")
+    lines = _pieces_for_lines(db, return_data)
+    return_id = generate_return_id()
+    linked, taken, prior = _set_aside(db, lines, return_id, return_data.store_id, actor)
+
     try:
         collection = db.get_collection("vendor_returns")
-        return_id = generate_return_id()
 
         items = [
             {
@@ -350,13 +576,17 @@ async def create_vendor_return(
             "credit_note_number": None,
             "credit_note_amount": None,
             "notes": return_data.notes or "",
+            # Every piece on the return, and the ones it took off the shelf
+            # (a cancel before shipping puts exactly those back).
+            "stock_ids": linked,
+            "set_aside_stock_ids": taken,
             "created_at": utc_now_iso(),
-            "created_by": current_user.get("user_id"),
+            "created_by": actor,
             "status_history": [
                 {
                     "status": "created",
                     "timestamp": utc_now_iso(),
-                    "changed_by": current_user.get("user_id"),
+                    "changed_by": actor,
                     "notes": "Return created",
                 }
             ],
@@ -364,23 +594,14 @@ async def create_vendor_return(
 
         collection.insert_one(return_doc)
 
-        # F21: backfill the physical-unit linkage. For each supplied stock_id
-        # that is currently QUARANTINED, set rtv_vendor_id = this return's id and
-        # write a STOCK_UNIT audit row. A unit NOT in QUARANTINED status is
-        # silently skipped (the {status: QUARANTINED} filter simply matches
-        # nothing). Standalone Mongo: each update is a single-document op.
-        if return_data.stock_ids:
-            _link_stock_units_to_rtv(
-                db, return_data.stock_ids, return_id,
-                return_data.store_id, current_user.get("user_id"),
-            )
-
         return {
             "return_id": return_id,
             "message": "Vendor return created successfully",
         }
 
     except Exception as e:
+        # The pieces were set aside for a return that was never saved.
+        _release_pieces(db, return_id, set(taken), actor, prior)
         raise HTTPException(
             status_code=500, detail="Failed to create return. Please try again."
         )
@@ -467,6 +688,10 @@ async def update_return_status(
                 status_code=400,
                 detail=f"Cannot transition from {current_status} to {status_update.status}",
             )
+        if status_update.status == "shipped":
+            not_ready = _not_ready_to_ship(db, return_doc)
+            if not_ready:
+                raise HTTPException(status_code=409, detail=not_ready)
 
         # Update document
         update_dict = {
@@ -543,6 +768,16 @@ async def update_return_status(
                     f"(current status: {latest.get('status')})"
                 ),
             )
+
+        # The pieces follow the return: shipped -> they leave stock for good
+        # (RTV); cancelled before shipping -> the ones it took off the shelf go
+        # back on it. A receipt-rejection draft keeps its rejected pieces on a
+        # cancel (it can be reopened; they never were sellable).
+        actor = current_user.get("user_id")
+        if status_update.status == "shipped":
+            _ship_pieces(db, return_id, actor)
+        elif status_update.status == "cancelled" and not return_doc.get("receipt_rejection"):
+            _release_pieces(db, return_id, set(return_doc.get("set_aside_stock_ids") or []), actor)
 
         # Fetch and return updated document
         updated_doc = collection.find_one({"return_id": return_id})

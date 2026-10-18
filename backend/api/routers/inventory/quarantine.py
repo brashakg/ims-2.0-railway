@@ -308,6 +308,22 @@ async def lift_quarantine_stock_unit(
             status_code=409,
             detail={"code": "not_quarantined", "message": "Unit is not quarantined."},
         )
+    # A piece set aside on a supplier return leaves with it or comes back on
+    # the return's cancel -- never by a lift that would let it be sold while
+    # the return still names it.
+    from ..vendor_returns import _open_return_of
+
+    db = _get_db()
+    on_return = _open_return_of(db, unit) if db is not None else None
+    if on_return:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "on_supplier_return",
+                "message": f"This piece is on supplier return {on_return}. "
+                           "Cancel that return to put it back on the shelf.",
+            },
+        )
 
     now = _now_ist()
     actor = current_user.get("user_id")
