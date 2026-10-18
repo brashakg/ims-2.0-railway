@@ -155,6 +155,86 @@ describe('supplier-confirmed credit, separate from internal return notes', () =>
     expect(calls.confirm).toHaveBeenCalledTimes(1);
   });
 
+  it.each([503, 401, 403])('keeps the exact reopened request through a %s reply instead of normalized preview selections', async status => {
+    const retryPayload = { idempotency_key: '81311dbd-c9ad-4eec-89fd-e52b590be44a',
+      credit_note_number: 'INTERRUPTED-CN', credit_note_date: '2026-10-16', received_amount: 52.5,
+      notes: 'Actual supplier note', source_selections: [],
+      allocations: [{ source_key: 'source1', taxable: 50, cgst: 1.25, sgst: 1.25, igst: 0 }] };
+    const existing = { ...retryPayload, confirmation_id: retryPayload.idempotency_key,
+      posting_status: 'PENDING_EVIDENCE' as const, pending_reasons: [],
+      retry_unchanged: true, retry_payload: retryPayload };
+    calls.preview.mockResolvedValueOnce({ ...resolved(), confirmations: [existing] })
+      .mockResolvedValueOnce({ ...resolved(), confirmations: [existing], confirmation: existing });
+    calls.confirm.mockRejectedValueOnce({ response: { status } }).mockResolvedValueOnce(posted);
+    const { saved } = setup();
+    await screen.findByLabelText('Supplier note to complete');
+    fireEvent.change(screen.getByLabelText('Supplier note to complete'), { target: { value: existing.confirmation_id } });
+    await screen.findByRole('button', { name: 'Retry same note' });
+    for (const label of ['Supplier note number', 'Supplier note date', 'Actual credited amount (₹)',
+      'Notes (optional)', 'Supplier note to complete', 'Goods value for Frame (INV-OLD)']) {
+      expect(screen.getByLabelText(label)).toBeDisabled();
+    }
+    fireEvent.click(screen.getByRole('button', { name: 'Retry same note' }));
+    await screen.findByRole('alert');
+    expect(calls.confirm).toHaveBeenLastCalledWith('R1', retryPayload);
+    expect(screen.getByLabelText('Notes (optional)')).toBeDisabled();
+    expect(screen.getByLabelText('Goods value for Frame (INV-OLD)')).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry same note' }));
+    await waitFor(() => expect(saved).toHaveBeenCalledWith(posted));
+    expect(calls.confirm.mock.calls[1]).toEqual(calls.confirm.mock.calls[0]);
+  });
+
+  it('unlocks pending evidence only after a fresh server preview confirms the interrupted request is no longer posting', async () => {
+    const retryPayload = { idempotency_key: '81311dbd-c9ad-4eec-89fd-e52b590be44a',
+      credit_note_number: 'INTERRUPTED-CN', credit_note_date: '2026-10-16', received_amount: 105,
+      notes: '', source_selections: [], allocations: [{ source_key: 'source1', taxable: 100, cgst: 2.5, sgst: 2.5, igst: 0 }] };
+    const existing = { ...retryPayload, confirmation_id: retryPayload.idempotency_key,
+      posting_status: 'PENDING_EVIDENCE' as const, pending_reasons: [], retry_unchanged: true, retry_payload: retryPayload };
+    const pending = { ...existing, retry_unchanged: false, retry_payload: null };
+    calls.preview.mockResolvedValueOnce({ ...resolved(), confirmation: existing, confirmations: [existing] })
+      .mockResolvedValueOnce({ ...resolved(), confirmation: pending, confirmations: [pending] });
+    calls.confirm.mockRejectedValueOnce({ response: { status: 409 } }).mockResolvedValueOnce(posted);
+    setup();
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry same note' }));
+    const refresh = await screen.findByRole('button', { name: 'Refresh original bills' });
+    expect(screen.getByLabelText('Notes (optional)')).toBeDisabled();
+    fireEvent.click(refresh);
+    await waitFor(() => expect(screen.getByLabelText('Notes (optional)')).toBeEnabled());
+    expect(calls.preview).toHaveBeenLastCalledWith('R1', { confirmation_id: existing.confirmation_id });
+    expect(screen.getByLabelText('Supplier note number')).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm supplier credit' }));
+    await waitFor(() => expect(calls.confirm).toHaveBeenCalledTimes(2));
+    expect(calls.confirm.mock.calls[1][1]).toMatchObject({ idempotency_key: existing.confirmation_id, source_selections: [original] });
+  });
+
+  it('does not invent a retry when an interrupted note is missing its original request', async () => {
+    const existing = { ...posted.confirmation, posting_status: 'PENDING_EVIDENCE' as const,
+      retry_unchanged: true, retry_payload: null };
+    calls.preview.mockResolvedValue({ ...resolved(), confirmations: [existing], confirmation: existing });
+    setup();
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry same note' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('original request could not be recovered');
+    expect(calls.confirm).not.toHaveBeenCalled();
+  });
+
+  it('clears a locally uncertain retry when the same pending note is freshly verified as editable', async () => {
+    const existing = { ...posted.confirmation, posting_status: 'PENDING_EVIDENCE' as const,
+      retry_unchanged: false, retry_payload: null };
+    calls.preview.mockResolvedValue({ ...resolved(), confirmation: existing, confirmations: [existing] });
+    calls.confirm.mockRejectedValueOnce({ response: { status: 503 } })
+      .mockRejectedValueOnce({ response: { status: 409 } }).mockResolvedValueOnce(posted);
+    setup();
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm supplier credit' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry same note' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Refresh original bills' }));
+    await waitFor(() => expect(screen.getByLabelText('Notes (optional)')).toBeEnabled());
+    expect(screen.getByLabelText('Supplier note number')).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('Notes (optional)'), { target: { value: 'Evidence rechecked' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm supplier credit' }));
+    await waitFor(() => expect(calls.confirm).toHaveBeenCalledTimes(3));
+    expect(calls.confirm.mock.calls[2][1]).toMatchObject({ idempotency_key: existing.confirmation_id, notes: 'Evidence rechecked' });
+  });
+
   it('restores the saved note identity after its first lookup fails and the bill refresh succeeds', async () => {
     const existing = { ...posted.confirmation, confirmation_id: 'saved-note-id',
       credit_note_number: 'SAVED-CN', credit_note_date: '2026-10-16', received_amount: 52.5,
