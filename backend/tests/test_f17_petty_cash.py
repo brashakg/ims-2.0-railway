@@ -1025,3 +1025,16 @@ def test_a_reject_takes_over_only_a_stale_claim_with_no_payout(claim, age, paid,
     assert doc["status"] == status
     if status == "REJECTED":
         assert "approving_claim" not in doc and _float(db) == 5000.0
+
+
+def test_a_stale_claim_reject_answers_503_when_the_float_cannot_be_read(claim, monkeypatch):
+    db, repo, _ = claim
+    _claim_age(repo, 600)
+
+    def unreadable(*a, **k):
+        raise OSError("float read failed")
+
+    monkeypatch.setattr(pcs, "live_payout_for", unreadable)
+    resp = _reject(db, repo, "mgr2")
+    assert resp.status_code == 503
+    assert repo.find_by_id("E1")["status"] == "APPROVING"

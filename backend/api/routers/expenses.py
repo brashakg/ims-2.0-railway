@@ -1622,9 +1622,11 @@ async def reject_expense(
             from ..services import petty_cash_service as pcs
 
             db = get_db()
-            if not _claim_is_stale(existing) or pcs.live_payout_for(
-                getattr(db, "db", db), existing.get("store_id"), expense_id
-            ):
+            try:
+                paid = pcs.live_payout_for(getattr(db, "db", db), existing.get("store_id"), expense_id)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(status_code=503, detail="The petty-cash float could not be read. Try again.") from exc
+            if not _claim_is_stale(existing) or paid:
                 raise HTTPException(
                     status_code=409, detail="This expense is being approved right now. Reload in a minute."
                 )
