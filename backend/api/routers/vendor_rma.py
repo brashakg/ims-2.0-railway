@@ -74,6 +74,8 @@ from ..services.vendor_rma import (
 )
 from ..services.rtv_debit_note import debit_note_issued
 from ..services.payables_mask import AP_ROLES, require_payables, strip_rma_credit
+from ..services import rma_supplier_credit
+from ..services.supplier_credit_evidence import SupplierCreditError
 
 logger = logging.getLogger(__name__)
 
@@ -162,12 +164,23 @@ class RMADispatch(BaseModel):
 
 class RMACreditNote(BaseModel):
     credit_note_number: str = Field(..., min_length=1, max_length=120)
+    credit_note_date: str = Field(..., min_length=10, max_length=10,
+                                  description="Actual supplier credit-note date, YYYY-MM-DD")
+    idempotency_key: str = Field(..., min_length=36, max_length=36,
+                                 description="One UUID per supplier note; reuse unchanged on retry")
     # Rupee amount the vendor actually credited on THIS note; converted to paise.
     received_amount: float = Field(..., ge=0, le=100_000_000)
     notes: Optional[str] = None
+    source_selections: List[dict] = Field(default_factory=list)
+    allocations: List[dict] = Field(default_factory=list)
     # E4 maker-checker token, required only when the credit crosses a tier.
     approval_token: Optional[str] = None
     approval_request_id: Optional[str] = None
+
+
+class RMACreditPreview(BaseModel):
+    confirmation_id: Optional[str] = None
+    source_selections: Optional[List[dict]] = None
 
 
 class RMAReject(BaseModel):
@@ -199,7 +212,9 @@ def _with_rupees(doc: dict) -> dict:
 def _masked(doc: dict, user: dict) -> dict:
     # An RMA's unit costs, credits and write-off are what we pay: read back by
     # the accounts roles only (owner ruling 2026-10-12, services/cost_mask).
-    return mask_rma(_with_rupees(doc), user)
+    result = mask_rma(_with_rupees(doc), user)
+    result.pop("credit_confirmation_fence", None)
+    return result
 
 
 def _http_from_result(res: dict, user: dict) -> HTTPException:
@@ -340,75 +355,83 @@ async def dispatch_rma(
     return mask_rma(res, current_user)
 
 
+@router.post("/{rma_id}/credit-preview")
+async def preview_rma_credit(
+    rma_id: str,
+    body: RMACreditPreview,
+    current_user: dict = Depends(require_roles(*AP_ROLES)),
+):
+    """Verified original bills and actual-note retry history; Accounts only."""
+    require_payables(current_user, "Previewing supplier credit")
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Supplier credit data is unavailable.")
+    doc = in_reach_or_404(_engine().get(rma_id), current_user, "RMA not found")
+    cross, reach = user_store_scope(current_user)
+    try:
+        return rma_supplier_credit.preview(
+            db, doc, selections=body.source_selections, confirmation_id=body.confirmation_id,
+            allowed_store_ids=None if cross else set(reach))
+    except SupplierCreditError as exc:
+        raise HTTPException(status_code=exc.status, detail={"error": exc.code, "message": str(exc)}) from exc
+    except Exception as exc:
+        logger.warning("[VENDOR_RMA] credit preview unavailable", exc_info=True)
+        raise HTTPException(status_code=503, detail="Original supplier credit evidence is unavailable.") from exc
+
+
 @router.post("/{rma_id}/credit-note")
 async def record_credit_note(
     rma_id: str,
     body: RMACreditNote,
     current_user: dict = Depends(require_roles(*AP_ROLES)),
 ):
-    """Record a vendor credit note against a DISPATCHED RMA, reconciling
-    expected-vs-received (paisa-exact, partial supported). A credit (or variance)
-    over the E2 tier requires a consumed E4 approval token (action_type 'rtv').
-    Recording supplier money: the accounts roles only (owner ruling 2026-10-12)."""
+    """Confirm the supplier's actual note, retaining the RMA maker-checker seam."""
     require_payables(current_user, "Recording a supplier credit note")
-    eng = _engine()
-    doc = in_reach_or_404(eng.get(rma_id), current_user, "RMA not found")
-    # No credit is reconciled against an unknown expectation: the lines are
-    # priced first (PUT /{rma_id}/prices). Checked before the maker-checker
-    # tier, which reads the expected credit.
-    if not rma_is_priced(doc):
-        raise _http_from_result(dict(PRICE_REQUIRED), current_user)
-
-    recv_paise = rupees_to_paise(body.received_amount)
-    expected = int(doc.get("expected_credit_paise") or 0)
-    received_so_far = int(doc.get("received_credit_paise") or 0)
-    projected_variance = expected - (received_so_far + recv_paise)
-
-    # E4 maker-checker: a large credit (or large variance) must be approved.
-    if credit_requires_approval(recv_paise, projected_variance,
-                                store_id=doc.get("store_id")):
-        token = (body.approval_token or "").strip() or None
-        request_id = (body.approval_request_id or "").strip() or None
-        # P1-2: a concrete approval_request_id is REQUIRED -- a bare floating token
-        # alone is rejected so the consume path can re-validate the RMA/store
-        # binding against the named request (not just any token at/below tier).
-        if not request_id:
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "error": "approval_required",
-                    "message": "This credit exceeds the maker-checker threshold; "
-                               "obtain an E4 approval (action_type 'rtv') bound to "
-                               "this RMA + store and supply approval_request_id "
-                               "(and approval_token).",
-                },
-            )
-        # Two-person control, checked BEFORE the consume so a refused approval
-        # is not spent: the recorder is an accounts role and so may approve an
-        # 'rtv' (owner ruling 2026-10-12, R1 + R2) -- the approval must still
-        # come from someone else (_rtv_second_person).
-        refusal = _rtv_second_person(request_id, current_user)
-        if refusal is not None:
-            raise HTTPException(status_code=403, detail=refusal)
-        # P1-2: bind the consume to THIS rma + store. consume_approval re-validates
-        # the approval's store_id == the RMA's store AND its context.rma_id == this
-        # RMA, rolling back on a mismatch -- so a token minted for store-A/RMA-A
-        # cannot be replayed against store-B or RMA-B (maker-checker bypass).
-        if not _consume_rtv_approval(token, request_id, recv_paise, current_user,
-                                     store_id=doc.get("store_id"), rma_id=rma_id):
-            raise HTTPException(status_code=403, detail=dict(_APPROVAL_INVALID))
-
-    res = eng.record_credit_note(
-        rma_id,
-        credit_note_number=body.credit_note_number,
-        received_amount=body.received_amount,
-        actor=current_user.get("user_id"),
-        notes=body.notes or "",
-        approval_token=(body.approval_token or "").strip() or None,
-    )
-    if not res.get("ok"):
-        raise _http_from_result(res, current_user)
-    return mask_rma(res, current_user)
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Supplier credit data is unavailable.")
+    doc = in_reach_or_404(_engine().get(rma_id), current_user, "RMA not found")
+    payload = body.model_dump(exclude={"approval_token", "approval_request_id"})
+    cross, reach = user_store_scope(current_user)
+    try:
+        submitted = rma_supplier_credit.canonical._input(payload, allow_zero=True)
+        existing = rma_supplier_credit.existing_confirmation(db, doc, submitted)
+        acknowledgement = rma_supplier_credit.existing_acknowledgement(doc, submitted)
+        if acknowledgement:
+            return mask_rma(rma_supplier_credit.record_zero(
+                db, doc, submitted, actor_id=current_user.get("user_id")), current_user)
+        if submitted["received_paise"] == 0 and submitted["allocations"]:
+            raise SupplierCreditError("ZERO_ACKNOWLEDGEMENT_ONLY", "A zero acknowledgement cannot contain credit allocations.")
+        if not existing or existing.get("posting_status") != "POSTED":
+            if not rma_is_priced(doc):
+                raise _http_from_result(dict(PRICE_REQUIRED), current_user)
+            if doc.get("status") not in rma_supplier_credit.READY:
+                raise HTTPException(status_code=409, detail={"error": "invalid_transition", "status": doc.get("status")})
+            recv_paise = submitted["received_paise"]
+            projected_variance = int(doc["expected_credit_paise"]) - int(doc.get("received_credit_paise") or 0) - recv_paise
+            if credit_requires_approval(recv_paise, projected_variance, store_id=doc.get("store_id")):
+                token = (body.approval_token or "").strip() or None
+                request_id = (body.approval_request_id or "").strip() or None
+                rma_supplier_credit.require_approval(
+                    db, doc, submitted, request_id=request_id, token=token,
+                    actor_id=current_user.get("user_id"),
+                    consume=lambda: _consume_rtv_approval(
+                        token, request_id, recv_paise, current_user,
+                        store_id=doc.get("store_id"), rma_id=rma_id))
+        if submitted["received_paise"] == 0:
+            result = rma_supplier_credit.record_zero(db, doc, submitted, actor_id=current_user.get("user_id"))
+        else:
+            result = rma_supplier_credit.record(
+                db, doc, payload, actor_id=current_user.get("user_id"),
+                allowed_store_ids=None if cross else set(reach))
+        return mask_rma(result, current_user)
+    except SupplierCreditError as exc:
+        raise HTTPException(status_code=exc.status, detail={"error": exc.code, "message": str(exc)}) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("[VENDOR_RMA] supplier confirmation unavailable", exc_info=True)
+        raise HTTPException(status_code=503, detail="The credit result is uncertain. Retry the same note unchanged.") from exc
 
 
 @router.put("/{rma_id}/prices")

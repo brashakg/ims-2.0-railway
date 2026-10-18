@@ -26,6 +26,8 @@ Handlers run for real against mongomock through FastAPI. No emoji (cp1252).
 """
 import os
 import sys
+from uuid import uuid4
+from rma_credit_fixtures import credit_payload
 from types import SimpleNamespace
 
 os.environ.setdefault("JWT_SECRET_KEY", "test")
@@ -258,7 +260,8 @@ def test_an_rma_credit_waits_for_the_accountants_price(world):
     assert stored["expected_credit_paise"] is None
     assert stored["lines"][0]["unit_cost_paise"] is None
 
-    credit = {"credit_note_number": "CN-1", "received_amount": 100.0}
+    credit = {"credit_note_number": "CN-1", "received_amount": 100.0,
+              "credit_note_date": "2026-10-18", "idempotency_key": str(uuid4())}
     r = world.call(acct, "POST", f"/vendor-rma/{rid}/credit-note", json=credit)
     assert r.status_code == 422, r.text
     assert r.json()["detail"]["error"] == "price_required"
@@ -272,6 +275,7 @@ def test_an_rma_credit_waits_for_the_accountants_price(world):
     assert r.status_code == 200, r.text
     assert r.json()["expected_credit_paise"] == 10000
 
+    credit = credit_payload(world.db, rid, number="CN-1", amount=100.0)
     r = world.call(acct, "POST", f"/vendor-rma/{rid}/credit-note", json=credit)
     assert r.status_code == 200, r.text
     stored = _stored_rma(world, rid)
@@ -290,7 +294,8 @@ def test_an_unpriced_rma_is_refused_before_the_approval_tier_reads_its_expectati
     # an approval demanded against an expected credit nobody has set.
     rid = _dispatched_rma(world, _user("STORE_MANAGER"))
     r = world.call(_user("ACCOUNTANT"), "POST", f"/vendor-rma/{rid}/credit-note",
-                   json={"credit_note_number": "CN-BIG", "received_amount": 60000.0})
+                   json={"credit_note_number": "CN-BIG", "received_amount": 60000.0,
+                         "credit_note_date": "2026-10-18", "idempotency_key": str(uuid4())})
     assert r.status_code == 422, r.text
     assert r.json()["detail"]["error"] == "price_required"
     assert world.db["approval_requests"].count_documents({}) == 0
@@ -339,7 +344,8 @@ def test_another_shops_rma_debit_note_or_return_answers_like_a_missing_id(world)
         ("POST", "/vendor-rma/{}/authorize", {"vendor_rma_number": "Z-1"}),
         ("POST", "/vendor-rma/{}/dispatch", {"carrier": "DTDC", "awb": "A1"}),
         ("PUT", "/vendor-rma/{}/prices", {"unit_costs": [1.0]}),
-        ("POST", "/vendor-rma/{}/credit-note", {"credit_note_number": "CN", "received_amount": 1.0}),
+        ("POST", "/vendor-rma/{}/credit-note", {"credit_note_number": "CN", "received_amount": 1.0,
+                                               "credit_note_date": "2026-10-18", "idempotency_key": str(uuid4())}),
         ("POST", "/vendor-rma/{}/reject", {"reason": "no"}),
         ("POST", "/vendor-rma/{}/close", {}),
     )

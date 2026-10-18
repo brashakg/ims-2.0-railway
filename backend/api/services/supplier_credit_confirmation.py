@@ -34,7 +34,7 @@ def _error(code, message, status=422):
     raise SupplierCreditError(code, message, status)
 
 
-def _input(payload):
+def _input(payload, *, allow_zero=False):
     try:
         identifier = str(UUID(str(payload.get("idempotency_key"))))
     except (ValueError, TypeError, AttributeError) as exc:
@@ -61,6 +61,8 @@ def _input(payload):
               "received_paise": paise(payload.get("received_amount")), "notes": notes or None,
               "source_selections": payload.get("source_selections") or [],
               "allocations": sorted(allocations, key=lambda row: row["source_key"])}
+    if result["received_paise"] <= 0 and not allow_zero:
+        _error("POSITIVE_SUPPLIER_CREDIT_REQUIRED", "Enter a positive amount actually credited by the supplier.")
     result["request_hash"] = _hash(result)
     return result
 
@@ -104,6 +106,7 @@ def _event(db, return_doc, submitted, actor_id):
     collection = db.get_collection(EVENTS)
     identifier = submitted["confirmation_id"]
     candidate = {"_id": identifier, **submitted, "return_id": return_doc["return_id"],
+                 "return_kind": return_doc.get("return_kind", "VENDOR_RETURN"),
                  "vendor_id": return_doc["vendor_id"], "store_id": return_doc["store_id"],
                  "posting_status": "PENDING_EVIDENCE", "pending_reasons": [], "version": 0,
                  "identity_claimed": False,
@@ -113,6 +116,8 @@ def _event(db, return_doc, submitted, actor_id):
     except DuplicateKeyError:
         pass
     existing = collection.find_one({"_id": identifier})
+    if existing.get("return_kind", "VENDOR_RETURN") != candidate["return_kind"]:
+        _error("CONFIRMATION_IDENTITY_CHANGED", "This confirmation belongs to another return workflow.", 409)
     immutable = ("return_id", "vendor_id", "store_id", "normalized_number", "credit_note_date", "received_paise")
     if any(existing.get(k) != candidate.get(k) for k in immutable):
         _error("CONFIRMATION_IDENTITY_CHANGED", "This confirmation's supplier, return, note number, date and amount are immutable.", 409)
@@ -156,6 +161,9 @@ def _prepare_allocations(sources, submitted):
 
 
 def _return_fence(db, event, return_doc):
+    if event.get("return_kind") == "RMA":
+        from .rma_supplier_credit import fence
+        return fence(db, event, return_doc)
     query = {"return_id": event["return_id"], "$or": [
         {"credit_confirmation_fence": {"$exists": False}}, {"credit_confirmation_fence": event["token"]},
     ]}
@@ -275,10 +283,15 @@ def _fence_failed(db, event, error):
     """The old worker loses POST permission BEFORE capacity can be reclaimed."""
     changed = db.get_collection(EVENTS).update_one(
         {"_id": event["_id"], "posting_status": "PREPARING", "token": event["token"]},
-        {"$set": {"posting_status": "PENDING_EVIDENCE", "pending_reasons": [{"code": error.code, "message": str(error)}]},
+        {"$set": {"posting_status": "PENDING_EVIDENCE", "fenced_token": event["token"],
+                  "pending_reasons": [{"code": error.code, "message": str(error)}]},
          "$unset": {"token": ""}, "$inc": {"version": 1}},
     )
     if changed.matched_count:
+        if event.get("return_kind") == "RMA":
+            from .rma_supplier_credit import release
+            release(db, event)
+            return
         db.get_collection("vendor_returns").update_one(
             {"return_id": event["return_id"], "credit_confirmation_fence": event["token"]},
             {"$unset": {"credit_confirmation_fence": ""}},
@@ -288,6 +301,9 @@ def _fence_failed(db, event, error):
 
 
 def _finish_return(db, event):
+    if event.get("return_kind") == "RMA":
+        from .rma_supplier_credit import finish
+        return finish(db, event)
     current = db.get_collection("vendor_returns").find_one({"return_id": event["return_id"]})
     preview = credit_preview(db, current, selections=event["source_selections"])
     full = preview["remaining_amount"] is not None and preview["remaining_amount"] <= 0

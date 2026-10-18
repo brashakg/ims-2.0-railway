@@ -46,6 +46,9 @@ from types import SimpleNamespace
 from typing import Any, Dict
 
 import pytest
+import mongomock
+from uuid import uuid4
+from rma_credit_fixtures import credit_payload
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("JWT_SECRET_KEY", "test-supplier-money-recorded")
@@ -138,7 +141,7 @@ def _gate_admits(gate, role: str) -> bool:
 def rma(monkeypatch):
     import api.routers.vendor_rma as r
 
-    db = FakeDB()
+    db = mongomock.MongoClient().db
     monkeypatch.setattr(r, "_get_db", lambda: db)
     return SimpleNamespace(r=r, db=db)
 
@@ -235,7 +238,7 @@ def _dispatched(rma, role="STORE_MANAGER"):
 def _credit(rma, rid, role="ACCOUNTANT", amount=1000.0, number="CN-Z1"):
     r = rma.r
     return _run(r.record_credit_note(
-        rid, r.RMACreditNote(credit_note_number=number, received_amount=amount),
+        rid, r.RMACreditNote(**credit_payload(rma.db, rid, number=number, amount=amount)),
         current_user=_user(role)))
 
 
@@ -322,7 +325,8 @@ def test_policy_row_keeps_the_goods_side_for_managers(name):
 def test_rma_credit_note_refused_to_a_manager_and_nothing_written(rma, role):
     rid, _ = _dispatched(rma)
     assert _status(rma.r.record_credit_note(
-        rid, rma.r.RMACreditNote(credit_note_number="CN-M", received_amount=1000.0),
+        rid, rma.r.RMACreditNote(credit_note_number="CN-M", received_amount=1000.0,
+                               credit_note_date="2026-10-18", idempotency_key=str(uuid4())),
         current_user=_user(role))) == 403
     stored = _stored_rma(rma, rid)
     assert stored["status"] == "DISPATCHED"
@@ -494,7 +498,7 @@ def test_http_every_money_write_is_403_for_a_manager_and_lands_for_accounts(http
     rid, _ = _dispatched(http.rma)
     calls = (
         ("post", f"/api/v1/vendor-rma/{rid}/credit-note",
-         {"credit_note_number": "CN-H", "received_amount": 1000.0}),
+         credit_payload(http.rma.db, rid, number="CN-H", amount=1000.0)),
         ("post", f"/api/v1/vendor-rma/{rid}/close", {"write_off_variance": True}),
         ("patch", "/api/v1/vendor-returns/VR-RCVD/status", {"status": "credit_issued"}),
         ("post", "/api/v1/rtv-debit-notes/issue",
@@ -721,7 +725,7 @@ def _mark_approved(two, request_id, reviewed_by):
 
 def _record_big(two, user, request_id, token, number="CN-BIG"):
     return two.r.record_credit_note(
-        two.rid, two.r.RMACreditNote(credit_note_number=number, received_amount=_BIG_CREDIT,
+        two.rid, two.r.RMACreditNote(**credit_payload(two.db, two.rid, number=number, amount=_BIG_CREDIT),
                                      approval_token=token, approval_request_id=request_id),
         current_user=user)
 
@@ -815,8 +819,7 @@ def test_http_one_accountant_cannot_raise_approve_and_spend_their_own_rtv(two):
     approve = cli.post(f"/api/v1/approvals/requests/{req}/approve", json={"pin": _PIN})
     if approve.status_code == 200:
         token = approve.json()["approval_token"]
-        r = cli.post(credit_url, json={"credit_note_number": "CN-SELF",
-                                       "received_amount": _BIG_CREDIT,
+        r = cli.post(credit_url, json={**credit_payload(two.db, two.rid, number="CN-SELF", amount=_BIG_CREDIT),
                                        "approval_token": token,
                                        "approval_request_id": req})
         assert r.status_code == 403, r.text
@@ -833,7 +836,7 @@ def test_http_one_accountant_cannot_raise_approve_and_spend_their_own_rtv(two):
     who["user"] = _user("ACCOUNTANT")
     approve = cli.post(f"/api/v1/approvals/requests/{req_m}/approve", json={"pin": _PIN})
     assert approve.status_code == 200, approve.text
-    body = {"credit_note_number": "CN-MINE", "received_amount": _BIG_CREDIT,
+    body = {**credit_payload(two.db, two.rid, number="CN-MINE", amount=_BIG_CREDIT),
             "approval_token": approve.json()["approval_token"],
             "approval_request_id": req_m}
     r = cli.post(credit_url, json=body)
@@ -853,13 +856,12 @@ def test_http_one_accountant_cannot_raise_approve_and_spend_their_own_rtv(two):
     approve = cli.post(f"/api/v1/approvals/requests/{req2}/approve", json={"pin": _PIN})
     assert approve.status_code == 200, approve.text
     who["user"] = _user("ACCOUNTANT")
-    r = cli.post(credit_url, json={"credit_note_number": "CN-TWO",
-                                   "received_amount": _BIG_CREDIT,
+    r = cli.post(credit_url, json={**credit_payload(two.db, two.rid, number="CN-TWO", amount=40000),
                                    "approval_token": approve.json()["approval_token"],
                                    "approval_request_id": req2})
     assert r.status_code == 200, r.text
-    # Rs 60,000 by the second accountant plus this Rs 60,000.
-    assert r.json()["received_credit_paise"] == 12_000_000
+    # Rs 60,000 by the second accountant plus the remaining original Rs 40,000.
+    assert r.json()["received_credit_paise"] == 10_000_000
 
 
 # ============================================================================
@@ -990,14 +992,14 @@ class _PricedEngine:
         return object()
 
     def get(self, rid):
-        return {"rma_id": rid, "store_id": "S1", "expected_credit_paise": 0,
+        return {"rma_id": rid, "store_id": "S1", "vendor_id": "V1", "status": getattr(self, "status", "DRAFT"), "expected_credit_paise": 0,
                 "received_credit_paise": 0}
 
     def _result(self, *_a, **_kw):
         return {"ok": True, "rma_id": "R1", "status": "X",
                 "lines": [dict(ln) for ln in _PRICED_LINES]}
 
-    raise_rma = authorize = dispatch = reject = record_credit_note = close_rma = _result
+    raise_rma = authorize = dispatch = reject = record_credit_note = close_rma = _transition = _result
 
 
 _RMA_WRITES = {
@@ -1012,7 +1014,8 @@ _RMA_WRITES = {
     "reject": lambda r, u: r.reject_rma("R1", r.RMAReject(), current_user=u),
     "close": lambda r, u: r.close_rma("R1", r.RMAClose(), current_user=u),
     "credit-note": lambda r, u: r.record_credit_note(
-        "R1", r.RMACreditNote(credit_note_number="CN-1", received_amount=10.0),
+        "R1", r.RMACreditNote(credit_note_number="CN-1", received_amount=10.0,
+                             credit_note_date="2026-10-18", idempotency_key=str(uuid4())),
         current_user=u),
 }
 _MANAGER_RMA_WRITES = sorted(set(_RMA_WRITES) - {"credit-note"})
@@ -1031,7 +1034,10 @@ def test_every_rma_write_result_drops_line_prices_for_a_manager(rma, monkeypatch
 
 @pytest.mark.parametrize("write", sorted(_RMA_WRITES))
 def test_every_rma_write_result_keeps_line_prices_for_accounts(rma, monkeypatch, write):
-    monkeypatch.setattr(rma.r, "_engine", lambda: _PricedEngine())
+    engine = _PricedEngine()
+    engine.status = "DISPATCHED" if write == "credit-note" else "DRAFT"
+    monkeypatch.setattr(rma.r, "_engine", lambda: engine)
+    monkeypatch.setattr(rma.r.rma_supplier_credit, "record", _PricedEngine()._result)
     res = _run(_RMA_WRITES[write](rma.r, _user("ACCOUNTANT")))
     assert res["lines"] == _PRICED_LINES
 

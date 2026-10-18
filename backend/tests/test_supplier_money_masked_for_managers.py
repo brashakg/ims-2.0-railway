@@ -624,8 +624,9 @@ def test_vendor_return_create_response_carries_no_credit(vret, role):
 @pytest.fixture
 def rma(monkeypatch):
     import api.routers.vendor_rma as r
+    import mongomock
 
-    db = FakeDB()
+    db = mongomock.MongoClient().db
     monkeypatch.setattr(r, "_get_db", lambda: db)
     return SimpleNamespace(r=r, db=db)
 
@@ -635,6 +636,7 @@ def _rma_to_credit(rma, role, creditor=None):
     1,000 credit on the Rs 3,000 RMA (below the maker-checker tier) recorded by
     ``creditor`` -- ``role`` itself by default. Recording it is the accounts
     roles' (owner ruling 2026-10-12). Returns every response."""
+    from rma_credit_fixtures import credit_payload
     r, user = rma.r, _user(role)
     # The price per piece is the accounts roles' to enter (R2 + R3): an
     # accounts role prices the line as it raises the RMA; a manager raises it
@@ -655,7 +657,7 @@ def _rma_to_credit(rma, role, creditor=None):
     dispatched = _run(r.dispatch_rma(rid, r.RMADispatch(carrier="DTDC", awb="AWB1"),
                                      current_user=user))
     credited = _run(r.record_credit_note(
-        rid, r.RMACreditNote(credit_note_number="CN-Z1", received_amount=1000.0),
+        rid, r.RMACreditNote(**credit_payload(rma.db, rid, number="CN-Z1", amount=1000.0)),
         current_user=_user(creditor or role)))
     return rid, [raised, authorized, dispatched, credited]
 
@@ -738,12 +740,12 @@ class _MoneyEngine:
         return object()
 
     def get(self, rid):
-        return {"rma_id": rid, "store_id": "S1", "expected_credit_paise": 0}
+        return {"rma_id": rid, "store_id": "S1", "vendor_id": "V1", "status": getattr(self, "status", "DRAFT"), "expected_credit_paise": 0}
 
     def _result(self, *_a, **_kw):
         return {"ok": True, "rma_id": "R1", "status": "X", **_ALL_RMA_MONEY}
 
-    raise_rma = authorize = dispatch = reject = record_credit_note = close_rma = _result
+    raise_rma = authorize = dispatch = reject = record_credit_note = close_rma = _transition = _result
 
 
 _RMA_WRITES = {
@@ -756,7 +758,8 @@ _RMA_WRITES = {
     "dispatch": lambda r, u: r.dispatch_rma(
         "R1", r.RMADispatch(carrier="DTDC", awb="A1"), current_user=u),
     "credit-note": lambda r, u: r.record_credit_note(
-        "R1", r.RMACreditNote(credit_note_number="CN-1", received_amount=10.0),
+        "R1", r.RMACreditNote(credit_note_number="CN-1", received_amount=10.0,
+                             credit_note_date="2026-10-18", idempotency_key="11111111-1111-4111-8111-111111111111"),
         current_user=u),
     "reject": lambda r, u: r.reject_rma("R1", r.RMAReject(), current_user=u),
     "close": lambda r, u: r.close_rma("R1", r.RMAClose(), current_user=u),
@@ -767,7 +770,10 @@ _RMA_WRITES = {
 @pytest.mark.parametrize("role,shown", (("STORE_MANAGER", False), ("AREA_MANAGER", False),
                                         ("ACCOUNTANT", True)))
 def test_every_rma_write_result_goes_through_the_strip(rma, monkeypatch, write, role, shown):
-    monkeypatch.setattr(rma.r, "_engine", lambda: _MoneyEngine())
+    engine = _MoneyEngine()
+    engine.status = "DISPATCHED" if write == "credit-note" else "DRAFT"
+    monkeypatch.setattr(rma.r, "_engine", lambda: engine)
+    monkeypatch.setattr(rma.r.rma_supplier_credit, "record", _MoneyEngine()._result)
     if write == "credit-note" and not shown:
         # Owner ruling 2026-10-12: a manager cannot record the credit at all.
         with pytest.raises(HTTPException) as ei:
@@ -792,7 +798,7 @@ def test_rma_accounts_see_the_credit(rma, role):
     assert detail["credit_notes"][0]["received_paise"] == 100000
     assert detail["credit_notes"][0]["credit_note_number"] == "CN-Z1"
     assert listed["rmas"][0]["variance_paise"] == 200000
-    assert any(h.get("notes") == "credit note CN-Z1 for 100000 paise"
+    assert any(h.get("notes") == "Recorded confirmed supplier credit CN-Z1"
                for h in detail["status_history"])
     with pytest.raises(HTTPException) as ei:
         _run(rma.r.close_rma(rid, rma.r.RMAClose(), current_user=_user(role)))
