@@ -44,3 +44,9 @@ Validation:
 Base main: `10c6c645ebe8354958da2e1e64d91ee2c36a9791`.
 Branch: `codex/catalog-category-guard`.
 Require final exact-head review, required CI and CLEAN status before merge.
+
+The first final-head E2E run found an unrelated existing probe weakness:
+cash-flow was declared fixed while its screenshot still showed only Loading.
+Its route inventory now waits for the existing payables card before measuring.
+No cash-flow application code or layout exemption changed. This tightens the
+browser check instead of retrying until a loading skeleton happens to disappear.
