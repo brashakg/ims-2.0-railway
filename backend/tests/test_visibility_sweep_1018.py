@@ -430,3 +430,146 @@ def test_a_lowercase_role_on_the_user_record_logs_in_canonically(client, shop, m
     token = r.json()["access_token"]
     r = client.get(_JE_READS[0], headers={"Authorization": f"Bearer {token}"})
     assert r.status_code == 200, r.text[:300]
+
+
+# ---------------------------------------------------------------------------
+# Security review of #1232 (2026-10-18)
+# ---------------------------------------------------------------------------
+
+_JE_JV = "/api/v1/finance/tally/journal-jv"
+
+
+@pytest.mark.parametrize("role", MANAGERS)
+def test_managers_cannot_export_the_journal_to_tally(client, voucher, role):
+    from api.routers.finance import journal_entries as je
+    from api.services.rbac_policy import policy_for
+
+    r = client.get(_JE_JV, headers=_headers(role))
+    assert r.status_code == 403, r.text[:300]
+    assert sorted(policy_for("GET", _JE_JV)["allowed"]) == ["ACCOUNTANT", "ADMIN"]
+    # The handler's own gate, not only the policy row.
+    with pytest.raises(HTTPException) as err:
+        asyncio.run(je.get_tally_journal_jv(current_user=_user(role)))
+    assert err.value.status_code == 403
+
+
+@pytest.mark.parametrize("role", ACCOUNTS)
+def test_accounts_export_the_journal_to_tally(client, voucher, role):
+    r = client.get(_JE_JV, headers=_headers(role))
+    assert r.status_code == 200 and "xml" in r.headers["content-type"], r.text[:300]
+
+
+@pytest.fixture
+def vouchers(voucher):
+    voucher.journal_entries.insert_many([
+        {"je_id": "JE2", "store_id": OTHER, "status": "POSTED", "created_at": datetime.now()},
+        {"je_id": "JE3", "store_id": None, "status": "POSTED", "created_at": datetime.now()},
+    ])
+    return voucher
+
+
+def test_another_shops_voucher_is_not_found(client, vouchers):
+    missing = client.get("/api/v1/finance/journal-entries/JE-NONE", headers=_headers("ACCOUNTANT"))
+    assert missing.status_code == 404, missing.text[:300]
+    for je_id in ("JE2", "JE3"):  # another shop's, and an HQ voucher
+        r = client.get(f"/api/v1/finance/journal-entries/{je_id}", headers=_headers("ACCOUNTANT"))
+        assert (r.status_code, r.json()) == (404, missing.json()), (je_id, r.text[:300])
+    own = client.get("/api/v1/finance/journal-entries/JE1", headers=_headers("ACCOUNTANT"))
+    assert own.status_code == 200, own.text[:300]
+    for je_id in ("JE2", "JE3"):
+        r = client.get(f"/api/v1/finance/journal-entries/{je_id}", headers=_headers("ADMIN"))
+        assert r.status_code == 200, (je_id, r.text[:300])
+
+
+# Opening stock: quantities for every inventory role, a unit cost for the
+# accounts roles only.
+_OPENING = "/api/v1/inventory/opening-stock/{}"
+_NON_COST_INVENTORY = ("AREA_MANAGER", "STORE_MANAGER", "CATALOG_MANAGER", "WORKSHOP_STAFF")
+
+
+def _opening(rows):
+    return {"rows": rows, "skip_if_existing": False}
+
+
+def _opening_units(shop):
+    return list(shop.stock_units.find({"source": "OPENING_STOCK"}))
+
+
+@pytest.mark.parametrize("role", _NON_COST_INVENTORY)
+def test_opening_stock_cost_is_refused_for_non_cost_roles(client, shop, role):
+    from api.services.cost_mask import COST_WRITE_REFUSED
+
+    costed = _opening([{"sku": "SKU-P1", "quantity": 2, "unit_cost": 999.0}])
+    for step in ("preview", "commit"):
+        r = client.post(_OPENING.format(step), json=costed, headers=_headers(role))
+        assert r.status_code == 403, (step, r.text[:300])
+        assert r.json()["detail"] == COST_WRITE_REFUSED
+    assert _opening_units(shop) == []
+    # Quantities alone still go on the shelf, with no cost.
+    plain = _opening([{"sku": "SKU-P1", "quantity": 2}])
+    r = client.post(_OPENING.format("commit"), json=plain, headers=_headers(role))
+    assert r.status_code == 200, r.text[:300]
+    units = _opening_units(shop)
+    assert len(units) == 2 and not any(u.get("cost_price") or u.get("unit_cost") for u in units)
+
+
+def test_accounts_enter_the_opening_stock_cost(client, shop):
+    costed = _opening([{"sku": "SKU-P1", "quantity": 2, "unit_cost": 999.0}])
+    r = client.post(_OPENING.format("commit"), json=costed, headers=_headers("ADMIN"))
+    assert r.status_code == 200, r.text[:300]
+    assert [u["cost_price"] for u in _opening_units(shop)] == [999.0, 999.0]
+
+
+# The barcode trace and the count scan: another shop's unit is an unknown code.
+
+
+@pytest.fixture
+def traced(two_shops):
+    # The own-shop unit was once sold, and returned, at the other shop.
+    two_shops.orders.insert_one(
+        {"order_id": "O7", "order_number": "BV-O7", "store_id": OTHER, "status": "DELIVERED",
+         "created_at": datetime.now(), "items": [{"product_id": "P1", "barcode": OWN_BARCODE}]})
+    two_shops.returns.insert_one(
+        {"return_number": "R7", "store_id": OTHER, "status": "DONE", "created_at": datetime.now(),
+         "items": [{"barcode": OWN_BARCODE}]})
+    return two_shops
+
+
+def _trace(client, role, code):
+    r = client.get(f"/api/v1/inventory/barcode/{code}/trace", headers=_headers(role))
+    assert r.status_code == 200, r.text[:300]
+    return r.json()
+
+
+@pytest.mark.parametrize("role", ("STORE_MANAGER", "CASHIER"))
+def test_trace_of_another_shops_unit_reads_as_unknown(client, traced, role):
+    unknown = {**_trace(client, role, "2999999999999"), "barcode": None}
+    assert {**_trace(client, role, OTHER_BARCODE), "barcode": None} == unknown
+    assert unknown["stock_unit"] is None
+
+
+@pytest.mark.parametrize("role", ("STORE_MANAGER", "CASHIER"))
+def test_trace_lists_the_callers_shops_only(client, traced, role):
+    mine = _trace(client, role, OWN_BARCODE)
+    assert mine["stock_unit"]["barcode"] == OWN_BARCODE
+    assert mine["sales"] == [] and mine["returns"] == [], mine
+    admin = _trace(client, "ADMIN", OWN_BARCODE)
+    assert [s["order_number"] for s in admin["sales"]] == ["BV-O7"]
+    assert [r["return_number"] for r in admin["returns"]] == ["R7"]
+    assert _trace(client, "ADMIN", OTHER_BARCODE)["stock_unit"]["barcode"] == OTHER_BARCODE
+
+
+def _count_scan(client, role, code):
+    return client.post("/api/v1/inventory/stock-count-scan",
+                       json={"barcode": code, "physical_count": 1}, headers=_headers(role))
+
+
+@pytest.mark.parametrize("role", ("STORE_MANAGER", "WORKSHOP_STAFF"))
+def test_count_scan_of_another_shops_unit_is_not_found(client, two_shops, role):
+    missing = _count_scan(client, role, "2999999999999")
+    foreign = _count_scan(client, role, OTHER_BARCODE)
+    assert missing.status_code == foreign.status_code == 404, foreign.text[:300]
+    assert foreign.json() == missing.json()
+    own = _count_scan(client, role, OWN_BARCODE)
+    assert own.status_code == 200 and own.json()["product_id"] == "P1", own.text[:300]
+    assert _count_scan(client, "ADMIN", OTHER_BARCODE).status_code == 200

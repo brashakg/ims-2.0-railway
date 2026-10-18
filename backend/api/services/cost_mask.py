@@ -146,18 +146,29 @@ def can_see_cost(user: dict, context: str = "default") -> bool:
 
 
 COST_WRITE_REFUSED = (
-    "Only the accounts team (admin, accountant) can set a product's cost price. "
-    "Save the product without it; the cost is filled in from the supplier bill."
+    "Only the accounts team (admin, accountant) can enter a cost price. "
+    "Leave the cost out; it is filled in from the supplier bill."
 )
 
 
 def refuse_cost_write(user: dict, *sent) -> None:
-    """THE write side of the product-cost rule (audit FU-23): a login that may
-    not SEE product cost may not SET it either. Every door that takes a cost
-    price from the caller (POST/PUT /products, POST/PUT /catalog/products,
-    POST/PATCH /lens-catalog) passes what was sent; any value that is not None
-    from such a login is a 403 with a plain message. Omitting the cost (what
-    the screens do for these roles) is untouched."""
+    """THE write side of the product-cost rule (audit FU-23, owner
+    2026-10-18): a login that may not SEE product cost may not SET it either.
+    Each door that takes a cost from the caller passes what was sent; any value
+    that is not None from such a login is a 403 with a plain message, and
+    omitting the cost (what the screens do for these roles) is untouched.
+
+    The doors that call it (keep this list in step with the callers):
+      * POST /products and PUT /products/{id} -- `cost_price`
+        (routers/products.py create_product / update_product);
+      * POST /catalog/products and PUT /catalog/products/{id} --
+        `pricing.cost_price` (routers/catalog.py);
+      * POST /lens-catalog and PATCH /lens-catalog/{id} -- `cost_price`
+        (routers/lens_catalog.py);
+      * POST /inventory/opening-stock/preview and /commit -- each row's
+        `unit_cost`, which mints the units' cost (routers/inventory/
+        opening_stock.py).
+    The purchase side (PO prices, receiving, bills) has its own gates."""
     if any(v is not None for v in sent) and not can_see_cost(user, "product"):
         from fastapi import HTTPException
 

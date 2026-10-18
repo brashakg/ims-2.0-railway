@@ -630,7 +630,7 @@ entry exactly; see the manual interpretation notes above.
 | `GET` | `/api/v1/finance/revenue` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
 | `GET` | `/api/v1/finance/summary-month` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
 | `GET` | `/api/v1/finance/survival-cashflow` | ACCOUNTANT, ADMIN |  |  |
-| `GET` | `/api/v1/finance/tally/journal-jv` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/finance/tally/journal-jv` | ACCOUNTANT, ADMIN | S |  |
 | `GET` | `/api/v1/finance/tally/sales-jv` | ACCOUNTANT, ADMIN |  |  |
 | `GET` | `/api/v1/finance/tally/tender-receipt-jv` | ACCOUNTANT, ADMIN |  |  |
 | `GET` | `/api/v1/finance/target-ticker` | AUTH |  |  |

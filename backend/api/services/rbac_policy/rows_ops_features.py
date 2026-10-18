@@ -335,10 +335,11 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/finance/chart-of-accounts",
         "allowed": ["SUPERADMIN"],
     },
+    # The POSTED vouchers as Tally XML: the journal's readers (FU-17).
     {
         "method": "GET",
         "path": "/api/v1/finance/tally/journal-jv",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ACCOUNTS,
         "store_scoped": True,
     },
     {

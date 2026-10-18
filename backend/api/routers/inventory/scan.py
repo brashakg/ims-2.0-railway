@@ -1,5 +1,7 @@
 """Stock-count scanning interface."""
 
+from ...dependencies import in_reach_or_404
+
 from ._shared import (
     BaseModel,
     Depends,
@@ -66,10 +68,14 @@ async def scan_barcode_for_count(
             else None
         )
 
-        # Find stock by barcode
-        stock = stock_coll.find_one(barcode_svc.unit_barcode_match(request.barcode))
-        if not stock:
-            raise HTTPException(status_code=404, detail="Barcode not found")
+        # Find stock by barcode. Another shop's unit is the same 404 as an
+        # unknown code: its product and on-hand are that shop's (audit
+        # 2026-10-18); admins reach every shop.
+        stock = in_reach_or_404(
+            stock_coll.find_one(barcode_svc.unit_barcode_match(request.barcode)),
+            current_user,
+            "Barcode not found",
+        )
 
         product_id = stock.get("product_id")
         product = products_coll.find_one({"_id": product_id})

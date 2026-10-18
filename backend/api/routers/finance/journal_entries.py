@@ -12,7 +12,12 @@ from fastapi import Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from ..auth import get_current_user
-from ...dependencies import NO_SHOP_DETAIL, is_no_shop_scope, resolve_store_scope
+from ...dependencies import (
+    NO_SHOP_DETAIL,
+    in_reach_or_404,
+    is_no_shop_scope,
+    resolve_store_scope,
+)
 from ...services import je_service
 from ...services.cost_mask import COST_VISIBLE_ROLES
 from ._shared import (
@@ -188,21 +193,12 @@ async def get_journal_entry(
     """Fetch one journal voucher with its full line detail."""
     _require_roles_for(current_user, _JE_READER_ROLES, _JE_READ_REFUSED)
     db = _get_db()
-    je = je_service.get_je(db, je_id)
-    if not je:
-        raise HTTPException(status_code=404, detail="Journal entry not found")
-    # Store-scope read: a store-level role cannot read another store's JE.
-    if je.get("store_id"):
-        resolve_store_scope(je.get("store_id"), current_user)
-    else:
-        # Store-LESS (HQ/entity-level) voucher: skipping the guard here let any
-        # store-scoped finance role read HQ vouchers by id (adversarial P3).
-        # HQ vouchers are HQ-readable only.
-        roles = set(current_user.get("roles") or [])
-        if not (roles & {"SUPERADMIN", "ADMIN"}):
-            raise HTTPException(
-                status_code=403, detail="HQ journal entries are not store-readable"
-            )
+    # Another shop's voucher -- or a store-LESS (HQ/entity-level) one, which
+    # only admins read (adversarial P3) -- is the same 404 as a missing one,
+    # so a guessed id never confirms a voucher exists (audit 2026-10-18).
+    je = in_reach_or_404(
+        je_service.get_je(db, je_id), current_user, "Journal entry not found"
+    )
     je.pop("_id", None)
     return je_service._jsonable(je)
 
@@ -376,7 +372,9 @@ async def get_tally_journal_jv(
     current_user: dict = Depends(get_current_user),
 ):
     """POSTED journal vouchers as Tally ``<JOURNALVOUCHER>`` import XML. DRAFT /
-    SUBMITTED / APPROVED JEs are never exported."""
+    SUBMITTED / APPROVED JEs are never exported. The same vouchers as the
+    journal list, so the same readers: the accounts roles (FU-17)."""
+    _require_roles_for(current_user, _JE_READER_ROLES, _JE_READ_REFUSED)
     db = _get_db()
     store_id = resolve_store_scope(store_id, current_user)
     from_dt = _parse_range_dt(from_date)
