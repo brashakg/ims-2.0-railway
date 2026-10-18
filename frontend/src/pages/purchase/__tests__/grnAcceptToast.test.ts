@@ -14,6 +14,15 @@ import { heldLinesSummary, reportGrnAccept } from '../grnAcceptToast';
 const toast = () => ({ success: vi.fn(), warning: vi.fn() });
 
 describe('reportGrnAccept on a held receipt', () => {
+  it('keeps rejected custody and a draft separate from sellable units and issued notes', () => {
+    const t = toast();
+    reportGrnAccept(t, 'R-3', { units_added: 2, quarantined_units: 1, rejection_return_ids: ['VR-1'] });
+    const msg = String(t.success.mock.calls[0][0]);
+    expect(msg).toContain('2 units added to stock');
+    expect(msg).toContain('1 rejected unit(s) quarantined');
+    expect(msg).toContain('draft returns for Accounts review');
+    expect(msg).not.toMatch(/note (raised|issued)/i);
+  });
   it('a line held for the catalogue: it goes on the shelf by itself once finished', () => {
     const t = toast();
     reportGrnAccept(t, 'R-1', {

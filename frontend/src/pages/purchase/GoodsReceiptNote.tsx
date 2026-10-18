@@ -43,6 +43,7 @@ interface GRNLineItem {
   // old all-or-nothing quality verdict.
   rejected_qty: number;
   rejection_reason?: string;
+  rejection_disposition?: 'credit_note' | 'replacement' | '';
   reject_only?: boolean;
   // D14 "Bought without PO" lines: what was paid per unit, and the expiry.
   unit_price?: number;
@@ -629,6 +630,10 @@ export function GoodsReceiptNote() {
       toast.error('Say why the units were rejected — the debit note needs the reason');
       return;
     }
+    if (lines.some((i) => rejectedOf(i) > 0 && !i.rejection_disposition)) {
+      toast.error('Choose credit note or replacement for each rejected line');
+      return;
+    }
     if (isDcMode && !dcNumber.trim()) {
       toast.error('DC Number is required for a Delivery Challan');
       return;
@@ -673,6 +678,7 @@ export function GoodsReceiptNote() {
           accepted_qty: item.received_qty - rejectedOf(item),
           rejected_qty: rejectedOf(item),
           rejection_reason: rejectedOf(item) > 0 ? item.rejection_reason : undefined,
+          rejection_disposition: rejectedOf(item) > 0 ? item.rejection_disposition || undefined : undefined,
           tallied: item.tallied,
           unit_price: isNoPo && canEnterPrice ? item.unit_price : undefined,
           expiry_date: isNoPo ? item.expiry_date || undefined : undefined,
@@ -693,7 +699,7 @@ export function GoodsReceiptNote() {
           // user so they can retry the post from the History tab rather than
           // believing nothing happened.
           toast.warning(
-            'GRN saved but stock posting failed. Retry from History — no stock was added.',
+            'GRN saved but posting did not finish. Retry from History to complete it.',
           );
           setActiveTab('history');
           await reloadGrns();
@@ -702,7 +708,7 @@ export function GoodsReceiptNote() {
       }
 
       if (rejectOnly) {
-        toast.success('Rejected delivery logged · nothing added to stock · a discrepancy task follows');
+        reportGrnAccept(toast, String(created?.grn_number || ''), posted);
       } else {
         reportGrnAccept(toast, String(created?.grn_number || ''), posted);
         if (grnId) setLabelsFor(grnId);
@@ -867,7 +873,7 @@ export function GoodsReceiptNote() {
           <div className="v" style={{ color: 'var(--err)' }}>
             {grns.filter((g) => g.quality_status === 'failed').length}
           </div>
-          <div className="d bad">{ofLatest('debit note raised')}</div>
+          <div className="d bad">{ofLatest('rejection recorded')}</div>
         </div>
       </div>
 
@@ -1148,8 +1154,8 @@ export function GoodsReceiptNote() {
                     {rejectOnly && (
                       <p className="text-xs mt-1" style={{ color: 'var(--ink-3)' }}>
                         This order was closed by a cancel. Count what the vendor sent: every unit
-                        is logged as rejected, nothing goes into stock, and a discrepancy task
-                        follows for the debit note.
+                        goes to quarantine with a draft return for Accounts review. Nothing
+                        becomes sellable and the order stays closed.
                       </p>
                     )}
                     {extraReceipt && (
@@ -1478,6 +1484,7 @@ export function GoodsReceiptNote() {
                             style={{ width: 64, textAlign: 'right', height: 30, padding: '0 6px' }}
                           />
                           {rejectedOf(item) > 0 ? (
+                            <>
                             <input
                               type="text"
                               value={item.rejection_reason || ''}
@@ -1496,6 +1503,21 @@ export function GoodsReceiptNote() {
                               className="input"
                               style={{ marginTop: 4, height: 28, padding: '0 6px', maxWidth: 150 }}
                             />
+                            <select
+                              value={item.rejection_disposition || ''}
+                              aria-label={`Rejection disposition on line ${idx + 1}`}
+                              onChange={(e) => {
+                                const value = e.target.value as 'credit_note' | 'replacement' | '';
+                                setReceivedItems((arr) => arr.map((r, j) => j === idx ? { ...r, rejection_disposition: value } : r));
+                              }}
+                              className="input"
+                              style={{ marginTop: 4, height: 28, padding: '0 6px', maxWidth: 150 }}
+                            >
+                              <option value="">Credit or replacement *</option>
+                              <option value="credit_note">Credit note</option>
+                              <option value="replacement">Replacement</option>
+                            </select>
+                            </>
                           ) : null}
                         </td>
                       </tr>
@@ -1517,7 +1539,7 @@ export function GoodsReceiptNote() {
                     {totals.rec} <span style={{ fontSize: 13, color: 'var(--ink-4)' }}>/ {totals.ord}</span>
                   </div>
                   <div className="d" style={{ color: totals.short ? 'var(--err)' : 'var(--ok)' }}>
-                    {totals.short ? `${totals.short} short · raise debit note` : 'No shortage'}
+                    {totals.short ? `${totals.short} short · review discrepancy` : 'No shortage'}
                   </div>
                 </div>
                 <div>
@@ -1599,12 +1621,12 @@ export function GoodsReceiptNote() {
           <div className="flex items-center gap-3 flex-wrap">
             <span className="text-xs" style={{ color: 'var(--ink-4)' }}>
               {rejectOnly
-                ? `Posting logs ${totals.rec} rejected unit${totals.rec === 1 ? '' : 's'} against ${poNumber} · nothing goes into stock · the order stays closed.`
+                ? `Posting quarantines ${totals.rec} rejected unit${totals.rec === 1 ? '' : 's'} against ${poNumber} with drafts for Accounts review · the order stays closed.`
                 : isNoPo
-                ? `Posting adds ${totals.rec} unit${totals.rec === 1 ? '' : 's'} to this store's stock · accounts get a task to enter supplier prices and book the bill.`
+                ? 'Posting adds accepted units to this store’s stock and quarantines rejected units with draft returns · Accounts enter supplier prices and book the bill.'
                 : noPoDc
-                ? `Posting this Delivery Challan adds ${totals.rec} unit${totals.rec === 1 ? '' : 's'} to your own shop's stock · the receipt is what the vendor's bill will link to.`
-                : `Posting against ${poNumber || 'the selected PO'} adds ${totals.rec} unit${totals.rec === 1 ? '' : 's'} to the stock of the shop it delivers to · the PO is marked partially / fully received · variance raises a debit note.`}
+                ? 'Posting this Delivery Challan adds accepted units to your shop’s stock and quarantines rejected units with draft returns · the vendor’s bill links to this receipt.'
+                : `Posting against ${poNumber || 'the selected PO'} adds accepted units to its shop's stock and quarantines rejected units with draft returns · Accounts review before a debit note is issued.`}
             </span>
             <span className="flex-1" />
             <button
