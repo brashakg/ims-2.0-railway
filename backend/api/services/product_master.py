@@ -3844,10 +3844,31 @@ def family_key(doc: Dict[str, Any]) -> Optional[Tuple[str, str, str]]:
         return None
     attrs = _shown_attributes((doc or {}).get("attributes") or {}, category)
     brand = normalise_identity_component(attrs.get("brand_name") or attrs.get("brand") or doc.get("brand"))
-    model = normalise_identity_component(attrs.get("model_no"))
-    if brand and model.startswith(brand) and len(model) > len(brand):
-        model = model[len(brand):]
+    model = _without_brand(brand, attrs.get("model_no"))
     return (category, brand, model) if brand and model else None
+
+
+_SEPARATOR = r"[^a-z0-9]"
+# What a model number looks like right after a brand typed without a gap:
+# a digit, or one or two letters then a digit ('CARRERA1001/S' -> 1001S,
+# 'RAYBANRB2140' -> RB2140). ponytail: 'TITANIUM12' under Titan stays
+# 'TITANIUM12' (three letters); widen only for a real model the rule misses.
+_MODEL_AFTER_BRAND = re.compile(r"^(?:\d|[a-z]{1,2}\d)")
+
+
+def _without_brand(brand: str, raw_model: Any) -> str:
+    """The normalised model number with a leading copy of the brand folded
+    away: always when a separator follows the brand ('CARRERA 1001/S'),
+    without one only before a model-number shape (_MODEL_AFTER_BRAND)."""
+    model = normalise_identity_component(raw_model)
+    if not brand or not model.startswith(brand) or len(model) == len(brand):
+        return model
+    rest = model[len(brand):]
+    typed_apart = re.match(
+        r"^\W*" + (_SEPARATOR + "*").join(map(re.escape, brand)) + _SEPARATOR + "+",
+        str(raw_model or "").strip().lower(),
+    )
+    return rest if typed_apart or _MODEL_AFTER_BRAND.match(rest) else model
 
 
 def _brand_rows_query(category: Any, brand: Any) -> Optional[Dict[str, Any]]:
@@ -4017,13 +4038,13 @@ _ENGINE_ROW_FIELDS = (
 
 def has_listing(db, spine: Dict[str, Any]) -> bool:
     """Is this product's twin on Shopify (it carries a product gid)? The twin
-    by the take-down's own resolver (online_delist._resolve_twin). A twin
-    that cannot be read counts as on Shopify: nothing is re-pointed under a
-    listing nobody could check."""
+    by the take-down's own resolver (online_delist._resolve_twin), read
+    STRICTLY: a catalogue that cannot be read counts as on Shopify -- nothing
+    is re-pointed under a listing nobody could check (fail closed)."""
     from .online_delist import _raw_db, _resolve_twin
 
     try:
-        twin = _resolve_twin(_raw_db(db), spine or {})
+        twin = _resolve_twin(_raw_db(db), spine or {}, strict=True)
     except Exception:  # noqa: BLE001
         return True
     return bool(((twin or {}).get("ecom") or {}).get("shopify_product_id"))

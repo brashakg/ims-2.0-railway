@@ -20,7 +20,8 @@ website is linked in IMS only: its rows wait for the website step (G2).
 Stored model numbers and brands are never rewritten. Shape and gender (the
 model-level fields that are not part of an item's identity) become the
 LEAD's value on every item of the model (the lead's blank is filled with the
-model's most common value). Variant fields (colours, sizes, materials, lens,
+model's most common value) -- never on an item that is on the website (a
+listing change belongs to G2; reported). Variant fields (colours, sizes, materials, lens,
 tint, polarization...) are never touched. Blank eye sizes stay blank
 (reported). An item with its own live website listing, a product marked
 'different model', archived items, items with no model number and
@@ -72,6 +73,8 @@ def plan(db) -> Dict[str, Any]:
         "scanned": 0,
         "brand_in_model": [],
         "model_field_changes": [],
+        # On the website: its shape / gender is a listing change (G2).
+        "model_field_left_live": [],
         "families": [],
         "skipped": [],
         "opted_out": 0,
@@ -121,7 +124,9 @@ def plan(db) -> Dict[str, Any]:
         for m in ordered:
             attrs = m.get("attributes") or {}
             diff = {k: v for k, v in values.items() if str(attrs.get(k) or "").strip() != str(v).strip()}
-            if diff:
+            if diff and pm.has_listing(db, m):
+                report["model_field_left_live"].append({"sku": m.get("sku"), "would_set": diff})
+            elif diff:
                 report["model_field_changes"].append(
                     {"product_id": m["product_id"], "sku": m.get("sku"), "set": diff,
                      "was": {k: attrs.get(k) for k in diff}}
@@ -252,6 +257,10 @@ def print_report(report: Dict[str, Any], mode: str, examples: int = 5) -> None:
     print(f"[{mode}] shape / gender set to the lead's value: {len(report['model_field_changes'])} item(s)")
     for c in report["model_field_changes"]:
         print(f"    {c['sku']}: {c['was']} -> {c['set']}")
+    print(f"[{mode}] shape / gender NOT changed because the item is on the website (G2): "
+          f"{len(report['model_field_left_live'])}")
+    for c in report["model_field_left_live"]:
+        print(f"    {c['sku']}: would set {c['would_set']}")
     print(f"[{mode}] left alone: {len(report['skipped'])} item(s); 'different model': {report['opted_out']}")
     for s in report["skipped"]:
         print(f"    {s['sku']}: {s['reason']}")

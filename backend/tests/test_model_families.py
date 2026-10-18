@@ -483,7 +483,8 @@ def _mig_world(db):
     out[0]["family_opt_out"] = True
     items += [out, _frame("LIVE", "102", model="RB4105", minutes=72, live=True)]
     # a model whose LEAD is on the website: linked in IMS only, no row moves
-    items += [_frame("WL", "201", model="RB4200", minutes=80, live=True), _frame("WC", "202", model="RB4200", minutes=81)]
+    items += [_frame("WL", "201", model="RB4200", minutes=80, live=True),
+              _frame("WC", "202", model="RB4200", minutes=81, shape="Round")]
     _seed(db, *items)
     db["catalog_variants"].update_one({"sku": _p(db, "WL")["sku"]}, {"$set": {"discounted_price": 4500.0, "shopify_variant_id": "gid://v/WL"}})
     # F99 has no catalog_variants row yet: the run creates one (revert removes it)
@@ -513,6 +514,8 @@ def test_migration_dry_run_apply_and_revert(db, capsys):
     assert fams["caprw5sin"]["members"] == 2 and fams["pld4162s"]["members"] == 2
     assert [b["sku"] for b in report["brand_in_model"]] == [_p(db, "CA1")["sku"]]
     assert fams["rb4200"]["lead_on_website"] is True and fams["rb4200"]["link"] == ["WC"]
+    # the live lead's blank shape is a website change: left for G2, reported
+    assert [c["sku"] for c in report["model_field_left_live"]] == [_p(db, "WL")["sku"]]
     changes = {c["sku"]: c["set"] for c in report["model_field_changes"]}
     assert changes[_p(db, "F07")["sku"]] == {"shape": "Aviator"}  # the lead's value
     assert _p(db, "PL2")["sku"] not in changes  # model numbers are never rewritten
@@ -531,8 +534,9 @@ def test_migration_dry_run_apply_and_revert(db, capsys):
     assert (lead_row["option_color"], lead_row["option_size"]) == ("Gold (001)", "58")
     assert _row(db, "F99")["option_size"] == "" and _row(db, "F99")["parent_product_id"] == "twin-F03"
     assert _row(db, "W1")["option_size"] == "" and _row(db, "W1")["option_color"] == "710"
-    # the live model: linked in IMS, rows exactly as they were
+    # the live model: linked in IMS, rows exactly as they were, its twin untouched
     assert _p(db, "WC")["variant_of"] == "WL"
+    assert "shape" not in _p(db, "WL")["attributes"] and "shape" not in _twin(db, "WL")["attributes"]
     after = _snapshot(db)
     for pid in ("WL", "WC"):
         sku = _p(db, pid)["sku"]
@@ -566,6 +570,12 @@ def test_family_key_folds_a_brand_typed_into_the_model_number():
     assert _key("Polaroid", "1001/S") != _key("Carrera", "1001/S")
     assert _key("Oakley", "OO9208") != _key("Oakley", "OO9208A")
     assert _key("Carrera", "CARRERA") == ("SUNGLASS", "carrera", "carrera")
+    # with no separator the brand folds only before a model-number shape
+    assert _key("Carrera", "CARRERACA1001")[2] == "ca1001"
+    assert _key("Ray-Ban", "RAYBANRB2140")[2] == "rb2140"
+    assert _key("Titan", "TITANIUM 12")[2] == "titanium12"
+    assert _key("Titan", "Titanium12")[2] == "titanium12"
+    assert _key("Titan", "TITAN 12")[2] == "12"
     # the model NUMBER only: a smart glass named by its model name is no family
     assert _key("Ray-Ban", "", category="SMARTGLASSES", model_name="Meta Wayfarer") is None
     assert _key("Ray-Ban", "RW4006", category="SMARTGLASSES", model_name="Meta Wayfarer") == (
@@ -629,3 +639,66 @@ def test_grouped_list_pages_models_and_the_archived_view_shows_archived_members(
     out = _list(sort="oldest", group="model", flag="archived")
     assert [p["product_id"] for p in out["products"]] == ["C2"]
     assert "family" not in out["products"][0]  # only its archived members: itself
+
+
+# ---------------------------------------------------------------------------
+# review round 2
+# ---------------------------------------------------------------------------
+
+
+class _Unreadable:
+    """A catalogue whose catalog_products read fails."""
+
+    def __init__(self, db):
+        self._db = db
+
+    def __getitem__(self, name):
+        if name == "catalog_products":
+            class _Boom:
+                def find_one(self, *a, **k):
+                    raise RuntimeError("catalogue down")
+            return _Boom()
+        return self._db[name]
+
+    def get_collection(self, name):
+        return self[name]
+
+
+def test_has_listing_fails_closed_when_the_catalogue_cannot_be_read(db):
+    lead, _, _ = _frame("L", "001")
+    assert pm.has_listing(_Conn(db), lead) is False  # readable, no twin: not on Shopify
+    assert pm.has_listing(_Unreadable(db), lead) is True
+    assert pm.has_listing(None, lead) is True
+
+
+def test_a_live_lead_is_never_relabelled_by_an_attribute_edit(db):
+    repo = ProductRepository(db["products"])
+    _seed(db, _frame("L", "001", "Gold"), _frame("C", "002", "Black", minutes=1))
+    pm.link_to_family(_Conn(db), "C", "L")  # linked before the model went live
+    db["catalog_products"].update_one({"id": "twin-L"}, {"$set": {"ecom.shopify_product_id": "gid://shopify/Product/L"}})
+    before = {pid: _row(db, pid) for pid in ("L", "C")}
+    # a colour name edit on the variant AND on the lead would relabel their rows
+    for pid, name in (("C", "Navy"), ("L", "Rose Gold")):
+        doc = _p(db, pid)
+        pm.update_product(product_id=pid, patch={"attributes": {**doc["attributes"], "frame_color": name}},
+                          actor="u1", product_repo=repo, db=_Conn(db))
+        assert _p(db, pid)["attributes"]["frame_color"] == name  # the edit itself saved
+    for pid in ("L", "C"):
+        assert {k: _row(db, pid).get(k) for k in ("option_color", "option_size")} ==             {k: before[pid].get(k) for k in ("option_color", "option_size")}, pid
+
+
+def test_a_row_that_moves_listing_drops_the_old_listings_shopify_ids(db):
+    _seed(db, _frame("L", "001"), _frame("A", "002", minutes=1), _frame("B", "003", minutes=2))
+    pm.link_to_family(_Conn(db), "A", "L")
+    pm.link_to_family(_Conn(db), "B", "L")
+    for pid in ("A", "B"):  # as if they had been variants on L's listing
+        db["catalog_variants"].update_one({"sku": _p(db, pid)["sku"]}, {"$set": {
+            "shopify_variant_id": "gid://v/" + pid, "shopify_inventory_item_id": "gid://i/" + pid,
+            "discounted_price": 4000.0}})
+    db["products"].update_one({"product_id": "L"}, {"$set": {"deleted_at": "2026-10-18T00:00:00Z"}})
+    assert pm.promote_new_lead(_Conn(db), "L") == "A"
+    for pid in ("A", "B"):
+        row = _row(db, pid)
+        assert row["parent_product_id"] == "twin-A"
+        for f in ("shopify_variant_id", "shopify_inventory_item_id", "discounted_price"):
+            assert f not in row, (pid, f)
