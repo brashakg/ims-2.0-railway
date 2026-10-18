@@ -286,6 +286,8 @@ _RETURN_KEYS = (
     "status", "notes", "status_history",
     "courier_name", "tracking_number", "tracking_url", "shipped_at",
     "created_at", "created_by", "updated_at", "updated_by",
+    "receipt_rejection", "grn_id", "grn_number", "grn_line_index",
+    "debit_note_draft_status", "debit_note_draft_id",
 )
 # A return LINE -- a vendor return's item or an RMA's line -- as anyone outside
 # the accounts roles reads it (owner ruling 2026-10-12, R3): the item, the

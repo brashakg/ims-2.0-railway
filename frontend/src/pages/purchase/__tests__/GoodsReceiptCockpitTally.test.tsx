@@ -154,6 +154,8 @@ async function openTwoStepForm() {
     { name: /create goods receipt/i },
     { timeout: 5000 },
   );
+  fireEvent.change(screen.getByLabelText('Rejection reason on line 2'), { target: { value: 'damaged' } });
+  fireEvent.change(screen.getByLabelText('Rejection disposition on line 2'), { target: { value: 'replacement' } });
 }
 
 describe('GoodsReceiptCockpit two-step receive - ruling 14 (the tally)', () => {
@@ -216,7 +218,17 @@ describe('GoodsReceiptCockpit two-step receive - ruling 14 (the tally)', () => {
     }
     // ...and the tick must not have quietly rewritten what arrived.
     expect(payload.items[0]).toMatchObject({ product_id: 'prod-a', received_qty: 8, rejected_qty: 0 });
-    expect(payload.items[1]).toMatchObject({ product_id: 'prod-b', received_qty: 20, rejected_qty: 2 });
+    expect(payload.items[1]).toMatchObject({ product_id: 'prod-b', received_qty: 20, rejected_qty: 2, rejection_reason: 'damaged', rejection_disposition: 'replacement' });
+  });
+
+  it('requires an explicit disposition for rejected pieces before creating the receipt', async () => {
+    await openTwoStepForm();
+    fireEvent.click(screen.getByRole('checkbox', { name: /tally line 1/i }));
+    fireEvent.click(screen.getByRole('checkbox', { name: /tally line 2/i }));
+    fireEvent.change(screen.getByLabelText('Rejection disposition on line 2'), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: /create goods receipt/i }));
+    expect(createGRNMock).not.toHaveBeenCalled();
+    expect(toastMock.error).toHaveBeenCalledWith('For each rejected line, enter a reason and choose credit note or replacement');
   });
 
   it('sends a walk-in buy to "Bought without PO", not to a challan (D14)', async () => {

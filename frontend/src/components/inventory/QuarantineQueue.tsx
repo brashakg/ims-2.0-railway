@@ -250,7 +250,15 @@ export function QuarantineQueue() {
                           <Printer className="w-4 h-4" /> Print
                         </button>
                       )}
-                      {canManage && !u.rtv_vendor_id && (
+                      {canManage && u.receipt_disposition === 'REJECTED' && u.rtv_vendor_id && (
+                        <button
+                          onClick={() => navigate(`/purchase/vendor-returns?return_id=${encodeURIComponent(u.rtv_vendor_id!)}`)}
+                          className="inline-flex items-center gap-1 text-xs text-gray-600 hover:text-bv-red-600"
+                        >
+                          <Tag className="w-4 h-4" /> View return
+                        </button>
+                      )}
+                      {canManage && u.receipt_disposition !== 'REJECTED' && !u.rtv_vendor_id && (
                         <button
                           onClick={() => handleCreateRtv(u)}
                           className="inline-flex items-center gap-1 text-xs text-gray-600 hover:text-bv-red-600"
@@ -259,7 +267,7 @@ export function QuarantineQueue() {
                           <Tag className="w-4 h-4" /> Create RTV
                         </button>
                       )}
-                      {canManage && (
+                      {canManage && u.receipt_disposition !== 'REJECTED' && (
                         <button
                           onClick={() => handleLift(u.stock_id)}
                           disabled={busyId === u.stock_id}

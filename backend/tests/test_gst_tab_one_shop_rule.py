@@ -44,8 +44,10 @@ def get(monkeypatch):
         {"store_id": DHN, "entity_id": "BV", "state": "Jharkhand"},
         {"store_id": PUN, "entity_id": "WO", "state": "Maharashtra"},
     ])
-    db["entities"].insert_many([{"entity_id": "BV", "name": "Better Vision"},
-                                {"entity_id": "WO", "name": "WizOpt"}])
+    db["entities"].insert_many([
+        {"entity_id": "BV", "name": "Better Vision", "gstins": [{"gstin": "20ABCDE1234F1Z5"}]},
+        {"entity_id": "WO", "name": "WizOpt", "gstins": [{"gstin": "27ABCDE1234F1Z5"}]},
+    ])
     on = datetime(2026, 10, 10, 6, 0, 0)
     for shop, sale_tax, input_tax in ((PUN, 100.0, 40.0), (DHN, 900.0, 300.0)):
         db["orders"].insert_one({"order_id": f"O-{shop}", "store_id": shop, "status": "DELIVERED",

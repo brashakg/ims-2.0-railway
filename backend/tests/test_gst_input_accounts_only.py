@@ -208,16 +208,15 @@ class TestGstSummary:
         finally:
             finance._get_db = original
 
-    def test_accounts_no_db_skeleton_unchanged(self):
+    def test_accounts_no_db_gets_a_clear_error_instead_of_zero_figures(self):
         original = finance._get_db
         finance._get_db = lambda: None
         try:
-            body = _finance_client("ACCOUNTANT").get(SUMMARY_URL).json()
+            response = _finance_client("ACCOUNTANT").get(SUMMARY_URL)
         finally:
             finance._get_db = original
-        assert body == {
-            "tax_collected": 0, "tax_paid": 0, "net_gst_liability": 0, "gst_by_rate": {},
-        }
+        assert response.status_code == 503
+        assert "could not read" in response.json()["detail"]
 
 
 # ============================================================================

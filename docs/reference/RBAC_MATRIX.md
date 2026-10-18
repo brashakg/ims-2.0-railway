@@ -1,58 +1,1808 @@
-# IMS 2.0 - RBAC Access Matrix (FOUNDATION / non-enforcing)
+# IMS 2.0 - RBAC Access Matrix
 
-> Source of truth: derived from the **current** router enforcement and the live
-> `api.main.app.routes` surface. Companion module:
-> [`backend/api/services/rbac_policy.py`](../../backend/api/services/rbac_policy.py)
-> (the declarative `POLICY` registry + `policy_for` / `check_access` /
-> `uncatalogued_routes`). Coverage is locked by
-> [`backend/tests/test_rbac_policy.py`](../../backend/tests/test_rbac_policy.py).
+The generated section documents every entry in the request-time
+[RBAC policy registry](../../backend/api/services/rbac_policy/__init__.py).
+The [RBAC middleware](../../backend/api/middleware/rbac_enforcement.py) consumes
+this policy on requests. Route dependencies and handler checks remain in place;
+this table is the registry's role gate, not a guarantee that every request or
+resource will be accessible.
 
-**This is a survey + registry, not a change.** No router gate was modified. The
-registry mirrors today's behavior exactly so it can later BECOME the single
-enforcer with zero behavior change (hardening dim 4).
+## How to maintain this document
 
-## How access is enforced today (4 mechanisms)
+Run `python scripts/generate_rbac_matrix.py` after changing policy entries.
+Run `python scripts/generate_rbac_matrix.py --check` to verify without writing.
+The generator imports the policy only; it does not start the API or connect to a
+database. It replaces only the explicitly marked generated section. Keep
+business explanations and historical notes outside those markers.
 
-1. **Per-endpoint dependency** - `Depends(require_roles(...))`, `require_admin`,
-   `require_manager`, `require_superadmin`.
-2. **Router-level dependency** - `APIRouter(dependencies=[Depends(_require_admin_role)])`
-   on `admin` / `admin_catalog` / `admin_extras` (-> ADMIN/SUPERADMIN), and
-   `include_router(..., dependencies=[Depends(require_roles(*_FINANCE_ROLES))])` on
-   `finance` / `hr` / `payroll` in `api/main.py` (-> ACCOUNTANT/ADMIN/AREA_MANAGER/STORE_MANAGER).
-3. **Inline check in the handler body** - e.g. `POS_WRITE_ROLES` on `POST /orders`,
-   `_require_superadmin(current_user)` on `GET /audit/verify`.
-4. **Implicit** - only `Depends(get_current_user)` (any logged-in user), or nothing
-   at all (PUBLIC).
+[The complete document-parity test](../../backend/tests/test_rbac_matrix_document.py)
+independently parses every documented route and compares its method, path,
+allowed roles, shop-scope flag and self-enforcement flag with POLICY. It also
+checks totals, duplicate rows and generator stability. Existing
+[route-coverage tests](../../backend/tests/test_rbac_policy.py) separately verify
+that policy keys match the application's routes. The ordinary backend test
+suite runs both checks.
 
-> NOTE: the finance/hr/payroll router-level gate does NOT flatten into a route's
-> `dependant`, so it was applied by prefix during the survey. The admin router-level
-> gate DOES flatten and was read from the dependency tree.
+## How to interpret the policy
 
-## Role model
+- `PUBLIC` means the registry has no IMS role gate. A route may still require
+  its own credential or proof, such as a webhook signature or a portal token.
+- `AUTH` abbreviates `AUTHENTICATED`: the registry admits an authenticated
+  caller with a nonempty role set. Ownership, shop and other handler checks
+  still apply.
+- Role lists reproduce the policy entry as stored. The registry's
+  `check_access` also admits `SUPERADMIN` on role-list entries, including those
+  whose list omits it. This does not remove independent handler conditions.
+- `S` records the policy's `store_scoped` flag. Store and resource access are
+  checked by handlers; the flag itself does not enforce shop scope.
+- `E` records `self_enforced`: on a role denial, the middleware defers to that
+  route's own response, for example existence-hiding 404s or a specific 403.
+- Investor write restrictions and per-user permission/module overrides are
+  additional request-time rules. Current roles and shop assignments are also
+  resolved at request time. This static table does not describe an individual
+  user's effective access after those rules and resource checks.
+- Dependencies may gate an individual endpoint or an entire router. Handler
+  bodies may add inline checks, including ownership, shop scope and financial
+  conditions. The generated rows do not replace those checks.
 
-`SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, CATALOG_MANAGER,
-OPTOMETRIST, SALES_CASHIER, SALES_STAFF, CASHIER, WORKSHOP_STAFF` + read-only
-**INVESTOR**.
+## Business explanations beyond role lists
 
-- `SUPERADMIN` passes every role-gated route (mirrors `require_roles`); it is listed
-  explicitly in each allow-set so the table is self-contained.
-- **INVESTOR** is read-only **app-wide via the `block_investor_writes` middleware**
-  in `api/main.py` (403 on every non-safe method, carve-outs for login/logout/refresh/
-  change-password). It is therefore NOT a member of any allow-set in this table.
-- `store_scoped` (S) = the handler additionally restricts results to the caller's
-  store(s) via `validate_store_access` (HQ roles bypass). Orthogonal to the role gate.
+ACCOUNTANT is on the inbox and on approve / reject for `rtv` (supplier credit)
+requests only -- owner ruling 2026-10-12; the engine refuses an ACCOUNTANT any
+other action type, and an `rtv` request is the accounts roles' alone (a
+manager gets 404).
+
+> Receiving goods (log a delivery, accept it, express receive, void, escalate,
+> upload the receipt document, the receiving cockpit) is **managers only** --
+> store manager, area manager, admin, superadmin; NOT the accountant (owner
+> ruling 2026-09-28). Raising, sending, editing and cancelling a purchase
+> order stay with the four order roles -- not the catalogue manager (owner
+> 2026-10-08).
+
+- `GET /api/v1/incentive/points/my-day`: Self-only by construction: keys on the JWT user_id, no staff parameter (POS "My day" tile).
+
+<!-- BEGIN GENERATED RBAC MATRIX -->
 
 ## Gate-type summary
 
 | Gate type | Count |
 |---|---|
-| PUBLIC (no IMS auth) | 31 |
-| AUTHENTICATED only (any logged-in user) | 367 |
-| Role-gated (one or more roles) | 431 |
-| **Total `/api/v1` (method x path)** | **829** |
-| ...of which `store_scoped` | 58 |
+| PUBLIC (no IMS role gate) | 45 |
+| AUTHENTICATED | 393 |
+| Role-gated (one or more roles) | 867 |
+| **Total `/api/v1` (method x path)** | **1305** |
+| ...of which `store_scoped` | 237 |
+| ...of which `self_enforced` | 47 |
 
----
+## Full matrix (method x path -> policy entry)
+
+Generated by `scripts/generate_rbac_matrix.py`; edit POLICY, then regenerate.
+`AUTH` means `AUTHENTICATED`; `S` and `E` mark the registry's
+`store_scoped` and `self_enforced` flags. Role lists preserve the policy
+entry exactly; see the manual interpretation notes above.
+
+### `/api/v1/admin`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/admin` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/brands` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/brands` | ADMIN, SUPERADMIN |  |  |
+| `DELETE` | `/api/v1/admin/brands/{brand_id}` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/brands/{brand_id}` | ADMIN, SUPERADMIN |  |  |
+| `PUT` | `/api/v1/admin/brands/{brand_id}` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/brands/{brand_id}/subbrands` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/brands/{brand_id}/subbrands` | ADMIN, SUPERADMIN |  |  |
+| `DELETE` | `/api/v1/admin/brands/{brand_id}/subbrands/{subbrand_id}` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/categories` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/categories` | ADMIN, SUPERADMIN |  |  |
+| `DELETE` | `/api/v1/admin/categories/{category_id}` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/categories/{category_id}` | ADMIN, SUPERADMIN |  |  |
+| `PUT` | `/api/v1/admin/categories/{category_id}` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/discounts/enforced-caps` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/discounts/promo-codes` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/discounts/promo-codes` | ADMIN, SUPERADMIN |  |  |
+| `DELETE` | `/api/v1/admin/discounts/promo-codes/{code_id}` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/discounts/rules` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/discounts/tier-discounts` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/discounts/tier-discounts` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/escalations` | ADMIN |  |  |
+| `GET` | `/api/v1/admin/hsn` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/hsn` | ADMIN, SUPERADMIN |  |  |
+| `DELETE` | `/api/v1/admin/hsn/{hsn_id}` | ADMIN, SUPERADMIN |  |  |
+| `PUT` | `/api/v1/admin/hsn/{hsn_id}` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/integrations` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/integrations/razorpay` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/integrations/razorpay` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/integrations/razorpay/test` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/integrations/shiprocket` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/integrations/shiprocket` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/integrations/shiprocket/create-shipment` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/integrations/shiprocket/rates` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/integrations/shiprocket/test` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/integrations/shiprocket/track/{awb}` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/integrations/shopify` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/integrations/shopify` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/integrations/shopify/sync-inventory` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/integrations/shopify/sync-orders` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/integrations/shopify/test` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/integrations/tally` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/integrations/tally` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/integrations/tally/exports` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/integrations/tally/regenerate` | SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/integrations/tally/test` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/integrations/tally/voucher.xml` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/lens/addons` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/lens/addons` | ADMIN, SUPERADMIN |  |  |
+| `DELETE` | `/api/v1/admin/lens/addons/{addon_id}` | ADMIN, SUPERADMIN |  |  |
+| `PUT` | `/api/v1/admin/lens/addons/{addon_id}` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/lens/brands` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/lens/brands` | ADMIN, SUPERADMIN |  |  |
+| `DELETE` | `/api/v1/admin/lens/brands/{brand_id}` | ADMIN, SUPERADMIN |  |  |
+| `PUT` | `/api/v1/admin/lens/brands/{brand_id}` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/lens/coatings` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/lens/coatings` | ADMIN, SUPERADMIN |  |  |
+| `DELETE` | `/api/v1/admin/lens/coatings/{coating_id}` | ADMIN, SUPERADMIN |  |  |
+| `PUT` | `/api/v1/admin/lens/coatings/{coating_id}` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/lens/indices` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/lens/indices` | ADMIN, SUPERADMIN |  |  |
+| `DELETE` | `/api/v1/admin/lens/indices/{index_id}` | ADMIN, SUPERADMIN |  |  |
+| `PUT` | `/api/v1/admin/lens/indices/{index_id}` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/lens/pricing` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/lens/pricing` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/lens/pricing-ranges` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/lens/pricing-ranges` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/lens/pricing-ranges/bulk` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/lens/pricing-ranges/quote` | ADMIN, SUPERADMIN |  |  |
+| `DELETE` | `/api/v1/admin/lens/pricing-ranges/{range_id}` | ADMIN, SUPERADMIN |  |  |
+| `PUT` | `/api/v1/admin/lens/pricing-ranges/{range_id}` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/online-store/drift` | SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/online-store/parity` | SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/online-store/register-webhooks` | SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/online-store/rehost-images` | SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/online-store/sync-health` | SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/owner-digest` | ADMIN |  |  |
+| `GET` | `/api/v1/admin/products` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/products/{product_id}` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/seed-database` | PUBLIC |  |  |
+| `GET` | `/api/v1/admin/system-health` | ADMIN |  |  |
+| `GET` | `/api/v1/admin/system/audit-logs` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/system/backups` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/system/backups` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/system/backups/{backup_id}/restore` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/system/export/{export_type}` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/admin/system/status` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/admin/techcherry/import` | SUPERADMIN |  | E |
+| `GET` | `/api/v1/admin/techcherry/status` | SUPERADMIN |  | E |
+
+### `/api/v1/analytics`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/analytics` | PUBLIC |  |  |
+
+### `/api/v1/analytics-v2`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/analytics-v2/anomaly-detection` | SUPERADMIN |  |  |
+| `GET` | `/api/v1/analytics-v2/churn-prediction` | SUPERADMIN |  |  |
+| `POST` | `/api/v1/analytics-v2/cl-subscription/reminder/{customer_id}` | AUTH |  |  |
+| `GET` | `/api/v1/analytics-v2/cl-subscriptions` | AUTH |  |  |
+| `GET` | `/api/v1/analytics-v2/dead-stock` | AUTH |  |  |
+| `GET` | `/api/v1/analytics-v2/demand-forecast` | SUPERADMIN |  |  |
+| `GET` | `/api/v1/analytics-v2/discount-analysis` | AUTH |  |  |
+| `GET` | `/api/v1/analytics-v2/eye-camps` | AUTH |  |  |
+| `POST` | `/api/v1/analytics-v2/eye-camps` | AUTH |  |  |
+| `PATCH` | `/api/v1/analytics-v2/eye-camps/{camp_id}` | AUTH |  |  |
+| `GET` | `/api/v1/analytics-v2/family-deals` | AUTH |  |  |
+| `GET` | `/api/v1/analytics-v2/loyalty/tiers` | AUTH |  |  |
+| `GET` | `/api/v1/analytics-v2/staff-leaderboard` | AUTH |  |  |
+| `GET` | `/api/v1/analytics-v2/vendor-margins` | SUPERADMIN |  |  |
+
+### `/api/v1/analytics`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/analytics/` | PUBLIC |  |  |
+| `GET` | `/api/v1/analytics/customer-insights` | AUTH |  |  |
+| `GET` | `/api/v1/analytics/dashboard-summary` | AUTH |  |  |
+| `GET` | `/api/v1/analytics/enterprise-kpis` | AUTH |  |  |
+| `GET` | `/api/v1/analytics/inventory-intelligence` | AUTH |  |  |
+| `GET` | `/api/v1/analytics/revenue-trends` | AUTH |  |  |
+| `GET` | `/api/v1/analytics/store-performance` | AUTH |  |  |
+| `GET` | `/api/v1/analytics/store-target-today` | AUTH |  |  |
+
+### `/api/v1/approvals`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `POST` | `/api/v1/approvals/requests` | AUTH |  |  |
+| `GET` | `/api/v1/approvals/requests/inbox` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |  |
+| `GET` | `/api/v1/approvals/requests/mine` | AUTH |  |  |
+| `GET` | `/api/v1/approvals/requests/{request_id}` | AUTH |  |  |
+| `POST` | `/api/v1/approvals/requests/{request_id}/approve` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/approvals/requests/{request_id}/consume` | AUTH |  |  |
+| `POST` | `/api/v1/approvals/requests/{request_id}/reject` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |  |
+
+### `/api/v1/audit`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/audit/verify` | SUPERADMIN |  |  |
+
+### `/api/v1/auth`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `POST` | `/api/v1/auth/change-password` | AUTH |  |  |
+| `GET` | `/api/v1/auth/devices` | SUPERADMIN |  |  |
+| `POST` | `/api/v1/auth/devices/assertion-options` | PUBLIC |  |  |
+| `POST` | `/api/v1/auth/devices/enroll` | PUBLIC |  |  |
+| `POST` | `/api/v1/auth/devices/enroll-ticket` | AUTH |  |  |
+| `POST` | `/api/v1/auth/devices/enroll/options` | PUBLIC |  |  |
+| `POST` | `/api/v1/auth/devices/{device_id}/approve` | SUPERADMIN |  |  |
+| `POST` | `/api/v1/auth/devices/{device_id}/revoke` | SUPERADMIN |  |  |
+| `GET` | `/api/v1/auth/ecommerce-sso` | AUTH |  |  |
+| `POST` | `/api/v1/auth/login` | PUBLIC |  |  |
+| `POST` | `/api/v1/auth/logout` | AUTH |  |  |
+| `GET` | `/api/v1/auth/me` | AUTH |  |  |
+| `POST` | `/api/v1/auth/refresh` | PUBLIC |  |  |
+| `POST` | `/api/v1/auth/switch-store/{store_id}` | AUTH |  |  |
+
+### `/api/v1/bank-recon`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `POST` | `/api/v1/bank-recon/bank-lines` | ACCOUNTANT, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `GET` | `/api/v1/bank-recon/reconciliations` | ACCOUNTANT, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `POST` | `/api/v1/bank-recon/reconciliations` | ACCOUNTANT, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `GET` | `/api/v1/bank-recon/reconciliations/{run_id}` | ACCOUNTANT, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `POST` | `/api/v1/bank-recon/reconciliations/{run_id}/lock` | ACCOUNTANT, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `POST` | `/api/v1/bank-recon/reconciliations/{run_id}/sign-off` | ACCOUNTANT, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+
+### `/api/v1/blind-count`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `POST` | `/api/v1/blind-count/open` | SALES_STAFF, SALES_CASHIER, CATALOG_MANAGER, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `GET` | `/api/v1/blind-count/{session_id}` | SALES_STAFF, SALES_CASHIER, CATALOG_MANAGER, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `POST` | `/api/v1/blind-count/{session_id}/lock` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `POST` | `/api/v1/blind-count/{session_id}/propose-adjustment` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `POST` | `/api/v1/blind-count/{session_id}/reopen` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `POST` | `/api/v1/blind-count/{session_id}/submit` | SALES_STAFF, SALES_CASHIER, CATALOG_MANAGER, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+
+### `/api/v1/budgets`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/budgets` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/budgets` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/budgets/` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/budgets/` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/budgets/variance` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `DELETE` | `/api/v1/budgets/{budget_id}` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+
+### `/api/v1/buy-desk`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/buy-desk/rows` | ADMIN, CATALOG_MANAGER, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, SUPERADMIN |  |  |
+
+### `/api/v1/catalog`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/catalog` | PUBLIC |  |  |
+
+### `/api/v1/catalog-field-options`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/catalog-field-options` | AUTH |  |  |
+| `GET` | `/api/v1/catalog-field-options/` | AUTH |  |  |
+| `PATCH` | `/api/v1/catalog-field-options/{field_name}` | ADMIN, CATALOG_MANAGER |  |  |
+
+### `/api/v1/catalog`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/catalog/` | PUBLIC |  |  |
+| `GET` | `/api/v1/catalog/brands` | AUTH |  |  |
+| `GET` | `/api/v1/catalog/categories` | AUTH |  |  |
+| `GET` | `/api/v1/catalog/categories/{category}/fields` | AUTH |  |  |
+| `POST` | `/api/v1/catalog/flags` | ADMIN, STORE_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/catalog/flags/fix` | ADMIN, CATALOG_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/catalog/online-status` | AUTH |  |  |
+| `POST` | `/api/v1/catalog/online-status` | AUTH |  |  |
+| `GET` | `/api/v1/catalog/online-stock-reconcile` | AUTH |  |  |
+| `GET` | `/api/v1/catalog/online-summary` | AUTH |  |  |
+| `GET` | `/api/v1/catalog/price-change-requests` | AUTH |  |  |
+| `GET` | `/api/v1/catalog/products` | AUTH |  |  |
+| `POST` | `/api/v1/catalog/products` | ADMIN, CATALOG_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/catalog/products/bulk-archive` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/catalog/products/bulk-restore` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/catalog/products/bulk-sync-shopify` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/catalog/products/export` | ADMIN, CATALOG_MANAGER, SUPERADMIN |  |  |
+| `DELETE` | `/api/v1/catalog/products/{product_id}` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/catalog/products/{product_id}` | AUTH |  |  |
+| `PUT` | `/api/v1/catalog/products/{product_id}` | ADMIN, CATALOG_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/catalog/products/{product_id}/inventory/adjust` | ADMIN, STORE_MANAGER, SUPERADMIN, WORKSHOP_STAFF |  |  |
+| `POST` | `/api/v1/catalog/products/{product_id}/promote` | ADMIN, CATALOG_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/catalog/products/{product_id}/sync-shopify` | ADMIN, CATALOG_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/catalog/recent-activity` | AUTH |  |  |
+| `POST` | `/api/v1/catalog/reconcile-store-barcodes` | SUPERADMIN |  |  |
+| `GET` | `/api/v1/catalog/sku-counts` | AUTH |  |  |
+
+### `/api/v1/catalogue`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `POST` | `/api/v1/catalogue/pdf` | AUTH |  |  |
+| `GET` | `/api/v1/catalogue/temp-collections` | AUTH |  |  |
+| `POST` | `/api/v1/catalogue/temp-collections` | AUTH |  |  |
+| `DELETE` | `/api/v1/catalogue/temp-collections/{collection_id}` | AUTH |  |  |
+
+### `/api/v1/cl-po`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `POST` | `/api/v1/cl-po/generate` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+
+### `/api/v1/clinical`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/clinical` | PUBLIC |  |  |
+| `GET` | `/api/v1/clinical/` | PUBLIC |  |  |
+| `GET` | `/api/v1/clinical/abuse-detection` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/clinical/conversion-dashboard` | ADMIN, AREA_MANAGER, OPTOMETRIST, STORE_MANAGER, SUPERADMIN | S |  |
+| `POST` | `/api/v1/clinical/device-import` | ADMIN, OPTOMETRIST, STORE_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/clinical/eye-tests` | AUTH |  |  |
+| `GET` | `/api/v1/clinical/lens-power-combos` | ADMIN, AREA_MANAGER, OPTOMETRIST, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/clinical/lens-power-combos` | ADMIN, OPTOMETRIST, STORE_MANAGER |  |  |
+| `DELETE` | `/api/v1/clinical/lens-power-combos/{combo_id}` | ADMIN, OPTOMETRIST, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/clinical/manufacturability-check` | AUTH |  |  |
+| `GET` | `/api/v1/clinical/optometrist/{optometrist_id}/stats` | ADMIN, AREA_MANAGER, OPTOMETRIST, STORE_MANAGER, SUPERADMIN | S |  |
+| `GET` | `/api/v1/clinical/patient-queue` | AUTH |  |  |
+| `GET` | `/api/v1/clinical/prescription-redo-rate` | AUTH |  |  |
+| `GET` | `/api/v1/clinical/prescriptions/{prescription_id}/print` | AUTH |  |  |
+| `POST` | `/api/v1/clinical/prescriptions/{prescription_id}/redo` | ADMIN, AREA_MANAGER, OPTOMETRIST, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/clinical/prescriptions/{prescription_id}/redos` | AUTH |  |  |
+| `GET` | `/api/v1/clinical/queue` | AUTH |  |  |
+| `POST` | `/api/v1/clinical/queue` | ADMIN, OPTOMETRIST, SALES_CASHIER, SALES_STAFF, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/clinical/queue/stats` | AUTH |  |  |
+| `DELETE` | `/api/v1/clinical/queue/{queue_id}` | ADMIN, OPTOMETRIST, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/clinical/queue/{queue_id}/start-test` | ADMIN, OPTOMETRIST, STORE_MANAGER |  |  |
+| `PATCH` | `/api/v1/clinical/queue/{queue_id}/status` | ADMIN, OPTOMETRIST, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/clinical/tests` | AUTH |  |  |
+| `GET` | `/api/v1/clinical/tests/customer/{customer_id}` | ADMIN, AREA_MANAGER, OPTOMETRIST, SALES_CASHIER, SALES_STAFF, STORE_MANAGER, SUPERADMIN, WORKSHOP_STAFF |  |  |
+| `GET` | `/api/v1/clinical/tests/patient/{customer_phone}` | ADMIN, AREA_MANAGER, OPTOMETRIST, SALES_CASHIER, SALES_STAFF, STORE_MANAGER, SUPERADMIN, WORKSHOP_STAFF |  |  |
+| `GET` | `/api/v1/clinical/tests/{test_id}` | ADMIN, AREA_MANAGER, OPTOMETRIST, SALES_CASHIER, SALES_STAFF, STORE_MANAGER, SUPERADMIN, WORKSHOP_STAFF |  |  |
+| `POST` | `/api/v1/clinical/tests/{test_id}/complete` | ADMIN, OPTOMETRIST, STORE_MANAGER |  |  |
+| `PUT` | `/api/v1/clinical/tests/{test_id}/exam` | ADMIN, OPTOMETRIST, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/clinical/tests/{test_id}/send-to-floor` | ADMIN, OPTOMETRIST, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/clinical/tests/{test_id}/soap-note` | ADMIN, AREA_MANAGER, OPTOMETRIST, SALES_CASHIER, SALES_STAFF, STORE_MANAGER, SUPERADMIN, WORKSHOP_STAFF |  |  |
+| `POST` | `/api/v1/clinical/tests/{test_id}/soap-note` | ADMIN, OPTOMETRIST, STORE_MANAGER |  |  |
+
+### `/api/v1/collections`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/collections` | AUTH |  |  |
+| `GET` | `/api/v1/collections/insights/summary` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, SUPERADMIN | S |  |
+| `POST` | `/api/v1/collections/preview` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, SUPERADMIN | S |  |
+| `GET` | `/api/v1/collections/{collection_id}/insights` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, SUPERADMIN | S |  |
+| `GET` | `/api/v1/collections/{collection_id}/insights/stores` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, SUPERADMIN | S |  |
+| `GET` | `/api/v1/collections/{handle}/products` | AUTH |  |  |
+| `POST` | `/api/v1/collections/{handle}/refresh` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+
+### `/api/v1/crm`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/crm` | PUBLIC |  |  |
+| `GET` | `/api/v1/crm/` | PUBLIC |  |  |
+| `POST` | `/api/v1/crm/cl-refill/{store_id}/create-reminders` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/crm/cl-refill/{store_id}/due` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, SALES_STAFF, SALES_CASHIER, OPTOMETRIST | S |  |
+| `GET` | `/api/v1/crm/customers/360/{customer_id}` | AUTH |  |  |
+| `GET` | `/api/v1/crm/customers/churn-risk/list` | SUPERADMIN, ADMIN, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/crm/customers/segment/rfm` | SUPERADMIN, ADMIN, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/crm/customers/{customer_id}/cl-refill-status` | AUTH |  |  |
+| `GET` | `/api/v1/crm/customers/{customer_id}/interactions` | AUTH |  |  |
+| `POST` | `/api/v1/crm/customers/{customer_id}/interactions` | AUTH |  |  |
+| `GET` | `/api/v1/crm/customers/{customer_id}/lifecycle` | AUTH |  |  |
+| `POST` | `/api/v1/crm/customers/{customer_id}/loyalty-points` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/crm/customers/{customer_id}/prescriptions` | AUTH |  |  |
+| `GET` | `/api/v1/crm/customers/{customer_id}/return-risk` | AUTH |  |  |
+| `GET` | `/api/v1/crm/customers/{customer_id}/vip` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN, CATALOG_MANAGER, OPTOMETRIST |  |  |
+| `POST` | `/api/v1/crm/customers/{customer_id}/vip` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/crm/nba/{store_id}` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, SALES_STAFF, SALES_CASHIER | S |  |
+| `POST` | `/api/v1/crm/nba/{store_id}/complete` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, SALES_STAFF, SALES_CASHIER | S |  |
+| `POST` | `/api/v1/crm/nba/{store_id}/dismiss` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, SALES_STAFF, SALES_CASHIER | S |  |
+| `GET` | `/api/v1/crm/personal-triggers` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN, CATALOG_MANAGER, OPTOMETRIST |  |  |
+| `POST` | `/api/v1/crm/personal-triggers` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN |  |  |
+| `DELETE` | `/api/v1/crm/personal-triggers/{trigger_id}` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN |  |  |
+| `PUT` | `/api/v1/crm/personal-triggers/{trigger_id}` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/crm/reactivation/{store_id}` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, SALES_STAFF, SALES_CASHIER | S |  |
+| `GET` | `/api/v1/crm/reactivation/{store_id}/analytics` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, SALES_STAFF, SALES_CASHIER | S |  |
+| `POST` | `/api/v1/crm/reactivation/{store_id}/log` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, SALES_STAFF, SALES_CASHIER | S |  |
+| `GET` | `/api/v1/crm/vip-churn` | SUPERADMIN, ADMIN |  |  |
+| `POST` | `/api/v1/crm/vip-churn/{customer_id}/intervene` | SUPERADMIN, ADMIN |  |  |
+
+### `/api/v1/customers`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/customers` | AUTH |  |  |
+| `POST` | `/api/v1/customers` | AUTH |  |  |
+| `GET` | `/api/v1/customers/consent/pending-purge` | ADMIN |  |  |
+| `GET` | `/api/v1/customers/mobile/{mobile}` | AUTH |  |  |
+| `GET` | `/api/v1/customers/search` | AUTH |  |  |
+| `GET` | `/api/v1/customers/search/phone` | AUTH |  |  |
+| `POST` | `/api/v1/customers/validate-emails` | SUPERADMIN, ADMIN |  |  |
+| `GET` | `/api/v1/customers/{customer_id}` | AUTH |  |  |
+| `PUT` | `/api/v1/customers/{customer_id}` | AUTH |  |  |
+| `POST` | `/api/v1/customers/{customer_id}/consent` | AUTH |  |  |
+| `GET` | `/api/v1/customers/{customer_id}/consent/ledger` | AUTH |  |  |
+| `POST` | `/api/v1/customers/{customer_id}/consent/withdraw` | AUTH |  |  |
+| `GET` | `/api/v1/customers/{customer_id}/credit-summary` | AUTH |  |  |
+| `POST` | `/api/v1/customers/{customer_id}/loyalty/add` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/customers/{customer_id}/orders` | AUTH |  |  |
+| `POST` | `/api/v1/customers/{customer_id}/patients` | AUTH |  |  |
+| `POST` | `/api/v1/customers/{customer_id}/patients/{patient_id}/promote` | AUTH |  |  |
+| `GET` | `/api/v1/customers/{customer_id}/prescriptions` | AUTH |  |  |
+| `POST` | `/api/v1/customers/{customer_id}/store-credit/add` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/customers/{customer_id}/store-credit/issue` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/customers/{customer_id}/store-credit/ledger` | AUTH |  |  |
+| `POST` | `/api/v1/customers/{customer_id}/store-credit/redeem` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `PATCH` | `/api/v1/customers/{customer_id}/tags` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/customers/{customer_id}/tags/suggest` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, SALES_STAFF, SALES_CASHIER |  |  |
+| `GET` | `/api/v1/customers/{customer_id}/tags/suggestions` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/customers/{customer_id}/tags/suggestions/{suggestion_id}/approve` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/customers/{customer_id}/tags/suggestions/{suggestion_id}/reject` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+
+### `/api/v1/display-fixtures`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/display-fixtures` | AUTH | S |  |
+| `POST` | `/api/v1/display-fixtures` | ADMIN, CATALOG_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/display-fixtures/` | AUTH | S |  |
+| `POST` | `/api/v1/display-fixtures/` | ADMIN, CATALOG_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/display-fixtures/meta/options` | AUTH |  |  |
+| `DELETE` | `/api/v1/display-fixtures/{fixture_id}` | ADMIN, CATALOG_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/display-fixtures/{fixture_id}` | AUTH | S |  |
+| `PATCH` | `/api/v1/display-fixtures/{fixture_id}` | ADMIN, CATALOG_MANAGER, STORE_MANAGER | S |  |
+
+### `/api/v1/display-placements`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/display-placements` | AUTH | S |  |
+| `POST` | `/api/v1/display-placements` | ADMIN, CATALOG_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/display-placements/` | AUTH | S |  |
+| `POST` | `/api/v1/display-placements/` | ADMIN, CATALOG_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/display-placements/move` | ADMIN, CATALOG_MANAGER, STORE_MANAGER | S |  |
+| `DELETE` | `/api/v1/display-placements/{placement_id}` | ADMIN, CATALOG_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/display-placements/{placement_id}` | AUTH | S |  |
+| `PATCH` | `/api/v1/display-placements/{placement_id}` | ADMIN, CATALOG_MANAGER, STORE_MANAGER | S |  |
+
+### `/api/v1/endless-aisle`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/endless-aisle/availability` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `GET` | `/api/v1/endless-aisle/requests` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `POST` | `/api/v1/endless-aisle/requests` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `GET` | `/api/v1/endless-aisle/requests/{request_id}` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `POST` | `/api/v1/endless-aisle/requests/{request_id}/accept` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `POST` | `/api/v1/endless-aisle/requests/{request_id}/create-transfer` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `POST` | `/api/v1/endless-aisle/requests/{request_id}/deliver` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `POST` | `/api/v1/endless-aisle/requests/{request_id}/reject` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `POST` | `/api/v1/endless-aisle/requests/{request_id}/ship` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+
+### `/api/v1/entities`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/entities` | AUTH |  |  |
+| `POST` | `/api/v1/entities` | ADMIN |  |  |
+| `GET` | `/api/v1/entities/` | AUTH |  |  |
+| `POST` | `/api/v1/entities/` | ADMIN |  |  |
+| `GET` | `/api/v1/entities/meta/options` | AUTH |  |  |
+| `GET` | `/api/v1/entities/{entity_id}` | AUTH |  |  |
+| `PUT` | `/api/v1/entities/{entity_id}` | ADMIN |  |  |
+| `GET` | `/api/v1/entities/{entity_id}/stores` | AUTH |  |  |
+| `DELETE` | `/api/v1/entities/{entity_id}/stores/{store_id}` | ADMIN |  |  |
+| `POST` | `/api/v1/entities/{entity_id}/stores/{store_id}` | ADMIN |  |  |
+
+### `/api/v1/estimates`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/estimates` | AUTH | S |  |
+| `POST` | `/api/v1/estimates` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, SALES_CASHIER, SALES_STAFF |  |  |
+| `GET` | `/api/v1/estimates/` | AUTH | S |  |
+| `POST` | `/api/v1/estimates/` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, SALES_CASHIER, SALES_STAFF |  |  |
+| `GET` | `/api/v1/estimates/{estimate_id}` | AUTH | S |  |
+| `GET` | `/api/v1/estimates/{estimate_id}/render` | AUTH | S |  |
+
+### `/api/v1/expenses`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/expenses` | AUTH |  |  |
+| `POST` | `/api/v1/expenses` | AUTH |  |  |
+| `GET` | `/api/v1/expenses/` | AUTH |  |  |
+| `POST` | `/api/v1/expenses/` | AUTH |  |  |
+| `GET` | `/api/v1/expenses/advances` | AUTH |  |  |
+| `POST` | `/api/v1/expenses/advances` | AUTH |  |  |
+| `POST` | `/api/v1/expenses/advances/{advance_id}/approve` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/expenses/advances/{advance_id}/disburse` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/expenses/advances/{advance_id}/settle` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/expenses/aging` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/expenses/caps` | AUTH |  |  |
+| `PUT` | `/api/v1/expenses/caps` | ADMIN |  |  |
+| `GET` | `/api/v1/expenses/duplicate-bills` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/expenses/pending-approval` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/expenses/petty-cash/balance` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/expenses/petty-cash/open` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/expenses/petty-cash/settlement` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/expenses/petty-cash/settlement` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/expenses/petty-cash/settlement/position` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/expenses/petty-cash/topup` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/expenses/to-enter` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/expenses/{expense_id}/approve` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/expenses/{expense_id}/bill` | AUTH |  |  |
+| `POST` | `/api/v1/expenses/{expense_id}/mark-entered` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/expenses/{expense_id}/reject` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/expenses/{expense_id}/send-to-accountant` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/expenses/{expense_id}/submit` | AUTH |  |  |
+| `POST` | `/api/v1/expenses/{expense_id}/upload-bill` | AUTH |  |  |
+
+### `/api/v1/family-wallet`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `POST` | `/api/v1/family-wallet/households` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/family-wallet/households/by-customer/{customer_id}` | SALES_CASHIER, CASHIER, SALES_STAFF, OPTOMETRIST, CATALOG_MANAGER, STORE_MANAGER, AREA_MANAGER, ACCOUNTANT, ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/family-wallet/households/{household_id}` | SALES_CASHIER, CASHIER, SALES_STAFF, OPTOMETRIST, CATALOG_MANAGER, STORE_MANAGER, AREA_MANAGER, ACCOUNTANT, ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/family-wallet/households/{household_id}/earn` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/family-wallet/households/{household_id}/members` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN |  |  |
+| `DELETE` | `/api/v1/family-wallet/households/{household_id}/members/{customer_id}` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/family-wallet/households/{household_id}/redeem` | SALES_CASHIER, SALES_STAFF, CASHIER, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/family-wallet/households/{household_id}/redeem/request-otp` | SALES_CASHIER, SALES_STAFF, CASHIER, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN |  |  |
+
+### `/api/v1/finance`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/finance/b2b-invoices` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/finance/b2b-invoices/export` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/finance/b2b-invoices/mark-exported` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/finance/b2b-invoices/{order_id}/attention-note` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/finance/b2b-invoices/{order_id}/mark-done` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/finance/b2b-invoices/{order_id}/tally-xml` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/finance/bank-statement` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/finance/bank-statement/import` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/finance/bank-statement/{statement_id}` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/finance/budget` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/finance/cash-flow` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/finance/cash-flow-forecast` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/finance/cash-reconciliation-signoff` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/finance/cash-reconciliation-summary` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/finance/cash-register/close` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/finance/cash-register/open` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/finance/cash-register/sessions` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/finance/chart-of-accounts` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/finance/chart-of-accounts` | SUPERADMIN |  |  |
+| `POST` | `/api/v1/finance/einvoice/{order_id}` | ACCOUNTANT, ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/finance/gst-status` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/finance/gst/cross-check` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/finance/gst/cross-check-signoff` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/finance/gst/reconciliation` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/finance/gst/summary` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/finance/gstr2b-reconcile` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/finance/itc-export` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/finance/itc-register` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/finance/journal-entries` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/finance/journal-entries` | ACCOUNTANT, ADMIN, SUPERADMIN | S |  |
+| `GET` | `/api/v1/finance/journal-entries/{je_id}` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/finance/journal-entries/{je_id}/approve` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/finance/journal-entries/{je_id}/post` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/finance/journal-entries/{je_id}/reject` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/finance/journal-entries/{je_id}/reverse` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/finance/journal-entries/{je_id}/submit` | ACCOUNTANT, ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/finance/outstanding` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/finance/owner-dashboard` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/finance/pending-reconciliations` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/finance/period-lock` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/finance/period-locks` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/finance/period-status` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/finance/pnl` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/finance/pnl/by-category` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/finance/pnl/by-store` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/finance/reconciliation` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/finance/reconciliation/by-mode` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/finance/reconciliation/snapshot` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/finance/reconciliation/{snapshot_id}/lock` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/finance/revenue` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/finance/summary-month` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/finance/survival-cashflow` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/finance/tally/journal-jv` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/finance/tally/sales-jv` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/finance/tally/tender-receipt-jv` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/finance/target-ticker` | AUTH |  |  |
+| `POST` | `/api/v1/finance/target-ticker/settings` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/finance/tender-ledger-map` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `PUT` | `/api/v1/finance/tender-ledger-map` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/finance/vendor-payments` | ACCOUNTANT, ADMIN |  |  |
+
+### `/api/v1/follow-ups`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `POST` | `/api/v1/follow-ups` | AUTH |  |  |
+| `GET` | `/api/v1/follow-ups/` | AUTH |  |  |
+| `POST` | `/api/v1/follow-ups/` | AUTH |  |  |
+| `POST` | `/api/v1/follow-ups/auto-generate` | AUTH |  |  |
+| `GET` | `/api/v1/follow-ups/due-today` | AUTH |  |  |
+| `GET` | `/api/v1/follow-ups/summary` | AUTH |  |  |
+| `PATCH` | `/api/v1/follow-ups/{follow_up_id}/complete` | AUTH |  |  |
+
+### `/api/v1/handoffs`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `POST` | `/api/v1/handoffs` | AUTH |  |  |
+| `POST` | `/api/v1/handoffs/` | AUTH |  |  |
+| `GET` | `/api/v1/handoffs/clinical-inbox` | ADMIN, AREA_MANAGER, SALES_CASHIER, SALES_STAFF, STORE_MANAGER, SUPERADMIN | S |  |
+| `GET` | `/api/v1/handoffs/eligible-recipients/list` | AUTH |  |  |
+| `GET` | `/api/v1/handoffs/inbox` | AUTH |  |  |
+| `GET` | `/api/v1/handoffs/sent` | AUTH |  |  |
+| `DELETE` | `/api/v1/handoffs/{handoff_id}` | AUTH |  |  |
+| `GET` | `/api/v1/handoffs/{handoff_id}` | AUTH |  |  |
+| `PATCH` | `/api/v1/handoffs/{handoff_id}/acknowledge` | SALES_CASHIER, SALES_STAFF, STORE_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/handoffs/{handoff_id}/dismiss` | AUTH |  |  |
+| `GET` | `/api/v1/handoffs/{handoff_id}/file` | AUTH |  |  |
+| `PATCH` | `/api/v1/handoffs/{handoff_id}/mark-served` | SALES_CASHIER, SALES_STAFF, STORE_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/handoffs/{handoff_id}/reshare` | AUTH |  |  |
+| `POST` | `/api/v1/handoffs/{handoff_id}/respond` | AUTH |  |  |
+
+### `/api/v1/health`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/health` | PUBLIC |  |  |
+
+### `/api/v1/hr`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/hr` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/hr/` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/hr/attendance` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/hr/attendance-compliance` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/hr/attendance/check-in` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/hr/attendance/check-out` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/hr/attendance/grid` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/hr/attendance/late-marks` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/hr/attendance/mark` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/hr/attendance/summary` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `PUT` | `/api/v1/hr/attendance/{attendance_id}` | ADMIN, STORE_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/hr/attendance/{attendance_id}/check-out` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/hr/employees/{employee_id}/documents` | ADMIN | S |  |
+| `POST` | `/api/v1/hr/employees/{employee_id}/documents` | ADMIN | S |  |
+| `DELETE` | `/api/v1/hr/employees/{employee_id}/documents/{doc_id}` | ADMIN | S |  |
+| `GET` | `/api/v1/hr/employees/{employee_id}/documents/{doc_id}` | ADMIN | S |  |
+| `GET` | `/api/v1/hr/leaves` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/hr/leaves` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/hr/leaves/balance/{employee_id}` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/hr/leaves/{leave_id}/approve` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/hr/leaves/{leave_id}/approve-remote` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/hr/leaves/{leave_id}/reject` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/hr/me/attendance` | AUTH |  | E |
+| `GET` | `/api/v1/hr/me/commission` | AUTH |  | E |
+| `GET` | `/api/v1/hr/me/leaves` | AUTH |  | E |
+| `POST` | `/api/v1/hr/me/leaves` | AUTH |  | E |
+| `POST` | `/api/v1/hr/me/leaves/{leave_id}/cancel` | AUTH |  | E |
+| `GET` | `/api/v1/hr/me/payslip` | AUTH |  | E |
+| `GET` | `/api/v1/hr/reports/lwp` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/hr/roster` | SALES_STAFF, SALES_CASHIER, OPTOMETRIST, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `POST` | `/api/v1/hr/roster` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `PUT` | `/api/v1/hr/roster/{roster_id}` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `GET` | `/api/v1/hr/roster/{roster_id}/coverage` | SALES_STAFF, SALES_CASHIER, OPTOMETRIST, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `GET` | `/api/v1/hr/shifts` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/hr/shifts` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/hr/shifts/assign` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/hr/staff-skills` | SALES_STAFF, SALES_CASHIER, OPTOMETRIST, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `GET` | `/api/v1/hr/staff-skills/{employee_id}` | SALES_STAFF, SALES_CASHIER, OPTOMETRIST, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN |  |  |
+| `PUT` | `/api/v1/hr/staff-skills/{employee_id}` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/hr/summary-today` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/hr/weekoff-swaps` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/hr/weekoff-swaps` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/hr/weekoff-swaps/{swap_id}/approve` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/hr/weekoff-swaps/{swap_id}/reject` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+
+### `/api/v1/incentive`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `POST` | `/api/v1/incentive/kicker/product-sale` | AUTH |  |  |
+| `GET` | `/api/v1/incentive/kicker/{ym}` | AUTH | S |  |
+| `GET` | `/api/v1/incentive/points/daily` | AUTH |  |  |
+| `POST` | `/api/v1/incentive/points/daily` | AUTH |  |  |
+| `GET` | `/api/v1/incentive/points/daily/` | AUTH |  |  |
+| `POST` | `/api/v1/incentive/points/daily/` | AUTH |  |  |
+| `POST` | `/api/v1/incentive/points/daily/bulk` | AUTH |  |  |
+| `DELETE` | `/api/v1/incentive/points/daily/{log_id}` | STORE_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/incentive/points/inputs/last-year-sale` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/incentive/points/leaderboard` | AUTH |  |  |
+| `POST` | `/api/v1/incentive/points/leaderboard/settings` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/incentive/points/leaderboard/titles` | AUTH |  |  |
+| `GET` | `/api/v1/incentive/points/mtd` | AUTH |  |  |
+| `GET` | `/api/v1/incentive/points/my-day` | AUTH |  |  |
+| `GET` | `/api/v1/incentive/points/settings/effective` | AUTH |  |  |
+| `GET` | `/api/v1/incentive/points/settings/eligibility` | AUTH |  |  |
+| `PATCH` | `/api/v1/incentive/points/settings/eligibility` | SUPERADMIN |  |  |
+| `PATCH` | `/api/v1/incentive/points/settings/payout` | SUPERADMIN |  |  |
+| `PATCH` | `/api/v1/incentive/points/settings/scope` | SUPERADMIN |  |  |
+| `PATCH` | `/api/v1/incentive/points/settings/visufit-gate` | SUPERADMIN |  |  |
+| `GET` | `/api/v1/incentive/points/staff/{staff_id}/history` | AUTH |  |  |
+
+### `/api/v1/integrations`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `POST` | `/api/v1/integrations/msg91/webhooks/{channel}` | PUBLIC |  |  |
+
+### `/api/v1/inventory`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/inventory` | PUBLIC |  |  |
+
+### `/api/v1/inventory-balancing`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/inventory-balancing/proposals` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+
+### `/api/v1/inventory`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/inventory/` | PUBLIC |  |  |
+| `GET` | `/api/v1/inventory/accountability` | ADMIN, AREA_MANAGER, CATALOG_MANAGER, STORE_MANAGER, WORKSHOP_STAFF |  |  |
+| `POST` | `/api/v1/inventory/accountability` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/inventory/accountability/shrinkage` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/inventory/aging` | AUTH | S |  |
+| `GET` | `/api/v1/inventory/alerts` | AUTH | S |  |
+| `GET` | `/api/v1/inventory/barcode/{barcode}` | AUTH |  |  |
+| `GET` | `/api/v1/inventory/barcode/{barcode}/trace` | AUTH |  |  |
+| `GET` | `/api/v1/inventory/brand-insights` | AUTH |  |  |
+| `GET` | `/api/v1/inventory/contact-lenses` | AUTH |  |  |
+| `GET` | `/api/v1/inventory/contact-lenses/expiry-status` | AUTH |  |  |
+| `GET` | `/api/v1/inventory/contact-lenses/power-grid` | AUTH |  |  |
+| `GET` | `/api/v1/inventory/cross-store-stock` | ADMIN, AREA_MANAGER, CATALOG_MANAGER, STORE_MANAGER, SUPERADMIN, WORKSHOP_STAFF |  |  |
+| `GET` | `/api/v1/inventory/expiring` | AUTH |  |  |
+| `GET` | `/api/v1/inventory/lenses/power-grid` | AUTH |  |  |
+| `GET` | `/api/v1/inventory/lookup` | ADMIN, AREA_MANAGER, CASHIER, OPTOMETRIST, SALES_CASHIER, SALES_STAFF, STORE_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/inventory/low-stock` | AUTH | S |  |
+| `GET` | `/api/v1/inventory/movements` | AUTH | S |  |
+| `GET` | `/api/v1/inventory/non-moving` | AUTH |  |  |
+| `POST` | `/api/v1/inventory/opening-stock/commit` | ADMIN, AREA_MANAGER, CATALOG_MANAGER, STORE_MANAGER, WORKSHOP_STAFF |  |  |
+| `POST` | `/api/v1/inventory/opening-stock/preview` | ADMIN, AREA_MANAGER, CATALOG_MANAGER, STORE_MANAGER, WORKSHOP_STAFF |  |  |
+| `GET` | `/api/v1/inventory/overstock-analysis` | AUTH |  |  |
+| `PUT` | `/api/v1/inventory/reorder-levels/{product_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN | S |  |
+| `GET` | `/api/v1/inventory/sell-through-analysis` | AUTH |  |  |
+| `GET` | `/api/v1/inventory/sellable` | AUTH | S |  |
+| `GET` | `/api/v1/inventory/serials` | AUTH | S |  |
+| `POST` | `/api/v1/inventory/serials` | ADMIN, AREA_MANAGER, CATALOG_MANAGER, STORE_MANAGER, WORKSHOP_STAFF | S |  |
+| `PATCH` | `/api/v1/inventory/serials/{serial_id}` | ADMIN, AREA_MANAGER, CATALOG_MANAGER, STORE_MANAGER, WORKSHOP_STAFF |  |  |
+| `GET` | `/api/v1/inventory/stock` | AUTH | S |  |
+| `GET` | `/api/v1/inventory/stock-count` | AUTH | S |  |
+| `POST` | `/api/v1/inventory/stock-count-scan` | ADMIN, AREA_MANAGER, CATALOG_MANAGER, STORE_MANAGER, WORKSHOP_STAFF |  |  |
+| `GET` | `/api/v1/inventory/stock-count-status` | AUTH |  |  |
+| `POST` | `/api/v1/inventory/stock-count/start` | ADMIN, AREA_MANAGER, CATALOG_MANAGER, STORE_MANAGER, WORKSHOP_STAFF | S |  |
+| `GET` | `/api/v1/inventory/stock-count/{count_id}` | AUTH |  |  |
+| `POST` | `/api/v1/inventory/stock-count/{count_id}/complete` | ADMIN, AREA_MANAGER, CATALOG_MANAGER, STORE_MANAGER, WORKSHOP_STAFF |  |  |
+| `POST` | `/api/v1/inventory/stock-count/{count_id}/items` | ADMIN, AREA_MANAGER, CATALOG_MANAGER, STORE_MANAGER, WORKSHOP_STAFF |  |  |
+| `POST` | `/api/v1/inventory/stock-count/{count_id}/reconcile` | ADMIN |  |  |
+| `POST` | `/api/v1/inventory/stock-count/{count_id}/reconcile/finish` | ADMIN |  |  |
+| `POST` | `/api/v1/inventory/stock/add` | ADMIN, AREA_MANAGER, CATALOG_MANAGER, STORE_MANAGER, WORKSHOP_STAFF |  |  |
+| `GET` | `/api/v1/inventory/stock/barcode/{barcode}` | AUTH |  |  |
+| `GET` | `/api/v1/inventory/stock/quarantined` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |  |
+| `PATCH` | `/api/v1/inventory/stock/{stock_id}/lift-quarantine` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `PATCH` | `/api/v1/inventory/stock/{stock_id}/quarantine` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/inventory/transfer-recommendations` | ADMIN, AREA_MANAGER, CATALOG_MANAGER, STORE_MANAGER, WORKSHOP_STAFF |  |  |
+| `GET` | `/api/v1/inventory/units` | AUTH | S |  |
+| `POST` | `/api/v1/inventory/units/barcode-printed` | ADMIN, AREA_MANAGER, CATALOG_MANAGER, STORE_MANAGER, WORKSHOP_STAFF | S |  |
+
+### `/api/v1/items`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/items/base-bank` | AUTH | S |  |
+| `POST` | `/api/v1/items/base-bank` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/items/events` | AUTH | S |  |
+| `GET` | `/api/v1/items/replenishment` | AUTH | S |  |
+| `GET` | `/api/v1/items/{stock_id}/events` | AUTH | S |  |
+| `POST` | `/api/v1/items/{stock_id}/quarantine` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/items/{stock_id}/quarantine/release` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/items/{stock_id}/sell` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, WORKSHOP_STAFF, SALES_CASHIER, SALES_STAFF | S |  |
+| `POST` | `/api/v1/items/{stock_id}/serial-bind` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, WORKSHOP_STAFF | S |  |
+
+### `/api/v1/jarvis`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/jarvis` | SUPERADMIN |  | E |
+| `GET` | `/api/v1/jarvis/` | SUPERADMIN |  | E |
+| `GET` | `/api/v1/jarvis/agents` | SUPERADMIN |  | E |
+| `GET` | `/api/v1/jarvis/agents/activity` | SUPERADMIN |  | E |
+| `GET` | `/api/v1/jarvis/agents/diagnostic` | SUPERADMIN |  | E |
+| `GET` | `/api/v1/jarvis/agents/health-history` | SUPERADMIN |  | E |
+| `GET` | `/api/v1/jarvis/agents/pixel/audits` | SUPERADMIN |  | E |
+| `POST` | `/api/v1/jarvis/agents/reseed` | SUPERADMIN |  | E |
+| `POST` | `/api/v1/jarvis/agents/run-all` | SUPERADMIN |  | E |
+| `GET` | `/api/v1/jarvis/agents/sentinel/health` | SUPERADMIN |  | E |
+| `GET` | `/api/v1/jarvis/agents/timeline` | SUPERADMIN |  | E |
+| `PATCH` | `/api/v1/jarvis/agents/{agent_id}/config` | SUPERADMIN |  | E |
+| `GET` | `/api/v1/jarvis/agents/{agent_id}/logs` | SUPERADMIN |  | E |
+| `POST` | `/api/v1/jarvis/agents/{agent_id}/run` | SUPERADMIN |  | E |
+| `POST` | `/api/v1/jarvis/agents/{agent_id}/run-now` | SUPERADMIN |  | E |
+| `GET` | `/api/v1/jarvis/agents/{agent_id}/status` | SUPERADMIN |  | E |
+| `PATCH` | `/api/v1/jarvis/agents/{agent_id}/toggle` | SUPERADMIN |  | E |
+| `GET` | `/api/v1/jarvis/alerts` | SUPERADMIN |  | E |
+| `POST` | `/api/v1/jarvis/analyze` | SUPERADMIN |  | E |
+| `POST` | `/api/v1/jarvis/command` | SUPERADMIN |  | E |
+| `GET` | `/api/v1/jarvis/dashboard` | SUPERADMIN |  | E |
+| `GET` | `/api/v1/jarvis/data/collections` | SUPERADMIN |  | E |
+| `GET` | `/api/v1/jarvis/data/{collection}` | SUPERADMIN |  | E |
+| `GET` | `/api/v1/jarvis/integrations/status` | SUPERADMIN |  | E |
+| `GET` | `/api/v1/jarvis/models` | SUPERADMIN |  | E |
+| `GET` | `/api/v1/jarvis/proposals` | SUPERADMIN, ADMIN |  | E |
+| `GET` | `/api/v1/jarvis/proposals/{proposal_id}` | SUPERADMIN, ADMIN |  | E |
+| `POST` | `/api/v1/jarvis/proposals/{proposal_id}/approve` | SUPERADMIN, ADMIN |  | E |
+| `POST` | `/api/v1/jarvis/proposals/{proposal_id}/reject` | SUPERADMIN, ADMIN |  | E |
+| `POST` | `/api/v1/jarvis/query` | SUPERADMIN |  | E |
+| `GET` | `/api/v1/jarvis/quick-insights` | SUPERADMIN |  | E |
+| `GET` | `/api/v1/jarvis/recommendations` | SUPERADMIN |  | E |
+| `GET` | `/api/v1/jarvis/status` | SUPERADMIN |  | E |
+
+### `/api/v1/labels`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `POST` | `/api/v1/labels/quarantine/{stock_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+
+### `/api/v1/lens-catalog`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/lens-catalog` | AUTH |  |  |
+| `POST` | `/api/v1/lens-catalog` | ADMIN, CATALOG_MANAGER |  |  |
+| `GET` | `/api/v1/lens-catalog/` | AUTH |  |  |
+| `POST` | `/api/v1/lens-catalog/` | ADMIN, CATALOG_MANAGER |  |  |
+| `GET` | `/api/v1/lens-catalog/meta/options` | AUTH |  |  |
+| `DELETE` | `/api/v1/lens-catalog/{lens_line_id}` | ADMIN, CATALOG_MANAGER |  |  |
+| `GET` | `/api/v1/lens-catalog/{lens_line_id}` | AUTH |  |  |
+| `PATCH` | `/api/v1/lens-catalog/{lens_line_id}` | ADMIN, CATALOG_MANAGER |  |  |
+
+### `/api/v1/lens-enums`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/lens-enums` | AUTH |  |  |
+| `GET` | `/api/v1/lens-enums/` | AUTH |  |  |
+| `GET` | `/api/v1/lens-enums/{enum_type}` | AUTH |  |  |
+| `PATCH` | `/api/v1/lens-enums/{enum_type}` | ADMIN, CATALOG_MANAGER |  |  |
+| `POST` | `/api/v1/lens-enums/{enum_type}/items` | ADMIN, CATALOG_MANAGER |  |  |
+| `DELETE` | `/api/v1/lens-enums/{enum_type}/items/{item}` | ADMIN, CATALOG_MANAGER |  |  |
+| `POST` | `/api/v1/lens-enums/{enum_type}/rename` | ADMIN, CATALOG_MANAGER |  |  |
+
+### `/api/v1/lens-stock`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `POST` | `/api/v1/lens-stock` | ADMIN, CATALOG_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/lens-stock/` | ADMIN, CATALOG_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/lens-stock/audit/{line_stock_id}` | AUTH |  |  |
+| `GET` | `/api/v1/lens-stock/cell/{line_stock_id}` | AUTH | S |  |
+| `GET` | `/api/v1/lens-stock/gap-planner` | AUTH | S |  |
+| `GET` | `/api/v1/lens-stock/{lens_line_id}` | AUTH | S |  |
+| `POST` | `/api/v1/lens-stock/{lens_line_id}/bulk-import` | ADMIN, CATALOG_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/lens-stock/{lens_line_id}/commit` | ADMIN, CATALOG_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/lens-stock/{lens_line_id}/release` | ADMIN, CATALOG_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/lens-stock/{lens_line_id}/reserve` | ADMIN, CATALOG_MANAGER, STORE_MANAGER | S |  |
+| `PATCH` | `/api/v1/lens-stock/{line_stock_id}` | ADMIN, CATALOG_MANAGER, STORE_MANAGER | S |  |
+
+### `/api/v1/loyalty`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/loyalty/account/{customer_id}` | AUTH |  |  |
+| `GET` | `/api/v1/loyalty/account/{customer_id}/ledger` | AUTH |  |  |
+| `POST` | `/api/v1/loyalty/adjust` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/loyalty/earn` | ADMIN, AREA_MANAGER, CASHIER, SALES_CASHIER, SALES_STAFF, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/loyalty/expire` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/loyalty/program-stats` | AUTH |  |  |
+| `POST` | `/api/v1/loyalty/redeem` | ADMIN, AREA_MANAGER, CASHIER, SALES_CASHIER, SALES_STAFF, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/loyalty/redeem/otp/send` | ADMIN, AREA_MANAGER, CASHIER, SALES_CASHIER, SALES_STAFF, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/loyalty/redeem/otp/verify` | ADMIN, AREA_MANAGER, CASHIER, SALES_CASHIER, SALES_STAFF, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/loyalty/rewards` | AUTH |  |  |
+| `POST` | `/api/v1/loyalty/rewards` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `DELETE` | `/api/v1/loyalty/rewards/{reward_id}` | ADMIN |  |  |
+| `GET` | `/api/v1/loyalty/rewards/{reward_id}` | AUTH |  |  |
+| `PUT` | `/api/v1/loyalty/rewards/{reward_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/loyalty/settings` | AUTH |  |  |
+| `PUT` | `/api/v1/loyalty/settings` | SUPERADMIN |  |  |
+
+### `/api/v1/marketing`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/marketing/ad-audience/export` | SUPERADMIN, ADMIN |  |  |
+| `GET` | `/api/v1/marketing/ad-audience/summary` | SUPERADMIN, ADMIN |  |  |
+| `GET` | `/api/v1/marketing/ad-performance` | SUPERADMIN, ADMIN |  |  |
+| `GET` | `/api/v1/marketing/campaigns` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/marketing/campaigns` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `DELETE` | `/api/v1/marketing/campaigns/{campaign_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/marketing/campaigns/{campaign_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `PUT` | `/api/v1/marketing/campaigns/{campaign_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/marketing/campaigns/{campaign_id}/analytics` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/marketing/campaigns/{campaign_id}/duplicate` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/marketing/campaigns/{campaign_id}/pause` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/marketing/campaigns/{campaign_id}/resume` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/marketing/campaigns/{campaign_id}/schedule` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/marketing/campaigns/{campaign_id}/send` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/marketing/consent-text` | AUTH |  |  |
+| `PUT` | `/api/v1/marketing/consent-text` | ADMIN |  |  |
+| `GET` | `/api/v1/marketing/notifications/logs` | AUTH |  |  |
+| `POST` | `/api/v1/marketing/notifications/send` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/marketing/notifications/send-bulk` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/marketing/nps-dashboard` | AUTH |  |  |
+| `POST` | `/api/v1/marketing/nps-response` | AUTH |  |  |
+| `POST` | `/api/v1/marketing/nps-survey/{order_id}` | AUTH |  |  |
+| `GET` | `/api/v1/marketing/promo-templates` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/marketing/promo-templates` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `DELETE` | `/api/v1/marketing/promo-templates/{template_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/marketing/promo-templates/{template_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `PUT` | `/api/v1/marketing/promo-templates/{template_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/marketing/referral-invite/{customer_id}` | AUTH |  |  |
+| `GET` | `/api/v1/marketing/referrals` | AUTH |  |  |
+| `POST` | `/api/v1/marketing/referrals/{referral_id}/redeem` | AUTH |  |  |
+| `POST` | `/api/v1/marketing/review-request/{order_id}` | AUTH |  |  |
+| `GET` | `/api/v1/marketing/rx-expiry-alerts` | AUTH |  |  |
+| `POST` | `/api/v1/marketing/rx-reminder/{customer_id}` | AUTH |  |  |
+| `POST` | `/api/v1/marketing/rx-snooze/{customer_id}` | AUTH |  |  |
+| `GET` | `/api/v1/marketing/segments` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/marketing/segments/{key}/preview` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/marketing/walkin` | AUTH |  |  |
+| `GET` | `/api/v1/marketing/walkins` | AUTH |  |  |
+| `GET` | `/api/v1/marketing/walkout-recoveries` | AUTH |  |  |
+| `POST` | `/api/v1/marketing/walkout/{customer_id}` | AUTH |  |  |
+| `POST` | `/api/v1/marketing/whatsapp-consent` | AUTH |  |  |
+| `GET` | `/api/v1/marketing/whatsapp-consent-ledger` | ADMIN |  |  |
+| `GET` | `/api/v1/marketing/whatsapp-consent/{customer_id}` | AUTH |  |  |
+
+### `/api/v1/non-adapt`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/non-adapt` | STORE_MANAGER, AREA_MANAGER, ADMIN, ACCOUNTANT, SUPERADMIN | S |  |
+| `GET` | `/api/v1/non-adapt/order/{order_id}` | OPTOMETRIST, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `POST` | `/api/v1/non-adapt/record` | OPTOMETRIST, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `GET` | `/api/v1/non-adapt/{record_id}` | OPTOMETRIST, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `POST` | `/api/v1/non-adapt/{record_id}/remake` | OPTOMETRIST, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+
+### `/api/v1/notifications`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/notifications` | AUTH |  |  |
+| `GET` | `/api/v1/notifications/` | AUTH |  |  |
+| `POST` | `/api/v1/notifications/mark-all-read` | AUTH |  |  |
+| `GET` | `/api/v1/notifications/unread-count` | AUTH |  |  |
+| `PATCH` | `/api/v1/notifications/{notification_id}/read` | AUTH |  |  |
+| `POST` | `/api/v1/notifications/{notification_id}/snooze` | AUTH |  |  |
+
+### `/api/v1/ondc`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `POST` | `/api/v1/ondc/on_cancel` | PUBLIC |  |  |
+| `POST` | `/api/v1/ondc/on_confirm` | PUBLIC |  |  |
+| `POST` | `/api/v1/ondc/on_init` | PUBLIC |  |  |
+| `POST` | `/api/v1/ondc/on_search` | PUBLIC |  |  |
+| `POST` | `/api/v1/ondc/on_select` | PUBLIC |  |  |
+| `POST` | `/api/v1/ondc/on_status` | PUBLIC |  |  |
+| `POST` | `/api/v1/ondc/publish` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/ondc/status` | ADMIN, SUPERADMIN |  |  |
+
+### `/api/v1/online-store`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/online-store/collections` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/online-store/collections` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `DELETE` | `/api/v1/online-store/collections/{collection_id}` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/online-store/collections/{collection_id}` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `PUT` | `/api/v1/online-store/collections/{collection_id}` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/online-store/collections/{collection_id}/block` | SUPERADMIN |  |  |
+| `GET` | `/api/v1/online-store/collections/{collection_id}/products` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/online-store/collections/{collection_id}/products` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `PUT` | `/api/v1/online-store/collections/{collection_id}/products/reorder` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `DELETE` | `/api/v1/online-store/collections/{collection_id}/products/{sku:path}` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/online-store/collections/{collection_id}/resolved-products` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/online-store/collections/{collection_id}/unblock` | SUPERADMIN |  |  |
+| `GET` | `/api/v1/online-store/discount-rules` | ADMIN, CATALOG_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/online-store/discount-rules` | ADMIN, CATALOG_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/online-store/discount-rules/recompute` | ADMIN, CATALOG_MANAGER, SUPERADMIN |  |  |
+| `DELETE` | `/api/v1/online-store/discount-rules/{rule_id}` | ADMIN, CATALOG_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/online-store/discount-rules/{rule_id}` | ADMIN, CATALOG_MANAGER, SUPERADMIN |  |  |
+| `PUT` | `/api/v1/online-store/discount-rules/{rule_id}` | ADMIN, CATALOG_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/online-store/images` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/online-store/images` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/online-store/images/upload` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `DELETE` | `/api/v1/online-store/images/{image_id}` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/online-store/images/{image_id}` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `PUT` | `/api/v1/online-store/images/{image_id}` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/online-store/images/{image_id}/assign` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/online-store/images/{image_id}/auto-edit` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/online-store/images/{image_id}/edited` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/online-store/images/{image_id}/status` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/online-store/menus` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/online-store/menus` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `DELETE` | `/api/v1/online-store/menus/{menu_id}` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/online-store/menus/{menu_id}` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `PUT` | `/api/v1/online-store/menus/{menu_id}` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/online-store/menus/{menu_id}/items` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `PUT` | `/api/v1/online-store/menus/{menu_id}/items/reorder` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `DELETE` | `/api/v1/online-store/menus/{menu_id}/items/{item_id}` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `PUT` | `/api/v1/online-store/menus/{menu_id}/items/{item_id}` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `PUT` | `/api/v1/online-store/menus/{menu_id}/items/{item_id}/move` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/online-store/orders` | ADMIN, ACCOUNTANT, SUPERADMIN |  |  |
+| `GET` | `/api/v1/online-store/orders/` | ADMIN, ACCOUNTANT, SUPERADMIN |  |  |
+| `POST` | `/api/v1/online-store/orders/remap/{shopify_order_id}` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/online-store/orders/{order_id}/clear-rx-hold` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/online-store/push/all-pending` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/online-store/push/collection/{collection_id}` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/online-store/push/history` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/online-store/push/image/{image_id}` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/online-store/push/locations` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/online-store/push/menu/{menu_id}` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/online-store/push/product/{product_id}` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/online-store/push/product/{product_id}/take-down` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/online-store/push/status` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/online-store/push/stock` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/online-store/push/sync-live` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/online-store/refund-reviews` | ADMIN, ACCOUNTANT, SUPERADMIN |  |  |
+| `GET` | `/api/v1/online-store/refund-reviews/` | ADMIN, ACCOUNTANT, SUPERADMIN |  |  |
+| `POST` | `/api/v1/online-store/refund-reviews/{review_id}/confirm` | ADMIN, ACCOUNTANT, SUPERADMIN |  |  |
+| `POST` | `/api/v1/online-store/refund-reviews/{review_id}/goods-back` | ADMIN, ACCOUNTANT, SUPERADMIN |  |  |
+| `POST` | `/api/v1/online-store/refund-reviews/{review_id}/reject` | ADMIN, ACCOUNTANT, SUPERADMIN |  |  |
+| `GET` | `/api/v1/online-store/stock-tally` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/online-store/store-health` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/online-store/summary` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+
+### `/api/v1/orders`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/orders` | AUTH | S |  |
+| `POST` | `/api/v1/orders` | ADMIN, AREA_MANAGER, SALES_CASHIER, SALES_STAFF, STORE_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/orders/overdue/list` | AUTH | S |  |
+| `GET` | `/api/v1/orders/pending/delivery` | AUTH | S |  |
+| `POST` | `/api/v1/orders/quote` | ADMIN, AREA_MANAGER, SALES_CASHIER, SALES_STAFF, STORE_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/orders/sales/summary` | AUTH | S |  |
+| `GET` | `/api/v1/orders/search` | AUTH | S |  |
+| `GET` | `/api/v1/orders/status/counts` | AUTH | S |  |
+| `GET` | `/api/v1/orders/unpaid/list` | AUTH | S |  |
+| `GET` | `/api/v1/orders/{order_id}` | AUTH | S |  |
+| `PUT` | `/api/v1/orders/{order_id}` | AUTH |  |  |
+| `POST` | `/api/v1/orders/{order_id}/bopis-transfer` | AUTH |  |  |
+| `POST` | `/api/v1/orders/{order_id}/cancel` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, SALES_CASHIER, SALES_STAFF |  |  |
+| `POST` | `/api/v1/orders/{order_id}/confirm` | AUTH |  |  |
+| `POST` | `/api/v1/orders/{order_id}/deliver` | AUTH |  |  |
+| `POST` | `/api/v1/orders/{order_id}/deliver-with-payment` | AUTH |  |  |
+| `GET` | `/api/v1/orders/{order_id}/invoice` | AUTH |  |  |
+| `GET` | `/api/v1/orders/{order_id}/invoice.pdf` | AUTH |  |  |
+| `POST` | `/api/v1/orders/{order_id}/items` | AUTH |  |  |
+| `DELETE` | `/api/v1/orders/{order_id}/items/{item_id}` | AUTH |  |  |
+| `POST` | `/api/v1/orders/{order_id}/payments` | AUTH |  |  |
+| `POST` | `/api/v1/orders/{order_id}/ready` | AUTH |  |  |
+| `PUT` | `/api/v1/orders/{order_id}/superadmin-edit` | AUTH |  |  |
+| `PUT` | `/api/v1/orders/{order_id}/superadmin-invoice-change` | AUTH |  |  |
+| `GET` | `/api/v1/orders/{order_id}/upi-qr` | AUTH | S |  |
+
+### `/api/v1/payout`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/payout/export/{snapshot_id}.csv` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/payout/lock` | SUPERADMIN |  |  |
+| `GET` | `/api/v1/payout/payroll-feed` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/payout/preview` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/payout/snapshot/{snapshot_id}` | ADMIN, SUPERADMIN |  |  |
+| `PATCH` | `/api/v1/payout/snapshot/{snapshot_id}/mark-paid` | SUPERADMIN |  |  |
+| `GET` | `/api/v1/payout/snapshots` | ADMIN, SUPERADMIN |  |  |
+
+### `/api/v1/payroll`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/payroll` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/payroll/` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/payroll/advances` | ADMIN |  |  |
+| `POST` | `/api/v1/payroll/advances/{advance_id}/settle` | ADMIN |  |  |
+| `GET` | `/api/v1/payroll/advances/{employee_id}` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/payroll/approve` | ADMIN |  |  |
+| `GET` | `/api/v1/payroll/commission/leaderboard` | AUTH |  |  |
+| `GET` | `/api/v1/payroll/commission/summary` | AUTH |  |  |
+| `GET` | `/api/v1/payroll/config` | ADMIN |  |  |
+| `POST` | `/api/v1/payroll/config` | ADMIN |  |  |
+| `POST` | `/api/v1/payroll/config/bulk` | ADMIN |  |  |
+| `GET` | `/api/v1/payroll/config/{employee_id}` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `PUT` | `/api/v1/payroll/config/{employee_id}` | ADMIN |  |  |
+| `GET` | `/api/v1/payroll/incentive-summary/{employee_id}/{month}/{year}` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/payroll/lock` | ADMIN |  |  |
+| `GET` | `/api/v1/payroll/payslip/{employee_id}` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/payroll/payslip/{employee_id}/{month}/{year}` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/payroll/payslip/{employee_id}/{month}/{year}/print` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/payroll/pt-slabs` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/payroll/pt-slabs/seed` | ADMIN |  |  |
+| `GET` | `/api/v1/payroll/pt-slabs/{state_code}` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `PUT` | `/api/v1/payroll/pt-slabs/{state_code}` | ADMIN |  |  |
+| `GET` | `/api/v1/payroll/registers/pf-ecr` | ADMIN |  |  |
+| `GET` | `/api/v1/payroll/registers/summary` | ADMIN |  |  |
+| `POST` | `/api/v1/payroll/run` | ADMIN |  |  |
+| `GET` | `/api/v1/payroll/run/rows` | ADMIN |  |  |
+| `GET` | `/api/v1/payroll/salary-sheet` | ADMIN |  |  |
+| `POST` | `/api/v1/payroll/salary/calculate` | ADMIN |  |  |
+| `GET` | `/api/v1/payroll/tally/salary-jv` | ADMIN |  |  |
+
+### `/api/v1/portal`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/portal/rx` | PUBLIC |  |  |
+| `POST` | `/api/v1/portal/rx/request-otp` | PUBLIC |  |  |
+| `POST` | `/api/v1/portal/rx/verify-otp` | PUBLIC |  |  |
+| `GET` | `/api/v1/portal/track/{token}` | PUBLIC |  |  |
+
+### `/api/v1/prescriptions`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/prescriptions` | AUTH |  |  |
+| `POST` | `/api/v1/prescriptions` | ADMIN, OPTOMETRIST, STORE_MANAGER, SUPERADMIN |  | E |
+| `GET` | `/api/v1/prescriptions/` | AUTH |  |  |
+| `POST` | `/api/v1/prescriptions/` | ADMIN, OPTOMETRIST, STORE_MANAGER, SUPERADMIN |  | E |
+| `GET` | `/api/v1/prescriptions/customer/{customer_id}/progression` | AUTH |  |  |
+| `GET` | `/api/v1/prescriptions/expiring` | AUTH |  |  |
+| `GET` | `/api/v1/prescriptions/family/{customer_id}` | AUTH |  |  |
+| `GET` | `/api/v1/prescriptions/patient/{patient_id}` | AUTH |  |  |
+| `GET` | `/api/v1/prescriptions/patient/{patient_id}/latest` | AUTH |  |  |
+| `GET` | `/api/v1/prescriptions/patient/{patient_id}/valid` | AUTH |  |  |
+| `GET` | `/api/v1/prescriptions/{prescription_id}` | AUTH |  |  |
+| `PUT` | `/api/v1/prescriptions/{prescription_id}` | ADMIN, OPTOMETRIST, STORE_MANAGER, SUPERADMIN |  | E |
+| `POST` | `/api/v1/prescriptions/{prescription_id}/finalize` | ADMIN, OPTOMETRIST, SUPERADMIN |  |  |
+| `GET` | `/api/v1/prescriptions/{prescription_id}/photo` | AUTH |  |  |
+| `POST` | `/api/v1/prescriptions/{prescription_id}/photo` | ADMIN, CASHIER, OPTOMETRIST, SALES_CASHIER, SALES_STAFF, STORE_MANAGER, SUPERADMIN |  | E |
+| `GET` | `/api/v1/prescriptions/{prescription_id}/print` | AUTH |  |  |
+| `GET` | `/api/v1/prescriptions/{prescription_id}/validate` | AUTH |  |  |
+| `PATCH` | `/api/v1/prescriptions/{prescription_id}/version/{version_name}` | ADMIN, OPTOMETRIST, STORE_MANAGER, SUPERADMIN |  | E |
+| `GET` | `/api/v1/prescriptions/{prescription_id}/versions` | AUTH |  |  |
+
+### `/api/v1/print-overrides`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/print-overrides` | AUTH |  |  |
+| `GET` | `/api/v1/print-overrides/_meta/templates` | AUTH |  |  |
+| `DELETE` | `/api/v1/print-overrides/{entity_id}/{template_key}` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/print-overrides/{entity_id}/{template_key}` | AUTH |  |  |
+| `PUT` | `/api/v1/print-overrides/{entity_id}/{template_key}` | ADMIN, SUPERADMIN |  |  |
+
+### `/api/v1/print`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/print/delivery-challan/order/{order_id}` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, SALES_CASHIER, SALES_STAFF, ACCOUNTANT | S |  |
+| `GET` | `/api/v1/print/delivery-challan/transfer/{transfer_id}` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, SALES_CASHIER, SALES_STAFF, ACCOUNTANT | S |  |
+| `GET` | `/api/v1/print/qz/cert` | AUTH |  |  |
+| `POST` | `/api/v1/print/qz/sign` | AUTH |  |  |
+
+### `/api/v1/product-templates`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/product-templates` | ADMIN, CATALOG_MANAGER |  |  |
+| `POST` | `/api/v1/product-templates` | ADMIN, CATALOG_MANAGER |  |  |
+| `GET` | `/api/v1/product-templates/` | ADMIN, CATALOG_MANAGER |  |  |
+| `POST` | `/api/v1/product-templates/` | ADMIN, CATALOG_MANAGER |  |  |
+| `DELETE` | `/api/v1/product-templates/{template_id}` | ADMIN, CATALOG_MANAGER |  |  |
+
+### `/api/v1/products`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/products` | AUTH |  |  |
+| `POST` | `/api/v1/products` | ADMIN, CATALOG_MANAGER |  |  |
+| `GET` | `/api/v1/products/brand-options` | AUTH |  |  |
+| `GET` | `/api/v1/products/brands/list` | AUTH |  |  |
+| `POST` | `/api/v1/products/bulk-offer` | ADMIN, CATALOG_MANAGER |  |  |
+| `POST` | `/api/v1/products/bulk-price` | ADMIN, CATALOG_MANAGER |  |  |
+| `GET` | `/api/v1/products/cataloguers` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER |  |  |
+| `GET` | `/api/v1/products/cataloguing-scorecard` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER |  |  |
+| `GET` | `/api/v1/products/categories/list` | AUTH |  |  |
+| `POST` | `/api/v1/products/clone-vary` | ADMIN, CATALOG_MANAGER |  |  |
+| `GET` | `/api/v1/products/facets` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER |  |  |
+| `POST` | `/api/v1/products/generate-description` | ADMIN, CATALOG_MANAGER |  |  |
+| `GET` | `/api/v1/products/gst-rates` | AUTH |  |  |
+| `POST` | `/api/v1/products/image` | ADMIN, CATALOG_MANAGER |  |  |
+| `POST` | `/api/v1/products/image/from-url` | ADMIN, CATALOG_MANAGER |  |  |
+| `GET` | `/api/v1/products/image/{file_id}` | PUBLIC |  |  |
+| `POST` | `/api/v1/products/image/{file_id}/edit` | ADMIN, CATALOG_MANAGER |  |  |
+| `POST` | `/api/v1/products/master` | ADMIN, CATALOG_MANAGER |  |  |
+| `GET` | `/api/v1/products/master/categories` | AUTH |  |  |
+| `GET` | `/api/v1/products/master/categories/{category}/fields` | AUTH |  |  |
+| `PUT` | `/api/v1/products/master/{product_id}` | ADMIN, CATALOG_MANAGER |  |  |
+| `GET` | `/api/v1/products/qc-samples` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER |  |  |
+| `POST` | `/api/v1/products/qc-samples/generate` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER |  |  |
+| `POST` | `/api/v1/products/qc-samples/{item_id}/verdict` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER |  |  |
+| `GET` | `/api/v1/products/similar` | AUTH |  |  |
+| `POST` | `/api/v1/products/sku-preview` | ADMIN, CATALOG_MANAGER |  |  |
+| `GET` | `/api/v1/products/sku/{sku}` | AUTH |  |  |
+| `GET` | `/api/v1/products/tags/list` | AUTH |  |  |
+| `GET` | `/api/v1/products/website-verdict` | AUTH |  |  |
+| `GET` | `/api/v1/products/{product_id}` | AUTH |  |  |
+| `PUT` | `/api/v1/products/{product_id}` | ADMIN, CATALOG_MANAGER |  |  |
+
+### `/api/v1/promotions`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/promotions` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, ACCOUNTANT, SALES_CASHIER, SALES_STAFF, CASHIER |  |  |
+| `POST` | `/api/v1/promotions` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER | S |  |
+| `GET` | `/api/v1/promotions/` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, ACCOUNTANT, SALES_CASHIER, SALES_STAFF, CASHIER |  |  |
+| `POST` | `/api/v1/promotions/` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER | S |  |
+| `POST` | `/api/v1/promotions/evaluate` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, ACCOUNTANT, SALES_CASHIER, SALES_STAFF, CASHIER |  |  |
+| `DELETE` | `/api/v1/promotions/{promo_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER | S |  |
+| `GET` | `/api/v1/promotions/{promo_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, ACCOUNTANT, SALES_CASHIER, SALES_STAFF, CASHIER |  |  |
+| `PUT` | `/api/v1/promotions/{promo_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER | S |  |
+
+### `/api/v1/reminders`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/reminders/rules` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/reminders/rules` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `DELETE` | `/api/v1/reminders/rules/{rule_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/reminders/rules/{rule_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `PUT` | `/api/v1/reminders/rules/{rule_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/reminders/rules/{rule_id}/history` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/reminders/rules/{rule_id}/preview` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/reminders/rules/{rule_id}/run-now` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/reminders/rules/{rule_id}/toggle` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+
+### `/api/v1/repairs`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/repairs/catalog` | SALES_STAFF, SALES_CASHIER, CASHIER, OPTOMETRIST, CATALOG_MANAGER, STORE_MANAGER, AREA_MANAGER, ACCOUNTANT, ADMIN, SUPERADMIN | S |  |
+| `POST` | `/api/v1/repairs/catalog` | CATALOG_MANAGER, ADMIN, SUPERADMIN |  |  |
+| `PUT` | `/api/v1/repairs/catalog/{service_id}` | CATALOG_MANAGER, ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/repairs/jobs` | SALES_STAFF, SALES_CASHIER, CASHIER, OPTOMETRIST, CATALOG_MANAGER, STORE_MANAGER, AREA_MANAGER, ACCOUNTANT, ADMIN, SUPERADMIN | S |  |
+| `POST` | `/api/v1/repairs/jobs` | SALES_STAFF, SALES_CASHIER, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `GET` | `/api/v1/repairs/jobs/{job_id}` | SALES_STAFF, SALES_CASHIER, CASHIER, OPTOMETRIST, CATALOG_MANAGER, STORE_MANAGER, AREA_MANAGER, ACCOUNTANT, ADMIN, SUPERADMIN | S |  |
+| `POST` | `/api/v1/repairs/jobs/{job_id}/transition` | SALES_STAFF, SALES_CASHIER, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+
+### `/api/v1/reports`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/reports` | PUBLIC |  |  |
+| `GET` | `/api/v1/reports/` | PUBLIC |  |  |
+| `GET` | `/api/v1/reports/blueprint` | AUTH |  |  |
+| `GET` | `/api/v1/reports/clinical/eye-tests` | AUTH |  |  |
+| `GET` | `/api/v1/reports/customers/acquisition` | AUTH |  |  |
+| `GET` | `/api/v1/reports/dashboard` | AUTH |  |  |
+| `GET` | `/api/v1/reports/day-end-close` | ACCOUNTANT, ADMIN, AREA_MANAGER, CASHIER, SALES_STAFF, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/reports/day-end-close` | ACCOUNTANT, ADMIN, AREA_MANAGER, CASHIER, SALES_STAFF, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/reports/discount/analysis` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/reports/finance/expense-vs-revenue` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/reports/finance/gst` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/reports/finance/outstanding` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/reports/gstr1` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/reports/gstr1/gstn-json` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/reports/gstr3b` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/reports/gstr3b/gstn-json` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/reports/hr/attendance` | AUTH |  |  |
+| `GET` | `/api/v1/reports/inventory` | AUTH |  |  |
+| `GET` | `/api/v1/reports/inventory/brand-sellthrough` | AUTH |  |  |
+| `GET` | `/api/v1/reports/inventory/non-moving-stock` | AUTH |  |  |
+| `GET` | `/api/v1/reports/inventory/summary` | AUTH |  |  |
+| `GET` | `/api/v1/reports/inventory/tax-code-audit` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/reports/inventory/valuation` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/reports/profit/by-category` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/reports/profit/by-store` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/reports/promotions` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/reports/purchase/recommendations` | AUTH |  |  |
+| `GET` | `/api/v1/reports/sales/by-category` | AUTH |  |  |
+| `GET` | `/api/v1/reports/sales/by-salesperson` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/reports/sales/comparison` | AUTH |  |  |
+| `GET` | `/api/v1/reports/sales/daily` | AUTH |  |  |
+| `GET` | `/api/v1/reports/sales/growth` | AUTH |  |  |
+| `GET` | `/api/v1/reports/sales/lens-deep-dive` | AUTH |  |  |
+| `GET` | `/api/v1/reports/sales/price-bands` | AUTH |  |  |
+| `GET` | `/api/v1/reports/sales/seasonality` | AUTH |  |  |
+| `GET` | `/api/v1/reports/sales/summary` | AUTH |  |  |
+| `GET` | `/api/v1/reports/staff/ranking` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/reports/stock/count` | AUTH |  |  |
+| `GET` | `/api/v1/reports/targets` | AUTH |  |  |
+| `GET` | `/api/v1/reports/tasks/summary` | AUTH |  |  |
+| `GET` | `/api/v1/reports/walkouts/footfall-audit` | AUTH |  |  |
+| `GET` | `/api/v1/reports/workshop/pending-jobs` | AUTH |  |  |
+| `GET` | `/api/v1/reports/workshop/productivity` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+
+### `/api/v1/returns`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/returns` | AUTH |  |  |
+| `POST` | `/api/v1/returns` | ADMIN, CASHIER, SALES_STAFF, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/returns/` | AUTH |  |  |
+| `POST` | `/api/v1/returns/` | ADMIN, CASHIER, SALES_STAFF, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/returns/quote` | ADMIN, CASHIER, SALES_STAFF, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/returns/{return_id}` | AUTH |  |  |
+| `POST` | `/api/v1/returns/{return_id}/restock` | ADMIN, CASHIER, SALES_STAFF, STORE_MANAGER |  |  |
+
+### `/api/v1/rtv-debit-notes`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/rtv-debit-notes` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER, WORKSHOP_STAFF | S |  |
+| `GET` | `/api/v1/rtv-debit-notes/` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER, WORKSHOP_STAFF | S |  |
+| `POST` | `/api/v1/rtv-debit-notes/issue` | ACCOUNTANT, ADMIN | S |  |
+| `GET` | `/api/v1/rtv-debit-notes/{debit_note_id}` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER, WORKSHOP_STAFF | S |  |
+| `GET` | `/api/v1/rtv-debit-notes/{debit_note_id}/print` | ACCOUNTANT, ADMIN | S |  |
+| `GET` | `/api/v1/rtv-debit-notes/{debit_note_id}/tally` | ACCOUNTANT, ADMIN | S |  |
+
+### `/api/v1/serials`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `POST` | `/api/v1/serials/capture` | CATALOG_MANAGER, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `GET` | `/api/v1/serials/warranty/{serial}` | SALES_CASHIER, CASHIER, SALES_STAFF, OPTOMETRIST, CATALOG_MANAGER, STORE_MANAGER, AREA_MANAGER, ACCOUNTANT, ADMIN, SUPERADMIN | S |  |
+| `GET` | `/api/v1/serials/{serial}` | SALES_CASHIER, CASHIER, SALES_STAFF, OPTOMETRIST, CATALOG_MANAGER, STORE_MANAGER, AREA_MANAGER, ACCOUNTANT, ADMIN, SUPERADMIN | S |  |
+| `POST` | `/api/v1/serials/{serial}/mark-sold` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `POST` | `/api/v1/serials/{serial}/recall` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `POST` | `/api/v1/serials/{serial}/return` | CATALOG_MANAGER, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+
+### `/api/v1/settings`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/settings` | PUBLIC |  |  |
+| `GET` | `/api/v1/settings/` | PUBLIC |  |  |
+| `GET` | `/api/v1/settings/admin-controls` | ADMIN, SUPERADMIN |  |  |
+| `PUT` | `/api/v1/settings/admin-controls` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/settings/approval-workflows` | ADMIN, SUPERADMIN |  |  |
+| `PUT` | `/api/v1/settings/approval-workflows` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/settings/audit-logs` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/settings/audit-logs/summary` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/settings/business` | AUTH |  |  |
+| `PUT` | `/api/v1/settings/business` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/settings/business/logo` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/settings/business/logo/{file_id}` | AUTH |  |  |
+| `GET` | `/api/v1/settings/discount-rules` | AUTH |  |  |
+| `POST` | `/api/v1/settings/discount-rules` | ADMIN, AREA_MANAGER, SUPERADMIN |  |  |
+| `PUT` | `/api/v1/settings/discount-rules` | ADMIN, AREA_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/settings/feature-toggles/{store_id}` | STORE_MANAGER, SUPERADMIN |  |  |
+| `PATCH` | `/api/v1/settings/feature-toggles/{store_id}` | STORE_MANAGER, SUPERADMIN |  |  |
+| `PUT` | `/api/v1/settings/feature-toggles/{store_id}` | STORE_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/settings/integrations` | AUTH |  |  |
+| `GET` | `/api/v1/settings/integrations/anthropic/models` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/settings/integrations/catalog` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/settings/integrations/{integration_type}` | AUTH |  |  |
+| `PUT` | `/api/v1/settings/integrations/{integration_type}` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/settings/integrations/{integration_type}/test` | AUTH |  |  |
+| `GET` | `/api/v1/settings/invoice` | AUTH |  |  |
+| `PUT` | `/api/v1/settings/invoice` | ACCOUNTANT, ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/settings/marketplace-channels` | AUTH |  |  |
+| `PUT` | `/api/v1/settings/marketplace-channels` | ADMIN |  |  |
+| `POST` | `/api/v1/settings/marketplace-channels/{channel}/sync` | ADMIN |  |  |
+| `GET` | `/api/v1/settings/notifications/logs` | AUTH |  |  |
+| `GET` | `/api/v1/settings/notifications/providers` | ADMIN |  |  |
+| `PUT` | `/api/v1/settings/notifications/providers` | ADMIN |  |  |
+| `GET` | `/api/v1/settings/notifications/templates` | AUTH |  |  |
+| `POST` | `/api/v1/settings/notifications/templates` | ADMIN, SUPERADMIN |  |  |
+| `DELETE` | `/api/v1/settings/notifications/templates/{template_id}` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/settings/notifications/templates/{template_id}` | AUTH |  |  |
+| `PUT` | `/api/v1/settings/notifications/templates/{template_id}` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/settings/notifications/test` | AUTH |  |  |
+| `GET` | `/api/v1/settings/policies` | SUPERADMIN, ADMIN, AREA_MANAGER, ACCOUNTANT, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/settings/policies/registry` | SUPERADMIN, ADMIN, AREA_MANAGER, ACCOUNTANT, STORE_MANAGER |  |  |
+| `DELETE` | `/api/v1/settings/policies/{key}` | SUPERADMIN, ADMIN, STORE_MANAGER, ACCOUNTANT |  |  |
+| `GET` | `/api/v1/settings/policies/{key}` | SUPERADMIN, ADMIN, AREA_MANAGER, ACCOUNTANT, STORE_MANAGER |  |  |
+| `PUT` | `/api/v1/settings/policies/{key}` | SUPERADMIN, ADMIN, STORE_MANAGER, ACCOUNTANT |  |  |
+| `GET` | `/api/v1/settings/printers` | AUTH |  |  |
+| `PUT` | `/api/v1/settings/printers` | AUTH |  |  |
+| `GET` | `/api/v1/settings/printers/available` | AUTH |  |  |
+| `GET` | `/api/v1/settings/profile` | AUTH |  |  |
+| `PUT` | `/api/v1/settings/profile` | AUTH |  |  |
+| `POST` | `/api/v1/settings/profile/change-password` | AUTH |  |  |
+| `GET` | `/api/v1/settings/profile/preferences` | AUTH |  |  |
+| `PUT` | `/api/v1/settings/profile/preferences` | AUTH |  |  |
+| `GET` | `/api/v1/settings/system` | ADMIN, SUPERADMIN |  |  |
+| `PUT` | `/api/v1/settings/system` | SUPERADMIN |  |  |
+| `GET` | `/api/v1/settings/tax` | AUTH |  |  |
+| `PUT` | `/api/v1/settings/tax` | ACCOUNTANT, ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/settings/tds-rates` | AUTH |  |  |
+| `PUT` | `/api/v1/settings/tds-rates` | SUPERADMIN |  |  |
+
+### `/api/v1/shipping`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/shipping/shipments` | AUTH |  |  |
+| `POST` | `/api/v1/shipping/shipments` | ADMIN, AREA_MANAGER, CASHIER, SALES_STAFF, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/shipping/shipments/{shipment_id}/track` | AUTH |  |  |
+
+### `/api/v1/stores`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/stores` | AUTH |  |  |
+| `POST` | `/api/v1/stores` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/stores/go-live-checklist` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/stores/summary` | AUTH |  |  |
+| `DELETE` | `/api/v1/stores/{store_id}` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/stores/{store_id}` | AUTH | S |  |
+| `PUT` | `/api/v1/stores/{store_id}` | ADMIN, SUPERADMIN |  |  |
+| `DELETE` | `/api/v1/stores/{store_id}/categories/{category}` | ADMIN |  |  |
+| `POST` | `/api/v1/stores/{store_id}/categories/{category}` | ADMIN |  |  |
+| `GET` | `/api/v1/stores/{store_id}/stats` | AUTH | S |  |
+| `GET` | `/api/v1/stores/{store_id}/users` | AUTH | S |  |
+
+### `/api/v1/tasks`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/tasks` | AUTH |  |  |
+| `POST` | `/api/v1/tasks` | AUTH |  |  |
+| `GET` | `/api/v1/tasks/` | AUTH |  |  |
+| `POST` | `/api/v1/tasks/` | AUTH |  |  |
+| `POST` | `/api/v1/tasks/auto-escalate-overdue` | AUTH |  |  |
+| `POST` | `/api/v1/tasks/auto-generate` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/tasks/checklists` | AUTH |  |  |
+| `POST` | `/api/v1/tasks/checklists/{checklist_type}/complete-item` | AUTH |  |  |
+| `GET` | `/api/v1/tasks/integrity/fake-closures` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/tasks/integrity/silent` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/tasks/my-tasks` | AUTH |  |  |
+| `GET` | `/api/v1/tasks/overdue` | AUTH |  |  |
+| `POST` | `/api/v1/tasks/scan/payment-variance` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/tasks/sla-config` | AUTH |  |  |
+| `PUT` | `/api/v1/tasks/sla-config` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/tasks/sop-checklist` | AUTH |  |  |
+| `POST` | `/api/v1/tasks/sop-checklist/item` | AUTH |  |  |
+| `GET` | `/api/v1/tasks/sop-templates` | AUTH |  |  |
+| `POST` | `/api/v1/tasks/sop-templates` | ADMIN, STORE_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/tasks/sop-templates/` | ADMIN, STORE_MANAGER, SUPERADMIN |  |  |
+| `DELETE` | `/api/v1/tasks/sop-templates/{template_id}` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/tasks/sop-templates/{template_id}` | AUTH |  |  |
+| `PATCH` | `/api/v1/tasks/sop-templates/{template_id}` | ADMIN, STORE_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/tasks/sop-templates/{template_id}/assign` | ADMIN, STORE_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/tasks/summary` | AUTH |  |  |
+| `POST` | `/api/v1/tasks/upload-file` | AUTH |  |  |
+| `GET` | `/api/v1/tasks/{task_id}` | AUTH |  |  |
+| `PATCH` | `/api/v1/tasks/{task_id}` | AUTH |  |  |
+| `PUT` | `/api/v1/tasks/{task_id}` | AUTH |  |  |
+| `POST` | `/api/v1/tasks/{task_id}/acknowledge` | AUTH |  |  |
+| `PATCH` | `/api/v1/tasks/{task_id}/complete` | AUTH |  |  |
+| `POST` | `/api/v1/tasks/{task_id}/escalate` | AUTH |  |  |
+| `GET` | `/api/v1/tasks/{task_id}/file` | AUTH |  |  |
+| `POST` | `/api/v1/tasks/{task_id}/reassign` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/tasks/{task_id}/start` | AUTH |  |  |
+
+### `/api/v1/till`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/till/sessions` | SALES_CASHIER, CASHIER, SALES_STAFF, STORE_MANAGER, AREA_MANAGER, ADMIN, ACCOUNTANT, SUPERADMIN | S |  |
+| `POST` | `/api/v1/till/sessions` | SALES_CASHIER, CASHIER, SALES_STAFF, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `GET` | `/api/v1/till/sessions/{session_id}` | SALES_CASHIER, CASHIER, SALES_STAFF, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `POST` | `/api/v1/till/sessions/{session_id}/blind-submit` | SALES_CASHIER, CASHIER, SALES_STAFF, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `POST` | `/api/v1/till/sessions/{session_id}/lock` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `POST` | `/api/v1/till/sessions/{session_id}/reopen` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `GET` | `/api/v1/till/sessions/{session_id}/zread` | STORE_MANAGER, AREA_MANAGER, ADMIN, ACCOUNTANT, SUPERADMIN | S |  |
+
+### `/api/v1/transfers`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/transfers` | AUTH |  |  |
+| `POST` | `/api/v1/transfers` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/transfers/` | AUTH |  |  |
+| `POST` | `/api/v1/transfers/` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/transfers/analytics/location/{location_id}` | AUTH |  |  |
+| `GET` | `/api/v1/transfers/analytics/summary` | AUTH |  |  |
+| `POST` | `/api/v1/transfers/bulk-approve` | ADMIN, AREA_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/transfers/pending` | AUTH |  |  |
+| `GET` | `/api/v1/transfers/{transfer_id}` | AUTH |  |  |
+| `PUT` | `/api/v1/transfers/{transfer_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/transfers/{transfer_id}/approve` | ADMIN, AREA_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/transfers/{transfer_id}/cancel` | ADMIN, AREA_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/transfers/{transfer_id}/complete` | ADMIN, STORE_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/transfers/{transfer_id}/complete-picking` | ADMIN, STORE_MANAGER, SUPERADMIN, WORKSHOP_STAFF |  |  |
+| `POST` | `/api/v1/transfers/{transfer_id}/create-shiprocket-shipment` | ADMIN, STORE_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/transfers/{transfer_id}/receive` | ADMIN, STORE_MANAGER, SUPERADMIN, WORKSHOP_STAFF |  |  |
+| `POST` | `/api/v1/transfers/{transfer_id}/ship` | ADMIN, STORE_MANAGER, SUPERADMIN, WORKSHOP_STAFF |  |  |
+| `POST` | `/api/v1/transfers/{transfer_id}/start-picking` | ADMIN, STORE_MANAGER, SUPERADMIN, WORKSHOP_STAFF |  |  |
+| `GET` | `/api/v1/transfers/{transfer_id}/tracking` | AUTH |  |  |
+
+### `/api/v1/users`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `POST` | `/api/v1/users` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/users/` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/users/` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/users/permissions/options` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/users/role/{role}` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/users/search` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/users/store/{store_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/users/summary` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |  |
+| `DELETE` | `/api/v1/users/{user_id}` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/users/{user_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |  |
+| `PUT` | `/api/v1/users/{user_id}` | ADMIN, SUPERADMIN |  |  |
+| `DELETE` | `/api/v1/users/{user_id}/approval-pin` | ADMIN, SUPERADMIN |  |  |
+| `PUT` | `/api/v1/users/{user_id}/approval-pin` | AUTH |  |  |
+| `GET` | `/api/v1/users/{user_id}/approval-pin/status` | AUTH |  |  |
+| `POST` | `/api/v1/users/{user_id}/assign-store` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/users/{user_id}/permissions` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/users/{user_id}/permissions/revert` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/users/{user_id}/reset-password` | ADMIN, SUPERADMIN |  |  |
+| `DELETE` | `/api/v1/users/{user_id}/roles/{role}` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/users/{user_id}/roles/{role}` | ADMIN, SUPERADMIN |  |  |
+| `DELETE` | `/api/v1/users/{user_id}/stores/{store_id}` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/users/{user_id}/stores/{store_id}` | ADMIN, SUPERADMIN |  |  |
+
+### `/api/v1/vendor-portal`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/vendor-portal/{token_id}/jobs` | PUBLIC |  |  |
+| `GET` | `/api/v1/vendor-portal/{token_id}/jobs/{job_id}` | PUBLIC |  |  |
+| `POST` | `/api/v1/vendor-portal/{token_id}/jobs/{job_id}/status` | PUBLIC |  |  |
+
+### `/api/v1/vendor-rebates`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/vendor-rebates/agreements` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/vendor-rebates/agreements` | ACCOUNTANT, ADMIN |  |  |
+| `PUT` | `/api/v1/vendor-rebates/agreements/{agreement_id}` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/vendor-rebates/agreements/{agreement_id}/preview` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/vendor-rebates/ledger` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/vendor-rebates/ledger/{rebate_id}` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/vendor-rebates/post` | ACCOUNTANT, ADMIN |  |  |
+
+### `/api/v1/vendor-returns`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/vendor-returns` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER, WORKSHOP_STAFF | S |  |
+| `POST` | `/api/v1/vendor-returns` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER, WORKSHOP_STAFF |  |  |
+| `GET` | `/api/v1/vendor-returns/` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER, WORKSHOP_STAFF | S |  |
+| `POST` | `/api/v1/vendor-returns/` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER, WORKSHOP_STAFF |  |  |
+| `GET` | `/api/v1/vendor-returns/{return_id}` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER, WORKSHOP_STAFF | S |  |
+| `PUT` | `/api/v1/vendor-returns/{return_id}/prices` | ACCOUNTANT, ADMIN | S |  |
+| `PATCH` | `/api/v1/vendor-returns/{return_id}/status` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+
+### `/api/v1/vendor-rma`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/vendor-rma` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/vendor-rma` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/vendor-rma/` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/vendor-rma/` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/vendor-rma/{rma_id}` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/vendor-rma/{rma_id}/authorize` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/vendor-rma/{rma_id}/close` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/vendor-rma/{rma_id}/credit-note` | ACCOUNTANT, ADMIN | S |  |
+| `POST` | `/api/v1/vendor-rma/{rma_id}/dispatch` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `PUT` | `/api/v1/vendor-rma/{rma_id}/prices` | ACCOUNTANT, ADMIN | S |  |
+| `POST` | `/api/v1/vendor-rma/{rma_id}/reject` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+
+### `/api/v1/vendors`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/vendors` | AUTH |  |  |
+| `POST` | `/api/v1/vendors` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/vendors/` | AUTH |  |  |
+| `POST` | `/api/v1/vendors/` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/vendors/ap-aging` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/vendors/goods-receipt/cockpit` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/vendors/grn` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/vendors/grn` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/vendors/grn/express` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/vendors/grn/upload-doc` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/vendors/grn/{grn_id}` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/vendors/grn/{grn_id}/accept` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/vendors/grn/{grn_id}/document` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/vendors/grn/{grn_id}/drop-over-order` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/vendors/grn/{grn_id}/escalate` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/vendors/grn/{grn_id}/void` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/vendors/last-cost` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/vendors/po-gst-heads` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/vendors/purchase-invoices` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/vendors/purchase-invoices` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/vendors/purchase-invoices/` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/vendors/purchase-invoices/` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/vendors/purchase-invoices/config` | ACCOUNTANT, ADMIN |  |  |
+| `PUT` | `/api/v1/vendors/purchase-invoices/config` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/vendors/purchase-invoices/from-dcs` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/vendors/purchase-invoices/from-grn/{grn_id}` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/vendors/purchase-invoices/preview` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/vendors/purchase-invoices/request-cataloguing` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/vendors/purchase-invoices/{invoice_id}` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/vendors/purchase-invoices/{invoice_id}/allocate-landed-costs` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/vendors/purchase-invoices/{invoice_id}/approve-exception` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/vendors/purchase-invoices/{invoice_id}/dc-match` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/vendors/purchase-invoices/{invoice_id}/landed-costs` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/vendors/purchase-invoices/{invoice_id}/landed-costs/preview` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/vendors/purchase-invoices/{invoice_id}/match` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/vendors/purchase-invoices/{invoice_id}/recon` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/vendors/purchase-invoices/{invoice_id}/recon` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/vendors/purchase-orders` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/vendors/purchase-orders` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/vendors/purchase-orders/from-forecast` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/vendors/purchase-orders/{po_id}` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `PUT` | `/api/v1/vendors/purchase-orders/{po_id}` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/vendors/purchase-orders/{po_id}/cancel` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/vendors/purchase-orders/{po_id}/dismiss-variance` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/vendors/purchase-orders/{po_id}/items/{line_index}/cancel` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/vendors/purchase-orders/{po_id}/send` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/vendors/purchase-orders/{po_id}/timeline` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/vendors/purchases-this-month` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/vendors/recon/credit-notes/{credit_note_number}/mark-received` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/vendors/recon/worklists` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/vendors/sku-alias-lookup` | AUTH |  |  |
+| `GET` | `/api/v1/vendors/tds/26q-export` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/vendors/tds/threshold-status` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/vendors/variance-report` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/vendors/{vendor_id}` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `PUT` | `/api/v1/vendors/{vendor_id}` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `GET` | `/api/v1/vendors/{vendor_id}/bills` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/vendors/{vendor_id}/bills` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/vendors/{vendor_id}/debit-notes` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/vendors/{vendor_id}/debit-notes` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/vendors/{vendor_id}/ledger` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/vendors/{vendor_id}/payments` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/vendors/{vendor_id}/payments` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/vendors/{vendor_id}/performance` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/vendors/{vendor_id}/portal-token` | ADMIN, SUPERADMIN |  |  |
+| `DELETE` | `/api/v1/vendors/{vendor_id}/portal-token/{token_id}` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/vendors/{vendor_id}/portal-tokens` | ADMIN, SUPERADMIN |  |  |
+| `GET` | `/api/v1/vendors/{vendor_id}/purchase-history` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/vendors/{vendor_id}/sku-aliases` | AUTH |  |  |
+| `POST` | `/api/v1/vendors/{vendor_id}/sku-aliases` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `DELETE` | `/api/v1/vendors/{vendor_id}/sku-aliases/{alias_id}` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+
+### `/api/v1/vouchers`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/vouchers` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/vouchers` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/vouchers/` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/vouchers/` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/vouchers/{code}` | AUTH |  |  |
+| `POST` | `/api/v1/vouchers/{code}/cancel` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/vouchers/{code}/redeem` | ADMIN, AREA_MANAGER, CASHIER, SALES_CASHIER, SALES_STAFF, STORE_MANAGER |  |  |
+
+### `/api/v1/walkouts`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/walkouts` | AUTH |  |  |
+| `POST` | `/api/v1/walkouts` | AUTH |  |  |
+| `GET` | `/api/v1/walkouts/` | AUTH |  |  |
+| `POST` | `/api/v1/walkouts/` | AUTH |  |  |
+| `GET` | `/api/v1/walkouts/conversion-feed` | AUTH |  |  |
+| `GET` | `/api/v1/walkouts/dashboard/fu-status` | AUTH |  |  |
+| `GET` | `/api/v1/walkouts/dashboard/per-staff` | AUTH |  |  |
+| `GET` | `/api/v1/walkouts/dashboard/result-breakdown` | AUTH |  |  |
+| `GET` | `/api/v1/walkouts/dashboard/top-reasons` | AUTH |  |  |
+| `GET` | `/api/v1/walkouts/followups/due-today` | AUTH |  |  |
+| `POST` | `/api/v1/walkouts/followups/escalate-overdue` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/walkouts/pos-compliance-check` | AUTH |  |  |
+| `POST` | `/api/v1/walkouts/walkins/manual-topup` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/walkouts/walkins/mtd` | AUTH |  |  |
+| `PATCH` | `/api/v1/walkouts/walkins/per-staff` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/walkouts/walkins/pos-increment` | ACCOUNTANT, ADMIN, AREA_MANAGER, CASHIER, OPTOMETRIST, SALES_CASHIER, SALES_STAFF, STORE_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/walkouts/walkins/status` | AUTH |  |  |
+| `GET` | `/api/v1/walkouts/walkins/today` | AUTH |  |  |
+| `DELETE` | `/api/v1/walkouts/{walkout_id}` | AUTH |  |  |
+| `GET` | `/api/v1/walkouts/{walkout_id}` | AUTH |  |  |
+| `PATCH` | `/api/v1/walkouts/{walkout_id}` | AUTH |  |  |
+| `POST` | `/api/v1/walkouts/{walkout_id}/followups` | AUTH |  |  |
+| `PATCH` | `/api/v1/walkouts/{walkout_id}/followups/{round_num}` | AUTH |  |  |
+| `POST` | `/api/v1/walkouts/{walkout_id}/followups/{round_num}/approve` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |  |
+| `PATCH` | `/api/v1/walkouts/{walkout_id}/result` | AUTH |  |  |
+
+### `/api/v1/webhooks`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/webhooks/health` | PUBLIC |  |  |
+| `POST` | `/api/v1/webhooks/msg91/delivery` | PUBLIC |  |  |
+| `POST` | `/api/v1/webhooks/razorpay` | PUBLIC |  |  |
+| `POST` | `/api/v1/webhooks/shiprocket` | PUBLIC |  |  |
+| `POST` | `/api/v1/webhooks/shopify` | PUBLIC |  |  |
+| `GET` | `/api/v1/webhooks/whatsapp` | PUBLIC |  |  |
+| `POST` | `/api/v1/webhooks/whatsapp` | PUBLIC |  |  |
+| `GET` | `/api/v1/webhooks/whatsapp/conversations` | SUPERADMIN, ADMIN, STORE_MANAGER |  | E |
+
+### `/api/v1/workshop`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/workshop` | PUBLIC |  |  |
+| `GET` | `/api/v1/workshop/` | PUBLIC |  |  |
+| `GET` | `/api/v1/workshop/dashboard-kpis` | AUTH |  |  |
+| `GET` | `/api/v1/workshop/jobs` | AUTH |  |  |
+| `POST` | `/api/v1/workshop/jobs` | AUTH |  |  |
+| `GET` | `/api/v1/workshop/jobs/by-vendor/{vendor_id}` | AUTH |  |  |
+| `GET` | `/api/v1/workshop/jobs/{job_id}` | AUTH |  |  |
+| `PUT` | `/api/v1/workshop/jobs/{job_id}` | AUTH |  |  |
+| `POST` | `/api/v1/workshop/jobs/{job_id}/assign` | AUTH |  |  |
+| `POST` | `/api/v1/workshop/jobs/{job_id}/complete` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN, WORKSHOP_STAFF |  |  |
+| `PATCH` | `/api/v1/workshop/jobs/{job_id}/fitting-details` | ADMIN, AREA_MANAGER, CASHIER, SALES_CASHIER, SALES_STAFF, STORE_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/workshop/jobs/{job_id}/label` | AUTH |  |  |
+| `POST` | `/api/v1/workshop/jobs/{job_id}/lens-status` | ADMIN, AREA_MANAGER, STORE_MANAGER, WORKSHOP_STAFF |  |  |
+| `POST` | `/api/v1/workshop/jobs/{job_id}/notify-ready` | ADMIN, AREA_MANAGER, STORE_MANAGER, WORKSHOP_STAFF |  |  |
+| `POST` | `/api/v1/workshop/jobs/{job_id}/print-job-card` | ADMIN, AREA_MANAGER, CASHIER, STORE_MANAGER, WORKSHOP_STAFF |  |  |
+| `POST` | `/api/v1/workshop/jobs/{job_id}/qc` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN, WORKSHOP_STAFF |  |  |
+| `POST` | `/api/v1/workshop/jobs/{job_id}/qc-checklist` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN, WORKSHOP_STAFF |  |  |
+| `POST` | `/api/v1/workshop/jobs/{job_id}/rework` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN, WORKSHOP_STAFF |  |  |
+| `POST` | `/api/v1/workshop/jobs/{job_id}/scan-advance` | ADMIN, AREA_MANAGER, CASHIER, STORE_MANAGER, WORKSHOP_STAFF |  |  |
+| `POST` | `/api/v1/workshop/jobs/{job_id}/start` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN, WORKSHOP_STAFF |  |  |
+| `PATCH` | `/api/v1/workshop/jobs/{job_id}/status` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN, WORKSHOP_STAFF |  |  |
+| `PATCH` | `/api/v1/workshop/jobs/{job_id}/vendor` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN, WORKSHOP_STAFF |  |  |
+| `POST` | `/api/v1/workshop/jobs/{job_id}/vendor-status` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN, WORKSHOP_STAFF |  |  |
+| `GET` | `/api/v1/workshop/overdue` | AUTH |  |  |
+| `GET` | `/api/v1/workshop/pending` | AUTH |  |  |
+| `GET` | `/api/v1/workshop/ready` | AUTH |  |  |
+| `GET` | `/api/v1/workshop/remake-reason-codes` | AUTH |  |  |
+| `PUT` | `/api/v1/workshop/remake-reason-codes` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/workshop/scan` | ADMIN, AREA_MANAGER, CASHIER, STORE_MANAGER, WORKSHOP_STAFF |  |  |
+| `GET` | `/api/v1/workshop/spoilage-analytics` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/workshop/stations` | AUTH | S |  |
+| `POST` | `/api/v1/workshop/stations` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/workshop/stations/{code}/queue` | ADMIN, AREA_MANAGER, CASHIER, STORE_MANAGER, WORKSHOP_STAFF | S |  |
+| `GET` | `/api/v1/workshop/technician-workload` | AUTH |  |  |
+
+<!-- END GENERATED RBAC MATRIX -->
+
+## Historical foundation review notes
+
+The following manual notes are retained to preserve the original business
+reasoning. They describe the foundation survey, **not current permissions or a
+current list of unresolved defects**. Several listed gates and routes have
+changed since that survey. Use the generated matrix above for the current
+registry; inspect the handler before acting on any historical concern.
+
+<details>
+<summary>Original foundation survey and protection notes (historical)</summary>
 
 ## REVIEW - candidate privilege gaps (AUTHENTICATED-only, sensitivity warrants a gate)
 
@@ -129,1147 +1879,4 @@ stay that way:
 
 ---
 
-## Full matrix (method x path -> allowed roles)
-
-`PUBLIC` = no auth - `AUTH` = any logged-in user - `S` = store-scoped. Role lists
-are the exact current gate (SUPERADMIN always implied).
-
-### `/api/v1/admin`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/admin` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/brands` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/brands` | SUPERADMIN, ADMIN |  |
-| `DELETE` | `/api/v1/admin/brands/{brand_id}` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/brands/{brand_id}` | SUPERADMIN, ADMIN |  |
-| `PUT` | `/api/v1/admin/brands/{brand_id}` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/brands/{brand_id}/subbrands` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/brands/{brand_id}/subbrands` | SUPERADMIN, ADMIN |  |
-| `DELETE` | `/api/v1/admin/brands/{brand_id}/subbrands/{subbrand_id}` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/categories` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/categories` | SUPERADMIN, ADMIN |  |
-| `DELETE` | `/api/v1/admin/categories/{category_id}` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/categories/{category_id}` | SUPERADMIN, ADMIN |  |
-| `PUT` | `/api/v1/admin/categories/{category_id}` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/discounts/promo-codes` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/discounts/promo-codes` | SUPERADMIN, ADMIN |  |
-| `DELETE` | `/api/v1/admin/discounts/promo-codes/{code_id}` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/discounts/rules` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/discounts/tier-discounts` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/discounts/tier-discounts` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/escalations` | AUTH |  |
-| `GET` | `/api/v1/admin/hsn` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/hsn` | SUPERADMIN, ADMIN |  |
-| `DELETE` | `/api/v1/admin/hsn/{hsn_id}` | SUPERADMIN, ADMIN |  |
-| `PUT` | `/api/v1/admin/hsn/{hsn_id}` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/integrations` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/integrations/razorpay` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/integrations/razorpay` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/integrations/razorpay/test` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/integrations/shiprocket` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/integrations/shiprocket` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/integrations/shiprocket/create-shipment` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/integrations/shiprocket/rates` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/integrations/shiprocket/test` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/integrations/shiprocket/track/{awb}` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/integrations/shopify` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/integrations/shopify` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/integrations/shopify/sync-inventory` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/integrations/shopify/sync-orders` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/integrations/shopify/test` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/integrations/sms` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/integrations/sms` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/integrations/tally` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/integrations/tally` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/integrations/tally/exports` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/integrations/tally/regenerate` | SUPERADMIN |  |
-| `POST` | `/api/v1/admin/integrations/tally/test` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/integrations/tally/voucher.xml` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/integrations/whatsapp` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/integrations/whatsapp` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/integrations/whatsapp/test` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/lens/addons` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/lens/addons` | SUPERADMIN, ADMIN |  |
-| `DELETE` | `/api/v1/admin/lens/addons/{addon_id}` | SUPERADMIN, ADMIN |  |
-| `PUT` | `/api/v1/admin/lens/addons/{addon_id}` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/lens/brands` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/lens/brands` | SUPERADMIN, ADMIN |  |
-| `DELETE` | `/api/v1/admin/lens/brands/{brand_id}` | SUPERADMIN, ADMIN |  |
-| `PUT` | `/api/v1/admin/lens/brands/{brand_id}` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/lens/coatings` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/lens/coatings` | SUPERADMIN, ADMIN |  |
-| `DELETE` | `/api/v1/admin/lens/coatings/{coating_id}` | SUPERADMIN, ADMIN |  |
-| `PUT` | `/api/v1/admin/lens/coatings/{coating_id}` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/lens/indices` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/lens/indices` | SUPERADMIN, ADMIN |  |
-| `DELETE` | `/api/v1/admin/lens/indices/{index_id}` | SUPERADMIN, ADMIN |  |
-| `PUT` | `/api/v1/admin/lens/indices/{index_id}` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/lens/pricing` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/lens/pricing` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/lens/pricing-ranges` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/lens/pricing-ranges` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/lens/pricing-ranges/bulk` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/lens/pricing-ranges/quote` | SUPERADMIN, ADMIN |  |
-| `DELETE` | `/api/v1/admin/lens/pricing-ranges/{range_id}` | SUPERADMIN, ADMIN |  |
-| `PUT` | `/api/v1/admin/lens/pricing-ranges/{range_id}` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/products` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/products/bulk-import` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/products/bulk-import/{job_id}/file` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/products/{product_id}` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/seed-database` | PUBLIC |  |
-| `GET` | `/api/v1/admin/system-health` | AUTH |  |
-| `GET` | `/api/v1/admin/system/audit-logs` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/system/backups` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/system/backups` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/system/backups/{backup_id}/restore` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/system/export/{export_type}` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/admin/system/status` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/admin/techcherry/import` | SUPERADMIN |  |
-| `GET` | `/api/v1/admin/techcherry/status` | SUPERADMIN |  |
-
-### `/api/v1/analytics`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/analytics` | PUBLIC |  |
-| `GET` | `/api/v1/analytics/` | PUBLIC |  |
-| `GET` | `/api/v1/analytics/customer-insights` | AUTH |  |
-| `GET` | `/api/v1/analytics/dashboard-summary` | AUTH |  |
-| `GET` | `/api/v1/analytics/enterprise-kpis` | AUTH |  |
-| `GET` | `/api/v1/analytics/inventory-intelligence` | AUTH |  |
-| `GET` | `/api/v1/analytics/revenue-trends` | AUTH |  |
-| `GET` | `/api/v1/analytics/store-performance` | AUTH |  |
-| `GET` | `/api/v1/analytics/store-target-today` | AUTH |  |
-
-### `/api/v1/analytics-v2`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/analytics-v2/anomaly-detection` | SUPERADMIN |  |
-| `GET` | `/api/v1/analytics-v2/churn-prediction` | SUPERADMIN |  |
-| `POST` | `/api/v1/analytics-v2/cl-subscription/reminder/{customer_id}` | AUTH |  |
-| `GET` | `/api/v1/analytics-v2/cl-subscriptions` | AUTH |  |
-| `GET` | `/api/v1/analytics-v2/dead-stock` | AUTH |  |
-| `GET` | `/api/v1/analytics-v2/demand-forecast` | SUPERADMIN |  |
-| `GET` | `/api/v1/analytics-v2/discount-analysis` | AUTH |  |
-| `GET` | `/api/v1/analytics-v2/eye-camps` | AUTH |  |
-| `POST` | `/api/v1/analytics-v2/eye-camps` | AUTH |  |
-| `PATCH` | `/api/v1/analytics-v2/eye-camps/{camp_id}` | AUTH |  |
-| `GET` | `/api/v1/analytics-v2/family-deals` | AUTH |  |
-| `POST` | `/api/v1/analytics-v2/loyalty/earn` | AUTH |  |
-| `POST` | `/api/v1/analytics-v2/loyalty/redeem` | AUTH |  |
-| `GET` | `/api/v1/analytics-v2/loyalty/tiers` | AUTH |  |
-| `GET` | `/api/v1/analytics-v2/staff-leaderboard` | AUTH |  |
-| `GET` | `/api/v1/analytics-v2/vendor-margins` | SUPERADMIN |  |
-
-### `/api/v1/approvals`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `POST` | `/api/v1/approvals/requests` | AUTH |  |
-| `GET` | `/api/v1/approvals/requests/inbox` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/approvals/requests/mine` | AUTH |  |
-| `GET` | `/api/v1/approvals/requests/{request_id}` | AUTH |  |
-| `POST` | `/api/v1/approvals/requests/{request_id}/approve` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/approvals/requests/{request_id}/reject` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/approvals/requests/{request_id}/consume` | AUTH |  |
-
-ACCOUNTANT is on the inbox and on approve / reject for `rtv` (supplier credit)
-requests only -- owner ruling 2026-10-12; the engine refuses an ACCOUNTANT any
-other action type, and an `rtv` request is the accounts roles' alone (a
-manager gets 404).
-
-### `/api/v1/audit`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/audit/verify` | SUPERADMIN |  |
-
-### `/api/v1/auth`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `POST` | `/api/v1/auth/change-password` | AUTH |  |
-| `GET` | `/api/v1/auth/ecommerce-sso` | AUTH |  |
-| `POST` | `/api/v1/auth/login` | PUBLIC |  |
-| `POST` | `/api/v1/auth/logout` | AUTH |  |
-| `GET` | `/api/v1/auth/me` | AUTH |  |
-| `POST` | `/api/v1/auth/refresh` | PUBLIC |  |
-| `POST` | `/api/v1/auth/switch-store/{store_id}` | AUTH |  |
-
-### `/api/v1/catalog`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/catalog` | PUBLIC |  |
-| `GET` | `/api/v1/catalog/` | PUBLIC |  |
-| `GET` | `/api/v1/catalog/brands` | AUTH |  |
-| `GET` | `/api/v1/catalog/categories` | AUTH |  |
-| `GET` | `/api/v1/catalog/categories/{category}/fields` | AUTH |  |
-| `GET` | `/api/v1/catalog/online-status` | AUTH |  |
-| `POST` | `/api/v1/catalog/online-status` | AUTH |  |
-| `GET` | `/api/v1/catalog/online-stock-reconcile` | AUTH |  |
-| `GET` | `/api/v1/catalog/online-summary` | AUTH |  |
-| `GET` | `/api/v1/catalog/price-change-requests` | AUTH |  |
-| `GET` | `/api/v1/catalog/products` | AUTH |  |
-| `POST` | `/api/v1/catalog/products` | SUPERADMIN, ADMIN, CATALOG_MANAGER |  |
-| `POST` | `/api/v1/catalog/products/bulk-sync-shopify` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/catalog/products/export` | SUPERADMIN, ADMIN, CATALOG_MANAGER |  |
-| `POST` | `/api/v1/catalog/products/import` | SUPERADMIN, ADMIN |  |
-| `DELETE` | `/api/v1/catalog/products/{product_id}` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/catalog/products/{product_id}` | AUTH |  |
-| `PUT` | `/api/v1/catalog/products/{product_id}` | SUPERADMIN, ADMIN, CATALOG_MANAGER |  |
-| `GET` | `/api/v1/catalog/products/{product_id}/inventory` | AUTH |  |
-| `POST` | `/api/v1/catalog/products/{product_id}/inventory/adjust` | SUPERADMIN, ADMIN, STORE_MANAGER, WORKSHOP_STAFF |  |
-| `POST` | `/api/v1/catalog/products/{product_id}/sync-shopify` | SUPERADMIN, ADMIN, CATALOG_MANAGER |  |
-| `GET` | `/api/v1/catalog/recent-activity` | AUTH |  |
-| `POST` | `/api/v1/catalog/reconcile-store-barcodes` | SUPERADMIN |  |
-| `GET` | `/api/v1/catalog/sku-counts` | AUTH |  |
-
-### `/api/v1/catalog-autopilot`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `POST` | `/api/v1/catalog-autopilot/candidates/{candidate_id}/decision` | SUPERADMIN, ADMIN, CATALOG_MANAGER |  |
-| `GET` | `/api/v1/catalog-autopilot/jobs` | SUPERADMIN, ADMIN, CATALOG_MANAGER |  |
-| `POST` | `/api/v1/catalog-autopilot/jobs` | SUPERADMIN, ADMIN, CATALOG_MANAGER |  |
-| `GET` | `/api/v1/catalog-autopilot/jobs/{job_id}` | SUPERADMIN, ADMIN, CATALOG_MANAGER |  |
-| `GET` | `/api/v1/catalog-autopilot/sources` | SUPERADMIN, ADMIN, CATALOG_MANAGER |  |
-
-### `/api/v1/clinical`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/clinical` | PUBLIC |  |
-| `GET` | `/api/v1/clinical/` | PUBLIC |  |
-| `GET` | `/api/v1/clinical/abuse-detection` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
-| `GET` | `/api/v1/clinical/eye-tests` | AUTH |  |
-| `GET` | `/api/v1/clinical/optometrist/{optometrist_id}/stats` | AUTH |  |
-| `GET` | `/api/v1/clinical/patient-queue` | AUTH |  |
-| `GET` | `/api/v1/clinical/prescription-redo-rate` | AUTH |  |
-| `GET` | `/api/v1/clinical/prescriptions/{prescription_id}/print` | AUTH |  |
-| `POST` | `/api/v1/clinical/prescriptions/{prescription_id}/redo` | ADMIN, AREA_MANAGER, STORE_MANAGER, OPTOMETRIST |  |
-| `GET` | `/api/v1/clinical/prescriptions/{prescription_id}/redos` | AUTH |  |
-| `GET` | `/api/v1/clinical/queue` | AUTH |  |
-| `POST` | `/api/v1/clinical/queue` | ADMIN, STORE_MANAGER, OPTOMETRIST, SALES_STAFF, SALES_CASHIER |  |
-| `GET` | `/api/v1/clinical/queue/stats` | AUTH |  |
-| `DELETE` | `/api/v1/clinical/queue/{queue_id}` | ADMIN, STORE_MANAGER, OPTOMETRIST |  |
-| `POST` | `/api/v1/clinical/queue/{queue_id}/start-test` | ADMIN, STORE_MANAGER, OPTOMETRIST |  |
-| `PATCH` | `/api/v1/clinical/queue/{queue_id}/status` | ADMIN, STORE_MANAGER, OPTOMETRIST |  |
-| `GET` | `/api/v1/clinical/tests` | AUTH |  |
-| `GET` | `/api/v1/clinical/tests/customer/{customer_id}` | AUTH |  |
-| `GET` | `/api/v1/clinical/tests/patient/{customer_phone}` | AUTH |  |
-| `GET` | `/api/v1/clinical/tests/{test_id}` | AUTH |  |
-| `POST` | `/api/v1/clinical/tests/{test_id}/complete` | ADMIN, STORE_MANAGER, OPTOMETRIST |  |
-
-### `/api/v1/crm`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/crm` | PUBLIC |  |
-| `GET` | `/api/v1/crm/` | PUBLIC |  |
-| `GET` | `/api/v1/crm/customers/360/{customer_id}` | AUTH |  |
-| `GET` | `/api/v1/crm/customers/churn-risk/list` | AUTH |  |
-| `GET` | `/api/v1/crm/customers/segment/rfm` | AUTH |  |
-| `GET` | `/api/v1/crm/customers/{customer_id}/interactions` | AUTH |  |
-| `POST` | `/api/v1/crm/customers/{customer_id}/interactions` | AUTH |  |
-| `GET` | `/api/v1/crm/customers/{customer_id}/lifecycle` | AUTH |  |
-| `POST` | `/api/v1/crm/customers/{customer_id}/loyalty-points` | AUTH |  |
-| `GET` | `/api/v1/crm/customers/{customer_id}/prescriptions` | AUTH |  |
-
-### `/api/v1/customers`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/customers` | AUTH |  |
-| `POST` | `/api/v1/customers` | AUTH |  |
-| `GET` | `/api/v1/customers/mobile/{mobile}` | AUTH |  |
-| `GET` | `/api/v1/customers/search` | AUTH |  |
-| `GET` | `/api/v1/customers/search/phone` | AUTH |  |
-| `GET` | `/api/v1/customers/{customer_id}` | AUTH |  |
-| `PUT` | `/api/v1/customers/{customer_id}` | AUTH |  |
-| `POST` | `/api/v1/customers/{customer_id}/loyalty/add` | AUTH |  |
-| `GET` | `/api/v1/customers/{customer_id}/orders` | AUTH |  |
-| `POST` | `/api/v1/customers/{customer_id}/patients` | AUTH |  |
-| `GET` | `/api/v1/customers/{customer_id}/prescriptions` | AUTH |  |
-| `POST` | `/api/v1/customers/{customer_id}/store-credit/add` | AUTH |  |
-| `POST` | `/api/v1/customers/{customer_id}/store-credit/issue` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/customers/{customer_id}/store-credit/ledger` | AUTH |  |
-| `POST` | `/api/v1/customers/{customer_id}/store-credit/redeem` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-
-### `/api/v1/display-fixtures`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/display-fixtures` | AUTH | S |
-| `POST` | `/api/v1/display-fixtures` | ADMIN, STORE_MANAGER, CATALOG_MANAGER | S |
-| `GET` | `/api/v1/display-fixtures/` | AUTH | S |
-| `POST` | `/api/v1/display-fixtures/` | ADMIN, STORE_MANAGER, CATALOG_MANAGER | S |
-| `GET` | `/api/v1/display-fixtures/meta/options` | AUTH |  |
-| `DELETE` | `/api/v1/display-fixtures/{fixture_id}` | ADMIN, STORE_MANAGER, CATALOG_MANAGER | S |
-| `GET` | `/api/v1/display-fixtures/{fixture_id}` | AUTH | S |
-| `PATCH` | `/api/v1/display-fixtures/{fixture_id}` | ADMIN, STORE_MANAGER, CATALOG_MANAGER | S |
-
-### `/api/v1/display-placements`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/display-placements` | AUTH | S |
-| `POST` | `/api/v1/display-placements` | ADMIN, STORE_MANAGER, CATALOG_MANAGER | S |
-| `GET` | `/api/v1/display-placements/` | AUTH | S |
-| `POST` | `/api/v1/display-placements/` | ADMIN, STORE_MANAGER, CATALOG_MANAGER | S |
-| `POST` | `/api/v1/display-placements/move` | ADMIN, STORE_MANAGER, CATALOG_MANAGER | S |
-| `DELETE` | `/api/v1/display-placements/{placement_id}` | ADMIN, STORE_MANAGER, CATALOG_MANAGER | S |
-| `GET` | `/api/v1/display-placements/{placement_id}` | AUTH | S |
-| `PATCH` | `/api/v1/display-placements/{placement_id}` | ADMIN, STORE_MANAGER, CATALOG_MANAGER | S |
-
-### `/api/v1/entities`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/entities` | AUTH |  |
-| `POST` | `/api/v1/entities` | ADMIN |  |
-| `GET` | `/api/v1/entities/` | AUTH |  |
-| `POST` | `/api/v1/entities/` | ADMIN |  |
-| `GET` | `/api/v1/entities/meta/options` | AUTH |  |
-| `GET` | `/api/v1/entities/{entity_id}` | AUTH |  |
-| `PUT` | `/api/v1/entities/{entity_id}` | ADMIN |  |
-| `GET` | `/api/v1/entities/{entity_id}/stores` | AUTH |  |
-| `DELETE` | `/api/v1/entities/{entity_id}/stores/{store_id}` | ADMIN |  |
-| `POST` | `/api/v1/entities/{entity_id}/stores/{store_id}` | ADMIN |  |
-
-### `/api/v1/expenses`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/expenses` | AUTH |  |
-| `POST` | `/api/v1/expenses` | AUTH |  |
-| `GET` | `/api/v1/expenses/` | AUTH |  |
-| `POST` | `/api/v1/expenses/` | AUTH |  |
-| `GET` | `/api/v1/expenses/advances` | AUTH |  |
-| `POST` | `/api/v1/expenses/advances` | AUTH |  |
-| `POST` | `/api/v1/expenses/advances/{advance_id}/approve` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/expenses/advances/{advance_id}/disburse` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/expenses/advances/{advance_id}/settle` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/expenses/aging` | ADMIN, ACCOUNTANT |  |
-| `GET` | `/api/v1/expenses/caps` | AUTH |  |
-| `PUT` | `/api/v1/expenses/caps` | ADMIN |  |
-| `GET` | `/api/v1/expenses/duplicate-bills` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/expenses/pending-approval` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/expenses/to-enter` | ADMIN, ACCOUNTANT |  |
-| `POST` | `/api/v1/expenses/{expense_id}/approve` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/expenses/{expense_id}/bill` | AUTH |  |
-| `POST` | `/api/v1/expenses/{expense_id}/mark-entered` | ADMIN, ACCOUNTANT |  |
-| `POST` | `/api/v1/expenses/{expense_id}/reject` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/expenses/{expense_id}/send-to-accountant` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/expenses/{expense_id}/submit` | AUTH |  |
-| `POST` | `/api/v1/expenses/{expense_id}/upload-bill` | AUTH |  |
-
-### `/api/v1/finance`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/finance/budget` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/finance/cash-flow` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/finance/cash-flow-forecast` | SUPERADMIN, ADMIN, ACCOUNTANT |  |
-| `POST` | `/api/v1/finance/cash-register/close` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-| `POST` | `/api/v1/finance/cash-register/open` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-| `GET` | `/api/v1/finance/cash-register/sessions` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-| `GET` | `/api/v1/finance/gst-status` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/finance/gst/reconciliation` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/finance/gst/summary` | ADMIN, ACCOUNTANT |  |
-| `POST` | `/api/v1/finance/gstr2b-reconcile` | SUPERADMIN, ADMIN, ACCOUNTANT |  |
-| `POST` | `/api/v1/finance/itc-export` | SUPERADMIN, ADMIN, ACCOUNTANT |  |
-| `GET` | `/api/v1/finance/itc-register` | SUPERADMIN, ADMIN, ACCOUNTANT |  |
-| `GET` | `/api/v1/finance/outstanding` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/finance/owner-dashboard` | SUPERADMIN, ADMIN, ACCOUNTANT |  |
-| `GET` | `/api/v1/finance/pending-reconciliations` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/finance/period-lock` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/finance/period-locks` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/finance/period-status` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/finance/pnl` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/finance/pnl/by-category` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/finance/pnl/by-store` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/finance/reconciliation` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/finance/revenue` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/finance/summary-month` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/finance/tally/sales-jv` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/finance/vendor-payments` | SUPERADMIN, ADMIN, ACCOUNTANT |  |
-
-### `/api/v1/follow-ups`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `POST` | `/api/v1/follow-ups` | AUTH |  |
-| `GET` | `/api/v1/follow-ups/` | AUTH |  |
-| `POST` | `/api/v1/follow-ups/` | AUTH |  |
-| `POST` | `/api/v1/follow-ups/auto-generate` | AUTH |  |
-| `GET` | `/api/v1/follow-ups/due-today` | AUTH |  |
-| `GET` | `/api/v1/follow-ups/summary` | AUTH |  |
-| `PATCH` | `/api/v1/follow-ups/{follow_up_id}/complete` | AUTH |  |
-
-### `/api/v1/handoffs`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `POST` | `/api/v1/handoffs` | AUTH |  |
-| `POST` | `/api/v1/handoffs/` | AUTH |  |
-| `GET` | `/api/v1/handoffs/eligible-recipients/list` | AUTH |  |
-| `GET` | `/api/v1/handoffs/inbox` | AUTH |  |
-| `GET` | `/api/v1/handoffs/sent` | AUTH |  |
-| `DELETE` | `/api/v1/handoffs/{handoff_id}` | AUTH |  |
-| `GET` | `/api/v1/handoffs/{handoff_id}` | AUTH |  |
-| `POST` | `/api/v1/handoffs/{handoff_id}/dismiss` | AUTH |  |
-| `GET` | `/api/v1/handoffs/{handoff_id}/file` | AUTH |  |
-| `POST` | `/api/v1/handoffs/{handoff_id}/reshare` | AUTH |  |
-| `POST` | `/api/v1/handoffs/{handoff_id}/respond` | AUTH |  |
-
-### `/api/v1/health`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/health` | PUBLIC |  |
-
-### `/api/v1/hr`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/hr` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/hr/` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/hr/attendance` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/hr/attendance-compliance` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/hr/attendance/check-in` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/hr/attendance/check-out` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/hr/attendance/grid` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-| `GET` | `/api/v1/hr/attendance/late-marks` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-| `POST` | `/api/v1/hr/attendance/mark` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/hr/attendance/{attendance_id}/check-out` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/hr/leaves` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/hr/leaves` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/hr/leaves/balance/{employee_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/hr/leaves/{leave_id}/approve` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/hr/leaves/{leave_id}/reject` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/hr/reports/lwp` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-| `GET` | `/api/v1/hr/shifts` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-| `POST` | `/api/v1/hr/shifts` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-| `POST` | `/api/v1/hr/shifts/assign` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-| `GET` | `/api/v1/hr/summary-today` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/hr/weekoff-swaps` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/hr/weekoff-swaps` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/hr/weekoff-swaps/{swap_id}/approve` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-| `POST` | `/api/v1/hr/weekoff-swaps/{swap_id}/reject` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-
-### `/api/v1/incentive`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/incentive/points/daily` | AUTH |  |
-| `POST` | `/api/v1/incentive/points/daily` | AUTH |  |
-| `GET` | `/api/v1/incentive/points/daily/` | AUTH |  |
-| `POST` | `/api/v1/incentive/points/daily/` | AUTH |  |
-| `POST` | `/api/v1/incentive/points/daily/bulk` | AUTH |  |
-| `DELETE` | `/api/v1/incentive/points/daily/{log_id}` | SUPERADMIN, STORE_MANAGER |  |
-| `POST` | `/api/v1/incentive/points/inputs/last-year-sale` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/incentive/points/leaderboard` | AUTH |  |
-| `GET` | `/api/v1/incentive/points/mtd` | AUTH |  |
-| `GET` | `/api/v1/incentive/points/my-day` | AUTH | Self-only by construction: keys on the JWT user_id, no staff parameter (POS "My day" tile) |
-| `GET` | `/api/v1/incentive/points/settings/eligibility` | AUTH |  |
-| `PATCH` | `/api/v1/incentive/points/settings/eligibility` | SUPERADMIN |  |
-| `PATCH` | `/api/v1/incentive/points/settings/payout` | SUPERADMIN |  |
-| `PATCH` | `/api/v1/incentive/points/settings/visufit-gate` | SUPERADMIN |  |
-| `GET` | `/api/v1/incentive/points/staff/{staff_id}/history` | AUTH |  |
-
-### `/api/v1/inventory`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/inventory` | PUBLIC |  |
-| `GET` | `/api/v1/inventory/` | PUBLIC |  |
-| `GET` | `/api/v1/inventory/accountability` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, WORKSHOP_STAFF |  |
-| `POST` | `/api/v1/inventory/accountability` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
-| `GET` | `/api/v1/inventory/accountability/shrinkage` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
-| `GET` | `/api/v1/inventory/aging` | AUTH | S |
-| `GET` | `/api/v1/inventory/alerts` | AUTH | S |
-| `GET` | `/api/v1/inventory/barcode/{barcode}` | AUTH |  |
-| `GET` | `/api/v1/inventory/contact-lenses` | AUTH |  |
-| `GET` | `/api/v1/inventory/contact-lenses/expiry-status` | AUTH |  |
-| `GET` | `/api/v1/inventory/contact-lenses/power-grid` | AUTH |  |
-| `GET` | `/api/v1/inventory/expiring` | AUTH |  |
-| `GET` | `/api/v1/inventory/lenses/power-grid` | AUTH |  |
-| `GET` | `/api/v1/inventory/low-stock` | AUTH | S |
-| `GET` | `/api/v1/inventory/non-moving` | AUTH |  |
-| `GET` | `/api/v1/inventory/overstock-analysis` | AUTH |  |
-| `GET` | `/api/v1/inventory/sell-through-analysis` | AUTH |  |
-| `GET` | `/api/v1/inventory/serials` | AUTH | S |
-| `POST` | `/api/v1/inventory/serials` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, WORKSHOP_STAFF | S |
-| `PATCH` | `/api/v1/inventory/serials/{serial_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, WORKSHOP_STAFF |  |
-| `GET` | `/api/v1/inventory/stock` | AUTH | S |
-| `GET` | `/api/v1/inventory/stock-count` | AUTH | S |
-| `POST` | `/api/v1/inventory/stock-count-scan` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, WORKSHOP_STAFF |  |
-| `GET` | `/api/v1/inventory/stock-count-status` | AUTH |  |
-| `POST` | `/api/v1/inventory/stock-count/start` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, WORKSHOP_STAFF | S |
-| `GET` | `/api/v1/inventory/stock-count/{count_id}` | AUTH |  |
-| `POST` | `/api/v1/inventory/stock-count/{count_id}/complete` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, WORKSHOP_STAFF |  |
-| `POST` | `/api/v1/inventory/stock-count/{count_id}/items` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, WORKSHOP_STAFF |  |
-| `POST` | `/api/v1/inventory/stock/add` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, WORKSHOP_STAFF |  |
-| `GET` | `/api/v1/inventory/stock/barcode/{barcode}` | AUTH |  |
-| `GET` | `/api/v1/inventory/transfer-recommendations` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, WORKSHOP_STAFF |  |
-
-### `/api/v1/jarvis`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/jarvis` | SUPERADMIN |  |
-| `GET` | `/api/v1/jarvis/` | SUPERADMIN |  |
-| `GET` | `/api/v1/jarvis/agents` | SUPERADMIN |  |
-| `GET` | `/api/v1/jarvis/agents/activity` | SUPERADMIN |  |
-| `GET` | `/api/v1/jarvis/agents/diagnostic` | SUPERADMIN |  |
-| `GET` | `/api/v1/jarvis/agents/health-history` | SUPERADMIN |  |
-| `GET` | `/api/v1/jarvis/agents/pixel/audits` | SUPERADMIN |  |
-| `POST` | `/api/v1/jarvis/agents/reseed` | SUPERADMIN |  |
-| `POST` | `/api/v1/jarvis/agents/run-all` | SUPERADMIN |  |
-| `GET` | `/api/v1/jarvis/agents/sentinel/health` | SUPERADMIN |  |
-| `GET` | `/api/v1/jarvis/agents/timeline` | SUPERADMIN |  |
-| `PATCH` | `/api/v1/jarvis/agents/{agent_id}/config` | SUPERADMIN |  |
-| `GET` | `/api/v1/jarvis/agents/{agent_id}/logs` | SUPERADMIN |  |
-| `POST` | `/api/v1/jarvis/agents/{agent_id}/run` | SUPERADMIN |  |
-| `POST` | `/api/v1/jarvis/agents/{agent_id}/run-now` | SUPERADMIN |  |
-| `GET` | `/api/v1/jarvis/agents/{agent_id}/status` | SUPERADMIN |  |
-| `PATCH` | `/api/v1/jarvis/agents/{agent_id}/toggle` | SUPERADMIN |  |
-| `GET` | `/api/v1/jarvis/alerts` | SUPERADMIN |  |
-| `POST` | `/api/v1/jarvis/analyze` | SUPERADMIN |  |
-| `POST` | `/api/v1/jarvis/command` | SUPERADMIN |  |
-| `GET` | `/api/v1/jarvis/dashboard` | SUPERADMIN |  |
-| `GET` | `/api/v1/jarvis/data/collections` | SUPERADMIN |  |
-| `GET` | `/api/v1/jarvis/data/{collection}` | SUPERADMIN |  |
-| `GET` | `/api/v1/jarvis/integrations/status` | SUPERADMIN |  |
-| `GET` | `/api/v1/jarvis/models` | SUPERADMIN |  |
-| `GET` | `/api/v1/jarvis/proposals` | SUPERADMIN |  |
-| `GET` | `/api/v1/jarvis/proposals/{proposal_id}` | SUPERADMIN |  |
-| `POST` | `/api/v1/jarvis/proposals/{proposal_id}/approve` | SUPERADMIN |  |
-| `POST` | `/api/v1/jarvis/proposals/{proposal_id}/reject` | SUPERADMIN |  |
-| `POST` | `/api/v1/jarvis/query` | SUPERADMIN |  |
-| `GET` | `/api/v1/jarvis/quick-insights` | SUPERADMIN |  |
-| `GET` | `/api/v1/jarvis/recommendations` | SUPERADMIN |  |
-| `GET` | `/api/v1/jarvis/status` | SUPERADMIN |  |
-
-### `/api/v1/lens-catalog`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/lens-catalog` | AUTH |  |
-| `POST` | `/api/v1/lens-catalog` | ADMIN, CATALOG_MANAGER |  |
-| `GET` | `/api/v1/lens-catalog/` | AUTH |  |
-| `POST` | `/api/v1/lens-catalog/` | ADMIN, CATALOG_MANAGER |  |
-| `GET` | `/api/v1/lens-catalog/meta/options` | AUTH |  |
-| `DELETE` | `/api/v1/lens-catalog/{lens_line_id}` | ADMIN, CATALOG_MANAGER |  |
-| `GET` | `/api/v1/lens-catalog/{lens_line_id}` | AUTH |  |
-| `PATCH` | `/api/v1/lens-catalog/{lens_line_id}` | ADMIN, CATALOG_MANAGER |  |
-
-### `/api/v1/lens-enums`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/lens-enums` | AUTH |  |
-| `GET` | `/api/v1/lens-enums/` | AUTH |  |
-| `GET` | `/api/v1/lens-enums/{enum_type}` | AUTH |  |
-| `PATCH` | `/api/v1/lens-enums/{enum_type}` | ADMIN, CATALOG_MANAGER |  |
-| `POST` | `/api/v1/lens-enums/{enum_type}/items` | ADMIN, CATALOG_MANAGER |  |
-| `DELETE` | `/api/v1/lens-enums/{enum_type}/items/{item}` | ADMIN, CATALOG_MANAGER |  |
-| `POST` | `/api/v1/lens-enums/{enum_type}/rename` | ADMIN, CATALOG_MANAGER |  |
-
-### `/api/v1/lens-stock`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `POST` | `/api/v1/lens-stock` | ADMIN, STORE_MANAGER, CATALOG_MANAGER | S |
-| `POST` | `/api/v1/lens-stock/` | ADMIN, STORE_MANAGER, CATALOG_MANAGER | S |
-| `GET` | `/api/v1/lens-stock/audit/{line_stock_id}` | AUTH |  |
-| `GET` | `/api/v1/lens-stock/cell/{line_stock_id}` | AUTH | S |
-| `GET` | `/api/v1/lens-stock/gap-planner` | AUTH | S |
-| `GET` | `/api/v1/lens-stock/{lens_line_id}` | AUTH | S |
-| `POST` | `/api/v1/lens-stock/{lens_line_id}/bulk-import` | ADMIN, STORE_MANAGER, CATALOG_MANAGER | S |
-| `POST` | `/api/v1/lens-stock/{lens_line_id}/commit` | ADMIN, STORE_MANAGER, CATALOG_MANAGER | S |
-| `POST` | `/api/v1/lens-stock/{lens_line_id}/release` | ADMIN, STORE_MANAGER, CATALOG_MANAGER | S |
-| `POST` | `/api/v1/lens-stock/{lens_line_id}/reserve` | ADMIN, STORE_MANAGER, CATALOG_MANAGER | S |
-| `PATCH` | `/api/v1/lens-stock/{line_stock_id}` | ADMIN, STORE_MANAGER, CATALOG_MANAGER | S |
-
-### `/api/v1/loyalty`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/loyalty/account/{customer_id}` | AUTH |  |
-| `GET` | `/api/v1/loyalty/account/{customer_id}/ledger` | AUTH |  |
-| `POST` | `/api/v1/loyalty/adjust` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/loyalty/earn` | AUTH |  |
-| `POST` | `/api/v1/loyalty/expire` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/loyalty/program-stats` | AUTH |  |
-| `POST` | `/api/v1/loyalty/redeem` | AUTH |  |
-| `GET` | `/api/v1/loyalty/settings` | AUTH |  |
-| `PUT` | `/api/v1/loyalty/settings` | SUPERADMIN |  |
-
-### `/api/v1/marketing`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/marketing/notifications/logs` | AUTH |  |
-| `POST` | `/api/v1/marketing/notifications/send` | AUTH |  |
-| `POST` | `/api/v1/marketing/notifications/send-bulk` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
-| `GET` | `/api/v1/marketing/nps-dashboard` | AUTH |  |
-| `POST` | `/api/v1/marketing/nps-response` | AUTH |  |
-| `POST` | `/api/v1/marketing/nps-survey/{order_id}` | AUTH |  |
-| `POST` | `/api/v1/marketing/referral-invite/{customer_id}` | AUTH |  |
-| `GET` | `/api/v1/marketing/referrals` | AUTH |  |
-| `POST` | `/api/v1/marketing/referrals/{referral_id}/redeem` | AUTH |  |
-| `POST` | `/api/v1/marketing/review-request/{order_id}` | AUTH |  |
-| `GET` | `/api/v1/marketing/rx-expiry-alerts` | AUTH |  |
-| `POST` | `/api/v1/marketing/rx-reminder/{customer_id}` | AUTH |  |
-| `POST` | `/api/v1/marketing/rx-snooze/{customer_id}` | AUTH |  |
-| `POST` | `/api/v1/marketing/walkin` | AUTH |  |
-| `GET` | `/api/v1/marketing/walkins` | AUTH |  |
-| `GET` | `/api/v1/marketing/walkout-recoveries` | AUTH |  |
-| `POST` | `/api/v1/marketing/walkout/{customer_id}` | AUTH |  |
-
-### `/api/v1/notifications`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/notifications` | AUTH |  |
-| `GET` | `/api/v1/notifications/` | AUTH |  |
-| `POST` | `/api/v1/notifications/mark-all-read` | AUTH |  |
-| `GET` | `/api/v1/notifications/unread-count` | AUTH |  |
-| `PATCH` | `/api/v1/notifications/{notification_id}/read` | AUTH |  |
-| `POST` | `/api/v1/notifications/{notification_id}/snooze` | AUTH |  |
-
-### `/api/v1/orders`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/orders` | AUTH | S |
-| `POST` | `/api/v1/orders` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, SALES_CASHIER, SALES_STAFF |  |
-| `GET` | `/api/v1/orders/overdue/list` | AUTH | S |
-| `GET` | `/api/v1/orders/pending/delivery` | AUTH | S |
-| `GET` | `/api/v1/orders/sales/summary` | AUTH | S |
-| `GET` | `/api/v1/orders/search` | AUTH | S |
-| `GET` | `/api/v1/orders/status/counts` | AUTH | S |
-| `GET` | `/api/v1/orders/unpaid/list` | AUTH | S |
-| `GET` | `/api/v1/orders/{order_id}` | AUTH | S |
-| `PUT` | `/api/v1/orders/{order_id}` | AUTH |  |
-| `POST` | `/api/v1/orders/{order_id}/cancel` | AUTH |  |
-| `POST` | `/api/v1/orders/{order_id}/confirm` | AUTH |  |
-| `POST` | `/api/v1/orders/{order_id}/deliver` | AUTH |  |
-| `GET` | `/api/v1/orders/{order_id}/invoice` | AUTH |  |
-| `POST` | `/api/v1/orders/{order_id}/items` | AUTH |  |
-| `DELETE` | `/api/v1/orders/{order_id}/items/{item_id}` | AUTH |  |
-| `POST` | `/api/v1/orders/{order_id}/payments` | AUTH |  |
-| `POST` | `/api/v1/orders/{order_id}/ready` | AUTH |  |
-
-### `/api/v1/payout`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/payout/export/{snapshot_id}.csv` | AUTH |  |
-| `POST` | `/api/v1/payout/lock` | SUPERADMIN |  |
-| `GET` | `/api/v1/payout/preview` | AUTH |  |
-| `GET` | `/api/v1/payout/snapshot/{snapshot_id}` | AUTH |  |
-| `PATCH` | `/api/v1/payout/snapshot/{snapshot_id}/mark-paid` | SUPERADMIN |  |
-| `GET` | `/api/v1/payout/snapshots` | AUTH |  |
-
-### `/api/v1/payroll`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/payroll` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/payroll/` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/payroll/advances` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/payroll/advances/{advance_id}/settle` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/payroll/advances/{employee_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/payroll/approve` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/payroll/config` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/payroll/config` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/payroll/config/bulk` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/payroll/config/{employee_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `PUT` | `/api/v1/payroll/config/{employee_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/payroll/incentive-summary/{employee_id}/{month}/{year}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/payroll/lock` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/payroll/payslip/{employee_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/payroll/payslip/{employee_id}/{month}/{year}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/payroll/payslip/{employee_id}/{month}/{year}/print` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/payroll/pt-slabs` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/payroll/pt-slabs/seed` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/payroll/pt-slabs/{state_code}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `PUT` | `/api/v1/payroll/pt-slabs/{state_code}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/payroll/registers/pf-ecr` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/payroll/registers/summary` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/payroll/run` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/payroll/run/rows` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/payroll/salary-sheet` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/payroll/salary/calculate` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/payroll/salary/{employee_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/payroll/tally/salary-jv` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-
-### `/api/v1/portal`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/portal/rx` | PUBLIC |  |
-| `POST` | `/api/v1/portal/rx/request-otp` | PUBLIC |  |
-| `POST` | `/api/v1/portal/rx/verify-otp` | PUBLIC |  |
-| `GET` | `/api/v1/portal/track/{token}` | PUBLIC |  |
-
-### `/api/v1/prescriptions`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/prescriptions` | AUTH |  |
-| `POST` | `/api/v1/prescriptions` | SUPERADMIN, ADMIN, STORE_MANAGER, OPTOMETRIST |  |
-| `GET` | `/api/v1/prescriptions/` | AUTH |  |
-| `POST` | `/api/v1/prescriptions/` | SUPERADMIN, ADMIN, STORE_MANAGER, OPTOMETRIST |  |
-| `GET` | `/api/v1/prescriptions/customer/{customer_id}/progression` | AUTH |  |
-| `GET` | `/api/v1/prescriptions/expiring` | AUTH |  |
-| `GET` | `/api/v1/prescriptions/patient/{patient_id}` | AUTH |  |
-| `GET` | `/api/v1/prescriptions/patient/{patient_id}/latest` | AUTH |  |
-| `GET` | `/api/v1/prescriptions/patient/{patient_id}/valid` | AUTH |  |
-| `GET` | `/api/v1/prescriptions/{prescription_id}` | AUTH |  |
-| `POST` | `/api/v1/prescriptions/{prescription_id}/finalize` | SUPERADMIN, ADMIN, OPTOMETRIST |  |
-| `GET` | `/api/v1/prescriptions/{prescription_id}/print` | AUTH |  |
-| `GET` | `/api/v1/prescriptions/{prescription_id}/validate` | AUTH |  |
-| `PATCH` | `/api/v1/prescriptions/{prescription_id}/version/{version_name}` | AUTH |  |
-| `GET` | `/api/v1/prescriptions/{prescription_id}/versions` | AUTH |  |
-
-### `/api/v1/print`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/print/qz/cert` | AUTH |  |
-| `POST` | `/api/v1/print/qz/sign` | AUTH |  |
-
-### `/api/v1/print-overrides`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/print-overrides` | AUTH |  |
-| `GET` | `/api/v1/print-overrides/_meta/templates` | AUTH |  |
-| `DELETE` | `/api/v1/print-overrides/{entity_id}/{template_key}` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/print-overrides/{entity_id}/{template_key}` | AUTH |  |
-| `PUT` | `/api/v1/print-overrides/{entity_id}/{template_key}` | SUPERADMIN, ADMIN |  |
-
-### `/api/v1/product-templates`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/product-templates` | ADMIN, CATALOG_MANAGER |  |
-| `POST` | `/api/v1/product-templates` | ADMIN, CATALOG_MANAGER |  |
-| `GET` | `/api/v1/product-templates/` | ADMIN, CATALOG_MANAGER |  |
-| `POST` | `/api/v1/product-templates/` | ADMIN, CATALOG_MANAGER |  |
-| `DELETE` | `/api/v1/product-templates/{template_id}` | ADMIN, CATALOG_MANAGER |  |
-
-### `/api/v1/products`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/products` | AUTH |  |
-| `POST` | `/api/v1/products` | ADMIN, CATALOG_MANAGER |  |
-| `GET` | `/api/v1/products/brands/list` | AUTH |  |
-| `POST` | `/api/v1/products/bulk-create` | ADMIN, CATALOG_MANAGER |  |
-| `POST` | `/api/v1/products/bulk-offer` | ADMIN, CATALOG_MANAGER |  |
-| `POST` | `/api/v1/products/bulk-price` | ADMIN, CATALOG_MANAGER |  |
-| `GET` | `/api/v1/products/categories/list` | AUTH |  |
-| `GET` | `/api/v1/products/gst-rates` | AUTH |  |
-| `GET` | `/api/v1/products/sku/{sku}` | AUTH |  |
-| `GET` | `/api/v1/products/{product_id}` | AUTH |  |
-| `PUT` | `/api/v1/products/{product_id}` | ADMIN, CATALOG_MANAGER |  |
-
-### `/api/v1/reports`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/reports` | PUBLIC |  |
-| `GET` | `/api/v1/reports/` | PUBLIC |  |
-| `GET` | `/api/v1/reports/blueprint` | AUTH |  |
-| `GET` | `/api/v1/reports/clinical/eye-tests` | AUTH |  |
-| `GET` | `/api/v1/reports/customers/acquisition` | AUTH |  |
-| `GET` | `/api/v1/reports/dashboard` | AUTH |  |
-| `GET` | `/api/v1/reports/discount/analysis` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/reports/finance/expense-vs-revenue` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/reports/finance/gst` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/reports/finance/outstanding` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/reports/gstr1` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/reports/gstr1/gstn-json` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/reports/gstr3b` | ADMIN, ACCOUNTANT |  |
-| `GET` | `/api/v1/reports/gstr3b/gstn-json` | ADMIN, ACCOUNTANT |  |
-| `GET` | `/api/v1/reports/hr/attendance` | AUTH |  |
-| `GET` | `/api/v1/reports/inventory` | AUTH |  |
-| `GET` | `/api/v1/reports/inventory/brand-sellthrough` | AUTH |  |
-| `GET` | `/api/v1/reports/inventory/non-moving-stock` | AUTH |  |
-| `GET` | `/api/v1/reports/inventory/summary` | AUTH |  |
-| `GET` | `/api/v1/reports/inventory/valuation` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-| `GET` | `/api/v1/reports/profit/by-category` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/reports/profit/by-store` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/reports/purchase/recommendations` | AUTH |  |
-| `GET` | `/api/v1/reports/sales/by-category` | AUTH |  |
-| `GET` | `/api/v1/reports/sales/by-salesperson` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-| `GET` | `/api/v1/reports/sales/comparison` | AUTH |  |
-| `GET` | `/api/v1/reports/sales/daily` | AUTH |  |
-| `GET` | `/api/v1/reports/sales/growth` | AUTH |  |
-| `GET` | `/api/v1/reports/sales/lens-deep-dive` | AUTH |  |
-| `GET` | `/api/v1/reports/sales/price-bands` | AUTH |  |
-| `GET` | `/api/v1/reports/sales/seasonality` | AUTH |  |
-| `GET` | `/api/v1/reports/sales/summary` | AUTH |  |
-| `GET` | `/api/v1/reports/staff/ranking` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-| `GET` | `/api/v1/reports/stock/count` | AUTH |  |
-| `GET` | `/api/v1/reports/targets` | AUTH |  |
-| `GET` | `/api/v1/reports/tasks/summary` | AUTH |  |
-| `GET` | `/api/v1/reports/walkouts/footfall-audit` | AUTH |  |
-| `GET` | `/api/v1/reports/workshop/pending-jobs` | AUTH |  |
-
-### `/api/v1/returns`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/returns` | AUTH |  |
-| `POST` | `/api/v1/returns` | ADMIN, STORE_MANAGER, SALES_CASHIER, CASHIER |  |
-| `GET` | `/api/v1/returns/` | AUTH |  |
-| `POST` | `/api/v1/returns/` | ADMIN, STORE_MANAGER, SALES_CASHIER, CASHIER |  |
-| `GET` | `/api/v1/returns/{return_id}` | AUTH |  |
-| `POST` | `/api/v1/returns/{return_id}/restock` | ADMIN, STORE_MANAGER, SALES_CASHIER, CASHIER |  |
-
-### `/api/v1/rtv-debit-notes`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/rtv-debit-notes` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, WORKSHOP_STAFF | S |
-| `GET` | `/api/v1/rtv-debit-notes/` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, WORKSHOP_STAFF | S |
-| `POST` | `/api/v1/rtv-debit-notes/issue` | ADMIN, ACCOUNTANT | S |
-| `GET` | `/api/v1/rtv-debit-notes/{debit_note_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, WORKSHOP_STAFF | S |
-| `GET` | `/api/v1/rtv-debit-notes/{debit_note_id}/print` | ADMIN, ACCOUNTANT | S |
-| `GET` | `/api/v1/rtv-debit-notes/{debit_note_id}/tally` | ADMIN, ACCOUNTANT | S |
-
-### `/api/v1/settings`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/settings` | PUBLIC |  |
-| `GET` | `/api/v1/settings/` | PUBLIC |  |
-| `GET` | `/api/v1/settings/admin-controls` | SUPERADMIN, ADMIN |  |
-| `PUT` | `/api/v1/settings/admin-controls` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/settings/approval-workflows` | SUPERADMIN, ADMIN |  |
-| `PUT` | `/api/v1/settings/approval-workflows` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/settings/audit-logs` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/settings/audit-logs/summary` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/settings/business` | AUTH |  |
-| `PUT` | `/api/v1/settings/business` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/settings/business/logo` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/settings/discount-rules` | AUTH |  |
-| `POST` | `/api/v1/settings/discount-rules` | SUPERADMIN, ADMIN, AREA_MANAGER |  |
-| `PUT` | `/api/v1/settings/discount-rules` | SUPERADMIN, ADMIN, AREA_MANAGER |  |
-| `GET` | `/api/v1/settings/feature-toggles/{store_id}` | SUPERADMIN, STORE_MANAGER |  |
-| `PATCH` | `/api/v1/settings/feature-toggles/{store_id}` | SUPERADMIN, STORE_MANAGER |  |
-| `PUT` | `/api/v1/settings/feature-toggles/{store_id}` | SUPERADMIN, STORE_MANAGER |  |
-| `GET` | `/api/v1/settings/integrations` | AUTH |  |
-| `GET` | `/api/v1/settings/integrations/{integration_type}` | AUTH |  |
-| `PUT` | `/api/v1/settings/integrations/{integration_type}` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/settings/integrations/{integration_type}/test` | AUTH |  |
-| `GET` | `/api/v1/settings/invoice` | AUTH |  |
-| `PUT` | `/api/v1/settings/invoice` | SUPERADMIN, ADMIN, ACCOUNTANT |  |
-| `GET` | `/api/v1/settings/marketplace-channels` | AUTH |  |
-| `PUT` | `/api/v1/settings/marketplace-channels` | ADMIN |  |
-| `POST` | `/api/v1/settings/marketplace-channels/{channel}/sync` | ADMIN |  |
-| `GET` | `/api/v1/settings/notifications/logs` | AUTH |  |
-| `GET` | `/api/v1/settings/notifications/providers` | ADMIN |  |
-| `PUT` | `/api/v1/settings/notifications/providers` | ADMIN |  |
-| `GET` | `/api/v1/settings/notifications/templates` | AUTH |  |
-| `POST` | `/api/v1/settings/notifications/templates` | SUPERADMIN, ADMIN |  |
-| `DELETE` | `/api/v1/settings/notifications/templates/{template_id}` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/settings/notifications/templates/{template_id}` | AUTH |  |
-| `PUT` | `/api/v1/settings/notifications/templates/{template_id}` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/settings/notifications/test` | AUTH |  |
-| `GET` | `/api/v1/settings/printers` | AUTH |  |
-| `PUT` | `/api/v1/settings/printers` | AUTH |  |
-| `GET` | `/api/v1/settings/printers/available` | AUTH |  |
-| `GET` | `/api/v1/settings/profile` | AUTH |  |
-| `PUT` | `/api/v1/settings/profile` | AUTH |  |
-| `POST` | `/api/v1/settings/profile/change-password` | AUTH |  |
-| `GET` | `/api/v1/settings/profile/preferences` | AUTH |  |
-| `PUT` | `/api/v1/settings/profile/preferences` | AUTH |  |
-| `GET` | `/api/v1/settings/system` | SUPERADMIN, ADMIN |  |
-| `PUT` | `/api/v1/settings/system` | SUPERADMIN |  |
-| `GET` | `/api/v1/settings/tax` | AUTH |  |
-| `PUT` | `/api/v1/settings/tax` | SUPERADMIN, ADMIN, ACCOUNTANT |  |
-
-### `/api/v1/shipping`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/shipping/shipments` | AUTH |  |
-| `POST` | `/api/v1/shipping/shipments` | ADMIN, AREA_MANAGER, STORE_MANAGER, SALES_CASHIER, CASHIER |  |
-| `GET` | `/api/v1/shipping/shipments/{shipment_id}/track` | AUTH |  |
-
-### `/api/v1/stores`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/stores` | AUTH |  |
-| `POST` | `/api/v1/stores` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/stores/summary` | AUTH |  |
-| `DELETE` | `/api/v1/stores/{store_id}` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/stores/{store_id}` | AUTH | S |
-| `PUT` | `/api/v1/stores/{store_id}` | SUPERADMIN, ADMIN |  |
-| `DELETE` | `/api/v1/stores/{store_id}/categories/{category}` | AUTH |  |
-| `POST` | `/api/v1/stores/{store_id}/categories/{category}` | AUTH |  |
-| `GET` | `/api/v1/stores/{store_id}/stats` | AUTH | S |
-| `GET` | `/api/v1/stores/{store_id}/users` | AUTH | S |
-
-### `/api/v1/tasks`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/tasks` | AUTH |  |
-| `POST` | `/api/v1/tasks` | AUTH |  |
-| `GET` | `/api/v1/tasks/` | AUTH |  |
-| `POST` | `/api/v1/tasks/` | AUTH |  |
-| `POST` | `/api/v1/tasks/auto-escalate-overdue` | AUTH |  |
-| `POST` | `/api/v1/tasks/auto-generate` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |
-| `GET` | `/api/v1/tasks/checklists` | AUTH |  |
-| `POST` | `/api/v1/tasks/checklists/{checklist_type}/complete-item` | AUTH |  |
-| `GET` | `/api/v1/tasks/integrity/fake-closures` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
-| `GET` | `/api/v1/tasks/integrity/silent` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
-| `GET` | `/api/v1/tasks/my-tasks` | AUTH |  |
-| `GET` | `/api/v1/tasks/overdue` | AUTH |  |
-| `POST` | `/api/v1/tasks/scan/payment-variance` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/tasks/sla-config` | AUTH |  |
-| `PUT` | `/api/v1/tasks/sla-config` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/tasks/sop-checklist` | AUTH |  |
-| `POST` | `/api/v1/tasks/sop-checklist/item` | AUTH |  |
-| `GET` | `/api/v1/tasks/sop-templates` | AUTH |  |
-| `POST` | `/api/v1/tasks/sop-templates` | SUPERADMIN, ADMIN, STORE_MANAGER |  |
-| `POST` | `/api/v1/tasks/sop-templates/` | SUPERADMIN, ADMIN, STORE_MANAGER |  |
-| `POST` | `/api/v1/tasks/sop-templates/seed-defaults` | SUPERADMIN, ADMIN, STORE_MANAGER |  |
-| `DELETE` | `/api/v1/tasks/sop-templates/{template_id}` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/tasks/sop-templates/{template_id}` | AUTH |  |
-| `PATCH` | `/api/v1/tasks/sop-templates/{template_id}` | SUPERADMIN, ADMIN, STORE_MANAGER |  |
-| `POST` | `/api/v1/tasks/sop-templates/{template_id}/assign` | SUPERADMIN, ADMIN, STORE_MANAGER |  |
-| `GET` | `/api/v1/tasks/summary` | AUTH |  |
-| `GET` | `/api/v1/tasks/{task_id}` | AUTH |  |
-| `PATCH` | `/api/v1/tasks/{task_id}` | AUTH |  |
-| `PUT` | `/api/v1/tasks/{task_id}` | AUTH |  |
-| `POST` | `/api/v1/tasks/{task_id}/acknowledge` | AUTH |  |
-| `PATCH` | `/api/v1/tasks/{task_id}/complete` | AUTH |  |
-| `POST` | `/api/v1/tasks/{task_id}/escalate` | AUTH |  |
-| `POST` | `/api/v1/tasks/{task_id}/reassign` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |
-| `POST` | `/api/v1/tasks/{task_id}/start` | AUTH |  |
-
-### `/api/v1/transfers`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/transfers` | AUTH |  |
-| `POST` | `/api/v1/transfers` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER |  |
-| `GET` | `/api/v1/transfers/` | AUTH |  |
-| `POST` | `/api/v1/transfers/` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER |  |
-| `GET` | `/api/v1/transfers/analytics/location/{location_id}` | AUTH |  |
-| `GET` | `/api/v1/transfers/analytics/summary` | AUTH |  |
-| `POST` | `/api/v1/transfers/bulk-approve` | SUPERADMIN, ADMIN, AREA_MANAGER |  |
-| `GET` | `/api/v1/transfers/pending` | AUTH |  |
-| `GET` | `/api/v1/transfers/{transfer_id}` | AUTH |  |
-| `PUT` | `/api/v1/transfers/{transfer_id}` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER |  |
-| `POST` | `/api/v1/transfers/{transfer_id}/approve` | SUPERADMIN, ADMIN, AREA_MANAGER |  |
-| `POST` | `/api/v1/transfers/{transfer_id}/cancel` | SUPERADMIN, ADMIN, AREA_MANAGER |  |
-| `POST` | `/api/v1/transfers/{transfer_id}/complete` | SUPERADMIN, ADMIN, STORE_MANAGER |  |
-| `POST` | `/api/v1/transfers/{transfer_id}/complete-picking` | SUPERADMIN, ADMIN, STORE_MANAGER, WORKSHOP_STAFF |  |
-| `POST` | `/api/v1/transfers/{transfer_id}/create-shiprocket-shipment` | SUPERADMIN, ADMIN, STORE_MANAGER |  |
-| `POST` | `/api/v1/transfers/{transfer_id}/receive` | SUPERADMIN, ADMIN, STORE_MANAGER, WORKSHOP_STAFF |  |
-| `POST` | `/api/v1/transfers/{transfer_id}/ship` | SUPERADMIN, ADMIN, STORE_MANAGER, WORKSHOP_STAFF |  |
-| `POST` | `/api/v1/transfers/{transfer_id}/start-picking` | SUPERADMIN, ADMIN, STORE_MANAGER, WORKSHOP_STAFF |  |
-| `GET` | `/api/v1/transfers/{transfer_id}/tracking` | AUTH |  |
-
-### `/api/v1/users`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `POST` | `/api/v1/users` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/users/` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER |  |
-| `POST` | `/api/v1/users/` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/users/role/{role}` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER |  |
-| `GET` | `/api/v1/users/search` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER |  |
-| `GET` | `/api/v1/users/store/{store_id}` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER |  |
-| `GET` | `/api/v1/users/summary` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER |  |
-| `DELETE` | `/api/v1/users/{user_id}` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/users/{user_id}` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER |  |
-| `PUT` | `/api/v1/users/{user_id}` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/users/{user_id}/assign-store` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/users/{user_id}/reset-password` | SUPERADMIN, ADMIN |  |
-| `DELETE` | `/api/v1/users/{user_id}/roles/{role}` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/users/{user_id}/roles/{role}` | SUPERADMIN, ADMIN |  |
-| `DELETE` | `/api/v1/users/{user_id}/stores/{store_id}` | SUPERADMIN, ADMIN |  |
-| `POST` | `/api/v1/users/{user_id}/stores/{store_id}` | SUPERADMIN, ADMIN |  |
-
-### `/api/v1/vendor-portal`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/vendor-portal/{token_id}/jobs` | PUBLIC |  |
-| `GET` | `/api/v1/vendor-portal/{token_id}/jobs/{job_id}` | PUBLIC |  |
-| `POST` | `/api/v1/vendor-portal/{token_id}/jobs/{job_id}/status` | PUBLIC |  |
-
-### `/api/v1/vendor-returns`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/vendor-returns` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, WORKSHOP_STAFF | S |
-| `POST` | `/api/v1/vendor-returns` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, WORKSHOP_STAFF |  |
-| `GET` | `/api/v1/vendor-returns/` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, WORKSHOP_STAFF | S |
-| `POST` | `/api/v1/vendor-returns/` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, WORKSHOP_STAFF |  |
-| `GET` | `/api/v1/vendor-returns/{return_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, WORKSHOP_STAFF | S |
-| `PATCH` | `/api/v1/vendor-returns/{return_id}/status` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `PUT` | `/api/v1/vendor-returns/{return_id}/prices` | ADMIN, ACCOUNTANT | S |
-
-### `/api/v1/vendor-rma`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/vendor-rma` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-| `GET` | `/api/v1/vendor-rma/` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-| `POST` | `/api/v1/vendor-rma` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-| `POST` | `/api/v1/vendor-rma/` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-| `GET` | `/api/v1/vendor-rma/{rma_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-| `POST` | `/api/v1/vendor-rma/{rma_id}/authorize` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-| `POST` | `/api/v1/vendor-rma/{rma_id}/dispatch` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-| `POST` | `/api/v1/vendor-rma/{rma_id}/credit-note` | ADMIN, ACCOUNTANT | S |
-| `PUT` | `/api/v1/vendor-rma/{rma_id}/prices` | ADMIN, ACCOUNTANT | S |
-| `POST` | `/api/v1/vendor-rma/{rma_id}/reject` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-| `POST` | `/api/v1/vendor-rma/{rma_id}/close` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-
-### `/api/v1/vendors`
-
-> Receiving goods (log a delivery, accept it, express receive, void, escalate,
-> upload the receipt document, the receiving cockpit) is **managers only** --
-> store manager, area manager, admin, superadmin; NOT the accountant (owner
-> ruling 2026-09-28). Raising, sending, editing and cancelling a purchase
-> order stay with the four order roles -- not the catalogue manager (owner
-> 2026-10-08).
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/vendors` | AUTH |  |
-| `POST` | `/api/v1/vendors` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/vendors/` | AUTH |  |
-| `POST` | `/api/v1/vendors/` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/vendors/purchases-this-month` | ADMIN, ACCOUNTANT |  |
-| `GET` | `/api/v1/vendors/ap-aging` | ADMIN, ACCOUNTANT |  |
-| `GET` | `/api/v1/vendors/grn` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-| `POST` | `/api/v1/vendors/grn` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
-| `POST` | `/api/v1/vendors/grn/express` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
-| `POST` | `/api/v1/vendors/grn/upload-doc` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
-| `GET` | `/api/v1/vendors/grn/{grn_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-| `POST` | `/api/v1/vendors/grn/{grn_id}/accept` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
-| `POST` | `/api/v1/vendors/grn/{grn_id}/escalate` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
-| `POST` | `/api/v1/vendors/grn/{grn_id}/void` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
-| `GET` | `/api/v1/vendors/goods-receipt/cockpit` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
-| `GET` | `/api/v1/vendors/last-cost` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/vendors/purchase-orders` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/vendors/purchase-orders` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/vendors/purchase-orders/{po_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `PUT` | `/api/v1/vendors/purchase-orders/{po_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/vendors/purchase-orders/{po_id}/cancel` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/vendors/purchase-orders/{po_id}/items/{line_index}/cancel` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/vendors/purchase-orders/{po_id}/send` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/vendors/purchase-orders/{po_id}/timeline` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/vendors/{vendor_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `PUT` | `/api/v1/vendors/{vendor_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/vendors/{vendor_id}/bills` | ADMIN, ACCOUNTANT |  |
-| `POST` | `/api/v1/vendors/{vendor_id}/bills` | ADMIN, ACCOUNTANT |  |
-| `GET` | `/api/v1/vendors/{vendor_id}/debit-notes` | ADMIN, ACCOUNTANT |  |
-| `POST` | `/api/v1/vendors/{vendor_id}/debit-notes` | ADMIN, ACCOUNTANT |  |
-| `GET` | `/api/v1/vendors/{vendor_id}/ledger` | ADMIN, ACCOUNTANT |  |
-| `GET` | `/api/v1/vendors/{vendor_id}/payments` | ADMIN, ACCOUNTANT |  |
-| `POST` | `/api/v1/vendors/{vendor_id}/payments` | ADMIN, ACCOUNTANT |  |
-| `GET` | `/api/v1/vendors/{vendor_id}/performance` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-| `POST` | `/api/v1/vendors/{vendor_id}/portal-token` | SUPERADMIN, ADMIN |  |
-| `DELETE` | `/api/v1/vendors/{vendor_id}/portal-token/{token_id}` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/vendors/{vendor_id}/portal-tokens` | SUPERADMIN, ADMIN |  |
-| `GET` | `/api/v1/vendors/{vendor_id}/purchase-history` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |
-
-### `/api/v1/vouchers`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/vouchers` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/vouchers` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/vouchers/` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `POST` | `/api/v1/vouchers/` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/vouchers/{code}` | AUTH |  |
-| `POST` | `/api/v1/vouchers/{code}/cancel` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |
-| `POST` | `/api/v1/vouchers/{code}/redeem` | ADMIN, AREA_MANAGER, STORE_MANAGER, SALES_CASHIER, SALES_STAFF, CASHIER |  |
-
-### `/api/v1/walkouts`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/walkouts` | AUTH |  |
-| `POST` | `/api/v1/walkouts` | AUTH |  |
-| `GET` | `/api/v1/walkouts/` | AUTH |  |
-| `POST` | `/api/v1/walkouts/` | AUTH |  |
-| `GET` | `/api/v1/walkouts/conversion-feed` | AUTH |  |
-| `GET` | `/api/v1/walkouts/dashboard/fu-status` | AUTH |  |
-| `GET` | `/api/v1/walkouts/dashboard/per-staff` | AUTH |  |
-| `GET` | `/api/v1/walkouts/dashboard/result-breakdown` | AUTH |  |
-| `GET` | `/api/v1/walkouts/dashboard/top-reasons` | AUTH |  |
-| `GET` | `/api/v1/walkouts/followups/due-today` | AUTH |  |
-| `POST` | `/api/v1/walkouts/followups/escalate-overdue` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER |  |
-| `POST` | `/api/v1/walkouts/walkins/manual-topup` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT |  |
-| `GET` | `/api/v1/walkouts/walkins/mtd` | AUTH |  |
-| `POST` | `/api/v1/walkouts/walkins/pos-increment` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, OPTOMETRIST, SALES_CASHIER, SALES_STAFF, CASHIER |  |
-| `GET` | `/api/v1/walkouts/walkins/today` | AUTH |  |
-| `DELETE` | `/api/v1/walkouts/{walkout_id}` | AUTH |  |
-| `GET` | `/api/v1/walkouts/{walkout_id}` | AUTH |  |
-| `PATCH` | `/api/v1/walkouts/{walkout_id}` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER |  |
-| `POST` | `/api/v1/walkouts/{walkout_id}/followups` | AUTH |  |
-| `PATCH` | `/api/v1/walkouts/{walkout_id}/followups/{round_num}` | AUTH |  |
-| `POST` | `/api/v1/walkouts/{walkout_id}/followups/{round_num}/approve` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER |  |
-| `PATCH` | `/api/v1/walkouts/{walkout_id}/result` | AUTH |  |
-
-### `/api/v1/webhooks`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/webhooks/health` | PUBLIC |  |
-| `POST` | `/api/v1/webhooks/razorpay` | PUBLIC |  |
-| `POST` | `/api/v1/webhooks/shiprocket` | PUBLIC |  |
-| `POST` | `/api/v1/webhooks/shopify` | PUBLIC |  |
-
-### `/api/v1/workshop`
-
-| Method | Path | Allowed | S |
-|---|---|---|---|
-| `GET` | `/api/v1/workshop` | PUBLIC |  |
-| `GET` | `/api/v1/workshop/` | PUBLIC |  |
-| `GET` | `/api/v1/workshop/dashboard-kpis` | AUTH |  |
-| `GET` | `/api/v1/workshop/jobs` | AUTH |  |
-| `POST` | `/api/v1/workshop/jobs` | AUTH |  |
-| `GET` | `/api/v1/workshop/jobs/by-vendor/{vendor_id}` | AUTH |  |
-| `GET` | `/api/v1/workshop/jobs/{job_id}` | AUTH |  |
-| `PUT` | `/api/v1/workshop/jobs/{job_id}` | AUTH |  |
-| `POST` | `/api/v1/workshop/jobs/{job_id}/assign` | AUTH |  |
-| `POST` | `/api/v1/workshop/jobs/{job_id}/complete` | AUTH |  |
-| `PATCH` | `/api/v1/workshop/jobs/{job_id}/fitting-details` | AUTH |  |
-| `GET` | `/api/v1/workshop/jobs/{job_id}/label` | AUTH |  |
-| `POST` | `/api/v1/workshop/jobs/{job_id}/lens-status` | ADMIN, AREA_MANAGER, STORE_MANAGER, WORKSHOP_STAFF |  |
-| `POST` | `/api/v1/workshop/jobs/{job_id}/notify-ready` | ADMIN, AREA_MANAGER, STORE_MANAGER, WORKSHOP_STAFF |  |
-| `POST` | `/api/v1/workshop/jobs/{job_id}/qc` | AUTH |  |
-| `POST` | `/api/v1/workshop/jobs/{job_id}/rework` | AUTH |  |
-| `POST` | `/api/v1/workshop/jobs/{job_id}/scan-advance` | ADMIN, AREA_MANAGER, STORE_MANAGER, CASHIER, WORKSHOP_STAFF |  |
-| `POST` | `/api/v1/workshop/jobs/{job_id}/start` | AUTH |  |
-| `PATCH` | `/api/v1/workshop/jobs/{job_id}/status` | AUTH |  |
-| `PATCH` | `/api/v1/workshop/jobs/{job_id}/vendor` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, WORKSHOP_STAFF |  |
-| `POST` | `/api/v1/workshop/jobs/{job_id}/vendor-status` | AUTH |  |
-| `GET` | `/api/v1/workshop/overdue` | AUTH |  |
-| `GET` | `/api/v1/workshop/pending` | AUTH |  |
-| `GET` | `/api/v1/workshop/ready` | AUTH |  |
-| `GET` | `/api/v1/workshop/technician-workload` | AUTH |  |
-
----
-
-_Generated from the live route surface (829 method x path entries). Re-derive after route changes and keep `rbac_policy.POLICY` + this doc in sync; `test_rbac_policy.py::test_no_uncatalogued_routes` enforces it._
+</details>

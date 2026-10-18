@@ -18,7 +18,19 @@ import pytest  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 
 import test_express_receive as ex  # noqa: E402
-from test_express_receive import vendors_mod, _user, _wire  # noqa: E402
+from test_express_receive import vendors_mod, _user, _wire as _express_wire  # noqa: E402
+from strict_fakes import StrictDB  # noqa: E402
+
+
+def _wire(monkeypatch, **kwargs):
+    wired = _express_wire(monkeypatch, **kwargs)
+    stock = wired[2]
+    # Accepted and rejected physical custody share one in-memory stock store.
+    db = StrictDB()
+    stock.collection = db.get_collection("stock_units")
+    stock.collection.docs = stock.units
+    monkeypatch.setattr(vendors_mod, "_get_db", lambda: db)
+    return wired
 
 
 def _line(pid, name, qty, **extra):
@@ -218,7 +230,8 @@ def test_two_accepts_one_after_the_other_mint_once(monkeypatch, line):
 
 
 def _p2_units(stock):
-    return len([u for u in stock.units if u["product_id"] == "P2"])
+    return len([u for u in stock.units if u["product_id"] == "P2"
+                and u.get("receipt_disposition") != "REJECTED"])
 
 
 def _accept(gid):
@@ -701,6 +714,7 @@ def test_a_cancelled_item_delivered_and_rejected_can_be_logged(monkeypatch):
     assert _accept(gid)["grn_status"] == "ACCEPTED"
     assert len([u for u in stock.units if u["product_id"] == "P1"]) == 5
     assert _p2_units(stock) == 0
+    assert stock.count({"product_id": "P2", "status": "QUARANTINED", "receipt_disposition": "REJECTED"}) == 3
 
 
 def test_a_part_cancelled_line_takes_what_is_open_and_rejects_the_rest(monkeypatch):
@@ -712,6 +726,7 @@ def test_a_part_cancelled_line_takes_what_is_open_and_rejects_the_rest(monkeypat
     split = [{"product_id": "P2", "received_qty": 2, "accepted_qty": 1, "rejected_qty": 1}]
     gid = _create("normal", split, _user())["grn_id"]
     assert _accept(gid)["grn_status"] == "ACCEPTED" and _p2_units(stock) == 1
+    assert stock.count({"product_id": "P2", "status": "QUARANTINED", "receipt_disposition": "REJECTED"}) == 1
     with pytest.raises(HTTPException) as e:
         _create("normal", _items("P2", 2), _user(), inv="INV-10")
     assert e.value.status_code == 400
@@ -759,6 +774,7 @@ def test_cancelled_items_rejected_on_delivery_log_on_an_order_the_cancel_closed(
     assert _accept(gid)["grn_status"] == "ACCEPTED"
     assert grn_repo.docs[gid]["total_rejected"] == 3
     assert _p2_units(stock) == 0
+    assert stock.count({"product_id": "P2", "status": "QUARANTINED", "receipt_disposition": "REJECTED"}) == 3
     assert po_repo.po["status"] == closed
     assert [t for t in tasks.created if t["title"].startswith("GRN discrepancy")]
 
@@ -1266,6 +1282,7 @@ def test_the_grn_screen_logs_a_rejected_delivery_on_a_cancelled_order(monkeypatc
         assert e.value.status_code == 400
     gid = _create("normal", screen(0), _user())["grn_id"]
     assert _accept(gid)["grn_status"] == "ACCEPTED"
-    assert stock.units == [] and po_repo.po["status"] == "CANCELLED"
+    assert _p2_units(stock) == 0 and po_repo.po["status"] == "CANCELLED"
+    assert stock.count({"product_id": "P2", "status": "QUARANTINED", "receipt_disposition": "REJECTED"}) == 3
     assert grn_repo.docs[gid]["total_rejected"] == 3
     assert [t for t in tasks.created if t["title"].startswith("GRN discrepancy")]

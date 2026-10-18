@@ -92,8 +92,8 @@ async def _managers_only(current_user: dict = Depends(get_current_user)) -> dict
 
 
 def _named_target(user_id: str, task: dict) -> dict:
-    """The person a manager hands a task to by name (POST /escalate with
-    escalate_to): a real, active colleague who works at the task's shop -- the
+    """The person a manager names through an edit, reassignment or escalation:
+    a real, active colleague who works at the task's shop -- the
     store reach every store gate uses -- so a task never lands on a leaver, a
     stranger from another shop, or a name nobody signs in as."""
     user_repo = get_user_repository()
@@ -837,6 +837,9 @@ async def update_task(
             status_code=400,
             detail=f"Cannot modify a task in '{current_status}' status.",
         )
+
+    if update.assigned_to:
+        _named_target(update.assigned_to, existing)
 
     update_data = {}
 
@@ -2341,6 +2344,7 @@ async def reassign_task(
             status_code=400,
             detail=f"Cannot reassign a task in '{task_status}' status.",
         )
+    _named_target(body.assigned_to, task)
     history_entry = {
         "action": "reassigned",
         "from": task.get("assigned_to"),

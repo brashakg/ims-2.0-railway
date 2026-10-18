@@ -33,7 +33,7 @@ from database.repositories.vendor_repository import (  # noqa: E402
     GRNRepository,
     PurchaseOrderRepository,
 )
-from strict_fakes import StrictCollection  # noqa: E402
+from strict_fakes import StrictDB  # noqa: E402
 
 _ADMIN = {
     "user_id": "admin",
@@ -60,15 +60,17 @@ class _World:
     """One vendor's purchase history on the real repositories."""
 
     def __init__(self, monkeypatch):
-        self.pos = PurchaseOrderRepository(StrictCollection("purchase_orders"))
-        self.grns = GRNRepository(StrictCollection("grns"))
-        self.stock = StockRepository(StrictCollection("stock_units"))
+        self.db = StrictDB()
+        self.pos = PurchaseOrderRepository(self.db.get_collection("purchase_orders"))
+        self.grns = GRNRepository(self.db.get_collection("grns"))
+        self.stock = StockRepository(self.db.get_collection("stock_units"))
         monkeypatch.setattr(v, "get_purchase_order_repository", lambda: self.pos)
         monkeypatch.setattr(v, "get_grn_repository", lambda: self.grns)
         monkeypatch.setattr(v, "get_stock_repository", lambda: self.stock)
-        # Accept mints without the catalogue gate and the item-event ledger.
+        # Keep the catalogue stub, but required rejection custody/drafts use
+        # the same in-memory collections as the real repositories.
         monkeypatch.setattr(v, "get_product_repository", lambda: None)
-        monkeypatch.setattr(v, "_get_db", lambda: None)
+        monkeypatch.setattr(v, "_get_db", lambda: self.db)
         monkeypatch.setattr(v, "is_online_store", lambda db, sid: False)
 
     def po(self, n, price, status="SENT", sent_at=None, created_at="2026-01-01", store="S1", pid="P1"):
