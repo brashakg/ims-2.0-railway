@@ -87,6 +87,12 @@ class _FakeColl:
                 return dict(d)
         return None
 
+    def find(self, query=None, *args, **kwargs):
+        # The store form's invoice-code check lists every store; it fails
+        # closed (503) on a collection it cannot read.
+        return [dict(d) for d in self._docs
+                if all(d.get(k) == v for k, v in (query or {}).items())]
+
 
 class _FakeDB:
     """Minimal db with an entities collection so the router's entity check

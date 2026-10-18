@@ -1907,10 +1907,10 @@ def ingest_shopify_order(
     now = now.astimezone(timezone.utc).replace(tzinfo=None)
     order_id = str(uuid.uuid4())
 
-    # Allocate the GST invoice serial (consecutive per store + FY) the same way
-    # POS does -- via the order repository's atomic counter. Best-effort: a
-    # DB-less repo falls back to a time-derived unique serial inside
-    # next_invoice_number, so we always get a usable, FY-labelled number.
+    # Allocate the GST invoice number (SHOPCODE/FYFY/NNNNN, consecutive per shop
+    # + FY) the same way POS does -- via the order repository's one mint. A
+    # refused mint (InvoiceNumberError: no shop code, DB-less) books the order
+    # with invoice_number None and a warning; the invoice door mints it later.
     #
     # HISTORICAL import: NO serial is minted. A back-dated order must never consume
     # the CURRENT financial year's consecutive invoice sequence (CGST Rule 46(b)) --

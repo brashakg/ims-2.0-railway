@@ -21,6 +21,7 @@ from ...utils.ist import (
     ist_today,
 )
 from ...utils.online_gst import order_interstate_flag
+from database.repositories.order_repository import gst_invoice_number_problem
 from calendar import monthrange
 from ..auth import get_current_user, require_roles
 from ...dependencies import (
@@ -132,21 +133,20 @@ def _order_discount(order: dict) -> float:
 
 _GSTN_DOC_ILLEGAL = re.compile(r"[^A-Za-z0-9/-]")
 
-# Marker key for the AGGREGATED >16-char invoice-serial warn (one issue per
-# report, not one per order -- see _note_over_cap_serial).
+# Marker key for the AGGREGATED illegal-invoice-number issue (one per report,
+# not one per order -- see _note_over_cap_serial). The code predates the
+# charset half of the check; the GSTR-1 screen keys its download warning on it.
 _OVER_CAP_ISSUE_CODE = "INVOICE_SERIAL_OVER_16"
 
 
-def _note_over_cap_serial(validation_issues: list, serial: str) -> None:
-    """Aggregate the >16-char minted-serial warn into ONE issue per report.
+def _note_over_cap_serial(validation_issues: list, serial: str, problem: str) -> None:
+    """Aggregate the illegal-invoice-number issue into ONE issue per report.
 
-    Every minted serial shares the same numbering scheme ({PREFIX}/{STORE}/{FY}/
-    {serial}, 20 chars), so a per-order warn would fire for EVERY sale in the
-    month: issueCount ~= order count and the issues[:50] window fills with
-    identical serial warns, burying the genuinely actionable ones (missing
-    GSTIN/state). One aggregated issue keeps ok=false and the real signal:
-    a count plus one example serial. The real fix is shortening the mint format
-    (order_repository.next_invoice_number) -- tracked separately."""
+    Every minted number shares one scheme, so a per-order issue would fire for
+    EVERY sale in the month and bury the actionable ones (missing GSTIN/state)
+    in issues[:50]. One aggregated issue keeps ok=false: a count plus one
+    example. The rule is order_repository.gst_invoice_number_problem -- the
+    same one the mint refuses on, so only an old number can trip it."""
     for issue in validation_issues:
         if isinstance(issue, dict) and issue.get("issue_code") == _OVER_CAP_ISSUE_CODE:
             issue["count"] = int(issue.get("count") or 1) + 1
@@ -158,9 +158,8 @@ def _note_over_cap_serial(validation_issues: list, serial: str) -> None:
             "invoice": serial,
             "count": 1,
             "issue": (
-                "Invoice numbers exceed the GSTN 16-char cap (example: "
-                f"{serial}) -- the portal may reject the upload; the minted "
-                "serial format needs shortening"
+                f"Invoice numbers break GSTN's rule (example: {problem}) -- "
+                "the portal may reject the upload"
             ),
         }
     )
@@ -171,11 +170,11 @@ def _gstr1_bill_number(order: dict, validation_issues: Optional[list] = None) ->
 
     A present, non-empty ``invoice_number`` ALWAYS wins VERBATIM: GSTR-1 must file
     the number of the tax invoice actually issued (the minted serial, e.g.
-    ``BV/BOK-01/26-27/0001``), never a substituted identifier -- substituting
+    ``BOK01/2627/00001``), never a substituted identifier -- substituting
     breaks the B2B recipient's GSTR-2A/2B matching and books-vs-return
-    reconciliation. If the real serial exceeds GSTN's 16-char cap, that is a
-    NUMBERING-SCHEME defect to flag (a ``validation_issues`` warn when a list is
-    passed) and fix at mint time, not something to paper over per row.
+    reconciliation. A real number that breaks GSTN's rule (over 16 chars, or a
+    character outside capitals/digits/'-'/'/') is FLAGGED (a
+    ``validation_issues`` warn when a list is passed), never papered over.
 
     Only when ``invoice_number`` is None/empty (historical online imports mint no
     serial -- CGST Rule 46(b)) do the FALLBACK tiers apply, each sanitized to the
@@ -189,10 +188,11 @@ def _gstr1_bill_number(order: dict, validation_issues: Optional[list] = None) ->
     if inv:
         s = str(inv).strip()
         if s:
-            if len(s) > 16 and validation_issues is not None:
+            problem = gst_invoice_number_problem(s)
+            if problem and validation_issues is not None:
                 # ONE aggregated warn per report (count + example), never one
                 # per order -- see _note_over_cap_serial.
-                _note_over_cap_serial(validation_issues, s)
+                _note_over_cap_serial(validation_issues, s, problem)
             return s
     for key in ("bill_number", "order_number"):
         val = order.get(key)

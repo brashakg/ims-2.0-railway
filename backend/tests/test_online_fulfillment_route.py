@@ -355,7 +355,7 @@ def test_order_is_claimed_billed_and_fulfilled_at_the_assigned_shop(world):
     assert route["fulfillment_order_ids"] == [FO_1]
     assert route["problems"] == [] and world["shop"].moves() == []
     # The shop's OWN invoice series (store segment), not the online bucket's.
-    assert "/BV-BOK-01/" in order["invoice_number"]
+    assert order["invoice_number"].startswith("BOK01/")
     # Its return restocks straight back at the shop that shipped it.
     from api.routers import returns
 
@@ -1120,7 +1120,7 @@ def test_shopifys_own_split_is_claimed_at_each_shop_and_nothing_moves(world):
     assert route["problems"] == [] and order["fulfillment_hold"] is False
     assert "stock_hold_reason" not in order
     # One invoice from one GSTIN: both shops are the same registration.
-    assert order["store_id"] == "BV-BOK-01" and "/BV-BOK-01/" in order["invoice_number"]
+    assert order["store_id"] == "BV-BOK-01" and order["invoice_number"].startswith("BOK01/")
     assert route["fulfillment_order_ids"] == [FO_1, FO_2]
     assert sorted(world["tasks"].refs("online_fallback_ship:")) == [
         f"online_fallback_ship:{res['order_id']}:BV-BOK-01",
@@ -1363,7 +1363,7 @@ def test_no_routing_never_guesses_a_seller_from_stock_counts(world, monkeypatch,
 
     route = order["fulfillment_route"]
     assert order["store_id"] == "BV-ONLINE-01" and route["reason"] == "NONE"
-    assert "/BV-ONLINE-01/" in order["invoice_number"]
+    assert order["invoice_number"].startswith("ONL01/")
     expected = ["SELLER_UNKNOWN"] if mode == "dark" else ["ROUTING_UNREAD", "SELLER_UNKNOWN"]
     assert [p["code"] for p in route["problems"]] == expected
     assert _sold_at(db, res["order_id"]) == []  # nothing claimed behind the bill's back
@@ -1404,7 +1404,7 @@ def test_the_claim_is_at_the_shipping_shop_never_at_the_fallback(world, monkeypa
 
     res, order = _book(world, _order(53030))
 
-    assert order["store_id"] == "BV-BOK-01" and "/BV-BOK-01/" in order["invoice_number"]
+    assert order["store_id"] == "BV-BOK-01" and order["invoice_number"].startswith("BOK01/")
     assert _sold_at(db, res["order_id"]) == ["BV-BOK-01"]
     assert db.stock_units.find_one({"store_id": PUNE})["status"] == "AVAILABLE"
     assert order["fulfillment_hold"] is False
@@ -2896,7 +2896,7 @@ def test_a_released_seller_hold_keeps_its_invoice_number_and_date(world, monkeyp
     assert after["invoice_date"] == after["created_at"] == booked
     assert not {"booked_at", "superseded_invoice_number"} & set(after)
     assert len(_gstr1(world, monkeypatch, after, "BV-BOK-01")["b2cs"]) == 1
-    assert db.counters.find_one({"_id": {"$regex": "BV-BOK-01"}})["seq"] == 1
+    assert db.counters.find_one({"_id": {"$regex": "^invoice:BOK01:"}})["seq"] == 1
 
 
 @pytest.mark.parametrize("door", ["clear_hold", "remap"])
@@ -3184,7 +3184,7 @@ def test_two_remap_presses_never_both_act(world, monkeypatch):
     assert "another Re-map of this order is running" in str(outs)
     after = db.orders.find_one({"order_id": oid}, {"_id": 0})
     assert after["invoice_number"] == order["invoice_number"]
-    assert db.counters.find_one({"_id": {"$regex": "BV-BOK-01"}})["seq"] == 1
+    assert db.counters.find_one({"_id": {"$regex": "^invoice:BOK01:"}})["seq"] == 1
     assert _sold_at(db, oid) == ["BV-BOK-01"] and "reroute_lease_at" not in after
 
 
@@ -4943,7 +4943,7 @@ def test_remap_resends_a_failed_billing_leg_move_to_the_shop_that_bills_it(world
     payload = _order(61271, lines=(("RB-1234", 2), ("OA-5", 1)))
     res, order = _book(world, payload)
     oid = res["order_id"]
-    assert order["store_id"] == "BV-DHN-01" and "/BV-DHN-01/" in order["invoice_number"]
+    assert order["store_id"] == "BV-DHN-01" and order["invoice_number"].startswith("DHN01/")
     assert [p["code"] for p in order["fulfillment_route"]["problems"]] == ["MOVE_FAILED"]
     assert route_mod.remappable(order)
     _stock(db, "BV-RAN-01", "P-RB", 2)

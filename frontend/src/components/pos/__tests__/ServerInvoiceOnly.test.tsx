@@ -101,9 +101,22 @@ describe('POS completion step prints the SERVER invoice', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Tax Invoice/i }));
 
-    expect(await screen.findByText(/Could not build the tax invoice/i)).toBeTruthy();
+    expect(await screen.findByText(/Could not build the document/i)).toBeTruthy();
     expect(document.querySelector('.tax-invoice-print')).toBeNull();
     expect(window.open).not.toHaveBeenCalled();
+  });
+
+  it("a refused invoice shows the server's own reason, not a fixed GSTIN hint", async () => {
+    const detail = 'Cannot generate invoice: store BV-HQ-01 has no valid invoice code';
+    apiGet.mockRejectedValue({
+      response: { data: new Blob([JSON.stringify({ detail })], { type: 'application/json' }) },
+    });
+    render(<StepComplete onPrint={() => {}} onReset={() => {}} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Tax Invoice/i }));
+
+    expect(await screen.findByText(detail)).toBeTruthy();
+    expect(screen.queryByText(/GSTIN/)).toBeNull();
   });
 });
 

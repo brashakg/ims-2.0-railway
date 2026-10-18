@@ -72,6 +72,7 @@ def test_invoice_payload_and_pdf_show_round_off(
 
         def set_invoice(self, oid, number):
             doc["invoice_number"] = number
+            return number
 
     monkeypatch.setattr(orders_module, "get_order_repository", lambda: _Repo())
     monkeypatch.setattr(orders_module, "get_customer_repository", lambda: _FakeCustomerRepo())
