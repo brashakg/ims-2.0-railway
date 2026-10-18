@@ -1,6 +1,7 @@
 """GRN accept concurrency: claim, heartbeat, guarded writes, unit mint."""
 
 from ._shared import HTTPException, Optional, datetime, logger, timedelta, uuid
+from api.utils.event_time import parse_event_utc, utc_now
 
 
 # ---------------------------------------------------------------------------
@@ -57,15 +58,15 @@ def _accept_lock_cutoff() -> str:
     OOM). ONE rule, three readers: the claim takes such a receipt over, the
     heartbeat of a worker whose own stamp got this old stops it before another
     unit, and the order's count (po_detail._received_by_product) no longer
-    treats it as being accepted right now. ISO text, compared as stored."""
-    return (
-        datetime.now() - timedelta(seconds=_GRN_ACCEPT_LOCK_STALE_SECONDS)
-    ).isoformat()
+    treats it as being accepted right now. Compare parsed instants, not ISO
+    string ordering: old naive UTC and explicit offsets can name one instant."""
+    return (utc_now() - timedelta(seconds=_GRN_ACCEPT_LOCK_STALE_SECONDS)).isoformat()
 
 
 def _accept_lock_live(locked_at) -> bool:
     """True while an accept claim stamped at `locked_at` is held by a worker."""
-    return bool(locked_at) and str(locked_at) >= _accept_lock_cutoff()
+    parsed = parse_event_utc(locked_at)
+    return parsed is not None and parsed >= parse_event_utc(_accept_lock_cutoff())
 
 # Heartbeat cadence for a long accept: re-stamp the lock at least this often, in
 # units minted or in wall-clock seconds, whichever comes first. The seconds arm
@@ -151,19 +152,31 @@ def _claim_grn_for_accept(grn_repo, grn_id: str, user_id) -> Optional[str]:
     receiving must never be blocked by an infrastructure gap -- same convention
     as is_online_store and the marketing.py claim fallback."""
     token = "GACC-" + uuid.uuid4().hex[:16]
-    stale_cutoff = _accept_lock_cutoff()
+    # Read only to normalize the timestamp. The write still compares the exact
+    # timestamp AND token just read, so a heartbeat or competing takeover wins
+    # over a stale snapshot; parsing never authorizes an unconditional update.
+    if _grn_atomic_primitive(grn_repo) is None:
+        return token
+    try:
+        current = grn_repo.find_by_id(grn_id)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Could not verify this goods receipt claim -- try again.") from exc
+    if not current:
+        return None
+    prior_stamp = current.get("accept_lock_at")
+    if prior_stamp is not None:
+        parsed = parse_event_utc(prior_stamp)
+        if parsed is None or parsed >= parse_event_utc(_accept_lock_cutoff()):
+            return None
     flt = {
         "grn_id": grn_id,
         "status": {"$in": list(_GRN_ACCEPTABLE_STATUSES)},
-        "$or": [
-            {"accept_lock_at": {"$exists": False}},
-            {"accept_lock_at": None},
-            {"accept_lock_at": {"$lt": stale_cutoff}},
-        ],
+        "accept_lock_at": prior_stamp,
+        "accept_lock_token": current.get("accept_lock_token"),
     }
     patch = {
         "$set": {
-            "accept_lock_at": datetime.now().isoformat(),
+            "accept_lock_at": utc_now().isoformat(),
             "accept_lock_token": token,
             "accept_lock_by": user_id or "",
         }
@@ -385,10 +398,10 @@ def _grn_accept_heartbeat_tick(grn_repo, grn_id: str, token, state: dict) -> Non
     if not token:
         return
     state["units"] += 1
-    now = datetime.now()
+    now = utc_now()
     due = (
         state["units"] >= _GRN_ACCEPT_HEARTBEAT_UNITS
-        or (now - state["at"]).total_seconds() >= _GRN_ACCEPT_HEARTBEAT_SECONDS
+        or (now - parse_event_utc(state["at"])).total_seconds() >= _GRN_ACCEPT_HEARTBEAT_SECONDS
     )
     if not due:
         return
@@ -400,15 +413,25 @@ def _grn_accept_heartbeat_tick(grn_repo, grn_id: str, token, state: dict) -> Non
     # is dead by the same rule the claim and the order's count use, so it stops
     # here even when nobody took the receipt over -- another delivery of the
     # order may have been accepted meanwhile, counting this one as dead.
-    res = _guarded_grn_write(
-        grn_repo,
-        {
-            "grn_id": grn_id,
-            "accept_lock_token": token,
-            "accept_lock_at": {"$gte": _accept_lock_cutoff()},
-        },
-        {"$set": {"accept_lock_at": now.isoformat()}},
-    )
+    if _grn_atomic_primitive(grn_repo) is None:
+        res = None
+    else:
+        try:
+            current = grn_repo.find_by_id(grn_id)
+        except Exception:
+            current = None
+            res = _GRN_WRITE_ERROR
+        else:
+            if (not current or current.get("accept_lock_token") != token
+                    or not _accept_lock_live(current.get("accept_lock_at"))):
+                res = False
+            else:
+                res = _guarded_grn_write(
+                    grn_repo,
+                    {"grn_id": grn_id, "accept_lock_token": token,
+                     "accept_lock_at": current.get("accept_lock_at")},
+                    {"$set": {"accept_lock_at": now.isoformat()}},
+                )
     if res is None:
         # No atomic primitive at all (minimal mock): there is no lock to keep
         # fresh and no takeover to detect. Never block receiving.
@@ -422,7 +445,7 @@ def _grn_accept_heartbeat_tick(grn_repo, grn_id: str, token, state: dict) -> Non
         # "keep minting" re-opened the full double mint (a panel reproduced 34
         # units for a 20-unit receipt, HTTP 200, receipt looking clean).
         state["errors"] += 1
-        unconfirmed_for = (now - state["confirmed_at"]).total_seconds()
+        unconfirmed_for = (now - parse_event_utc(state["confirmed_at"])).total_seconds()
         if (
             state["errors"] >= _GRN_ACCEPT_HEARTBEAT_MAX_ERRORS
             or unconfirmed_for >= _GRN_ACCEPT_LOCK_STALE_SECONDS / 2
@@ -764,12 +787,10 @@ def _grn_accept_lock_minutes_left(locked_at) -> Optional[int]:
     the stale window, so "wait a moment" would be a lie."""
     if not locked_at:
         return None
-    try:
-        held_for = (
-            datetime.now() - datetime.fromisoformat(str(locked_at))
-        ).total_seconds()
-    except (TypeError, ValueError):
+    parsed = parse_event_utc(locked_at)
+    if parsed is None:
         return None
+    held_for = (utc_now() - parsed).total_seconds()
     remaining = _GRN_ACCEPT_LOCK_STALE_SECONDS - held_for
     if remaining <= 0:
         return None

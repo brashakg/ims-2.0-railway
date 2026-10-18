@@ -6,6 +6,8 @@ package split): no path, method, dependency, status code, response_model,
 default or validation was changed.
 """
 
+from api.utils.event_time import utc_event_iso, utc_now
+
 from fastapi import HTTPException, Depends, Query
 from typing import Optional
 from datetime import datetime
@@ -126,7 +128,7 @@ async def qc_checklist(
     effective_pass = all_passed or payload.waived
 
     # Stamp each checklist item with reviewer identity + timestamp
-    now = datetime.now()
+    now = utc_now().replace(tzinfo=None)
     stamped_items = [
         {
             "key": item.key,
@@ -134,7 +136,7 @@ async def qc_checklist(
             "passed": item.passed,
             "note": item.note or "",
             "checked_by": current_user.get("user_id"),
-            "checked_at": now.isoformat(),
+            "checked_at": utc_event_iso(now),
         }
         for item in payload.checklist
     ]
@@ -284,14 +286,14 @@ async def rework_job(
 
     cost_paise = spoilage_analytics.spoilage_cost_paise(job, _lens_cost_rupees)
 
-    now = datetime.now()
+    now = utc_now().replace(tzinfo=None)
     attempt = int(job.get("rework_count") or 0) + 1
     remake_entry = {
         "reason_code": code,
         "category": category,
         "cost_paise": cost_paise,
         "by": current_user.get("user_id"),
-        "at": now.isoformat(),
+        "at": utc_event_iso(now),
         "notes": notes,
     }
 

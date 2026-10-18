@@ -4,6 +4,8 @@ IMS 2.0 - Authentication Router
 Login, logout, token management
 """
 
+from api.utils.event_time import utc_now_iso
+
 from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
@@ -1603,7 +1605,7 @@ async def change_password(
             "$set": {
                 "password_hash": new_hash,
                 "must_change_password": False,
-                "updated_at": datetime.utcnow().isoformat(),
+                "updated_at": utc_now_iso(),
             }
         },
     )

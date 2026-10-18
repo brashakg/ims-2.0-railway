@@ -1,5 +1,7 @@
 """Accounts payable: bill models, AP aging and vendor bills."""
 
+from api.utils.event_time import utc_now_iso
+
 from ._shared import (
     BaseModel,
     Depends,
@@ -484,7 +486,7 @@ async def create_vendor_bill(
         "notes": bill.notes,
         "status": "OUTSTANDING",
         "created_by": current_user.get("user_id"),
-        "created_at": datetime.now().isoformat(),
+        "created_at": utc_now_iso(),
     }
     db = _get_db()
 

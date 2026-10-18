@@ -5,6 +5,8 @@ split): no path, method, dependency, status code, response_model, default,
 rounding or validation was changed.
 """
 
+from api.utils.event_time import utc_now_iso
+
 import uuid
 from datetime import datetime
 from fastapi import Depends, HTTPException, Header
@@ -207,7 +209,7 @@ async def add_payment(
             "amount": payment.amount,
             "reference": payment.reference,
             "received_by": current_user.get("user_id"),
-            "received_at": datetime.now().isoformat(),
+            "received_at": utc_now_iso(),
             # POS-14: persist the idempotency key on the row so a duplicate POST
             # with the same key is caught by the guard at the top of this handler.
             "idempotency_key": (idem_key or None),

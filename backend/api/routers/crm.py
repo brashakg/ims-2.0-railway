@@ -5,6 +5,8 @@ Enterprise CRM endpoints for customer 360 views, segmentation,
 lifecycle management, and customer intelligence
 """
 
+from api.utils.event_time import utc_now_iso
+
 from fastapi import APIRouter, HTTPException, Depends, Query, Path, Body
 from pydantic import BaseModel, Field
 from typing import Any, Dict, List, Optional, Literal
@@ -933,7 +935,7 @@ async def dismiss_nba_card(
                     "$set": {
                         "status": "skipped",
                         "outcome": body.reason,
-                        "completed_at": datetime.now().isoformat(),
+                        "completed_at": utc_now_iso(),
                         "completed_by": current_user.get("user_id")
                         or current_user.get("id"),
                     }
@@ -984,7 +986,7 @@ async def complete_nba_card(
     card = _nba_card_for(updated, body.customer_id) if updated else None
     follow_up_id = (card or {}).get("follow_up_id")
 
-    now_iso = datetime.now().isoformat()
+    now_iso = utc_now_iso()
     user_id = current_user.get("user_id") or current_user.get("id")
     if follow_up_id:
         try:
@@ -1177,7 +1179,7 @@ async def log_reactivation_outcome(
         raise HTTPException(status_code=404, detail="not_on_todays_list")
     entry = _reactivation_entry_for(updated, body.customer_id)
     follow_up_id = (entry or {}).get("follow_up_id")
-    now_iso = datetime.now().isoformat()
+    now_iso = utc_now_iso()
     user_id = current_user.get("user_id") or current_user.get("id")
     reached = body.outcome in ("reached", "scheduled_visit")
 

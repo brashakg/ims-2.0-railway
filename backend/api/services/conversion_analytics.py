@@ -23,6 +23,7 @@ millions (F24 packet "Why Python-side"). No emoji (Windows cp1252).
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from api.utils.event_time import parse_event_utc_naive
 from typing import Dict, List, Optional
 
 from api.utils.ist import ist_day_start_utc
@@ -52,33 +53,22 @@ def _order_revenue(order: dict) -> float:
 
 
 def _parse_dt(value) -> Optional[datetime]:
-    """Coerce a stored timestamp (datetime or ISO string) to a naive datetime.
+    """Known event instant in the naive-UTC BSON comparison frame.
 
-    ``eye_tests.completed_at`` is stored as ``datetime.now().isoformat()`` (a
-    string); ``orders.created_at`` is a Mongo datetime. Both must compare against
-    the conversion window, so normalise to naive datetime. Returns None on junk.
+    Keep the existing calendar ``test_date`` fallback for older examinations.
+    Explicit event offsets are converted, never discarded.
     """
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.replace(tzinfo=None) if value.tzinfo else value
+    parsed = parse_event_utc_naive(value)
+    if parsed is not None:
+        return parsed
     if isinstance(value, str):
         s = value.strip()
         if not s:
             return None
-        # Tolerate a trailing 'Z' (UTC designator) that fromisoformat rejects
-        # on older Pythons.
-        if s.endswith("Z"):
-            s = s[:-1]
         try:
-            dt = datetime.fromisoformat(s)
-            return dt.replace(tzinfo=None) if dt.tzinfo else dt
+            return datetime.fromisoformat(s[:10])
         except ValueError:
-            # Date-only fallback (YYYY-MM-DD).
-            try:
-                return datetime.fromisoformat(s[:10])
-            except ValueError:
-                return None
+            return None
     return None
 
 

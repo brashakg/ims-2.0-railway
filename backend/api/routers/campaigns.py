@@ -33,6 +33,8 @@ rbac_policy.POLICY (the coverage-lock test enforces this).
 
 from __future__ import annotations
 
+from api.utils.event_time import utc_now_iso
+
 import logging
 import uuid
 from datetime import datetime
@@ -152,7 +154,7 @@ class CampaignUpdate(BaseModel):
 
 
 def _now_iso() -> str:
-    return datetime.now().isoformat()
+    return utc_now_iso()
 
 
 def _new_campaign_id() -> str:

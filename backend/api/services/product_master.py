@@ -42,6 +42,8 @@ SAFETY (CORRECTIONS, binding):
 
 from __future__ import annotations
 
+from api.utils.event_time import utc_now_iso
+
 import os
 import re
 import uuid
@@ -2811,7 +2813,7 @@ def _stage_catalog_draft(
 
 def _sync_status_dict(targets: List[_SyncTarget]) -> Dict[str, Any]:
     return {
-        "mirrored_at": datetime.now().isoformat(),
+        "mirrored_at": utc_now_iso(),
         "targets": {t.name: {"status": t.status, "detail": t.detail} for t in targets},
     }
 
@@ -3304,7 +3306,7 @@ def create_product(
                     "entity_type": "product",
                     "entity_id": product_id,
                     "timestamp": datetime.now(),
-                    "ts": datetime.now().isoformat(),
+                    "ts": utc_now_iso(),
                     "after": {
                         "product_id": product_id,
                         "sku": created.get("sku"),
@@ -3560,7 +3562,7 @@ def revive_discarded_draft(
     spine = product_repo.find_by_id(product_id)
     if not revivable_discarded_draft(spine):
         return False
-    now = datetime.now().isoformat()
+    now = utc_now_iso()
     price: Dict[str, Any] = {}
     if mrp not in (None, "") and mrp != spine.get("mrp"):
         price = {"mrp": mrp}
@@ -4024,7 +4026,7 @@ def update_product(
                     "entity_type": "product",
                     "entity_id": product_id,
                     "timestamp": datetime.now(),
-                    "ts": datetime.now().isoformat(),
+                    "ts": utc_now_iso(),
                     "before": before,
                     "after": {k: updated.get(k) for k in clean.keys()},
                 }
@@ -4057,7 +4059,7 @@ def soft_delete_product(
                     "entity_type": "product",
                     "entity_id": product_id,
                     "timestamp": datetime.now(),
-                    "ts": datetime.now().isoformat(),
+                    "ts": utc_now_iso(),
                     "before": {"is_active": True},
                     "after": {"is_active": False},
                 }

@@ -1,5 +1,7 @@
 """Vendor payments, debit notes and the vendor ledger."""
 
+from api.utils.event_time import utc_now_iso
+
 from ._shared import (
     Depends,
     HTTPException,
@@ -282,7 +284,7 @@ async def create_vendor_payment(
     # hold below, whose message would describe that bill -- and the money is
     # stamped with its shop (an admin's naming no bill and no shop: the
     # supplier's shop by its bills, worked out on this row's own dates).
-    created_at = datetime.now().isoformat()
+    created_at = utc_now_iso()
     named = _named_bill_in_scope_or_404(db, vendor_id, payment.bill_id, current_user)
     shop = _money_shop(
         named,
@@ -381,7 +383,7 @@ async def create_debit_note(
     db_early = _get_db()
     named = _named_bill_in_scope_or_404(db_early, vendor_id, note.bill_id, current_user)
     receipt = _named_receipt_in_scope_or_404(db_early, vendor_id, note.grn_id, current_user)
-    created_at = datetime.now().isoformat()
+    created_at = utc_now_iso()
     shop = _money_shop(
         named,
         store_id,

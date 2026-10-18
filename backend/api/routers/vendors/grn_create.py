@@ -1,5 +1,7 @@
 """Goods receipt creation (the mandatory-attachment gate) and read."""
 
+from api.utils.event_time import utc_now_iso
+
 from ._shared import (
     Depends,
     HTTPException,
@@ -490,7 +492,7 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
         "dc_matched": False if is_dc else None,
         "linked_bulk_invoice_id": None,
         "created_by": current_user.get("user_id"),
-        "created_at": datetime.now().isoformat(),
+        "created_at": utc_now_iso(),
     }
 
     if grn_repo is not None:

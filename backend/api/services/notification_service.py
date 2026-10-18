@@ -19,6 +19,8 @@ row is independently auditable for Indian telecom (TRAI/DLT) compliance:
 template_id, pe_id, category, consent_basis, provider_msg_id, delivery_status.
 """
 
+from api.utils.event_time import utc_now_iso
+
 from datetime import datetime
 import os
 import uuid
@@ -184,7 +186,7 @@ def queue_notification_row(
         "triggered_by": triggered_by,
         "related_entity_type": related_entity_type,
         "related_entity_id": related_entity_id,
-        "created_at": datetime.now().isoformat(),
+        "created_at": utc_now_iso(),
         "sent_at": None,
         "delivered_at": None,
         "failure_reason": None,

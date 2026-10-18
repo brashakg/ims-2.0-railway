@@ -22,6 +22,8 @@ is read at a glance.
 
 from __future__ import annotations
 
+from api.utils.event_time import utc_event_iso, utc_now
+
 from collections import defaultdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -280,13 +282,13 @@ async def post_vendor_status(
     if job is None or job.get("vendor_id") != vendor_id:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    now = datetime.now()
+    now = utc_now().replace(tzinfo=None)
     history_entry = {
         "status": payload.status,
         "note": payload.note,
         "source": "vendor_portal",
         "logged_by": vendor_id,  # vendor_id is the closest thing to identity here
-        "logged_at": now.isoformat(),
+        "logged_at": utc_event_iso(now),
     }
     history = list(job.get("vendor_status_history") or [])
     history.append(history_entry)
@@ -301,9 +303,9 @@ async def post_vendor_status(
     if payload.vendor_order_id:
         update["vendor_order_id"] = payload.vendor_order_id
     if payload.status == "DISPATCHED" and not job.get("vendor_dispatch_date"):
-        update["vendor_dispatch_date"] = now.isoformat()
+        update["vendor_dispatch_date"] = utc_event_iso(now)
     if payload.status == "DELIVERED" and not job.get("vendor_received_date"):
-        update["vendor_received_date"] = now.isoformat()
+        update["vendor_received_date"] = utc_event_iso(now)
 
     repo.update(job_id, update)
 

@@ -29,6 +29,8 @@ Safety contract:
 
 from __future__ import annotations
 
+from api.utils.event_time import utc_now_iso
+
 import logging
 import uuid
 from datetime import datetime
@@ -458,7 +460,7 @@ async def generate_cl_po(
         )
 
     created_pos: List[Dict[str, Any]] = []
-    now_iso = datetime.now().isoformat()
+    now_iso = utc_now_iso()
     # Everything a PO line's GST needs that is NOT on the line: the product /
     # lens-line doc it came from (for its HSN) and the receiving shop (for the
     # place of supply). Read once for the whole draft.

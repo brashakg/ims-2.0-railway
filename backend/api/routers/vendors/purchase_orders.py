@@ -1,5 +1,8 @@
 """Purchase-order list and creation (manual + from forecast)."""
 
+from api.utils.event_time import utc_event_iso, utc_now, utc_now_iso
+
+
 from collections import Counter
 
 from ._shared import (
@@ -307,7 +310,7 @@ async def create_pos_from_forecast(
     try:
         from datetime import timedelta
 
-        now = datetime.now()
+        now = utc_now().replace(tzinfo=None)
         ninety_days_ago = now - timedelta(days=90)
 
         # --- Step 1: compute sales velocity per product (last 90 days) ---
@@ -468,7 +471,7 @@ async def create_pos_from_forecast(
                     "source": "demand_forecast",
                     "forecast_horizon_days": horizon,
                     "created_by": current_user.get("user_id"),
-                    "created_at": now.isoformat(),
+                    "created_at": utc_event_iso(now),
                     "notes": (
                         f"Auto-generated from {horizon}-day demand forecast "
                         f"(safety stock {safety} days)"
@@ -953,7 +956,7 @@ async def create_po(
                 "gst_summary": gst_summary,
                 **parties,
                 "created_by": current_user.get("user_id"),
-                "created_at": datetime.now().isoformat(),
+                "created_at": utc_now_iso(),
             }
         )
 

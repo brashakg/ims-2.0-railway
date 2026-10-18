@@ -160,18 +160,12 @@ def _parse_hhmm(value: str) -> Optional[time]:
 
 
 def _coerce_check_in(check_in) -> Optional[datetime]:
-    """Coerce a check-in value (datetime or ISO string) into a datetime. None on failure."""
-    if check_in is None:
-        return None
-    if isinstance(check_in, datetime):
-        return check_in
-    if isinstance(check_in, str):
-        try:
-            # fromisoformat handles 'YYYY-MM-DDTHH:MM[:SS]' and with offset.
-            return datetime.fromisoformat(check_in.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-    return None
+    """Attendance is an IST wall clock; preserve legacy naive IST values."""
+    from api.utils.event_time import parse_event_utc
+    from api.utils.ist import IST
+
+    parsed = parse_event_utc(check_in, naive_timezone=IST)
+    return parsed.astimezone(IST).replace(tzinfo=None) if parsed is not None else None
 
 
 def compute_late_mark(
@@ -208,10 +202,9 @@ def compute_late_mark(
     # Compare on the check-in's own calendar date so we measure minutes-of-day,
     # independent of which date the shift template nominally lives on.
     shift_start_dt = datetime.combine(ci.date(), start)
-    grace_boundary = shift_start_dt.timestamp() + grace * 60
+    delta_seconds = (ci - shift_start_dt).total_seconds()
 
-    if ci.timestamp() > grace_boundary:
-        delta_seconds = ci.timestamp() - shift_start_dt.timestamp()
+    if delta_seconds > grace * 60:
         # Minutes late from the actual shift start (whole minutes, floored).
         late_min = int(delta_seconds // 60)
         result["is_late"] = True
@@ -442,7 +435,7 @@ def classify_half_day(
         cutoff = _parse_hhmm(late_after)
         if cutoff is not None:
             cutoff_dt = datetime.combine(ci.date(), cutoff)
-            if ci.timestamp() > cutoff_dt.timestamp():
+            if ci > cutoff_dt:
                 return {
                     "is_half_day": True,
                     "reason": "CHECK_IN_AFTER_CUTOFF",
@@ -456,7 +449,7 @@ def classify_half_day(
         except (TypeError, ValueError):
             threshold = 0.0
         if threshold > 0:
-            hours = (co.timestamp() - ci.timestamp()) / 3600.0
+            hours = (co - ci).total_seconds() / 3600.0
             if hours >= 0:  # guard bad/negative spans (don't false-flag)
                 if hours < threshold:
                     return {

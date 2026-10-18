@@ -4,6 +4,8 @@ IMS 2.0 - Customers Router
 Customer and patient management endpoints
 """
 
+from api.utils.event_time import utc_now_iso
+
 from fastapi import APIRouter, HTTPException, Depends, Query, Path, Body
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing import Any, Dict, List, Optional
@@ -73,7 +75,7 @@ async def _email_validation_stamp(email, source: str) -> Optional[dict]:
     return {
         "status": verdict.get("status"),
         "raw": verdict.get("raw"),
-        "checked_at": datetime.utcnow().isoformat(),
+        "checked_at": utc_now_iso(),
         "source": source,
     }
 
@@ -859,7 +861,7 @@ async def create_customer(
             # DPDP consent — server-stamped so it's provable (who/when/what text).
             "data_consent": customer.data_consent,
             "data_consent_at": (
-                datetime.utcnow().isoformat() if customer.data_consent else None
+                utc_now_iso() if customer.data_consent else None
             ),
             "data_consent_text_version": customer.data_consent_text_version,
             "home_store_id": current_user.get("active_store_id"),
@@ -997,7 +999,7 @@ async def validate_customer_emails(
     }
     counts = {"valid": 0, "invalid": 0, "risky": 0, "unknown": 0, "skipped": 0}
     checked = 0
-    now = datetime.utcnow().isoformat()
+    now = utc_now_iso()
     for doc in repo.collection.find(flt, {"customer_id": 1, "email": 1}).limit(limit):
         verdict = await validate_email(doc.get("email"))
         if not verdict:
@@ -2127,7 +2129,7 @@ def _append_consent_event(
         "actor_id": current_user.get("user_id"),
         "actor_role": (current_user.get("roles") or [""])[0],
         "store_id": current_user.get("active_store_id"),
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": utc_now_iso(),
     }
     coll = _consent_ledger_coll()
     if coll is not None:
@@ -2475,7 +2477,7 @@ async def suggest_customer_tag(
         "tag": cleaned,
         "status": "pending",
         "suggested_by": user_id,
-        "suggested_at": datetime.utcnow().isoformat(),
+        "suggested_at": utc_now_iso(),
         "reviewed_by": None,
         "reviewed_at": None,
         "store_id": current_user.get("active_store_id"),
@@ -2531,7 +2533,7 @@ async def approve_tag_suggestion(
         {"$set": {
             "status": "approved",
             "reviewed_by": current_user.get("user_id") or current_user.get("id"),
-            "reviewed_at": datetime.utcnow().isoformat(),
+            "reviewed_at": utc_now_iso(),
         }},
     )
     if not sug:
@@ -2572,7 +2574,7 @@ async def reject_tag_suggestion(
         {"$set": {
             "status": "rejected",
             "reviewed_by": current_user.get("user_id") or current_user.get("id"),
-            "reviewed_at": datetime.utcnow().isoformat(),
+            "reviewed_at": utc_now_iso(),
         }},
     )
     if not sug:

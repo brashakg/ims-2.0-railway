@@ -4,6 +4,8 @@ IMS 2.0 - Expenses Router
 Real database queries for expense and advance management
 """
 
+from api.utils.event_time import utc_now_iso
+
 import hashlib
 import io
 from fastapi import APIRouter, Depends, Header, Query, UploadFile, File, HTTPException
@@ -1001,7 +1003,7 @@ async def create_expense(
             raise HTTPException(status_code=400, detail=reason)
 
     if expense_repo is not None:
-        now = datetime.now().isoformat()
+        now = utc_now_iso()
         # Denominated payout record. CASH-only (a UPI payout has no notes) and
         # additive -- the cap checks above ran on `amount` and are untouched.
         cash_count_block = None
@@ -1127,7 +1129,7 @@ async def upload_bill(
     if not file_id:
         raise HTTPException(status_code=500, detail="File store write failed")
 
-    uploaded_at = datetime.now().isoformat()
+    uploaded_at = utc_now_iso()
     expense_repo.update(
         expense_id,
         {
@@ -1235,7 +1237,7 @@ async def submit_expense(
 
         expense_repo.update(
             expense_id,
-            {"status": "PENDING", "submitted_at": datetime.now().isoformat()},
+            {"status": "PENDING", "submitted_at": utc_now_iso()},
         )
 
     return {"message": "Expense submitted for approval", "expense_id": expense_id}
@@ -1326,7 +1328,7 @@ async def approve_expense(
             {
                 "status": "APPROVED",
                 "approved_by": current_user.get("user_id"),
-                "approved_at": datetime.now().isoformat(),
+                "approved_at": utc_now_iso(),
                 "petty_cash_txn_id": approved.get("txn_id"),
             },
         )
@@ -1342,7 +1344,7 @@ async def approve_expense(
         {
             "status": "APPROVED",
             "approved_by": current_user.get("user_id"),
-            "approved_at": datetime.now().isoformat(),
+            "approved_at": utc_now_iso(),
         },
     )
 
@@ -1550,7 +1552,7 @@ async def reject_expense(
             {
                 "status": "REJECTED",
                 "rejected_by": current_user.get("user_id"),
-                "rejected_at": datetime.now().isoformat(),
+                "rejected_at": utc_now_iso(),
                 "rejection_reason": reason,
             },
         )
@@ -1582,7 +1584,7 @@ async def send_to_accountant(
             {
                 "status": "SENT_TO_ACCOUNTANT",
                 "sent_to_accountant_by": current_user.get("user_id"),
-                "sent_to_accountant_at": datetime.now().isoformat(),
+                "sent_to_accountant_at": utc_now_iso(),
             },
         )
 
@@ -1614,7 +1616,7 @@ async def mark_entered(
             {
                 "status": "ENTERED",
                 "entered_by": current_user.get("user_id"),
-                "entered_at": datetime.now().isoformat(),
+                "entered_at": utc_now_iso(),
                 "ledger_reference": ledger_reference,
             },
         )
@@ -1676,7 +1678,7 @@ async def update_expense_caps(
         "caps": [entry.model_dump() for entry in payload.caps],
         "global": (payload.global_cap.model_dump() if payload.global_cap else {}),
         "updated_by": current_user.get("user_id"),
-        "updated_at": datetime.now().isoformat(),
+        "updated_at": utc_now_iso(),
     }
     try:
         coll.update_one({"_id": _CAPS_DOC_ID}, {"$set": doc}, upsert=True)
@@ -2120,7 +2122,7 @@ async def request_advance(
                     else None
                 ),
                 "status": "PENDING",
-                "created_at": datetime.now().isoformat(),
+                "created_at": utc_now_iso(),
             }
         )
         # BaseRepository.create swallows write errors and returns None. Surface
@@ -2165,7 +2167,7 @@ async def approve_advance(
             {
                 "status": "APPROVED",
                 "approved_by": current_user.get("user_id"),
-                "approved_at": datetime.now().isoformat(),
+                "approved_at": utc_now_iso(),
             },
         )
 
@@ -2198,7 +2200,7 @@ async def disburse_advance(
                 "status": "DISBURSED",
                 "disbursement_reference": reference,
                 "disbursed_by": current_user.get("user_id"),
-                "disbursed_at": datetime.now().isoformat(),
+                "disbursed_at": utc_now_iso(),
             },
         )
 
@@ -2229,7 +2231,7 @@ async def settle_advance(
             )
 
         advance_repo.update(
-            advance_id, {"status": "SETTLED", "settled_at": datetime.now().isoformat()}
+            advance_id, {"status": "SETTLED", "settled_at": utc_now_iso()}
         )
 
     return {"message": "Advance settled", "advance_id": advance_id}

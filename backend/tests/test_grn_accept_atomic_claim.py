@@ -35,7 +35,7 @@ import logging
 import os
 import sys
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-key-grn-atomic-claim")
@@ -196,6 +196,13 @@ class _GrnRepo:
 
     def find(self, *a, **k):
         return [dict(self.doc)]
+
+
+def _unavailable_claim_read(_gid):
+    # A13 also reads the exact lease preimage before its guarded heartbeat.
+    # The outage sentinels must make that proof unavailable too; a successful
+    # read of the new holder would correctly stop the old worker immediately.
+    raise RuntimeError("not primary; election in progress")
 
 
 class _MinimalGrnRepo:
@@ -361,7 +368,7 @@ def _grn_lines(lines, status="PENDING", **extra):
 
 def _aged_lock(extra_seconds=60):
     return (
-        datetime.now()
+        datetime.now(timezone.utc).replace(tzinfo=None)
         - timedelta(seconds=vd._GRN_ACCEPT_LOCK_STALE_SECONDS + extra_seconds)
     ).isoformat()
 
@@ -531,7 +538,7 @@ def test_claim_filter_rejects_a_non_acceptable_status(wired):
 
 def test_claim_rejects_while_a_fresh_lock_is_held(wired):
     grn_repo, _stock = wired(
-        _grn(accept_lock_at=datetime.now().isoformat(), accept_lock_token="OTHER")
+        _grn(accept_lock_at=datetime.now(timezone.utc).replace(tzinfo=None).isoformat(), accept_lock_token="OTHER")
     )
     assert vd._claim_grn_for_accept(grn_repo, "GRN-1", "u1") is None
     # The rival's lock is untouched.
@@ -541,7 +548,7 @@ def test_claim_rejects_while_a_fresh_lock_is_held(wired):
 def test_stale_lock_is_taken_over(wired):
     """A crashed worker must not freeze a receipt forever."""
     stale = (
-        datetime.now() - timedelta(seconds=vd._GRN_ACCEPT_LOCK_STALE_SECONDS + 60)
+        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=vd._GRN_ACCEPT_LOCK_STALE_SECONDS + 60)
     ).isoformat()
     grn_repo, _stock = wired(_grn(accept_lock_at=stale, accept_lock_token="DEAD"))
     token = vd._claim_grn_for_accept(grn_repo, "GRN-1", "u1")
@@ -858,7 +865,7 @@ def test_stale_window_is_wide_enough_to_be_safe_and_short_enough_to_wait_out():
 def test_conflict_message_is_honest_about_the_wait(wired):
     """After a hard kill the wait really is the stale window, so the 409 must
     say roughly how long rather than 'wait a moment'."""
-    grn_repo, _stock = wired(_grn(accept_lock_at=datetime.now().isoformat()))
+    grn_repo, _stock = wired(_grn(accept_lock_at=datetime.now(timezone.utc).replace(tzinfo=None).isoformat()))
     exc = vd._grn_accept_conflict(grn_repo, "GRN-1")
     assert exc.status_code == 409
     assert "minute(s)" in exc.detail
@@ -872,7 +879,7 @@ def test_terminal_write_flips_status_but_never_clears_a_stolen_lock(wired):
     acceptable status AND a null lock and minted again -- the amplifier that
     turned one takeover into unbounded re-entry."""
     grn_repo, stock_repo = wired(_grn(qty=2))
-    grn_repo.doc["accept_lock_at"] = datetime.now().isoformat()
+    grn_repo.doc["accept_lock_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
     grn_repo.doc["accept_lock_token"] = "THIEF"
     grn_repo.doc["accept_lock_by"] = "u-thief"
 
@@ -898,7 +905,7 @@ def test_a_stolen_winner_leaves_the_receipt_unclaimable_by_a_third_caller(wired)
     """The end-to-end consequence of MUST-FIX 4: with the thief's lock intact, a
     third POST is refused instead of minting a third time."""
     grn_repo, stock_repo = wired(_grn(qty=2))
-    grn_repo.doc["accept_lock_at"] = datetime.now().isoformat()
+    grn_repo.doc["accept_lock_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
     grn_repo.doc["accept_lock_token"] = "THIEF"
 
     vd._accept_grn_claimed(
@@ -1150,6 +1157,7 @@ def test_errored_heartbeat_after_a_takeover_does_not_keep_minting(wired, monkeyp
         # From here on, A's heartbeat writes raise (the election is ongoing).
         grn_repo.collection.__class__ = _HeartbeatBoomColl
         grn_repo.collection.heartbeat_attempts = 0
+        grn_repo.find_by_id = _unavailable_claim_read
 
     stock_repo.after_hook = _steal
     stock_repo.after_n = 6
@@ -1177,6 +1185,7 @@ def test_errored_heartbeat_without_the_failclosed_guard_would_keep_minting(
         _run(vd.accept_grn("GRN-1", _ADMIN))
         grn_repo.collection.__class__ = _HeartbeatBoomColl
         grn_repo.collection.heartbeat_attempts = 0
+        grn_repo.find_by_id = _unavailable_claim_read
 
     stock_repo.after_hook = _steal
     stock_repo.after_n = 6
@@ -1233,7 +1242,7 @@ def test_a_single_transient_heartbeat_error_is_tolerated_and_re_probes_at_once(
 # --- MF3: the 300s window, and the freeze paths that made 1800s indefensible
 def test_stale_boundary_just_inside_the_window_is_refused(wired):
     held = (
-        datetime.now() - timedelta(seconds=vd._GRN_ACCEPT_LOCK_STALE_SECONDS - 5)
+        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=vd._GRN_ACCEPT_LOCK_STALE_SECONDS - 5)
     ).isoformat()
     grn_repo, _stock = wired(_grn(accept_lock_at=held, accept_lock_token="LIVE"))
     assert vd._claim_grn_for_accept(grn_repo, "GRN-1", "u1") is None
@@ -1242,7 +1251,7 @@ def test_stale_boundary_just_inside_the_window_is_refused(wired):
 
 def test_stale_boundary_just_past_the_window_is_taken_over(wired):
     aged = (
-        datetime.now() - timedelta(seconds=vd._GRN_ACCEPT_LOCK_STALE_SECONDS + 5)
+        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=vd._GRN_ACCEPT_LOCK_STALE_SECONDS + 5)
     ).isoformat()
     grn_repo, _stock = wired(_grn(accept_lock_at=aged, accept_lock_token="DEAD"))
     token = vd._claim_grn_for_accept(grn_repo, "GRN-1", "u1")
@@ -1370,7 +1379,7 @@ def test_stolen_worker_does_not_overwrite_the_holders_units_added(wired):
     grn_repo, stock_repo = wired(_grn(qty=2))
     grn_repo.doc.update(
         {
-            "accept_lock_at": datetime.now().isoformat(),
+            "accept_lock_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
             "accept_lock_token": "THIEF",
             "accepted_by": "u-thief",
             "units_added": 99,
@@ -1645,12 +1654,12 @@ def test_half_window_arm_aborts_even_before_max_errors(wired):
     grn_repo.collection.__class__ = _HeartbeatBoomColl
     grn_repo.collection.heartbeat_attempts = 0
 
-    stale_confirm = datetime.now() - timedelta(
+    stale_confirm = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
         seconds=vd._GRN_ACCEPT_LOCK_STALE_SECONDS / 2 + 5
     )
     state = {
         "units": vd._GRN_ACCEPT_HEARTBEAT_UNITS,
-        "at": datetime.now(),
+        "at": datetime.now(timezone.utc).replace(tzinfo=None),
         "errors": 1,  # well under MAX_ERRORS: the TIME arm must fire
         "confirmed_at": stale_confirm,
     }
@@ -1695,6 +1704,7 @@ def test_headline_interleave_with_the_index_absent_is_pinned(wired, monkeypatch)
         _run(vd.accept_grn("GRN-1", _ADMIN))
         grn_repo.collection.__class__ = _HeartbeatBoomColl
         grn_repo.collection.heartbeat_attempts = 0
+        grn_repo.find_by_id = _unavailable_claim_read
 
     stock_repo.after_hook = _steal
     stock_repo.after_n = 6
@@ -1802,6 +1812,7 @@ def test_accept_wedged_before_the_first_unit_mints_nothing_after_a_takeover(
     happens through the real staleness rule."""
     clock = _Clock()
     monkeypatch.setattr(vd, "datetime", clock)
+    monkeypatch.setattr(vd, "utc_now", lambda: clock.now(timezone.utc))
 
     grn_repo, stock_repo = wired(_grn(qty=24))
     grn_repo.doc["po_id"] = "PO-1"
@@ -1905,7 +1916,7 @@ def test_an_overdue_tick_refuses_a_claim_that_is_no_longer_ours(wired):
     grn_repo, stock_repo = wired(_grn(qty=2))
     grn_repo.doc["po_id"] = "PO-1"
     token = vd._claim_grn_for_accept(grn_repo, "GRN-1", "u1")
-    stale_claim = datetime.now() - timedelta(
+    stale_claim = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
         seconds=vd._GRN_ACCEPT_HEARTBEAT_SECONDS + 5
     )
     # Somebody else has since taken the claim, so the first tick must 409.

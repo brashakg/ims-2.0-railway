@@ -5,6 +5,8 @@ Real database queries for attendance, leaves, shifts and employee documents.
 Payroll has ONE door: routers/payroll.py (/payroll/run|approve|lock).
 """
 
+from api.utils.event_time import ist_event_iso, utc_now_iso
+
 import io
 from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
@@ -258,10 +260,9 @@ class AttendanceMarkRequest(BaseModel):
         ci = self.check_in
         co = self.check_out
         if ci is not None and co is not None:
-            # Strip timezone info for naive comparison (both are stored naive).
-            ci_ts = ci.replace(tzinfo=None)
-            co_ts = co.replace(tzinfo=None)
-            if co_ts <= ci_ts:
+            ci_ts = attendance_engine._coerce_check_in(ci)
+            co_ts = attendance_engine._coerce_check_in(co)
+            if ci_ts is None or co_ts is None or co_ts <= ci_ts:
                 raise ValueError("check_out must be after check_in")
         return self
 
@@ -325,7 +326,9 @@ class AttendanceEditRequest(BaseModel):
         ci = self.check_in
         co = self.check_out
         if ci is not None and co is not None:
-            if co.replace(tzinfo=None) <= ci.replace(tzinfo=None):
+            ci_ts = attendance_engine._coerce_check_in(ci)
+            co_ts = attendance_engine._coerce_check_in(co)
+            if ci_ts is None or co_ts is None or co_ts <= ci_ts:
                 raise ValueError("check_out must be after check_in")
         return self
 
@@ -1068,11 +1071,11 @@ async def check_in(
                 "geo_verified": geo["reason"] in ("WITHIN_RADIUS", "EXEMPT_ROLE"),
             }
             if not already_checked_in:
-                update_data["check_in"] = now.isoformat()
+                update_data["check_in"] = ist_event_iso(now)
                 update_data["is_late"] = late["is_late"]
                 update_data["late_minutes"] = late["late_minutes"]
                 update_data["marked_by"] = employee_id
-                update_data["marked_at"] = now.isoformat()
+                update_data["marked_at"] = ist_event_iso(now)
             attendance_repo.update(
                 existing.get("attendance_id") or existing.get("_id"), update_data
             )
@@ -1085,13 +1088,13 @@ async def check_in(
                 "store_id": active_store,
                 "date": today_iso,
                 "status": "HALF_DAY" if checkin_half_day else "PRESENT",
-                "check_in": now.isoformat(),
+                "check_in": ist_event_iso(now),
                 "is_late": late["is_late"],
                 "late_minutes": late["late_minutes"],
                 "shift_id": (shift or {}).get("shift_id"),
                 "geo_verified": geo["reason"] in ("WITHIN_RADIUS", "EXEMPT_ROLE"),
                 "marked_by": employee_id,
-                "marked_at": now.isoformat(),
+                "marked_at": ist_event_iso(now),
             }
             _create_day_row_safe(attendance_repo, data)
 
@@ -1099,7 +1102,7 @@ async def check_in(
         "message": (
             "Already checked in today" if already_checked_in else "Check-in recorded"
         ),
-        "checkInTime": now.isoformat(),
+        "checkInTime": ist_event_iso(now),
         "already_checked_in": already_checked_in,
         "is_late": late["is_late"],
         "late_minutes": late["late_minutes"],
@@ -1124,7 +1127,7 @@ async def check_out(
     row yet, returns a stub timestamp so the operator UI still works.
     """
     now = now_ist_naive()
-    now_iso = now.isoformat()
+    now_iso = ist_event_iso(now)
     employee_id = current_user.get("user_id")
     active_store = validate_store_access(store_id, current_user)  # as check_in
     attendance_repo = get_attendance_repository()
@@ -1215,7 +1218,7 @@ async def check_out_by_id(
             detail="Already checked out for this attendance record.",
         )
 
-    now_iso = datetime.now().isoformat()
+    now_iso = utc_now_iso()
     repo.update(
         existing.get("attendance_id") or existing.get("_id"),
         {"check_out": now_iso, "checked_out_by": current_user.get("user_id")},
@@ -1247,10 +1250,10 @@ async def mark_attendance(
             "store_id": active_store,
             "date": date_iso,
             "status": request.status,
-            "check_in": request.check_in.isoformat() if request.check_in else None,
-            "check_out": request.check_out.isoformat() if request.check_out else None,
+            "check_in": ist_event_iso(request.check_in) if request.check_in else None,
+            "check_out": ist_event_iso(request.check_out) if request.check_out else None,
             "marked_by": current_user.get("user_id"),
-            "marked_at": datetime.now().isoformat(),
+            "marked_at": utc_now_iso(),
         }
 
         if existing is not None:
@@ -1345,10 +1348,10 @@ async def edit_attendance(
     if "notes" in sent:
         updates["notes"] = (request.notes or "").strip() or None
     if "check_in" in sent:
-        updates["check_in"] = request.check_in.isoformat() if request.check_in else None
+        updates["check_in"] = ist_event_iso(request.check_in) if request.check_in else None
     if "check_out" in sent:
         updates["check_out"] = (
-            request.check_out.isoformat() if request.check_out else None
+            ist_event_iso(request.check_out) if request.check_out else None
         )
 
     # Cross-field guard: the resulting check_out must still be after check_in,
@@ -1395,7 +1398,7 @@ async def edit_attendance(
         raise HTTPException(status_code=422, detail="No effective changes to apply")
 
     updates["edited_by"] = current_user.get("user_id")
-    updates["edited_at"] = datetime.now().isoformat()
+    updates["edited_at"] = utc_now_iso()
 
     row_id = existing.get("attendance_id") or existing.get("_id")
     attendance_repo.update(row_id, updates)
@@ -1621,7 +1624,7 @@ async def apply_leave(
         "reason": (leave.reason or "").strip(),
         "status": "PENDING",
         "applied_by": employee_id,
-        "applied_at": datetime.now().isoformat(),
+        "applied_at": utc_now_iso(),
         # F26 remote-approval fields (additive; absence on legacy rows = standard).
         "fast_path": fast_path,
         "approval_request_id": None,
@@ -1709,7 +1712,7 @@ async def approve_leave(
             {
                 "status": "APPROVED",
                 "approved_by": current_user.get("user_id"),
-                "approved_at": datetime.now().isoformat(),
+                "approved_at": utc_now_iso(),
                 "approved_via": "standard",
             },
         )
@@ -1749,7 +1752,7 @@ async def reject_leave(
             {
                 "status": "REJECTED",
                 "rejected_by": current_user.get("user_id"),
-                "rejected_at": datetime.now().isoformat(),
+                "rejected_at": utc_now_iso(),
                 "rejection_reason": reason,
             },
         )
@@ -1854,7 +1857,7 @@ async def approve_leave_remote(
         {
             "status": "APPROVED",
             "approved_by": current_user.get("user_id"),
-            "approved_at": datetime.now().isoformat(),
+            "approved_at": utc_now_iso(),
             "approved_via": "fast_path",
         },
     )
@@ -1929,7 +1932,7 @@ async def create_shift(
         "weekly_off": _clean_weekly_off(shift.weekly_off),
         "is_active": True,
         "created_by": current_user.get("user_id"),
-        "created_at": datetime.now().isoformat(),
+        "created_at": utc_now_iso(),
     }
     try:
         db = _get_db()
@@ -2121,7 +2124,7 @@ async def create_weekoff_swap(
         "reason": (req.reason or "").strip(),
         "status": "PENDING",
         "requested_by": employee_id,
-        "created_at": datetime.now().isoformat(),
+        "created_at": utc_now_iso(),
     }
     try:
         db = _get_db()
@@ -2246,7 +2249,7 @@ async def approve_weekoff_swap(
             "$set": {
                 "status": "APPROVED",
                 "approved_by": current_user.get("user_id"),
-                "approved_at": datetime.now().isoformat(),
+                "approved_at": utc_now_iso(),
             }
         },
     )
@@ -2298,7 +2301,7 @@ async def reject_weekoff_swap(
             "$set": {
                 "status": "REJECTED",
                 "rejected_by": current_user.get("user_id"),
-                "rejected_at": datetime.now().isoformat(),
+                "rejected_at": utc_now_iso(),
                 "rejection_reason": reason,
             }
         },

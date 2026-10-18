@@ -35,6 +35,8 @@ No emojis in Python (Windows cp1252 safety rule).
 
 from __future__ import annotations
 
+from api.utils.event_time import utc_now_iso
+
 import logging
 import urllib.parse
 from datetime import datetime
@@ -266,7 +268,7 @@ def _do_reconcile(db, order_id: str, upi_txn: Dict[str, Any]) -> bool:
                 )
                 return False
 
-    now_iso = datetime.now().isoformat()
+    now_iso = utc_now_iso()
     payment_row = {
         "payment_id": f"upi-auto-{razorpay_payment_id or order_id}",
         "method": "UPI",

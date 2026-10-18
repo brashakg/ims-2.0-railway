@@ -324,7 +324,8 @@ def _actor_id(actor: Optional[Dict[str, Any]]) -> Optional[str]:
 
 
 def _now_iso(now: Optional[datetime] = None) -> str:
-    return (now or datetime.utcnow()).isoformat()
+    from api.utils.event_time import utc_event_iso, utc_now_iso
+    return utc_event_iso(now) if now is not None else utc_now_iso()
 
 
 def not_captured_block(amount_paisa: Any = 0) -> Dict[str, Any]:

@@ -6,6 +6,8 @@ package split): no path, method, dependency, status code, response_model,
 default or validation was changed.
 """
 
+from api.utils.event_time import utc_event_iso, utc_now
+
 from fastapi import HTTPException, Depends
 from datetime import datetime
 from ..auth import get_current_user, require_roles
@@ -135,13 +137,13 @@ async def post_admin_vendor_status(
             detail="Job has no vendor assigned. PATCH /vendor first.",
         )
 
-    now = datetime.now()
+    now = utc_now().replace(tzinfo=None)
     history_entry = {
         "status": payload.status,
         "note": payload.note,
         "source": "ims_user",
         "logged_by": current_user.get("user_id"),
-        "logged_at": now.isoformat(),
+        "logged_at": utc_event_iso(now),
     }
     history = list(job.get("vendor_status_history") or [])
     history.append(history_entry)
@@ -152,9 +154,9 @@ async def post_admin_vendor_status(
         "vendor_status_updated_at": now,
     }
     if payload.status == "DISPATCHED" and not job.get("vendor_dispatch_date"):
-        update["vendor_dispatch_date"] = now.isoformat()
+        update["vendor_dispatch_date"] = utc_event_iso(now)
     if payload.status == "DELIVERED" and not job.get("vendor_received_date"):
-        update["vendor_received_date"] = now.isoformat()
+        update["vendor_received_date"] = utc_event_iso(now)
 
     repo.update(job_id, update)
 

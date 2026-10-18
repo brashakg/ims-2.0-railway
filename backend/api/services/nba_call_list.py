@@ -35,6 +35,8 @@ No emoji (Windows cp1252). No POS touch. No money mutation.
 
 from __future__ import annotations
 
+from api.utils.event_time import utc_now_iso
+
 import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
@@ -421,7 +423,7 @@ def build_nba_doc(store_id: str, cards: List[Dict[str, Any]], *, date_str: Optio
         "nba_id": f"NBA-{date_str.replace('-', '')}-{store_id}",
         "store_id": store_id,
         "date": date_str,
-        "generated_at": datetime.utcnow().isoformat(),
+        "generated_at": utc_now_iso(),
         "scored_count": len(cards),
         "cards": cards,
         "ttl_expires_at": _ist_midnight_utc(date_str),

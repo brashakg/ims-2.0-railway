@@ -1,5 +1,7 @@
 """POST /grn/{grn_id}/accept - the three-way match and the stock mint."""
 
+from api.utils.event_time import utc_now, utc_now_iso
+
 from contextvars import ContextVar
 from datetime import timedelta
 from typing import Tuple
@@ -485,7 +487,7 @@ def _put_on_shelf(
     # the first tick was not due and it minted the whole delivery without ever
     # re-proving ownership. Measured on the previous build: 24 real sellable
     # units behind a receipt that had been VOIDed in the meantime.
-    claimed_at = datetime.now()
+    claimed_at = utc_now()
     claim_token = _claim_grn_for_accept(grn_repo, grn_id, current_user.get("user_id"))
     if claim_token is None:
         raise _grn_accept_conflict(grn_repo, grn_id)
@@ -681,7 +683,7 @@ def refresh_po_received(po_repo, po_id, grn_id=None) -> tuple:
                     "items": updated_items,
                     "received_qty_by_product": received_by_product,
                     "total_received_qty": sum(received_by_product.values()),
-                    "last_received_at": datetime.now().isoformat(),
+                    "last_received_at": utc_now_iso(),
                 },
             ):
                 po_status = state
@@ -1013,7 +1015,7 @@ def _accept_grn_claimed(
     # _GRN_ACCEPT_HEARTBEAT_SECONDS makes the FIRST tick due, so a woken worker
     # re-proves ownership before minting a single unit. Zero cost on the happy
     # path: the first unit is milliseconds from the claim, so no extra write.
-    _now = claimed_at or datetime.now()
+    _now = claimed_at or utc_now()
     heartbeat_state = {"units": 0, "at": _now, "errors": 0, "confirmed_at": _now}
     # Probed ONCE per accept, not per unit.
     mint_raises_on_duplicate = _stock_create_raises_on_duplicate(stock_repo)
@@ -1343,8 +1345,8 @@ def _accept_grn_claimed(
         {
             # When the receipt was FIRST accepted: a later release or re-accept
             # of its held lines never restamps it (R1-21); it is last_accepted_at.
-            "accepted_at": grn.get("accepted_at") or datetime.now().isoformat(),
-            "last_accepted_at": datetime.now().isoformat(),
+            "accepted_at": grn.get("accepted_at") or utc_now_iso(),
+            "last_accepted_at": utc_now_iso(),
             "accepted_by": user_id,
             "units_added": units_added,
             "unresolved_lines": unresolved_lines,

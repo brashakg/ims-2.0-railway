@@ -5,6 +5,8 @@ split): no path, method, dependency, status code, response_model, default,
 rounding or validation was changed.
 """
 
+from api.utils.event_time import utc_now_iso
+
 import uuid
 from datetime import datetime
 from fastapi import Depends, HTTPException
@@ -100,7 +102,7 @@ async def create_bopis_transfer(
 
     created_transfers = []
     user_id = current_user.get("user_id", "")
-    now = datetime.now().isoformat()
+    now = utc_now_iso()
 
     for source_store_id, lines in by_source.items():
         transfer_id = str(uuid.uuid4())

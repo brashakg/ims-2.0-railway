@@ -1,5 +1,7 @@
 """Opening-stock importer (go-live): preview + commit."""
 
+from api.utils.event_time import utc_now_iso
+
 from ._shared import (
     BaseModel,
     Depends,
@@ -114,7 +116,7 @@ def _write_opening_stock_batch(
                 "batch_id": batch_id,
                 "store_id": store_id,
                 "committed_by": user_id,
-                "committed_at": datetime.utcnow().isoformat(),
+                "committed_at": utc_now_iso(),
                 "skip_if_existing": skip_if_existing,
                 "lines": lines,
                 "total_units": total_units,

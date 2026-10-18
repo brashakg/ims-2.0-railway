@@ -11,6 +11,8 @@ Pure helpers here (no DB) so the math is unit-tested; the router persists.
 
 from __future__ import annotations
 
+from api.utils.event_time import utc_now_iso
+
 import math
 import uuid
 from datetime import datetime
@@ -82,5 +84,5 @@ def make_entry(
         "ref": ref,
         "store_id": store_id,
         "created_by": user_id,
-        "created_at": datetime.now().isoformat(),
+        "created_at": utc_now_iso(),
     }

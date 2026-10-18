@@ -50,6 +50,8 @@ create path so POS pricing/payment stays the single source of truth.
 
 from __future__ import annotations
 
+from api.utils.event_time import utc_now_iso
+
 import uuid
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Union
@@ -345,7 +347,7 @@ class NonAdaptEngine:
 
     @staticmethod
     def _now_iso() -> str:
-        return datetime.utcnow().isoformat()
+        return utc_now_iso()
 
     # -- record a non-adaptation --------------------------------------------
 

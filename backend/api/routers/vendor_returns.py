@@ -4,6 +4,8 @@ IMS 2.0 - Vendor Returns Router
 Vendor returns, debit notes, and credit note management
 """
 
+from api.utils.event_time import utc_now_iso
+
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from typing import Annotated, List, Optional, Literal
@@ -348,12 +350,12 @@ async def create_vendor_return(
             "credit_note_number": None,
             "credit_note_amount": None,
             "notes": return_data.notes or "",
-            "created_at": datetime.now().isoformat(),
+            "created_at": utc_now_iso(),
             "created_by": current_user.get("user_id"),
             "status_history": [
                 {
                     "status": "created",
-                    "timestamp": datetime.now().isoformat(),
+                    "timestamp": utc_now_iso(),
                     "changed_by": current_user.get("user_id"),
                     "notes": "Return created",
                 }
@@ -469,7 +471,7 @@ async def update_return_status(
         # Update document
         update_dict = {
             "status": status_update.status,
-            "updated_at": datetime.now().isoformat(),
+            "updated_at": utc_now_iso(),
             "updated_by": current_user.get("user_id"),
         }
         if current_status == "draft" and status_update.status == "created":
@@ -488,13 +490,13 @@ async def update_return_status(
                 if value is not None and str(value).strip():
                     update_dict[field_name] = str(value).strip()
             if status_update.status == "shipped" and not return_doc.get("shipped_at"):
-                update_dict["shipped_at"] = datetime.now().isoformat()
+                update_dict["shipped_at"] = utc_now_iso()
 
         # Add status to history
         status_history = return_doc.get("status_history", [])
         history_entry = {
             "status": status_update.status,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": utc_now_iso(),
             "changed_by": current_user.get("user_id"),
             "notes": status_update.notes or "",
         }
@@ -617,7 +619,7 @@ async def price_vendor_return(
         )
 
     priced = [dict(it, unit_price=float(price)) for it, price in zip(items, body.unit_prices)]
-    now = datetime.now().isoformat()
+    now = utc_now_iso()
     # Compare-and-swap on the status just read: a credit issued in between
     # makes this a 409, never a re-price under a recorded credit.
     result = collection.update_one(

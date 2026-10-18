@@ -37,6 +37,8 @@ No emojis (Windows cp1252). ASCII only.
 
 from __future__ import annotations
 
+from api.utils.event_time import utc_now_iso
+
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -294,7 +296,7 @@ def build_revised_invoice_doc(
     money snapshot at the moment of revision. Pure: the router allocates the
     serial and persists; this only shapes the document. Never raises.
     """
-    now = datetime.now().isoformat()
+    now = utc_now_iso()
     return {
         "revision_id": str(uuid.uuid4()),
         "order_id": order.get("order_id"),
@@ -334,7 +336,7 @@ def build_credit_note_doc(
     """
     note_type = delta["note_type"] or CREDIT_NOTE
     amount = delta["abs_delta"]
-    now = datetime.now().isoformat()
+    now = utc_now_iso()
     return {
         "note_number": note_number or generate_note_number(note_type),
         "note_type": note_type,  # CREDIT_NOTE | DEBIT_NOTE

@@ -1189,6 +1189,21 @@ class _Clock(datetime):
         return cls.at if tz is None else cls.at.replace(tzinfo=timezone.utc).astimezone(tz)
 
 
+def _freeze_receiving_clock(monkeypatch):
+    """Keep receipt event strings and stock BSON dates on the same test clock."""
+    from database.repositories import base_repository
+
+    from api.routers.vendors import grn_accept, grn_accept_lock
+    from api.utils import event_time
+
+    for mod in (grn_accept, grn_accept_lock, base_repository):
+        monkeypatch.setattr(mod, "datetime", _Clock)
+    # The event helper and both receipt modules hold separate clock bindings.
+    # Read _Clock.at on every call so a later acceptance advances all of them.
+    for mod in (event_time, grn_accept, grn_accept_lock):
+        monkeypatch.setattr(mod, "utc_now", lambda: _Clock.now(timezone.utc))
+
+
 def _catalogued(pid: str) -> dict:
     """A catalogue-complete frame with its cost already known (nothing to promote)."""
     return {
@@ -1238,10 +1253,7 @@ def _seed_held(db) -> None:
 @pytest.fixture
 def held(monkeypatch):
     """The real accept engine (grn_accept) over its own Mongo, clock in hand."""
-    from database.repositories import base_repository
     from database.repositories.product_repository import StockRepository
-
-    from api.routers.vendors import grn_accept, grn_accept_lock
 
     gen = _fresh_db(_seed_held)
     db = next(gen)
@@ -1250,8 +1262,7 @@ def held(monkeypatch):
     monkeypatch.setenv("PM_MIRROR_ENABLED", "")
     monkeypatch.setattr(vendors_pkg, "get_stock_repository", lambda: StockRepository(db["stock_units"]))
     monkeypatch.setattr(vendors_pkg, "get_product_repository", lambda: spine)
-    for mod in (grn_accept, grn_accept_lock, base_repository):
-        monkeypatch.setattr(mod, "datetime", _Clock)
+    _freeze_receiving_clock(monkeypatch)
     _today(monkeypatch, "2026-10-02")
     yield world, db, spine
     next(gen, None)
@@ -1293,6 +1304,8 @@ def test_r5_received_is_what_went_into_stock_in_the_month_it_went_in(held):
     # Receiving preserves the first accept; the stock's mint dates place
     # the later catalogue release in October without changing September.
     assert str(stored["accepted_at"]).startswith("2026-09-25") and stored["unresolved_lines"] == []
+    assert stored["accepted_at"] == "2026-09-25T06:00:00+00:00"
+    assert stored["last_accepted_at"] == "2026-10-02T06:00:00+00:00"
     _open(
         (_received(world, "2026-09"), _received(world, "2026-10")) == (1120.0, 2240.0),
         "F56: after the re-accept September Received is "
@@ -1529,11 +1542,9 @@ def moving(monkeypatch):
     """The real accept engine and the real transfer stock moves
     (transfers._apply_ship_stock_move / _apply_receive_stock_move, whose
     _rehome rewrites a unit's source_type / source_id) over one Mongo."""
-    from database.repositories import base_repository
     from database.repositories.product_repository import StockRepository
 
     from api.routers import transfers as transfers_mod
-    from api.routers.vendors import grn_accept, grn_accept_lock
 
     gen = _fresh_db(_seed_moving)
     db = next(gen)
@@ -1546,8 +1557,7 @@ def moving(monkeypatch):
     monkeypatch.setattr(transfers_mod, "get_stock_repository", stock)
     monkeypatch.setattr(transfers_mod, "_get_db", lambda: _DBProxy(db))
     monkeypatch.setattr(transfers_mod, "_writeback_units_left", lambda *a, **k: None)
-    for mod in (grn_accept, grn_accept_lock, base_repository):
-        monkeypatch.setattr(mod, "datetime", _Clock)
+    _freeze_receiving_clock(monkeypatch)
     _today(monkeypatch, "2026-10-05")
     yield world, db, spine
     next(gen, None)

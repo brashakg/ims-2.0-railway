@@ -30,6 +30,8 @@ no secret values ever returned (only signatures + the public cert).
 
 from __future__ import annotations
 
+from api.utils.event_time import utc_event_iso, utc_now
+
 import base64
 import logging
 import os
@@ -362,7 +364,7 @@ async def scan_advance(
             "station": station,
         }
 
-    now = datetime.now()
+    now = utc_now().replace(tzinfo=None)
     operator = current_user.get("user_id")
 
     # Advance the SAME status field the rest of the workshop uses. Stamp a
@@ -374,14 +376,14 @@ async def scan_advance(
         "station": station,
         "scanned_code": body.scanned_code,
         "operator": operator,
-        "at": now.isoformat(),
+        "at": utc_event_iso(now),
     }
     history = list(job.get("scan_history") or [])
     history.append(history_entry)
 
     update = {
         "scan_history": history,
-        f"stage_at_{target.lower()}": now.isoformat(),
+        f"stage_at_{target.lower()}": utc_event_iso(now),
     }
     ok = repo.update_status(job_id, target, operator, "scan-advance")
     if not ok:
@@ -428,7 +430,7 @@ async def scan_advance(
         "stage": target,
         "stage_label": STAGE_LABELS.get(target, target),
         "station": station,
-        "stamped_at": now.isoformat(),
+        "stamped_at": utc_event_iso(now),
         "message": f"Advanced to {STAGE_LABELS.get(target, target)}.",
     }
 

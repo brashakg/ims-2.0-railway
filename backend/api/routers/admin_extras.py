@@ -16,6 +16,8 @@ infra, not the app). System SETTINGS have one door, /settings/system
 /system/settings pair here was deleted (2026-10-08).
 """
 
+from api.utils.event_time import utc_now_iso
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
@@ -52,7 +54,7 @@ def _scrub(doc: Optional[Dict]) -> Optional[Dict]:
 
 
 def _now_iso() -> str:
-    return datetime.utcnow().isoformat()
+    return utc_now_iso()
 
 
 # ============================================================================

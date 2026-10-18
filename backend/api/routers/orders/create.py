@@ -5,6 +5,8 @@ split): no path, method, dependency, status code, response_model, default,
 rounding or validation was changed.
 """
 
+from api.utils.event_time import utc_now_iso
+
 import secrets
 import uuid
 from database.repositories.order_repository import derive_bill_type
@@ -522,7 +524,7 @@ async def create_order(
                     "discount_percent": item.discount_percent,
                     "discount_amount": discount_amount,
                     "salesperson_id": salesperson_id,
-                    "tagged_at": datetime.now().isoformat(),
+                    "tagged_at": utc_now_iso(),
                 }
 
             _pdoc = _pdoc_by_pid.get(item.product_id or "") or {}
@@ -1034,7 +1036,7 @@ async def create_order(
             "status_history": [
                 {
                     "status": "DRAFT",
-                    "timestamp": datetime.now().isoformat(),
+                    "timestamp": utc_now_iso(),
                     "changed_by": current_user.get("user_id") or "system",
                 }
             ],
@@ -1126,7 +1128,7 @@ async def create_order(
                                     "approved_by": zero_total_approved_by,
                                     "reason": cart_discount_reason,
                                 },
-                                "created_at": datetime.now().isoformat(),
+                                "created_at": utc_now_iso(),
                             }
                         )
                 except Exception as exc:  # noqa: BLE001

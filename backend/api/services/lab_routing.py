@@ -41,6 +41,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime
+from api.utils.event_time import utc_event_iso, parse_event_utc, utc_now
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -344,15 +345,11 @@ def _dwell_ms(previous_ts: Optional[str], now: datetime) -> Optional[int]:
     and clamps negatives to 0 (clock skew). Pure."""
     if not previous_ts:
         return None
-    try:
-        prev = datetime.fromisoformat(str(previous_ts).replace("Z", "+00:00"))
-    except (ValueError, TypeError):
+    prev = parse_event_utc(previous_ts)
+    current = parse_event_utc(now)
+    if prev is None or current is None:
         return None
-    # Compare naive-to-naive: station_timestamps are stamped with datetime.now()
-    # (naive local), so strip tz if the parsed value carried one.
-    if prev.tzinfo is not None and now.tzinfo is None:
-        prev = prev.replace(tzinfo=None)
-    delta_ms = int((now - prev).total_seconds() * 1000)
+    delta_ms = int((current - prev).total_seconds() * 1000)
     return max(0, delta_ms)
 
 
@@ -440,14 +437,14 @@ def advance_lab_station(
             "current_station": current_station,
         }
 
-    now = datetime.now()
+    now = utc_now().replace(tzinfo=None)
     station_cfg = next((s for s in seq if s.get("code") == code), {})
 
     # Dwell for the station the job is LEAVING (the current one), computed from
     # its stored entry timestamp -- never client-supplied.
     set_block: dict = {
         "current_station": code,
-        f"station_timestamps.{code}": now.isoformat(),
+        f"station_timestamps.{code}": utc_event_iso(now),
         "updated_at": now,
     }
     if current_station:
@@ -464,7 +461,7 @@ def advance_lab_station(
         "current_station": code,
         "scanned_code": job.get("job_number") or job_id,
         "operator": operator_id,
-        "at": now.isoformat(),
+        "at": utc_event_iso(now),
     }
 
     # CAS guard: current_station must still equal what we read. A racing scan
@@ -585,7 +582,7 @@ def advance_lab_station(
             and new_status == "READY"
             and gate_block is None
         ),
-        "stamped_at": now.isoformat(),
+        "stamped_at": utc_event_iso(now),
         "message": f"Scanned in at {STATION_LABELS.get(code, code)}." + _gate_msg.get(gate_block, ""),
     }
 

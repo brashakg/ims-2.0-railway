@@ -1,5 +1,7 @@
 """Serialized inventory (feeds SerialNumberTracker.tsx)."""
 
+from api.utils.event_time import utc_event_iso
+
 from ...dependencies import store_in_view
 from ._shared import (
     BaseModel,
@@ -244,9 +246,9 @@ async def create_serial(
             "notes": req.notes,
             "sold_to": req.sold_to,
             "sold_date": req.sold_date,
-            "created_at": now.isoformat(),
+            "created_at": utc_event_iso(now),
             "created_by": current_user.get("user_id", ""),
-            "updated_at": now.isoformat(),
+            "updated_at": utc_event_iso(now),
         }
         serials_coll.insert_one(doc)
         doc.pop("_id", None)
@@ -285,7 +287,7 @@ async def update_serial(
             raise HTTPException(status_code=400, detail="Invalid status")
 
         now = datetime.utcnow()
-        updates["updated_at"] = now.isoformat()
+        updates["updated_at"] = utc_event_iso(now)
         serials_coll.update_one({"serial_id": serial_id}, {"$set": updates})
 
         merged = {**existing, **updates}

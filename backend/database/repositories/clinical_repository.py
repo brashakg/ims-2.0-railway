@@ -3,6 +3,8 @@ IMS 2.0 - Clinical Repository
 ==============================
 Repositories for eye test queue and clinical examination data
 """
+
+from api.utils.event_time import utc_now_iso
 from typing import List, Optional, Dict
 from datetime import datetime, date
 from .base_repository import BaseRepository
@@ -84,9 +86,9 @@ class EyeTestQueueRepository(BaseRepository):
 
         update_data = {"status": status}
         if status == "IN_PROGRESS":
-            update_data["started_at"] = datetime.now().isoformat()
+            update_data["started_at"] = utc_now_iso()
         elif status == "COMPLETED":
-            update_data["completed_at"] = datetime.now().isoformat()
+            update_data["completed_at"] = utc_now_iso()
 
         return self.update(queue_id, update_data)
 
@@ -143,7 +145,7 @@ class EyeTestRepository(BaseRepository):
             "optometrist_id": optometrist_id,
             "optometrist_name": optometrist_name,
             "status": "IN_PROGRESS",
-            "started_at": datetime.now().isoformat(),
+            "started_at": utc_now_iso(),
             "test_date": date.today().isoformat()
         }
         return self.create(test_data)
@@ -213,7 +215,7 @@ class EyeTestRepository(BaseRepository):
         """
         update_data = {
             "status": "COMPLETED",
-            "completed_at": datetime.now().isoformat(),
+            "completed_at": utc_now_iso(),
             "prescription": self._prescription_block(
                 right_eye,
                 left_eye,
@@ -309,7 +311,7 @@ class EyeTestRepository(BaseRepository):
         for key, value in (exam_header or {}).items():
             update_data[key] = value
 
-        stamped_at = amended_at or datetime.now().isoformat()
+        stamped_at = amended_at or utc_now_iso()
         if draft:
             update_data["draft_saved_at"] = stamped_at
             return self.update(test_id, update_data)

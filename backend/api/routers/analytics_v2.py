@@ -15,6 +15,8 @@ Advanced analytics and feature endpoints:
 25. Vendor Margin Insights (SUPERADMIN)
 """
 
+from api.utils.event_time import utc_now_iso
+
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -792,7 +794,7 @@ async def create_eye_camp(
         "conversions": None,
         "notes": None,
         "status": "planned",
-        "created_at": datetime.now().isoformat(),
+        "created_at": utc_now_iso(),
         "created_by": current_user.get("user_id", "unknown"),
     }
 
@@ -813,7 +815,7 @@ async def update_eye_camp(
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
-    update_fields: dict = {"updated_at": datetime.now().isoformat()}
+    update_fields: dict = {"updated_at": utc_now_iso()}
     if req.actual_attendees is not None:
         update_fields["actual_attendees"] = req.actual_attendees
     if req.leads_captured is not None:

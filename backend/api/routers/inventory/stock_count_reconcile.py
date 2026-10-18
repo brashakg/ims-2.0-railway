@@ -1,5 +1,7 @@
 """Stock count: fetch a session, reconcile it, finish a stuck write-off."""
 
+from api.utils.event_time import utc_event_iso
+
 from ._shared import (
     BaseModel,
     Depends,
@@ -288,7 +290,7 @@ async def reconcile_stock_count(
                         {
                             "$set": {
                                 "status": "VOID",
-                                "voided_at": now.isoformat(),
+                                "voided_at": utc_event_iso(now),
                                 "void_reason": f"cycle-count-reconcile:{count_id}",
                             }
                         },
@@ -335,7 +337,7 @@ async def reconcile_stock_count(
                             if (pid in override_map and accepted_qty != counted_qty)
                             else None
                         ),
-                        "recorded_at": now.isoformat(),
+                        "recorded_at": utc_event_iso(now),
                         "recorded_by": current_user.get("user_id", ""),
                         "notes": request.notes if request else None,
                     }
@@ -384,7 +386,7 @@ async def reconcile_stock_count(
             {
                 "$set": {
                     "status": "reconciled",
-                    "reconciled_at": now.isoformat(),
+                    "reconciled_at": utc_event_iso(now),
                     "reconciled_by": current_user.get("user_id", ""),
                     "reconciled_by_name": current_user.get(
                         "full_name", current_user.get("username", "")
@@ -413,7 +415,7 @@ async def reconcile_stock_count(
             "lines_skipped_moved": lines_skipped_moved,
             "shrinkage_value_written_off": shrinkage_value_total,
             "overages_pending_review": overage_records,
-            "reconciled_at": now.isoformat(),
+            "reconciled_at": utc_event_iso(now),
         }
 
     except HTTPException:
@@ -528,7 +530,7 @@ async def finish_stuck_stock_count_reconcile(
                     "shrinkage_value": value,
                     "system_quantity": int(v.get("system_quantity", 0) or 0),
                     "accepted_quantity": int(v.get("physical_quantity", 0) or 0),
-                    "recorded_at": now.isoformat(),
+                    "recorded_at": utc_event_iso(now),
                     "recorded_by": current_user.get("user_id", ""),
                     # Rebuilt from the units themselves after the original
                     # audit write failed -- say so, never pass it off as the
@@ -547,7 +549,7 @@ async def finish_stuck_stock_count_reconcile(
             {
                 "$set": {
                     "status": "reconciled",
-                    "reconciled_at": now.isoformat(),
+                    "reconciled_at": utc_event_iso(now),
                     "reconciled_by": current_user.get("user_id", ""),
                     "reconciled_by_name": current_user.get(
                         "full_name", current_user.get("username", "")
@@ -574,7 +576,7 @@ async def finish_stuck_stock_count_reconcile(
             "shrinkage_lines": len(voided_by_product),
             "audit_rows_written": len(rows),
             "shrinkage_value_written_off": value_total,
-            "reconciled_at": now.isoformat(),
+            "reconciled_at": utc_event_iso(now),
         }
 
     except HTTPException:

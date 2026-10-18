@@ -24,6 +24,8 @@ Conventions mirrored from returns.py:
 
 from __future__ import annotations
 
+from api.utils.event_time import utc_now_iso
+
 import logging
 import uuid
 from datetime import datetime
@@ -445,7 +447,7 @@ async def book_shipment(
     )
 
     shipment_id = generate_shipment_id()
-    now = datetime.now().isoformat()
+    now = utc_now_iso()
     simulated = result.status == "SIMULATED"
 
     doc: Dict[str, Any] = {
@@ -601,7 +603,7 @@ async def track_shipment(
                             "tracking_url": result.tracking_url
                             or doc.get("tracking_url"),
                             "courier": result.courier or doc.get("courier"),
-                            "updated_at": datetime.now().isoformat(),
+                            "updated_at": utc_now_iso(),
                         }
                     },
                 )

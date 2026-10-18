@@ -27,6 +27,8 @@ always matches what those modules report:
 Fail-soft contract: no DB -> empty list / zeroed variance, never a 500.
 """
 
+from api.utils.event_time import utc_now_iso
+
 import logging
 import re
 import uuid
@@ -261,7 +263,7 @@ async def upsert_budget(
         }
 
     key = {"store_id": store_id, "period": period, "head": head}
-    now = datetime.now().isoformat()
+    now = utc_now_iso()
     update = {
         "$set": {
             **key,

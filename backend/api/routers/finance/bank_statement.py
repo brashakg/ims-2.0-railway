@@ -5,6 +5,8 @@ package split): no path, method, dependency, status code, response_model
 or default was changed.
 """
 
+from api.utils.event_time import utc_now_iso
+
 import csv
 import io
 import uuid
@@ -384,7 +386,7 @@ async def import_bank_statement(
                     "uploaded_by": current_user.get("id")
                     or current_user.get("user_id")
                     or "",
-                    "uploaded_at": datetime.utcnow().isoformat(),
+                    "uploaded_at": utc_now_iso(),
                     "row_count": len(matched_rows),
                     "summary": summary,
                     "rows": matched_rows,

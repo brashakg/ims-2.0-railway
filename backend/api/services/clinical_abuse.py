@@ -124,7 +124,16 @@ def rx_date(rx: Dict[str, Any]) -> Optional[datetime]:
     """Best date for a prescription dict (prescription_date > test_date >
     created_at). Returns the first that parses, else None."""
     for key in ("prescription_date", "test_date", "created_at"):
-        dt = parse_dt(rx.get(key))
+        # Manual clinical dates retain their existing wall-clock convention.
+        # Auto-test and repository creation fields are event instants; their
+        # newly explicit offsets must compare in the legacy UTC cutoff frame.
+        if key == "created_at" or (
+            key == "test_date" and rx.get("source") == "TESTED_AT_STORE" and rx.get("eye_test_id")
+        ):
+            from api.utils.event_time import parse_event_utc_naive
+            dt = parse_event_utc_naive(rx.get(key))
+        else:
+            dt = parse_dt(rx.get(key))
         if dt is not None:
             return dt
     return None

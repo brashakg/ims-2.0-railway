@@ -23,6 +23,8 @@ All endpoints are fail-soft: no DB / no records => a valid empty-but-shaped
 payload, never a 500.
 """
 
+from api.utils.event_time import utc_now_iso
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Optional
 from datetime import datetime
@@ -322,7 +324,7 @@ async def cancel_my_leave(
         {
             "status": "CANCELLED",
             "cancelled_by": caller,
-            "cancelled_at": datetime.now().isoformat(),
+            "cancelled_at": utc_now_iso(),
         },
     )
     return {"message": "Leave request cancelled", "leave_id": leave_id, "status": "CANCELLED"}

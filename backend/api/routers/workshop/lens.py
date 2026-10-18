@@ -6,6 +6,8 @@ package split): no path, method, dependency, status code, response_model,
 default or validation was changed.
 """
 
+from api.utils.event_time import utc_event_iso, utc_now
+
 from fastapi import HTTPException, Depends
 from typing import Optional
 from datetime import datetime
@@ -77,14 +79,14 @@ async def update_lens_status(
             ),
         )
 
-    now = datetime.now()
+    now = utc_now().replace(tzinfo=None)
     update = {
         "lens_status": target,
         "lens_status_updated_by": current_user.get("user_id"),
     }
     ts_field = LENS_STATUS_TIMESTAMP_FIELD.get(target)
     if ts_field:
-        update[ts_field] = now.isoformat()
+        update[ts_field] = utc_event_iso(now)
 
     if not repo.update(job_id, update):
         raise HTTPException(status_code=500, detail="Failed to update lens status")
@@ -181,7 +183,7 @@ async def _perform_ready_notify(job: dict, actor_id: Optional[str]) -> dict:
     """
     job_id = job.get("job_id")
     phone = job.get("customer_phone") or job.get("customerPhone")
-    now = datetime.now()
+    now = utc_now().replace(tzinfo=None)
 
     # 1. WhatsApp (provider is DISPATCH_MODE-gated + fail-soft internally).
     wa_status = "no_phone"
@@ -223,7 +225,7 @@ async def _perform_ready_notify(job: dict, actor_id: Optional[str]) -> dict:
                             # Already dispatched - never drain this row again.
                             "status": "SENT",
                             "delivery_status": "SENT",
-                            "sent_at": now.isoformat(),
+                            "sent_at": utc_event_iso(now),
                             "provider_msg_id": res.provider_id,
                             "provider_id": res.provider_id,
                         },
@@ -243,7 +245,7 @@ async def _perform_ready_notify(job: dict, actor_id: Optional[str]) -> dict:
             repo.update(
                 job_id,
                 {
-                    "ready_notified_at": now.isoformat(),
+                    "ready_notified_at": utc_event_iso(now),
                     "ready_notified_by": actor_id,
                 },
             )
@@ -259,7 +261,7 @@ async def _perform_ready_notify(job: dict, actor_id: Optional[str]) -> dict:
             if coll is not None:
                 coll.insert_one(
                     {
-                        "notification_id": f"NTF-{now.strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}",
+                        "notification_id": f"NTF-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}",
                         "notification_type": "workshop_ready",
                         "user_id": actor_id,
                         "title": "Pickup notification sent",
@@ -281,7 +283,7 @@ async def _perform_ready_notify(job: dict, actor_id: Optional[str]) -> dict:
         logger.warning("[WORKSHOP] notify-ready notification insert failed: %s", e)
 
     return {
-        "ready_notified_at": now.isoformat(),
+        "ready_notified_at": utc_event_iso(now),
         "whatsapp_status": wa_status,
         "notification_logged": notif_written,
     }

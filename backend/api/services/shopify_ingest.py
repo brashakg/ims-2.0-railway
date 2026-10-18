@@ -912,6 +912,7 @@ def _synth_gateway_payment(
     order.payments[].amount) read zero against real online sales. Mirrors the
     POS payment-row shape (orders.py record_payment) and the historical
     import's settled row so every payments[] consumer treats it uniformly."""
+    from api.utils.event_time import utc_event_iso
     return {
         "payment_id": str(uuid.uuid4()),
         "method": "SHOPIFY",
@@ -920,7 +921,7 @@ def _synth_gateway_payment(
         "status": "SETTLED",
         "settled_outside_ims": True,
         "received_by": "SYSTEM_SHOPIFY_WEBHOOK",
-        "received_at": received_at.isoformat(),
+        "received_at": utc_event_iso(received_at),
     }
 
 
@@ -1035,10 +1036,7 @@ def _historical_overrides(payload: Dict[str, Any], grand_total: float) -> Dict[s
                 "status": "SETTLED",
                 "settled_outside_ims": True,
                 "received_by": "SYSTEM_SHOPIFY_HISTORY_IMPORT",
-                "received_at": (
-                    (_to_naive_utc(payload.get("created_at")) or _order_datetime(payload)
-                     .astimezone(timezone.utc).replace(tzinfo=None)).isoformat()
-                ),
+                "received_at": _order_datetime(payload).astimezone(timezone.utc).isoformat(),
             }
         ],
     }
@@ -1048,15 +1046,15 @@ def _refund_credit_note_date_iso(refund: Dict[str, Any], order_payload: Dict[str
     """The ISO-STRING date a synthesized historical credit note is stamped with:
     the refund's own processed_at / created_at (so the CDNR is reported in the
     period the refund was ISSUED -- correct GST credit-note timing), falling back to
-    the order date. Returned as a naive-UTC ISO STRING because the GSTR-1 CDNR query
-    (reports.py) and store_credit_ledger.make_entry both bound / write
-    credit_note_ledger.created_at as STRINGS."""
+    the order date. New strings include UTC explicitly while preserving the
+    original refund instant and the existing STRING storage type."""
+    from api.utils.event_time import utc_event_iso
     for raw in (refund.get("processed_at"), refund.get("created_at")):
         dt = _to_naive_utc(raw)
         if dt is not None:
-            return dt.isoformat()
+            return utc_event_iso(dt)
     return (
-        _order_datetime(order_payload).astimezone(timezone.utc).replace(tzinfo=None).isoformat()
+        _order_datetime(order_payload).astimezone(timezone.utc).isoformat()
     )
 
 

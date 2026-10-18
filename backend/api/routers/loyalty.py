@@ -21,6 +21,8 @@ Side-effect on order create:
 
 from __future__ import annotations
 
+from api.utils.event_time import utc_now_iso
+
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 import logging
@@ -1111,8 +1113,8 @@ async def create_reward(
         "active": req.active,
         "store_id": req.store_id,
         "created_by": current_user.get("user_id", "unknown"),
-        "created_at": datetime.now().isoformat(),
-        "updated_at": datetime.now().isoformat(),
+        "created_at": utc_now_iso(),
+        "updated_at": utc_now_iso(),
     }
     db.get_collection("loyalty_rewards").insert_one(doc)
     _audit("loyalty.reward.create", current_user, {"name": req.name, "type": req.type}, reward_id)
@@ -1155,7 +1157,7 @@ async def update_reward(
     if not updates:
         doc.pop("_id", None)
         return doc
-    updates["updated_at"] = datetime.now().isoformat()
+    updates["updated_at"] = utc_now_iso()
     db.get_collection("loyalty_rewards").update_one({"reward_id": reward_id}, {"$set": updates})
     _audit("loyalty.reward.update", current_user, {"fields": list(updates.keys())}, reward_id)
     fresh = db.get_collection("loyalty_rewards").find_one({"reward_id": reward_id})
