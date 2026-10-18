@@ -58,6 +58,7 @@ interface VendorReturn {
   total_value?: number | null;
   receipt_rejection?: boolean;
   debit_note_draft_status?: string;
+  issued_debit_note_id?: string;
   credit_note_number?: string | null;
   credit_note_amount?: number | null;
   created_at: string;
@@ -175,6 +176,7 @@ export function VendorReturns() {
   const [expandedReturn, setExpandedReturn] = useState<string | null>(linkedReturnId);
   const [draftChoices, setDraftChoices] = useState<Record<string, 'credit_note' | 'replacement' | ''>>({});
   const [confirmingDraft, setConfirmingDraft] = useState<string | null>(null);
+  const [reopeningDraft, setReopeningDraft] = useState<string | null>(null);
   // F20: issued GST debit notes keyed by source return_id (one per return). The
   // physical return is unchanged; this is the formal debiting document layer.
   const [debitNotes, setDebitNotes] = useState<Record<string, DebitNote>>({});
@@ -316,9 +318,22 @@ export function VendorReturns() {
       const resp = await api.patch(`/vendor-returns/${returnId}/status`, { status: newStatus });
       const updated: VendorReturn = shownReturn(resp.data.return);
       setReturns(prev => prev.map(r => r.return_id === returnId ? updated : r));
+      if (newStatus === 'draft') {
+        setActiveTab('active');
+        setExpandedReturn(returnId);
+      }
       toast.success(`Status updated to ${STATUS_LABELS[newStatus] || newStatus}`);
     } catch (e) {
       toast.error(errMsg(e, 'Failed to update return status'));
+    }
+  };
+
+  const handleReopenDraft = async (returnId: string) => {
+    setReopeningDraft(returnId);
+    try {
+      await handleUpdateStatus(returnId, 'draft');
+    } finally {
+      setReopeningDraft(null);
     }
   };
 
@@ -552,6 +567,20 @@ export function VendorReturns() {
               {/* Expanded Details */}
               {expandedReturn === ret.return_id && (
                 <div className="border-t border-gray-200 px-6 py-4 bg-gray-50 space-y-4">
+                  {ret.receipt_rejection && ret.status === 'cancelled' && (
+                    <div className="rounded border border-amber-200 bg-amber-50 p-3 space-y-2">
+                      <p className="text-sm text-amber-800">Rejected pieces remain in quarantine.</p>
+                      {canMoveGoods && !debitNotes[ret.return_id] && !ret.issued_debit_note_id && ret.debit_note_draft_status !== 'ISSUED' && (
+                        <button
+                          onClick={() => handleReopenDraft(ret.return_id)}
+                          disabled={reopeningDraft === ret.return_id}
+                          className="bg-gray-900 text-white rounded px-3 py-2 text-sm disabled:opacity-50"
+                        >
+                          {reopeningDraft === ret.return_id ? 'Reopening...' : 'Reopen draft'}
+                        </button>
+                      )}
+                    </div>
+                  )}
                   {ret.status === 'draft' && (
                     <div className="rounded border border-amber-200 bg-amber-50 p-3 space-y-2">
                       <p className="text-sm text-amber-800">Draft — Accounts review. No debit note has been issued.</p>
@@ -610,7 +639,7 @@ export function VendorReturns() {
                             <p className="text-gray-600 font-medium">
                               {rupees(item.unit_price == null ? null : item.quantity * item.unit_price)}
                             </p>
-                            <p className="text-gray-500 text-xs">{RETURN_REASONS.find(r => r.value === item.reason)?.label}</p>
+                            <p className="text-gray-500 text-xs">{RETURN_REASONS.find(r => r.value === item.reason)?.label || item.reason}</p>
                           </div>
                         </div>
                       ))}
@@ -683,6 +712,8 @@ export function VendorReturns() {
                             )}
                           </>
                           )
+                        ) : ret.receipt_rejection && ret.status === 'cancelled' ? (
+                          <p className="text-gray-500 text-xs">Reopen and confirm the return before issuing a debit note</p>
                         ) : ret.status === 'draft' ? (
                           <p className="text-gray-500 text-xs">Confirm the return before issuing a debit note</p>
                         ) : canSeePayables ? (

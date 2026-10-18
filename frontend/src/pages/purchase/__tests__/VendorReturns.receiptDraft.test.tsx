@@ -82,4 +82,34 @@ describe('receipt rejection draft handoff', () => {
     expect(api.get).toHaveBeenCalledWith('/vendor-returns/VR-DRAFT');
     expect(screen.getByText('Draft — Accounts review. No debit note has been issued.')).toBeInTheDocument();
   });
+
+  it('reopens cancelled rejected custody on the same return and requires fresh confirmation', async () => {
+    const cancelled = { ...draft, status: 'cancelled', return_type: 'replacement', debit_note_draft_status: 'CANCELLED' };
+    api.get.mockImplementation((url: string) => Promise.resolve({ data: url === '/vendor-returns/' ? { returns: [cancelled] } : { vendors: [] } }));
+    api.patch.mockResolvedValue({ data: { return: { ...cancelled, status: 'draft', debit_note_draft_status: 'DRAFT' } } });
+    open(true);
+    fireEvent.click(await screen.findByRole('button', { name: 'Reopen draft' }));
+    await waitFor(() => expect(api.patch).toHaveBeenCalledWith('/vendor-returns/VR-DRAFT/status', { status: 'draft' }));
+    await screen.findByRole('button', { name: 'Confirm return' });
+    expect(screen.getByLabelText('Return type')).toHaveValue('replacement');
+    expect(api.patch).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('button', { name: 'Issue Debit Note' })).toBeNull();
+  });
+
+  it.each([
+    { receipt_rejection: false },
+    { issued_debit_note_id: 'DN1', debit_note_draft_status: 'ISSUED' },
+  ])('does not reopen ordinary or already-issued cancelled returns: %j', async (extra) => {
+    const cancelled = { ...draft, status: 'cancelled', ...extra };
+    api.get.mockImplementation((url: string) => Promise.resolve({ data: url === '/vendor-returns/' ? { returns: [cancelled] } : { vendors: [] } }));
+    open(true);
+    await screen.findByText('Items');
+    expect(screen.queryByRole('button', { name: 'Reopen draft' })).toBeNull();
+  });
+
+  it('shows the receiver free-text rejection reason on the draft', async () => {
+    api.get.mockImplementation((url: string) => Promise.resolve({ data: url === '/vendor-returns/' ? { returns: [{ ...draft, items: [{ ...draft.items[0], reason: 'Damaged packaging and scratched lens' }] }] } : { vendors: [] } }));
+    open(true);
+    expect(await screen.findByText('Damaged packaging and scratched lens')).toBeInTheDocument();
+  });
 });
