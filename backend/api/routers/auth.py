@@ -482,9 +482,11 @@ def _mint_access_token(token_data: dict) -> Tuple[str, int]:
 # /refresh path already re-checked the live record (_resolve_refresh_claims
 # raises 403 for a disabled account); the per-request path did not.
 #
-# PERFORMANCE: get_current_user runs on EVERY authenticated request and did no
-# database work at all, so an unconditional find_one would add a Mongo
-# round-trip to the entire API surface. Two things keep this cheap:
+# This status helper predates the current-authority check below. Its ALLOW
+# cache still avoids a separate status read on most requests; current_authority
+# additionally performs one projected authority read per request, shared by the
+# middleware and route dependencies, to apply role/shop edits immediately.
+# Two things limit the extra cost of this older status helper:
 #   1. The ALLOW verdict is memoised in the shared cache (api.services.cache -
 #      Redis in prod, so all four uvicorn workers share it; in-memory in dev)
 #      for _USER_STATUS_TTL_SECONDS. Steady-state cost is one Redis GET, next
@@ -494,14 +496,14 @@ def _mint_access_token(token_data: dict) -> Tuple[str, int]:
 # lock out a legitimate user, and a rejected caller costs nothing worth saving.
 # users.py drops the cached ALLOW entry whenever an account is deactivated.
 #
-# THE GUARANTEED BOUND IS THE TTL, NOT "the next request". Usually the
+# THIS HELPER ALONE HAS A TTL BOUND, NOT "the next request". Usually the
 # invalidation makes it land on the very next request, but there is a
 # write-after-delete race: a request already in flight can read is_active=True,
 # have the admin's DELETE + cache.delete land, and only THEN execute its own
 # cache.set -- re-arming a stale ALLOW for a full TTL. So the honest promise to
-# an owner handling a sacking is "gone within _USER_STATUS_TTL_SECONDS", which
-# is still a 45x improvement on the 45-minute token lifetime this replaces. Do
-# not let this comment drift back into promising more than the code delivers.
+# this helper alone cannot guarantee next-request revocation. The subsequent
+# current_authority read also checks is_active and rejects a disabled account
+# despite a cached ALLOW, when the live record is available.
 #
 # FAILURE MODE (deliberate): #726's convention is that the app fails LOUD when
 # Mongo is unreachable - and it still does, at the routes that actually need
@@ -587,8 +589,45 @@ def _account_is_disabled(payload: dict) -> bool:
     return False
 
 
+def current_authority(payload: dict, request: Request = None) -> dict:
+    """Re-evaluate role/shop claims against the current account, once per request.
+
+    Access-token identity and lifetime stay unchanged. Authority is never cached
+    across requests: a role/shop edit must apply to the next protected action.
+    As with the existing live-account/refresh checks, unavailable or absent user
+    records retain the signed claims; changing that outage policy is separate.
+    """
+    user_id = payload.get("user_id")
+    if not user_id:
+        return payload
+    cached = getattr(request.state, "_current_authority", None) if request else None
+    if cached is not None and cached[0] == user_id:
+        return {**payload, **cached[1]}
+
+    from ..dependencies import get_user_repository
+
+    try:
+        repo = get_user_repository()
+        record = None if repo is None else repo.collection.find_one(
+            {"user_id": user_id},
+            {"roles": 1, "store_ids": 1, "is_active": 1,
+             "module_access": 1, "must_change_password": 1},
+        )
+    except Exception as exc:  # noqa: BLE001 - preserve the existing outage policy
+        logger.warning("Live authority check unavailable: %s", exc)
+        record = None
+
+    if record is not None and record.get("is_active", True) is False:
+        raise HTTPException(status_code=401, detail="Account is disabled")
+    claims = _resolve_refresh_claims(payload, record) if record is not None else {}
+    if request is not None:
+        request.state._current_authority = (user_id, claims)
+    return {**payload, **claims}
+
+
 async def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    request: Request = None,
 ) -> dict:
     """Get current user from JWT token (and confirm the account is still live)"""
     try:
@@ -628,7 +667,7 @@ async def get_current_user(
                 detail="Account is disabled",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        return payload
+        return current_authority(payload, request)
     except HTTPException:
         # Re-raise HTTPException as-is
         raise
@@ -1319,7 +1358,7 @@ def _resolve_refresh_claims(payload: dict, db_user: Optional[dict]) -> dict:
         if not db_user.get("is_active", True):
             raise HTTPException(status_code=403, detail="Account is disabled")
         roles = db_user.get("roles", payload.get("roles", []))
-        store_ids = db_user.get("store_ids", payload.get("store_ids", []))
+        store_ids = db_user.get("store_ids", payload.get("store_ids", [])) or []
         module_access = db_user.get("module_access") or {}
         must_change = bool(db_user.get("must_change_password", False))
     else:

@@ -422,17 +422,16 @@ def test_deny_verdict_is_not_cached_so_reactivation_takes_effect(monkeypatch):
     assert c.get("/probe", headers=_headers("sacked-1")).status_code == 200
 
 
-def test_allow_verdict_is_memoised_and_invalidation_takes_effect(monkeypatch):
-    """Performance contract: the ALLOW verdict costs ONE lookup, not one per
-    request -- and users.py's invalidation hook makes a deactivation land on the
-    very next request rather than after the TTL."""
+def test_account_allow_is_memoised_but_authority_is_fresh(monkeypatch):
+    """The account-status cache remains, but A06 reads current authority on
+    each request so a role or shop revocation never waits for the cache TTL."""
     repo = _FakeUserRepo(seed=[{"user_id": "live-1", "is_active": True}])
     c = _auth_probe_client(repo, monkeypatch)
     assert c.get("/probe", headers=_headers("live-1")).status_code == 200
     lookups_after_first = repo.collection.calls
-    assert lookups_after_first == 1
+    assert lookups_after_first == 2  # account status plus current authority
     assert c.get("/probe", headers=_headers("live-1")).status_code == 200
-    assert repo.collection.calls == lookups_after_first  # served from cache
+    assert repo.collection.calls == lookups_after_first + 1  # authority refreshed
 
     repo.set_active("live-1", False)
     auth_router.invalidate_user_status("live-1")
