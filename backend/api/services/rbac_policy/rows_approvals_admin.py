@@ -445,16 +445,6 @@ ROWS: List[Dict[str, object]] = [
         "allowed": ["ADMIN", "SUPERADMIN"],
     },
     {
-        "method": "POST",
-        "path": "/api/v1/admin/products/bulk-import",
-        "allowed": ["ADMIN", "SUPERADMIN"],
-    },
-    {
-        "method": "GET",
-        "path": "/api/v1/admin/products/bulk-import/{job_id}/file",
-        "allowed": ["ADMIN", "SUPERADMIN"],
-    },
-    {
         "method": "GET",
         "path": "/api/v1/admin/products/{product_id}",
         "allowed": ["ADMIN", "SUPERADMIN"],

@@ -3,7 +3,7 @@
 // ============================================================================
 // The old InventoryPage `activeTab === 'catalog'` block on its own URL: the
 // per-store product ledger with search / availability / cataloguer / category
-// filters, CSV export + bulk CSV import, the barcode modal, the read-only
+// filters, CSV export, the barcode modal, the read-only
 // detail drawer and the image lightbox. Data comes from inventoryQueries so
 // the layout's stat strip and this table share one cache entry.
 //
@@ -15,16 +15,13 @@ import { useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Barcode,
-  CheckCircle,
   Download,
   Eye,
-  FileText,
   Globe,
   Loader2,
   Package,
   Plus,
   Search,
-  Upload,
   X,
 } from 'lucide-react';
 import clsx from 'clsx';
@@ -33,10 +30,6 @@ import { sameCategory } from '../../utils/categoryNormalize';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { useQueryClient } from '@tanstack/react-query';
-// Product writes go through the SINGLE validated path (productApi -> /products).
-// Imported DIRECTLY from the module (not the api barrel) to dodge the TS2614
-// re-export resolution issue documented in CLAUDE.md.
-import { productApi, type CreateProductPayload } from '../../services/api/products';
 import type { DisplayFixture, } from '../../services/api/displayFixtures';
 import type { DisplayPlacement } from '../../services/api/displayPlacements';
 import { BarcodeManagementModal } from '../../components/inventory/BarcodeManagementModal';
@@ -89,14 +82,6 @@ export function InventoryStockPage() {
   const [detailItem, setDetailItem] = useState<StockItem | null>(null);
   // F27: the product whose units (each with its own barcode + label) are open.
   const [unitsFor, setUnitsFor] = useState<StockItem | null>(null);
-
-  // CSV Import state. csvRows = ALL parsed rows (sent to the validated
-  // bulk-create endpoint); csvPreview = first 10, for the preview table only.
-  const [showCSVImport, setShowCSVImport] = useState(false);
-  const [csvFile, setCsvFile] = useState<File | null>(null);
-  const [csvRows, setCsvRows] = useState<Array<Record<string, string>>>([]);
-  const [csvPreview, setCsvPreview] = useState<Array<Record<string, string>>>([]);
-  const [isImporting, setIsImporting] = useState(false);
 
   // Role-based permissions (each list is used only by this page now).
   const canAddProduct = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']);
@@ -256,69 +241,6 @@ export function InventoryStockPage() {
     toast.success(`Exported ${rows.length} row${rows.length === 1 ? '' : 's'} to CSV`);
   };
 
-  // Handle CSV import through the SINGLE validated path
-  // (`POST /products/bulk-create`) - per-row results, invalid rows reported.
-  const handleImportProducts = async () => {
-    if (!csvFile || csvRows.length === 0) {
-      toast.error('Please select a CSV file first');
-      return;
-    }
-
-    const num = (v: string | undefined): number | undefined => {
-      if (v === undefined || String(v).trim() === '') return undefined;
-      const n = Number(String(v).replace(/[^0-9.-]/g, ''));
-      return Number.isFinite(n) ? n : undefined;
-    };
-    const products: CreateProductPayload[] = csvRows.map((row) => {
-      const mrp = num(row.mrp) ?? 0;
-      const offer = num(row.offer_price);
-      return {
-        category: (row.category || '').trim(),
-        sku: (row.sku || '').trim(),
-        brand: (row.brand || '').trim(),
-        model: (row.model || row.name || '').trim(),
-        attributes: {},
-        mrp,
-        // Backend ProductCreate requires offer_price > 0; default to MRP when
-        // the CSV omits it (i.e. sell at MRP, no discount).
-        offer_price: offer && offer > 0 ? offer : mrp,
-        ...(row.hsn_code && row.hsn_code.trim() ? { hsn_code: row.hsn_code.trim() } : {}),
-        ...(row.description && row.description.trim() ? { description: row.description.trim() } : {}),
-      };
-    });
-
-    setIsImporting(true);
-    try {
-      const result = await productApi.bulkCreateProducts(products);
-      const created = result?.summary?.created ?? 0;
-      const failed = result?.summary?.failed ?? 0;
-      if (created > 0) {
-        toast.success(`Imported ${created} product${created === 1 ? '' : 's'}${failed ? ` (${failed} skipped)` : ''}`);
-      }
-      if (failed > 0) {
-        const firstErr = result.results.find(r => !r.ok);
-        const reason = firstErr?.errors?.[0] ? `: ${firstErr.errors[0]}` : '';
-        toast.error(`${failed} row${failed === 1 ? '' : 's'} skipped${reason}`);
-      }
-      if (created === 0 && failed === 0) {
-        toast.error('No products were imported. Check the CSV format and try again.');
-      }
-      if (created > 0) {
-        setShowCSVImport(false);
-        setCsvFile(null);
-        setCsvPreview([]);
-        setCsvRows([]);
-        await reloadInventory();
-      }
-    } catch (err: unknown) {
-      // An ApiError's message is the server's reason (it has no .response).
-      const msg = (err as Error)?.message || 'Import failed. Check CSV format and try again.';
-      toast.error(msg);
-    } finally {
-      setIsImporting(false);
-    }
-  };
-
   const openBarcodeModal = (item: StockItem) => {
     setSelectedProduct(item);
     setShowBarcodeModal(true);
@@ -353,7 +275,7 @@ export function InventoryStockPage() {
           </div>
           {/* Ledger actions (were in the page header before the split - they
               act on THIS table, so they live next to it now). Hidden on an
-              ONLINE store: it owns no ledger to export or import into. */}
+              ONLINE store: it owns no ledger to export. */}
           {!isOnlineStoreView && (
             <div className="flex gap-2 shrink-0">
               {canExport && (
@@ -361,11 +283,7 @@ export function InventoryStockPage() {
                   <Download className="w-4 h-4" /> Export
                 </button>
               )}
-              {canAddProduct && (
-                <button onClick={() => setShowCSVImport(true)} className="btn sm">
-                  <Upload className="w-4 h-4" /> CSV import
-                </button>
-              )}
+
             </div>
           )}
         </div>
@@ -848,140 +766,6 @@ export function InventoryStockPage() {
           </div>
         );
       })()}
-
-      {/* CSV Import Modal */}
-      {showCSVImport && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
-          <div className="bg-white border border-gray-200 rounded-xl w-full max-w-2xl max-h-[80dvh] overflow-hidden flex flex-col">
-            <div className="flex items-center justify-between p-5 border-b border-gray-200">
-              <div className="flex items-center gap-3">
-                <Upload className="w-5 h-5 text-blue-600" />
-                <div>
-                  <h2 className="text-lg font-semibold text-gray-900">Bulk CSV Product Import</h2>
-                  <p className="text-sm text-gray-500">Upload a CSV file with product data</p>
-                </div>
-              </div>
-              <button onClick={() => { setShowCSVImport(false); setCsvFile(null); setCsvPreview([]); setCsvRows([]); }} className="text-gray-500 hover:text-gray-900" aria-label="Close" title="Close">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="p-5 space-y-4 overflow-y-auto flex-1">
-              {/* Template Download */}
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-                <div className="flex items-start gap-3">
-                  <FileText className="w-5 h-5 text-blue-600 mt-0.5" />
-                  <div>
-                    <p className="text-sm text-blue-700 font-medium">CSV Format Required</p>
-                    <p className="text-xs text-blue-600 mt-1">
-                      Columns: name, sku, category, brand, mrp, offer_price, hsn_code, opening_stock
-                    </p>
-                    <button
-                      onClick={() => {
-                        const template = 'name,sku,category,brand,mrp,offer_price,hsn_code,opening_stock\nRay-Ban Aviator Classic,FR-RAYB-3025-GLD,FRAMES,Ray-Ban,12990,12990,900311,5\nEssilor Crizal Alize 1.67,RX-ESSL-CRZL-167,RX_LENSES,Essilor,8500,7200,900150,10';
-                        const blob = new Blob([template], { type: 'text/csv' });
-                        const url = URL.createObjectURL(blob);
-                        const a = document.createElement('a'); a.href = url; a.download = 'product_import_template.csv'; a.click();
-                        URL.revokeObjectURL(url);
-                      }}
-                      className="text-xs text-blue-600 underline mt-2 inline-block hover:text-blue-800"
-                    >
-                      Download template CSV
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              {/* File Upload */}
-              <div className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-gray-400 transition-colors">
-                <input
-                  type="file"
-                  accept=".csv,.tsv"
-                  className="hidden"
-                  id="csv-upload"
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (!file) return;
-                    setCsvFile(file);
-                    const reader = new FileReader();
-                    reader.onload = (ev) => {
-                      const text = ev.target?.result as string;
-                      const lines = text.split('\n').filter(l => l.trim());
-                      if (lines.length < 2) { toast.error('CSV file is empty or has no data rows'); return; }
-                      const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
-                      const rows = lines.slice(1).map(line => {
-                        const values = line.split(',');
-                        const row: Record<string, string> = {};
-                        headers.forEach((h, i) => { row[h] = values[i]?.trim() || ''; });
-                        return row;
-                      });
-                      setCsvRows(rows);                 // ALL rows -> bulk-create
-                      setCsvPreview(rows.slice(0, 10)); // Preview first 10
-                      toast.success(`Parsed ${rows.length} product${rows.length === 1 ? '' : 's'} from CSV`);
-                    };
-                    reader.readAsText(file);
-                  }}
-                />
-                <label htmlFor="csv-upload" className="cursor-pointer">
-                  <Upload className="w-8 h-8 text-gray-500 mx-auto mb-2" />
-                  <p className="text-sm text-gray-600">{csvFile ? csvFile.name : 'Click to select CSV file'}</p>
-                  <p className="text-xs text-gray-500 mt-1">Supports .csv and .tsv files</p>
-                </label>
-              </div>
-
-              {/* Preview Table */}
-              {csvPreview.length > 0 && (
-                <div>
-                  <h3 className="text-sm font-medium text-gray-700 mb-2">Preview ({csvPreview.length} rows shown)</h3>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-xs">
-                      <thead className="bg-gray-50 text-gray-500">
-                        <tr>
-                          {Object.keys(csvPreview[0]).map(h => (
-                            <th key={h} className="px-2 py-2 text-left">{h}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-200">
-                        {csvPreview.map((row, i) => (
-                          <tr key={i} className="text-gray-700">
-                            {Object.values(row).map((v, j) => (
-                              <td key={j} className="px-2 py-1.5 truncate max-w-[120px]">{v}</td>
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <div className="p-5 border-t border-gray-200 flex justify-between items-center">
-              <p className="text-xs text-gray-500">
-                {csvFile ? `${csvRows.length} product${csvRows.length === 1 ? '' : 's'} ready to import` : 'Select a CSV file to begin'}
-              </p>
-              <div className="flex gap-2">
-                <button onClick={() => { setShowCSVImport(false); setCsvFile(null); setCsvPreview([]); setCsvRows([]); }} className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm hover:bg-gray-200">
-                  Cancel
-                </button>
-                <button
-                  onClick={handleImportProducts}
-                  disabled={!csvFile || isImporting}
-                  className="px-6 py-2 bg-bv-red-600 text-white rounded-lg text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 hover:bg-bv-red-700 transition-colors"
-                >
-                  {isImporting ? (
-                    <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                  ) : (
-                    <CheckCircle className="w-4 h-4" />
-                  )}
-                  {isImporting ? 'Importing...' : 'Import Products'}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Full-size product image viewer (owner 2026-07-05) */}
       {lightbox && (

@@ -602,20 +602,6 @@ def test_form_door_response_surfaces_FAILED_SKU_CONFLICT(router_world):
     assert targets["catalog_draft"]["status"] == "FAILED_SKU_CONFLICT", targets
 
 
-def test_bulk_door_row_surfaces_FAILED_SKU_CONFLICT(router_world):
-    """Same for each BULK row: ok:true is not the whole truth."""
-    import asyncio
-
-    from api.routers.products import BulkCreateRequest, bulk_create_products
-
-    body = BulkCreateRequest(products=[_form_payload()])
-    res = asyncio.run(bulk_create_products(body, _ADMIN))
-
-    row = res["results"][0]
-    assert row["ok"] is True and row["sku"]  # contract UNCHANGED
-    targets = (row.get("sync_status") or {}).get("targets") or {}
-    assert targets, "the BULK row tells the cataloguer nothing about the mirror"
-    assert targets["catalog_draft"]["status"] == "FAILED_SKU_CONFLICT", targets
 
 
 # ===========================================================================

@@ -423,14 +423,6 @@ def test_f13_different_products_never_share_a_readable_sku():
     assert sku(colour_code="901", size="58") == "SG-RAYBAN-RB2140-901-58"
     assert sku(colour_code="1109-71") == "SG-RAYBAN-RB2140-1109/71"
     assert sku(colour_code="110971") == "SG-RAYBAN-RB2140-110971"
-    seen: set = set()
-    for colour, size in (("901/58", None), ("901", "58"), ("1109-71", None), ("110971", None)):
-        row = prod_router.ProductCreate(category="SUNGLASS", brand="Ray-Ban", model="RB2140",
-                                        color=colour, size=size, mrp=5000.0, offer_price=4500.0)
-        errors, resolved = prod_router._validate_bulk_row(row, seen)
-        assert errors == [], (colour, size, errors)
-        seen.add(resolved)
-    assert len(seen) == 4
 
 
 def test_f13_preview_endpoint_shows_the_readable_sku():
@@ -824,19 +816,6 @@ def test_f13_catalog_door_mints_the_same_sku(client, auth_headers):
     assert not hasattr(cat, "generate_sku")
 
 
-def test_f13_catalog_import_mints_the_same_sku(client, auth_headers):
-    """POST /catalog/products/import (the API-only bulk twin) mints through
-    the same minter too -- never a formula of its own."""
-    cat.CATALOG_PRODUCTS.clear()
-    resp = client.post(
-        "/api/v1/catalog/products/import",
-        json=[{"category": "FR", "attributes": dict(_CARRERA, colour_code="809"),
-               "pricing": {"mrp": 9000, "discount_category": "PREMIUM"}}],
-        headers=auth_headers,
-    )
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["created_count"] == 1, resp.json()
-    assert "FR-CARRERA-CA8895-809-54" in [p.get("sku") for p in cat._all_catalog_products()]
 
 
 def test_f13_guard_existing_sku_never_changes_on_edit():
@@ -1344,20 +1323,6 @@ def test_c_catalog_create_refuses_a_power_that_is_not_a_number(client, auth_head
     assert resp.json()["detail"] == "Missing required field: power"
 
 
-def test_c_catalog_import_says_power_is_not_a_number(client, auth_headers):
-    cat.CATALOG_PRODUCTS.clear()
-    resp = client.post(
-        "/api/v1/catalog/products/import",
-        json=[{"category": "CL", "attributes": dict(_CAT_CL, power="abc"),
-               "pricing": {"mrp": 900, "discount_category": "MASS"}},
-              {"category": "CL", "attributes": dict(_CAT_CL),
-               "pricing": {"mrp": 900, "discount_category": "MASS"}}],
-        headers=auth_headers,
-    )
-    assert resp.status_code == 200, resp.text
-    errors = {e["index"]: e["error"] for e in resp.json()["errors"]}
-    assert "power is not a number" in errors[0] and "Missing" not in errors[0]
-    assert errors[1] == "Missing required field: power"
 
 
 # ---------------------------------------------------------------------------
@@ -1516,25 +1481,14 @@ def test_d_the_edit_form_saves_a_price_on_a_lens_with_an_old_bad_value(door, bad
     ("SMTWT", "Apple", "Series 9", "SMTWT-APPLE-SERIES9", "Apple Series 9 Smartwatch", "model_name"),
     ("LS", "Essilor", "Crizal", "LS-ESSILOR-CRIZAL", "Essilor Crizal Lenses", "subbrand"),
 ])
-def test_e_a_price_list_model_lands_in_the_field_the_form_shows(
-        door, monkeypatch, category, brand, model, sku, name, field):
-    """The vendor price-list import (POST /catalog-import/commit) puts the
-    Model column in attributes.model_no. A category with no Model No field
-    stores it where its form shows the model, never as a hidden copy, so the
-    SKU, the model column, the name and the duplicate key all read it, and the
-    same row committed twice is a duplicate, never a numbered twin."""
-    from api.routers import catalog_import as cir
-    from api.services import catalog_import as ci
-
-    monkeypatch.setattr(cir, "_get_db", lambda: door.db)
-    monkeypatch.setattr(cir, "get_product_repository", lambda: door.repo)
-    row = {"brand": brand, "model": model, "category": category, "mrp": "900"}
-    payload = ci.map_row_to_product(row, ci.guess_column_map(list(row)))
-    assert payload["attributes"]["model_no"] == model  # what the import sends
-    commit = cir.ImportCommitRow(action="CREATE", payload=payload)
-    out = _run(cir.commit_import(cir.ImportCommitRequest(vendor_id="V1", rows=[commit, commit]), _ADMIN))
-    assert out["created"] == 1 and "already exists" in out["errors"][0]["error"], out
-    p = door.repo.find_by_id(out["created_products"][0]["product_id"])
+def test_e_a_draft_model_lands_in_the_field_the_form_shows(
+        door, category, brand, model, sku, name, field):
+    """A sparse draft model is normalized to the category's visible field.
+    This rule still matters for manual drafts and previously imported rows."""
+    payload = {"category": category, "mrp": 900, "offer_price": 900,
+               "attributes": {"brand_name": brand, "model_no": model}, "as_draft": True}
+    p = pm.create_via_door(payload, source="FORM", actor="admin", force_draft=True,
+                          product_repo=door.repo, db=door.db)
     assert (p["sku"], p["model"], p["name"]) == (sku, model, name)
     assert p["identity_key"] == pm.compute_identity_key(brand, model)
     assert p["attributes"][field] == model

@@ -3262,34 +3262,8 @@ def create_product(
         )
         return spine
 
-    # --- Hub Phase 1: duplicate HARD-BLOCK (409 + show-existing) ---
-    # The DB unique indexes are the race-safe backstop (handled at the create
-    # below). Pre-check first so the common case returns the existing row for
-    # the FE to link to.
-    conflict = identity_conflict(spine, product_repo)
-    if conflict is not None:
-        raise conflict
-    # The manufacturer's code must be unique at create as well as on edit.
-    assert_gtin_free((spine.get("attributes") or {}).get("gtin"), product_repo, None)
-
     # --- STEP 1: spine FIRST + alone (single-document atomic create) ---
-    # raise_on_duplicate=True so a race lost to the unique index surfaces as a
-    # clean 409 (re-querying the winner) instead of a swallowed None -> 500.
-    try:
-        created = product_repo.create(spine, raise_on_duplicate=True)
-    except Exception as exc:  # noqa: BLE001
-        if exc.__class__.__name__ == "DuplicateKeyError":
-            winner = product_repo.find_by_sku(spine["sku"])
-            if (
-                winner is None
-                and spine.get("identity_key")
-                and hasattr(product_repo, "find_by_identity_key")
-            ):
-                winner = product_repo.find_by_identity_key(spine["identity_key"])
-            raise _duplicate_error(winner or {"sku": spine.get("sku")}) from exc
-        raise
-    if not created:
-        raise ProductMasterError("Failed to create product.", status=500)
+    created = persist_new_spine(spine, product_repo)
     product_id = created.get("product_id")
 
     # --- STEP 2: gated, best-effort mirror (never corrupts the spine) ---
@@ -3343,6 +3317,36 @@ def create_product(
         except Exception as exc:  # noqa: BLE001
             logger.warning("[PM] audit write failed for %s: %s", product_id, exc)
 
+    return created
+
+
+def persist_new_spine(spine: Dict[str, Any], product_repo) -> Dict[str, Any]:
+    """Persist a validated product with the shared identity and GTIN guards.
+
+    Catalogue has its own twin shape and preassigned id, but its billing
+    identity must obey the same create rule. A concurrent duplicate is a
+    refusal naming the winner, never permission to save an orphan twin.
+    Callers must build/validate the spine before entering this write gate.
+    """
+    conflict = identity_conflict(spine, product_repo)
+    if conflict is not None:
+        raise conflict
+    assert_gtin_free((spine.get("attributes") or {}).get("gtin"), product_repo, None)
+    try:
+        created = product_repo.create(spine, raise_on_duplicate=True)
+    except Exception as exc:  # noqa: BLE001
+        if exc.__class__.__name__ == "DuplicateKeyError":
+            winner = product_repo.find_by_sku(spine["sku"])
+            if (
+                winner is None
+                and spine.get("identity_key")
+                and hasattr(product_repo, "find_by_identity_key")
+            ):
+                winner = product_repo.find_by_identity_key(spine["identity_key"])
+            raise _duplicate_error(winner or {"sku": spine.get("sku")}) from exc
+        raise
+    if not created:
+        raise ProductMasterError("Failed to create product.", status=500)
     return created
 
 
