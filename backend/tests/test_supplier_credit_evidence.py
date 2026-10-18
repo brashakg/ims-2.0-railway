@@ -1,5 +1,4 @@
 """Supplier confirmation preview proves original evidence, never master tax."""
-from copy import deepcopy
 from unittest.mock import Mock
 
 import pytest
@@ -11,10 +10,16 @@ from api.services.supplier_credit_evidence import (
 from test_return_provenance import bill, db, line, receipt, returned, selection, unit  # noqa: F401
 
 
+@pytest.fixture(autouse=True)
+def _isolate_db():
+    """Use only each test's in-memory database; no application lifespan."""
+    yield
+
+
 @pytest.fixture
 def ready(db):
     receipt(db)
-    bill(db, taxable_amount=400, cgst_total=10, sgst_total=10, igst_total=0)
+    bill(db, taxable_amount=400, tax_amount=20, cgst_total=10, sgst_total=10, igst_total=0)
     db.entities.insert_one({"entity_id": "E1", "gstins": [{"gstin": "20AAAAA0000A1Z5"}]})
     return returned(items=[{"product_id": "P1", "product_name": "Original frame", "quantity": 1, "unit_price": 80}])
 
@@ -48,6 +53,8 @@ def test_original_requested_value_and_original_caps_are_distinct(db, ready):
     ({"bill_number": ""}, "ORIGINAL_NUMBER_REQUIRED"),
     ({"cgst_total": 0}, "ORIGINAL_TAX_TOTAL_MISMATCH"),
     ({"sgst_total": None}, "ORIGINAL_TAX_TOTAL_REQUIRED"),
+    ({"tax_amount": 0}, "ORIGINAL_TAX_TOTAL_MISMATCH"),
+    ({"tax_amount": None}, "ORIGINAL_TAX_TOTAL_REQUIRED"),
 ])
 def test_original_claims_need_stamped_identity_and_matching_header(db, ready, patch, code):
     db.vendor_bills.update_one({"bill_id": "B1"}, {"$set": patch})
@@ -108,7 +115,7 @@ def test_candidates_use_linked_origin_and_actual_unit_label(db, ready):
 
 def test_ambiguous_candidates_are_not_chosen_latest_and_selection_resolves(db, ready):
     receipt(db, "G2")
-    bill(db, "B2", gid="G2", cgst_total=10, sgst_total=10, igst_total=0)
+    bill(db, "B2", gid="G2", tax_amount=20, cgst_total=10, sgst_total=10, igst_total=0)
     result = credit_preview(db, ready)
     assert result["source_status"] == "PENDING_EVIDENCE"
     assert {c["bill_id"] for c in result["choices"][0]["candidates"]} == {"B1", "B2"}

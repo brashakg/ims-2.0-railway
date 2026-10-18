@@ -80,10 +80,14 @@ def _verify_original(db, origin):
             _pending("ORIGINAL_SUPPLIER_GSTIN_REQUIRED", "Claimed input tax needs the original bill's valid supplier GSTIN; current vendor data cannot replace it.")
         bill = db.get_collection("vendor_bills").find_one({"bill_id": origin["bill_id"]}) or {}
         try:
+            all_tax = 0
             for head in HEADS:
                 total = sum(paise(line.get(head)) for line in bill.get("lines") or [])
+                all_tax += total
                 if total != paise(bill.get(f"{head}_total")):
                     _pending("ORIGINAL_TAX_TOTAL_MISMATCH", "The original bill's item tax does not match its recorded input-tax total.")
+            if paise(bill.get("tax_amount")) != all_tax:
+                _pending("ORIGINAL_TAX_TOTAL_MISMATCH", "The original bill's total input tax does not match its recorded tax heads.")
         except SupplierCreditError as exc:
             raise ReturnProvenanceError("ORIGINAL_TAX_TOTAL_REQUIRED", "The original bill's input-tax totals need verified item evidence.") from exc
 
@@ -200,12 +204,16 @@ def credit_choices(db, return_doc, *, allowed_store_ids=None):
 def credit_preview(db, return_doc, *, selections=None, confirmation_id=None, allowed_store_ids=None):
     """Read-only form data; reservations and a fresh source check still gate POST."""
     rid = return_doc.get("return_id") or return_doc.get("rma_id")
-    events = list(db.get_collection(EVENTS).find({"return_id": rid}))
+    events = list(db.get_collection(EVENTS).find({"return_id": rid, "identity_claimed": {"$ne": False}}))
     confirmation = next((e for e in events if e["confirmation_id"] == confirmation_id), None)
     if confirmation_id and confirmation is None:
         raise SupplierCreditError("CONFIRMATION_NOT_FOUND", "This supplier confirmation was not found for the return.", 404)
     if selections is None and confirmation:
         selections = confirmation.get("source_selections") or []
+    if selections is None:
+        prior = next((e for e in events if e.get("posting_status") == "POSTED"), None)
+        if prior:
+            selections = prior.get("source_selections") or []
     posted = sum(e["received_paise"] for e in events if e.get("posting_status") == "POSTED")
     response = {"return_id": rid, "source_status": "RESOLVED", "pending_reasons": [], "sources": [],
                 "choices": credit_choices(db, return_doc, allowed_store_ids=allowed_store_ids),
