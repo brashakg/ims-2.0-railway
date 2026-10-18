@@ -110,7 +110,9 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string; scrollTo?: st
   { path: '/finance/expenses/settle' },
   { path: '/finance/expenses/summary' },
   { path: '/finance/dashboard' },
-  { path: '/finance/cash-flow' },
+  // The heading is present during loading. Wait for the actual dashboard so
+  // a quiet loading skeleton cannot be mistaken for a fixed layout.
+  { path: '/finance/cash-flow', ready: '[data-testid="payables-card"]' },
   { path: '/finance/itc' },
   { path: '/finance/gst-cross-check' },
   { path: '/finance/cash-register' },

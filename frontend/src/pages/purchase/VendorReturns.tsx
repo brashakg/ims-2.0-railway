@@ -53,9 +53,12 @@ interface VendorReturn {
   vendor_name: string;
   store_id: string;
   items: ReturnLine[];
-  return_type: 'credit_note' | 'replacement';
+  return_type: 'credit_note' | 'replacement' | null;
   status: string;
-  total_value?: number;
+  total_value?: number | null;
+  receipt_rejection?: boolean;
+  debit_note_draft_status?: string;
+  issued_debit_note_id?: string;
   credit_note_number?: string | null;
   credit_note_amount?: number | null;
   created_at: string;
@@ -86,6 +89,7 @@ const RETURN_REASONS = [
 // info blue, "received by vendor" as amber (awaiting credit), settled as green,
 // cancelled as red. Decorative cyan/purple/orange are consolidated away.
 const STATUS_COLORS: Record<string, string> = {
+  draft: 'bg-amber-50 text-amber-700',
   created: 'bg-blue-50 text-blue-700',
   approved: 'bg-blue-50 text-blue-700',
   shipped: 'bg-blue-50 text-blue-700',
@@ -96,6 +100,7 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 const STATUS_LABELS: Record<string, string> = {
+  draft: 'Draft',
   created: 'Created',
   approved: 'Approved',
   shipped: 'Shipped',
@@ -156,6 +161,7 @@ export function VendorReturns() {
   // rtv_vendor_id). Without reading it, the advertised one-click linkage was dead.
   const [searchParams] = useSearchParams();
   const linkedStockId = searchParams.get('stock_id');
+  const linkedReturnId = searchParams.get('return_id');
   // Workshop staff log a return (item, quantity, reason) and nothing more
   // (owner ruling 2026-10-12): moving it along -- approve, ship, received by
   // vendor -- is the purchase roles' (the server's _VENDOR_RETURN_ROLES), and
@@ -167,7 +173,10 @@ export function VendorReturns() {
   const [returns, setReturns] = useState<VendorReturn[]>([]);
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [showModal, setShowModal] = useState(false);
-  const [expandedReturn, setExpandedReturn] = useState<string | null>(null);
+  const [expandedReturn, setExpandedReturn] = useState<string | null>(linkedReturnId);
+  const [draftChoices, setDraftChoices] = useState<Record<string, 'credit_note' | 'replacement' | ''>>({});
+  const [confirmingDraft, setConfirmingDraft] = useState<string | null>(null);
+  const [reopeningDraft, setReopeningDraft] = useState<string | null>(null);
   // F20: issued GST debit notes keyed by source return_id (one per return). The
   // physical return is unchanged; this is the formal debiting document layer.
   const [debitNotes, setDebitNotes] = useState<Record<string, DebitNote>>({});
@@ -197,7 +206,19 @@ export function VendorReturns() {
           api.get('/vendors/', { params: { limit: 100 } }),
         ]);
 
-        setReturns((returnsResp.data.returns || []).map(shownReturn));
+        const loaded: VendorReturn[] = (returnsResp.data.returns || []).map(shownReturn);
+        if (linkedReturnId && !loaded.some((r) => r.return_id === linkedReturnId)) {
+          const linked = await api.get(`/vendor-returns/${encodeURIComponent(linkedReturnId)}`);
+          const ret: VendorReturn = shownReturn(linked.data);
+          if (showShopOf(ret.store_id)) return;
+          loaded.unshift(ret);
+        }
+        setReturns(loaded);
+        if (linkedReturnId) {
+          setExpandedReturn(linkedReturnId);
+          const linked = loaded.find((r) => r.return_id === linkedReturnId);
+          if (linked) setActiveTab(SETTLED.includes(linked.status) ? 'history' : 'active');
+        }
         setVendors(vendorsResp.data.vendors || vendorsResp.data.items || []);
 
         // F20: map any already-issued debit notes to their source return so the
@@ -223,7 +244,7 @@ export function VendorReturns() {
     };
 
     loadData();
-  }, [listScope]);
+  }, [listScope, linkedReturnId]);
 
   const handleAddItem = () => {
     setItems([...items, newLine()]);
@@ -297,9 +318,43 @@ export function VendorReturns() {
       const resp = await api.patch(`/vendor-returns/${returnId}/status`, { status: newStatus });
       const updated: VendorReturn = shownReturn(resp.data.return);
       setReturns(prev => prev.map(r => r.return_id === returnId ? updated : r));
+      if (newStatus === 'draft') {
+        setActiveTab('active');
+        setExpandedReturn(returnId);
+      }
       toast.success(`Status updated to ${STATUS_LABELS[newStatus] || newStatus}`);
     } catch (e) {
       toast.error(errMsg(e, 'Failed to update return status'));
+    }
+  };
+
+  const handleReopenDraft = async (returnId: string) => {
+    setReopeningDraft(returnId);
+    try {
+      await handleUpdateStatus(returnId, 'draft');
+    } finally {
+      setReopeningDraft(null);
+    }
+  };
+
+  const handleConfirmDraft = async (ret: VendorReturn) => {
+    const choice = draftChoices[ret.return_id] ?? ret.return_type;
+    if (!choice) {
+      toast.error('Choose credit note or replacement');
+      return;
+    }
+    setConfirmingDraft(ret.return_id);
+    try {
+      const resp = await api.patch(`/vendor-returns/${ret.return_id}/status`, {
+        status: 'created', return_type: choice,
+      });
+      const updated: VendorReturn = shownReturn(resp.data.return);
+      setReturns((prev) => prev.map((r) => r.return_id === ret.return_id ? updated : r));
+      toast.success('Return confirmed; the debit note is not yet issued');
+    } catch (e) {
+      toast.error(errMsg(e, 'Failed to confirm return'));
+    } finally {
+      setConfirmingDraft(null);
     }
   };
 
@@ -483,13 +538,11 @@ export function VendorReturns() {
                       )}>
                         {STATUS_LABELS[ret.status]}
                       </span>
-                      {/* Anything not typed 'replacement' is owed a credit --
-                          the server reads it so (update_return_status). */}
                       <span className={clsx(
                         'px-2 py-1 rounded text-xs font-semibold',
                         ret.return_type !== 'replacement' ? 'bg-blue-50 text-blue-700' : 'bg-gray-100 text-gray-700'
                       )}>
-                        {ret.return_type !== 'replacement' ? 'Credit Note' : 'Replacement'}
+                        {ret.return_type === 'replacement' ? 'Replacement' : ret.status === 'draft' && !ret.return_type ? 'Choose return type' : 'Credit Note'}
                       </span>
                     </div>
                     <p className="text-gray-500 text-sm">Return ID: {ret.return_id}</p>
@@ -514,6 +567,47 @@ export function VendorReturns() {
               {/* Expanded Details */}
               {expandedReturn === ret.return_id && (
                 <div className="border-t border-gray-200 px-6 py-4 bg-gray-50 space-y-4">
+                  {ret.receipt_rejection && ret.status === 'cancelled' && (
+                    <div className="rounded border border-amber-200 bg-amber-50 p-3 space-y-2">
+                      <p className="text-sm text-amber-800">Rejected pieces remain in quarantine.</p>
+                      {canMoveGoods && !debitNotes[ret.return_id] && !ret.issued_debit_note_id && ret.debit_note_draft_status !== 'ISSUED' && (
+                        <button
+                          onClick={() => handleReopenDraft(ret.return_id)}
+                          disabled={reopeningDraft === ret.return_id}
+                          className="bg-gray-900 text-white rounded px-3 py-2 text-sm disabled:opacity-50"
+                        >
+                          {reopeningDraft === ret.return_id ? 'Reopening...' : 'Reopen draft'}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                  {ret.status === 'draft' && (
+                    <div className="rounded border border-amber-200 bg-amber-50 p-3 space-y-2">
+                      <p className="text-sm text-amber-800">Draft — Accounts review. No debit note has been issued.</p>
+                      {canMoveGoods && (
+                        <div className="flex flex-wrap items-center gap-2">
+                          <label className="text-sm text-gray-700" htmlFor={`draft-type-${ret.return_id}`}>Return type</label>
+                          <select
+                            id={`draft-type-${ret.return_id}`}
+                            value={draftChoices[ret.return_id] ?? ret.return_type ?? ''}
+                            onChange={(e) => setDraftChoices((prev) => ({ ...prev, [ret.return_id]: e.target.value as 'credit_note' | 'replacement' | '' }))}
+                            className="border border-gray-300 rounded px-3 py-2 text-sm bg-white"
+                          >
+                            <option value="">Choose credit or replacement</option>
+                            <option value="credit_note">Credit note</option>
+                            <option value="replacement">Replacement</option>
+                          </select>
+                          <button
+                            onClick={() => handleConfirmDraft(ret)}
+                            disabled={confirmingDraft === ret.return_id || !(draftChoices[ret.return_id] ?? ret.return_type)}
+                            className="bg-gray-900 text-white rounded px-3 py-2 text-sm disabled:opacity-50"
+                          >
+                            {confirmingDraft === ret.return_id ? 'Confirming...' : 'Confirm return'}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
                   {/* Items */}
                   <div>
                     <div className="flex items-center justify-between mb-2">
@@ -545,7 +639,7 @@ export function VendorReturns() {
                             <p className="text-gray-600 font-medium">
                               {rupees(item.unit_price == null ? null : item.quantity * item.unit_price)}
                             </p>
-                            <p className="text-gray-500 text-xs">{RETURN_REASONS.find(r => r.value === item.reason)?.label}</p>
+                            <p className="text-gray-500 text-xs">{RETURN_REASONS.find(r => r.value === item.reason)?.label || item.reason}</p>
                           </div>
                         </div>
                       ))}
@@ -584,7 +678,7 @@ export function VendorReturns() {
                             )}
                           </p>
                         ) : (
-                          <p className="text-gray-400 text-sm">Not yet issued</p>
+                          <p className="text-gray-400 text-sm">{ret.debit_note_draft_status === 'DRAFT' ? 'Draft — Accounts review' : 'Not yet issued'}</p>
                         )}
                       </div>
                       <div className="flex gap-2">
@@ -618,6 +712,10 @@ export function VendorReturns() {
                             )}
                           </>
                           )
+                        ) : ret.receipt_rejection && ret.status === 'cancelled' ? (
+                          <p className="text-gray-500 text-xs">Reopen and confirm the return before issuing a debit note</p>
+                        ) : ret.status === 'draft' ? (
+                          <p className="text-gray-500 text-xs">Confirm the return before issuing a debit note</p>
                         ) : canSeePayables ? (
                           // Issuing the note records what the supplier owes us:
                           // COST_ROLES only (the server 403s the rest).

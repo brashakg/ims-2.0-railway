@@ -59,6 +59,7 @@ interface ReceiveLine {
   accepted_qty: number;
   rejected_qty: number;
   rejection_reason: string;
+  rejection_disposition?: 'credit_note' | 'replacement' | '';
   // Ruling 14: the receiver ticks each line to say "I counted this one against
   // what was ordered". Starts UNticked -- the server refuses a PO-backed
   // receipt with an unticked line (422 LINES_NOT_TALLIED). Express receiving
@@ -643,6 +644,11 @@ export function GoodsReceiptCockpit() {
       return;
     }
 
+    if (receiveLines.some((l) => l.rejected_qty > 0 && (!l.rejection_reason.trim() || !l.rejection_disposition))) {
+      toast.error('For each rejected line, enter a reason and choose credit note or replacement');
+      return;
+    }
+
     const items: GRNItemInput[] = receiveLines
       .filter((l) => l.received_qty > 0)
       .map((l) => ({
@@ -651,6 +657,7 @@ export function GoodsReceiptCockpit() {
         accepted_qty: l.accepted_qty,
         rejected_qty: l.rejected_qty,
         rejection_reason: l.rejection_reason || undefined,
+        rejection_disposition: l.rejected_qty > 0 ? l.rejection_disposition || undefined : undefined,
         tallied: l.tallied,
         batch_code: l.batch_code.trim() || undefined,
         expiry_date: l.expiry_date.trim() || undefined,
@@ -1236,6 +1243,7 @@ export function GoodsReceiptCockpit() {
                           </td>
                           <td>
                             {line.rejected_qty > 0 && (
+                              <div className="space-y-1">
                               <input
                                 type="text"
                                 value={line.rejection_reason}
@@ -1247,6 +1255,7 @@ export function GoodsReceiptCockpit() {
                                   )
                                 }
                                 placeholder="Reason…"
+                                aria-label={`Rejection reason on line ${idx + 1}`}
                                 className="input"
                                 style={{
                                   height: 30,
@@ -1254,6 +1263,18 @@ export function GoodsReceiptCockpit() {
                                   minWidth: 120,
                                 }}
                               />
+                              <select
+                                value={line.rejection_disposition || ''}
+                                aria-label={`Rejection disposition on line ${idx + 1}`}
+                                onChange={(e) => setLineField(idx, 'rejection_disposition', e.target.value)}
+                                className="input"
+                                style={{ height: 30, padding: '0 6px', minWidth: 120 }}
+                              >
+                                <option value="">Credit or replacement *</option>
+                                <option value="credit_note">Credit note</option>
+                                <option value="replacement">Replacement</option>
+                              </select>
+                              </div>
                             )}
                           </td>
                         </tr>

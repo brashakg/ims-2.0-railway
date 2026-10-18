@@ -294,6 +294,15 @@ async def lift_quarantine_stock_unit(
         raise HTTPException(status_code=404, detail="Stock unit not found")
 
     current_status = (unit.get("status") or "").strip().upper()
+    if unit.get("receipt_disposition") == "REJECTED":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "receipt_rejected",
+                "message": "This piece was rejected at receiving. Follow its supplier return; "
+                           "lifting quarantine cannot accept it into sellable stock.",
+            },
+        )
     if current_status != STOCK_STATUS_QUARANTINED:
         raise HTTPException(
             status_code=409,

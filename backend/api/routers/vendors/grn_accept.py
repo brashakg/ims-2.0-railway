@@ -795,7 +795,7 @@ def _way_out_of(grn) -> str:
     wherever a transfer has moved them (_receipt_units)."""
     stock_repo = get_stock_repository()
     try:
-        shelved = stock_repo is not None and _receipt_units(stock_repo, grn)
+        shelved = stock_repo is not None and _receipt_units(stock_repo, grn, include_rejected=True)
     except Exception:  # noqa: BLE001 - unknown: never advise a void
         shelved = True
     if not shelved:
@@ -1301,9 +1301,20 @@ def _accept_grn_claimed(
                                 _le_exc,
                             )
 
-    # Every line is decided.
+    # Accepted lines are all decided even if the rejected-goods handoff fails.
+    # Recovery must not reconstruct a phantom held unit from the last loop's
+    # pre-insert progress snapshot.
     if progress:
         progress.update(line_index=len(grn.get("items") or []), left=None)
+
+    # Required rejected-goods custody and unissued draft handoff, under this
+    # same claim and BEFORE terminal status. A failure leaves accept retryable.
+    from .grn_rejections import handoff_rejected_units
+
+    rejection_result = handoff_rejected_units(
+        _get_db(), grn_repo, stock_repo, grn, current_user,
+        claim_token, heartbeat_state,
+    )
 
     # Mark the GRN accepted -- or PARTIALLY_ACCEPTED when one or more lines were
     # HELD because their product is not yet catalogued (Hub Phase 2). A held GRN
@@ -1333,6 +1344,7 @@ def _accept_grn_claimed(
             "accepted_by": user_id,
             "units_added": units_added,
             "unresolved_lines": unresolved_lines,
+            **rejection_result,
         },
     )
     if not status_ok:
@@ -1350,6 +1362,7 @@ def _accept_grn_claimed(
             "status_flip_failed": True,
             "units_added": units_added,
             "stock_ids": minted_stock_ids,
+            **rejection_result,
             "po_status": None,
             "unresolved_lines": unresolved_lines,
             "needs_cataloguing": bool(unresolved_lines),
@@ -1380,6 +1393,7 @@ def _accept_grn_claimed(
         "grn_status": grn_status,
         "units_added": units_added,
         "stock_ids": minted_stock_ids,
+        **rejection_result,
         "po_status": po_status,
         # Hub Phase 2: lines held because their product is not yet on the spine.
         # The FE renders a "Catalog now" affordance; cataloguing + re-accepting
