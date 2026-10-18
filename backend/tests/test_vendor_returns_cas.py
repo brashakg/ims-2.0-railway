@@ -1,9 +1,9 @@
 """vendor_returns update_return_status compare-and-swap (salvaged 2026-07-03).
 
-Two racing transitions out of the SAME status must not both issue a credit note.
+Two racing goods transitions out of the SAME status must not both succeed.
 A frozen-read fake simulates two requests that both read the pre-transition
 snapshot (received_by_vendor); the CAS baked into the update_one filter lets
-exactly one win (200) and the other 409s -- so the credit note is minted once.
+exactly one win (200) and the other 409s. Credit confirmation has separate tests.
 """
 from __future__ import annotations
 

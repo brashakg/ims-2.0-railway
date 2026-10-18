@@ -690,10 +690,13 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
         # Table 6.1 "paid through ITC": the credit the cash rule actually used
         # -- the liability less what net_cash_due leaves for cash. Never the
         # whole credit: reverse-charge tax and unused credit are not set off.
+        # A negative net credit adds repayment liability. Include it before
+        # subtracting cash so positive credit from another head used against
+        # that liability is counted, without inventing negative utilisation.
         "itcUtilized": {
-            "integratedTax": _r(out_igst + rcm_igst - cash_igst),
-            "centralTax": _r(out_cgst + rcm_cgst - cash_cgst),
-            "stateTax": _r(out_sgst + rcm_sgst - cash_sgst),
+            "integratedTax": _r(max(0, out_igst + max(0, -itc_igst) + rcm_igst - cash_igst)),
+            "centralTax": _r(max(0, out_cgst + max(0, -itc_cgst) + rcm_cgst - cash_cgst)),
+            "stateTax": _r(max(0, out_sgst + max(0, -itc_sgst) + rcm_sgst - cash_sgst)),
             "cess": 0.0,
         },
         "taxPaidCash": {

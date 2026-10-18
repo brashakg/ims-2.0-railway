@@ -36,6 +36,7 @@ def test_later_period_reversal_reaches_registration_report_portal_and_register(d
     report = gst._compute_gstr3b("2026-10", "S1")
     assert report["itcAvailable"]["centralTax"] == -2
     assert report["taxPaidCash"]["centralTax"] == 2
+    assert report["itcUtilized"] == {"integratedTax": 0, "centralTax": 0, "stateTax": 0, "cess": 0}
     assert report["itcAvailableGstin"]["centralTax"] == -2
     portal = to_gstr3b_json(report)
     assert portal["itc_elg"]["itc_net"]["camt"] == -2
@@ -55,6 +56,36 @@ def test_summary_subtracts_actual_original_credit_without_inventing_rcm_liabilit
     summary = asyncio.run(finance.get_gst_summary(month=10, year=2026, current_user=ADMIN))
     assert summary["gst_input_credit"] == -4
     assert summary["net_gst_payable"] == 4
+
+
+@pytest.mark.parametrize("reverse_charge", [False, True])
+@pytest.mark.parametrize("other_head_credit", [0, 1, 5])
+def test_reversal_never_reports_negative_utilisation_with_other_head_credit(db, return_doc, monkeypatch, reverse_charge, other_head_credit):
+    db.vendor_bills.update_one({}, {"$set": {"reverse_charge": reverse_charge}})
+    post(db, return_doc, payload(db, return_doc, amount=80 if reverse_charge else 84))
+    gst, _ = setup_report(db, monkeypatch)
+    monkeypatch.setattr(gst, "_itc_from_vendor_bills", lambda *_args: (other_head_credit, 0, 0))
+    monkeypatch.setattr(gst, "_itc_gstin_from_vendor_bills", lambda *_args: (other_head_credit, 0, 0))
+    report = gst._compute_gstr3b("2026-10", "S1")
+    assert report["itcAvailable"]["centralTax"] == -2
+    assert report["itcReversed"]["centralTax"] == 2
+    assert sum(report["taxPaidCash"].values()) == max(0, 4 - other_head_credit)
+    assert sum(report["itcUtilized"].values()) == min(4, other_head_credit)
+    assert all(value >= 0 for value in report["itcUtilized"].values())
+
+
+def test_positive_central_credit_used_for_igst_reversal_and_output_is_all_counted(db, return_doc, monkeypatch):
+    db.vendor_bills.update_one({}, {"$set": {"lines.0.cgst": 0, "lines.0.sgst": 0,
+        "lines.0.igst": 20, "cgst_total": 0, "sgst_total": 0, "igst_total": 20}})
+    post(db, return_doc, payload(db, return_doc, amount=82, cgst=0, sgst=0, igst=2))
+    gst, _ = setup_report(db, monkeypatch)
+    monkeypatch.setattr(gst, "_itc_from_vendor_bills", lambda *_args: (0, 3, 0))
+    monkeypatch.setattr(gst, "_itc_gstin_from_vendor_bills", lambda *_args: (0, 3, 0))
+    monkeypatch.setattr(gst, "_transfer_outward_totals", lambda *_args: (10, 0, 0, 200))
+    report = gst._compute_gstr3b("2026-10", "S1")
+    assert report["itcAvailable"]["integratedTax"] == -2
+    assert report["taxPaidCash"]["integratedTax"] == 9
+    assert report["itcUtilized"]["integratedTax"] == 3
 
 
 def test_credit_does_not_leak_to_another_registration_or_pending_document(db, return_doc, monkeypatch):

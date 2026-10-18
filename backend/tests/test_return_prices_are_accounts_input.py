@@ -16,9 +16,9 @@ Now:
   * the accounts roles price the lines -- at create, or on the pricing door
     (PUT /vendor-returns/{id}/prices, PUT /vendor-rma/{id}/prices), which the
     managers are refused;
-  * the credit (credit_issued), an RMA credit note and the GST debit note are
-    refused (422 price_required) while the lines are unpriced, and the figure
-    they record is the accountant's;
+  * internal return requests and RMA credit notes wait for Accounts' prices;
+    a vendor return posts credit only through an actual supplier confirmation
+    with original bill evidence, never through the old status-only door;
   * a settled return, an RMA with a credit recorded, or an RTV whose debit note
     was issued keeps its prices (409).
 
@@ -98,7 +98,16 @@ _RETURN = {"vendor_id": "V1", "vendor_name": "GKB Optical", "store_id": DHN,
 
 def _create_return(w, user, **line):
     body = dict(_RETURN, items=[dict(_LINE, **line)])
-    return w.call(user, "POST", "/vendor-returns/", json=body)
+    response = w.call(user, "POST", "/vendor-returns/", json=body)
+    if response.status_code == 201:
+        # Existing pricing/permission tests must identify real received goods.
+        # An unbilled receipt permits an internal request, not accounting credit.
+        rid = response.json()["return_id"]
+        gid = "original-" + rid
+        w.db.grns.insert_one({"grn_id": gid, "vendor_id": "V1", "store_id": DHN,
+            "status": "ACCEPTED", "items": [{"product_id": "P1", "accepted_qty": body["items"][0]["quantity"]}]})
+        w.db.vendor_returns.update_one({"return_id": rid}, {"$set": {"grn_id": gid}})
+    return response
 
 
 def _to_received(w, rid, user):
@@ -139,14 +148,13 @@ def test_an_accounts_role_may_price_as_it_raises(world, role):
     assert _stored_return(world, r.json()["return_id"])["total_value"] == 1500.0
 
 
-def test_the_credit_is_refused_until_the_lines_are_priced_then_is_the_accountants(world):
+def test_accounts_price_is_locked_only_after_actual_supplier_credit_with_bill_evidence(world):
     mgr, acct = _user("STORE_MANAGER"), _user("ACCOUNTANT")
     rid = _create_return(world, mgr).json()["return_id"]
     _to_received(world, rid, mgr)
 
     r = world.call(acct, "PATCH", f"/vendor-returns/{rid}/status", json={"status": "credit_issued"})
     assert r.status_code == 422, r.text
-    assert r.json()["detail"]["error"] == "price_required"
     stored = _stored_return(world, rid)
     assert stored["status"] == "received_by_vendor" and stored["credit_note_amount"] is None
 
@@ -162,6 +170,24 @@ def test_the_credit_is_refused_until_the_lines_are_priced_then_is_the_accountant
     assert stored["priced_by"] == acct["user_id"] and stored["created_by"] == mgr["user_id"]
 
     r = world.call(acct, "PATCH", f"/vendor-returns/{rid}/status", json={"status": "credit_issued"})
+    assert r.status_code == 422, r.text
+    assert _stored_return(world, rid)["credit_note_amount"] is None
+    world.db.vendor_bills.insert_one({"bill_id": "B-" + rid, "grn_id": "original-" + rid,
+        "vendor_id": "V1", "store_id": DHN, "status": "UNPAID", "received": True,
+        "doc_type": "PURCHASE_INVOICE", "bill_number": "ORIGINAL-INV", "bill_date": "2026-01-01",
+        "recipient_entity_id": "E1", "recipient_gstin": "20ABCDE1234F1Z5",
+        "vendor_gstin": "20ZZZZZ9999Z1Z5", "taxable_amount": 300, "tax_amount": 0,
+        "cgst_total": 0, "sgst_total": 0, "igst_total": 0,
+        "lines": [{"product_id": "P1", "qty": 3, "taxable": 300, "gst_rate": 0,
+                   "cgst": 0, "sgst": 0, "igst": 0, "line_total": 300}]})
+    preview = world.call(acct, "POST", f"/vendor-returns/{rid}/credit-preview", json={})
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["source_status"] == "RESOLVED", preview.text
+    r = world.call(acct, "POST", f"/vendor-returns/{rid}/credit-confirmations", json={
+        "idempotency_key": str(uuid4()), "credit_note_number": "SUPPLIER-CN-1",
+        "credit_note_date": "2026-10-18", "received_amount": 300,
+        "allocations": [{"source_key": preview.json()["sources"][0]["source_key"],
+                         "taxable": 300, "cgst": 0, "sgst": 0, "igst": 0}]})
     assert r.status_code == 200, r.text
     assert _stored_return(world, rid)["credit_note_amount"] == 300.0
 
@@ -230,7 +256,14 @@ _RMA = {"vendor_id": "V1", "vendor_name": "GKB Optical", "store_id": DHN,
 
 def _raise_rma(w, user, **line):
     body = dict(_RMA, lines=[dict(_RMA["lines"][0], **line)])
-    return w.call(user, "POST", "/vendor-rma/", json=body)
+    response = w.call(user, "POST", "/vendor-rma/", json=body)
+    if response.status_code == 201:
+        rid = response.json()["rma_id"]
+        gid = "unbilled-" + rid
+        w.db.grns.insert_one({"grn_id": gid, "vendor_id": "V1", "store_id": DHN,
+            "status": "ACCEPTED", "items": [{"product_id": "P1", "accepted_qty": body["lines"][0]["quantity"]}]})
+        w.db.vendor_rmas.update_one({"rma_id": rid}, {"$set": {"grn_id": gid}})
+    return response
 
 
 def _dispatched_rma(w, user):

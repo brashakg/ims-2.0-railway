@@ -194,6 +194,21 @@ def test_preload_cannot_read_another_return_confirmation(db, ready):
     assert caught.value.status == 404
 
 
+def test_same_identifier_in_rma_and_vendor_return_has_separate_history_and_sources(db, ready):
+    event_for(db, ready)
+    rma = {**ready, "return_kind": "RMA"}
+    ordinary_key = resolve_credit_evidence(db, ready)[0]["source_key"]
+    assert resolve_credit_evidence(db, rma)[0]["source_key"] != ordinary_key
+    assert credit_preview(db, ready)["posted_amount"] == 42
+    assert credit_preview(db, rma)["posted_amount"] == 0
+    with pytest.raises(SupplierCreditError) as caught:
+        credit_preview(db, rma, confirmation_id="confirmed")
+    assert caught.value.status == 404
+    db.supplier_credit_confirmations.update_one({}, {"$set": {"return_kind": "RMA"}})
+    assert credit_preview(db, ready)["confirmations"] == []
+    assert credit_preview(db, rma)["posted_amount"] == 42
+
+
 def test_source_key_changes_when_original_evidence_changes(db, ready):
     original = resolve_credit_evidence(db, ready)[0]["source_key"]
     db.vendor_bills.update_one({}, {"$set": {"bill_number": "CORRECTED"}})
