@@ -7,6 +7,7 @@ from ._shared import (
     Depends,
     Field,
     HTTPException,
+    logger,
     Optional,
     Query,
     _AP_ROLES,
@@ -214,11 +215,10 @@ def _money_shop(
 
 
 def _month(day) -> Optional[tuple]:
-    """(year, month) of an ISO day, else None."""
-    try:
-        return int(str(day)[:4]), int(str(day)[5:7])
-    except (TypeError, ValueError):
-        return None
+    """(year, month) of a stored day on the IST clock (ap_engine.parse_date:
+    '2026-09-30T20:00:00+00:00' is 1 October in India), else None."""
+    d = ap_engine.parse_date(day)
+    return (d.year, d.month) if d else None
 
 
 def _refuse_restating_a_closed_month(db, money_day, bill_day, *, adds_line: bool) -> None:
@@ -230,6 +230,7 @@ def _refuse_restating_a_closed_month(db, money_day, bill_day, *, adds_line: bool
     (locks need not be contiguous); and, when a ledger line is added on the
     money's day (a new payment, or a part-applied advance's split row), when
     that month is locked. Fail-soft like check_period_locked."""
+    now = ap_engine.now_ist_naive()
     try:
         locked = {
             (int(row["year"]), int(row["month"]))
@@ -237,6 +238,9 @@ def _refuse_restating_a_closed_month(db, money_day, bill_day, *, adds_line: bool
         }
     except Exception:  # noqa: BLE001 - as check_period_locked: unreadable locks never block
         return
+    # A mistyped lock (month 13, or 05/2062) is no closed month: it would
+    # block every bill-named payment, and lock_period now refuses to write one.
+    locked = {m for m in locked if 1 <= m[1] <= 12 and m <= (now.year, now.month)}
     days = [m for m in (_month(money_day), _month(bill_day)) if m]
     if not locked or not days:
         return
@@ -319,8 +323,15 @@ async def create_vendor_payment(
     else:
         tds_amount = 0.0
 
-    # Accounting period lock: cannot record vendor payments into a closed month.
+    # A retried request (the client retries a 5xx; a 504 may come after the
+    # save) answers the payment it already recorded.
     db = _get_db()
+    if payment.request_id and db is not None:
+        done = _payment_by_request(db, vendor_id, payment.request_id)
+        if done is not None:
+            return done
+
+    # Accounting period lock: cannot record vendor payments into a closed month.
     if db is not None:
         from ..finance import check_period_locked
 
@@ -352,6 +363,7 @@ async def create_vendor_payment(
 
     payment_id = str(uuid.uuid4())
     doc = {
+        **({"request_id": payment.request_id} if payment.request_id else {}),
         "payment_id": payment_id,
         "vendor_id": vendor_id,
         "vendor_name": (vendor or {}).get("trade_name")
@@ -372,8 +384,15 @@ async def create_vendor_payment(
     db = _get_db()
     if db is not None:
         try:
+            if payment.request_id:
+                _ensure_request_index(db)
             db.get_collection("vendor_payments").insert_one(dict(doc))
         except Exception as exc:
+            # The same request racing itself: the unique request_id index let
+            # one through -- answer with that one.
+            done = _payment_by_request(db, vendor_id, payment.request_id) if payment.request_id else None
+            if done is not None:
+                return done
             raise HTTPException(
                 status_code=500, detail="Failed to save payment"
             ) from exc
@@ -381,9 +400,36 @@ async def create_vendor_payment(
     return _clean(doc)
 
 
+def _payment_by_request(db, vendor_id: str, request_id: str) -> Optional[dict]:
+    """The payment this request already recorded, else None."""
+    try:
+        row = db.get_collection("vendor_payments").find_one(
+            {"vendor_id": vendor_id, "request_id": request_id}, {"_id": 0}
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Database unavailable") from exc
+    return _clean(row) if row else None
+
+
+def _ensure_request_index(db) -> None:
+    """Unique on request_id (sparse: older payments carry none), so the same
+    request racing itself can record only one payment. create_index is a
+    no-op once the index exists; payments are few, so it runs each time.
+    Never blocks a payment: without it the read-first check still answers a
+    retry that arrives after the save."""
+    try:
+        db.get_collection("vendor_payments").create_index("request_id", unique=True, sparse=True)
+    except Exception:  # noqa: BLE001
+        logger.warning("[AP] vendor_payments.request_id index could not be ensured", exc_info=True)
+
+
 class AdvanceApply(BaseModel):
     bill_id: str = Field(..., min_length=1)
     amount: float = Field(..., gt=0)  # gross: cash + TDS, as a bill counts it
+    # What the form showed was left of the advance: a repeated request (a
+    # retried 5xx after the save) finds less left and is refused, never
+    # applied twice.
+    advance_left: float = Field(..., ge=0)
 
 
 @router.post("/{vendor_id}/payments/{payment_id}/apply")
@@ -442,6 +488,11 @@ async def apply_advance_to_bill(
         raise HTTPException(status_code=422, detail="Enter an amount to apply.")
     cash, tds = round(float(adv.get("amount") or 0), 2), round(float(adv.get("tds_amount") or 0), 2)
     gross = round(cash + tds, 2)
+    if round(body.advance_left, 2) != gross:
+        raise HTTPException(
+            status_code=409,
+            detail="This advance was already applied - refresh to see what is left of it.",
+        )
     if applied > gross:
         raise HTTPException(
             status_code=422, detail=f"This advance has only Rs {gross:,.2f} to apply."

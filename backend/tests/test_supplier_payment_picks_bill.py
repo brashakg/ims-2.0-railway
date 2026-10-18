@@ -33,9 +33,20 @@ def _pay(world, body, user=ACCT_PUNE):
     return world.post("/vendors/V1/payments", user, {"payment_date": "2026-10-15", **body})
 
 
-def _apply(world, payment_id, bill_id, amount, user=ACCT_PUNE):
+def _advance_left(world, payment_id, user):
+    """What the form shows is left of the advance: its row in the payments
+    list (cash + TDS); 0 when this login cannot see it."""
+    rows = world.get("/vendors/V1/payments", user).json().get("payments", [])
+    row = next((r for r in rows if r.get("payment_id") == payment_id), {})
+    return round((row.get("amount") or 0) + (row.get("tds_amount") or 0), 2)
+
+
+def _apply(world, payment_id, bill_id, amount, user=ACCT_PUNE, left=None):
+    """The Apply advance form: it sends what it showed was left (`left`
+    overrides it: a request made earlier, before another one landed)."""
+    seen = _advance_left(world, payment_id, user) if left is None else left
     return world.post(f"/vendors/V1/payments/{payment_id}/apply", user,
-                      {"bill_id": bill_id, "amount": amount})
+                      {"bill_id": bill_id, "amount": amount, "advance_left": seen})
 
 
 def _owed_and_advances(world):
@@ -172,7 +183,8 @@ def test_two_racing_applications_of_one_advance_apply_once(ap, monkeypatch, seco
     proxy = SimpleNamespace(get_collection=lambda name: (
         _StaleAdvance(memory[name], stale) if name == "vendor_payments" else memory[name]))
     monkeypatch.setattr(vendors_pkg, "_get_db", lambda: proxy)
-    assert _apply(world, adv, "B1", second).status_code == 409
+    # Sent with what it saw (400): only the compare-and-set can stop it.
+    assert _apply(world, adv, "B1", second, left=400).status_code == 409
     assert sum(p["amount"] for p in memory.vendor_payments.find({})) == 400
     assert memory.vendor_payments.count_documents({"applied_from": adv}) == 1
     assert memory.vendor_payments.find_one({"payment_id": adv})["amount"] == 100
@@ -203,8 +215,10 @@ _CLOSED = "That month is closed - ask an admin to reopen it."
     ("2026-09-15", "2026-10-01", [9], 100, 423),    # ...but a part-apply splits the advance's Sept row
     ("2026-10-02", "2026-09-01", [9], 100, 200),    # Oct advance, Sept bill: nothing from Sept changes
     ("2026-09-15", "2026-10-01", [10], 400, 423),   # the month the change starts is closed
-    ("2026-08-10", "2026-10-01", [11], 400, 423),   # a later closed month, not next to the change
-    ("2026-08-10", "2026-10-01", [9], 400, 200),    # a closed month before the change starts
+    ("2026-06-10", "2026-08-01", [10], 400, 423),   # a later closed month, not next to the change
+    ("2026-06-10", "2026-08-01", [7], 400, 200),    # a closed month before the change starts
+    ("2026-09-15", "2026-10-01", [11], 400, 200),   # a lock on a month not yet started is no lock
+    ("2026-09-15", "2026-10-01", [13], 100, 200),   # nor is a mistyped month
     ("2026-09-15", "2026-10-01", [8], 100, 200),    # an earlier closed month
 ])
 def test_a_closed_month_stays_closed(ap, advance_day, bill_day, locked, amount, code):
@@ -222,10 +236,11 @@ def test_a_closed_month_stays_closed(ap, advance_day, bill_day, locked, amount, 
 
 @pytest.mark.parametrize("pay_day,bill_day,locked,taken", [
     ("2026-10-10", "2026-09-01", [9], True),
-    ("2026-10-10", "2026-10-01", [11], False),
+    ("2026-08-10", "2026-08-01", [10], False),
     ("2026-10-10", "2026-10-01", [10], False),
-    ("2026-10-10", "2026-09-01", [8, 11], False),
+    ("2026-08-10", "2026-07-01", [6, 10], False),
     ("2026-10-10", "2026-08-01", [9], True),
+    ("2026-10-10", "2026-10-01", [11], True),
 ])
 def test_paying_a_bill_and_applying_an_advance_to_it_agree_on_closed_months(ap, pay_day, bill_day, locked, taken):
     """The same money put on the same bill: a payment naming it, or an advance
@@ -289,7 +304,106 @@ def test_a_failed_apply_gives_back_only_what_it_took(ap, monkeypatch):
     proxy = SimpleNamespace(get_collection=lambda name: (
         _InsertFailsAfterRival(memory[name], adv) if name == "vendor_payments" else memory[name]))
     monkeypatch.setattr(vendors_pkg, "_get_db", lambda: proxy)
-    assert _apply(world, adv, "B1", 300).status_code == 500
+    assert _apply(world, adv, "B1", 300, left=400).status_code == 500
     # The rival's 50 stands; the failed 300 went back: 350 + 50 = 400 paid.
     assert memory.vendor_payments.find_one({"payment_id": adv})["amount"] == 350
     assert sum(p["amount"] for p in memory.vendor_payments.find({})) == 400
+
+
+# --- review round 4 -----------------------------------------------------------
+
+
+def test_a_retried_payment_request_records_one_payment(ap):
+    """The client retries a 5xx; a 504 can come after the save. The same
+    request id answers the payment already recorded."""
+    memory, world = ap
+    body = {"amount": 300, "bill_id": "B1", "request_id": "req-0001-abcd"}
+    first, again = _pay(world, body), _pay(world, body)
+    assert first.status_code == again.status_code == 201
+    assert first.json()["payment_id"] == again.json()["payment_id"]
+    assert memory.vendor_payments.count_documents({}) == 1
+    assert _owed_and_advances(world) == (700, 0)
+    other = _pay(world, {**body, "request_id": "req-0002-abcd"})
+    assert other.status_code == 201 and memory.vendor_payments.count_documents({}) == 2
+
+
+def test_the_same_payment_request_racing_itself_records_one(ap, monkeypatch):
+    """Both copies passed the 'already recorded?' read before either saved:
+    the unique request id lets one through and the other answers with it."""
+    from api.routers.vendors import ap_payments
+
+    memory, world = ap
+    real, seen = ap_payments._payment_by_request, []
+
+    def missed_once(db, vendor_id, request_id):
+        if not seen:
+            seen.append(1)
+            memory.vendor_payments.insert_one(  # the twin saved in between
+                payment(300, "B1", store_id=PUN, payment_id="TWIN", request_id=request_id))
+            return None
+        return real(db, vendor_id, request_id)
+
+    monkeypatch.setattr(vendors_pkg, "_payment_by_request", missed_once)
+    resp = _pay(world, {"amount": 300, "bill_id": "B1", "request_id": "req-race-0001"})
+    assert resp.status_code == 201 and resp.json()["payment_id"] == "TWIN"
+    assert memory.vendor_payments.count_documents({}) == 1
+
+
+def test_a_repeated_part_apply_is_refused_not_applied_twice(ap):
+    memory, world = ap
+    memory.vendor_bills.update_one({}, {"$set": {"total_amount": 5000}})
+    adv = _pay(world, {"amount": 1000}).json()["payment_id"]
+    assert _apply(world, adv, "B1", 300, left=1000).status_code == 200
+    again = _apply(world, adv, "B1", 300, left=1000)  # the retried copy
+    assert again.status_code == 409 and "already applied" in again.json()["detail"]
+    assert memory.vendor_payments.find_one({"payment_id": adv})["amount"] == 700
+    assert memory.vendor_payments.count_documents({"applied_from": adv}) == 1
+
+
+@pytest.mark.parametrize("month,year,code", [(13, 2026, 422), (0, 2026, 422), (5, 2062, 422),
+                                             (11, 2026, 422), (9, 2026, 200), (10, 2026, 200)])
+def test_only_a_month_that_has_started_can_be_closed(ap, monkeypatch, month, year, code):
+    """A mistyped lock (month 13, 05/2062) or one on a month not yet started
+    is refused at the door -- nothing could reopen it."""
+    import asyncio
+    from datetime import datetime
+    from fastapi import HTTPException
+    from api.routers.finance import period_lock
+    from test_finance_ap_scope_round2 import _DBProxy
+
+    memory, _ = ap
+    monkeypatch.setattr(period_lock, "_get_db", lambda: _DBProxy(memory))
+    monkeypatch.setattr("api.utils.ist.now_ist_naive", lambda: datetime(2026, 10, 15, 12))
+    try:
+        asyncio.run(period_lock.lock_period(month, year, ADMIN))
+        status = 200
+    except HTTPException as exc:
+        status = exc.status_code
+    assert status == code
+    assert memory.period_locks.count_documents({}) == (1 if code == 200 else 0)
+
+
+def test_a_payment_dated_by_timestamp_falls_in_its_ist_month(ap):
+    """20:00 UTC on 30 Sept is 01:30 IST on 1 Oct: October's money. With
+    September closed it is taken, and stored as the IST day."""
+    memory, world = ap
+    memory.period_locks.insert_one({"month": 9, "year": 2026})
+    resp = _pay(world, {"amount": 100, "bill_id": "B1", "payment_date": "2026-09-30T20:00:00+00:00"})
+    assert resp.status_code == 201, resp.text
+    assert memory.vendor_payments.find_one({})["payment_date"] == "2026-10-01"
+
+
+@pytest.mark.parametrize("bad", ["", "garbage", "30/09/2026", "2062-01-01", "2016-01-01"])
+def test_a_payment_date_that_is_no_real_day_is_refused(ap, bad):
+    memory, world = ap
+    assert _pay(world, {"amount": 100, "payment_date": bad}).status_code == 422
+    assert memory.vendor_payments.count_documents({}) == 0
+
+
+def test_a_legacy_advance_dated_by_timestamp_is_read_in_its_ist_month(ap):
+    """A stored advance from before the date rule: its month is the IST one."""
+    memory, world = ap
+    memory.vendor_payments.insert_one(
+        payment(400, store_id=PUN, payment_id="OLD", payment_date="2026-09-30T20:00:00+00:00"))
+    memory.period_locks.insert_one({"month": 9, "year": 2026})
+    assert _apply(world, "OLD", "B1", 100).status_code == 200  # part-apply: the split row is October's

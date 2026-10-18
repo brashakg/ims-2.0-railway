@@ -479,6 +479,10 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: RecordKind; ve
   const [applyAmount, setApplyAmount] = useState('');
   const pickedBill = (bills ?? []).find((b) => b.bill_id === applyTo);
   const pickedAdvance = (advances ?? []).find((p) => p.payment_id === advanceId);
+  // One id for the payment this form records, kept across the client's
+  // automatic retries and a second click after an error: the server records
+  // it once (owner 2026-10-18 review).
+  const [requestId] = useState(() => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`);
   const [creditType, setCreditType] = useState<'' | 'RETURN_CN' | 'SCHEME_CN' | 'DISCOUNT_CN' | 'QUALITY_CN'>('');
   // The IST business day, like every other bill door: toISOString() is the
   // UTC day, so a bill keyed at 01:00 IST on 1 October booked 30 September
@@ -599,12 +603,13 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: RecordKind; ve
           reference: String(f.reference || ''),
           // A bill's money is the bill's shop's: no shop is sent with it.
           bill_id: pickedBill ? pickedBill.bill_id : undefined,
+          request_id: requestId,
           store_id: pickedBill ? undefined : moneyShop || undefined,
         });
         toast.success(bookedTo(pickedBill ? `Payment against bill ${pickedBill.bill_number}` : 'Payment', saved, shopName));
       } else if (kind === 'apply' && pickedAdvance && pickedBill) {
         const out = await vendorApApi.applyAdvance(vendorId, pickedAdvance.payment_id, {
-          bill_id: pickedBill.bill_id, amount: Number(applyAmount) || 0,
+          bill_id: pickedBill.bill_id, amount: Number(applyAmount) || 0, advance_left: gross(pickedAdvance),
         });
         toast.success(out.advance_left > 0
           ? `Applied to bill ${pickedBill.bill_number}; ${inr(out.advance_left)} of the advance is still unapplied`

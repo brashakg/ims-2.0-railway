@@ -105,6 +105,25 @@ describe('a payment picks its bill', () => {
     const payload = apis.vendorApApi.createPayment.mock.calls[0][1];
     expect(payload).toMatchObject({ amount: 1000, bill_id: 'B1' });
     expect(payload.store_id).toBeUndefined();
+    // One request id per form: a retried or re-clicked save records one payment.
+    expect(typeof payload.request_id).toBe('string');
+    expect(payload.request_id.length).toBeGreaterThanOrEqual(8);
+  });
+
+  it('a second Save on the same form sends the same request id', async () => {
+    apis.vendorApApi.createPayment.mockRejectedValueOnce(new Error('504'));
+    await openForm('Payment');
+    const picker = await screen.findByLabelText('Apply this payment to');
+    await waitFor(() => expect((picker as HTMLSelectElement).options.length).toBe(3));
+    fireEvent.change(picker, { target: { value: 'B1' } });
+    fireEvent.change(screen.getByPlaceholderText('Amount paid'), { target: { value: '600' } });
+    fireEvent.click(screen.getByRole('button', { name: /Save/ }));
+    await waitFor(() => expect(apis.vendorApApi.createPayment).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: /Save/ }));
+    await waitFor(() => expect(apis.vendorApApi.createPayment).toHaveBeenCalledTimes(2));
+    const [first, second] = apis.vendorApApi.createPayment.mock.calls.map((c) => c[1].request_id);
+    expect(typeof first).toBe('string');
+    expect(first).toBe(second);
   });
 
   it('records an advance with no bill when chosen', async () => {
@@ -131,7 +150,8 @@ describe('an advance is applied to a bill later, never on its own', () => {
     expect(amount.value).toBe('400');
     fireEvent.change(amount, { target: { value: '250' } });
     fireEvent.click(screen.getByRole('button', { name: /Save/ }));
-    await waitFor(() => expect(apis.vendorApApi.applyAdvance).toHaveBeenCalledWith('V-PUN', 'P-ADV', { bill_id: 'B1', amount: 250 }));
+    // advance_left: what the form showed was left, so a repeated request is refused.
+    await waitFor(() => expect(apis.vendorApApi.applyAdvance).toHaveBeenCalledWith('V-PUN', 'P-ADV', { bill_id: 'B1', amount: 250, advance_left: 400 }));
   });
 
   it('says so when the supplier has no unapplied advance', async () => {

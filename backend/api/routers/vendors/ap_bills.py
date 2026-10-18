@@ -90,6 +90,15 @@ class VendorPaymentCreate(BaseModel):
     # The shop the money is paid for (F63) when no bill is named; a named
     # bill's shop wins. See ap_payments._money_shop.
     store_id: Optional[str] = None
+    # One id per payment the form records: a retried request (the client
+    # retries a 5xx, a 504 can come after the save) answers the payment it
+    # already recorded, never a second one. See ap_payments.create_vendor_payment.
+    request_id: Optional[str] = Field(default=None, min_length=8, max_length=64)
+
+    @field_validator("payment_date", mode="before")
+    @classmethod
+    def _iso_payment_date(cls, v):
+        return ap_engine.iso_payment_date(v)
 
 
 # Recognized vendor credit-note / debit-note types. Every type lands in the

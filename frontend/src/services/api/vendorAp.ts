@@ -78,6 +78,10 @@ export interface VendorPayment {
   // answer carries the shop it was stamped with (null = no shop on record),
   // which the Cash Flow drawer names in its toast.
   store_id?: string | null;
+  // One id per payment the form records: the client retries a 5xx (a 504
+  // can come after the save), and the server answers the payment that id
+  // already recorded instead of recording a second one.
+  request_id?: string;
 }
 
 export interface DebitNote {
@@ -470,7 +474,9 @@ export const vendorApApi = {
   // Apply an advance (all or part, gross = cash + TDS) to one bill (A12). The
   // server refuses more than the advance or than is left on the bill (422), a
   // bill held for rejected goods (409) and another shop's bill (422).
-  applyAdvance: async (vendorId: string, paymentId: string, payload: { bill_id: string; amount: number }) => {
+  // advance_left: what the form showed was left of the advance -- a repeated
+  // request (a retried 5xx after the save) finds less left and gets a 409.
+  applyAdvance: async (vendorId: string, paymentId: string, payload: { bill_id: string; amount: number; advance_left: number }) => {
     const res = await api.post(`/vendors/${vendorId}/payments/${paymentId}/apply`, payload);
     return res.data as { payment: VendorPayment; advance_left: number };
   },
