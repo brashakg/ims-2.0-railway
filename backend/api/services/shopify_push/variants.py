@@ -434,9 +434,9 @@ async def _seed_variants_after_write(
         # ecom fallback write-back).
         "inventory_item_gids": [],
         "product_level_inventory_item_gid": None,
-        # How many seed rows actually carried a selling price. The publish
-        # precondition (must-fix 1) requires this to be > 0: a SKU-only seed
-        # means Shopify's variant is still at 0.00 and must never go visible.
+        # How many seed rows carried a selling price -- informational only.
+        # The gate is push_product's every-size rule (unpriced_size_names,
+        # SF-05): a press with ANY unpriced size never reaches seeding.
         "priced_rows": sum(1 for r in seed_rows if r["row"].get("price")),
     }
 

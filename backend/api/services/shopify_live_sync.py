@@ -251,8 +251,9 @@ async def push_product_docs(
     that is now frozen at its last pushed price.
 
     ``max_results`` caps the rows attempted (every result counts);
-    ``max_sent`` caps the rows that reached Shopify -- a photo-less REFUSAL
-    never did, so it does not count against it (the press cap semantics).
+    ``max_sent`` caps the rows that reached Shopify -- a photo-less or an
+    unpriced-size REFUSAL never did, so it does not count against it (the
+    press cap semantics).
 
     Returns {results, blocked_skipped, refused, sent, cap_reached, limit_reached}."""
     from . import online_block
@@ -288,7 +289,7 @@ async def push_product_docs(
         ).to_dict()
         write_push_audit(data, current_user)
         results.append(data)
-        if data.get("reason") != "no_photo":
+        if data.get("reason") != "no_photo" and data.get("code") != shopify_push.UNPRICED_SIZE:
             sent += 1
     return {
         "results": results,
@@ -455,12 +456,16 @@ def _serialise_run(doc: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     return {k: _iso(v) for k, v in doc.items() if k not in ("_id", "lock_key")}
 
 
-def last_run(db) -> Optional[Dict[str, Any]]:
-    """The most recent run summary (scheduled or manual), JSON-ready. None when
-    nothing has ever run. Cursor sort (not find_one(sort=)) so it reads the same
-    on pymongo, the strict fake and the no-Mongo MockCollection. Fail-soft."""
+def last_run(db, trigger: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """The most recent run summary (scheduled or manual; ``trigger`` narrows it
+    to one, e.g. "scheduled"), JSON-ready. None when nothing has ever run.
+    Cursor sort (not find_one(sort=)) so it reads the same on pymongo, the
+    strict fake and the no-Mongo MockCollection. Fail-soft."""
+    query: Dict[str, Any] = {"job": JOB_ID}
+    if trigger:
+        query["trigger"] = trigger
     try:
-        rows = list(db[RUNS_COLLECTION].find({"job": JOB_ID}).sort([("started_at", -1)]).limit(1))
+        rows = list(db[RUNS_COLLECTION].find(query).sort([("started_at", -1)]).limit(1))
     except Exception:  # noqa: BLE001
         return None
     return _serialise_run(rows[0]) if rows else None

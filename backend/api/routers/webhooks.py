@@ -53,13 +53,17 @@ Fail-soft contract:
   written (or it's a verified duplicate whose original row is the record).
 - Event dispatch failure → still 200 (the inbox row is ALREADY durable, and
   re-acking would make the vendor resend a delivery we already persisted).
-  NOTE, because an earlier version of this docstring claimed otherwise:
-  NOTHING SWEEPS `webhook_inbox` FOR `processed=false`.
-  `NexusAgent._handle_inbox_webhook` is reachable only from
-  `on_event("webhook.received")`; `_do_background_work` iterates
-  INTEGRATION_SCHEDULES and never touches this collection. A dispatch failure
-  is therefore logged at ERROR, and the only automatic recovery is a later
-  vendor retry, which the duplicate path re-dispatches.
+  NOTE: the only background sweep of `webhook_inbox` is NEXUS's hourly retry
+  of rows whose HANDLER FAILED (status=failed, below). A row whose dispatch
+  never reached NEXUS stays status=received, and nothing sweeps those: a
+  dispatch failure is logged at ERROR, and its only automatic recovery is a
+  later vendor retry, which the duplicate path re-dispatches.
+- Handler failure (SF03) -> the row is NOT marked processed. NEXUS records
+  status=failed + handler_error + attempts; a vendor redelivery re-runs it at
+  once and NEXUS's hourly tick retries status=failed rows, until
+  NexusAgent.WEBHOOK_MAX_ATTEMPTS parks it as status=dead (dead letter: counted
+  in the failed-webhooks number on the SUPERADMIN sync-health card, and listed
+  in GET /admin/online-store/sync-health -> webhooks.dead_letters).
 
 The inbox doc shape:
 
@@ -70,8 +74,11 @@ The inbox doc shape:
       "headers": {...selected headers...},
       "payload": {...parsed json body...},
       "raw_body_size": <int>,
-      "processed": false,
+      "processed": false,              # true = succeeded or terminal skip
       "processed_at": None,
+      "status": "received" | "processing" | "succeeded" | "failed" | "dead"
+                | "skipped",
+      "attempts": <int>, "handler_error": <str>,   # set by NEXUS on failure
       "skipped_reason": None | str,
       "event_id": None | str,          # vendor delivery id header, if any
       "body_fingerprint": "sha256:..." # content-bound replay key
@@ -635,9 +642,9 @@ async def _dispatch_webhook_received(webhook_id: str, vendor: str) -> bool:
     except Exception as e:  # noqa: BLE001
         logger.error(
             "[WEBHOOKS] dispatch_event failed for %s webhook_id=%s: %s — the row "
-            "is durable but UNPROCESSED. Nothing sweeps webhook_inbox for "
-            "processed=false, so it will only be drained if the vendor retries "
-            "(which now re-dispatches) or an operator replays it by hand.",
+            "is durable but UNPROCESSED (status=received). The hourly sweep "
+            "retries only failed handlers, so it will only be drained if the "
+            "vendor retries (which re-dispatches) or an operator replays it.",
             vendor,
             webhook_id,
             e,
@@ -672,26 +679,46 @@ _REDISPATCH_MIN_AGE_SECONDS = 60
 
 
 def _is_stranded(existing: Dict[str, Any]) -> bool:
-    """True when an inbox row's dispatch demonstrably never landed.
+    """True when an inbox row needs another drain.
 
-    Requires BOTH processed is false AND the row to be older than
-    `_REDISPATCH_MIN_AGE_SECONDS` — see `_duplicate_response` for why the age
-    check is not optional. Unparseable/missing `received_at` returns False:
-    we would rather miss a rescue than risk a concurrent second drain.
+    Keyed on the SF03 state NexusAgent._handle_inbox_webhook writes:
+      * processed=True (succeeded / terminal skip) or status=dead -> never.
+      * status=failed -> yes, at once: its drain FINISHED and failed, so no
+        drain is in flight and the handler's own business claims make the
+        re-run safe.
+      * status=processing -> only once the drain's lease has expired (the
+        worker died mid-run); the drain's atomic claim re-checks the lease.
+      * received / legacy rows with no status -> processed is false AND the
+        row is older than `_REDISPATCH_MIN_AGE_SECONDS` (see
+        `_duplicate_response` for why the age check is not optional).
+    Unparseable/missing timestamps return False: we would rather miss a
+    rescue than risk a concurrent second drain.
     """
     if existing.get("processed") is not False:
         return False
-    received_at = existing.get("received_at")
-    if isinstance(received_at, str):
+    status = existing.get("status")
+    if status == "failed":
+        return True
+    if status == "dead":
+        return False
+    if status == "processing":
+        from agents.implementations.nexus import NexusAgent
+
+        stamp = existing.get("processing_at")
+        min_age = NexusAgent.WEBHOOK_PROCESSING_LEASE.total_seconds()
+    else:
+        stamp = existing.get("received_at")
+        min_age = _REDISPATCH_MIN_AGE_SECONDS
+    if isinstance(stamp, str):
         from agents.webhook_verify import _parse_iso
 
-        received_at = _parse_iso(received_at)
-    if not isinstance(received_at, datetime):
+        stamp = _parse_iso(stamp)
+    if not isinstance(stamp, datetime):
         return False
-    if received_at.tzinfo is None:
-        received_at = received_at.replace(tzinfo=timezone.utc)
-    age = (datetime.now(timezone.utc) - received_at).total_seconds()
-    return age >= _REDISPATCH_MIN_AGE_SECONDS
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - stamp).total_seconds()
+    return age >= min_age
 
 
 async def _duplicate_response(
@@ -720,12 +747,14 @@ async def _duplicate_response(
         stranding. Re-dispatching on the flag alone would let a fast vendor
         retry run a second concurrent drain of the same row — trading a
         stranded row for double-processing on a money path.
-      * `NexusAgent._handle_inbox_webhook` sets processed=true even when the
-        vendor handler raises (it records `handler_error`). So a row that is
-        still false after the grace window genuinely never reached NEXUS,
-        which is the only case worth rescuing. A handler that failed is NOT
-        re-run here; replaying a failed money handler on every duplicate
-        would be worse than leaving it for an operator.
+      * SF03: `NexusAgent._handle_inbox_webhook` no longer marks a failed
+        handler processed. It records status=failed (error + attempts), and a
+        redelivery re-runs it here; after NexusAgent.WEBHOOK_MAX_ATTEMPTS the
+        row is status=dead and is NOT re-run. Replay is safe because every
+        money handler keeps its own claim: orders on the X-Shopify-Webhook-Id
+        claim + order-id guard + unique index, refunds on the unique
+        shopify_refund_id, so a re-run resolves to replayed/duplicate, never a
+        second booking or credit note.
 
     Re-dispatch is otherwise safe: the drain is keyed on webhook_id, re-checks
     `processed` before doing any work, and the downstream ingest layers are
@@ -747,11 +776,11 @@ async def _duplicate_response(
 
     if webhook_id and _is_stranded(existing):
         logger.warning(
-            "[WEBHOOKS] %s: duplicate matched a row still unprocessed after "
-            "%ss (webhook_id=%s) — its dispatch never landed; re-dispatching "
-            "so the delivery is not stranded",
+            "[WEBHOOKS] %s: duplicate matched an unfinished row (status=%s, "
+            "webhook_id=%s) — its dispatch never landed or its handler failed; "
+            "re-dispatching so the delivery is not stranded",
             vendor,
-            _REDISPATCH_MIN_AGE_SECONDS,
+            existing.get("status") or "legacy",
             webhook_id,
         )
         out["redispatched"] = await _dispatch_webhook_received(webhook_id, vendor)
@@ -815,6 +844,7 @@ def _record_unverifiable(
                 "raw_body_size": len(raw_body or b""),
                 "processed": True,
                 "processed_at": now,
+                "status": "skipped",
                 "skipped_reason": "secret_not_configured",
                 "signature_verified": False,
                 "event_id": None,
@@ -878,6 +908,7 @@ def _persist_skipped(
         "raw_body_size": len(raw_body or b""),
         "processed": True,
         "processed_at": datetime.now(timezone.utc),
+        "status": "skipped",
         "skipped_reason": skipped_reason,
         "event_id": event_id,
         "body_fingerprint": fingerprint,
@@ -1165,6 +1196,10 @@ async def _ingest(
         "raw_body_size": len(raw_body or b""),
         "processed": False,
         "processed_at": None,
+        # SF03 state: received -> processing -> succeeded | failed | dead
+        # (written by NexusAgent._handle_inbox_webhook).
+        "status": "received",
+        "attempts": 0,
         "skipped_reason": None,
         "event_id": event_id,
         "body_fingerprint": fingerprint,
@@ -1207,7 +1242,8 @@ async def _ingest(
     # resend a delivery we already persisted, and the resend would now be
     # rejected as a duplicate anyway). It is logged at ERROR, and a later
     # vendor retry re-dispatches the still-unprocessed row via
-    # _duplicate_response — there is NO background sweep to fall back on.
+    # _duplicate_response — the hourly sweep retries only rows whose handler
+    # FAILED, never one that was never dispatched.
     await _dispatch_webhook_received(webhook_id, vendor)
 
     return {
@@ -1718,7 +1754,8 @@ def _reconcile_razorpay_payment_bg(request: Request) -> None:
             return
         # Find the most recent razorpay inbox row that we just ingested.
         doc = inbox.find_one(
-            {"vendor": "razorpay", "processed": False},
+            {"vendor": "razorpay", "processed": False,
+             "status": {"$nin": ["failed", "dead"]}},
             sort=[("received_at", -1)],
         )
         if not doc:

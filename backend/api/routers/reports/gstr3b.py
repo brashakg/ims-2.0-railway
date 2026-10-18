@@ -2,9 +2,9 @@
 
 from fastapi import Depends, HTTPException, Query
 from typing import Optional
-from datetime import date
+from ...utils.event_time import parse_event_utc_naive
 from ...utils.ist import (
-    ist_day_start_utc,
+    instant_in_window_query,
     ist_month_window_utc,
 )
 from calendar import monthrange
@@ -154,10 +154,10 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
                 {
                     "store_id": active_store,
                     "type": "ISSUED",
-                    "created_at": {
-                        "$gte": from_dt.isoformat(),
-                        "$lt": to_dt.isoformat(),
-                    },
+                    # Half-open [from_dt, to_dt): the month's last microsecond
+                    # is IN, next month's first is OUT (audit R03). Rows are
+                    # ISO strings (naive-UTC legacy or '+00:00') or BSON dates.
+                    **instant_in_window_query("created_at", from_dt, to_dt),
                 }
             ):
                 for f in ("ref", "reason"):
@@ -223,17 +223,12 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
                 rid = str(ret.get("return_id") or "")
                 if rid and rid in seen_returns:
                     continue
-                when = ret.get("created_at")
-                try:
-                    if isinstance(when, str):
-                        if not (from_dt.isoformat() <= when < to_dt.isoformat()):
-                            continue
-                    elif when is not None:
-                        if not (from_dt <= when < to_dt):
-                            continue
-                    else:
-                        continue
-                except (TypeError, ValueError):
+                # Parse to the naive-UTC instant whatever the stored shape
+                # (BSON naive or aware, ISO string with or without offset),
+                # then the half-open month test. Comparing an aware datetime
+                # to the naive bound used to raise and silently drop the row.
+                when = parse_event_utc_naive(ret.get("created_at"))
+                if when is None or not (from_dt <= when < to_dt):
                     continue
                 gb = ret.get("gst_breakup") or {}
                 if not isinstance(gb, dict):
@@ -358,11 +353,9 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
         # last_day feeds the vendor-bill helpers, which filter on bill_date --
         # a CALENDAR date, deliberately kept in calendar (not instant) frame.
         _, last_day = monthrange(year, mon)
-        # Same IST-month -> naive-UTC created_at window as _compute_gstr1, so
-        # GSTR-1 and GSTR-3B agree on which invoices belong to the period.
-        from_dt = ist_day_start_utc(date(year, mon, 1))
-        nxt_y, nxt_m = (year + 1, 1) if mon == 12 else (year, mon + 1)
-        to_dt = ist_day_start_utc(date(nxt_y, nxt_m, 1))
+        # THE IST-month window (half-open), the same one _compute_gstr1 and
+        # _credit_note_totals read, so GSTR-1 and GSTR-3B agree on the period.
+        from_dt, to_dt = ist_month_window_utc(year, mon)
     except Exception:
         raise HTTPException(status_code=400, detail="month must be in YYYY-MM format")
 

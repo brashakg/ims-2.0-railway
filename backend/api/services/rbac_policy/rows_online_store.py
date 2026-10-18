@@ -1,5 +1,5 @@
 """
-POLICY rows: /online-store family, /collections, /catalogue, /ondc.
+POLICY rows: /online-store family, /collections, /catalogue, /ondc, /shopify/app.
 
 Moved VERBATIM from the flat ``api/services/rbac_policy.py`` lines 4521-5012.
 These rows are load-bearing DATA. Their ORDER is preserved (``policy_for``
@@ -541,4 +541,10 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/ondc/publish",
         "allowed": ["ADMIN", "SUPERADMIN"],
     },
+    # --- /api/v1/shopify/app ---  The page Shopify admin frames when the owner
+    # opens the "IMS 2.0 Sync" app. PUBLIC (no IMS login inside Shopify's
+    # iframe); HMAC-gated like the webhook receiver: the read-only status panel
+    # renders only on a valid Shopify app-load HMAC for the configured shop.
+    # See backend/api/routers/shopify_app.py.
+    {"method": "GET", "path": "/api/v1/shopify/app", "allowed": "PUBLIC"},
 ]

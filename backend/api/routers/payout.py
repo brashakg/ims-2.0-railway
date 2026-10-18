@@ -53,7 +53,7 @@ from database.repositories.product_incentive_log_repository import (
 from api.services.points_calculator import aggregate_mtd
 from api.services import scorecard_engine
 from api.services.csv_safe import safe_writer, BOM
-from api.utils.ist import ist_day_start_utc, ist_today
+from api.utils.ist import ist_month_window_utc, ist_today
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -208,8 +208,7 @@ def _month_window(year: int, month: int) -> tuple:
     next_y, next_m = (year + 1, 1) if month == 12 else (year, month + 1)
     next_first_date = date_type(next_y, next_m, 1)
 
-    start_dt = ist_day_start_utc(first)
-    next_first = ist_day_start_utc(next_first_date)
+    start_dt, next_first = ist_month_window_utc(year, month)
     df = first.isoformat()
     dt = (next_first_date - timedelta(days=1)).isoformat()
     return start_dt, next_first, df, dt

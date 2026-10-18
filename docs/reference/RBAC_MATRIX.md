@@ -67,10 +67,10 @@ manager gets 404).
 
 | Gate type | Count |
 |---|---|
-| PUBLIC (no IMS role gate) | 45 |
+| PUBLIC (no IMS role gate) | 46 |
 | AUTHENTICATED | 394 |
 | Role-gated (one or more roles) | 872 |
-| **Total `/api/v1` (method x path)** | **1311** |
+| **Total `/api/v1` (method x path)** | **1312** |
 | ...of which `store_scoped` | 240 |
 | ...of which `self_enforced` | 47 |
 
@@ -1456,6 +1456,12 @@ entry exactly; see the manual interpretation notes above.
 | `GET` | `/api/v1/shipping/shipments` | AUTH |  |  |
 | `POST` | `/api/v1/shipping/shipments` | ADMIN, AREA_MANAGER, CASHIER, SALES_STAFF, STORE_MANAGER |  |  |
 | `GET` | `/api/v1/shipping/shipments/{shipment_id}/track` | AUTH |  |  |
+
+### `/api/v1/shopify`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/shopify/app` | PUBLIC |  |  |
 
 ### `/api/v1/stores`
 

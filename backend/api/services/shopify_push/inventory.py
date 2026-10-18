@@ -69,6 +69,19 @@ compare deep; the old flat ``{sku: qty}`` never equals the nested shape, so
 the first pass after deploy re-sends every listed product -- the wanted
 seeding, no backfill script).
 
+WRITE ORDER (audit SF01): every row is ABSOLUTE and sent with
+ignoreCompareQuantity, so an older count reaching Shopify after a newer one
+used to win (a sweep and a sale write-back overlapping, two workers, a manual
+press during the schedule). Each reading of IMS stock now carries a TICKET
+(``stock_write_ticket``, a Mongo counter taken BEFORE the on-hand read) and
+every send goes through ONE guard per (inventory item, location) in
+``shopify_stock_write_guard``: a row whose key a NEWER ticket has already
+claimed is dropped (that reading is the truth and it is the one that goes
+out); a key another send is still holding is waited for, never overtaken; a
+send with no answer is re-read on Shopify before anything is concluded, and
+while unconfirmed its key stays fenced so nothing newer can be overtaken by
+it landing late. Durable in Mongo, so it holds across workers.
+
 WHY A DIFF AND NOT A DIRTY FLAG: on-hand is written by fourteen files and the
 POS sell path explicitly refuses the item_events ledger, so there is NO single
 choke point to hook a flag into. Diffing per store against the last number
@@ -77,6 +90,9 @@ sent is one rule in one place and catches every writer.
 
 from __future__ import annotations
 
+import asyncio
+import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -85,14 +101,24 @@ from agents.nexus_providers import _as_shopify_gid
 from ._shared import (
     MODE_LIVE,
     MODE_SIMULATED,
+    PROVIDER_TIMEOUT,
     PushResult,
     _live_or_reason,
     is_variant_of,
     logger,
 )
-from .transport import _graphql, _now, _user_error_codes, _user_errors
+from .transport import (
+    _MAX_RETRIES,
+    _RETRY_MAX_DELAY,
+    ShopifyRequestRefused,
+    _graphql,
+    _now,
+    _user_error_codes,
+    _user_errors,
+)
 from .queries import (
     _INVENTORY_ACTIVATE,
+    _INVENTORY_LEVELS_READ,
     _INVENTORY_SET_MAX,
     _INVENTORY_SET_QUANTITIES,
     _LOCATIONS_LIST_QUERY,
@@ -713,21 +739,197 @@ def _forget_deleted_sizes(db, product: Dict[str, Any], deleted: Iterable[str]) -
 _TRANSPORT_FAILURE = "__transport__"
 
 
-async def _set_chunk(db, chunk: List[Dict[str, Any]]) -> Tuple[Optional[str], set]:
-    """ONE inventorySetQuantities call: ``(error_or_None, userError codes)``."""
+# ---------------------------------------------------------------------------
+# THE WRITE-ORDER GUARD (audit SF01) -- one rule, inside the one writer
+# ---------------------------------------------------------------------------
+
+_GUARD_COLLECTION = "shopify_stock_write_guard"
+_TICKET_COUNTER = "shopify_stock_write"
+# The longest one _graphql call can take: every attempt timing out, every
+# backoff at its cap (4 x (30 s + 30 s) = 240 s with today's settings).
+_CALL_WORST_S = _MAX_RETRIES * (PROVIDER_TIMEOUT + _RETRY_MAX_DELAY)
+# A claimed key is leased past the send plus the re-read after no answer
+# (renewed before that re-read), so a lease never lapses mid-send.
+_LEASE_S = 2 * _CALL_WORST_S + 60.0
+# After a send with no answer that the re-read could not confirm, the key
+# stays held this long: the unanswered request may still land, and nothing
+# newer may go out before it could have.
+_FENCE_S = _CALL_WORST_S
+# A newer writer waits out at most one dead holder's lease plus its fence.
+_WAIT_S = _LEASE_S + _FENCE_S + 30.0
+# Asking again for a busy key backs off 0.1 s, 0.2 s, ... capped at 2 s: a
+# long wait is a few hundred reads, not thousands.
+_POLL_S = 0.1
+_POLL_MAX_S = 2.0
+STOCK_WRITE_GUARD_FAILED = "the stock write-order guard could not be read -- nothing written"
+
+
+def stock_write_ticket(db) -> Optional[int]:
+    """The ORDER STAMP of one reading of IMS stock. Take it BEFORE the on-hand
+    read the rows come from: a higher ticket is a later reading, and the guard
+    lets no lower ticket overwrite it on Shopify. None when the counter cannot
+    be reached -- the writer then refuses (unknown is never assumed)."""
+    if db is None:
+        return None
+    from ..barcode import allocate_sequence
+
+    try:
+        return allocate_sequence(db.get_collection("counters"), _TICKET_COUNTER)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[SHOPIFY_STOCK] write ticket unavailable: %s", exc)
+        return None
+
+
+def _poll_delay(attempt: int) -> float:
+    return min(_POLL_S * (2 ** min(attempt, 16)), _POLL_MAX_S)
+
+
+def _guard_key(row: Dict[str, Any]) -> str:
+    return f"{row['inventoryItemId']}|{row['locationId']}"
+
+
+def _claim(coll, key: str, ticket: int, token: str) -> str:
+    """ONE key: ``held`` (ours to send), ``superseded`` (a newer reading has
+    claimed it -- drop ours) or ``busy`` (an older send is still holding it --
+    ask again). Atomic per key; raises on a dead read."""
+    from pymongo.errors import DuplicateKeyError
+
+    now = time.time()
+    lease = {"seq": ticket, "lease": token, "lease_until": now + _LEASE_S}
+    if coll.find_one_and_update(
+        {"_id": key, "seq": {"$lte": ticket}, "$or": [{"lease": None}, {"lease_until": {"$lt": now}}]},
+        {"$set": lease},
+    ) is not None:
+        return "held"
+    doc = coll.find_one({"_id": key})
+    if doc is None:
+        try:
+            coll.insert_one({"_id": key, **lease})
+            return "held"
+        except DuplicateKeyError:
+            return "busy"  # another writer's first claim landed first
+    return "superseded" if int(doc.get("seq") or 0) > ticket else "busy"
+
+
+async def _claim_rows(coll, chunk: List[Dict[str, Any]], ticket: int, token: str) -> List[Dict[str, Any]]:
+    """Claim every row's key, all or nothing (sorted, and everything given
+    back on a busy key, so two writers never deadlock): the rows still ours
+    to send, in chunk order. Raises TimeoutError when a key stays busy past
+    ``_WAIT_S`` -- named as a refused write, never sent unguarded."""
+    deadline = time.monotonic() + _WAIT_S
+    attempt = 0
+    while True:
+        held: List[str] = []
+        busy = False
+        for key in sorted({_guard_key(r) for r in chunk}):
+            verdict = _claim(coll, key, ticket, token)
+            if verdict == "held":
+                held.append(key)
+            elif verdict == "busy":
+                busy = True
+                break
+        if not busy:
+            return [r for r in chunk if _guard_key(r) in held]
+        _release(coll, held, token)
+        if time.monotonic() > deadline:
+            raise TimeoutError("another stock write for the same item and shop is still running")
+        await asyncio.sleep(_poll_delay(attempt))
+        attempt += 1
+
+
+def _release(coll, keys: Iterable[str], token: str, *, hold_s: Optional[float] = None) -> None:
+    """Give our keys back (``hold_s``: keep holding them that much longer --
+    the fence after an unconfirmed send). Fail-soft: a lease that cannot be
+    released expires on its own."""
+    for key in keys:
+        try:
+            coll.update_one(
+                {"_id": key, "lease": token},
+                {"$set": {"lease": None} if hold_s is None else {"lease_until": time.time() + hold_s}},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[SHOPIFY_STOCK] write guard release failed %s: %s", key, exc)
+
+
+async def _landed(db, rows: List[Dict[str, Any]]) -> bool:
+    """A send that got NO answer is never assumed either way: re-read Shopify.
+    True only when every row now reads back exactly the quantity sent."""
+    try:
+        for loc, at in _by_location(rows).items():
+            body = await _graphql(
+                db, _INVENTORY_LEVELS_READ, {"ids": [r["inventoryItemId"] for r in at], "locationId": loc}
+            )
+            seen: Dict[str, Any] = {}
+            for node in ((body or {}).get("data") or {}).get("nodes") or []:
+                level = (node or {}).get("inventoryLevel") or {}
+                for q in level.get("quantities") or []:
+                    if q.get("name") == "available":
+                        seen[node.get("id")] = q.get("quantity")
+            if any(seen.get(r["inventoryItemId"]) != r["quantity"] for r in at):
+                return False
+        return True
+    except Exception as exc:  # noqa: BLE001 -- unread is unconfirmed
+        logger.warning("[SHOPIFY_STOCK] re-read after an unanswered send failed: %s", exc)
+        return False
+
+
+async def _set_chunk(
+    db, chunk: List[Dict[str, Any]], ticket: Optional[int]
+) -> Tuple[List[Dict[str, Any]], Optional[str], set]:
+    """ONE GUARDED inventorySetQuantities call: ``(rows sent, error_or_None,
+    userError codes)``. A row a newer reading has claimed is not sent (and is
+    no error); an unreadable guard sends nothing; a send with no answer is
+    re-read on Shopify and counts only if every row reads back as sent."""
+    token = uuid.uuid4().hex
+    try:
+        if db is None or ticket is None:
+            raise RuntimeError("no write ticket")
+        coll = db.get_collection(_GUARD_COLLECTION)
+        held = await _claim_rows(coll, chunk, ticket, token)
+    except Exception as exc:  # noqa: BLE001 -- refused, never sent unguarded
+        return [], f"{STOCK_WRITE_GUARD_FAILED} ({exc})", {_TRANSPORT_FAILURE}
+    if not held:
+        return [], None, set()
+    keys = [_guard_key(r) for r in held]
     variables = {
         "input": {
             "name": "available",
             "reason": "correction",
             "ignoreCompareQuantity": True,
-            "quantities": chunk,
+            "quantities": held,
         }
     }
     try:
         body = await _graphql(db, _INVENTORY_SET_QUANTITIES, variables)
-    except Exception as exc:  # noqa: BLE001 -- fail-soft side channel
-        return str(exc), {_TRANSPORT_FAILURE}
-    return _user_errors(body, "inventorySetQuantities"), _user_error_codes(body, "inventorySetQuantities")
+    except ShopifyRequestRefused as exc:
+        # Definitely NOT applied (never sent, or a deterministic refusal):
+        # nothing to re-read, nothing that could land late -- no fence.
+        _release(coll, keys, token)
+        return held, str(exc), {_TRANSPORT_FAILURE}
+    except Exception as exc:  # noqa: BLE001 -- UNCERTAIN: a timeout / 5xx may have applied it
+        _release(coll, keys, token, hold_s=_LEASE_S)  # still ours while we re-read
+        if await _landed(db, held):
+            _release(coll, keys, token)
+            return held, None, set()
+        _release(coll, keys, token, hold_s=_FENCE_S)
+        return held, str(exc), {_TRANSPORT_FAILURE}
+    _release(coll, keys, token)
+    return held, _user_errors(body, "inventorySetQuantities"), _user_error_codes(body, "inventorySetQuantities")
+
+
+def _overtaken(db, ticket: Optional[int], written: Iterable[Tuple[str, str, int]]) -> set:
+    """Of the rows just accepted, the ``(item, location)`` keys a NEWER reading
+    has claimed since: their last-sent baseline is that writer's to record
+    (an older baseline landing late would make the next diff skip a change).
+    An unreadable guard answers "all of them" -- a skipped baseline only
+    costs a re-send."""
+    rows = list(written)
+    try:
+        keys = [f"{i}|{l}" for i, l, _q in rows]
+        found = db.get_collection(_GUARD_COLLECTION).find({"_id": {"$in": keys}, "seq": {"$gt": ticket}})
+        return {tuple(d["_id"].split("|", 1)) for d in found}
+    except Exception:  # noqa: BLE001
+        return {(i, l) for i, l, _q in rows}
 
 
 async def _activate_chunk(db, chunk: List[Dict[str, Any]]) -> List[str]:
@@ -759,7 +961,7 @@ async def _activate_chunk(db, chunk: List[Dict[str, Any]]) -> List[str]:
 
 
 async def set_inventory_quantities(
-    db, rows: Iterable[Tuple[str, str, int]]
+    db, rows: Iterable[Tuple[str, str, int]], *, ticket: Optional[int] = None
 ) -> Dict[str, Any]:
     """THE writer. ABSOLUTE available quantity per ``(inventory_item_gid,
     location_gid, qty)`` row via inventorySetQuantities (ignoreCompareQuantity:
@@ -768,11 +970,16 @@ async def set_inventory_quantities(
     chunk's locations, then ONE retry. ANY refusal Shopify answered with -- that
     one included -- is then re-sent SPLIT PER LOCATION, so only the bad
     location's rows are lost and only it carries STOCK_ACTIVATION_FAILED /
-    STOCK_WRITE_FAILED; see ``_write_chunk``. Stateless:
-    no "activated" bookkeeping, so it
-    self-heals when the owner adds or re-enables a location by hand and costs
-    zero extra calls in steady state. Fail-soft ``{set, written, activated,
-    errors, code}`` -- ``written`` is the rows Shopify accepted."""
+    STOCK_WRITE_FAILED; see ``_write_chunk``. No "activated" bookkeeping, so
+    it self-heals when the owner adds or re-enables a location by hand and
+    costs zero extra calls in steady state. EVERY send goes through the
+    write-order guard (``_set_chunk``): ``ticket`` is the stamp the CALLER
+    took before the on-hand read the rows came from. The writer never takes
+    one itself -- a ticket taken after the read could rank a stale reading
+    above a newer one -- so a None ticket (the counter could not be reached)
+    REFUSES every row as STOCK_WRITE_FAILED. A row a newer reading has claimed
+    is dropped -- neither written nor an error. Fail-soft ``{set, written,
+    activated, errors, code}`` -- ``written`` is the rows Shopify accepted."""
     out: Dict[str, Any] = {"set": 0, "written": [], "activated": 0, "errors": [], "code": None}
     entries = [
         {
@@ -783,7 +990,7 @@ async def set_inventory_quantities(
         for inv, loc, qty in rows
     ]
     for i in range(0, len(entries), _INVENTORY_SET_MAX):
-        await _write_chunk(db, entries[i : i + _INVENTORY_SET_MAX], out)
+        await _write_chunk(db, entries[i : i + _INVENTORY_SET_MAX], out, ticket)
     return out
 
 
@@ -794,7 +1001,9 @@ def _by_location(chunk: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]
     return out
 
 
-async def _write_chunk(db, chunk: List[Dict[str, Any]], out: Dict[str, Any], *, split: bool = True) -> None:
+async def _write_chunk(
+    db, chunk: List[Dict[str, Any]], out: Dict[str, Any], ticket: Optional[int], *, split: bool = True
+) -> None:
     """ONE inventorySetQuantities call plus its two recoveries, accumulating
     into ``out``.
 
@@ -822,29 +1031,29 @@ async def _write_chunk(db, chunk: List[Dict[str, Any]], out: Dict[str, Any], *, 
     A refusal that survives both is named AND coded (STOCK_WRITE_FAILED, or
     STOCK_ACTIVATION_FAILED from recovery 1): a write Shopify refused must
     never reach the operator as a codeless green run."""
-    err, codes = await _set_chunk(db, chunk)
+    sent, err, codes = await _set_chunk(db, chunk, ticket)
     activation = False
     if err and ITEM_NOT_STOCKED_AT_LOCATION in codes:
-        act_errors = await _activate_chunk(db, chunk)
-        out["activated"] += len({r["inventoryItemId"] for r in chunk})
-        err, codes = await _set_chunk(db, chunk)
+        act_errors = await _activate_chunk(db, sent)
+        out["activated"] += len({r["inventoryItemId"] for r in sent})
+        sent, err, codes = await _set_chunk(db, sent, ticket)
         if err:
             activation = True
             err = f"{STOCK_ACTIVATION_FAILED}: {err}" + (
                 f" (activation: {'; '.join(act_errors)})" if act_errors else ""
             )
     if not err:
-        out["set"] += len(chunk)
-        out["written"].extend((r["inventoryItemId"], r["locationId"], r["quantity"]) for r in chunk)
+        out["set"] += len(sent)
+        out["written"].extend((r["inventoryItemId"], r["locationId"], r["quantity"]) for r in sent)
         return
-    per_location = _by_location(chunk)
+    per_location = _by_location(sent)
     if split and _TRANSPORT_FAILURE not in codes and len(per_location) > 1:
         # The survivors land; the refusals collapse into ONE error for the
         # chunk, so a split never inflates the caller's failure COUNT
         # (writeback_skus reports len(errors)).
         sub: Dict[str, Any] = {"set": 0, "written": [], "activated": 0, "errors": [], "code": None}
         for rows_at in per_location.values():
-            await _write_chunk(db, rows_at, sub, split=False)
+            await _write_chunk(db, rows_at, sub, ticket, split=False)
         out["set"] += sub["set"]
         out["written"].extend(sub["written"])
         out["activated"] += sub["activated"]
@@ -1558,6 +1767,7 @@ async def push_skus_stock(
     policy: Optional[str] = None,
     tracked: Optional[bool] = None,
     targets_pending: bool = False,
+    ticket: Optional[int] = None,
 ) -> Dict[str, Any]:
     """THE quantity path. For every listed SKU, one row per MAPPED shop (an
     explicit 0 included) at that shop's location, through ``set_inventory_
@@ -1576,7 +1786,13 @@ async def push_skus_stock(
 
     ``targets_pending`` (with ``dry_run`` only -- the per-product preview): a
     SKU with no Shopify inventory item yet is one the press is about to mint,
-    so it is planned, not refused as STOCK_TARGET_MISSING."""
+    so it is planned, not refused as STOCK_TARGET_MISSING.
+
+    ``ticket`` (audit SF01): the write-order stamp of the on-hand reading the
+    rows come from. A caller that passes ``quantities`` MUST pass the ticket
+    it took before reading them -- none is ever taken here for a reading made
+    elsewhere, so a missing one refuses the write (STOCK_WRITE_FAILED). Only
+    when this door does the read itself is the ticket taken here, before it."""
     from ..online_catalog import inventory_items_for_skus, listings_for_skus
     from ..online_stock_writeback import online_quantities_for_skus, orphan_stock_stores
 
@@ -1620,6 +1836,8 @@ async def push_skus_stock(
     conflicts = _location_conflicts(stores)
 
     if quantities is None:
+        if ticket is None and not dry_run:
+            ticket = stock_write_ticket(db)  # BEFORE the read it stamps; None refuses the write
         quantities = online_quantities_for_skus(db, distinct)
     if not quantities:
         # STRICT: an absolute writer never fails soft to 0 for a whole batch.
@@ -1764,8 +1982,9 @@ async def push_skus_stock(
     if not mapped:
         return summary  # nothing writable -- code + error already say so
     written_per_sku: Dict[str, Dict[str, int]] = {}
+    baseline_per_sku: Dict[str, Dict[str, int]] = {}
     if rows:
-        written = await set_inventory_quantities(db, rows)
+        written = await set_inventory_quantities(db, rows, ticket=ticket)
         summary["set"] = written["set"]
         summary["errors"].extend(written["errors"])
         if written["errors"]:
@@ -1784,15 +2003,19 @@ async def push_skus_stock(
             summary["error"] = refused + (
                 f" -- ALSO: {summary['error']}" if summary.get("error") else ""
             )
+        overtaken = _overtaken(db, ticket, written["written"])
         for inv_gid, loc, qty in written["written"]:
             sku, sid = key_of[(inv_gid, loc)]
             written_per_sku.setdefault(sku, {})[sid] = qty
+            if (inv_gid, loc) not in overtaken:
+                baseline_per_sku.setdefault(sku, {})[sid] = qty
     # What was accepted goes to the baseline -- per listing, only the SKUs
     # written, only the shops written; a failed or unknown shop keeps the
-    # number it last had accepted (what Shopify still shows there).
-    if written_per_sku:
+    # number it last had accepted (what Shopify still shows there). A row a
+    # newer reading has claimed since is that writer's to record (SF01).
+    if baseline_per_sku:
         for pid, pid_skus in by_product.items():
-            rows_for = {s: written_per_sku[s] for s in pid_skus if s in written_per_sku}
+            rows_for = {s: baseline_per_sku[s] for s in pid_skus if s in baseline_per_sku}
             if rows_for:
                 _writeback_stock(db, pid, rows_for, mapped, policy=policy, tracked=tracked)
     # What Shopify ACCEPTED, not what was planned: the sync page prints these
@@ -2010,7 +2233,8 @@ async def release_store_location(db, store_id: str, location_gid: str) -> Dict[s
             if inv
         ]
         if rows:
-            written = await set_inventory_quantities(db, rows)
+            # Zeros read from nothing: a ticket taken now ranks them correctly.
+            written = await set_inventory_quantities(db, rows, ticket=stock_write_ticket(db))
             out["set"] = written["set"]
             if written["errors"]:
                 out["ok"] = False
@@ -2312,11 +2536,11 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
     for every listed SKU decides the DIFF over the MAPPED shops; each changed
     product's rows are then RECOMPUTED immediately before its own write
     (``sync_product_stock``), so a POS sale landing while the loop is
-    mid-way is written, not overwritten with the snapshot. Residual, known
-    and carried over, not built here: one round-trip and cross-worker (a
-    sale between a product's recompute and its inventorySetQuantities);
-    closing it needs a per-SKU version, and until then the next sale's own
-    write-back or the next tick re-sends the true number. DARK -> a SIMULATED plan and zero
+    mid-way is written, not overwritten with the snapshot. A sale between a
+    product's recompute and its inventorySetQuantities (one round-trip, or
+    another worker) is closed by the writer's write-order guard (audit
+    SF01): the sale's write-back reads later, so its ticket is higher, and
+    the older pass can neither overtake nor overwrite it. DARK -> a SIMULATED plan and zero
     network; ``dry_run=True`` returns that SIMULATED plan EVEN WHEN LIVE (the
     "Preview first" press) -- with the SAME ok / code / error the live pass
     would report, so a mapped shop whose read failed is named in the preview

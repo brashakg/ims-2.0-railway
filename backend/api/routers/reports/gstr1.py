@@ -2,10 +2,11 @@
 
 from fastapi import Depends, Query
 from typing import Optional
-from datetime import date
+from ...utils.event_time import parse_event_utc_naive
 from ...utils.ist import (
+    instant_in_window_query,
     ist_date_str,
-    ist_day_start_utc,
+    ist_month_window_utc,
 )
 from calendar import monthrange
 from ..auth import require_roles
@@ -73,16 +74,14 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
     """
     # Parse month to date range. The GST tax period is an IST calendar month,
     # but `created_at` is stored as a naive-UTC instant (BaseRepository) -- so
-    # the month boundaries must be shifted through ist_day_start_utc. With the
+    # the month boundaries must be shifted through ist_month_window_utc. With the
     # old UTC-frame window an invoice minted 01-Jun 02:00 IST (= 31-May 20:30
     # UTC) filed into MAY's GSTR-1, contradicting its IST-minted Rule 46(b)
     # serial; on 1-Apr it even fell into the prior FY. The half-open
     # [from_dt, to_dt) window also closes the old `$lte 23:59:59` 1-second hole.
     try:
         year, mon = int(month[:4]), int(month[5:7])
-        from_dt = ist_day_start_utc(date(year, mon, 1))
-        nxt_y, nxt_m = (year + 1, 1) if mon == 12 else (year, mon + 1)
-        to_dt = ist_day_start_utc(date(nxt_y, nxt_m, 1))
+        from_dt, to_dt = ist_month_window_utc(year, mon)
     except Exception:
         from fastapi import HTTPException
 
@@ -402,13 +401,13 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
             ledger_col = db.get_collection("credit_note_ledger") or db["credit_note_ledger"]
             if ledger_col is not None:
                 # Query credit notes issued in the period. The ledger writes
-                # created_at as a naive-UTC ISO STRING (store_credit_ledger.
-                # make_entry), so the bounds stay strings -- the isoformat of
-                # the IST-month window above is frame-consistent with them.
+                # created_at as an ISO STRING (legacy naive-UTC, or explicit
+                # '+00:00' since A13); the match also covers a BSON-date row.
+                # Half-open [from_dt, to_dt), the same match GSTR-3B uses.
                 ledger_query = {
                     "store_id": active_store,
                     "type": "ISSUED",
-                    "created_at": {"$gte": from_dt.isoformat(), "$lt": to_dt.isoformat()},
+                    **instant_in_window_query("created_at", from_dt, to_dt),
                 }
                 # Allow for date stored as datetime or ISO string
                 try:
@@ -587,20 +586,11 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                     if r_tax <= 0 and r_taxable <= 0:
                         continue
 
-                    # Period filter. `returns.created_at` is written by
-                    # BaseRepository as a real Date, unlike the ledger's ISO
-                    # string, so compare in the frame it is actually stored in.
-                    r_when = ret.get("created_at")
-                    try:
-                        if isinstance(r_when, str):
-                            if not (from_dt.isoformat() <= r_when < to_dt.isoformat()):
-                                continue
-                        elif r_when is not None:
-                            if not (from_dt <= r_when < to_dt):
-                                continue
-                        else:
-                            continue
-                    except (TypeError, ValueError):
+                    # Period filter: the naive-UTC instant whatever the stored
+                    # shape (BSON naive/aware, ISO string with or without an
+                    # offset), half-open -- the same test GSTR-3B applies.
+                    r_when = parse_event_utc_naive(ret.get("created_at"))
+                    if r_when is None or not (from_dt <= r_when < to_dt):
                         continue
                     if _cn_parent_held(db, ret, _held_cache):
                         validation_issues.append(_held_cn_issue(rid, ret))

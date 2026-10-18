@@ -214,31 +214,49 @@ def ist_date_str_from_stored(value: Any) -> str:
 
 
 def ist_month_window_utc(year: int, month: int):
-    """NAIVE-UTC (start, end_inclusive) bounds for the IST calendar month.
+    """NAIVE-UTC HALF-OPEN bounds ``[start, next_start)`` for the IST calendar month.
+
+    Compare ``$gte start`` and ``$lt next_start`` (``start <= v < next_start``)
+    -- NEVER ``$lte``. ``next_start`` IS the next month's ``start``, so
+    consecutive windows tile exactly: no row in two months, none in neither.
+
+    Why half-open (audit R03, 2026-10-18): the end used to be ``next_start``
+    minus one microsecond, an INCLUSIVE end, and GSTR-3B compared it with
+    ``$lt`` -- silently dropping an event at the month's last microsecond.
+    An inclusive end is also wrong for ISO-string rows with an explicit offset:
+    ``'...T18:29:59.999999+00:00'`` sorts AFTER ``'...T18:29:59.999999'``. The
+    exclusive bound has neither failure: an offset suffix only matters on an
+    exact tie, and a tie with ``start`` is in (``$gte``) and a tie with
+    ``next_start`` is out (``$lt``) -- both correct.
 
     THE BOUND MOVES BACKWARD, the stored value is never touched. IST midnight
     on the 1st IS 18:30 UTC on the last day of the previous month, so a naive
     ``datetime(year, month, 1)`` bound silently excludes every order placed
-    00:00-05:30 IST on the 1st -- they fall into the PREVIOUS month. In
-    production 4 real orders sit in exactly that shape (2021-09, 2022-01,
-    2024-06, 2025-04), and on the payout screen that is staff incentive money
-    counted into the wrong month.
+    00:00-05:30 IST on the 1st -- they fall into the PREVIOUS month.
 
-    Consecutive windows TILE: this month's end is one microsecond before next
-    month's start, so no row is counted twice and none is dropped. The previous
-    hand-written copies subtracted a whole SECOND, leaving a one-second hole an
-    order could fall into.
-
-    ONE definition on purpose. Three separate copies of this window existed --
-    payout, reports /sales/growth and budgets -- and fixing one of them made two
-    screens report different revenue for the same month.
+    ONE definition on purpose: payout, budgets, growth, payroll commission,
+    GSTR-1, GSTR-3B and the GST summary / cross-check all read this.
     """
     start = ist_day_start_utc(_date(year, month, 1))
     if month == 12:
         nxt = ist_day_start_utc(_date(year + 1, 1, 1))
     else:
         nxt = ist_day_start_utc(_date(year, month + 1, 1))
-    return start, nxt - timedelta(microseconds=1)
+    return start, nxt
+
+
+def instant_in_window_query(field: str, start: datetime, end: datetime) -> dict:
+    """Mongo match: stored instant ``field`` in the half-open ``[start, end)``.
+
+    Matches the field whichever shape a row holds it in -- a BSON date, or an
+    ISO string (legacy naive-UTC, or explicit ``+00:00`` / ``Z``). Mongo range
+    operators never compare across types, so each shape needs its own branch;
+    a string-only filter silently skips every BSON row and vice versa.
+    """
+    return {"$or": [
+        {field: {"$gte": start, "$lt": end}},
+        {field: {"$gte": start.isoformat(), "$lt": end.isoformat()}},
+    ]}
 
 
 def fy_start_year_ist(dt: Optional[datetime] = None) -> int:

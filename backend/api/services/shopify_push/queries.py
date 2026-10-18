@@ -242,6 +242,21 @@ mutation imsInventorySetQuantities($input: InventorySetQuantitiesInput!) {
   }
 }
 """
+# READ ONLY, used only after a quantity write got NO answer (audit SF01): what
+# Shopify now shows as available for each item at one location, so an
+# unanswered write is confirmed or refused by reading, never assumed.
+# InventoryItem.inventoryLevel(locationId:) + InventoryLevel.quantities(names:)
+# exist unchanged from 2024-10 through 2026-04.
+_INVENTORY_LEVELS_READ = """
+query imsInventoryLevelsRead($ids: [ID!]!, $locationId: ID!) {
+  nodes(ids: $ids) {
+    ... on InventoryItem {
+      id
+      inventoryLevel(locationId: $locationId) { quantities(names: ["available"]) { name quantity } }
+    }
+  }
+}
+"""
 # Shopify caps one inventorySetQuantities call at 250 quantity entries.
 _INVENTORY_SET_MAX = 250
 

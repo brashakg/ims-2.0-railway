@@ -142,6 +142,7 @@ from .routers import (
     approvals_router,
 )
 from .routers.auth import require_roles
+from .routers.shopify_app import PAGE_PATH as _SHOPIFY_APP_PAGE, router as shopify_app_router
 
 # Roles allowed to see company financials / payroll (mirrors the frontend
 # Finance + Payroll route guards — managers + accountant; SUPERADMIN auto).
@@ -800,8 +801,16 @@ async def global_rate_limiter(request: Request, call_next):
 async def add_security_headers(request: Request, call_next):
     """Add security headers to every response."""
     response = await call_next(request)
+    # The ONE framed page: the app page Shopify admin loads in an iframe sets
+    # its own CSP frame-ancestors (admin.shopify.com + the verified shop), so it
+    # keeps that and gets no X-Frame-Options. Every other response -- including
+    # anything else on that path that did not set frame-ancestors -- stays DENY.
+    framed = request.url.path == _SHOPIFY_APP_PAGE and "frame-ancestors" in (
+        response.headers.get("Content-Security-Policy") or ""
+    )
     response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
+    if not framed:
+        response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = (
@@ -818,14 +827,15 @@ async def add_security_headers(request: Request, call_next):
         "noindex, nofollow, noarchive, nosnippet, noimageindex, notranslate"
     )
     # CSP: allow self + Vercel preview domains for the frontend
-    response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline'; "
-        "style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data: https:; "
-        "connect-src 'self' https://*.vercel.app https://*.up.railway.app "
-        "https://*.uniparallel.com"
-    )
+    if not framed:
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: https:; "
+            "connect-src 'self' https://*.vercel.app https://*.up.railway.app "
+            "https://*.uniparallel.com"
+        )
     return response
 
 
@@ -1713,6 +1723,12 @@ app.include_router(
     prefix="/api/v1/online-store/push",
     tags=["Online Store - Push"],
 )
+# The page Shopify admin frames when the owner opens the "IMS 2.0 Sync" app
+# (its App URL): a welcome + "Open IMS" + a read-only connection status shown
+# only on a valid Shopify app-load HMAC. PUBLIC in rbac_policy (HMAC-gated);
+# the one route add_security_headers lets Shopify frame. Path lives in the
+# router (PAGE_PATH), so no prefix here.
+app.include_router(shopify_app_router, tags=["Online Store - Shopify app page"])
 # Discount-Rule sub-module (rebuild of BVI's Postgres DiscountRule). Owner-editable
 # CRUD for ecom_discount_rules -- the automatic ONLINE storefront discount rules the
 # online discount engine reads (services/online_discount_engine.py). PUSH-DARK:

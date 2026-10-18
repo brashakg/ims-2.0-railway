@@ -95,6 +95,10 @@ def _record_health(db, shop: str, payload: Dict[str, Any], now: str) -> None:
                         f"sync and webhooks are DOWN until the app is reinstalled."
                     ),
                     "resolved": False,
+                    # SF03: cleared once the HIGH alert is raised. A row still
+                    # carrying it (the run stopped between the two) is not
+                    # done: a redelivery raises the alert, never skips it.
+                    "alert_pending": True,
                     "created_at": now,
                 }
             )
@@ -123,25 +127,35 @@ def _record_health(db, shop: str, payload: Dict[str, Any], now: str) -> None:
 async def _raise_high_alert(shop: str, payload: Dict[str, Any]) -> Optional[str]:
     """Raise a HIGH audit alert through the existing alert spine
     (audit_alerts.emit_audit_alert -> audit_logs + audit.alert event -> SENTINEL).
-    Fail-soft: emit_audit_alert never raises, and we swallow an import error."""
-    try:
-        from .audit_alerts import emit_audit_alert
+    SF03: an error RAISES (the caller leaves alert_pending set and reports a
+    failure, so the inbox retries), never reads as alerted."""
+    from .audit_alerts import emit_audit_alert
 
-        return await emit_audit_alert(
-            severity="HIGH",
-            action="integration.shopify.uninstalled",
-            entity_type="integration",
-            entity_id="shopify",
-            user_id="SYSTEM_SHOPIFY_WEBHOOK",
-            context={
-                "shop": shop,
-                "reason": "Shopify app/uninstalled webhook",
-                "impact": "access token revoked; all Shopify sync + webhooks down",
-            },
+    return await emit_audit_alert(
+        severity="HIGH",
+        action="integration.shopify.uninstalled",
+        entity_type="integration",
+        entity_id="shopify",
+        user_id="SYSTEM_SHOPIFY_WEBHOOK",
+        context={
+            "shop": shop,
+            "reason": "Shopify app/uninstalled webhook",
+            "impact": "access token revoked; all Shopify sync + webhooks down",
+        },
+    )
+
+
+def _alert_sent(db, shop: str) -> None:
+    """Clear alert_pending on the shop's open alert row once its HIGH alert
+    went out. Fail-soft: a miss only means one extra alert on a redelivery."""
+    try:
+        db.get_collection(_ALERTS_COLLECTION).update_one(
+            {"type": "shopify", "kind": _ALERT_KIND, "shop": shop,
+             "resolved": {"$ne": True}},
+            {"$set": {"alert_pending": False}},
         )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[SHOPIFY_APP_UNINSTALL] HIGH alert dispatch failed: %s", exc)
-        return None
+        logger.warning("[SHOPIFY_APP_UNINSTALL] alert_pending clear failed: %s", exc)
 
 
 async def handle_shopify_app_uninstalled(
@@ -168,8 +182,14 @@ async def handle_shopify_app_uninstalled(
         if db is None:
             return {"status": "simulated", "shop": shop, "alerted": False}
 
-        # IDEMPOTENCY: a redelivery must not double-record or re-alert.
-        if _existing_unresolved_alert(db, shop) is not None:
+        # IDEMPOTENCY: a redelivery must not double-record or re-alert -- but a
+        # row whose alert never went out (alert_pending, SF03) is finished now.
+        existing = _existing_unresolved_alert(db, shop)
+        if existing is not None and existing.get("alert_pending"):
+            audit_id = await _raise_high_alert(shop, payload)
+            _alert_sent(db, shop)
+            return {"status": "recorded", "shop": shop, "alerted": True, "audit_id": audit_id}
+        if existing is not None:
             logger.info(
                 "[SHOPIFY_APP_UNINSTALL] shop=%s already has an open uninstall "
                 "alert -- duplicate, no re-alert",
@@ -182,6 +202,7 @@ async def handle_shopify_app_uninstalled(
 
         # Raise the HIGH alert ONCE, on the first record.
         audit_id = await _raise_high_alert(shop, payload)
+        _alert_sent(db, shop)
 
         return {
             "status": "recorded",

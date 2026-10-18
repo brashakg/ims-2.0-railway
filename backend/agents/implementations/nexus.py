@@ -59,6 +59,25 @@ INTEGRATION_SCHEDULES = {
 }
 
 
+def _raise_if_failed(result: Any) -> None:
+    """SF03: the Shopify services are fail-soft and RETURN their failures
+    ({"status": "error"} or {"reason": "exception:<Type>"}) instead of raising.
+    Turn those into an exception so the inbox row is recorded as failed and
+    retried, never read as done. Business outcomes (duplicate, order_not_found,
+    credit_failed -> accountant queue, skipped for a real reason) are NOT
+    failures."""
+    r = result if isinstance(result, dict) else {}
+    reason = str(r.get("reason") or "")
+    if r.get("status") == "error" or reason.startswith("exception:"):
+        raise RuntimeError(f"handler reported failure: {r.get('error') or reason or 'error'}")
+    if r.get("sync_failed"):
+        # The order mapper's status sync did not land (online_order_mapper).
+        raise RuntimeError(f"order status sync failed: {r['sync_failed']}")
+    if r.get("booking_unsettled"):
+        # A booked order whose stock claim is not stamped (shopify_ingest).
+        raise RuntimeError(f"booking not settled: {r['booking_unsettled']}")
+
+
 class NexusAgent(JarvisAgent):
     """Integration orchestration — sync, webhook routing, retry, audit."""
 
@@ -88,6 +107,8 @@ class NexusAgent(JarvisAgent):
         hour, run the sync and record a sync_run row. Real sync work hands
         off to the existing admin.py integration endpoints (next pass).
         """
+        await self._retry_failed_webhooks()
+
         configured = await self._get_enabled_integrations()
         if not configured:
             logger.debug("[NEXUS] No integrations enabled — tick skipped")
@@ -789,35 +810,74 @@ class NexusAgent(JarvisAgent):
             logger.info(f"[NEXUS] Webhook nudge for {vendor} — running sync")
             await self._run_integration_sync(vendor)
 
+    # SF03: an inbox row moves received -> processing -> succeeded | failed |
+    # dead. `processed` keeps its old meaning for every existing reader: True =
+    # the work is DONE (succeeded, or an explicit terminal skip written by the
+    # receiver). A handler failure leaves processed=False with status=failed,
+    # the error and the attempt count, so a vendor redelivery
+    # (webhooks._duplicate_response) or the hourly retry sweep re-runs it; after
+    # WEBHOOK_MAX_ATTEMPTS it parks as status=dead (dead letter: counted in the
+    # failed-webhooks number on the SUPERADMIN sync-health card and listed in
+    # that route's webhooks.dead_letters) and nothing re-runs it again.
+    WEBHOOK_MAX_ATTEMPTS = 5
+    # A drain that died mid-run (worker killed) leaves status=processing; after
+    # this lease another drain may claim it. Business handlers keep their own
+    # idempotency claims, so a late second run cannot double-apply.
+    WEBHOOK_PROCESSING_LEASE = timedelta(minutes=15)
+
     async def _handle_inbox_webhook(self, webhook_id: str, vendor: str):
         """
-        Read the inbox row, hand off to vendor handler, mark processed.
+        Claim the inbox row, hand off to the vendor handler, record the outcome.
 
         Stays fail-soft: a missing inbox row, a handler exception, or a
-        Mongo update failure is logged but never raised — the agent loop
-        must keep ticking.
+        Mongo update failure is logged but never raised -- the agent loop
+        must keep ticking. A handler exception is RECORDED (status=failed),
+        never turned into success.
         """
         coll = self.get_collection("webhook_inbox")
         if coll is None:
             logger.warning(f"[NEXUS] webhook_inbox collection unavailable — cannot drain {webhook_id}")
             return
 
+        import uuid
+
+        from pymongo import ReturnDocument
+
+        now = datetime.now(timezone.utc)
+        # This drain's fence: the outcome write lands only while the row still
+        # carries it, so a drain that outlived its lease (another took the row
+        # over) can never overwrite the newer run's outcome.
+        claim = uuid.uuid4().hex
         try:
-            doc = coll.find_one({"webhook_id": webhook_id})
+            # Atomic claim: only a row that is not done, not dead and not
+            # freshly in flight elsewhere. Terminal skips carry processed=True,
+            # so they are never claimed.
+            doc = coll.find_one_and_update(
+                {
+                    "webhook_id": webhook_id,
+                    "processed": {"$ne": True},
+                    "status": {"$ne": "dead"},
+                    "$or": [
+                        {"status": {"$ne": "processing"}},
+                        {"processing_at": {"$lt": now - self.WEBHOOK_PROCESSING_LEASE}},
+                    ],
+                },
+                {"$set": {"status": "processing", "processing_at": now, "claim": claim},
+                 "$inc": {"attempts": 1}},
+                return_document=ReturnDocument.AFTER,
+            )
         except Exception as e:
-            logger.warning(f"[NEXUS] inbox lookup failed for {webhook_id}: {e}")
+            logger.warning(f"[NEXUS] inbox claim failed for {webhook_id}: {e}")
             return
 
         if not doc:
-            logger.info(f"[NEXUS] inbox row not found for webhook_id={webhook_id} (already swept?)")
-            return
-
-        if doc.get("processed"):
-            # Idempotent — another worker already drained it.
+            # Missing (swept), already done, dead, or being drained right now.
+            logger.info(f"[NEXUS] inbox row {webhook_id} not claimable (done, dead, in flight or missing)")
             return
 
         webhook_payload = doc.get("payload") or {}
         handler_error: str = ""
+        terminal = False
         try:
             if vendor == "razorpay":
                 await self._handle_razorpay_webhook(webhook_payload)
@@ -831,26 +891,67 @@ class NexusAgent(JarvisAgent):
             elif vendor == "shiprocket":
                 await self._handle_shiprocket_webhook(webhook_payload)
             else:
+                # Explicit terminal skip: no retry can grow a handler.
+                terminal = True
                 handler_error = f"unknown_vendor:{vendor}"
                 logger.warning(f"[NEXUS] no handler for vendor={vendor!r} (webhook_id={webhook_id})")
         except Exception as e:
             handler_error = f"{type(e).__name__}: {e}"
             logger.warning(f"[NEXUS] {vendor} handler raised on {webhook_id}: {e}")
 
-        # Mark processed regardless of handler outcome — the inbox row's
-        # job is "we received and acknowledged this". Handler-specific
-        # state (retries, dead-letter) goes on a future iteration.
+        done_at = datetime.now(timezone.utc).isoformat()
+        attempts = int(doc.get("attempts") or 1)
+        if terminal:
+            update = {"$set": {"processed": True, "processed_at": done_at,
+                               "status": "skipped", "handler_error": handler_error}}
+        elif not handler_error:
+            update = {"$set": {"processed": True, "processed_at": done_at,
+                               "status": "succeeded"},
+                      "$unset": {"handler_error": ""}}
+        else:
+            dead = attempts >= self.WEBHOOK_MAX_ATTEMPTS
+            update = {"$set": {"processed": False, "status": "dead" if dead else "failed",
+                               "handler_error": handler_error[:500],
+                               "failed_at": done_at}}
+            if dead:
+                logger.error(
+                    f"[NEXUS] {vendor} webhook {webhook_id} DEAD after {attempts} attempts: {handler_error}"
+                )
         try:
-            coll.update_one(
-                {"webhook_id": webhook_id},
-                {"$set": {
-                    "processed": True,
-                    "processed_at": datetime.now(timezone.utc).isoformat(),
-                    **({"handler_error": handler_error} if handler_error else {}),
-                }},
+            res = coll.update_one({"webhook_id": webhook_id, "claim": claim}, update)
+            if not getattr(res, "matched_count", 1):
+                logger.warning(
+                    f"[NEXUS] {webhook_id}: outcome not written -- another drain took "
+                    f"the row over after this one's lease ran out"
+                )
+        except Exception as e:
+            logger.warning(f"[NEXUS] outcome update failed on {webhook_id}: {e}")
+
+    async def _retry_failed_webhooks(self, limit: int = 50):
+        """Bounded retry: re-run inbox rows whose handler FAILED (not dead, not
+        skipped), and rows a drain was killed in (a deploy or restart left them
+        status=processing past the lease -- the drain's claim takes those over).
+        Called from the hourly tick, so the tick is the back-off. Fail-soft."""
+        coll = self.get_collection("webhook_inbox")
+        if coll is None:
+            return
+        abandoned = datetime.now(timezone.utc) - self.WEBHOOK_PROCESSING_LEASE
+        try:
+            rows = list(
+                coll.find({"processed": {"$ne": True},
+                           "$or": [{"status": "failed"},
+                                   {"status": "processing",
+                                    "processing_at": {"$lt": abandoned}}]},
+                          {"webhook_id": 1, "vendor": 1})
+                .sort("received_at", 1)
+                .limit(limit)
             )
         except Exception as e:
-            logger.warning(f"[NEXUS] processed-flag update failed on {webhook_id}: {e}")
+            logger.warning(f"[NEXUS] failed-webhook sweep query failed: {e}")
+            return
+        for row in rows:
+            if row.get("webhook_id") and row.get("vendor"):
+                await self._handle_inbox_webhook(row["webhook_id"], row["vendor"])
 
     # ------------------------------------------------------------------
     # Vendor-specific handlers — stubs for now. Each one is the logical
@@ -929,8 +1030,10 @@ class NexusAgent(JarvisAgent):
         (kept off the call signature so the existing 1-arg handler contract is
         preserved). They also fall back to fields on the payload body.
 
-        Fail-soft: every handler swallows its own errors and SIMULATES when the DB
-        is unavailable; any residual error is swallowed by the caller.
+        Failures are NOT swallowed (SF03): a handler that raises, or whose service
+        reports {"status": "error"} / an "exception:" reason, re-raises so
+        `_handle_inbox_webhook` records the row as failed and it is retried.
+        Handlers still SIMULATE when the DB is unavailable.
         """
         headers = getattr(self, "_current_webhook_headers", None)
         headers = headers if isinstance(headers, dict) else {}
@@ -1001,8 +1104,13 @@ class NexusAgent(JarvisAgent):
                 result.get("customer_id"),
                 result.get("store_id"),
             )
-        except Exception as e:  # noqa: BLE001 - never let mapping crash the loop
+            _raise_if_failed(result)
+            if result.get("status") in ("duplicate", "replayed") and not result.get("order_id"):
+                # Backstop: "already booked" with no order behind it is not done.
+                raise RuntimeError(f"order {result.get('status')} with no IMS order")
+        except Exception as e:  # noqa: BLE001 - logged here, recorded by the inbox drain
             logger.warning(f"[NEXUS] shopify order mapping failed: {e}")
+            raise  # SF03: the inbox row records the failure
 
     async def _handle_shopify_refund_topic(self, payload: Dict[str, Any], topic: str):
         """refunds/create -> GST credit note (output-tax reversal) + stock restock,
@@ -1027,8 +1135,10 @@ class NexusAgent(JarvisAgent):
                 result.get("order_id"),
                 result.get("gross_refund"),
             )
-        except Exception as e:  # noqa: BLE001 - never let a refund crash the loop
+            _raise_if_failed(result)
+        except Exception as e:  # noqa: BLE001 - logged here, recorded by the inbox drain
             logger.warning(f"[NEXUS] shopify refund handling failed: {e}")
+            raise  # SF03: the inbox row records the failure
 
     async def _handle_shopify_fulfillment_topic(self, payload: Dict[str, Any], topic: str):
         """fulfillments/create + fulfillments/update -> reconcile shipped status +
@@ -1046,8 +1156,10 @@ class NexusAgent(JarvisAgent):
                 result.get("fulfillment_id"),
                 result.get("order_status"),
             )
+            _raise_if_failed(result)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[NEXUS] shopify fulfilment handling failed: {e}")
+            raise  # SF03: the inbox row records the failure
 
     async def _handle_shopify_customer_topic(self, payload: Dict[str, Any], topic: str):
         """customers/create + customers/update -> upsert into the IMS CRM (dedupe
@@ -1063,8 +1175,10 @@ class NexusAgent(JarvisAgent):
                 result.get("customer_id"),
                 result.get("shopify_customer_id"),
             )
+            _raise_if_failed(result)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[NEXUS] shopify customer handling failed: {e}")
+            raise  # SF03: the inbox row records the failure
 
     async def _handle_shopify_checkout_topic(self, payload: Dict[str, Any], topic: str):
         """checkouts/create + checkouts/update -> upsert the raw essentials of an
@@ -1081,8 +1195,10 @@ class NexusAgent(JarvisAgent):
                 result.get("token"),
                 result.get("item_count"),
             )
+            _raise_if_failed(result)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[NEXUS] shopify checkout handling failed: {e}")
+            raise  # SF03: the inbox row records the failure
 
     async def _handle_shopify_order_delete_topic(self, payload: Dict[str, Any], topic: str):
         """orders/delete -> VOID the matching IMS online order (soft status change +
@@ -1099,8 +1215,10 @@ class NexusAgent(JarvisAgent):
                 result.get("order_id"),
                 result.get("shopify_order_id"),
             )
+            _raise_if_failed(result)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[NEXUS] shopify order delete handling failed: {e}")
+            raise  # SF03: the inbox row records the failure
 
     async def _handle_shopify_customer_delete_topic(self, payload: Dict[str, Any], topic: str):
         """customers/delete -> flag the matching IMS customer for data erasure
@@ -1116,8 +1234,10 @@ class NexusAgent(JarvisAgent):
                 result.get("customer_id"),
                 result.get("shopify_customer_id"),
             )
+            _raise_if_failed(result)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[NEXUS] shopify customer delete handling failed: {e}")
+            raise  # SF03: the inbox row records the failure
 
     async def _handle_shopify_app_uninstalled_topic(self, payload: Dict[str, Any], topic: str):
         """app/uninstalled -> LOUD log + integration-health/alert record + a HIGH
@@ -1134,8 +1254,10 @@ class NexusAgent(JarvisAgent):
                 result.get("shop"),
                 result.get("alerted"),
             )
+            _raise_if_failed(result)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[NEXUS] shopify app-uninstalled handling failed: {e}")
+            raise  # SF03: the inbox row records the failure
 
     async def _handle_shiprocket_webhook(self, payload: Dict[str, Any]):
         """A signed Shiprocket status push. A courier DELIVERED on a known AWB
@@ -1152,8 +1274,10 @@ class NexusAgent(JarvisAgent):
             return
         orders = self.get_collection("orders")
         order = orders.find_one(awb_filter(awb)) if orders is not None else None
-        if order:
-            apply_fact(self.db, order, DELIVER, source="SHIPROCKET_WEBHOOK")
+        if order and apply_fact(self.db, order, DELIVER, source="SHIPROCKET_WEBHOOK").get("failed"):
+            # SF03: nothing was written; record the row as failed so it is
+            # retried (the status claim makes a repeat DELIVER a no-op).
+            raise RuntimeError(f"shiprocket DELIVER not applied for awb={awb}")
 
     async def run(self, query: str, context: AgentContext) -> AgentResponse:
         """On-demand: report recent sync runs."""

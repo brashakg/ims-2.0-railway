@@ -35,6 +35,15 @@ _RETRY_BASE_DELAY = 1.0  # seconds; doubles per attempt
 _RETRY_MAX_DELAY = 30.0  # cap, also applied to a vendor Retry-After
 
 
+class ShopifyRequestRefused(ValueError):
+    """The request was DEFINITELY not applied: it never left (credentials
+    missing) or every attempt got a deterministic refusal (4xx / 429) with no
+    attempt that timed out or got a 5xx -- the only answers after which
+    Shopify may have applied it anyway. A ValueError, so every existing
+    ``except ValueError`` is unchanged; the stock writer reads it to skip the
+    read-back and the fence an UNCERTAIN failure needs (audit SF01)."""
+
+
 def _is_throttled_body(body: Any) -> bool:
     """True when a transport-200 GraphQL body carries a top-level THROTTLED
     error (Shopify's cost-based rate limiter). Fail-soft -> False."""
@@ -95,7 +104,7 @@ async def _graphql(db, query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
     access_token = (creds or {}).get("access_token")
     if not shop_url or not access_token:
         # Should never happen (gate checked creds) but guard anyway.
-        raise ValueError("shopify creds missing at GraphQL call time")
+        raise ShopifyRequestRefused("shopify creds missing at GraphQL call time")
     url = f"https://{shop_url}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
     headers = {
         "X-Shopify-Access-Token": access_token,
@@ -104,11 +113,15 @@ async def _graphql(db, query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
     payload = {"query": query, "variables": variables}
 
     last_error = "unknown"
+    # Did ANY attempt end where Shopify may have applied the request anyway
+    # (a timeout, a 5xx)? Then the final failure is uncertain, not a refusal.
+    uncertain = False
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
             resp = await _post_once(url, headers, payload)
         except httpx.TimeoutException as e:
             last_error = f"timeout: {e}"
+            uncertain = True
             if attempt >= _MAX_RETRIES:
                 raise ValueError(
                     f"shopify request failed after {attempt} attempts ({last_error})"
@@ -143,8 +156,9 @@ async def _graphql(db, query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
 
         if status == 429 or status >= 500:
             last_error = f"status {status}: {resp.text[:200]}"
+            uncertain = uncertain or status >= 500
             if attempt >= _MAX_RETRIES:
-                raise ValueError(
+                raise (ValueError if uncertain else ShopifyRequestRefused)(
                     f"shopify request failed after {attempt} attempts ({last_error})"
                 )
             logger.warning(
@@ -158,7 +172,7 @@ async def _graphql(db, query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
 
         # A non-retryable 4xx (bad token, bad payload...) fails immediately --
         # replaying a deterministic user error only burns the rate budget.
-        raise ValueError(f"status {status}: {resp.text[:200]}")
+        raise (ValueError if uncertain else ShopifyRequestRefused)(f"status {status}: {resp.text[:200]}")
 
     raise ValueError(f"shopify request failed ({last_error})")  # unreachable guard
 

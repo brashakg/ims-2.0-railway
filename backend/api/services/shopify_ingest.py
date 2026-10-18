@@ -815,6 +815,32 @@ def _webhook_already_seen(db, webhook_id: Optional[str]) -> bool:
         return False
 
 
+def _booking_unsettled(db, existing: Dict[str, Any], historical: bool) -> Dict[str, Any]:
+    """SF03: a replay of a booked order whose creator stopped between the insert
+    and its stamped stock claim finishes that claim
+    (online_fulfillment_route.finish_crashed_booking). {}: settled. Else
+    {"booking_unsettled": why}, merged into the replay's answer: every caller
+    goes on exactly as before (a duplicate mid-claim is normal), and the
+    webhook drain reads the flag as NOT DONE, so the inbox retries it."""
+    if historical:
+        return {}
+    from .online_fulfillment_route import finish_crashed_booking
+
+    unstamped = "fulfillment_breakdown" not in existing and bool(existing.get("fulfillment_route"))
+    why = finish_crashed_booking(db, existing)
+    if why:
+        return {"booking_unsettled": why}
+    if unstamped:
+        try:
+            now_doc = db.get_collection("orders").find_one({"order_id": existing.get("order_id")}) or {}
+        except Exception:  # noqa: BLE001
+            now_doc = {}
+        if "fulfillment_breakdown" in now_doc:
+            # This replay finished the claim (finish_crashed_booking).
+            return {"booking_recovered": True}
+    return {}
+
+
 # ---------------------------------------------------------------------------
 # HISTORICAL import support (scripts/import_shopify_order_history.py).
 # A historical import replays the FULL Shopify order history as settled IMS
@@ -1686,19 +1712,28 @@ def ingest_shopify_order(
         return {"status": "simulated", "shopify_order_id": shopify_order_id}
 
     # --- Layer 2: webhook-id replay guard (cheap, best-effort) --------------
+    # SF03: "seen" is not "booked". The id is recorded BEFORE the build, so a
+    # delivery that stopped between the two (a crash in the line mapping, the
+    # invoice serial, the insert) left a seen id and NO order -- answering
+    # "replayed" there marked the retry done with nothing booked. Replayed only
+    # when the order exists; otherwise fall through to the order-id guard and
+    # the build (that guard + the unique index + the inbox lease keep it one).
     if _webhook_already_seen(db, webhook_id):
         existing = None
         try:
             existing = orders_coll.find_one({"shopify_order_id": shopify_order_id})
-        except Exception:  # noqa: BLE001
-            existing = None
-        return {
-            "status": "replayed",
-            "order_id": (existing or {}).get("order_id"),
-            "invoice_number": (existing or {}).get("invoice_number"),
-            "shopify_order_id": shopify_order_id,
-            "store_id": (existing or {}).get("store_id"),
-        }
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "error", "error": f"replay lookup failed: {exc}",
+                    "shopify_order_id": shopify_order_id}
+        if existing:
+            return {
+                "status": "replayed",
+                "order_id": existing.get("order_id"),
+                "invoice_number": existing.get("invoice_number"),
+                "shopify_order_id": shopify_order_id,
+                "store_id": existing.get("store_id"),
+                **_booking_unsettled(db, existing, historical),
+            }
 
     # --- Layer 1: Shopify-order-id guard (hard backstop) --------------------
     try:
@@ -1713,6 +1748,7 @@ def ingest_shopify_order(
             "invoice_number": existing.get("invoice_number"),
             "shopify_order_id": shopify_order_id,
             "store_id": existing.get("store_id"),
+            **_booking_unsettled(db, existing, historical),
         }
         if historical:
             # SELF-HEAL: a prior apply run may have inserted the order but
