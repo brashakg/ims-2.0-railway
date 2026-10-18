@@ -961,9 +961,9 @@ async def block_investor_writes(request: Request, call_next):
         return await call_next(request)
     token = auth_header.split(" ", 1)[1].strip()
     try:
-        from .routers.auth import decode_token
+        from .routers.auth import current_authority, decode_token
 
-        payload = decode_token(token)
+        payload = current_authority(decode_token(token), request)
         roles = payload.get("roles", [])
     except Exception:
         return await call_next(request)

@@ -85,9 +85,9 @@ def _payload_from_bearer(request: Request):
     try:
         # Local import keeps middleware import-order-independent and mirrors the
         # lazy import used by block_investor_writes.
-        from ..routers.auth import decode_token
+        from ..routers.auth import current_authority, decode_token
 
-        return decode_token(token)
+        return current_authority(decode_token(token), request)
     except Exception:  # noqa: BLE001 - any decode failure => defer to route 401
         return None
 
@@ -214,16 +214,10 @@ async def rbac_enforcement_middleware(request: Request, call_next):
     # AUTHENTICATED or a role list: inspect the token's payload + roles.
     payload = _payload_from_bearer(request)
     roles = _roles_from_payload(payload)
-    if not roles:
-        # Either no usable token (missing / malformed / invalid / expired ->
-        # None) OR a valid token whose ``roles`` claim is empty/absent (-> []).
-        # In BOTH cases defer to the route: its ``get_current_user`` returns the
-        # canonical 401 for a bad token, while a valid zero-role token still
-        # reaches an AUTHENTICATED route (which would 200) and is 403'd by a
-        # role-gated route's own ``require_roles``. We must never substitute a
-        # hard 403 here for an empty role set -- that would be stricter than the
-        # route on AUTHENTICATED endpoints, breaking the behavior-preserving
-        # contract. The route decides.
+    if payload is None or (not roles and allowed == rbac_policy.AUTHENTICATED):
+        # Missing/invalid credentials still receive the route's canonical 401.
+        # A valid account with all roles removed must run through the policy:
+        # AUTHENTICATED routes remain usable, role-gated routes are denied.
         return await call_next(request)
 
     role_allowed = rbac_policy.check_access(method, path, roles)

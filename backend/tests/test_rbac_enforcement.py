@@ -327,13 +327,11 @@ def test_empty_roles_token_defers_on_authenticated_route(client):
     assert not r.json().get("detail", "").startswith(_MW_FORBIDDEN_PREFIX), r.text
 
 
-def test_empty_roles_token_still_blocked_on_gated_route_by_the_route(client):
-    # On a ROLE-gated route, an empty-roles token is still rejected -- but by the
-    # ROUTE's own require_roles (deferred to), so the body is NOT the enforcer's
-    # generic "Forbidden:" prefix. Confirms defer != bypass.
+def test_empty_roles_token_is_blocked_on_gated_route_by_middleware(client):
+    # A06: removing every role must not bypass middleware-only role gates.
     r = client.get(_GATED, headers=_auth([]))
-    assert r.status_code in (401, 403), r.text
-    assert not r.json().get("detail", "").startswith(_MW_FORBIDDEN_PREFIX), r.text
+    assert r.status_code == 403, r.text
+    assert r.json().get("detail", "").startswith(_MW_FORBIDDEN_PREFIX), r.text
 
 
 # ---------------------------------------------------------------------------
