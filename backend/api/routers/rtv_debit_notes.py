@@ -250,6 +250,15 @@ async def issue_debit_note(
     # answer is never stripped: the caller may read every figure on it.
     if not res.get("ok"):
         raise _http_from_result(res)
+    if rtv.get("receipt_rejection"):
+        # Metadata only: this draft never enters the posted AP-note collection.
+        # If this write fails after issue, retry finds the same issued note and
+        # repairs the handoff without allocating a second serial.
+        db.get_collection("vendor_returns").update_one(
+            {"return_id": rtv.get("return_id")},
+            {"$set": {"debit_note_draft_status": "ISSUED",
+                      "issued_debit_note_id": (res.get("debit_note") or {}).get("debit_note_id")}},
+        )
     # Masked as GET /{id} masks it: re-issuing returns an existing note, so an
     # unmasked reply would read any note's money (owner ruling 2026-10-12).
     return {

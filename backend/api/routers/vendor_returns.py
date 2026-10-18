@@ -95,6 +95,8 @@ class VendorReturnCreate(BaseModel):
 
 class VendorReturnStatusUpdate(BaseModel):
     status: str
+    # Only the receipt draft -> created step may choose the disposition.
+    return_type: Optional[Literal["credit_note", "replacement"]] = None
     notes: Optional[str] = None
     # N9: courier/logistics tracking, captured on the "shipped" transition so
     # staff can see where an in-transit RMA physically is (mirrors the transfer
@@ -283,6 +285,13 @@ async def create_vendor_return(
     # the accounts roles' alone (R2 + R3). A manager sends none.
     if any(item.unit_price is not None for item in return_data.items):
         require_payables(current_user, "Pricing a vendor return")
+    if return_data.stock_ids and db.get_collection("stock_units").find_one({
+        "stock_id": {"$in": return_data.stock_ids},
+        "store_id": return_data.store_id,
+        "receipt_disposition": "REJECTED",
+        "rtv_vendor_id": {"$ne": None},
+    }):
+        raise HTTPException(status_code=409, detail="Rejected receipt pieces already have a return draft. Open that return instead.")
 
     try:
         collection = db.get_collection("vendor_returns")
@@ -408,7 +417,13 @@ async def update_return_status(
 
         # Valid status transitions
         current_status = return_doc.get("status")
+        if current_status == "draft":
+            if status_update.status == "created" and not status_update.return_type:
+                raise HTTPException(status_code=422, detail="Choose credit or replacement before confirming this return.")
+        elif status_update.return_type is not None:
+            raise HTTPException(status_code=409, detail="A confirmed return keeps its credit or replacement choice.")
         valid_transitions = {
+            "draft": ["created", "cancelled"],
             "created": ["approved", "cancelled"],
             "approved": ["shipped", "cancelled"],
             "shipped": ["received_by_vendor"],
@@ -435,6 +450,10 @@ async def update_return_status(
             "updated_at": datetime.now().isoformat(),
             "updated_by": current_user.get("user_id"),
         }
+        if current_status == "draft" and status_update.status == "created":
+            update_dict["return_type"] = status_update.return_type
+        if return_doc.get("receipt_rejection") and status_update.status == "cancelled":
+            update_dict["debit_note_draft_status"] = "CANCELLED"
 
         # N9: persist courier/AWB tracking on the "shipped" transition (and allow
         # a later correction while still in transit). Surfaced on GET so staff
@@ -455,6 +474,8 @@ async def update_return_status(
             "changed_by": current_user.get("user_id"),
             "notes": status_update.notes or "",
         }
+        if "return_type" in update_dict:
+            history_entry["return_type"] = update_dict["return_type"]
         if update_dict.get("tracking_number"):
             history_entry["tracking_number"] = update_dict["tracking_number"]
             history_entry["courier_name"] = update_dict.get("courier_name", "")

@@ -212,7 +212,7 @@ async def void_grn(
             # rewrites their source fields, and a void over moved units let
             # the same goods be logged and received twice.
             try:
-                already_minted = _receipt_units(stock_repo, grn)
+                already_minted = _receipt_units(stock_repo, grn, include_rejected=True)
             except Exception as exc:  # noqa: BLE001
                 logger.error(
                     "[VENDOR] GRN %s: could not check for already-minted units "
@@ -456,7 +456,7 @@ async def escalate_grn(
             try:
                 if stock_repo is None:
                     raise RuntimeError("stock repository unavailable")
-                already_minted = _receipt_units(stock_repo, grn)
+                already_minted = _receipt_units(stock_repo, grn, include_rejected=True)
             except Exception as exc:
                 raise HTTPException(
                     status_code=503,
@@ -618,7 +618,10 @@ async def drop_over_order(
         # Nothing held and nothing kept: the receipt put nothing on the shelf
         # (a second count of a box, say) -- VOID, as a void leaves it, never
         # an ACCEPTED that reads "On shelf" for 0 units.
-        kept = any(int(it.get("accepted_qty") or 0) > 0 for it in items)
+        kept = any(
+            int(it.get("accepted_qty") or 0) > 0 or int(it.get("rejected_qty") or 0) > 0
+            for it in items
+        )
         status = "PARTIALLY_ACCEPTED" if rest else ("ACCEPTED" if kept else "VOID")
         patch = {
             "items": items,
