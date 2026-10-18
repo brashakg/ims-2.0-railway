@@ -38,9 +38,11 @@ from .create_claim import (
     take_claim,
 )
 from .queries import _PRODUCT_CREATE, _PRODUCT_UPDATE
+from .listing import FAMILY_UNREADABLE, HELD, listing_view, model_listing, plan_summary
 from .product_input import (
     _has_publishable_price,
     _set_product_metafields,
+    _set_variant_metafields,
     unpriced_size_names,
     _variants_for_price_push,
     build_product_input,
@@ -52,7 +54,9 @@ from .product_input import (
 from .tags import plan_product_tags, sync_product_tags
 from .variants import (
     _needs_repair,
+    _row_has_gid,
     _seed_variants_after_write,
+    all_variant_nodes,
     plan_variant_seed,
     push_variant_prices,
 )
@@ -67,11 +71,13 @@ from .inventory import (
     sku_by_variant_gid,
     sync_product_stock,
 )
-from .media import plan_product_media, product_photo_urls, sync_product_media
-from .writeback import _requeue_unpublished, _writeback_product
+from .media import plan_product_media, product_photo_urls, sync_product_media, sync_variant_media
+from .writeback import _requeue_unpublished, _writeback_product, _writeback_variant
 
 # A first publish / reseed / repair refused because a size has no price (SF-05).
 UNPRICED_SIZE = "UNPRICED_SIZE"
+# How many runs a listing whose photo step keeps failing is re-queued for.
+PHOTO_RETRY_CAP = 6
 
 # ===========================================================================
 # PUSH FUNCTIONS -- one per entity. DARK by default; LIVE only behind the gates.
@@ -169,7 +175,65 @@ async def push_product(
             reason="online_sync_blocked",
         )
     variants = variants or []
+    raw_variants = variants  # what the caller read: a re-entry re-derives the model
     ecom = product.get("ecom") or {}
+
+    # ONE LISTING PER MODEL (G2, owner 2026-10-18). A lead of colours / sizes
+    # pushes as its MODEL: every member a variant (lead first), the options
+    # its members vary on, the model's title / SEO / body / photos / tags.
+    # Unreadable -> refused (never a one-colour listing by accident); a model
+    # whose new variant could not be told apart or has no option value ->
+    # refused before anything is sent (listing.model_listing).
+    listing = None
+    try:
+        listing = model_listing(db, product, variants)
+    except Exception as exc:  # noqa: BLE001 -- fail-closed
+        return PushResult(
+            mode=MODE_BLOCKED,
+            entity="product",
+            action="skip",
+            target_id=pid,
+            ok=False,
+            shopify_id=ecom.get("shopify_product_id"),
+            error=(
+                f"refused: this product's colours and sizes could not be read ({exc}) -- "
+                "nothing was sent; press again"
+            ),
+            reason="publish_withheld",
+            code=FAMILY_UNREADABLE,
+        )
+    if listing is not None and listing.get("variant_of"):
+        return PushResult(
+            mode=MODE_BLOCKED,
+            entity="product",
+            action="skip",
+            target_id=pid,
+            ok=False,
+            error=(
+                f"variant of {listing['variant_of']}: its price, barcode and stock ride "
+                "its model's listing -- push the model"
+            ),
+            reason="variant_of",
+        )
+    if listing is not None:
+        if listing["refusal"]:
+            code, message = listing["refusal"]
+            return PushResult(
+                mode=MODE_BLOCKED,
+                entity="product",
+                action="skip",
+                target_id=pid,
+                ok=False,
+                shopify_id=ecom.get("shopify_product_id"),
+                error=message,
+                reason="publish_withheld",
+                code=code,
+                listing=plan_summary(listing),
+            )
+        product = listing_view(product, listing)
+        variants = listing["rows"]
+        ecom = product.get("ecom") or {}
+    listing_plan = plan_summary(listing) if listing is not None else None
 
     # THE PHOTO RULE (owner ruling 2026-08-25): "Refuse -- no photo, no
     # publish." A listing with a name, a price and an empty grey box is worse
@@ -199,10 +263,12 @@ async def push_product(
     # an update carries none -- the diff against what IMS last sent runs
     # after the write (tags.sync_product_tags), so hand-added admin tags
     # survive. Computed once so the plan, the input and the ledger agree.
-    ims_tags = ims_product_tags(product)
+    ims_tags = ims_product_tags(product)  # a model's: the union (listing_view)
     # Attribute -> metafield side channel (owner 2026-07-05): planned in the
     # dry-run, upserted via metafieldsSet after a LIVE product write succeeds.
-    metafields = build_product_metafields(product)
+    # A model's listing carries what EVERY colour shares; the rest rides
+    # each variant (listing.model_listing).
+    metafields = listing["metafields"] if listing is not None else build_product_metafields(product)
     action = "update" if existing_gid else "create"
     # full_reseed: touch EVERY variant row (CREATE always does; an UPDATE only
     # when the owner explicitly opted in). repair_only: an UPDATE that is NOT
@@ -213,6 +279,9 @@ async def push_product(
     # keep an already-seeded row from ever being re-touched by the repair).
     full_reseed = action == "create" or price_on_update_enabled()
     repair_only = (not full_reseed) and _needs_repair(product, variants)
+    # The rows already on Shopify as the press starts (a repair press re-sends
+    # only THEIR price -- see the price step).
+    pre_seeded = {id(v) for v in variants if _row_has_gid(v, ecom)}
     # EVERY SIZE PRICED (audit SF-05, owner 18 Oct 2026). A press that
     # creates or (re)seeds sizes -- first publish, full reseed, repair -- is
     # REFUSED before any write, dry-run or live, while any size has no
@@ -222,7 +291,16 @@ async def push_product(
     # queued and pricing the size + pressing again ships it.
     # ponytail: refuses the WHOLE press (title/photo edits of a live listing
     # wait too) -- seeding only the priced sizes would split the one rule.
-    unpriced = unpriced_size_names(product, variants) if (full_reseed or repair_only) else []
+    # A LIVE model listing: a colour at fault was already held back by
+    # model_listing (review of #1233 -- one bad colour never freezes a live
+    # listing), so only the variants this press SEEDS are asked here.
+    seed_targets = variants
+    if listing is not None and existing_gid:
+        seed_targets = [
+            v for v in variants
+            if not v.get(HELD) and (full_reseed or not _row_has_gid(v, ecom))
+        ]
+    unpriced = unpriced_size_names(product, seed_targets) if (full_reseed or repair_only) else []
     if unpriced:
         return PushResult(
             mode=MODE_BLOCKED,
@@ -278,6 +356,7 @@ async def push_product(
             stock=await plan_product_stock(db, product, variants),
             photos=plan_product_media(product, photos),
             tags=plan_product_tags(product, ims_tags),
+            listing=listing_plan,
         )
 
     query = _PRODUCT_UPDATE if existing_gid else _PRODUCT_CREATE
@@ -337,7 +416,7 @@ async def push_product(
             # The listing exists (another press made it, or an earlier send
             # whose answer was lost): carry on as an UPDATE of that listing.
             fresh = db["catalog_products"].find_one({"id": pid}) or product
-            res = await push_product(db, fresh, variants, blocked=blocked)
+            res = await push_product(db, fresh, raw_variants, blocked=blocked)
             if adopted and adopted[1] > 1:
                 res.error = (
                     (res.error + " -- ALSO: ") if res.error else ""
@@ -394,7 +473,7 @@ async def push_product(
                 # Refused because this product IS already on Shopify (the
                 # unique identity says so): link it and carry on as an update.
                 fresh = db["catalog_products"].find_one({"id": pid}) or product
-                return await push_product(db, fresh, variants, blocked=blocked)
+                return await push_product(db, fresh, raw_variants, blocked=blocked)
             return PushResult(
                 mode=MODE_LIVE,
                 entity="product",
@@ -466,7 +545,10 @@ async def push_product(
         # Fail-soft: their errors are reported on the result, never flip ok.
         # A removed manufacturer barcode also leaves its ims.* metafield (only
         # an existing product can hold one).
-        removed = build_removed_metafields(product) if existing_gid else []
+        if listing is not None:
+            removed = listing["removed_metafields"] if existing_gid else []
+        else:
+            removed = build_removed_metafields(product) if existing_gid else []
         mf_summary = None
         if (metafields or removed) and new_gid:
             mf_summary = await _set_product_metafields(db, new_gid, metafields, removed)
@@ -489,11 +571,19 @@ async def push_product(
         # Idempotent + fail-soft.
         seed_summary = None
         seeded = False
-        variant_nodes = ((prod.get("variants") or {}).get("nodes")) or []
+        # EVERY variant of the listing, page by page (G2: never truncated at
+        # the first 100). A page that could not be read stops any create.
+        variant_nodes, nodes_complete = (
+            await all_variant_nodes(db, new_gid, prod.get("variants") or {}) if new_gid else ([], True)
+        )
         if new_gid and (full_reseed or repair_only):
             seed_summary = await _seed_variants_after_write(
                 db, product, variants, new_gid, variant_nodes,
                 repair_only=repair_only,
+                # A live listing's options: a new colour/size first gets the
+                # option it is chosen by (G2). None (not read) -> as before.
+                listing_options=prod.get("options") if existing_gid else None,
+                nodes_complete=nodes_complete,
             )
             seeded = seed_summary is not None
             if seed_summary and seed_summary.get("default_variant_gid") and pid:
@@ -546,6 +636,42 @@ async def push_product(
                 db, product, new_gid, photos, existing_media
             )
         photo_on_shopify = bool((photo_summary or {}).get("on_shopify"))
+        # EACH COLOUR'S OWN (G2): its first photo on its variant (choosing the
+        # colour shows it) and its own attributes -- lens colour, polarization,
+        # materials, its maker barcode -- as metafields on its variant. Both
+        # fail-soft; a photo not attached re-queues the listing (below).
+        variant_photo_summary = None
+        listed_rows = variants
+        if listing is not None and new_gid:
+            # A lead whose row predates its listing's ids (or has no row):
+            # the row now carries the listing's default variant, as the
+            # seeding write-back would have written it.
+            for r in variants:
+                if r.get("_listing_set") and r.get("shopify_variant_id") and id(r) in pre_seeded:
+                    _writeback_variant(db, r, r["shopify_variant_id"], r.get("shopify_inventory_item_id"))
+            gid_by_sku = {
+                str(r.get("sku")): _as_shopify_gid(r["shopify_variant_id"], "ProductVariant")
+                for r in variants
+                if r.get("sku") and r.get("shopify_variant_id")
+            }
+            gid_by_sku.update((seed_summary or {}).get("gid_by_sku") or {})
+            variant_photo_summary = await sync_variant_media(
+                db, product, new_gid, listing["variant_photos"], gid_by_sku, variant_nodes
+            )
+            if photo_summary is not None and variant_photo_summary is not None:
+                photo_summary["variants"] = variant_photo_summary
+            variant_mfs = await _set_variant_metafields(
+                db,
+                {
+                    gid_by_sku[sku]: rows
+                    for sku, rows in listing["variant_metafields"].items()
+                    if rows and gid_by_sku.get(sku)
+                },
+            )
+            mf_summary = {**(mf_summary or {}), "variants": variant_mfs}
+            # A colour this press could not add is no part of the listing's
+            # stock (it has no Shopify item; the press already said why).
+            listed_rows = [r for r in variants if r.get("shopify_variant_id") or str(r.get("sku")) in gid_by_sku]
         # STOCK, IN THIS SAME PRESS, BEFORE THE PUBLISH (owner ruling
         # 2026-09-07 -- the website sells only what the shops can ship). Every
         # variant gid this press knows -- the response nodes, whatever seeding
@@ -561,7 +687,7 @@ async def push_product(
             stock_summary = await sync_product_stock(
                 db,
                 product,
-                variants,
+                listed_rows,
                 new_gid,
                 extra_variant_gids=[n.get("id") for n in variant_nodes if isinstance(n, dict)]
                 + list((seed_summary or {}).get("variant_gids") or [])
@@ -640,7 +766,9 @@ async def push_product(
         elif new_gid and payload.get("status") == "ACTIVE":
             # ONE price rule for every press (SF-05): every size priced. A
             # seeding press must also have seeded clean.
-            priced_ok = _has_publishable_price(product, variants) and not (
+            # A colour held back (no price of its own) keeps its last price
+            # on a live listing: it never withholds the rest (review of #1233).
+            priced_ok = _has_publishable_price(product, [v for v in variants if not v.get(HELD)]) and not (
                 seed_summary or {}
             ).get("errors")
             if seed_summary is None and (full_reseed or repair_only):
@@ -671,6 +799,11 @@ async def push_product(
                     "published": False,
                     "error": "publish withheld: variant unpriced or seeding failed",
                 }
+                held = (seed_summary or {}).get("held")
+                if held:
+                    # G2: a new colour / size that could not be added says why.
+                    pub_summary["error"] += f" -- {held}"
+                    pub_summary["code"] = (seed_summary or {}).get("code")
             else:
                 # Priced and photographed, but tracking + DENY did not stick:
                 # the stock pass's own line and code, under "withheld".
@@ -710,12 +843,24 @@ async def push_product(
         # stored ecom.shopify_variant_id pseudo-variant) so a queued price
         # change is actually CARRIED by the update push (OS-016).
         vp_summary = None
-        if _variants_for_price_push(product, variants) and new_gid and not seeded:
+        # A REPAIR press seeded only the NEW sizes / colours: the ones that were
+        # already on the listing before it still take today's price, exactly
+        # as in a press with no seeding (G2: a price edit in the same press as
+        # a new colour must not be dropped). The ones it just seeded are not
+        # sent twice.
+        vp_rows = variants
+        if seeded and repair_only:
+            vp_rows = [v for v in variants if id(v) in pre_seeded]
+        if (
+            new_gid
+            and (not seeded or (repair_only and vp_rows))
+            and _variants_for_price_push(product, vp_rows)
+        ):
             vp_product = dict(product)
             vp_ecom = dict(vp_product.get("ecom") or {})
             vp_ecom["shopify_product_id"] = new_gid
             vp_product["ecom"] = vp_ecom
-            vp_res = await push_variant_prices(db, vp_product, variants)
+            vp_res = await push_variant_prices(db, vp_product, vp_rows)
             vp_summary = {
                 "ok": vp_res.ok,
                 "action": vp_res.action,
@@ -753,13 +898,45 @@ async def push_product(
         # cleared the queue flag -- so a reorder that did not land was never
         # sent again and the website kept the old photo 1. Same rule as the
         # price: live, so ok stays True, but re-queued with its own code.
-        photos_not_synced = bool((photo_summary or {}).get("error"))
+        photos_not_synced = bool((photo_summary or {}).get("error")) or bool(
+            (variant_photo_summary or {}).get("error")
+        )
+        # ...BUT NOT FOR EVER (review of #1233): a photo step that keeps
+        # failing re-queues the listing for PHOTO_RETRY_CAP runs, then the
+        # press says so and stops re-queueing it (a person must look). A
+        # clean photo pass resets the count.
+        photo_line = (
+            _PHOTOS_NOT_SYNCED_MSG
+            if (photo_summary or {}).get("error")
+            else (variant_photo_summary or {}).get("error")
+        )
+        photo_requeue = photos_not_synced
+        if pid and new_gid:
+            tries = _count_photo_tries(db, pid, failed=photos_not_synced)
+            if photos_not_synced and tries >= PHOTO_RETRY_CAP:
+                photo_requeue = False
+                photo_line = (
+                    f"{photo_line} -- tried {tries} times; it is no longer re-queued for its "
+                    "photos: check the photographs, then press Send to website"
+                )
+        # A colour held back from this LIVE listing (no price, no colour or
+        # size, looks the same as another): named by SKU, the rest was sent.
+        held = list((listing or {}).get("held") or [])
+        if (seed_summary or {}).get("held_data"):
+            held.append({"sku": "new colours/sizes", "code": seed_summary.get("code"), "reason": seed_summary["held"]})
+        held_line = (
+            "not on the website yet: "
+            + ", ".join(f"{h['sku']} ({h['reason']})" for h in held)
+            + " -- fix them and press again; everything else was sent"
+            if held
+            else None
+        )
         # THE ONE RE-QUEUE RULE. The press reached Shopify but did not do all
         # it was pressed for -- the product is not visible, or it is visible at
         # the wrong price or with the wrong photos. Either way the row goes
         # BACK in the queue so the next press / scheduled sync retries it. See
         # _requeue_unpublished for why this is not the ping-pong hazard.
-        if pid and (not published_ok or price_not_synced or photos_not_synced):
+        if pid and (not published_ok or price_not_synced or photo_requeue):
             _requeue_unpublished(db, pid)
         return PushResult(
             mode=MODE_LIVE,
@@ -779,8 +956,9 @@ async def push_product(
                         line
                         for line in (
                             _PRICE_NOT_SYNCED_MSG if price_not_synced else None,
-                            _PHOTOS_NOT_SYNCED_MSG if photos_not_synced else None,
+                            photo_line if photos_not_synced else None,
                             (stock_summary or {}).get("error") if stock_not_written else None,
+                            held_line,
                         )
                         if line
                     )
@@ -801,6 +979,7 @@ async def push_product(
                     if photos_not_synced
                     else ((stock_summary or {}).get("code") if stock_not_written else None)
                 )
+                or (held[0]["code"] if held else None)
                 if published_ok
                 else (pub_summary or {}).get("code")
             ),
@@ -816,6 +995,7 @@ async def push_product(
             photos=photo_summary,
             stock=stock_summary,
             tags=tag_summary,
+            listing=listing_plan,
         )
     except Exception as e:  # noqa: BLE001 -- fail-soft, never propagate
         return PushResult(
@@ -827,6 +1007,28 @@ async def push_product(
             payload=payload,
             error=str(e),
         )
+
+
+def _count_photo_tries(db, pid: str, *, failed: bool) -> int:
+    """ecom.photo_sync_tries: +1 for a press whose photo step failed, back to
+    0 for a clean one. Returns the count after this press (0 on a read or
+    write failure -- never a reason to stop re-queueing)."""
+    from ..catalog_ecom import update_ecom
+
+    box = {"n": 0}
+
+    def _apply(ecom: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        held = int(ecom.get("photo_sync_tries") or 0)
+        box["n"] = held + 1 if failed else 0
+        if box["n"] == held:
+            return None
+        return {**ecom, "photo_sync_tries": box["n"]}
+
+    try:
+        update_ecom(db, pid, _apply)
+    except Exception:  # noqa: BLE001 -- the count is advisory
+        return 0
+    return box["n"]
 
 
 async def _set_active(db, product_gid: str, published: Dict[str, Any]) -> Dict[str, Any]:

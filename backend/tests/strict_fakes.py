@@ -405,6 +405,24 @@ class StrictCollection:
 
                 _set_path(doc, k, [x for x in arr if not _pulled(x)])
 
+    def replace_one(self, filter, replacement, upsert=False, **kwargs):
+        """Mongo's replace: the FIRST match's whole body becomes
+        ``replacement`` (its ``_id`` kept); with ``upsert`` and no match it is
+        inserted. An operator in the replacement is refused, as Mongo does."""
+        if any(str(k).startswith("$") for k in replacement):
+            raise UnsupportedMongoFeature("replace_one with an update operator")
+        for i, d in enumerate(self.docs):
+            if matches(d, filter):
+                body = dict(replacement)
+                if "_id" in d:
+                    body["_id"] = d["_id"]
+                self.docs[i] = body
+                return type("R", (), {"matched_count": 1, "modified_count": 1, "upserted_id": None})()
+        if upsert:
+            self.docs.append(dict(replacement))
+            return type("R", (), {"matched_count": 0, "modified_count": 0, "upserted_id": replacement.get("_id")})()
+        return type("R", (), {"matched_count": 0, "modified_count": 0, "upserted_id": None})()
+
     def update_one(self, filter, update, upsert=False, **kwargs):
         for d in self.docs:
             if matches(d, filter):

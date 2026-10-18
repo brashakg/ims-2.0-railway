@@ -27,6 +27,7 @@ No emojis (Windows cp1252 safe).
 
 from __future__ import annotations
 
+import re
 from html import escape
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -163,3 +164,218 @@ def build_shopify_description_html(
         )
 
     return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# THE MODEL'S DESCRIPTION (G2, owner 2026-10-18: one website listing per
+# model -- "both SEO and website made accordingly")
+# ---------------------------------------------------------------------------
+# A model's listing carries every colour and size, so its body is written for
+# the MODEL: the model line has no colour or size, the spec tables keep only
+# what EVERY colour/size shares, the choices are listed ('Available Colours',
+# 'Sizes'), and what differs between them (lens colour, polarization,
+# materials...) sits in one 'Colours and Sizes' table, never in the shared
+# body. The barcode is per colour/size (a variant metafield), never here.
+
+# Per-variant by nature: never a shared row and never a column of their own
+# (the Colour / Size columns already name them; the barcode is a variant
+# metafield).
+_VARIANT_ONLY_KEYS = frozenset({"gtin", "upc", "colour_code", "lens_size", "frame_colour", "colour_name"})
+
+STORE_PROMISE = (
+    "Enjoy best discounts and guaranteed authentic and genuine products, "
+    "ensuring you have the ultimate eyewear shopping experience. Discover your "
+    "perfect pair at Better Vision today!"
+)
+
+
+def build_model_name_line(category_name: str, attrs: Dict[str, Any]) -> str:
+    """The model's <h5> line: brand + model number + model name + category,
+    never a colour code or a size."""
+    a = _clean(attrs)
+    out: List[str] = []
+    for p in (a.get("brand_name"), a.get("model_no"), a.get("model_name"), category_name):
+        if p and p.lower() not in (o.lower() for o in out):
+            out.append(p)
+    return " ".join(out)
+
+
+def default_model_paragraph(
+    category_name: str, attrs: Dict[str, Any], colours: int, sizes: int
+) -> str:
+    """The deterministic model paragraph (used until an AI paragraph is
+    written for the model): names the model and how many colours / sizes it
+    comes in, never one colour."""
+    a = _clean(attrs)
+    who = {"MEN": "men", "WOMEN": "women", "KIDS": "kids", "UNISEX": "men and women"}.get(
+        str(a.get("gender") or "").upper().replace("'", "").replace(" ", ""), ""
+    )
+    name = build_model_name_line(category_name, attrs) or category_name
+    first = f"Reflect your style with the {name}" + (f", made for {who}." if who else ".")
+    choice = []
+    if colours > 1:
+        choice.append(f"{colours} colours")
+    if sizes > 1:
+        choice.append(f"{sizes} sizes")
+    second = f" Available in {' and '.join(choice)} -- choose yours above." if choice else ""
+    return f"{first}{second} {STORE_PROMISE}"
+
+
+def _same_everywhere(members: List[Dict[str, Any]], key: str) -> Optional[str]:
+    """The value of ``key`` when EVERY member has it filled and equal (case
+    insensitive), else None."""
+    values = [_clean(m.get("attributes") or {}).get(key) or "" for m in members]
+    if not values or not values[0]:
+        return None
+    first = values[0].lower()
+    return values[0] if all(v.lower() == first for v in values) else None
+
+
+def build_model_description_html(
+    category_name: str,
+    model_attrs: Dict[str, Any],
+    members: List[Dict[str, Any]],
+    paragraph: str,
+) -> str:
+    """The model listing's body. ``members`` = [{sku, attributes, colour,
+    size}] in listing order (lead first). Pure/deterministic -- only
+    ``paragraph`` may come from the AI."""
+    colours = list(dict.fromkeys(m.get("colour") for m in members if m.get("colour")))
+    sizes = list(dict.fromkeys(m.get("size") for m in members if m.get("size")))
+    parts: List[str] = ["<h4>Product Details</h4>"]
+    line = build_model_name_line(category_name, model_attrs)
+    if line:
+        parts.append("<h5>Model Number: {}</h5>".format(escape(line)))
+    if paragraph and paragraph.strip():
+        parts.append("<p>{}</p>".format(escape(paragraph.strip())))
+
+    spec_rows = TECH_SPEC_ROWS + GENERAL_INFO_ROWS
+    shared: Dict[str, str] = {}
+    for key, _label in spec_rows:
+        if key in _VARIANT_ONLY_KEYS or key in shared:
+            continue
+        value = _same_everywhere(members, key)
+        if value:
+            shared[key] = value
+    tech = _rows_for(TECH_SPEC_ROWS, shared, category_name)
+    if len(colours) > 1:
+        tech.append(("Available Colours", ", ".join(colours)))
+    if sizes:
+        tech.append(("Sizes" if len(sizes) > 1 else "Size", ", ".join(sizes)))
+    if tech:
+        parts.append("<h4>Technical Specifications</h4>")
+        parts.append(_table(tech))
+    general = _rows_for(GENERAL_INFO_ROWS, shared, category_name)
+    if general:
+        parts.append("<h4>General Information</h4>")
+        parts.append(_table(general))
+
+    table = variant_table_html(members)
+    if table:
+        parts.append(table)
+
+    warranty = _same_everywhere(members, "warranty")
+    if warranty:
+        parts.append("<h4>Warranty</h4>")
+        parts.append(
+            "<p><span>This product comes with a manufacturer's warranty of "
+            "{} from the date of sale. For more details on warranty, "
+            '<a href="{}" title="Warranty" target="_blank">Click Here</a>.'
+            "</span></p>".format(escape(warranty), WARRANTY_URL)
+        )
+    return "\n".join(parts)
+
+
+def variant_table_html(members: List[Dict[str, Any]]) -> str:
+    """'Colours and Sizes': one row per colour/size, a column only for what is
+    NOT the same on every member ('' for a model of one)."""
+    if len(members) < 2:
+        return ""
+    sizes = [m.get("size") for m in members if m.get("size")]
+    label_of: Dict[str, str] = {}
+    for key, label in TECH_SPEC_ROWS + GENERAL_INFO_ROWS:
+        label_of.setdefault(key, label)
+    differing = [
+        key
+        for key in label_of
+        if key not in _VARIANT_ONLY_KEYS
+        and key != "_category"
+        and not _same_everywhere(members, key)
+        and any(_clean(m.get("attributes") or {}).get(key) for m in members)
+    ]
+    head = ["Colour"] + (["Size"] if sizes else []) + [label_of[k] for k in differing]
+    body_rows = []
+    for m in members:
+        a = _clean(m.get("attributes") or {})
+        cells = [m.get("colour") or ""] + ([m.get("size") or ""] if sizes else [])
+        body_rows.append(cells + [a.get(k, "") for k in differing])
+    return "<h4>Colours and Sizes</h4>\n<table>\n<thead>\n<tr>{}</tr>\n</thead>\n<tbody>\n{}\n</tbody>\n</table>".format(
+        "".join("<th>{}</th>".format(escape(h)) for h in head),
+        "\n".join(
+            "<tr>{}</tr>".format("".join("<td>{}</td>".format(escape(c)) for c in cells))
+            for cells in body_rows
+        ),
+    )
+
+
+def names_a_colour(text: str, colours: List[str]) -> bool:
+    """True when ``text`` names any of the model's colours (a colour name or
+    code of 3+ characters, as a whole word) -- a model paragraph names none."""
+    low = str(text or "").lower()
+    for c in colours or []:
+        for piece in re.split(r"[()/]", str(c or "")):
+            word = piece.strip().lower()
+            if len(word) >= 3 and re.search(r"(?<![a-z0-9])" + re.escape(word) + r"(?![a-z0-9])", low):
+                return True
+    return False
+
+
+async def generate_model_paragraph(
+    category_name: str,
+    model_attrs: Dict[str, Any],
+    colours: List[str],
+    sizes: List[str],
+    max_length: int = 350,
+) -> Optional[str]:
+    """The AI paragraph for a MODEL (the 'Auto-fill with AI' voice, model
+    level): written from the model-level fields and the NUMBER of colours /
+    sizes only -- no colour name is sent, and an answer that names one anyway
+    is thrown away. None (the caller keeps the deterministic paragraph) when
+    no model is configured, the call fails, or the answer names a colour."""
+    try:
+        from agents.claude_client import call_claude, is_claude_available
+    except Exception:  # noqa: BLE001
+        return None
+    if not is_claude_available():
+        return None
+    model_keys = ("brand_name", "model_no", "model_name", "shape", "gender")
+    filled = {k: v for k, v in _clean(model_attrs).items() if k in model_keys}
+    if not filled:
+        return None
+    system = (
+        "You are the product copywriter for Better Vision, an Indian optical "
+        "retail chain. Write ONE marketing paragraph for a MODEL that is sold "
+        "in several colours and sizes on one product page. Open with a line "
+        "like 'Reflect your style with {brand + model + product type}', say "
+        "how many colours (and sizes) it comes in, who it suits (gender) and "
+        "its shape, then close with: '" + STORE_PROMISE + "'. Rules: 3-4 "
+        f"sentences, under {max_length} characters, PLAIN TEXT only (no "
+        "markdown, no HTML, no emojis). NEVER name a colour, a lens colour or "
+        "a size -- the page carries many. Use ONLY the attributes given; never "
+        "invent specifications or claims."
+    )
+    lines = "\n".join(f"{k}: {v}" for k, v in sorted(filled.items()))
+    user_msg = (
+        f"Product category: {category_name}\nAttributes:\n{lines}\n"
+        f"Number of colours: {len(colours)}\nNumber of sizes: {len(sizes)}"
+    )
+    try:
+        text = await call_claude(system, user_msg, max_tokens=300, timeout=20.0)
+    except Exception:  # noqa: BLE001
+        return None
+    text = (text or "").strip()
+    if not text or names_a_colour(text, colours):
+        return None
+    if len(text) > max_length:
+        text = text[:max_length].rsplit(" ", 1)[0].rstrip(" ,;:.") + "."
+    return text

@@ -215,6 +215,12 @@ def mark_for_republish(db, product: Dict[str, Any]) -> bool:
                 taken_down_at=None,
                 **{k: None for k in DELIST_KEYS},
             )
+            # Switched back on -- or on for the FIRST time, finishing a colour
+            # that waits to join its model's listing (G2, review of #1233):
+            # the model's listing is queued.
+            from . import product_master as _pm
+
+            _pm.queue_model_listing_of(db, twin)
             return True
         if not ((twin or {}).get("ecom") or {}).get("shopify_product_id"):
             return False

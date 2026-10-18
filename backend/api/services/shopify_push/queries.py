@@ -39,8 +39,10 @@ mutation imsProductCreate($input: ProductInput!) {
       id
       handle
       tags
+      options { id name position optionValues { id name } }
       variants(first: 100) {
-        nodes { id title selectedOptions { name value } inventoryItem { id } }
+        pageInfo { hasNextPage endCursor }
+        nodes { id title selectedOptions { name value } inventoryItem { id } media(first: 1) { nodes { id } } }
       }
       media(first: 250) { nodes { id ... on MediaImage { image { url } } } }
     }
@@ -60,8 +62,10 @@ mutation imsProductUpdate($input: ProductInput!) {
       id
       handle
       tags
+      options { id name position optionValues { id name } }
       variants(first: 100) {
-        nodes { id title selectedOptions { name value } inventoryItem { id } }
+        pageInfo { hasNextPage endCursor }
+        nodes { id title selectedOptions { name value } inventoryItem { id } media(first: 1) { nodes { id } } }
       }
       media(first: 250) { nodes { id ... on MediaImage { image { url } } } }
     }
@@ -296,10 +300,76 @@ _VARIANTS_PER_CALL = 250
 # minted onto a live listing is on sale the moment it exists, so Shopify's
 # own answer is what confirms it cannot sell past 0.
 _VARIANTS_BULK_CREATE = """
-mutation imsVariantsBulkCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-  productVariantsBulkCreate(productId: $productId, variants: $variants) {
+mutation imsVariantsBulkCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!, $strategy: ProductVariantsBulkCreateStrategy) {
+  productVariantsBulkCreate(productId: $productId, variants: $variants, strategy: $strategy) {
     productVariants { id title selectedOptions { name value } inventoryPolicy inventoryItem { id tracked } }
     userErrors { field message }
+  }
+}
+"""
+
+# ONE LISTING PER MODEL (G2, owner 2026-10-18). A live one-colour listing
+# gains its colours: the option the model is chosen by is ADDED (a listing
+# holding only Shopify's default "Title" placeholder has it replaced, and the
+# existing variant -- same id -- takes the first value given, the lead's), then
+# the new colours are created with productVariantsBulkCreate under
+# PRESERVE_STANDALONE_VARIANT (a create never deletes the listing's own
+# variant). LEAVE_AS_IS: no variant is made for the new option by itself.
+_PRODUCT_OPTIONS_CREATE = """
+mutation imsProductOptionsCreate($productId: ID!, $options: [OptionCreateInput!]!) {
+  productOptionsCreate(productId: $productId, options: $options, variantStrategy: LEAVE_AS_IS) {
+    product { id options { id name position optionValues { id name } } }
+    userErrors { field message code }
+  }
+}
+"""
+_BULK_CREATE_STRATEGY = "PRESERVE_STANDALONE_VARIANT"
+
+# EVERY variant of a listing, page by page (a model can carry more than the
+# 100 a product response returns -- never truncated). Same node selection as
+# the product create/update responses.
+_PRODUCT_VARIANTS_PAGE = """
+query imsProductVariantsPage($id: ID!, $after: String) {
+  product(id: $id) {
+    variants(first: 100, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      nodes { id title selectedOptions { name value } inventoryItem { id } media(first: 1) { nodes { id } } }
+    }
+  }
+}
+"""
+# Shopify's variants-per-product ceiling; the pager stops there whatever a
+# broken pageInfo says.
+_MAX_VARIANT_PAGES = 21
+
+# A colour's own photo: choosing it on the website shows it. One media per
+# variant (Shopify's rule) -- a different IMS photo is detached first.
+# Both answer MediaUserError (`userErrors`, with `code`).
+_VARIANT_APPEND_MEDIA = """
+mutation imsVariantAppendMedia($productId: ID!, $variantMedia: [ProductVariantAppendMediaInput!]!) {
+  productVariantAppendMedia(productId: $productId, variantMedia: $variantMedia) {
+    productVariants { id }
+    userErrors { field message code }
+  }
+}
+"""
+_VARIANT_DETACH_MEDIA = """
+mutation imsVariantDetachMedia($productId: ID!, $variantMedia: [ProductVariantDetachMediaInput!]!) {
+  productVariantDetachMedia(productId: $productId, variantMedia: $variantMedia) {
+    productVariants { id }
+    userErrors { field message code }
+  }
+}
+"""
+
+# The duplicate-listing runbook (scripts/merge_duplicate_model_listings.py):
+# the URL of a listing taken down keeps working -- it redirects to the
+# model's kept listing.
+_URL_REDIRECT_CREATE = """
+mutation imsUrlRedirectCreate($urlRedirect: UrlRedirectInput!) {
+  urlRedirectCreate(urlRedirect: $urlRedirect) {
+    urlRedirect { id path target }
+    userErrors { field message code }
   }
 }
 """

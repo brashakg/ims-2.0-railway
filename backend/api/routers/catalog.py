@@ -1430,6 +1430,16 @@ def _save_catalog_product(product: Dict, *, mark_dirty: bool = True) -> None:
             stored.update(product)
         else:
             CATALOG_PRODUCTS[product["id"]] = product
+    if mark_dirty:
+        _queue_model_of(product)
+
+
+def _queue_model_of(product: Dict) -> None:
+    """A catalogue edit of a colour/size of a model queues its MODEL's
+    listing (G2, review of #1233: the colour itself owns no listing, so its
+    own dirty flag is never swept). Fail-soft."""
+    if (product.get("ecom") or {}).get("variant_of"):
+        _pm.queue_model_listing_of(_get_db(), product)
 
 
 def _save_catalog_product_cas(
@@ -1461,6 +1471,7 @@ def _save_catalog_product_cas(
             matched = getattr(res, "modified_count", 0)
         if matched and mark_dirty:
             _merge_catalog_ecom(coll, product)
+            _queue_model_of(product)
         return bool(matched)
     stored = CATALOG_PRODUCTS.get(product["id"])
     if stored is None or stored.get("updated_at") != expected_raw_updated_at:
@@ -3450,18 +3461,30 @@ async def _archive_product(
     # it FIRST -- its other colours and sizes move to a new lead only once
     # the listing is down. Refused (nothing written) when the take-down did
     # not land, so no variant is ever left under a listing still on sale.
+    #
+    # G2 (owner 2026-10-18): when another colour/size of the model is still
+    # in the catalogue, the LISTING is handed over instead -- it stays on the
+    # website under the next first-catalogued colour (same Shopify product,
+    # same handle; product_master._hand_over_listing) and only the archived
+    # lead's own variant is taken off sale, after the hand-over. The whole
+    # listing comes down first only when nothing is left to sell on it.
     delisted_first = False
+    hand_over = False
     try:
         from ..dependencies import get_product_repository as _lead_repo
 
         spine_id = spine_id or _spine_product_id(_lead_repo(), product)
-        leads_variants = bool(spine_id) and (
-            _get_db().get_collection("products").find_one({"variant_of": spine_id}) is not None
+        members = (
+            list(_get_db().get_collection("products").find({"variant_of": spine_id})) if spine_id else []
         )
+        leads_variants = bool(members)
+        hand_over = any(not m.get("deleted_at") for m in members)
     except Exception:  # noqa: BLE001
         logger.warning("[CATALOG] model check on delete skipped for %s", spine_id, exc_info=True)
         leads_variants = False
-    if leads_variants and product is not None and (product.get("ecom") or {}).get("shopify_product_id"):
+    on_website = product is not None and bool((product.get("ecom") or {}).get("shopify_product_id"))
+    hand_over = hand_over and on_website
+    if leads_variants and on_website and not hand_over:
         taken = await _delist.delist_if_live(_get_db(), product, reason="deleted", actor=actor)
         if not (taken and taken.get("ok")):
             raise HTTPException(
@@ -3556,21 +3579,33 @@ async def _archive_product(
     # AFTER the write above on purpose: the soft delete keeps the row and its
     # gid, and the full-doc $set would clobber the take-down's own ecom
     # write-back. Fail-soft: the delete stands even if Shopify says no.
-    if product is not None and not delisted_first:
+    if product is not None and not delisted_first and not hand_over:
         await _delist.delist_if_live(_get_db(), product, reason="deleted", actor=actor)
     # Model families (G1): an archived LEAD hands the model to its next
     # first-catalogued variant -- after the take-down above (a lead on the
     # website was taken down first, or nothing was deleted). Fail-soft: the
     # archive stands.
+    handed_over = False
     if spine_id:
         try:
             from ..dependencies import get_audit_repository
 
-            _pm.promote_new_lead(
-                _get_db(), spine_id, actor=actor.get("user_id"), audit_repo=get_audit_repository()
+            handed_over = bool(
+                _pm.promote_new_lead(
+                    _get_db(), spine_id, actor=actor.get("user_id"), audit_repo=get_audit_repository()
+                )
             )
         except Exception:  # noqa: BLE001
             logger.warning("[CATALOG] model lead hand-over skipped for %s", spine_id, exc_info=True)
+    if hand_over and product is not None:
+        # G2: the listing now belongs to the new lead -- the archived lead's
+        # OWN variant comes off sale (DENY + 0, never deleted). A hand-over
+        # that did not happen leaves the lead holding the listing: then the
+        # whole listing comes down, exactly as when nothing is left on it.
+        fresh = _get_catalog_product(product.get("id")) or product
+        await _delist.delist_if_live(
+            _get_db(), fresh if handed_over else product, reason="deleted", actor=actor
+        )
     # Every archive door: a cached Catalog / till list page must not keep
     # listing it until the cache runs out.
     invalidate_product_lists()

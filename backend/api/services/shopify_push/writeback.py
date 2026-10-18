@@ -146,6 +146,11 @@ def _requeue_unpublished(db, product_id: str) -> None:
         logger.warning(f"[SHOPIFY_PUSH] re-queue failed {product_id}: {e}")
 
 
+def _gid_tail(gid) -> str:
+    """'gid://shopify/ProductVariant/12' and '12' -> '12'."""
+    return str(gid or "").rsplit("/", 1)[-1]
+
+
 def _writeback_variant(
     db,
     variant: Dict[str, Any],
@@ -170,20 +175,46 @@ def _writeback_variant(
         filt = {"variant_id": variant["variant_id"]}
     if filt is None:
         return False
+    # A MODEL LISTING row (listing.ROW_SET, G2): a colour joining the model's
+    # listing moves its IMS row under it IN THIS SAME WRITE -- the row and
+    # the Shopify variant appear together. A lead with no row yet gets one.
+    listing_set = dict((variant or {}).get("_listing_set") or {})
     update: Dict[str, Any] = {
+        **listing_set,
         "shopify_variant_id": shopify_variant_id,
         "updated_at": _now(),
     }
     if inventory_item_gid:
         update["shopify_inventory_item_id"] = inventory_item_gid
     try:
-        res = db["catalog_variants"].update_one(filt, {"$set": update})
+        coll = db["catalog_variants"]
+        res = coll.update_one(filt, {"$set": update})
+        touched = getattr(res, "matched_count", None)
+        if touched is None:
+            touched = getattr(res, "modified_count", 0)
+        if not touched and listing_set:
+            coll.insert_one({**filt, **update})
+            touched = 1
+        adopts = (variant or {}).get("_adopts")
+        handed = (variant or {}).get("_adopt_variant_id")
+        if (
+            touched
+            and adopts
+            and handed
+            and _gid_tail(handed) == _gid_tail(shopify_variant_id)
+        ):
+            # The archived colour whose variant this one took over lets go of
+            # it in the same step -- one inventory item, one owner.
+            coll.update_one(
+                {"sku": adopts},
+                {
+                    "$unset": {"shopify_variant_id": "", "shopify_inventory_item_id": ""},
+                    "$set": {"variant_taken_over_by": (variant or {}).get("sku"), "updated_at": _now()},
+                },
+            )
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[SHOPIFY_PUSH] variant write-back failed {filt}: {e}")
         return False
-    touched = getattr(res, "matched_count", None)
-    if touched is None:
-        touched = getattr(res, "modified_count", 0)
     return bool(touched)
 
 
