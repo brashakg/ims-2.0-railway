@@ -6,6 +6,7 @@ from datetime import date
 from ...services.ap_engine import bill_supplier_gstin, iso_bill_date
 from ...services.org_validation import has_valid_gstin, itc_claimable, shop_gstins
 from ...services.purchase_invoice_engine import determine_place_of_supply
+from ...services.gst_registration import legacy_bill_gstin
 
 # ============================================================================
 # GST RETURNS - GSTR-3B (Summary Return)
@@ -130,28 +131,14 @@ def _legacy_bill_ids(db, entity_id, store_gstin, year, mon, last_day) -> list:
         "$or": _itc_month(year, mon, last_day),
     }
     result = []
+
+    def receipt_store(rid):
+        receipt = db["grns"].find_one({"grn_id": rid}, {"store_id": 1})
+        return (receipt or {}).get("store_id")
+
     for bill in db["vendor_bills"].find(query):
-        ids = {bill.get(k) for k in ("store_id", "to_store_id") if bill.get(k)}
-        receipt_ids = set(bill.get("linked_dc_ids") or [])
-        if bill.get("grn_id"):
-            receipt_ids.add(bill["grn_id"])
-        valid = True
-        for rid in receipt_ids:
-            receipt = db["grns"].find_one({"grn_id": rid}, {"store_id": 1})
-            if not receipt or not receipt.get("store_id"):
-                valid = False
-            else:
-                ids.add(receipt["store_id"])
-        candidates = set()
-        for sid in ids:
-            gstin = gstins.get(sid)
-            if stores.get(sid) != entity_id or gstin not in held:
-                valid = False
-            else:
-                candidates.add(gstin)
-        if not ids and not receipt_ids:
-            candidates = held
-        if valid and candidates == {store_gstin} and bill.get("bill_id"):
+        inferred = legacy_bill_gstin(bill, entity_id, held, gstins, stores, receipt_store)
+        if inferred == store_gstin and bill.get("bill_id"):
             result.append(bill["bill_id"])
     return result
 

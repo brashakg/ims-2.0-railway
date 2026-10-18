@@ -673,9 +673,17 @@ def test_task_complete_same_store_still_succeeds(monkeypatch):
 
 
 def test_task_reassign_same_store_still_succeeds(monkeypatch):
+    from unittest.mock import Mock
+
     client, repo = _tasks_client(
         monkeypatch, _seed_task(), ["STORE_MANAGER"], OTHER_STORE
     )
+    users = Mock()
+    users.find_by_id.return_value = {
+        "user_id": "u9", "roles": ["SALES_STAFF"],
+        "store_ids": [OTHER_STORE], "is_active": True,
+    }
+    monkeypatch.setattr(tasks_mod, "get_user_repository", lambda: users)
     r = client.post("/api/v1/tasks/T1/reassign", json={"assigned_to": "u9"})
     assert r.status_code == 200
     assert r.json()["assigned_to"] == "u9"

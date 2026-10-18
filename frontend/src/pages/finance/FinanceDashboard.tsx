@@ -191,6 +191,7 @@ export default function FinanceDashboard() {
   const [revenueData, setRevenueData] = useState<RevenueData[]>([]);
   const [plStatement, setPLStatement] = useState<ProfitLossStatement | null>(null);
   const [gstSummary, setGSTSummary] = useState<GSTSummaryData | null>(null);
+  const [gstSummaryError, setGSTSummaryError] = useState<string | null>(null);
   const [outstanding, setOutstanding] = useState<OutstandingReceivable[]>([]);
   const [cashFlow, setCashFlow] = useState<CashFlowData[]>([]);
   const [budgets, setBudgets] = useState<BudgetData[]>([]);
@@ -254,6 +255,9 @@ export default function FinanceDashboard() {
       setRevenueData(rev.status === 'fulfilled' ? mapRevenue(rev.value) : []);
       setPLStatement(pnl.status === 'fulfilled' ? mapPnl(pnl.value, dateFrom, dateTo) : null);
       setGSTSummary(gst.status === 'fulfilled' ? mapGst(gst.value) : null);
+      setGSTSummaryError(gst.status === 'rejected'
+        ? (gst.reason instanceof Error ? gst.reason.message : 'GST summary could not be calculated. Please retry.')
+        : null);
       setOutstanding(out.status === 'fulfilled' ? mapOutstanding(out.value) : []);
       setCashFlow(cf.status === 'fulfilled' ? mapCashFlow(cf.value) : []);
       setBudgets(bud.status === 'fulfilled' ? mapBudget(bud.value) : []);
@@ -579,6 +583,11 @@ export default function FinanceDashboard() {
           )}
           {activeTab === 'gst' && canSeeWhatWePay && (
             <>
+              {gstSummaryError && (
+                <div role="alert" className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+                  {gstSummaryError}
+                </div>
+              )}
               <GSTPanel gstSummary={gstSummary} />
               {gstRecon.length > 0 && (
                 <div className="card mt-4 overflow-x-auto">

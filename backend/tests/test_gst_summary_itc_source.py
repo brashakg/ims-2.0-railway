@@ -41,6 +41,8 @@ def gst_db(monkeypatch):
     from api.routers import finance as finance_mod
 
     db = StrictDB()
+    db.seed("entities", [{"entity_id": "E1", "gstins": [{"gstin": "20ABCDE1234F1Z5"}]}])
+    db.seed("stores", [{"store_id": "S1", "entity_id": "E1", "gstin": "20ABCDE1234F1Z5"}])
     monkeypatch.setattr(finance_mod, "_get_db", lambda: db)
     return db
 
@@ -48,6 +50,7 @@ def gst_db(monkeypatch):
 def _bill(bill_id, tax, bill_date, **extra):
     doc = {
         "bill_id": bill_id,
+        "store_id": "S1",
         "vendor_id": "v-1",
         "bill_number": bill_id,
         "bill_date": bill_date,

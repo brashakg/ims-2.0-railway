@@ -8,11 +8,12 @@ or default was changed.
 from datetime import datetime, date
 from ...utils.ist import now_ist, ist_day_start_utc
 from typing import Optional
-from fastapi import Depends
+from fastapi import Depends, HTTPException
 from ..auth import get_current_user
 from ...dependencies import resolve_store_scope
 from ...services import ap_engine
 from ...services.payables_mask import can_see_payables, strip_input_tax
+from ...services.gst_registration import RegistrationAmbiguous, SummaryRegistrations
 from ._shared import (
     _REAL_ORDER_STATUS_FILTER,
     _customer_state_map,
@@ -34,6 +35,13 @@ from ._shared import (
 # Bill statuses that mean "not yet received / not bookable for ITC". A bill in
 # one of these is excluded from the ITC total; any other status (or none) counts.
 _ITC_PENDING_STATUSES = {"DRAFT", "PENDING", "CANCELLED", "REJECTED", "VOID"}
+
+
+def _summary_unavailable():
+    return HTTPException(
+        status_code=503,
+        detail="GST summary could not read its source or registration data. Retry when the data is available.",
+    )
 
 
 def _bill_booked(bill: dict) -> bool:
@@ -87,17 +95,31 @@ async def get_gst_summary(
     # 2026-10-12 ruling covers it (PLAN_STATUS section 5, OPEN 2026-10-12).
     scope = resolve_store_scope(None, current_user)
     at_shop = {"store_id": scope} if scope else {}
-    db = _get_db()
+    try:
+        db = _get_db()
+    except Exception as exc:
+        raise _summary_unavailable() from exc
     if db is None:
-        return strip_input_tax(
-            {
-                "tax_collected": 0,
-                "tax_paid": 0,
-                "net_gst_liability": 0,
-                "gst_by_rate": {},
-            },
-            current_user,
-        )
+        raise _summary_unavailable()
+    registrations = None
+    buckets = {}
+
+    def bucket_for(row, *, purchase=False):
+        nonlocal registrations
+        try:
+            if registrations is None:
+                registrations = SummaryRegistrations(db)
+            key = registrations.bill_key(row) if purchase else registrations.shop_key(row.get("store_id"))
+        except RegistrationAmbiguous as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=("GST summary cannot be calculated because a registration is missing or ambiguous. "
+                        "Accounts must correct the shop/entity GST registration or the supplier bill's "
+                        "receiving registration, then retry."),
+            ) from exc
+        except Exception as exc:
+            raise _summary_unavailable() from exc
+        return buckets.setdefault(key, {"orders": [], "itc": 0.0, "itc_c": 0.0, "itc_s": 0.0, "rcm": 0.0})
     # R5 (owner ruling 2026-10-12): a caller outside the accounts rule never
     # reads the supplier bills, and strip_input_tax drops the input-tax keys
     # from what it returns (the R1 gate above admits none today).
@@ -137,24 +159,31 @@ async def get_gst_summary(
     # (tally._filed_orders, the ONE rule), and so does this summary.
     from .tally import _filed_orders
 
-    _sales_orders = _filed_orders(
-        db,
-        db.get_collection("orders").find(
-            sales_match,
-            {
-                "_id": 0,
-                "store_id": 1,
-                "customer_id": 1,
-                "tax_amount": 1,
-                "tax_total": 1,
-                # OS-008: the order-carried inter-state flag (online orders).
-                "interstate": 1,
-                "fulfillment_route": 1,
-                "fulfillment_hold": 1,
-                "stock_hold_reason": 1,
-            },
-        ),
-    )
+    try:
+        _sales_orders = list(_filed_orders(
+            db,
+            db.get_collection("orders").find(
+                sales_match,
+                {
+                    "_id": 0,
+                    "store_id": 1,
+                    "customer_id": 1,
+                    "tax_amount": 1,
+                    "tax_total": 1,
+                    # OS-008: the order-carried inter-state flag (online orders).
+                    "interstate": 1,
+                    "fulfillment_route": 1,
+                    "fulfillment_hold": 1,
+                    "stock_hold_reason": 1,
+                },
+            ),
+        ))
+    except Exception as exc:
+        raise _summary_unavailable() from exc
+    for order in _sales_orders:
+        tax = order.get("tax_amount")
+        if float((order.get("tax_total") if tax is None else tax) or 0):
+            bucket_for(order)["orders"].append(order)
 
     # GST paid (Input Tax Credit). ITC is claimable on PURCHASES recorded as
     # vendor BILLS (GRN-backed), NOT purchase_orders. Read vendor_bills.bill_date
@@ -176,7 +205,6 @@ async def get_gst_summary(
     # The credit by head, for the set-off (net_cash_due): a bill's CGST and SGST
     # are its own; the rest of its tax counts as IGST credit, which pays any
     # head -- so a legacy bill with no heads sets off as its total always did.
-    itc_c = itc_s = 0.0
     # 3.1(d)'s own "dead bill", and GSTR-3B's own cash rule.
     from ..reports.gst_itc import _DEAD_BILL, net_cash_due
 
@@ -195,25 +223,37 @@ async def get_gst_summary(
                 "reverse_charge": 1,
                 "cgst_total": 1,
                 "sgst_total": 1,
+                "store_id": 1,
+                "to_store_id": 1,
+                "recipient_entity_id": 1,
+                "recipient_gstin": 1,
+                "grn_id": 1,
+                "linked_dc_ids": 1,
             },
         ) if show_input else ():
             _bd = ap_engine.parse_date(_b.get("bill_date"))
             if _bd is None or not (bill_start <= _bd < bill_end):
                 continue
             _tax = float(_b.get("tax_amount") or _b.get("gst_amount") or 0)
-            if _b.get("reverse_charge") is True and _b.get("status") not in _DEAD_BILL:
+            rcm = _b.get("reverse_charge") is True and _b.get("status") not in _DEAD_BILL
+            eligible = _itc_eligible_bill(_b)
+            b = bucket_for(_b, purchase=True) if _tax and (rcm or eligible) else None
+            if rcm:
                 rcm_tax += _tax
-            if _itc_eligible_bill(_b):
+                if b is not None:
+                    b["rcm"] += _tax
+            if eligible:
                 gst_paid += _tax
-                itc_c += float(_b.get("cgst_total") or 0)
-                itc_s += float(_b.get("sgst_total") or 0)
+                if b is not None:
+                    b["itc"] += _tax
+                    b["itc_c"] += float(_b.get("cgst_total") or 0)
+                    b["itc_s"] += float(_b.get("sgst_total") or 0)
             else:
                 gst_paid_excluded += _tax
-    except Exception:
-        gst_paid = 0.0
-        gst_paid_excluded = 0.0
-        rcm_tax = 0.0
-        itc_c = itc_s = 0.0
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _summary_unavailable() from exc
     gst_paid = round(gst_paid, 2)
     gst_paid_excluded = round(gst_paid_excluded, 2)
     rcm_tax = round(rcm_tax, 2)
@@ -222,24 +262,28 @@ async def get_gst_summary(
     # the same store-state-vs-customer-state rule as gst_reconciliation()/GSTR-1
     # (unknown state either side -> intra-state). gst_collected is the sum of the
     # three, so the summary cards reconcile to the period total.
-    cgst, sgst, igst = _split_output_tax(
-        _sales_orders, _store_state_map(db), _customer_state_map(db)
-    )
+    try:
+        states = _store_state_map(db, strict=True)
+        customers = _customer_state_map(db, strict=True)
+    except Exception as exc:
+        raise _summary_unavailable() from exc
+    cgst, sgst, igst = _split_output_tax(_sales_orders, states, customers)
     gst_collected = round(cgst + sgst + igst, 2)
     # GSTR-3B's cash rule (net_cash_due): credit sets off the output tax as the
     # law orders it, never the reverse-charge tax, which is paid in cash on top
     # (its head does not change the total). The credit it did not use carries
     # to next month (shown, so the panel adds up).
-    net_payable = round(
-        sum(
-            net_cash_due(
-                (igst, cgst, sgst),
-                (gst_paid - itc_c - itc_s, itc_c, itc_s),
-                (rcm_tax, 0.0, 0.0),
-            )
-        ),
-        2,
-    )
+    # One set-off per verified registration. Sum cash AFTER calculation;
+    # spare credit on a different GSTIN never pays this registration's tax.
+    net_payable = 0.0
+    for b in buckets.values():
+        out_c, out_s, out_i = _split_output_tax(b["orders"], states, customers)
+        net_payable += sum(net_cash_due(
+            (out_i, out_c, out_s),
+            (b["itc"] - b["itc_c"] - b["itc_s"], b["itc_c"], b["itc_s"]),
+            (b["rcm"], 0.0, 0.0),
+        ))
+    net_payable = round(net_payable, 2)
     credit_used = gst_collected + rcm_tax - net_payable
     # max() only keeps a float -0.0 off the screen; the rule is net_cash_due's.
     credit_carried = round(max(0.0, gst_paid - credit_used), 2)

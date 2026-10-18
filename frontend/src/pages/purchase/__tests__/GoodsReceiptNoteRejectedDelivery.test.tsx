@@ -68,7 +68,7 @@ beforeEach(() => {
     file_id: 'F-1', filename: 'bill.pdf', mime: 'application/pdf', size: 1, sha256: 'x', persisted: true,
   });
   api.createGRN.mockResolvedValue({ grn_id: 'GRN-1' });
-  api.acceptGRN.mockResolvedValue({ grn_status: 'ACCEPTED', units_added: 0, po_status: 'CANCELLED' });
+  api.acceptGRN.mockResolvedValue({ grn_status: 'ACCEPTED', units_added: 0, quarantined_units: 3, rejection_return_ids: ['VR-1'], po_status: 'CANCELLED' });
 });
 
 async function open() {
@@ -116,6 +116,12 @@ describe('a delivery against an order a cancel closed', () => {
     fireEvent.click(screen.getByLabelText(/Tally line 2/));
     await attachBillAndInvoice();
 
+    // A receipt reason alone cannot silently choose credit versus replacement.
+    fireEvent.click(screen.getByRole('button', { name: /Post GRN/i }));
+    expect(api.createGRN).not.toHaveBeenCalled();
+    expect(toastMock.error).toHaveBeenCalledWith('Choose credit note or replacement for each rejected line');
+    fireEvent.change(screen.getByLabelText('Rejection disposition on line 2'), { target: { value: 'credit_note' } });
+
     fireEvent.click(screen.getByRole('button', { name: /Post GRN/i }));
 
     await waitFor(() => expect(api.createGRN).toHaveBeenCalledTimes(1));
@@ -129,11 +135,14 @@ describe('a delivery against an order a cancel closed', () => {
         accepted_qty: 0,
         rejected_qty: 3,
         rejection_reason: 'order was cancelled',
+        rejection_disposition: 'credit_note',
         tallied: true,
       }),
     ]);
     await waitFor(() => expect(api.acceptGRN).toHaveBeenCalledWith('GRN-1'));
-    expect(toastMock.success).toHaveBeenCalledWith(expect.stringContaining('nothing added to stock'));
+    expect(toastMock.success).toHaveBeenCalledWith(expect.stringContaining('0 units added to stock'));
+    expect(toastMock.success).toHaveBeenCalledWith(expect.stringContaining('3 rejected unit(s) quarantined'));
+    expect(toastMock.success).toHaveBeenCalledWith(expect.stringContaining('draft returns for Accounts review'));
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
@@ -194,6 +203,7 @@ describe('a standard receipt on this screen', () => {
     expect(screen.getByLabelText('Rejected units on line 2')).toBeDisabled();
     expect(screen.getByLabelText('Rejected units on line 2')).toHaveValue(2);
     fireEvent.change(screen.getByLabelText('Rejection reason on line 2'), { target: { value: 'cancelled' } });
+    fireEvent.change(screen.getByLabelText('Rejection disposition on line 2'), { target: { value: 'replacement' } });
     fireEvent.click(screen.getByLabelText(/Tally line 1/));
     fireEvent.click(screen.getByLabelText(/Tally line 2/));
     await attachBillAndInvoice();
@@ -201,7 +211,7 @@ describe('a standard receipt on this screen', () => {
     await waitFor(() => expect(api.createGRN).toHaveBeenCalledTimes(1));
     expect(api.createGRN.mock.calls[0][0].items).toEqual([
       expect.objectContaining({ product_id: 'P1', received_qty: 1, accepted_qty: 1 }),
-      expect.objectContaining({ product_id: 'P2', received_qty: 2, accepted_qty: 0, rejected_qty: 2 }),
+      expect.objectContaining({ product_id: 'P2', received_qty: 2, accepted_qty: 0, rejected_qty: 2, rejection_disposition: 'replacement' }),
     ]);
   });
 

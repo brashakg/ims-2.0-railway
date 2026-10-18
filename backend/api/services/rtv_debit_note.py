@@ -1004,6 +1004,15 @@ class DebitNoteEngine:
         if existing is not None:
             return {"ok": True, "idempotent": True, "debit_note": existing}
 
+        # The GRN handoff is explicitly unissued. Only a confirmed return
+        # reaches the existing Accounts price/tax checks and serial allocation.
+        if rtv_doc.get("receipt_rejection") and (
+            rtv_doc.get("status") in ("draft", "cancelled")
+            or rtv_doc.get("return_type") not in ("credit_note", "replacement")
+        ):
+            return {"ok": False, "http": 409, "error": "receipt_return_unconfirmed",
+                    "message": "Confirm this rejected-goods return's credit or replacement choice before issuing a debit note."}
+
         # The note reverses credit taken on OUR GSTIN. With none to issue
         # under, every bill door refuses the bill (purchase_invoices.
         # _bill_recipient); the note is refused too -- never a blank GSTIN.

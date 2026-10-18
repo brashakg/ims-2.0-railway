@@ -119,6 +119,13 @@ def _seed(db) -> None:
         for d in docs:
             db[coll].insert_one(dict(d))
 
+    # A04 verifies the registration behind the existing shop-scoped amounts.
+    ins("entities", {"entity_id": "E-JH", "gstins": [{"gstin": "20ABCDE1234F1Z5"}]},
+        {"entity_id": "E-MH", "gstins": [{"gstin": "27ABCDE1234F1Z5"}]})
+    ins("stores", {"store_id": DHN, "entity_id": "E-JH", "gstin": "20ABCDE1234F1Z5"},
+        {"store_id": BOK, "entity_id": "E-JH", "gstin": "20ABCDE1234F1Z5"},
+        {"store_id": PUN, "entity_id": "E-MH", "gstin": "27ABCDE1234F1Z5"})
+
     ins(
         "vendors",
         {"vendor_id": VP, "legal_name": "Pune Lens Co"},

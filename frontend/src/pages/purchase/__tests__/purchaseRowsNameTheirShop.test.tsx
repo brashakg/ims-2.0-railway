@@ -242,7 +242,8 @@ describe('#12 Goods received: counts over the newest page say they cover the lat
     await waitFor(() => expect(captionUnder('Total GRNs')).toBe('all stores · latest 50 shown'));
     expect(captionUnder('Quality passed')).toBe('clean receipts · of latest 50');
     expect(captionUnder('Conditional')).toBe('partial accept · of latest 50');
-    expect(captionUnder('Failed quality')).toBe('debit note raised · of latest 50');
+    // Rejection creates custody/draft work, not an already issued debit note.
+    expect(captionUnder('Failed quality')).toBe('rejection recorded · of latest 50');
     expect(tabText(/History/)).toBe('History· latest 50 of 120');
     expect(tabText(/Discrepancies/)).toBe('Discrepancies· 3 in latest 50');
     fireEvent.click(screen.getByRole('button', { name: /Discrepancies/ }));
@@ -265,7 +266,7 @@ describe('#12 Goods received: counts over the newest page say they cover the lat
     await waitFor(() => expect(captionUnder('Total GRNs')).toBe('all stores'));
     expect(captionUnder('Quality passed')).toBe('clean receipts');
     expect(captionUnder('Conditional')).toBe('partial accept');
-    expect(captionUnder('Failed quality')).toBe('debit note raised');
+    expect(captionUnder('Failed quality')).toBe('rejection recorded');
     expect(tabText(/History/)).toBe('History· 2');
     expect(tabText(/Discrepancies/)).toBe('Discrepancies· 1');
   });
