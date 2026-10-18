@@ -116,6 +116,7 @@ def test_push_product_unlocked_proceeds(monkeypatch):
                 "brand": "Ray-Ban",
                 "name": "RB Frame",
                 "sku": "RB1",
+                "mrp": 1000,  # priced: an unpriced create is refused (SF-05)
                 # a photograph: push_product refuses a product without one
                 # (owner ruling 2026-08-25, "no photo, no publish").
                 "images": ["https://cdn.example.com/p.jpg"],
