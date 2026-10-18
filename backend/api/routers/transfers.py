@@ -5,6 +5,8 @@ Complete stock transfer management between locations, stores, and warehouses.
 Includes transfer requests, approvals, in-transit tracking, and receiving.
 """
 
+from api.utils.event_time import utc_now_iso
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
@@ -464,7 +466,7 @@ def _audit_stock_move(prior_status, new_status, stock_id, transfer, extra=None):
             "transfer_number": transfer.get("transfer_number"),
             "from_store_id": transfer.get("from_location_id"),
             "to_store_id": transfer.get("to_location_id"),
-            "at": datetime.now().isoformat(),
+            "at": utc_now_iso(),
         }
         if extra:
             row.update(extra)
@@ -574,7 +576,7 @@ def _create_receive_mismatch_task(transfer: Dict, discrepancy: Dict) -> Optional
                     "surplus": surplus,
                     "damaged": damaged,
                 },
-                "created_at": datetime.now().isoformat(),
+                "created_at": utc_now_iso(),
                 "created_by": "system:transfer_receive",
             }
         )
@@ -1006,7 +1008,7 @@ def _apply_receive_stock_move(transfer: Dict) -> Dict:
             patch = {
                 "status": new_status,
                 "store_id": to_store,
-                "received_at": datetime.now().isoformat(),
+                "received_at": utc_now_iso(),
                 "source_type": "TRANSFER",
                 "source_id": transfer.get("id"),
                 "transfer_number": transfer.get("transfer_number"),
@@ -1019,7 +1021,7 @@ def _apply_receive_stock_move(transfer: Dict) -> Dict:
                 # Flag WHY the unit is parked so the quarantine console can
                 # surface it and an explicit disposition is required to release.
                 patch["quarantine_reason"] = "TRANSFER_DAMAGED"
-                patch["quarantined_at"] = datetime.now().isoformat()
+                patch["quarantined_at"] = utc_now_iso()
             return stock_repo.update(sid, patch)
 
         for sid in good_ids:
@@ -1345,7 +1347,7 @@ async def create_transfer(
         "status_history": [
             {
                 "status": initial_status,
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": utc_now_iso(),
                 "user_id": current_user.get("user_id"),
                 "user_name": current_user.get("username"),
                 "notes": "Transfer created",
@@ -1359,15 +1361,15 @@ async def create_transfer(
             else None
         ),
         "approved_at": (
-            datetime.now().isoformat()
+            utc_now_iso()
             if initial_status == TransferStatus.APPROVED
             else None
         ),
         "shipped_at": None,
         "received_at": None,
         "completed_at": None,
-        "created_at": datetime.now().isoformat(),
-        "updated_at": datetime.now().isoformat(),
+        "created_at": utc_now_iso(),
+        "updated_at": utc_now_iso(),
     }
 
     # Create Shiprocket shipment if requested
@@ -1411,7 +1413,7 @@ async def update_transfer(
 
     update_data = update.model_dump(exclude_none=True)
     transfer.update(update_data)
-    transfer["updated_at"] = datetime.now().isoformat()
+    transfer["updated_at"] = utc_now_iso()
 
     _save_transfer(transfer)
     return {"transfer": _caller_view(transfer, current_user), "message": "Transfer updated successfully"}
@@ -1449,17 +1451,17 @@ async def approve_transfer(
 
     transfer["status"] = new_status
     transfer["approved_by"] = current_user.get("user_id")
-    transfer["approved_at"] = datetime.now().isoformat()
+    transfer["approved_at"] = utc_now_iso()
     transfer["rejection_reason"] = (
         approval.rejection_reason if not approval.approved else None
     )
-    transfer["updated_at"] = datetime.now().isoformat()
+    transfer["updated_at"] = utc_now_iso()
 
     _append_status_history(
         transfer,
         {
             "status": new_status,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": utc_now_iso(),
             "user_id": current_user.get("user_id"),
             "user_name": current_user.get("username"),
             "notes": approval.rejection_reason if not approval.approved else "Approved",
@@ -1494,15 +1496,15 @@ async def start_picking(
         )
 
     transfer["status"] = TransferStatus.PICKING
-    transfer["picking_started_at"] = datetime.now().isoformat()
+    transfer["picking_started_at"] = utc_now_iso()
     transfer["picking_by"] = current_user.get("user_id")
-    transfer["updated_at"] = datetime.now().isoformat()
+    transfer["updated_at"] = utc_now_iso()
 
     _append_status_history(
         transfer,
         {
             "status": TransferStatus.PICKING,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": utc_now_iso(),
             "user_id": current_user.get("user_id"),
             "user_name": current_user.get("username"),
             "notes": "Picking started",
@@ -1548,14 +1550,14 @@ async def complete_picking(
             item_map[picked["item_id"]]["status"] = "packed"
 
     transfer["status"] = TransferStatus.PACKED
-    transfer["picking_completed_at"] = datetime.now().isoformat()
-    transfer["updated_at"] = datetime.now().isoformat()
+    transfer["picking_completed_at"] = utc_now_iso()
+    transfer["updated_at"] = utc_now_iso()
 
     _append_status_history(
         transfer,
         {
             "status": TransferStatus.PACKED,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": utc_now_iso(),
             "user_id": current_user.get("user_id"),
             "user_name": current_user.get("username"),
             "notes": "Picking completed, items packed",
@@ -1621,9 +1623,9 @@ async def ship_transfer(
         transfer["courier_name"] = courier_name
 
     transfer["status"] = TransferStatus.IN_TRANSIT
-    transfer["shipped_at"] = datetime.now().isoformat()
+    transfer["shipped_at"] = utc_now_iso()
     transfer["shipped_by"] = current_user.get("user_id")
-    transfer["updated_at"] = datetime.now().isoformat()
+    transfer["updated_at"] = utc_now_iso()
 
     # Update item statuses
     for item in transfer["items"]:
@@ -1637,7 +1639,7 @@ async def ship_transfer(
         transfer,
         {
             "status": TransferStatus.IN_TRANSIT,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": utc_now_iso(),
             "user_id": current_user.get("user_id"),
             "user_name": current_user.get("username"),
             # F51: no carrier named -> "Shipped", never "Shipped via None".
@@ -1782,7 +1784,7 @@ async def receive_transfer(
             item["quantity_received"] = received.quantity_received
             item["quantity_damaged"] = received.quantity_damaged
             item["damage_notes"] = received.damage_notes
-            item["received_at"] = datetime.now().isoformat()
+            item["received_at"] = utc_now_iso()
             item["status"] = "received"
 
     # SYSTEM_INTENT 5: raise destination on-hand by creating AVAILABLE units at
@@ -1820,17 +1822,17 @@ async def receive_transfer(
         new_status = TransferStatus.PARTIALLY_RECEIVED
 
     transfer["status"] = new_status
-    transfer["received_at"] = datetime.now().isoformat()
+    transfer["received_at"] = utc_now_iso()
     transfer["received_by"] = current_user.get("user_id")
     transfer["total_received"] = total_received
     transfer["total_damaged"] = total_damaged
-    transfer["updated_at"] = datetime.now().isoformat()
+    transfer["updated_at"] = utc_now_iso()
 
     _append_status_history(
         transfer,
         {
             "status": new_status,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": utc_now_iso(),
             "user_id": current_user.get("user_id"),
             "user_name": current_user.get("username"),
             "notes": f"Received {total_received} items, {total_damaged} damaged",
@@ -1894,16 +1896,16 @@ async def complete_transfer(
         )
 
     transfer["status"] = TransferStatus.COMPLETED
-    transfer["completed_at"] = datetime.now().isoformat()
+    transfer["completed_at"] = utc_now_iso()
     transfer["completed_by"] = current_user.get("user_id")
     transfer["completion_notes"] = notes
-    transfer["updated_at"] = datetime.now().isoformat()
+    transfer["updated_at"] = utc_now_iso()
 
     _append_status_history(
         transfer,
         {
             "status": TransferStatus.COMPLETED,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": utc_now_iso(),
             "user_id": current_user.get("user_id"),
             "user_name": current_user.get("username"),
             "notes": notes or "Transfer completed",
@@ -2038,16 +2040,16 @@ async def cancel_transfer(
         )
 
     transfer["status"] = TransferStatus.CANCELLED
-    transfer["cancelled_at"] = datetime.now().isoformat()
+    transfer["cancelled_at"] = utc_now_iso()
     transfer["cancelled_by"] = current_user.get("user_id")
     transfer["cancellation_reason"] = reason
-    transfer["updated_at"] = datetime.now().isoformat()
+    transfer["updated_at"] = utc_now_iso()
 
     _append_status_history(
         transfer,
         {
             "status": TransferStatus.CANCELLED,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": utc_now_iso(),
             "user_id": current_user.get("user_id"),
             "user_name": current_user.get("username"),
             "notes": reason,
@@ -2637,7 +2639,7 @@ def _book_mirror_purchase(transfer: Dict) -> None:
         bill_id = f"mbill_{uuid.uuid4().hex[:12]}"
         # Bill number mirrors the transfer number so it is traceable.
         bill_number = f"TRF/{transfer.get('transfer_number', transfer.get('id', ''))}"
-        now_iso = datetime.now().isoformat()
+        now_iso = utc_now_iso()
         # Filing date in IST frame (the GST tax period is the IST calendar
         # month); completed_at is a naive-UTC stamp -- see _bill_date_ist.
         bill_date_iso = _bill_date_ist(transfer.get("completed_at"))
@@ -2776,14 +2778,14 @@ async def bulk_approve_transfers(
 
         transfer["status"] = TransferStatus.APPROVED
         transfer["approved_by"] = current_user.get("user_id")
-        transfer["approved_at"] = datetime.now().isoformat()
-        transfer["updated_at"] = datetime.now().isoformat()
+        transfer["approved_at"] = utc_now_iso()
+        transfer["updated_at"] = utc_now_iso()
 
         _append_status_history(
             transfer,
             {
                 "status": TransferStatus.APPROVED,
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": utc_now_iso(),
                 "user_id": current_user.get("user_id"),
                 "user_name": current_user.get("username"),
                 "notes": "Bulk approved",
@@ -2838,7 +2840,7 @@ async def create_shiprocket_shipment_for_transfer(
     transfer["tracking_number"] = awb
     transfer["tracking_url"] = f"https://shiprocket.co/tracking/{awb}"
     transfer["courier_name"] = courier_code or "Delhivery"
-    transfer["updated_at"] = datetime.now().isoformat()
+    transfer["updated_at"] = utc_now_iso()
 
     _save_transfer(transfer)
     return {

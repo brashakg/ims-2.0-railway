@@ -1,5 +1,7 @@
 """Single purchase order: timeline, read, edit, send, cancel (whole or a line)."""
 
+from api.utils.event_time import utc_now_iso
+
 from collections import Counter
 from datetime import timezone
 
@@ -412,7 +414,7 @@ async def send_po(
             _as_read(po),
             {
                 "status": "SENT",
-                "sent_at": datetime.now().isoformat(),
+                "sent_at": utc_now_iso(),
                 "sent_by": current_user.get("user_id"),
             },
         ):

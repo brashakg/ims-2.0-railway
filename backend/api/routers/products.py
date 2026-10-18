@@ -4,6 +4,8 @@ IMS 2.0 - Products Router
 Product catalog management endpoints
 """
 
+from api.utils.event_time import utc_now_iso
+
 import io
 from fastapi import APIRouter, HTTPException, Depends, Query, Request, UploadFile, File
 from fastapi.responses import StreamingResponse
@@ -3519,7 +3521,7 @@ async def update_product(
                                 "entity_type": "product",
                                 "entity_id": product_id,
                                 "timestamp": datetime.now(),
-                                "ts": datetime.now().isoformat(),
+                                "ts": utc_now_iso(),
                                 "source": "spine_put",
                                 "before": _before,
                                 "after": _after,

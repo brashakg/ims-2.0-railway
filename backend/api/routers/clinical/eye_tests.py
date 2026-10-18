@@ -5,6 +5,9 @@ package split): no path, method, dependency, status code, response_model,
 default or validation was changed.
 """
 
+from api.utils.event_time import utc_event_iso, utc_now_iso
+
+
 from fastapi import HTTPException, Depends, Query
 from typing import Optional
 from datetime import datetime, date
@@ -231,7 +234,7 @@ async def complete_test(
         # is recorded, not just the refraction. by_alias=False keeps the stored
         # keys snake_case (consistent with the rest of the test doc).
         # CLI-11: also persist the structured SOAP note when provided.
-        now_iso = datetime.utcnow().isoformat()
+        now_iso = utc_now_iso()
         soap_note_dict = None
         if data.soap_note is not None:
             soap_note_dict = data.soap_note.model_dump(exclude_none=True)
@@ -321,10 +324,10 @@ async def complete_test(
                     "next_checkup": data.next_checkup,
                     "remarks": data.notes,
                     "validity_months": 12,
-                    "test_date": now.isoformat(),
+                    "test_date": utc_event_iso(now),
                     "expiry_date": (now + timedelta(days=365)).isoformat(),
                     "status": "ACTIVE",
-                    "created_at": now.isoformat(),
+                    "created_at": utc_event_iso(now),
                     "created_by": current_user.get("user_id", ""),
                 }
                 try:
@@ -410,7 +413,7 @@ async def amend_eye_test(
     # "Continue" on the queue finds the exam where it was left.
     is_pause = existing.get("status") != "COMPLETED"
 
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = utc_now_iso()
     soap_note_dict = None
     if data.soap_note is not None:
         soap_note_dict = data.soap_note.model_dump(exclude_none=True)

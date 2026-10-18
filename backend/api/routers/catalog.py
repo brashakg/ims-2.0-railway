@@ -5,6 +5,8 @@ Comprehensive product catalog management with category-specific fields.
 Handles product creation, SKU generation, and Shopify sync.
 """
 
+from api.utils.event_time import utc_now_iso
+
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional, Dict, Any, List, Tuple, Union
@@ -2261,8 +2263,8 @@ async def create_catalog_product(
         },
         "is_active": True,
         "created_by": current_user.get("user_id"),
-        "created_at": datetime.now().isoformat(),
-        "updated_at": datetime.now().isoformat(),
+        "created_at": utc_now_iso(),
+        "updated_at": utc_now_iso(),
     }
 
     # Set inventory by location if provided
@@ -2564,7 +2566,7 @@ async def update_catalog_product(
     if product.is_active is not None:
         existing["is_active"] = product.is_active
 
-    existing["updated_at"] = datetime.now().isoformat()
+    existing["updated_at"] = utc_now_iso()
     # Per-user attribution (multiple staff catalogue in parallel): WHO made
     # this edit and WHEN -- THE edit stamp (catalog_list.edit_stamp), the
     # fields the review list reads for an import with no spine yet.
@@ -2764,7 +2766,7 @@ async def update_catalog_product(
                         # scorecard's creators map matches on it).
                         "entity_id": product_id,
                         "timestamp": datetime.now(),
-                        "ts": datetime.now().isoformat(),
+                        "ts": utc_now_iso(),
                         "source": "catalog_put",
                         "before": _before,
                         "after": _after,
@@ -3152,9 +3154,9 @@ async def promote_catalog_product(
     stamp: Dict[str, Any] = {
         "needs_review": False,
         "pos_ready": True,
-        "promoted_at": datetime.now().isoformat(),
+        "promoted_at": utc_now_iso(),
         "promoted_by": current_user.get("user_id"),
-        "updated_at": datetime.now().isoformat(),
+        "updated_at": utc_now_iso(),
     }
     if minted_sku:
         stamp["sku"] = minted_sku
@@ -3198,7 +3200,7 @@ async def promote_catalog_product(
                     "entity_type": "product",
                     "entity_id": product_id,
                     "timestamp": datetime.now(),
-                    "ts": datetime.now().isoformat(),
+                    "ts": utc_now_iso(),
                     "after": {
                         "product_id": product_id,
                         "sku": spine.get("sku"),
@@ -3820,7 +3822,7 @@ async def adjust_product_inventory(
     product["inventory"]["total_quantity"] = sum(
         product["inventory"]["locations"].values()
     )
-    product["updated_at"] = datetime.now().isoformat()
+    product["updated_at"] = utc_now_iso()
 
     # NOT a catalogue edit: a stock movement. Quantity is never pushed from the
     # product payload (online qty is the derived allocation, written by the
@@ -3879,7 +3881,7 @@ async def sync_product_to_shopify(
 
     result = await _sync_product_to_shopify(product, sync_config)
     product["shopify"] = result
-    product["updated_at"] = datetime.now().isoformat()
+    product["updated_at"] = utc_now_iso()
     # SYNC PATH -- deliberately does NOT queue the row. This write is sync
     # book-keeping (the retired-marker stamp), not a human catalogue edit.
     # Marking a row dirty from anything on the Shopify sync side is the
@@ -3920,7 +3922,7 @@ async def bulk_sync_products_to_shopify(
 
         result = await _sync_product_to_shopify(product, sync_config)
         product["shopify"] = result
-        product["updated_at"] = datetime.now().isoformat()
+        product["updated_at"] = utc_now_iso()
         # SYNC PATH -- same reason as the single sync above: never queue from
         # the Shopify sync side (ping-pong).
         _save_catalog_product(product, mark_dirty=False)

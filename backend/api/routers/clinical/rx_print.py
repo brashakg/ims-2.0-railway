@@ -5,6 +5,8 @@ package split): no path, method, dependency, status code, response_model,
 default or validation was changed.
 """
 
+from api.utils.event_time import utc_event_iso
+
 from fastapi import HTTPException, Depends, Path
 from fastapi.responses import HTMLResponse
 from typing import Optional
@@ -324,7 +326,7 @@ async def create_prescription_redo(
         "reason": body.reason,
         "redo_by": current_user.get("user_id", ""),
         "redo_by_name": current_user.get("full_name", current_user.get("username", "")),
-        "redo_at": now.isoformat(),
+        "redo_at": utc_event_iso(now),
     }
 
     existing = rx.get("redos") or []

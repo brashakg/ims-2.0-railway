@@ -1,5 +1,7 @@
 """PO/GRN document numbers and the goods-receipt arithmetic helpers."""
 
+from api.utils.event_time import utc_now_iso
+
 from ._shared import Optional, _get_db, datetime
 
 
@@ -243,7 +245,7 @@ def _grn_stock_audit(
                 "po_id": po_id,
                 "store_id": store_id,
                 "by_user": user_id,
-                "at": datetime.now().isoformat(),
+                "at": utc_now_iso(),
             }
         )
     except Exception:  # noqa: BLE001

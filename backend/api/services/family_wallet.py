@@ -66,15 +66,10 @@ DEFAULT_MAX_MEMBERS = 7  # code fallback; E2 loyalty.pool_max_members overrides
 
 
 def _now_iso() -> str:
-    """IST-naive ISO timestamp (matches money_guard / petty_cash convention)."""
-    try:
-        from ..utils.ist import now_ist_naive
+    """Explicit IST event; legacy ledger days remain in their IST frame."""
+    from api.utils.event_time import ist_now_iso
 
-        return now_ist_naive().isoformat()
-    except Exception:  # noqa: BLE001
-        from datetime import datetime
-
-        return datetime.now().isoformat()
+    return ist_now_iso()
 
 
 def _coll(db, name: str):

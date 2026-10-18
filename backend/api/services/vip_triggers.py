@@ -37,6 +37,8 @@ no-double-fire stamp. Fail-soft reads.
 
 from __future__ import annotations
 
+from api.utils.event_time import utc_now_iso
+
 import uuid
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
@@ -292,7 +294,7 @@ def create_trigger(
         "store_id": store_id,
         "active": True,
         "created_by": created_by,
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": utc_now_iso(),
         "updated_at": None,
         "last_fired_for": None,
         **cleaned,
@@ -350,7 +352,7 @@ def update_trigger(
     if not existing:
         return None
 
-    updates: Dict[str, Any] = {"updated_at": datetime.utcnow().isoformat()}
+    updates: Dict[str, Any] = {"updated_at": utc_now_iso()}
 
     # Toggle active without touching the date fields.
     if "active" in payload and payload["active"] is not None:
@@ -408,7 +410,7 @@ def claim_fire(db, trigger_id: str, key: str) -> bool:
             {
                 "$set": {
                     "last_fired_for": key,
-                    "last_fired_at": datetime.utcnow().isoformat(),
+                    "last_fired_at": utc_now_iso(),
                 }
             },
         )
@@ -462,7 +464,7 @@ def build_vip_update(
             {
                 "note": str(note_text)[:1000],
                 "by": note_by,
-                "at": datetime.utcnow().isoformat(),
+                "at": utc_now_iso(),
             }
         )
         out["personal_notes"] = notes[-_MAX_NOTES:]

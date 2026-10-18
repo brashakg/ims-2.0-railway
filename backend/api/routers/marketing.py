@@ -11,6 +11,8 @@ Tier 1 marketing features:
 7. Walkout recovery
 """
 
+from api.utils.event_time import utc_now, utc_now_iso
+
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional, Literal
@@ -592,7 +594,7 @@ async def snooze_rx_alert(
     if db is None:
         return {"message": "Snoozed"}
 
-    snooze_until = (datetime.now() + timedelta(days=req.days)).isoformat()
+    snooze_until = (utc_now() + timedelta(days=req.days)).isoformat()
     db.get_collection("notification_logs").update_many(
         {"customer_id": customer_id, "template_id": "PRESCRIPTION_EXPIRY"},
         {"$set": {"snooze_until": snooze_until}},
@@ -658,8 +660,8 @@ async def send_referral_invite(
             "referee_name": None,
             "status": "INVITED",
             "reward_amount": 500,
-            "invite_sent_at": datetime.now().isoformat(),
-            "created_at": datetime.now().isoformat(),
+            "invite_sent_at": utc_now_iso(),
+            "created_at": utc_now_iso(),
         }
         ref_coll.insert_one(referral)
 
@@ -753,7 +755,7 @@ async def redeem_referral(
             {
                 "$set": {
                     "status": "REWARD_CREDITED",
-                    "reward_credited_at": datetime.now().isoformat(),
+                    "reward_credited_at": utc_now_iso(),
                     "reward_credited_by": current_user.get("user_id"),
                 }
             },
@@ -767,7 +769,7 @@ async def redeem_referral(
             {
                 "$set": {
                     "status": "REWARD_CREDITED",
-                    "reward_credited_at": datetime.now().isoformat(),
+                    "reward_credited_at": utc_now_iso(),
                     "reward_credited_by": current_user.get("user_id"),
                 }
             },
@@ -890,9 +892,9 @@ async def send_nps_survey(
         "score": None,
         "feedback": None,
         "status": "SENT",
-        "survey_sent_at": datetime.now().isoformat(),
+        "survey_sent_at": utc_now_iso(),
         "responded_at": None,
-        "created_at": datetime.now().isoformat(),
+        "created_at": utc_now_iso(),
     }
 
     db.get_collection("nps_responses").insert_one(nps_entry)
@@ -937,7 +939,7 @@ async def submit_nps_response(
                 "score": req.score,
                 "feedback": req.feedback,
                 "status": "RESPONDED",
-                "responded_at": datetime.now().isoformat(),
+                "responded_at": utc_now_iso(),
             }
         },
     )
@@ -977,7 +979,7 @@ async def submit_nps_response(
                 .isoformat(),
                 "status": "pending",
                 "outcome": None,
-                "created_at": datetime.now().isoformat(),
+                "created_at": utc_now_iso(),
                 "completed_at": None,
                 "completed_by": None,
             }
@@ -1078,7 +1080,7 @@ async def create_walkin(
         ),
         "follow_up_created": True,
         "converted": False,
-        "created_at": datetime.now().isoformat(),
+        "created_at": utc_now_iso(),
         "created_by": current_user.get("user_id", "unknown"),
     }
 
@@ -1097,7 +1099,7 @@ async def create_walkin(
             "reason": f"Walk-in follow-up (Interest: {req.interest})",
             "due_date": (datetime.now() + timedelta(days=1)).isoformat(),
             "status": "pending",
-            "created_at": datetime.now().isoformat(),
+            "created_at": utc_now_iso(),
         }
     )
 
@@ -1264,7 +1266,7 @@ async def update_consent_text(
             "$set": {
                 "text": body.text.strip(),
                 "version": new_version,
-                "updated_at": datetime.now().isoformat(),
+                "updated_at": utc_now_iso(),
                 "updated_by": current_user.get("user_id"),
             }
         },
@@ -1597,7 +1599,7 @@ async def record_whatsapp_consent(
         {
             "$set": {
                 "marketing_consent": new_consent,
-                "marketing_consent_updated_at": datetime.now().isoformat(),
+                "marketing_consent_updated_at": utc_now_iso(),
             }
         },
     )
@@ -1614,7 +1616,7 @@ async def record_whatsapp_consent(
         "marketing_consent_after": new_consent,
         "notes": req.notes or "",
         "recorded_by": current_user.get("user_id", "unknown"),
-        "recorded_at": datetime.now().isoformat(),
+        "recorded_at": utc_now_iso(),
     }
     db.get_collection(_CONSENT_LEDGER_COLL).insert_one(ledger_row)
 

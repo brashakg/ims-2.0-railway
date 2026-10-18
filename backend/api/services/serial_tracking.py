@@ -47,6 +47,8 @@ stock flip is unchanged (no new double-sell risk -- that path predates this).
 
 from __future__ import annotations
 
+from api.utils.event_time import parse_event_utc_naive, utc_now, utc_now_iso
+
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -205,7 +207,7 @@ def capture_serial(
             f"serial {sn} already exists", status=409, code="serial_duplicate"
         )
 
-    now = datetime.utcnow().isoformat()
+    now = utc_now_iso()
     doc: Dict[str, Any] = {
         "stock_id": str(uuid.uuid4()),
         "serial": sn,
@@ -278,7 +280,7 @@ def mark_serial_sold(
     filt: Dict[str, Any] = {"serial": sn, "status": STATUS_IN_STOCK}
     if store_id:
         filt["store_id"] = store_id
-    now = datetime.utcnow().isoformat()
+    now = utc_now_iso()
     updated = units_coll.find_one_and_update(
         filt,
         {
@@ -328,7 +330,7 @@ def transition_serial(
     filt: Dict[str, Any] = {"serial": sn, "status": {"$in": valid_from}}
     if store_id:
         filt["store_id"] = store_id
-    now = datetime.utcnow().isoformat()
+    now = utc_now_iso()
     set_doc: Dict[str, Any] = {"status": to_status, "updated_at": now}
     if to_status == STATUS_RECALLED:
         set_doc["recalled_at"] = now
@@ -413,13 +415,13 @@ def compute_warranty(unit: Dict[str, Any], now: Optional[datetime] = None) -> Di
     Returns {expiry_date, active(bool|None), days_remaining(int|None)}.
     ``active`` is None when there is no derivable expiry (NONE state).
     """
-    now = now or datetime.utcnow()
+    now = parse_event_utc_naive(now if now is not None else utc_now())
     expiry = unit.get("warranty_expiry_date")
     if not expiry:
         sold_at = unit.get("sold_at")
         months = unit.get("warranty_months")
         if sold_at and months:
-            base = _parse_dt(sold_at)
+            base = parse_event_utc_naive(sold_at)
             if base is not None:
                 expiry = _add_months(base, int(months)).isoformat()
     if not expiry:

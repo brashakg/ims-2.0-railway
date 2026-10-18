@@ -49,6 +49,8 @@ immutable record of every manual re-run (SYSTEM_INTENT: Audit Everything).
 
 from __future__ import annotations
 
+from api.utils.event_time import utc_event_iso
+
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -830,7 +832,7 @@ async def clear_rx_hold(
         "fulfillment_hold": bool(stock_left),
         "rx_hold_cleared": True,
         "rx_hold_cleared_by": current_user.get("user_id"),
-        "rx_hold_cleared_at": now_dt.isoformat(),
+        "rx_hold_cleared_at": utc_event_iso(now_dt),
         "updated_at": now_dt,
     }
     if note:
@@ -841,7 +843,7 @@ async def clear_rx_hold(
         update["stock_hold_reason"] = stock_left
     if seller:
         # The verdict every door reads (seller_held): released, for good.
-        update[f"fulfillment_route.{SELLER_RELEASED}"] = now_dt.isoformat()
+        update[f"fulfillment_route.{SELLER_RELEASED}"] = utc_event_iso(now_dt)
         # THE SIMPLIFIED ROOT RULE: the release never changes the invoice --
         # number, date, seller or tax heads. A fix that changed how the shop
         # splits the order's GST (its state or GSTIN) cannot be released:

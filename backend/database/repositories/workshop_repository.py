@@ -3,6 +3,8 @@ IMS 2.0 - Workshop Repository
 ==============================
 Workshop job data access operations
 """
+
+from api.utils.event_time import utc_event_iso, utc_now
 from typing import List, Optional, Dict, Any
 from datetime import datetime, date, timedelta
 from api.utils.ist import ist_today
@@ -75,7 +77,7 @@ class WorkshopJobRepository(BaseRepository):
         picked_up_by_name: str = None,
         picked_up_by_phone: str = None,
     ) -> bool:
-        now = datetime.now()
+        now = utc_now().replace(tzinfo=None)
         update: Dict[str, Any] = {"status": status, "status_updated_at": now}
         if by_user:
             update["status_updated_by"] = by_user
@@ -100,7 +102,7 @@ class WorkshopJobRepository(BaseRepository):
         except Exception:
             existing = None
         if isinstance(existing, dict):
-            entry: Dict[str, Any] = {"status": status, "at": now.isoformat()}
+            entry: Dict[str, Any] = {"status": status, "at": utc_event_iso(now)}
             if by_user:
                 entry["by_user"] = by_user
             if notes:
@@ -145,7 +147,7 @@ class WorkshopJobRepository(BaseRepository):
         both rely on those fields being present, so the old code produced
         incorrect zero/None KPIs for jobs that had gone through QC.
         """
-        now = datetime.now()
+        now = utc_now().replace(tzinfo=None)
         target_status = "READY" if (passed or waived) else "QC_FAILED"
 
         qc_update: Dict[str, Any] = {
@@ -169,7 +171,7 @@ class WorkshopJobRepository(BaseRepository):
                     "waived": waived,
                     "notes": notes,
                     "by_user": by_user,
-                    "at": now.isoformat(),
+                    "at": utc_event_iso(now),
                     "checklist": checklist_items or [],
                 }
             )

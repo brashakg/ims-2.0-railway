@@ -32,6 +32,8 @@ Mounted at /api/v1/promotions (see api/main.py).
 
 from __future__ import annotations
 
+from api.utils.event_time import utc_now_iso
+
 import logging
 import os
 import uuid
@@ -91,7 +93,7 @@ def _get_db():
 
 
 def _now_iso() -> str:
-    return datetime.now().isoformat()
+    return utc_now_iso()
 
 
 def _strip(doc: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

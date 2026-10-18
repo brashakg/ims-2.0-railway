@@ -5,6 +5,8 @@ split): no path, method, dependency, status code, response_model, default,
 rounding or validation was changed.
 """
 
+from api.utils.event_time import utc_now_iso
+
 from database.repositories.order_repository import derive_bill_type
 from datetime import datetime
 from fastapi import Depends, HTTPException
@@ -78,8 +80,8 @@ def _write_order_edit_audit(
         "before_state": before,
         "after_state": after,
         "diff": build_money_diff(before, after),
-        "timestamp": datetime.now().isoformat(),
-        "created_at": datetime.now().isoformat(),
+        "timestamp": utc_now_iso(),
+        "created_at": utc_now_iso(),
     }
     if extra:
         row["context"] = extra
@@ -216,7 +218,7 @@ async def superadmin_edit_order(
         "updated_by": current_user.get("user_id"),
         "superadmin_edited": True,
         "superadmin_edit_reason": body.reason,
-        "superadmin_edited_at": datetime.now().isoformat(),
+        "superadmin_edited_at": utc_now_iso(),
     }
     if body.cart_discount_reason is not None:
         update_data["cart_discount_reason"] = body.cart_discount_reason
@@ -416,7 +418,7 @@ async def superadmin_invoice_change(
             "invoice_revision_id": revised_doc["revision_id"],
             "superadmin_edited": True,
             "superadmin_edit_reason": body.reason,
-            "superadmin_edited_at": datetime.now().isoformat(),
+            "superadmin_edited_at": utc_now_iso(),
             "updated_by": current_user.get("user_id"),
         }
         if body.customer_id is not None:

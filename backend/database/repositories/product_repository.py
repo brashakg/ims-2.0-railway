@@ -4,6 +4,8 @@ IMS 2.0 - Product Repository
 Product and Stock data access operations
 """
 
+from api.utils.event_time import utc_now_iso
+
 import logging
 import re
 import uuid
@@ -909,7 +911,7 @@ class StockRepository(BaseRepository):
                             "prior_sold_order_id": order_id,
                             "released_from_order_id": order_id,
                             "release_reason": reason,
-                            "released_at": datetime.now().isoformat(),
+                            "released_at": utc_now_iso(),
                         }
                     },
                 )
@@ -1076,7 +1078,7 @@ class StockRepository(BaseRepository):
                     "$set": {
                         "status": "TRANSFERRED",
                         "transfer_id": transfer_id,
-                        "transferred_at": datetime.now().isoformat(),
+                        "transferred_at": utc_now_iso(),
                         "transfer_to_store_id": to_store_id,
                     }
                 },

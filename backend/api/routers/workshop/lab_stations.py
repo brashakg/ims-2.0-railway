@@ -6,6 +6,8 @@ package split): no path, method, dependency, status code, response_model,
 default or validation was changed.
 """
 
+from api.utils.event_time import utc_event_iso, utc_now
+
 from fastapi import HTTPException, Depends, Query
 from typing import Optional
 from datetime import datetime
@@ -286,12 +288,12 @@ async def print_job_card(
     if not can_access_store_scoped(job.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="Workshop job not found")
 
-    now = datetime.now()
+    now = utc_now().replace(tzinfo=None)
     try:
         repo.update(
             job_id,
             {
-                "job_card_printed_at": now.isoformat(),
+                "job_card_printed_at": utc_event_iso(now),
                 "job_card_printed_by": current_user.get("user_id"),
             },
         )
@@ -303,6 +305,6 @@ async def print_job_card(
         "job_id": job_id,
         "job_number": job.get("job_number"),
         "barcode_value": job.get("job_number") or job_id,
-        "job_card_printed_at": now.isoformat(),
+        "job_card_printed_at": utc_event_iso(now),
         "message": "Job card stamped; print the traveler label.",
     }

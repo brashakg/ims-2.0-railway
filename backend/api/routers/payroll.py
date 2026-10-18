@@ -5,6 +5,8 @@ Salary management, advances, payslips, and incentive integration
 Indian salary structure with PF, ESI, PT, TDS deductions
 """
 
+from api.utils.event_time import utc_now_iso
+
 from fastapi import APIRouter, Depends, Query, HTTPException, Body
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict
@@ -581,8 +583,8 @@ async def create_salary_config(
             {
                 "config_id": str(uuid.uuid4()),
                 "is_active": True,
-                "created_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat(),
+                "created_at": utc_now_iso(),
+                "updated_at": utc_now_iso(),
                 "created_by": current_user.get("user_id"),
             }
         )
@@ -659,7 +661,7 @@ async def update_salary_config(
         updates = {k: v for k, v in update.model_dump().items() if v is not None}
         if not updates:
             return {"status": "no_changes", "config_id": existing.get("config_id")}
-        updates["updated_at"] = datetime.now().isoformat()
+        updates["updated_at"] = utc_now_iso()
         coll.update_one({"employee_id": employee_id}, {"$set": updates})
         return {
             "status": "success",
@@ -745,7 +747,7 @@ async def bulk_upsert_salary_config(
             doc = cfg.model_dump()
             existing = coll.find_one({"employee_id": cfg.employee_id})
             if existing:
-                doc["updated_at"] = datetime.now().isoformat()
+                doc["updated_at"] = utc_now_iso()
                 coll.update_one({"employee_id": cfg.employee_id}, {"$set": doc})
                 updated += 1
             else:
@@ -753,8 +755,8 @@ async def bulk_upsert_salary_config(
                     {
                         "config_id": str(uuid.uuid4()),
                         "is_active": True,
-                        "created_at": datetime.now().isoformat(),
-                        "updated_at": datetime.now().isoformat(),
+                        "created_at": utc_now_iso(),
+                        "updated_at": utc_now_iso(),
                         "created_by": current_user.get("user_id"),
                     }
                 )
@@ -983,7 +985,7 @@ async def calculate_salary(
             "working_days": calc_request.working_days,
             "leave_without_pay_days": calc_request.leave_without_pay_days,
             "status": "calculated",
-            "created_at": datetime.now().isoformat(),
+            "created_at": utc_now_iso(),
             "created_by": current_user.get("user_id"),
         }
 
@@ -1071,7 +1073,7 @@ async def record_salary_advance(
             "reason": advance.reason,
             "status": "pending",  # pending, approved, settled, deducted
             "settlement_salary_record_id": None,
-            "created_at": datetime.now().isoformat(),
+            "created_at": utc_now_iso(),
             "created_by": current_user.get("user_id"),
         }
 
@@ -1162,7 +1164,7 @@ async def settle_salary_advance(
                     "status": "settled",
                     "settlement_month": settlement.settlement_month,
                     "settlement_year": settlement.settlement_year,
-                    "settled_at": datetime.now().isoformat(),
+                    "settled_at": utc_now_iso(),
                     "settled_by": current_user.get("user_id"),
                 }
             },
@@ -1277,7 +1279,7 @@ async def get_payslip(
             "year": year,
             "breakdown": salary_record.get("breakdown", {}),
             "bank_account": cfg.get("bank_account") if cfg else None,
-            "generated_at": datetime.now().isoformat(),
+            "generated_at": utc_now_iso(),
         }
         payslips_coll.insert_one({**payslip})
         return {"payslip": _strip_id(payslip)}
@@ -1493,7 +1495,7 @@ async def upsert_pt_slab(
         coll = db.get_collection("pt_slabs")
         doc = payload.model_dump()
         doc["state_code"] = state_code
-        doc["updated_at"] = datetime.now().isoformat()
+        doc["updated_at"] = utc_now_iso()
         coll.update_one({"state_code": state_code}, {"$set": doc}, upsert=True)
         return {
             "status": "success",
@@ -1518,7 +1520,7 @@ async def seed_pt_slabs(current_user: dict = Depends(require_roles("ADMIN"))):
         for state_code, slab in DEFAULT_PT_SLABS.items():
             if not coll.find_one({"state_code": state_code}):
                 doc = dict(slab)
-                doc["updated_at"] = datetime.now().isoformat()
+                doc["updated_at"] = utc_now_iso()
                 coll.insert_one(doc)
                 seeded += 1
         return {
@@ -1755,7 +1757,7 @@ async def run_payroll(
                 "advance_deduction": breakdown["deductions"]["advance_recovery"],
                 "net_salary": breakdown["net_pay"],
                 "status": "DRAFT",
-                "updated_at": datetime.now().isoformat(),
+                "updated_at": utc_now_iso(),
             }
             if not req.dry_run:
                 existing = payroll_coll.find_one(
@@ -1779,7 +1781,7 @@ async def run_payroll(
                     )
                 else:
                     doc["payroll_id"] = str(uuid.uuid4())
-                    doc["created_at"] = datetime.now().isoformat()
+                    doc["created_at"] = utc_now_iso()
                     doc["created_by"] = current_user.get("user_id")
                     payroll_coll.insert_one(doc)
             rows.append(_strip_id({k: v for k, v in doc.items()}))
@@ -1895,7 +1897,7 @@ async def approve_payroll(
                 "$set": {
                     "status": "APPROVED",
                     "approved_by": current_user.get("user_id"),
-                    "approved_at": datetime.now().isoformat(),
+                    "approved_at": utc_now_iso(),
                 }
             },
         )
@@ -1932,7 +1934,7 @@ async def lock_payroll(
             query["entity_id"] = req.entity_id
         result = db.get_collection("payroll").update_many(
             query,
-            {"$set": {"status": "PAID", "paid_at": datetime.now().isoformat()}},
+            {"$set": {"status": "PAID", "paid_at": utc_now_iso()}},
         )
         return {"status": "success", "locked": getattr(result, "modified_count", 0)}
     except HTTPException:

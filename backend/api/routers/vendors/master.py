@@ -1,5 +1,8 @@
 """Vendor master CRUD and vendor SKU aliases."""
 
+from api.utils.event_time import utc_event_iso, utc_now, utc_now_iso
+
+
 from ._shared import (
     BaseModel,
     Depends,
@@ -156,7 +159,7 @@ async def create_vendor(
                 "credit_days": vendor.credit_days,
                 "is_active": True,
                 "created_by": current_user.get("user_id"),
-                "created_at": datetime.now().isoformat(),
+                "created_at": utc_now_iso(),
             }
         )
 
@@ -252,7 +255,7 @@ async def update_vendor(
         }
 
         update_data["updated_by"] = current_user.get("user_id")
-        update_data["updated_at"] = datetime.now().isoformat()
+        update_data["updated_at"] = utc_now_iso()
 
         vendor_repo.update(vendor_id, update_data)
 
@@ -374,7 +377,7 @@ async def create_vendor_sku_alias(
                 raise HTTPException(status_code=404, detail="Vendor not found")
 
         coll = db.get_collection("vendor_sku_aliases")
-        now = datetime.now()
+        now = utc_now().replace(tzinfo=None)
 
         # Upsert on (vendor_id, vendor_sku) — idempotent
         existing = coll.find_one(
@@ -387,7 +390,7 @@ async def create_vendor_sku_alias(
                     "$set": {
                         "product_id": body.product_id,
                         "description": body.description,
-                        "updated_at": now.isoformat(),
+                        "updated_at": utc_event_iso(now),
                         "updated_by": current_user.get("user_id", ""),
                     }
                 },
@@ -403,7 +406,7 @@ async def create_vendor_sku_alias(
                     "vendor_sku": body.vendor_sku,
                     "product_id": body.product_id,
                     "description": body.description,
-                    "created_at": now.isoformat(),
+                    "created_at": utc_event_iso(now),
                     "created_by": current_user.get("user_id", ""),
                 }
             )

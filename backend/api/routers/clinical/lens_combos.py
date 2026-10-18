@@ -5,6 +5,8 @@ package split): no path, method, dependency, status code, response_model,
 default or validation was changed.
 """
 
+from api.utils.event_time import utc_now_iso
+
 from fastapi import HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from typing import Optional
@@ -135,7 +137,7 @@ async def create_lens_power_combo(
             status_code=400,
             detail="Select an active store before saving a lens-power combo",
         )
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = utc_now_iso()
     combo_id = str(uuid.uuid4())
 
     doc = {

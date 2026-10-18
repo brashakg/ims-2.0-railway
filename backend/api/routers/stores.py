@@ -4,6 +4,8 @@ IMS 2.0 - Stores Router
 Store management endpoints
 """
 
+from api.utils.event_time import utc_now_iso
+
 import logging
 import re
 
@@ -1117,7 +1119,7 @@ async def delete_store(store_id: str, current_user: dict = Depends(get_current_u
         store_id,
         {
             "is_active": False,
-            "deactivated_at": __import__("datetime").datetime.now().isoformat(),
+            "deactivated_at": utc_now_iso(),
             "deactivated_by": current_user.get("user_id"),
         },
     )

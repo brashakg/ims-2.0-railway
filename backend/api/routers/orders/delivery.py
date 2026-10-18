@@ -5,6 +5,8 @@ split): no path, method, dependency, status code, response_model, default,
 rounding or validation was changed.
 """
 
+from api.utils.event_time import utc_now_iso
+
 from datetime import datetime
 from fastapi import Depends, HTTPException, Header
 from pydantic import BaseModel, Field
@@ -216,7 +218,7 @@ async def deliver_order(
                     "handover_record": {
                         **_h,
                         "recorded_by": current_user.get("user_id"),
-                        "recorded_at": datetime.now().isoformat(),
+                        "recorded_at": utc_now_iso(),
                     }
                 }
 

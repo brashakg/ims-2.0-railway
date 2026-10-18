@@ -126,7 +126,8 @@ def silent_tasks(
     sla_config: Optional[dict] = None,
 ) -> List[Dict[str, Any]]:
     """OPEN (unacknowledged) tasks past their ack-SLA window. Pure."""
-    now = now or datetime.now()
+    from api.utils.event_time import utc_now
+    now = _as_dt(now if now is not None else utc_now())
     out: List[Dict[str, Any]] = []
     for t in tasks or []:
         status = str(t.get("status", "") or "").upper()
@@ -142,14 +143,8 @@ def silent_tasks(
 
 
 def _as_dt(v: Any) -> Optional[datetime]:
-    if isinstance(v, datetime):
-        return v
-    if isinstance(v, str) and v:
-        try:
-            return datetime.fromisoformat(v.replace("Z", "").split("+")[0])
-        except ValueError:
-            return None
-    return None
+    from api.utils.event_time import parse_event_utc_naive
+    return parse_event_utc_naive(v)
 
 
 # ---------------------------------------------------------------------------

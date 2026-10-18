@@ -58,6 +58,8 @@ Delivery Challan answers the same 404 for a receipt outside it
 (in_reach_or_404), exactly as for a missing one.
 """
 
+from api.utils.event_time import utc_now_iso
+
 import logging
 import uuid
 from datetime import datetime
@@ -678,7 +680,7 @@ def _claim_grn_units(db, grn, proposed_lines, invoice_id, priors=None):
             {
                 "$inc": inc,
                 "$addToSet": {"billed_claim_ids": invoice_id},
-                "$set": {"billed_claim_at": datetime.now().isoformat()},
+                "$set": {"billed_claim_at": utc_now_iso()},
             },
         )
     except Exception as exc:  # noqa: BLE001
@@ -926,7 +928,7 @@ def _stamp_dcs_matched(db, dc_ids, invoice_id):
                     "$set": {
                         "dc_matched": True,
                         "linked_bulk_invoice_id": invoice_id,
-                        "dc_matched_at": datetime.now().isoformat(),
+                        "dc_matched_at": utc_now_iso(),
                     }
                 },
             )
@@ -1275,7 +1277,7 @@ def _apply_valuation_trueup(db, invoice_doc, computed, config) -> Optional[list]
                 fields["cost_price_is_catalogue_only"] = False
             if new_cost is not None:
                 fields.update({
-                    "cost_price": new_cost, "cost_updated_at": datetime.now().isoformat(),
+                    "cost_price": new_cost, "cost_updated_at": utc_now_iso(),
                     "cost_source": "PURCHASE_INVOICE", "cost_source_id": invoice_doc.get("invoice_id"),
                 })
             try:
@@ -1293,7 +1295,7 @@ def _apply_valuation_trueup(db, invoice_doc, computed, config) -> Optional[list]
                     {
                         "$set": {
                             "pricing.cost_price": new_cost,
-                            "pricing.cost_updated_at": datetime.now().isoformat(),
+                            "pricing.cost_updated_at": utc_now_iso(),
                             "pricing.cost_source": "PURCHASE_INVOICE",
                         }
                     },
@@ -2048,7 +2050,7 @@ def _apply_invoice_mrp(db, lines, invoice_id) -> Optional[list]:
                         "mrp": round(float(new_mrp), 2),
                         "mrp_source": "PURCHASE_INVOICE",
                         "mrp_source_id": invoice_id,
-                        "mrp_updated_at": datetime.now().isoformat(),
+                        "mrp_updated_at": utc_now_iso(),
                     }
                 },
             )
@@ -2602,7 +2604,7 @@ async def create_purchase_invoice(
         "status": "OUTSTANDING",
         "notes": body.notes,
         "created_by": current_user.get("user_id"),
-        "created_at": datetime.now().isoformat(),
+        "created_at": utc_now_iso(),
     }
 
     # ATOMIC CLAIM of the receipt's units, BEFORE the payable exists. Claiming
@@ -3235,7 +3237,7 @@ async def update_purchase_config(
                     "$set": {
                         **payload,
                         "updated_by": current_user.get("user_id"),
-                        "updated_at": datetime.now().isoformat(),
+                        "updated_at": utc_now_iso(),
                     }
                 },
                 upsert=True,
@@ -3400,7 +3402,7 @@ async def approve_invoice_exception(
         "exception_override": {
             "approved_by": current_user.get("user_id"),
             "reason": body.reason,
-            "approved_at": datetime.now().isoformat(),
+            "approved_at": utc_now_iso(),
             "prior_status": pmatch.MATCH_ON_HOLD,
         },
     }
@@ -3590,7 +3592,7 @@ async def set_invoice_landed_costs(
                     "allocation_method": body.allocation_method,
                     "landed_cost_allocated": False,
                     "landed_cost_captured_by": current_user.get("user_id"),
-                    "landed_cost_captured_at": datetime.now().isoformat(),
+                    "landed_cost_captured_at": utc_now_iso(),
                 }
             },
         )
@@ -3754,7 +3756,7 @@ async def allocate_invoice_landed_costs(
             merged[key] = row[key]
         merged_lines.append(merged)
 
-    now = datetime.now().isoformat()
+    now = utc_now_iso()
     # THE one-way gate: single guarded single-document update (PROTOCOL P0-1:
     # no cross-collection transaction). Exactly one concurrent caller matches
     # the landed_cost_allocated != true filter; everyone else gets None -> 409.

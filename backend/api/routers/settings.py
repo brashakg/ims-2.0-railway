@@ -10,6 +10,8 @@ Comprehensive settings management for all user roles.
 - Audit logs
 """
 
+from api.utils.event_time import utc_now_iso
+
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -879,7 +881,7 @@ async def update_preferences(
     if collection is not None and user_id:
         to_write = dict(payload)
         to_write["user_id"] = user_id
-        to_write["updated_at"] = datetime.utcnow().isoformat()
+        to_write["updated_at"] = utc_now_iso()
         collection.update_one({"_id": user_id}, {"$set": to_write}, upsert=True)
         return {"message": "Preferences updated", "preferences": payload}
     return {"message": "Preferences updated (no DB)", "preferences": payload}
@@ -1239,7 +1241,7 @@ async def update_notification_providers(
         raise HTTPException(status_code=503, detail="Database not available")
     providers = {k: v for k, v in providers.items() if k != "_id"}
     providers = _strip_unstorable_fields(providers)
-    providers["updated_at"] = datetime.now().isoformat()
+    providers["updated_at"] = utc_now_iso()
     coll.update_one({"_id": "notification_providers"}, {"$set": providers}, upsert=True)
     doc = coll.find_one({"_id": "notification_providers"})
     if doc:
@@ -1546,7 +1548,7 @@ async def update_discount_rules(
     if collection is not None:
         collection.update_one(
             {"_id": "default"},
-            {"$set": {"rules": rules, "updated_at": datetime.utcnow().isoformat()}},
+            {"$set": {"rules": rules, "updated_at": utc_now_iso()}},
             upsert=True,
         )
         return {"message": "Discount rules updated", "rules": rules}
@@ -1575,7 +1577,7 @@ async def set_discount_rule(
             {
                 "$set": {
                     key: payload["max_discount"],
-                    "updated_at": datetime.utcnow().isoformat(),
+                    "updated_at": utc_now_iso(),
                 }
             },
             upsert=True,
@@ -1834,7 +1836,7 @@ async def update_integration(
                     "enabled": bool(payload.get("enabled")),
                     # BUG-155: encrypt secrets at rest (was stored plaintext).
                     "config": encrypted_cfg,
-                    "updated_at": datetime.now().isoformat(),
+                    "updated_at": utc_now_iso(),
                 }
             },
             upsert=True,
@@ -2016,7 +2018,7 @@ async def update_marketplace_channels(
                 {
                     "$set": {
                         "channels": to_store,
-                        "updated_at": datetime.utcnow().isoformat(),
+                        "updated_at": utc_now_iso(),
                     }
                 },
                 upsert=True,
@@ -2130,7 +2132,7 @@ async def update_system_settings(
             {
                 "$set": {
                     **settings_clean,
-                    "updated_at": datetime.utcnow().isoformat(),
+                    "updated_at": utc_now_iso(),
                 }
             },
             upsert=True,
@@ -2587,7 +2589,7 @@ async def update_approval_workflows(
     if collection is not None:
         collection.update_one(
             {"_id": "default"},
-            {"$set": {**data, "updated_at": datetime.utcnow().isoformat()}},
+            {"$set": {**data, "updated_at": utc_now_iso()}},
             upsert=True,
         )
         return {"message": "Approval workflows saved successfully", **data}
@@ -2667,7 +2669,7 @@ def _save_feature_toggles(store_id: str, features: Dict[str, bool]) -> dict:
             {
                 "$set": {
                     "features": features,
-                    "updated_at": datetime.utcnow().isoformat(),
+                    "updated_at": utc_now_iso(),
                 }
             },
             upsert=True,
@@ -2799,7 +2801,7 @@ async def update_tds_rates(
         {
             "$set": {
                 "rates": body.rates,
-                "updated_at": datetime.now().isoformat(),
+                "updated_at": utc_now_iso(),
                 "updated_by": current_user.get("user_id"),
             }
         },

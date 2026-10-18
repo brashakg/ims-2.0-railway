@@ -1,5 +1,7 @@
 """Stock count: record a counted item, complete the session."""
 
+from api.utils.event_time import utc_event_iso
+
 from ._shared import (
     Depends,
     HTTPException,
@@ -236,7 +238,7 @@ async def complete_stock_count(
         now = datetime.utcnow()
         update_data = {
             "status": "completed",
-            "completed_at": now.isoformat(),
+            "completed_at": utc_event_iso(now),
             "completed_by": current_user.get("user_id", ""),
             "variances": variances,
             "variance_percentage": overall_var_pct,

@@ -31,6 +31,8 @@ HTTP /{code}/redeem endpoint calls the very same function.
 
 from __future__ import annotations
 
+from api.utils.event_time import utc_now_iso
+
 import logging
 import secrets
 import uuid
@@ -205,7 +207,7 @@ def mint_voucher(
     vtype = (vtype or "GIFT_CARD").upper()
     if vtype not in ("GIFT_CARD", "DISCOUNT"):
         raise ValueError("type must be GIFT_CARD or DISCOUNT")
-    now = datetime.now().isoformat()
+    now = utc_now_iso()
     amount = float(amount)
     base = {
         "type": vtype,
@@ -281,7 +283,7 @@ def redeem_voucher_atomic(
 
     code_u = (code or "").strip().upper()
     amount = float(amount)
-    now = datetime.now().isoformat()
+    now = utc_now_iso()
 
     redemption = {
         "order_id": order_id,
@@ -325,7 +327,7 @@ def redeem_voucher_atomic(
     if new_balance <= 0:
         flipped = coll.find_one_and_update(
             {"code": code_u, "status": "ACTIVE", "balance": {"$lte": 0}},
-            {"$set": {"status": "REDEEMED", "updated_at": datetime.now().isoformat()}},
+            {"$set": {"status": "REDEEMED", "updated_at": utc_now_iso()}},
             return_document=ReturnDocument.AFTER,
         )
         if flipped is not None:
@@ -572,8 +574,8 @@ async def cancel_voucher(
             "$set": {
                 "status": "CANCELLED",
                 "cancelled_by": current_user.get("user_id"),
-                "cancelled_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat(),
+                "cancelled_at": utc_now_iso(),
+                "updated_at": utc_now_iso(),
             }
         },
         return_document=ReturnDocument.AFTER,

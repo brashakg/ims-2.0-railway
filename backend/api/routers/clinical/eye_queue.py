@@ -5,6 +5,8 @@ package split): no path, method, dependency, status code, response_model,
 default or validation was changed.
 """
 
+from api.utils.event_time import utc_now_iso
+
 from fastapi import HTTPException, Depends, Query
 from datetime import datetime
 import uuid
@@ -102,7 +104,7 @@ async def add_to_queue(
         "customerId": item.customer_id,
         "patientId": item.patient_id,
         "status": "WAITING",
-        "createdAt": datetime.now().isoformat(),
+        "createdAt": utc_now_iso(),
         "waitTime": 0,
     }
     return new_item

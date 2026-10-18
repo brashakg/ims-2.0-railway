@@ -4,6 +4,8 @@ IMS 2.0 - Prescriptions Router
 Prescription management endpoints
 """
 
+from api.utils.event_time import utc_now_iso
+
 from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -1516,7 +1518,7 @@ async def upload_prescription_photo(
         {
             "rx_photo_file_id": file_id,
             "rx_photo_uploaded_by": current_user.get("user_id"),
-            "rx_photo_uploaded_at": datetime.now().isoformat(),
+            "rx_photo_uploaded_at": utc_now_iso(),
         },
     )
     if old_file_id and old_file_id != file_id:
@@ -1707,7 +1709,7 @@ async def update_prescription(
         update_doc["expiry_date"] = _add_months(base_dt, rx.validity_months).isoformat()
 
     update_doc["updated_by"] = current_user.get("user_id")
-    update_doc["updated_at"] = datetime.now().isoformat()
+    update_doc["updated_at"] = utc_now_iso()
 
     repo.update(prescription_id, update_doc)
     refreshed = repo.find_by_id(prescription_id) or {**existing, **update_doc}

@@ -6,6 +6,9 @@ split): no path, method, dependency, status code, response_model, default,
 rounding or validation was changed.
 """
 
+from api.utils.event_time import utc_event_iso, utc_now, utc_now_iso
+
+
 from datetime import datetime
 from typing import List, Optional
 from ...dependencies import get_stock_repository
@@ -290,7 +293,7 @@ def _claim_order_status(
     wanted = (
         [required_status] if isinstance(required_status, str) else list(required_status)
     )
-    now = datetime.now()
+    now = utc_now().replace(tzinfo=None)
     payload = {
         "status": new_status,
         "status_updated_at": now,
@@ -310,7 +313,7 @@ def _claim_order_status(
     # an afterthought.
     history_entry = {
         "status": new_status,
-        "timestamp": now.isoformat(),
+        "timestamp": utc_event_iso(now),
         "changed_by": user_id or "system",
     }
     coll = getattr(repo, "collection", None)
@@ -394,7 +397,7 @@ def _claim_order_for_cancel(
         "status": "CANCELLED",
         "cancellation_reason": reason,
         "cancelled_by": current_user.get("user_id"),
-        "cancelled_at": datetime.now().isoformat(),
+        "cancelled_at": utc_now_iso(),
     }
     coll = getattr(repo, "collection", None)
     updater = getattr(coll, "find_one_and_update", None) if coll is not None else None

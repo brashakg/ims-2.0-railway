@@ -5,6 +5,8 @@ package split): no path, method, dependency, status code, response_model
 or default was changed.
 """
 
+from api.utils.event_time import utc_now_iso
+
 from datetime import datetime
 from fastapi import Depends, HTTPException
 from ..auth import get_current_user
@@ -39,7 +41,7 @@ async def lock_period(
             "month": month,
             "year": year,
             "locked_by": current_user.get("user_id"),
-            "locked_at": datetime.utcnow().isoformat(),
+            "locked_at": utc_now_iso(),
         }
     )
     return {"message": f"Period {month}/{year} locked", "month": month, "year": year}

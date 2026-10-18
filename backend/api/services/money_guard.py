@@ -48,7 +48,8 @@ tier-agnostic -- the caller enforces refund/discount tiers from E2). E6 OTP verb
 No emoji in this file (Windows cp1252).
 """
 from dataclasses import dataclass
-from datetime import datetime, date
+from datetime import date
+from api.utils.event_time import ist_event_iso, ist_now_iso
 from typing import Any, Dict, Optional
 import uuid
 
@@ -153,13 +154,13 @@ ACCOUNT_TYPES: Dict[str, AccountSpec] = {
 
 def _now_iso() -> str:
     """IST timestamp for money_ledger / new-verb records (forensic trail is India-
-    time). Falls back to naive local only if the IST helper is unavailable."""
+    time), including an explicit offset in both normal and fallback paths."""
     if _ist_now is not None:
         try:
-            return _ist_now().isoformat()
+            return ist_event_iso(_ist_now())
         except Exception:  # noqa: BLE001
             pass
-    return datetime.now().isoformat()
+    return ist_now_iso()
 
 
 def _today_date_iso() -> str:

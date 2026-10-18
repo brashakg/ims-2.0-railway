@@ -1,5 +1,7 @@
 """Inventory intelligence: transfer recommendations + staff accountability."""
 
+from api.utils.event_time import utc_now_iso
+
 from ...dependencies import store_in_view
 from ._shared import (
     BaseModel,
@@ -165,7 +167,7 @@ async def assign_accountability(
                 "staff_id": body.staff_id,
                 "staff_name": body.staff_name,
                 "assigned_by": current_user.get("user_id"),
-                "assigned_at": datetime.now().isoformat(),
+                "assigned_at": utc_now_iso(),
             }
         },
         upsert=True,

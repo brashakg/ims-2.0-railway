@@ -23,6 +23,7 @@ are tolerated and coerced.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from api.utils.event_time import parse_event_utc_naive, utc_now
 from typing import Any, Dict, Optional, Tuple
 
 # priority -> {ack_minutes, grace_minutes}
@@ -92,21 +93,8 @@ def sla_for(priority: Any, sla_config: Optional[dict] = None) -> Dict[str, int]:
 
 
 def _as_dt(value: Any) -> Optional[datetime]:
-    """Coerce datetime | ISO-string | None to a naive datetime, or None."""
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.replace(tzinfo=None) if value.tzinfo else value
-    if isinstance(value, str):
-        s = value.strip()
-        if not s:
-            return None
-        try:
-            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-            return dt.replace(tzinfo=None) if dt.tzinfo else dt
-        except ValueError:
-            return None
-    return None
+    """Known legacy UTC task instant in the existing naive-UTC read frame."""
+    return parse_event_utc_naive(value)
 
 
 def should_escalate(
@@ -133,9 +121,7 @@ def should_escalate(
     if is_flag_task(task):
         return False, ""
 
-    now = now or datetime.now()
-    if now.tzinfo:
-        now = now.replace(tzinfo=None)
+    now = _as_dt(now if now is not None else utc_now())
 
     sla = sla_for(task.get("priority", "P3"), sla_config)
 

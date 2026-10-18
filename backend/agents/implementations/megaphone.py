@@ -24,6 +24,8 @@ Scope of MVP implementation:
   - Respects DND quiet hours
 """
 
+from api.utils.event_time import utc_now_iso
+
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone, timedelta
 import logging
@@ -314,7 +316,7 @@ class MegaphoneAgent(JarvisAgent):
                                 "status": "pending",
                                 "outcome": None,
                                 "notes": card.get("headline", ""),
-                                "created_at": datetime.now().isoformat(),
+                                "created_at": utc_now_iso(),
                                 "completed_at": None,
                                 "completed_by": None,
                             }
@@ -412,7 +414,7 @@ class MegaphoneAgent(JarvisAgent):
                                 "status": "pending",
                                 "outcome": None,
                                 "notes": entry.get("headline", ""),
-                                "created_at": datetime.now().isoformat(),
+                                "created_at": utc_now_iso(),
                                 "completed_at": None,
                                 "completed_by": None,
                             }
@@ -520,7 +522,7 @@ class MegaphoneAgent(JarvisAgent):
                                 "notes": headline,
                                 "trigger_id": trig.get("trigger_id"),
                                 "event_date": event_iso,
-                                "created_at": datetime.now().isoformat(),
+                                "created_at": utc_now_iso(),
                                 "completed_at": None,
                                 "completed_by": None,
                             }

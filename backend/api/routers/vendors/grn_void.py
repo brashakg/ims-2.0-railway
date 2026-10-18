@@ -1,5 +1,7 @@
 """GRN void and escalate."""
 
+from api.utils.event_time import utc_now_iso
+
 from ._shared import (
     Depends,
     HTTPException,
@@ -257,7 +259,7 @@ async def void_grn(
             claim_token,
             {
                 "status": "VOID",
-                "voided_at": datetime.now().isoformat(),
+                "voided_at": utc_now_iso(),
                 "voided_by": current_user.get("user_id"),
             },
             "voided",
@@ -473,7 +475,7 @@ async def escalate_grn(
             claim_token,
             {
                 "status": "ESCALATED",
-                "escalated_at": datetime.now().isoformat(),
+                "escalated_at": utc_now_iso(),
                 "escalated_by": current_user.get("user_id"),
                 "escalation_note": note,
             },
@@ -631,7 +633,7 @@ async def drop_over_order(
             "unresolved_lines": rest,
             "status": status,
             "over_order_dropped_by": current_user.get("user_id"),
-            "over_order_dropped_at": datetime.now().isoformat(),
+            "over_order_dropped_at": utc_now_iso(),
         }
         if status == "VOID":
             patch.update(voided_at=patch["over_order_dropped_at"], voided_by=current_user.get("user_id"))

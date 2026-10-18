@@ -9,6 +9,8 @@ Powered by Anthropic Claude - the most intelligent AI assistant.
 *** STRICTLY SUPERADMIN ONLY - NO EXCEPTIONS ***
 """
 
+from api.utils.event_time import utc_now_iso
+
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
@@ -2679,7 +2681,7 @@ class Jarvis:
                         "status": "OPEN",
                         "priority": params.get("priority", "MEDIUM"),
                         "source": "JARVIS",
-                        "created_at": datetime.now().isoformat(),
+                        "created_at": utc_now_iso(),
                     }
                 )
                 return {

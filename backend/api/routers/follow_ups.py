@@ -8,6 +8,8 @@ Automated customer follow-up management for optical retail:
 - Prescription expiry reminders
 """
 
+from api.utils.event_time import utc_now_iso
+
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
@@ -265,7 +267,7 @@ async def create_follow_up(
         "status": "pending",
         "outcome": None,
         "notes": request.notes,
-        "created_at": datetime.now().isoformat(),
+        "created_at": utc_now_iso(),
         "completed_at": None,
         "completed_by": None,
     }
@@ -315,7 +317,7 @@ async def complete_follow_up(
                 "status": "completed",
                 "outcome": request.outcome.value,
                 "notes": request.notes,
-                "completed_at": datetime.now().isoformat(),
+                "completed_at": utc_now_iso(),
                 "completed_by": current_user.get("user_id") or current_user.get("id"),
             }
         },
@@ -443,7 +445,7 @@ async def auto_generate_follow_ups(
                                     "status": "pending",
                                     "outcome": None,
                                     "notes": f"Frame replacement reminder for order {order.get('order_id')}",
-                                    "created_at": datetime.now().isoformat(),
+                                    "created_at": utc_now_iso(),
                                     "completed_at": None,
                                     "completed_by": None,
                                 }
@@ -494,7 +496,7 @@ async def auto_generate_follow_ups(
                                     "status": "pending",
                                     "outcome": None,
                                     "notes": "Annual eye test reminder",
-                                    "created_at": datetime.now().isoformat(),
+                                    "created_at": utc_now_iso(),
                                     "completed_at": None,
                                     "completed_by": None,
                                 }
@@ -536,7 +538,7 @@ async def auto_generate_follow_ups(
                                     "status": "pending",
                                     "outcome": None,
                                     "notes": "Prescription expiry reminder",
-                                    "created_at": datetime.now().isoformat(),
+                                    "created_at": utc_now_iso(),
                                     "completed_at": None,
                                     "completed_by": None,
                                 }

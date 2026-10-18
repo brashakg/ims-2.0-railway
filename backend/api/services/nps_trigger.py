@@ -20,6 +20,8 @@ rather than duplicating it) -- so DISPATCH_MODE and DND gate apply.
 
 from __future__ import annotations
 
+from api.utils.event_time import utc_now_iso
+
 import logging
 import uuid
 from datetime import datetime
@@ -107,9 +109,9 @@ async def trigger_nps_on_delivery(
         "feedback": None,
         "status": "SENT",
         "auto_triggered": True,
-        "survey_sent_at": datetime.now().isoformat(),
+        "survey_sent_at": utc_now_iso(),
         "responded_at": None,
-        "created_at": datetime.now().isoformat(),
+        "created_at": utc_now_iso(),
     }
     nps_coll.insert_one(nps_entry)
     logger.info("[NPS_TRIGGER] NPS %s queued for order %s customer %s", nps_id, order_id, customer_id)

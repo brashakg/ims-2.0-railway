@@ -4,6 +4,8 @@ IMS 2.0 - Users Router
 User management endpoints
 """
 
+from api.utils.event_time import utc_now_iso
+
 import re
 
 from fastapi import APIRouter, HTTPException, Depends, Query
@@ -1355,7 +1357,7 @@ async def reset_password(
         user_id,
         {
             "password_hash": hash_password(temp),
-            "password_reset_at": datetime.now().isoformat(),
+            "password_reset_at": utc_now_iso(),
             "password_reset_by": current_user.get("user_id"),
             "must_change_password": True,
         },

@@ -1,5 +1,7 @@
 """Day-end close (cash-drawer reconciliation persistence)."""
 
+from api.utils.event_time import utc_event_iso
+
 from fastapi import Depends, Query
 from pydantic import BaseModel, Field
 from typing import Optional
@@ -224,7 +226,7 @@ async def create_day_end_close(
         ),
         "notes": (body.notes or "").strip() or None,
         "closed_by": current_user.get("user_id"),
-        "closed_at": now.isoformat(),
+        "closed_at": utc_event_iso(now),
     }
 
     try:

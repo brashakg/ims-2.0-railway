@@ -26,6 +26,8 @@ Conventions mirrored from the rest of the codebase:
 
 from __future__ import annotations
 
+from api.utils.event_time import utc_now_iso
+
 import logging
 import uuid
 from datetime import datetime
@@ -1764,7 +1766,7 @@ def _reactivate_original_unit(
                 sid,
                 {
                     "status": "AVAILABLE",
-                    "returned_at": datetime.now().isoformat(),
+                    "returned_at": utc_now_iso(),
                     "reserved_at": None,
                     # Clear the stale sale attribution.
                     "order_id": None,
@@ -1869,7 +1871,7 @@ def _audit_stock_transition(
                 "return_id": return_id,
                 "store_id": store_id,
                 "by_user": user_id,
-                "at": datetime.now().isoformat(),
+                "at": utc_now_iso(),
             }
         )
     except Exception as exc:  # noqa: BLE001
@@ -3829,7 +3831,7 @@ async def create_return(
             logger.debug("[RETURNS] online write-back skipped: %s", exc)
 
     # 4. Persist the return doc.
-    now = datetime.now().isoformat()
+    now = utc_now_iso()
     doc: Dict[str, Any] = {
         "return_id": return_id,
         "order_id": resolved_order_id,
@@ -4090,7 +4092,7 @@ async def retry_restock(
         raise HTTPException(status_code=404, detail="Return not found")
 
     # Atomic claim: succeed only if NOT already applied AND NOT in progress.
-    now_iso = datetime.now().isoformat()
+    now_iso = utc_now_iso()
     try:
         claim = coll.find_one_and_update(
             {
@@ -4290,7 +4292,7 @@ async def retry_restock(
         "restock_applied": bool(restock_result.get("applied")),
         "restock_stock_ids": merged_ids,
         "restock_in_progress": False,
-        "restock_completed_at": datetime.now().isoformat(),
+        "restock_completed_at": utc_now_iso(),
         # F9 audit stamp (mirrors the create path).
         "restock_store_id": restock_result.get("restock_store_id"),
         "restock_store_ids": restock_result.get("restock_store_ids", []),

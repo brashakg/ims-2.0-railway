@@ -66,15 +66,10 @@ LOW_BALANCE_EVENT = "cash.float.low"
 
 
 def _now_iso() -> str:
-    """IST-naive ISO timestamp for the petty-cash ledger (matches money_guard)."""
-    try:
-        from ..utils.ist import now_ist_naive
+    """Explicit IST event; legacy ledger days remain in their IST frame."""
+    from api.utils.event_time import ist_now_iso
 
-        return now_ist_naive().isoformat()
-    except Exception:  # noqa: BLE001
-        from datetime import datetime
-
-        return datetime.now().isoformat()
+    return ist_now_iso()
 
 
 def _coll(db):

@@ -1,5 +1,8 @@
 """Stock count sessions: list, start, and the countable-scope helpers."""
 
+from api.utils.event_time import utc_event_iso, utc_now_iso
+
+
 from ...dependencies import store_in_view
 from ._shared import (
     Any,
@@ -135,7 +138,7 @@ async def start_stock_count(
         "zone": request.zone,
         "notes": request.notes,
         "status": "in_progress",
-        "created_at": now.isoformat(),
+        "created_at": utc_event_iso(now),
         "created_by": current_user.get("user_id", ""),
         "created_by_name": current_user.get(
             "full_name", current_user.get("username", "")
@@ -494,7 +497,7 @@ def _upsert_count_item(
     to a positional `$[elem]` update.
     """
     items = list(count_doc.get("items", []) or [])
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = utc_now_iso()
     line = {
         "product_id": product_id,
         "product_name": product_name or "",

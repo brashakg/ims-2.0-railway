@@ -3,6 +3,8 @@ IMS 2.0 - Order Repository
 ===========================
 Order data access operations
 """
+
+from api.utils.event_time import utc_event_iso, utc_now, utc_now_iso
 import logging
 from typing import List, Optional, Dict, Tuple
 from datetime import datetime, date, timedelta
@@ -225,20 +227,21 @@ class OrderRepository(BaseRepository):
     
     def update_status(self, order_id: str, status: str, by_user: str = None) -> bool:
         """Update order status and add to status_history"""
+        now = utc_now().replace(tzinfo=None)
         update_data = {
             "status": status,
-            "status_updated_at": datetime.now()
+            "status_updated_at": now
         }
         if by_user:
             update_data["status_updated_by"] = by_user
         
         if status == "DELIVERED":
-            update_data["delivered_at"] = datetime.now()
+            update_data["delivered_at"] = now
         
         # Add to status_history array
         status_history_entry = {
             "status": status,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": utc_event_iso(now),
             "changed_by": by_user or "system"
         }
         

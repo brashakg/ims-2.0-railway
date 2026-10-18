@@ -6,6 +6,8 @@ package split): no path, method, dependency, status code, response_model
 or default was changed.
 """
 
+from api.utils.event_time import utc_now_iso
+
 # This is the ORIGINAL finance.py import block, kept whole on purpose. Several
 # of these names are not referenced in THIS file any more (the sub-modules
 # import what they need directly), but they are part of the module surface the
@@ -648,7 +650,7 @@ def _require_org_finance(current_user: dict) -> None:
 
 
 def _iso_now() -> str:
-    return datetime.utcnow().isoformat()
+    return utc_now_iso()
 
 
 def _store_name_map(db) -> Dict[str, str]:

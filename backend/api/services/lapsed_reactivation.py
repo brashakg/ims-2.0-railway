@@ -33,6 +33,8 @@ No emoji (Windows cp1252). No POS touch. No money mutation. No voucher mint.
 
 from __future__ import annotations
 
+from api.utils.event_time import utc_now_iso
+
 import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
@@ -209,7 +211,7 @@ def build_cohort_doc(
         "store_id": store_id,
         "date": date_str,
         "lapse_months": lapse_months,
-        "generated_at": datetime.utcnow().isoformat(),
+        "generated_at": utc_now_iso(),
         "entry_count": len(entries),
         "entries": entries,
         "ttl_expires_at": _ist_midnight_utc(date_str),

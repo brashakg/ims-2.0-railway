@@ -5,6 +5,8 @@ package split): no path, method, dependency, status code, response_model,
 default or validation was changed.
 """
 
+from api.utils.event_time import utc_now_iso
+
 from fastapi import HTTPException, Depends
 from datetime import datetime
 from ..auth import require_roles
@@ -86,7 +88,7 @@ async def save_soap_note(
     # OWN store's tests (404-hide otherwise).
     _store_scope_or_404(test, current_user)
 
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = utc_now_iso()
     note_dict = note.model_dump(exclude_none=True)
     note_dict.setdefault("recorded_by", current_user.get("user_id", ""))
     note_dict.setdefault("recorded_at", now_iso)

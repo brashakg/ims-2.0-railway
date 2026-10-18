@@ -6,6 +6,8 @@ package split): no path, method, dependency, status code, response_model,
 default or validation was changed.
 """
 
+from api.utils.event_time import utc_now_iso
+
 from fastapi import HTTPException, Depends, Query, Response
 from typing import Optional
 from datetime import datetime
@@ -203,7 +205,7 @@ async def create_job(
         _verify_job_prescription(job.prescription_id, order, current_user)
 
         store_id = current_user.get("active_store_id")
-        created_at = datetime.now().isoformat()
+        created_at = utc_now_iso()
 
         # F9 -- LENS DC HARDLOCK. An external-lab lens (lens_status=ORDERED) may
         # not be worked until an accepted Delivery Challan covering its SKU
@@ -325,13 +327,14 @@ async def update_fitting_details(
 
     # Stamp metadata we want server-controlled rather than trusting the client.
     fd = payload.fitting_details.model_dump(mode="json")
+    # These are existing calendar defaults, not event instants.
     now = datetime.now()
     fd["order_date"] = fd.get("order_date") or now.date().isoformat()
     fd["order_time"] = fd.get("order_time") or now.strftime("%H:%M")
     fd["ordered_by"] = fd.get("ordered_by") or current_user.get("user_id")
     fd["ordered_by_name"] = fd.get("ordered_by_name") or current_user.get("username")
     if fd.get("confirmed_by_sales"):
-        fd["confirmed_at"] = fd.get("confirmed_at") or now.isoformat()
+        fd["confirmed_at"] = fd.get("confirmed_at") or utc_now_iso()
 
     ok = repo.update(job_id, {"fitting_details": fd})
     if not ok:

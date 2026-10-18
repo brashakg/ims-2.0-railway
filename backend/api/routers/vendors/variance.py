@@ -1,5 +1,7 @@
 """PO/GRN variance report and variance dismissal."""
 
+from api.utils.event_time import utc_now_iso
+
 from ._shared import (
     BaseModel,
     Depends,
@@ -274,7 +276,7 @@ async def dismiss_po_variance(
             debit_note_suggested = False
             suggested_amount = None
 
-    now_iso = datetime.now().isoformat()
+    now_iso = utc_now_iso()
     entry = {
         "product_id": body.product_id,
         "reason": reason,

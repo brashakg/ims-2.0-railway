@@ -127,7 +127,15 @@ def _created_at_or_clauses(start_iso, end_iso) -> list:
     str_win: Dict = {"$gte": start_str} if start_str else {}
     if end_iso:
         if end_str:
-            str_win["$lte"] = end_str
+            # Old rows are naive UTC strings; new events use canonical +00:00.
+            # Both faces of the same inclusive endpoint must fit. Six-digit
+            # fractional precision also retains a legacy '.000000' endpoint.
+            # This is not a query for arbitrary non-UTC offset strings.
+            end_value = _to_dt(end_iso)
+            str_win["$lte"] = (
+                end_value.isoformat(timespec="microseconds") + "+00:00"
+                if end_value is not None else end_str
+            )
         end_dt = _to_dt(end_iso)
         if end_dt:
             date_win["$lte"] = end_dt
