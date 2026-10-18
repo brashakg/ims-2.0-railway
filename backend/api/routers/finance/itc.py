@@ -7,7 +7,7 @@ or default was changed.
 
 import io
 from typing import Optional, List, Dict
-from fastapi import Depends, Query
+from fastapi import Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from ..auth import get_current_user
@@ -86,8 +86,10 @@ async def itc_register(
                 },
             )
         )
-    except Exception:
-        raw_bills = []
+        from ...services.supplier_credit_reads import confirmed_itc_rows
+        raw_bills += confirmed_itc_rows(db, store_id=scope, entity_id=entity_id)
+    except Exception as exc:
+        raise HTTPException(503, "Input-credit records are unavailable; please retry.") from exc
     bills = [b for b in raw_bills if _itc_eligible_bill(b)]
     out = itc_reconcile.build_itc_register(bills)
     if period:
@@ -153,8 +155,14 @@ def _book_rows_from_db(db, store_id: Optional[str] = None) -> List[dict]:
                     "place_of_supply": b.get("place_of_supply"),
                 }
             )
-    except Exception:
-        pass
+        from ...services.supplier_credit_reads import confirmed_itc_rows
+        for credit in confirmed_itc_rows(db, store_id=store_id):
+            rows.append({"claims_credit": True, "gstin": credit["vendor_gstin"],
+                         "invoice_no": credit["bill_number"], "taxable": credit["taxable_amount"],
+                         "tax": credit["tax_amount"], "bill_id": credit["bill_id"],
+                         "bill_date": credit["bill_date"]})
+    except Exception as exc:
+        raise HTTPException(503, "Input-credit records are unavailable; please retry.") from exc
     return rows
 
 

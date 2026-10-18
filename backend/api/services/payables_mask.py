@@ -203,6 +203,7 @@ INPUT_TAX_KEYS = frozenset({
     # split, ITC utilised), Table 3.1(d) (inward supplies on reverse charge --
     # supplier bills) and the tax paid in cash (output - ITC + RCM).
     "itcAvailable",
+    "itcReversed",
     "itcAvailableRegular",
     "itcAvailableGstin",
     "itcReverseCharge",

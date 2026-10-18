@@ -1,5 +1,6 @@
 """Supplier confirmation preview proves original evidence, never master tax."""
 from unittest.mock import Mock
+from datetime import datetime
 
 import pytest
 
@@ -19,7 +20,7 @@ def _isolate_db():
 @pytest.fixture
 def ready(db):
     receipt(db)
-    bill(db, taxable_amount=400, tax_amount=20, cgst_total=10, sgst_total=10, igst_total=0)
+    bill(db, bill_date="2026-01-01", taxable_amount=400, tax_amount=20, cgst_total=10, sgst_total=10, igst_total=0)
     db.entities.insert_one({"entity_id": "E1", "gstins": [{"gstin": "20AAAAA0000A1Z5"}]})
     return returned(items=[{"product_id": "P1", "product_name": "Original frame", "quantity": 1, "unit_price": 80}])
 
@@ -41,6 +42,21 @@ def test_original_requested_value_and_original_caps_are_distinct(db, ready):
     assert result["source_selections"] == [selection(stock_ids=[])]
     assert list(db.vendor_bills.find()) == before
     assert db.supplier_credit_confirmations.count_documents({}) == 0
+
+
+def test_original_tax_reader_accepts_production_connection_collection_interface(db, ready):
+    class Connection:
+        def get_collection(self, name):
+            return db.get_collection(name)
+    assert credit_preview(Connection(), ready)["source_status"] == "RESOLVED"
+
+
+@pytest.mark.parametrize("patch", [{"bill_date": datetime(2026, 1, 1)}, {"itc_blocked": True}])
+def test_disagreeing_legacy_tax_readers_require_reconciliation_not_a_guessed_reversal(db, ready, patch):
+    db.vendor_bills.update_one({}, {"$set": patch})
+    preview = credit_preview(db, ready)
+    assert preview["source_status"] == "PENDING_EVIDENCE"
+    assert preview["pending_reasons"][0]["code"] == "ORIGINAL_TAX_CLAIM_INCONSISTENT"
 
 
 @pytest.mark.parametrize("patch,code", [
@@ -115,7 +131,7 @@ def test_candidates_use_linked_origin_and_actual_unit_label(db, ready):
 
 def test_ambiguous_candidates_are_not_chosen_latest_and_selection_resolves(db, ready):
     receipt(db, "G2")
-    bill(db, "B2", gid="G2", tax_amount=20, cgst_total=10, sgst_total=10, igst_total=0)
+    bill(db, "B2", gid="G2", bill_date="2026-01-01", tax_amount=20, cgst_total=10, sgst_total=10, igst_total=0)
     result = credit_preview(db, ready)
     assert result["source_status"] == "PENDING_EVIDENCE"
     assert {c["bill_id"] for c in result["choices"][0]["candidates"]} == {"B1", "B2"}

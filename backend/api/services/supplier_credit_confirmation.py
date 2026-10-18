@@ -15,7 +15,7 @@ from pymongo.errors import DuplicateKeyError
 
 from .return_provenance import ReturnProvenanceError
 from .supplier_credit_evidence import (
-    EVENTS, HEADS, SupplierCreditError, credit_preview, paise, resolve_credit_evidence,
+    EVENTS, HEADS, SupplierCreditError, credit_preview, paise, resolve_credit_evidence, return_event_query,
 )
 
 GUARDS = "supplier_credit_bill_guards"
@@ -61,6 +61,8 @@ def _input(payload):
               "received_paise": paise(payload.get("received_amount")), "notes": notes or None,
               "source_selections": payload.get("source_selections") or [],
               "allocations": sorted(allocations, key=lambda row: row["source_key"])}
+    if result["received_paise"] <= 0:
+        _error("POSITIVE_SUPPLIER_CREDIT_REQUIRED", "Enter a positive amount actually credited by the supplier.")
     result["request_hash"] = _hash(result)
     return result
 
@@ -159,6 +161,8 @@ def _return_fence(db, event, return_doc):
     query = {"return_id": event["return_id"], "$or": [
         {"credit_confirmation_fence": {"$exists": False}}, {"credit_confirmation_fence": event["token"]},
     ]}
+    if event.get("fenced_token"):
+        query["$or"].append({"credit_confirmation_fence": event["fenced_token"]})
     for key in ("status", "items", "stock_ids", "grn_id", "total_value", "return_type", "receipt_rejection"):
         query[key] = return_doc[key] if key in return_doc else {"$exists": False}
     result = db.get_collection("vendor_returns").update_one(query, {"$set": {"credit_confirmation_fence": event["token"]}})
@@ -189,11 +193,12 @@ def _check_capacity(entries):
             lines[index] = source
             # Each source reserves its physical quantity once across successive
             # partial notes. The whole return's selection is frozen separately.
-            sources[source["source_key"]] = {"source": source, "return_id": entry["return_id"]}
+            owner = (entry.get("return_kind", "VENDOR_RETURN"), entry["return_id"])
+            sources[source["source_key"]] = {"source": source, "return_id": owner}
             for stock_id in source["stock_ids"]:
-                if stock_id in physical and physical[stock_id] != entry["return_id"]:
+                if stock_id in physical and physical[stock_id] != owner:
                     _error("RETURNED_UNIT_ALREADY_CREDITED", "A physical unit is already reserved by another supplier return.")
-                physical[stock_id] = entry["return_id"]
+                physical[stock_id] = owner
         for allocation in entry["allocations"]:
             for head in ("taxable", *HEADS):
                 paid_by_line[allocation["bill_line_index"]][head] += allocation[f"{head}_paise"]
@@ -219,6 +224,7 @@ def _reserve_bill(db, event, bill_id):
     except DuplicateKeyError:
         pass
     entry = {"confirmation_id": event["confirmation_id"], "return_id": event["return_id"], "token": event["token"],
+             "return_kind": event.get("return_kind", "VENDOR_RETURN"),
              "sources": [s for s in event["sources"] if s["bill_id"] == bill_id],
              "allocations": [a for a in event["allocations"] if a["bill_id"] == bill_id]}
     for _ in range(12):
@@ -238,16 +244,18 @@ def _reserve_physical(db, event):
     collection = db.get_collection("supplier_credit_origin_guards")
     groups = defaultdict(list)
     for source in event["sources"]:
-        groups[(source["grn_id"], source["product_id"])].append(source)
-    for (grn_id, product_id), sources in sorted(groups.items()):
+        groups[(source["grn_id"], source["product_id"], source.get("receipt_disposition", "ACCEPTED"))].append(source)
+    for (grn_id, product_id, disposition), sources in sorted(groups.items()):
         receipt = db.get_collection("grns").find_one({"grn_id": grn_id}) or {}
-        limit = sum(int(line.get("accepted_qty") or 0) for line in receipt.get("items") or [] if line.get("product_id") == product_id)
-        key = _hash([grn_id, product_id])
+        quantity_key = "rejected_qty" if disposition == "REJECTED" else "accepted_qty"
+        limit = sum(int(line.get(quantity_key) or 0) for line in receipt.get("items") or [] if line.get("product_id") == product_id)
+        key = _hash([grn_id, product_id, "REJECTED"] if disposition == "REJECTED" else [grn_id, product_id])
         try:
             collection.update_one({"_id": key}, {"$setOnInsert": {"version": 0, "reservations": []}}, upsert=True)
         except DuplicateKeyError:
             pass
         entry = {"confirmation_id": event["confirmation_id"], "return_id": event["return_id"], "token": event["token"],
+                 "return_kind": event.get("return_kind", "VENDOR_RETURN"),
                  "quantity": sum(s["quantity"] for s in sources), "stock_ids": [u for s in sources for u in s["stock_ids"]]}
         for _ in range(12):
             state = collection.find_one({"_id": key})
@@ -255,14 +263,14 @@ def _reserve_physical(db, event):
             kept = [r for r in kept if r["confirmation_id"] != event["confirmation_id"]] + [entry]
             quantities, units = {}, {}
             for reservation in kept:
-                owner = reservation["return_id"]
+                owner = (reservation.get("return_kind", "VENDOR_RETURN"), reservation["return_id"])
                 quantities[owner] = max(quantities.get(owner, 0), reservation["quantity"])
                 for unit_id in reservation["stock_ids"]:
                     if unit_id in units and units[unit_id] != owner:
                         _error("RETURNED_UNIT_ALREADY_CREDITED", "A physical unit is already reserved by another supplier return.")
                     units[unit_id] = owner
             if sum(quantities.values()) > limit:
-                _error("RECEIPT_QUANTITY_EXCEEDED", "Supplier returns already reserve this receipt's accepted quantity.")
+                _error("RECEIPT_QUANTITY_EXCEEDED", f"Supplier returns already reserve this receipt's {disposition.lower()} quantity.")
             saved = collection.update_one({"_id": key, "version": state["version"]},
                                           {"$set": {"reservations": kept}, "$inc": {"version": 1}})
             if saved.matched_count:
@@ -275,7 +283,8 @@ def _fence_failed(db, event, error):
     """The old worker loses POST permission BEFORE capacity can be reclaimed."""
     changed = db.get_collection(EVENTS).update_one(
         {"_id": event["_id"], "posting_status": "PREPARING", "token": event["token"]},
-        {"$set": {"posting_status": "PENDING_EVIDENCE", "pending_reasons": [{"code": error.code, "message": str(error)}]},
+        {"$set": {"posting_status": "PENDING_EVIDENCE", "fenced_token": event["token"],
+                  "pending_reasons": [{"code": error.code, "message": str(error)}]},
          "$unset": {"token": ""}, "$inc": {"version": 1}},
     )
     if changed.matched_count:
@@ -291,10 +300,13 @@ def _finish_return(db, event):
     current = db.get_collection("vendor_returns").find_one({"return_id": event["return_id"]})
     preview = credit_preview(db, current, selections=event["source_selections"])
     full = preview["remaining_amount"] is not None and preview["remaining_amount"] <= 0
+    numbers = list(dict.fromkeys(c["credit_note_number"] for c in preview["confirmations"] if c["posting_status"] == "POSTED"))
     db.get_collection("vendor_returns").update_one(
         {"return_id": event["return_id"], "credit_confirmation_fence": event["token"]},
         {"$set": {"status": "credit_issued" if full else "received_by_vendor",
-                  "credit_note_number": event["credit_note_number"], "confirmed_credit_amount": preview["posted_amount"],
+                  "credit_note_number": ", ".join(numbers), "credit_note_amount": preview["posted_amount"],
+                  "confirmed_credit_amount": preview["posted_amount"],
+                  "credit_confirmation_locked": True,
                   "updated_at": _now()}, "$unset": {"credit_confirmation_fence": ""}},
     )
 
@@ -320,7 +332,7 @@ def record_supplier_confirmation(db, return_doc, payload, *, actor_id, allowed_s
             return _pending_event(db, event, submitted, [{"code": exc.code, "message": str(exc)}], actor_id), False
         registration = _hash([sources[0]["recipient_entity_id"], sources[0]["recipient_gstin"]])
         _identity(db, event, registration)
-        for previous in db.get_collection(EVENTS).find({"return_id": event["return_id"], "posting_status": "POSTED"}):
+        for previous in db.get_collection(EVENTS).find({**return_event_query(event), "posting_status": "POSTED"}):
             if {s["source_key"] for s in previous["sources"]} != {s["source_key"] for s in sources}:
                 _error("RETURN_ORIGIN_CHANGED", "A partly confirmed return cannot change its original bill allocation.", 409)
         allocations = _prepare_allocations(sources, submitted)
@@ -329,6 +341,7 @@ def record_supplier_confirmation(db, return_doc, payload, *, actor_id, allowed_s
         updated = db.get_collection(EVENTS).update_one(
             {"_id": event["_id"], "version": event["version"], "posting_status": "PENDING_EVIDENCE"},
             {"$set": {**submitted, "allocations": allocations, "sources": sources, "token": token,
+                      "submitted_source_selections": submitted["source_selections"],
                       "source_selections": [{k: s[k] for k in ("return_line_index", "grn_id", "bill_id", "bill_line_index", "quantity", "stock_ids")} for s in sources],
                       "registration_key": registration, "posting_status": "PREPARING", "pending_reasons": [],
                       "updated_by": actor_id, "updated_at": _now()}, "$inc": {"version": 1}},
@@ -338,6 +351,11 @@ def record_supplier_confirmation(db, return_doc, payload, *, actor_id, allowed_s
         event = db.get_collection(EVENTS).find_one({"_id": event["_id"]})
     try:
         _return_fence(db, event, return_doc)
+        # A PREPARING retry may have waited while another partial note posted.
+        # Recheck the now-frozen origin while holding this return's CAS fence.
+        for previous in db.get_collection(EVENTS).find({**return_event_query(event), "posting_status": "POSTED"}):
+            if {s["source_key"] for s in previous["sources"]} != {s["source_key"] for s in event["sources"]}:
+                _error("RETURN_ORIGIN_CHANGED", "A partly confirmed return cannot change its original bill allocation.", 409)
         _reserve_physical(db, event)
         for bill_id in sorted({s["bill_id"] for s in event["sources"]}):
             _reserve_bill(db, event, bill_id)

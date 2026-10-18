@@ -226,12 +226,14 @@ def _ap_rows(db, store_id=None, as_of=None):
     today -- a post-dated cheque is not paid yet). ALL bills: dropping the PAID ones
     left their payments behind to net off the vendor as if they were
     on-account money (F56)."""
+    from ...services.supplier_credit_reads import payable_credit_rows
     try:
         bills = list(db.get_collection("vendor_bills").find({}, {"_id": 0}))
         payments = list(db.get_collection("vendor_payments").find({}, {"_id": 0}))
-        dn = list(db.get_collection("vendor_debit_notes").find({}, {"_id": 0}))
-    except Exception:
-        bills, payments, dn = [], [], []
+        dn = payable_credit_rows(db)
+    except Exception as exc:
+        from fastapi import HTTPException
+        raise HTTPException(503, "Supplier balances could not be verified. Retry the report.") from exc
     return ap_engine.supplier_ledger_rows(bills, payments, dn, store_id, as_of)
 
 

@@ -2,11 +2,13 @@
 
 ## Delivery state
 
-Foundation only at this stage: the new resolver and its isolated tests are ready
-for review. The existing debit-note issue path has not yet been switched to this
-resolver, so **A03 is not yet fixed in the application**. Integration waits for
-the overlapping A08 return-draft change to merge. A01 confirmed-credit posting
-will consume the same evidence after A03 integration.
+The issue engine now uses the original receipt/bill resolver after the A08
+merge. It prints an internal RETURN REQUEST, using original stored tax evidence
+where verified, or clearly unverified tax for accepted-unbilled/rejected custody.
+It never guesses the newest receipt or today's catalogue rate. A01 confirmation
+uses the same strict original-bill evidence for financial posting. This branch
+is still an integration candidate pending the coordinated frontend/RMA delivery,
+final checks and independent review; it is not a merged or deployed fix.
 
 A03 and A01 will be reviewed as separate scoped commits in one coordinated
 draft PR. Merge only when the approved supplier-confirmation path and its
@@ -17,7 +19,7 @@ The owner has approved recording the supplier's actual credit-note number/date,
 credited items and amounts through the existing Issue Credit action. A unique,
 traceable original bill can be filled automatically; Accounts selects an
 ambiguous origin. Only the confirmed partial amount posts; untraceable amounts
-remain pending. These are A01 changes, not implemented by this foundation.
+remain pending. See CODEX-A01.md for the connected posting/read adapters.
 
 ## Evidence and behavior
 
@@ -51,13 +53,13 @@ rejected quantity, supplier/shop and linked physical-unit identities. A matching
 accepted-goods bill cannot be borrowed to tax those rejected pieces. Ambiguous
 accepted origins, bad links and read failures remain errors.
 
-The adapter will retain the Accounts-entered known goods value with GST
+The adapter retains the Accounts-entered known goods value with GST
 explicitly unverified, rather than labelling it zero-rated or adding current
-catalogue GST. The internal print must explain that the supplier credit is not
+catalogue GST. The internal print explains that the supplier credit is not
 posted. A08 issue/retry/cancel/reprice fences stay intact. The accounting Tally
-export must require the canonical confirmed POSTED event for ordinary traceable
-notes as well as unbilled requests: today's exporter otherwise debits the vendor
-and credits Input GST immediately. A01's export must use confirmed allocations,
+export requires the canonical confirmed POSTED event for ordinary traceable
+notes as well as unbilled requests; the prior exporter debited the vendor
+and credited Input GST immediately. A01's export uses confirmed allocations,
 not the earlier requested amount.
 
 ## Files and verification
@@ -79,24 +81,22 @@ All 62 foundation cases passed in 10.76 seconds. Pinned Pylint 3.0.3 with the
 repository errors/fatal gate passed. No live database, POS,
 deployment, or financial posting was used. No frontend source changed.
 
-## Required integration work and limitations
+## Integration and limitations
 
 Callers must authorize the return and original bills before showing evidence.
-These snapshots are not reservations. A01's writer must atomically enforce
+These snapshots are not reservations. A01's connected writer enforces
 cumulative quantities, money and tax caps across confirmations and returns,
-check fingerprints, obey period locks, and supply idempotency. This helper does
-not yet validate the original registration against entity records or provide an
+checks fingerprints, obeys period locks, and supplies idempotency. A01 validates
+the original registration against entity records. Neither helper provides an
 API to repair a historical bill. Missing original tax provenance must not be
 replaced with today's tax rule.
 
 The existing printable debit note assumes one supplier/recipient GSTIN pair.
-Its adapter must preserve original tax heads and reject incompatible original
+Its adapter preserves original tax heads and rejects incompatible original
 registration pairs instead of putting mixed tax origins under today's header.
-Application-level regressions must reproduce the old issue-engine failure
-before this finding can be called fixed. Six initial regressions have reproduced
-the old failures; the no-booked-bill test is being corrected to allow an explicit
-internal request without claimed tax, preserving the approved A08 handoff.
-Those adapter tests remain uncommitted until the adapter is implemented.
-A01 must keep the internal debit-note
-document separate from the supplier-confirmed accounting event. This is a
+Eight application-level issue regressions cover original versus newer receipts,
+master-tax changes, missing bill evidence, exact original invoice reference and
+the explicit unbooked internal request. A01 keeps the internal request
+separate from the supplier-confirmed accounting event. See its handover for
+the coordinated verification and outstanding integration gates. This is a
 software/data-scoping review, not tax-filing certification.

@@ -1,88 +1,39 @@
 # A01: supplier-confirmed credit recognition
 
-## Current delivery state
+## Delivery state
 
-Isolated evidence/preview, canonical writer and shared read foundations. No
-application route, AP/GST report or accounting export has been switched yet;
-A01 remains open.
-A03 and A01 deliver together in one coordinated draft PR after A08 merges.
-Root implements the owner-approved form on the existing Issue Credit action.
+Backend application adapters are connected in this integration checkpoint. A03/A01 will ship in one coordinated draft PR after the approved frontend and parallel RMA adapter are integrated, final tests pass and an independent reviewer checks the exact head. This is not a merge or deployment claim. A12 aging remains separate.
 
-The owner approved posting only when Accounts records the supplier's actual
-credit note, with the original bill's claimed GST only. Partial supplier notes
-post only their confirmed amount. Missing evidence stays pending. The approved
-form records number/date, credited items/amounts, and explicit original-bill
-selection when the physical origin is ambiguous. This is the sole A01 workflow
-exception; other screens/steps remain unchanged.
+## Owner decisions implemented
 
-## Evidence boundary
+Accounts records the supplier's actual credit-note number, date, items and amounts. Only its immutable POSTED event reduces AP and reverses GST that the original bill claimed. Partial actual notes post their actual amounts; one note stays wholly pending until its complete amount has verified allocations. Unknown evidence stays pending with a reason.
 
-`supplier_credit_evidence.py` uses the A03 original-bill resolver, verifies the
-stored recipient GSTIN against its legal entity, and requires original bill
-number/date. Claimed tax also requires a valid stored supplier GSTIN (except
-reverse charge) and original line sums matching the stored tax headers used by
-the GST readers. Missing or inconsistent legacy identity remains pending with a
-precise reason; current vendor records never repair historical tax silently.
-Blocked input tax retains its commercial supplier amount without an ITC reversal.
-RCM self-paid tax is excluded from the supplier commercial total.
+Approved staff-facing exceptions are the existing Vendor Returns Issue Credit form, a Cash Flow credit-type choice that directs returned goods to that form, and an extension of the existing RMA credit-note endpoint with actual date/bill evidence while retaining maker-checker. Other adjustments remain SCHEME_CN, DISCOUNT_CN and QUALITY_CN. New manual RETURN_CN/default requests return 422; existing historical manual ledger rows are preserved without a data migration.
 
-The preview differentiates requested value from original caps, supports explicit
-receipt/bill choices and physical-unit labels, restricts original bills to the
-caller's shop access, and reloads pending or POSTED confirmations after a lost
-response. Pending/preparing events do not reduce credit figures. Database read
-failures propagate instead of becoming zero figures or missing-evidence answers.
+The owner also approved payment of a verifiably accepted-only bill after its rejected goods have a confirmed, uncancelled A08 custody/return disposition. Here confirmed means the existing A08 draft-to-created choice has been made; no accounting credit is inferred from that operational request. If rejected units were billed, payment requires a fully confirmed actual supplier credit against that bill. Missing quantities, header-only invoices, conflicting ownership, multiple bills or unreadable records keep payment on hold. Explicit supplier advances have no bill to apply this hold to.
 
-The agreed API contract is recorded externally in
-`fixes-2026-10-18/A01-CREDIT-CONFIRMATION-API-CONTRACT.md`. Confirmation UUID equals
-the submitted idempotency key. Number/date/amount are immutable for an existing
-pending note; posted events are wholly immutable. The writer must also deduplicate
-actual supplier note identity across UUIDs and reserve original quantities and
-values before a single canonical POSTED event is visible to AP/GST/Tally.
+## Evidence and posting
 
-## Validation so far
+`return_provenance.py` identifies original receipt units and booked invoice lines, never the newest receipt or current master tax. `supplier_credit_evidence.py` verifies stamped recipient registration, original date/number, claimed supplier tax identity, original tax totals and agreement between the existing GST-return and register eligibility rules. Inconsistent legacy dates or flags stay pending. Current vendor/shop data cannot silently repair historical tax.
 
-134 in-memory foundation cases pass: evidence/preview, canonical writer, shared
-AP/ITC readers and the 62 A03 resolver cases. They cover missing/malformed original registration, mismatched tax
-headers, blocked credit, RCM, exact original-unit choices, shop access, ambiguous
-origins, unknown expected amounts, partial-history preload, lost-response
-recovery, changed source fingerprints and read failures. Canonical writer cases
-also exercise a competing worker winning the bill CAS, a unit or receipt reused
-through a different bill, successive partial notes, immutable posted payloads,
-cross-UUID supplier-note claims, closed periods, lost reservation/write replies,
-and fencing an old writer before reserved capacity can be reused. The read
-adapters feed the real AP ledger and ITC register; later-period reversals remain
-negative when that month has no new input credit. Pinned Pylint 3.0.3 errors/fatal
-checks pass. No live services,
-database, POS or financial operations are used.
+Rejected custody by itself remains unbilled. A canonical credit for rejected goods requires one unique bill and product line, linked only to that receipt, whose quantity proves all accepted and rejected units were billed. Partial/consolidated/ambiguous evidence stays pending. This does not change the A08 internal request path.
 
-## Remaining work and limits
+`supplier_credit_confirmation.py` uses unique note identity claims, token/version-fenced events, per-bill caps and per-receipt physical reservations. Original quantity, value and each tax head cannot be reused across competing returns. Partial notes reserve the physical return once. Only one PREPARING-to-POSTED transition exposes the financial fact; no timeout releases an uncertain reservation.
 
-`supplier_credit_confirmation.py` records the actual note pending or atomically
-POSTED in `supplier_credit_confirmations`. Bill guards cap original line
-quantities/value/tax; receipt guards also prevent the same goods being credited
-through another bill. A return reserves its physical quantity once across partial
-notes. Uncertain operations retain their event token and capacity; an identical
-UUID resumes them. A known rejection fences POST permission before a future
-writer may reclaim capacity. No elapsed timeout frees uncertain money. Supplier
-note identity claims prevent duplicate posting after reopening a lost-response
-form with a new UUID; unknown registration uses a conservative supplier-wide
-claim until evidence becomes available. Unclaimed attempts are omitted from the
-confirmation history.
+Review regressions cover a PREPARING retry after a different-origin partial note posts, positive actual amount enforcement, lost cleanup recovery using only the same event's prior fenced token, lost POSTED responses, cross-UUID duplicate notes and reopening with the exact original submitted payload. RMA and Vendor Return histories and physical owners have separate kinds. There are no shadow financial Vendor Return documents for RMAs.
 
-`supplier_credit_reads.py` adapts POSTED facts to existing bill-allocated AP rows
-and original-head input-credit reversals in the supplier-note period. Manual and
-scheme AP adjustments remain existing rows; internal requests never become
-accounting facts. These adapters are not yet connected to report consumers.
+## Application adapters
 
-API role/scope checks and RBAC rows, existing return writer fence enforcement,
-all AP/GST report consumers, printable-request labels and the Tally gate must
-still be integrated and tested. The application-level
-adapter regressions remain uncommitted until the A08-safe adapter is ready.
-The current preview is read-only and does not reserve money; POST rechecks
-evidence and cumulative caps. Existing status/pricing writers must respect the
-confirmation fence before these new services are exposed as routes. The
-independent Cash Flow debit-note form currently omits supplier-note identity
-and defaults to RETURN_CN. Its bypass needs a separately approved narrow form
-change or explicit deferral; no change to that existing form/route is made by
-these foundations. This is software/data-scoping work, not tax-filing
-certification. A12 is separate aging/report correction, with no bill-allocation UI.
+- `vendor_returns.py`: Accounts-only preview/confirmation, original-shop access, price/status CAS fences, masked responses; old status-only credit shortcut cannot generate a supplier note.
+- `return_request_document.py`, `rtv_debit_note.py`, `rtv_debit_notes.py`: original-bill internal request, explicit unverified-tax description, canonical-only Tally export. Multiple actual notes export distinct UUID vouchers at their actual dates/amounts. RCM supplier amounts exclude self-paid tax; blocked input tax has no reversal.
+- `supplier_credit_reads.py`: one POSTED source feeds bill-allocated AP, negative ITC register rows and original GST heads in the actual note period.
+- Finance Cash Flow, supplier ledger/AP, invoice settlement stamps and Purchases report use the same canonical credit rows. GST summary, ITC register/reconciliation and GSTR-3B/portal output consume the same confirmed original heads. A later-month reversal is not zero-clamped when that month has no purchases. Each GST registration remains isolated. Canonical read failure produces an error rather than a partial figure.
+- Dedicated confirmation capabilities preserve Accounts-only access and existing parent/module denies. New input-tax totals remain masked for other roles. RBAC matrix regeneration follows the RMA route integration.
+
+The exact frontend API contract is saved externally in `fixes-2026-10-18/A01-CREDIT-CONFIRMATION-API-CONTRACT.md`. PREPARING history exposes `retry_unchanged` plus an exact `retry_payload`; normal pending evidence remains editable with immutable note identity.
+
+## Verification and limits
+
+Before the final review refinements: 446 related tests passed, covering original-bill issue, supplier ledger/roles/scopes, GST summary/register/portal and canonical writer/readers. A subsequent 107 focused cases passed after recovery and real AP reader probes. The final exact integrated run and lint/smoke results will be recorded before PR review. Tests use the external sanitized runner, in-memory data and explicit test environment; no live database, financial operation, POS or deployment was used.
+
+No historical data repair or tax filing has been performed. Original evidence gaps are visible pending records, not automatically repaired invoices. Unknown write outcomes keep their fences until same-request recovery; unsupported contradictory legacy records may need technical reconciliation. Existing manual historical credits are not retrospectively reclassified. This is software and data-scoping work, not tax-filing certification.

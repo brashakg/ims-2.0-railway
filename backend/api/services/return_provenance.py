@@ -326,7 +326,49 @@ def resolve_return_provenance(db, return_doc, *, selections=None):
     tax. An internal request uses the separate resolver below; its output must
     never be passed off as this financial evidence.
     """
+    if return_doc.get("receipt_rejection"):
+        return _resolve_billed_rejection(db, return_doc, selections=selections)
     return _resolve_origins(db, return_doc, selections=selections)
+
+
+def _resolve_billed_rejection(db, return_doc, *, selections=None):
+    """Custody is not a purchase. A unique full-quantity bill can prove it is billed.
+
+    A consolidated/partial or repeated-product bill cannot identify which
+    rejected pieces were charged. Such evidence stays pending, never guessed.
+    """
+    from api.routers.finance.gst import _bill_booked
+
+    custody = resolve_request_provenance(db, return_doc)[0]
+    gid, pid = custody["grn_id"], custody["product_id"]
+    receipt = db.get_collection("grns").find_one({"grn_id": gid})
+    bills = [b for b in db.get_collection("vendor_bills").find({
+        "vendor_id": custody["vendor_id"], "$or": [{"grn_id": gid}, {"linked_dc_ids": gid}],
+    }) if _bill_booked(b)]
+    if not bills:
+        _pending("REJECTED_ORIGIN_UNBILLED", "Rejected custody alone does not prove an original billed purchase.")
+    if len(bills) != 1:
+        _pending("REJECTED_BILL_PROOF_REQUIRED", "Rejected goods need one original bill proving they were charged; ambiguous bills remain pending.")
+    bill = bills[0]
+    receipts = set([bill["grn_id"]] if bill.get("grn_id") else []) | set(bill.get("linked_dc_ids") or [])
+    matching = [(index, line) for index, line in enumerate(bill.get("lines") or []) if line.get("product_id") == pid]
+    if (receipts != {gid} or bill.get("store_id") != custody["store_id"]
+            or bill.get("source_transfer_id") or bill.get("doc_type") not in (None, "PURCHASE_INVOICE")
+            or len(matching) != 1):
+        _pending("REJECTED_BILL_PROOF_REQUIRED", "The rejected goods' exact billed quantity and original bill line must be verified.")
+    index, line = matching[0]
+    delivered = sum(_number(row.get("accepted_qty")) + _number(row.get("rejected_qty") or 0)
+                    for row in receipt["items"] if row.get("product_id") == pid)
+    if _number(line.get("qty")) != delivered:
+        _pending("REJECTED_BILL_PROOF_REQUIRED", "This bill does not uniquely prove that all rejected units were charged.")
+    expected = {"return_line_index": 0, "grn_id": gid, "bill_id": bill["bill_id"],
+                "bill_line_index": index, "quantity": custody["quantity"], "stock_ids": custody["stock_ids"]}
+    if selections and (len(selections) != 1 or any(selections[0].get(key) != value for key, value in expected.items())):
+        _pending("REJECTED_BILL_PROOF_REQUIRED", "The selected bill does not match the verified rejected units.")
+    origin = _snapshot(bill, line, index, custody["quantity"], gid, custody["stock_ids"], 0)
+    origin["receipt_disposition"] = "REJECTED"
+    _set_caps([origin])
+    return [origin]
 
 
 def resolve_request_provenance(db, return_doc, *, selections=None):

@@ -275,9 +275,8 @@ def _in_no_shop(db, as_of: str) -> Optional[tuple]:
     (so a shop a row is placed in is always counted), then split by
     _owed_and_ahead. None when the rows cannot be read."""
     try:
-        raw = tuple(
-            _find(db, coll, {}) for coll in ("vendor_bills", "vendor_payments", "vendor_debit_notes")
-        )
+        from ...services.supplier_credit_reads import payable_credit_rows
+        raw = (_find(db, "vendor_bills", {}), _find(db, "vendor_payments", {}), payable_credit_rows(db))
     except Exception:
         return None
     shops = {d.get("store_id") for docs in raw for d in docs if isinstance(d, dict) and d.get("store_id")}

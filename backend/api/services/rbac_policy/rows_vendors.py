@@ -81,6 +81,14 @@ ROWS: List[Dict[str, object]] = [
         "allowed": ACCOUNTS,
         "store_scoped": True,
     },
+    {
+        "method": "POST", "path": "/api/v1/vendor-returns/{return_id}/credit-preview",
+        "allowed": ACCOUNTS, "store_scoped": True,
+    },
+    {
+        "method": "POST", "path": "/api/v1/vendor-returns/{return_id}/credit-confirmations",
+        "allowed": ACCOUNTS, "store_scoped": True,
+    },
     # --- /api/v1/vendor-rma (N4 Vendor RMA + credit-note reconciliation) ---
     # An RMA + its vendor credit note are financial instruments against a
     # vendor; create + every lifecycle transition is gated to the same vendor/AP
@@ -127,6 +135,12 @@ ROWS: List[Dict[str, object]] = [
         "method": "POST",
         "path": "/api/v1/vendor-rma/{rma_id}/dispatch",
         "allowed": PURCHASE,
+        "store_scoped": True,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/vendor-rma/{rma_id}/credit-preview",
+        "allowed": ACCOUNTS,
         "store_scoped": True,
     },
     {

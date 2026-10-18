@@ -319,8 +319,11 @@ async def export_debit_note_tally(
     eng = _engine()
     doc = in_reach_or_404(eng.get(debit_note_id), current_user, "Debit note not found")
     try:
-        xml = tally_build_debit_note_xml(doc)
+        from ..services.supplier_credit_reads import confirmed_tally_xml
+        xml = confirmed_tally_xml(_get_db(), doc)
     except ValueError as e:
         # An unbalanced voucher fails loudly (would be rejected by Tally anyway).
         raise HTTPException(status_code=409, detail={"error": str(e)})
+    except Exception as exc:
+        raise HTTPException(503, "The supplier confirmation could not be verified. Retry the export.") from exc
     return PlainTextResponse(content=xml, media_type="application/xml")

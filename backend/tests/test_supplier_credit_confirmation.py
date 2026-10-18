@@ -46,6 +46,17 @@ def test_actual_note_posts_one_canonical_fact_and_closes_fully_confirmed_return(
     assert db.debit_notes.count_documents({}) == 0
 
 
+@pytest.mark.parametrize("rcm", [False, True])
+def test_zero_commercial_credit_cannot_post_or_reserve_even_with_rcm_tax(db, return_doc, rcm):
+    db.vendor_bills.update_one({}, {"$set": {"reverse_charge": rcm}})
+    body = payload(db, return_doc, amount=0, base=0, cgst=2 if rcm else 0, sgst=2 if rcm else 0)
+    with pytest.raises(SupplierCreditError) as caught:
+        post(db, return_doc, body)
+    assert caught.value.code == "POSITIVE_SUPPLIER_CREDIT_REQUIRED"
+    assert db.supplier_credit_confirmations.count_documents({}) == 0
+    assert db.supplier_credit_origin_guards.count_documents({}) == 0
+
+
 def test_partial_notes_reserve_physical_quantity_once_and_only_confirm_received_amount(db, return_doc):
     first, _ = post(db, return_doc, payload(db, return_doc, 42, base=40, cgst=1, sgst=1))
     assert db.vendor_returns.find_one({})["status"] == "received_by_vendor"
@@ -53,6 +64,31 @@ def test_partial_notes_reserve_physical_quantity_once_and_only_confirm_received_
     assert first["confirmation_id"] != second["confirmation_id"]
     assert db.vendor_returns.find_one({})["status"] == "credit_issued"
     assert db.supplier_credit_confirmations.count_documents({"posting_status": "POSTED"}) == 2
+
+
+def test_preparing_retry_rechecks_origin_after_another_partial_note_posts(db, return_doc, monkeypatch):
+    receipt(db, gid="G2")
+    bill(db, bid="B2", gid="G2", bill_date="2026-01-01", taxable_amount=400, tax_amount=20, cgst_total=10, sgst_total=10, igst_total=0)
+    def selected(gid, bid, number):
+        choices = [selection(grn_id=gid, bill_id=bid, stock_ids=[])]
+        source = resolve_credit_evidence(db, return_doc, selections=choices)[0]
+        return {"idempotency_key": str(uuid4()), "credit_note_number": number,
+                "credit_note_date": "2026-10-18", "received_amount": 42,
+                "source_selections": choices,
+                "allocations": [{"source_key": source["source_key"], "taxable": 40, "cgst": 1, "sgst": 1, "igst": 0}]}
+    second = selected("G2", "B2", "SECOND")
+    original = service._return_fence
+    def interrupted(*_args):
+        raise OSError("lost before claim")
+    monkeypatch.setattr(service, "_return_fence", interrupted)
+    with pytest.raises(SupplierCreditError, match="same request"):
+        post(db, return_doc, second)
+    monkeypatch.setattr(service, "_return_fence", original)
+    post(db, return_doc, selected("G1", "B1", "FIRST"))
+    with pytest.raises(SupplierCreditError) as caught:
+        post(db, db.vendor_returns.find_one({}), second)
+    assert caught.value.code == "RETURN_ORIGIN_CHANGED"
+    assert db.supplier_credit_confirmations.count_documents({"posting_status": "POSTED"}) == 1
 
 
 def test_identical_retry_returns_same_event_even_after_return_closed(db, return_doc):
@@ -193,6 +229,27 @@ def test_unknown_reservation_result_stays_occupied_and_same_request_resumes(db, 
     assert db.supplier_credit_confirmations.count_documents({}) == 1
 
 
+def test_reopened_preparing_confirmation_preserves_exact_submitted_auto_selection_payload(db, return_doc, monkeypatch):
+    reserve = service._reserve_bill
+    def uncertain(*args):
+        reserve(*args)
+        raise OSError("lost response")
+    body = payload(db, return_doc)
+    assert body["source_selections"] == []
+    monkeypatch.setattr(service, "_reserve_bill", uncertain)
+    with pytest.raises(SupplierCreditError):
+        post(db, return_doc, body)
+    preview = credit_preview(db, return_doc, confirmation_id=body["idempotency_key"])
+    restored = preview["confirmation"]
+    assert restored["source_selections"] == []
+    assert preview["source_selections"][0]["bill_id"] == "B1"
+    assert restored["retry_unchanged"] is True
+    retry = restored["retry_payload"]
+    monkeypatch.setattr(service, "_reserve_bill", reserve)
+    event, _ = post(db, db.vendor_returns.find_one({}), retry)
+    assert event["posting_status"] == "POSTED"
+
+
 def test_source_change_during_reservation_fences_old_writer_before_releasing_capacity(db, return_doc, monkeypatch):
     original = service._reserve_bill
     def change_bill(*args):
@@ -210,6 +267,32 @@ def test_source_change_during_reservation_fences_old_writer_before_releasing_cap
     late = db.supplier_credit_confirmations.update_one({"_id": event["_id"], "posting_status": "PREPARING", "token": old_token},
                                                       {"$set": {"posting_status": "POSTED"}})
     assert late.matched_count == 0
+
+
+def test_same_uuid_recovers_its_failed_cleanup_but_another_uuid_cannot(db, return_doc, monkeypatch):
+    body = payload(db, return_doc)
+    reserve = service._reserve_bill
+    update = db.vendor_returns.update_one
+    def refused(*_args):
+        raise SupplierCreditError("KNOWN_REJECTION", "Temporary verified rejection")
+    def lose_cleanup(query, values, *args, **kwargs):
+        if "credit_confirmation_fence" in values.get("$unset", {}):
+            raise OSError("lost cleanup before write")
+        return update(query, values, *args, **kwargs)
+    monkeypatch.setattr(service, "_reserve_bill", refused)
+    monkeypatch.setattr(db.vendor_returns, "update_one", lose_cleanup)
+    with pytest.raises((SupplierCreditError, OSError)):
+        post(db, return_doc, body)
+    orphan = db.vendor_returns.find_one({})["credit_confirmation_fence"]
+    assert db.supplier_credit_confirmations.find_one({})["fenced_token"] == orphan
+    monkeypatch.setattr(service, "_reserve_bill", reserve)
+    monkeypatch.setattr(db.vendor_returns, "update_one", update)
+    with pytest.raises(SupplierCreditError) as caught:
+        post(db, db.vendor_returns.find_one({}), payload(db, return_doc, number="OTHER"))
+    assert caught.value.code == "RETURN_CHANGED"
+    event, _ = post(db, db.vendor_returns.find_one({}), body)
+    assert event["posting_status"] == "POSTED"
+    assert "credit_confirmation_fence" not in db.vendor_returns.find_one({})
 
 
 def test_competing_worker_wins_bill_cas_and_loser_cannot_exceed_quantity(db, return_doc, monkeypatch):
@@ -241,7 +324,7 @@ def test_named_unit_cannot_be_claimed_by_another_return_even_with_other_bill(db,
     unit(db)
     first = payload(db, return_doc)
     post(db, return_doc, first)
-    bill(db, "B2", tax_amount=20, cgst_total=10, sgst_total=10, igst_total=0)
+    bill(db, "B2", bill_date="2026-01-01", tax_amount=20, cgst_total=10, sgst_total=10, igst_total=0)
     db.stock_units.update_one({}, {"$set": {"rtv_vendor_id": "R2"}})
     other = {**return_doc, "return_id": "R2"}
     db.vendor_returns.insert_one(deepcopy(other))
@@ -260,7 +343,7 @@ def test_unlinked_receipt_quantity_cannot_be_reused_via_another_bill(db, return_
     db.grns.update_one({}, {"$set": {"items.0.accepted_qty": 1}})
     first = payload(db, return_doc)
     post(db, return_doc, first)
-    bill(db, "B2", tax_amount=20, cgst_total=10, sgst_total=10, igst_total=0)
+    bill(db, "B2", bill_date="2026-01-01", tax_amount=20, cgst_total=10, sgst_total=10, igst_total=0)
     other = {**return_doc, "return_id": "R2"}
     db.vendor_returns.insert_one(deepcopy(other))
     selected = [selection(bid="B2")]
@@ -277,7 +360,7 @@ def test_partial_return_origin_stays_frozen_after_additional_receipt_becomes_ava
     first = payload(db, return_doc, amount=42, base=40, cgst=1, sgst=1)
     post(db, return_doc, first)
     receipt(db, "G2")
-    bill(db, "B2", gid="G2", tax_amount=20, cgst_total=10, sgst_total=10, igst_total=0)
+    bill(db, "B2", gid="G2", bill_date="2026-01-01", tax_amount=20, cgst_total=10, sgst_total=10, igst_total=0)
     selected = [selection(gid="G2", bid="B2")]
     source = resolve_credit_evidence(db, return_doc, selections=selected)[0]
     body = {**first, "idempotency_key": str(uuid4()), "credit_note_number": "SECOND",

@@ -5,6 +5,7 @@ The caller authorizes the return before entry and supplies its bill-read scope.
 This module never posts money; the writer must reserve the returned capacity.
 """
 from collections import defaultdict
+from calendar import monthrange
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
@@ -15,6 +16,25 @@ from .return_provenance import ReturnProvenanceError, resolve_return_provenance
 
 HEADS = ("cgst", "sgst", "igst")
 EVENTS = "supplier_credit_confirmations"
+
+
+class _CollectionAccess:
+    """The existing GST query builder takes raw DB-style collection access."""
+
+    def __init__(self, db):
+        self.db = db
+
+    def __getitem__(self, name):
+        return self.db.get_collection(name)
+
+    def get_collection(self, name):
+        return self.db.get_collection(name)
+
+
+def return_event_query(return_doc):
+    kind = return_doc.get("return_kind") or ("RMA" if return_doc.get("rma_id") and not return_doc.get("return_id") else "VENDOR_RETURN")
+    return {"return_id": return_doc.get("return_id") or return_doc.get("rma_id"),
+            "return_kind": "RMA" if kind == "RMA" else {"$in": [None, "VENDOR_RETURN"]}}
 
 
 class SupplierCreditError(ValueError):
@@ -78,6 +98,18 @@ def _verify_original(db, origin):
     if origin["claims_credit"] and any(origin["original_tax_paise"].values()):
         if not origin["reverse_charge"] and not has_valid_gstin(origin.get("vendor_gstin")):
             _pending("ORIGINAL_SUPPLIER_GSTIN_REQUIRED", "Claimed input tax needs the original bill's valid supplier GSTIN; current vendor data cannot replace it.")
+    if any(origin["original_tax_paise"].values()):
+        from api.routers.reports.gst_itc import _dated, _itc_match
+        placed_claim = False
+        if _dated(origin.get("bill_date")):
+            original_day = date.fromisoformat(day(origin["bill_date"]))
+            match = _itc_match([origin["store_id"]], entity_id, recipient,
+                               original_day.year, original_day.month,
+                               monthrange(original_day.year, original_day.month)[1], _CollectionAccess(db))
+            placed_claim = db.get_collection("vendor_bills").find_one({"$and": [{"bill_id": origin["bill_id"]}, match]}) is not None
+        if placed_claim != origin["claims_credit"]:
+            _pending("ORIGINAL_TAX_CLAIM_INCONSISTENT", "The original bill's GST-return and input-register eligibility disagree; Accounts must reconcile the original claim first.")
+    if origin["claims_credit"] and any(origin["original_tax_paise"].values()):
         bill = db.get_collection("vendor_bills").find_one({"bill_id": origin["bill_id"]}) or {}
         try:
             all_tax = 0
@@ -100,7 +132,8 @@ def resolve_credit_evidence(db, return_doc, *, selections=None, allowed_store_id
         if allowed_store_ids is not None and source["store_id"] not in allowed_store_ids:
             _pending("ORIGINAL_SHOP_ACCESS_REQUIRED", "Accounts needs access to the original bill's shop before confirming this credit.")
         _verify_original(db, source)
-        source["source_key"] = source_key(return_id, source)
+        identity = f"RMA:{return_id}" if return_event_query(return_doc)["return_kind"] == "RMA" else return_id
+        source["source_key"] = source_key(identity, source)
     registrations = {(s["recipient_entity_id"], s["recipient_gstin"], s.get("vendor_gstin")) for s in sources}
     if len(registrations) != 1:
         _pending("MIXED_ORIGINAL_REGISTRATIONS", "One supplier note must identify one original supplier and recipient registration pair.")
@@ -136,16 +169,22 @@ def _requested(return_doc, source):
 
 
 def confirmation_view(event):
-    return {
+    view = {
         "confirmation_id": event["confirmation_id"],
         "credit_note_number": event["credit_note_number"], "credit_note_date": event["credit_note_date"],
         "received_amount": event["received_paise"] / 100, "notes": event.get("notes"),
         "posting_status": "POSTED" if event.get("posting_status") == "POSTED" else "PENDING_EVIDENCE",
-        "source_selections": event.get("source_selections") or [],
+        "source_selections": (event.get("submitted_source_selections", event.get("source_selections")) or [])
+            if event.get("posting_status") in ("PREPARING", "POSTED") else event.get("source_selections") or [],
         "allocations": [{"source_key": a["source_key"], **{h: a[f"{h}_paise"] / 100
                         for h in ("taxable", *HEADS)}} for a in event.get("allocations") or []],
         "pending_reasons": event.get("pending_reasons") or [],
     }
+    view["retry_unchanged"] = event.get("posting_status") == "PREPARING"
+    view["retry_payload"] = ({"idempotency_key": event["confirmation_id"],
+                              **{key: view[key] for key in ("credit_note_number", "credit_note_date", "received_amount", "notes", "source_selections", "allocations")}}
+                             if view["retry_unchanged"] else None)
+    return view
 
 
 def credit_choices(db, return_doc, *, allowed_store_ids=None):
@@ -190,7 +229,12 @@ def credit_choices(db, return_doc, *, allowed_store_ids=None):
                                  "quantity": min(len(ids) if units else accepted, int(line.get("qty") or accepted)),
                                  "stock_ids": ids, "stock_units": labels}
                     if return_doc.get("receipt_rejection"):
-                        candidate["disabled_reason"] = "Rejected custody does not prove a billed purchase."
+                        try:
+                            verified = resolve_return_provenance(db, return_doc)
+                            if (verified[0]["bill_id"], verified[0]["bill_line_index"]) != (candidate["bill_id"], line_index):
+                                candidate["disabled_reason"] = "This bill does not prove the rejected units were charged."
+                        except ReturnProvenanceError as exc:
+                            candidate["disabled_reason"] = str(exc)
                     elif not bill:
                         candidate["disabled_reason"] = "No original booked bill."
                     elif not line:
@@ -204,7 +248,12 @@ def credit_choices(db, return_doc, *, allowed_store_ids=None):
 def credit_preview(db, return_doc, *, selections=None, confirmation_id=None, allowed_store_ids=None):
     """Read-only form data; reservations and a fresh source check still gate POST."""
     rid = return_doc.get("return_id") or return_doc.get("rma_id")
-    events = list(db.get_collection(EVENTS).find({"return_id": rid, "identity_claimed": {"$ne": False}}))
+    events = list(db.get_collection(EVENTS).find({**return_event_query(return_doc), "identity_claimed": {"$ne": False}}))
+    if allowed_store_ids is not None and any(
+        a.get("store_id") not in allowed_store_ids
+        for event in events for a in event.get("allocations") or [] if a.get("bill_id")
+    ):
+        raise SupplierCreditError("ORIGINAL_SHOP_ACCESS_REQUIRED", "Accounts needs access to the original bills' shops to read this confirmation history.", 403)
     confirmation = next((e for e in events if e["confirmation_id"] == confirmation_id), None)
     if confirmation_id and confirmation is None:
         raise SupplierCreditError("CONFIRMATION_NOT_FOUND", "This supplier confirmation was not found for the return.", 404)

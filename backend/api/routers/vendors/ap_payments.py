@@ -220,6 +220,7 @@ def _ledger_rows(db, vendor_id: str, scope: Optional[str]) -> tuple:
     notes are Pune's share, the same figures /finance/vendor-payments?store_id=
     and the Purchases report give that shop. ALL the supplier's bills are
     read, so money naming a bill finds the bill's shop."""
+    from ...services.supplier_credit_reads import payable_credit_rows
     try:
         bills = list(
             db.get_collection("vendor_bills").find({"vendor_id": vendor_id}, {"_id": 0})
@@ -229,13 +230,9 @@ def _ledger_rows(db, vendor_id: str, scope: Optional[str]) -> tuple:
                 {"vendor_id": vendor_id}, {"_id": 0}
             )
         )
-        debit_notes = list(
-            db.get_collection("vendor_debit_notes").find(
-                {"vendor_id": vendor_id}, {"_id": 0}
-            )
-        )
-    except Exception:
-        bills, payments, debit_notes = [], [], []
+        debit_notes = payable_credit_rows(db, vendor_id=vendor_id)
+    except Exception as exc:
+        raise HTTPException(503, "Supplier balances could not be verified. Retry the ledger.") from exc
     return ap_engine.supplier_rows(bills, payments, debit_notes, scope)
 
 
@@ -370,6 +367,8 @@ async def create_debit_note(
 ):
     """Issue a debit note against a vendor (e.g. for rejected/returned goods).
     Reduces the payable. Recomputes the allocated bill's status."""
+    if note.cn_type == "RETURN_CN":
+        raise HTTPException(422, "Record returned-goods credit through Vendor Returns > Issue Credit, using the supplier's actual credit note. Internal debit notes cannot reduce supplier balances.")
     vendor_repo = get_vendor_repository()
     vendor = vendor_repo.find_by_id(vendor_id) if vendor_repo is not None else None
     if vendor_repo is not None and vendor is None:

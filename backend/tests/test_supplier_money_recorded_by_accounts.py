@@ -192,12 +192,15 @@ def rtv(monkeypatch):
     db.get_collection("vendors").insert_one(
         {"vendor_id": "V1", "name": "GKB Optical", "gstin": "20ZZZZZ9999Z1Z5",
          "state_code": "20", "address": "Jamshedpur"})
-    db.get_collection("vendor_returns").insert_one({
+    original_return = {
         "return_id": "VR-1", "store_id": "S1", "vendor_id": "V1", "entity_id": "E1",
         "vendor_name": "GKB Optical", "purchase_invoice_number": "PINV-77",
         "lines": [{"product_id": "P1", "product_name": "Zeiss Lens", "hsn": "9001",
                    "quantity": 2, "rate_paise": 150000, "gst_rate": 5.0}],
-    })
+    }
+    from tests.test_f20_rtv_debit_note import _seed_original_bill
+    _seed_original_bill(db, original_return)
+    db.get_collection("vendor_returns").insert_one(original_return)
     monkeypatch.setattr(r, "_get_db", lambda: db)
     return SimpleNamespace(r=r, db=db)
 
@@ -414,11 +417,12 @@ def test_credit_issued_refused_to_a_manager_and_nothing_written(vret, role):
 
 @pytest.mark.parametrize("role", RECORDERS)
 def test_credit_issued_by_accounts(vret, role):
-    res = _run(_patch(vret, "VR-RCVD", "credit_issued", role))
-    assert res["return"]["status"] == "credit_issued"
+    # The old status-only shortcut cannot fabricate a supplier's note. The
+    # canonical API's actual-note success/retry is covered separately.
+    assert _status(_patch(vret, "VR-RCVD", "credit_issued", role)) == 422
     stored = _stored_return(vret, "VR-RCVD")
-    assert stored["credit_note_amount"] == 3000.0
-    assert stored["credit_note_number"].startswith("CN-")
+    assert stored["credit_note_amount"] is None
+    assert stored["credit_note_number"] is None
 
 
 @pytest.mark.parametrize("role", MANAGERS)
@@ -511,10 +515,11 @@ def test_http_every_money_write_is_403_for_a_manager_and_lands_for_accounts(http
     http.who["role"] = "ACCOUNTANT"
     for verb, url, body in calls:
         r = getattr(http.client, verb)(url, json=body)
-        assert r.status_code in (200, 201), (url, r.text)
+        expected = (422,) if url.endswith("/status") else (200, 201)
+        assert r.status_code in expected, (url, r.text)
     stored = _stored_rma(http.rma, rid)
     assert stored["status"] == "CLOSED" and stored["written_off_paise"] == 200000
-    assert _stored_return(http.vret, "VR-RCVD")["credit_note_amount"] == 3000.0
+    assert _stored_return(http.vret, "VR-RCVD")["credit_note_amount"] is None
     assert len(http.rtv.db.get_collection("debit_notes").docs) == 1
 
 
@@ -604,9 +609,9 @@ def test_replaced_on_a_credit_return_refused_to_a_manager_and_nothing_written(vr
     stored = _stored_return(vret, "VR-RCVD2")
     assert stored["status"] == "received_by_vendor" and stored["status_history"] == []
     # The credit is still there for accounts to record.
-    res = _run(_patch(vret, "VR-RCVD2", "credit_issued", "ACCOUNTANT"))
-    assert _stored_return(vret, "VR-RCVD2")["credit_note_amount"] == 3000.0
-    assert res["return"]["status"] == "credit_issued"
+    assert _status(_patch(vret, "VR-RCVD2", "credit_issued", "ACCOUNTANT")) == 422
+    assert _stored_return(vret, "VR-RCVD2")["credit_note_amount"] is None
+    assert _stored_return(vret, "VR-RCVD2")["status"] == "received_by_vendor"
 
 
 @pytest.mark.parametrize("role", MANAGERS)
@@ -939,7 +944,7 @@ def test_return_reads_and_writes_keep_price_for_accounts(vret, role):
     assert detail["items"][0]["unit_price"] == 1500.0
     assert all(r["items"][0].get("unit_price", r["items"][0].get("unit_cost"))
                for r in listed["returns"])
-    res = _run(_patch(vret, "VR-RCVD", "credit_issued", role))
+    res = _run(_patch(vret, "VR-SHIP", "received_by_vendor", role))
     assert res["return"]["items"][0]["unit_price"] == 1500.0
 
 

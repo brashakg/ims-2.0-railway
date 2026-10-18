@@ -1,11 +1,13 @@
 """Canonical event reaches AP and tax once, in its own confirmed period."""
 from copy import deepcopy
+from xml.etree import ElementTree
 
 import pytest
 
 from api.services import ap_engine, itc_reconcile
 from api.services.supplier_credit_reads import (
     confirmed_allocations, confirmed_ap_rows, confirmed_itc_heads, confirmed_itc_rows, payable_credit_rows,
+    confirmed_tally_xml,
 )
 from test_return_provenance import db  # noqa: F401
 from test_supplier_credit_confirmation import payload, post, return_doc  # noqa: F401
@@ -92,3 +94,32 @@ def test_read_failure_propagates_instead_of_returning_only_legacy_figures(db, mo
     monkeypatch.setattr(db.supplier_credit_confirmations, "find", unavailable)
     with pytest.raises(OSError, match="canonical event"):
         payable_credit_rows(db)
+
+
+@pytest.mark.parametrize("rcm,claimed,amount,tax", [(False, True, 84, 4), (False, False, 84, 0), (True, True, 80, 4)])
+def test_tally_exports_only_actual_supplier_amount_and_original_claimed_heads(db, return_doc, rcm, claimed, amount, tax):
+    db.vendor_bills.update_one({}, {"$set": {"reverse_charge": rcm, "itc_eligible": claimed}})
+    post(db, return_doc, payload(db, return_doc, amount=amount))
+    request = {"rtv_ref": {"id": "R1"}, "vendor": {"name": "Original supplier"},
+               "debit_note_number": "INTERNAL-999", "totals": {"grand_total_paise": 999999}}
+    xml = ElementTree.fromstring(confirmed_tally_xml(db, request))
+    voucher = xml.find(".//VOUCHER")
+    assert voucher.findtext("VOUCHERNUMBER") == "SUP-CN-1"
+    assert voucher.findtext("DATE") == "20261018"
+    entries = {leg.findtext("LEDGERNAME"): float(leg.findtext("AMOUNT")) for leg in voucher.findall("ALLLEDGERENTRIES.LIST")}
+    assert entries["Original supplier"] == -amount
+    assert entries["Purchase Returns"] == amount - tax
+    assert sum(entries.values()) == 0
+
+
+def test_multiple_partial_notes_export_distinct_actual_vouchers_and_unconfirmed_request_blocks(db, return_doc):
+    request = {"rtv_ref_id": "R1", "vendor": {"name": "Supplier"}}
+    with pytest.raises(ValueError, match="supplier_confirmation_required"):
+        confirmed_tally_xml(db, request)
+    post(db, return_doc, payload(db, return_doc, 42, base=40, cgst=1, sgst=1))
+    post(db, db.vendor_returns.find_one({}), payload(db, return_doc, 42, number="SECOND", base=40, cgst=1, sgst=1))
+    xml = ElementTree.fromstring(confirmed_tally_xml(db, request))
+    vouchers = xml.findall(".//VOUCHER")
+    assert len(vouchers) == 2
+    assert {v.findtext("VOUCHERNUMBER") for v in vouchers} == {"SUP-CN-1", "SECOND"}
+    assert len({v.findtext("GUID") for v in vouchers}) == 2
