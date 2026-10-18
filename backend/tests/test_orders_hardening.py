@@ -10,7 +10,8 @@ test maps to one finding:
        the `item_type` rate (when item_type maps) before the optical default.
   C-3  Non-finite / absurd-magnitude unit_price or quantity is a clean 422,
        not a 500 from Infinity overflowing JSON serialisation.
-  C-4  A Rs 0 / 100%-discount order stamps an approver + writes an audit row.
+  C-4  A Rs 0 / 100%-discount order needs a reason and an approver the SERVER
+       resolves (owner 2026-10-18: never a typed name), and writes an audit row.
   C-7  delivery_priority is constrained to {NORMAL, EXPRESS, URGENT}.
   C-8  delivery_date cannot be strictly before today.
   C-9  A CREDIT over-tender is allowed (pay-later promise); CASH/UPI/CARD
@@ -544,20 +545,24 @@ def test_c1_order_create_unknown_product_still_404s(
 # ---- C-4 end-to-end -------------------------------------------------------
 
 
-def test_c4_zero_total_without_approver_rejected_400(
-    client, auth_headers, hardening_orders
+def test_c4_zero_total_by_a_cashier_needs_a_manager(
+    client, staff_headers, hardening_orders
 ):
-    """DELTA 2: a 100% cart discount -> Rs 0 order with NO approver/reason is
-    REJECTED with 400 (no longer silently auto-stamped). Nothing persists."""
+    """A 100% bill discount -> Rs 0 order rung by a cashier (10% limit), with a
+    reason and a TYPED approver, is refused 403 DISCOUNT_NEEDS_APPROVAL: the
+    typed name approves nothing. Nothing persists."""
     resp = _post_order(
         client,
-        auth_headers,
+        staff_headers,
         [_frame_item(1000.0)],
         cart_discount_percent=100.0,
         cart_discount_reason="test: full comp",
+        cart_discount_approved_by="mgr-007",
     )
-    assert resp.status_code == 400, resp.text
-    assert "approver" in resp.text.lower() and "reason" in resp.text.lower()
+    assert resp.status_code == 403, resp.text
+    detail = resp.json()["detail"]
+    assert detail["code"] == "DISCOUNT_NEEDS_APPROVAL"
+    assert detail["zero_total"] is True
 
     # No order row was created.
     assert not [
@@ -567,25 +572,27 @@ def test_c4_zero_total_without_approver_rejected_400(
     ]
 
 
-def test_c4_zero_total_reason_without_approver_rejected_400(
+def test_c4_zero_total_without_reason_rejected_400(
     client, auth_headers, hardening_orders
 ):
-    """A reason alone is not enough -- an approver is also required."""
+    """An approver alone is not enough -- the giveaway still needs a reason,
+    even from an admin whose own limit covers it."""
     resp = _post_order(
         client,
         auth_headers,
         [_frame_item(1000.0)],
         cart_discount_percent=100.0,
-        cart_discount_reason="Full comp - warranty replacement",
     )
     assert resp.status_code == 400, resp.text
+    assert "reason" in resp.text.lower()
 
 
 def test_c4_zero_total_with_approver_and_reason_allowed_and_audited(
     client, auth_headers, hardening_orders
 ):
-    """DELTA 2: a Rs 0 order WITH both an approver and a reason is ALLOWED
-    (201) and writes the immutable ORDER_ZERO_TOTAL_APPROVED audit row."""
+    """A Rs 0 order by an admin (whose own limit covers it) WITH a reason is
+    ALLOWED (201): the approver recorded is the admin -- the typed "mgr-007"
+    is ignored -- and the immutable ORDER_ZERO_TOTAL_APPROVED row is written."""
     resp = _post_order(
         client,
         auth_headers,
@@ -604,9 +611,10 @@ def test_c4_zero_total_with_approver_and_reason_allowed_and_audited(
         if d.get("status") == "DRAFT"
     )
     assert saved["zero_total"] is True
-    # The supplied approver + reason are preserved (never overwritten).
-    assert saved["cart_discount_approved_by"] == "mgr-007"
-    assert saved["zero_total_approved_by"] == "mgr-007"
+    # The approver is the logged-in admin, never the typed name.
+    assert saved["cart_discount_approved_by"] == "test-admin-001"
+    assert saved["zero_total_approved_by"] == "test-admin-001"
+    assert saved["discount_approval_id"] is None
     assert saved["cart_discount_reason"] == "Full comp - warranty replacement"
 
     # An immutable audit row was written for the zero-total approval.
@@ -614,15 +622,15 @@ def test_c4_zero_total_with_approver_and_reason_allowed_and_audited(
     zt = [a for a in audit_docs if a.get("action") == "ORDER_ZERO_TOTAL_APPROVED"]
     assert len(zt) == 1
     assert zt[0]["entity_id"] == saved["order_id"]
-    assert zt[0]["details"]["approved_by"] == "mgr-007"
+    assert zt[0]["details"]["approved_by"] == "test-admin-001"
     assert zt[0]["details"]["reason"] == "Full comp - warranty replacement"
 
 
 def test_c4_full_line_discount_needs_line_approver_and_reason(
     client, auth_headers, hardening_orders
 ):
-    """A 100% LINE discount may be approved via the line's own approver +
-    reason ('whichever applies'); the order is then allowed + audited."""
+    """A 100% LINE discount with the line's reason, rung by an admin: allowed
+    + audited, approved by the admin (the line's typed approver is ignored)."""
     resp = _post_order(
         client,
         auth_headers,
@@ -642,7 +650,8 @@ def test_c4_full_line_discount_needs_line_approver_and_reason(
         if d.get("status") == "DRAFT"
     )
     assert saved["zero_total"] is True
-    assert saved["zero_total_approved_by"] == "mgr-009"
+    assert saved["zero_total_approved_by"] == "test-admin-001"
+    assert saved["items"][0]["discount_approved_by"] == "test-admin-001"
     audit_docs = hardening_orders["audit_repo"].collection.docs
     zt = [a for a in audit_docs if a.get("action") == "ORDER_ZERO_TOTAL_APPROVED"]
     assert len(zt) == 1

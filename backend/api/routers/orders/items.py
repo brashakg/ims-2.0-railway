@@ -6,7 +6,8 @@ rounding or validation was changed.
 """
 
 import uuid
-from fastapi import Depends, HTTPException
+from typing import Optional
+from fastapi import Depends, HTTPException, Query
 from ..auth import get_current_user
 from ...dependencies import (
     get_order_repository,
@@ -24,7 +25,9 @@ from .pricing import (
     OrderItemCreate,
     _enforce_line_pricing,
     assert_stack_within_cap,
+    combined_discount_pct,
 )
+from ...services import discount_approval
 from .rx import _validate_order_line_rx
 from .stock import (
     _assert_serialized_stock_available,
@@ -42,7 +45,13 @@ from .release import (
 
 @router.post("/{order_id}/items")
 async def add_order_item(
-    order_id: str, item: OrderItemCreate, current_user: dict = Depends(get_current_user)
+    order_id: str,
+    item: OrderItemCreate,
+    current_user: dict = Depends(get_current_user),
+    # A line discount over the seller's own limit: the request_id of a
+    # manager-approved E4 discount_override approval for this product, spent
+    # once (services/discount_approval -- the same rule as order create).
+    discount_approval_id: Optional[str] = Query(None, max_length=64),
 ):
     """Add item to order (only DRAFT orders)"""
     # BUG-119/BUG-118: real price-integrity validation is below (after the DRAFT
@@ -107,18 +116,13 @@ async def add_order_item(
 
         # Per-line price integrity + discount caps: THE shared gate
         # (_enforce_line_pricing), identical to create_order's. Ceiling /
-        # cost floor / HQ-offer rule / role+category+luxury-brand cap /
-        # reason requirement -- one implementation, never forked again.
-        from api.services.role_caps import effective_discount_cap
-
-        _role_cap = effective_discount_cap(
-            current_user.get("roles", []), current_user.get("discount_cap")
-        )
+        # cost floor / HQ-offer rule / category+luxury-brand cap / reason
+        # requirement -- one implementation, never forked again.
         _is_admin = any(
             r in current_user.get("roles", []) for r in ("SUPERADMIN", "ADMIN")
         )
         _line_gate = _enforce_line_pricing(
-            item, product, is_admin=_is_admin, role_cap=_role_cap, user=current_user
+            item, product, is_admin=_is_admin, user=current_user
         )
         _cap = _line_gate["cap"]
         _eff_disc = _line_gate["eff_disc"]
@@ -173,7 +177,8 @@ async def add_order_item(
             # The guard above VALIDATED these; persist them or the audit
             # trail records a demanded-but-dropped reason (panel round 3).
             "discount_reason": item.discount_reason,
-            "discount_approved_by": item.discount_approved_by,
+            # Server-resolved below (never the request's): see _approver.
+            "discount_approved_by": None,
             "item_total": item_subtotal,
             "prescription_id": item.prescription_id,
             "lens_options": item.lens_options,
@@ -232,6 +237,27 @@ async def add_order_item(
             ),
             user=current_user,
         )
+
+        # The seller's ROLE limit on the line's stacked figure, and who is
+        # recorded as approving it: THE rule order create uses. After every
+        # hard limit above, before anything is reserved below.
+        _approver = discount_approval.resolve_discount_approver(
+            current_user,
+            store_id=order.get("store_id"),
+            approval_id=discount_approval_id,
+            lines=[
+                {
+                    "product_id": item.product_id,
+                    "product_name": item.product_name,
+                    "discount_percent": combined_discount_pct(
+                        _eff_disc, float(order.get("cart_discount_percent") or 0.0)
+                    ),
+                }
+            ],
+        )
+        if _eff_disc > 1e-9:
+            item_data["discount_approved_by"] = (_approver or {}).get("user_id")
+            item_data["discount_approved_by_name"] = (_approver or {}).get("name")
 
         # ------------------------------------------------------------------
         # F15 (P3 STOCK): RESERVE THE APPENDED LINE, exactly like create_order.
@@ -293,6 +319,23 @@ async def add_order_item(
         # leaves the order untouched; a scanned line reserves no lens cell).
         claimed = _claim_scanned_units(order_id, [item_data], _store_id)
         try:
+            # Spend the manager's approval (if one lifted the limit) last thing
+            # before the save -- atomic, single use, as at create.
+            discount_approval.spend(_approver, current_user, _store_id)
+        except HTTPException:
+            _release_claimed_units(order_id, claimed)
+            try:
+                await release_for_cancel(
+                    order_item=item_data,
+                    order_id=order_id,
+                    line_index=_line_idx,
+                    store_id=_store_id or "",
+                    user=current_user,
+                )
+            except Exception:  # noqa: BLE001
+                pass  # fail-soft compensating action
+            raise
+        try:
             persisted = repo.update(
                 order_id,
                 {
@@ -316,6 +359,7 @@ async def add_order_item(
             # The line never landed on the order -> give the lens cell back so
             # the reservation cannot leak against a line that does not exist.
             _release_claimed_units(order_id, claimed)
+            discount_approval.give_back(_approver, current_user)
             try:
                 await release_for_cancel(
                     order_item=item_data,

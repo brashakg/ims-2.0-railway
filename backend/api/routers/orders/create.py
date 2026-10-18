@@ -36,8 +36,10 @@ from .pricing import (
     OrderItemCreate,
     _enforce_line_pricing,
     assert_stack_within_cap,
+    combined_discount_pct,
     effective_line_discount_pct,
 )
+from ...services import discount_approval
 from .models import OrderCreate
 from .rx import _validate_order_line_rx
 from .numbering import (
@@ -387,25 +389,20 @@ async def create_order(
             if _ip and _ip not in _canon_by_pid:
                 _canon_by_pid[_ip] = _canonical_pid(product_repo, _ip)
 
-        # Retrieve user discount cap for enforcement.
-        # Use the role-aware effective cap helper rather than the raw user
-        # document field — that one defaults to 10% even for SUPERADMIN,
-        # which was the long-standing "why is my cap 10%" bug.
-        from api.services.role_caps import effective_discount_cap
-
+        # Only HQ roles bypass the item caps (category / luxury brand / HQ
+        # offer). The seller's ROLE limit is checked once the bill discount is
+        # known, by services/discount_approval (see the approver block below).
         user_roles = current_user.get("roles", [])
-        user_discount_cap = effective_discount_cap(
-            user_roles, current_user.get("discount_cap")
-        )
-        # Only HQ roles bypass discount caps. STORE_MANAGER has a real 20%
-        # cap (SYSTEM_INTENT discount matrix) and MUST flow through the
-        # effective_cap + category-cap path -- it was incorrectly bypassing.
         is_admin = any(r in user_roles for r in ["SUPERADMIN", "ADMIN"])
+        # Each line's effective discount (explicit % or implied by a price
+        # under MRP), as the shared gate measured it -- the approver check
+        # combines it with the bill discount.
+        line_effs: List[float] = []
 
         for item in order.items:
             # ---- Per-line price integrity + discount caps (SHARED gate) ----
-            # BUG-119/BUG-118 ceiling / cost floor / HQ-offer rule / role +
-            # category + luxury-brand cap / reason requirement all live in
+            # BUG-119/BUG-118 ceiling / cost floor / HQ-offer rule / category +
+            # luxury-brand cap / reason requirement all live in
             # _enforce_line_pricing, THE one implementation shared with the
             # POST /{order_id}/items door (they were written twice and drifted:
             # the add-item copy resolved products narrowly, so SKU/_id/catalog
@@ -415,9 +412,9 @@ async def create_order(
                 item,
                 _pdoc_by_pid.get(_pid),
                 is_admin=is_admin,
-                role_cap=user_discount_cap,
                 user=current_user,
             )
+            line_effs.append(float(_line_gate["eff_disc"] or 0.0))
             _loyalty_eff = _line_gate["loyalty_eff"]
 
             discount_amount, item_subtotal = bill_line_value(
@@ -559,9 +556,9 @@ async def create_order(
                     "discount_percent": item.discount_percent,
                     "effective_discount_percent": round(_loyalty_eff, 4),
                     "discount_amount": discount_amount,
-                    # C-4 (DELTA 2): per-line approver + reason (consumed by the
-                    # required-approval gate for a 100%-line-discount order).
-                    "discount_approved_by": item.discount_approved_by,
+                    # Who approved the discount is stamped by the server once it
+                    # is resolved (approver block below) -- never the client's.
+                    "discount_approved_by": None,
                     "discount_reason": item.discount_reason,
                     "item_total": item_subtotal,
                     # COGS-freeze: snapshot the product cost at sale time so
@@ -621,7 +618,11 @@ async def create_order(
             )
 
         if not is_admin and cart_discount_percent > 0:
-            cart_cap = user_discount_cap
+            # The ITEM caps (category / luxury brand) on the bill discount and
+            # on each line's stacked figure. The seller's ROLE limit on that
+            # same stacked figure -- every line, lens and custom lines
+            # included -- is services/discount_approval's (approver block).
+            cart_cap = 100.0
             from api.services.pricing_caps import (
                 effective_discount_cap as _line_discount_cap,
             )
@@ -630,22 +631,9 @@ async def create_order(
                 _pid = getattr(_it, "product_id", None)
                 if not _pid or _pid.startswith(("custom-", "lens-", "lens-sug-")):
                     # A lens / custom line resolves to no product doc, so no
-                    # category or luxury-brand cap can tighten it -- but the ROLE
-                    # cap still applies, and a lens is MOST of an optical
-                    # ticket's money. Skipping the line outright (what this did)
-                    # enforced the stacking cap on the frame and not on the lens:
-                    # 10% on the lens + a 10% bill discount = 19% on the single
-                    # biggest line, under a 10% cap.
-                    assert_stack_within_cap(
-                        getattr(_it, "product_name", None) or _pid or "this line",
-                        effective_line_discount_pct(
-                            getattr(_it, "discount_percent", 0) or 0,
-                            getattr(_it, "unit_price", 0) or 0,
-                            _mrp_by_pid.get(_pid) or 0,
-                        ),
-                        cart_discount_percent,
-                        user_discount_cap,
-                    )
+                    # item cap tightens it. It is NOT exempt: a lens is most of
+                    # an optical ticket's money, and its stacked figure (10% on
+                    # the lens + a 10% bill = 19%) meets the role limit below.
                     continue
                 # BUG-118: a cart-level discount on an HQ-discounted line is the
                 # same forbidden "further discount" (SYSTEM_INTENT s3) -- block it.
@@ -666,11 +654,8 @@ async def create_order(
                 # is how this loop and the per-line cap started disagreeing.
                 _prod = _pdoc_by_pid.get(_pid)
                 if _prod:
-                    _this_cap = min(
-                        user_discount_cap,
-                        _line_discount_cap(
-                            _prod.get("discount_category"), _prod.get("brand")
-                        ),
+                    _this_cap = _line_discount_cap(
+                        _prod.get("discount_category"), _prod.get("brand")
                     )
                     cart_cap = min(cart_cap, _this_cap)
 
@@ -699,7 +684,7 @@ async def create_order(
                     status_code=403,
                     detail=f"Cart discount {cart_discount_percent}% exceeds the "
                     f"maximum {cart_cap}% allowed for these items "
-                    f"(role + category/brand caps). Contact a manager for approval.",
+                    f"(category/brand caps).",
                 )
 
         # ============================================================
@@ -792,6 +777,75 @@ async def create_order(
             ),
             user=current_user,
         )
+
+        # C-4 (DELTA 2): a fully-discounted / Rs 0 order (100% line or cart
+        # discount, or a grand_total that rounds to 0) is a sensitive giveaway:
+        # it needs a written reason at the level that triggered it (the bill's,
+        # or a 100% line's) and an approver, and writes the immutable
+        # ORDER_ZERO_TOTAL_APPROVED audit row below.
+        acting_user_id = current_user.get("user_id")
+
+        def _nonempty(value) -> bool:
+            return bool(value is not None and str(value).strip())
+
+        full_line_items = [
+            it
+            for it in items_data
+            if float((it or {}).get("discount_percent") or 0) >= 100.0
+        ]
+        has_full_line_discount = bool(full_line_items)
+        cart_level_zero = round(grand_total, 2) <= 0.0 or cart_discount_percent >= 100.0
+        is_zero_total = cart_level_zero or has_full_line_discount
+
+        cart_discount_reason = order.cart_discount_reason
+        zero_total_reason = None
+        if is_zero_total:
+            zero_total_reason = (
+                cart_discount_reason if _nonempty(cart_discount_reason) else None
+            )
+            if zero_total_reason is None:
+                zero_total_reason = next(
+                    (
+                        it["discount_reason"]
+                        for it in full_line_items
+                        if _nonempty((it or {}).get("discount_reason"))
+                    ),
+                    None,
+                )
+            if zero_total_reason is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Zero-total or 100% discount requires a reason.",
+                )
+
+        # WHO APPROVED THE DISCOUNT (owner 2026-10-18): the server decides --
+        # the seller when their own role limit covers each line's combined
+        # (item x bill) discount, else the manager behind a discount_override
+        # approval this request carries. Refuses 403 otherwise. Runs BEFORE any
+        # lens cell or unit is reserved, so a refusal leaks nothing. The
+        # approval is only READ here; it is spent just before the save below.
+        discount_approver = discount_approval.resolve_discount_approver(
+            current_user,
+            store_id=store_id,
+            zero_total=is_zero_total,
+            approval_id=order.discount_approval_id,
+            lines=[
+                {
+                    "product_id": it.product_id,
+                    "product_name": it.product_name,
+                    "discount_percent": combined_discount_pct(eff, cart_discount_percent),
+                }
+                for it, eff in zip(order.items, line_effs)
+            ],
+        )
+        approver_id = (discount_approver or {}).get("user_id")
+        approver_name = (discount_approver or {}).get("name")
+        for _line, _eff in zip(items_data, line_effs):
+            if _eff > 1e-9:
+                _line["discount_approved_by"] = approver_id
+                _line["discount_approved_by_name"] = approver_name
+        cart_discount_approved_by = approver_id if cart_discount_percent > 0 else None
+        zero_total_approved_by = approver_id if is_zero_total else None
 
         # Resolve delivery date — explicit date > expected_delivery_days
         if order.delivery_date:
@@ -892,69 +946,6 @@ async def create_order(
             )
             lens_reserve_failed = True
 
-        # C-4 (DELTA 2): a fully-discounted / Rs 0 order (100% line or cart
-        # discount, or a grand_total that rounds to 0) is a sensitive giveaway
-        # that REQUIRES explicit approval -- it is no longer silently
-        # auto-stamped. When the order triggers the zero-total condition, the
-        # request MUST carry an approver AND a non-empty reason at the level
-        # that triggered it ("whichever applies"):
-        #   * cart-level trigger (cart_discount 100% / grand_total 0)
-        #       -> cart_discount_approved_by + cart_discount_reason
-        #   * a 100% LINE discount
-        #       -> that line's discount_approved_by + discount_reason
-        #          (the order-wide cart_discount_* fields are accepted as a
-        #          fallback so a single order-level sign-off still works)
-        # Missing approver or empty reason -> HTTP 400. When approval IS
-        # present we ALLOW the sale and still write the immutable
-        # ORDER_ZERO_TOTAL_APPROVED audit row (below).
-        acting_user_id = current_user.get("user_id")
-
-        def _nonempty(value) -> bool:
-            return bool(value is not None and str(value).strip())
-
-        full_line_items = [
-            it
-            for it in items_data
-            if float((it or {}).get("discount_percent") or 0) >= 100.0
-        ]
-        has_full_line_discount = bool(full_line_items)
-        cart_level_zero = round(grand_total, 2) <= 0.0 or cart_discount_percent >= 100.0
-        is_zero_total = cart_level_zero or has_full_line_discount
-
-        cart_discount_approved_by = order.cart_discount_approved_by
-        cart_discount_reason = order.cart_discount_reason
-        zero_total_approved_by = None
-        if is_zero_total:
-            # Resolve the effective approver + reason from whichever level
-            # supplied them: cart-level first, then any 100%-discount line.
-            approver = (
-                cart_discount_approved_by
-                if _nonempty(cart_discount_approved_by)
-                else None
-            )
-            reason = cart_discount_reason if _nonempty(cart_discount_reason) else None
-            if approver is None and has_full_line_discount:
-                for it in full_line_items:
-                    if _nonempty((it or {}).get("discount_approved_by")):
-                        approver = it["discount_approved_by"]
-                        break
-            if reason is None and has_full_line_discount:
-                for it in full_line_items:
-                    if _nonempty((it or {}).get("discount_reason")):
-                        reason = it["discount_reason"]
-                        break
-
-            if approver is None or reason is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "Zero-total or 100% discount requires an approver and a "
-                        "reason."
-                    ),
-                )
-
-            zero_total_approved_by = approver
-
         order_data = {
             "order_id": precomputed_order_id,
             "order_number": generate_order_number(store_id),
@@ -986,9 +977,14 @@ async def create_order(
             "cart_discount_percent": cart_discount_percent,
             "cart_discount_amount": cart_discount_amount,
             "cart_discount_reason": cart_discount_reason,
-            # C-4 (DELTA 2): the approver the POS supplied (now REQUIRED for a
-            # zero-total / 100%-discount order -- never auto-stamped).
+            # Server-resolved (services/discount_approval), never the till's:
+            # the user id + display name of who approved the bill discount,
+            # and the E4 approval that lifted the seller's limit, if one did.
             "cart_discount_approved_by": cart_discount_approved_by,
+            "cart_discount_approved_by_name": (
+                approver_name if cart_discount_approved_by else None
+            ),
+            "discount_approval_id": (discount_approver or {}).get("approval_id"),
             "tax_rate": tax_rate,
             "tax_amount": tax_amount,
             "total_discount": total_discount,
@@ -1021,6 +1017,9 @@ async def create_order(
             # order view can surface a Rs 0 sale and who approved it).
             "zero_total": bool(is_zero_total),
             "zero_total_approved_by": zero_total_approved_by,
+            "zero_total_approved_by_name": (
+                approver_name if zero_total_approved_by else None
+            ),
             # F11/F12: promos that fired on this order (empty [] when the engine
             # is dark or nothing matched -- the dark-default path). Surfaced on
             # the order view, the Tally JV, and the Offer Tally report.
@@ -1043,6 +1042,7 @@ async def create_order(
         }
 
         claimed_units: set = set()
+        approval_spent = False
         try:
             # Scanned units are claimed (atomic) BEFORE the save: a till that
             # lost its unit to another till since the gate gets a 409 here, and
@@ -1050,6 +1050,12 @@ async def create_order(
             claimed_units = _claim_scanned_units(
                 precomputed_order_id, items_data, store_id
             )
+            # The manager's discount approval (when one lifted the seller's
+            # limit) is spent HERE, last thing before the save: one atomic
+            # compare-and-set, so two tills racing one approval -> one sale;
+            # the loser gets 409 and the release below gives back its stock.
+            discount_approval.spend(discount_approver, current_user, store_id)
+            approval_spent = True
             # P3-B: order_number carries a UNIQUE sparse index. Under
             # concurrency two creates can mint the same value and the loser
             # hits a Mongo E11000 -- which previously 500'd. create_unique
@@ -1073,6 +1079,9 @@ async def create_order(
                 precomputed_order_id,
             )
             _release_claimed_units(precomputed_order_id, claimed_units)
+            if approval_spent:
+                # No order was written: the approval did not cover a sale.
+                discount_approval.give_back(discount_approver, current_user)
             try:
                 from ...services.lens_stock_hook import release_for_cancel
 
@@ -1122,11 +1131,15 @@ async def create_order(
                                     "subtotal": subtotal,
                                     "cart_discount_percent": cart_discount_percent,
                                     "has_full_line_discount": has_full_line_discount,
-                                    # C-4 (DELTA 2): approval is now REQUIRED,
-                                    # so the approver + reason are always real
-                                    # (never auto-stamped).
+                                    # The SERVER-resolved approver (the seller
+                                    # within their limit, or the manager behind
+                                    # the spent approval) + the written reason.
                                     "approved_by": zero_total_approved_by,
-                                    "reason": cart_discount_reason,
+                                    "approved_by_name": approver_name,
+                                    "approval_id": (discount_approver or {}).get(
+                                        "approval_id"
+                                    ),
+                                    "reason": zero_total_reason,
                                 },
                                 "created_at": utc_now_iso(),
                             }
@@ -1223,6 +1236,7 @@ async def create_order(
             return _order_create_response(created)
 
         _release_claimed_units(precomputed_order_id, claimed_units)
+        discount_approval.give_back(discount_approver, current_user)
         raise HTTPException(status_code=500, detail="Failed to create order")
 
     return {

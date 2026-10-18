@@ -104,7 +104,9 @@ def _rebuilt_items_or_existing(body_items, existing_items: list) -> list:
         return [dict(it) for it in (existing_items or [])]
     # SuperadminEditLine carries no discount_reason/discount_approved_by
     # (Pydantic strips unknown keys), so merge them from the STORED line by
-    # item_id — an edit must not wipe the accountability trail.
+    # item_id — an edit must not wipe the accountability trail. The approver
+    # is only ever the one the server stamped at sale
+    # (services/discount_approval); this door never takes one from a client.
     _stored_by_id = {
         it.get("item_id"): it for it in (existing_items or []) if it.get("item_id")
     }
@@ -112,7 +114,7 @@ def _rebuilt_items_or_existing(body_items, existing_items: list) -> list:
     for line in body_items:
         payload = line.model_dump() if hasattr(line, "model_dump") else dict(line)
         stored = _stored_by_id.get(payload.get("item_id")) or {}
-        for _k in ("discount_reason", "discount_approved_by"):
+        for _k in ("discount_reason", "discount_approved_by", "discount_approved_by_name"):
             if payload.get(_k) is None and stored.get(_k) is not None:
                 payload[_k] = stored.get(_k)
         rebuilt.append(rebuild_edited_line(payload))

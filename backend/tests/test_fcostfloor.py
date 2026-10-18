@@ -340,7 +340,9 @@ def test_role_cap_still_blocks_before_floor(client, staff_headers, floor_env):
     pid = _seed_product(floor_env, pid="FLR-13", cost_price=10.0, mrp=100.0)
     r = _post(client, staff_headers, [_item(pid, 100.0, discount_percent=12.0)])
     assert r.status_code == 403, r.text
-    assert "exceeds your limit" in r.json()["detail"].lower()
+    # Over the seller's ROLE limit: the structured refusal the till acts on.
+    assert r.json()["detail"]["code"] == "DISCOUNT_NEEDS_APPROVAL"
+    assert "exceeds your limit" in r.json()["detail"]["message"].lower()
 
 
 def test_floor_blocks_when_caps_pass_cashier_raw_cost(client, cashier_headers, floor_env):
@@ -380,13 +382,13 @@ def test_admin_cap_bypass_does_not_bypass_floor(client, auth_headers, floor_env)
 
 
 def test_full_line_discount_exempt_from_floor(client, auth_headers, floor_env):
-    """Packet test 6: a 100%-discount line WITH its C-4 approver + reason is
-    NOT floored -- the giveaway stays approval-gated, not floor-blocked."""
+    """Packet test 6: a 100%-discount line WITH its C-4 reason, rung by an
+    admin (who approves it), is NOT floored -- the giveaway stays
+    approval-gated, not floor-blocked."""
     pid = _seed_product(floor_env, pid="FLR-17", cost_price=100.0)
     r = _post(
         client, auth_headers,
         [_item(pid, 150.0, discount_percent=100.0,
-               discount_approved_by="mgr-009",
                discount_reason="Warranty replacement")],
     )
     assert r.status_code in (200, 201), r.text
@@ -395,16 +397,16 @@ def test_full_line_discount_exempt_from_floor(client, auth_headers, floor_env):
     assert saved["zero_total"] is True
 
 
-def test_full_line_discount_without_approval_still_400s_via_c4(
-    client, auth_headers, floor_env
+def test_full_line_discount_without_approval_still_refused_via_c4(
+    client, staff_headers, floor_env
 ):
-    """The exemption hands the line to C-4, which still 400s when the
-    approver/reason is missing (floor does not swallow that gate)."""
+    """The exemption hands the line to the discount gates, which still refuse
+    a seller (an item cap, then their own limit) -- the floor does not swallow
+    them, and it is not the floor that answers."""
     pid = _seed_product(floor_env, pid="FLR-18", cost_price=100.0)
-    r = _post(client, auth_headers, [_item(pid, 150.0, discount_percent=100.0)])
-    assert r.status_code == 400, r.text
-    detail = r.json()["detail"].lower()
-    assert "approver" in detail or "reason" in detail
+    r = _post(client, staff_headers, [_item(pid, 150.0, discount_percent=100.0)])
+    assert r.status_code == 403, r.text
+    assert "category/brand cap" in r.text.lower()
 
 
 # --------------------------------------------------------------------------

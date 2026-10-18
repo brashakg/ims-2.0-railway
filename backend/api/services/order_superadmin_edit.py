@@ -117,6 +117,7 @@ def rebuild_edited_line(line: Dict[str, Any]) -> Dict[str, Any]:
         # separately as superadmin_edit_reason).
         "discount_reason": line.get("discount_reason"),
         "discount_approved_by": line.get("discount_approved_by"),
+        "discount_approved_by_name": line.get("discount_approved_by_name"),
         # Carry COGS + clinical fields through unchanged when supplied so a
         # historical P&L / lab spec is not silently dropped on an edit.
         "cost_at_sale": line.get("cost_at_sale"),

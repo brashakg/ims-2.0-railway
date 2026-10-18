@@ -55,7 +55,12 @@ class OrderCreate(BaseModel):
     cart_discount_amount: float = Field(default=0.0, ge=0.0)
     # POS-9: cap cart-level discount reason (same 200-char limit as item reasons).
     cart_discount_reason: Optional[str] = Field(None, max_length=200)
-    cart_discount_approved_by: Optional[str] = None
+    # Owner 2026-10-18: WHO approved a discount is the server's decision
+    # (services/discount_approval.py), never a name the till types -- a sent
+    # cart_discount_approved_by is an unknown key and is dropped. A discount
+    # over the seller's own limit carries instead the request_id of a
+    # manager-approved E4 discount_override approval, spent once by this sale.
+    discount_approval_id: Optional[str] = Field(None, max_length=64)
     # Incentive integration — explicit salesperson attribution (POS picker)
     # and the Visufit measurement ID for the per-staff Visufit coverage gate.
     salesperson_id: Optional[str] = None
