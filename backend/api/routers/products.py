@@ -3289,7 +3289,14 @@ async def update_product(
         # category decides at the create door (normalise_payload): the
         # canonical category, the HSN unless the edit names one -- and so the
         # rate (below) -- and the identity (rekey_on_edit, below).
+        category_expected = None
         if "category" in update_data:
+            # Also fence an alias-equivalent category write: an earlier draft
+            # edit may change the stored category before this save lands.
+            category_expected = {
+                key: existing[key] if key in existing else {"$exists": False}
+                for key in ("category", "catalog_status", "provisional")
+            }
             update_data["category"] = (
                 _pm.resolve_category(update_data["category"]) or update_data["category"]
             )
@@ -3452,7 +3459,16 @@ async def update_product(
                     status_code=err.status, detail=_pm_error_detail(err)
                 ) from err
 
-        if repo.update(product_id, update_data):
+        if category_expected is not None:
+            saved = repo.update(product_id, update_data, expected=category_expected)
+            if not saved:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Product category or catalogue status changed. Reload before saving.",
+                )
+        else:
+            saved = repo.update(product_id, update_data)
+        if saved:
             if _gtin_written and "barcode" not in update_data:
                 _pm.drop_legacy_spine_barcode(repo, product_id)
             # Compact field-classified audit row (scorecard corrections): the

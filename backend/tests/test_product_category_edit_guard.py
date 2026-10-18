@@ -51,3 +51,38 @@ def test_explicit_invalid_category_still_rejected_as_validation_error(env, categ
         edit(category=category)
     assert exc.value.status_code == 422
     assert env["db"].products.find_one({"product_id": "P1"})["category"] == "SUNGLASS"
+
+
+@pytest.mark.parametrize("winner,requested", [
+    ({"catalog_status": "ACTIVE", "provisional": False}, "FR"),
+    ({"category": "SMARTGLASSES"}, "FR"),
+    ({"category": "FRAME"}, "SG"),  # A stale alias must not undo a draft edit.
+])
+def test_concurrent_finish_or_category_edit_wins_without_stale_side_effects(env, monkeypatch, winner, requested):
+    db = env["db"]
+    db.stock_units.delete_many({"product_id": "P1"})
+    db.products.update_one({"product_id": "P1"}, {"$set": {
+        "provisional": True, "catalog_status": "DRAFT",
+    }})
+    original = db.products.update_one
+    snapshots = {}
+    injected = False
+
+    def interleaved(query, update, *args, **kwargs):
+        nonlocal injected
+        if not injected and "category" in update.get("$set", {}):
+            injected = True
+            original({"product_id": "P1"}, {"$set": winner})
+            if winner.get("catalog_status") == "ACTIVE":
+                db.stock_units.insert_one({"product_id": "P1", "store_id": "S1", "status": "AVAILABLE"})
+            snapshots.update({name: copy.deepcopy(list(db[name].find())) for name in (
+                "products", "catalog_products", "stock_units", "audit_logs",
+            )})
+        return original(query, update, *args, **kwargs)
+
+    monkeypatch.setattr(db.products, "update_one", interleaved)
+    with pytest.raises(HTTPException) as exc:
+        edit(category=requested, mrp=6500)
+    assert injected and exc.value.status_code == 409
+    for name, rows in snapshots.items():
+        assert list(db[name].find()) == rows, name
