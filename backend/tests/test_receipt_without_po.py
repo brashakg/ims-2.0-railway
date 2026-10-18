@@ -1913,6 +1913,56 @@ def _return_of(world, return_id, stock_id, vendor=DEALER):
     return {"return_id": return_id, "vendor_id": vendor, "store_id": STORE}, unit["product_id"]
 
 
+def _request_note(db, rtv, lines, seller=None):
+    """Persist the return's actual items before resolving their original bills."""
+    from api.services.rtv_debit_note import DebitNoteEngine
+
+    doc = {**rtv, "items": lines, "status": "received_by_vendor", "return_type": "credit_note"}
+    db.vendor_returns.insert_one(doc)
+    vendor = db.vendors.find_one({"vendor_id": doc["vendor_id"]}, {"_id": 0})
+    return DebitNoteEngine(db).issue(doc, vendor, actor="u-acct", seller=seller or _SELLER, lines=lines)
+
+
+def _confirmed_return_xml(db, note):
+    """Use an actual supplier-note confirmation, never promote the internal note."""
+    from api.services.rtv_debit_note import tally_build_debit_note_xml
+    from api.services.supplier_credit_confirmation import record_supplier_confirmation
+    from api.services.supplier_credit_evidence import credit_preview
+    from api.services.supplier_credit_reads import confirmed_tally_xml
+
+    with pytest.raises(ValueError, match="supplier_confirmation_required"):
+        tally_build_debit_note_xml(note)
+    doc = db.vendor_returns.find_one({"return_id": note["rtv_ref"]["id"]})
+    preview = credit_preview(db, doc)
+    assert preview["source_status"] == "RESOLVED", preview
+    allocations = [{"source_key": source["source_key"],
+                    **{head: source["suggested"][head] for head in ("taxable", "cgst", "sgst", "igst")}}
+                   for source in preview["sources"]]
+    event, repeated = record_supplier_confirmation(db, doc, {
+        "credit_note_number": "SUP-" + doc["return_id"], "credit_note_date": "2026-10-18",
+        "idempotency_key": str(uuid.uuid4()), "received_amount": preview["expected_credit_amount"],
+        "source_selections": preview["source_selections"], "allocations": allocations,
+    }, actor_id="u-acct", allowed_store_ids={STORE})
+    assert event["posting_status"] == "POSTED" and repeated is False
+    assert note.get("accounting_status") != "POSTED"
+    return confirmed_tally_xml(db, note)
+
+
+def _original_lens_bill(db, grn_id, vendor_id, **over):
+    """One original PO invoice proves one Rs400 lens and the Rs20 tax heads."""
+    db.vendor_bills.insert_one({
+        "bill_id": f"B-{grn_id}", "bill_number": f"INV-{grn_id}", "bill_date": "2026-09-14",
+        "vendor_id": vendor_id, "vendor_gstin": DEALER_GSTIN if vendor_id == DEALER else "URP",
+        "grn_id": grn_id, "store_id": STORE, "recipient_entity_id": ENTITY,
+        "recipient_gstin": SHOP_GSTIN, "status": "OUTSTANDING", "received": True,
+        "taxable_amount": 400, "tax_amount": 20, "cgst_total": 10, "sgst_total": 10, "igst_total": 0,
+        "total_amount": 420, "itc_eligible": True,
+        "lines": [{"product_id": LENS, "qty": 1, "unit_price": 400, "taxable": 400,
+                   "gst_rate": 5, "cgst": 10, "sgst": 10, "igst": 0, "line_total": 420}],
+        **over,
+    })
+
+
 def test_r5_a_walk_in_return_reverses_only_the_credit_its_bill_claimed(world):
     """Owner rulings 2026-10-12 (R5) and 2026-10-13 (G2): a vendor return
     reverses GST only where the returned goods' bill claimed it -- the debit
@@ -1921,15 +1971,12 @@ def test_r5_a_walk_in_return_reverses_only_the_credit_its_bill_claimed(world):
     registered V-DEALER they claim credit like a PO receipt's (G2) and reverse
     it -- unless the bill was booked with credit switched off. Each line by
     the receipt its unit came in on."""
-    from api.services.rtv_debit_note import DebitNoteEngine, tally_build_debit_note_xml
-
     db = world["db"]
     seller = {"entity_id": ENTITY, "name": "BV Test Optical Pvt Ltd", "gstin": SHOP_GSTIN, "state_code": "20"}
     frame = [{"product_id": FRAME, "product_name": "Acme Aviator", "quantity": 1, "unit_price": 3100.0}]
 
     def note(rtv, lines):
-        vendor = db.vendors.find_one({"vendor_id": rtv["vendor_id"]}, {"_id": 0})
-        res = DebitNoteEngine(db).issue(rtv, vendor, actor="u-acct", seller=seller, lines=lines)
+        res = _request_note(db, rtv, lines, seller)
         assert res["ok"], res
         return res["debit_note"]
 
@@ -1937,21 +1984,25 @@ def test_r5_a_walk_in_return_reverses_only_the_credit_its_bill_claimed(world):
         return db.stock_units.find_one({"source_id": grn_id, "product_id": FRAME})["stock_id"]
 
     sharma = _on_the_shelf(world, vendor_id=SHARMA)
+    _book_as_drafted(sharma)
     walked = note(_return_of(world, "VR-SHARMA", frame_unit(sharma), SHARMA)[0], frame)
     assert walked["totals"]["tax_paise"] == 0
     assert walked["totals"]["grand_total_paise"] == walked["totals"]["taxable_paise"] == 310000
-    assert "Input CGST" not in tally_build_debit_note_xml(walked)
+    assert "Input CGST" not in _confirmed_return_xml(db, walked)
 
     dealer = _on_the_shelf(world, vendor_invoice_no="CASH-51")
+    _run(pi.create_purchase_invoice(_invoice_body(dealer, "CASH-51"), current_user=ACCOUNTANT))
     claimed = note(_return_of(world, "VR-DEALER", frame_unit(dealer))[0], frame)
     assert claimed["totals"]["tax_paise"] == 15500  # 5% of Rs 3100, reversed
-    assert "Input CGST" in tally_build_debit_note_xml(claimed)
+    assert "Input CGST" in _confirmed_return_xml(db, claimed)
 
     off_grn = _on_the_shelf(world, vendor_invoice_no="CASH-52")
     off = _invoice_body(off_grn, "CASH-52")
     off.itc_eligible = False
     _run(pi.create_purchase_invoice(off, current_user=ACCOUNTANT))
-    _seed_receipt(db, grn_id="GRN-STD-0501", subtype="STANDARD", po_id="PO-501")
+    _seed_receipt(db, grn_id="GRN-STD-0501", subtype="STANDARD", po_id="PO-501",
+                  items=[{"product_id": LENS, "accepted_qty": 1, "unit_price": 400}])
+    _original_lens_bill(db, "GRN-STD-0501", DEALER)
     db.stock_units.insert_one({"stock_id": "SU-PO-1", "product_id": LENS, "source_type": "GRN", "source_id": "GRN-STD-0501", "store_id": STORE})
     # One return of both: each line by its own receipt.
     db.stock_units.update_many({"stock_id": {"$in": [frame_unit(off_grn), "SU-PO-1"]}}, {"$set": {"rtv_vendor_id": "VR-MIXED"}})
@@ -1972,19 +2023,17 @@ def test_r5_the_debit_note_is_what_the_bill_charged_for_the_goods(world):
     the bill's rate) and the voucher debits the vendor that. Credit claimed:
     the 155 is reversed as GST. None claimed: no credit reversed, the 155 is
     in the return's value. An unregistered dealer charged no GST: the price."""
-    from api.services.rtv_debit_note import DebitNoteEngine, tally_build_debit_note_xml
-
     db = world["db"]
     frame = [{"product_id": FRAME, "product_name": "Acme Aviator", "quantity": 1, "unit_price": 3100.0}]
 
     def returned(grn_id, rid, vendor=DEALER):
         stock_id = db.stock_units.find_one({"grn_id": grn_id, "product_id": FRAME})["stock_id"]
         rtv, _pid = _return_of(world, rid, stock_id, vendor)
-        res = DebitNoteEngine(db).issue(rtv, db.vendors.find_one({"vendor_id": vendor}, {"_id": 0}), actor="u-acct", seller=_SELLER, lines=frame)
+        res = _request_note(db, rtv, frame)
         assert res["ok"], res
         note = res["debit_note"]
         # The voucher's first leg debits the vendor (tally_build_debit_note_xml).
-        vendor_leg = re.findall(r"<AMOUNT>(-?[\d.]+)</AMOUNT>", tally_build_debit_note_xml(note))[0]
+        vendor_leg = re.findall(r"<AMOUNT>(-?[\d.]+)</AMOUNT>", _confirmed_return_xml(db, note))[0]
         return note["totals"]["grand_total_paise"], note["totals"]["tax_paise"], vendor_leg
 
     off = _on_the_shelf(world, vendor_invoice_no="CASH-D1")
@@ -1999,10 +2048,14 @@ def test_r5_the_debit_note_is_what_the_bill_charged_for_the_goods(world):
     assert returned(off, "VR-D1") == (325500, 0, "-3255.00")
     assert returned(claimed, "VR-D2") == (325500, 15500, "-3255.00")
 
-    # The header-only door: the bill's tax share is its rate.
+    # A header-only bill needs its actual item breakup before return tax can
+    # be proved; do not infer quantities from the receipt's accepted total.
     header = _on_the_shelf(world, vendor_invoice_no="CASH-D3")
     _header_bill(header, "CASH-D3", "2026-09-14")
-    db.vendor_bills.update_one({"grn_id": header}, {"$set": {"itc_eligible": False}})
+    db.vendor_bills.update_one({"grn_id": header}, {"$set": {"itc_eligible": False, "lines": [
+        {"product_id": FRAME, "qty": 2, "unit_price": 3100, "taxable": 6200,
+         "cgst": 155, "sgst": 155, "igst": 0, "gst_rate": 5, "line_total": 6510},
+    ]}})
     assert returned(header, "VR-D3") == (325500, 0, "-3255.00")
 
     # Unregistered Sharma's cash memo charged no GST, on either door: the price.
@@ -2013,6 +2066,12 @@ def test_r5_the_debit_note_is_what_the_bill_charged_for_the_goods(world):
         else:
             memo_bill = vd.VendorBillCreate(bill_number=number, bill_date="2026-09-14", taxable_amount=7460.0, total_amount=7460.0, grn_id=memo)
             _run(vd.create_vendor_bill(SHARMA, memo_bill, current_user=ACCOUNTANT))
+            db.vendor_bills.update_one({"grn_id": memo}, {"$set": {"lines": [
+                {"product_id": FRAME, "qty": 2, "unit_price": 3100, "taxable": 6200,
+                 "cgst": 0, "sgst": 0, "igst": 0, "gst_rate": 0, "line_total": 6200},
+                {"product_id": LENS, "qty": 3, "unit_price": 420, "taxable": 1260,
+                 "cgst": 0, "sgst": 0, "igst": 0, "gst_rate": 0, "line_total": 1260},
+            ]}})
         assert returned(memo, f"VR-{number}", SHARMA) == (310000, 0, "-3100.00"), number
 
 
@@ -2025,20 +2084,22 @@ def _lens_return(db, rid, vendor_id, grn_id, *, bill=None, linked=True):
     `vendor_id`, received on PO
     receipt `grn_id`, with `bill` (stored fields) booked against it; the
     debit note's tax in paise."""
-    from api.services.rtv_debit_note import DebitNoteEngine
-
     lens_line = {"product_id": LENS, "received_qty": 1, "accepted_qty": 1, "rejected_qty": 0, "unit_price": 400.0}
     _seed_receipt(db, grn_id=grn_id, subtype="STANDARD", vendor_id=vendor_id, po_id=f"PO-{grn_id}", items=[lens_line])
     if bill is not None:
-        db.vendor_bills.insert_one({"bill_id": f"B-{grn_id}", "vendor_id": vendor_id, "grn_id": grn_id, "status": "OUTSTANDING", **bill})
+        _original_lens_bill(db, grn_id, vendor_id, **bill)
     if linked:
         db.stock_units.insert_one(
             {"stock_id": f"SU-{grn_id}", "product_id": LENS, "source_type": "GRN", "source_id": grn_id, "store_id": STORE, "rtv_vendor_id": rid}
         )
-    vendor = db.vendors.find_one({"vendor_id": vendor_id}, {"_id": 0})
-    rtv = {"return_id": rid, "vendor_id": vendor_id, "store_id": STORE}
-    res = DebitNoteEngine(db).issue(rtv, vendor, actor="u-acct", seller=_SELLER, lines=_ONE_LENS)
+    rtv = {"return_id": rid, "vendor_id": vendor_id, "store_id": STORE, "grn_id": grn_id}
+    res = _request_note(db, rtv, _ONE_LENS)
     assert res["ok"], res
+    if bill is None or bill.get("status") == "CANCELLED":
+        from api.services.rtv_debit_note import tally_build_debit_note_xml
+        assert res["debit_note"]["tax_status"] == "UNVERIFIED"
+        with pytest.raises(ValueError, match="supplier_confirmation_required"):
+            tally_build_debit_note_xml(res["debit_note"])
     return res["debit_note"]["totals"]["tax_paise"]
 
 
@@ -2050,7 +2111,7 @@ def test_r5_the_debit_note_reverses_what_the_bill_booked(world):
     supplier's reverse-charge bill (credit claimed): tax 0. And a bill booked
     with credit off or 17(5)-blocked still had 'credit' reversed. The bill
     against the receipt answers from its stored flag (_itc_eligible_bill, the
-    register's reader); only with no bill booked does the credit rule decide."""
+    register's reader). With no booked bill, tax remains explicitly unverified."""
     db = world["db"]
     # Unregistered Sharma: reverse charge claimed the credit -> reversed.
     assert _lens_return(db, "VR-RCM", SHARMA, "GRN-STD-0610", bill={"itc_eligible": True, "reverse_charge": True}) == 2000
@@ -2060,8 +2121,8 @@ def test_r5_the_debit_note_reverses_what_the_bill_booked(world):
     assert _lens_return(db, "VR-OFF", DEALER, "GRN-STD-0612", bill={"itc_eligible": False, "vendor_gstin": DEALER_GSTIN}) == 0
     blocked = {"itc_eligible": True, "itc_blocked": True, "vendor_gstin": DEALER_GSTIN}
     assert _lens_return(db, "VR-BLK", DEALER, "GRN-STD-0613", bill=blocked) == 0
-    # A cancelled bill booked nothing: the credit rule decides (a registered dealer's PO receipt).
-    assert _lens_return(db, "VR-CXL", DEALER, "GRN-STD-0614", bill={"itc_eligible": False, "status": "CANCELLED"}) == 2000
+    # A cancelled bill proves no booked tax; no current-master fallback.
+    assert _lens_return(db, "VR-CXL", DEALER, "GRN-STD-0614", bill={"itc_eligible": False, "status": "CANCELLED"}) == 0
     # The dealer's registration cancelled after the bill claimed credit: still reversed.
     db.vendors.update_one({"vendor_id": DEALER}, {"$set": {"gstin": None}})
     assert _lens_return(db, "VR-GONE", DEALER, "GRN-STD-0601", bill={"itc_eligible": True, "vendor_gstin": DEALER_GSTIN}) == 2000
@@ -2072,9 +2133,8 @@ def test_r5_a_return_naming_no_units_finds_their_receipt(world):
     was opened from one, and the note then decided by the supplier's GSTIN
     alone -- V-DEALER's walk-in frame, its bill booked with no credit,
     reversed Rs 155 'Input CGST' never claimed (R5). With no unit linked the
-    supplier's latest receipt of that product stands in, and its bill
-    answers."""
-    from api.services.rtv_debit_note import DebitNoteEngine, tally_build_debit_note_xml
+    supplier's uniquely identified original receipt and bill answer; never
+    a most-recent-receipt guess."""
 
     db = world["db"]
     frame_only = [it for it in _no_po_body(world)["items"] if it["product_id"] == FRAME]
@@ -2082,15 +2142,16 @@ def test_r5_a_return_naming_no_units_finds_their_receipt(world):
     off = _invoice_body(grn_id, "CASH-77")
     off.itc_eligible = False
     _run(pi.create_purchase_invoice(off, current_user=ACCOUNTANT))
-    vendor = db.vendors.find_one({"vendor_id": DEALER}, {"_id": 0})
     rtv = {"return_id": "VR-NOLINK", "vendor_id": DEALER, "store_id": STORE}
     line = [{"product_id": FRAME, "product_name": "Acme Aviator", "quantity": 1, "unit_price": 3100.0}]
-    res = DebitNoteEngine(db).issue(rtv, vendor, actor="u-acct", seller=_SELLER, lines=line)
+    res = _request_note(db, rtv, line)
     assert res["ok"], res
     assert res["debit_note"]["totals"]["tax_paise"] == 0
-    assert "Input CGST" not in tally_build_debit_note_xml(res["debit_note"])
-    # The dealer's PO lens, returned with no unit linked: its credit is reversed.
-    assert _lens_return(db, "VR-NOLINK-PO", DEALER, "GRN-STD-0620", linked=False) == 2000
+    assert "Input CGST" not in _confirmed_return_xml(db, res["debit_note"])
+    # The dealer's billed PO lens, returned with no unit linked: its original
+    # receipt is explicit and its booked credit is reversed.
+    assert _lens_return(db, "VR-NOLINK-PO", DEALER, "GRN-STD-0620", linked=False,
+                        bill={"itc_eligible": True}) == 2000
 
 
 def _booked(db, bill_id, number, date, *, vendor=DEALER, gstin=DEALER_GSTIN, tax=310.0, credit=True):
@@ -2684,9 +2745,8 @@ def test_r5_a_walk_in_return_reverses_at_the_rate_its_bill_booked(world):
     credit a lens); one lens returned, the debit note taxed it at 12% (Rs
     50.40), reversing Rs 29.40 never claimed -- the note had its own rate
     rule (catalogue, then category) beside the PO-line rule (HSN first). It
-    now reverses at the rate the bill booked, and with no rate on a bill by
-    THE purchase-side rule; accounts who booked the lens at 12% see 12%."""
-    from api.services.rtv_debit_note import DebitNoteEngine
+    now reverses at the rate the bill booked. Without a booked original,
+    tax remains unverified; accounts who booked the lens at 12% see 12%."""
 
     db = world["db"]
     lens = [{"product_id": LENS, "product_name": "Acme Daily", "quantity": 1, "unit_price": 420.0}]
@@ -2694,23 +2754,27 @@ def test_r5_a_walk_in_return_reverses_at_the_rate_its_bill_booked(world):
     def returned_lens(grn_id, rid):
         stock_id = db.stock_units.find_one({"source_id": grn_id, "product_id": LENS})["stock_id"]
         rtv, _pid = _return_of(world, rid, stock_id)
-        vendor = db.vendors.find_one({"vendor_id": DEALER}, {"_id": 0})
-        res = DebitNoteEngine(db).issue(rtv, vendor, actor="u-acct", seller=_SELLER, lines=lens)
+        res = _request_note(db, rtv, lens)
         assert res["ok"], res
-        return res["debit_note"]["totals"]["tax_paise"]
+        return res["debit_note"]
 
     drafted = _on_the_shelf(world, vendor_invoice_no="CASH-71")
     _book_as_drafted(drafted)
-    assert returned_lens(drafted, "VR-71") == 2100  # 5% of Rs 420
+    assert returned_lens(drafted, "VR-71")["totals"]["tax_paise"] == 2100  # 5% of Rs 420
 
     at_12 = _on_the_shelf(world, vendor_invoice_no="CASH-72")
     body = _invoice_body(at_12, "CASH-72")
     body.lines.append(pi.PurchaseInvoiceLine(product_id=LENS, description="Acme Daily", hsn="900130", qty=3, unit_price=420.0, gst_rate=12.0))
     _run(pi.create_purchase_invoice(body, current_user=ACCOUNTANT))
-    assert returned_lens(at_12, "VR-72") == 5040  # the bill's 12%
+    assert returned_lens(at_12, "VR-72")["totals"]["tax_paise"] == 5040  # the bill's 12%
 
     unbilled = _on_the_shelf(world, vendor_invoice_no="CASH-73")
-    assert returned_lens(unbilled, "VR-73") == 2100  # no bill yet: the PO-line rule
+    pending = returned_lens(unbilled, "VR-73")
+    assert pending["totals"]["tax_paise"] == 0
+    assert pending["tax_status"] == "UNVERIFIED"
+    from api.services.rtv_debit_note import tally_build_debit_note_xml
+    with pytest.raises(ValueError, match="supplier_confirmation_required"):
+        tally_build_debit_note_xml(pending)
 
     # Panel probe (round 9): V-DEALER's walk-in CASH-55 booked with the frame
     # at 0% (credit on, Rs 0 tax); one frame returned reversed Rs 155 (5%,
@@ -2720,8 +2784,7 @@ def test_r5_a_walk_in_return_reverses_at_the_rate_its_bill_booked(world):
     assert db.vendor_bills.find_one({"bill_number": "CASH-55"})["itc_eligible"] is True
     frame_unit = db.stock_units.find_one({"source_id": zero, "product_id": FRAME})["stock_id"]
     rtv, _pid = _return_of(world, "VR-55", frame_unit)
-    vendor = db.vendors.find_one({"vendor_id": DEALER}, {"_id": 0})
     frame = [{"product_id": FRAME, "product_name": "Acme Aviator", "quantity": 1, "unit_price": 3100.0}]
-    res = DebitNoteEngine(db).issue(rtv, vendor, actor="u-acct", seller=_SELLER, lines=frame)
+    res = _request_note(db, rtv, frame)
     assert res["ok"], res
     assert res["debit_note"]["totals"]["tax_paise"] == 0
