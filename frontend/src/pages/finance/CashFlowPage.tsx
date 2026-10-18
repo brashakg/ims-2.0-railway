@@ -8,6 +8,7 @@
 //               a bill / payment / debit-note.
 
 import { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
   Banknote, TrendingDown, AlertTriangle, Loader2, X, Plus, RefreshCw,
 } from 'lucide-react';
@@ -642,10 +643,10 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
         </>}
       </div>
       <div className="flex justify-end mt-2">
-        {kind === 'debit' && creditType === 'RETURN_CN' ? <a
-          href={`/purchase/vendor-returns?vendor_id=${encodeURIComponent(vendorId)}`}
+        {kind === 'debit' && creditType === 'RETURN_CN' ? <Link
+          to={`/purchase/vendor-returns?vendor_id=${encodeURIComponent(vendorId)}`}
           className="text-sm font-medium text-white bg-bv hover:bg-bv-600 rounded-lg px-4 py-1.5"
-        >Open Vendor Returns</a> : <button type="button" onClick={save} disabled={saving} className="inline-flex items-center gap-1.5 text-sm font-medium text-white bg-bv hover:bg-bv-600 rounded-lg px-4 py-1.5 disabled:opacity-60">
+        >Open Vendor Returns</Link> : <button type="button" onClick={save} disabled={saving} className="inline-flex items-center gap-1.5 text-sm font-medium text-white bg-bv hover:bg-bv-600 rounded-lg px-4 py-1.5 disabled:opacity-60">
           {saving && <Loader2 className="w-4 h-4 animate-spin" />} Save
         </button>}
       </div>

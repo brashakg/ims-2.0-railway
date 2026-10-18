@@ -48,3 +48,14 @@ a01-integration-build.log and supplier-credit-form-browser.json/png.
 Root owns this frontend branch; the supplier-accounting agent owns backend
 routes/readers. Independent review of the combined accounting release and
 fresh hosted CI are still required. No production transaction occurred.
+
+Independent review corrections: when loading a pending note fails, the next
+successful refresh replaces number, date, amount and request identity with
+the selected note; switching back to a new note also clears the old identity
+after recovery. The Cash Flow and Vendor Returns links use app navigation,
+preserving the in-memory shop selection. Three additional regressions cover
+both recovery directions and the real router/shop handoff. The focused run
+passes 47 tests. Independent offline browser probes confirm both recovery
+directions submit the correct existing or fresh request identity.
+Forced TypeScript checking, Vite production build and focused ESLint also
+pass after these corrections; the pre-existing CSS-comment warning remains.
