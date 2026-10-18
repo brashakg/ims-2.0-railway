@@ -85,6 +85,7 @@ from ..services import org_validation as ov
 from ..services import landed_cost as lc
 from ..services import purchase_invoice_engine as pinv
 from ..services import purchase_match as pmatch
+from ..services import stock_value
 from ..services import product_master as _pm
 from ..services.cost_mask import AP_ROLES
 
@@ -1000,71 +1001,156 @@ def _run_match_for_invoice(
 def _product_state_for_valuation(
     db, product_ids, store_id=None, exclude_grn_id=None
 ) -> dict:
-    """Build {product_id: {on_hand_qty, cost_price}} for the moving-average
-    true-up: the CURRENT on-hand quantity (count of AVAILABLE serialized
-    stock_units) and current cost (product cost_price / landed_cost) per
-    product. Fail-soft: any error yields an empty/partial map (the true-up then
-    treats missing products as zero on-hand at zero cost -> takes the invoice
-    cost, which is the correct first-receipt behaviour).
+    """Prior available layers, preserving unknown cost instead of assuming zero.
 
-    S9: `exclude_grn_id` subtracts the units THIS delivery minted. The blend
-    adds the invoiced quantity as the incoming layer, so counting the same
-    delivery again in the "existing" on-hand made every delivery appear twice in
-    its own average and dragged the new cost back toward the old one (receive 10
-    @100, be billed @120 -> 110 instead of 120). Subtracting only the units
-    still AVAILABLE from this GRN is exactly right: a unit from this delivery
-    that has already sold is no longer AVAILABLE, so it was never in the count."""
+    Use the stock-value reader's own-cost / legacy master fallback rule. The
+    current receipt is excluded by immutable origin (also after transfer).
+    Read failures propagate to the fail-soft booking wrapper; an unreadable
+    inventory must not be mistaken for an empty first receipt.
+    """
     state: dict = {}
     if db is None or not product_ids:
         return state
     pids = [p for p in product_ids if p]
-    # Current cost per product from the product master.
-    try:
-        for p in db.get_collection("products").find(
-            {"product_id": {"$in": pids}},
-            {"_id": 0, "product_id": 1, "cost_price": 1, "landed_cost": 1},
-        ):
-            pid = p.get("product_id")
-            if pid is None:
+    masters = {p["product_id"]: p for p in db.get_collection("products").find(
+        {"product_id": {"$in": pids}},
+        {"_id": 0, "product_id": 1, "cost_price": 1, "cost_price_is_catalogue_only": 1})}
+    receipt = db.get_collection("grns").find_one({"grn_id": exclude_grn_id}) if exclude_grn_id else None
+    receipt = receipt or {"grn_id": exclude_grn_id}
+    unique_number = _valuation_unique_number(db, receipt)
+    for pid in pids:
+        master_cost = stock_value.master_fallback_cost(masters.get(pid))
+        flt = {"product_id": pid, "status": "AVAILABLE"}
+        if store_id:
+            flt["store_id"] = store_id
+        qty = known_qty = value = receipt_uncosted = 0.0
+        for unit in db.get_collection("stock_units").find(flt):
+            pieces = stock_value._pieces(unit)
+            cost = stock_value.resolved_cost(unit, master_cost)
+            if exclude_grn_id and _valuation_receipt_unit(unit, receipt, unique_number):
+                if cost <= 0:
+                    receipt_uncosted += pieces
                 continue
-            state[pid] = {
-                "cost_price": (
-                    p.get("cost_price")
-                    if p.get("cost_price") is not None
-                    else p.get("landed_cost")
-                ),
-                "on_hand_qty": 0,
-            }
-    except Exception:
-        pass
-    # Current on-hand qty from the canonical serialized stock_units collection.
-    try:
-        coll = db.get_collection("stock_units")
-        for pid in pids:
-            flt = {"product_id": pid, "status": "AVAILABLE"}
-            if store_id:
-                flt["store_id"] = store_id
-            try:
-                cnt = coll.count_documents(flt)
-            except Exception:
-                # very old pymongo / fake: fall back to count()
-                cnt = coll.count(flt) if hasattr(coll, "count") else 0
-            # S9: take this delivery's own units back out of the "existing"
-            # on-hand. Counted as a second equality query rather than a $ne so
-            # the arithmetic is identical on Mongo and on the test doubles.
-            own = 0
-            if exclude_grn_id:
-                own_flt = dict(flt)
-                own_flt["source_id"] = exclude_grn_id
-                try:
-                    own = int(coll.count_documents(own_flt) or 0)
-                except Exception:
-                    own = 0
-            state.setdefault(pid, {"cost_price": None, "on_hand_qty": 0})
-            state[pid]["on_hand_qty"] = max(0, int(cnt or 0) - own)
-    except Exception:
-        pass
+            qty += pieces
+            if cost > 0:
+                known_qty += pieces
+                value += pieces * cost
+        # The master carries earlier invoice true-ups, while already priced
+        # physical units may still retain their original receipt price. Do not
+        # erase that established average by recomputing it from those units.
+        prior_cost = master_cost or None
+        if not prior_cost and known_qty:
+            prior_cost = round(value / known_qty, 2)
+        state[pid] = {"on_hand_qty": qty, "uncosted_qty": qty - known_qty,
+                      "receipt_uncosted_qty": receipt_uncosted,
+                      "cost_price": prior_cost}
     return state
+
+
+def _valuation_unique_number(db, grn):
+    number = (grn or {}).get("grn_number")
+    return bool(number and db.get_collection("grns").count_documents({"grn_number": number}) == 1)
+
+
+def _valuation_receipt_unit(unit, grn, unique_number):
+    """Same disjoint immutable-id / legacy-source rule as GRN origin counts."""
+    grn_id = (grn or {}).get("grn_id")
+    if not grn_id:
+        return False
+    if unit.get("grn_id") is not None:
+        return unit.get("grn_id") == grn_id
+    return ((unit.get("source_type") == "GRN" and unit.get("source_id") == grn_id)
+            or (unique_number and unit.get("grn_number") == grn.get("grn_number")))
+
+
+def _preserve_unpriced_layers(db, product_ids):
+    """Persist unknown layers BEFORE any new master price could mask them.
+
+    Cover every shop/status: a transfer, reservation or later return must not
+    change whether a unit's original cost was known. Known own costs remain.
+    A failed marker write stops valuation, while the booked payable stands.
+    """
+    products = db.get_collection("products")
+    stock = db.get_collection("stock_units")
+    for pid in set(product_ids):
+        master = products.find_one({"product_id": pid}) or {}
+        for unit in stock.find({"product_id": pid}):
+            if stock_value.resolved_cost(unit, stock_value.master_fallback_cost(master)) > 0:
+                continue
+            if unit.get("valuation_cost_pending"):
+                continue
+            identity = {"stock_id": unit["stock_id"]} if unit.get("stock_id") else {"_id": unit["_id"]}
+            expected = {**identity, "unit_cost": unit.get("unit_cost"), "cost_price": unit.get("cost_price")}
+            result = stock.update_one(expected, {"$set": {"valuation_cost_pending": True}})
+            if result.matched_count != 1:
+                current = stock.find_one(identity)
+                if not current or not (current.get("valuation_cost_pending") or stock_value._own_cost(current)):
+                    raise RuntimeError("Could not preserve an unpriced stock layer")
+
+
+def _resolve_billed_receipt_costs(db, grn):
+    """Price missing accepted units only with complete, unambiguous bill evidence.
+
+    A partial bill or two prices does not identify which serialized pieces it
+    bought. Leave those layers pending instead of assigning arbitrary costs.
+    """
+    from .vendors.grn_accept_lock import _GRN_TERMINAL_ACCEPT_STATUSES
+
+    if not grn or not grn.get("grn_id") or grn.get("status") not in _GRN_TERMINAL_ACCEPT_STATUSES:
+        return
+    import math
+
+    stock = db.get_collection("stock_units")
+    unique_number = _valuation_unique_number(db, grn)
+    accepted = pmatch._grn_accepted_by_product(grn)
+    bills = list(db.get_collection("vendor_bills").find({
+        "grn_id": grn["grn_id"], "doc_type": "PURCHASE_INVOICE"}))
+    for pid, qty in accepted.items():
+        if qty <= 0:
+            continue
+        units = [u for u in stock.find({"product_id": pid})
+                 if _valuation_receipt_unit(u, grn, unique_number)
+                 and u.get("receipt_disposition") != "REJECTED"]
+        if not math.isclose(sum(stock_value._pieces(u) for u in units), qty, abs_tol=0.001):
+            continue
+        prices = set()
+        billed_qty = 0.0
+        invalid = False
+        for bill in bills:
+            if str(bill.get("status") or "").upper() not in {"OUTSTANDING", "PARTIAL", "PAID"}:
+                continue
+            if grn.get("vendor_id") and bill.get("vendor_id") != grn["vendor_id"]:
+                continue
+            for line in bill.get("lines") or []:
+                if line.get("product_id") != pid:
+                    continue
+                cost = pmatch._valuation_cost(line.get("unit_price"))
+                count = pmatch._valuation_cost(line.get("qty"))
+                if cost is None or cost <= 0 or count is None or count <= 0:
+                    invalid = True
+                    continue
+                base_price = cost
+                if grn.get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO and bill.get("itc_eligible") is False:
+                    rate = pmatch._valuation_cost(line.get("gst_rate"))
+                    if rate is None:
+                        invalid = True
+                        continue
+                    cost *= 1 + rate / 100
+                prices.add((round(base_price, 2), round(cost, 2)))
+                billed_qty += count
+        if invalid or len(prices) != 1 or not math.isclose(billed_qty, qty, abs_tol=0.001):
+            continue
+        base_price, landed_price = prices.pop()
+        for unit in units:
+            if stock_value._own_cost(unit):
+                continue
+            identity = {"stock_id": unit["stock_id"]} if unit.get("stock_id") else {"_id": unit["_id"]}
+            stock.update_one(
+                {**identity, "unit_cost": unit.get("unit_cost"), "cost_price": unit.get("cost_price")},
+                {"$set": {"unit_cost": base_price, "cost_price": base_price,
+                          "landed_cost": landed_price,
+                          "cost_source": "PURCHASE_INVOICE", "valuation_cost_pending": False}},
+            )
 
 
 def _bought_since(db, product_id, accepted_at) -> bool:
@@ -1112,7 +1198,7 @@ def _apply_valuation_trueup(db, invoice_doc, computed, config) -> Optional[list]
             try:
                 grn = db.get_collection("grns").find_one(
                     {"grn_id": grn_id},
-                    {"_id": 0, "store_id": 1, "grn_subtype": 1, "accepted_at": 1},
+                    {"_id": 0},
                 )
                 store_id = (grn or {}).get("store_id")
             except Exception:
@@ -1147,13 +1233,18 @@ def _apply_valuation_trueup(db, invoice_doc, computed, config) -> Optional[list]
                 }
                 for ln in lines
             ]
+        method = pmatch.VALUATION_LATEST_PRICE if walk_in else pmatch.normalize_valuation_method(config.get("valuation_method"))
+        # Every method may update the master price. Preserve unknown layers
+        # first without changing FIFO or walk-in latest-price arithmetic.
+        _preserve_unpriced_layers(db, pids)
+        _resolve_billed_receipt_costs(db, grn)
         product_state = _product_state_for_valuation(
             db, pids, store_id, exclude_grn_id=grn_id
         )
         updates = pmatch.valuation_trueup_for_invoice(
             lines,
             product_state,
-            pmatch.VALUATION_LATEST_PRICE if walk_in else config.get("valuation_method"),
+            method,
         )
         if not updates:
             return None
@@ -1163,28 +1254,36 @@ def _apply_valuation_trueup(db, invoice_doc, computed, config) -> Optional[list]
         for u in updates:
             pid = u.get("product_id")
             new_cost = u.get("new_cost")
-            if pid is None or new_cost is None:
+            if pid is None:
                 continue
             try:
                 current = products.find_one({"product_id": pid})
             except Exception:  # noqa: BLE001 - the pre-image never blocks the cost
                 current = None
+            pending = new_cost is None
+            fields = {"moving_avg_cost": new_cost, "cost_valuation_pending": pending,
+                      "valuation_method": u.get("method")}
+            if pending:
+                # Preserve a valid prior master. If the bill supplies the
+                # catalogue's last missing price, retain that existing finish
+                # path without presenting the price as a complete average.
+                incoming = pmatch._valuation_cost(u.get("receipt_unit_cost"))
+                if current is not None and not stock_value._price(current.get("cost_price")) and incoming:
+                    new_cost = incoming
+                    fields["cost_price_is_catalogue_only"] = True
+            else:
+                fields["cost_price_is_catalogue_only"] = False
+            if new_cost is not None:
+                fields.update({
+                    "cost_price": new_cost, "cost_updated_at": datetime.now().isoformat(),
+                    "cost_source": "PURCHASE_INVOICE", "cost_source_id": invoice_doc.get("invoice_id"),
+                })
             try:
-                products.update_one(
-                    {"product_id": pid},
-                    {
-                        "$set": {
-                            "cost_price": new_cost,
-                            "moving_avg_cost": new_cost,
-                            "valuation_method": u.get("method"),
-                            "cost_updated_at": datetime.now().isoformat(),
-                            "cost_source": "PURCHASE_INVOICE",
-                            "cost_source_id": invoice_doc.get("invoice_id"),
-                        }
-                    },
-                )
+                products.update_one({"product_id": pid}, {"$set": fields})
                 applied.append(u)
             except Exception:
+                continue
+            if new_cost is None:
                 continue
             # Fail-soft companion write to catalog_products so catalog-only
             # products (not yet in the products spine) also get a fresh cost.

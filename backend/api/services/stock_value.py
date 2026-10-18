@@ -3,9 +3,11 @@
 The stock at a shop is worth what it COST: every unit physically there (on the
 shelf or reserved -- the PHYSICAL half of item_events.on_hand_match) at the
 cost stamped on it at goods receipt (unit_cost, else cost_price), else its
-product's cost_price. Sold, transferred-out and written-off units are not
-stock. Selling value (offer price / MRP) is a different figure and is labelled
-as such wherever it is shown.
+product's cost_price. Newly invoice-priced layers carry their inventory cost
+in landed_cost while unit_cost retains the supplier base price. An explicitly
+pending layer cannot inherit a later product price. Sold, transferred-out and
+written-off units are not stock. Selling value (offer price / MRP) is a
+different figure and is labelled as such wherever it is shown.
 
 A unit with none of those prices (a zero or blank cost is no price) is
 UNCOSTED: it adds nothing to the value, but it is counted (`cost_known`
@@ -23,6 +25,7 @@ No DB import; takes the repositories the caller already holds.
 """
 
 from typing import Dict, List, Optional
+import math
 
 from .item_events import on_hand_match
 
@@ -45,11 +48,29 @@ def _price(v) -> float:
     """A cost figure, or 0.0 when it is no price at all (blank, zero, junk or
     negative)."""
     c = _f(v)
-    return c if c > 0 else 0.0
+    return c if math.isfinite(c) and c > 0 else 0.0
 
 
 def _own_cost(unit: dict) -> float:
+    # Late-priced invoice layers keep supplier base price for last-paid quotes
+    # and inventory landed cost separately (including non-recoverable tax).
+    if unit.get("cost_source") == "PURCHASE_INVOICE" and _price(unit.get("landed_cost")):
+        return _price(unit.get("landed_cost"))
     return _price(unit.get("unit_cost")) or _price(unit.get("cost_price"))
+
+
+def resolved_cost(unit: dict, product_cost=None) -> float:
+    """A recorded unit cost wins; an unresolved layer cannot inherit a later bill's price."""
+    own = _own_cost(unit)
+    if own or unit.get("valuation_cost_pending"):
+        return own
+    return _price(product_cost)
+
+
+def master_fallback_cost(product: dict) -> float:
+    """A price supplied only to finish cataloguing is not stock-cost evidence."""
+    product = product or {}
+    return 0.0 if product.get("cost_price_is_catalogue_only") else _price(product.get("cost_price"))
 
 
 def _pieces(unit: dict) -> float:
@@ -68,9 +89,9 @@ def shelf_units(stock_repo, product_repo, store_id: Optional[str]) -> List[dict]
     product_cost: Dict[str, float] = {}
     for pid in {u.get("product_id") for u in units if not _own_cost(u)}:
         doc = product_repo.find_by_id(pid) if product_repo is not None and pid else None
-        product_cost[pid] = _price((doc or {}).get("cost_price"))
+        product_cost[pid] = master_fallback_cost(doc)
     for u in units:
-        cost = _own_cost(u) or product_cost.get(u.get("product_id"), 0.0)
+        cost = resolved_cost(u, product_cost.get(u.get("product_id")))
         u["cost_known"] = cost > 0
         u["cost_value"] = round(_pieces(u) * cost, 2)
     return units

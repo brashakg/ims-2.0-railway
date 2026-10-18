@@ -1215,6 +1215,10 @@ def _accept_grn_claimed(
                         "po_id": po_id,
                         "created_by": user_id,
                         **cost_fields,
+                        # Receiving is allowed before Accounts prices it. An
+                        # unrelated existing/later master price is not evidence
+                        # of this accepted unit's cost.
+                        **({"valuation_cost_pending": True} if not cost_fields else {}),
                         **batch_fields,
                     },
                     mint_raises_on_duplicate,
