@@ -1494,11 +1494,15 @@ def test_g1_new_colour_under_a_live_lead_never_touches_its_listing(monkeypatch):
     parent = _twin(db, "tw-parent")
     rows = ls.variants_for_product(db, parent)
     assert [r["sku"] for r in rows] == [PARENT_SKU]
-    _run(shopify_push.push_product(db, parent, rows, blocked=False))
+    res = _run(shopify_push.push_product(db, parent, rows, blocked=False))
     (create,) = spy.calls_for("productVariantsBulkCreate")
     made = {(v.get("inventoryItem") or {}).get("sku"): v for v in create["variables"]["variants"]}
-    assert set(made) == {NEW_SKU, created["sku"]}
-    assert made[NEW_SKU]["price"] == "41000.00" and made[created["sku"]]["price"] == "42000.00"
+    # The colour typed in Add Product is still a catalogue DRAFT (no cost /
+    # HSN yet): it WAITS -- a colour goes on the website only once a person
+    # has finished it (review of #1233); the finished one is created.
+    assert set(made) == {NEW_SKU}
+    assert made[NEW_SKU]["price"] == "41000.00"
+    assert [w["sku"] for w in res.listing["waiting"]] == [created["sku"]]
     assert all("id" not in v for v in made.values()), "created, never an existing variant"
     assert create["variables"]["strategy"] == "PRESERVE_STANDALONE_VARIANT"
     # (the canned listing also has a 'Large' variant B: only tracking reaches it)
