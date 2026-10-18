@@ -687,7 +687,9 @@ def test_media_and_title_are_hands_off_for_a_child(monkeypatch):
     transcript = json.dumps(spy.calls)
     assert CHILD_PHOTO not in transcript, "the child's photo never reaches a media mutation"
     assert CHILD_NAME not in transcript, "the child's name never reaches the title"
-    assert spy.calls_for("productUpdate(")[0]["variables"]["input"]["title"] == PARENT_NAME
+    # G2 (owner 2026-10-18): the listing is the MODEL's -- brand + model +
+    # model name, never one item's bill line (colour / size).
+    assert spy.calls_for("productUpdate(")[0]["variables"]["input"]["title"] == "Ray-Ban Meta Wayfarer Shiny Black G15"
     # the child's SKU still rode the parent's stock write
     setq = spy.calls_for("inventorySetQuantities")
     assert B_INV in {q["inventoryItemId"] for c in setq for q in c["variables"]["input"]["quantities"]}
@@ -783,8 +785,10 @@ def test_the_one_create_door_mints_a_size_variant():
     parent = _twin(db, "tw-parent")
     assert sorted(r["sku"] for r in ls.variants_for_product(db, parent)) == sorted([PARENT_SKU, CHILD_SKU])
     assert shopify_push.product_skus(parent, ls.variants_for_product(db, parent)) == [PARENT_SKU, CHILD_SKU]
-    # the parent was NOT queued by the create (first publish stays a human press)
-    assert parent["ecom"]["locally_modified"] is False
+    # G2 (owner 2026-10-18): a new size of a model QUEUES the model's listing
+    # (its next push adds the size). A first publish still stays a human
+    # press: the scheduled sync only updates listings already on Shopify.
+    assert parent["ecom"]["locally_modified"] is True
 
     # the same payload again is a duplicate (sku)
     with pytest.raises(pm.ProductMasterError) as exc:
@@ -902,7 +906,9 @@ def test_runbook_creates_links_and_seeds_opening_stock_through_the_doors(monkeyp
     row = _row(db, CHILD_SKU)
     assert (row["shopify_variant_id"], row["shopify_inventory_item_id"], row["parent_product_id"]) == (B_GID, B_INV, "tw-parent")
     assert _spine(db, made["product_id"])["variant_of"] == "sp-parent"
-    assert _twin(db, "tw-parent")["ecom"]["locally_modified"] is False, "the parent is left CLEAN"
+    # G2 (owner 2026-10-18): the new size queues its model's listing; the row
+    # already carries the Large variant's gid, so its next push creates nothing.
+    assert _twin(db, "tw-parent")["ecom"]["locally_modified"] is True, "the model's listing is queued"
 
     out = runbook.opening_stock(rows, user, apply=True)
     assert out["commit"]["summary"]["units_added"] == 1 and out["commit"]["summary"]["batch_id"]
@@ -1249,8 +1255,13 @@ def test_push_image_never_attaches_a_childs_photo_to_the_parents_listing(monkeyp
     twin. Invariant 1 (a child twin never carries a gid) is enforced
     nowhere, so a twin repair that stamps the parent gid on the child twin
     would attach the child's APPROVED image to the PARENT's listing through
-    productCreateMedia. The gid resolver now reads a child twin as None."""
-    db = _world()
+    productCreateMedia. A gid on a child twin is never read.
+
+    G2 (owner 2026-10-18): a colour/size's photo DOES go on its MODEL's
+    listing -- but only through its catalog_variants row: the row sits under
+    that listing and carries its Shopify variant id (it IS on the listing).
+    A size not yet on the listing (no variant id) resolves to nothing."""
+    db = _world(child_gids=False)
     spy = _Spy({
         **_responses(),
         "productCreateMedia": _ok("productCreateMedia", media=[{"id": "gid://shopify/MediaImage/9"}]),
@@ -1260,7 +1271,14 @@ def test_push_image_never_attaches_a_childs_photo_to_the_parents_listing(monkeyp
     child = db["catalog_products"].find_one({"id": "tw-child"})
     child["ecom"]["shopify_product_id"] = P_GID  # what a twin-repair-by-SKU script would do
     assert _media._resolve_product_gid(db, "tw-parent") == P_GID, "the parent's own image still resolves"
-    assert _media._resolve_product_gid(db, "tw-child") is None
+    assert _media._resolve_product_gid(db, "tw-child") is None, "not on the listing yet"
+    db["catalog_variants"].update_one({"sku": CHILD_SKU}, {"$set": {"shopify_variant_id": B_GID}})
+    assert _media._resolve_product_gid(db, "tw-child") == P_GID, "on the model's listing: its photo goes there"
+    db["catalog_variants"].update_one({"sku": CHILD_SKU}, {"$set": {"parent_product_id": "tw-elsewhere"}})
+    assert _media._resolve_product_gid(db, "tw-child") is None, "a row under another listing is not this one"
+    db["catalog_variants"].update_one(
+        {"sku": CHILD_SKU}, {"$set": {"parent_product_id": "tw-parent"}, "$unset": {"shopify_variant_id": ""}}
+    )
 
     image = {"image_id": "img-child", "product_id": "tw-child", "status": "APPROVED", "url": CHILD_PHOTO}
     res = _run(shopify_push.push_image(db, image))
@@ -1465,28 +1483,36 @@ def test_g1_new_colour_under_a_live_lead_never_touches_its_listing(monkeypatch):
     assert typed_row["parent_product_id"] == created["pim_product_id"] and "mrp" not in typed_row
     assert _row(db, PARENT_SKU) == lead_row, "the lead's own row is never rewritten"
 
-    # 3. the lead's next LIVE push: its one variant, its own price -- nothing else
+    # 3. G2 (owner 2026-10-18) -- the lead's next LIVE push is the website
+    # step: the new colours are CREATED as their own variants (own SKU, own
+    # price) and never land on the lead's variant -- no shared inventory
+    # item, the lead's prices untouched. (This canned Shopify answers the
+    # create with nothing, so no row moves: a row joins the listing only
+    # with the variant Shopify minted for it.)
     spy = _Spy(_responses())
     _live(monkeypatch, spy)
     parent = _twin(db, "tw-parent")
     rows = ls.variants_for_product(db, parent)
     assert [r["sku"] for r in rows] == [PARENT_SKU]
     _run(shopify_push.push_product(db, parent, rows, blocked=False))
-    transcript = json.dumps(spy.calls)
-    for sku in (NEW_SKU, created["sku"]):
-        assert sku not in transcript, f"{sku} reached a Shopify call"
-    for price in ("41000", "42000"):
-        assert price not in transcript
+    (create,) = spy.calls_for("productVariantsBulkCreate")
+    made = {(v.get("inventoryItem") or {}).get("sku"): v for v in create["variables"]["variants"]}
+    assert set(made) == {NEW_SKU, created["sku"]}
+    assert made[NEW_SKU]["price"] == "41000.00" and made[created["sku"]]["price"] == "42000.00"
+    assert all("id" not in v for v in made.values()), "created, never an existing variant"
+    assert create["variables"]["strategy"] == "PRESERVE_STANDALONE_VARIANT"
     # (the canned listing also has a 'Large' variant B: only tracking reaches it)
-    for call in spy.calls_for("productVariantsBulk"):
+    for call in spy.calls_for("productVariantsBulkUpdate"):
         for v in call["variables"].get("variants") or []:
             if "price" in v or "inventoryItem" in v and "sku" in (v.get("inventoryItem") or {}):
                 assert v.get("id") == A_GID, f"a price / SKU was sent to {v.get('id')}"
+                assert v.get("price") in (None, "35910.00"), "the lead keeps its own price"
     after = _row(db, PARENT_SKU)
     assert (after.get("discounted_price"), after.get("compare_at_price")) == (35910.0, 39900.0)
     assert after.get("shopify_inventory_item_id") == A_INV
     assert _row(db, NEW_SKU).get("shopify_inventory_item_id") is None
     assert _row(db, created["sku"]).get("shopify_inventory_item_id") is None
+    assert _row(db, NEW_SKU)["parent_product_id"] == "tw-new", "no variant came back: the row did not move"
 
 
 # ---------------------------------------------------------------------------
@@ -1509,9 +1535,40 @@ def test_g1_drawer_save_refuses_a_model_field_on_a_variant(monkeypatch):
 
 
 @pytest.mark.parametrize("taken_down", [False, True])
-def test_g1_archiving_a_live_lead_takes_the_listing_down_first(monkeypatch, taken_down):
+def test_g2_archiving_a_live_lead_hands_its_listing_to_the_next_colour(monkeypatch, taken_down):
+    """G2 (owner 2026-10-18): another colour/size is still in the catalogue,
+    so the LISTING moves to it -- same Shopify product, every variant kept on
+    it -- and only the archived lead's own variant comes off sale, AFTER the
+    hand-over (the take-down sees a variant). Never refused: nothing is left
+    under a listing nobody owns, whatever the take-down answers."""
     db = _world()
     _wire_catalog(monkeypatch, db)
+    calls = []
+
+    async def _delist(db_, product, *, reason, actor):  # noqa: ARG001
+        calls.append((product.get("id"), bool((product.get("ecom") or {}).get("variant_of"))))
+        return {"ok": taken_down}
+
+    monkeypatch.setattr(cat._delist, "delist_if_live", _delist)
+    _run(cat._archive_product(_twin(db, "tw-parent"), ADMIN, spine_id="sp-parent"))
+    assert calls == [("tw-parent", True)], "one take-down, of the old lead's own variant, after the hand-over"
+    assert _spine(db, "sp-parent")["deleted_at"]
+    assert "variant_of" not in _spine(db, "sp-child") and _spine(db, "sp-parent")["variant_of"] == "sp-child"
+    child, old = _twin(db, "tw-child"), _twin(db, "tw-parent")
+    assert child["ecom"]["shopify_product_id"] == P_GID, "the same Shopify product"
+    assert "variant_of" not in child["ecom"] and child["ecom"]["locally_modified"] is True
+    assert "shopify_product_id" not in old["ecom"] and old["ecom"]["variant_of"]["twin_id"] == "tw-child"
+    assert (_row(db, PARENT_SKU)["parent_product_id"], _row(db, PARENT_SKU)["shopify_variant_id"]) == ("tw-child", A_GID)
+    assert (_row(db, CHILD_SKU)["parent_product_id"], _row(db, CHILD_SKU)["shopify_variant_id"]) == ("tw-child", B_GID)
+
+
+@pytest.mark.parametrize("taken_down", [False, True])
+def test_g1_archiving_a_live_lead_takes_the_listing_down_first(monkeypatch, taken_down):
+    """Nothing left to sell on it (every other colour archived): the whole
+    listing comes down FIRST, or nothing is deleted (G1, unchanged)."""
+    db = _world()
+    _wire_catalog(monkeypatch, db)
+    db["products"].update_one({"product_id": "sp-child"}, {"$set": {"deleted_at": "2026-10-01T00:00:00+00:00"}})
     calls = []
 
     async def _delist(db_, product, *, reason, actor):  # noqa: ARG001
@@ -1529,4 +1586,5 @@ def test_g1_archiving_a_live_lead_takes_the_listing_down_first(monkeypatch, take
     _run(cat._archive_product(_twin(db, "tw-parent"), ADMIN, spine_id="sp-parent"))
     assert calls == ["tw-parent"], "taken down once, before the archive"
     assert _spine(db, "sp-parent")["deleted_at"]
-    assert "variant_of" not in _spine(db, "sp-child") and _spine(db, "sp-parent")["variant_of"] == "sp-child"
+    # no colour left to lead: the family stays as it is
+    assert _spine(db, "sp-child")["variant_of"] == "sp-parent" and not _spine(db, "sp-parent").get("variant_of")
