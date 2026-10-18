@@ -429,7 +429,7 @@ async def my_commission(
 
         order_query = {
             "status": {"$in": SALE_DONE_STATUSES},
-            "created_at": {"$gte": from_dt, "$lte": to_dt},
+            "created_at": {"$gte": from_dt, "$lt": to_dt},
             # Superset pre-filter; order_actor_id below decides which field
             # actually credits the sale (same single rule the manager ledger
             # uses, so an employee's own page can never disagree with it).

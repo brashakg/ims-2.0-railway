@@ -2200,7 +2200,7 @@ async def get_commission_summary(
         # Build order query.
         order_query: dict = {
             "status": {"$in": SALE_DONE_STATUSES},
-            "created_at": {"$gte": from_dt, "$lte": to_dt},
+            "created_at": {"$gte": from_dt, "$lt": to_dt},
         }
         active_store = store_in_view(store_id, current_user)
         if active_store:
