@@ -706,6 +706,139 @@ def test_writer_chunks_at_shopifys_cap_and_records_only_accepted_rows(monkeypatc
 
 
 # ---------------------------------------------------------------------------
+# 3b. Write ORDER across doors (audit SF01): an older count never wins
+# ---------------------------------------------------------------------------
+
+
+class _HoldFirst(_Spy):
+    """Holds the FIRST call whose query carries ``marker`` until ``release``.
+    A call is recorded when it LANDS, so the transcript is landing order."""
+
+    def __init__(self, responses, marker):
+        super().__init__(responses)
+        self.marker, self._done = marker, False
+        self.held, self.release = asyncio.Event(), asyncio.Event()
+
+    async def __call__(self, db, query, variables):
+        if not self._done and self.marker in query:
+            self._done = True
+            self.held.set()
+            await self.release.wait()
+        return await super().__call__(db, query, variables)
+
+    def last_at(self, inv, loc):
+        last = None
+        for c in self.calls_for("inventorySetQuantities"):
+            for r in c["variables"]["input"]["quantities"]:
+                if (r["inventoryItemId"], r["locationId"]) == (inv, loc):
+                    last = r["quantity"]
+        return last
+
+
+def _sell_a(db):
+    assert db.get_collection("stock_units").find_one_and_update(
+        {"stock_id": "BV-A-u0", **item_events.on_hand_match()}, {"$set": {"status": "SOLD"}}
+    )
+
+
+def test_SF01_a_sweep_send_in_flight_can_never_undo_a_sales_write_back(monkeypatch):
+    """The audit's race through the real doors: the 09:00 sweep read BV-A=1
+    and its send is in flight; the last unit sells and the sale's write-back
+    (a LATER reading) starts. Pre-fix the sale's 0 landed first and the
+    sweep's 1 after it: the website sold a unit that had walked out. Now the
+    sale waits for the key and lands last."""
+    db = _listed(_db(a=1, b=1, c=0, sold=0))
+    monkeypatch.setattr(shopify_push.inventory, "_POLL_S", 0.01, raising=False)
+
+    async def scenario():
+        spy = _HoldFirst(_responses(), "inventorySetQuantities")
+        _live(monkeypatch, spy)
+        sweep = asyncio.create_task(shopify_push.sync_stock_levels(db))
+        await spy.held.wait()
+        _sell_a(db)
+        sale = asyncio.create_task(wb.writeback_skus(db, ["SP-1"], "BV-A"))
+        await asyncio.sleep(0.2)
+        spy.release.set()
+        await sweep
+        return spy, await sale
+
+    spy, sale = _run(scenario())
+    assert spy.last_at(INV_GID, LOC_A) == 0, "the sweep's older 1 overwrote the sale's 0"
+    assert sale["pushed"] == 1 and sale["failed"] == 0
+    assert _baseline(db)["quantities"]["SP-1"]["BV-A"] == 0
+
+
+def test_SF01_an_older_reading_reaching_the_writer_late_is_dropped_not_sent(monkeypatch):
+    """The other ordering: a write-back read BV-A=1 and stalled before its
+    send; the sale's write-back read 0 and landed. The stalled one is dropped
+    -- never sent, not a failure -- and the baseline keeps the sale's 0."""
+    db = _listed(_db(a=1, b=1, c=0, sold=0))
+
+    async def scenario():
+        spy = _HoldFirst(_responses(), "imsLocationList")  # after the read, before the send
+        _live(monkeypatch, spy)
+        first = asyncio.create_task(wb.writeback_skus(db, ["SP-1"], "BV-A"))
+        await spy.held.wait()
+        _sell_a(db)
+        second = await wb.writeback_skus(db, ["SP-1"], "BV-A")
+        spy.release.set()
+        return spy, await first, second
+
+    spy, first, second = _run(scenario())
+    assert second["pushed"] == 1
+    assert len(spy.calls_for("inventorySetQuantities")) == 1, "the older reading was sent after the newer"
+    assert spy.last_at(INV_GID, LOC_A) == 0
+    assert first["failed"] == 0 and first["pushed"] == 0
+    assert _baseline(db)["quantities"]["SP-1"]["BV-A"] == 0
+
+
+def test_SF01_every_door_stamps_its_reading_before_it_reads(monkeypatch):
+    """The order stamp must be taken BEFORE the on-hand read it stamps --
+    after it, a stale reading could carry a higher ticket than a fresher
+    one. The sale door (which reads, then hands the writer its numbers) and
+    the sweep door (the writer's own read) both claim with the ticket that
+    existed when they read."""
+    db = _listed(_db(a=1, b=1, c=0, sold=0))
+    _live(monkeypatch, _Spy(_responses()))
+    real = wb.online_quantities_for_skus
+    at_read = []
+
+    def reading(db_, skus, **kw):
+        doc = db_.get_collection("counters").find_one({"_id": "shopify_stock_write"})
+        at_read.append((doc or {}).get("seq"))
+        return real(db_, skus, **kw)
+
+    monkeypatch.setattr(wb, "online_quantities_for_skus", reading)
+    guard = db.get_collection("shopify_stock_write_guard")
+    for door in (lambda: wb.writeback_skus(db, ["SP-1"], "BV-A"), lambda: shopify_push.sync_stock_levels(db)):
+        _run(door())
+        claimed = guard.find_one({"_id": f"{INV_GID}|{LOC_A}"})["seq"]
+        assert claimed == at_read[-1], "the ticket was taken after the read it stamps"
+        db.get_collection("stock_units").update_one({"stock_id": "BV-B-u0"}, {"$set": {"status": "SOLD"}})
+
+
+def test_SF01_a_baseline_never_overwrites_a_newer_writers(monkeypatch):
+    """Another worker claims BV-A's key with a newer reading in the moment
+    between this write landing and its baseline being saved: BV-A's last-sent
+    number is that writer's to record. Saving ours on top would make the next
+    diff skip a real change (Shopify at one number, the baseline at another)."""
+    db = _listed(_db(a=1, b=1, c=0, sold=0))
+    _live(monkeypatch, _Spy(_responses()))
+    real = shopify_push.inventory.set_inventory_quantities
+
+    async def then_a_newer_worker_claims_a(db_, rows, **kw):
+        out = await real(db_, rows, **kw)
+        db_.get_collection("shopify_stock_write_guard").update_one(
+            {"_id": f"{INV_GID}|{LOC_A}"}, {"$inc": {"seq": 100}}
+        )
+        return out
+
+    monkeypatch.setattr(shopify_push.inventory, "set_inventory_quantities", then_a_newer_worker_claims_a)
+    _run(wb.writeback_skus(db, ["SP-1"], "BV-A"))
+    assert _baseline(db)["quantities"]["SP-1"] == {"BV-B": 1, "BV-C": 0}
+
+
+# ---------------------------------------------------------------------------
 # 4. THE POS / ingest / restock door (T3, T6)
 # ---------------------------------------------------------------------------
 
