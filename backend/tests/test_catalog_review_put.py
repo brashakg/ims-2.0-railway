@@ -1251,25 +1251,20 @@ def _frame_input(**attrs):
 
 
 @pytest.mark.parametrize("key", ["upc", "gtin"])
-def test_catalog_create_and_import_name_a_junk_code_as_junk(gtin_env, key):
-    """A junk GTIN / UPC is not a missing field: the create and import doors
+def test_catalog_create_name_a_junk_code_as_junk(gtin_env, key):
+    """A junk GTIN / UPC is not a missing field: the create door
     say what is wrong with it, not 'Missing required field: upc'."""
     with pytest.raises(HTTPException) as exc:
         asyncio.run(catalog_mod.create_catalog_product(
             _frame_input(**{key: "2000000000015"}), _user()))
     assert exc.value.status_code == 422
     assert f"not a valid {key.upper()}" in exc.value.detail
-    res = asyncio.run(catalog_mod.import_products(
-        [_frame_input(**{key: "2000000000015"})], current_user=_user()))
-    assert f"not a valid {key.upper()}" in res["errors"][0]["error"]
 
 
-def test_catalog_create_and_import_keep_the_missing_field_answer(gtin_env):
+def test_catalog_create_keep_the_missing_field_answer(gtin_env):
     inp = _frame_input()
     del inp.attributes["colour_code"]
     with pytest.raises(HTTPException) as exc:
         asyncio.run(catalog_mod.create_catalog_product(inp, _user()))
     assert exc.value.status_code == 400
     assert exc.value.detail == "Missing required field: colour_code"
-    res = asyncio.run(catalog_mod.import_products([inp], current_user=_user()))
-    assert res["errors"][0]["error"] == "Missing required field: colour_code"

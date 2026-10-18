@@ -3,7 +3,7 @@ IMS 2.0 - Admin Catalog Router
 ==============================
 Master-data CRUD for catalog admin UI: categories, brands (+ subbrands),
 lens master (brands / indices / coatings / addons / pricing), and the
-bulk-import product helper the frontend expects at `/api/v1/admin/*`.
+catalogue administration helpers under `/api/v1/admin/*`.
 
 Why this router exists:
 The frontend `services/api/products.ts` was written against an
@@ -25,10 +25,8 @@ Conventions:
   envelopes / 503 on writes; never crash the FastAPI worker.
 """
 
-import io
 import re
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, model_validator
 from pydantic import ConfigDict
 from typing import Optional, List, Dict, Any
@@ -36,7 +34,6 @@ from datetime import datetime
 import uuid
 
 from .admin import _require_admin_role
-from ..services.file_store import ANY_KIND, get_file_store, MAX_FILE_SIZE_BYTES
 from ..services.gst_rates import (
     seed_hsn_gst_master,
     invalidate_cache as invalidate_gst_cache,
@@ -995,119 +992,6 @@ async def quote_lens_price(payload: LensPriceQuoteInput):
 
 
 # ============================================================================
-# PRODUCTS — bulk-import helper
-# ============================================================================
-# Sits alongside the existing /catalog/products surface. Frontend posts
-# multipart/form-data for bulk-import; we stash the row count + accept
-# the file, then defer the actual ingestion to the catalog router's
-# /catalog/products/import endpoint (which already exists at line 1358).
-# (A THIRD SKU generator used to live here: POST /products/generate-sku,
-# CAT-BRAND-MODEL-RAND4 with uuid randomness. It WAS admin-gated -- this
-# router carries a router-level _require_admin_role dependency -- but it was
-# a redundant, non-deterministic, dead-code generator (zero frontend
-# callers), REMOVED as hygiene/attack-surface reduction. The canonical
-# deterministic preview is POST /products/sku-preview in routers/product_master.py.)
-
-
-@router.post("/products/bulk-import", status_code=202)
-async def bulk_import_products(
-    file: UploadFile = File(...),
-    category: str = Form(...),
-):
-    """Accept a CSV / XLSX upload for batch product creation.
-
-    Records the upload metadata to a `bulk_import_jobs` collection and
-    persists the raw upload bytes durably in the GridFS-backed file store
-    so the source file survives a Railway redeploy and the deferred
-    row-by-row ingestion (`/catalog/products/import`) can re-read it. We
-    keep the 25 MB size cap but DON'T apply the image/PDF mime gate here:
-    bulk-import files are CSV / XLSX, which are not in ALLOWED_MIME_TYPES.
-    """
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="No file provided")
-    contents = await file.read()
-    size_bytes = len(contents) if contents else 0
-    if size_bytes == 0:
-        raise HTTPException(status_code=400, detail="Empty file")
-    if size_bytes > MAX_FILE_SIZE_BYTES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"File exceeds {MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB cap",
-        )
-
-    job_id = _new_id()
-
-    # Persist the raw bytes durably (fail-soft if storage is unavailable).
-    file_id = None
-    store = get_file_store()
-    if store is not None:
-        file_id = store.put(
-            content=contents,
-            filename=file.filename,
-            mime_type=(file.content_type or "application/octet-stream").lower(),
-            metadata={"bulk_import_job_id": job_id, "category": category},
-        )
-
-    coll = _coll("bulk_import_jobs")
-    if coll is not None:
-        coll.insert_one(
-            {
-                "_id": job_id,
-                "job_id": job_id,
-                "filename": file.filename,
-                "file_id": file_id,
-                "mime": (file.content_type or "").lower() or None,
-                "category": category,
-                "size_bytes": size_bytes,
-                "status": "received",
-                "created_at": _now(),
-            }
-        )
-    return {
-        "job_id": job_id,
-        "filename": file.filename,
-        "file_id": file_id,
-        "category": category,
-        "size_bytes": size_bytes,
-        "persisted": file_id is not None,
-        "status": "received",
-        "next_step": "POST /api/v1/catalog/products/import to process rows",
-    }
-
-
-@router.get("/products/bulk-import/{job_id}/file")
-async def download_bulk_import_file(job_id: str):
-    """Stream the original CSV / XLSX uploaded for a bulk-import job."""
-    coll = _coll("bulk_import_jobs")
-    if coll is None:
-        raise HTTPException(status_code=503, detail="Database not available")
-    job = coll.find_one({"job_id": job_id})
-    if job is None:
-        raise HTTPException(status_code=404, detail="Bulk-import job not found")
-
-    file_id = job.get("file_id")
-    if not file_id:
-        raise HTTPException(status_code=404, detail="No file stored for this job")
-
-    store = get_file_store()
-    if store is None:
-        raise HTTPException(status_code=503, detail="File storage unavailable")
-    # ANY_KIND is deliberate: file_id is not from the request -- it was
-    # minted by store.put() when this job was created and read back off the
-    # job document the caller just fetched, so the job IS the authorisation.
-    rec = store.get(file_id, require_kind=ANY_KIND)
-    if rec is None:
-        raise HTTPException(status_code=404, detail="Import file no longer available")
-
-    content, filename, mime = rec
-    return StreamingResponse(
-        io.BytesIO(content),
-        media_type=mime,
-        headers={"Content-Disposition": f'inline; filename="{filename}"'},
-    )
-
-
-# ============================================================================
 # PRODUCTS — full CRUD aliases under /admin/products
 # ============================================================================
 # The frontend's `adminProductApi` was written against `/admin/products`
@@ -1179,9 +1063,8 @@ async def get_product(product_id: str):
 # There must be exactly ONE validated product-write path. All product
 # create/update/delete now go through routers/products.py:
 #   POST   /api/v1/products              (single create, validated)
-#   POST   /api/v1/products/bulk-create  (batch create, same validators)
 #   PUT    /api/v1/products/{id}         (update -- incl. barcode + reorder fields)
 # The frontend callers (adminProductApi writes, reorderApi) were repointed to
 # productApi accordingly (the read-only client was deleted in A6, 2026-09-27).
-# The GET reads above + bulk-import (file-stash only; not a product writer)
+# The GET reads above
 # remain for backwards-compat.

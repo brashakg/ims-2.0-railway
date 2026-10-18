@@ -56,12 +56,13 @@ boundary; this is not a production concurrency/load test.
 
 ## Scope and remaining work
 
-**A05 remains partially open.** Avinash first chose to leave legacy imports
-unchanged while fixing catalogue creation. During validation he asked to remove
-imports and improve cataloguing; scope clarification for that separate change
-is pending. This commit does not modify TechCherry, the catalogue bulk-import
-staging/review workflow, or promotion. Do not describe it as fixing every import
-door or repairing historical data.
+The follow-on [product-import retirement](CODEX-PRODUCT-IMPORTS.md) closes
+new catalogue/TechCherry product-import entry points under Avinash's explicit
+exception: remove product imports, preserve customer/prescription/order imports
+and every other screen/workflow. Deliver this identity commit and the separate
+retirement commit in one draft PR for Claude. Existing duplicate/orphan data is
+not repaired by either commit. Previously imported products still have their
+review/edit/promotion workflow; no catalogue redesign was implemented.
 
 No POS, frontend, live data, Shopify, deployment, or original audit-worktree
 changes. `C:/ims-final-audit` was left untouched. Claude remains the lead agent;

@@ -228,11 +228,6 @@ ROWS: List[Dict[str, object]] = [
         "allowed": ["ADMIN", "CATALOG_MANAGER"],
     },
     {
-        "method": "POST",
-        "path": "/api/v1/products/bulk-create",
-        "allowed": ["ADMIN", "CATALOG_MANAGER"],
-    },
-    {
         # Hub Phase 4 clone-and-vary -> N DRAFT variants.
         "method": "POST",
         "path": "/api/v1/products/clone-vary",

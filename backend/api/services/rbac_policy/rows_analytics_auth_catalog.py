@@ -220,18 +220,6 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/catalog/products",
         "allowed": ["ADMIN", "CATALOG_MANAGER", "SUPERADMIN"],
     },
-    # Hub Phase 3: vendor price-list import (preview = no-write dry run; commit
-    # lands DRAFT products + teaches the SKU-alias flywheel). CATALOG-role gated.
-    {
-        "method": "POST",
-        "path": "/api/v1/catalog-import/preview",
-        "allowed": ["ADMIN", "CATALOG_MANAGER", "SUPERADMIN"],
-    },
-    {
-        "method": "POST",
-        "path": "/api/v1/catalog-import/commit",
-        "allowed": ["ADMIN", "CATALOG_MANAGER", "SUPERADMIN"],
-    },
     # Hub Buy Desk: read-only rows for the one-screen catalog->purchase landing.
     # Catalog owners + PO raisers may view (they decide what to buy).
     {
@@ -255,11 +243,6 @@ ROWS: List[Dict[str, object]] = [
         "method": "GET",
         "path": "/api/v1/catalog/products/export",
         "allowed": ["ADMIN", "CATALOG_MANAGER", "SUPERADMIN"],
-    },
-    {
-        "method": "POST",
-        "path": "/api/v1/catalog/products/import",
-        "allowed": ["ADMIN", "SUPERADMIN"],
     },
     {
         "method": "DELETE",

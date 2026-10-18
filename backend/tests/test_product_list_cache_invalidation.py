@@ -5,7 +5,7 @@ from fnmatch import fnmatchcase
 
 import pytest
 
-from api.routers import catalog, products, techcherry_import
+from api.routers import catalog, products
 from api.services import cache as cache_module
 from test_catalog_flags_archive import (
     ADMIN, _archive, _fix, _flag, _restore, _rows, env,
@@ -77,16 +77,6 @@ def test_create_in_another_shop_is_visible_on_the_next_cached_list(env, cached):
     assert created["product_id"] in after
 
 
-def test_product_import_clears_the_other_shops_list(env, cached, monkeypatch):
-    _prime(cached)
-    monkeypatch.setattr(techcherry_import, "_get_db", lambda: env["db"])
-    result = asyncio.run(techcherry_import.import_batch(
-        techcherry_import.ImportRequest(type="products", store_id="S2", overwrite=True,
-            rows=[{"Prod Name": "Imported frame", "Barcode": "4006381333931"}]),
-        {**SHOP_B, "roles": ["SUPERADMIN"]},
-    ))
-    assert result.inserted == 1 and not result.errors
-    _assert_cleared(cached)
 
 
 @pytest.mark.parametrize("door", ["edit", "photo_order", "review", "archive", "restore", "flag", "fixed"])

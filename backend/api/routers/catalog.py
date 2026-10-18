@@ -1549,7 +1549,6 @@ def _twins_of(repo, spines: List[Optional[Dict]]) -> List[Optional[Dict]]:
     return out
 
 
-
 def _products_coll():
     """The `products` (spine) collection, or None when it cannot be reached --
     then no spine is known, and no catalogue door can write one either (their
@@ -3939,123 +3938,6 @@ async def bulk_sync_products_to_shopify(
 # ============================================================================
 # ENDPOINTS - Import/Export
 # ============================================================================
-
-
-@router.post("/products/import")
-async def import_products(
-    products: List[ProductCreateInput], current_user: dict = Depends(get_current_user)
-):
-    """Bulk import products"""
-    if not any(
-        role in current_user.get("roles", []) for role in ["SUPERADMIN", "ADMIN"]
-    ):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
-    created = 0
-    errors = []
-    # Resolve the DB once so each row's SKU counter is allocated atomically +
-    # persistently (the per-worker in-memory dict would collide under concurrency).
-    _bulk_db = _get_db()
-    from ..dependencies import get_product_repository
-
-    _bulk_repo = get_product_repository()
-
-    for i, product in enumerate(products):
-        try:
-            # Validate and create
-            category_config = CATEGORY_FIELDS.get(product.category)
-            if not category_config:
-                errors.append({"index": i, "error": "Invalid category"})
-                continue
-
-            # Step-9: enforce the SAME registry required-field rulebook as the
-            # single /catalog create. A row missing a required field is recorded
-            # + skipped (per-row), never a batch abort.
-            try:
-                _row_spine = _pm.build_canonical_product(
-                    {
-                        "category": product.category.value,
-                        "attributes": dict(product.attributes or {}),
-                        "mrp": product.pricing.mrp,
-                        "offer_price": product.pricing.offer_price
-                        or product.pricing.mrp,
-                        "discount_category": product.pricing.discount_category,
-                        "hsn_code": product.hsn_code,
-                        "gst_rate": product.gst_rate,
-                    },
-                    source="CATALOG",
-                )
-                # One product per manufacturer GTIN, as at every create door.
-                _pm.assert_gtin_free(
-                    (_row_spine.get("attributes") or {}).get("gtin"), _bulk_repo, None
-                )
-            except _pm.ProductMasterError as req_exc:
-                errors.append({"index": i, "error": _catalog_pm_error(req_exc, product)[1]})
-                continue
-
-            # Same pricing guards as the single-create path: block offer > MRP
-            # and derive GST from HSN/category. A bad row is recorded + skipped
-            # (the 400 raised by the guard is reported per-row, not as a batch
-            # abort) so one bad row never poisons the whole import.
-            try:
-                gst_rate, hsn_code = _guard_catalog_pricing(product)
-            except HTTPException as guard_exc:
-                errors.append({"index": i, "error": guard_exc.detail})
-                continue
-
-            product_id = f"prod_{uuid.uuid4().hex[:12]}"
-            sku = _pm.mint_unique_sku(
-                product.category.value, product.attributes,
-                product_repo=_bulk_repo, db=_bulk_db,
-            )
-            title = generate_product_title(product.category, product.attributes)
-
-            product_data = {
-                "id": product_id,
-                "sku": sku,
-                "title": title,
-                "category": product.category.value,
-                "category_name": CATEGORY_NAMES.get(product.category),
-                # Same fix as the single create: the import validated through
-                # build_canonical_product and then threw its result away, so an
-                # imported row kept the spreadsheet's own capitalisation.
-                "attributes": (_row_spine or {}).get("attributes") or product.attributes,
-                "description": product.description,
-                "hsn_code": hsn_code,
-                "gst_rate": gst_rate,
-                "weight": product.weight,
-                "pricing": {
-                    "mrp": product.pricing.mrp,
-                    "offer_price": product.pricing.offer_price or product.pricing.mrp,
-                    "cost_price": product.pricing.cost_price,
-                    "discount_category": product.pricing.discount_category,
-                },
-                "images": product.images,
-                # reorder_quantity -1 = auto-reorder disabled (owner default).
-                "inventory": {
-                    "total_quantity": 0,
-                    "locations": {},
-                    "reorder_quantity": -1,
-                },
-                "shopify": {"synced": False},
-                "seo": {},
-                "is_active": True,
-                "created_by": current_user.get("user_id"),
-                "created_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat(),
-            }
-
-            _save_catalog_product(product_data)
-            created += 1
-
-        except Exception as e:
-            errors.append({"index": i, "error": str(e)})
-
-    return {
-        "created_count": created,
-        "errors": errors,
-        "message": f"{created} products imported successfully",
-    }
 
 
 @router.get("/products/export")
