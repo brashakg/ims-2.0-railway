@@ -84,6 +84,7 @@ export interface DebitNote {
   amount: number;
   date: string;
   reason: string;
+  cn_type?: 'RETURN_CN' | 'SCHEME_CN' | 'DISCOUNT_CN' | 'QUALITY_CN';
   grn_id?: string;
   // As VendorPayment.store_id; a note naming a goods receipt is that receipt's shop's.
   store_id?: string | null;
