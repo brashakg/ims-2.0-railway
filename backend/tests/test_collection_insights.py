@@ -16,7 +16,8 @@ api/routers/collections_insights.py:
   * margin_30d is None unless 100% of sold units carried cost_at_sale.
   * the summary endpoint path is BATCHED (one membership read, one stock agg,
     one movement agg -- no per-collection N+1).
-  * STORE SCOPING: a STORE_MANAGER is FORCED to their token store; SALES_STAFF
+  * STORE SCOPING: anyone but an admin reads their own shop (the shared rule,
+    403 for another shop named); SALES_STAFF
     is 403'd (policy rows: ADMIN/AREA_MANAGER/STORE_MANAGER/CATALOG_MANAGER).
   * preview evaluates unsaved rules and returns
     {match_count, units_on_hand, sample<=12}.
@@ -742,15 +743,23 @@ def _headers_for(roles, store="BV-TEST-01"):
     return {"Authorization": f"Bearer {token}"}
 
 
-def test_summary_store_forced_for_store_manager(client):
+@pytest.mark.parametrize("role", ["STORE_MANAGER", "AREA_MANAGER", "CATALOG_MANAGER"])
+def test_summary_held_to_own_shop_for_non_admins(client, role):
+    # THE shop rule (owner 2026-10-18): none named -> their own shop; another
+    # shop named -> 403 (was: silently overridden; area and catalogue managers
+    # read every shop).
     r = client.get(
-        "/api/v1/collections/insights/summary?store_id=BV-OTHER-99",
-        headers=_headers_for(["STORE_MANAGER"]),
+        "/api/v1/collections/insights/summary", headers=_headers_for([role])
     )
     assert r.status_code == 200
     body = r.json()
-    assert body["store_id"] == "BV-TEST-01"  # requested store overridden
+    assert body["store_id"] == "BV-TEST-01"
     assert "collections" in body and isinstance(body["collections"], list)
+    r = client.get(
+        "/api/v1/collections/insights/summary?store_id=BV-OTHER-99",
+        headers=_headers_for([role]),
+    )
+    assert r.status_code == 403
 
 
 def test_summary_admin_keeps_requested_store(client):

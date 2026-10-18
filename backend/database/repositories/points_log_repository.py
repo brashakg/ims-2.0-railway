@@ -37,13 +37,6 @@ class PointsLogRepository(BaseRepository):
     # ID generation
     # ------------------------------------------------------------------
     @staticmethod
-    def _store_code(store_id: str) -> str:
-        raw = (store_id or "").strip().upper()
-        parts = [p for p in raw.split("-") if p and p not in ("BV", "WO", "BVO")]
-        code = (parts[0][:3] if parts else "XXX") or "XXX"
-        return "".join(c for c in code if c.isalnum()) or "XXX"
-
-    @staticmethod
     def _staff_code(staff_id: str) -> str:
         raw = (staff_id or "").strip().upper()
         # Strip "USER-" prefix if present

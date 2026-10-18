@@ -33,7 +33,8 @@ class WorkshopJobRepository(BaseRepository):
         # BUG-061: limit=0 -> full-store rollup (workshop dashboard KPIs sum/count
         # ALL jobs by status). The default 100 cap understated the counts. The
         # paginated workshop list endpoints use their own find_many(skip/limit).
-        filter_dict = {"store_id": store_id}
+        # store_id None = every shop (an admin with no shop picked).
+        filter_dict = {"store_id": store_id} if store_id else {}
         if status:
             filter_dict["status"] = status
         return self.find_many(filter_dict, sort=[("created_at", -1)], limit=0)
@@ -188,7 +189,7 @@ class WorkshopJobRepository(BaseRepository):
         pipeline = [
             {
                 "$match": {
-                    "store_id": store_id,
+                    **({"store_id": store_id} if store_id else {}),
                     "status": {"$in": ["PENDING", "IN_PROGRESS"]},
                 }
             },

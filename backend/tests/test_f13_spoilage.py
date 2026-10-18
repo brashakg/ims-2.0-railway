@@ -575,7 +575,8 @@ class TestSpoilageAnalytics:
         assert s["spoilage_cost_total_paise"] == 45000
         assert s["by_technician"] == {"TECH-1": {"count": 1, "cost_paise": 45000}}
         assert s["top_reasons"][0]["reason_code"] == "AXIS_ERROR"
-        assert s["store_id"] == STORE
+        # An admin with no shop named reads every shop (owner 2026-10-18).
+        assert s["store_id"] is None
 
     def test_old_job_with_fresh_remake_counts(self, monkeypatch, db):
         # A job CREATED long ago but remade yesterday IS current margin bleed.

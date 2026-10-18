@@ -32,13 +32,6 @@ class PayoutSnapshotRepository(BaseRepository):
     def id_field(self) -> str:
         return "snapshot_id"
 
-    @staticmethod
-    def _store_code(store_id: str) -> str:
-        raw = (store_id or "").strip().upper()
-        parts = [p for p in raw.split("-") if p and p not in ("BV", "WO", "BVO")]
-        code = (parts[0][:3] if parts else "XXX") or "XXX"
-        return "".join(c for c in code if c.isalnum()) or "XXX"
-
     def _generate_snapshot_id(
         self, store_id: str, year: int, month: int, status: str
     ) -> str:

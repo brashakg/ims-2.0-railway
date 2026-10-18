@@ -62,6 +62,9 @@ export interface GstCrossCheck {
   period: string;
   entity_id: string | null;
   entity_name: string | null;
+  /** The one shop this check covers (an accountant's, owner 2026-10-18);
+   *  null = every shop (an admin). */
+  store_id?: string | null;
   store_count: number;
   stores_computed: number;
   failed_store_ids: string[];

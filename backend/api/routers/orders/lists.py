@@ -13,6 +13,7 @@ from ..auth import get_current_user
 from ...dependencies import (
     get_customer_repository,
     get_order_repository,
+    no_shop_scope_for,
     validate_store_access,
 )
 from ._shared import (
@@ -48,7 +49,12 @@ async def list_orders(
 ):
     """List orders with filters"""
     repo = get_order_repository()
-    active_store = validate_store_access(store_id, current_user)
+    # A non-admin login with NO shop lists no shop's orders (owner-approved
+    # 2026-10-18, R4): the reserved no-shop id, which no order carries. It
+    # used to fall through to every shop's orders; naming a shop is a 403.
+    active_store = validate_store_access(store_id, current_user) or no_shop_scope_for(
+        store_id, current_user
+    )
 
     # 30-DAY BROWSE HORIZON (owner ruling 2026-09-01). Everyone except ADMIN /
     # SUPERADMIN sees only the last 30 days when BROWSING. Asking for ONE

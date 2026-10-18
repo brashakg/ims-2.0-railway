@@ -52,7 +52,7 @@ async def dashboard_stats(
     current_user: dict = Depends(get_current_user),
 ):
     """Get dashboard statistics for a store - fetched from database"""
-    active_store = store_in_view(store_id, current_user) or "store-001"
+    active_store = store_in_view(store_id, current_user)
 
     order_repo = get_order_repository()
     stock_repo = get_stock_repository()
@@ -79,8 +79,12 @@ async def dashboard_stats(
 
     # Fetch orders data
     if order_repo is not None:
-        # Get all orders for store
-        all_orders = order_repo.find_by_store(active_store)
+        # Get all orders for store (every shop's when none is in view)
+        all_orders = (
+            order_repo.find_by_store(active_store)
+            if active_store
+            else order_repo.find_many({}, sort=[("created_at", -1)], limit=500)
+        )
 
         # Calculate totals
         for order in all_orders:
@@ -117,7 +121,9 @@ async def dashboard_stats(
     # Fetch customer data
     if customer_repo is not None:
         # Count customers created today
-        all_customers = customer_repo.find_many({"store_id": active_store}, limit=0)
+        all_customers = customer_repo.find_many(
+            {"store_id": active_store} if active_store else {}, limit=0
+        )
         for customer in all_customers:
             created_date = ist_date_str(customer.get("created_at"))
             if created_date == today_str:
@@ -127,7 +133,9 @@ async def dashboard_stats(
     open_tasks = 0
     if task_repo is not None:
         # THE task count: only the tasks the caller can see (task_visibility).
-        open_tasks = task_counts(task_repo, current_user, {"store_id": active_store})["open"]
+        open_tasks = task_counts(
+            task_repo, current_user, {"store_id": active_store} if active_store else {}
+        )["open"]
 
     # Real today-vs-yesterday sales change (same delta math as
     # /sales/comparison + /sales/growth). null when yesterday had no sales
@@ -162,7 +170,7 @@ async def inventory_report(
     current_user: dict = Depends(get_current_user),
 ):
     """Get inventory report for a store - fetched from database"""
-    active_store = store_in_view(store_id, current_user) or "store-001"
+    active_store = store_in_view(store_id, current_user)
     stock_repo = get_stock_repository()
 
     if stock_repo is not None:
@@ -320,7 +328,7 @@ async def sales_by_salesperson(
     # so a string filter never matched and this report came back empty.
     orders = order_repo.find_many(
         {
-            "store_id": active_store,
+            **({"store_id": active_store} if active_store else {}),
             "created_at": {"$gte": from_dt, "$lte": to_dt},
             "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]},
         },

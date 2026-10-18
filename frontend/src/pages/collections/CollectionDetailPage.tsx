@@ -5,9 +5,9 @@
 // read-only rule chips) and the KPI strip — products, units on hand, stock
 // value (+ basis + MRP subtext), sold 7/30/90, revenue, margin (or "needs cost
 // data"), sell-through, days of cover (display-capped at 180+) — plus a
-// per-store split table. The 7/30/90 selector re-fetches; non-store-scoped
-// roles also get a store filter (STORE_MANAGER numbers arrive store-forced
-// from the backend, so no filter is rendered for them). Fail-soft while the
+// per-store split table. The 7/30/90 selector re-fetches; an admin also gets
+// a store filter (anyone else's numbers arrive scoped to their own shop by
+// the backend, so no filter is rendered for them). Fail-soft while the
 // Track 2 insights backend isn't deployed.
 
 import { useEffect, useMemo, useState } from 'react';
@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { storeApi } from '../../services/api/stores';
+import { userSeesAllStores } from '../../utils/storeAccess';
 import {
   collectionsInsightsApi,
   type CollectionInsights,
@@ -37,9 +38,9 @@ interface StoreOpt {
   store_code?: string;
 }
 
-// Roles that get the store filter (a pure STORE_MANAGER is already store-forced
-// by the backend, so the select would be a lie for them).
-const STORE_FILTER_ROLES = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'CATALOG_MANAGER'];
+// Only an admin gets the store filter (owner 2026-10-18): everyone else --
+// an area or catalogue manager too -- reads their own shop on the server, so
+// an 'All stores' select would be a lie for them.
 const PUBLISH_LINK_ROLES = ['SUPERADMIN', 'ADMIN'];
 
 // NOTE: the insights API's KPI windows are FIXED (sold d7/d30/d90; revenue/
@@ -80,7 +81,7 @@ export default function CollectionDetailPage() {
   const { id = '' } = useParams<{ id: string }>();
   const { user } = useAuth();
   const roles: string[] = (user?.roles as string[]) || [];
-  const showStoreFilter = roles.some((r) => STORE_FILTER_ROLES.includes(r));
+  const showStoreFilter = userSeesAllStores(roles);
   const canManagePublishing = roles.some((r) => PUBLISH_LINK_ROLES.includes(r));
 
   const [meta, setMeta] = useState<CollectionMeta | null>(null);

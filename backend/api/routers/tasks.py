@@ -995,7 +995,7 @@ async def get_daily_checklists(
             "progress": 0,
         }
 
-    active_store = store_in_view(store_id, current_user)
+    active_store = store_in_view(store_id, current_user, one_shop=True)
 
     # Get SOP template for this checklist type
     filters = {"type": checklist_type, "store_id": active_store, "active": True}
@@ -1555,7 +1555,7 @@ async def scan_payment_variance(
     if order_repo is None:
         return {"scanned": 0, "anomalies": 0, "tasks_created": 0}
 
-    active_store = store_in_view(store_id, current_user)
+    active_store = store_in_view(store_id, current_user, one_shop=True)
     # BUG-031 dual window. `orders.created_at` is a BSON Date on every live
     # write path (BaseRepository._add_timestamps stamps datetime.now();
     # shopify_ingest persists naive-UTC datetimes), and Mongo type-bracketing
@@ -2131,7 +2131,7 @@ async def get_sop_checklist(
     if not tpl:
         raise HTTPException(status_code=404, detail="SOP template not found")
 
-    active_store = store_in_view(store_id, current_user)
+    active_store = store_in_view(store_id, current_user, one_shop=True)
     # IST audit: the checklist day key must be the IST business day. The UTC
     # day (datetime.now() on Railway) put late-night reads on yesterday's doc.
     day = date or ist_today().isoformat()

@@ -1914,7 +1914,7 @@ async def get_petty_cash_balance(
     """Current float balance, limit, low-balance flag, and recent ledger for a
     store. Store-scoped (an accountant/manager only sees their stores; admins see
     any). Fail-soft to a not-open envelope when no float exists."""
-    scoped = store_in_view(store_id, current_user)
+    scoped = store_in_view(store_id, current_user, one_shop=True)
     if not scoped:
         raise HTTPException(status_code=400, detail="store_id required")
     from ..services import petty_cash_service as pcs
@@ -1950,7 +1950,7 @@ async def get_petty_cash_settlement_position(
 
     Store-scoped (a manager/accountant only sees their stores; admins see any).
     Fail-soft to an exists=False envelope when no float / no DB."""
-    scoped = store_in_view(store_id, current_user)
+    scoped = store_in_view(store_id, current_user, one_shop=True)
     if not scoped:
         raise HTTPException(status_code=400, detail="store_id required")
     from ..services import petty_cash_settlement_service as pcss
@@ -2001,7 +2001,7 @@ async def list_petty_cash_settlements(
     current_user: dict = Depends(require_roles(*_PETTY_SETTLE_VIEW_ROLES)),
 ):
     """Settlement history for a store (newest first). Store-scoped; fail-soft."""
-    scoped = store_in_view(store_id, current_user)
+    scoped = store_in_view(store_id, current_user, one_shop=True)
     if not scoped:
         raise HTTPException(status_code=400, detail="store_id required")
     from ..services import petty_cash_settlement_service as pcss

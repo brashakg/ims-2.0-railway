@@ -243,7 +243,7 @@ async def non_moving_stock(
         pipeline = [
             {
                 "$match": {
-                    "store_id": active_store,
+                    **({"store_id": active_store} if active_store else {}),
                     "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]},
                 }
             },

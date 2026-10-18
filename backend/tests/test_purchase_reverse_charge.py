@@ -657,7 +657,8 @@ class TestTwoRegistrations:
         row = next(c for c in xc["comparisons"] if c["metric"] == "Net GST payable (cash)")
         assert row["status"] == "INFO"  # one pool would read 0; advisory, never a green MATCH
         body = finance.GstCrossCheckSignoff(month=5, year=2026, entity_id="E1", note="ok")
-        out = asyncio.run(finance.gst_cross_check_signoff(body, dict(_ADMIN)))
+        # The company's sign-off is an admin's (owner 2026-10-18).
+        out = asyncio.run(finance.gst_cross_check_signoff(body, {**_ADMIN, "roles": ["ADMIN"]}))
         stored = db[finance._GST_CROSSCHECK_SIGNOFFS].find_one({"entity_id": "E1"})
         assert stored["gst_payable"] == 1000.0, out
 

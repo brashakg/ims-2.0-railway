@@ -11,7 +11,6 @@ from typing import Optional
 from fastapi import Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from ..auth import get_current_user
-from ...dependencies import resolve_store_scope
 from ...services.org_validation import shop_gstins
 from ._shared import (
     _REAL_ORDER_STATUS_FILTER,
@@ -42,7 +41,7 @@ async def get_gst_reconciliation(
     # Entity-grouped GST reconciliation is a filing/accounting view --
     # finance-admin only (owner decision 2026-06-16), so a single-store
     # STORE_MANAGER/AREA_MANAGER cannot read any entity's GST position.
-    _require_org_finance(current_user)
+    scope = _require_org_finance(current_user)
     db = _get_db()
     now = now_ist()
     m = month or now.month
@@ -56,11 +55,10 @@ async def get_gst_reconciliation(
     if entity_id:
         store_ids = [sid for sid, eid in s2e.items() if eid == entity_id]
     # THE shop rule the GST summary cards above this table read
-    # (resolve_store_scope): ADMIN / SUPERADMIN every shop, an accountant
-    # his own shop -- so one tab never shows one login two scopes (a Pune
-    # accountant read Pune's input credit on the cards and every entity's in
-    # this table, round 4).
-    scope = resolve_store_scope(None, current_user)
+    # (resolve_store_scope, via _require_org_finance): ADMIN / SUPERADMIN
+    # every shop, an accountant his own shop -- so one tab never shows one
+    # login two scopes (a Pune accountant read Pune's input credit on the
+    # cards and every entity's in this table, round 4).
     if scope:
         store_ids = [scope] if store_ids is None or scope in store_ids else []
 
@@ -258,7 +256,9 @@ def _books_and_tally_for_stores(db, store_ids, start, end) -> tuple:
     return books, tally
 
 
-def _run_gst_cross_check(db, m: int, y: int, entity_id: Optional[str]) -> dict:
+def _run_gst_cross_check(
+    db, m: int, y: int, entity_id: Optional[str], shop: Optional[str] = None
+) -> dict:
     """Compute the full GST cross-check payload for (month, year, entity).
 
     Shared by the GET (display) and the POST sign-off, which RECOMPUTES
@@ -266,7 +266,11 @@ def _run_gst_cross_check(db, m: int, y: int, entity_id: Optional[str]) -> dict:
     client's claim. Raises 503 when the DB is unreachable and 404 when a named
     entity resolves to no stores (which would otherwise render every source as
     0.00 -- a false 'all sources reconcile' green screen). Returns the result
-    WITHOUT the sign-off marker (the GET attaches that separately)."""
+    WITHOUT the sign-off marker (the GET attaches that separately).
+
+    `shop` (an accountant's, owner 2026-10-18): the check covers that shop
+    alone -- its returns, books and purchase-side credit; a named entity it
+    is not part of has no stores here (404)."""
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
@@ -285,8 +289,12 @@ def _run_gst_cross_check(db, m: int, y: int, entity_id: Optional[str]) -> dict:
     except Exception:  # noqa: BLE001
         logger.exception("cross-check: shop GSTINs unreadable")
         s2g, gstins_failed = {}, True
-    if entity_id:
-        store_ids = [sid for sid, eid in s2e.items() if eid == entity_id]
+    if entity_id or shop:
+        store_ids = [
+            sid
+            for sid, eid in s2e.items()
+            if (not entity_id or eid == entity_id) and (not shop or sid == shop)
+        ]
         if not store_ids:
             raise HTTPException(
                 status_code=404, detail="No stores found for this entity"
@@ -350,7 +358,7 @@ def _run_gst_cross_check(db, m: int, y: int, entity_id: Optional[str]) -> dict:
             "created_at": {"$gte": start, "$lt": end},
             "status": {"$nin": ["DRAFT", "draft", "CANCELLED", "cancelled"]},
         }
-        if entity_id:
+        if entity_id or shop:
             p_match["$or"] = [
                 {"delivery_store_id": {"$in": store_ids}},
                 {"store_id": {"$in": store_ids}},
@@ -388,7 +396,9 @@ def _run_gst_cross_check(db, m: int, y: int, entity_id: Optional[str]) -> dict:
     # Booked credit that no GSTIN's return counts (no company, no tax heads,
     # or a GSTIN that is no shop's): a row of its own, so a month with credit
     # missing from GSTR-3B can never read green.
-    unplaced = _itc_unplaced(db, y, m, monthrange(y, m)[1], entity_id)
+    unplaced = _itc_unplaced(
+        db, y, m, monthrange(y, m)[1], entity_id or (s2e.get(shop) if shop else None)
+    )
     # A bill read that failed is a dead ITC leg too (HR-1): no sign-off.
     itc_leg_failed = itc_leg_failed or gstins_failed or bool(unplaced.get("failed"))
     result =_xc.build_crosscheck(gstr1, gstr3b, books, tally, unplaced=unplaced)
@@ -399,6 +409,7 @@ def _run_gst_cross_check(db, m: int, y: int, entity_id: Optional[str]) -> dict:
             "period": period,
             "entity_id": entity_id,
             "entity_name": enames.get(entity_id) if entity_id else "All entities",
+            "store_id": shop,
             "store_count": len(store_ids),
             "stores_computed": len(store_ids) - len(failed),
             "failed_store_ids": sorted(failed),
@@ -436,15 +447,16 @@ async def get_gst_cross_check(
     """Accountant GST cross-check for a (month, entity): GSTR-1 / GSTR-3B vs the
     books (orders / payments / Tally / purchase-side ITC), side by side, with
     per-rate breakup, CDNR + deemed-supply detail, and mismatch flags. A review
-    aid only -- it changes no figure and locks no period."""
-    _require_org_finance(current_user)
+    aid only -- it changes no figure and locks no period. An accountant's
+    check covers his own shop (owner 2026-10-18)."""
+    shop = _require_org_finance(current_user)
     db = _get_db()
 
     now = now_ist()
     m = month or now.month
     y = year or now.year
 
-    result = _run_gst_cross_check(db, m, y, entity_id)
+    result = _run_gst_cross_check(db, m, y, entity_id, shop)
 
     # Attach the latest sign-off (if any) so the screen shows CHECKED status.
     signoff = None
@@ -467,8 +479,17 @@ async def gst_cross_check_signoff(
 
     Idempotent upsert keyed on (year, month, entity_id). Audit-logged. This is a
     review marker only -- it does NOT lock the accounting period (that is the
-    separate /period-lock action) and changes no GST figure."""
-    _require_org_finance(current_user)
+    separate /period-lock action) and changes no GST figure.
+
+    The sign-off is the COMPANY's month (keyed by entity, one per period): an
+    accountant assigned to a shop sees only that shop's check, so his sign-off
+    would vouch for figures he was not shown -- company-wide needs an admin
+    (owner 2026-10-18)."""
+    if _require_org_finance(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="Signing off the company's GST cross-check needs an admin.",
+        )
     db = _get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")

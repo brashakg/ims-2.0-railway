@@ -416,7 +416,7 @@ export default function GstCrossCheckPage() {
               <button
                 type="button"
                 onClick={doSignoff}
-                disabled={signingOff || data.partial}
+                disabled={signingOff || data.partial || !!data.store_id}
                 className="inline-flex items-center gap-1.5 text-sm font-medium text-white bg-bv hover:bg-bv-600 rounded-lg px-4 py-1.5 disabled:opacity-60"
               >
                 {signingOff ? (
@@ -426,6 +426,11 @@ export default function GstCrossCheckPage() {
                 )}
                 {data.signoff?.checked ? 'Re-check month' : 'Mark month CHECKED'}
               </button>
+              {data.store_id && (
+                <span className="text-xs text-gray-600">
+                  This check covers your shop only. Signing off the company&apos;s month needs an admin.
+                </span>
+              )}
               {data.partial && (
                 <span className="text-xs text-red-700">
                   Sign-off blocked: some stores failed to compute.

@@ -27,6 +27,23 @@ class BaseRepository(ABC, Generic[T]):
         """
         self.collection = collection
 
+    def _store_code(self, store_id: str) -> str:
+        """A shop's short code for human ids (PAY-PUN-2026-10, PL-PUN-...): the
+        part of its store_code after the brand (BV-PUN-01 -> PUN). The code is
+        read off the store document -- Pune's store_id is a UUID -- and the id
+        stands in only when no store document resolves."""
+        raw = store_id or ""
+        try:
+            doc = self.collection.database["stores"].find_one(
+                {"store_id": store_id}, {"store_code": 1}
+            )
+            raw = (doc or {}).get("store_code") or raw
+        except Exception:  # noqa: BLE001 -- no stores collection: the id
+            pass
+        parts = [p for p in raw.strip().upper().split("-") if p and p not in ("BV", "WO", "BVO")]
+        code = (parts[0][:3] if parts else "XXX") or "XXX"
+        return "".join(c for c in code if c.isalnum()) or "XXX"
+
     @property
     @abstractmethod
     def entity_name(self) -> str:

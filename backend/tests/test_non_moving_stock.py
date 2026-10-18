@@ -65,8 +65,8 @@ class TestAuthAndEnvelope:
         assert body["count"] == 0
         assert body["days_threshold"] == 90
         assert "as_of" in body
-        # store_id should reflect the token's active_store_id
-        assert body["store_id"] == "BV-TEST-01"
+        # An admin with no shop named reads every shop (owner 2026-10-18).
+        assert body["store_id"] is None
 
     def test_custom_days_threshold(self, client, auth_headers):
         resp = client.get(

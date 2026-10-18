@@ -31,6 +31,22 @@ def _counters_collection():
         return None
 
 
+def _store_code_of(store_id: str) -> str:
+    """The code a shop's documents print (stores.store_code): Pune's store_id
+    is a UUID, its code BV-PUN-01. The id itself when no code is on file or
+    the store cannot be read (DB-less)."""
+    try:
+        db = _get_db()
+        doc = (
+            db.get_collection("stores").find_one({"store_id": store_id}, {"store_code": 1})
+            if db is not None and store_id
+            else None
+        )
+        return (doc or {}).get("store_code") or store_id
+    except Exception:  # noqa: BLE001
+        return store_id
+
+
 def generate_po_number(store_id: str, store_code: Optional[str] = None) -> str:
     """Allocate the next PO number for a store in its financial year.
 
@@ -44,7 +60,7 @@ def generate_po_number(store_id: str, store_code: Optional[str] = None) -> str:
         _counters_collection(),
         doc_type="PO",
         store_id=store_id,
-        store_code=store_code or store_id,
+        store_code=store_code or _store_code_of(store_id),
     )
 
 
@@ -59,7 +75,7 @@ def generate_grn_number(store_id: str, store_code: Optional[str] = None) -> str:
         _counters_collection(),
         doc_type="GRN",
         store_id=store_id,
-        store_code=store_code or store_id,
+        store_code=store_code or _store_code_of(store_id),
     )
 
 
