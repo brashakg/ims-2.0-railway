@@ -5527,3 +5527,53 @@ def test_clear_hold_never_claims_beside_a_running_remap(world, monkeypatch):
     assert getattr(out, "status_code", None) == 409 and "press Re-map" in out.detail, out
     assert _sold_at(db, oid) == ["BV-BOK-01"]
     assert db.orders.find_one({"order_id": oid})["fulfillment_hold"] is True
+
+
+# ---------------------------------------------------------------------------
+# SF03 -- a failed order drain is retried, and the retry never books twice
+# ---------------------------------------------------------------------------
+
+
+def test_order_drain_that_failed_after_booking_is_retried_without_a_second_booking(
+        world, monkeypatch):
+    """The first drain books the order (invoice serial + stock claim) and then
+    fails. The inbox row must be FAILED (not done), and its retry must resolve
+    to the existing booking through the webhook-id claim: one order, one
+    invoice, one sold unit."""
+    from datetime import datetime, timezone
+
+    from agents.implementations.nexus import NexusAgent
+    from api.services import online_order_mapper
+
+    db = world["db"]
+    _stock(db, "BV-BOK-01", "P-RB", 2)
+    world["shop"].fo(FO_1, LOC_BOK)
+    db.webhook_inbox.insert_one({
+        "webhook_id": "inbox-1", "vendor": "shopify", "processed": False,
+        "status": "received", "attempts": 0, "received_at": datetime.now(timezone.utc),
+        "payload": _order(53001),
+        "headers": {"x-shopify-topic": "orders/create", "x-shopify-webhook-id": "WH-53001"},
+    })
+    real = online_order_mapper._stamp_order_customer
+    calls = []
+
+    def fail_once(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("crash after booking")
+        return real(*a, **k)
+
+    monkeypatch.setattr(online_order_mapper, "_stamp_order_customer", fail_once)
+    agent = NexusAgent(db=db)
+
+    asyncio.run(agent._handle_inbox_webhook("inbox-1", "shopify"))
+    row = db.webhook_inbox.find_one({"webhook_id": "inbox-1"})
+    assert row["status"] == "failed" and row["processed"] is False
+    assert db.orders.count_documents({"shopify_order_id": "53001"}) == 1
+
+    asyncio.run(agent._handle_inbox_webhook("inbox-1", "shopify"))
+    row = db.webhook_inbox.find_one({"webhook_id": "inbox-1"})
+    assert row["status"] == "succeeded" and row["processed"] is True
+    orders = list(db.orders.find({"shopify_order_id": "53001"}))
+    assert len(orders) == 1, "the retry must not book a second order"
+    assert _sold_at(db, orders[0]["order_id"]) == ["BV-BOK-01"], "one unit claimed once"

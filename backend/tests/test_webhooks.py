@@ -36,6 +36,7 @@ import sys
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List
 
+import mongomock
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -500,7 +501,7 @@ def test_inbox_doc_shape_has_required_fields(client, patched_webhooks):
 def test_nexus_marks_inbox_processed_on_event():
     """Hand NEXUS a webhook.received event; it should look up the inbox
     row, run the handler stub, and flip processed=True."""
-    fake_db = FakeDB()
+    fake_db = mongomock.MongoClient()["t"]  # SF03 drain claims via find_one_and_update
     inbox = fake_db.get_collection("webhook_inbox")
 
     inbox.insert_one({
@@ -539,7 +540,7 @@ def test_nexus_handles_missing_inbox_row_gracefully():
 def test_nexus_dispatches_per_vendor_handler():
     """Each vendor invokes its dedicated handler stub. We patch the handler
     to capture the payload."""
-    fake_db = FakeDB()
+    fake_db = mongomock.MongoClient()["t"]  # SF03 drain claims via find_one_and_update
     inbox = fake_db.get_collection("webhook_inbox")
     inbox.insert_one({
         "webhook_id": "wh-2",

@@ -149,7 +149,8 @@ def test_sync_health_none_db_is_failsoft():
     assert "reconcile" not in out
     assert out["last_shopify_sync"] == {"found": False}
     assert out["last_successful_shopify_sync_at"] is None
-    assert out["webhooks"] == {"failed": 0, "skipped": 0, "pending": 0}
+    assert out["webhooks"] == {"failed": 0, "skipped": 0, "pending": 0, "dead": 0,
+                               "dead_letters": []}
     # online_configured = IMS Mongo carries Shopify-mapped objects; no DB -> False.
     assert out["online_configured"] is False
     # Catalog-push signal (OS-049) degrades to not-found on no DB.

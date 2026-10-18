@@ -324,7 +324,9 @@ def _unbooked_webhook_rows(db, *, search: Optional[str]) -> List[Dict[str, Any]]
     for sid, (row, payload) in candidates.items():
         if sid in booked:
             continue
-        processed = bool(row.get("processed"))
+        # SF03: a drain whose handler FAILED leaves processed=False with
+        # status failed/dead -- that is a failed mapping, not a pending one.
+        processed = bool(row.get("processed")) or row.get("status") in ("failed", "dead")
         # Honest skip reason, best-effort: an explicit handler/skip note on the
         # inbox row wins; else derive the mapper's own no-line-items skip; else a
         # plain-English generic that still tells the operator what to do.

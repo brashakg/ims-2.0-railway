@@ -1142,3 +1142,60 @@ def test_webhook_subscription_delete_dark_no_network(monkeypatch):
     monkeypatch.setattr(shopify_push, "_graphql", boom)
     res = _run(shopify_push.delete_webhook_subscription(object(), "gid://x/1"))
     assert res["mode"] == "SIMULATED" and res["ok"] is True and res["deleted"] is None
+
+
+# ===========================================================================
+# SF03 -- a refund drain that failed is retried without a second credit note
+# ===========================================================================
+
+
+def test_refund_drain_failed_after_posting_is_retried_without_double_credit(wired, monkeypatch):
+    """The credit note + restock post, then the handler fails. The inbox row
+    is FAILED (not done); the retry hits the refund-id claim and resolves to
+    duplicate: one ledger entry, one returns doc."""
+    import mongomock
+    from datetime import datetime, timezone
+
+    from agents.implementations.nexus import NexusAgent
+    from api.services import shopify_refund as sr
+
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    _seed_online_order(wired)
+    wired["customer_repo"].create(
+        {"customer_id": "CUST-1", "name": "Ravi", "mobile": "9876543210", "store_credit": 0.0}
+    )
+    real = sr._post_credit_and_restock
+    calls = []
+
+    def post_then_crash(*a, **k):
+        out = real(*a, **k)
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("crash after posting")
+        return out
+
+    monkeypatch.setattr(sr, "_post_credit_and_restock", post_then_crash)
+
+    inbox = mongomock.MongoClient()["sf03"].webhook_inbox
+    inbox.insert_one({
+        "webhook_id": "inbox-r", "vendor": "shopify", "processed": False,
+        "status": "received", "attempts": 0, "received_at": datetime.now(timezone.utc),
+        "payload": _refund_payload(),
+        "headers": {"x-shopify-topic": "refunds/create", "x-shopify-webhook-id": "WH-R"},
+    })
+    agent = NexusAgent(db=wired["db"])
+    real_get = agent.get_collection
+    monkeypatch.setattr(agent, "get_collection",
+                        lambda name: inbox if name == "webhook_inbox" else real_get(name))
+
+    _run(agent._handle_inbox_webhook("inbox-r", "shopify"))
+    row = inbox.find_one({"webhook_id": "inbox-r"})
+    assert row["status"] == "failed" and row["processed"] is False
+    assert wired["ledger"].count_documents({"customer_id": "CUST-1"}) == 1
+
+    _run(agent._handle_inbox_webhook("inbox-r", "shopify"))
+    row = inbox.find_one({"webhook_id": "inbox-r"})
+    assert row["status"] == "succeeded" and row["processed"] is True
+    assert len(calls) == 1, "the retry must not post the refund again"
+    assert wired["ledger"].count_documents({"customer_id": "CUST-1"}) == 1
+    assert wired["returns"].count_documents({"shopify_refund_id": "700001"}) == 1

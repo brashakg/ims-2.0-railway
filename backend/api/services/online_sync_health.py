@@ -654,9 +654,13 @@ def failed_webhook_summary(db) -> Dict[str, Any]:
 
     A row is 'failed' if NEXUS recorded a handler_error, and 'skipped' if the
     receiver couldn't process it (e.g. skipped_reason=secret_not_configured).
-    Also reports how many envelopes are still unprocessed (pending drain).
+    Also reports how many envelopes are still waiting for a drain (pending),
+    and the DEAD LETTERS (SF03): rows whose handler failed
+    NexusAgent.WEBHOOK_MAX_ATTEMPTS times and are no longer retried -- count
+    plus the newest few, so an operator can act on them.
     Fail-soft -> zeros."""
-    out = {"failed": 0, "skipped": 0, "pending": 0}
+    out: Dict[str, Any] = {"failed": 0, "skipped": 0, "pending": 0, "dead": 0,
+                           "dead_letters": []}
     coll = _coll(db, "webhook_inbox")
     if coll is None:
         return out
@@ -677,9 +681,30 @@ def failed_webhook_summary(db) -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SYNC_HEALTH] webhook skipped-count failed: %s", exc)
     try:
-        out["pending"] = int(coll.count_documents({"processed": {"$ne": True}}))
+        out["pending"] = int(coll.count_documents(
+            {"processed": {"$ne": True}, "status": {"$nin": ["failed", "dead"]}}
+        ))
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SYNC_HEALTH] webhook pending-count failed: %s", exc)
+    try:
+        out["dead"] = int(coll.count_documents({"status": "dead"}))
+        out["dead_letters"] = [
+            {
+                "webhook_id": r.get("webhook_id"),
+                "vendor": r.get("vendor"),
+                "topic": (r.get("headers") or {}).get("x-shopify-topic"),
+                "attempts": r.get("attempts"),
+                "error": r.get("handler_error"),
+                "failed_at": r.get("failed_at"),
+            }
+            for r in coll.find(
+                {"status": "dead"},
+                {"webhook_id": 1, "vendor": 1, "headers": 1, "attempts": 1,
+                 "handler_error": 1, "failed_at": 1},
+            ).sort("received_at", -1).limit(20)
+        ]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[SYNC_HEALTH] webhook dead-letter read failed: %s", exc)
     return out
 
 
