@@ -2280,6 +2280,19 @@ async def create_catalog_product(
 
     _save_catalog_product(product_data)
 
+    # Model families (G1): a model that already exists takes this product as
+    # a new colour/size -- the same link_to_family every door uses. Fail-soft:
+    # an unlinked product is still a product (catalogue review links it).
+    if _pr is not None:
+        try:
+            _fdb = _get_db()
+            _lead = _pm.find_family_lead(_fdb.get_collection("products"), _spine, exclude_id=product_id)
+            if _lead is not None:
+                _pm.link_to_family(_fdb, product_id, _lead["product_id"], actor=current_user.get("user_id"))
+                product_data = _get_catalog_product(product_id) or product_data
+        except Exception:  # noqa: BLE001
+            logger.warning("[CATALOG] model link skipped for %s", product_id, exc_info=True)
+
     # Online discount engine (rebuild of BVI DiscountRule): compute + store the
     # ONLINE storefront price from the active rules onto product_data.ecom.*
     # (and any variants). ADDITIVE + FAIL-SOFT -- it must NEVER block a save, and
@@ -3448,6 +3461,18 @@ async def _archive_product(
     # write-back. Fail-soft: the delete stands even if Shopify says no.
     if product is not None:
         await _delist.delist_if_live(_get_db(), product, reason="deleted", actor=actor)
+    # Model families (G1): an archived LEAD hands the model to its next
+    # first-catalogued variant. AFTER the take-down, which reads the twin as
+    # the listing owner it still was. Fail-soft: the archive stands.
+    if spine_id:
+        try:
+            from ..dependencies import get_audit_repository
+
+            _pm.promote_new_lead(
+                _get_db(), spine_id, actor=actor.get("user_id"), audit_repo=get_audit_repository()
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("[CATALOG] model lead hand-over skipped for %s", spine_id, exc_info=True)
     # Every archive door: a cached Catalog / till list page must not keep
     # listing it until the cache runs out.
     invalidate_product_lists()

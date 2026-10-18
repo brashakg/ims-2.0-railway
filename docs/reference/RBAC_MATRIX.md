@@ -68,9 +68,9 @@ manager gets 404).
 | Gate type | Count |
 |---|---|
 | PUBLIC (no IMS role gate) | 45 |
-| AUTHENTICATED | 393 |
-| Role-gated (one or more roles) | 870 |
-| **Total `/api/v1` (method x path)** | **1308** |
+| AUTHENTICATED | 394 |
+| Role-gated (one or more roles) | 872 |
+| **Total `/api/v1` (method x path)** | **1311** |
 | ...of which `store_scoped` | 240 |
 | ...of which `self_enforced` | 47 |
 
@@ -1262,6 +1262,9 @@ entry exactly; see the manual interpretation notes above.
 | `GET` | `/api/v1/products/website-verdict` | AUTH |  |  |
 | `GET` | `/api/v1/products/{product_id}` | AUTH |  |  |
 | `PUT` | `/api/v1/products/{product_id}` | ADMIN, CATALOG_MANAGER |  |  |
+| `GET` | `/api/v1/products/{product_id}/family` | AUTH |  |  |
+| `POST` | `/api/v1/products/{product_id}/link-to-model` | ADMIN, CATALOG_MANAGER |  |  |
+| `POST` | `/api/v1/products/{product_id}/unlink-from-model` | ADMIN, CATALOG_MANAGER |  |  |
 
 ### `/api/v1/promotions`
 
