@@ -885,7 +885,19 @@ def _sync_existing_order_status(
     stamps cancelled_at on a real move to CANCELLED). Returns True on a write.
     `verdict`, when given, gets the table's terminal_withheld -- decided HERE,
     on the doc as it is now, so the pull sweep reports the handler's own
-    answer. Fail-soft."""
+    answer. Fail-soft.
+
+    SF03: False is either "nothing to apply" (no such order, a historical
+    import, a stale body) or a FAILURE (the DB unreadable, the status claim
+    or the money write not landed). A failure also sets
+    ``verdict["sync_failed"]`` so the webhook drain reports it and the inbox
+    retries, instead of reading a missed sync as done."""
+
+    def failed(why: str) -> bool:
+        if verdict is not None:
+            verdict["sync_failed"] = why
+        return False
+
     if db is None or not shopify_order_id:
         return False
     try:
@@ -893,12 +905,12 @@ def _sync_existing_order_status(
     except Exception:  # noqa: BLE001
         orders_coll = None
     if orders_coll is None:
-        return False
+        return failed("orders collection unavailable")
 
     try:
         existing = orders_coll.find_one({"shopify_order_id": shopify_order_id})
-    except Exception:  # noqa: BLE001
-        existing = None
+    except Exception as exc:  # noqa: BLE001
+        return failed(f"order read failed: {exc}")
     if not existing:
         return False
 
@@ -984,7 +996,7 @@ def _sync_existing_order_status(
         if moved["failed"]:
             # Nothing landed -- not the status, not one marker -- so the next
             # sweep (or a replay) sees the same facts still to apply.
-            return False
+            return failed("the status claim did not land")
         # Decided HERE, on the doc as it is now, so the pull sweep reports the
         # handler's own answer (status_skipped_terminal).
         if verdict is not None:
@@ -1059,6 +1071,9 @@ def _sync_existing_order_status(
                 _MONEY_SYNC_MAX_ATTEMPTS,
                 shopify_order_id,
             )
+            # The lifecycle landed; the money did not. The webhook's own
+            # retry is that "next webhook" (SF03).
+            failed("the payment reconciliation did not land")
 
         logger.info(
             "[ONLINE_MAP] synced status for shopify_order=%s -> status=%s payment=%s "
@@ -1069,9 +1084,9 @@ def _sync_existing_order_status(
             st["fulfillment_status"],
         )
         return True
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         logger.debug("[ONLINE_MAP] status sync write failed", exc_info=True)
-        return False
+        return failed(f"status sync write failed: {exc}")
 
 
 def _stamp_order_customer(
@@ -1225,6 +1240,9 @@ def map_shopify_order(
         verdict: Dict[str, Any] = {"terminal_withheld": False}
         if not payload.get("line_items"):
             synced = _sync_existing_order_status(db, shopify_order_id, payload, verdict)
+            if verdict.get("sync_failed"):
+                return {"status": "error", "error": verdict["sync_failed"],
+                        "shopify_order_id": shopify_order_id, "store_id": store_id}
             if synced:
                 return {
                     "status": "status_synced",
@@ -1302,7 +1320,11 @@ def map_shopify_order(
             from .online_order_status import order_fact
 
             if order_fact(payload) is not None:
-                _sync_existing_order_status(db, shopify_order_id, payload)
+                _sync_existing_order_status(db, shopify_order_id, payload, verdict)
+                if verdict.get("sync_failed"):
+                    # Booked, but its lifecycle fact did not land: the webhook's
+                    # retry (a replay of the booked order) applies it (SF03).
+                    result["sync_failed"] = verdict["sync_failed"]
 
         # On a duplicate / replayed delivery the order already exists -> SYNC its
         # status from this payload (it may be an orders/updated or orders/paid that

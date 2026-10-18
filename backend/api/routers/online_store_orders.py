@@ -324,7 +324,9 @@ def _unbooked_webhook_rows(db, *, search: Optional[str]) -> List[Dict[str, Any]]
     for sid, (row, payload) in candidates.items():
         if sid in booked:
             continue
-        processed = bool(row.get("processed"))
+        # SF03: a drain whose handler FAILED leaves processed=False with
+        # status failed/dead -- that is a failed mapping, not a pending one.
+        processed = bool(row.get("processed")) or row.get("status") in ("failed", "dead")
         # Honest skip reason, best-effort: an explicit handler/skip note on the
         # inbox row wins; else derive the mapper's own no-line-items skip; else a
         # plain-English generic that still tells the operator what to do.
@@ -654,7 +656,17 @@ async def remap_online_order(
     except Exception as exc:  # noqa: BLE001 - the mapper is fail-soft; belt-and-braces
         result = {"status": "error", "error": str(exc)}
     sent = (result or {}).get("moves_sent") or {}
-    if (
+    if (result or {}).get("booking_recovered"):
+        # SF03: this press finished a booking that stopped before its stock
+        # claim (shopify_ingest -> finish_crashed_booking). Something was done.
+        result = {**result, "message": (
+            "Re-map finished this order's interrupted booking: its stock claim "
+            "is now recorded.")}
+    elif (result or {}).get("booking_unsettled"):
+        result = {**result, "nothing_done": True, "message": (
+            "This order's booking has not finished claiming its stock yet (it may "
+            "still be running). Press Re-map again in a few minutes.")}
+    elif (
         booked
         and str((result or {}).get("status")) in ("duplicate", "replayed")
         and not (sent.get("moved") or sent.get("failed"))

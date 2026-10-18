@@ -2015,7 +2015,23 @@ export interface SyncHealth {
     last_pushed_at?: string | null;
     pushed_products?: number;
   } | null;
-  webhooks?: { checked?: boolean; failed?: number; skipped?: number } | null;
+  webhooks?: {
+    checked?: boolean;
+    failed?: number;
+    skipped?: number;
+    pending?: number;
+    /** Dead letters (audit SF03): handlers that failed every retry. Counted in
+     *  `failed` too; listed newest first (up to 20). */
+    dead?: number;
+    dead_letters?: Array<{
+      webhook_id?: string | null;
+      vendor?: string | null;
+      topic?: string | null;
+      attempts?: number | null;
+      error?: string | null;
+      failed_at?: string | null;
+    }>;
+  } | null;
   drift?: { checked?: boolean; reason?: string | null } | null;
   stock_miss?: { checked?: boolean; unresolved?: number } | null;
   [k: string]: any;

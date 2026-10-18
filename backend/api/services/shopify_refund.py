@@ -68,7 +68,7 @@ from __future__ import annotations
 import logging
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .online_order_status import GOODS_OUT
@@ -77,6 +77,46 @@ logger = logging.getLogger(__name__)
 
 _REVIEW_COLLECTION = "shopify_refund_review"
 _RETURNS_COLLECTION = "returns"
+
+# SF03: how long a claim (a PENDING returns doc, or a re-drive's
+# reprocessing_at) may sit unfinished before the run that took it is taken for
+# dead and a retry may finish it under the same claim. The inbox drain's lease
+# (NexusAgent.WEBHOOK_PROCESSING_LEASE); a live post finishes in seconds.
+_CLAIM_STALE_SECONDS = 15 * 60
+
+
+def _stale_cutoff() -> str:
+    return (datetime.now(timezone.utc) - timedelta(seconds=_CLAIM_STALE_SECONDS)).isoformat()
+
+
+def _unfinished_claim(db, refund_id: str) -> Optional[Dict[str, Any]]:
+    """The refund's returns doc when a run claimed it and never finalized it
+    (status PENDING, no credit note), else None. Fail-soft -> None."""
+    try:
+        coll = db.get_collection(_RETURNS_COLLECTION)
+        doc = coll.find_one({"shopify_refund_id": refund_id}) if coll is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+    if doc and doc.get("status") == "PENDING" and doc.get("credit_note_issued") is not True:
+        return doc
+    return None
+
+
+def _posted_credit(db, return_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The credit-note ledger row an earlier attempt of this return already
+    wrote (its ref is the return id), so a re-drive never posts it twice.
+    Fail-soft -> None."""
+    if not return_id:
+        return None
+    try:
+        ledger = db.get_collection("credit_note_ledger")
+        row = ledger.find_one({"ref": return_id, "type": "ISSUED"}) if ledger is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+    if row:
+        row = dict(row)
+        row.pop("_id", None)
+    return row
 
 # Rupee tolerance when reconciling the computed credit-note gross against what
 # Shopify actually refunded. Absorbs GST rounding dust (a paisa or two on a
@@ -160,20 +200,31 @@ def _claim_stale_refund_for_retry(returns_coll, refund_id: str, now: str):
     never-credited row (the caller falls through to the credit-issue + finalize
     path, which update_one's this same doc); returns None for a TRUE duplicate -- a
     credit note really exists, OR another worker is mid-reprocess. Never raises."""
+    # SF03: a claim whose run stopped is re-claimable once STALE -- a PENDING
+    # doc older than _CLAIM_STALE_SECONDS (the first run died between its claim
+    # and its finalize) or a re-drive's reprocessing_at that old. A fresh one
+    # is still in flight and stays untouchable. The re-drive then checks the
+    # ledger for a credit note the dead run already posted (_posted_credit)
+    # and books restock per order line (_restock_booked), so neither leg posts
+    # twice.
+    stale = _stale_cutoff()
     fou = getattr(returns_coll, "find_one_and_update", None)
     if callable(fou):
+        base = {"shopify_refund_id": refund_id, "credit_note_issued": {"$ne": True}}
         try:
-            return fou(
-                {
-                    "shopify_refund_id": refund_id,
-                    "credit_note_issued": {"$ne": True},
-                    "reprocessing_at": None,
-                    # Only re-claim a FINALIZED row -- never an in-flight brand-new
-                    # PENDING claim (closes the concurrent first-ever double-issue).
-                    "status": {"$ne": "PENDING"},
-                },
-                {"$set": {"reprocessing_at": now}},
-            )
+            for extra in (
+                # Only re-claim a FINALIZED row -- never an in-flight brand-new
+                # PENDING claim (closes the concurrent first-ever double-issue).
+                {"reprocessing_at": None, "status": {"$ne": "PENDING"}},
+                # A PENDING claim whose first run is dead.
+                {"reprocessing_at": None, "status": "PENDING", "created_at": {"$lt": stale}},
+                # A re-drive that took the claim and died.
+                {"reprocessing_at": {"$lt": stale}},
+            ):
+                won = fou({**base, **extra}, {"$set": {"reprocessing_at": now}})
+                if won is not None:
+                    return won
+            return None
         except Exception as exc:  # noqa: BLE001
             logger.warning("[SHOPIFY_REFUND] retry-claim find_one_and_update failed: %s", exc)
             return None
@@ -186,7 +237,7 @@ def _claim_stale_refund_for_retry(returns_coll, refund_id: str, now: str):
     if (
         existing
         and existing.get("credit_note_issued") is not True
-        and existing.get("status") != "PENDING"
+        and (existing.get("status") != "PENDING" or str(existing.get("created_at") or "") < stale)
     ):
         return existing
     return None
@@ -757,11 +808,25 @@ def handle_shopify_refund(
         # Idempotency: a re-delivered refund webhook must not double-credit /
         # double-restock (UNMATCHED rows stay reprocessable -- see the guard).
         if _refund_already_processed(db, refund_id):
-            return {
-                "status": "duplicate",
-                "refund_id": refund_id,
-                "shopify_order_id": shopify_order_id,
-            }
+            # SF03: a returns doc claimed and never finalized is NOT done. A
+            # fresh one is still being posted (or its run just died): report
+            # a failure so the inbox retries later. A stale one falls through:
+            # the post re-claims it (_claim_stale_refund_for_retry) and finishes
+            # it without posting either leg twice.
+            unfinished = _unfinished_claim(db, refund_id)
+            if unfinished is None:
+                return {
+                    "status": "duplicate",
+                    "refund_id": refund_id,
+                    "shopify_order_id": shopify_order_id,
+                }
+            if str(unfinished.get("created_at") or "") >= _stale_cutoff():
+                return {
+                    "status": "error",
+                    "error": "refund claim not finalized yet",
+                    "refund_id": refund_id,
+                    "shopify_order_id": shopify_order_id,
+                }
 
         order = _find_ims_order(db, shopify_order_id)
         if not order:
@@ -1212,11 +1277,13 @@ def _post_credit_and_restock(
 
     # (a) GST credit note -> credit_note_ledger (the CDNR source). Booked under the
     #     BILLING store with the real GST split; card refunds skip the balance bump.
-    credit_entry = None
+    #     A re-drive first looks for the note an earlier attempt of this return
+    #     already posted (SF03: a run that died after posting it): never twice.
+    credit_entry = _posted_credit(db, return_id) if prior_doc is not None else None
     try:
         from ..routers.returns import _issue_store_credit
 
-        if customer_id and gross_refund > 0:
+        if credit_entry is None and customer_id and gross_refund > 0:
             credit_entry = _issue_store_credit(
                 customer_id,
                 gross_refund,
