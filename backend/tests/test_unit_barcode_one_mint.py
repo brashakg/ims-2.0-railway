@@ -269,6 +269,8 @@ def test_stock_count_scan_finds_a_unit_typed_in_lower_case(monkeypatch):
 # unit's own code and its sale by the order the till stamped on it.
 # --------------------------------------------------------------------------- #
 def _trace(monkeypatch, db, typed):
+    # The records seeded below are the manager's own shop's: the trace lists
+    # the caller's shops only (audit 2026-10-18, test_visibility_sweep_1018).
     from api.routers.inventory import barcode_trace as bt
 
     monkeypatch.setattr(bt, "_get_db", lambda: db)
@@ -286,11 +288,11 @@ def test_trace_finds_a_unit_and_its_history_typed_in_lower_case(monkeypatch):
          "store_id": STORE, "status": "AVAILABLE"}
     )
     db.orders.insert_one(
-        {"order_number": "ORD-1", "created_at": "2026-09-20",
+        {"order_number": "ORD-1", "store_id": STORE, "created_at": "2026-09-20",
          "items": [{"product_id": "P1", "barcode": "BV0000000042"}]}
     )
     db.returns.insert_one(
-        {"return_number": "RET-1", "created_at": "2026-09-21",
+        {"return_number": "RET-1", "store_id": STORE, "created_at": "2026-09-21",
          "items": [{"barcode": "BV0000000042"}]}
     )
     for typed in ("bv0000000042", "Bv0000000042"):
@@ -312,7 +314,7 @@ def test_trace_shows_the_till_sale_of_a_scanned_unit(monkeypatch):
          "store_id": STORE, "status": "SOLD", "order_id": "ORD-ID-7"}
     )
     db.orders.insert_one(
-        {"order_id": "ORD-ID-7", "order_number": "BV/26-27/0007",
+        {"order_id": "ORD-ID-7", "order_number": "BV/26-27/0007", "store_id": STORE,
          "created_at": "2026-09-22", "items": [{"product_id": "P1", "stock_id": "SU-7"}]}
     )
     out = _trace(monkeypatch, db, "BV0000000007")
@@ -332,11 +334,11 @@ def test_trace_keeps_scanned_sale_history_after_a_typed_item_resale(monkeypatch)
          "store_id": STORE, "status": "SOLD", "order_id": "ORD-RESALE"}
     )
     db.orders.insert_many([
-        {"order_id": "ORD-SCAN", "order_number": "FIRST-SALE",
+        {"order_id": "ORD-SCAN", "order_number": "FIRST-SALE", "store_id": STORE,
          "created_at": "2026-09-22", "items": [{"product_id": "P1", "stock_id": "SU-7"}]},
-        {"order_id": "ORD-RESALE", "order_number": "TYPED-RESALE",
+        {"order_id": "ORD-RESALE", "order_number": "TYPED-RESALE", "store_id": STORE,
          "created_at": "2026-10-01", "items": [{"product_id": "P1"}]},
-        {"order_id": "ORD-OTHER", "order_number": "OTHER-UNIT",
+        {"order_id": "ORD-OTHER", "order_number": "OTHER-UNIT", "store_id": STORE,
          "created_at": "2026-10-02", "items": [{"product_id": "P1", "stock_id": "SU-8"}]},
     ])
 
@@ -356,7 +358,7 @@ def test_trace_shows_a_transfer_that_moved_the_unit(monkeypatch):
          "store_id": STORE, "status": "AVAILABLE"}
     )
     db.stock_transfers.insert_one(
-        {"id": "TR-1", "transfer_number": "TR-001", "created_at": "2026-09-23",
+        {"id": "TR-1", "transfer_number": "TR-001", "from_location_id": STORE, "created_at": "2026-09-23",
          "items": [{"product_id": "P1", "shipped_stock_ids": ["SU-9"],
                     "received_stock_ids": ["SU-9"]}]}
     )

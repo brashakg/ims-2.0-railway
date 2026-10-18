@@ -79,9 +79,10 @@ const TABS: { id: TabType; label: string; icon: typeof TrendingUp }[] = [
   { id: 'journal-entries', label: 'Journal Entries', icon: BookOpen },
 ];
 
-// Supplier payments, and GST whose payable is struck with the input credit from
-// supplier bills (owner ruling 2026-10-07, R1): the accounts roles' tabs.
-const ACCOUNTS_TABS = new Set<TabType>(['vendor-payments', 'gst']);
+// Supplier payments, GST whose payable is struck with the input credit from
+// supplier bills (owner ruling 2026-10-07, R1) and the journal vouchers (owner
+// decision 2026-10-18, FU-17): the accounts roles' tabs.
+const ACCOUNTS_TABS = new Set<TabType>(['vendor-payments', 'gst', 'journal-entries']);
 
 export default function FinanceFilters({
   selectedYear,

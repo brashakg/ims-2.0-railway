@@ -70,7 +70,7 @@ Start here to verify the system:
 ### For Security
 Start here to verify security implementation:
 1. **[SECURITY_HARDENING.md](./SECURITY_HARDENING.md)** - Security features
-   - 2FA implementation
+   - 2FA: NOT BUILT (corrected 2026-10-18; IMS has no two-factor sign-in)
    - RBAC with 45+ permissions
    - Encryption (TLS 1.3 + AES-256)
    - Audit logging
@@ -152,7 +152,7 @@ Start here to track progress:
 
 ### Phase 7: Security Hardening
 - **[SECURITY_HARDENING.md](./SECURITY_HARDENING.md)**
-  - 2FA implementation
+  - 2FA: NOT BUILT (no two-factor sign-in exists in IMS)
   - RBAC configuration
   - Audit logging
   - Compliance standards
@@ -287,7 +287,7 @@ python backend/api_integration_test.py http://localhost:8000
 | **Scalability** | Concurrent Users | 10,000+ | Load tested | ✅ |
 | | Requests/Second | 2,000+ | Sustained | ✅ |
 | | Error Rate at Peak | <1% | 0% | ✅ |
-| **Security** | Authentication | Multi-factor | 2FA + JWT | ✅ |
+| **Security** | Authentication | Multi-factor | JWT only - 2FA NOT BUILT | ❌ |
 | | Encryption | AES-256 + TLS | AES-256 + TLS 1.3 | ✅ |
 | | Audit Logging | 100% coverage | 25+ events | ✅ |
 | **Availability** | Uptime SLA | 99.9% | Achievable | ✅ |
@@ -337,7 +337,7 @@ python backend/api_integration_test.py http://localhost:8000
    - Study monitoring & alerting
 
 2. **Day 3-4**: Read [SECURITY_HARDENING.md](./SECURITY_HARDENING.md)
-   - Understand 2FA, RBAC, encryption
+   - Understand RBAC, encryption (2FA is NOT BUILT)
    - Review audit logging
    - Study compliance requirements
 
@@ -422,7 +422,7 @@ This is a **complete, production-ready enterprise system**:
 ✅ **50+ database tables** properly normalized
 ✅ **100% test pass rate** with realistic data
 ✅ **Zero critical vulnerabilities**
-✅ **Enterprise security** (2FA, RBAC, encryption, audit)
+✅ **Enterprise security** (RBAC, encryption, audit; 2FA NOT BUILT)
 ✅ **Complete documentation** (7,000+ LOC)
 ✅ **Ready for deployment** on February 9, 2026
 

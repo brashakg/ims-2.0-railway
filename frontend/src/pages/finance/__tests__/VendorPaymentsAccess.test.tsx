@@ -83,6 +83,8 @@ describe('FinanceDashboard - vendor payables follow the accounts rule', () => {
       expect(api.getVendorPayments).not.toHaveBeenCalled();
       expect(screen.queryByRole('button', { name: /vendor payments/i })).toBeNull();
       expect(screen.queryByText(/vendor payment schedule/i)).toBeNull();
+      // Journal vouchers are the accounts roles' too (owner decision 2026-10-18).
+      expect(screen.queryByRole('button', { name: /journal entries/i })).toBeNull();
     },
   );
 
@@ -105,6 +107,7 @@ describe('FinanceDashboard - vendor payables follow the accounts rule', () => {
       await openOutstanding();
       expect(api.getVendorPayments).toHaveBeenCalled();
       expect(screen.getByRole('button', { name: /vendor payments/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /journal entries/i })).toBeInTheDocument();
       expect(await screen.findByText(/vendor payment schedule/i)).toBeInTheDocument();
       expect(await screen.findByText('Acme Optics')).toBeInTheDocument();
     },

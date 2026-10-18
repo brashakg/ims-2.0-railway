@@ -302,16 +302,22 @@ def test_preview_echoes_cost_and_total_value(client, auth_headers, patched):
 def test_import_replies_follow_accounts_cost_visibility(client, patched, path, role):
     from test_counter_roles_no_cost_anywhere import _headers
     patched(*_TWO_PRODUCTS, {})
-    reply = client.post(path, json={"rows": [{"product_id": "P1", "quantity": 1, "unit_cost": 100.5}]},
+    costed = {"rows": [{"product_id": "P1", "quantity": 1, "unit_cost": 100.5}]}
+    if role == "ADMIN":
+        reply = client.post(path, json=costed, headers=_headers(role))
+        assert reply.status_code == 200, reply.text
+        assert "100.5" in reply.text
+        return
+    # A manager enters quantities only: a sent unit cost is refused (owner
+    # 2026-10-18, FU-23; tests/test_visibility_sweep_1018.py walks every
+    # inventory role), and the reply to his quantities carries no cost key.
+    assert client.post(path, json=costed, headers=_headers(role)).status_code == 403
+    reply = client.post(path, json={"rows": [{"product_id": "P1", "quantity": 1}]},
                         headers=_headers(role))
     assert reply.status_code == 200, reply.text
     body = reply.json()
-    if role == "ADMIN":
-        assert "100.5" in reply.text
-    else:
-        assert "100.5" not in reply.text
-        assert "total_value" not in body.get("summary", {})
-        assert all("unit_cost" not in row for row in body.get("rows", []))
+    assert "total_value" not in body.get("summary", {})
+    assert all("unit_cost" not in row for row in body.get("rows", []))
 
 
 def test_preview_without_cost_has_zero_total_value(client, auth_headers, patched):

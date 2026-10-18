@@ -1,5 +1,6 @@
 """INV-12 barcode lifecycle trace."""
 
+from ...dependencies import can_access_store_scoped, user_store_scope
 from ...services import cost_mask
 from ._shared import (
     Depends,
@@ -44,6 +45,10 @@ async def barcode_lifecycle_trace(
     Honest empty state: when a barcode is unknown an empty envelope is returned
     (not 404) because the barcode may have been received via a path that did not
     mint a stock_units row yet.
+
+    Shop scope (audit 2026-10-18): a unit outside the caller's shops answers
+    exactly as an unknown barcode does, and the sales, returns and transfers
+    listed are the caller's shops' only (admins see every shop).
     """
     db = _get_db()
     result: Dict = {
@@ -72,9 +77,20 @@ async def barcode_lifecycle_trace(
     code = barcode
     stock_id = ""  # a failed unit lookup still lets the sales and returns run
     sold_on = None
+    every_shop, my_shops = user_store_scope(current_user)
+    shops = sorted(s for s in my_shops if isinstance(s, str) and s)
+
+    def _mine(query: dict, *fields: str) -> dict:
+        """`query` held to the caller's shops on any of `fields`; a login with
+        no shop matches nothing."""
+        if every_shop:
+            return query
+        return {"$and": [query, {"$or": [{f: {"$in": shops}} for f in fields]}]}
     try:
         # 1. Stock unit
         su = db.get_collection("stock_units").find_one(barcode_svc.unit_barcode_match(barcode))
+        if su and not can_access_store_scoped(su.get("store_id"), current_user):
+            su = None  # another shop's unit: the unknown-barcode answer
         if su:
             # Its cost answers the one per-unit cost rule ("product", the
             # mask at the end), as on every read of a unit.
@@ -126,7 +142,7 @@ async def barcode_lifecycle_trace(
             sales_filter.append({"order_id": sold_on})
         orders = list(
             db.get_collection("orders").find(
-                {"$or": sales_filter},
+                _mine({"$or": sales_filter}, "store_id"),
                 {"_id": 0, "order_number": 1, "created_at": 1, "store_id": 1,
                  "status": 1, "items": 1, "order_items": 1},
             ).sort("created_at", 1).limit(50)
@@ -168,7 +184,7 @@ async def barcode_lifecycle_trace(
             transfer_filter.append({"id": transfer_id_on_unit})
         transfers = list(
             db.get_collection("stock_transfers").find(
-                {"$or": transfer_filter},
+                _mine({"$or": transfer_filter}, "from_location_id", "to_location_id"),
                 {"_id": 0, "id": 1, "transfer_number": 1, "from_location_name": 1,
                  "to_location_name": 1, "status": 1, "shipped_at": 1, "received_at": 1},
             ).sort("created_at", 1).limit(50)
@@ -184,7 +200,7 @@ async def barcode_lifecycle_trace(
             return_filter.append({"items.stock_id": stock_id})
         returns = list(
             db.get_collection("returns").find(
-                {"$or": return_filter},
+                _mine({"$or": return_filter}, "store_id"),
                 {"_id": 0, "return_number": 1, "created_at": 1, "store_id": 1,
                  "status": 1, "items": 1},
             ).sort("created_at", 1).limit(50)
