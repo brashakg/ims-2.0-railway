@@ -795,10 +795,14 @@ async def _seed_variants_after_write(
             # parent would hand a parent-sku stock lookup the WRONG variant's
             # inventory target.
             summary["product_level_inventory_item_gid"] = inventory_item_gid
-    if pairs:
-        # The FIRST pair is the default variant (the product-level row for a
-        # no-variant product) -- the one a later price push needs.
-        summary["default_variant_gid"] = pairs[0][1]
+    # The product's DEFAULT variant is its OWN: the product-level pseudo row,
+    # or the row carrying the product's own SKU -- never another colour/size
+    # (review of #1233: a colour added to a live listing became the lead's
+    # stored default, and a deleted lead variant was then re-mapped to it).
+    own_sku = str(product.get("sku") or "")
+    summary["default_variant_gid"] = next(
+        (gid for v, gid, _inv in pairs if v is None or str(v.get("sku") or "") == own_sku), None
+    )
     # What Shopify's create answer SAYS about each size it made: tracked +
     # this policy (`tracking_verdicts`, the one rule; the stock pass
     # remembers it per size). A created variant it does not confirm may sell

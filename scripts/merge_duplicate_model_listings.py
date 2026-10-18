@@ -41,6 +41,11 @@ USAGE
     railway run --service MongoDB -- ".venv\\Scripts\\python.exe" scripts/merge_duplicate_model_listings.py
     ... scripts/merge_duplicate_model_listings.py --apply
     ... scripts/merge_duplicate_model_listings.py --revert [--run-id <id>]   (IMS only)
+        refuses (and lists them) when the kept listing already sells a folded
+        colour: add --take-down-added (off sale first, needs a LIVE push) or
+        --leave-added-unmanaged
+  An item marked 'This is a different model' is never folded (shown in the
+  dry run; its flag is never cleared).
 """
 from __future__ import annotations
 
@@ -85,15 +90,24 @@ def plan(db) -> Dict[str, Any]:
             groups.setdefault(key, []).append(spine)
     report: Dict[str, Any] = {"merges": [], "left": []}
     for key, items in groups.items():
+        label = " ".join(str(k) for k in key)
         listed = []
         for spine in items:
             twin = _twin(db, spine)
             ecom = (twin or {}).get("ecom") or {}
-            if ecom.get("shopify_product_id") and not ecom.get("variant_of"):
-                listed.append((spine, twin))
+            if not (ecom.get("shopify_product_id") and not ecom.get("variant_of")):
+                continue
+            if spine.get("family_opt_out"):
+                # 'This is a different model' (a person said so): its listing
+                # is its own -- never folded, and the flag is never cleared.
+                report["left"].append({
+                    "model": label,
+                    "reason": f"{spine.get('sku')} is marked 'This is a different model' -- its listing stays its own",
+                })
+                continue
+            listed.append((spine, twin))
         if len(listed) < 2:
             continue
-        label = " ".join(str(k) for k in key)
         keep_spine, keep_twin = min(listed, key=lambda st: pm.lead_order(st[0]))
         lead = pm.lead_of(items)
         if lead is not None and lead.get("product_id") != keep_spine.get("product_id"):
@@ -136,13 +150,16 @@ def plan(db) -> Dict[str, Any]:
     return report
 
 
-def _backup(db, run_id: str, collection: str, flt: Dict[str, Any]) -> None:
+def _backup(db, run_id: str, collection: str, flt: Dict[str, Any], fold: Dict[str, Any]) -> None:
+    """One document as it was, with the fold it belongs to (the revert's
+    warning reads which colour went into which kept listing)."""
     before = db[collection].find_one(flt)
     if before is not None:
         before = copy.deepcopy(before)
         before.pop("_id", None)
     db[BACKUP].insert_one(
-        {"run_id": run_id, "collection": collection, "filter": flt, "before": before, "at": datetime.now(timezone.utc)}
+        {"run_id": run_id, "collection": collection, "filter": flt, "before": before,
+         "at": datetime.now(timezone.utc), "fold": fold}
     )
 
 
@@ -216,7 +233,10 @@ async def apply(db, report: Dict[str, Any], *, actor: str = "runbook:merge_dupli
                     ("products", {"product_id": fold["product_id"]}),
                     ("catalog_products", {"id": keep["twin_id"]}),
                 ):
-                    _backup(db, run_id, coll, flt)
+                    _backup(db, run_id, coll, flt, {
+                        "sku": fold["sku"], "keep_twin_id": keep["twin_id"],
+                        "keep_shopify_product_id": keep["shopify_product_id"],
+                    })
                 twin = db["catalog_products"].find_one({"id": fold["twin_id"]}) or {}
                 ecom = dict(twin.get("ecom") or {})
                 former = {k: ecom.pop(k) for k in list(pm.LISTING_FIELDS) + list(pm._VARIANT_IDS) if k in ecom}
@@ -234,22 +254,90 @@ async def apply(db, report: Dict[str, Any], *, actor: str = "runbook:merge_dupli
     return out
 
 
-def revert(db, run_id: Optional[str] = None) -> Dict[str, Any]:
-    """IMS only (the website is not touched: the drafted listing stays Draft,
-    the redirect stays). Restores every document an applied run wrote."""
-    backups = db[BACKUP]
+def _latest_run(db, run_id: Optional[str]) -> Optional[str]:
+    if run_id is not None:
+        return run_id
+    last = db[BACKUP].find_one({"reverted_at": {"$exists": False}}, sort=[("at", -1)])
+    return last["run_id"] if last else None
+
+
+def added_variants(db, run_id: str) -> List[Dict[str, Any]]:
+    """The folded colours the KEPT listing already sells as its own variant
+    (a push after the apply added them). A revert puts the colour back on its
+    old (drafted) listing in IMS, so such a variant would be left on the kept
+    listing with nothing in IMS managing it."""
+    folds = {}
+    for b in db[BACKUP].find({"run_id": run_id, "reverted_at": {"$exists": False}}):
+        if b.get("fold"):
+            folds[b["fold"]["sku"]] = b["fold"]
+    out = []
+    for sku, fold in sorted(folds.items()):
+        row = db["catalog_variants"].find_one({"sku": sku}) or {}
+        if row.get("parent_product_id") == fold["keep_twin_id"] and row.get("shopify_variant_id"):
+            out.append({**fold, "shopify_variant_id": row["shopify_variant_id"],
+                        "shopify_inventory_item_id": row.get("shopify_inventory_item_id")})
+    return out
+
+
+async def _take_down_variant(db, added: Dict[str, Any]) -> Optional[str]:
+    """Take ONE added variant off sale on the kept listing (stop selling at 0
+    + quantity 0 at every mapped shop) -- never deleted. The error, or None."""
+    from api.services import shopify_push
+    from api.services.shopify_push.inventory import _set_variant_tracking, stock_write_ticket
+    from api.services.stores_util import physical_stores
+
+    tracked = await _set_variant_tracking(db, added["keep_shopify_product_id"], [added["shopify_variant_id"]], "DENY")
+    if tracked.get("errors"):
+        return "; ".join(str(e) for e in tracked["errors"])
+    mapped = shopify_push.mapped_store_locations(physical_stores(db))
+    out = await shopify_push.push_skus_stock(
+        db, [added["sku"]], quantities={added["sku"]: {sid: 0 for sid in mapped}},
+        source="merge_revert", product_id=added["keep_twin_id"], policy="DENY", tracked=None,
+        ticket=stock_write_ticket(db),
+    )
+    return out.get("error") if out.get("errors") else None
+
+
+async def revert(
+    db, run_id: Optional[str] = None, *, take_down_added: bool = False, leave_added: bool = False
+) -> Dict[str, Any]:
+    """Restores every IMS document an applied run wrote (the drafted listing
+    stays Draft on Shopify, the redirect stays).
+
+    WARNS FIRST (review of #1233): when the kept listing already sells a
+    folded colour as its own variant, the revert REFUSES and lists them,
+    unless --take-down-added (each such variant is taken off sale on the kept
+    listing -- stop at 0, quantity 0, never deleted -- before the restore; it
+    needs a LIVE push) or --leave-added-unmanaged (a person accepts it)."""
+    run_id = _latest_run(db, run_id)
     if run_id is None:
-        last = backups.find_one({"reverted_at": {"$exists": False}}, sort=[("at", -1)])
-        if last is None:
-            return {"run_id": None, "restored": 0}
-        run_id = last["run_id"]
+        return {"run_id": None, "restored": 0}
+    added = added_variants(db, run_id)
+    if added and not (take_down_added or leave_added):
+        return {"run_id": run_id, "restored": 0, "refused": True, "added": added}
+    taken = []
+    if added and take_down_added:
+        from api.services import shopify_push
+
+        live, reason = shopify_push._live_or_reason(db)
+        if not live:
+            return {"run_id": run_id, "restored": 0, "refused": True, "added": added,
+                    "why": f"the Shopify push is not LIVE ({reason}) -- nothing was changed"}
+        for a in added:
+            err = await _take_down_variant(db, a)
+            if err:
+                return {"run_id": run_id, "restored": 0, "refused": True, "added": added, "taken_down": taken,
+                        "why": f"{a['sku']}: the take-down failed ({err}) -- nothing was restored"}
+            taken.append(a["sku"])
+    backups = db[BACKUP]
     restored = 0
     for b in reversed(list(backups.find({"run_id": run_id, "reverted_at": {"$exists": False}}))):
         if b.get("before") is not None:
             db[b["collection"]].replace_one(b["filter"], b["before"], upsert=True)
             restored += 1
     backups.update_many({"run_id": run_id}, {"$set": {"reverted_at": datetime.now(timezone.utc)}})
-    return {"run_id": run_id, "restored": restored}
+    return {"run_id": run_id, "restored": restored, "taken_down": taken,
+            "left_unmanaged": [a["sku"] for a in added] if added and not take_down_added else []}
 
 
 def print_report(report: Dict[str, Any], mode: str) -> None:
@@ -274,6 +362,10 @@ def parse_args(argv=None):
     parser.add_argument("--apply", action="store_true", help="Take down, redirect, link (needs a LIVE push).")
     parser.add_argument("--revert", action="store_true", help="Undo an applied run in IMS.")
     parser.add_argument("--run-id", default=None)
+    parser.add_argument("--take-down-added", action="store_true",
+                        help="With --revert: take the folded colours the kept listing already sells off sale first.")
+    parser.add_argument("--leave-added-unmanaged", action="store_true",
+                        help="With --revert: restore anyway, leaving those variants on the kept listing unmanaged.")
     return parser.parse_args(argv)
 
 
@@ -288,7 +380,16 @@ def main(argv=None):
         raise SystemExit("No Mongo connection: pass --mongo-uri or use `railway run`.")
     db = MongoClient(uri, serverSelectionTimeoutMS=10000)[args.db]
     if args.revert:
-        print(f"[REVERT] {revert(db, args.run_id)}")
+        out = asyncio.run(revert(db, args.run_id, take_down_added=args.take_down_added,
+                                 leave_added=args.leave_added_unmanaged))
+        if out.get("refused"):
+            print("[REVERT] REFUSED -- the kept listing already sells these folded colours as its own variants:")
+            for a in out["added"]:
+                print(f"    {a['sku']}: variant {a['shopify_variant_id']} on {a['keep_shopify_product_id']}")
+            print("    " + (out.get("why") or "re-run with --take-down-added (recommended: off sale, never deleted) "
+                                              "or --leave-added-unmanaged"))
+        else:
+            print(f"[REVERT] {out}")
         return 0
     report = plan(db)
     mode = "APPLY" if args.apply else "DRY-RUN"

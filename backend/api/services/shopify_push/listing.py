@@ -19,9 +19,24 @@ OPTIONS come from what VARIES in the model: colour only -> Color, size only
 -> Size, both -> Color + Size. The values are G1's (product_master.
 family_option_values: 'Gold (001)'; two members of one frame colour get their
 lens label, 'Gold (001) / Green Polarized'). A value is never left blank and
-never shared by two variants: a model that would need either is REFUSED
-before anything is sent (OPTION_MISSING / OPTION_CLASH), but only when the
-press would create a variant -- a press that adds nothing never asks.
+never shared by two variants. A FIRST publish that would need either -- or
+has an unpriced variant -- is REFUSED before anything is sent
+(OPTION_MISSING / OPTION_CLASH / UNPRICED_SIZE, #1225). A LIVE listing holds
+back only the colour(s) at fault, names them by SKU and sends everything
+else (review of #1233: one bad colour never freezes a live listing).
+
+ONLY FINISHED COLOURS GO ON BY THEMSELVES (review of #1233): a colour not
+yet on the listing joins it only when it is active, not archived, not a
+purchase-order draft, not a catalogue draft and not in Needs review -- the
+catalogue review's approval is the human press. The others WAIT (named in
+the plan). A colour already on the listing keeps syncing whatever its state
+(switched off or archived: it sells 0, never deleted); an archived one never
+counts as a clash -- a colour catalogued again in its place takes over its
+variant.
+
+ONE PRICE RULE for every variant, the lead's too: its own engine price, else
+its own in-store offer (<= its MRP), else its own MRP, the MRP struck through
+when higher (product_input._resolve_variant_pricing).
 
 A COLOUR NOT YET ON THE LISTING (linked under a live lead by G1 with its own
 row) rides the press as a PENDING row: built fresh from its spine (its own
@@ -56,6 +71,13 @@ ROW_SET = "_listing_set"
 FULL_OPTIONS = "_full_options"
 PENDING = "_pending"
 OWN_PRICE = "_own_price"
+# A colour catalogued again in the place of an archived one still on the
+# listing: it takes over that variant (the archived row lets go of it).
+ADOPTS = "_adopts"
+ARCHIVED = "_archived"
+# A colour held back from a LIVE listing this press (named on the result).
+HELD = "_held"
+UNPRICED_SIZE = "UNPRICED_SIZE"
 
 _ID_FIELDS = ("shopify_variant_id", "shopify_inventory_item_id")
 _BARCODE_KEYS = ("gtin", "upc")
@@ -100,51 +122,71 @@ def model_listing(
     if not children:
         return None
     ecom = product.get("ecom") or {}
+    live = bool(ecom.get("shopify_product_id"))
     twin_id = str(product.get("id") or lead.get("pim_product_id") or lead.get("product_id"))
     lead_sku = str(product.get("sku") or lead.get("sku"))
     rows_by_sku = {str(r.get("sku")): r for r in variants or [] if isinstance(r, dict) and r.get("sku")}
+    twins: Dict[str, Any] = {lead_sku: product}
+
+    def _twin_of(m: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        sku = str(m["sku"])
+        if sku not in twins:
+            twins[sku] = db["catalog_products"].find_one({"sku": sku})
+        return twins[sku]
 
     # Who is on the listing: the lead, every member already on it (an
     # archived colour stays a variant -- never delete a live variant; it
-    # sells 0), and every member not archived.
+    # sells 0), and every colour READY to go on (owner, review of #1233): a
+    # colour joins only once a person has finished it -- active, not
+    # archived, not a purchase-order draft, not a catalogue draft, not in
+    # Needs review (the catalogue review's approval is the human press). The
+    # rest WAIT (named in the plan); nothing is created for them.
     members: List[Dict[str, Any]] = []
+    waiting: List[Dict[str, str]] = []
     for m in [lead] + sorted(children, key=pm.lead_order):
         row = rows_by_sku.get(str(m.get("sku")))
-        on_listing = bool(row and row.get("shopify_variant_id"))
-        if m is lead or on_listing or not pm._is_archived(m):
+        if m is lead or (row and row.get("shopify_variant_id")):
             members.append(m)
+            continue
+        why = _not_ready(pm, m, _twin_of(m))
+        if why:
+            waiting.append({"sku": str(m["sku"]), "reason": why})
+        else:
+            members.append(m)
+    # An archived colour still on the listing is taken down (sells 0, never
+    # deleted): it never makes a clash with a colour catalogued again in its
+    # place -- that one takes over its variant instead (ADOPTS, below).
+    archived_listed = {str(m["sku"]) for m in members if m is not lead and pm._is_archived(m)}
     values, clashes = pm.family_option_values(members)
-
-    distinct = {
-        field: {str(values[m["sku"]][field] or "").strip().lower() for m in members}
-        for _name, field in AXES
-    }
-    axes = [name for name, field in AXES if len(distinct[field]) > 1]
+    clashes = [g for g in ([x for x in grp if x not in archived_listed] for grp in clashes) if len(g) > 1]
 
     rows: List[Dict[str, Any]] = []
     for m in members:
         sku = str(m["sku"])
         full = dict(values[sku])
-        shown = {field: (full[field] if name in axes else "") for name, field in AXES}
         row = rows_by_sku.get(sku)
         if row is not None:
             r = copy.deepcopy(row)
-            r.update(shown)
-            if m is lead and not r.get("shopify_variant_id") and ecom.get("shopify_variant_id"):
+            if m is lead and not r.get("shopify_variant_id") and _ecom_ids_are_the_leads(db, ecom, lead_sku):
                 # A live listing made before the lead had a row with its ids:
-                # the listing's default variant IS the lead's own.
+                # the listing's default variant IS the lead's own -- unless
+                # another IMS row already owns it (never adopted then).
                 ids = {f: ecom.get(f) for f in _ID_FIELDS if ecom.get(f)}
                 r.update(ids)
                 r[ROW_SET] = {**ids, **full}
         elif m is lead:
-            ids = {f: ecom.get(f) for f in _ID_FIELDS if ecom.get(f)}
-            r = {"sku": sku, "parent_product_id": twin_id, "parent_sku": lead_sku, **shown, **ids}
+            ids = (
+                {f: ecom.get(f) for f in _ID_FIELDS if ecom.get(f)}
+                if _ecom_ids_are_the_leads(db, ecom, lead_sku)
+                else {}
+            )
+            r = {"sku": sku, "parent_product_id": twin_id, "parent_sku": lead_sku, **ids}
             r[ROW_SET] = {"parent_product_id": twin_id, "parent_sku": lead_sku, **ids, **full}
         else:
             # PENDING: on the model in IMS, not yet on this listing. Built
             # from its spine -- never a copy of its row's Shopify ids.
             attrs = m.get("attributes") or {}
-            r = {"sku": sku, "parent_product_id": twin_id, "parent_sku": lead_sku, "mrp": m.get("mrp"), **shown}
+            r = {"sku": sku, "parent_product_id": twin_id, "parent_sku": lead_sku, "mrp": m.get("mrp")}
             if attrs.get("gtin"):
                 r["gtin"] = attrs["gtin"]
             r[PENDING] = True
@@ -156,16 +198,25 @@ def model_listing(
                 **full,
             }
         r[FULL_OPTIONS] = full
-        if m is not lead:
-            # Its OWN price, never the lead's (prices may differ per colour /
-            # size): product_input._resolve_variant_pricing reads only the row.
-            r[OWN_PRICE] = True
-            if not r.get("mrp"):
-                r["mrp"] = m.get("mrp")
+        # ONE price rule for every variant, the lead's too (owner, review of
+        # #1233; product_input._resolve_variant_pricing): its own engine
+        # price, else its own in-store offer (<= its MRP), else its own MRP.
+        # Never another item's price.
+        r[OWN_PRICE] = True
+        if m is lead:
+            pricing = product.get("pricing") or {}
+            r["mrp"] = product.get("mrp") or pricing.get("mrp") or lead.get("mrp")
+            r["offer_price"] = product.get("offer_price") or pricing.get("offer_price") or lead.get("offer_price")
+        else:
+            r["mrp"] = r.get("mrp") or m.get("mrp")
+            r["offer_price"] = m.get("offer_price")
+        if pm._is_archived(m):
+            r[ARCHIVED] = True
         rows.append(r)
 
     # A row on this listing that belongs to no member we keep: on Shopify it
-    # stays exactly as it is; never created (an archived colour) otherwise.
+    # stays exactly as it is; never created (an archived or waiting colour)
+    # otherwise.
     member_skus = {str(m["sku"]) for m in members}
     family_skus = member_skus | {str(c["sku"]) for c in children}
     for sku, row in rows_by_sku.items():
@@ -175,44 +226,155 @@ def model_listing(
 
     _price_pending(db, product, rows)
 
-    refusal = None
-    creating = [r for r in rows if not r.get("shopify_variant_id")]
-    if creating and len(members) > 1:
-        if clashes or not axes:
-            groups = clashes or [[str(m["sku"]) for m in members]]
-            refusal = (
-                OPTION_CLASH,
-                "refused: two colours/sizes of this model would look the same on the website ("
-                + "; ".join(" and ".join(g) for g in groups)
-                + ") -- give one a different colour name, lens colour or size, then press again. "
-                "Nothing was sent",
-            )
-        else:
-            missing = [
-                f"{'colour' if name == 'Color' else 'size'} on {r['sku']}"
-                for r in creating
-                for name, field in AXES
-                if name in axes and not str(r.get(field) or "").strip()
-            ]
-            if missing:
-                refusal = (
-                    OPTION_MISSING,
-                    "refused: the website chooses this model by "
-                    + " and ".join(a.lower() for a in axes)
-                    + ", and there is no "
-                    + ", no ".join(missing)
-                    + " -- fill it in, then press again. Nothing was sent",
-                )
+    # WHAT EACH NEW COLOUR NEEDS. A first publish refuses as a whole (#1225);
+    # a LIVE listing holds back only the colour(s) at fault and sends the
+    # rest -- one bad colour never freezes a live listing (owner, review of
+    # #1233). Held colours are named by SKU on the result.
+    from .product_input import _resolve_variant_pricing
 
-    content = _model_content(db, product, lead, members, values, axes)
+    held: List[Dict[str, str]] = []
+    by_sku = {str(r.get("sku")): r for r in rows}
+
+    def _creating(sku: str) -> bool:
+        return sku in member_skus and not (by_sku.get(sku) or {}).get("shopify_variant_id")
+
+    def _hold(sku: str, code: str, reason: str) -> None:
+        if not any(h["sku"] == sku for h in held):
+            held.append({"sku": sku, "code": code, "reason": reason})
+            by_sku[sku][HELD] = True
+
+    def _not_held(ms: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return [m for m in ms if not (by_sku[str(m["sku"])].get(HELD) and _creating(str(m["sku"])))]
+
+    refusal = None
+    if live:
+        for m in members:
+            sku = str(m["sku"])
+            if not by_sku[sku].get(ARCHIVED) and _resolve_variant_pricing(product, by_sku[sku])[0] <= 0:
+                _hold(sku, UNPRICED_SIZE, "no selling price" if _creating(sku)
+                      else "no selling price -- keeps its last price on the website")
+        for grp in clashes:
+            for sku in grp:
+                if _creating(sku):
+                    _hold(sku, OPTION_CLASH, "looks the same as " + " / ".join(x for x in grp if x != sku))
+        kept = _not_held(members)
+        axes = _axes_of(kept, values)
+        for m in kept:
+            sku = str(m["sku"])
+            for name, field in AXES:
+                if _creating(sku) and name in axes and not str(values[sku][field] or "").strip():
+                    _hold(sku, OPTION_MISSING, f"no {'colour' if name == 'Color' else 'size'}")
+        members = _not_held(kept)
+        axes = _axes_of(members, values)
+        dropped = {h["sku"] for h in held if _creating(h["sku"])}
+        rows = [r for r in rows if str(r.get("sku")) not in dropped]
+    else:
+        axes = _axes_of(members, values)
+        if len(members) > 1 and any(_creating(str(m["sku"])) for m in members):
+            if clashes or not axes:
+                groups = clashes or [[str(m["sku"]) for m in members]]
+                refusal = (
+                    OPTION_CLASH,
+                    "refused: two colours/sizes of this model would look the same on the website ("
+                    + "; ".join(" and ".join(g) for g in groups)
+                    + ") -- give one a different colour name, lens colour or size, then press again. "
+                    "Nothing was sent",
+                )
+            else:
+                missing = [
+                    f"{'colour' if name == 'Color' else 'size'} on {m['sku']}"
+                    for m in members
+                    if _creating(str(m["sku"]))
+                    for name, field in AXES
+                    if name in axes and not str(values[str(m["sku"])][field] or "").strip()
+                ]
+                if missing:
+                    refusal = (
+                        OPTION_MISSING,
+                        "refused: the website chooses this model by "
+                        + " and ".join(a.lower() for a in axes)
+                        + ", and there is no "
+                        + ", no ".join(missing)
+                        + " -- fill it in, then press again. Nothing was sent",
+                    )
+
+    # The option values each row is chosen by on the website: exactly the
+    # axes the model (as sent) varies on.
+    for r in rows:
+        if FULL_OPTIONS in r:
+            for name, field in AXES:
+                r[field] = r[FULL_OPTIONS][field] if name in axes else ""
+
+    # A colour catalogued AGAIN in the place of an archived one still on the
+    # listing (same colour and size) takes over its variant: the slot is
+    # reused, nothing is deleted, and the archived row lets go of it in the
+    # same write that records it (writeback._writeback_variant).
+    for r in list(rows):
+        if r.get("shopify_variant_id") or not r.get(FULL_OPTIONS) or str(r.get("sku")) not in member_skus:
+            continue
+        mine = {k: str(v).strip().lower() for k, v in r[FULL_OPTIONS].items()}
+        for a in sorted(archived_listed):
+            other = by_sku.get(a) or {}
+            if other.get(FULL_OPTIONS) and {k: str(v).strip().lower() for k, v in other[FULL_OPTIONS].items()} == mine:
+                r[ADOPTS] = a
+                rows = [x for x in rows if str(x.get("sku")) != a]
+                archived_listed = archived_listed - {a}
+                break
+
+    # The model's words, photos, tags and metafields: its colours on sale
+    # (an archived one still on the listing is not offered any more).
+    on_offer = [m for m in members if m is lead or not pm._is_archived(m)]
+    content = _model_content(db, product, lead, on_offer, values, axes, twins)
     return {
         "lead_sku": lead_sku,
         "members": [str(m["sku"]) for m in members],
         "rows": rows,
         "axes": axes,
         "refusal": refusal,
+        "held": held,
+        "waiting": waiting,
         **content,
     }
+
+
+def _axes_of(members: List[Dict[str, Any]], values: Dict[str, Dict[str, str]]) -> List[str]:
+    """The option names these members VARY on (a blank counts as a value)."""
+    return [
+        name
+        for name, field in AXES
+        if len({str(values[str(m["sku"])][field] or "").strip().lower() for m in members}) > 1
+    ]
+
+
+def _not_ready(pm, spine: Dict[str, Any], twin: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Why a colour not yet on the listing may not go on it by itself (the
+    catalogue review's approval is the human press), or None."""
+    if pm._is_archived(spine):
+        return "archived"
+    if spine.get("is_active") is False:
+        return "switched off"
+    if pm.is_ordered_draft(spine):
+        return "a purchase-order draft -- finish it in Needs review"
+    if pm.effective_catalog_status(spine) != "ACTIVE":
+        return "a catalogue draft -- finish it first"
+    if (twin or {}).get("needs_review"):
+        return "waiting in Needs review"
+    return None
+
+
+def _ecom_ids_are_the_leads(db, ecom: Dict[str, Any], lead_sku: str) -> bool:
+    """The listing's stored default variant may be adopted as the LEAD's own
+    only when no other IMS row already owns it (review of #1233: a colour's
+    variant id once landed there). Raises on a read failure."""
+    gid = ecom.get("shopify_variant_id")
+    if not gid:
+        return False
+    from agents.nexus_providers import _as_shopify_gid
+
+    full = _as_shopify_gid(gid, "ProductVariant")
+    forms = sorted({str(gid), full, full.rsplit("/", 1)[-1]})
+    owner = db["catalog_variants"].find_one({"shopify_variant_id": {"$in": forms}, "sku": {"$ne": lead_sku}})
+    return owner is None
 
 
 def _price_pending(db, product: Dict[str, Any], rows: List[Dict[str, Any]]) -> None:
@@ -239,7 +401,7 @@ def _price_pending(db, product: Dict[str, Any], rows: List[Dict[str, Any]]) -> N
         logger.warning("[SHOPIFY_PUSH] engine price for new colours skipped", exc_info=True)
 
 
-def _model_content(db, product, lead, members, values, axes) -> Dict[str, Any]:
+def _model_content(db, product, lead, members, values, axes, twins=None) -> Dict[str, Any]:
     """Title, SEO, handle, body, tags, photos and metafields of the MODEL."""
     from .. import product_master as pm
     from ..product_description import build_model_description_html, default_model_paragraph
@@ -264,10 +426,14 @@ def _model_content(db, product, lead, members, values, axes) -> Dict[str, Any]:
     colours = list(dict.fromkeys(values[m["sku"]]["option_color"] for m in members if values[m["sku"]]["option_color"]))
     sizes = list(dict.fromkeys(values[m["sku"]]["option_size"] for m in members if values[m["sku"]]["option_size"]))
 
-    twins: Dict[str, Dict[str, Any]] = {}
+    known = dict(twins or {})
+    twins = {}
     for m in members:
         sku = str(m["sku"])
-        twin = product if sku == str(product.get("sku")) else db["catalog_products"].find_one({"sku": sku})
+        if sku in known:
+            twin = known[sku]
+        else:
+            twin = product if sku == str(product.get("sku")) else db["catalog_products"].find_one({"sku": sku})
         twins[sku] = twin or {"sku": sku, "attributes": m.get("attributes") or {}, "brand": m.get("brand"),
                               "category": m.get("category"), "ecom": {}}
 
@@ -403,4 +569,8 @@ def plan_summary(listing: Dict[str, Any]) -> Dict[str, Any]:
             for r in listing["rows"]
         ],
         "refusal": (listing["refusal"] or (None, None))[1],
+        # Held back from a live listing this press (fix them and press again)
+        # and colours waiting for a person (catalogue review) -- by SKU.
+        "held": list(listing.get("held") or []),
+        "waiting": list(listing.get("waiting") or []),
     }

@@ -190,6 +190,17 @@ def _writeback_variant(
         if not touched and listing_set:
             coll.insert_one({**filt, **update})
             touched = 1
+        adopts = (variant or {}).get("_adopts")
+        if touched and adopts:
+            # The archived colour whose variant this one took over lets go of
+            # it in the same step -- one inventory item, one owner.
+            coll.update_one(
+                {"sku": adopts},
+                {
+                    "$unset": {"shopify_variant_id": "", "shopify_inventory_item_id": ""},
+                    "$set": {"variant_taken_over_by": (variant or {}).get("sku"), "updated_at": _now()},
+                },
+            )
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[SHOPIFY_PUSH] variant write-back failed {filt}: {e}")
         return False

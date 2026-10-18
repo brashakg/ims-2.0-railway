@@ -38,7 +38,7 @@ from .create_claim import (
     take_claim,
 )
 from .queries import _PRODUCT_CREATE, _PRODUCT_UPDATE
-from .listing import FAMILY_UNREADABLE, listing_view, model_listing, plan_summary
+from .listing import FAMILY_UNREADABLE, HELD, listing_view, model_listing, plan_summary
 from .product_input import (
     _has_publishable_price,
     _set_product_metafields,
@@ -76,6 +76,8 @@ from .writeback import _requeue_unpublished, _writeback_product, _writeback_vari
 
 # A first publish / reseed / repair refused because a size has no price (SF-05).
 UNPRICED_SIZE = "UNPRICED_SIZE"
+# How many runs a listing whose photo step keeps failing is re-queued for.
+PHOTO_RETRY_CAP = 6
 
 # ===========================================================================
 # PUSH FUNCTIONS -- one per entity. DARK by default; LIVE only behind the gates.
@@ -289,7 +291,16 @@ async def push_product(
     # queued and pricing the size + pressing again ships it.
     # ponytail: refuses the WHOLE press (title/photo edits of a live listing
     # wait too) -- seeding only the priced sizes would split the one rule.
-    unpriced = unpriced_size_names(product, variants) if (full_reseed or repair_only) else []
+    # A LIVE model listing: a colour at fault was already held back by
+    # model_listing (review of #1233 -- one bad colour never freezes a live
+    # listing), so only the variants this press SEEDS are asked here.
+    seed_targets = variants
+    if listing is not None and existing_gid:
+        seed_targets = [
+            v for v in variants
+            if not v.get(HELD) and (full_reseed or not _row_has_gid(v, ecom))
+        ]
+    unpriced = unpriced_size_names(product, seed_targets) if (full_reseed or repair_only) else []
     if unpriced:
         return PushResult(
             mode=MODE_BLOCKED,
@@ -755,7 +766,9 @@ async def push_product(
         elif new_gid and payload.get("status") == "ACTIVE":
             # ONE price rule for every press (SF-05): every size priced. A
             # seeding press must also have seeded clean.
-            priced_ok = _has_publishable_price(product, variants) and not (
+            # A colour held back (no price of its own) keeps its last price
+            # on a live listing: it never withholds the rest (review of #1233).
+            priced_ok = _has_publishable_price(product, [v for v in variants if not v.get(HELD)]) and not (
                 seed_summary or {}
             ).get("errors")
             if seed_summary is None and (full_reseed or repair_only):
@@ -888,12 +901,40 @@ async def push_product(
         photos_not_synced = bool((photo_summary or {}).get("error")) or bool(
             (variant_photo_summary or {}).get("error")
         )
+        # ...BUT NOT FOR EVER (review of #1233): a photo step that keeps
+        # failing re-queues the listing for PHOTO_RETRY_CAP runs, then the
+        # press says so and stops re-queueing it (a person must look). A
+        # clean photo pass resets the count.
+        photo_line = (
+            _PHOTOS_NOT_SYNCED_MSG
+            if (photo_summary or {}).get("error")
+            else (variant_photo_summary or {}).get("error")
+        )
+        photo_requeue = photos_not_synced
+        if pid and new_gid:
+            tries = _count_photo_tries(db, pid, failed=photos_not_synced)
+            if photos_not_synced and tries >= PHOTO_RETRY_CAP:
+                photo_requeue = False
+                photo_line = (
+                    f"{photo_line} -- tried {tries} times; it is no longer re-queued for its "
+                    "photos: check the photographs, then press Send to website"
+                )
+        # A colour held back from this LIVE listing (no price, no colour or
+        # size, looks the same as another): named by SKU, the rest was sent.
+        held = list((listing or {}).get("held") or [])
+        held_line = (
+            "not on the website yet: "
+            + ", ".join(f"{h['sku']} ({h['reason']})" for h in held)
+            + " -- fix them and press again; everything else was sent"
+            if held
+            else None
+        )
         # THE ONE RE-QUEUE RULE. The press reached Shopify but did not do all
         # it was pressed for -- the product is not visible, or it is visible at
         # the wrong price or with the wrong photos. Either way the row goes
         # BACK in the queue so the next press / scheduled sync retries it. See
         # _requeue_unpublished for why this is not the ping-pong hazard.
-        if pid and (not published_ok or price_not_synced or photos_not_synced):
+        if pid and (not published_ok or price_not_synced or photo_requeue):
             _requeue_unpublished(db, pid)
         return PushResult(
             mode=MODE_LIVE,
@@ -913,14 +954,9 @@ async def push_product(
                         line
                         for line in (
                             _PRICE_NOT_SYNCED_MSG if price_not_synced else None,
-                            (
-                                _PHOTOS_NOT_SYNCED_MSG
-                                if (photo_summary or {}).get("error")
-                                else (variant_photo_summary or {}).get("error")
-                            )
-                            if photos_not_synced
-                            else None,
+                            photo_line if photos_not_synced else None,
                             (stock_summary or {}).get("error") if stock_not_written else None,
+                            held_line,
                         )
                         if line
                     )
@@ -941,6 +977,7 @@ async def push_product(
                     if photos_not_synced
                     else ((stock_summary or {}).get("code") if stock_not_written else None)
                 )
+                or (held[0]["code"] if held else None)
                 if published_ok
                 else (pub_summary or {}).get("code")
             ),
@@ -968,6 +1005,28 @@ async def push_product(
             payload=payload,
             error=str(e),
         )
+
+
+def _count_photo_tries(db, pid: str, *, failed: bool) -> int:
+    """ecom.photo_sync_tries: +1 for a press whose photo step failed, back to
+    0 for a clean one. Returns the count after this press (0 on a read or
+    write failure -- never a reason to stop re-queueing)."""
+    from ..catalog_ecom import update_ecom
+
+    box = {"n": 0}
+
+    def _apply(ecom: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        held = int(ecom.get("photo_sync_tries") or 0)
+        box["n"] = held + 1 if failed else 0
+        if box["n"] == held:
+            return None
+        return {**ecom, "photo_sync_tries": box["n"]}
+
+    try:
+        update_ecom(db, pid, _apply)
+    except Exception:  # noqa: BLE001 -- the count is advisory
+        return 0
+    return box["n"]
 
 
 async def _set_active(db, product_gid: str, published: Dict[str, Any]) -> Dict[str, Any]:

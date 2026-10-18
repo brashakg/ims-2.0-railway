@@ -379,15 +379,34 @@ def _resolve_variant_pricing(
     carrying products are unaffected: the variant's own discounted_price (which the
     engine writes) still wins first.
 
-    A COLOUR / SIZE OF A MODEL (``_own_price``, set by listing.model_listing,
-    G2 owner 2026-10-18: "prices MAY differ per colour/size") is priced by its
-    OWN row only -- never the lead's price: a colour with no price of its own
-    is unpriced (the every-size rule refuses it), never sold at the lead's."""
+    EVERY VARIANT OF A MODEL (``_own_price``, set by listing.model_listing --
+    G2 owner 2026-10-18 "prices MAY differ per colour/size"; ONE rule for the
+    lead too, review of #1233) is priced from ITS OWN numbers only:
+        price       the discount engine's online price for that variant when
+                    set (its row's discounted_price; the lead's stamped
+                    ecom.online_offer_price), else its own in-store offer
+                    price when > 0 and <= its MRP, else its own MRP
+        compare-at  its own MRP -- the callers strike it through only when it
+                    is higher than the price.
+    Never another item's price: a colour with none of its own is unpriced
+    (the every-size rule holds or refuses it)."""
     if variant.get("_own_price"):
-        return (
-            _price_float(variant.get("discounted_price")) or _price_float(variant.get("mrp")),
-            _price_float(variant.get("compare_at_price")) or _price_float(variant.get("mrp")),
-        )
+        mrp = _price_float(variant.get("mrp"))
+        engine = _price_float(variant.get("discounted_price"))
+        if not engine and str(variant.get("sku") or "") == str(product.get("sku") or ""):
+            ecom = product.get("ecom") or {}
+            if ecom.get("online_price_source") in ("rule", "manual"):
+                engine = _price_float(ecom.get("online_offer_price"))
+        offer = _price_float(variant.get("offer_price"))
+        if engine:
+            price = engine
+        elif offer and (not mrp or offer <= mrp):
+            # ponytail: no MRP at all -> its offer stands (a draft-quality
+            # item); a model press holds/refuses only when both are missing.
+            price = offer
+        else:
+            price = mrp
+        return price, mrp
     pricing = product.get("pricing") or {}
     ecom = product.get("ecom") or {}
     # Only trust the product-level online offer/compare-at when the engine stamped
