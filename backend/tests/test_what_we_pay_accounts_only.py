@@ -314,6 +314,14 @@ def catalogue(buying):
 
 @pytest.mark.parametrize("role", ("STORE_MANAGER", "AREA_MANAGER"))
 def test_a_managers_po_is_priced_on_the_server_and_hides_it(client, catalogue, role):
+    # A11: sent quotations without accepted receipts must neither replace a
+    # known catalogue cost nor invent one for an otherwise unpriced product.
+    catalogue.purchase_orders.insert_one({
+        "po_id": "QUOTE-ONLY", "vendor_id": "V1", "delivery_store_id": STORE,
+        "status": "SENT", "sent_at": "2026-09-20T10:00:00",
+        "items": [{"product_id": "P2", "quantity": 1, "unit_price": 1200},
+                  {"product_id": "P3", "quantity": 1, "unit_price": 500}],
+    })
     reply = _po(
         client, role,
         ("P1", {"unit_price": 1.0}),  # typed: not taken; last paid to V1 wins
