@@ -170,20 +170,29 @@ def _writeback_variant(
         filt = {"variant_id": variant["variant_id"]}
     if filt is None:
         return False
+    # A MODEL LISTING row (listing.ROW_SET, G2): a colour joining the model's
+    # listing moves its IMS row under it IN THIS SAME WRITE -- the row and
+    # the Shopify variant appear together. A lead with no row yet gets one.
+    listing_set = dict((variant or {}).get("_listing_set") or {})
     update: Dict[str, Any] = {
+        **listing_set,
         "shopify_variant_id": shopify_variant_id,
         "updated_at": _now(),
     }
     if inventory_item_gid:
         update["shopify_inventory_item_id"] = inventory_item_gid
     try:
-        res = db["catalog_variants"].update_one(filt, {"$set": update})
+        coll = db["catalog_variants"]
+        res = coll.update_one(filt, {"$set": update})
+        touched = getattr(res, "matched_count", None)
+        if touched is None:
+            touched = getattr(res, "modified_count", 0)
+        if not touched and listing_set:
+            coll.insert_one({**filt, **update})
+            touched = 1
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[SHOPIFY_PUSH] variant write-back failed {filt}: {e}")
         return False
-    touched = getattr(res, "matched_count", None)
-    if touched is None:
-        touched = getattr(res, "modified_count", 0)
     return bool(touched)
 
 

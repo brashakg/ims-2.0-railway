@@ -20,7 +20,16 @@ from ._shared import (
     product_push_refusal,
 )
 from .transport import _graphql, _user_errors
-from .queries import _VARIANTS_BULK_CREATE, _VARIANTS_BULK_UPDATE, _VARIANTS_PER_CALL
+from .queries import (
+    _BULK_CREATE_STRATEGY,
+    _MAX_VARIANT_PAGES,
+    _PRODUCT_OPTIONS_CREATE,
+    _PRODUCT_VARIANTS_PAGE,
+    _VARIANTS_BULK_CREATE,
+    _VARIANTS_BULK_UPDATE,
+    _VARIANTS_PER_CALL,
+)
+from .listing import AXES, FULL_OPTIONS, OPTION_MISSING, PENDING
 from .product_input import (
     _resolve_variant_pricing,
     _variants_for_price_push,
@@ -60,7 +69,7 @@ def _node_option_key(node: Dict[str, Any]) -> Tuple[str, str]:
     color = size = ""
     for so in (node or {}).get("selectedOptions") or []:
         name = _norm_opt((so or {}).get("name"))
-        if name == "color":
+        if name in ("color", "colour"):
             color = _norm_opt(so.get("value"))
         elif name == "size":
             size = _norm_opt(so.get("value"))
@@ -82,21 +91,26 @@ def _node_inventory_item_gid(node: Optional[Dict[str, Any]]) -> Optional[str]:
     return _as_shopify_gid(raw, "InventoryItem") or None
 
 
-def _variant_option_values(variant: Optional[Dict[str, Any]]) -> List[Dict[str, str]]:
+def _variant_option_values(
+    variant: Optional[Dict[str, Any]], names: Optional[Dict[str, str]] = None
+) -> List[Dict[str, str]]:
     """VariantOptionValueInput rows (used only when CREATING a variant Shopify
     did not auto-create). Empty for a product-level / option-less variant --
-    such a variant can never be created, only updated."""
+    such a variant can never be created, only updated. ``names`` maps a row
+    field to the option's name ON THE LISTING (a live one may spell it
+    'Colour'); default Color / Size."""
     v = variant or {}
     out: List[Dict[str, str]] = []
-    if v.get("option_color"):
-        out.append({"optionName": "Color", "name": str(v["option_color"])})
-    if v.get("option_size"):
-        out.append({"optionName": "Size", "name": str(v["option_size"])})
+    for name, field in AXES:
+        if v.get(field):
+            out.append({"optionName": (names or {}).get(field, name), "name": str(v[field])})
     return out
 
 
 def build_variant_seed_rows(
-    product: Dict[str, Any], variants: Optional[List[Dict[str, Any]]] = None
+    product: Dict[str, Any],
+    variants: Optional[List[Dict[str, Any]]] = None,
+    names: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """The DESIRED Shopify variant state for a product being created. Pure.
 
@@ -151,7 +165,7 @@ def build_variant_seed_rows(
         rows.append(
             {
                 "key": _variant_option_key(v),
-                "option_values": _variant_option_values(v),
+                "option_values": _variant_option_values(v, names),
                 "row": row,
                 "variant": v,  # None for the product-level pseudo-variant
             }
@@ -248,7 +262,9 @@ def _needs_repair(
 
 
 def build_repair_seed_rows(
-    product: Dict[str, Any], variants: Optional[List[Dict[str, Any]]] = None
+    product: Dict[str, Any],
+    variants: Optional[List[Dict[str, Any]]] = None,
+    names: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """Like build_variant_seed_rows, but restricted to the row(s) that have
     NEVER been seeded (see _row_has_gid / _needs_repair). Used by the
@@ -272,11 +288,40 @@ def build_repair_seed_rows(
     # build_variant_seed_rows expects as its own `variants` argument (a bare
     # [None] round-trips through its `list(variants or []) or [None]` guard
     # identically to passing None/[] outright), so no special-casing needed.
-    return build_variant_seed_rows(product, unseeded)
+    return build_variant_seed_rows(product, unseeded, names)
+
+
+def _claimed_gids(
+    product: Dict[str, Any],
+    variants: Optional[List[Dict[str, Any]]],
+    seed_rows: List[Dict[str, Any]],
+) -> set:
+    """The variant gids an IMS row OUTSIDE ``seed_rows`` already owns -- every
+    other row's stored gid, and the listing's default (ecom.shopify_variant_id)
+    unless one of the seed rows IS the product's own variant. A node in this
+    set belongs to someone: it is never paired with a seed row (G2, owner
+    2026-10-18 -- a colour joining a live one-variant listing was paired with
+    the LEAD's variant by the lone-pair rule and took its price and its
+    inventory item)."""
+    mine = {id(r["variant"]) for r in seed_rows if r["variant"] is not None}
+    out = {
+        _as_shopify_gid(v["shopify_variant_id"], "ProductVariant")
+        for v in variants or []
+        if isinstance(v, dict) and id(v) not in mine and v.get("shopify_variant_id")
+    }
+    own_sku = str(product.get("sku") or "")
+    default = (product.get("ecom") or {}).get("shopify_variant_id")
+    if default and not any(
+        str((r["variant"] or {}).get("sku") or own_sku) == own_sku for r in seed_rows
+    ):
+        out.add(_as_shopify_gid(default, "ProductVariant"))
+    return out
 
 
 def _assign_seed_rows(
-    seed_rows: List[Dict[str, Any]], nodes: Optional[List[Dict[str, Any]]]
+    seed_rows: List[Dict[str, Any]],
+    nodes: Optional[List[Dict[str, Any]]],
+    claimed: Optional[set] = None,
 ) -> Tuple[
     List[Dict[str, Any]],
     List[Dict[str, Any]],
@@ -305,12 +350,18 @@ def _assign_seed_rows(
     A row whose stored gid is present in the nodes can therefore NEVER reach
     productVariantsBulkCreate -- the drift case previously minted a duplicate
     live variant and re-pointed the row's stock target at it, leaving the old
-    variant sellable at a stale price with its stock never synced again."""
+    variant sellable at a stale price with its stock never synced again.
+
+    ``claimed`` (``_claimed_gids``): nodes another IMS row already owns are
+    left out entirely -- neither option matching nor the lone-pair rule can
+    hand one to a seed row."""
     pool: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
     unmatched: List[Dict[str, Any]] = []
     node_by_gid: Dict[str, Dict[str, Any]] = {}
     for n in nodes or []:
         if isinstance(n, dict) and n.get("id"):
+            if claimed and _as_shopify_gid(n.get("id"), "ProductVariant") in claimed:
+                continue
             pool.setdefault(_node_option_key(n), []).append(n)
             unmatched.append(n)
             node_by_gid[_as_shopify_gid(n.get("id"), "ProductVariant")] = n
@@ -348,7 +399,14 @@ def _assign_seed_rows(
 
     # Single remaining row / single remaining node: trust the 1:1 pairing even
     # if the option labels do not line up (e.g. Shopify kept a "Title" option).
-    lone = len(remaining) == 1 and len(unmatched) == 1
+    # Never for a colour JOINING a model's listing (listing.PENDING, G2): it
+    # is not on Shopify by definition, so a variant whose options are not its
+    # own is someone else's -- it is created, never handed that one.
+    lone = (
+        len(remaining) == 1
+        and len(unmatched) == 1
+        and not (remaining[0][1]["variant"] or {}).get(PENDING)
+    )
 
     # PASS 2 -- option-key matching for the rows without a stored-and-present
     # gid (unchanged semantics); only these may fall through to create/skip.
@@ -376,6 +434,182 @@ def _assign_seed_rows(
     return update_rows, create_rows, create_variants, pairs, skipped
 
 
+async def all_variant_nodes(
+    db, product_gid: str, connection: Optional[Dict[str, Any]] = None
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """EVERY variant node of a listing: the ``connection`` a product response
+    carried (its first page), then page after page while Shopify says there
+    is more (G2: a model can carry more than 100 colours x sizes -- never
+    truncated). ``connection`` None reads from the first page. Returns
+    (nodes, complete); complete False when a page could not be read -- the
+    caller then creates nothing (a variant it cannot see could be minted
+    twice). Never raises."""
+    nodes: List[Dict[str, Any]] = []
+    after: Optional[str] = None
+    if connection is not None:
+        nodes = [n for n in (connection.get("nodes") or []) if isinstance(n, dict)]
+        page = connection.get("pageInfo") or {}
+        if not page.get("hasNextPage"):
+            return nodes, True
+        after = page.get("endCursor")
+        if not after:
+            return nodes, False
+    for _ in range(_MAX_VARIANT_PAGES):
+        try:
+            body = await _graphql(
+                db, _PRODUCT_VARIANTS_PAGE, {"id": _as_shopify_gid(product_gid, "Product"), "after": after}
+            )
+        except Exception:  # noqa: BLE001 -- reported as incomplete
+            return nodes, False
+        conn = (((body or {}).get("data") or {}).get("product") or {}).get("variants")
+        if not isinstance(conn, dict) or (body or {}).get("errors"):
+            return nodes, False
+        nodes += [n for n in (conn.get("nodes") or []) if isinstance(n, dict)]
+        page = conn.get("pageInfo") or {}
+        if not page.get("hasNextPage"):
+            return nodes, True
+        after = page.get("endCursor")
+        if not after:
+            return nodes, False
+    return nodes, False
+
+
+def _full_options(v: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """A row's option values on EVERY axis (listing.FULL_OPTIONS for a model
+    row; the row's own fields otherwise)."""
+    v = v or {}
+    full = v.get(FULL_OPTIONS) or {}
+    return {field: str(full.get(field, v.get(field)) or "").strip() for _n, field in AXES}
+
+
+async def _ensure_listing_options(
+    db,
+    product: Dict[str, Any],
+    variants: List[Dict[str, Any]],
+    product_gid: str,
+    options: Optional[List[Dict[str, Any]]],
+    nodes: List[Dict[str, Any]],
+    creating: List[Optional[Dict[str, Any]]],
+) -> Dict[str, Any]:
+    """Before a LIVE listing gains a variant: every option the new variant is
+    chosen by must exist on it (Shopify: "an option referenced must exist on
+    the product; every variant has one value for every option").
+
+    The axes are the listing's own (Color / Size, however spelled) plus every
+    axis an IMS row carries a value on. A missing one is added with
+    productOptionsCreate, its first value the one of the row that owns the
+    listing's first variant (the lead's) -- Shopify gives that value to the
+    variants already there and replaces a lone default "Title" placeholder,
+    so the lead's variant keeps its id. Every row's option fields are then set
+    for exactly those axes (from listing.FULL_OPTIONS) and the nodes re-read.
+
+    Returns {names: {field: option name}, nodes, created: [option names]} or
+    {error, code} -- then NOTHING is created (no option is half-added: every
+    check runs before the call). Never raises."""
+    present: List[str] = []
+    for o in options or []:
+        if isinstance(o, dict) and o.get("name"):
+            present.append(str(o["name"]))
+    placeholder = (
+        len(present) == 1
+        and present[0].strip().lower() == "title"
+        and all(
+            str((v or {}).get("name") or "").strip().lower() == "default title"
+            for v in ((options or [{}])[0].get("optionValues") or [])
+        )
+    )
+    names: Dict[str, str] = {}
+    unknown: List[str] = []
+    for name in [] if placeholder else present:
+        low = name.strip().lower()
+        if low in ("color", "colour"):
+            names["option_color"] = name
+        elif low == "size":
+            names["option_size"] = name
+        else:
+            unknown.append(name)
+    if unknown:
+        return {
+            "error": (
+                "this listing has an option IMS does not manage ("
+                + ", ".join(unknown)
+                + ") -- no new colour or size was added; remove that option in Shopify admin "
+                "or add the colour there"
+            ),
+            "code": "LISTING_OPTIONS_UNKNOWN",
+        }
+    # An axis the listing has, or one the rows are chosen by (a model's rows
+    # carry only the axes its members VARY on -- listing.model_listing).
+    wanted = [
+        field
+        for _n, field in AXES
+        if field in names or any(str((v or {}).get(field) or "").strip() for v in variants)
+    ]
+    blank = [
+        f"{'colour' if field == 'option_color' else 'size'} on {(v or {}).get('sku') or product.get('sku')}"
+        for v in creating
+        for field in wanted
+        if not _full_options(v)[field]
+    ]
+    missing = [field for field in wanted if field not in names]
+    first: Dict[str, str] = {}
+    if missing:
+        owner = None
+        first_gid = _as_shopify_gid(nodes[0].get("id"), "ProductVariant") if nodes else ""
+        for v in variants:
+            if first_gid and _as_shopify_gid(v.get("shopify_variant_id") or "", "ProductVariant") == first_gid:
+                owner = v
+        if owner is None:
+            owner = next((v for v in variants if str(v.get("sku")) == str(product.get("sku"))), None)
+        for field in missing:
+            first[field] = _full_options(owner)[field]
+            if not first[field]:
+                blank.append(
+                    f"{'colour' if field == 'option_color' else 'size'} on "
+                    f"{(owner or {}).get('sku') or product.get('sku')} (the variant already on the website)"
+                )
+    if blank:
+        return {
+            "error": "no new colour or size was added: there is no " + ", no ".join(blank)
+            + " -- fill it in, then press again",
+            "code": OPTION_MISSING,
+        }
+    created: List[str] = []
+    if missing:
+        default_names = {field: name for name, field in AXES}
+        try:
+            body = await _graphql(
+                db,
+                _PRODUCT_OPTIONS_CREATE,
+                {
+                    "productId": _as_shopify_gid(product_gid, "Product"),
+                    "options": [
+                        {"name": default_names[field], "values": [{"name": first[field]}]} for field in missing
+                    ],
+                },
+            )
+            err = _user_errors(body, "productOptionsCreate")
+        except Exception as exc:  # noqa: BLE001 -- nothing created on a failure
+            err = str(exc)
+        if err:
+            return {"error": f"the listing's options could not be added ({err}) -- no new colour or size was added"}
+        for field in missing:
+            names[field] = default_names[field]
+            created.append(default_names[field])
+        nodes, complete = await all_variant_nodes(db, product_gid)
+        if not complete:
+            return {
+                "error": "the listing's variants could not be re-read after adding its options -- "
+                "no new colour or size was added; press again",
+                "options_created": created,
+            }
+    for v in variants:
+        full = _full_options(v)
+        for _n, field in AXES:
+            v[field] = full[field] if field in wanted else ""
+    return {"names": {field: names[field] for field in wanted}, "nodes": nodes, "created": created}
+
+
 async def _seed_variants_after_write(
     db,
     product: Dict[str, Any],
@@ -384,6 +618,8 @@ async def _seed_variants_after_write(
     nodes: Optional[List[Dict[str, Any]]],
     *,
     repair_only: bool = False,
+    listing_options: Optional[List[Dict[str, Any]]] = None,
+    nodes_complete: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """LIVE-only: give the freshly created Shopify variants their price / MRP /
     barcode / SKU, create any remaining IMS variant, and write every gid back --
@@ -407,9 +643,43 @@ async def _seed_variants_after_write(
     )
     if not seed_rows:
         return None
+    nodes = list(nodes or [])
+    claimed = _claimed_gids(product, variants, seed_rows)
     update_rows, create_rows, create_variants, pairs, skipped = _assign_seed_rows(
-        seed_rows, nodes
+        seed_rows, nodes, claimed
     )
+    # A NEW COLOUR OR SIZE ON A LIVE LISTING (G2): the listing must carry the
+    # option it is chosen by first, and IMS must see EVERY variant the listing
+    # has -- one it cannot see could be minted twice. Either missing -> the
+    # existing variants are still seeded below, nothing is created.
+    hold_create: Optional[Dict[str, Any]] = None
+    options_created: List[str] = []
+    if create_rows and not nodes_complete:
+        hold_create = {
+            "error": "the listing's variants could not all be read -- no new colour or size was "
+            "added; press again"
+        }
+    elif create_rows and listing_options is not None:
+        ens = await _ensure_listing_options(
+            db, product, list(variants or []), product_gid, listing_options, nodes, create_variants
+        )
+        options_created = list(ens.get("created") or [])
+        if ens.get("error"):
+            hold_create = ens
+        else:
+            nodes = ens["nodes"]
+            seed_rows = (
+                build_repair_seed_rows(product, variants, ens["names"])
+                if repair_only
+                else build_variant_seed_rows(product, variants, ens["names"])
+            )
+            claimed = _claimed_gids(product, variants, seed_rows)
+            update_rows, create_rows, create_variants, pairs, skipped = _assign_seed_rows(
+                seed_rows, nodes, claimed
+            )
+    if hold_create is not None:
+        skipped += len(create_rows)
+        create_rows, create_variants = [], []
     # A size created on a listing that is already live is on sale the moment
     # it exists, so tracking + the stop-at-0 policy go in THE SAME call that
     # creates it -- never a second call that can be refused while the size
@@ -438,7 +708,14 @@ async def _seed_variants_after_write(
         # The gate is push_product's every-size rule (unpriced_size_names,
         # SF-05): a press with ANY unpriced size never reaches seeding.
         "priced_rows": sum(1 for r in seed_rows if r["row"].get("price")),
+        # G2: the options this press added to a live listing, and why a new
+        # colour/size was NOT created (its own line + code on the result).
+        "options_created": options_created,
     }
+    if hold_create is not None:
+        summary["errors"].append(hold_create["error"])
+        summary["held"] = hold_create["error"]
+        summary["code"] = hold_create.get("code")
 
     for i in range(0, len(update_rows), _VARIANTS_PER_CALL):
         chunk = update_rows[i : i + _VARIANTS_PER_CALL]
@@ -458,8 +735,13 @@ async def _seed_variants_after_write(
     for i in range(0, len(create_rows), _VARIANTS_PER_CALL):
         chunk = create_rows[i : i + _VARIANTS_PER_CALL]
         try:
+            # PRESERVE_STANDALONE_VARIANT: a create never deletes the
+            # listing's own variant (Shopify's DEFAULT strategy removes a
+            # standalone one when variants are added).
             body = await _graphql(
-                db, _VARIANTS_BULK_CREATE, {"productId": product_gid, "variants": chunk}
+                db,
+                _VARIANTS_BULK_CREATE,
+                {"productId": product_gid, "variants": chunk, "strategy": _BULK_CREATE_STRATEGY},
             )
             err = _user_errors(body, "productVariantsBulkCreate")
             if err:
@@ -532,6 +814,9 @@ async def _seed_variants_after_write(
     verdicts = tracking_verdicts(created_nodes, policy)
     summary["tracking_verdicts"] = verdicts
     summary["unconfirmed_variant_gids"] = [g for g in made if not verdicts.get(g)]
+    # Each seeded row's variant by its SKU (the colour-photo pass, G2).
+    own_sku = str(product.get("sku") or "")
+    summary["gid_by_sku"] = {str((v or {}).get("sku") or own_sku): gid for v, gid, _inv in pairs}
     return summary
 
 

@@ -818,9 +818,24 @@ def test_second_push_repairs_the_still_unseeded_row_without_retouching_seeded_on
     assert (
         "gid://shopify/ProductVariant/5003" in res2.variants_seeded["variant_gids"]
     )
-    # ...and Black/Gold were NEVER resubmitted -- no bulk-update call at all,
-    # they were not even part of this push's seed_rows.
-    assert spy2.seed_count_for("productVariantsBulkUpdate") == 0
+    # ...and Black/Gold were NEVER resubmitted to the SEED pass -- no seed row
+    # (one carrying its SKU) went out for them; they were not even part of
+    # this push's seed_rows. Since G2 the repair press does re-send TODAY'S
+    # PRICE to the sizes already on the listing (exactly what a press with no
+    # seeding does -- a price edit in the same press as a new size must not
+    # be dropped), and only to them: by their stored gids, no SKU.
+    bulk = [c for c in spy2.calls if "productVariantsBulkUpdate" in c["query"]]
+    seed_rows_sent = [
+        r for c in bulk for r in c["variables"]["variants"]
+        if "inventoryItem" in r and "inventoryPolicy" not in r
+    ]
+    assert seed_rows_sent == []
+    price_rows = [
+        r for c in bulk for r in c["variables"]["variants"] if "price" in r
+    ]
+    assert {r["id"] for r in price_rows} == {
+        black["shopify_variant_id"], gold["shopify_variant_id"]
+    }
     assert spy2.count_for("productVariantsBulkCreate") == 1
 
     black2 = db["catalog_variants"].find_one({"sku": "S-BLK"})

@@ -290,6 +290,35 @@ async def _set_product_metafields(
     return {"set": set_count, "errors": errors, **out}
 
 
+async def _set_variant_metafields(
+    db, by_variant: Dict[str, List[Dict[str, Any]]]
+) -> Dict[str, Any]:
+    """LIVE-only (G2): the per-colour/size attributes (lens colour,
+    polarization, materials, the maker barcode...) as ims.* metafields ON
+    EACH VARIANT, so the theme shows the chosen variant's own. One
+    metafieldsSet stream over every variant (ownerId = the variant gid),
+    chunked at Shopify's cap. Fail-soft: {"set": n, "errors": [...]}."""
+    rows = [
+        {**m, "ownerId": _as_shopify_gid(gid, "ProductVariant")}
+        for gid, mfs in by_variant.items()
+        if gid
+        for m in mfs or []
+    ]
+    set_count = 0
+    errors: List[str] = []
+    for i in range(0, len(rows), _METAFIELDS_PER_CALL):
+        try:
+            body = await _graphql(db, _METAFIELDS_SET, {"metafields": rows[i : i + _METAFIELDS_PER_CALL]})
+            field_obj = (body.get("data") or {}).get("metafieldsSet") or {}
+            errors.extend(
+                f"{(e.get('field') or '?')}: {e.get('message')}" for e in field_obj.get("userErrors") or []
+            )
+            set_count += len(field_obj.get("metafields") or [])
+        except Exception as e:  # noqa: BLE001 -- fail-soft side channel
+            errors.append(str(e))
+    return {"set": set_count, "errors": errors}
+
+
 def _derive_options(variants: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Build Shopify productOptions (Color / Size) from the variant option axes
     that are actually present. Returns [] when no variant carries an option."""
@@ -348,7 +377,17 @@ def _resolve_variant_pricing(
     existing in-store offer (pre-batch behaviour) so nothing flips unexpectedly. The
     engine NEVER writes offer_price, so in-store POS pricing is untouched. Variant-
     carrying products are unaffected: the variant's own discounted_price (which the
-    engine writes) still wins first."""
+    engine writes) still wins first.
+
+    A COLOUR / SIZE OF A MODEL (``_own_price``, set by listing.model_listing,
+    G2 owner 2026-10-18: "prices MAY differ per colour/size") is priced by its
+    OWN row only -- never the lead's price: a colour with no price of its own
+    is unpriced (the every-size rule refuses it), never sold at the lead's."""
+    if variant.get("_own_price"):
+        return (
+            _price_float(variant.get("discounted_price")) or _price_float(variant.get("mrp")),
+            _price_float(variant.get("compare_at_price")) or _price_float(variant.get("mrp")),
+        )
     pricing = product.get("pricing") or {}
     ecom = product.get("ecom") or {}
     # Only trust the product-level online offer/compare-at when the engine stamped

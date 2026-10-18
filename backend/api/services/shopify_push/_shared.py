@@ -127,6 +127,10 @@ class PushResult:
     # {added, removed, unmanaged, adopted, error?, code?} from
     # tags.sync_product_tags. None when the push never got that far.
     tags: Optional[Any] = None
+    # Product pushes of a MODEL only (G2, owner 2026-10-18): its options, every
+    # colour/size with its option values, whether it is on Shopify, its photo
+    # (listing.plan_summary). None for a product that leads no model.
+    listing: Optional[Any] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
