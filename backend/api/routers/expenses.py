@@ -1327,20 +1327,34 @@ async def approve_expense(
         "approved_at": utc_now_iso(),
     }
     if is_petty:
-        approved = _petty_cash_approve(existing, current_user)
+        from ..services import petty_cash_service as pcs
+
+        db = get_db()
+        db = getattr(db, "db", db)
+        store_id = existing.get("store_id")
+        try:
+            stranded = pcs.live_payout_for(db, store_id, expense_id)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=503, detail="The petty-cash float could not be read. Try again.") from exc
+        if stranded:
+            # An earlier approval paid this out but its APPROVED stamp never
+            # landed: finish it with that payout, never a second one.
+            approved = {"txn_id": stranded.get("txn_id"), "balance": pcs.get_balance(db, store_id).get("balance")}
+        else:
+            approved = _petty_cash_approve(existing, current_user)
         # approved is the debit result envelope; the float is already debited.
         stamp["petty_cash_txn_id"] = approved.get("txn_id")
-        if not expense_repo.update_if(expense_id, {"status": "PENDING"}, stamp):
-            # A reject won between the debit and this stamp: hand the payout
-            # back (idempotent), never keep money for an expense not approved.
-            from ..services import petty_cash_service as pcs
-
-            db = get_db()
-            pcs.reverse_payout(
-                getattr(db, "db", db), store_id=existing.get("store_id"),
-                txn_id=approved.get("txn_id"), actor=current_user.get("user_id"),
-                reason="approval lost to another decision",
-            )
+        try:
+            won = expense_repo.update_if(expense_id, {"status": "PENDING"}, stamp)
+        except Exception as exc:  # noqa: BLE001
+            # Outcome unknown: the payout stays on record, and approving again
+            # finishes this approval with it (the stranded branch above).
+            raise HTTPException(
+                status_code=503,
+                detail="The payout is recorded but the approval could not be saved. Approve again to finish it.",
+            ) from exc
+        if not won:
+            _settle_lost_petty_approval(db, expense_repo, existing, approved.get("txn_id"), current_user)
             raise HTTPException(status_code=409, detail=_NOT_PENDING)
         return {
             "message": "Petty-cash expense approved; float debited",
@@ -1358,6 +1372,23 @@ async def approve_expense(
 # The one answer for an approval that is no longer possible (E4-4): already
 # approved or rejected -- by an earlier click, or a colleague's racing one.
 _NOT_PENDING = "This expense is no longer pending approval: it was already approved or rejected."
+
+
+def _settle_lost_petty_approval(db, expense_repo, existing: dict, txn_id, current_user: dict) -> None:
+    """A petty approval paid out (txn_id) and then lost the PENDING
+    compare-and-set. If the expense now stands APPROVED on this very payout,
+    a colleague finished it: the money is where it belongs. Otherwise a reject
+    won: hand the payout back (idempotent), never keep money for an expense
+    that was not approved."""
+    from ..services import petty_cash_service as pcs
+
+    now = expense_repo.find_by_id(existing.get("expense_id")) or {}
+    if now.get("status") == "APPROVED" and now.get("petty_cash_txn_id") == txn_id:
+        return
+    pcs.reverse_payout(
+        db, store_id=existing.get("store_id"), txn_id=txn_id,
+        actor=current_user.get("user_id"), reason="approval lost to a reject",
+    )
 
 
 def _petty_cash_approve(existing: dict, current_user: dict):
@@ -1524,7 +1555,8 @@ async def reject_expense(
 
         # F17 cross-store guard (mirror approve): a petty-cash reject REVERSES the
         # expense's store float -> a non-HQ approver must be scoped to that store.
-        if (existing.get("category") or "").upper() == _PETTY_CASH_CATEGORY:
+        is_petty = (existing.get("category") or "").upper() == _PETTY_CASH_CATEGORY
+        if is_petty:
             validate_store_access(existing.get("store_id"), current_user)
 
         # A PENDING claim rejects directly. An already-APPROVED petty-cash claim
@@ -1541,34 +1573,54 @@ async def reject_expense(
                 status_code=400, detail="Expense is not pending approval"
             )
 
-        # Reverse the float debit FIRST (idempotent). Only on success do we flip
-        # the expense to REJECTED, so a reversal failure never strands the books.
-        if status == "APPROVED" and txn_id:
-            from ..services import petty_cash_service as pcs
+        # B1: the REJECTED stamp is a compare-and-set on the status read, so a
+        # reject racing an approval -- exactly one wins; the loser gets a 409.
+        from ..services import petty_cash_service as pcs
 
-            db = get_db()
-            db = getattr(db, "db", db)
-            rev = pcs.reverse_payout(
-                db, store_id=existing.get("store_id"), txn_id=txn_id,
-                actor=current_user.get("user_id"), reason="reversal",
+        db = get_db()
+        db = getattr(db, "db", db)
+        expected = {"status": status}
+        if status == "APPROVED":
+            expected["petty_cash_txn_id"] = txn_id
+        rejected = {
+            "status": "REJECTED",
+            "rejected_by": current_user.get("user_id"),
+            "rejected_at": utc_now_iso(),
+            "rejection_reason": reason,
+        }
+        if not expense_repo.update_if(expense_id, expected, dict(rejected)):
+            raise HTTPException(status_code=409, detail=_DECIDED_MEANWHILE)
+
+        # The money follows the decision that won. An APPROVED claim's payout
+        # is reversed; a PENDING one hands back any payout an approval made
+        # without landing its stamp (in flight, or cut off). Both idempotent.
+        try:
+            payout = txn_id if status == "APPROVED" else (
+                (pcs.live_payout_for(db, existing.get("store_id"), expense_id) or {}).get("txn_id")
+                if is_petty else None
             )
-            if not rev.get("ok") and rev.get("error") != "already_reversed":
-                raise HTTPException(
-                    status_code=int(rev.get("http", 409)),
-                    detail={"error": rev.get("error") or "reverse_failed"},
-                )
-
-        expense_repo.update(
-            expense_id,
-            {
-                "status": "REJECTED",
-                "rejected_by": current_user.get("user_id"),
-                "rejected_at": utc_now_iso(),
-                "rejection_reason": reason,
-            },
-        )
+            rev = pcs.reverse_payout(
+                db, store_id=existing.get("store_id"), txn_id=payout,
+                actor=current_user.get("user_id"), reason="reversal",
+            ) if payout else {"ok": True}
+        except Exception:  # noqa: BLE001
+            rev = {"ok": False, "http": 503, "error": "float_unreadable"}
+        if not rev.get("ok") and rev.get("error") != "already_reversed":
+            # The reversal failed: put the expense back as it was, so the
+            # books never read REJECTED while the payout stands.
+            expense_repo.update_if(
+                expense_id, {"status": "REJECTED", "rejected_at": rejected["rejected_at"]},
+                {"status": status, "rejected_by": None, "rejected_at": None, "rejection_reason": None},
+            )
+            raise HTTPException(
+                status_code=int(rev.get("http", 409)),
+                detail={"error": rev.get("error") or "reverse_failed"},
+            )
 
     return {"message": "Expense rejected", "expense_id": expense_id}
+
+
+_DECIDED_MEANWHILE = "This expense was approved or rejected meanwhile. Reload to see it."
 
 
 @router.post("/{expense_id}/send-to-accountant")

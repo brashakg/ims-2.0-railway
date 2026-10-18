@@ -707,23 +707,48 @@ def test_t16_topup_not_found_after_float_deleted_is_not_ceiling(db, monkeypatch)
 # ============================================================================
 
 
-def _stale_reads(repo, monkeypatch, expense_id="E1"):
-    """The second approver read the expense while it was still PENDING (two
-    managers clicking at once): every later read returns that stale copy."""
-    snap = repo.find_by_id(expense_id)
-    monkeypatch.setattr(repo, "find_by_id", lambda _id: dict(snap))
+def _stale_once(repo, monkeypatch, snap):
+    """The next request read the expense as `snap` (it read before a
+    colleague's decision landed); every later read sees the store as it is."""
+    real, left = repo.find_by_id, [1]
+
+    def read(_id):
+        if left[0]:
+            left[0] = 0
+            return dict(snap)
+        return real(_id)
+
+    monkeypatch.setattr(repo, "find_by_id", read)
 
 
-def test_double_approve_of_a_petty_claim_debits_once(wired, monkeypatch):
+def _approve(db, repo, user):
+    return _client(db, repo, ["STORE_MANAGER"], user_id=user).post("/api/v1/expenses/E1/approve")
+
+
+def _reject(db, repo, user):
+    return _client(db, repo, ["STORE_MANAGER"], user_id=user).post(
+        "/api/v1/expenses/E1/reject", params={"reason": "not ours"})
+
+
+def _float(db):
+    return db.get_collection("petty_cash_floats").find_one({"store_id": "S1"})["balance"]
+
+
+@pytest.fixture
+def claim(wired):
     db, repo = wired
     _open(db, amount=5000.0)
     _seed_expense(repo, expense_id="E1", amount=300.0, bill="file-1")
-    _stale_reads(repo, monkeypatch)
-    first = _client(db, repo, ["STORE_MANAGER"], user_id="mgr1").post("/api/v1/expenses/E1/approve")
-    second = _client(db, repo, ["STORE_MANAGER"], user_id="mgr2").post("/api/v1/expenses/E1/approve")
-    assert first.status_code == 200, first.text
+    return db, repo, repo.find_by_id("E1")
+
+
+def test_double_approve_of_a_petty_claim_debits_once(claim, monkeypatch):
+    db, repo, pending = claim
+    assert _approve(db, repo, "mgr1").status_code == 200
+    _stale_once(repo, monkeypatch, pending)
+    second = _approve(db, repo, "mgr2")
     assert second.status_code == 409 and isinstance(second.json()["detail"], str)
-    assert db.get_collection("petty_cash_floats").find_one({"store_id": "S1"})["balance"] == 4700.0
+    assert _float(db) == 4700.0
     assert [r["type"] for r in _ledger(db)].count("DEBIT") == 1
     assert repo.coll.find_one({"expense_id": "E1"})["approved_by"] == "mgr1"
 
@@ -731,19 +756,18 @@ def test_double_approve_of_a_petty_claim_debits_once(wired, monkeypatch):
 def test_double_approve_of_an_ordinary_expense_is_one_approval(wired, monkeypatch):
     db, repo = wired
     _seed_expense(repo, expense_id="E2", amount=900.0, category="TRAVEL")
-    _stale_reads(repo, monkeypatch, "E2")
+    pending = repo.find_by_id("E2")
     first = _client(db, repo, ["STORE_MANAGER"], user_id="mgr1").post("/api/v1/expenses/E2/approve")
+    _stale_once(repo, monkeypatch, pending)
     second = _client(db, repo, ["STORE_MANAGER"], user_id="mgr2").post("/api/v1/expenses/E2/approve")
     assert first.status_code == 200, first.text
     assert second.status_code == 409 and isinstance(second.json()["detail"], str)
     assert repo.coll.find_one({"expense_id": "E2"})["approved_by"] == "mgr1"
 
 
-def test_an_approval_that_loses_to_a_reject_hands_the_payout_back(wired, monkeypatch):
+def test_an_approval_that_loses_to_a_reject_hands_the_payout_back(claim, monkeypatch):
     """The reject lands between the float debit and the APPROVED stamp."""
-    db, repo = wired
-    _open(db, amount=5000.0)
-    _seed_expense(repo, expense_id="E1", amount=300.0, bill="file-1")
+    db, repo, _ = claim
     real = expenses._do_petty_debit
 
     def debit_then_rejected(*a, **k):
@@ -752,8 +776,85 @@ def test_an_approval_that_loses_to_a_reject_hands_the_payout_back(wired, monkeyp
         return out
 
     monkeypatch.setattr(expenses, "_do_petty_debit", debit_then_rejected)
-    resp = _client(db, repo, ["STORE_MANAGER"], user_id="mgr1").post("/api/v1/expenses/E1/approve")
+    resp = _approve(db, repo, "mgr1")
     assert resp.status_code == 409, resp.text
     doc = repo.find_by_id("E1")
     assert doc["status"] == "REJECTED" and "approved_by" not in doc
-    assert db.get_collection("petty_cash_floats").find_one({"store_id": "S1"})["balance"] == 5000.0
+    assert _float(db) == 5000.0
+
+
+# B1 -- a reject racing an approval: exactly one wins, and money follows it.
+
+
+def test_a_reject_that_read_pending_loses_to_the_approval(claim, monkeypatch):
+    db, repo, pending = claim
+    assert _approve(db, repo, "mgr1").status_code == 200
+    _stale_once(repo, monkeypatch, pending)
+    lost = _reject(db, repo, "mgr2")
+    assert lost.status_code == 409 and isinstance(lost.json()["detail"], str)
+    doc = repo.coll.find_one({"expense_id": "E1"})
+    assert (doc["status"], doc["approved_by"]) == ("APPROVED", "mgr1")
+    assert _float(db) == 4700.0  # paid once, and the payout stands with the approval
+
+
+def test_a_reject_that_wins_first_leaves_no_debit(claim, monkeypatch):
+    db, repo, pending = claim
+    assert _reject(db, repo, "mgr2").status_code == 200
+    _stale_once(repo, monkeypatch, pending)  # the approver read it still PENDING
+    assert _approve(db, repo, "mgr1").status_code == 409
+    assert repo.coll.find_one({"expense_id": "E1"})["status"] == "REJECTED"
+    assert _float(db) == 5000.0
+
+
+def _stamp_fails_once(repo, monkeypatch):
+    real, left = repo.update_if, [1]
+
+    def update_if(*a, **k):
+        if left[0]:
+            left[0] = 0
+            raise RuntimeError("write timed out")
+        return real(*a, **k)
+
+    monkeypatch.setattr(repo, "update_if", update_if)
+
+
+def test_approving_again_finishes_an_approval_whose_stamp_failed(claim, monkeypatch):
+    db, repo, _ = claim
+    _stamp_fails_once(repo, monkeypatch)
+    cut = _approve(db, repo, "mgr1")
+    assert cut.status_code == 503 and "Approve again" in cut.json()["detail"]
+    assert _float(db) == 4700.0 and repo.find_by_id("E1")["status"] == "PENDING"
+    done = _approve(db, repo, "mgr1")
+    assert done.status_code == 200, done.text
+    doc = repo.find_by_id("E1")
+    assert doc["status"] == "APPROVED" and doc["petty_cash_txn_id"] == _ledger(db)[-1]["txn_id"]
+    assert _float(db) == 4700.0 and [r["type"] for r in _ledger(db)].count("DEBIT") == 1
+
+
+def test_a_reject_hands_back_a_payout_whose_approval_never_stamped(claim, monkeypatch):
+    db, repo, _ = claim
+    _stamp_fails_once(repo, monkeypatch)
+    assert _approve(db, repo, "mgr1").status_code == 503
+    assert _reject(db, repo, "mgr2").status_code == 200
+    assert repo.find_by_id("E1")["status"] == "REJECTED"
+    assert _float(db) == 5000.0
+
+
+def test_a_colleague_who_finishes_the_approval_keeps_the_payout(claim, monkeypatch):
+    """mgr2 approves (finishing on mgr1's payout) between mgr1's debit and
+    stamp: mgr1's stamp loses, and must not hand back the payout mgr2 used."""
+    db, repo, _ = claim
+    real = expenses._do_petty_debit
+    seen = []
+
+    def debit_then_colleague(*a, **k):
+        out = real(*a, **k)
+        seen.append(_approve(db, repo, "mgr2"))
+        return out
+
+    monkeypatch.setattr(expenses, "_do_petty_debit", debit_then_colleague)
+    assert _approve(db, repo, "mgr1").status_code == 409
+    assert seen[0].status_code == 200, seen[0].text
+    doc = repo.find_by_id("E1")
+    assert doc["status"] == "APPROVED" and doc["approved_by"] == "mgr2"
+    assert _float(db) == 4700.0 and [r["type"] for r in _ledger(db)].count("DEBIT") == 1
