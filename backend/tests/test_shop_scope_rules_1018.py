@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 os.environ.setdefault("ENVIRONMENT", "test")
@@ -121,7 +121,11 @@ NO_SHOP_ACCOUNTANT = _user("ACCOUNTANT")
 # 1. An accountant reads his own shop's books; company-wide is an admin's
 # ===========================================================================
 
-_JV = f"/api/v1/finance/tally/sales-jv?from_date={TODAY}&to_date={TODAY}"
+# The day before to the day after: the orders (stamped by the box clock)
+# fall inside whether the export reads a date as a UTC or an IST day -- this
+# file tests the shop rule, not the day boundary.
+_JV = (f"/api/v1/finance/tally/sales-jv?from_date={ist_today() - timedelta(days=1)}"
+       f"&to_date={ist_today() + timedelta(days=1)}")
 
 
 def test_sales_jv_is_the_accountants_shop_only(client, world):
