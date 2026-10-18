@@ -133,6 +133,46 @@ def _clean(doc: dict) -> dict:
     return {k: v for k, v in doc.items() if k != "_id"}
 
 
+def _bill_settlement(db, bill: dict) -> dict:
+    """ap_engine.bill_settlement of one bill over EVERY recorded payment and
+    credit naming it (a post-dated cheque included). Raises when unreadable."""
+    from ...services.supplier_credit_reads import payable_credit_rows
+
+    bill_id = bill.get("bill_id")
+    payments = list(
+        db.get_collection("vendor_payments").find({"bill_id": bill_id}, {"_id": 0})
+    )
+    return ap_engine.bill_settlement(bill, payments, payable_credit_rows(db, bill_id=bill_id))
+
+
+def _refuse_more_than_bill_left(db, bill: Optional[dict], gross: float) -> None:
+    """Money applied to a bill can never exceed what is left on it once every
+    recorded payment and credit naming it clears (A12-2): the excess would sit
+    against this bill, out of reach of the supplier's other bills. 422 with
+    what is left, before anything is written; 503 when unreadable."""
+    if bill is None or db is None:
+        return
+    try:
+        left = _bill_settlement(db, bill)["outstanding"]
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=503, detail="What is left on this bill could not be read. Try again."
+        ) from exc
+    if round(gross - left, 2) > 0:
+        number = bill.get("bill_number") or bill.get("bill_id")
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "MORE_THAN_BILL_LEFT",
+                "message": (
+                    f"Only Rs {left:,.2f} is left to pay on bill {number}. Apply up to "
+                    "that to the bill, and record the rest as an advance (no bill)."
+                ),
+                "left": left,
+            },
+        )
+
+
 def _recompute_bill_status(db, bill_id: Optional[str]) -> None:
     """Re-derive a bill's stored status (OUTSTANDING / PARTIAL / PAID) and
     outstanding from its allocated payments + debit notes. Fail-soft.
@@ -154,12 +194,7 @@ def _recompute_bill_status(db, bill_id: Optional[str]) -> None:
         )
         if not bill:
             return
-        payments = list(
-            db.get_collection("vendor_payments").find({"bill_id": bill_id}, {"_id": 0})
-        )
-        from ...services.supplier_credit_reads import payable_credit_rows
-        debit_notes = payable_credit_rows(db, bill_id=bill_id)
-        st = ap_engine.bill_settlement(bill, payments, debit_notes)
+        st = _bill_settlement(db, bill)
         db.get_collection("vendor_bills").update_one(
             {"bill_id": bill_id},
             {"$set": {"outstanding": st["outstanding"], "status": st["status"]}},

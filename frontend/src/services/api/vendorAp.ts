@@ -458,6 +458,18 @@ export const vendorApApi = {
     const res = await api.post(`/vendors/${vendorId}/payments`, payload);
     return res.data as VendorPayment;
   },
+  // Every recorded payment of the supplier (an advance is one with no bill_id).
+  listPayments: async (vendorId: string) => {
+    const res = await api.get(`/vendors/${vendorId}/payments`);
+    return res.data as { payments: VendorPayment[]; total: number };
+  },
+  // Apply an advance (all or part, gross = cash + TDS) to one bill (A12). The
+  // server refuses more than the advance or than is left on the bill (422), a
+  // bill held for rejected goods (409) and another shop's bill (422).
+  applyAdvance: async (vendorId: string, paymentId: string, payload: { bill_id: string; amount: number }) => {
+    const res = await api.post(`/vendors/${vendorId}/payments/${paymentId}/apply`, payload);
+    return res.data as { payment: VendorPayment; advance_left: number };
+  },
   createDebitNote: async (vendorId: string, payload: Partial<DebitNote> & { amount: number; date: string; reason: string }) => {
     const res = await api.post(`/vendors/${vendorId}/debit-notes`, payload);
     return res.data as DebitNote;

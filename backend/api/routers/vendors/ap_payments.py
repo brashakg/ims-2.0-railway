@@ -3,7 +3,9 @@
 from api.utils.event_time import utc_now_iso
 
 from ._shared import (
+    BaseModel,
     Depends,
+    Field,
     HTTPException,
     Optional,
     Query,
@@ -23,6 +25,7 @@ from .ap_bills import (
     VendorPaymentCreate,
     _clean,
     _recompute_bill_status,
+    _refuse_more_than_bill_left,
     _rejected_goods_hold,
 )
 from ._shared import in_reach_or_404
@@ -210,6 +213,17 @@ def _money_shop(
     return _shop_by_the_suppliers_bills(db, vendor_id, money or {})
 
 
+def _refuse_held_bill(db, bill_id: Optional[str]) -> None:
+    """Owner ruling 7: no money is applied to a bill while its rejected goods
+    have no confirmed supplier credit (receipt_payment_hold) -- 409."""
+    hold = _rejected_goods_hold(db, bill_id)
+    if hold:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "REJECTED_GOODS_NO_DEBIT_NOTE", "message": hold},
+        )
+
+
 def _ledger_rows(db, vendor_id: str, scope: Optional[str]) -> tuple:
     """EVERY recorded (bill, payment, debit note) of one supplier by THE row
     rule every 'what we owe' figure reads (ap_engine.supplier_rows): no
@@ -299,12 +313,8 @@ async def create_vendor_payment(
     # Owner ruling 7: HOLD the bill while goods were rejected and no debit note
     # exists. Until now a rejection inside the 5% match tolerance was paid in
     # full, silently -- we paid for the defects AND claimed the ITC on them.
-    hold = _rejected_goods_hold(db, payment.bill_id)
-    if hold:
-        raise HTTPException(
-            status_code=409,
-            detail={"code": "REJECTED_GOODS_NO_DEBIT_NOTE", "message": hold},
-        )
+    _refuse_held_bill(db, payment.bill_id)
+    _refuse_more_than_bill_left(db, named, round(payment.amount, 2) + tds_amount)
 
     payment_id = str(uuid.uuid4())
     doc = {
@@ -335,6 +345,104 @@ async def create_vendor_payment(
             ) from exc
         _recompute_bill_status(db, payment.bill_id)
     return _clean(doc)
+
+
+class AdvanceApply(BaseModel):
+    bill_id: str = Field(..., min_length=1)
+    amount: float = Field(..., gt=0)  # gross: cash + TDS, as a bill counts it
+
+
+@router.post("/{vendor_id}/payments/{payment_id}/apply")
+async def apply_advance_to_bill(
+    vendor_id: str,
+    payment_id: str,
+    body: AdvanceApply,
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
+):
+    """Apply an advance (a payment that named no bill) to one of this
+    supplier's bills -- all of it, or part (owner 2026-10-18, A12). Nothing is
+    ever applied on its own: an advance settles a bill only through this door.
+
+    The same checks as a payment naming the bill: the bill is this supplier's
+    and in the caller's shop (404), not held for rejected goods (409), and not
+    paid beyond what is left on it (422). The advance must be in the caller's
+    reach (404), still unapplied, and of the bill's shop (422).
+
+    The money keeps its payment date. All of it: the payment now names the
+    bill. Part: the payment keeps the rest as its advance and a new payment
+    row of the applied part names the bill (`applied_from`), so every reader
+    sees two ordinary payments summing to what was paid. A compare-and-set on
+    the advance's amount makes two racing applications of it one (409)."""
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    coll = db.get_collection("vendor_payments")
+    try:
+        adv = coll.find_one({"payment_id": payment_id, "vendor_id": vendor_id}, {"_id": 0})
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Database unavailable") from exc
+    in_reach_or_404(adv, current_user, "Payment not found")
+    if ap_engine._has_bill_id(adv.get("bill_id")):
+        raise HTTPException(status_code=409, detail="This payment is already applied to a bill.")
+    bill = _named_bill_in_scope_or_404(db, vendor_id, body.bill_id, current_user)
+    if adv.get("store_id") and adv["store_id"] != bill.get("store_id"):
+        raise HTTPException(
+            status_code=422,
+            detail="This advance was paid for another shop. Apply it to a bill of the same shop.",
+        )
+    _refuse_held_bill(db, body.bill_id)
+
+    applied = round(body.amount, 2)
+    cash, tds = round(float(adv.get("amount") or 0), 2), round(float(adv.get("tds_amount") or 0), 2)
+    gross = round(cash + tds, 2)
+    if applied > gross:
+        raise HTTPException(
+            status_code=422, detail=f"This advance has only Rs {gross:,.2f} to apply."
+        )
+    # ponytail: TDS is one deduction on one row (26Q lists rows); an advance
+    # with TDS applies whole. Split it by section if part-application is needed.
+    if tds and applied != gross:
+        raise HTTPException(
+            status_code=422,
+            detail="TDS was withheld on this advance, so it can only be applied whole, to one bill.",
+        )
+    _refuse_more_than_bill_left(db, bill, applied)
+    # No period-lock check: nothing is paid or dated anew, so no month's cash
+    # or supplier balance moves -- only which bill the money settles.
+    # ponytail: two racing applies of DIFFERENT money to one bill can both
+    # pass the bill-left check; the excess stays visible as unapplied credit.
+
+    now, actor = utc_now_iso(), current_user.get("user_id")
+    unchanged = {"payment_id": payment_id, "amount": adv.get("amount"), "bill_id": adv.get("bill_id")}
+    stamp = {"bill_id": body.bill_id, "store_id": bill.get("store_id"), "applied_at": now, "applied_by": actor}
+    if applied == gross:
+        moved = coll.update_one(unchanged, {"$set": stamp})
+        row = {**adv, **stamp}
+    else:
+        row = {**{k: v for k, v in adv.items() if k != "applications"}, **stamp,
+               "payment_id": str(uuid.uuid4()), "amount": applied, "applied_from": payment_id}
+        moved = coll.update_one(unchanged, {
+            "$set": {"amount": round(cash - applied, 2)},
+            "$push": {"applications": {"payment_id": row["payment_id"], "bill_id": body.bill_id,
+                                       "amount": applied, "at": now, "by": actor}},
+        })
+        if moved.matched_count:  # the advance's `applications` names the row below
+            try:
+                coll.insert_one(dict(row))
+            except Exception as exc:
+                coll.update_one(  # give the advance back its amount
+                    {"payment_id": payment_id},
+                    {"$set": {"amount": adv.get("amount")},
+                     "$pull": {"applications": {"payment_id": row["payment_id"]}}},
+                )
+                raise HTTPException(status_code=500, detail="Failed to apply the advance") from exc
+    if not moved.matched_count:
+        raise HTTPException(
+            status_code=409,
+            detail="This advance changed while you were applying it. Reload and try again.",
+        )
+    _recompute_bill_status(db, body.bill_id)
+    return {"payment": _clean(row), "advance_left": round(gross - applied, 2)}
 
 
 @router.get("/{vendor_id}/payments")
