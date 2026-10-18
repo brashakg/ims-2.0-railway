@@ -938,3 +938,90 @@ def test_a_colleague_who_finishes_the_approval_keeps_the_payout(claim, monkeypat
     doc = repo.find_by_id("E1")
     assert doc["status"] == "APPROVED" and doc["approved_by"] == "mgr2"
     assert _float(db) == 4700.0 and [r["type"] for r in _ledger(db)].count("DEBIT") == 1
+
+
+# --- review round 4 -----------------------------------------------------------
+
+
+def _claim_age(repo, seconds, claim="dead"):
+    from datetime import datetime, timedelta, timezone
+
+    at = (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
+    repo.update("E1", {"status": "APPROVING", "approving_claim": claim, "approving_by": "mgr9", "approving_at": at})
+
+
+def test_the_approval_queue_keeps_an_approval_that_was_cut_off(claim):
+    """A 503 after the claim, or a worker gone before or after paying out,
+    leaves APPROVING: it stays in the queue, where Approve finishes it."""
+    db, repo, _ = claim
+    _seed_expense(repo, expense_id="E9", amount=120.0)
+    _claim_age(repo, 5)
+    queue = _client(db, repo, ["STORE_MANAGER"], user_id="mgr2").get("/api/v1/expenses/pending-approval")
+    assert queue.status_code == 200, queue.text
+    assert {e["expense_id"]: e["status"] for e in queue.json()["expenses"]} == {"E1": "APPROVING", "E9": "PENDING"}
+
+
+def _payout_live(db):
+    ledger = _ledger(db)
+    undone = {r.get("reverses") for r in ledger}
+    return [r for r in ledger if r["type"] == "DEBIT" and r["txn_id"] not in undone]
+
+
+def test_a_colleague_still_holding_the_claim_keeps_the_payout(claim, monkeypatch):
+    """mgr2 took the claim over (it had paid out) and has not stamped yet when
+    mgr1's own stamp loses: mgr1 must not hand back the payout mgr2 is
+    finishing on."""
+    db, repo, _ = claim
+    real = expenses._do_petty_debit
+
+    def debit_then_taken_over(*a, **k):
+        out = real(*a, **k)
+        repo.update("E1", {"approving_claim": "mgr2-claim", "approving_by": "mgr2"})
+        return out
+
+    monkeypatch.setattr(expenses, "_do_petty_debit", debit_then_taken_over)
+    assert _approve(db, repo, "mgr1").status_code == 409
+    assert repo.find_by_id("E1")["status"] == "APPROVING"
+    assert _float(db) == 4700.0 and len(_payout_live(db)) == 1
+    monkeypatch.setattr(expenses, "_do_petty_debit", real)
+    _claim_age(repo, 5, claim="mgr2-claim")
+    assert _approve(db, repo, "mgr2").status_code == 200  # finishes on the live payout
+    assert repo.find_by_id("E1")["status"] == "APPROVED" and _float(db) == 4700.0
+
+
+def test_an_expense_released_to_pending_keeps_its_live_payout(claim, monkeypatch):
+    """A colleague's takeover found the payout already made and let go (back to
+    PENDING) before mgr1's stamp: mgr1 must not hand it back; the next approval
+    finishes on it."""
+    db, repo, _ = claim
+    real = expenses._do_petty_debit
+
+    def debit_then_released(*a, **k):
+        out = real(*a, **k)
+        repo.update("E1", {"status": "PENDING", "approving_claim": None})
+        return out
+
+    monkeypatch.setattr(expenses, "_do_petty_debit", debit_then_released)
+    assert _approve(db, repo, "mgr1").status_code == 409
+    assert _float(db) == 4700.0 and len(_payout_live(db)) == 1
+    monkeypatch.setattr(expenses, "_do_petty_debit", real)
+    assert _approve(db, repo, "mgr2").status_code == 200
+    assert repo.find_by_id("E1")["status"] == "APPROVED" and _float(db) == 4700.0
+    assert [r["type"] for r in _ledger(db)].count("DEBIT") == 1
+
+
+@pytest.mark.parametrize("age,paid,code,status", [
+    (600, False, 200, "REJECTED"),   # abandoned before any money moved: the reject takes it
+    (5, False, 409, "APPROVING"),    # a live approval may be paying out right now
+    (600, True, 409, "APPROVING"),   # paid out: the next approval finishes it
+])
+def test_a_reject_takes_over_only_a_stale_claim_with_no_payout(claim, age, paid, code, status):
+    db, repo, _ = claim
+    if paid:
+        assert pcs.debit_float(db, store_id="S1", amount=300.0, expense_id="E1", actor="mgr9")["ok"]
+    _claim_age(repo, age)
+    assert _reject(db, repo, "mgr2").status_code == code
+    doc = repo.find_by_id("E1")
+    assert doc["status"] == status
+    if status == "REJECTED":
+        assert "approving_claim" not in doc and _float(db) == 5000.0

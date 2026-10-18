@@ -1614,11 +1614,21 @@ async def reject_expense(
         # that carries a float debit can be voided + reversed.
         status = existing.get("status")
         txn_id = existing.get("petty_cash_txn_id")
-        if status == _APPROVING:  # a petty approval holds it; it may be paying out
-            raise HTTPException(
-                status_code=409, detail="This expense is being approved right now. Reload in a minute."
-            )
-        if status not in ("PENDING", "APPROVED"):
+        if status == _APPROVING:
+            # A petty approval holds it. It may be paying out right now, or it
+            # paid out and was cut off (the next approval finishes it): either
+            # way not rejectable. A stale claim with NO payout was abandoned
+            # before any money moved: the reject takes it over.
+            from ..services import petty_cash_service as pcs
+
+            db = get_db()
+            if not _claim_is_stale(existing) or pcs.live_payout_for(
+                getattr(db, "db", db), existing.get("store_id"), expense_id
+            ):
+                raise HTTPException(
+                    status_code=409, detail="This expense is being approved right now. Reload in a minute."
+                )
+        elif status not in ("PENDING", "APPROVED"):
             raise HTTPException(
                 status_code=400, detail="Expense is not pending approval"
             )
@@ -1637,13 +1647,15 @@ async def reject_expense(
         expected = {"status": status}
         if status == "APPROVED":
             expected["petty_cash_txn_id"] = txn_id
+        if status == _APPROVING:
+            expected["approving_claim"] = existing.get("approving_claim")
         rejected = {
             "status": "REJECTED",
             "rejected_by": current_user.get("user_id"),
             "rejected_at": utc_now_iso(),
             "rejection_reason": reason,
         }
-        if not expense_repo.update_if(expense_id, expected, dict(rejected)):
+        if not expense_repo.update_if(expense_id, expected, dict(rejected), unset=_CLAIM_FIELDS):
             raise HTTPException(status_code=409, detail=_DECIDED_MEANWHILE)
 
         # The money follows the decision that won. An APPROVED claim's payout
@@ -2376,7 +2388,11 @@ async def get_pending_approvals(
     pending_advances = []
 
     if expense_repo is not None:
-        filter_dict = {"status": "PENDING"}
+        # APPROVING too: a petty approval that was cut off (a 503 after its
+        # claim, a worker gone before or after paying out) stays in this queue,
+        # shown as being approved; Approve / Reject act on it by the takeover
+        # rules in approve_expense / reject_expense.
+        filter_dict = {"status": {"$in": ["PENDING", _APPROVING]}}
         if active_store:
             filter_dict["store_id"] = active_store
         pending_expenses = expense_repo.find_many(filter_dict, limit=0) or []
