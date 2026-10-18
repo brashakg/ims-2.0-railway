@@ -193,18 +193,52 @@ def test_an_advance_with_no_shop_applies_only_to_the_shop_the_ledger_counts_it_u
     assert _apply(world, "LEGACY", "B1", 100, ADMIN).status_code == 200
 
 
-@pytest.mark.parametrize("advance_day,bill_day", [("2026-09-15", "2026-10-01"), ("2026-10-02", "2026-09-01")])
-def test_a_closed_month_stays_closed(ap, advance_day, bill_day):
+_CLOSED = "That month is closed - ask an admin to reopen it."
+
+
+# An apply changes figures only from the LATER of the advance's day and the
+# bill's day onward; a part-apply also adds a line on the advance's own day.
+@pytest.mark.parametrize("advance_day,bill_day,locked,amount,code", [
+    ("2026-09-15", "2026-10-01", [9], 400, 200),    # Sept advance, Oct bill, Sept closed: whole apply is fine
+    ("2026-09-15", "2026-10-01", [9], 100, 423),    # ...but a part-apply splits the advance's Sept row
+    ("2026-10-02", "2026-09-01", [9], 100, 200),    # Oct advance, Sept bill: nothing from Sept changes
+    ("2026-09-15", "2026-10-01", [10], 400, 423),   # the month the change starts is closed
+    ("2026-08-10", "2026-10-01", [11], 400, 423),   # a later closed month, not next to the change
+    ("2026-08-10", "2026-10-01", [9], 400, 200),    # a closed month before the change starts
+    ("2026-09-15", "2026-10-01", [8], 100, 200),    # an earlier closed month
+])
+def test_a_closed_month_stays_closed(ap, advance_day, bill_day, locked, amount, code):
     memory, world = ap
     memory.vendor_bills.update_one({}, {"$set": {"bill_date": bill_day}})
     memory.vendor_payments.insert_one(payment(400, store_id=PUN, payment_id="ADV", payment_date=advance_day))
-    memory.period_locks.insert_one({"month": 9, "year": 2026})
-    closed = _apply(world, "ADV", "B1", 100)
-    assert closed.status_code == 423
-    assert closed.json()["detail"] == "That month is closed - ask an admin to reopen it."
-    assert memory.vendor_payments.count_documents({}) == 1
-    memory.period_locks.delete_many({})
-    assert _apply(world, "ADV", "B1", 100).status_code == 200
+    memory.period_locks.insert_many([{"month": m, "year": 2026} for m in locked])
+    resp = _apply(world, "ADV", "B1", amount)
+    assert resp.status_code == code, resp.text
+    if code == 423:
+        assert resp.json()["detail"] == _CLOSED
+        assert memory.vendor_payments.count_documents({}) == 1
+        assert memory.vendor_payments.find_one({})["amount"] == 400
+
+
+@pytest.mark.parametrize("pay_day,bill_day,locked,taken", [
+    ("2026-10-10", "2026-09-01", [9], True),
+    ("2026-10-10", "2026-10-01", [11], False),
+    ("2026-10-10", "2026-10-01", [10], False),
+    ("2026-10-10", "2026-09-01", [8, 11], False),
+    ("2026-10-10", "2026-08-01", [9], True),
+])
+def test_paying_a_bill_and_applying_an_advance_to_it_agree_on_closed_months(ap, pay_day, bill_day, locked, taken):
+    """The same money put on the same bill: a payment naming it, or an advance
+    of that day part-applied to it (both add a line on the money's day)."""
+    memory, world = ap
+    memory.vendor_bills.update_one({}, {"$set": {"bill_date": bill_day}})
+    memory.vendor_payments.insert_one(payment(400, store_id=PUN, payment_id="ADV", payment_date=pay_day))
+    memory.period_locks.insert_many([{"month": m, "year": 2026} for m in locked])
+    paid = world.post("/vendors/V1/payments", ACCT_PUNE, {"payment_date": pay_day, "amount": 100, "bill_id": "B1"})
+    applied = _apply(world, "ADV", "B1", 100)
+    assert (paid.status_code == 201, applied.status_code == 200) == (taken, taken), (paid.text, applied.text)
+    if paid.status_code != 201:  # (the payment's own month keeps its older words)
+        assert paid.status_code == applied.status_code == 423
 
 
 def test_an_amount_that_rounds_to_nothing_is_refused(ap):

@@ -213,6 +213,38 @@ def _money_shop(
     return _shop_by_the_suppliers_bills(db, vendor_id, money or {})
 
 
+def _month(day) -> Optional[tuple]:
+    """(year, month) of an ISO day, else None."""
+    try:
+        return int(str(day)[:4]), int(str(day)[5:7])
+    except (TypeError, ValueError):
+        return None
+
+
+def _refuse_restating_a_closed_month(db, money_day, bill_day, *, adds_line: bool) -> None:
+    """THE period-lock rule for money put on a bill -- a payment naming it or
+    an advance applied to it (owner 2026-10-18, review B2). Allocating money
+    to a bill changes figures only from the LATER of the money's day and the
+    bill's day onward (before that the bill or the money is not yet counted).
+    Refused (423) when that month is locked or any locked month lies after it
+    (locks need not be contiguous); and, when a ledger line is added on the
+    money's day (a new payment, or a part-applied advance's split row), when
+    that month is locked. Fail-soft like check_period_locked."""
+    try:
+        locked = {
+            (int(row["year"]), int(row["month"]))
+            for row in db.get_collection("period_locks").find({}, {"_id": 0, "year": 1, "month": 1})
+        }
+    except Exception:  # noqa: BLE001 - as check_period_locked: unreadable locks never block
+        return
+    days = [m for m in (_month(money_day), _month(bill_day)) if m]
+    if not locked or not days:
+        return
+    start = max(days)
+    if any(m >= start for m in locked) or (adds_line and _month(money_day) in locked):
+        raise HTTPException(status_code=423, detail="That month is closed - ask an admin to reopen it.")
+
+
 def _refuse_held_bill(db, bill_id: Optional[str]) -> None:
     """Owner ruling 7: no money is applied to a bill while its rejected goods
     have no confirmed supplier credit (receipt_payment_hold) -- 409."""
@@ -314,6 +346,8 @@ async def create_vendor_payment(
     # exists. Until now a rejection inside the 5% match tolerance was paid in
     # full, silently -- we paid for the defects AND claimed the ITC on them.
     _refuse_held_bill(db, payment.bill_id)
+    if named is not None and db is not None:
+        _refuse_restating_a_closed_month(db, payment.payment_date, named.get("bill_date"), adds_line=True)
     _refuse_more_than_bill_left(db, named, round(payment.amount, 2) + tds_amount)
 
     payment_id = str(uuid.uuid4())
@@ -402,20 +436,6 @@ async def apply_advance_to_bill(
             ),
         )
     _refuse_held_bill(db, body.bill_id)
-    # A closed month stays closed: the advance's payment day and the bill's
-    # day are both read in that month's books (aging, the supplier ledger).
-    from ..finance import check_period_locked
-
-    for day in (adv.get("payment_date"), bill.get("bill_date")):
-        if day:
-            try:
-                check_period_locked(db, str(day)[:10])
-            except HTTPException as exc:
-                if exc.status_code == 423:
-                    raise HTTPException(
-                        status_code=423, detail="That month is closed - ask an admin to reopen it."
-                    ) from exc
-                raise
 
     applied = round(body.amount, 2)
     if applied <= 0:
@@ -433,6 +453,10 @@ async def apply_advance_to_bill(
             status_code=422,
             detail="TDS was withheld on this advance, so it can only be applied whole, to one bill.",
         )
+    _refuse_restating_a_closed_month(
+        db, adv.get("payment_date") or adv.get("created_at"), bill.get("bill_date"),
+        adds_line=applied != gross,  # a part-application splits the advance's row
+    )
     _refuse_more_than_bill_left(db, bill, applied)
     # ponytail: two racing applies of DIFFERENT money to one bill can both
     # pass the bill-left check; the excess stays visible as unapplied credit.
