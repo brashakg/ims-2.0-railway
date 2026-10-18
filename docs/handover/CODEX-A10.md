@@ -44,6 +44,9 @@ unallocated legacy purchase bills remains in place.
   fixture has neither a registration nor a receiving shop, so the same 409
   assertion continues to exercise a genuinely ambiguous bill. Access
   assertions were not weakened.
+- `backend/tests/test_reports_sales.py`: its existing GST report fixture now
+  supplies the shop's owning entity and held registration. All original tax
+  amounts, response status, GSTIN and state assertions are preserved.
 - `docs/handover/CODEX-A10.md`: this handover.
 
 ## Verification
@@ -71,6 +74,29 @@ external application actions were used.
 
 No frontend source changed; the coordinating agent owns the final frontend
 verification gate and PR workflow.
+
+### CI follow-up: PR #1206
+
+On head `fdb82b5a817e98ea305dddb650cc9e20d4afd528`, backend CI shard 3
+(`39098703248`, job `117590353444`) reported **1 failed, 6,113 passed,
+5 skipped**. The sole failure was
+`TestGSTR3B.test_outward_supplies_use_grand_total` in `test_reports_sales.py`.
+Its shop fixture carried a raw GSTIN but no `entity_id` or owning entity;
+the corrected resolver therefore returned an empty header. Its exact tax
+amount assertions already passed.
+
+The same header failure was reproduced locally before the fixture correction
+(1 failed). The fixture now records the registration on the shop's legal
+entity. No application code changed, and no assertion was weakened.
+
+After correction: **90 passed, 1 skipped, 86 warnings** in 19.84 seconds
+across the entire `test_reports_sales.py`, the nine A10 regression cases,
+`test_gst_one_engine.py`, `test_gst_itc_vendor_bills.py`, and
+`test_gst_no_shop_login.py`. The existing skip is the one-engine test's
+same-state parameter, which is covered separately. The changed test compiles
+and `git diff --check` passes. Execution used the external sanitized test
+runner with loopback Mongo on `127.0.0.1:27099`; the report fixtures use their
+own fake or in-memory collections. A new remote CI run is still required.
 
 ## Remaining work
 

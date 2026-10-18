@@ -714,11 +714,18 @@ def test_brand_sellthrough_uses_item_revenue_helper(
 
 
 def _seed_store(fake_db, *, store_id="BV-TEST-01", state="Delhi", gstin="07AABCB0001Q1ZZ"):
+    # A report's registration belongs to the shop's legal entity. Seed that
+    # ownership as well as the raw shop field so the real resolver can verify it.
+    entity_id = f"entity-{store_id}"
+    fake_db.get_collection("entities").insert_one(
+        {"entity_id": entity_id, "gstins": [{"gstin": gstin}]}
+    )
     fake_db.get_collection("stores").insert_one(
         {
             "store_id": store_id,
             "store_code": store_id,
             "store_name": f"BV {state}",
+            "entity_id": entity_id,
             "state": state,
             "gstin": gstin,
             "is_active": True,
@@ -907,7 +914,7 @@ class TestGSTR3B:
         assert body["outwardTaxableSupplies"]["centralTax"] == 900.0
         assert body["outwardTaxableSupplies"]["stateTax"] == 900.0
         assert body["outwardTaxableSupplies"]["integratedTax"] == 900.0
-        # Header carries store gstin + state
+        # Header carries the shop's entity-held registration + state.
         assert body["gstin"] == "07AABCB0001Q1ZZ"
         assert body["storeState"] == "Delhi"
 
