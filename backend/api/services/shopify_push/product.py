@@ -200,6 +200,19 @@ async def push_product(
             reason="publish_withheld",
             code=FAMILY_UNREADABLE,
         )
+    if listing is not None and listing.get("variant_of"):
+        return PushResult(
+            mode=MODE_BLOCKED,
+            entity="product",
+            action="skip",
+            target_id=pid,
+            ok=False,
+            error=(
+                f"variant of {listing['variant_of']}: its price, barcode and stock ride "
+                "its model's listing -- push the model"
+            ),
+            reason="variant_of",
+        )
     if listing is not None:
         if listing["refusal"]:
             code, message = listing["refusal"]

@@ -800,7 +800,7 @@ def test_title_seo_and_description_are_the_models_never_one_colour(monkeypatch):
     html = lst["description_html"]
     head = html.split("<h4>Technical Specifications</h4>")[0]
     assert not names_a_colour(head, colours), "the model line and paragraph name no colour"
-    assert "Model Number: Ray-Ban RB3025 Aviator Large Metal Sunglass</h5>" in html
+    assert "Model Number: Ray-Ban RB3025 Aviator Large Metal Sunglasses</h5>" in html
     assert "Available Colours" in html and "Gold (001), Black (002/58), Havana (003/32)" in html
     assert "<h4>Colours and Sizes</h4>" in html and "Lens Colour" in html.split("<h4>Colours and Sizes</h4>")[1]
     assert "Frame Material</td>\n<td>Metal" in html, "what every colour shares stays in the shared body"
@@ -1014,3 +1014,17 @@ def test_model_paragraph_runbook_writes_the_ai_paragraph_the_listing_then_carrie
     twin = _twin(db, pids[0])
     lst = model.model_listing(db, twin, ls.variants_for_product(db, twin))
     assert "<p>Reflect your style with the Ray-Ban RB3025 Aviator Large Metal, in 2 colours.</p>" in lst["description_html"]
+
+
+def test_a_colour_whose_twin_lost_its_half_of_the_link_never_gets_a_listing(monkeypatch):
+    """The spine says 'colour of model X' but the twin's ecom.variant_of is
+    missing (a link write that died half-way): it is still never pushed as a
+    listing of its own -- that would be a second listing for the model."""
+    db = _world()
+    pids = _family(db, [("Gold", "001"), ("Black", "002/58")])
+    twin = _twin(db, pids[1])
+    db["catalog_products"].update_one({"id": twin["id"]}, {"$unset": {"ecom.variant_of": ""}})
+    fake = FakeShopify()
+    _live(monkeypatch, fake)
+    res = _push(db, pids[1])
+    assert res.ok is False and res.reason == "variant_of" and fake.calls == []

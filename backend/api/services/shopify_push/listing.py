@@ -90,8 +90,12 @@ def model_listing(
     from .. import product_master as pm
 
     lead = lead_spine(db, product)
-    if lead is None or lead.get("variant_of"):
+    if lead is None:
         return None
+    if lead.get("variant_of"):
+        # The SPINE says this is a colour/size of a model even though its
+        # twin's half of the link is missing: it owns no listing either.
+        return {"variant_of": lead["variant_of"]}
     children = [c for c in db["products"].find({"variant_of": lead.get("product_id")}) if c.get("sku")]
     if not children:
         return None
@@ -244,6 +248,7 @@ def _model_content(db, product, lead, members, values, axes) -> Dict[str, Any]:
         build_model_seo_description,
         build_model_seo_title,
         build_model_title,
+        resolve_category_word,
     )
     from .media import product_photo_urls
     from .product_input import build_product_metafields, ims_product_tags
@@ -251,7 +256,11 @@ def _model_content(db, product, lead, members, values, axes) -> Dict[str, Any]:
     ecom = product.get("ecom") or {}
     lead_doc = {**lead, "attributes": lead.get("attributes") or {}}
     spec = pm.category_spec(lead.get("category"))
-    category_name = spec.display if spec is not None else str(lead.get("category") or "")
+    # The shopper's word ("Sunglasses", "Eyeglasses") -- the model line and
+    # paragraph read as a page title, not an internal category.
+    category_name = resolve_category_word(lead.get("category")) or (
+        spec.display if spec is not None else str(lead.get("category") or "")
+    )
     colours = list(dict.fromkeys(values[m["sku"]]["option_color"] for m in members if values[m["sku"]]["option_color"]))
     sizes = list(dict.fromkeys(values[m["sku"]]["option_size"] for m in members if values[m["sku"]]["option_size"]))
 
