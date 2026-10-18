@@ -251,8 +251,9 @@ async def push_product_docs(
     that is now frozen at its last pushed price.
 
     ``max_results`` caps the rows attempted (every result counts);
-    ``max_sent`` caps the rows that reached Shopify -- a photo-less REFUSAL
-    never did, so it does not count against it (the press cap semantics).
+    ``max_sent`` caps the rows that reached Shopify -- a photo-less or an
+    unpriced-size REFUSAL never did, so it does not count against it (the
+    press cap semantics).
 
     Returns {results, blocked_skipped, refused, sent, cap_reached, limit_reached}."""
     from . import online_block
@@ -288,7 +289,7 @@ async def push_product_docs(
         ).to_dict()
         write_push_audit(data, current_user)
         results.append(data)
-        if data.get("reason") != "no_photo":
+        if data.get("reason") != "no_photo" and data.get("code") != shopify_push.UNPRICED_SIZE:
             sent += 1
     return {
         "results": results,

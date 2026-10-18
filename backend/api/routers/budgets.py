@@ -128,10 +128,10 @@ def _validate_period(period: str) -> str:
 
 
 def _month_window(period: str):
-    """(start_dt, end_dt) datetimes spanning the whole month of `period`.
+    """Half-open [start_dt, next_start) datetimes for the IST month `period`.
 
-    Mirrors the inclusive [month-start, month-end] window reports.py builds for
-    its month aggregations so the revenue actual lines up exactly.
+    The shared ist_month_window_utc window, so the revenue actual lines up
+    exactly with payout and /sales/growth. Compare with `$lt`, never `$lte`.
     """
     year = int(period[:4])
     month = int(period[5:7])
@@ -141,7 +141,7 @@ def _month_window(period: str):
     # 1st -- and once payout's window was corrected and this one was not, the
     # incentive screen and the budget-vs-actual screen reported DIFFERENT
     # revenue for the same month. One shared definition, so they cannot drift
-    # again. It also closes the one-second `$lte` hole the old `seconds=1` left.
+    # again. Half-open, so no hole and no overlap at the month boundary.
     return ist_month_window_utc(year, month)
 
 
@@ -158,7 +158,11 @@ def _revenue_actual(store_id: Optional[str], period: str) -> float:
     start_dt, end_dt = _month_window(period)
     try:
         orders = _reports._orders_in_window(
-            order_repo, store_id=store_id, start_dt=start_dt, end_dt=end_dt
+            order_repo,
+            store_id=store_id,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            end_exclusive=True,
         )
         return float(sum(_reports._order_revenue(o) for o in orders))
     except Exception:

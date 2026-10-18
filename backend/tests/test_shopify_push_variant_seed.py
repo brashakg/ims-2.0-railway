@@ -870,8 +870,9 @@ def test_live_create_seed_failure_never_fails_the_product_push(monkeypatch):
     assert any("boom" in e for e in res.variants_seeded["errors"])
 
 
-def test_live_create_with_no_price_and_no_sku_makes_no_extra_call(monkeypatch):
-    """Nothing to seed -> no second mutation (and certainly no price 0.00)."""
+def test_live_create_with_no_price_and_no_sku_makes_no_call_at_all(monkeypatch):
+    """Nothing priced -> refused before productCreate (SF-05): no call at all,
+    and certainly no price 0.00."""
     spy = _force_live(
         monkeypatch, {"productCreate": _create_response([_DEFAULT_VARIANT_NODE])}
     )
@@ -881,15 +882,10 @@ def test_live_create_with_no_price_and_no_sku_makes_no_extra_call(monkeypatch):
     )
     product = db["catalog_products"].find_one({"id": "P2"})
     res = _run(shopify_push.push_product(db, product, []))
-    # No price and no SKU anywhere -> nothing to seed AND nothing publishable.
     assert res.ok is False and res.reason == "publish_withheld"
+    assert res.code == shopify_push.UNPRICED_SIZE
     assert res.variants_seeded is None
-    assert spy.seed_count_for("productVariantsBulkUpdate") == 0
-    # productCreate + the photograph. Nothing else: no seeding call, and
-    # no publish (the product is unpriced -- publish stays withheld).
-    assert spy.count_for("productCreateMedia") == 1
-    assert spy.count_for("publishablePublish") == 0
-    assert len(spy.calls) == 3  # + the stock step's tracking update (2026-09-07)
+    assert spy.calls == []
 
 
 # ===========================================================================
@@ -1169,11 +1165,10 @@ def test_publish_withheld_when_seeding_failed(monkeypatch):
     assert spy.count_for("publishablePublish") == 0
 
 
-def test_publish_withheld_for_an_unpriced_published_product(monkeypatch):
-    """Panel must-fix 1(b): a PUBLISHED product with no resolvable price must
-    never go visible -- Shopify's auto-created variant sits at 0.00. Covers
-    BOTH unpriced shapes: SKU-only seeding (priced_rows == 0) and
-    nothing-to-seed at all (seed_summary is None)."""
+def test_an_unpriced_published_product_is_refused_before_any_write(monkeypatch):
+    """Panel must-fix 1(b), tightened by SF-05: a PUBLISHED product with no
+    resolvable price never reaches Shopify at all -- BOTH unpriced shapes
+    (SKU-only, and no price AND no SKU) are refused before productCreate."""
     monkeypatch.setenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", "77")
     spy = _force_live(
         monkeypatch,
@@ -1184,39 +1179,168 @@ def test_publish_withheld_for_an_unpriced_published_product(monkeypatch):
         },
     )
     db = _EngineDB()
-    withheld = {
-        "published": False,
-        "error": "publish withheld: variant unpriced or seeding failed",
-    }
-    # Shape 1: SKU-only (seeding ran, but zero priced rows).
     db["catalog_products"].insert_one(
-        {
-            "id": "P7",
-            "title": "X",
-            "sku": "BV-NOPRICE",
-            "images": ["https://cdn.example.com/x.jpg"],
-            "ecom": {"status": "PUBLISHED"},
-        }
+        {"id": "P7", "title": "X", "sku": "BV-NOPRICE",
+         "images": ["https://cdn.example.com/x.jpg"], "ecom": {"status": "PUBLISHED"}}
     )
-    res = _run(
-        shopify_push.push_product(
-            db, db["catalog_products"].find_one({"id": "P7"}), []
-        )
-    )
-    assert res.variants_seeded["priced_rows"] == 0
-    assert res.publication == withheld
-    # Shape 2: no price AND no SKU (nothing to seed at all).
     db["catalog_products"].insert_one(
         {"id": "P8", "title": "Y", "images": ["https://cdn.example.com/x.jpg"], "ecom": {"status": "PUBLISHED"}}
     )
-    res2 = _run(
-        shopify_push.push_product(
-            db, db["catalog_products"].find_one({"id": "P8"}), []
-        )
-    )
-    assert res2.variants_seeded is None
-    assert res2.publication == withheld
+    res = _run(shopify_push.push_product(db, db["catalog_products"].find_one({"id": "P7"}), []))
+    assert res.ok is False and res.code == shopify_push.UNPRICED_SIZE
+    assert "BV-NOPRICE" in res.error
+    res2 = _run(shopify_push.push_product(db, db["catalog_products"].find_one({"id": "P8"}), []))
+    assert res2.ok is False and res2.code == shopify_push.UNPRICED_SIZE
+    assert spy.calls == []
+
+
+# ===========================================================================
+# SF-05 (owner 18 Oct 2026): EVERY size priced before a first publish /
+# reseed / repair; the refusal names the unpriced sizes by IMS SKU.
+# ===========================================================================
+
+_SIZE50 = {"id": "gid://shopify/ProductVariant/5001",
+           "selectedOptions": [{"name": "Size", "value": "50"}],
+           "inventoryItem": {"id": "gid://shopify/InventoryItem/6001"}}
+_SIZE52 = {"id": "gid://shopify/ProductVariant/5002",
+           "selectedOptions": [{"name": "Size", "value": "52"}],
+           "inventoryPolicy": "DENY",
+           "inventoryItem": {"id": "gid://shopify/InventoryItem/6002", "tracked": True}}
+
+
+def _two_sizes(p50, p52):
+    return [
+        {"variant_id": "V1", "sku": "S50", "parent_product_id": "P1", "option_size": "50", "mrp": p50},
+        {"variant_id": "V2", "sku": "S52", "parent_product_id": "P1", "option_size": "52", "mrp": p52},
+    ]
+
+
+def _sizes_world(monkeypatch, product, variants):
+    from api.services import catalog_dictionary
+    monkeypatch.setattr(catalog_dictionary, "brand_website_refusal", lambda db, brand: None)
+    monkeypatch.setenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", "77")
+    spy = _force_live(monkeypatch, {
+        "productCreate": _create_response([_SIZE50]),
+        "productVariantsBulkUpdate": {"data": {"productVariantsBulkUpdate": {
+            "productVariants": [_SIZE50], "userErrors": []}}},
+        "productVariantsBulkCreate": {"data": {"productVariantsBulkCreate": {
+            "productVariants": [_SIZE52], "userErrors": []}}},
+        "publishablePublish": {"data": {"publishablePublish": {"userErrors": []}}},
+    })
+    db = _EngineDB()
+    db["catalog_products"].insert_one(product)
+    for row in variants:
+        db["catalog_variants"].insert_one(row)
+    return db, spy
+
+
+def test_sf05_mixed_price_first_publish_is_refused_naming_the_sku(monkeypatch):
+    """THE AUDIT PROBE, inverted: size 50 priced, size 52 unpriced, parent
+    unpriced. On main the listing was created and PUBLISHED with size 52
+    priceless; now nothing is sent and the press names S52 (never a gid)."""
+    product = _product(mrp=0, offer_price=0)
+    variants = _two_sizes(100, 0)
+    db, spy = _sizes_world(monkeypatch, product, variants)
+    res = _run(shopify_push.push_product(db, product, variants, blocked=False))
+    assert res.ok is False and res.code == shopify_push.UNPRICED_SIZE
+    assert "S52" in res.error and "S50" not in res.error and "gid://" not in res.error
+    assert spy.calls == [], "a listing with an unpriced size reached Shopify"
+
+
+def test_sf05_all_sizes_priced_publishes(monkeypatch):
+    product = _product(mrp=0, offer_price=0)
+    variants = _two_sizes(100, 120)
+    db, spy = _sizes_world(monkeypatch, product, variants)
+    res = _run(shopify_push.push_product(db, product, variants, blocked=False))
+    assert res.code != shopify_push.UNPRICED_SIZE
+    created = spy.call_for("productVariantsBulkCreate")["variables"]["variants"]
+    assert created[0]["price"] == "120.00"
+    assert res.publication["published"] is True
+
+
+def test_sf05_all_sizes_unpriced_is_refused_naming_both(monkeypatch):
+    product = _product(mrp=0, offer_price=0)
+    variants = _two_sizes(0, 0)
+    db, spy = _sizes_world(monkeypatch, product, variants)
+    res = _run(shopify_push.push_product(db, product, variants, blocked=False))
+    assert res.code == shopify_push.UNPRICED_SIZE
+    assert "S50" in res.error and "S52" in res.error
+    assert spy.calls == []
+
+
+def test_sf05_parent_fallback_price_prices_every_size(monkeypatch):
+    """A size with no price of its own takes the parent's selling price --
+    that IS a price, so the listing publishes."""
+    product = _product(mrp=5000, offer_price=4000)
+    variants = _two_sizes(100, 0)
+    db, spy = _sizes_world(monkeypatch, product, variants)
+    res = _run(shopify_push.push_product(db, product, variants, blocked=False))
+    assert res.code != shopify_push.UNPRICED_SIZE
+    created = spy.call_for("productVariantsBulkCreate")["variables"]["variants"]
+    assert created[0]["price"] == "4000.00"
+    assert res.publication["published"] is True
+
+
+def test_sf05_repair_of_a_live_listing_is_refused_when_a_size_is_unpriced(monkeypatch):
+    """REPAIR: the listing exists, size 50 is seeded, size 52 was never seeded
+    and has no price. The repair would create size 52 at 0.00 on a LIVE
+    listing -- refused before any write."""
+    monkeypatch.delenv("SHOPIFY_PUSH_PRICE_ON_UPDATE", raising=False)
+    product = _product(mrp=0, offer_price=0,
+                       ecom={"status": "PUBLISHED", "shopify_product_id": "gid://shopify/Product/900"})
+    variants = _two_sizes(100, 0)
+    variants[0]["shopify_variant_id"] = _SIZE50["id"]
+    db, spy = _sizes_world(monkeypatch, product, variants)
+    res = _run(shopify_push.push_product(db, product, variants, blocked=False))
+    assert res.code == shopify_push.UNPRICED_SIZE and "S52" in res.error
+    assert spy.calls == []
+
+
+def test_sf05_full_reseed_is_refused_when_a_size_is_unpriced(monkeypatch):
+    """RESEED (SHOPIFY_PUSH_PRICE_ON_UPDATE on): every size already seeded,
+    but one is unpriced now -- the reseed would send it without a price."""
+    monkeypatch.setattr(shopify_push.product, "price_on_update_enabled", lambda: True)
+    product = _product(mrp=0, offer_price=0,
+                       ecom={"status": "PUBLISHED", "shopify_product_id": "gid://shopify/Product/900"})
+    variants = _two_sizes(100, 0)
+    variants[0]["shopify_variant_id"] = _SIZE50["id"]
+    variants[1]["shopify_variant_id"] = _SIZE52["id"]
+    db, spy = _sizes_world(monkeypatch, product, variants)
+    res = _run(shopify_push.push_product(db, product, variants, blocked=False))
+    assert res.code == shopify_push.UNPRICED_SIZE and "S52" in res.error
+    assert spy.calls == []
+
+
+def test_sf05_an_already_seeded_update_with_an_unpriced_size_is_withheld(monkeypatch):
+    """The no-seeding update keeps the SAME rule at the publish gate: the
+    write goes out (nothing new is created) but the listing is not
+    (re)published while a size is unpriced."""
+    monkeypatch.setattr(shopify_push.product, "price_on_update_enabled", lambda: False)
+    product = _product(mrp=0, offer_price=0,
+                       ecom={"status": "PUBLISHED", "shopify_product_id": "gid://shopify/Product/900"})
+    variants = _two_sizes(100, 0)
+    variants[0]["shopify_variant_id"] = _SIZE50["id"]
+    variants[1]["shopify_variant_id"] = _SIZE52["id"]
+    db, spy = _sizes_world(monkeypatch, product, variants)
+    res = _run(shopify_push.push_product(db, product, variants, blocked=False))
     assert spy.count_for("publishablePublish") == 0
+    assert res.ok is False
+
+
+def test_sf05_dry_run_refuses_too(monkeypatch):
+    """No path, dry-run or live: the SIMULATED plan never shows an unpriced
+    size as about to be created."""
+    monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)
+    product = _product(mrp=0, offer_price=0)
+    res = _run(shopify_push.push_product(_EngineDB(), product, _two_sizes(100, 0), blocked=False))
+    assert res.code == shopify_push.UNPRICED_SIZE
+
+
+def test_sf05_one_rule_names_sizes_by_sku():
+    product = _product(mrp=0, offer_price=0)
+    assert shopify_push.unpriced_size_names(product, _two_sizes(100, 0)) == ["S52"]
+    assert shopify_push.unpriced_size_names(product, _two_sizes(100, 1)) == []
+    assert shopify_push._has_publishable_price(product, _two_sizes(100, 0)) is False
 
 
 def test_push_mode_status_reports_the_new_flags(monkeypatch):

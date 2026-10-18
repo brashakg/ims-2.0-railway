@@ -39,6 +39,7 @@ from .queries import _PRODUCT_CREATE, _PRODUCT_UPDATE
 from .product_input import (
     _has_publishable_price,
     _set_product_metafields,
+    unpriced_size_names,
     _variants_for_price_push,
     build_product_input,
     build_product_metafields,
@@ -66,6 +67,9 @@ from .inventory import (
 )
 from .media import plan_product_media, product_photo_urls, sync_product_media
 from .writeback import _requeue_unpublished, _writeback_product
+
+# A first publish / reseed / repair refused because a size has no price (SF-05).
+UNPRICED_SIZE = "UNPRICED_SIZE"
 
 # ===========================================================================
 # PUSH FUNCTIONS -- one per entity. DARK by default; LIVE only behind the gates.
@@ -207,6 +211,34 @@ async def push_product(
     # keep an already-seeded row from ever being re-touched by the repair).
     full_reseed = action == "create" or price_on_update_enabled()
     repair_only = (not full_reseed) and _needs_repair(product, variants)
+    # EVERY SIZE PRICED (audit SF-05, owner 18 Oct 2026). A press that
+    # creates or (re)seeds sizes -- first publish, full reseed, repair -- is
+    # REFUSED before any write, dry-run or live, while any size has no
+    # positive selling price: a size seeded without a price sits at 0.00 on
+    # Shopify. One rule (unpriced_size_names, the same one the no-seeding
+    # publish gate below uses); nothing is written back, so the row stays
+    # queued and pricing the size + pressing again ships it.
+    # ponytail: refuses the WHOLE press (title/photo edits of a live listing
+    # wait too) -- seeding only the priced sizes would split the one rule.
+    unpriced = unpriced_size_names(product, variants) if (full_reseed or repair_only) else []
+    if unpriced:
+        return PushResult(
+            mode=MODE_BLOCKED,
+            entity="product",
+            action="skip",
+            target_id=pid,
+            ok=False,
+            shopify_id=existing_gid,
+            error=(
+                "refused: every size needs a selling price before it goes on the "
+                f"website -- no price on {', '.join(unpriced)}. Nothing was sent; "
+                "price these sizes and press again"
+            ),
+            # Counted with the other "not put on the website" presses (never
+            # `failed` -- the operator can act on it), told apart by its code.
+            reason="publish_withheld",
+            code=UNPRICED_SIZE,
+        )
 
     live, reason = _live_or_reason(db)
     if not live:
@@ -542,11 +574,11 @@ async def push_product(
         # publishing is WITHHELD unless the price is provably right, because
         # seeding is fail-SOFT (a bulk-update userError or a priceless product
         # still leaves ok=True) and a 0.00 listing is worse than no listing.
+        #   * EVERY press: IMS must hold a positive price for EVERY size
+        #     (_has_publishable_price -- the one rule; a seeding press with an
+        #     unpriced size was already refused before any write, SF-05).
         #   * a press that SEEDED (create, or an update that repaired/reseeded):
-        #     the seeding must have run clean AND priced at least one row.
-        #   * a press that needed NO seeding: every variant already carries the
-        #     gid an earlier successful seed wrote, so its price is already on
-        #     Shopify -- but IMS must still hold a positive price for every row.
+        #     the seeding must also have run clean.
         #   * TRACKED + THE POLICY BEFORE PUBLISH (design 4.2, the root rule
         #     above): the listing is published only when `tracking_ok` --
         #     Shopify's answer confirmed every size. Anything less and the
@@ -577,17 +609,14 @@ async def push_product(
                 "reason": "publish_withheld" if taken_down else None,
             }
         elif new_gid and payload.get("status") == "ACTIVE":
-            if seed_summary is not None:
-                priced_ok = (
-                    not seed_summary.get("errors")
-                    and int(seed_summary.get("priced_rows") or 0) > 0
-                )
-            elif full_reseed or repair_only:
-                # Seeding was due but produced nothing to seed -- no price and
-                # no SKU anywhere. Never publish that.
+            # ONE price rule for every press (SF-05): every size priced. A
+            # seeding press must also have seeded clean.
+            priced_ok = _has_publishable_price(product, variants) and not (
+                seed_summary or {}
+            ).get("errors")
+            if seed_summary is None and (full_reseed or repair_only):
+                # Seeding was due but produced nothing to seed. Never publish that.
                 priced_ok = False
-            else:
-                priced_ok = _has_publishable_price(product, variants)
             if priced_ok and photo_on_shopify and tracking_ok:
                 pub_summary = await _publish_to_online_store(db, new_gid)
                 if pub_summary.get("published") and hold_active:

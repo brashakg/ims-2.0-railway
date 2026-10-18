@@ -80,12 +80,18 @@ def _orders_in_window(
     store_id: Optional[str],
     start_dt: datetime,
     end_dt: datetime,
+    end_exclusive: bool = False,
 ) -> list:
     """Fetch non-cancelled, non-DRAFT orders for a (store, datetime
     window). Filter is a real Mongo Date range — passes through to
-    `order_repo.find_many` which preserves the datetime objects."""
+    `order_repo.find_many` which preserves the datetime objects.
+
+    ``end_dt`` is inclusive (``$lte``) for the day-range callers; a month
+    window from ``ist_month_window_utc`` is half-open, so pass
+    ``end_exclusive=True`` (``$lt``) or the next month's first order is
+    counted in both months."""
     flt: dict = {
-        "created_at": {"$gte": start_dt, "$lte": end_dt},
+        "created_at": {"$gte": start_dt, ("$lt" if end_exclusive else "$lte"): end_dt},
         "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]},
     }
     if store_id:

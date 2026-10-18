@@ -6,7 +6,8 @@ manual membership resolution/push, and `push_collection`.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
+import logging
+from typing import Any, Dict, List, Optional, Tuple
 
 from agents.nexus_providers import _as_shopify_gid
 
@@ -26,6 +27,35 @@ from .queries import (
     _COLLECTION_UPDATE,
 )
 from .writeback import _writeback_simple
+
+logger = logging.getLogger(__name__)
+
+# Shopify GraphQL CollectionSortOrder. The stored value is often REST-style
+# ("manual", "best-selling", "alpha-asc"); GraphQL rejects anything but these.
+_SORT_ORDERS = frozenset(
+    {
+        "ALPHA_ASC",
+        "ALPHA_DESC",
+        "BEST_SELLING",
+        "CREATED",
+        "CREATED_DESC",
+        "MANUAL",
+        "PRICE_ASC",
+        "PRICE_DESC",
+    }
+)
+
+
+def graphql_sort_order(value: Any) -> Optional[str]:
+    """REST spelling or any case / hyphen / underscore variant -> the GraphQL
+    CollectionSortOrder enum. Unknown -> None (caller omits it; never fails)."""
+    key = str(value or "").strip().upper().replace("-", "_").replace(" ", "_")
+    if key in _SORT_ORDERS:
+        return key
+    if key:
+        logger.warning("collection sort_order %r is not a Shopify sort order; not sent", value)
+    return None
+
 
 def build_collection_input(collection: Dict[str, Any]) -> Dict[str, Any]:
     """Build a Shopify CollectionInput from an ecom_collections doc. A SMART
@@ -49,8 +79,9 @@ def build_collection_input(collection: Dict[str, Any]) -> Dict[str, Any]:
             "title": collection.get("seo_title") or collection.get("title") or "",
             "description": collection.get("seo_description") or "",
         }
-    if collection.get("sort_order"):
-        inp["sortOrder"] = collection["sort_order"]
+    sort_order = graphql_sort_order(collection.get("sort_order"))
+    if sort_order:
+        inp["sortOrder"] = sort_order
     # Collection hero image (parity with BVI's updateCollection, which pushed
     # image:{src,altText}). `image_url` is the stored collection image; the
     # `banner_image` metafield is a separate storefront concern, not the

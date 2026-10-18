@@ -139,6 +139,7 @@ def _push(db, brand, **extra):
         "sku": f"SKU-{brand}",
         "attributes": {"brand_name": brand},
         "images": ["https://cdn.example.com/p.jpg"],  # no photo, no publish
+        "mrp": 1000,  # every size priced (SF-05)
         **extra,
     }
     return _run(sp.push_product(db, product, blocked=False))
@@ -385,7 +386,7 @@ def test_f12_the_gate_reads_a_brand_from_vendor_or_attributes(monkeypatch):
     assert "not for the website" in sp.product_push_refusal(
         db, {"vendor": "Carrera", "attributes": {"brand_name": "Ray-Ban"}})
     assert doc_online_state(db, twin)["online"] != "NOT_FOR_WEBSITE"
-    assert _run(sp.push_product(db, {"id": "T1", "sku": "T1", "title": "t", **twin},
+    assert _run(sp.push_product(db, {"id": "T1", "sku": "T1", "title": "t", "mrp": 1000, **twin},
                                 blocked=False)).action == "create"
     # ... and the push lock reads the same brand.
     monkeypatch.setattr(pe, "get_policy", lambda key, default=None: (

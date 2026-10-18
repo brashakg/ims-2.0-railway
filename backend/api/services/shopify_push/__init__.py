@@ -257,6 +257,7 @@ from .product_input import (  # noqa: F401
     _price_float,
     _resolve_variant_pricing,
     _has_publishable_price,
+    unpriced_size_names,
     _variants_for_price_push,
     _publishable_gtin,
     build_variant_price_inputs,
@@ -332,6 +333,7 @@ from .writeback import (  # noqa: F401
     _writeback_simple,
 )
 from .product import (  # noqa: F401
+    UNPRICED_SIZE,
     push_product,
     push_product_delist,
     _delist_variant_row,

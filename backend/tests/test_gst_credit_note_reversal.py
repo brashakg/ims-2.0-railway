@@ -49,7 +49,13 @@ class _Coll:
     @staticmethod
     def _matches(doc, flt):
         for key, cond in (flt or {}).items():
-            if key in ("$or", "$and"):
+            if key == "$or":
+                if not any(_Coll._matches(doc, sub) for sub in cond):
+                    return False
+                continue
+            if key == "$and":
+                if not all(_Coll._matches(doc, sub) for sub in cond):
+                    return False
                 continue
             v = doc.get(key)
             if isinstance(cond, dict):
