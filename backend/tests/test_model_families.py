@@ -482,12 +482,17 @@ def _mig_world(db):
     out = _frame("OUT", "101", model="RB4105", minutes=71)
     out[0]["family_opt_out"] = True
     items += [out, _frame("LIVE", "102", model="RB4105", minutes=72, live=True)]
+    # a model whose LEAD is on the website: linked in IMS only, no row moves
+    items += [_frame("WL", "201", model="RB4200", minutes=80, live=True), _frame("WC", "202", model="RB4200", minutes=81)]
     _seed(db, *items)
+    db["catalog_variants"].update_one({"sku": _p(db, "WL")["sku"]}, {"$set": {"discounted_price": 4500.0, "shopify_variant_id": "gid://v/WL"}})
+    # F99 has no catalog_variants row yet: the run creates one (revert removes it)
+    db["catalog_variants"].delete_one({"sku": _p(db, "F99")["sku"]})
     db["stock_units"].insert_many([{"unit_id": f"u{i}", "product_id": "F01", "sku": "x"} for i in range(3)])
 
 
 def _snapshot(db):
-    return {c: sorted((copy.deepcopy(d) for d in db[c].find({})), key=lambda d: str(d["_id"]))
+    return {c: sorted((copy.deepcopy(d) for d in db[c].find({})), key=lambda d: str(d.get("sku") or d.get("unit_id") or d.get("id")))
             for c in ("products", "catalog_products", "catalog_variants", "stock_units")}
 
 
@@ -504,35 +509,123 @@ def test_migration_dry_run_apply_and_revert(db, capsys):
     assert big["blank_sizes"] == [_p(db, "F99")["sku"]]
     assert len(fams["rb4105"]["link"]) == 2  # the opted-out and the live one stay out
     assert any(s["reason"] == "own live website listing" for s in report["skipped"])
+    # the brand typed into the model groups with the clean spelling, unrewritten
     assert fams["caprw5sin"]["members"] == 2 and fams["pld4162s"]["members"] == 2
-    assert [f["sku"] for f in report["brand_prefix_fixes"]] == [_p(db, "CA1")["sku"]]
+    assert [b["sku"] for b in report["brand_in_model"]] == [_p(db, "CA1")["sku"]]
+    assert fams["rb4200"]["lead_on_website"] is True and fams["rb4200"]["link"] == ["WC"]
     changes = {c["sku"]: c["set"] for c in report["model_field_changes"]}
     assert changes[_p(db, "F07")["sku"]] == {"shape": "Aviator"}  # the lead's value
-    assert changes[_p(db, "PL2")["sku"]] == {"model_no": "PLD 4162/S"}  # the lead's spelling
+    assert _p(db, "PL2")["sku"] not in changes  # model numbers are never rewritten
     assert "SOLO" not in str(report["families"])
 
     result = mig.apply(db, report)
-    assert result["linked"] == 15 + 2 + 1 + 1
+    assert result["linked"] == 15 + 2 + 1 + 1 + 1
     assert all(_p(db, f"F{n:02d}").get("variant_of") == "F03" for n in range(1, 16) if n != 3)
     assert _p(db, "CA2")["variant_of"] == "CA1"  # first catalogued leads
-    assert _p(db, "CA1")["attributes"]["model_no"] == "CA PRW 5/S/IN"
+    assert _p(db, "CA1")["attributes"]["model_no"] == "CARRERA CA PRW 5/S/IN"
+    assert _p(db, "PL2")["attributes"]["model_no"] == "PLD4162/S"
     assert _p(db, "F07")["attributes"]["shape"] == "Aviator"
     assert _p(db, "PL1")["attributes"]["shape"] == "Round"  # the lead's blank: the model's value
     assert _p(db, "F05")["attributes"]["frame_color"] == "Black"  # variant fields: untouched
     lead_row = _row(db, "F03")
     assert (lead_row["option_color"], lead_row["option_size"]) == ("Gold (001)", "58")
-    assert _row(db, "F99")["option_size"] == ""
+    assert _row(db, "F99")["option_size"] == "" and _row(db, "F99")["parent_product_id"] == "twin-F03"
     assert _row(db, "W1")["option_size"] == "" and _row(db, "W1")["option_color"] == "710"
+    # the live model: linked in IMS, rows exactly as they were
+    assert _p(db, "WC")["variant_of"] == "WL"
     after = _snapshot(db)
-    # SKUs, barcodes and stock never move
+    for pid in ("WL", "WC"):
+        sku = _p(db, pid)["sku"]
+        assert [r for r in after["catalog_variants"] if r["sku"] == sku] == [r for r in before["catalog_variants"] if r["sku"] == sku]
+    # SKUs, identity keys, barcodes and stock never move
     assert [d["sku"] for d in after["products"]] == [d["sku"] for d in before["products"]]
+    assert [d.get("identity_key") for d in after["products"]] == [d.get("identity_key") for d in before["products"]]
     assert after["stock_units"] == before["stock_units"]
-    # identity keys move only for the brand-prefix fix
-    moved = [d["product_id"] for b, d in zip(before["products"], after["products"]) if b.get("identity_key") != d.get("identity_key")]
-    assert moved == ["CA1"]
 
     again = mig.plan(db)
     assert sum(len(f["link"]) for f in again["families"]) == 0 and again["model_field_changes"] == []
 
     mig.revert(db)
     assert _snapshot(db) == before  # exactly as it was
+
+
+# ---------------------------------------------------------------------------
+# review round 1 (independent review of #1226)
+# ---------------------------------------------------------------------------
+
+
+def _key(brand, model_no, category="SUNGLASS", **attrs):
+    return pm.family_key({"category": category, "attributes": {"brand_name": brand, "model_no": model_no, **attrs}})
+
+
+def test_family_key_folds_a_brand_typed_into_the_model_number():
+    one = {_key("Carrera", "CARRERA 1001/S"), _key("Carrera", "CARRERA1001/S"), _key("CARRERA", "1001/S"),
+           _key("Carrera", "carrera-1001-s")}
+    assert one == {("SUNGLASS", "carrera", "1001s")}
+    # no false merges: another brand, another model, a model that IS the brand
+    assert _key("Polaroid", "1001/S") != _key("Carrera", "1001/S")
+    assert _key("Oakley", "OO9208") != _key("Oakley", "OO9208A")
+    assert _key("Carrera", "CARRERA") == ("SUNGLASS", "carrera", "carrera")
+    # the model NUMBER only: a smart glass named by its model name is no family
+    assert _key("Ray-Ban", "", category="SMARTGLASSES", model_name="Meta Wayfarer") is None
+    assert _key("Ray-Ban", "RW4006", category="SMARTGLASSES", model_name="Meta Wayfarer") == (
+        "SMARTGLASSES", "rayban", "rw4006")
+
+
+def test_a_new_item_typed_without_the_brand_prefix_joins_the_model(db):
+    lead = _create(db, {"brand_name": "Carrera", "model_no": "CARRERA 1001/S", "colour_code": "807", "shape": "Square"})
+    child = _create(db, {"brand_name": "Carrera", "model_no": "1001/S", "colour_code": "086", "shape": "Round"})
+    assert child["variant_of"] == lead["product_id"]
+    assert _p(db, child["product_id"])["attributes"]["model_no"] == "1001/S"  # stored as typed
+    assert _p(db, child["product_id"])["attributes"]["shape"] == "Square"  # the model's
+
+
+def test_link_refuses_archived_products(db):
+    _seed(db, _frame("L", "001"), _frame("C", "002", minutes=1))
+    db["products"].update_one({"product_id": "C"}, {"$set": {"deleted_at": "2026-10-18T00:00:00Z"}})
+    with pytest.raises(pm.ProductMasterError) as e:
+        pm.link_to_family(_Conn(db), "C", "L")
+    assert e.value.status == 422 and "archived" in e.value.message
+
+
+def _put(pid, **fields):
+    return asyncio.run(products_mod.update_product(pid, products_mod.ProductUpdate(**fields), current_user=ADMIN))
+
+
+def test_put_products_runs_the_variant_guard_on_every_field(db):
+    # the variant stores its model fields in other spellings than the form sends
+    lead = _frame("L", "601", model="RB4165", shape="Square")
+    child = _frame("C", "710", model="rb4165", brand="RAY-BAN", minutes=1, shape="Square", model_name="JUSTIN")
+    child[0]["variant_of"] = "L"
+    _seed(db, lead, child)
+    child = child[0]
+    form = {**child["attributes"], "brand_name": "Ray-Ban", "model_no": "RB4165", "model_name": "Justin"}
+    # a price-only save of the whole form: the same values canonically -> saved
+    out = _put("C", attributes=form, brand="Ray-Ban", model="RB4165", mrp=6100.0, offer_price=6100.0)
+    assert out["message"] == "Product updated" and _p(db, "C")["mrp"] == 6100.0
+    for bad in (
+        {"attributes": {**form, "shape": "Round"}},
+        {"brand": "Oakley"},
+        {"model": "RB4166"},
+    ):
+        with pytest.raises(products_mod.HTTPException) as e:
+            _put("C", **bad)
+        assert e.value.status_code == 422, bad
+    assert _p(db, "C")["attributes"]["shape"] == "Square"
+
+
+def test_grouped_list_pages_models_and_the_archived_view_shows_archived_members(db, list_cache):
+    _seed(db, _frame("L", "001", minutes=0), _frame("C1", "002", minutes=1), _frame("C2", "003", minutes=2),
+          _frame("S", "777", model="RB3025", minutes=3))
+    pm.link_to_family(_Conn(db), "C1", "L")
+    pm.link_to_family(_Conn(db), "C2", "L")
+    out = _list(sort="oldest", is_active="true", group="model", skip=0, limit=1)
+    assert [p["product_id"] for p in out["products"]] == ["L"] and out["total_count"] == 2
+    out = _list(sort="oldest", is_active="true", group="model", skip=1, limit=1)
+    assert [p["product_id"] for p in out["products"]] == ["S"] and out["total_count"] == 2
+    db["products"].update_one({"product_id": "C2"}, {"$set": {"deleted_at": "2026-10-18T00:00:00Z", "is_active": False}})
+    out = _list(sort="oldest", is_active="true", group="model")
+    assert [m["product_id"] for m in out["products"][0]["family"]["members"]] == ["L", "C1"]
+    out = _list(sort="oldest", group="model", flag="archived")
+    assert [p["product_id"] for p in out["products"]] == ["C2"]
+    assert "family" not in out["products"][0]  # only its archived members: itself

@@ -1759,13 +1759,13 @@ def _family_hint_or_raise(products_collection, category: str, attributes: Dict[s
         if not _is_archived(d)
     ]
     ids = {d.get("product_id") for d in rows}
-    q = model_family_query(category, lead.get("brand"), lead.get("model"))
+    lead_attrs = lead.get("attributes") or {}
+    q = _brand_rows_query(category, lead_attrs.get("brand_name") or lead.get("brand"))
     for d in products_collection.find(q) if q else ():
         if d.get("product_id") not in ids and not d.get("variant_of") and not d.get("family_opt_out") \
                 and not _is_archived(d) and family_key(d) == key:
             rows.append(d)
     options, _ = family_option_values(rows)
-    lead_attrs = lead.get("attributes") or {}
     return {
         "lead_id": lead.get("product_id"),
         "lead_sku": lead.get("sku"),
@@ -2677,10 +2677,14 @@ def _spine_images(spine: Dict[str, Any]) -> List[str]:
     return [u.strip() for u in imgs if isinstance(u, str) and u.strip()]
 
 
+_SAME_AS_PARENT: Any = object()
+
+
 def _write_mirror(
     spine: Dict[str, Any],
     *,
     parent: Optional[Dict[str, Any]] = None,
+    row_parent: Any = _SAME_AS_PARENT,
     catalog_repo=None,
     variant_repo=None,
     db=None,
@@ -2739,7 +2743,9 @@ def _write_mirror(
     # --- catalog_variants (per-SKU identity) -- internal, flag-gated only ---
     try:
         if variant_repo is not None:
-            variant_repo.upsert(_variant_row_for(spine, parent))
+            variant_repo.upsert(
+                _variant_row_for(spine, parent if row_parent is _SAME_AS_PARENT else row_parent)
+            )
             targets.append(_SyncTarget("catalog_variants", "OK"))
         else:
             targets.append(
@@ -3099,6 +3105,9 @@ def create_via_door(
         provisional=bool(p.get("provisional", False)),
         variant_of=p.get("variant_of"),
         family_opt_out=bool(p.get("family_opt_out", False)),
+        # The size-variant runbook (scripts/create_large_variants.py, the
+        # MASTER door) creates the variant on the live listing itself.
+        live_lead_rows=p["_source"] == "MASTER",
         extra_fields=extra_fields,
         product_repo=product_repo,
         catalog_repo=catalog_repo,
@@ -3252,6 +3261,7 @@ def create_product(
     provisional: bool = False,
     variant_of: Optional[str] = None,
     family_opt_out: bool = False,
+    live_lead_rows: bool = False,
     extra_fields: Optional[Dict[str, Any]] = None,
     product_repo=None,
     catalog_repo=None,
@@ -3264,7 +3274,12 @@ def create_product(
     MODEL FAMILIES (G1, owner 2026-10-18): with no ``variant_of``, a product
     whose model already exists is linked to that model's lead automatically
     (find_family_lead) -- unless ``family_opt_out`` ('This is a different
-    model'), which is stored so nothing links it later.
+    model'), which is stored so nothing links it later. A new member takes
+    the lead's shape and gender (model-level). Under a lead that is ON
+    SHOPIFY the new member keeps its own catalog_variants row and waits for
+    the website step (G2); only ``live_lead_rows`` (the size-variant
+    runbook, which creates the variant on the listing itself) writes the row
+    under a live lead.
 
     ``variant_of`` (owner ruling 2026-09-06): the parent spine's product_id
     when this product is a SIZE VARIANT of another -- its own spine, SKU,
@@ -3330,6 +3345,17 @@ def create_product(
             logger.warning("[PM] family lookup failed for %s", spine.get("sku"), exc_info=True)
     if parent is not None:
         spine["variant_of"] = parent.get("product_id")
+        if not variant_of or not live_lead_rows:
+            # Model-level fields are the model's (owner 2026-10-18).
+            lead_attrs = parent.get("attributes") or {}
+            for key in ("shape", "gender"):
+                if not _is_blank(lead_attrs.get(key)):
+                    spine.setdefault("attributes", {})[key] = lead_attrs[key]
+    # The row goes under the lead's listing only while that listing is not on
+    # Shopify (or no one can check: then it waits too).
+    row_parent = parent
+    if parent is not None and not live_lead_rows and (db is None or has_listing(db, parent)):
+        row_parent = None
 
     if product_repo is None:
         # No DB (local/dev): echo a synthetic shape; no mirror, no audit.
@@ -3347,6 +3373,7 @@ def create_product(
     targets = _write_mirror(
         created,
         parent=parent,
+        row_parent=row_parent,
         catalog_repo=catalog_repo,
         variant_repo=variant_repo,
         db=db,
@@ -3360,15 +3387,13 @@ def create_product(
     targets.append(
         _stage_catalog_draft(created, parent=parent, catalog_repo=catalog_repo, db=db)
     )
-    if parent is not None and db is not None:
-        # The lead's own row and every colour label of the family (a clash
-        # with the new member changes both). Fail-soft: the link stands.
+    if row_parent is not None and db is not None:
+        # The new member's row (the flag-gated mirror above may have skipped
+        # it), the lead's own row and every colour label of the family (a
+        # clash with the new member changes both). Fail-soft: the link stands.
         try:
-            # The new member's row too: the flag-gated mirror above may have
-            # skipped it, and without it the model's listing cannot carry it.
-            _write_row(db, created, parent)
-            _write_row(db, parent, None)
-            refresh_family_options(db, parent.get("product_id"))
+            _write_row(db, created, row_parent)
+            _settle_lead(db, row_parent)
         except Exception:  # noqa: BLE001
             logger.warning("[PM] family options refresh failed for %s", product_id, exc_info=True)
 
@@ -3745,7 +3770,7 @@ def _resolve_variant_parent(
             status=422,
             field="variant_of",
         )
-    if family_key(parent) is None or family_key(parent) != family_key(spine):
+    if _model_identity(parent) != _model_identity(spine):
         raise ProductMasterError(
             "variant_of: a variant is the same model in another colour or size -- "
             "the parent must have the same brand and model number.",
@@ -3795,17 +3820,46 @@ def is_family_category(category: Any) -> bool:
     return spec is not None and "colour_code" in spec.required
 
 
+def _model_identity(doc: Dict[str, Any]) -> Tuple[Any, str, str]:
+    """(category, brand, model) as the identity key reads them -- the rule an
+    explicit variant_of (the size-variant runbook's door) is checked by."""
+    category = resolve_category((doc or {}).get("category"))
+    ids = _derive_brand_model_color_size((doc or {}).get("attributes") or {}, category)
+    return (
+        category,
+        normalise_identity_component(ids["brand"] or doc.get("brand")),
+        normalise_identity_component(ids["model"] or doc.get("model")),
+    )
+
+
 def family_key(doc: Dict[str, Any]) -> Optional[Tuple[str, str, str]]:
-    """(category, brand, model) normalised by THE identity normaliser (the
-    same fold model_family_query's identity-key prefix uses), or None for a
-    product that cannot be in a family."""
+    """(category, brand, model number) normalised by THE identity normaliser,
+    or None for a product that cannot be in a family. The model is the MODEL
+    NUMBER only (a blank model_no is no family -- a smart glass named only by
+    its model name is not grouped), with a brand typed in front of it folded
+    away, separator or not: 'CARRERA 1001/S', 'CARRERA1001/S' and '1001/S'
+    under Carrera are one model. Stored values are never rewritten."""
     category = resolve_category((doc or {}).get("category"))
     if not is_family_category(category):
         return None
-    ids = _derive_brand_model_color_size((doc or {}).get("attributes") or {}, category)
-    brand = normalise_identity_component(ids["brand"] or doc.get("brand"))
-    model = normalise_identity_component(ids["model"] or doc.get("model"))
+    attrs = _shown_attributes((doc or {}).get("attributes") or {}, category)
+    brand = normalise_identity_component(attrs.get("brand_name") or attrs.get("brand") or doc.get("brand"))
+    model = normalise_identity_component(attrs.get("model_no"))
+    if brand and model.startswith(brand) and len(model) > len(brand):
+        model = model[len(brand):]
     return (category, brand, model) if brand and model else None
+
+
+def _brand_rows_query(category: Any, brand: Any) -> Optional[Dict[str, Any]]:
+    """Every row of one brand in one category (the identity key's "brand|"
+    prefix): the candidates family_key narrows to one model. A model typed
+    with the brand in front keys apart, so the model-prefix scan
+    (model_family_query) cannot find it."""
+    canonical = resolve_category(category)
+    b = normalise_identity_component(brand)
+    if canonical is None or not b:
+        return None
+    return {"category": canonical, "identity_key": {"$regex": "^" + re.escape(f"{b}|")}}
 
 
 def _created_sort_value(value: Any) -> float:
@@ -3854,14 +3908,14 @@ def lead_of(members: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
 def find_family_lead(
     products_collection, doc: Dict[str, Any], *, exclude_id: Any = None
 ) -> Optional[Dict[str, Any]]:
-    """The lead of `doc`'s model (another product), or None. Reads the rows by
-    model_family_query, then keeps the exact family_key (the prefix scan is
-    the index walk; the key is the rule)."""
+    """The lead of `doc`'s model (another product), or None. Reads the
+    brand's rows (the identity-key prefix walk), then keeps the exact
+    family_key (the key is the rule)."""
     key = family_key(doc)
     if key is None or products_collection is None:
         return None
-    ids = _derive_brand_model_color_size(doc.get("attributes") or {}, key[0])
-    q = model_family_query(key[0], ids["brand"] or doc.get("brand"), ids["model"] or doc.get("model"))
+    attrs = doc.get("attributes") or {}
+    q = _brand_rows_query(key[0], attrs.get("brand_name") or attrs.get("brand") or doc.get("brand"))
     if q is None:
         return None
     members = [
@@ -3949,11 +4003,30 @@ def _variant_repo(db):
     return CatalogVariantRepository(db.get_collection("catalog_variants"))
 
 
-# The online discount engine's per-row prices: computed for the listing the
-# row sat on, so a row that moves listing drops them (the engine re-derives
-# them on that listing's next pass; the push falls back to row mrp / the
-# product's own price meanwhile).
-_ENGINE_ROW_FIELDS = ("discounted_price", "compare_at_price")
+# What belongs to the LISTING a row sat on, dropped when the row moves to
+# another one: the online discount engine's per-row prices (re-derived on the
+# new listing's next pass; the push falls back to row mrp / the product's own
+# price meanwhile) and the old listing's Shopify variant ids.
+_ENGINE_ROW_FIELDS = (
+    "discounted_price",
+    "compare_at_price",
+    "shopify_variant_id",
+    "shopify_inventory_item_id",
+)
+
+
+def has_listing(db, spine: Dict[str, Any]) -> bool:
+    """Is this product's twin on Shopify (it carries a product gid)? The twin
+    by the take-down's own resolver (online_delist._resolve_twin). A twin
+    that cannot be read counts as on Shopify: nothing is re-pointed under a
+    listing nobody could check."""
+    from .online_delist import _raw_db, _resolve_twin
+
+    try:
+        twin = _resolve_twin(_raw_db(db), spine or {})
+    except Exception:  # noqa: BLE001
+        return True
+    return bool(((twin or {}).get("ecom") or {}).get("shopify_product_id"))
 
 
 _OPTION_FIELDS = ("option_color", "option_size")
@@ -3974,11 +4047,26 @@ def _write_row(db, spine: Dict[str, Any], parent: Optional[Dict[str, Any]]) -> N
     db.get_collection("catalog_variants").update_one({"sku": spine["sku"]}, {"$unset": unset})
 
 
+def _own_row(db, spine: Dict[str, Any]) -> None:
+    """The product's row as a product of its own: written when missing,
+    re-pointed (and cleaned, _write_row) only when it sat under another
+    listing -- never rewritten in place, so a lead's own engine prices and
+    Shopify ids are never touched."""
+    if not spine.get("sku"):
+        return
+    row = db.get_collection("catalog_variants").find_one({"sku": spine["sku"]})
+    if row is None or row.get("parent_product_id") != _twin_id(spine):
+        _write_row(db, spine, None)
+
+
 def refresh_family_options(db, lead_id: str) -> List[List[str]]:
     """Re-derive option_color / option_size on every row of the family (a
     colour clash between two members changes BOTH labels). Returns the SKU
-    groups whose options are still identical."""
+    groups whose options are still identical. A model whose lead is on
+    Shopify is left exactly as its listing has it (G2 changes live options)."""
     members = family_members(db, lead_id)
+    if members and members[0].get("product_id") == lead_id and has_listing(db, members[0]):
+        return []
     variants = db.get_collection("catalog_variants")
     if len(members) < 2:
         # No model any more (the last variant left): a product of its own,
@@ -4037,14 +4125,32 @@ def _set_twin_link(db, spine: Dict[str, Any], parent: Optional[Dict[str, Any]]) 
         )
 
 
-def _link_one(db, child: Dict[str, Any], parent: Dict[str, Any]) -> None:
-    """Write the three halves of one link (spine, twin, row). No checks."""
+def _link_one(db, child: Dict[str, Any], parent: Dict[str, Any]) -> bool:
+    """Write one link: spine and twin always; the row under the lead's
+    listing only while the lead is NOT on Shopify. Under a live listing the
+    child keeps its own row and waits for the website step (G2): a row
+    re-pointed there is paired onto the listing's variants by its next push.
+    Returns whether the row moved. No other checks."""
     db.get_collection("products").update_one(
         {"product_id": child.get("product_id")},
         {"$set": {"variant_of": parent.get("product_id")}, "$unset": {"family_opt_out": ""}},
     )
     _set_twin_link(db, child, parent)
+    if has_listing(db, parent):
+        _own_row(db, child)
+        return False
     _write_row(db, child, parent)
+    return True
+
+
+def _settle_lead(db, lead: Dict[str, Any]) -> List[List[str]]:
+    """After a link: the lead's own row exists (never rewritten in place) and
+    the model's colour/size labels are re-derived -- both skipped for a lead
+    on Shopify."""
+    if has_listing(db, lead):
+        return []
+    _own_row(db, lead)
+    return refresh_family_options(db, lead.get("product_id"))
 
 
 def link_to_family(
@@ -4068,6 +4174,12 @@ def link_to_family(
     parent = products.find_one({"product_id": parent_id})
     if child is None or parent is None:
         raise ProductMasterError("Product not found.", status=404, field="variant_of")
+    if _is_archived(child) or _is_archived(parent):
+        raise ProductMasterError(
+            "An archived product cannot be linked to a model. Restore it first.",
+            status=422,
+            field="variant_of",
+        )
     if child_id == parent_id:
         raise ProductMasterError("A product cannot be a variant of itself.", status=422, field="variant_of")
     if family_key(child) is None or family_key(child) != family_key(parent):
@@ -4093,25 +4205,31 @@ def link_to_family(
             status=422,
             field="variant_of",
         )
-    twin = db.get_collection("catalog_products").find_one({"id": _twin_id(child)}) or {}
-    if (twin.get("ecom") or {}).get("shopify_product_id"):
+    if has_listing(db, child):
         raise ProductMasterError(
             "This product is on the website as its own listing, so it cannot join "
             "a model yet (that comes with the website update).",
             status=409,
             field="variant_of",
         )
-    _link_one(db, child, parent)
-    _write_row(db, parent, None)
-    clashes = refresh_family_options(db, parent_id)
+    row_moved = _link_one(db, child, parent)
+    clashes = _settle_lead(db, parent)
     _family_audit(
         audit_repo,
         "product.linked_to_model",
         child_id,
         actor,
-        {"sku": child.get("sku"), "lead_id": parent_id, "lead_sku": parent.get("sku")},
+        {"sku": child.get("sku"), "lead_id": parent_id, "lead_sku": parent.get("sku"), "row_moved": row_moved},
     )
-    return {"lead_id": parent_id, "product_id": child_id, "changed": True, "clashes": clashes}
+    return {
+        "lead_id": parent_id,
+        "product_id": child_id,
+        "changed": True,
+        "clashes": clashes,
+        # False: the model is on the website; this colour/size joins its
+        # listing with the website step (G2).
+        "on_listing": row_moved,
+    }
 
 
 def unlink_from_family(
@@ -4141,7 +4259,7 @@ def unlink_from_family(
         {"$unset": {"variant_of": ""}, "$set": {"family_opt_out": True}},
     )
     _set_twin_link(db, child, None)
-    _write_row(db, child, None)
+    _own_row(db, child)
     refresh_family_options(db, lead_id)
     _family_audit(
         audit_repo, "product.unlinked_from_model", child_id, actor, {"sku": child.get("sku"), "lead_id": lead_id}
@@ -4168,10 +4286,10 @@ def promote_new_lead(
     products.update_one({"product_id": new["product_id"]}, {"$unset": {"variant_of": ""}})
     new.pop("variant_of", None)
     _set_twin_link(db, new, None)
-    _write_row(db, new, None)
+    _own_row(db, new)
     for member in [c for c in children if c.get("product_id") != new["product_id"]] + [old]:
         _link_one(db, member, new)
-    refresh_family_options(db, new["product_id"])
+    _settle_lead(db, new)
     _family_audit(
         audit_repo,
         "product.model_lead_promoted",
@@ -4509,16 +4627,36 @@ def model_field_changes(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[s
     return {
         k: a.get(k)
         for k in MODEL_LEVEL_FIELDS
-        if k in a and str(b.get(k) or "").strip() != str(a.get(k) or "").strip()
+        # Canonical (the identity normaliser): 'rb4165' / 'RB 4165' and
+        # 'RAY-BAN' / 'Ray-Ban' are the same value, never an edit.
+        if k in a and normalise_identity_component(b.get(k)) != normalise_identity_component(a.get(k))
     }
 
 
-def assert_variant_model_fields(existing: Dict[str, Any], new_attributes: Dict[str, Any]) -> None:
-    """A variant's model-level fields belong to its model: an edit that
-    changes one on a variant is refused, naming where to make it."""
+def assert_variant_model_fields(
+    existing: Dict[str, Any],
+    new_attributes: Optional[Dict[str, Any]] = None,
+    *,
+    brand: Any = None,
+    model: Any = None,
+    category: Any = None,
+) -> None:
+    """THE guard every edit door calls (PUT /products, PUT /products/master
+    via update_product, PUT /catalog/products): a variant's model-level
+    fields belong to its model -- an edit that changes one on a variant (in
+    the attributes, or the flat brand / model / category columns) is refused,
+    naming where to make it. Values compare canonically."""
     if not existing.get("variant_of"):
         return
-    changed = model_field_changes(existing.get("attributes") or {}, new_attributes)
+    stored = existing.get("attributes") or {}
+    changed = model_field_changes(stored, new_attributes or {})
+    canon = normalise_identity_component
+    if brand is not None and canon(brand) != canon(stored.get("brand_name") or existing.get("brand")):
+        changed["brand_name"] = brand
+    if model is not None and canon(model) not in (canon(existing.get("model")), canon(stored.get("model_no"))):
+        changed["model_no"] = model
+    if category is not None and resolve_category(category) != resolve_category(existing.get("category")):
+        changed["category"] = category
     if changed:
         key = next(iter(changed))
         raise ProductMasterError(
@@ -4631,9 +4769,15 @@ def update_product(
     # Model families: a variant's model-level fields are its model's
     # (`from_model` = this write IS the model's edit reaching it).
     model_changes: Dict[str, Any] = {}
+    if not from_model:
+        assert_variant_model_fields(
+            current,
+            clean.get("attributes"),
+            brand=clean.get("brand"),
+            model=clean.get("model"),
+            category=clean.get("category"),
+        )
     if "attributes" in clean:
-        if not from_model:
-            assert_variant_model_fields(current, clean["attributes"] or {})
         model_changes = model_field_changes(current.get("attributes") or {}, clean["attributes"] or {})
 
     rekey_on_edit(current, clean, product_repo=product_repo)

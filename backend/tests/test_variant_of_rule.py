@@ -1413,3 +1413,120 @@ def test_runbook_apply_refuses_until_the_owner_points_are_acknowledged(capsys):
     assert "--owner-ack" in str(exc.value)
     out = capsys.readouterr().out
     assert out.count("OWNER POINTS") == 3 and all(p in out for p in runbook.OWNER_POINTS)
+
+
+# ---------------------------------------------------------------------------
+# 18. G1 (owner 2026-10-18): a new colour joining a model whose lead is LIVE
+#     never reaches the live listing before the website step (G2) -- the
+#     review's end-to-end probe. Before the fix the re-pointed gid-less row
+#     made the next push 'repair' it 1:1 onto the lead's only variant (the
+#     new colour's SKU + price on the lead's variant), copied the lead's ids
+#     onto it (one shared inventory item) and stripped the lead's prices.
+# ---------------------------------------------------------------------------
+
+NEW_SKU = "SMTFR-RAYBAN-RW4006-60172"
+
+
+def test_g1_new_colour_under_a_live_lead_never_touches_its_listing(monkeypatch):
+    db = _world(seed_child=False)
+    _wire(monkeypatch, db)
+    db["products"].update_one({"product_id": "sp-parent"}, {"$set": {"attributes.model_no": "RW4006"}})
+    db["catalog_variants"].update_one(
+        {"sku": PARENT_SKU}, {"$set": {"discounted_price": 35910.0, "compare_at_price": 39900.0}}
+    )
+    lead_row = _row(db, PARENT_SKU)
+    attrs = {"brand_name": "Ray-Ban", "model_name": "Meta Wayfarer Shiny Black G15", "model_no": "RW4006"}
+    # 1. an existing colour catalogued on its own, linked through catalogue review
+    db["products"].insert_one({
+        "product_id": "sp-new", "sku": NEW_SKU, "pim_product_id": "tw-new", "category": "SMARTGLASSES",
+        "brand": "Ray-Ban", "model": "RW4006", "mrp": 41000.0, "offer_price": 41000.0, "is_active": True,
+        "attributes": {**attrs, "colour_code": "601/72"},
+    })
+    db["catalog_products"].insert_one({"id": "tw-new", "sku": NEW_SKU, "ecom": {"status": "DRAFT", "locally_modified": True}})
+    own_row = {"variant_id": "v-new", "sku": NEW_SKU, "parent_product_id": "tw-new", "parent_sku": NEW_SKU}
+    db["catalog_variants"].insert_one(dict(own_row))
+    out = pm.link_to_family(db, "sp-new", "sp-parent", actor="u-admin")
+    assert out["changed"] is True and out["on_listing"] is False
+    assert _spine(db, "sp-new")["variant_of"] == "sp-parent"  # the IMS family link stands
+    new_row = _row(db, NEW_SKU)
+    assert {k: new_row.get(k) for k in own_row} == own_row, "the row stayed the colour's own"
+    assert "shopify_inventory_item_id" not in new_row
+    # 2. a new colour typed in Add Product (FORM door): linked, its row its own
+    created = pm.create_via_door(
+        {"category": "SMARTGLASSES", "attributes": {**attrs, "colour_code": "601/73"},
+         "mrp": 42000.0, "offer_price": 42000.0},
+        source="FORM", actor="u-admin", actor_name="admin",
+        product_repo=ProductRepository(db["products"]),
+        variant_repo=CatalogVariantRepository(db["catalog_variants"]),
+        audit_repo=AuditRepository(db["audit_logs"]), db=db,
+    )
+    assert created["variant_of"] == "sp-parent"
+    typed_row = _row(db, created["sku"])
+    assert typed_row["parent_product_id"] == created["pim_product_id"] and "mrp" not in typed_row
+    assert _row(db, PARENT_SKU) == lead_row, "the lead's own row is never rewritten"
+
+    # 3. the lead's next LIVE push: its one variant, its own price -- nothing else
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    parent = _twin(db, "tw-parent")
+    rows = ls.variants_for_product(db, parent)
+    assert [r["sku"] for r in rows] == [PARENT_SKU]
+    _run(shopify_push.push_product(db, parent, rows, blocked=False))
+    transcript = json.dumps(spy.calls)
+    for sku in (NEW_SKU, created["sku"]):
+        assert sku not in transcript, f"{sku} reached a Shopify call"
+    for price in ("41000", "42000"):
+        assert price not in transcript
+    # (the canned listing also has a 'Large' variant B: only tracking reaches it)
+    for call in spy.calls_for("productVariantsBulk"):
+        for v in call["variables"].get("variants") or []:
+            if "price" in v or "inventoryItem" in v and "sku" in (v.get("inventoryItem") or {}):
+                assert v.get("id") == A_GID, f"a price / SKU was sent to {v.get('id')}"
+    after = _row(db, PARENT_SKU)
+    assert (after.get("discounted_price"), after.get("compare_at_price")) == (35910.0, 39900.0)
+    assert after.get("shopify_inventory_item_id") == A_INV
+    assert _row(db, NEW_SKU).get("shopify_inventory_item_id") is None
+    assert _row(db, created["sku"]).get("shopify_inventory_item_id") is None
+
+
+# ---------------------------------------------------------------------------
+# 19. G1: the drawer / review save runs THE variant guard, and archiving a
+#     LIVE lead takes its listing down first (or deletes nothing)
+# ---------------------------------------------------------------------------
+
+
+def test_g1_drawer_save_refuses_a_model_field_on_a_variant(monkeypatch):
+    db = _world()
+    _wire_catalog(monkeypatch, db)
+    with pytest.raises(cat.HTTPException) as refused:
+        _drawer("tw-child", attributes={"shape": "Round"})
+    assert refused.value.status_code == 422 and "Change it on the model" in refused.value.detail
+    with pytest.raises(cat.HTTPException):
+        _drawer("tw-child", category="SUNGLASSES")
+    # a variant field and a price on the variant are its own
+    _drawer("tw-child", attributes={"lens_colour": "Green"}, pricing=cat.PricingPatchInput(offer_price=45000.0))
+    assert _spine(db, "sp-child")["offer_price"] == 45000.0
+
+
+@pytest.mark.parametrize("taken_down", [False, True])
+def test_g1_archiving_a_live_lead_takes_the_listing_down_first(monkeypatch, taken_down):
+    db = _world()
+    _wire_catalog(monkeypatch, db)
+    calls = []
+
+    async def _delist(db_, product, *, reason, actor):  # noqa: ARG001
+        calls.append(product.get("id"))
+        return {"ok": taken_down}
+
+    monkeypatch.setattr(cat._delist, "delist_if_live", _delist)
+    if not taken_down:
+        with pytest.raises(cat.HTTPException) as refused:
+            _run(cat._archive_product(_twin(db, "tw-parent"), ADMIN, spine_id="sp-parent"))
+        assert refused.value.status_code == 409 and "nothing was deleted" in refused.value.detail
+        assert not _spine(db, "sp-parent").get("deleted_at")
+        assert _spine(db, "sp-child")["variant_of"] == "sp-parent"
+        return
+    _run(cat._archive_product(_twin(db, "tw-parent"), ADMIN, spine_id="sp-parent"))
+    assert calls == ["tw-parent"], "taken down once, before the archive"
+    assert _spine(db, "sp-parent")["deleted_at"]
+    assert "variant_of" not in _spine(db, "sp-child") and _spine(db, "sp-parent")["variant_of"] == "sp-child"

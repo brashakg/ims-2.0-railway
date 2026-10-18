@@ -285,15 +285,16 @@ GROUP_SCAN_CAP = 5000
 
 
 def group_page(
-    collection, query: Dict[str, Any], sort: str, skip: int, limit: int
+    collection, query: Dict[str, Any], sort: str, skip: int, limit: int, *, archived: bool = False
 ) -> Tuple[List[Dict], int]:
     """One page of MODELS (owner 2026-10-18, G1): every filter matches the
     variants, then the matching rows fold into one row per model -- the
     model's lead when it matched, else its best-placed variant -- in the
     order the sort put the model's first match. Each folded row carries
-    `family` {lead_id, count, members[]} (the whole model, archived left
-    out: product_id, sku, name, colour, size, prices, on/off, is_lead) when
-    the model has more than one item. Returns (rows, number of models)."""
+    `family` {lead_id, count, members[]} (the whole model -- its archived
+    items only in the `archived` view, never in the catalogue: product_id,
+    sku, name, colour, size, prices, on/off, is_lead) when the model has more
+    than one item. Returns (rows, number of models)."""
     from .product_master import family_option_values, lead_order
 
     order: List[Any] = []
@@ -311,7 +312,7 @@ def group_page(
         for m in collection.find(
             {"$or": [{"product_id": {"$in": page_ids}}, {"variant_of": {"$in": page_ids}}]}
         ):
-            if not m.get("deleted_at"):
+            if bool(m.get("deleted_at")) == archived:
                 families[m.get("variant_of") or m.get("product_id")].append(m)
     rows = []
     for lead_id in page_ids:

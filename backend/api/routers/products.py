@@ -1095,7 +1095,8 @@ async def list_products(
                 )
             if new["group"]:
                 products, total_count = _catalog_list.group_page(
-                    repo.collection, query, new["sort"] or "edited", _skip, _limit
+                    repo.collection, query, new["sort"] or "edited", _skip, _limit,
+                    archived=new["flag"] == "archived",
                 )
             else:
                 products = _catalog_list.page(
@@ -3526,13 +3527,19 @@ async def update_product(
         # Model families (G1): a variant's model-level fields are edited on
         # its model; the model's edit reaches every variant (after the save).
         _model_changes: Dict[str, Any] = {}
+        try:
+            _pm.assert_variant_model_fields(
+                existing,
+                update_data.get("attributes"),
+                brand=update_data.get("brand"),
+                model=update_data.get("model"),
+                category=update_data.get("category"),
+            )
+        except _pm.ProductMasterError as err:
+            raise HTTPException(
+                status_code=err.status, detail=_pm_error_detail(err)
+            ) from err
         if "attributes" in update_data:
-            try:
-                _pm.assert_variant_model_fields(existing, update_data["attributes"])
-            except _pm.ProductMasterError as err:
-                raise HTTPException(
-                    status_code=err.status, detail=_pm_error_detail(err)
-                ) from err
             _model_changes = _pm.model_field_changes(
                 existing.get("attributes") or {}, update_data["attributes"]
             )
