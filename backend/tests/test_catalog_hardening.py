@@ -65,7 +65,17 @@ def _frame_payload(mrp, offer_price=None, gst_rate=None, discount_category="MASS
 
 
 @pytest.fixture(autouse=True)
-def _clear_inmemory_catalog():
+def _clear_inmemory_catalog(monkeypatch):
+    # The identity gate checks the billing spine too. Keep both sides isolated
+    # even in local mock mode, where global test cleanup has no real Mongo.
+    import mongomock
+    from api import dependencies
+    from database.repositories.product_repository import ProductRepository
+
+    db = mongomock.MongoClient().db
+    repo = ProductRepository(db.products)
+    monkeypatch.setattr(catalog, "_get_db", lambda: db)
+    monkeypatch.setattr(dependencies, "get_product_repository", lambda: repo)
     catalog.CATALOG_PRODUCTS.clear()
     yield
     catalog.CATALOG_PRODUCTS.clear()
@@ -252,6 +262,9 @@ class TestCatalogSpineWriteIsHardGate:
         # get_product_repository` at call time, so patch the source module.
         from api import dependencies as deps
 
+        # These write-failure doubles still support the common identity check.
+        repo.find_by_sku = lambda sku: None
+        repo.find_by_identity_key = lambda key: None
         monkeypatch.setattr(deps, "get_product_repository", lambda: repo)
 
     def test_spine_write_exception_aborts_with_500_and_no_catalog_doc(
@@ -290,13 +303,10 @@ class TestCatalogSpineWriteIsHardGate:
         # the response is an error with no product (no orphan catalog-only doc).
         assert "product" not in resp.json()
 
-    def test_spine_duplicate_is_tolerated_same_identity_variant(
+    def test_spine_duplicate_is_refused_without_a_catalog_doc(
         self, client, auth_headers, monkeypatch
     ):
-        """A DuplicateKeyError means the identity already has a (billable) spine.
-        The catalog/PIM door legitimately holds same-identity variants, so the
-        create is TOLERATED and still saves the catalog doc (200) -- it must NOT
-        hard-fail (that would break the by-design form+catalog dual-door flow)."""
+        """A rejected spine never authorizes a twin under the rejected id."""
 
         class DuplicateKeyError(Exception):
             pass
@@ -306,13 +316,15 @@ class TestCatalogSpineWriteIsHardGate:
                 raise DuplicateKeyError("E11000 duplicate key")
 
         self._patch_repo(monkeypatch, _DupRepo())
+        saved = []
+        monkeypatch.setattr(catalog, "_save_catalog_product", saved.append)
         resp = client.post(
             "/api/v1/catalog/products",
             json=_frame_payload(mrp=4000, offer_price=3600),
             headers=auth_headers,
         )
-        assert resp.status_code == 200, resp.text
-        assert resp.json()["product"]["id"]
+        assert resp.status_code == 409, resp.text
+        assert saved == []
 
     def test_spine_success_saves_catalog_doc(self, client, auth_headers, monkeypatch):
         saved = []

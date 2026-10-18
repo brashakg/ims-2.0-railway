@@ -414,7 +414,7 @@ def test_http_incomplete_frame_rejected_at_form_and_catalog(client):
     assert "colour_code" in cat_resp.json()["detail"]
 
 
-def test_http_complete_frame_accepted_at_form_and_catalog(client):
+def test_http_catalogue_refuses_identity_already_created_at_form(client):
     headers = _su_headers()
     form_resp = client.post(
         "/api/v1/products",
@@ -445,10 +445,11 @@ def test_http_complete_frame_accepted_at_form_and_catalog(client):
             "pricing": {"mrp": 5000.0, "offer_price": 4500.0, "discount_category": "MASS"},
         },
     )
-    assert cat_resp.status_code == 200, cat_resp.text
-    prod = cat_resp.json()["product"]
-    # Same canonical GST/HSN as the FORM door derives for a frame.
-    assert prod["gst_rate"] == 5.0
+    assert cat_resp.status_code == 409, cat_resp.text
+    detail = cat_resp.json()["detail"]
+    assert detail["code"] == "DUPLICATE_PRODUCT"
+    assert detail["existing"]["product_id"] == form_resp.json()["product_id"]
+    assert detail["existing"]["sku"] == "HTTP-FR-COMPLETE-1"
 
 
 def test_http_bulk_mixed_complete_and_incomplete(client):

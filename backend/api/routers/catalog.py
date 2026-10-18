@@ -2103,11 +2103,18 @@ def _guard_catalog_pricing(product: "ProductCreateInput") -> tuple:
     return gst_rate, hsn_code
 
 
-def _catalog_pm_error(err: "_pm.ProductMasterError", product) -> Tuple[int, str]:
+def _catalog_pm_error(err: "_pm.ProductMasterError", product) -> Tuple[int, Any]:
     """(status, detail) the catalog doors (single create and import) give a
     registry breach: their historical 400 "Missing required field: X" only
     when X really is missing; anything else (a contact-lens power that is not
     a number) in its own words, with its own status."""
+    conflict = getattr(err, "conflict", None)
+    if conflict:
+        return err.status, {
+            "message": err.message,
+            "code": getattr(err, "code", "DUPLICATE_PRODUCT"),
+            "existing": conflict,
+        }
     missing = _pm.missing_required_fields(
         product.category.value, dict(product.attributes or {})
     )
@@ -2143,17 +2150,9 @@ async def create_catalog_product(
     product_id = f"prod_{uuid.uuid4().hex[:12]}"
     title = generate_product_title(product.category, product.attributes)
 
-    # PRODUCTS-CONVERGENCE step-10: validate through the canonical registry AND
-    # persist a `products` SPINE row that SHARES this catalog id + sku, so a
-    # catalog/PIM product is a first-class BILLABLE + discount-cap-enforced master
-    # and POS -- which references the catalog id -- resolves straight to the
-    # spine. Nothing can then be ordered off a catalog-only doc (the order-create
-    # spine guard ③ fails loud otherwise). We insert the spine doc DIRECTLY
-    # (build_canonical_product validates + builds it, no persistence) instead of
-    # create_via_door, to avoid imposing the spine's identity duplicate-block on
-    # the catalog/PIM door (which legitimately holds same-identity variants) and
-    # to keep the native catalog_products doc (storefront/Shopify shape) below
-    # unchanged.
+    # The catalogue twin and its billing spine share one id. Build the spine
+    # here to preserve the native storefront shape below; persistence uses the
+    # same identity/GTIN gate as the canonical product-create door.
     try:
         sku = _pm.mint_unique_sku(
             product.category.value, product.attributes,
@@ -2188,66 +2187,22 @@ async def create_catalog_product(
     _spine["product_id"] = product_id
     _spine["id"] = product_id
     _spine["sku"] = sku
-    # F6: persist the spine as a HARD gate on a GENUINE write failure. The products
-    # spine is REQUIRED -- POS / PO / Buy Desk resolve the catalog id straight to
-    # it, and the order-create spine guard (3) fails loud without it. Previously a
-    # spine-write error was swallowed and the catalog doc saved anyway, leaving a
-    # hidden catalog-only product that couldn't be billed until a sale surfaced the
-    # gap. Now a REAL spine-write failure (a transient DB error -> create() returns
-    # None, or a non-duplicate exception) aborts the create BEFORE the catalog doc
-    # is saved -> 500.
-    #
-    # A DuplicateKeyError is DELIBERATELY tolerated: the catalog/PIM door
-    # legitimately holds same-identity variants (see the build_canonical_product
-    # note above -- the spine is inserted directly precisely to NOT impose the
-    # identity duplicate-block here), and that identity already has a billable
-    # spine. Failing it would break the by-design "accept the same product at the
-    # form AND catalog doors" flow. When there is no DB (_pr is None) the catalog
-    # save below also falls back to in-memory, so there is no orphan to guard.
+    # Save the billing identity before the catalogue twin. A refused duplicate
+    # (including a concurrent unique-index loss) must never save a second twin
+    # pointing at this newly minted id, which has no billing record.
     _pr = get_product_repository()
-    # One product per manufacturer GTIN at this create door too (the same rule
-    # as the form and edit doors).
-    try:
-        _pm.assert_gtin_free((_spine.get("attributes") or {}).get("gtin"), _pr, None)
-    except _pm.ProductMasterError as err:
-        raise HTTPException(status_code=err.status, detail=err.message) from err
     if _pr is not None:
         try:
-            _spine_created = _pr.create(_spine, raise_on_duplicate=True)
-        except HTTPException:
-            raise
+            _pm.persist_new_spine(_spine, _pr)
+        except _pm.ProductMasterError as err:
+            status, detail = _catalog_pm_error(err, product)
+            raise HTTPException(status_code=status, detail=detail) from err
         except Exception as err:  # noqa: BLE001
-            if err.__class__.__name__ == "DuplicateKeyError":
-                # Same-identity variant: the spine already exists (billable).
-                # Tolerate + proceed to save the catalog/PIM doc, as before.
-                logger.info(
-                    "[CATALOG] spine already exists for the identity of %s (%s); "
-                    "saving catalog variant",
-                    product_id,
-                    sku,
-                )
-                _spine_created = True
-            else:
-                logger.error(
-                    "[CATALOG] spine write FAILED for %s (%s); aborting catalog create",
-                    product_id,
-                    sku,
-                    exc_info=True,
-                )
-                raise HTTPException(
-                    status_code=500,
-                    detail=(
-                        "Failed to create the product's billing record. The "
-                        "product was not saved -- please retry."
-                    ),
-                ) from err
-        if not _spine_created:
-            # create() returns None on a swallowed (non-duplicate) DB error;
-            # treat that as a hard failure too rather than saving an orphan.
             logger.error(
-                "[CATALOG] spine write returned no doc for %s (%s); aborting create",
+                "[CATALOG] spine write FAILED for %s (%s); aborting catalog create",
                 product_id,
                 sku,
+                exc_info=True,
             )
             raise HTTPException(
                 status_code=500,
@@ -2255,7 +2210,7 @@ async def create_catalog_product(
                     "Failed to create the product's billing record. The product "
                     "was not saved -- please retry."
                 ),
-            )
+            ) from err
 
     # Build product data
     product_data = {
