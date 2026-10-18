@@ -581,7 +581,8 @@ _COLL = {"payments": "vendor_payments", "debit-notes": "vendor_debit_notes"}
 def _body(kind: str, bill_id) -> dict:
     if kind == "payments":
         return {"amount": 100.0, "payment_date": "2026-09-28", "mode": "BANK", "bill_id": bill_id}
-    return {"amount": 100.0, "date": "2026-09-28", "reason": "short supply", "bill_id": bill_id}
+    return {"amount": 100.0, "date": "2026-09-28", "reason": "quality adjustment",
+            "cn_type": "QUALITY_CN", "bill_id": bill_id}
 
 
 def _snapshot(world) -> tuple:

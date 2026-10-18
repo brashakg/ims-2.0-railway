@@ -83,6 +83,10 @@ def _resolve_path(doc: Dict[str, Any], key: str) -> Any:
 
 def _matches(doc: Dict[str, Any], query: Dict[str, Any]) -> bool:
     for k, v in query.items():
+        if k == "$or":
+            if not any(_matches(doc, branch) for branch in v):
+                return False
+            continue
         actual = _resolve_path(doc, k)
         if isinstance(v, dict) and any(str(kk).startswith("$") for kk in v):
             for op, expected in v.items():
@@ -267,9 +271,39 @@ def _seed_return(db, *, return_id="VR-1", store_id="S1", vendor_id="V1",
         "purchase_invoice_number": "PINV-2026-77",
         "purchase_invoice_date": "2026-05-01",
         "lines": items,
+        "grn_id": "GRN-" + return_id,
     }
+    _seed_original_bill(db, doc)
     db.get_collection("vendor_returns").insert_one(dict(doc))
     return doc
+
+
+def _seed_original_bill(db, doc):
+    """Issue fixtures now prove original receipt/bill, independent of masters."""
+    items = doc.get("items") or doc.get("lines") or []
+    if any(not item.get("product_id") for item in items):
+        return
+    gid = doc.get("grn_id") or "GRN-" + doc["return_id"]
+    doc["grn_id"] = gid
+    enriched = []
+    for item in items:
+        product = db.get_collection("products").find_one({"product_id": item["product_id"]}) or {}
+        enriched.append({**item, "gst_rate": item.get("gst_rate", product.get("gst_rate", 5)),
+                         "hsn": item.get("hsn", product.get("hsn", "9003"))})
+    vendor = db.get_collection("vendors").find_one({"vendor_id": doc["vendor_id"]})
+    note = build_debit_note({**doc, "items": enriched, "lines": enriched}, vendor, [], "FIXTURE", seller=_seller())
+    db.get_collection("grns").insert_one({"grn_id": gid, "vendor_id": doc["vendor_id"],
+        "store_id": doc["store_id"], "status": "ACCEPTED",
+        "items": [{"product_id": item["product_id"], "accepted_qty": item["quantity"]} for item in items]})
+    db.get_collection("vendor_bills").insert_one({"bill_id": "BILL-" + doc["return_id"], "grn_id": gid,
+        "store_id": doc["store_id"], "vendor_id": doc["vendor_id"], "status": "UNPAID", "received": True,
+        "bill_number": "PINV-2026-77", "bill_date": "2026-05-01", "recipient_entity_id": "E1",
+        "recipient_gstin": _seller()["gstin"], "vendor_gstin": vendor["gstin"],
+        "lines": [{"product_id": item["product_id"], "qty": row["qty"], "gst_rate": row["gst_rate"],
+                   "hsn": row["hsn"], "taxable": row["taxable_paise"] / 100,
+                   "cgst": row["cgst_paise"] / 100, "sgst": row["sgst_paise"] / 100,
+                   "igst": row["igst_paise"] / 100, "line_total": row["line_total_paise"] / 100}
+                  for item, row in zip(items, note["lines"])]})
 
 
 def _seller():
@@ -284,9 +318,8 @@ def _seller():
 # ============================================================================
 
 
-def test_line_gst_hsn_resolved_from_product_when_absent_on_line(db):
-    """P1-1: a vendor_returns line as PRODUCTION writes it (sku + qty + rate, NO
-    gst_rate/hsn) must resolve GST + HSN from the PRODUCT -- not silently emit 0%."""
+def test_line_gst_hsn_resolved_from_original_bill_when_absent_on_return_line(db):
+    """A03: production return lines use their original bill, never current tax."""
     db.get_collection("products").insert_one(
         {"product_id": "P9", "sku": "SKU-9", "category": "FRAME",
          "gst_rate": 5.0, "hsn": "9003"}
@@ -316,7 +349,7 @@ def test_unresolvable_gst_fails_loud(db):
         actor="u1", seller=_seller())
     assert res["ok"] is False
     assert res.get("http") == 422
-    assert str(res.get("error", "")).startswith("gst_unresolved")
+    assert res.get("error") == "PRODUCT_REQUIRED"
 
 
 def test_fy_serial_uses_ist_at_apr_boundary(db, monkeypatch):
@@ -470,6 +503,7 @@ def test_tally_voucher_balanced_intra(db):
     rtv = _seed_return(db)
     note = build_debit_note(rtv, db.get_collection("vendors").find_one({"vendor_id": "V1"}),
                             [], "DN/BV/2026-27/000001", seller=_seller())
+    note.update(accounting_status="POSTED", confirmation_id="TEST-CONFIRMED-INTRA")
     xml = tally_build_debit_note_xml(note)
     root = ET.fromstring(xml)
     voucher = root.find(".//VOUCHER")
@@ -496,6 +530,7 @@ def test_tally_voucher_balanced_inter(db):
     rtv = _seed_return(db, return_id="VR-INT", vendor_id="V2")
     note = build_debit_note(rtv, db.get_collection("vendors").find_one({"vendor_id": "V2"}),
                             [], "DN/BV/2026-27/000002", seller=_seller())
+    note.update(accounting_status="POSTED", confirmation_id="TEST-CONFIRMED-INTER")
     xml = tally_build_debit_note_xml(note)
     root = ET.fromstring(xml)
     voucher = root.find(".//VOUCHER")
@@ -513,7 +548,7 @@ def test_print_html_renders(db):
     note = build_debit_note(rtv, db.get_collection("vendors").find_one({"vendor_id": "V1"}),
                             [], "DN/BV/2026-27/000001", seller=_seller())
     html = render_debit_note_html(note)
-    assert "DEBIT NOTE" in html
+    assert "RETURN REQUEST" in html
     assert "DN/BV/2026-27/000001" in html
     assert "Better Vision Pvt Ltd" in html
     assert "GKB Optical" in html

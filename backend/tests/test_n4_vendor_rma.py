@@ -29,6 +29,9 @@ import sys
 from typing import Any, Dict, List, Optional
 
 import pytest
+import mongomock
+from uuid import uuid4
+from rma_credit_fixtures import credit_payload
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("JWT_SECRET_KEY", "test-n4")
@@ -219,7 +222,7 @@ class FakeDB:
 
 @pytest.fixture
 def db():
-    return FakeDB()
+    return mongomock.MongoClient().db
 
 
 @pytest.fixture
@@ -228,7 +231,7 @@ def engine(db):
 
 
 def _audit_rows(db, entity_type="VENDOR_RMA"):
-    return [r for r in db.get_collection("audit_logs").docs
+    return [r for r in db.get_collection("audit_logs").find({})
             if r.get("entity_type") == entity_type]
 
 
@@ -625,7 +628,8 @@ def test_large_credit_requires_approval_token(rt, db, monkeypatch):
     eng.authorize(rma_id, vendor_rma_number="LRMA-1", actor="mgr")
     eng.dispatch(rma_id, carrier="X", awb="W", dispatch_date=None, actor="mgr")
 
-    body = RMACreditNote(credit_note_number="CN-BIG", received_amount=80000.0)  # > Rs 50k
+    body = RMACreditNote(credit_note_number="CN-BIG", received_amount=80000.0,
+                         credit_note_date="2026-10-18", idempotency_key=str(uuid4()))  # > Rs 50k
     with pytest.raises(HTTPException) as ei:
         _run(record_credit_note(rma_id, body, current_user=_user(["ACCOUNTANT"])))
     assert ei.value.status_code == 403
@@ -666,7 +670,7 @@ def test_large_credit_proceeds_with_valid_approval(rt, db):
     assert approved["ok"] is True
     token = approved["approval_token"]
 
-    body = RMACreditNote(credit_note_number="CN-BIG", received_amount=80000.0,
+    body = RMACreditNote(**credit_payload(db, rma_id, number="CN-BIG", amount=80000.0),
                          approval_token=token, approval_request_id=req["request_id"])
     res = _run(record_credit_note(rma_id, body, current_user=_user(["ACCOUNTANT"], uid="acc")))
     assert res["ok"] is True
@@ -808,6 +812,7 @@ def test_rtv_token_rejected_on_different_rma(rt, db):
 
     # ...replayed against RMA-B -> rejected.
     body = RMACreditNote(credit_note_number="CN-X", received_amount=80000.0,
+                         credit_note_date="2026-10-18", idempotency_key=str(uuid4()),
                          approval_token=token, approval_request_id=req_id)
     with pytest.raises(HTTPException) as ei:
         _run(record_credit_note(rma_b, body, current_user=_user(["ACCOUNTANT"], uid="acc")))
@@ -815,7 +820,7 @@ def test_rtv_token_rejected_on_different_rma(rt, db):
     assert ei.value.detail.get("error") == "approval_invalid"
     # The token was rolled back (not burned) by the mismatch, so it still works
     # against its OWN RMA-A.
-    body_ok = RMACreditNote(credit_note_number="CN-A", received_amount=80000.0,
+    body_ok = RMACreditNote(**credit_payload(db, rma_a, number="CN-A", amount=80000.0),
                             approval_token=token, approval_request_id=req_id)
     res = _run(record_credit_note(rma_a, body_ok,
                                   current_user=_user(["ACCOUNTANT"], uid="acc")))
@@ -839,6 +844,7 @@ def test_rtv_token_rejected_on_different_store(rt, db):
     req_id, token = _mint_rtv_token(db, store_id="S1", rma_id=rma_b)
 
     body = RMACreditNote(credit_note_number="CN-X", received_amount=80000.0,
+                         credit_note_date="2026-10-18", idempotency_key=str(uuid4()),
                          approval_token=token, approval_request_id=req_id)
     with pytest.raises(HTTPException) as ei:
         _run(record_credit_note(rma_b, body,
@@ -860,6 +866,7 @@ def test_rtv_floating_token_without_request_id_rejected(rt, db):
     rma_id = _big_dispatched_rma(eng, store_id="S1", vendor_rma_number="A-1")
 
     body = RMACreditNote(credit_note_number="CN-X", received_amount=80000.0,
+                         credit_note_date="2026-10-18", idempotency_key=str(uuid4()),
                          approval_token="some-floating-token")  # no request id
     with pytest.raises(HTTPException) as ei:
         _run(record_credit_note(rma_id, body, current_user=_user(["ACCOUNTANT"], uid="acc")))

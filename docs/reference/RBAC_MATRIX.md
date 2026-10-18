@@ -69,9 +69,9 @@ manager gets 404).
 |---|---|
 | PUBLIC (no IMS role gate) | 45 |
 | AUTHENTICATED | 393 |
-| Role-gated (one or more roles) | 867 |
-| **Total `/api/v1` (method x path)** | **1305** |
-| ...of which `store_scoped` | 237 |
+| Role-gated (one or more roles) | 870 |
+| **Total `/api/v1` (method x path)** | **1308** |
+| ...of which `store_scoped` | 240 |
 | ...of which `self_enforced` | 47 |
 
 ## Full matrix (method x path -> policy entry)
@@ -1602,6 +1602,8 @@ entry exactly; see the manual interpretation notes above.
 | `GET` | `/api/v1/vendor-returns/` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER, WORKSHOP_STAFF | S |  |
 | `POST` | `/api/v1/vendor-returns/` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER, WORKSHOP_STAFF |  |  |
 | `GET` | `/api/v1/vendor-returns/{return_id}` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER, WORKSHOP_STAFF | S |  |
+| `POST` | `/api/v1/vendor-returns/{return_id}/credit-confirmations` | ACCOUNTANT, ADMIN | S |  |
+| `POST` | `/api/v1/vendor-returns/{return_id}/credit-preview` | ACCOUNTANT, ADMIN | S |  |
 | `PUT` | `/api/v1/vendor-returns/{return_id}/prices` | ACCOUNTANT, ADMIN | S |  |
 | `PATCH` | `/api/v1/vendor-returns/{return_id}/status` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
 
@@ -1617,6 +1619,7 @@ entry exactly; see the manual interpretation notes above.
 | `POST` | `/api/v1/vendor-rma/{rma_id}/authorize` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
 | `POST` | `/api/v1/vendor-rma/{rma_id}/close` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
 | `POST` | `/api/v1/vendor-rma/{rma_id}/credit-note` | ACCOUNTANT, ADMIN | S |  |
+| `POST` | `/api/v1/vendor-rma/{rma_id}/credit-preview` | ACCOUNTANT, ADMIN | S |  |
 | `POST` | `/api/v1/vendor-rma/{rma_id}/dispatch` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
 | `PUT` | `/api/v1/vendor-rma/{rma_id}/prices` | ACCOUNTANT, ADMIN | S |  |
 | `POST` | `/api/v1/vendor-rma/{rma_id}/reject` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |

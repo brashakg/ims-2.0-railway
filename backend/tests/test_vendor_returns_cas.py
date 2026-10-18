@@ -1,9 +1,9 @@
 """vendor_returns update_return_status compare-and-swap (salvaged 2026-07-03).
 
-Two racing transitions out of the SAME status must not both issue a credit note.
+Two racing goods transitions out of the SAME status must not both succeed.
 A frozen-read fake simulates two requests that both read the pre-transition
 snapshot (received_by_vendor); the CAS baked into the update_one filter lets
-exactly one win (200) and the other 409s -- so the credit note is minted once.
+exactly one win (200) and the other 409s. Credit confirmation has separate tests.
 """
 from __future__ import annotations
 
@@ -74,18 +74,18 @@ def _admin():
     return {"user_id": "u1", "roles": ["ADMIN"], "active_store_id": "STORE-A", "store_ids": []}
 
 
-def test_concurrent_credit_issue_one_wins_one_409(monkeypatch):
+def test_concurrent_goods_transition_one_wins_one_409(monkeypatch):
     coll = _FrozenReadColl(_seed())
     monkeypatch.setattr(vr, "_get_db", lambda: _FakeDB(coll))
 
     async def _call():
         return await vr.update_return_status(
-            "VR-1", vr.VendorReturnStatusUpdate(status="credit_issued"), _admin()
+            "VR-1", vr.VendorReturnStatusUpdate(status="replaced"), _admin()
         )
 
     # First transition wins the CAS.
     out1 = asyncio.run(_call())
-    assert "credit_issued" in out1["message"]
+    assert "replaced" in out1["message"]
 
     # Second racer still sees the frozen received_by_vendor snapshot, so it passes
     # the transition-validity check but LOSES the CAS -> 409, no second write.
@@ -95,5 +95,5 @@ def test_concurrent_credit_issue_one_wins_one_409(monkeypatch):
 
     # Exactly ONE write happened -> exactly one credit note issued.
     assert coll.writes == 1
-    assert coll._real.get("status") == "credit_issued"
-    assert coll._real.get("credit_note_number")
+    assert coll._real.get("status") == "replaced"
+    assert not coll._real.get("credit_note_number")

@@ -34,6 +34,7 @@ from types import SimpleNamespace
 from typing import Any, Dict, List
 
 import pytest
+import mongomock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("JWT_SECRET_KEY", "test-supplier-money")
@@ -320,8 +321,9 @@ def test_rtv_routes_are_their_own_module_s_functions():
 @pytest.fixture
 def rtv(monkeypatch):
     import api.routers.rtv_debit_notes as r
+    from test_f20_rtv_debit_note import _seed_original_bill
 
-    db = FakeDB()
+    db = mongomock.MongoClient()["rtv_money_masks"]
     db.get_collection("entities").insert_one(
         {"entity_id": "E1", "code": "BV", "legal_name": "Better Vision Pvt Ltd",
          "gstin": "20ABCDE1234F1Z5", "state_code": "20",
@@ -333,12 +335,17 @@ def rtv(monkeypatch):
     db.get_collection("vendors").insert_one(
         {"vendor_id": "V1", "name": "GKB Optical", "gstin": "20ZZZZZ9999Z1Z5",
          "state_code": "20", "address": "Jamshedpur"})
-    db.get_collection("vendor_returns").insert_one({
+    doc = {
         "return_id": "VR-1", "store_id": "S1", "vendor_id": "V1", "entity_id": "E1",
         "vendor_name": "GKB Optical", "purchase_invoice_number": "PINV-77",
-        "lines": [{"product_id": "P1", "product_name": "Zeiss Lens", "hsn": "9001",
-                   "quantity": 2, "rate_paise": 150000, "gst_rate": 5.0}],
-    })
+        "status": "received_by_vendor", "return_type": "credit_note", "total_value": 3000,
+        "items": [{"product_id": "P1", "product_name": "Zeiss Lens", "hsn": "9001",
+                   "quantity": 2, "unit_price": 1500, "gst_rate": 5.0}],
+    }
+    _seed_original_bill(db, doc)
+    db.vendor_bills.update_one({}, {"$set": {"taxable_amount": 3000, "tax_amount": 150,
+                                            "cgst_total": 75, "sgst_total": 75, "igst_total": 0}})
+    db.get_collection("vendor_returns").insert_one(doc)
     monkeypatch.setattr(r, "_get_db", lambda: db)
     return SimpleNamespace(r=r, db=db)
 
@@ -350,7 +357,23 @@ def _issue(rtv, role):
 
 
 def _note_id(rtv):
-    return rtv.db.get_collection("debit_notes").docs[0]["debit_note_id"]
+    return rtv.db.get_collection("debit_notes").find_one({})["debit_note_id"]
+
+
+def _confirm_rtv(rtv):
+    """Exports require a real confirmed event, independently of its request."""
+    from uuid import uuid4
+    from api.services.supplier_credit_confirmation import record_supplier_confirmation
+    from api.services.supplier_credit_evidence import credit_preview
+    doc = rtv.db.vendor_returns.find_one({"return_id": "VR-1"})
+    preview = credit_preview(rtv.db, doc)
+    assert preview["source_status"] == "RESOLVED", preview
+    return record_supplier_confirmation(rtv.db, doc, {
+        "idempotency_key": str(uuid4()), "credit_note_number": "ACTUAL-SUPPLIER-CN",
+        "credit_note_date": "2026-10-18", "received_amount": 3150,
+        "allocations": [{"source_key": preview["sources"][0]["source_key"],
+                         "taxable": 3000, "cgst": 75, "sgst": 75, "igst": 0}]},
+        actor_id="ACCOUNTANT", allowed_store_ids={"S1"})
 
 
 def _dn_reads(rtv, role):
@@ -367,7 +390,7 @@ def test_rtv_issue_is_refused_to_a_manager(rtv, role):
     with pytest.raises(HTTPException) as ei:
         _issue(rtv, role)
     assert ei.value.status_code == 403
-    assert rtv.db.get_collection("debit_notes").docs == []
+    assert rtv.db.get_collection("debit_notes").count_documents({}) == 0
 
 
 @pytest.mark.parametrize("role", MANAGERS + COUNTER)
@@ -406,6 +429,10 @@ def test_rtv_print_and_tally_work_for_accounts(rtv, role):
     _issue(rtv, "ACCOUNTANT")
     html = _run(rtv.r.print_debit_note(_note_id(rtv), current_user=_user(role)))
     assert "3,150.00" in html.body.decode()
+    with pytest.raises(HTTPException) as missing:
+        _run(rtv.r.export_debit_note_tally(_note_id(rtv), current_user=_user(role)))
+    assert missing.value.status_code == 409
+    _confirm_rtv(rtv)
     xml = _run(rtv.r.export_debit_note_tally(_note_id(rtv), current_user=_user(role)))
     assert "3150" in xml.body.decode()
 
@@ -489,6 +516,8 @@ def test_r2_the_accountant_does_the_debit_note_work_through_the_routes(rtv, monk
     assert r.status_code == 201, r.text
     assert r.json()["debit_note"]["totals_rupees"]["grand_total"] == 3150.0
     dn = r.json()["debit_note"]["debit_note_id"]
+    assert c.get(f"/api/v1/rtv-debit-notes/{dn}/tally").status_code == 409
+    _confirm_rtv(rtv)
     reads = ("/api/v1/vendor-returns", "/api/v1/vendor-returns/VR-1", "/api/v1/rtv-debit-notes",
              f"/api/v1/rtv-debit-notes/{dn}", f"/api/v1/rtv-debit-notes/{dn}/print",
              f"/api/v1/rtv-debit-notes/{dn}/tally")
@@ -597,12 +626,13 @@ def test_vendor_return_status_response_has_no_credit_for_a_manager(vret, role):
     assert not _keys(res) & RETURN_CREDIT, _keys(res) & RETURN_CREDIT
 
 
-def test_vendor_return_credit_issue_response_keeps_credit_for_accounts(vret):
+def test_vendor_return_status_cannot_invent_a_supplier_credit_even_for_accounts(vret):
     body = vret.r.VendorReturnStatusUpdate(status="credit_issued")
-    res = _run(vret.r.update_return_status("VR-OPEN", body,
-                                           current_user=_user("ACCOUNTANT")))
-    assert res["return"]["credit_note_amount"] == 3000.0
-    assert res["return"]["credit_note_number"].startswith("CN-")
+    with pytest.raises(HTTPException) as caught:
+        _run(vret.r.update_return_status("VR-OPEN", body, current_user=_user("ACCOUNTANT")))
+    assert caught.value.status_code == 422
+    stored = vret.db.get_collection("vendor_returns").find_one({"return_id": "VR-OPEN"})
+    assert stored["credit_note_amount"] is None and stored["credit_note_number"] is None
 
 
 @pytest.mark.parametrize("role", MANAGERS)
@@ -624,8 +654,9 @@ def test_vendor_return_create_response_carries_no_credit(vret, role):
 @pytest.fixture
 def rma(monkeypatch):
     import api.routers.vendor_rma as r
+    import mongomock
 
-    db = FakeDB()
+    db = mongomock.MongoClient().db
     monkeypatch.setattr(r, "_get_db", lambda: db)
     return SimpleNamespace(r=r, db=db)
 
@@ -635,6 +666,7 @@ def _rma_to_credit(rma, role, creditor=None):
     1,000 credit on the Rs 3,000 RMA (below the maker-checker tier) recorded by
     ``creditor`` -- ``role`` itself by default. Recording it is the accounts
     roles' (owner ruling 2026-10-12). Returns every response."""
+    from rma_credit_fixtures import credit_payload
     r, user = rma.r, _user(role)
     # The price per piece is the accounts roles' to enter (R2 + R3): an
     # accounts role prices the line as it raises the RMA; a manager raises it
@@ -655,7 +687,7 @@ def _rma_to_credit(rma, role, creditor=None):
     dispatched = _run(r.dispatch_rma(rid, r.RMADispatch(carrier="DTDC", awb="AWB1"),
                                      current_user=user))
     credited = _run(r.record_credit_note(
-        rid, r.RMACreditNote(credit_note_number="CN-Z1", received_amount=1000.0),
+        rid, r.RMACreditNote(**credit_payload(rma.db, rid, number="CN-Z1", amount=1000.0)),
         current_user=_user(creditor or role)))
     return rid, [raised, authorized, dispatched, credited]
 
@@ -738,12 +770,12 @@ class _MoneyEngine:
         return object()
 
     def get(self, rid):
-        return {"rma_id": rid, "store_id": "S1", "expected_credit_paise": 0}
+        return {"rma_id": rid, "store_id": "S1", "vendor_id": "V1", "status": getattr(self, "status", "DRAFT"), "expected_credit_paise": 0}
 
     def _result(self, *_a, **_kw):
         return {"ok": True, "rma_id": "R1", "status": "X", **_ALL_RMA_MONEY}
 
-    raise_rma = authorize = dispatch = reject = record_credit_note = close_rma = _result
+    raise_rma = authorize = dispatch = reject = record_credit_note = close_rma = _transition = _result
 
 
 _RMA_WRITES = {
@@ -756,7 +788,8 @@ _RMA_WRITES = {
     "dispatch": lambda r, u: r.dispatch_rma(
         "R1", r.RMADispatch(carrier="DTDC", awb="A1"), current_user=u),
     "credit-note": lambda r, u: r.record_credit_note(
-        "R1", r.RMACreditNote(credit_note_number="CN-1", received_amount=10.0),
+        "R1", r.RMACreditNote(credit_note_number="CN-1", received_amount=10.0,
+                             credit_note_date="2026-10-18", idempotency_key="11111111-1111-4111-8111-111111111111"),
         current_user=u),
     "reject": lambda r, u: r.reject_rma("R1", r.RMAReject(), current_user=u),
     "close": lambda r, u: r.close_rma("R1", r.RMAClose(), current_user=u),
@@ -767,7 +800,10 @@ _RMA_WRITES = {
 @pytest.mark.parametrize("role,shown", (("STORE_MANAGER", False), ("AREA_MANAGER", False),
                                         ("ACCOUNTANT", True)))
 def test_every_rma_write_result_goes_through_the_strip(rma, monkeypatch, write, role, shown):
-    monkeypatch.setattr(rma.r, "_engine", lambda: _MoneyEngine())
+    engine = _MoneyEngine()
+    engine.status = "DISPATCHED" if write == "credit-note" else "DRAFT"
+    monkeypatch.setattr(rma.r, "_engine", lambda: engine)
+    monkeypatch.setattr(rma.r.rma_supplier_credit, "record", _MoneyEngine()._result)
     if write == "credit-note" and not shown:
         # Owner ruling 2026-10-12: a manager cannot record the credit at all.
         with pytest.raises(HTTPException) as ei:
@@ -792,7 +828,7 @@ def test_rma_accounts_see_the_credit(rma, role):
     assert detail["credit_notes"][0]["received_paise"] == 100000
     assert detail["credit_notes"][0]["credit_note_number"] == "CN-Z1"
     assert listed["rmas"][0]["variance_paise"] == 200000
-    assert any(h.get("notes") == "credit note CN-Z1 for 100000 paise"
+    assert any(h.get("notes") == "Recorded confirmed supplier credit CN-Z1"
                for h in detail["status_history"])
     with pytest.raises(HTTPException) as ei:
         _run(rma.r.close_rma(rid, rma.r.RMAClose(), current_user=_user(role)))

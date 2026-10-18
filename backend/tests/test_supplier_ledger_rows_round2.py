@@ -407,7 +407,7 @@ _KINDS = {
 def _money(kind: str, amount: float, bill_id=None, on="2026-09-30", **extra) -> dict:
     if kind == "payments":
         return {"amount": amount, "payment_date": on, "mode": "BANK", "bill_id": bill_id, **extra}
-    return {"amount": amount, "date": on, "reason": "short supply", "bill_id": bill_id, **extra}
+    return {"amount": amount, "date": on, "reason": "quality adjustment", "cn_type": "QUALITY_CN", "bill_id": bill_id, **extra}
 
 
 @pytest.mark.parametrize("kind", list(_KINDS))
@@ -501,7 +501,7 @@ def _record_post_dated(world, user=ADMIN) -> tuple:
         "amount": 5000.0, "payment_date": "2026-11-15", "bill_id": "PD1", "mode": "CHEQUE", "reference": "CHQ-777",
     }), 201)
     note = _ok(world.post(f"/vendors/{V_PDC}/debit-notes", user, {
-        "amount": 300.0, "date": "2026-10-20", "bill_id": "PD1", "reason": "short supply",
+        "amount": 300.0, "date": "2026-10-20", "bill_id": "PD1", "reason": "quality adjustment", "cn_type": "QUALITY_CN",
     }), 201)
     return pay, note
 

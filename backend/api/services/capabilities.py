@@ -151,6 +151,12 @@ def capability_for(method: str, path: str) -> Optional[str]:
     # vendor-returns:write), still answer it: PARENT_CAPABILITY.
     if method.upper() == "POST" and tmpl.rstrip("/") == "/api/v1/vendor-returns":
         return "vendor-returns:create"
+    if tmpl in ("/api/v1/vendor-returns/{return_id}/credit-preview",
+                "/api/v1/vendor-returns/{return_id}/credit-confirmations"):
+        return "vendor-returns:confirm-credit"
+    if tmpl in ("/api/v1/vendor-rma/{rma_id}/credit-preview",
+                "/api/v1/vendor-rma/{rma_id}/credit-note"):
+        return "vendor-rma:confirm-credit"
     verb = "read" if method.upper() in _READ_METHODS else "write"
     return f"{mod}:{verb}"
 
@@ -163,6 +169,8 @@ def capability_for(method: str, path: str) -> Optional[str]:
 # the parent), so the key needs no MODULE_EXTRA_DENY_CAPABILITIES entry.
 PARENT_CAPABILITY: Dict[str, str] = {
     "vendor-returns:create": "vendor-returns:write",
+    "vendor-returns:confirm-credit": "vendor-returns:write",
+    "vendor-rma:confirm-credit": "vendor-rma:write",
 }
 
 

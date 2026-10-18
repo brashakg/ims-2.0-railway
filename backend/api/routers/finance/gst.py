@@ -250,6 +250,15 @@ async def get_gst_summary(
                     b["itc_s"] += float(_b.get("sgst_total") or 0)
             else:
                 gst_paid_excluded += _tax
+        # Confirmed supplier credits belong to their actual note period and
+        # original registration, even when that period has no new purchases.
+        from ...services.supplier_credit_reads import confirmed_itc_rows
+        for credit in confirmed_itc_rows(db, store_id=at_shop.get("store_id"), period=f"{y:04d}-{m:02d}") if show_input else ():
+            b = bucket_for(credit, purchase=True)
+            gst_paid += credit["tax_amount"]
+            b["itc"] += credit["tax_amount"]
+            b["itc_c"] += credit["cgst_total"]
+            b["itc_s"] += credit["sgst_total"]
     except HTTPException:
         raise
     except Exception as exc:

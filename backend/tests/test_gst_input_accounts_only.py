@@ -59,7 +59,7 @@ GSTR3B_INPUT_KEYS = {
     "itcAvailable", "itcAvailableRegular", "itcAvailableGstin", "itcUtilized",
     "inwardSuppliesReverseChargeValue", "inwardSuppliesReverseCharge",
     "inwardSuppliesReverseChargeGstin", "taxPaidCash",
-    "itcReverseCharge",
+    "itcReverseCharge", "itcReversed",
     "itcIneligible", "inwardExemptNilNonGst",
 }
 # ...and by shape, so one added later under another name is caught too.

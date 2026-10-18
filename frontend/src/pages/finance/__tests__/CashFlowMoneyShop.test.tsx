@@ -12,6 +12,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { MemoryRouter, Route, Routes, useSearchParams } from 'react-router-dom';
 
 const toastMock = vi.hoisted(() => ({
   success: vi.fn(),
@@ -54,6 +55,7 @@ vi.mock('../../../hooks/usePOSQueries', () => ({
 }));
 
 import CashFlowPage from '../CashFlowPage';
+import { PurchaseShopPicker, usePurchaseShop } from '../../purchase/purchaseShop';
 
 const ADMIN = { id: 'u-admin', roles: ['ADMIN'], activeRole: 'ADMIN', activeStoreId: 'BV-HQ-01' };
 const PUNE_ACCOUNTANT = { id: 'u-acct', roles: ['ACCOUNTANT'], activeRole: 'ACCOUNTANT', activeStoreId: 'WO-PUN-01' };
@@ -89,7 +91,7 @@ const LEDGER = {
 const SHOP_SELECT = 'Shop this money is for';
 
 async function openForm(kind: 'Payment' | 'Debit note' | 'Bill') {
-  render(<CashFlowPage />);
+  render(<MemoryRouter><CashFlowPage /></MemoryRouter>);
   fireEvent.click(await screen.findByRole('button', { name: 'AP Aging' }));
   fireEvent.click(await screen.findByText('Pune Lens Co'));
   await waitFor(() => expect(apis.vendorApApi.ledger).toHaveBeenCalledWith('V-PUN'));
@@ -144,18 +146,67 @@ describe('an admin picks the shop a payment or debit note is for, or leaves it t
 
   it('sends the shop he picks for a debit note, and none when he leaves the default', async () => {
     await openForm('Debit note');
+    fireEvent.change(screen.getByLabelText('Credit type'), { target: { value: 'SCHEME_CN' } });
     fireEvent.change(screen.getByPlaceholderText('Amount'), { target: { value: '300' } });
-    fireEvent.change(screen.getByPlaceholderText('Reason (e.g. rejected goods)'), { target: { value: 'rejected' } });
+    fireEvent.change(screen.getByPlaceholderText('Reason for adjustment'), { target: { value: 'scheme earned' } });
     fireEvent.change(screen.getByLabelText(SHOP_SELECT), { target: { value: 'BV-DHN-01' } });
     save();
     await waitFor(() => expect(apis.vendorApApi.createDebitNote).toHaveBeenCalledTimes(1));
-    expect(apis.vendorApApi.createDebitNote.mock.calls[0][1]).toMatchObject({ amount: 300, reason: 'rejected', store_id: 'BV-DHN-01' });
+    expect(apis.vendorApApi.createDebitNote.mock.calls[0][1]).toMatchObject({ amount: 300, reason: 'scheme earned', store_id: 'BV-DHN-01', cn_type: 'SCHEME_CN' });
 
     fireEvent.click(await screen.findByRole('button', { name: 'Debit note' }));
+    fireEvent.change(screen.getByLabelText('Credit type'), { target: { value: 'DISCOUNT_CN' } });
     fireEvent.change(screen.getByPlaceholderText('Amount'), { target: { value: '10' } });
     save();
     await waitFor(() => expect(apis.vendorApApi.createDebitNote).toHaveBeenCalledTimes(2));
     expect(apis.vendorApApi.createDebitNote.mock.calls[1][1].store_id).toBeUndefined();
+    expect(apis.vendorApApi.createDebitNote.mock.calls[1][1].cn_type).toBe('DISCOUNT_CN');
+  });
+
+  it('requires an adjustment type instead of silently treating every credit as a goods return', async () => {
+    await openForm('Debit note');
+    fireEvent.change(screen.getByPlaceholderText('Amount'), { target: { value: '300' } });
+    save();
+    expect(apis.vendorApApi.createDebitNote).not.toHaveBeenCalled();
+    expect(toastMock.error).toHaveBeenCalledWith('Choose the type of credit adjustment');
+  });
+
+  it('routes a goods-return credit to that supplier’s returns without creating a manual adjustment', async () => {
+    await openForm('Debit note');
+    fireEvent.change(screen.getByLabelText('Credit type'), { target: { value: 'RETURN_CN' } });
+    expect(screen.getByRole('link', { name: 'Open Vendor Returns' })).toHaveAttribute('href', '/purchase/vendor-returns?vendor_id=V-PUN');
+    expect(screen.queryByRole('button', { name: /Save/ })).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText('Amount')).not.toBeInTheDocument();
+    expect(apis.vendorApApi.createDebitNote).not.toHaveBeenCalled();
+  });
+
+  it('keeps a quality adjustment without returned goods available', async () => {
+    await openForm('Debit note');
+    fireEvent.change(screen.getByLabelText('Credit type'), { target: { value: 'QUALITY_CN' } });
+    fireEvent.change(screen.getByPlaceholderText('Amount'), { target: { value: '25' } });
+    save();
+    await waitFor(() => expect(apis.vendorApApi.createDebitNote).toHaveBeenCalledWith('V-PUN', expect.objectContaining({ amount: 25, cn_type: 'QUALITY_CN' })));
+  });
+
+  it('keeps the selected purchase shop when following the supplier return link', async () => {
+    function ReturnDestination() {
+      const { storeId, setShop } = usePurchaseShop();
+      const [params] = useSearchParams();
+      return <><output data-testid="return-destination">{storeId}:{params.get('vendor_id')}</output>
+        <button onClick={() => setShop('')}>Reset shop after check</button></>;
+    }
+    render(<MemoryRouter initialEntries={['/finance']}><Routes>
+      <Route path="/finance" element={<><PurchaseShopPicker /><CashFlowPage /></>} />
+      <Route path="/purchase/vendor-returns" element={<ReturnDestination />} />
+    </Routes></MemoryRouter>);
+    fireEvent.change(screen.getByLabelText('Purchase shop'), { target: { value: 'WO-PUN-01' } });
+    fireEvent.click(await screen.findByRole('button', { name: 'AP Aging' }));
+    fireEvent.click(await screen.findByText('Pune Lens Co'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Debit note' }));
+    fireEvent.change(screen.getByLabelText('Credit type'), { target: { value: 'RETURN_CN' } });
+    fireEvent.click(screen.getByRole('link', { name: 'Open Vendor Returns' }));
+    expect(await screen.findByTestId('return-destination')).toHaveTextContent('WO-PUN-01:V-PUN');
+    fireEvent.click(screen.getByRole('button', { name: 'Reset shop after check' }));
   });
 
   it('asks no shop on a bill (a bill is booked to its goods receipt’s shop)', async () => {

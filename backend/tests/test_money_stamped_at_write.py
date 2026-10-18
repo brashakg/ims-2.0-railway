@@ -233,7 +233,7 @@ def _ok(resp, code=200):
 def _money(kind: str, amount: float, on: str, **extra) -> dict:
     if kind == "payments":
         return {"amount": amount, "payment_date": on, "mode": "BANK", **extra}
-    return {"amount": amount, "date": on, "reason": "short supply", **extra}
+    return {"amount": amount, "date": on, "reason": "quality adjustment", "cn_type": "QUALITY_CN", **extra}
 
 
 def _stored(world, kind: str, made: dict) -> dict:
@@ -420,7 +420,8 @@ def test_r3_2_a_non_admin_and_a_named_shop_are_unchanged(world):
 
 
 def _note(grn_id=None, bill_id=None, amount=100.0, on="2026-09-25", **extra) -> dict:
-    return {"amount": amount, "date": on, "reason": "rejected", "grn_id": grn_id, "bill_id": bill_id, **extra}
+    return {"amount": amount, "date": on, "reason": "quality adjustment", "cn_type": "QUALITY_CN",
+            "grn_id": grn_id, "bill_id": bill_id, **extra}
 
 
 @pytest.mark.parametrize("how", ["query", "body"])

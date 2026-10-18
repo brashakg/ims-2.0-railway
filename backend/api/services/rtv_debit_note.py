@@ -394,6 +394,13 @@ def render_debit_note_html(note: Dict[str, Any]) -> str:
     orig = note.get("original_invoice") or {}
     totals = note.get("totals") or {}
     inter = bool(note.get("is_inter_state"))
+    internal = note.get("accounting_status") != "POSTED"
+    heading = "RETURN REQUEST" if internal else "SUPPLIER CREDIT"
+    explanation = ("Internal goods-return request; supplier credit has not been posted."
+                   if internal else "Supplier-confirmed credit")
+    if internal and note.get("tax_status") == "UNVERIFIED":
+        explanation += " GST is unverified; this is not a zero-rated tax document."
+    total_label = "Requested supplier credit" if internal else "Confirmed supplier credit"
 
     def _r(p: Any) -> str:
         # None = a figure the reader may not see (cost_mask.mask_debit_note).
@@ -452,8 +459,8 @@ def render_debit_note_html(note: Dict[str, Any]) -> str:
   .label {{ font-size: 11px; text-transform: uppercase; color: #888; letter-spacing: .4px; }}
 </style></head>
 <body>
-  <h1>DEBIT NOTE</h1>
-  <div class="muted">Return to Vendor (GST debit note)</div>
+  <h1>{heading}</h1>
+  <div class="muted">{escape(explanation)}</div>
   <table class="meta"><tr>
     <td><span class="label">Debit Note No.</span><br>{escape(str(note.get('debit_note_number') or ''))}</td>
     <td><span class="label">Date</span><br>{escape(str(note.get('issue_date') or ''))}</td>
@@ -462,13 +469,13 @@ def render_debit_note_html(note: Dict[str, Any]) -> str:
   </tr></table>
   <table class="parties"><tr>
     <td>
-      <span class="label">Issued By (Debiting)</span><br>
+      <span class="label">Requested By</span><br>
       <strong>{escape(str(seller.get('name') or ''))}</strong><br>
       GSTIN: {escape(str(seller.get('gstin') or ''))}<br>
       {escape(str(seller.get('address') or ''))}
     </td>
     <td>
-      <span class="label">Vendor (Debited)</span><br>
+      <span class="label">Supplier</span><br>
       <strong>{escape(str(vendor.get('name') or ''))}</strong><br>
       GSTIN: {escape(str(vendor.get('gstin') or ''))}<br>
       {escape(str(vendor.get('address') or ''))}
@@ -494,7 +501,7 @@ def render_debit_note_html(note: Dict[str, Any]) -> str:
     </tbody>
   </table>
   <p class="muted" style="margin-top:18px">Total Tax: {_r(totals.get('tax_paise'))} &nbsp;|&nbsp;
-     Grand Total (Debited to Vendor): <strong>{_r(totals.get('grand_total_paise'))}</strong></p>
+     {total_label}: <strong>{_r(totals.get('grand_total_paise'))}</strong></p>
 </body></html>"""
 
 
@@ -516,7 +523,7 @@ def _ledger_entry(name: str, xml_amount: float) -> str:
     </ALLLEDGERENTRIES.LIST>"""
 
 
-def tally_build_debit_note_xml(
+def _tally_debit_note_voucher(
     note: Dict[str, Any],
     *,
     purchase_ledger: str = "Purchase Returns",
@@ -524,9 +531,7 @@ def tally_build_debit_note_xml(
     input_sgst_ledger: str = "Input SGST",
     input_igst_ledger: str = "Input IGST",
 ) -> str:
-    """Build a Tally import XML carrying ONE ``VCHTYPE="Debit Note"`` voucher for
-    the debit note. Mirrors the Receipt-voucher builder's sign convention +
-    envelope; emits a SEPARATE voucher stream (never modifies sales vouchers).
+    """Render ONE confirmed voucher using the Receipt-voucher sign convention.
 
     Accounting (a debit note returning goods to a vendor):
       * DEBIT  the vendor party ledger by the grand total (reduces payable) ->
@@ -540,8 +545,9 @@ def tally_build_debit_note_xml(
     paise-exact assertion runs before emit (fail loudly -- Tally would reject an
     unbalanced voucher anyway)."""
     note = note if isinstance(note, dict) else {}
+    if note.get("accounting_status") != "POSTED" or not note.get("confirmation_id"):
+        raise ValueError("supplier_confirmation_required")
     totals = note.get("totals") or {}
-    inter = bool(note.get("is_inter_state"))
 
     taxable = paise_to_rupees(totals.get("taxable_paise"))
     cgst = paise_to_rupees(totals.get("cgst_paise"))
@@ -549,7 +555,7 @@ def tally_build_debit_note_xml(
     igst = paise_to_rupees(totals.get("igst_paise"))
     grand = paise_to_rupees(totals.get("grand_total_paise"))
 
-    party = escape(str((note.get("vendor") or {}).get("name") or "Vendor"))
+    party = str((note.get("vendor") or {}).get("name") or "Vendor")
     dn_number = escape(str(note.get("debit_note_number") or ""))
     issue = str(note.get("issue_date") or _now().date().isoformat())
     vch_date = issue.replace("-", "")[:8]  # yyyymmdd
@@ -558,14 +564,12 @@ def tally_build_debit_note_xml(
     legs: List[Dict[str, Any]] = []
     legs.append({"ledger": party, "amount": -grand})  # debit vendor (reduce payable)
     legs.append({"ledger": purchase_ledger, "amount": taxable})  # credit purchase returns
-    if inter:
-        if igst:
-            legs.append({"ledger": input_igst_ledger, "amount": igst})
-    else:
-        if cgst:
-            legs.append({"ledger": input_cgst_ledger, "amount": cgst})
-        if sgst:
-            legs.append({"ledger": input_sgst_ledger, "amount": sgst})
+    if igst:
+        legs.append({"ledger": input_igst_ledger, "amount": igst})
+    if cgst:
+        legs.append({"ledger": input_cgst_ledger, "amount": cgst})
+    if sgst:
+        legs.append({"ledger": input_sgst_ledger, "amount": sgst})
 
     # Balance assertion (paise-exact). Sum of signed amounts must be ~0.
     paise_sum = sum(int(round(float(leg["amount"]) * 100)) for leg in legs)
@@ -576,13 +580,26 @@ def tally_build_debit_note_xml(
 
     voucher = f"""
   <VOUCHER VCHTYPE="Debit Note" ACTION="Create">
+    <GUID>{escape(str(note['confirmation_id']))}</GUID>
     <DATE>{vch_date}</DATE>
     <VOUCHERTYPENAME>Debit Note</VOUCHERTYPENAME>
     <VOUCHERNUMBER>{dn_number}</VOUCHERNUMBER>
-    <PARTYLEDGERNAME>{party}</PARTYLEDGERNAME>
+    <PARTYLEDGERNAME>{escape(party)}</PARTYLEDGERNAME>
     <NARRATION>Return to vendor debit note {dn_number}</NARRATION>{entries}
   </VOUCHER>"""
 
+    return voucher
+
+
+def tally_build_debit_notes_xml(notes, *, purchase_ledger="Purchase Returns",
+                               input_cgst_ledger="Input CGST", input_sgst_ledger="Input SGST",
+                               input_igst_ledger="Input IGST") -> str:
+    """Assemble escaped confirmed vouchers directly; never parse input XML."""
+    vouchers = "".join(_tally_debit_note_voucher(note, purchase_ledger=purchase_ledger,
+        input_cgst_ledger=input_cgst_ledger, input_sgst_ledger=input_sgst_ledger,
+        input_igst_ledger=input_igst_ledger) for note in notes)
+    if not vouchers:
+        raise ValueError("supplier_confirmation_required")
     return f"""<ENVELOPE>
   <HEADER>
     <TALLYREQUEST>Import Data</TALLYREQUEST>
@@ -592,11 +609,22 @@ def tally_build_debit_note_xml(
       <REQUESTDESC>
         <REPORTNAME>Vouchers</REPORTNAME>
       </REQUESTDESC>
-      <REQUESTDATA>{voucher}
+      <REQUESTDATA>{vouchers}
       </REQUESTDATA>
     </IMPORTDATA>
   </BODY>
 </ENVELOPE>"""
+
+
+def tally_build_debit_note_xml(
+    note: Dict[str, Any], *, purchase_ledger: str = "Purchase Returns",
+    input_cgst_ledger: str = "Input CGST", input_sgst_ledger: str = "Input SGST",
+    input_igst_ledger: str = "Input IGST",
+) -> str:
+    """Keep the single-note API using the same confirmed-voucher renderer."""
+    return tally_build_debit_notes_xml([note], purchase_ledger=purchase_ledger,
+        input_cgst_ledger=input_cgst_ledger, input_sgst_ledger=input_sgst_ledger,
+        input_igst_ledger=input_igst_ledger)
 
 
 # ============================================================================
@@ -1013,22 +1041,6 @@ class DebitNoteEngine:
             return {"ok": False, "http": 409, "error": "receipt_return_unconfirmed",
                     "message": "Confirm this rejected-goods return's credit or replacement choice before issuing a debit note."}
 
-        # The note reverses credit taken on OUR GSTIN. With none to issue
-        # under, every bill door refuses the bill (purchase_invoices.
-        # _bill_recipient); the note is refused too -- never a blank GSTIN.
-        if not str((seller or {}).get("gstin") or "").strip():
-            store_id = rtv_doc.get("store_id") or "?"
-            name = (seller or {}).get("name") or "Our company"
-            return {
-                "ok": False,
-                "http": 422,
-                "error": "seller_has_no_gstin",
-                "message": f"{name} has no GST number for shop {store_id}, so no "
-                "debit note was issued. Add the company's registration for the "
-                "shop's state in Organization (left menu) or correct the shop's state "
-                "or GSTIN in Organization (left menu).",
-            }
-
         # P1: resolve the source lines + enrich each with product-derived GST
         # rate + HSN (the source RTV docs don't persist them). Fail loud on a
         # taxable line whose GST is unresolvable rather than emit a 0% tax doc.
@@ -1045,36 +1057,20 @@ class DebitNoteEngine:
                 "set each line's price first, then issue the debit note.",
             }
 
-        # The note's total is what the returned goods' bill charged for them
-        # (their price + the GST at the bill's rate) -- what the supplier
-        # credits back. It reverses the credit that bill claimed; a bill that
-        # claimed none (credit off, 17(5) blocked, an unregistered supplier's
-        # walk-in buy, G2) has none to reverse (owner 2026-10-12): its GST is
-        # carried in the value (_norm_line). Per line, from the receipt the
-        # returned units came in on.
-        receipt_of = self._receipts_of(rtv_doc)
-        src = []
-        for raw in src_lines:
-            ln = dict(raw)
-            pid = ln.get("product_id")
-            receipt = receipt_of.get(pid, receipt_of.get(None)) or self._latest_receipt(rtv_doc, pid)
-            bills = self._booked_bills(receipt)
-            ln["claims_credit"] = self._credit_claimed(vendor, bills)
-            # The bill's booked rate -- 0% is a booked rate too (it reverses
-            # no tax), so None alone means "no bill says". No bill yet and no
-            # credit: the supplier has no GSTIN, so charges no GST (the bill
-            # draft's 0%), whatever rate a line names -- the note is the price.
-            ln["billed_gst_rate"] = self._billed_rate(bills, pid)
-            if not bills and not ln["claims_credit"]:
-                ln.update(billed_gst_rate=0.0, gst_rate=None, tax_rate=None)
-            src.append(ln)
-        enriched, gst_err = self._enrich_lines_gst(src)
-        if gst_err:
-            return {"ok": False, "http": 422, "error": gst_err}
-
-        entity_id = rtv_doc.get("entity_id") or (seller or {}).get("entity_id")
-        serial = next_debit_note_number(self._db, entity_id)
-        note = build_debit_note(rtv_doc, vendor, enriched, serial, seller=seller)
+        # A03: every unit keeps its original booked bill and tax heads.
+        # Rejected/unbilled custody supports only an explicit internal request.
+        from .return_provenance import ReturnProvenanceError
+        from .return_request_document import prepare_request, build_request
+        try:
+            prepared = prepare_request(self._db, rtv_doc, vendor, seller, src_lines)
+            entity_id = prepared["seller"].get("entity_id")
+            serial = next_debit_note_number(self._db, entity_id)
+            note = build_request(rtv_doc, prepared, serial)
+        except ReturnProvenanceError as exc:
+            return {"ok": False, "http": 422, "error": exc.code, "message": str(exc)}
+        except Exception:
+            return {"ok": False, "http": 503, "error": "original_bill_verification_unavailable",
+                    "message": "Original purchase evidence could not be verified. Retry the same return."}
 
         debit_note_id = f"DN-{uuid.uuid4().hex[:12].upper()}"
         doc = dict(note)

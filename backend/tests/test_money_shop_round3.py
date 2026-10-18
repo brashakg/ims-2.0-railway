@@ -303,7 +303,7 @@ def test_r3_1_an_admin_who_names_the_shop_stamps_it(world, kind):
     body = (
         {"amount": 100.0, "payment_date": "2026-09-20", "mode": "BANK"}
         if kind == "payments"
-        else {"amount": 100.0, "date": "2026-09-20", "reason": "rate difference"}
+        else {"amount": 100.0, "date": "2026-09-20", "reason": "rate difference", "cn_type": "DISCOUNT_CN"}
     )
     by_query = _ok(world.post(f"/vendors/{V_BOTH}/{kind}", ADMIN_HQ, body, store_id=PUN), 201)
     by_body = _ok(world.post(f"/vendors/{V_BOTH}/{kind}", ADMIN_HQ, {**body, "store_id": DHN}), 201)
@@ -326,7 +326,10 @@ def test_r3_1_a_non_admins_on_account_money_is_still_his_own_shops(world):
 
 
 def _note(grn_id=None, bill_id=None, amount=300.0, **extra) -> dict:
-    return {"amount": amount, "date": "2026-09-20", "reason": "rejected goods", "grn_id": grn_id, "bill_id": bill_id, **extra}
+    # Shop/supplier checks still apply to permitted quality adjustments.
+    # Returned-goods credit now has its own confirmed-evidence route.
+    return {"amount": amount, "date": "2026-09-20", "reason": "quality adjustment", "cn_type": "QUALITY_CN",
+            "grn_id": grn_id, "bill_id": bill_id, **extra}
 
 
 def _pay_b_d(world):
@@ -379,8 +382,8 @@ def test_r3_7_a_note_on_the_callers_own_receipt_takes_that_receipts_shop(world):
 
 def test_r3_7_an_admins_note_on_dhanbads_receipt_is_dhanbads_not_his_topbar_shops(world):
     """The admin sits on HQ; V-BOTH's latest bill on or before 20 Sep is
-    Pune's B-P. The note credits Dhanbad's rejected goods, so it is
-    Dhanbad's -- it releases Dhanbad's hold and comes off Dhanbad's ledger."""
+    Pune's B-P. The quality adjustment belongs to Dhanbad's receipt and ledger,
+    but cannot release its rejected-goods payment hold."""
     dhn_before = _ok(world.get(f"/vendors/{V_BOTH}/ledger", ACCT_DHN))["ledger"]["closing_balance"]
     pun_before = _ok(world.get(f"/vendors/{V_BOTH}/ledger", ACCT_PUNE))["ledger"]["closing_balance"]
     made = _ok(world.post(f"/vendors/{V_BOTH}/debit-notes", ADMIN_HQ, _note("GRN-D")), 201)
@@ -388,7 +391,7 @@ def test_r3_7_an_admins_note_on_dhanbads_receipt_is_dhanbads_not_his_topbar_shop
     assert world.db["vendor_debit_notes"].find_one({"debit_note_id": made["debit_note_id"]})["store_id"] == DHN
     assert _ok(world.get(f"/vendors/{V_BOTH}/ledger", ACCT_DHN))["ledger"]["closing_balance"] == pytest.approx(dhn_before - 300.0)
     assert _ok(world.get(f"/vendors/{V_BOTH}/ledger", ACCT_PUNE))["ledger"]["closing_balance"] == pytest.approx(pun_before)
-    assert _pay_b_d(world).status_code == 201, "the note on Dhanbad's receipt releases Dhanbad's hold"
+    assert _pay_b_d(world).status_code == 409, "an unrelated adjustment cannot release the rejected-goods hold"
     # Dhanbad's own accountant may raise it too.
     assert _ok(world.post(f"/vendors/{V_BOTH}/debit-notes", ACCT_DHN, _note("GRN-D", amount=1.0)), 201)["store_id"] == DHN
 

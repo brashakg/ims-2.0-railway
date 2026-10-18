@@ -7,7 +7,7 @@ Vendor returns, debit notes, and credit note management
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from typing import Annotated, List, Optional, Literal
-from datetime import datetime
+from datetime import date, datetime
 import uuid
 from .auth import require_roles
 from ..dependencies import (
@@ -15,6 +15,7 @@ from ..dependencies import (
     get_db,
     resolve_store_scope,
     validate_store_access,
+    user_store_scope,
 )
 from ..services.cost_mask import AP_ROLES, PURCHASE_ROLES, RETURN_READERS, mask_vendor_return
 from ..services.payables_mask import require_payables
@@ -80,6 +81,38 @@ class ReturnPrices(BaseModel):
     unit_prices: List[UnitPricePaid] = Field(..., min_length=1)
 
 
+class CreditSourceSelection(BaseModel):
+    return_line_index: int = Field(ge=0)
+    grn_id: str = Field(min_length=1)
+    bill_id: str = Field(min_length=1)
+    bill_line_index: int = Field(ge=0)
+    quantity: int = Field(gt=0, le=100000)
+    stock_ids: List[str] = Field(default_factory=list)
+
+
+class CreditAllocation(BaseModel):
+    source_key: str = Field(min_length=64, max_length=64)
+    taxable: UnitPricePaid
+    cgst: UnitPricePaid
+    sgst: UnitPricePaid
+    igst: UnitPricePaid
+
+
+class SupplierCreditPreview(BaseModel):
+    confirmation_id: Optional[uuid.UUID] = None
+    source_selections: Optional[List[CreditSourceSelection]] = None
+
+
+class SupplierCreditConfirmation(BaseModel):
+    idempotency_key: uuid.UUID
+    credit_note_number: str = Field(min_length=1, max_length=120)
+    credit_note_date: date
+    received_amount: Annotated[float, Field(gt=0, le=1_000_000_000, allow_inf_nan=False)]
+    notes: Optional[str] = Field(default=None, max_length=4000)
+    source_selections: List[CreditSourceSelection] = Field(default_factory=list)
+    allocations: List[CreditAllocation] = Field(default_factory=list)
+
+
 class VendorReturnCreate(BaseModel):
     vendor_id: str
     vendor_name: str
@@ -129,12 +162,6 @@ def generate_return_id() -> str:
     timestamp = datetime.now().strftime("%Y%m%d")
     unique_part = str(uuid.uuid4())[:8].upper()
     return f"VR-{timestamp}-{unique_part}"
-
-
-def generate_credit_note_number() -> str:
-    """Generate unique credit note number"""
-    timestamp = datetime.now().strftime("%y%m%d%H%M")
-    return f"CN-{timestamp}-{str(uuid.uuid4())[:6].upper()}"
 
 
 def _link_stock_units_to_rtv(db, stock_ids, return_id, store_id, actor_id) -> None:
@@ -396,6 +423,7 @@ async def update_return_status(
     'replaced', which forgoes that credit -- is the accounts roles' alone."""
     if status_update.status in _CREDIT_TRANSITIONS:
         require_payables(current_user, "Recording a vendor return's credit note")
+        raise HTTPException(status_code=422, detail="Use Issue Credit to record the supplier's actual credit-note confirmation; an internal status change cannot post supplier credit.")
     db = _get_db()
     if db is None:
         raise HTTPException(status_code=500, detail="Database not available")
@@ -403,6 +431,8 @@ async def update_return_status(
     try:
         collection = db.get_collection("vendor_returns")
         return_doc = _return_in_reach(collection, return_id, current_user)
+        if return_doc.get("credit_confirmation_fence"):
+            raise HTTPException(status_code=409, detail="A supplier credit is being confirmed. Resolve that confirmation before changing the return.")
         # A return not typed 'replacement' is owed a credit: closing it as
         # 'replaced' ends it without that credit -- forgoing supplier money,
         # the accounts roles' (owner ruling 2026-10-12, R2). On a replacement
@@ -410,11 +440,6 @@ async def update_return_status(
         # before any write; return_type is fixed at create.
         if status_update.status == "replaced" and return_doc.get("return_type") != "replacement":
             require_payables(current_user, "Closing a credit-note return as replaced")
-        # The credit is the priced lines' value: an unpriced return has none to
-        # record (it would go down as a credit of nothing).
-        if status_update.status == "credit_issued" and return_doc.get("total_value") is None:
-            raise HTTPException(status_code=422, detail=dict(_PRICE_REQUIRED))
-
         # Valid status transitions
         current_status = return_doc.get("status")
         if current_status == "draft":
@@ -427,7 +452,7 @@ async def update_return_status(
             "created": ["approved", "cancelled"],
             "approved": ["shipped", "cancelled"],
             "shipped": ["received_by_vendor"],
-            "received_by_vendor": ["credit_issued", "replaced"],
+            "received_by_vendor": ["replaced"],
             "credit_issued": [],
             "replaced": [],
             "cancelled": [],
@@ -440,11 +465,6 @@ async def update_return_status(
                 status_code=400,
                 detail=f"Cannot transition from {current_status} to {status_update.status}",
             )
-
-        # Generate credit note if transitioning to credit_issued
-        credit_note_number = return_doc.get("credit_note_number")
-        if status_update.status == "credit_issued" and not credit_note_number:
-            credit_note_number = generate_credit_note_number()
 
         # Update document
         update_dict = {
@@ -486,17 +506,13 @@ async def update_return_status(
         status_history.append(history_entry)
         update_dict["status_history"] = status_history
 
-        if credit_note_number:
-            update_dict["credit_note_number"] = credit_note_number
-            if status_update.status == "credit_issued":
-                update_dict["credit_note_amount"] = return_doc.get("total_value")
-
         # Compare-and-swap on status: the CURRENT status is baked into the filter
         # so two concurrent transitions out of the same state can't both win. The
         # loser matches zero docs -> 409, so a credit note is issued (and the
         # status advanced) exactly once. The credit-note number generated above is
         # pure (no side effect) and is simply discarded by the loser.
-        expected = {"return_id": return_id, "status": current_status}
+        expected = {"return_id": return_id, "status": current_status,
+                    "credit_confirmation_fence": {"$exists": False}}
         if return_doc.get("receipt_rejection") and status_update.status in ("cancelled", "draft"):
             from ..services.receipt_return_issue import require_unissued, unissued_filter
             require_unissued(db, return_doc)
@@ -573,6 +589,8 @@ async def price_vendor_return(
         raise HTTPException(status_code=500, detail="Database not available")
     collection = db.get_collection("vendor_returns")
     return_doc = _return_in_reach(collection, return_id, current_user)
+    if return_doc.get("credit_confirmation_fence") or return_doc.get("credit_confirmation_locked"):
+        raise HTTPException(status_code=409, detail="Supplier confirmation has fixed this return's price evidence.")
 
     items = return_doc.get("items") or []
     if len(body.unit_prices) != len(items):
@@ -586,7 +604,8 @@ async def price_vendor_return(
             status_code=409,
             detail=f"A return that is {current_status} keeps the prices it was settled at.",
         )
-    expected = {"return_id": return_id, "status": current_status}
+    expected = {"return_id": return_id, "status": current_status,
+                "credit_confirmation_fence": {"$exists": False}, "credit_confirmation_locked": {"$ne": True}}
     if return_doc.get("receipt_rejection"):
         from ..services.receipt_return_issue import require_unissued, unissued_filter
         require_unissued(db, return_doc)
@@ -618,3 +637,66 @@ async def price_vendor_return(
     updated = collection.find_one({"return_id": return_id}) or {}
     updated.pop("_id", None)
     return {"message": "Return prices set", "return": mask_vendor_return(updated, current_user)}
+
+
+def _credit_scope(current_user):
+    cross_shop, shops = user_store_scope(current_user)
+    return None if cross_shop else shops
+
+
+@router.post("/{return_id}/credit-preview")
+async def preview_supplier_credit(
+    return_id: str, body: SupplierCreditPreview,
+    current_user: dict = Depends(require_roles(*AP_ROLES)),
+):
+    """Accounts-only original evidence and actual supplier-note history."""
+    require_payables(current_user, "Previewing supplier credit")
+    from ..services.supplier_credit_evidence import SupplierCreditError, credit_preview
+
+    db = _get_db()
+    if db is None:
+        raise HTTPException(503, "Database not available")
+    return_doc = _return_in_reach(db.get_collection("vendor_returns"), return_id, current_user)
+    try:
+        choices = None if body.source_selections is None else [s.model_dump() for s in body.source_selections]
+        return credit_preview(db, return_doc, selections=choices,
+                              confirmation_id=str(body.confirmation_id) if body.confirmation_id else None,
+                              allowed_store_ids=_credit_scope(current_user))
+    except SupplierCreditError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(503, "Supplier credit evidence could not be verified. Retry the preview.") from exc
+
+
+@router.post("/{return_id}/credit-confirmations")
+async def confirm_supplier_credit(
+    return_id: str, body: SupplierCreditConfirmation,
+    current_user: dict = Depends(require_roles(*AP_ROLES)),
+):
+    """One actual supplier note is wholly pending or one immutable POSTED fact."""
+    require_payables(current_user, "Confirming supplier credit")
+    from ..services.supplier_credit_confirmation import record_supplier_confirmation
+    from ..services.supplier_credit_evidence import SupplierCreditError, confirmation_view, credit_preview
+
+    db = _get_db()
+    if db is None:
+        raise HTTPException(503, "Database not available")
+    return_doc = _return_in_reach(db.get_collection("vendor_returns"), return_id, current_user)
+    try:
+        event, repeated = record_supplier_confirmation(
+            db, return_doc, body.model_dump(mode="json"), actor_id=current_user.get("user_id"),
+            allowed_store_ids=_credit_scope(current_user),
+        )
+        updated = db.get_collection("vendor_returns").find_one({"return_id": return_id}) or {}
+        updated.pop("_id", None)
+        preview = credit_preview(db, updated, selections=event.get("source_selections"), allowed_store_ids=_credit_scope(current_user))
+        state = ("PENDING_EVIDENCE" if event["posting_status"] != "POSTED" else
+                 "CONFIRMED" if preview["remaining_amount"] is not None and preview["remaining_amount"] <= 0 else "PARTIAL")
+        return {"idempotent": repeated, "confirmation": confirmation_view(event),
+                "return": mask_vendor_return(updated, current_user),
+                "summary": {"posted_amount": preview["posted_amount"], "remaining_amount": preview["remaining_amount"],
+                            "settlement_status": state}}
+    except SupplierCreditError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(503, "The supplier confirmation result could not be verified. Retry the same request unchanged.") from exc

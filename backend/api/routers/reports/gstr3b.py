@@ -364,8 +364,6 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
         nxt_y, nxt_m = (year + 1, 1) if mon == 12 else (year, mon + 1)
         to_dt = ist_day_start_utc(date(nxt_y, nxt_m, 1))
     except Exception:
-        from fastapi import HTTPException
-
         raise HTTPException(status_code=400, detail="month must be in YYYY-MM format")
 
     # Output tax accumulators
@@ -396,6 +394,7 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
     t_rcm = (0.0, 0.0, 0.0, 0.0)
     # Table 4(A)(3): the reverse-charge part of the ITC above.
     itc_rcm = (0.0, 0.0, 0.0)
+    supplier_reversal = {"igst": 0.0, "cgst": 0.0, "sgst": 0.0}
 
     # Credit-note totals + the per-head excess the zero-clamp would otherwise
     # swallow SILENTLY (filled below when a DB is present).
@@ -553,6 +552,21 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
         )
         t_rcm = _rcm_gstin_from_vendor_bills(db, active_store, year, mon, last_day)
         itc_rcm = _rcm_credit_from_vendor_bills(db, active_store, year, mon, last_day)
+        from ...services.supplier_credit_reads import confirmed_itc_heads
+        try:
+            if store_gstin:
+                supplier_reversal = confirmed_itc_heads(
+                    db, entity_id=entity_id, gstin=store_gstin, period=month)
+        except Exception as exc:
+            raise HTTPException(503, "Confirmed supplier credits are unavailable; please retry.") from exc
+        itc_igst -= supplier_reversal["igst"]
+        itc_cgst -= supplier_reversal["cgst"]
+        itc_sgst -= supplier_reversal["sgst"]
+        # Every confirmation retains a verified original GSTIN. Its reversal
+        # belongs entirely to that registration's slice, including later months.
+        t_itc_igst -= supplier_reversal["igst"]
+        t_itc_cgst -= supplier_reversal["cgst"]
+        t_itc_sgst -= supplier_reversal["sgst"]
 
     # Net cash liability = output tax less the ITC the law lets set it off
     # (across heads: IGST credit also pays CGST/SGST), plus reverse-charge tax,
@@ -622,6 +636,12 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
             "stateTax": _r(itc_sgst),
             "cess": 0.0,
         },
+        "itcReversed": {
+            "integratedTax": _r(supplier_reversal["igst"]),
+            "centralTax": _r(supplier_reversal["cgst"]),
+            "stateTax": _r(supplier_reversal["sgst"]),
+            "cess": 0.0,
+        },
         # Table 4(A)(3): the reverse-charge part of itcAvailable (inside it,
         # never on top); the portal upload files it apart from 4(A)(5).
         "itcReverseCharge": {
@@ -670,10 +690,13 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
         # Table 6.1 "paid through ITC": the credit the cash rule actually used
         # -- the liability less what net_cash_due leaves for cash. Never the
         # whole credit: reverse-charge tax and unused credit are not set off.
+        # A negative net credit adds repayment liability. Include it before
+        # subtracting cash so positive credit from another head used against
+        # that liability is counted, without inventing negative utilisation.
         "itcUtilized": {
-            "integratedTax": _r(out_igst + rcm_igst - cash_igst),
-            "centralTax": _r(out_cgst + rcm_cgst - cash_cgst),
-            "stateTax": _r(out_sgst + rcm_sgst - cash_sgst),
+            "integratedTax": _r(max(0, out_igst + max(0, -itc_igst) + rcm_igst - cash_igst)),
+            "centralTax": _r(max(0, out_cgst + max(0, -itc_cgst) + rcm_cgst - cash_cgst)),
+            "stateTax": _r(max(0, out_sgst + max(0, -itc_sgst) + rcm_sgst - cash_sgst)),
             "cess": 0.0,
         },
         "taxPaidCash": {

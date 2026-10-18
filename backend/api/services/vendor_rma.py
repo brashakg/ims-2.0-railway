@@ -478,7 +478,7 @@ class VendorRMAEngine:
         now = _now()
         try:
             updated = coll.find_one_and_update(
-                {"rma_id": rma_id, "status": {"$in": rejectable}},
+                {"rma_id": rma_id, "status": {"$in": rejectable}, "credit_confirmation_fence": None},
                 {
                     "$set": {"status": RMAStatus.REJECTED.value, "updated_at": now},
                     "$push": {
@@ -580,6 +580,7 @@ class VendorRMAEngine:
                     "rma_id": rma_id,
                     "status": {"$in": recordable},
                     "credit_notes.credit_note_number": {"$ne": cn_number},
+                    "credit_confirmation_fence": None,
                 },
                 {
                     "$set": {
@@ -680,7 +681,8 @@ class VendorRMAEngine:
         now = _now()
         try:
             updated = coll.find_one_and_update(
-                {"rma_id": rma_id, "status": status, "received_credit_paise": 0},
+                {"rma_id": rma_id, "status": status, "received_credit_paise": 0,
+                 "credit_confirmation_fence": None},
                 {"$set": {
                     "lines": priced,
                     "expected_credit_paise": exp_paise,
@@ -744,7 +746,11 @@ class VendorRMAEngine:
             set_fields["written_off_paise"] = variance
         try:
             updated = coll.find_one_and_update(
-                {"rma_id": rma_id, "status": RMAStatus.CREDIT_RECEIVED.value},
+                {"rma_id": rma_id, "status": RMAStatus.CREDIT_RECEIVED.value,
+                 "credit_confirmation_fence": None,
+                 "received_credit_paise": cur.get("received_credit_paise"),
+                 "expected_credit_paise": cur.get("expected_credit_paise"),
+                 "variance_paise": cur.get("variance_paise")},
                 {
                     "$set": set_fields,
                     "$push": {
@@ -806,7 +812,7 @@ class VendorRMAEngine:
             set_fields.update(extra_set)
         try:
             updated = coll.find_one_and_update(
-                {"rma_id": rma_id, "status": from_status},
+                {"rma_id": rma_id, "status": from_status, "credit_confirmation_fence": None},
                 {
                     "$set": set_fields,
                     "$push": {

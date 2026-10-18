@@ -316,6 +316,8 @@ def mask_vendor_return(doc: Dict, user: dict) -> Dict:
     """A vendor return without the price paid, its total, the credit amount or
     the supplier's credit-note / bill reference, unless the caller may see
     what we pay."""
+    if isinstance(doc, dict) and "credit_confirmation_fence" in doc:
+        doc = {k: v for k, v in doc.items() if k != "credit_confirmation_fence"}
     if not isinstance(doc, dict) or can_see_cost(user, "purchase"):
         return doc
     out = _pick(doc, _RETURN_KEYS)

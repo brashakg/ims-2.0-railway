@@ -14,7 +14,7 @@ import {
   Clock,
 } from 'lucide-react';
 import clsx from 'clsx';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { usePurchaseShop } from './purchaseShop';
@@ -24,6 +24,8 @@ import { rtvDebitNotesApi, type DebitNote } from '../../services/api/rtvDebitNot
 import { COST_ROLES } from '../../components/common/CostCell';
 import { PURCHASE_ROLES } from './purchaseRoles';
 import { errMsg } from './invoices/shared';
+import { SupplierCreditConfirmation } from './SupplierCreditConfirmation';
+import type { SupplierCreditResult } from '../../services/api/supplierCredits';
 
 // A return line. Its price per piece is the accounts roles' to enter and to
 // read (owner rulings 2026-10-12 R2 + R3): a manager raises the return with
@@ -160,6 +162,7 @@ export function VendorReturns() {
   // so the new return physically links that quarantined unit (backend backfills
   // rtv_vendor_id). Without reading it, the advertised one-click linkage was dead.
   const [searchParams] = useSearchParams();
+  const linkedVendorId = searchParams.get('vendor_id');
   const linkedStockId = searchParams.get('stock_id');
   const linkedReturnId = searchParams.get('return_id');
   // Workshop staff log a return (item, quantity, reason) and nothing more
@@ -191,6 +194,7 @@ export function VendorReturns() {
   const [pricing, setPricing] = useState<VendorReturn | null>(null);
   const [priceInputs, setPriceInputs] = useState<string[]>([]);
   const [pricingBusy, setPricingBusy] = useState(false);
+  const [confirmingCredit, setConfirmingCredit] = useState<string | null>(null);
 
   // Load data on mount
   useEffect(() => {
@@ -201,15 +205,17 @@ export function VendorReturns() {
         // Fetch vendor returns and vendors in parallel
         const [returnsResp, vendorsResp] = await Promise.all([
           api.get('/vendor-returns/', {
-            params: { store_id: listScope, limit: 100 },
+            params: { store_id: listScope, limit: 100, ...(linkedVendorId ? { vendor_id: linkedVendorId } : {}) },
           }),
           api.get('/vendors/', { params: { limit: 100 } }),
         ]);
 
-        const loaded: VendorReturn[] = (returnsResp.data.returns || []).map(shownReturn);
+        const loaded: VendorReturn[] = (returnsResp.data.returns || [])
+          .filter((ret: VendorReturn) => !linkedVendorId || ret.vendor_id === linkedVendorId).map(shownReturn);
         if (linkedReturnId && !loaded.some((r) => r.return_id === linkedReturnId)) {
           const linked = await api.get(`/vendor-returns/${encodeURIComponent(linkedReturnId)}`);
           const ret: VendorReturn = shownReturn(linked.data);
+          if (linkedVendorId && ret.vendor_id !== linkedVendorId) return;
           if (showShopOf(ret.store_id)) return;
           loaded.unshift(ret);
         }
@@ -244,7 +250,7 @@ export function VendorReturns() {
     };
 
     loadData();
-  }, [listScope, linkedReturnId]);
+  }, [listScope, linkedReturnId, linkedVendorId]);
 
   const handleAddItem = () => {
     setItems([...items, newLine()]);
@@ -296,9 +302,10 @@ export function VendorReturns() {
       // the return was raised at (the list reloads with it), so it never vanishes.
       if (showShopOf(ownStoreId)) return;
       const refreshResp = await api.get('/vendor-returns/', {
-        params: { store_id: listScope, limit: 100 },
+        params: { store_id: listScope, limit: 100, ...(linkedVendorId ? { vendor_id: linkedVendorId } : {}) },
       });
-      setReturns((refreshResp.data.returns || []).map(shownReturn));
+      setReturns((refreshResp.data.returns || [])
+        .filter((ret: VendorReturn) => !linkedVendorId || ret.vendor_id === linkedVendorId).map(shownReturn));
     } catch (e) {
       toast.error(errMsg(e, 'Failed to create vendor return'));
     }
@@ -312,6 +319,19 @@ export function VendorReturns() {
   const historyReturns = returns.filter(r => ['credit_issued', 'replaced', 'cancelled'].includes(r.status));
 
   const displayReturns = activeTab === 'active' ? activeReturns : historyReturns;
+
+  const handleCreditSaved = (result: SupplierCreditResult) => {
+    setReturns(current => current.map(ret => ret.return_id === result.return.return_id
+      ? shownReturn({ ...ret, ...result.return } as VendorReturn) : ret));
+    setConfirmingCredit(null);
+    if (result.confirmation.posting_status === 'PENDING_EVIDENCE') {
+      toast.success('Supplier note saved pending verification. Supplier dues and GST are unchanged.');
+    } else if (result.summary.settlement_status === 'PARTIAL') {
+      toast.success('Confirmed supplier credit posted. The remaining credit stays open.');
+    } else {
+      toast.success('Confirmed supplier credit posted.');
+    }
+  };
 
   const handleUpdateStatus = async (returnId: string, newStatus: string) => {
     try {
@@ -449,6 +469,11 @@ export function VendorReturns() {
           Create Return
         </button>
       </div>
+
+      {linkedVendorId && <p className="rounded border border-blue-100 bg-blue-50 p-3 text-sm text-blue-900">
+        Showing this supplier’s returns. Open the relevant return and use Issue Credit to record the supplier’s confirmed note.{' '}
+        <Link to="/purchase/vendor-returns" className="underline">Show all suppliers</Link>
+      </p>}
 
       {/* Summary Stats */}
       <div className="grid grid-cols-2 tablet:grid-cols-4 gap-4">
@@ -769,12 +794,10 @@ export function VendorReturns() {
                               note and its amount: COST_ROLES only (owner
                               ruling 2026-10-12; the server 403s the rest). */}
                           {canSeePayables ? (
-                            // The credit is the priced lines' value: none to
-                            // record until they are priced (the server 422s).
+                            // Actual supplier notes can remain pending while
+                            // Accounts verifies missing original-bill evidence.
                             <button
-                              disabled={!isPriced(ret)}
-                              title={isPriced(ret) ? undefined : 'Set the prices first'}
-                              onClick={() => handleUpdateStatus(ret.return_id, 'credit_issued')}
+                              onClick={() => setConfirmingCredit(ret.return_id)}
                               className="flex-1 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white px-3 py-2 rounded text-sm font-medium transition"
                             >
                               Issue Credit
@@ -1059,6 +1082,13 @@ export function VendorReturns() {
           </div>
         </div>
       )}
+      {confirmingCredit && <SupplierCreditConfirmation
+        key={`${confirmingCredit}:${listScope ?? ''}`}
+        returnId={confirmingCredit}
+        canRecord={canSeePayables && returns.some(ret => ret.return_id === confirmingCredit && (!listScope || ret.store_id === listScope))}
+        onClose={() => setConfirmingCredit(null)}
+        onSaved={handleCreditSaved}
+      />}
     </div>
   );
 }
