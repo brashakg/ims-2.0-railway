@@ -156,6 +156,8 @@ def test_bounded_retries_then_dead_letter_visible_to_superadmin(db):
 
     # Shown on the SUPERADMIN sync-health card (GET /admin/online-store/sync-health).
     summary = failed_webhook_summary(db)
+    assert summary["checked"] is True, "the page tile shows '-' unless checked"
+    assert summary["failed"] == 1, "the tile's failed count includes the dead row"
     assert summary["dead"] == 1
     assert summary["pending"] == 0, "a dead row is not 'waiting for a drain'"
     assert summary["dead_letters"][0]["webhook_id"] == "doomed"

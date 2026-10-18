@@ -659,8 +659,11 @@ def failed_webhook_summary(db) -> Dict[str, Any]:
     NexusAgent.WEBHOOK_MAX_ATTEMPTS times and are no longer retried -- count
     plus the newest few, so an operator can act on them.
     Fail-soft -> zeros."""
-    out: Dict[str, Any] = {"failed": 0, "skipped": 0, "pending": 0, "dead": 0,
-                           "dead_letters": []}
+    # `checked` is what the sync page's Failed-webhooks tile keys on
+    # (OnlineShopifySyncPage: `webhooks.checked ? failed : '-'`); it was never
+    # sent, so the tile always read '-'. True once the failed count was read.
+    out: Dict[str, Any] = {"checked": False, "failed": 0, "skipped": 0, "pending": 0,
+                           "dead": 0, "dead_letters": []}
     coll = _coll(db, "webhook_inbox")
     if coll is None:
         return out
@@ -670,6 +673,7 @@ def failed_webhook_summary(db) -> Dict[str, Any]:
                 {"handler_error": {"$exists": True, "$nin": [None, ""]}}
             )
         )
+        out["checked"] = True
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SYNC_HEALTH] webhook failed-count failed: %s", exc)
     try:
