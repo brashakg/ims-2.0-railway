@@ -153,7 +153,7 @@ describe('An unpriced return: the accounts roles set its prices before the credi
     expect(screen.queryByRole('button', { name: /prices/ })).not.toBeInTheDocument();
   });
 
-  it('ACCOUNTANT: Issue Credit and Issue Debit Note wait; Set prices sends one price per line', async () => {
+  it('ACCOUNTANT: supplier evidence may be recorded while unpriced; internal issue waits for prices', async () => {
     roles = ['ACCOUNTANT'];
     apiMock.put.mockResolvedValue({
       data: {
@@ -162,7 +162,7 @@ describe('An unpriced return: the accounts roles set its prices before the credi
     });
     await openReturn();
     expect(screen.getByText('Not priced')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Issue Credit' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Issue Credit' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Issue Debit Note' })).toBeDisabled();
 
     fireEvent.click(screen.getByRole('button', { name: 'Set prices' }));

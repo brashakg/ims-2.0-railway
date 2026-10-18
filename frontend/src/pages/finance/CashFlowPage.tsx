@@ -452,6 +452,7 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
   const { canPick } = usePurchaseShop();
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState<Record<string, string | number>>({});
+  const [creditType, setCreditType] = useState<'' | 'RETURN_CN' | 'SCHEME_CN' | 'DISCOUNT_CN' | 'QUALITY_CN'>('');
   // The IST business day, like every other bill door: toISOString() is the
   // UTC day, so a bill keyed at 01:00 IST on 1 October booked 30 September
   // and landed on September's GSTR-3B.
@@ -495,6 +496,12 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
   }, [kind, billKind, vendorId]);
 
   const save = async () => {
+    if (kind === 'debit' && (!creditType || creditType === 'RETURN_CN')) {
+      toast.error(creditType === 'RETURN_CN'
+        ? 'Record the supplier’s confirmed goods-return credit in Vendor Returns.'
+        : 'Choose the type of credit adjustment');
+      return;
+    }
     if (kind === 'bill' && !billKind) {
       toast.error('Say what this bill is for: goods, or services/expenses');
       return;
@@ -533,6 +540,7 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
         const saved = await vendorApApi.createDebitNote(vendorId, {
           amount: Number(f.amount) || 0, date: String(f.date || today), reason: String(f.reason || ''),
           store_id: moneyShop || undefined,
+          cn_type: creditType as 'SCHEME_CN' | 'DISCOUNT_CN' | 'QUALITY_CN',
         });
         toast.success(bookedTo('Debit note', saved, shopName));
       }
@@ -607,9 +615,21 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
           />
         </>}
         {kind === 'debit' && <>
+          <label className="col-span-2 text-sm">Credit type
+            <select className={cls} value={creditType} onChange={event => setCreditType(event.target.value as typeof creditType)}>
+              <option value="">Choose credit type…</option>
+              <option value="RETURN_CN">Returned goods — confirm supplier note</option>
+              <option value="SCHEME_CN">Scheme credit</option>
+              <option value="DISCOUNT_CN">Discount credit</option>
+              <option value="QUALITY_CN">Quality adjustment without returned goods</option>
+            </select>
+          </label>
+          {creditType === 'RETURN_CN' ? <p className="col-span-2 text-sm text-gray-600">
+            Use the matching vendor return to record the supplier’s actual credit note and original bill details.
+          </p> : <>
           <input className={cls} type="number" placeholder="Amount" onChange={(e) => set('amount', e.target.value)} />
           <input className={cls} type="date" defaultValue={today} onChange={(e) => set('date', e.target.value)} />
-          <input className={`${cls} col-span-2`} placeholder="Reason (e.g. rejected goods)" onChange={(e) => set('reason', e.target.value)} />
+          <input className={`${cls} col-span-2`} placeholder="Reason for adjustment" onChange={(e) => set('reason', e.target.value)} />
           <PurchaseShopField
             value={moneyShop}
             onChange={setMoneyShop}
@@ -618,12 +638,16 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
             className="col-span-2"
             testId="money-shop"
           />
+          </>}
         </>}
       </div>
       <div className="flex justify-end mt-2">
-        <button type="button" onClick={save} disabled={saving} className="inline-flex items-center gap-1.5 text-sm font-medium text-white bg-bv hover:bg-bv-600 rounded-lg px-4 py-1.5 disabled:opacity-60">
+        {kind === 'debit' && creditType === 'RETURN_CN' ? <a
+          href={`/purchase/vendor-returns?vendor_id=${encodeURIComponent(vendorId)}`}
+          className="text-sm font-medium text-white bg-bv hover:bg-bv-600 rounded-lg px-4 py-1.5"
+        >Open Vendor Returns</a> : <button type="button" onClick={save} disabled={saving} className="inline-flex items-center gap-1.5 text-sm font-medium text-white bg-bv hover:bg-bv-600 rounded-lg px-4 py-1.5 disabled:opacity-60">
           {saving && <Loader2 className="w-4 h-4 animate-spin" />} Save
-        </button>
+        </button>}
       </div>
     </div>
   );

@@ -207,14 +207,17 @@ describe('#11 each kind of record mounts a fresh form', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Debit note' }));
     expect((screen.getByPlaceholderText('Amount') as HTMLInputElement).value).toBe('');
     expect((screen.getByLabelText(SHOP_SELECT) as HTMLSelectElement).value).toBe('');
-    fireEvent.change(screen.getByPlaceholderText('Reason (e.g. rejected goods)'), { target: { value: 'rejected' } });
+    expect(screen.getByLabelText('Credit type')).toHaveValue('');
+    fireEvent.change(screen.getByLabelText('Credit type'), { target: { value: 'SCHEME_CN' } });
+    fireEvent.change(screen.getByPlaceholderText('Reason for adjustment'), { target: { value: 'scheme earned' } });
     save();
 
     await waitFor(() => expect(apis.vendorApApi.createDebitNote).toHaveBeenCalledTimes(1));
     const [, payload] = apis.vendorApApi.createDebitNote.mock.calls[0];
     expect(payload.amount).toBe(0);
     expect(payload.store_id).toBeUndefined();
-    expect(payload.reason).toBe('rejected');
+    expect(payload.reason).toBe('scheme earned');
+    expect(payload.cn_type).toBe('SCHEME_CN');
     expect(apis.vendorApApi.createPayment).not.toHaveBeenCalled();
   });
 
@@ -297,6 +300,7 @@ describe('after saving money, the toast names the shop it was booked to', () => 
   it('a debit note the server stamped Dhanbad reads "Debit note recorded for Better Vision Dhanbad"', async () => {
     apis.vendorApApi.createDebitNote.mockResolvedValue({ debit_note_id: 'd1', store_id: 'BV-DHN-01' });
     await openForm('Debit note');
+    fireEvent.change(screen.getByLabelText('Credit type'), { target: { value: 'DISCOUNT_CN' } });
     fireEvent.change(screen.getByPlaceholderText('Amount'), { target: { value: '300' } });
     save();
     await waitFor(() =>

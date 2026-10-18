@@ -94,10 +94,10 @@ function load(returns: unknown[]) {
   dnMock.list.mockResolvedValue({ debit_notes: [], total: 0 });
 }
 
-async function openReturn() {
+async function openReturn(initialEntry = '/purchase/vendor-returns') {
   render(
     withCache(
-      <MemoryRouter>
+      <MemoryRouter initialEntries={[initialEntry]}>
         <VendorReturns />
       </MemoryRouter>,
     ),
@@ -219,6 +219,16 @@ describe('VendorReturns - the accounts roles read the prices and record the supp
     load([AT_VENDOR]);
   });
 
+  it('Cash Flow handoff filters to its supplier while keeping the existing shop scope', async () => {
+    roles = ['ACCOUNTANT'];
+    load([AT_VENDOR, { ...AT_VENDOR, return_id: 'VR2', vendor_id: 'V2', vendor_name: 'Other supplier' }]);
+    await openReturn('/purchase/vendor-returns?vendor_id=V1');
+    expect(apiMock.get).toHaveBeenCalledWith('/vendor-returns/', { params: { store_id: 'BV-TEST-01', limit: 100, vendor_id: 'V1' } });
+    expect(screen.queryByText('Other supplier')).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Show all suppliers' })).toHaveAttribute('href', '/purchase/vendor-returns');
+    expect(apiMock.post).not.toHaveBeenCalled();
+  });
+
   it.each([['ACCOUNTANT'], ['ADMIN'], ['SUPERADMIN']])(
     '%s: the unit price and line value, Issue Credit and Issue Debit Note',
     async (role) => {
@@ -236,10 +246,22 @@ describe('VendorReturns - the accounts roles read the prices and record the supp
     },
   );
 
-  it('ACCOUNTANT: Issue Credit records credit_issued; Issue Debit Note issues the note', async () => {
+  it('ACCOUNTANT: internal issue does not post a credit; Issue Credit requires the actual supplier note', async () => {
     roles = ['ACCOUNTANT'];
-    apiMock.patch.mockResolvedValue({
-      data: { return: { ...AT_VENDOR, status: 'credit_issued', credit_note_number: 'CN-9', credit_note_amount: 6000 } },
+    const source = { return_line_index: 0, grn_id: 'GRN1', bill_id: 'BILL1', bill_line_index: 0, quantity: 2, stock_ids: ['U1', 'U2'] };
+    const values = { taxable: 6000, cgst: 150, sgst: 150, igst: 0, total: 6300 };
+    apiMock.post.mockImplementation((url: string, body: Record<string, unknown>) => {
+      if (url.endsWith('/credit-preview')) return Promise.resolve({ data: {
+        return_id: 'VR1', source_status: 'RESOLVED', pending_reasons: [],
+        sources: [{ ...source, source_key: 'source-1', product_id: 'P1', product_name: 'RB Frame', bill_number: 'BILL-1', bill_date: '2026-10-01', claims_credit: true, reverse_charge: false, suggested: values, remaining_caps: values }],
+        choices: [], source_selections: [source], expected_credit_amount: 6300, posted_amount: 0, remaining_amount: 6300, confirmation: null, confirmations: [],
+      } });
+      return Promise.resolve({ data: {
+        idempotent: false,
+        confirmation: { confirmation_id: body.idempotency_key, credit_note_number: 'CN-9', credit_note_date: '2026-10-18', received_amount: 6300, posting_status: 'POSTED', pending_reasons: [] },
+        return: { ...AT_VENDOR, status: 'credit_issued', credit_note_number: 'CN-9', credit_note_amount: 6300 },
+        summary: { posted_amount: 6300, remaining_amount: 0, settlement_status: 'CONFIRMED' },
+      } });
     });
     dnMock.issue.mockResolvedValue({
       debit_note: {
@@ -258,8 +280,17 @@ describe('VendorReturns - the accounts roles read the prices and record the supp
     expect(dnMock.issue).toHaveBeenCalledWith('VR1', 'vendor_return');
     expect(document.body.textContent).toContain('₹6,300');
     fireEvent.click(screen.getByRole('button', { name: 'Issue Credit' }));
-    await waitFor(() =>
-      expect(apiMock.patch).toHaveBeenCalledWith('/vendor-returns/VR1/status', { status: 'credit_issued' }),
-    );
+    await screen.findByLabelText('Supplier note number');
+    expect(apiMock.patch).not.toHaveBeenCalled();
+    expect(apiMock.post).toHaveBeenCalledTimes(1);
+    fireEvent.change(screen.getByLabelText('Supplier note number'), { target: { value: 'CN-9' } });
+    fireEvent.change(screen.getByLabelText('Supplier note date'), { target: { value: '2026-10-18' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm supplier credit' }));
+    await waitFor(() => expect(apiMock.post).toHaveBeenCalledWith('/vendor-returns/VR1/credit-confirmations', expect.objectContaining({
+      credit_note_number: 'CN-9', credit_note_date: '2026-10-18', received_amount: 6300,
+      source_selections: [source], allocations: [{ source_key: 'source-1', taxable: 6000, cgst: 150, sgst: 150, igst: 0 }],
+    })));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Confirm supplier credit note' })).not.toBeInTheDocument());
+    expect(apiMock.patch).not.toHaveBeenCalled();
   });
 });
