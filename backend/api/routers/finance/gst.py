@@ -5,8 +5,8 @@ package split): no path, method, dependency, status code, response_model
 or default was changed.
 """
 
-from datetime import datetime, date
-from ...utils.ist import now_ist, ist_day_start_utc
+from datetime import datetime
+from ...utils.ist import now_ist, ist_month_window_utc
 from typing import Optional
 from fastapi import Depends, HTTPException
 from ..auth import get_current_user
@@ -132,8 +132,7 @@ async def get_gst_summary(
     # naive-UTC instant -- shift the month boundaries through ist_day_start_utc
     # (same pattern as /cash-flow). With plain datetime(y, m, 1) bounds an
     # invoice at 01-Jun 02:00 IST (= 31-May 20:30 UTC) summed into MAY.
-    start = ist_day_start_utc(date(y, m, 1))
-    end = ist_day_start_utc(date(y + 1, 1, 1) if m == 12 else date(y, m + 1, 1))
+    start, end = ist_month_window_utc(y, m)
     # bill_date is a CALENDAR date (not an instant), so the ITC filter below
     # keeps calendar-day month bounds -- do NOT shift it through IST (see the
     # /itc-register note on bill_date framing).

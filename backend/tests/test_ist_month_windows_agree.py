@@ -31,9 +31,8 @@ MONTHS = [(2026, 1), (2026, 4), (2026, 6), (2026, 12), (2027, 1)]
 @pytest.mark.parametrize("year,month", MONTHS)
 def test_payout_and_the_shared_window_start_on_the_same_instant(year, month):
     """payout returns (start, next_start, label, label); the shared helper
-    returns (start, end_inclusive). The STARTS must be identical -- that is the
-    bound an order is measured against."""
-    assert payout_window(year, month)[0] == ist_month_window_utc(year, month)[0]
+    returns the same half-open (start, next_start). Both bounds identical."""
+    assert payout_window(year, month)[:2] == ist_month_window_utc(year, month)
 
 
 @pytest.mark.parametrize("year,month", MONTHS)
@@ -54,17 +53,21 @@ def test_the_window_starts_at_ist_midnight_not_utc_midnight(year, month):
 
 @pytest.mark.parametrize("year,month", MONTHS)
 def test_consecutive_months_tile_with_no_gap_and_no_overlap(year, month):
+    """Half-open (audit R03): this month's exclusive end IS next month's start,
+    so with `$gte start, $lt end` every instant is in exactly one month."""
     end = ist_month_window_utc(year, month)[1]
     ny, nm = (year + 1, 1) if month == 12 else (year, month + 1)
-    assert end + timedelta(microseconds=1) == ist_month_window_utc(ny, nm)[0]
+    assert end == ist_month_window_utc(ny, nm)[0]
 
 
-def test_the_one_second_hole_is_closed():
-    """The hand-written copies subtracted a whole SECOND, so an order stamped
-    inside that second belonged to neither month."""
+def test_the_boundary_holes_are_closed():
+    """The hand-written copies subtracted a whole SECOND (a one-second hole);
+    the inclusive `- 1 microsecond` end that replaced them still lost the last
+    microsecond wherever a caller compared it with `<` (GSTR-3B, R03). No gap
+    at all now."""
     end = ist_month_window_utc(2026, 6)[1]
     nxt = ist_month_window_utc(2026, 7)[0]
-    assert (nxt - end) == timedelta(microseconds=1)
+    assert nxt - end == timedelta(0)
 
 
 def test_a_small_hours_order_on_the_1st_is_inside_its_own_month():
@@ -73,12 +76,12 @@ def test_a_small_hours_order_on_the_1st_is_inside_its_own_month():
     stored = datetime(2026, 5, 31, 20, 0)  # naive-UTC, as created_at is stored
     js, je = ist_month_window_utc(2026, 6)
     ms, me = ist_month_window_utc(2026, 5)
-    assert js <= stored <= je, "the 1-June IST order fell outside June"
-    assert not (ms <= stored <= me), "it was also counted in May"
+    assert js <= stored < je, "the 1-June IST order fell outside June"
+    assert not (ms <= stored < me), "it was also counted in May"
 
 
 def test_an_afternoon_order_is_unmoved_positive_control():
     """Without this, shifting every order into the next month would pass."""
     stored = datetime(2026, 6, 15, 11, 0)
     js, je = ist_month_window_utc(2026, 6)
-    assert js <= stored <= je
+    assert js <= stored < je

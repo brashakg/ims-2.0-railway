@@ -139,18 +139,21 @@ async def sales_growth(
         store_id=active_store,
         start_dt=current_start,
         end_dt=current_end,
+        end_exclusive=True,
     )
     mom_orders = _orders_in_window(
         order_repo,
         store_id=active_store,
         start_dt=mom_start,
         end_dt=mom_end,
+        end_exclusive=True,
     )
     yoy_orders = _orders_in_window(
         order_repo,
         store_id=active_store,
         start_dt=yoy_start,
         end_dt=yoy_end,
+        end_exclusive=True,
     )
 
     current_sales = sum(_order_revenue(o) for o in current_orders)

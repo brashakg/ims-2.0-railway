@@ -6,8 +6,7 @@ or default was changed.
 """
 
 from calendar import monthrange
-from datetime import date
-from ...utils.ist import now_ist, ist_day_start_utc
+from ...utils.ist import now_ist, ist_month_window_utc
 from typing import Optional
 from fastapi import Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -50,8 +49,7 @@ async def get_gst_reconciliation(
     y = year or now.year
     # IST calendar month -> naive-UTC created_at bounds (same as /gst/summary),
     # so the reconciliation and GSTR-1/3B agree on the period's invoices.
-    start = ist_day_start_utc(date(y, m, 1))
-    end = ist_day_start_utc(date(y + 1, 1, 1) if m == 12 else date(y, m + 1, 1))
+    start, end = ist_month_window_utc(y, m)
 
     s2e, enames = _store_maps(db)
     store_ids = None
@@ -171,8 +169,7 @@ def _gst_month_window(y: int, m: int):
     """IST-calendar-month -> naive-UTC created_at bounds [start, end). Same
     framing as /gst/summary and /gst/reconciliation so every GST view agrees
     on which invoices belong to the period."""
-    start = ist_day_start_utc(date(y, m, 1))
-    end = ist_day_start_utc(date(y + 1, 1, 1) if m == 12 else date(y, m + 1, 1))
+    start, end = ist_month_window_utc(y, m)
     return start, end
 
 
