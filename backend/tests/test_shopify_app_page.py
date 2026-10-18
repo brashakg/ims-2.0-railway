@@ -112,10 +112,54 @@ def test_unverified_load_gets_the_welcome_only(client, canned, query):
     assert "myshopify" not in csp  # nothing about our config leaks
 
 
-def test_no_client_secret_configured_means_no_status(client, canned, monkeypatch):
-    monkeypatch.delenv("SHOPIFY_CLIENT_SECRET")
-    r = client.get(PATH + "?" + urlencode(_load()))
+def _load_signed_with_empty_secret():
+    """What an attacker can mint when no secret is configured: HMAC keyed by ''."""
+    params = {k: v for k, v in _load().items() if k != "hmac"}
+    return dict(params, hmac=_sign(params, secret=""))
+
+
+@pytest.mark.parametrize("unset", [None, "", "   "], ids=["unset", "blank", "whitespace"])
+def test_no_client_secret_configured_means_no_status(client, canned, monkeypatch, unset):
+    if unset is None:
+        monkeypatch.delenv("SHOPIFY_CLIENT_SECRET")
+    else:
+        monkeypatch.setenv("SHOPIFY_CLIENT_SECRET", unset)
+    r = client.get(PATH + "?" + urlencode(_load_signed_with_empty_secret()))
     assert r.status_code == 200 and "Connection status" not in r.text and canned == []
+
+
+def test_an_empty_secret_never_verifies():
+    """The secret-present guard in verified_shop itself (not just the route's
+    pre-check): a load signed with '' must not verify against ''."""
+    signed = _load_signed_with_empty_secret()
+    assert shopify_app.verified_shop(signed.items(), "", SHOP, time.time()) is None
+
+
+def test_an_anonymous_hit_does_not_read_the_shop_config(client, monkeypatch):
+    reads = []
+    monkeypatch.setattr(shopify_app, "_resolve_shop", lambda db: reads.append(1) or SHOP)
+    client.get(PATH)
+    client.get(PATH + "?shop=" + SHOP)
+    assert reads == []
+    client.get(PATH + "?" + urlencode(_load()))
+    assert reads == [1]
+
+
+def test_status_text_is_escaped(client, monkeypatch):
+    payloads = ['<script>alert(1)</script>', '<img src=x onerror=alert(1)>', '"><svg onload=alert(1)>']
+
+    async def _items(db, host):
+        return [("ok", payloads[0], payloads[1]), ("bad", payloads[2], payloads[0] + payloads[1])]
+
+    monkeypatch.setattr(shopify_app, "status_items", _items)
+    r = client.get(PATH + "?" + urlencode(_load()))
+    assert r.status_code == 200 and "Connection status" in r.text
+    for raw in payloads:
+        assert raw not in r.text
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in r.text
+    assert "&lt;img src=x onerror=alert(1)&gt;" in r.text
+    assert "&quot;&gt;&lt;svg onload=alert(1)&gt;" in r.text
+    assert "<script" not in r.text.lower() and "<img" not in r.text and "<svg" not in r.text
 
 
 def test_verified_shop_rules():
@@ -126,7 +170,6 @@ def test_verified_shop_rules():
     # A repeated key (or a second hmac) is refused outright.
     assert shopify_app.verified_shop(list(good.items()) + [("locale", "en")], SECRET, SHOP, now) is None
     assert shopify_app.verified_shop(list(good.items()) + [("hmac", good["hmac"])], SECRET, SHOP, now) is None
-    assert shopify_app.verified_shop(good.items(), "", SHOP, now) is None
     assert shopify_app.verified_shop(good.items(), SECRET, "", now) is None
     assert shopify_app.verified_shop(good.items(), SECRET, SHOP, now + 301) is None
     # A non-ASCII hmac must not raise (compare_digest on str would).

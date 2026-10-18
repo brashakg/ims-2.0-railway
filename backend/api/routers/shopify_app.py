@@ -337,16 +337,17 @@ async def shopify_app_page(request: Request) -> HTMLResponse:
     """The App URL Shopify admin frames. PUBLIC; the status panel needs a valid
     app-load HMAC for the configured shop (see the module docstring)."""
     db = live_sync.connected_db()
+    secret = (os.getenv("SHOPIFY_CLIENT_SECRET") or "").strip()
     shop = None
-    try:
-        shop = verified_shop(
-            request.query_params.multi_items(),
-            (os.getenv("SHOPIFY_CLIENT_SECRET") or "").strip(),
-            _resolve_shop(db),
-            time.time(),
-        )
-    except Exception as exc:  # noqa: BLE001 -- an unreadable config = unverified
-        logger.warning("[SHOPIFY_APP] app-load check failed: %s", exc)
+    # No hmac or no secret -> unverified without reading the shop config, so an
+    # anonymous hit costs nothing.
+    if secret and request.query_params.get("hmac"):
+        try:
+            shop = verified_shop(
+                request.query_params.multi_items(), secret, _resolve_shop(db), time.time()
+            )
+        except Exception as exc:  # noqa: BLE001 -- an unreadable config = unverified
+            logger.warning("[SHOPIFY_APP] app-load check failed: %s", exc)
     items, checked = None, None
     if shop:
         try:
