@@ -306,7 +306,13 @@ class TestReassignGuards:
 
     def test_reassign_open_task_ok(self):
         repo = _FakeRepo([_task(status="OPEN")])
-        with patch.object(tasks_mod, "get_task_repository", return_value=repo):
+        users = MagicMock()
+        users.find_by_id.return_value = {
+            "user_id": "u2", "roles": ["SALES_STAFF"],
+            "store_ids": ["S1"], "is_active": True,
+        }
+        with patch.object(tasks_mod, "get_task_repository", return_value=repo), \
+                patch.object(tasks_mod, "get_user_repository", return_value=users):
             r = TestClient(_APP).post(
                 "/tasks/TASK-AABBCCDD/reassign",
                 json={"assigned_to": "u2", "reason": "Vacation"},
