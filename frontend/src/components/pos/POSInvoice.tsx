@@ -18,7 +18,7 @@ import {
   CheckCircle, Plus, Printer, FileText, Sparkles, AlertTriangle,
 } from 'lucide-react';
 import { usePOSStore } from '../../stores/posStore';
-import api from '../../services/api/client';
+import { printDocumentsApi } from '../../services/api/printDocuments';
 
 /** Safe currency format */
 function fc(amount: number | undefined | null): string {
@@ -36,30 +36,17 @@ export function StepComplete({ onPrint, onReset }: StepCompleteProps) {
   const [invoiceError, setInvoiceError] = useState<string | null>(null);
   const [invoiceBusy, setInvoiceBusy] = useState(false);
 
-  // Server-rendered A4 tax invoice. Nothing is numbered, laid out or totalled
-  // in the browser -- fetch the PDF and hand it to a new tab for printing.
-  // (Same snippet as SaleCompleteScreen.openDocumentPdf; that file lives in
-  // pages/pos/next and is owned elsewhere, so the ten lines are duplicated
-  // rather than half-extracted.)
+  // Server-rendered A4 tax invoice through the ONE opener
+  // (printDocumentsApi.openOrderInvoice): it reads the server's refusal back,
+  // so staff see the real reason ("Cannot generate invoice: ...").
   const openTaxInvoicePdf = async () => {
     if (!store.order_id || invoiceBusy) return;
     setInvoiceError(null);
     setInvoiceBusy(true);
     try {
-      const res = await api.get(`/orders/${store.order_id}/invoice.pdf`, {
-        responseType: 'blob',
-      });
-      const url = URL.createObjectURL(
-        new Blob([res.data as BlobPart], { type: 'application/pdf' }),
-      );
-      const win = window.open(url, '_blank');
-      if (!win) setInvoiceError('Allow pop-ups for this site to open the tax invoice.');
-      // Keep the blob alive long enough for the new tab to load it.
-      window.setTimeout(() => URL.revokeObjectURL(url), 60000);
-    } catch {
-      // An error body on a blob request is itself a Blob -- no readable server
-      // detail here, so the message stays generic.
-      setInvoiceError('Could not build the tax invoice. Check the store GSTIN in settings.');
+      await printDocumentsApi.openOrderInvoice(store.order_id);
+    } catch (err) {
+      setInvoiceError(err instanceof Error ? err.message : 'Could not build the tax invoice.');
     } finally {
       setInvoiceBusy(false);
     }

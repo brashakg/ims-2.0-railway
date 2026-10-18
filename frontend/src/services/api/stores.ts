@@ -76,6 +76,8 @@ export interface StorePayload {
   upi_vpa?: string;
   cost_center?: string;
   invoice_prefix?: string;
+  /** 5-char shop code in tax invoice numbers (BOK01/2627/00001); unset = derived. */
+  invoice_code?: string | null;
   invoice_header?: string;
   invoice_footer?: string;
   invoice_terms?: string;

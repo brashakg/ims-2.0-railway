@@ -8,6 +8,10 @@ rounding or validation was changed.
 from datetime import datetime
 from fastapi import Depends, HTTPException
 from typing import Optional
+from database.repositories.order_repository import (
+    InvoiceNumberError,
+    historical_order_problem,
+)
 from ..auth import get_current_user
 from ...dependencies import (
     get_customer_repository,
@@ -252,25 +256,35 @@ def _assemble_invoice(order_id: str, current_user: dict):
 
         # Return the existing invoice or generate a new one.
         #
-        # GST compliance (P3-A): a NEW invoice gets a consecutive serial that
-        # is unique per (configured-prefix, financial year) -- e.g.
-        # BV/2026-27/000123 -- allocated atomically via a counters doc so two
-        # simultaneous bills can't share a serial (Rule 46(b)). The prefix is
-        # the store's CONFIGURED invoice_prefix (falling back to global invoice
-        # settings, then "INV"); store_doc was already loaded above for the
-        # GSTIN check, so we hand it straight to the allocator. OLD orders keep
-        # whatever invoice_number they already carry (including the legacy
-        # BV/INV/{year}/{order_id[:8]} format); we never rewrite a stored
-        # number, so historical invoices stay resolvable exactly as before.
+        # GST compliance (Rule 46(b)): a NEW invoice gets the next number of the
+        # shop's own series, SHOPCODE/FYFY/NNNNN (e.g. BOK01/2627/00001, 16
+        # chars), allocated atomically by next_invoice_number -- store_doc was
+        # loaded above for the GSTIN check, so it goes straight to the mint. A
+        # refused mint (a historical import, no valid shop code, a code clash,
+        # no counter) is a 400 naming the reason, never a guessed number.
+        # set_invoice is compare-and-set: a double tap gets the first tap's
+        # number back. OLD orders keep whatever invoice_number they already
+        # carry; a stored number is never rewritten.
         invoice_number = order.get("invoice_number")
         if not invoice_number:
+            historical = historical_order_problem(order)
+            if historical:
+                raise HTTPException(
+                    status_code=400, detail=f"Cannot generate invoice: {historical}"
+                )
             # Best-effort unique index (idempotent; no-op if already present).
             try:
                 repo.ensure_invoice_index()
             except Exception:  # noqa: BLE001 - index is defense-in-depth only
                 pass
-            invoice_number = repo.next_invoice_number(store_id, store_doc=store_doc)
-            repo.set_invoice(order_id, invoice_number)
+            try:
+                invoice_number = repo.set_invoice(
+                    order_id, repo.next_invoice_number(store_id, store_doc=store_doc)
+                )
+            except InvoiceNumberError as exc:
+                raise HTTPException(
+                    status_code=400, detail=f"Cannot generate invoice: {exc}"
+                ) from exc
         # Convert items to camelCase
         items_formatted = [item_to_frontend(item, current_user) for item in order.get("items", [])]
 

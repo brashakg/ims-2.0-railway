@@ -307,6 +307,9 @@ def wired(monkeypatch):
 
     order_repo = OrderRepository(db.get_collection("orders"))
     customer_repo = CustomerRepository(db.get_collection("customers"))
+    # The invoice mint reads the order's STORE RECORD (no record, no number).
+    db.get_collection("stores").insert_one({"store_id": "BV-ONLINE-01", "store_code": "BV-ONLINE-01",
+                                         "store_type": "ONLINE", "is_active": True})
 
     store_state = {"code": "20"}  # Jharkhand by default
 

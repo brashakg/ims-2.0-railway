@@ -78,6 +78,7 @@ class _FakeOrderRepo:
 
     def set_invoice(self, oid, number):
         self._doc["invoice_number"] = number
+        return number
 
 
 class _FakeStoreRepo:

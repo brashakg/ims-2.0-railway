@@ -1018,6 +1018,9 @@ def test_c6_invoice_endpoint_includes_gst_split(
         if d.get("order_id") == order_id
     )
     saved["status"] = "CONFIRMED"  # invoice refuses DRAFT
+    # The invoice mint reaches counters/stores through collection.database (a
+    # DB-less mint is refused, never guessed).
+    hardening_orders["order_repo"].collection.database = hardening_orders["db"]
 
     inv = client.get(f"/api/v1/orders/{order_id}/invoice", headers=auth_headers)
     assert inv.status_code == 200, inv.text
@@ -1025,7 +1028,7 @@ def test_c6_invoice_endpoint_includes_gst_split(
     # Preserved fields.
     assert body["orderId"] == order_id
     assert body["grandTotal"] == grand_total
-    assert "items" in body and body["invoiceNumber"]
+    assert "items" in body and len(body["invoiceNumber"]) == 16
     # New C-6 fields.
     assert body["storeGstin"] == "20ABCDE1234F1Z5"
     assert body["interstate"] is False  # walk-in customer -> intra default
