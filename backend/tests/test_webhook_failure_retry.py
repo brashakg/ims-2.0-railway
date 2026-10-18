@@ -281,3 +281,19 @@ def test_order_answer_already_booked_with_no_order_is_a_failure(db):
     with patch.object(online_fulfillment_route, "map_routed_order", side_effect=phantom):
         row = _drain(db, "phantom")
     assert row["status"] == "failed" and "no IMS order" in row["handler_error"]
+
+
+def test_hourly_tick_rescues_a_drain_killed_mid_run(db):
+    """F-a: a deploy/restart killed the drain; the row sat 'processing' with
+    no outcome. The sweep takes over a row whose lease ran out."""
+    _inbox_row(db, "killed", "customers/update", _CUSTOMER, status="processing",
+               processing_at=datetime.now(timezone.utc) - timedelta(hours=3), attempts=1)
+    _inbox_row(db, "busy-now", "customers/update", _CUSTOMER, status="processing",
+               processing_at=datetime.now(timezone.utc), attempts=1)
+    with patch.object(shopify_customer_sync, "upsert_shopify_customer",
+                      return_value={"status": "updated"}) as up:
+        asyncio.run(NexusAgent(db=db)._retry_failed_webhooks())
+    up.assert_called_once()
+    row = db.webhook_inbox.find_one({"webhook_id": "killed"})
+    assert row["status"] == "succeeded" and row["attempts"] == 2
+    assert db.webhook_inbox.find_one({"webhook_id": "busy-now"})["status"] == "processing"

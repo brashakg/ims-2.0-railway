@@ -5700,3 +5700,112 @@ def test_status_sync_that_did_not_land_is_a_failure(world, monkeypatch):
     row = _sf03_drain(db, "cancel")
     assert row["status"] == "succeeded"
     assert db.orders.find_one({"shopify_order_id": "53103"}).get("shopify_cancelled_at")
+
+
+def _sf03_age(db, shopify_order_id):
+    from datetime import datetime, timedelta
+
+    from api.services import online_fulfillment_route
+
+    aged = datetime.utcnow() - timedelta(seconds=online_fulfillment_route._BOOKING_SETTLE_SECONDS + 60)
+    db.orders.update_one({"shopify_order_id": shopify_order_id}, {"$set": {"created_at": aged}})
+
+
+def test_recovery_keeps_the_units_the_crashed_booking_already_claimed(world, monkeypatch):
+    """F-c: the booking claimed its unit and stopped before stamping the
+    claim. The recovery counts that unit as held -- it never claims a second
+    one for the same line (2 on the shelf, 1 sold). A Re-map press (no
+    webhook id) is answered 'booking recovered', not 'nothing to resend'."""
+    from api.services import shopify_ingest
+
+    db = world["db"]
+    _stock(db, "BV-BOK-01", "P-RB", 2)
+    world["shop"].fo(FO_1, LOC_BOK)
+    real = shopify_ingest._claim_online_units
+    calls = []
+
+    def claim_then_stop(*a, **k):
+        calls.append(1)
+        out = real(*a, **k)
+        if len(calls) == 1:
+            raise RuntimeError("stopped after the claim, before its stamp")
+        return out
+
+    monkeypatch.setattr(shopify_ingest, "_claim_online_units", claim_then_stop)
+    _sf03_inbox(db, "post-claim", _order(53104))
+    assert _sf03_drain(db, "post-claim")["status"] == "failed"
+    order = db.orders.find_one({"shopify_order_id": "53104"})
+    assert "fulfillment_breakdown" not in order
+    assert _sold_at(db, order["order_id"]) == ["BV-BOK-01"], "the stopped run claimed one"
+
+    _sf03_age(db, "53104")
+    res = asyncio.run(route_mod.map_routed_order(_order(53104), db, topic="orders/create"))
+    assert res["status"] == "duplicate" and res.get("booking_recovered") is True
+    order = db.orders.find_one({"shopify_order_id": "53104"})
+    assert _sold_at(db, order["order_id"]) == ["BV-BOK-01"], "the held unit is kept, never a second"
+    assert [r["qty"] for r in order["fulfillment_breakdown"]] == [1]
+    assert db.stock_units.count_documents({"store_id": "BV-BOK-01", "status": "AVAILABLE"}) == 1
+
+
+def test_an_ims_cancel_during_the_recovery_claim_releases_its_units(world, monkeypatch):
+    """F-b: the IMS cancel door lands while the recovery claims. Its rule
+    (release every unit sold to the order) runs after the claim, as Re-map
+    and clear-hold run it, so no unit stays SOLD to a cancelled order."""
+    from api.services import shopify_ingest
+
+    db = world["db"]
+    _stock(db, "BV-BOK-01", "P-RB", 2)
+    world["shop"].fo(FO_1, LOC_BOK)
+    real = shopify_ingest._claim_online_units
+    calls = []
+
+    def first_stops_second_races_a_cancel(db_, oid, *a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("stopped before the claim")
+        out = real(db_, oid, *a, **k)
+        db_.orders.update_one({"order_id": oid}, {"$set": {
+            "status": "CANCELLED", "cancellation_reason": "customer changed mind"}})
+        return out
+
+    monkeypatch.setattr(shopify_ingest, "_claim_online_units", first_stops_second_races_a_cancel)
+    _sf03_inbox(db, "cancel-race", _order(53105))
+    assert _sf03_drain(db, "cancel-race")["status"] == "failed"
+    _sf03_age(db, "53105")
+    row = _sf03_drain(db, "cancel-race")
+    assert row["status"] == "succeeded"
+    order = db.orders.find_one({"shopify_order_id": "53105"})
+    assert len(calls) == 2, "the recovery did claim"
+    assert db.stock_units.count_documents({"order_id": order["order_id"], "status": "SOLD"}) == 0
+    assert db.stock_units.count_documents({"store_id": "BV-BOK-01", "status": "AVAILABLE"}) == 2
+
+
+def test_a_replayed_order_whose_status_sync_did_not_land_is_a_failure(world, monkeypatch):
+    """F-c: an orders/cancelled body WITH line_items for a booked order goes
+    through ingest's duplicate path; its status claim not landing must fail
+    the row (the drain's sync_failed rule), not read as a duplicate done."""
+    from api.services import online_order_status
+
+    db = world["db"]
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK)
+    _book(world, _order(53106))
+    real = online_order_status.apply_fact
+    calls = []
+
+    def fail_once(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            return {"to": None, "from": None, "why": None, "terminal_withheld": False,
+                    "failed": True}
+        return real(*a, **k)
+
+    monkeypatch.setattr(online_order_status, "apply_fact", fail_once)
+    body = {**_order(53106), "cancelled_at": "2026-10-18T10:00:00Z",
+            "updated_at": "2026-10-18T10:00:00Z"}
+    _sf03_inbox(db, "cancel-full", body, topic="orders/cancelled")
+    row = _sf03_drain(db, "cancel-full")
+    assert row["status"] == "failed" and "status sync failed" in row["handler_error"]
+    row = _sf03_drain(db, "cancel-full")
+    assert row["status"] == "succeeded"
+    assert db.orders.find_one({"shopify_order_id": "53106"}).get("shopify_cancelled_at")

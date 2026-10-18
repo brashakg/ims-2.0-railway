@@ -1675,7 +1675,7 @@ def finish_crashed_booking(db, order: Dict[str, Any]) -> Optional[str]:
     two of them claim; units already SOLD to the order are kept, never
     claimed again. A dead order, or one a refund or return owns, is settled
     as it stands (their doors' rules)."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timezone
 
     from .shopify_ingest import _claim_online_units
 
@@ -1698,7 +1698,6 @@ def finish_crashed_booking(db, order: Dict[str, Any]) -> Optional[str]:
         return "its booking is still claiming stock"
     coll = _orders(db)
     mine = now.isoformat()
-    stale = (now - timedelta(seconds=_REROUTE_LEASE_SECONDS)).isoformat()
     taken = coll.find_one_and_update(
         {"order_id": oid, "fulfillment_breakdown": {"$exists": False},
          "reroute_lease_at": None},
@@ -1725,6 +1724,13 @@ def finish_crashed_booking(db, order: Dict[str, Any]) -> Optional[str]:
             {"order_id": oid},
             {"$set": {"fulfillment_breakdown": breakdown, "fulfillment_stores": stores}},
         )
+        # A cancel landing while this claimed: its door's rule, as Re-map and
+        # clear-hold run it after their claims (the IMS cancel door releases
+        # every unit sold to the order; a Shopify cancel keeps them for its
+        # refund's restock). Nothing ships for a dead order: no tasks, no
+        # stock write-back.
+        if _dead_order_units(db, oid):
+            return None
         if taken.get("rx_pending"):
             from .online_rx_hold import raise_rx_hold_task  # idempotent per order
 

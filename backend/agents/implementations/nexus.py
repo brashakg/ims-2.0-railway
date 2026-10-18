@@ -929,14 +929,19 @@ class NexusAgent(JarvisAgent):
 
     async def _retry_failed_webhooks(self, limit: int = 50):
         """Bounded retry: re-run inbox rows whose handler FAILED (not dead, not
-        skipped). Called from the hourly tick, so the tick is the back-off.
-        Fail-soft."""
+        skipped), and rows a drain was killed in (a deploy or restart left them
+        status=processing past the lease -- the drain's claim takes those over).
+        Called from the hourly tick, so the tick is the back-off. Fail-soft."""
         coll = self.get_collection("webhook_inbox")
         if coll is None:
             return
+        abandoned = datetime.now(timezone.utc) - self.WEBHOOK_PROCESSING_LEASE
         try:
             rows = list(
-                coll.find({"status": "failed", "processed": {"$ne": True}},
+                coll.find({"processed": {"$ne": True},
+                           "$or": [{"status": "failed"},
+                                   {"status": "processing",
+                                    "processing_at": {"$lt": abandoned}}]},
                           {"webhook_id": 1, "vendor": 1})
                 .sort("received_at", 1)
                 .limit(limit)

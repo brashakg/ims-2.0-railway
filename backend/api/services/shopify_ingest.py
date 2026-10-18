@@ -826,8 +826,19 @@ def _booking_unsettled(db, existing: Dict[str, Any], historical: bool) -> Dict[s
         return {}
     from .online_fulfillment_route import finish_crashed_booking
 
+    unstamped = "fulfillment_breakdown" not in existing and bool(existing.get("fulfillment_route"))
     why = finish_crashed_booking(db, existing)
-    return {"booking_unsettled": why} if why else {}
+    if why:
+        return {"booking_unsettled": why}
+    if unstamped:
+        try:
+            now_doc = db.get_collection("orders").find_one({"order_id": existing.get("order_id")}) or {}
+        except Exception:  # noqa: BLE001
+            now_doc = {}
+        if "fulfillment_breakdown" in now_doc:
+            # This replay finished the claim (finish_crashed_booking).
+            return {"booking_recovered": True}
+    return {}
 
 
 # ---------------------------------------------------------------------------
