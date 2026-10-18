@@ -593,6 +593,12 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/{vendor_id}/payments",
         "allowed": ACCOUNTS,
     },
+    # Apply an advance to a bill (owner 2026-10-18, A12): the same money gate.
+    {
+        "method": "POST",
+        "path": "/api/v1/vendors/{vendor_id}/payments/{payment_id}/apply",
+        "allowed": ACCOUNTS,
+    },
     {
         "method": "POST",
         "path": "/api/v1/vendors/{vendor_id}/portal-token",

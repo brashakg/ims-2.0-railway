@@ -229,6 +229,8 @@ describe('#11 each kind of record mounts a fresh form', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Payment' }));
     expect((screen.getByPlaceholderText('Amount paid') as HTMLInputElement).value).toBe('');
     expect((screen.getByLabelText(SHOP_SELECT) as HTMLSelectElement).value).toBe('');
+    // A payment now names its bill or is an advance (owner 2026-10-18).
+    fireEvent.change(screen.getByLabelText('Apply this payment to'), { target: { value: '__advance__' } });
     save();
 
     await waitFor(() => expect(apis.vendorApApi.createPayment).toHaveBeenCalledTimes(1));
@@ -292,6 +294,8 @@ describe('after saving money, the toast names the shop it was booked to', () => 
   it('a payment the server stamped Pune reads "Payment recorded for WizOpt Pune"', async () => {
     apis.vendorApApi.createPayment.mockResolvedValue({ payment_id: 'p1', store_id: 'WO-PUN-01' });
     await openForm('Payment');
+    // A payment now names its bill or is an advance (owner 2026-10-18).
+    fireEvent.change(screen.getByLabelText('Apply this payment to'), { target: { value: '__advance__' } });
     fireEvent.change(screen.getByPlaceholderText('Amount paid'), { target: { value: '3000' } });
     save();
     await waitFor(() => expect(toastMock.success).toHaveBeenCalledWith('Payment recorded for WizOpt Pune'));
@@ -311,6 +315,8 @@ describe('after saving money, the toast names the shop it was booked to', () => 
   it('money booked to no shop says so', async () => {
     apis.vendorApApi.createPayment.mockResolvedValue({ payment_id: 'p2', store_id: null });
     await openForm('Payment');
+    // A payment now names its bill or is an advance (owner 2026-10-18).
+    fireEvent.change(screen.getByLabelText('Apply this payment to'), { target: { value: '__advance__' } });
     fireEvent.change(screen.getByPlaceholderText('Amount paid'), { target: { value: '100' } });
     save();
     await waitFor(() =>

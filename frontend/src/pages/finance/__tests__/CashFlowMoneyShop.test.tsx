@@ -99,6 +99,8 @@ async function openForm(kind: 'Payment' | 'Debit note' | 'Bill') {
 }
 
 function fillPayment(amount: string) {
+  // A payment now names its bill or is an advance (owner 2026-10-18).
+  fireEvent.change(screen.getByLabelText('Apply this payment to'), { target: { value: '__advance__' } });
   fireEvent.change(screen.getByPlaceholderText('Amount paid'), { target: { value: amount } });
 }
 

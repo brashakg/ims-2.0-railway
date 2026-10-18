@@ -248,6 +248,30 @@ def iso_bill_date(value) -> str:
     return d.isoformat()
 
 
+def iso_payment_date(value) -> str:
+    """THE payment-date rule of the supplier-payment door, iso_bill_date's
+    twin: 'YYYY-MM-DD', or a full ISO timestamp read on the IST clock (a
+    payment at 01:30 IST on 1 October is October's, never September's), from
+    the start of GST to at most a year ahead (a post-dated cheque is dated
+    later than today). The period lock and the closed-month rule read this
+    day, so an unparseable one would slip past both. ValueError otherwise."""
+    txt = str(value or "").strip()
+    stamp = parse_date(txt) if len(txt) > 10 else None
+    d = stamp.date() if stamp else None
+    if d is None and len(txt) == 10:
+        try:
+            d = date.fromisoformat(txt)
+        except ValueError:
+            d = None
+    if d is None:
+        raise ValueError("Payment date must be a real date written YYYY-MM-DD")
+    if not GST_START <= d <= now_ist_naive().date() + timedelta(days=366):
+        raise ValueError(
+            f"Payment date {d.isoformat()} is not between 1 July 2017 and a year from today -- check the year"
+        )
+    return d.isoformat()
+
+
 def compute_due_date(bill_date_iso: str, credit_days: int) -> Optional[str]:
     """Due date = bill date + credit_days. ISO date string, or None if the
     bill date is unparseable."""

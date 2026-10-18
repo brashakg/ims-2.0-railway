@@ -4,7 +4,7 @@ IMS 2.0 - Privilege-gap fixes (from the RBAC policy-matrix audit)
 Endpoints that mint customer money (loyalty / store credit), send outbound
 messages (WhatsApp/SMS spend), or mutate store configuration were reachable by
 ANY authenticated user (only get_current_user). They are now gated:
-  - loyalty/add + store-credit/add -> _CREDIT_ROLES (matches issue/redeem siblings)
+  - store-credit/add -> _CREDIT_ROLES (matches issue/redeem siblings)
   - marketing notifications/send   -> _BULK_SEND_ROLES (matches send-bulk)
   - store categories enable/disable -> HQ only (Admin/Superadmin) per SYSTEM_INTENT 11
 All gates fire before any DB access.
@@ -44,16 +44,6 @@ _NOTIF = {"customer_id": "C1", "customer_phone": "9000000000",
 
 
 # --- customer money: loyalty + store credit (_CREDIT_ROLES) -------------
-
-def test_loyalty_add_denied_for_sales_staff():
-    assert _client(customers.router, "/api/v1/customers", ["SALES_STAFF"]).post(
-        "/api/v1/customers/C1/loyalty/add", params={"points": 10}).status_code == 403
-
-
-def test_loyalty_add_allowed_for_manager():
-    assert _client(customers.router, "/api/v1/customers", ["STORE_MANAGER"]).post(
-        "/api/v1/customers/C1/loyalty/add", params={"points": 10}).status_code != 403
-
 
 def test_store_credit_add_denied_for_sales_staff():
     assert _client(customers.router, "/api/v1/customers", ["SALES_STAFF"]).post(

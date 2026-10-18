@@ -277,10 +277,10 @@ def test_self_enforced_flag_present_on_policy_rows():
 # These assert the ENFORCER blocks the now-stricter roles, mirroring the route.
 # ---------------------------------------------------------------------------
 
-def test_corrected_loyalty_add_blocks_sales_staff(client):
-    # POST /customers/{id}/loyalty/add is credit-roles only (was AUTHENTICATED).
+def test_corrected_store_credit_add_blocks_sales_staff(client):
+    # POST /customers/{id}/store-credit/add is credit-roles only.
     r = client.post(
-        "/api/v1/customers/CUST-1/loyalty/add?points=5", headers=_auth(["SALES_STAFF"])
+        "/api/v1/customers/CUST-1/store-credit/add?amount=5", headers=_auth(["SALES_STAFF"])
     )
     assert r.status_code == 403
     assert r.json().get("detail", "").startswith(_MW_FORBIDDEN_PREFIX)

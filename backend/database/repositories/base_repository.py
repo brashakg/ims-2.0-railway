@@ -199,17 +199,19 @@ class BaseRepository(ABC, Generic[T]):
             print(f"Error updating {self.entity_name}: {e}")
             return False
 
-    def update_if(self, id: str, expected: Dict, data: Dict) -> bool:
+    def update_if(self, id: str, expected: Dict, data: Dict, unset: Optional[List[str]] = None) -> bool:
         """Compare-and-set update: lands only while the stored document still
         matches ``expected`` (e.g. the status and updated_at the caller read).
+        ``unset`` names fields the same write removes.
 
         False when another write got there first -- the caller refuses rather
         than overwriting it. A database error RAISES: it is never reported as
         a lost race."""
         data["updated_at"] = datetime.now()
-        result = self.collection.update_one(
-            {**expected, self.id_field: id}, {"$set": data}
-        )
+        update: Dict = {"$set": data}
+        if unset:
+            update["$unset"] = {field: "" for field in unset}
+        result = self.collection.update_one({**expected, self.id_field: id}, update)
         matched = getattr(result, "matched_count", None)
         if matched is None:  # MockCollection reports modified_count only
             matched = getattr(result, "modified_count", 0)

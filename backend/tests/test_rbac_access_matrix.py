@@ -40,7 +40,6 @@ COVERAGE LIST (method, path, roles_tested)
   POST /api/v1/payroll/run                 -> ADMIN only (owner ruling 2026-08-09)
   GET  /api/v1/finance/cash-flow           -> finance roles; WORKSHOP_STAFF -> 403
   GET  /api/v1/finance/pnl                 -> finance roles; OPTOMETRIST -> 403
-  GET  /api/v1/customers/{id}/loyalty/add  -> credit roles; SALES_STAFF -> 403
   POST /api/v1/customers/{id}/store-credit/add -> credit roles; CASHIER -> 403
   POST /api/v1/marketing/notifications/send -> mgmt roles; SALES_STAFF -> 403
   POST /api/v1/marketing/notifications/send-bulk -> mgmt roles; WORKSHOP_STAFF -> 403
@@ -394,7 +393,7 @@ class TestNoTokenYields401:
         ("/api/v1/payroll/config", "GET"),
         ("/api/v1/finance/cash-flow", "GET"),
         ("/api/v1/audit/verify", "GET"),
-        ("/api/v1/customers/CUST-001/loyalty/add", "POST"),
+        ("/api/v1/customers/CUST-001/store-credit/add", "POST"),
         ("/api/v1/marketing/notifications/send", "POST"),
         ("/api/v1/reports/inventory/valuation", "GET"),
         ("/api/v1/users/", "GET"),
@@ -752,51 +751,11 @@ class TestFinancePayrollHrRoutes:
 # ===========================================================================
 
 class TestCreditLoyaltyRoutes:
-    """POST loyalty/add and store-credit/add are ACCOUNTANT, ADMIN, AREA_MANAGER,
+    """POST store-credit/add is ACCOUNTANT, ADMIN, AREA_MANAGER,
     STORE_MANAGER only."""
 
     _CREDIT_ALLOWED = {"ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SUPERADMIN"}
     _DUMMY_CUST = "CUST-DUMMY-001"
-
-    def test_loyalty_add_denied_for_sales_staff(self, client):
-        r = client.post(
-            f"/api/v1/customers/{self._DUMMY_CUST}/loyalty/add",
-            headers=ALL_ROLE_HEADERS["SALES_STAFF"],
-            json={"points": 10, "reason": "test"},
-        )
-        assert_middleware_403(r, "POST", f"/api/v1/customers/{self._DUMMY_CUST}/loyalty/add")
-
-    def test_loyalty_add_denied_for_cashier(self, client):
-        r = client.post(
-            f"/api/v1/customers/{self._DUMMY_CUST}/loyalty/add",
-            headers=ALL_ROLE_HEADERS["CASHIER"],
-            json={"points": 10, "reason": "test"},
-        )
-        assert_middleware_403(r, "POST", f"/api/v1/customers/{self._DUMMY_CUST}/loyalty/add")
-
-    def test_loyalty_add_denied_for_workshop_staff(self, client):
-        r = client.post(
-            f"/api/v1/customers/{self._DUMMY_CUST}/loyalty/add",
-            headers=ALL_ROLE_HEADERS["WORKSHOP_STAFF"],
-            json={"points": 10, "reason": "test"},
-        )
-        assert_middleware_403(r, "POST", f"/api/v1/customers/{self._DUMMY_CUST}/loyalty/add")
-
-    def test_loyalty_add_allowed_for_accountant(self, matrix_client):
-        r = matrix_client.post(
-            f"/api/v1/customers/{self._DUMMY_CUST}/loyalty/add",
-            headers=ALL_ROLE_HEADERS["ACCOUNTANT"],
-            json={"points": 10, "reason": "test"},
-        )
-        assert_route_allowed(r, "ACCOUNTANT", "POST", f"/api/v1/customers/{self._DUMMY_CUST}/loyalty/add")
-
-    def test_loyalty_add_allowed_for_store_manager(self, matrix_client):
-        r = matrix_client.post(
-            f"/api/v1/customers/{self._DUMMY_CUST}/loyalty/add",
-            headers=ALL_ROLE_HEADERS["STORE_MANAGER"],
-            json={"points": 10, "reason": "test"},
-        )
-        assert_route_allowed(r, "STORE_MANAGER", "POST", f"/api/v1/customers/{self._DUMMY_CUST}/loyalty/add")
 
     def test_store_credit_add_denied_for_sales_cashier(self, client):
         r = client.post(
@@ -1461,8 +1420,6 @@ class TestPolicyConsistencyWithLiveApp:
         ("GET", "/api/v1/reports/gstr1", "ACCOUNTANT", True),
         ("GET", "/api/v1/reports/gstr1", "CATALOG_MANAGER", False),
         # Credit
-        ("POST", "/api/v1/customers/CUST-001/loyalty/add", "STORE_MANAGER", True),
-        ("POST", "/api/v1/customers/CUST-001/loyalty/add", "SALES_STAFF", False),
         ("POST", "/api/v1/customers/CUST-001/store-credit/add", "AREA_MANAGER", True),
         ("POST", "/api/v1/customers/CUST-001/store-credit/add", "CASHIER", False),
         # Marketing

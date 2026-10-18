@@ -61,6 +61,7 @@ class _FakeColl:
         self.key_field = key_field
         self.docs = [copy.deepcopy(d) for d in (docs or [])]
         self.database = None
+        self._positional = None
 
     def _match(self, doc, filt):
         for k, v in filt.items():
@@ -97,7 +98,14 @@ class _FakeColl:
                     doc[f] = (doc.get(f) or 0) + d
             elif op == "$set":
                 for f, val in block.items():
-                    doc[f] = val
+                    if ".$." in f:  # positional: the element the filter matched
+                        arr, sub = f.split(".$.", 1)
+                        key, want = self._positional or (None, None)
+                        for el in doc.get(arr) or []:
+                            if isinstance(el, dict) and el.get(key) == want:
+                                el[sub] = val
+                    else:
+                        doc[f] = val
             elif op == "$push":
                 for f, val in block.items():
                     doc.setdefault(f, []).append(val)
@@ -116,6 +124,12 @@ class _FakeColl:
         return None
 
     def update_one(self, filt, update):
+        # A positional $set targets the array element a dotted equality matched.
+        self._positional = next(
+            ((k.split(".", 1)[1], v) for k, v in filt.items()
+             if "." in k and not isinstance(v, dict)),
+            None,
+        )
         for d in self.docs:
             if self._match(d, filt):
                 self._apply(d, update)

@@ -20,6 +20,10 @@ export interface VendorBill {
   tax_amount: number;
   total_amount: number;
   outstanding?: number;
+  // What can still be paid on it once every recorded payment clears (a
+  // post-dated cheque included): GET /vendors/{id}/bills, the figure the
+  // server's over-payment refusal (MORE_THAN_BILL_LEFT) tests.
+  left_to_pay?: number;
   status?: string;
   po_id?: string;
   grn_id?: string;
@@ -74,6 +78,10 @@ export interface VendorPayment {
   // answer carries the shop it was stamped with (null = no shop on record),
   // which the Cash Flow drawer names in its toast.
   store_id?: string | null;
+  // One id per payment the form records: the client retries a 5xx (a 504
+  // can come after the save), and the server answers the payment that id
+  // already recorded instead of recording a second one.
+  request_id?: string;
 }
 
 export interface DebitNote {
@@ -457,6 +465,20 @@ export const vendorApApi = {
   createPayment: async (vendorId: string, payload: Partial<VendorPayment> & { amount: number; payment_date: string }) => {
     const res = await api.post(`/vendors/${vendorId}/payments`, payload);
     return res.data as VendorPayment;
+  },
+  // Every recorded payment of the supplier (an advance is one with no bill_id).
+  listPayments: async (vendorId: string) => {
+    const res = await api.get(`/vendors/${vendorId}/payments`);
+    return res.data as { payments: VendorPayment[]; total: number };
+  },
+  // Apply an advance (all or part, gross = cash + TDS) to one bill (A12). The
+  // server refuses more than the advance or than is left on the bill (422), a
+  // bill held for rejected goods (409) and another shop's bill (422).
+  // advance_left: what the form showed was left of the advance -- a repeated
+  // request (a retried 5xx after the save) finds less left and gets a 409.
+  applyAdvance: async (vendorId: string, paymentId: string, payload: { bill_id: string; amount: number; advance_left: number }) => {
+    const res = await api.post(`/vendors/${vendorId}/payments/${paymentId}/apply`, payload);
+    return res.data as { payment: VendorPayment; advance_left: number };
   },
   createDebitNote: async (vendorId: string, payload: Partial<DebitNote> & { amount: number; date: string; reason: string }) => {
     const res = await api.post(`/vendors/${vendorId}/debit-notes`, payload);

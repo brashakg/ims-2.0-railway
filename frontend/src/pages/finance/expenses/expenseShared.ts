@@ -58,6 +58,8 @@ const PAYMENT_MODES: { value: string; label: string }[] = [
 const STATUS_META: Record<string, { label: string; badge: string }> = {
   DRAFT: { label: 'Draft', badge: 'bg-gray-100 text-gray-600' },
   PENDING: { label: 'Pending', badge: 'bg-amber-50 text-amber-700' },
+  // A petty-cash approval claimed it and was cut off; Approve finishes it.
+  APPROVING: { label: 'Being approved', badge: 'bg-blue-50 text-blue-700' },
   APPROVED: { label: 'Approved', badge: 'bg-green-50 text-green-700' },
   REJECTED: { label: 'Rejected', badge: 'bg-red-50 text-red-700' },
   SENT_TO_ACCOUNTANT: { label: 'With accountant', badge: 'bg-blue-50 text-blue-700' },

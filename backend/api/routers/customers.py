@@ -1658,31 +1658,6 @@ async def get_customer_prescriptions(
     return {"prescriptions": []}
 
 
-@router.post("/{customer_id}/loyalty/add")
-async def add_loyalty_points(
-    customer_id: str = Path(..., description="Customer ID"),
-    points: int = Query(..., ge=1, description="Loyalty points to add"),
-    current_user: dict = Depends(require_roles(*_CREDIT_ROLES)),
-):
-    """Add loyalty points to customer"""
-    repo = get_customer_repository()
-
-    if repo is not None:
-        # Loyalty points redeem against real money, so the same object-level
-        # scope as the rest of the customer's record applies.
-        existing = _scoped_customer_or_404(customer_id, current_user, write=True)
-
-        if repo.add_loyalty_points(customer_id, points):
-            return {
-                "message": f"Added {points} loyalty points",
-                "new_total": existing.get("loyalty_points", 0) + points,
-            }
-
-        raise HTTPException(status_code=500, detail="Failed to add loyalty points")
-
-    return {"message": f"Added {points} loyalty points"}
-
-
 @router.post("/{customer_id}/store-credit/add")
 async def add_store_credit(
     customer_id: str,
