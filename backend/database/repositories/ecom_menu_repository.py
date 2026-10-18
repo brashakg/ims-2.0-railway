@@ -393,6 +393,7 @@ class EcomMenuRepository(BaseRepository):
                     "$set": {
                         "items": items,
                         "locally_modified": True,
+                        "edit_rev": new_edit_rev(),  # SF-04: the push clears only this
                         "updated_at": datetime.now(),
                     }
                 },

@@ -819,7 +819,7 @@ def test_a_republish_stamps_a_fresh_revision():
 # ---- collections and menus: the same revision-guarded clear
 
 
-def _repo_push(monkeypatch, kind, edit_during):
+def _repo_push(monkeypatch, kind, edit_during, edit=None):
     from database.repositories.ecom_collection_repository import EcomCollectionRepository
     from database.repositories.ecom_menu_repository import EcomMenuRepository
 
@@ -840,7 +840,7 @@ def _repo_push(monkeypatch, kind, edit_during):
 
     async def _maybe_edit(dbx, query, variables):
         if edit_during and marker in query:
-            repo.update(oid, {"title": "NEW UNSENT"})
+            (edit or (lambda r, i: r.update(i, {"title": "NEW UNSENT"})))(repo, oid)
         return await inner(dbx, query, variables)
 
     monkeypatch.setattr(shopify_push, "_graphql", _maybe_edit)
@@ -861,3 +861,16 @@ def test_a_collection_or_menu_edit_during_its_push_stays_queued(monkeypatch, kin
 def test_control_a_collection_or_menu_push_drains_its_flag(monkeypatch, kind):
     saved = _repo_push(monkeypatch, kind, edit_during=False)
     assert saved["locally_modified"] is False
+
+
+def test_a_menu_item_added_during_its_push_stays_queued(monkeypatch):
+    """Re-review: the item doors (add / move / remove / edit item) save the
+    tree through _save_items, which must stamp a fresh revision too -- or an
+    item added mid-push is taken off the queue and never reaches Shopify."""
+    saved = _repo_push(
+        monkeypatch, "menu", edit_during=True,
+        edit=lambda repo, mid: repo.add_item(mid, {"title": "New item", "item_type": "HTTP", "url": "/new"}),
+    )
+    assert [i["title"] for i in saved["items"]] == ["New item"]
+    assert saved["locally_modified"] is True, "the added item left the queue unsent"
+    assert saved.get("shopify_menu_id")
