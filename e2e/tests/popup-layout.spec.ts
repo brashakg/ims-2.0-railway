@@ -159,11 +159,9 @@ const KNOWN_BROKEN: ReadonlyArray<{ name: string; widths: number[]; why: string 
   // a 90dvh panel was centred inside a box shorter than itself. With the fill
   // on `backwards` the overlay anchors to the viewport and CI measured this
   // popup CLEAN at all seven widths.
-  {
-    name: 'tasks new-task',
-    widths: [360, 390, 430, 768, 820],
-    why: '`.nt-modal` is `width: 1060px; max-width: 100%` inside `.nt-overlay { display: grid; place-items: center }`. The implicit grid track sizes to max-content, so `max-width: 100%` resolves against 1060px and never clamps: the modal renders 1060px wide on a 360px phone with both edges cut and no horizontal scroll. Screenshot-confirmed. Worst of the five.',
-  },
+  // REMOVED: 'tasks new-task'. Explicit shrinkable columns on the overlay
+  // and panel let the existing max-width clamp to the padded viewport. The
+  // unchanged fields/buttons are now measured normally, including 1024x768.
   {
     name: 'estimates create',
     widths: [360, 390, 430, 768, 820, 1180, 1440],

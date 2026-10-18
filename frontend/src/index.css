@@ -564,6 +564,7 @@
   position: fixed; inset: 0; background: rgba(22,22,20,.42);
   backdrop-filter: blur(2px);
   display: grid; place-items: center; z-index: 200;
+  grid-template-columns: minmax(0, 1fr);
   animation: nt-fade .18s ease-out;
   padding: 20px;
 }
@@ -572,7 +573,7 @@
   width: 1060px; max-width: 100%; max-height: calc(100vh - 40px);
   background: var(--surface, #fff); border-radius: 14px;
   box-shadow: 0 40px 80px -20px rgba(0,0,0,.4), 0 0 0 1px var(--line-strong, #d3d3cc);
-  display: grid; grid-template-rows: auto 1fr auto; overflow: hidden;
+  display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr auto; overflow: hidden;
   animation: nt-pop .22s cubic-bezier(.2,.9,.3,1.2);
 }
 @keyframes nt-pop { from { transform: scale(.96); opacity: 0 } to { transform: scale(1); opacity: 1 } }
