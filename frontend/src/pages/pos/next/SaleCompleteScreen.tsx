@@ -44,7 +44,7 @@ import {
   Ruler,
   X,
 } from 'lucide-react';
-import api from '../../../services/api/client';
+import { printDocumentsApi } from '../../../services/api/printDocuments';
 import { orderApi, workshopApi } from '../../../services/api/sales';
 import { marketingApi } from '../../../services/api/marketing';
 import { incentiveApi } from '../../../services/api/incentive';
@@ -519,25 +519,19 @@ export function CompletionScreen({
   const roundOff = Number(order?.roundOff || 0);
   const hasRoundOff = roundOff !== 0;
 
+  // The ONE invoice opener (printDocumentsApi.openOrderInvoice) reads the
+  // server's refusal back, so staff see the real reason ("Cannot generate
+  // invoice: ...") instead of a fixed GSTIN hint. Busy guards a double tap.
+  const [docBusy, setDocBusy] = useState(false);
   const openDocumentPdf = async () => {
     setErrorMsg(null);
+    setDocBusy(true);
     try {
-      // Server-rendered A4 (GET /orders/{id}/invoice.pdf) -- the same assembly
-      // the JSON invoice door uses, so nothing is laid out or totalled here.
-      const res = await api.get(`/orders/${orderId}/invoice.pdf`, {
-        responseType: 'blob',
-      });
-      const url = URL.createObjectURL(
-        new Blob([res.data as BlobPart], { type: 'application/pdf' }),
-      );
-      const win = window.open(url, '_blank');
-      if (!win) setErrorMsg('Allow pop-ups for this site to open the printable document.');
-      // Keep the blob alive long enough for the new tab to load it.
-      window.setTimeout(() => URL.revokeObjectURL(url), 60000);
-    } catch {
-      // An error body on a blob request is itself a Blob, so there is no
-      // readable server detail here -- keep the message generic.
-      setErrorMsg('Could not build the document. Check the store GSTIN in settings.');
+      await printDocumentsApi.openOrderInvoice(orderId);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Could not build the document.');
+    } finally {
+      setDocBusy(false);
     }
   };
 
@@ -663,7 +657,12 @@ export function CompletionScreen({
               {/* The server has exactly ONE A4 document door
                   (GET /orders/{id}/invoice.pdf); every stage prints through
                   it and only the LABEL differs, per the stage table. */}
-              <PrintButton label={cfg.printDocLabel} primary onClick={openDocumentPdf} />
+              <PrintButton
+                label={docBusy ? 'Opening...' : cfg.printDocLabel}
+                primary
+                disabled={docBusy}
+                onClick={openDocumentPdf}
+              />
               {stage === 'DELIVERY' ? (
                 <PrintButton
                   label={cfg.secondPrintLabel}

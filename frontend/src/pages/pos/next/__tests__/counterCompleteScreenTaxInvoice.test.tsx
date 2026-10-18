@@ -149,6 +149,35 @@ describe('the general counter completion screen', () => {
     expect(sendNotification.mock.calls[0][0]).toMatchObject({ template_id: 'ORDER_CONFIRMED' });
   });
 
+  it("a refused invoice shows the server's own reason, not a fixed GSTIN hint", async () => {
+    const detail = 'Cannot generate invoice: this is a historical imported order';
+    apiGet.mockRejectedValue({
+      response: { data: new Blob([JSON.stringify({ detail })], { type: 'application/json' }) },
+    });
+    mount(<SaleCompleteScreen orderId="o-1" />);
+    await screen.findByText(/Asha Verma/);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Tax invoice (A4)' }));
+    expect(await screen.findByText(detail)).toBeTruthy();
+    expect(screen.queryByText(/GSTIN/)).toBeNull();
+  });
+
+  it('the invoice button is disabled while it loads, so a double tap asks once', async () => {
+    let finish: (v: unknown) => void = () => undefined;
+    apiGet.mockReturnValue(new Promise((r) => { finish = r; }));
+    mount(<SaleCompleteScreen orderId="o-1" />);
+    await screen.findByText(/Asha Verma/);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Tax invoice (A4)' }));
+    const busy = await screen.findByRole('button', { name: 'Opening...' });
+    expect(busy).toBeDisabled();
+    fireEvent.click(busy);
+    await waitFor(() => expect(apiGet).toHaveBeenCalledTimes(1));
+    finish({ data: new Blob(['%PDF']) });
+    expect(await screen.findByRole('button', { name: 'Tax invoice (A4)' })).toBeEnabled();
+    expect(apiGet).toHaveBeenCalledTimes(1);
+  });
+
   it("shows the bill's Round off line from the server's order, never re-derived", async () => {
     // Owner ruling 2026-10-08: the bill is rounded to the nearest rupee and
     // the paise it moved print as their own line -- read off the order.
