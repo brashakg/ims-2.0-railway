@@ -3296,6 +3296,13 @@ async def update_product(
             if update_data["category"] != (
                 _pm.resolve_category(existing.get("category")) or existing.get("category")
             ):
+                # Match the editor: only an unfinished ordered product may
+                # change category. Check before rekey, twin or audit writes.
+                if not _pm.is_ordered_draft(existing):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Product category can only be changed on an unfinished ordered product.",
+                    )
                 update_data.setdefault("hsn_code", hsn_for_category(update_data["category"]))
         if _catalog_list.switches_on_archived(existing, update_data.get("is_active")):
             raise HTTPException(status_code=409, detail=_catalog_list.USE_RESTORE)
