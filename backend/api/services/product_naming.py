@@ -483,6 +483,94 @@ def build_seo_description(product: Dict[str, Any]) -> str:
     return _clamp(lead + tail, MAX_DESC_LEN)
 
 
+# ---------------------------------------------------------------------------
+# MODEL-LEVEL builders (G2, owner 2026-10-18): one website listing per model
+# ---------------------------------------------------------------------------
+# A model's listing carries every colour and size, so its title, SEO and
+# handle read the MODEL-LEVEL fields only (product_master.MODEL_LEVEL_FIELDS:
+# brand, model number, model name, shape, gender -- plus the category word).
+# Never a colour, a colour code, an eye size or a lens: "Ray-Ban RB3025
+# Aviator Large Metal", never "... - Polished Gold". A set `name` is the
+# bill line of ONE item (it carries its colour), so it is never read here.
+
+
+def _model_pieces(product: Dict[str, Any]) -> list:
+    """Brand, model number, model name -- de-duplicated case-insensitively
+    (a model name equal to the number, or to the shape, is not repeated)."""
+    a = _attrs(product)
+    pieces: list = []
+    seen: set = set()
+    for piece in (
+        _brand(product),
+        _first(a.get("model_no"), product.get("model")),
+        _first(a.get("model_name")),
+    ):
+        low = piece.lower()
+        if piece and low not in seen:
+            seen.add(low)
+            pieces.append(piece)
+    return pieces
+
+
+def build_model_title(product: Dict[str, Any]) -> str:
+    """The listing title of a MODEL (owner 2026-10-18): Brand + Model number +
+    Model name, title-cased, no colour, no size. Falls back to the category
+    word when the model carries nothing else."""
+    if not isinstance(product, dict):
+        return ""
+    core = " ".join(_model_pieces(product))
+    if not core:
+        core = resolve_category_word(product.get("category"))
+    return _clamp(_smart_title(core), MAX_NAME_LEN)
+
+
+def build_model_seo_title(product: Dict[str, Any]) -> str:
+    """The model's <title>: its title + shape + gender + category word (what
+    a shopper searches), still no colour or size."""
+    if not isinstance(product, dict):
+        return ""
+    a = _attrs(product)
+    parts = _model_pieces(product)
+    seen = {p.lower() for p in parts}
+    shape = _first(a.get("shape"), a.get("frame_type"))
+    for piece in (shape, _gender_qualifier(product), resolve_category_word(product.get("category"))):
+        if piece and piece.lower() not in seen and not any(piece.lower() in p.lower() for p in parts):
+            seen.add(piece.lower())
+            parts.append(piece)
+    return _clamp(_smart_title(" ".join(parts)), MAX_NAME_LEN)
+
+
+def build_model_handle(product: Dict[str, Any]) -> str:
+    """URL slug of the model title (a NEW listing only -- a live listing keeps
+    its handle, so no URL ever breaks)."""
+    base = build_model_title(product) or _first((product or {}).get("sku"))
+    return re.sub(r"-{2,}", "-", re.sub(r"[^a-z0-9]+", "-", base.lower())).strip("-")
+
+
+def build_model_seo_description(
+    product: Dict[str, Any], colours: int = 0, sizes: int = 0
+) -> str:
+    """The model's meta description: names the model and how many colours /
+    sizes it comes in -- never one colour. <= MAX_DESC_LEN."""
+    if not isinstance(product, dict):
+        return ""
+    title = build_model_seo_title(product)
+    if not title:
+        return ""
+    choice = []
+    if colours > 1:
+        choice.append(f"{colours} colours")
+    if sizes > 1:
+        choice.append(f"{sizes} sizes")
+    brand = _brand(product)
+    word = (resolve_category_word(product.get("category")) or "product").lower()
+    text = f"Buy {title} online"
+    if choice:
+        text += " in " + " and ".join(choice)
+    text += f" -- genuine {brand + ' ' if brand else ''}{word} with authenticity assured."
+    return _clamp(text, MAX_DESC_LEN)
+
+
 def needs_name(product: Dict[str, Any]) -> bool:
     """True when the doc has no usable top-level display name yet (blank /
     whitespace). Used by the create door + backfill to decide whether to mint;
