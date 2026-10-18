@@ -256,7 +256,7 @@ describe('who sees which bulk button', () => {
   it('an admin can flag and archive', async () => {
     renderAt('');
     const bar = await tickFirstRow();
-    expect(within(bar).getByText(/Flag 1 product/)).toBeTruthy();
+    expect(within(bar).getByText(/Flag 1 item/)).toBeTruthy();
     expect(within(bar).getByText('Delete (archive)')).toBeTruthy();
   });
 
@@ -264,7 +264,7 @@ describe('who sees which bulk button', () => {
     auth.roles = ['STORE_MANAGER'];
     renderAt('');
     const bar = await tickFirstRow();
-    expect(within(bar).getByText(/Flag 1 product/)).toBeTruthy();
+    expect(within(bar).getByText(/Flag 1 item/)).toBeTruthy();
     expect(within(bar).queryByText('Delete (archive)')).toBeNull();
     expect(screen.queryByText('Add product')).toBeNull();
   });
@@ -287,7 +287,7 @@ describe('who sees which bulk button', () => {
     expect(await screen.findByText('Archived (deleted) (3)')).toBeTruthy();
     const bar = await tickFirstRow();
     expect(within(bar).getByText('Restore')).toBeTruthy();
-    expect(within(bar).queryByText(/Flag 1 product/)).toBeNull();
+    expect(within(bar).queryByText(/Flag 1 item/)).toBeNull();
   });
 });
 
@@ -385,7 +385,7 @@ describe('the Flag dialog names who gets the tasks from the server', () => {
     renderAt('');
     await screen.findByTestId('catalog-table');
     fireEvent.click(screen.getByLabelText('Select Carrera 8035 Black'));
-    fireEvent.click(within(await screen.findByTestId('selection-bar')).getByText(/Flag 1 product/));
+    fireEvent.click(within(await screen.findByTestId('selection-bar')).getByText(/Flag 1 item/));
     await waitFor(() =>
       expect(screen.getByTestId('tasks-go-to').textContent).toBe('Tasks go to: Akshay Ovhal (1 product)')
     );
@@ -533,7 +533,7 @@ describe('a page past the end is never a dead end', () => {
     await screen.findByTestId('catalog-table');
     fireEvent.click(screen.getByLabelText('Select Carrera 8035 Black'));
     fireEvent.click(within(await screen.findByTestId('selection-bar')).getByText('Delete (archive)'));
-    fireEvent.click(await screen.findByRole('button', { name: /Delete \(archive\) 1 product/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Delete \(archive\) 1 item/ }));
     await waitFor(() => expect(where().get('page')).toBeNull());
     await waitFor(() =>
       expect(getProducts.mock.calls.at(-1)?.[0]).toMatchObject({ skip: 0, limit: 25 })
@@ -687,5 +687,25 @@ describe('G1 - one row per model (owner 2026-10-18)', () => {
     expect(rows[2]).toHaveTextContent('(off)');
     expect(within(rows[0]).getByText('model')).toBeTruthy();
     expect(screen.getByTestId('result-line').textContent).toMatch(/^1 model of 481 products/);
+  });
+
+  it('ticking a model selects all its colours/sizes; each variant has its own tick', async () => {
+    getProducts.mockResolvedValue({ products: [MODEL], total: 1, total_count: 1 });
+    renderAt();
+    await screen.findByText('Carrera 8035 Black');
+    fireEvent.click(screen.getByLabelText('Select all 3 items of Carrera 8035 Black'));
+    const bar = await screen.findByTestId('selection-bar');
+    expect(bar).toHaveTextContent('3 items selected');
+    expect(within(bar).getByText(/Flag 3 items/)).toBeTruthy();
+    fireEvent.click(screen.getByTestId('family-toggle'));
+    const rows = screen.getAllByTestId('family-member-row');
+    fireEvent.click(within(rows[1]).getByRole('checkbox'));
+    expect(screen.getByTestId('selection-bar')).toHaveTextContent('2 items selected');
+    const modelBox = screen.getByLabelText('Select all 3 items of Carrera 8035 Black') as HTMLInputElement;
+    expect(modelBox.checked).toBe(false);
+    expect(modelBox.indeterminate).toBe(true);
+    // the page box counts items too
+    fireEvent.click(screen.getByLabelText('Select all on this page'));
+    expect(screen.getByTestId('selection-bar')).toHaveTextContent('3 items selected');
   });
 });

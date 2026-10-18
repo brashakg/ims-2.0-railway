@@ -658,23 +658,27 @@ export function CatalogManagerPage({
   const canTick = (it: CatalogDrawerItem) =>
     segment !== 'review' || (!it.doc.deleted_at && !isOrderedDraft(it.doc));
   const tickable = items.filter(canTick);
-  const pageIds = tickable.map((it) => docId(it.doc)).filter(Boolean);
+  // G1: a model row stands for ALL its colours/sizes -- ticking it ticks
+  // every one of them (the bar and the dialogs count items, not rows).
+  const rowIds = (it: CatalogDrawerItem): string[] => {
+    const fam = it.kind === 'spine' ? (it.doc.family as { members?: FamilyMember[] } | undefined) : undefined;
+    const ids = fam?.members?.length ? fam.members.map((m) => m.product_id) : [docId(it.doc)];
+    return ids.filter(Boolean);
+  };
+  const pageIds = tickable.flatMap(rowIds);
   const allOnPage = pageIds.length > 0 && pageIds.every((id) => selected.has(id));
-  const toggleAllOnPage = () => {
+  const toggleIds = useCallback((ids: string[]) => {
     setSelected((prev) => {
       const next = new Set(prev);
-      if (allOnPage) {
-        for (const it of tickable) next.delete(docId(it.doc));
+      if (ids.every((id) => next.has(id))) {
+        for (const id of ids) next.delete(id);
       } else {
-        for (const it of tickable) {
-          const id = docId(it.doc);
-          if (!id || next.size >= BULK_CAP) continue;
-          next.add(id);
-        }
+        for (const id of ids) if (next.size < BULK_CAP) next.add(id);
       }
       return next;
     });
-  };
+  }, []);
+  const toggleAllOnPage = () => toggleIds(pageIds);
 
   const afterBulk = useCallback(
     (message: string, ok: boolean) => {
@@ -1072,6 +1076,8 @@ export function CatalogManagerPage({
                       ? (doc.family as { lead_id: string; count: number; members: FamilyMember[] } | undefined)
                       : undefined;
                   const isOpen = Boolean(family && expanded.has(family.lead_id));
+                  const ids = rowIds(it);
+                  const ticked = ids.filter((id) => selected.has(id)).length;
                   const memberLabel = (m: FamilyMember) =>
                     [m.color, m.size].filter(Boolean).join(' · ') || m.sku || 'variant';
                   return (
@@ -1079,7 +1085,7 @@ export function CatalogManagerPage({
                     <tr
                       className={clsx(
                         'border-t border-gray-100 hover:bg-gray-50',
-                        selected.has(pid) && 'bg-amber-50',
+                        ticked > 0 && 'bg-amber-50',
                         inactive && 'opacity-60'
                       )}
                     >
@@ -1088,10 +1094,13 @@ export function CatalogManagerPage({
                           {canTick(it) && (
                             <input
                               type="checkbox"
-                              checked={selected.has(pid)}
-                              onChange={() => toggleSelect(pid)}
+                              checked={ticked > 0 && ticked === ids.length}
+                              ref={(el) => {
+                                if (el) el.indeterminate = ticked > 0 && ticked < ids.length;
+                              }}
+                              onChange={() => (ids.length > 1 ? toggleIds(ids) : toggleSelect(pid))}
                               className="h-3.5 w-3.5 accent-amber-500"
-                              aria-label={`Select ${name}`}
+                              aria-label={ids.length > 1 ? `Select all ${ids.length} items of ${name}` : `Select ${name}`}
                             />
                           )}
                         </td>
@@ -1243,7 +1252,19 @@ export function CatalogManagerPage({
                           className={clsx('border-t border-gray-50 bg-gray-50/60 text-xs', !m.is_active && 'opacity-60')}
                           data-testid="family-member-row"
                         >
-                          {showChecks && <td />}
+                          {showChecks && (
+                            <td className="px-3 py-1.5">
+                              {canTick(it) && (
+                                <input
+                                  type="checkbox"
+                                  checked={selected.has(m.product_id)}
+                                  onChange={() => toggleSelect(m.product_id)}
+                                  className="h-3.5 w-3.5 accent-amber-500"
+                                  aria-label={`Select ${memberLabel(m)}`}
+                                />
+                              )}
+                            </td>
+                          )}
                           <td />
                           <td className="px-3 py-1.5">
                             <button

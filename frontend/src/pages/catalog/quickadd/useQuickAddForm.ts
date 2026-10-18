@@ -157,7 +157,6 @@ export function useQuickAddForm() {
   // this is NOT ('This is a different model') -- never re-joined automatically.
   const [familyHint, setFamilyHint] = useState<FamilyHint | null>(null);
   const [optedOutLeadId, setOptedOutLeadId] = useState<string | null>(null);
-  const autoFamilyRef = useRef<string | null>(null);
   // Copied-but-unconfirmed fields (attribute names + form-level keys like
   // 'mrp'/'offer_price'). Amber ring until the operator touches the field.
   const [flaggedFields, setFlaggedFields] = useState<Set<string>>(new Set());
@@ -556,18 +555,19 @@ export function useQuickAddForm() {
     setVariantCtx(null);
     setFlaggedFields(new Set());
     setOptedOutLeadId(null);
-    autoFamilyRef.current = null;
     resetForm(false);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }, [resetForm]);
 
-  // G1 "This is a different model": leave variant mode KEEPING what is on
-  // the form; the save sends family_opt_out so the server never links it.
+  // G1 "This is a different model": KEEP what is on the form (leaving
+  // variant mode if in it); the save sends family_opt_out so the server never
+  // links it to that model.
   const leaveFamily = useCallback(() => {
-    if (variantCtx) setOptedOutLeadId(variantCtx.leadId);
+    const leadId = variantCtx?.leadId ?? familyHint?.lead_id;
+    if (leadId) setOptedOutLeadId(leadId);
     setVariantCtx(null);
     setFlaggedFields(new Set());
-  }, [variantCtx]);
+  }, [variantCtx, familyHint]);
 
   // VARIANT STREAK: after a successful save in variant mode, stay in variant
   // mode — keep the model-level (copy/flag) fields, clear the variant-defining
@@ -642,33 +642,15 @@ export function useQuickAddForm() {
     [enterVariantMode, toast, attributes, weight, reorderLevel]
   );
 
-  // G1: brand + model typed match a model that exists -> join it, no extra
-  // step: the form flips into variant mode on the model's LEAD (its
-  // model-level fields filled and locked, what was typed kept) and the save
-  // links it. Never while editing, never twice for one model, never for the
-  // model the cataloguer said this is not.
-  const handleFamilyFound = useCallback(
-    async (family: FamilyHint | null) => {
-      setFamilyHint(family);
-      if (!family || editMode || variantCtx || isSubmitting) return;
-      if (family.lead_id === optedOutLeadId || autoFamilyRef.current === family.lead_id) return;
-      autoFamilyRef.current = family.lead_id;
-      try {
-        const lead = (await productApi.getProduct(family.lead_id)) as ProductDoc;
-        enterVariantMode(
-          lead,
-          { attributes, weight, reorderLevel, prices: { mrp, offerPrice, costPrice } },
-          family,
-        );
-      } catch {
-        autoFamilyRef.current = null; // the server still links it on Save
-      }
-    },
-    [
-      editMode, variantCtx, isSubmitting, optedOutLeadId, enterVariantMode, attributes, weight,
-      reorderLevel, mrp, offerPrice, costPrice,
-    ]
-  );
+  // G1: brand + model typed match a model that exists -> the banner says it
+  // will join that model. Nothing locks while typing (RB4165 can still
+  // become RB4165F): the SERVER decides the link on Save from what is typed
+  // then, and gives the new item the model's shape and gender; after a
+  // Save + New the form is in variant mode on that model (locked) for the
+  // next colour.
+  const handleFamilyFound = useCallback((family: FamilyHint | null) => {
+    setFamilyHint(family);
+  }, []);
 
   const handleSimilarOpen = useCallback(
     (existing?: SimilarProductSummary | null) => {
@@ -746,6 +728,15 @@ export function useQuickAddForm() {
           });
           // Finishing a product releases the units receipts held for it.
           const released = Number((updated as { released_units?: number })?.released_units) || 0;
+          // G1: a model-level edit on the model reaches its colours/sizes; any
+          // that refused it are named (they keep the old value).
+          const notUpdated = (updated as { family_not_updated?: string[] })?.family_not_updated || [];
+          if (notUpdated.length > 0) {
+            toast.warning(
+              `Saved on the model, but these colours/sizes did not take the change: ${notUpdated.join(', ')}. Open each one to fix it.`,
+              10000,
+            );
+          }
           // Only a level the user changed: an untouched one sends nothing (it
           // could clear an unset level or overwrite a newer save by someone else).
           const loadedLevel = typedLevel(levelText(editLevels?.[reorderShop]));
@@ -794,10 +785,20 @@ export function useQuickAddForm() {
               }
             : undefined
         );
+        const joined = (created as { variant_of?: string } | undefined)?.variant_of;
         if (variantCtx) {
           // VARIANT STREAK: stay in variant mode for the next colour/size of
           // the same model (Esc / "New model" exits to a blank form).
           startNextVariant();
+        } else if (saveAndNew && joined) {
+          // G1: the server linked it to a model -- the next colour/size is
+          // entered in variant mode on that model, its model fields locked.
+          try {
+            const lead = (await productApi.getProduct(joined)) as ProductDoc;
+            enterVariantMode(lead, undefined, familyHint?.lead_id === joined ? familyHint : null);
+          } catch {
+            resetForm(true);
+          }
         } else if (saveAndNew) {
           resetForm(true);
           // Keep focus flowing: back to the top, cursor in the model field
@@ -826,7 +827,7 @@ export function useQuickAddForm() {
     },
     [
       currentValues, toast, resetForm, navigate, variantCtx, startNextVariant,
-      optedOutLeadId, familyHint,
+      optedOutLeadId, familyHint, enterVariantMode,
       editMode, editLevels, reorderLevel, reorderBadInput, canSetReorderLevel, reorderShop,
       focusAttrField,
     ]
@@ -1625,7 +1626,7 @@ export function useQuickAddForm() {
     openSections, toggleSection, liveErrors, sectionIssues, jumpToField,
     firstFieldRef,
     // modes
-    editMode, isReviewMode, variantCtx, exitVariantMode, leaveFamily,
+    editMode, isReviewMode, variantCtx, exitVariantMode, leaveFamily, familyHint, optedOutLeadId,
     flaggedFields, clearFlag,
     // templates + clone
     templatesOpen, setTemplatesOpen, templates, templatesLoading,

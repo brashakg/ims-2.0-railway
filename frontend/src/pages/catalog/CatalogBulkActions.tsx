@@ -129,7 +129,7 @@ export function FlagDialog({
       const done = res.results.filter((r) => r.status === 'done').length;
       const already = res.results.filter((r) => r.status === 'already').length;
       const refused = res.results.filter((r) => r.status === 'refused').length;
-      const parts = [`${plural(done, 'product')} flagged`];
+      const parts = [`${plural(done, 'item')} flagged`];
       if (res.tasks.length) parts.push(`tasks sent to ${tasksGoTo(res.tasks)}`);
       if (already) parts.push(`${already} already had this flag`);
       if (refused) parts.push(`${refused} could not be flagged`);
@@ -142,7 +142,7 @@ export function FlagDialog({
   };
 
   return (
-    <Dialog title={`Flag ${plural(n, 'product')}`} onClose={onClose}>
+    <Dialog title={`Flag ${plural(n, 'item')}`} onClose={onClose}>
       <p className="-mt-2 text-sm text-gray-600">
         The person who added each product gets a task. The flag clears when they mark it fixed.
         The products keep selling meanwhile.
@@ -265,7 +265,7 @@ export function ArchiveDialog({
       const done = res.results.filter((r) => r.status === 'done').length;
       const no = res.results.filter((r) => r.status === 'refused');
       onDone(
-        `${plural(done, 'product')} archived` +
+        `${plural(done, 'item')} archived` +
           (no.length ? ` - ${no.length} refused (${no[0].reason})` : ''),
         no.length === 0
       );
@@ -276,7 +276,7 @@ export function ArchiveDialog({
   };
 
   return (
-    <Dialog title={`Delete (archive) ${plural(ids.length, 'product')}?`} onClose={onClose}>
+    <Dialog title={`Delete (archive) ${plural(ids.length, 'item')}?`} onClose={onClose}>
       {!preview && !error && (
         <p className="flex items-center gap-2 text-sm text-gray-600">
           <Loader2 className="h-4 w-4 animate-spin" /> Checking stock and the website...
@@ -290,7 +290,7 @@ export function ArchiveDialog({
           </p>
           {inStock.length > 0 ? (
             <p className="rounded-lg bg-amber-50 px-3 py-2 text-amber-900">
-              {plural(inStock.length, 'product')} still {inStock.length === 1 ? 'has' : 'have'}{' '}
+              {plural(inStock.length, 'item')} still {inStock.length === 1 ? 'has' : 'have'}{' '}
               {plural(units, 'unit')} at the shops:{' '}
               {inStock.map((r) => r.name || r.product_id).join(', ')}.
             </p>
@@ -327,7 +327,7 @@ export function ArchiveDialog({
           className="inline-flex h-10 items-center gap-1.5 rounded-lg bg-red-700 px-4 text-sm font-semibold text-white hover:bg-red-800 disabled:opacity-60"
         >
           {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
-          Delete (archive) {plural(ready.length, 'product')}
+          Delete (archive) {plural(ready.length, 'item')}
         </button>
       </div>
     </Dialog>
@@ -368,7 +368,7 @@ export function SelectionBar({
       data-testid="selection-bar"
     >
       <span className="text-sm">
-        <span className="font-semibold">{count}</span> selected
+        <span className="font-semibold">{plural(count, 'item')}</span> selected
         {count >= cap && <span className="ml-1 text-xs text-gray-500">(max {cap} at a time)</span>}
       </span>
       {canFlag && !archivedView && (
@@ -394,7 +394,7 @@ export function SelectionBar({
             disabled={busy}
             className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-gray-900 px-3 text-sm font-medium text-white hover:bg-gray-800 disabled:opacity-60"
           >
-            <Flag className="h-4 w-4" /> Flag {plural(count, 'product')}
+            <Flag className="h-4 w-4" /> Flag {plural(count, 'item')}
           </button>
         </>
       )}

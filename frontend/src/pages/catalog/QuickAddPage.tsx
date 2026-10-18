@@ -43,7 +43,7 @@ export function QuickAddPage() {
   const {
     canAddProduct, queueClear, setQueueClear, setSearchParams, navigate,
     editMode, isReviewMode, reviewSnapshot, handleBackToQueue,
-    variantCtx, exitVariantMode, leaveFamily,
+    variantCtx, exitVariantMode, leaveFamily, familyHint, optedOutLeadId,
     dupInfo, setDupInfo, dupBusy, handleDupAddVariant, handleDupOpenExisting,
   } = form;
 
@@ -176,6 +176,48 @@ export function QuickAddPage() {
       <div className="space-y-3">
         {/* ---- Form column ---- */}
         <div className="space-y-3">
+          {/* G1: the brand + model typed match an existing model -- Save adds
+              this as a new colour/size of it (decided on Save, from what is
+              typed then; nothing locks while typing). */}
+          {!variantCtx && !editMode && familyHint && familyHint.lead_id !== optedOutLeadId && (
+            <div
+              className="flex items-start gap-2.5 rounded-xl border border-bv-50 bg-bv-soft px-4 py-3 text-sm"
+              data-testid="model-family-hint"
+            >
+              <CopyPlus className="w-4 h-4 text-bv mt-0.5 shrink-0" />
+              <div className="min-w-0 flex-1 space-y-1">
+                <p className="text-gray-800">
+                  <span className="font-semibold">This model already exists:</span>{' '}
+                  <span className="font-semibold">{familyHint.label}</span>
+                  <span className="text-gray-500">
+                    {' '}— {familyHint.count} variant{familyHint.count === 1 ? '' : 's'}
+                  </span>
+                  . This will be added as a new colour/size of it; its shape and gender come from the model.
+                </p>
+                {familyHint.chips.length > 0 && (
+                  <div className="flex flex-wrap gap-1">
+                    {familyHint.chips.map((c, i) => (
+                      <span
+                        key={`${c}-${i}`}
+                        className="rounded border border-gray-200 bg-white px-1.5 py-0.5 text-[11px] text-gray-700"
+                      >
+                        {c}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={leaveFamily}
+                className="shrink-0 btn-secondary !py-1 !px-2.5 text-xs"
+                title="Save it as a model of its own"
+              >
+                This is a different model
+              </button>
+            </div>
+          )}
+
           {/* VARIANT MODE banner: which model this sibling belongs to, the
               copied-field legend, the dictionary-drop note, and the exit. */}
           {variantCtx && (
