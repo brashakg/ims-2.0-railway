@@ -30,6 +30,11 @@ from ..dependencies import (
     validate_store_access,
 )
 from ..services import org_validation as ov
+from database.repositories.order_repository import (
+    INVOICE_CODE_RE,
+    invoice_code_clash,
+    store_invoice_code,
+)
 from ..services.stores_util import ONLINE_STORE_TYPE, is_online_store, physical_stores
 
 logger = logging.getLogger(__name__)
@@ -97,6 +102,9 @@ class StoreCreate(BaseModel):
     cost_center: Optional[str] = None
     # --- per-store invoice identity (overrides entity defaults slightly) ---
     invoice_prefix: Optional[str] = None
+    # 5-char shop code in tax invoice numbers (BOK01/2627/00001); unset =
+    # derived from store_code. Validated in _validate_invoice_code.
+    invoice_code: Optional[str] = None
     invoice_header: Optional[str] = None
     invoice_footer: Optional[str] = None
     invoice_terms: Optional[str] = None
@@ -139,6 +147,9 @@ class StoreUpdate(BaseModel):
     upi_vpa: Optional[str] = None
     cost_center: Optional[str] = None
     invoice_prefix: Optional[str] = None
+    # 5-char shop code in tax invoice numbers (BOK01/2627/00001); unset =
+    # derived from store_code. Validated in _validate_invoice_code.
+    invoice_code: Optional[str] = None
     invoice_header: Optional[str] = None
     invoice_footer: Optional[str] = None
     invoice_terms: Optional[str] = None
@@ -219,6 +230,53 @@ def _location_holder(db, gid: str) -> Optional[dict]:
     )
 
 
+def _validate_invoice_code(
+    data: dict, *, db=None, store_id: Optional[str] = None, existing=None
+) -> None:
+    """The shop code in the store's tax invoice numbers (BOK01/2627/00001):
+    ``invoice_code`` when set, else derived from the store code. A set code is
+    NORMALISED in place ("" clears it back to the derived one) and must be 5
+    capital letters/digits (400). On a create, or whenever the payload names
+    an invoice_code, the code the store will carry must not be ANOTHER store's
+    (409) -- the mint refuses a clash too, so this only catches it at the desk."""
+    declared = "invoice_code" in data
+    if declared:
+        code = str(data.get("invoice_code") or "").strip().upper()
+        data["invoice_code"] = code or None
+        if code and not INVOICE_CODE_RE.match(code):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Invoice code must be 5 capital letters or digits, not "
+                    "starting with 0 (e.g. BOK01)"
+                ),
+            )
+    if db is None or not (declared or existing is None):
+        return
+    merged = {**(existing or {}), **data}
+    merged["store_code"] = ov.normalize_store_code(merged.get("store_code")) or None
+    code = store_invoice_code(merged, store_id)
+    if not code:
+        return  # no code yet (e.g. HQ): the mint refuses until one is set
+    try:
+        docs = list(
+            db.get_collection("stores").find(
+                {}, {"_id": 0, "store_id": 1, "store_code": 1, "invoice_code": 1}
+            )
+        )
+    except Exception:  # noqa: BLE001 - the mint re-checks on every invoice
+        return
+    other = invoice_code_clash(code, (store_id, merged["store_code"]), docs)
+    if other:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Invoice code {code} is already store {other}'s -- "
+                "set a different invoice code"
+            ),
+        )
+
+
 def _validate_store_payload(
     data: dict,
     *,
@@ -279,6 +337,7 @@ def _validate_store_payload(
         raise HTTPException(
             status_code=400, detail=f"Unknown categories: {', '.join(bad)}"
         )
+    _validate_invoice_code(data, db=db, store_id=store_id, existing=existing)
     declared = "shopify_location_id" in data
     if declared:
         gid = _as_shopify_gid(data.get("shopify_location_id"), "Location")

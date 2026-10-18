@@ -7,7 +7,10 @@ rounding or validation was changed.
 
 from api.utils.event_time import utc_now_iso
 
-from database.repositories.order_repository import derive_bill_type
+from database.repositories.order_repository import (
+    InvoiceNumberError,
+    derive_bill_type,
+)
 from datetime import datetime
 from fastapi import Depends, HTTPException
 from typing import Any, Dict, Optional
@@ -388,9 +391,14 @@ async def superadmin_invoice_change(
 
     if body.mode == "REVISED_INVOICE":
         # Allocate a fresh GST serial for the revised invoice.
-        new_invoice_number = repo.next_invoice_number(
-            order.get("store_id"), store_doc=store_doc
-        )
+        try:
+            new_invoice_number = repo.next_invoice_number(
+                order.get("store_id"), store_doc=store_doc
+            )
+        except InvoiceNumberError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"Cannot issue a revised invoice: {exc}"
+            ) from exc
         revised_doc = build_revised_invoice_doc(
             order=order,
             new_invoice_number=new_invoice_number,

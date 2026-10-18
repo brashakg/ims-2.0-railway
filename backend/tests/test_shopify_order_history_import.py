@@ -1177,10 +1177,11 @@ def test_reimport_never_books_a_refund_a_queued_review_row_holds(wired):
 def test_gstr1_bill_number_real_minted_serial_always_wins_verbatim():
     from api.routers.reports import _gstr1_bill_number
 
-    # The system's OWN minted serial format ({PREFIX}/{STORE}/{FY}/{serial},
-    # 20 chars -- pinned by test_orders_numbering) must be returned VERBATIM:
-    # GSTR-1 files the number of the tax invoice actually issued; substituting a
-    # UUID fragment breaks B2B recipients' GSTR-2A/2B matching.
+    # An issued number is returned VERBATIM, even the OLD 20-char format
+    # ({PREFIX}/{STORE}/{FY}/{serial}, minted before the 2026-10-18 16-char
+    # format -- test_gst_invoice_number_16): GSTR-1 files the number of the tax
+    # invoice actually issued; substituting a UUID fragment breaks B2B
+    # recipients' GSTR-2A/2B matching.
     real = "BV/BOK-01/26-27/0001"
     assert len(real) == 20
     uuid_like = "b1f2c3d4-e5f6-7890-abcd-ef1234567890"
@@ -1192,7 +1193,7 @@ def test_gstr1_bill_number_real_minted_serial_always_wins_verbatim():
         }
     )
     assert got == real
-    # A live ONLINE serial (23 chars) also wins over the Shopify name.
+    # An old ONLINE serial (23 chars) also wins over the Shopify name.
     online = "BV/ONLINE-01/26-27/0001"
     assert _gstr1_bill_number(
         {"invoice_number": online, "shopify_order_name": "#1001"}
