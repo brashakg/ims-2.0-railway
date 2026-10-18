@@ -487,7 +487,7 @@ def _store_maps(db):
     return s2e, enames
 
 
-def _store_state_map(db) -> dict:
+def _store_state_map(db, *, strict=False) -> dict:
     """store_id -> home state (for intra/inter-state GST classification)."""
     out: dict = {}
     try:
@@ -497,11 +497,12 @@ def _store_state_map(db) -> dict:
             if s.get("store_id"):
                 out[s["store_id"]] = str(s.get("state") or "")
     except Exception:
-        pass
+        if strict:
+            raise
     return out
 
 
-def _customer_state_map(db) -> dict:
+def _customer_state_map(db, *, strict=False) -> dict:
     """customer_id -> state (for intra/inter-state GST classification)."""
     out: dict = {}
     try:
@@ -512,7 +513,8 @@ def _customer_state_map(db) -> dict:
             if cid:
                 out[cid] = str(c.get("state") or "")
     except Exception:
-        pass
+        if strict:
+            raise
     return out
 
 
