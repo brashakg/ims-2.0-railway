@@ -1430,6 +1430,16 @@ def _save_catalog_product(product: Dict, *, mark_dirty: bool = True) -> None:
             stored.update(product)
         else:
             CATALOG_PRODUCTS[product["id"]] = product
+    if mark_dirty:
+        _queue_model_of(product)
+
+
+def _queue_model_of(product: Dict) -> None:
+    """A catalogue edit of a colour/size of a model queues its MODEL's
+    listing (G2, review of #1233: the colour itself owns no listing, so its
+    own dirty flag is never swept). Fail-soft."""
+    if (product.get("ecom") or {}).get("variant_of"):
+        _pm.queue_model_listing_of(_get_db(), product)
 
 
 def _save_catalog_product_cas(
@@ -1461,6 +1471,7 @@ def _save_catalog_product_cas(
             matched = getattr(res, "modified_count", 0)
         if matched and mark_dirty:
             _merge_catalog_ecom(coll, product)
+            _queue_model_of(product)
         return bool(matched)
     stored = CATALOG_PRODUCTS.get(product["id"])
     if stored is None or stored.get("updated_at") != expected_raw_updated_at:

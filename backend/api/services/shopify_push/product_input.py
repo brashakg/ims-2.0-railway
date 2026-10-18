@@ -385,7 +385,8 @@ def _resolve_variant_pricing(
         price       the discount engine's online price for that variant when
                     set (its row's discounted_price; the lead's stamped
                     ecom.online_offer_price), else its own in-store offer
-                    price when > 0 and <= its MRP, else its own MRP
+                    price when > 0 and <= its MRP, else its own MRP -- and
+                    NOTHING when it has no MRP (MRP is required)
         compare-at  its own MRP -- the callers strike it through only when it
                     is higher than the price.
     Never another item's price: a colour with none of its own is unpriced
@@ -397,12 +398,15 @@ def _resolve_variant_pricing(
             ecom = product.get("ecom") or {}
             if ecom.get("online_price_source") in ("rule", "manual"):
                 engine = _price_float(ecom.get("online_offer_price"))
+        if not mrp:
+            # MRP is required (the Indian MRP display rule, review of #1233):
+            # no MRP, no price -- held on a live listing (its last web price
+            # and MRP stand), refused on a first publish.
+            return 0.0, 0.0
         offer = _price_float(variant.get("offer_price"))
         if engine:
             price = engine
-        elif offer and (not mrp or offer <= mrp):
-            # ponytail: no MRP at all -> its offer stands (a draft-quality
-            # item); a model press holds/refuses only when both are missing.
+        elif offer and offer <= mrp:
             price = offer
         else:
             price = mrp

@@ -74,6 +74,7 @@ OWN_PRICE = "_own_price"
 # A colour catalogued again in the place of an archived one still on the
 # listing: it takes over that variant (the archived row lets go of it).
 ADOPTS = "_adopts"
+ADOPT_GID = "_adopt_variant_id"
 ARCHIVED = "_archived"
 # A colour held back from a LIVE listing this press (named on the result).
 HELD = "_held"
@@ -251,8 +252,10 @@ def model_listing(
         for m in members:
             sku = str(m["sku"])
             if not by_sku[sku].get(ARCHIVED) and _resolve_variant_pricing(product, by_sku[sku])[0] <= 0:
-                _hold(sku, UNPRICED_SIZE, "no selling price" if _creating(sku)
-                      else "no selling price -- keeps its last price on the website")
+                # No MRP is no price (Indian MRP display rule, review of #1233).
+                why = "no MRP" if not _positive(by_sku[sku].get("mrp")) else "no selling price"
+                _hold(sku, UNPRICED_SIZE, why if _creating(sku)
+                      else f"{why} -- keeps its last price and MRP on the website")
         for grp in clashes:
             for sku in grp:
                 if _creating(sku):
@@ -265,6 +268,25 @@ def model_listing(
                 if _creating(sku) and name in axes and not str(values[sku][field] or "").strip():
                     _hold(sku, OPTION_MISSING, f"no {'colour' if name == 'Color' else 'size'}")
         members = _not_held(kept)
+        axes = _axes_of(members, values)
+        # A colour that would ADD an option the listing's own variants have no
+        # value for (a live lead with no size, a new colour with one) is held
+        # -- the listing cannot take that option; the lead's own edits still
+        # go out (review of #1233; was a refusal re-queued every run).
+        listed = [m for m in members if not _creating(str(m["sku"]))]
+        for name, field in AXES:
+            if name not in axes or not listed:
+                continue
+            have = {str(values[str(m["sku"])][field] or "").strip().lower() for m in listed}
+            if have != {""}:
+                continue
+            for m in members:
+                sku = str(m["sku"])
+                if _creating(sku) and str(values[sku][field] or "").strip():
+                    what = "colour" if name == "Color" else "size"
+                    _hold(sku, OPTION_MISSING, f"adds a {what} the listing has none of -- fill the {what} of "
+                          + ", ".join(str(x["sku"]) for x in listed) + " first")
+        members = _not_held(members)
         axes = _axes_of(members, values)
         dropped = {h["sku"] for h in held if _creating(h["sku"])}
         rows = [r for r in rows if str(r.get("sku")) not in dropped]
@@ -307,8 +329,11 @@ def model_listing(
 
     # A colour catalogued AGAIN in the place of an archived one still on the
     # listing (same colour and size) takes over its variant: the slot is
-    # reused, nothing is deleted, and the archived row lets go of it in the
-    # same write that records it (writeback._writeback_variant).
+    # reused, nothing is deleted. It is handed the archived row's STORED
+    # variant id up front (ADOPT_GID -- matched by id, never by today's
+    # label, which may differ from the one Shopify shows: review of #1233),
+    # and the archived row lets go of it only when the id written back is
+    # that one (writeback._writeback_variant).
     for r in list(rows):
         if r.get("shopify_variant_id") or not r.get(FULL_OPTIONS) or str(r.get("sku")) not in member_skus:
             continue
@@ -317,6 +342,7 @@ def model_listing(
             other = by_sku.get(a) or {}
             if other.get(FULL_OPTIONS) and {k: str(v).strip().lower() for k, v in other[FULL_OPTIONS].items()} == mine:
                 r[ADOPTS] = a
+                r[ADOPT_GID] = other.get("shopify_variant_id")
                 rows = [x for x in rows if str(x.get("sku")) != a]
                 archived_listed = archived_listed - {a}
                 break
@@ -335,6 +361,13 @@ def model_listing(
         "waiting": waiting,
         **content,
     }
+
+
+def _positive(value: Any) -> bool:
+    try:
+        return float(value) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _axes_of(members: List[Dict[str, Any]], values: Dict[str, Dict[str, str]]) -> List[str]:

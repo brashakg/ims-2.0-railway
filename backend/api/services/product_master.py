@@ -4130,6 +4130,24 @@ def queue_model_listing(db, lead: Optional[Dict[str, Any]]) -> None:
         logger.warning("[PM] model listing queue skipped for %s", (lead or {}).get("sku"), exc_info=True)
 
 
+def queue_model_listing_of(db, doc: Optional[Dict[str, Any]]) -> None:
+    """``doc`` is a colour/size of a model -- its spine (variant_of = the
+    lead's product_id) or its twin (ecom.variant_of): its MODEL's listing is
+    queued (queue_model_listing). Any edit of it counts (review of #1233: the
+    cost / HSN / GST / switch / status edits that finish a waiting colour
+    used to queue nothing, so it never reached the website). A product that
+    is no colour of a model: nothing. Fail-soft."""
+    try:
+        link = ((doc or {}).get("ecom") or {}).get("variant_of")
+        lead_id = link.get("product_id") if isinstance(link, dict) else None
+        lead_id = lead_id or (doc or {}).get("variant_of")
+        if db is None or not lead_id:
+            return
+        queue_model_listing(db, db.get_collection("products").find_one({"product_id": lead_id}))
+    except Exception:  # noqa: BLE001
+        logger.warning("[PM] model listing queue skipped for %s", (doc or {}).get("sku"), exc_info=True)
+
+
 def _family_audit(audit_repo, action: str, product_id: Any, actor: Any, detail: Dict[str, Any]) -> None:
     if audit_repo is None:
         return
@@ -4756,15 +4774,12 @@ def mirror_update_to_catalog_twin(
             row_ok = _mirror_variant_row_update(
                 current=current, patch=patch, db=db, mark_dirty=mark_dirty
             )
-            if mark_dirty and any(
-                k in patch
-                for k in ("mrp", "offer_price", "images", "brand", "category", "attributes", "tags")
-            ):
-                # Its colour, photo, price or attributes show on its MODEL's
-                # listing (G2): that listing is queued.
-                queue_model_listing(
-                    db, db.get_collection("products").find_one({"product_id": current["variant_of"]})
-                )
+            if mark_dirty and patch:
+                # ANY edit of a colour/size -- its price, photo, attributes,
+                # but also its cost / HSN / GST, catalogue status or switch
+                # (the edits that FINISH a waiting colour) -- queues its
+                # MODEL's listing (G2; review of #1233).
+                queue_model_listing_of(db, current)
         if not cat_patch:
             return row_ok
         if cat_patch.get("ecom.locally_modified"):

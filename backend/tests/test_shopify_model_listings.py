@@ -1126,7 +1126,7 @@ def test_a_live_listing_holds_back_only_an_unpriced_colour(monkeypatch):
     assert silver_sku in res.error and "everything else was sent" in res.error
     assert {v["sku"] for v in p["variants"]} == {db["products"].find_one({"product_id": i})["sku"] for i in pids[:2]}
     assert var["price"] == "11990.00", "the lead's price edit went out in the same press"
-    assert res.listing["held"] == [{"sku": silver_sku, "code": "UNPRICED_SIZE", "reason": "no selling price"}]
+    assert res.listing["held"] == [{"sku": silver_sku, "code": "UNPRICED_SIZE", "reason": "no MRP"}]
 
 
 def test_a_live_listing_holds_back_only_a_colour_with_no_size(monkeypatch):
@@ -1330,3 +1330,272 @@ def test_a_colour_on_the_listing_that_lost_its_price_never_freezes_the_rest(monk
     assert black["sku"] in res.error and "keeps its last price" in res.error
     assert len(p["variants"]) == 4 and var["price"] == "11990.00"
     assert black["price"] == "12990.00", "its last price stands -- never 0.00"
+
+
+# ---------------------------------------------------------------------------
+# 10. re-review of #1233 (round 2)
+# ---------------------------------------------------------------------------
+
+
+def _sku(db, pid):
+    return db["products"].find_one({"product_id": pid})["sku"]
+
+
+def _live_single(db, fake, *, size="58"):
+    """A lead live as ONE 'Default Title' variant, nothing linked yet."""
+    lead = _item(db, 1, "Gold", "001", size)
+    p = fake.new_product(handle="rb3025-gold-live")
+    var = p["variants"][0]
+    var.update({"sku": _sku(db, lead), "price": "12990.00"})
+    twin = _twin(db, lead)
+    db["catalog_products"].update_one({"id": twin["id"]}, {"$set": {
+        "ecom.shopify_product_id": p["id"], "ecom.shopify_variant_id": var["id"],
+        "ecom.shopify_inventory_item_id": var["inv"], "ecom.status": "PUBLISHED",
+        "ecom.locally_modified": False, "ecom.handle": "rb3025-gold-live",
+        "ecom.confirmed_sizes": {var["id"]: "DENY"}}})
+    db["catalog_variants"].update_one({"sku": twin["sku"]}, {"$set": {
+        "shopify_variant_id": var["id"], "shopify_inventory_item_id": var["inv"]}})
+    return lead, p, var
+
+
+@pytest.mark.parametrize("finish", ["cost", "switch_on", "status", "catalog_door", "reactivate"])
+def test_finishing_a_waiting_colour_queues_its_models_listing(monkeypatch, finish):
+    """Round 2, item 1: ANY edit of a colour of a model queues the model's
+    listing -- cost / HSN / GST, the catalogue status, the switch -- so the
+    colour Add Product left as a draft reaches the website once finished."""
+    db = _world()
+    fake = FakeShopify()
+    lead, p, var = _live_single(db, fake)
+    black = _item(db, 2, "Black", "002/58")
+    if finish in ("switch_on", "reactivate"):
+        db["products"].update_one({"product_id": black}, {"$set": {"is_active": False}})
+    else:
+        db["products"].update_one({"product_id": black}, {"$set": {"catalog_status": "DRAFT"}})
+    pm.link_to_family(db, black, lead, actor="u-admin")
+    _live(monkeypatch, fake)
+    res = _push(db, lead)
+    assert res.ok and [w["sku"] for w in res.listing["waiting"]] == [_sku(db, black)]
+    assert _twin(db, lead)["ecom"]["locally_modified"] is False
+    spine = db["products"].find_one({"product_id": black})
+    if finish == "reactivate":
+        db["products"].update_one({"product_id": black}, {"$set": {"is_active": True}})
+        _run(online_delist.on_active_flip(db, spine, was_active=False, now_active=True, actor={"user_id": "u"}))
+    elif finish == "catalog_door":
+        from api.routers import catalog as cat
+
+        monkeypatch.setattr(cat, "_get_db", lambda: db)
+        monkeypatch.setattr(cat, "_catalog_coll", lambda: db["catalog_products"])
+        db["products"].update_one({"product_id": black}, {"$set": {"catalog_status": "ACTIVE"}})
+        cat._save_catalog_product({**_twin(db, black), "cost_price": 5000.0})
+    else:
+        patch = {"cost": {"cost_price": 5000.0}, "switch_on": {"is_active": True},
+                 "status": {"catalog_status": "ACTIVE"}}[finish]
+        db["products"].update_one({"product_id": black}, {"$set": {**patch, "catalog_status": "ACTIVE", "is_active": True}})
+        pm.mirror_update_to_catalog_twin(product_id=black, current=spine, patch=patch, db=db)
+    assert _twin(db, lead)["ecom"]["locally_modified"] is True, f"{finish} never queued the model's listing"
+    res = _push(db, lead)
+    assert res.ok and res.listing["waiting"] == []
+    assert _sku(db, black) in {v["sku"] for v in p["variants"]}, "the finished colour went on"
+
+
+def test_a_colour_catalogued_again_is_handed_the_archived_variant_by_its_id(monkeypatch):
+    """Round 2, item 2: Shopify's variant keeps its OLD label (no lens) while
+    IMS now labels both items with their lens -- the new item is handed the
+    archived row's stored variant id, never a second variant beside it."""
+    db = _world()
+    fake = FakeShopify()
+    lead, p, var = _live_single(db, fake)
+    black = _item(db, 2, "Black", "002/58", lens="Grey")
+    pm.link_to_family(db, black, lead, actor="u-admin")
+    _live(monkeypatch, fake)
+    assert _push(db, lead).ok
+    old_gid = _row(db, black)["shopify_variant_id"]
+    assert next(v for v in p["variants"] if v["id"] == old_gid)["opts"] == {"Color": "Black (002/58)"}
+    db["products"].update_one({"product_id": black}, {"$set": {"deleted_at": "2026-10-19", "is_active": False}})
+    again = _item(db, 3, "Black", "002/58", lens="Grey", units=(2, 0))
+    pm.link_to_family(db, again, lead, actor="u-admin")
+    res = _push(db, lead)
+    assert res.ok, (res.error, res.code)
+    assert len(p["variants"]) == 2, "no second Black beside the archived one"
+    assert _row(db, again)["shopify_variant_id"] == old_gid
+    assert not _row(db, black).get("shopify_variant_id")
+    owned = {r.get("shopify_variant_id") for r in db["catalog_variants"].find({}) if r.get("shopify_variant_id")}
+    assert all(v["id"] in owned for v in p["variants"]), "every variant on the listing has an IMS owner"
+
+
+def test_an_archived_row_lets_go_only_of_the_id_it_handed_over(monkeypatch):
+    """Round 2, item 2: when the handed variant is gone on Shopify the new
+    item gets a variant of its own -- and the archived row keeps its (stale)
+    record instead of releasing an id it never handed over."""
+    db = _world()
+    fake = FakeShopify()
+    lead, p, var = _live_single(db, fake)
+    black = _item(db, 2, "Black", "002/58")
+    pm.link_to_family(db, black, lead, actor="u-admin")
+    _live(monkeypatch, fake)
+    assert _push(db, lead).ok
+    old_gid = _row(db, black)["shopify_variant_id"]
+    p["variants"] = [v for v in p["variants"] if v["id"] != old_gid]  # deleted in Shopify admin
+    db["products"].update_one({"product_id": black}, {"$set": {"deleted_at": "2026-10-19", "is_active": False}})
+    again = _item(db, 3, "Black", "002/58")
+    pm.link_to_family(db, again, lead, actor="u-admin")
+    _push(db, lead)
+    assert _row(db, again)["shopify_variant_id"] not in (None, old_gid)
+    assert _row(db, black).get("shopify_variant_id") == old_gid
+
+
+def test_runbook_revert_puts_back_only_what_apply_wrote(monkeypatch):
+    """Round 2, item 3: a person's later edits survive the revert -- the kept
+    item's price and name, its photo record, the folded item's price."""
+    db = _world()
+    fake = FakeShopify()
+    (keep, kp), (other, op) = _two_live_listings(db, fake)
+    _live(monkeypatch, fake)
+    mod = _script()
+    out = _run(mod.apply(db, mod.plan(db)))
+    assert out["merged"] and _push(db, keep).ok
+    db["catalog_products"].update_one({"id": _twin(db, keep)["id"]}, {"$set": {"offer_price": 9990.0, "name": "EDITED"}})
+    db["products"].update_one({"product_id": other}, {"$set": {"offer_price": 8990.0}})
+    media_before = _twin(db, keep)["ecom"].get("media_map")
+    assert media_before
+    done = _run(mod.revert(db, take_down_added=True))
+    assert not done.get("refused"), done
+    kt = _twin(db, keep)
+    assert (kt["offer_price"], kt["name"], kt["ecom"]["media_map"]) == (9990.0, "EDITED", media_before)
+    assert db["products"].find_one({"product_id": other})["offer_price"] == 8990.0
+    assert not db["products"].find_one({"product_id": other}).get("variant_of")
+    ot = _twin(db, other)
+    assert ot["ecom"]["shopify_product_id"] == op["id"] and "former_listing" not in ot["ecom"]
+    assert "variant_of" not in ot["ecom"]
+    row = _row(db, other)
+    assert row["parent_product_id"] == ot["id"] and row["shopify_variant_id"] == op["variants"][0]["id"]
+
+
+def test_runbook_revert_refuses_when_a_field_it_wrote_was_changed(monkeypatch):
+    db = _world()
+    fake = FakeShopify()
+    (keep, kp), (other, op) = _two_live_listings(db, fake)
+    _live(monkeypatch, fake)
+    mod = _script()
+    _run(mod.apply(db, mod.plan(db)))
+    # a person unlinks / re-links the folded colour elsewhere after the apply
+    db["products"].update_one({"product_id": other}, {"$set": {"variant_of": "sp-someone-else"}})
+    snapshot = copy.deepcopy(list(db["catalog_products"].find({})))
+    out = _run(mod.revert(db))
+    assert out["refused"] and any("products.variant_of" in c for c in out["changed"]), out
+    assert list(db["catalog_products"].find({})) == snapshot, "nothing reverted"
+
+
+def test_a_new_colour_that_adds_a_size_to_a_lead_with_none_is_held_not_looped(monkeypatch):
+    """Round 2, item 4: a live lead with no size, a new colour with one --
+    the colour is held (named), the press is ok, nothing re-queues it every
+    run, and the lead's own edit goes out."""
+    db = _world()
+    fake = FakeShopify()
+    lead, p, var = _live_single(db, fake)
+    db["products"].update_one({"product_id": lead}, {"$unset": {"attributes.lens_size": ""}})
+    black = _item(db, 2, "Black", "002/58", "62")
+    pm.link_to_family(db, black, lead, actor="u-admin")
+    _price_edit(db, lead, 9990.0)
+    _live(monkeypatch, fake)
+    res = _push(db, lead)
+    assert res.ok and res.code == "OPTION_MISSING", (res.error, res.code)
+    assert [h["sku"] for h in res.listing["held"]] == [_sku(db, black)]
+    assert _twin(db, lead)["ecom"]["locally_modified"] is False, "never re-queued every run"
+    assert p["status"] == "ACTIVE" and var["price"] == "9990.00" and len(p["variants"]) == 1
+    assert fake.ops("imsProductOptionsCreate") == []
+
+
+def test_a_colour_with_no_mrp_is_held_on_a_live_listing_and_refused_on_a_first_publish(monkeypatch):
+    """Round 2, item 6: MRP is required (the Indian MRP display rule)."""
+    db = _world()
+    fake = FakeShopify()
+    pids, p, var = _live_lead(db, fake)
+    _live(monkeypatch, fake)
+    assert _push(db, pids[0]).ok
+    black = next(v for v in p["variants"] if v["sku"] == _sku(db, pids[1]))
+    db["products"].update_one({"product_id": pids[1]}, {"$set": {"mrp": None, "offer_price": 10990.0}})
+    # its row still carries an old engine price: no MRP, so not that either
+    db["catalog_variants"].update_one({"sku": black["sku"]}, {"$unset": {"mrp": ""}, "$set": {"discounted_price": 9990.0}})
+    _price_edit(db, pids[0], 11990.0)
+    res = _push(db, pids[0])
+    assert res.ok and res.code == "UNPRICED_SIZE", (res.error, res.code)
+    assert "no MRP" in res.error
+    assert (black["price"], black["compareAtPrice"]) == ("12990.00", None), "its last web price stands"
+    assert var["price"] == "11990.00"
+
+    db2 = _world()
+    pids2 = _family(db2, [("Gold", "001"), ("Black", "002/58", "58", {"mrp": 0.0, "offer": 10990.0})])
+    fake2 = FakeShopify()
+    _live(monkeypatch, fake2)
+    res2 = _push(db2, pids2[0])
+    assert res2.ok is False and res2.code == "UNPRICED_SIZE" and fake2.writes() == []
+
+
+def test_an_offer_above_the_mrp_is_never_the_price(monkeypatch):
+    """Round 2, item 8: the offer counts only when it is not above the MRP."""
+    db = _world()
+    pids = _family(db, [("Gold", "001", "58", {"offer": 13990.0}), ("Black", "002/58")])
+    fake = FakeShopify()
+    _live(monkeypatch, fake)
+    assert _push(db, pids[0]).ok
+    gold = next(v for v in _only_product(fake)["variants"] if v["sku"] == _sku(db, pids[0]))
+    assert (gold["price"], gold["compareAtPrice"]) == ("12990.00", None)
+
+
+def test_dry_run_script_reads_only_and_names_what_would_change(monkeypatch, capsys):
+    """Round 2, item 5: scripts/dry_run_model_listings.py -- for each live
+    model: options / variants, held and waiting by SKU, the lead's price
+    under main's rule and the G2 rule, size and own-MRP flags. No Shopify
+    call, no write."""
+    db = _world()
+    fake = FakeShopify()
+    pids, p, var = _live_lead(db, fake)
+    db["catalog_variants"].update_one({"sku": _sku(db, pids[0])}, {"$set": {"mrp": 12990.0}})
+    draft = _item(db, 4, "Bronze", "9196/31")
+    db["products"].update_one({"product_id": draft}, {"$set": {"catalog_status": "DRAFT"}})
+    pm.link_to_family(db, draft, pids[0], actor="u-admin")
+    _price_edit(db, pids[0], 11990.0)
+    _dark(monkeypatch)
+    spec = importlib.util.spec_from_file_location(
+        "dry_run_model_listings", os.path.join(os.path.dirname(_SCRIPT), "dry_run_model_listings.py")
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    before = {c: copy.deepcopy(list(db[c].find({}))) for c in db.list_collection_names()}
+    (entry,) = mod.report(db)
+    after = {c: list(db[c].find({})) for c in db.list_collection_names()}
+    assert {c: after[c] for c in before} == before, "read-only"
+    assert all(after[c] == [] for c in after if c not in before), "a read never writes a document"
+    assert entry["lead_sku"] == _sku(db, pids[0])
+    assert [w["sku"] for w in entry["plan"]["waiting"]] == [_sku(db, draft)]
+    assert {v["sku"]: v["on_shopify"] for v in entry["plan"]["variants"]} == {
+        _sku(db, pids[0]): True, _sku(db, pids[1]): False, _sku(db, pids[2]): False}
+    assert (entry["lead_price_main"], entry["lead_price_g2"]) == (12990.0, 11990.0)
+    assert entry["lead_has_size"] is True and entry["lead_row_has_own_mrp"] is True
+    mod.print_report([entry])
+    out = capsys.readouterr().out
+    assert "<-- CHANGES" in out and "WAITING" in out and "options: Color =" in out
+
+
+def test_a_listing_with_an_option_ims_does_not_manage_names_it_and_does_not_loop(monkeypatch):
+    """A live listing someone gave an option IMS does not manage ('Lens'):
+    no colour is added, the press says why, and it is never re-queued every
+    run for a problem only a person can fix (round 2, item 4's rule for the
+    seeding step's own data hold)."""
+    db = _world()
+    fake = FakeShopify()
+    lead = _item(db, 1, "Gold", "001")
+    p = fake.new_product(handle="rb3025", options=[{"name": "Lens", "values": ["Standard"]}],
+                         variants=[{"opts": {"Lens": "Standard"}}])
+    var = p["variants"][0]
+    db["catalog_products"].update_one({"id": _twin(db, lead)["id"]}, {"$set": {
+        "ecom.shopify_product_id": p["id"], "ecom.shopify_variant_id": var["id"],
+        "ecom.shopify_inventory_item_id": var["inv"], "ecom.status": "PUBLISHED"}})
+    black = _item(db, 2, "Black", "002/58")
+    pm.link_to_family(db, black, lead, actor="u-admin")
+    _live(monkeypatch, fake)
+    res = _push(db, lead)
+    assert res.ok and res.code == "LISTING_OPTIONS_UNKNOWN", (res.error, res.code)
+    assert "Lens" in res.error and fake.ops("imsVariantsBulkCreate") == []
+    assert _twin(db, lead)["ecom"]["locally_modified"] is False

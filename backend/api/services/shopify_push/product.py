@@ -922,6 +922,8 @@ async def push_product(
         # A colour held back from this LIVE listing (no price, no colour or
         # size, looks the same as another): named by SKU, the rest was sent.
         held = list((listing or {}).get("held") or [])
+        if (seed_summary or {}).get("held_data"):
+            held.append({"sku": "new colours/sizes", "code": seed_summary.get("code"), "reason": seed_summary["held"]})
         held_line = (
             "not on the website yet: "
             + ", ".join(f"{h['sku']} ({h['reason']})" for h in held)

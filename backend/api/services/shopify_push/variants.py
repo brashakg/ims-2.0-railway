@@ -29,7 +29,7 @@ from .queries import (
     _VARIANTS_BULK_UPDATE,
     _VARIANTS_PER_CALL,
 )
-from .listing import AXES, FULL_OPTIONS, OPTION_MISSING, PENDING
+from .listing import ADOPT_GID, AXES, FULL_OPTIONS, OPTION_MISSING, PENDING
 from .product_input import (
     _resolve_variant_pricing,
     _variants_for_price_push,
@@ -379,8 +379,10 @@ def _assign_seed_rows(
     matched_by_row: Dict[int, Tuple[str, Optional[str]]] = {}
     remaining: List[Tuple[int, Dict[str, Any]]] = []
     for idx, r in enumerate(seed_rows):
+        # A colour taking over an archived twin's variant (G2) is matched by
+        # the id it was handed (listing.ADOPT_GID), never by its label.
         stored = (
-            (r["variant"] or {}).get("shopify_variant_id")
+            (r["variant"] or {}).get("shopify_variant_id") or (r["variant"] or {}).get(ADOPT_GID)
             if r["variant"] is not None
             else None
         )
@@ -713,9 +715,16 @@ async def _seed_variants_after_write(
         "options_created": options_created,
     }
     if hold_create is not None:
-        summary["errors"].append(hold_create["error"])
         summary["held"] = hold_create["error"]
         summary["code"] = hold_create.get("code")
+        if hold_create.get("code") in (OPTION_MISSING, "LISTING_OPTIONS_UNKNOWN"):
+            # A DATA hold (a person must fill a value / fix the listing):
+            # named on the result, never a failed press re-queued every run
+            # (review of #1233). A transient one (a page unread, the option
+            # call refused) stays an error: the next run retries it.
+            summary["held_data"] = True
+        else:
+            summary["errors"].append(hold_create["error"])
 
     for i in range(0, len(update_rows), _VARIANTS_PER_CALL):
         chunk = update_rows[i : i + _VARIANTS_PER_CALL]

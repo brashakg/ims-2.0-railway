@@ -694,12 +694,15 @@ def test_media_and_title_are_hands_off_for_a_child(monkeypatch):
     setq = spy.calls_for("inventorySetQuantities")
     assert B_INV in {q["inventoryItemId"] for c in setq for q in c["variables"]["input"]["quantities"]}
 
-    # a rename of the child queues NOTHING (no listing to retitle)
+    # a rename of the child never queues the CHILD (it owns no listing);
+    # since G2 any edit of a colour/size queues its MODEL's listing (review
+    # of #1233: the edits that finish a waiting colour must reach it)
     pm.mirror_update_to_catalog_twin(
         product_id="sp-child", current=_spine(db, "sp-child"), patch={"name": "Large Renamed"}, db=db
     )
     assert _twin(db, "tw-child")["ecom"]["locally_modified"] is False
-    assert _twin(db, "tw-parent")["ecom"]["locally_modified"] is False
+    assert _twin(db, "tw-parent")["ecom"]["locally_modified"] is True
+    db["catalog_products"].update_one({"id": "tw-parent"}, {"$set": {"ecom.locally_modified": False}})
     # an mrp edit lands on the row and queues the PARENT, never the child
     pm.mirror_update_to_catalog_twin(
         product_id="sp-child", current=_spine(db, "sp-child"), patch={"mrp": 47000.0}, db=db

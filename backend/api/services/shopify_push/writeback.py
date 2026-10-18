@@ -146,6 +146,11 @@ def _requeue_unpublished(db, product_id: str) -> None:
         logger.warning(f"[SHOPIFY_PUSH] re-queue failed {product_id}: {e}")
 
 
+def _gid_tail(gid) -> str:
+    """'gid://shopify/ProductVariant/12' and '12' -> '12'."""
+    return str(gid or "").rsplit("/", 1)[-1]
+
+
 def _writeback_variant(
     db,
     variant: Dict[str, Any],
@@ -191,7 +196,13 @@ def _writeback_variant(
             coll.insert_one({**filt, **update})
             touched = 1
         adopts = (variant or {}).get("_adopts")
-        if touched and adopts:
+        handed = (variant or {}).get("_adopt_variant_id")
+        if (
+            touched
+            and adopts
+            and handed
+            and _gid_tail(handed) == _gid_tail(shopify_variant_id)
+        ):
             # The archived colour whose variant this one took over lets go of
             # it in the same step -- one inventory item, one owner.
             coll.update_one(
