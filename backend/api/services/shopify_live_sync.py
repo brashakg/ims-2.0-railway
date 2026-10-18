@@ -456,12 +456,16 @@ def _serialise_run(doc: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     return {k: _iso(v) for k, v in doc.items() if k not in ("_id", "lock_key")}
 
 
-def last_run(db) -> Optional[Dict[str, Any]]:
-    """The most recent run summary (scheduled or manual), JSON-ready. None when
-    nothing has ever run. Cursor sort (not find_one(sort=)) so it reads the same
-    on pymongo, the strict fake and the no-Mongo MockCollection. Fail-soft."""
+def last_run(db, trigger: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """The most recent run summary (scheduled or manual; ``trigger`` narrows it
+    to one, e.g. "scheduled"), JSON-ready. None when nothing has ever run.
+    Cursor sort (not find_one(sort=)) so it reads the same on pymongo, the
+    strict fake and the no-Mongo MockCollection. Fail-soft."""
+    query: Dict[str, Any] = {"job": JOB_ID}
+    if trigger:
+        query["trigger"] = trigger
     try:
-        rows = list(db[RUNS_COLLECTION].find({"job": JOB_ID}).sort([("started_at", -1)]).limit(1))
+        rows = list(db[RUNS_COLLECTION].find(query).sort([("started_at", -1)]).limit(1))
     except Exception:  # noqa: BLE001
         return None
     return _serialise_run(rows[0]) if rows else None
