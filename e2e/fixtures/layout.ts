@@ -37,6 +37,8 @@ export const VIEWPORTS = [
   // flips. BUG-1 lived exactly on such a hinge.
   { name: 'tablet-small 768x1024', width: 768, height: 1024 },
   { name: 'ipad-portrait 820x1180', width: 820, height: 1180 },
+  // Landscape tablet at the lg breakpoint; shorter than the portrait probes.
+  { name: 'tablet-landscape 1024x768', width: 1024, height: 768 },
   // The owner's POS register target (spec 11b).
   { name: 'ipad-landscape 1180x820', width: 1180, height: 820 },
   { name: 'laptop 1440x900', width: 1440, height: 900 },
