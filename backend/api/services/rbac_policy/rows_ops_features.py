@@ -286,16 +286,18 @@ ROWS: List[Dict[str, object]] = [
         "allowed": ["ACCOUNTANT", "ADMIN", "SUPERADMIN"],
         "store_scoped": True,
     },
+    # Reading the vouchers is the accounts roles' only (owner decision
+    # 2026-10-18, audit FU-17): a voucher carries what we pay.
     {
         "method": "GET",
         "path": "/api/v1/finance/journal-entries",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ACCOUNTS,
         "store_scoped": True,
     },
     {
         "method": "GET",
         "path": "/api/v1/finance/journal-entries/{je_id}",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": ACCOUNTS,
         "store_scoped": True,
     },
     {

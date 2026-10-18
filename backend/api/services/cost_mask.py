@@ -145,6 +145,25 @@ def can_see_cost(user: dict, context: str = "default") -> bool:
     return bool(roles & (COST_VISIBLE_ROLES | _CONTEXT_ROLES.get(context, set())))
 
 
+COST_WRITE_REFUSED = (
+    "Only the accounts team (admin, accountant) can set a product's cost price. "
+    "Save the product without it; the cost is filled in from the supplier bill."
+)
+
+
+def refuse_cost_write(user: dict, *sent) -> None:
+    """THE write side of the product-cost rule (audit FU-23): a login that may
+    not SEE product cost may not SET it either. Every door that takes a cost
+    price from the caller (POST/PUT /products, POST/PUT /catalog/products,
+    POST/PATCH /lens-catalog) passes what was sent; any value that is not None
+    from such a login is a 403 with a plain message. Omitting the cost (what
+    the screens do for these roles) is untouched."""
+    if any(v is not None for v in sent) and not can_see_cost(user, "product"):
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=403, detail=COST_WRITE_REFUSED)
+
+
 def _strip(value, hide):
     if isinstance(value, dict):
         return {k: _strip(v, hide) for k, v in value.items() if k not in hide}

@@ -39,7 +39,7 @@ from pydantic import BaseModel, Field
 
 from .auth import require_roles
 from ..services import collection_insights as _svc
-from ..services.cost_mask import mask_cost
+from ..services.cost_mask import can_see_cost, mask_cost
 
 router = APIRouter()
 
@@ -132,7 +132,9 @@ async def collections_insights_summary(
             docs = list(db["ecom_collections"].find({}))[:_SUMMARY_SCAN_MAX]
         except Exception:  # noqa: BLE001
             return envelope
-    rows = _svc.summary(db, docs, store_id=store)[:limit]
+    rows = _svc.summary(
+        db, docs, store_id=store, cost_ok=can_see_cost(current_user, "product")
+    )[:limit]
     envelope["collections"] = rows
     envelope["total"] = len(rows)
     return _masked(envelope, current_user)
@@ -261,7 +263,9 @@ async def collection_insights_stores(
             "store_id": store,
         }
     doc = _load_collection_or_404(db, collection_id)
-    rows = _svc.store_breakdown(db, doc, store_id=store)
+    rows = _svc.store_breakdown(
+        db, doc, store_id=store, cost_ok=can_see_cost(current_user, "product")
+    )
     return _masked(
         {
             "collection_id": collection_id,

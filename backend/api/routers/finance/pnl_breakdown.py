@@ -8,6 +8,7 @@ or default was changed.
 from typing import Optional
 from fastapi import Depends, HTTPException
 from ..auth import get_current_user
+from ...dependencies import resolve_store_scope
 from ...services.cost_mask import mask_cost
 from ...services.salary_visibility import SALARY_RESTRICTED_MESSAGE, is_salary_admin
 from ._shared import (
@@ -159,7 +160,12 @@ async def get_pnl_by_category(
     entity_id: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
 ):
-    """Revenue + COGS + gross profit per product category."""
+    """Revenue + COGS + gross profit per product category.
+
+    Shop scope as on GET /pnl (audit FU-16): a login reads its own shops only
+    and a login with no shop reads none (resolve_store_scope); only an admin,
+    who reads every shop, can narrow by entity_id."""
+    store_id = resolve_store_scope(store_id, current_user)
     db = _get_db()
     # Exclude DRAFT/CANCELLED; compare the date range as datetimes
     # (created_at is a BSON datetime, so a string bound matched nothing).

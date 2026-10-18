@@ -672,10 +672,15 @@ def _store_names(db, store_ids: List[str]) -> Dict[str, str]:
     return out
 
 
-def store_breakdown(db, collection: Dict, store_id: Optional[str] = None) -> List[Dict]:
+def store_breakdown(
+    db, collection: Dict, store_id: Optional[str] = None, cost_ok: bool = True
+) -> List[Dict]:
     """Per-store rows for one collection: on-hand, valuation (+basis), 30-day
     sales, sell-through and days-of-cover. `store_id` (when set, e.g. a forced
-    store scope) restricts the breakdown to that store. Fail-soft -> []."""
+    store scope) restricts the breakdown to that store. Rows run by stock value
+    for a reader who sees cost; `cost_ok=False` orders them by 30-day sales,
+    so the order never gives back the valuation that reader is not shown
+    (FU-05/FU-19). Fail-soft -> []."""
     collection = collection if isinstance(collection, dict) else {}
     cid = collection.get("collection_id") or collection.get("id")
     members = member_ids(db, cid, collection=collection)
@@ -720,11 +725,14 @@ def store_breakdown(db, collection: Dict, store_id: Optional[str] = None) -> Lis
                 "days_of_cover": days_of_cover(valued["units_on_hand"], sold30),
             }
         )
-    rows.sort(key=lambda r: (-(r["stock_value"] or 0), r["store_id"] or ""))
+    rank = (lambda r: r["stock_value"] or 0) if cost_ok else (lambda r: r["sold_30d"])
+    rows.sort(key=lambda r: (-rank(r), r["store_id"] or ""))
     return rows
 
 
-def summary(db, collections: List[Dict], store_id: Optional[str] = None) -> List[Dict]:
+def summary(
+    db, collections: List[Dict], store_id: Optional[str] = None, cost_ok: bool = True
+) -> List[Dict]:
     """BATCHED per-collection roll-up (no N+1): one chunked membership read
     grouped by collection_id, one stock rollup over the UNION of member
     product_ids, one movement aggregation over the same union -- then composed
@@ -790,7 +798,10 @@ def summary(db, collections: List[Dict], store_id: Optional[str] = None) -> List
                 "sold_30d": sold30,
             }
         )
-    rows.sort(key=lambda r: (-r["sold_30d"], -(r["stock_value"] or 0), str(r["title"] or "")))
+    # Ties on sales break by stock value only for a reader who sees it;
+    # otherwise by units on hand (FU-05: the order never ranks by cost).
+    tie = (lambda r: r["stock_value"] or 0) if cost_ok else (lambda r: r["on_hand"] or 0)
+    rows.sort(key=lambda r: (-r["sold_30d"], -tie(r), str(r["title"] or "")))
     return rows
 
 

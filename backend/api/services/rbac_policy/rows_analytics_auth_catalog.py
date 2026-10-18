@@ -240,11 +240,6 @@ ROWS: List[Dict[str, object]] = [
         "allowed": ["ADMIN", "SUPERADMIN"],
     },
     {
-        "method": "GET",
-        "path": "/api/v1/catalog/products/export",
-        "allowed": ["ADMIN", "CATALOG_MANAGER", "SUPERADMIN"],
-    },
-    {
         "method": "DELETE",
         "path": "/api/v1/catalog/products/{product_id}",
         "allowed": ["ADMIN", "SUPERADMIN"],

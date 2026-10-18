@@ -17,7 +17,7 @@ import random
 import uuid
 from .auth import get_current_user, require_roles
 from ..dependencies import get_product_repository
-from ..services.cost_mask import can_see_cost, mask_cost, mask_cost_list
+from ..services.cost_mask import can_see_cost, mask_cost, mask_cost_list, refuse_cost_write
 from ..services.file_store import (
     get_file_store,
     ALLOWED_MIME_TYPES,
@@ -1243,6 +1243,8 @@ async def create_product(
     lands DRAFT (not purchasable until cost is filled). The persisted row always
     carries catalog_status + done_gaps so the Buy Desk can name what is missing.
     """
+    # What we pay is the accounts roles' to SET as well as to see (FU-23).
+    refuse_cost_write(current_user, product.cost_price)
     # Block save when category is blank/null/missing (server-side guard for the
     # GST-default bug: an uncategorized product would otherwise fall back to a
     # default GST rate). Normalizes the category to the validated value.
@@ -3340,6 +3342,7 @@ async def update_product(
     current_user: dict = Depends(require_roles(*_CATALOG_ROLES)),
 ):
     """Update product details"""
+    refuse_cost_write(current_user, product.cost_price)  # FU-23
     # If the client explicitly sends `category`, it must be a valid non-blank
     # category -- you cannot blank-out / null-out a product's category via update
     # (same GST-default guard as create). Updates that omit `category` are
