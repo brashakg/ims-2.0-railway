@@ -62,7 +62,8 @@ interface GSTR1Validation {
   issues: GSTR1ValidationIssue[];
 }
 
-// issue_code of the aggregated "minted serial exceeds GSTN's 16-char cap" warn.
+// issue_code of the aggregated "invoice numbers break GSTN's rule" warn
+// (over 16 chars or a bad character; the code name predates the charset half).
 const SERIAL_OVER_CAP_CODE = 'INVOICE_SERIAL_OVER_16';
 
 interface GSTR1Data {
@@ -132,13 +133,13 @@ export function GSTR1Report() {
     if (!reportData) return;
     if (hasSerialLengthIssue) {
       const proceed = window.confirm(
-        'Warning: invoice numbers in this report exceed the GSTN 16-character ' +
-          'cap, so the portal may REJECT this upload. The invoice serial ' +
-          'format needs shortening (a tracked fix). Download anyway?'
+        'Warning: invoice numbers in this report break the GSTN rule (16 ' +
+          'characters at most; capital letters, digits, - and / only), so the ' +
+          'portal may REJECT this upload. Download anyway?'
       );
       if (!proceed) return;
       toast.warning(
-        'GSTN JSON downloaded with over-length invoice numbers - the portal may reject it'
+        'GSTN JSON downloaded with invoice numbers GSTN may reject'
       );
     }
     try {

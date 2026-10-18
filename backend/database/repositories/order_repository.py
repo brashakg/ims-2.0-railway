@@ -6,9 +6,10 @@ Order data access operations
 
 from api.utils.event_time import utc_event_iso, utc_now, utc_now_iso
 import logging
-from typing import List, Optional, Dict, Tuple
-from datetime import datetime, date, timedelta
-from api.utils.ist import now_ist, ist_today, ist_day_start_utc
+import re
+from typing import Iterable, List, Optional, Dict, Tuple
+from datetime import datetime, date, timedelta, timezone
+from api.utils.ist import IST, now_ist, ist_today, ist_day_start_utc
 from api.utils.dates import iso_date_window
 from decimal import Decimal
 from .base_repository import BaseRepository
@@ -24,30 +25,134 @@ logger = logging.getLogger(__name__)
 # 1 Apr -> 31 Mar, so an invoice dated 2026-03-31 belongs to FY 2025-26 while
 # one dated 2026-04-01 starts the fresh FY 2026-27 series.
 
-# Default invoice prefix when neither the store nor the global invoice settings
-# configure one. Matches settings.InvoiceSettings.invoice_prefix default so a
-# fresh deployment is internally consistent.
-DEFAULT_INVOICE_PREFIX = "INV"
+# Tax invoice number (owner ruling 2026-10-18): SHOPCODE/FYFY/NNNNN, e.g.
+# BOK01/2627/00001 -- exactly 16 characters, the most Rule 46(b) allows (letters,
+# digits, '-' or '/'). The IRP e-invoice schema is stricter (capitals; the first
+# character a letter or 1-9), so ONE pattern serves the mint, GSTR-1 and IRP.
+_GST_INVOICE_NUMBER_RE = re.compile(r"[A-Z1-9][A-Z0-9/-]{0,15}")
+# A store's 5-character shop code: derived, or the store's own invoice_code.
+INVOICE_CODE_RE = re.compile(r"[A-Z1-9][A-Z0-9]{4}")
+# CHAIN-TOWN-NN store codes the shop code is derived from.
+_STORE_CODE_PARTS_RE = re.compile(r"(BV|BVO|WO|WIZ)-([A-Z]{3})[A-Z]*-(\d+)")
+# (Every pattern is used with fullmatch: "$" would let a trailing newline in.)
 
 
-def sanitize_invoice_prefix(value: object) -> Optional[str]:
-    """Normalise a human-entered invoice prefix into a safe serial segment.
+class InvoiceNumberError(ValueError):
+    """No LEGAL tax invoice number can be minted -- refused, never guessed."""
 
-    Uppercases, strips surrounding whitespace, and keeps only characters that
-    are legal in a printed/scanned invoice number: alphanumerics plus a small
-    set of separators (``- _ /``). Caps the length at 10 (mirrors the
-    settings.InvoiceSettings validator). Returns None for an empty / unusable
-    input so callers can fall through to the next source rather than emit a
-    blank prefix that would collapse every store's series together.
-    """
-    if value is None:
+
+def gst_invoice_number_problem(number: object) -> Optional[str]:
+    """Why ``number`` breaks the GST invoice-number rule, else None."""
+    s = str(number or "")
+    if len(s) > 16:
+        return f"{s} is {len(s)} characters; GST allows at most 16"
+    if not _GST_INVOICE_NUMBER_RE.fullmatch(s):
+        return (
+            f"{s or '(blank)'} may use only capital letters, digits, '-' and '/' "
+            "and must start with a letter or 1-9"
+        )
+    return None
+
+
+def historical_order_problem(order: Optional[Dict]) -> Optional[str]:
+    """Why ``order`` may never take a number from the live invoice series, else
+    None: a historical import (``historical`` / the order-history import) was
+    billed before IMS, so no door mints for it (CGST Rule 46(b))."""
+    o = order or {}
+    if o.get("historical") or o.get("import_source") == "shopify_order_history":
+        return (
+            "this is a historical imported order -- it was billed before IMS "
+            "and never takes a number from this year's invoice series"
+        )
+    return None
+
+
+def derive_invoice_code(store_code: object) -> Optional[str]:
+    """Stable 5-character shop code from a CHAIN-TOWN-NN store code, else None.
+
+    Better Vision: first 3 letters of the town + 2-digit number --
+    BV-BOK-02 -> BOK02, BV-ONLINE-01 -> ONL01. WizOpt: W + town + 1-digit
+    number -- WIZ-DHN-01 -> WDHN1, WO-ONLINE-01 -> WONL1; the W keeps a WizOpt
+    shop apart from a Better Vision shop in the same town. A code that does not
+    fit (no chain, a town under 3 letters, WizOpt number over 9) -> None: the
+    store then needs an ``invoice_code``, never a squeezed guess."""
+    m = _STORE_CODE_PARTS_RE.fullmatch(str(store_code or "").strip().upper())
+    if not m:
         return None
-    raw = str(value).strip().upper()
-    cleaned = "".join(c for c in raw if c.isalnum() or c in ("-", "_", "/"))
-    cleaned = cleaned.strip("/-_ ")
-    if not cleaned:
+    chain, town, n = m.group(1), m.group(2), int(m.group(3))
+    if chain in ("WO", "WIZ"):
+        return f"W{town}{n}" if n <= 9 else None
+    return f"{town}{n:02d}" if n <= 99 else None
+
+
+def store_invoice_code(store_doc: Optional[Dict]) -> Optional[str]:
+    """The shop code a store RECORD's tax invoices carry: its ``invoice_code``
+    when set (None if that is malformed), else derived from its store_code --
+    the prod store_id can be a UUID (Pune), so the code comes first. No record,
+    no code: a bare store_id string never yields one."""
+    if not store_doc:
         return None
-    return cleaned[:10]
+    override = str(store_doc.get("invoice_code") or "").strip().upper()
+    if override:
+        return override if INVOICE_CODE_RE.fullmatch(override) else None
+    return derive_invoice_code(store_doc.get("store_code") or store_doc.get("store_id"))
+
+
+def invoice_code_clash(
+    code: str, own_ids: Iterable[Optional[str]], store_docs: Iterable[Dict]
+) -> Optional[str]:
+    """The store code of ANOTHER store whose invoices carry ``code``, else None.
+    Codes are unique across ALL stores, so two shops under one GSTIN can never
+    print the same number."""
+    own = {i for i in own_ids if i}
+    for d in store_docs:
+        if own & {d.get("store_id"), d.get("store_code")}:
+            continue
+        if store_invoice_code(d) == code:
+            return str(d.get("store_code") or d.get("store_id") or "another store")
+    return None
+
+
+def invoice_fy_start(when: Optional[datetime] = None) -> int:
+    """FY start year of ``when`` on the IST calendar (default: now). A NAIVE
+    ``when`` is UTC -- the frame every stored instant is in -- never an IST
+    wall clock."""
+    now = when or now_ist()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return fy_start_year(now.astimezone(IST))
+
+
+def invoice_series_key(code: str, fy: int) -> str:
+    """The ``counters`` _id of one shop code's series in one FY."""
+    return f"invoice:{code}:{fy}"
+
+
+def invoice_series_problem(counters, code: str, store_id: str, fy: int) -> Optional[str]:
+    """Why ``store_id`` may not issue under ``code`` in FY ``fy``, else None.
+
+    ONE series per shop per financial year, never shared: the counter doc
+    records the store that opened it, so a code another store issued under
+    this FY stays theirs (even after they moved off it), and a shop that issued
+    under one code cannot open a second series before 1 April. The mint and
+    the store form both ask this one question."""
+    key = invoice_series_key(code, fy)
+    held = counters.find_one({"_id": key})
+    if held and held.get("store_id") != store_id:
+        return (
+            f"invoice code {code} was already used this financial year by store "
+            f"{held.get('store_code') or held.get('store_id')}"
+        )
+    other = counters.find_one(
+        {"store_id": store_id, "fy": fy, "seq": {"$gt": 0}, "_id": {"$ne": key}}
+    )
+    if other:
+        used = str(other.get("_id") or "").split(":")
+        return (
+            f"this store already issued invoices as {used[1] if len(used) > 2 else '?'} "
+            "this financial year -- its invoice code can change only from 1 April"
+        )
+    return None
 
 
 def fy_start_year(dt: datetime) -> int:
@@ -374,168 +479,30 @@ class OrderRepository(BaseRepository):
             print(f"Error adding payment: {e}")
             return False
     
-    def set_invoice(self, order_id: str, invoice_number: str) -> bool:
-        """Set invoice number"""
-        return self.update(order_id, {
-            "invoice_number": invoice_number,
-            "invoice_date": datetime.now()
-        })
+    def set_invoice(self, order_id: str, invoice_number: str) -> str:
+        """Record the order's tax invoice number ONCE; return the number the
+        order now carries. Compare-and-set on "no number yet": of two taps on
+        one sale the loser gets the WINNER's number back -- one sale, one
+        number. The loser's own serial is a gap (logged for the CA), never a
+        second printed number."""
+        if self.update_if(
+            order_id,
+            {"invoice_number": {"$in": [None, ""]}},
+            {"invoice_number": invoice_number, "invoice_date": datetime.now()},
+        ):
+            return invoice_number
+        stored = (self.find_by_id(order_id) or {}).get("invoice_number")
+        if not stored:
+            raise InvoiceNumberError("the invoice number could not be saved -- try again")
+        logger.warning(
+            "invoice serial %s unused: order %s already carries %s",
+            invoice_number, order_id, stored,
+        )
+        return stored
 
     # =========================================================================
     # GST invoice numbering (consecutive serial per store + financial year)
     # =========================================================================
-
-    @staticmethod
-    def _store_invoice_prefix(store_id: Optional[str]) -> str:
-        """Stable alnum key fragment derived from the store_id string.
-
-        LAST-RESORT fallback only -- the configured ``invoice_prefix`` (per the
-        store doc, then global invoice settings) is the source of truth and is
-        resolved by ``_resolve_invoice_prefix``. This derivation is used only
-        when nothing is configured AND no store doc is available, so a missing
-        config still yields a stable, store-distinct key rather than collapsing
-        every store onto one series.
-
-        Mirrors the order-number convention: drop the chain prefix (BV/WO/BVO),
-        keep the store part, alnum-only, uppercase. "BV-BOK-01" -> "BOK01".
-        Falls back to "IMS" so a missing/garbage store_id can't collapse the
-        counter key to an empty string.
-        """
-        raw = (store_id or "").strip().upper()
-        parts = [p for p in raw.split("-") if p and p not in ("BV", "WO", "BVO")]
-        if len(parts) >= 2:
-            frag = (parts[0] + parts[1])[:8]
-        elif len(parts) == 1:
-            frag = parts[0][:8]
-        else:
-            frag = "IMS"
-        frag = "".join(c for c in frag if c.isalnum()) or "IMS"
-        return frag
-
-    def _lookup_configured_prefix(self, store_id: Optional[str]) -> Optional[str]:
-        """Read the configured invoice prefix from the DB, fail-soft.
-
-        Order of precedence:
-          1. ``stores.invoice_prefix`` for this ``store_id`` (per-store identity).
-          2. ``invoice_settings`` global doc (``_id == "default"``).
-        Returns a sanitized prefix or None if neither is configured / the DB is
-        unavailable. Never raises -- invoicing must not 500 on a config read.
-        """
-        db = None
-        try:
-            db = getattr(self.collection, "database", None)
-        except Exception:  # noqa: BLE001
-            db = None
-        if db is None:
-            return None
-        # 1) Per-store configured prefix.
-        if store_id:
-            try:
-                store_doc = db["stores"].find_one(
-                    {"store_id": store_id}, {"invoice_prefix": 1}
-                )
-                prefix = sanitize_invoice_prefix(
-                    (store_doc or {}).get("invoice_prefix")
-                )
-                if prefix:
-                    return prefix
-            except Exception:  # noqa: BLE001
-                logger.debug("store invoice_prefix lookup failed", exc_info=True)
-        # 2) Global invoice settings.
-        try:
-            settings_doc = db["invoice_settings"].find_one(
-                {"_id": "default"}, {"invoice_prefix": 1}
-            )
-            prefix = sanitize_invoice_prefix(
-                (settings_doc or {}).get("invoice_prefix")
-            )
-            if prefix:
-                return prefix
-        except Exception:  # noqa: BLE001
-            logger.debug("invoice_settings prefix lookup failed", exc_info=True)
-        return None
-
-    def _resolve_invoice_prefix(
-        self, store_id: Optional[str], store_doc: Optional[Dict] = None
-    ) -> str:
-        """Resolve the invoice prefix to use for ``store_id``.
-
-        Honors the CONFIGURED prefix rather than deriving it from the store_id
-        string. Precedence:
-          1. ``store_doc.invoice_prefix`` (when the caller already has the doc).
-          2. ``stores.invoice_prefix`` / global ``invoice_settings`` from the DB.
-          3. ``DEFAULT_INVOICE_PREFIX`` ("INV") -- a sane, non-empty default.
-
-        The result is sanitized (uppercased, serial-safe characters, <=10 chars)
-        and is GUARANTEED non-empty: an empty prefix would merge every store's
-        series and break Rule 46(b) uniqueness, so we never return one.
-        """
-        if store_doc is not None:
-            prefix = sanitize_invoice_prefix(store_doc.get("invoice_prefix"))
-            if prefix:
-                return prefix
-        prefix = self._lookup_configured_prefix(store_id)
-        if prefix:
-            return prefix
-        return DEFAULT_INVOICE_PREFIX
-
-    def _resolve_invoice_store_segment(
-        self, store_id: Optional[str], store_doc: Optional[Dict], prefix: str
-    ) -> str:
-        """Human store segment for the per-store invoice series, e.g. ``BOK-01``.
-
-        Each store runs its OWN invoice series (Rule 46(b) permits multiple
-        series), so the store identifier rides inside the number:
-        ``BV/BOK-01/26-27/0001``. We use the store's human ``store_code`` -- the
-        production ``store_id`` is an opaque UUID, unfit for a printed invoice --
-        taken from the passed ``store_doc`` then looked up from the stores
-        collection. A redundant leading copy of the prefix is stripped on a
-        clean separator boundary (``BV-BOK-01`` under prefix ``BV`` -> ``BOK-01``),
-        never a partial-word match. Falls back to a sanitized store_id, then
-        ``NA`` -- never empty (an empty segment would merge two stores' series).
-        """
-        code = None
-        if store_doc is not None:
-            code = store_doc.get("store_code") or store_doc.get("code")
-        if not code and store_id:
-            try:
-                db = getattr(self.collection, "database", None)
-                if db is not None:
-                    sd = db["stores"].find_one(
-                        {"store_id": store_id}, {"store_code": 1}
-                    )
-                    code = (sd or {}).get("store_code")
-            except Exception:  # noqa: BLE001 - invoicing must not 500
-                code = None
-        raw = str(code or store_id or "").strip().upper()
-        seg = "".join(c for c in raw if c.isalnum() or c in ("-", "_"))
-        seg = seg.strip("-_")
-        if prefix:
-            stripped = False
-            for sep in ("-", "_"):
-                if seg.startswith(prefix + sep):
-                    seg = seg[len(prefix) + 1 :].strip("-_")
-                    stripped = True
-                    break
-            if not stripped and seg == prefix:
-                seg = ""
-        return seg[:16] or "NA"
-
-    def _counters_collection(self):
-        """Best-effort handle on the shared ``counters`` collection.
-
-        The order collection is a real pymongo Collection in production
-        (exposes ``.database``); in DB-less / mock modes it may not, in which
-        case we return None and the caller falls back to a non-atomic number.
-        Never raises.
-        """
-        try:
-            db = getattr(self.collection, "database", None)
-            if db is None:
-                return None
-            return db["counters"]
-        except Exception:  # noqa: BLE001 - fail-soft, invoicing must not 500
-            return None
 
     def ensure_invoice_index(self) -> None:
         """Best-effort UNIQUE index on ``invoice_number``.
@@ -565,67 +532,96 @@ class OrderRepository(BaseRepository):
         when: Optional[datetime] = None,
         store_doc: Optional[Dict] = None,
     ) -> str:
-        """Allocate the next GST invoice number for ``store_id`` in its FY.
+        """Allocate the next GST tax invoice number for ``store_id``.
 
-        Format: ``{PREFIX}/{STORE}/{FY}/{serial}`` e.g. ``BV/BOK-01/26-27/0001``.
-          * PREFIX -- the CONFIGURED ``invoice_prefix`` (store doc, then global
-            invoice settings, then the "INV" default; see
-            ``_resolve_invoice_prefix``). The operator's brand identity.
-          * STORE  -- the store's human ``store_code`` (see
-            ``_resolve_invoice_store_segment``), so EACH store runs its own
-            invoice series (Rule 46(b) permits multiple series). The opaque
-            production store_id UUID never appears on the printed invoice.
-          * FY     -- short Indian financial-year label ``YY-YY`` (Apr-Mar), so
-            ``2026-27`` reads ``26-27``. The serial RESETS each FY.
-          * serial -- consecutive within (prefix, store, FY), zero-padded to 4
-            (``0001``); grows past 9999 naturally, never overflows.
+        THE one mint -- the counter, online and admin-edit doors all call it.
+        Format (owner ruling 2026-10-18): ``SHOPCODE/FYFY/NNNNN``, e.g.
+        ``BOK01/2627/00001`` -- 16 characters, Rule 46(b)'s cap.
+          * SHOPCODE -- the store RECORD's 5-character code
+            (``store_invoice_code``), refused if another store carries it, so
+            shops sharing a GSTIN can never print the same number.
+          * FYFY -- the Indian financial year in IST (``invoice_fy_start``):
+            Apr 2026-Mar 2027 = 2627.
+          * NNNNN -- consecutive in the shop's ONE series for the FY: the
+            ``counters`` doc ``invoice:{code}:{fy}``, opened by and owned by
+            this store (``invoice_series_problem``), claimed with ONE atomic
+            ``find_one_and_update($inc)``; restarts at 00001 each FY. Mongo
+            serialises the $inc, so concurrent bills get distinct serials.
 
-        Atomic per (prefix, store, financial-year): a single
-        ``find_one_and_update`` with ``$inc`` claims the next serial from a
-        ``counters`` doc keyed ``invoice:{prefix}:{store}:{fy_start_year}``.
-        Mongo serialises the increment, so two cashiers raising invoices at the
-        same instant get distinct serials -- no read-modify-write window, no
-        duplicates (Rule 46(b)).
-
-        We do NOT renumber existing invoices: callers only invoke this for an
-        order with no stored invoice_number, and the stored value is never
-        overwritten -- historical invoices keep their original number.
-
-        Fail-soft: with no counters collection (DB-less / mock), falls back to
-        a timestamp-derived suffix so the caller still gets a usable, unique
-        string (same prefix/store/FY shape) rather than a 500. That fallback
-        path is only hit when the DB is unavailable, in which case nothing is
-        persisted anyway.
+        REFUSES with InvoiceNumberError -- never guesses, never truncates: no
+        store record, no valid shop code, a code another store carries or
+        issued under this FY, a second series for the shop this FY, an
+        unreadable stores/counters collection (fail CLOSED), or a number that
+        breaks the GST rule (serial 100000 is 17 chars). Callers mint only for
+        an order with no stored number (``set_invoice`` keeps the first);
+        an issued number (old format included) is never rewritten.
         """
-        now = when or now_ist()
-        start = fy_start_year(now)
-        label = f"{start % 100:02d}-{(start + 1) % 100:02d}"  # short FY, e.g. 26-27
-        prefix = self._resolve_invoice_prefix(store_id, store_doc)
-        store_seg = self._resolve_invoice_store_segment(store_id, store_doc, prefix)
-        counters = self._counters_collection()
-        if counters is not None:
-            try:
+        start = invoice_fy_start(when)
+        fy = f"{start % 100:02d}{(start + 1) % 100:02d}"
+        try:
+            db = getattr(self.collection, "database", None)
+        except Exception:  # noqa: BLE001
+            db = None
+        if db is None:  # DB-less: no atomic counter, so no number
+            raise InvoiceNumberError("invoice counter unavailable -- try again in a minute")
+        try:
+            stores = db.get_collection("stores")
+            if store_doc is None and store_id:
+                store_doc = stores.find_one({"store_id": store_id}) or stores.find_one(
+                    {"store_code": store_id}
+                )
+            docs = list(
+                stores.find({}, {"_id": 0, "store_id": 1, "store_code": 1, "invoice_code": 1})
+            )
+        except Exception as exc:  # noqa: BLE001 - fail CLOSED
+            raise InvoiceNumberError(
+                "store records unreadable -- try again in a minute"
+            ) from exc
+        if not store_doc:
+            raise InvoiceNumberError(f"store {store_id} has no store record")
+        name = store_doc.get("store_code") or store_id
+        owner = store_doc.get("store_id") or store_id
+        code = store_invoice_code(store_doc)
+        if not code:
+            raise InvoiceNumberError(
+                f"store {name} has no valid invoice code -- set a 5-character "
+                "invoice code (capital letters/digits) on the store"
+            )
+        other = invoice_code_clash(code, (store_id, owner, name), docs)
+        if other:
+            raise InvoiceNumberError(
+                f"invoice code {code} of store {name} is also store {other}'s "
+                "-- give one of them a different invoice code"
+            )
+        counters = db.get_collection("counters")
+        doc = None
+        try:
+            problem = invoice_series_problem(counters, code, owner, start)
+            if problem is None:
                 from pymongo import ReturnDocument
 
-                key = f"invoice:{prefix}:{store_seg}:{start}"
+                # The filter names the owner: a series another store opened in
+                # a race is a duplicate _id on upsert -- refused, not shared.
                 doc = counters.find_one_and_update(
-                    {"_id": key},
-                    {"$inc": {"seq": 1}},
+                    {"_id": invoice_series_key(code, start), "store_id": owner, "fy": start},
+                    {"$inc": {"seq": 1}, "$setOnInsert": {"store_code": name}},
                     upsert=True,
                     return_document=ReturnDocument.AFTER,
                 )
-                seq = (doc or {}).get("seq")
-                if isinstance(seq, int) and seq > 0:
-                    return f"{prefix}/{store_seg}/{label}/{seq:04d}"
-            except Exception:  # noqa: BLE001 - fall through to safe fallback
-                logger.warning(
-                    "invoice counter $inc failed; using fallback serial",
-                    exc_info=True,
-                )
-        # Fail-soft fallback (DB-less / counter error): time-derived, still
-        # unique and still FY-labelled so the format stays consistent.
-        suffix = now.strftime("%m%d%H%M%S")
-        return f"{prefix}/{store_seg}/{label}/{suffix}"
+        except Exception as exc:  # noqa: BLE001
+            raise InvoiceNumberError(
+                "invoice counter unavailable -- try again in a minute"
+            ) from exc
+        if problem:
+            raise InvoiceNumberError(problem)
+        seq = (doc or {}).get("seq")
+        if not isinstance(seq, int) or seq < 1:
+            raise InvoiceNumberError(f"invoice counter returned {seq!r}")
+        number = f"{code}/{fy}/{seq:05d}"
+        problem = gst_invoice_number_problem(number)
+        if problem:
+            raise InvoiceNumberError(problem)
+        return number
 
     def create_unique(
         self, data: Dict, number_field: str, regenerate, max_retries: int = 6

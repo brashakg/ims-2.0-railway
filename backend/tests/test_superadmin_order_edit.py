@@ -177,6 +177,10 @@ def wired(monkeypatch):
     # counters collections via collection.database.
     for cname in ("orders", "audit_logs", "counters", "audit_chain_head", "stores"):
         setattr(db.get_collection(cname), "database", db)
+    # The invoice mint reads the order's STORE RECORD (no record, no number).
+    db.get_collection("stores").insert_one(
+        {"store_id": "BV-TEST-01", "store_code": "BV-TEST-01", "is_active": True}
+    )
 
     order_repo = OrderRepository(orders_coll)
     customer_repo = CustomerRepository(db.get_collection("customers"))
@@ -646,3 +650,42 @@ def test_pre_invoice_edit_keeps_line_discount_reason(client, auth_headers, wired
     line = doc["items"][0]
     assert line["discount_reason"] == "price match - Titan quote"
     assert line["discount_approved_by"] == "mgr-7"
+
+
+# ============================================================================
+# GST 16-char review (2026-10-19): a historical import never takes a live
+# serial, and two revise presses never print two revised numbers.
+# ============================================================================
+
+
+def _revise(client, auth_headers):
+    return client.put(
+        "/api/v1/orders/ord-16/superadmin-invoice-change",
+        json={"mode": "REVISED_INVOICE", "reason": "Wrong price on the original invoice",
+              "items": [_edit_item(unit_price=3000.0)]},
+        headers=auth_headers,
+    )
+
+
+def test_revised_invoice_refused_for_a_historical_import(client, auth_headers, wired):
+    _seed_order(wired["order_repo"], invoice_number="INV/BOK-01/26-27/0001", historical=True)
+    resp = _revise(client, auth_headers)
+    assert resp.status_code == 400
+    assert "historical imported order" in resp.json()["detail"]
+    assert wired["db"].get_collection("counters").docs == []
+    assert wired["order_repo"].find_by_id("ord-16")["invoice_number"] == "INV/BOK-01/26-27/0001"
+
+
+def test_revised_invoice_write_is_compare_and_set(client, auth_headers, wired, monkeypatch):
+    """The press read invoice X; another press already replaced X with Y. The
+    late write must not land a second revised number over Y."""
+    _seed_order(wired["order_repo"], invoice_number="INV/BOK-01/26-27/0001")
+    repo = wired["order_repo"]
+    stale = repo.find_by_id("ord-16")
+    repo.collection.update_one({"order_id": "ord-16"},
+                               {"$set": {"invoice_number": "TES01/2627/00001"}})
+    monkeypatch.setattr(repo, "find_by_id", lambda _oid: dict(stale))
+    resp = _revise(client, auth_headers)
+    assert resp.status_code == 409, resp.text
+    saved = repo.collection.find_one({"order_id": "ord-16"})
+    assert saved["invoice_number"] == "TES01/2627/00001"

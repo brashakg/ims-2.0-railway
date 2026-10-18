@@ -180,6 +180,9 @@ def wired(monkeypatch):
         db.get_collection("stores").insert_one(
             {"store_id": sid, "store_code": sid, "store_type": "RETAIL", "is_active": True}
         )
+    # The invoice mint reads the order's STORE RECORD (no record, no number).
+    db.get_collection("stores").insert_one({"store_id": "BV-ONLINE-01", "store_code": "BV-ONLINE-01",
+                                         "store_type": "ONLINE", "is_active": True})
     # The shops' company: a shop's GSTIN must be one it holds (shop_gstin).
     db.get_collection("entities").insert_one({"entity_id": "ENT-TEST", "gstins": [
         {"gstin": f"{c}AAAAA0000A1Z5", "state_code": c} for c in ("20", "27")]})

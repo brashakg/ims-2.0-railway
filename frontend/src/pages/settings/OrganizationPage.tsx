@@ -542,7 +542,10 @@ function StoreModal({
         <Field label="Region / zone"><input className={inputCls} value={form.region || ''} onChange={(e) => set('region', e.target.value)} /></Field>
         <Field label="UPI VPA"><input className={inputCls} value={form.upi_vpa || ''} onChange={(e) => set('upi_vpa', e.target.value)} /></Field>
         <Field label="Cost center"><input className={inputCls} value={form.cost_center || ''} onChange={(e) => set('cost_center', e.target.value)} /></Field>
-        <Field label="Invoice prefix"><input className={inputCls} placeholder="BV-RNC" value={form.invoice_prefix || ''} onChange={(e) => set('invoice_prefix', e.target.value.toUpperCase())} /></Field>
+        {/* The shop code in this store's tax invoice numbers (BOK01/2627/00001).
+            Blank = derived from the store code; the server refuses a code
+            another store uses. The old invoice prefix no longer reaches a number. */}
+        <Field label="Invoice code (5 letters/digits)"><input className={inputCls} placeholder="auto, e.g. BOK01" maxLength={5} value={form.invoice_code || ''} onChange={(e) => set('invoice_code', e.target.value.toUpperCase())} /></Field>
       </div>
 
       {!online && (
