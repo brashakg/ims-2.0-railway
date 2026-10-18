@@ -216,7 +216,7 @@ def _grn_accepted_by_product(grn: Optional[dict]) -> Dict[str, int]:
     return out
 
 
-def _invoice_by_product(invoice_lines: Optional[List[dict]]) -> Dict[str, dict]:
+def _invoice_by_product(invoice_lines: Optional[List[dict]], *, preserve_missing_price=False) -> Dict[str, dict]:
     """{product_id: {invoiced_qty, unit_price}} from invoice lines.
 
     A line's unit price is taken explicitly when present, else derived from
@@ -237,17 +237,19 @@ def _invoice_by_product(invoice_lines: Optional[List[dict]]) -> Dict[str, dict]:
             taxable = ln.get("taxable")
             if taxable is not None:
                 unit_price = _f(taxable) / qty if qty else 0.0
-        price = _f(unit_price)
+        price = _valuation_cost(unit_price) if preserve_missing_price else _f(unit_price)
         cur = out.get(pid)
         if cur is None:
             out[pid] = {
                 "invoiced_qty": qty,
-                "_value": qty * price,
+                "_value": qty * (price or 0),
+                "_unknown": price is None and qty > 0,
                 "unit_price": price,
             }
         else:
             cur["invoiced_qty"] += qty
-            cur["_value"] += qty * price
+            cur["_value"] += qty * (price or 0)
+            cur["_unknown"] = cur["_unknown"] or (price is None and qty > 0)
             cur["unit_price"] = (
                 round(cur["_value"] / cur["invoiced_qty"], 2)
                 if cur["invoiced_qty"]
@@ -255,6 +257,8 @@ def _invoice_by_product(invoice_lines: Optional[List[dict]]) -> Dict[str, dict]:
             )
     for v in out.values():
         v.pop("_value", None)
+        if v.pop("_unknown", False):
+            v["unit_price"] = None
     return out
 
 
@@ -610,29 +614,44 @@ def moving_average_cost(
     old_cost,
     receipt_qty,
     receipt_unit_cost,
-) -> float:
+) -> Optional[float]:
     """Weighted-average (AVCO) blended unit cost after a receipt.
 
         new_cost = (old_qty * old_cost + receipt_qty * receipt_unit_cost)
                    / (old_qty + receipt_qty)
 
-    Pure + total: all inputs coerce to numbers. Degenerate cases:
+    Missing cost is unknown, never a zero-cost layer. Degenerate cases:
       * total qty <= 0      -> fall back to the receipt unit cost (or old cost
                                if the receipt cost is 0) so cost is never NaN.
       * receipt_qty <= 0    -> cost unchanged (returns old_cost).
-    Returns a 2dp float.
+    Returns a 2dp float, or None when a positive-quantity layer is unpriced.
     """
     oq = _f(old_qty)
-    oc = _f(old_cost)
+    oc = _valuation_cost(old_cost)
     rq = _f(receipt_qty)
-    rc = _f(receipt_unit_cost)
+    rc = _valuation_cost(receipt_unit_cost)
     if rq <= 0:
         return oc
+    if rc is None or (oq > 0 and oc is None):
+        return None
     total_qty = oq + rq
     if total_qty <= 0:
         return rc if rc > 0 else oc
-    blended = (oq * oc + rq * rc) / total_qty
+    blended = (oq * (oc or 0) + rq * rc) / total_qty
     return round(blended, 2)
+
+
+def _valuation_cost(value) -> Optional[float]:
+    """Optional numeric cost; an explicitly recorded zero remains distinct."""
+    import math
+
+    if value is None or value == "":
+        return None
+    try:
+        cost = float(value)
+    except (TypeError, ValueError):
+        return None
+    return cost if math.isfinite(cost) and cost >= 0 else None
 
 
 def valuation_trueup_for_invoice(
@@ -652,37 +671,46 @@ def valuation_trueup_for_invoice(
     Args:
       invoice_lines:  computed invoice lines ({product_id, qty, unit_price,
                       taxable}).
-      product_state:  {product_id: {on_hand_qty, cost_price}} -- the CURRENT
-                      on-hand quantity + cost for each product (the router reads
+      product_state:  {product_id: {on_hand_qty, cost_price, uncosted_qty,
+                      receipt_uncosted_qty}} -- prior quantity, average of its
+                      known layers, and unresolved quantities (the router reads
                       these from products / stock_units before calling).
       method:         resolved valuation method.
 
     Returns a list of {product_id, old_cost, new_cost, receipt_qty,
-    receipt_unit_cost, method} -- one per product on the invoice that has a
-    positive invoiced qty. The router persists these fail-soft (a valuation
-    update must never block the booking).
+    receipt_unit_cost, method, unknown_old_qty, unknown_receipt_qty,
+    cost_complete} -- one per product with positive invoiced qty. An incomplete
+    moving average returns new_cost=None. The router persists these fail-soft
+    (a valuation update must never block the booking).
     """
     meth = (
         VALUATION_LATEST_PRICE
         if method == VALUATION_LATEST_PRICE
         else normalize_valuation_method(method)
     )
-    inv_idx = _invoice_by_product(invoice_lines)
+    inv_idx = _invoice_by_product(invoice_lines, preserve_missing_price=True)
     updates: List[dict] = []
     for pid, line in inv_idx.items():
         recv_qty = _f(line.get("invoiced_qty"))
-        recv_unit_cost = _f(line.get("unit_price"))
+        recv_unit_cost = _valuation_cost(line.get("unit_price"))
         if recv_qty <= 0:
             continue
         cur = product_state.get(pid) if isinstance(product_state, dict) else None
         old_qty = _f((cur or {}).get("on_hand_qty"))
-        old_cost = _f((cur or {}).get("cost_price"))
+        old_cost = _valuation_cost((cur or {}).get("cost_price"))
+        unknown_old_qty = _f((cur or {}).get("uncosted_qty"))
+        unknown_receipt_qty = _f((cur or {}).get("receipt_uncosted_qty"))
+        if old_qty > 0 and old_cost is None:
+            unknown_old_qty = max(unknown_old_qty, old_qty)
         if meth != VALUATION_MOVING_AVERAGE:
             # FIFO / a walk-in buy: don't blend the product-level cost; record
             # the latest cost. (The stock_units carry their own unit_cost.)
-            new_cost = recv_unit_cost if recv_unit_cost > 0 else old_cost
+            new_cost = recv_unit_cost if recv_unit_cost is not None and recv_unit_cost > 0 else old_cost
         else:
-            new_cost = moving_average_cost(old_qty, old_cost, recv_qty, recv_unit_cost)
+            new_cost = (
+                None if unknown_old_qty > 0 or unknown_receipt_qty > 0
+                else moving_average_cost(old_qty, old_cost, recv_qty, recv_unit_cost)
+            )
         updates.append(
             {
                 "product_id": pid,
@@ -691,6 +719,9 @@ def valuation_trueup_for_invoice(
                 "receipt_qty": recv_qty,
                 "receipt_unit_cost": recv_unit_cost,
                 "old_qty": old_qty,
+                "unknown_old_qty": unknown_old_qty,
+                "unknown_receipt_qty": unknown_receipt_qty,
+                "cost_complete": new_cost is not None,
                 "method": meth,
             }
         )

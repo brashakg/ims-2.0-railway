@@ -89,7 +89,8 @@ _COST_FIELDS = {
     "estimated_purchase_cost",
     # How many units carry NO cost: it goes with the cost it qualifies (F47
     # stock ledger rows), so the one mask hides it with cost_value.
-    "uncosted_units",
+    "uncosted_units", "valuation_cost_pending", "cost_valuation_pending",
+    "cost_price_is_catalogue_only",
 }
 # Derived margin / COGS figures emitted by analytics + finance payloads.
 _MARGIN_FIELDS = {
