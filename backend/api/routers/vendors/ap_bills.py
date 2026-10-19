@@ -606,15 +606,22 @@ async def create_vendor_bill(
     # carries the bill's tax share as its rate.
     # ponytail: one share for every line; a mixed-rate walk-in bill wants the
     # line-detail door (Purchase -> Invoices -> Create from GRN).
-    if db is not None and (linked or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO:
+    # F04 (owner + CA 2026-10-18): a PO receipt's bill claiming no credit (an
+    # unregistered supplier's, on this door) trues up the same way, priced
+    # from its order; one claiming credit leaves the cost as received.
+    walk_in = (linked or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO
+    if db is not None and linked and (walk_in or doc["itc_eligible"] is False):
         from ..purchase_invoices import _apply_valuation_trueup, _resolved_purchase_config
         from ...services.purchase_invoice_engine import lines_from_grn
 
+        po = None
+        if not walk_in and linked.get("po_id"):
+            po = db.get_collection("purchase_orders").find_one({"po_id": linked["po_id"]}, {"_id": 0})
         share = ap_engine.header_bill_gst_rate(bill.tax_amount, bill.taxable_amount) or 0.0
         _apply_valuation_trueup(
             db,
             {**doc, "invoice_id": bill_id},
-            {"lines": [{**ln, "gst_rate": share} for ln in lines_from_grn(linked, None)]},
+            {"lines": [{**ln, "gst_rate": share} for ln in lines_from_grn(linked, po)]},
             _resolved_purchase_config(db),
         )
     return _clean(doc)
