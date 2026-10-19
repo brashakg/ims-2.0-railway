@@ -211,7 +211,7 @@ def _live(monkeypatch, tags=None):
 
 def _product(seo_tags, sent=None, shopify_id=GID, pid="P1"):
     """A Ray-Ban FRAME (so ims_product_tags = seo tags + brand_rayban +
-    gender_men + product_spectacles) already on Shopify (or not, shopify_id=None), with the
+    gender_men) already on Shopify (or not, shopify_id=None), with the
     ownership ledger IMS recorded (None = never through the pass)."""
     doc = {
         "id": pid,
@@ -246,7 +246,7 @@ def _ledger(db, pid="P1"):
     return (db["catalog_products"].find_one({"id": pid}) or {})["ecom"].get("shopify_tags_sent")
 
 
-IMS_BASE = ["brand_rayban", "gender_men", "product_spectacles"]  # attribute + type tags
+IMS_BASE = ["brand_rayban", "gender_men"]  # the attribute-derived filter tags
 
 
 # ===========================================================================
@@ -265,7 +265,7 @@ def test_create_sends_the_full_list_on_the_input_and_records_the_ledger(db, gate
     assert cre["variables"]["input"]["tags"] == ["aviator"] + IMS_BASE
     assert fake.calls_of("imsTagsAdd") == [] and fake.calls_of("imsTagsRemove") == []
     assert _ledger(db) == ["aviator"] + IMS_BASE
-    assert res.tags == {"added": 4, "removed": 0, "unmanaged": 0, "adopted": False}
+    assert res.tags == {"added": 3, "removed": 0, "unmanaged": 0, "adopted": False}
 
 
 def test_an_update_never_sends_tags_on_the_product_input(db, gates, monkeypatch):
@@ -309,8 +309,7 @@ def test_dropping_every_ims_tag_leaves_the_hand_tags_standing(db, gates, monkeyp
     doc = _seed(db, _product([], sent=["aviator"]))
     doc["brand"] = None
     doc["attributes"] = {}
-    doc["category"] = "ACCESSORIES"  # no type tag either
-    db["catalog_products"].update_one({"id": "P1"}, {"$set": {"brand": None, "attributes": {}, "category": "ACCESSORIES"}})
+    db["catalog_products"].update_one({"id": "P1"}, {"$set": {"brand": None, "attributes": {}}})
 
     res = _run(shopify_push.push_product(db, doc, []))
 
@@ -332,10 +331,10 @@ def test_a_product_live_before_the_ledger_is_adopted_add_only(db, gates, monkeyp
     res = _run(shopify_push.push_product(db, doc, []))
 
     (add,) = fake.calls_of("imsTagsAdd")
-    assert add["variables"]["tags"] == ["aviator", "gender_men", "product_spectacles"]
+    assert add["variables"]["tags"] == ["aviator", "gender_men"]
     assert fake.calls_of("imsTagsRemove") == []
-    assert fake.tags == ["brand_rayban", "smart-glasses", HAND, "aviator", "gender_men", "product_spectacles"]
-    assert res.tags == {"added": 3, "removed": 0, "unmanaged": 2, "adopted": True}
+    assert fake.tags == ["brand_rayban", "smart-glasses", HAND, "aviator", "gender_men"]
+    assert res.tags == {"added": 2, "removed": 0, "unmanaged": 2, "adopted": True}
     assert _ledger(db) == ["aviator"] + IMS_BASE
 
 

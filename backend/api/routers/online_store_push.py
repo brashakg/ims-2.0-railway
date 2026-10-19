@@ -826,16 +826,18 @@ async def push_all_pending(
         if start + processed < eligible_total:
             next_offset = start + processed
 
-    brand_collections: Optional[Dict[str, Any]] = None
+    collection_registry: Optional[Dict[str, Any]] = None
     if "collections" in selected:
-        # Every brand with a listing on the website has its collection
-        # (owner 2026-10-19) -- made or found BEFORE the sweep below sends
-        # the queue, so a brand's first press carries its collection too.
+        # THE IMS collection set (owner 2026-10-19), derived from the listings
+        # on the website AFTER the product sweep above, so a press that puts
+        # a brand's / shape's first product live queues its collection too.
+        # LIVE only: a dark press changes nothing.
         try:
-            brand_collections = await shopify_push.ensure_brand_collections(db)
+            live, why = shopify_push._live_or_reason(db)
+            collection_registry = shopify_push.apply_collection_registry(db) if live else {"dark": why}
         except Exception as exc:  # noqa: BLE001 -- reported, never stops the sweep
-            logger.warning("[PUSH] brand collections skipped: %s", exc)
-            brand_collections = {"error": str(exc)}
+            logger.warning("[PUSH] collection registry skipped: %s", exc)
+            collection_registry = {"error": str(exc)}
         for doc in _all_docs(db, "ecom_collections"):
             if len(results) >= limit:
                 break
@@ -903,9 +905,9 @@ async def push_all_pending(
         # when no products were swept. {mode, action, ok, payload{changed,
         # synced, failed, stores_mapped, ...}, code, error}.
         "stock": stock,
-        # Brand collections made / found for this press ({created, reused}),
-        # None when collections were not selected.
-        "brand_collections": brand_collections,
+        # The collection registry for this press ({created, updated,
+        # unchanged, skipped}), None when collections were not selected.
+        "collection_registry": collection_registry,
         "results": results,
     }
 

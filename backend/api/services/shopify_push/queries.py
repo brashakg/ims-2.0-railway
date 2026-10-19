@@ -400,13 +400,24 @@ _ONLINE_STORE_PUBLICATION_NAME = "Online Store"
 _publication_id_cache: Dict[str, str] = {}
 
 
-# Read-only: every collection on the shop with its smart rules (brand
-# collections are matched against these before one is ever created).
+
+# The collection rebuild (collection_registry / scripts/rebuild_collections.py):
+# every collection on the shop with IMS's key metafield (set on the ones IMS
+# keeps), and the delete of one that is not IMS's.
 _COLLECTIONS_READ = """
 query imsCollectionsRead($after: String) {
   collections(first: 250, after: $after) {
     pageInfo { hasNextPage endCursor }
-    nodes { id handle title ruleSet { appliedDisjunctively rules { column relation condition } } }
+    nodes { id handle title productsCount { count } imsKey: metafield(namespace: "ims", key: "collection_key") { value } }
+  }
+}
+"""
+
+_COLLECTION_DELETE = """
+mutation imsCollectionDelete($input: CollectionDeleteInput!) {
+  collectionDelete(input: $input) {
+    deletedCollectionId
+    userErrors { field message }
   }
 }
 """

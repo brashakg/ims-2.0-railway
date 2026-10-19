@@ -113,7 +113,7 @@ def test_sunglass_emits_lens_tags():
         "shape_aviator",
         "lenscolour_green",
         "tint_gradient",
-        "polarization_polarized",
+        "polarization_yes",  # one spelling per meaning (collection rule, 2026-10-19)
         "uvprotection_uv400",
         "lensmaterial_polycarbonate",
     ]:

@@ -107,6 +107,7 @@ from . import (
     variants,
     publish,
     collections,
+    collection_registry,
     menus,
     media,
     writeback,
@@ -303,13 +304,20 @@ from .publish import (  # noqa: F401
 from .collections import (  # noqa: F401
     build_collection_input,
     _RULE_COLUMN,
-    AUTO_BRAND,
+    IMS_KEY,
+    IMS_MANAGED,
+    RETIRED,
     convert_rule_set,
-    ensure_brand_collections,
     rules_left_alone,
     _member_product_gids,
     _push_collection_membership,
     push_collection,
+)
+from .collection_registry import (  # noqa: F401
+    apply_collection_registry,
+    derive_definitions,
+    listing_facts,
+    sync_collections,
 )
 from .menus import (  # noqa: F401
     build_menu_items,
@@ -375,6 +383,7 @@ _SUBMODULES = (
     variants,
     publish,
     collections,
+    collection_registry,
     menus,
     media,
     writeback,
