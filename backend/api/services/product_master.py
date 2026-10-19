@@ -67,7 +67,7 @@ from .gtin import (
     normalise_candidate,
     sanitise_gtin,
 )
-from .pricing_caps import evaluate_offer_price
+from .pricing_caps import evaluate_offer_price, offer_terms_changed, offer_write_problem
 from .catalog_ecom import dirty_marks
 from .product_naming import (
     build_handle,
@@ -2246,6 +2246,13 @@ def normalise_payload(
         )
 
     ids = _derive_brand_model_color_size(attributes, canonical)
+
+    # THE offer-write check (pricing_caps.offer_write_problem): an offer
+    # deeper than the item's category / luxury-brand cap -- with the tier this
+    # door just settled -- is refused at every create door and import.
+    _cap_problem = offer_write_problem(mrp, offer_price, dc, ids["brand"])
+    if _cap_problem:
+        raise ProductMasterError(_cap_problem, status=400, field="offer_price")
 
     doc: Dict[str, Any] = {
         "sku": resolved_sku,
@@ -4761,12 +4768,20 @@ def update_product(
     # Merge price fields against the current doc for the both-directions check.
     new_mrp = clean.get("mrp", current.get("mrp"))
     new_offer = clean.get("offer_price", current.get("offer_price"))
-    if new_mrp is not None and new_offer is not None:
-        verdict = evaluate_offer_price(new_mrp, new_offer)
-        if verdict.get("reason") == "MRP_BELOW_OFFER":
-            raise ProductMasterError(
-                "Offer price cannot exceed MRP", status=400, field="offer_price"
-            )
+    # THE offer-write check, against the EFFECTIVE tier and brand. The cap is
+    # judged when the edit CHANGES the MRP, offer, tier or brand (any can make
+    # the standing offer too deep); otherwise only the MRP rule -- a legacy
+    # row's offer never blocks an unrelated edit (a rename, a model edit
+    # reaching its variants).
+    _cap_problem = offer_write_problem(
+        new_mrp,
+        new_offer,
+        str(clean.get("discount_category") or current.get("discount_category") or "") or None,
+        clean.get("brand", current.get("brand")),
+        judge_cap=offer_terms_changed(clean, current),
+    )
+    if _cap_problem:
+        raise ProductMasterError(_cap_problem, status=400, field="offer_price")
 
     # discount_category: validate + enforce LOWER-ONLY for LUXURY (cannot move a
     # LUXURY tier to a laxer tier -- CORRECTIONS E2 luxury-cap invariant).

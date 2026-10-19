@@ -31,7 +31,12 @@ from ..services.online_catalog import (
     online_mapping_available,
 )
 from ..services import stock_allocation
-from ..services.pricing_caps import evaluate_offer_price, CATEGORY_DISCOUNT_CAPS
+from ..services.pricing_caps import (
+    evaluate_offer_price,
+    offer_terms_changed,
+    offer_write_problem,
+    CATEGORY_DISCOUNT_CAPS,
+)
 from ..services.gst_rates import gst_rate_for_category, hsn_for_category
 from ..services import product_master as _pm
 from ..services import online_delist as _delist
@@ -2114,11 +2119,11 @@ def _guard_catalog_pricing(product: "ProductCreateInput") -> tuple:
     POST /api/v1/products path already enforces, so /catalog/products is not an
     unguarded back-door (SYSTEM_INTENT section 3/10: offer_price > mrp -> BLOCK):
 
-      1. Block offer_price > mrp (400), via the SHARED pricing_caps validator
-         (services/pricing_caps.evaluate_offer_price) -- the same source of
-         truth used by products.py and the bulk-price endpoints. Only the
-         MRP_BELOW_OFFER verdict is raised here; discount-cap (CAP_EXCEEDED)
-         stays a bulk/POS concern, matching products._assert_mrp_ge_offer.
+      1. Block offer_price > mrp, and an offer deeper than the item's
+         category / luxury-brand cap (400), via THE offer-write check
+         (services/pricing_caps.offer_write_problem) every offer door and
+         the bulk tools share. (The canonical door re-checks with the tier it
+         derives from the Brand Master.)
       2. Derive gst_rate / hsn_code from the product category via the canonical
          services/gst_rates table when the client omits the rate (or omits the
          HSN), so the master rate equals what POS bills (a frame -> 5%, not the
@@ -2127,12 +2132,15 @@ def _guard_catalog_pricing(product: "ProductCreateInput") -> tuple:
     Returns the (gst_rate, hsn_code) to persist. The ProductCategory enum values
     are the short codes ("FR", "SG", ...) which are keys in GST_CATEGORY_TABLE.
     """
-    mrp = product.pricing.mrp
-    offer_price = product.pricing.offer_price
-    if mrp is not None and offer_price is not None:
-        verdict = evaluate_offer_price(mrp, offer_price)
-        if verdict["reason"] == "MRP_BELOW_OFFER":
-            raise HTTPException(status_code=400, detail="Offer price cannot exceed MRP")
+    attrs = product.attributes or {}
+    problem = offer_write_problem(
+        product.pricing.mrp,
+        product.pricing.offer_price,
+        product.pricing.discount_category,
+        attrs.get("brand_name") or attrs.get("brand"),
+    )
+    if problem:
+        raise HTTPException(status_code=400, detail=problem)
 
     category_code = product.category.value
     if product.gst_rate is not None:
@@ -2604,6 +2612,12 @@ async def update_catalog_product(
         }
         eff_mrp = merged_pricing.get("mrp")
         eff_offer = merged_pricing.get("offer_price")
+        # THE offer-write check (pricing_caps.offer_write_problem). The cap is
+        # judged when this edit CHANGES the MRP, offer or tier; an untouched
+        # legacy offer never blocks an unrelated edit.
+        _judge_cap = offer_terms_changed(pricing_patch, existing.get("pricing") or {})
+        _dc = merged_pricing.get("discount_category") or existing.get("discount_category")
+        _brand = existing.get("brand") or (existing.get("attributes") or {}).get("brand_name")
         if "offer_price" in pricing_patch:
             # An offer-touching patch REQUIRES a usable effective MRP: price-
             # less imports (BVI fold_variant_prices leaves {mrp: 0.0}) made
@@ -2615,10 +2629,9 @@ async def update_catalog_product(
             if eff_mrp is None:
                 eff_mrp = existing.get("mrp")
             verdict = evaluate_offer_price(eff_mrp, eff_offer)
-            if verdict["reason"] == "MRP_BELOW_OFFER":
-                raise HTTPException(
-                    status_code=400, detail="Offer price cannot exceed MRP"
-                )
+            problem = offer_write_problem(eff_mrp, eff_offer, _dc, _brand, _judge_cap)
+            if problem:
+                raise HTTPException(status_code=400, detail=problem)
             if verdict["reason"] == "INVALID_MRP":
                 raise HTTPException(
                     status_code=400,
@@ -2626,13 +2639,11 @@ async def update_catalog_product(
                 )
         elif eff_mrp is not None and eff_offer is not None:
             # Patches NOT touching offer_price stay lenient (metadata/cost
-            # fixes on price-less imports must keep working): only the
-            # non-negotiable MRP >= offer rule is enforced.
-            verdict = evaluate_offer_price(eff_mrp, eff_offer)
-            if verdict["reason"] == "MRP_BELOW_OFFER":
-                raise HTTPException(
-                    status_code=400, detail="Offer price cannot exceed MRP"
-                )
+            # fixes on price-less imports must keep working): the MRP >= offer
+            # rule, and the cap when the MRP or the tier changes.
+            problem = offer_write_problem(eff_mrp, eff_offer, _dc, _brand, _judge_cap)
+            if problem:
+                raise HTTPException(status_code=400, detail=problem)
         existing["pricing"] = merged_pricing
         # Imported (BVI) docs carry the price BOTH top-level (generic
         # consumers, incl. the promote payload) and nested under `pricing`

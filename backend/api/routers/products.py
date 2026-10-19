@@ -219,29 +219,24 @@ def _resolve_hsn_or_400(category: str, hsn_code) -> str:
     )
 
 
-def _assert_mrp_ge_offer(mrp, offer_price) -> None:
-    """Enforce the non-negotiable MRP >= offer_price rule via the SHARED
-    pricing_caps validator -- the single source of truth also used by the
-    bulk-price / bulk-offer endpoints (see services/pricing_caps.py). Sharing
-    it keeps the "offer can never exceed MRP" check (incl. its float tolerance)
-    in one place instead of duplicated inline comparisons.
+def _assert_mrp_ge_offer(
+    mrp, offer_price, discount_category=None, brand=None, judge_cap=True
+) -> None:
+    """Refuse an offer above MRP, or deeper than the item's category / luxury-
+    brand cap (400), via THE offer-write check (services/pricing_caps.
+    offer_write_problem) every offer door and the bulk tools share.
 
-    Single-product create/update intentionally enforce ONLY this rule:
-      - A CAP_EXCEEDED verdict (discount-cap breach) is NOT raised here -- caps
-        are a bulk-pricing / POS concern; the single-product path has never
-        enforced them and doing so now could block legitimate catalog edits.
-      - INVALID_MRP is left to pydantic's gt=0 field guards (create) and to
-        fail-soft handling of legacy data (update); we act solely on the
-        MRP-below-offer verdict so behavior is unchanged. Skips silently when
-        either value is missing (partial update with no price merge).
+    The cap is enforced here too now (money review 2026-10-19): the till sells
+    an HQ offer as-is without counting it against anyone's limit, so a 30%
+    offer on a 2%-cap Cartier frame saved here would sell at 30% off. Skips
+    silently when either price is missing (partial update with no price
+    merge); INVALID_MRP stays pydantic's (create) / legacy-tolerant (update).
     """
-    if mrp is None or offer_price is None:
-        return
-    from ..services.pricing_caps import evaluate_offer_price
+    from ..services.pricing_caps import offer_write_problem
 
-    verdict = evaluate_offer_price(mrp, offer_price)
-    if verdict["reason"] == "MRP_BELOW_OFFER":
-        raise HTTPException(status_code=400, detail="Offer price cannot exceed MRP")
+    problem = offer_write_problem(mrp, offer_price, discount_category, brand, judge_cap)
+    if problem:
+        raise HTTPException(status_code=400, detail=problem)
 
 
 def _validate_product_barcode_or_400(barcode, repo, this_product_id: str):
@@ -1255,8 +1250,10 @@ async def create_product(
     # HSN. Stamp the resolved value so the canonical door + GSTR-1/Tally carry it.
     product.hsn_code = _resolve_hsn_or_400(product.category, product.hsn_code)
 
-    # Validate MRP >= Offer Price via the shared pricing_caps validator.
-    _assert_mrp_ge_offer(product.mrp, product.offer_price)
+    # Offer <= MRP and within the item's cap: THE offer-write check.
+    _assert_mrp_ge_offer(
+        product.mrp, product.offer_price, product.discount_category, product.brand
+    )
 
     if product.modality and product.modality not in CL_MODALITIES:
         raise HTTPException(
@@ -3517,10 +3514,27 @@ async def update_product(
         # doc and validate regardless of which field(s) are present, mirroring
         # the create-path guard. Both share services/pricing_caps via the
         # _assert_mrp_ge_offer helper so the MRP-rule lives in one place.
-        if "mrp" in update_data or "offer_price" in update_data:
+        # A price, tier or brand change can make the standing offer too deep:
+        # judge the EFFECTIVE offer against the effective cap whenever one
+        # moves; otherwise only the MRP rule (a legacy offer never blocks an
+        # unrelated edit the form re-sends unchanged prices with).
+        from ..services.pricing_caps import offer_terms_changed
+
+        if offer_terms_changed(update_data, existing):
             eff_mrp = update_data.get("mrp", existing.get("mrp"))
             eff_offer = update_data.get("offer_price", existing.get("offer_price"))
-            _assert_mrp_ge_offer(eff_mrp, eff_offer)
+            _assert_mrp_ge_offer(
+                eff_mrp,
+                eff_offer,
+                update_data.get("discount_category", existing.get("discount_category")),
+                update_data.get("brand", existing.get("brand")),
+            )
+        elif "mrp" in update_data or "offer_price" in update_data:
+            _assert_mrp_ge_offer(
+                update_data.get("mrp", existing.get("mrp")),
+                update_data.get("offer_price", existing.get("offer_price")),
+                judge_cap=False,
+            )
 
         # Step-12: normalise tags on edit so the stored shape is identical to the
         # canonical create (lowercase/trim/dedupe). An explicit [] clears tags.
