@@ -9,6 +9,10 @@ Nothing is written. A piece the return NAMES (its stock_ids, every return
 made since PR #1234) is finished by pressing Ship again on its return; a piece
 only linked (an older return that named none) needs a decision.
 
+It also lists every return still 'saving' after 10 minutes (a create whose
+request died): the next supplier return raised at that shop undoes it and
+puts its pieces back on the shelf.
+
   railway run --service <backend> -- .venv\\Scripts\\python.exe backend\\scripts\\count_stuck_return_pieces.py
 """
 
@@ -47,6 +51,21 @@ def stuck_pieces(db):
     return sorted(rows, key=lambda r: (str(r[0]), str(r[2])))
 
 
+def dead_claims(db):
+    """[(return_id, store_id, claimed_at, pieces it named)] for returns still
+    'saving' after SAVING_MINUTES -- reads only."""
+    from datetime import datetime, timedelta, timezone
+
+    from api.services.quarantine_hold import SAVING_MINUTES, stamp
+
+    dead = stamp(datetime.now(timezone.utc) - timedelta(minutes=SAVING_MINUTES))
+    return sorted(
+        (r.get("return_id"), r.get("store_id"), r.get("claimed_at"), list(r.get("stock_ids") or []))
+        for r in db.get_collection("vendor_returns").find({"status": "saving"})
+        if str(r.get("claimed_at") or "") < dead
+    )
+
+
 def _connect():
     from database.connection import DatabaseConfig, get_db, init_db
 
@@ -67,6 +86,10 @@ def main() -> int:
     for rid, rstatus, sid, barcode, ustatus, named in rows:
         print(f"  {rid} ({rstatus})  piece {barcode or '-'} [{sid}]  status {ustatus}  "
               f"{'named: press Ship again' if named else 'linked only: needs a decision'}")
+    claims = dead_claims(conn.db)
+    print(f"returns still 'saving' after 10 minutes: {len(claims)}")
+    for rid, store, at, pieces in claims:
+        print(f"  {rid} at {store} since {at}  pieces {', '.join(pieces) or '-'}")
     return 0
 
 

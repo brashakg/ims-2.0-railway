@@ -48,6 +48,7 @@ interface Piece {
   barcode: string;
   status?: string;
   expiry_date?: string | null;
+  /** Rejected at receiving: goes back on its own rejection draft (never offered). */
   rejected?: boolean;
   /** The open supplier return this piece is already on (never offered). */
   on_supplier_return?: string | null;
@@ -391,7 +392,7 @@ export function VendorReturns() {
       })).data?.units || [];
       const options: Piece[] = units
         .map((u: Piece) => ({ ...u, status: pieceState(u.status) }))
-        .filter((u: Piece) => RETURNABLE.includes(u.status as string) && !u.on_supplier_return)
+        .filter((u: Piece) => RETURNABLE.includes(u.status as string) && !u.on_supplier_return && !u.rejected)
         .sort(pickOrder);
       const dated = options.some((u) => u.expiry_date);
       setPieces(idx, (l) => ({

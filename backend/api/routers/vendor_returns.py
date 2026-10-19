@@ -29,7 +29,7 @@ from ..services.payables_mask import require_payables
 from ..services.rtv_debit_note import debit_note_issued
 from ..services import item_events as _ie
 from ..services.org_validation import shop_gstins
-from ..services.quarantine_hold import open_return_of, stamp as _stamp
+from ..services.quarantine_hold import SAVING_MINUTES, open_return_of, stamp as _stamp
 from .inventory.accountability import _STOCK_MANAGER_ROLES
 
 logger = logging.getLogger(__name__)
@@ -243,6 +243,8 @@ def _may_take_from_shelf(user) -> bool:
 def _not_returnable(db, unit) -> Optional[str]:
     """Why a piece cannot go on a return; None when it can: it is on the shelf
     (AVAILABLE) or set aside (QUARANTINED) and on no other open return."""
+    if unit.get("receipt_disposition") == "REJECTED":
+        return "was rejected at receiving: it goes back on its own receiving rejection"
     raw = unit.get("status")
     if _ie.is_on_hand(raw):
         return None
@@ -310,7 +312,8 @@ def _typed_line_problem(db, item, store_id) -> Optional[str]:
         return (f"{item.product_name} is a product this shop holds pieces of: scan or "
                 "pick the pieces going back.")
     return (f"{item.product_name} is a product this shop holds pieces of, but every one is "
-            "already on another supplier return, so none can go on this one.")
+            "already on another supplier return or held by its receiving rejection, so none "
+            "can go on this one.")
 
 
 def _pieces_for_lines(db, data: "VendorReturnCreate", user):
@@ -338,10 +341,6 @@ def _pieces_for_lines(db, data: "VendorReturnCreate", user):
         if vendor and vendor != data.vendor_id:
             _refuse(f"Piece {_label(unit, sid)} was received from a different supplier "
                     f"(receipt {gid}). Return it to the supplier it came from.")
-        if unit.get("receipt_disposition") == "REJECTED" and not vendor:
-            # Rejected at receiving: it goes back to the supplier that sent it.
-            _refuse(f"Piece {_label(unit, sid)} was rejected at receiving and its supplier "
-                    "could not be checked. Open its receiving rejection instead.")
         why_not_here = _gstin_refusal(db, receipt_store, data.store_id, gstins, _label(unit, sid))
         if why_not_here:
             _refuse(why_not_here)
@@ -556,22 +555,66 @@ def _request_fingerprint(data) -> str:
 
 
 def _same_submission(held: dict, fingerprint: str) -> dict:
-    """The answer to a repeat of a submission already saved (or being saved):
-    its return -- touching nothing -- unless it said something else."""
+    """The answer to a repeat of a submission already saved: its return --
+    touching nothing -- unless it said something else. A submission still
+    being saved is no success yet."""
     if held.get("request_fingerprint") != fingerprint:
         raise HTTPException(status_code=409, detail=(
             "This form was already saved with different details - refresh the page."))
+    if held.get("status") == "saving":
+        raise HTTPException(status_code=409, detail=(
+            "This return is still being saved - try again in a moment."))
     return {"return_id": held.get("return_id"), "message": "Vendor return created successfully"}
 
 
-def _claim_return(collection, return_id, actor, request_id, fingerprint, token) -> Optional[dict]:
+def _claim_expired(claim: dict) -> bool:
+    """A 'saving' claim older than SAVING_MINUTES: its request died."""
+    dead = _stamp(datetime.now(timezone.utc) - timedelta(minutes=SAVING_MINUTES))
+    return claim.get("status") == "saving" and str(claim.get("claimed_at") or "") < dead
+
+
+def _abandon_claim(db, claim: dict, actor_id) -> None:
+    """Undo a claim whose request died mid-save, the cancel's way: every piece
+    it named that is still linked to it -- or that it quarantined itself (its
+    own ledger row is the piece's last) before linking -- gets its earlier
+    link back, a piece it took off the shelf goes back on it (website count
+    re-pushed), then the claim is deleted. Pieces another door holds now stay
+    where they are."""
+    rid = claim.get("return_id")
+    prior = {p.get("stock_id"): p.get("rtv_vendor_id") for p in claim.get("prior_links") or []}
+    mine = []
+    for unit in db.get_collection("stock_units").find({"stock_id": {"$in": claim.get("stock_ids") or []}}):
+        sid = unit.get("stock_id")
+        if unit.get("rtv_vendor_id") == rid:
+            mine.append(sid)
+        elif unit.get("rtv_vendor_id") == prior.get(sid) and _is_set_aside(unit):
+            last = list(db.get_collection("item_events").find({"stock_id": sid})
+                        .sort("event_seq", -1).limit(1))
+            if last and last[0].get("source_id") == rid and last[0].get("to_state") == "QUARANTINED":
+                mine.append(sid)
+    _release_pieces(db, rid, mine, set(claim.get("set_aside_stock_ids") or []), actor_id, prior)
+    db.get_collection("vendor_returns").delete_one(
+        {"_id": claim.get("_id"), "status": "saving", "claim_token": claim.get("claim_token")})
+
+
+def _sweep_dead_claims(db, store_id, actor_id) -> None:
+    """Every create first undoes its shop's dead claims, so an abandoned save
+    never leaves pieces off sale."""
+    for claim in list(db.get_collection("vendor_returns").find({"status": "saving", "store_id": store_id})):
+        if _claim_expired(claim):
+            _abandon_claim(db, claim, actor_id)
+
+
+def _claim_return(db, return_id, plan: dict) -> Optional[dict]:
     """Insert the return's claim row ('saving', its id unique) BEFORE any
-    piece is touched. None when this request won it; else the row that holds
-    the id (a repeat of the same submission, or a different one)."""
+    piece is touched -- recording the pieces it will set aside, so a request
+    that dies mid-save can be undone. None when this request won it; else the
+    row that holds the id (a repeat of the same submission, or a different
+    one). A dead claim on the id was undone before the pieces were checked
+    (create); one that died since answers 'still being saved' until then."""
+    collection = db.get_collection("vendor_returns")
     claim = {"_id": return_id, "return_id": return_id, "status": "saving",
-             "created_by": actor, "client_request_id": request_id,
-             "request_fingerprint": fingerprint, "claim_token": token,
-             "claimed_at": _stamp(datetime.now(timezone.utc))}
+             "claimed_at": _stamp(datetime.now(timezone.utc)), **plan}
     try:
         collection.insert_one(claim)
         return None
@@ -700,12 +743,13 @@ async def create_vendor_return(
         require_payables(current_user, "Pricing a vendor return")
     named = [sid for item in return_data.items for sid in item.stock_ids or []]
     named += return_data.stock_ids or []
-    rejected = list(db.get_collection("stock_units").find({
+    # A piece rejected at receiving goes back only on its own rejection draft
+    # (its supplier credit and the bill's payment hold are built on it).
+    if named and db.get_collection("stock_units").find_one({
         "stock_id": {"$in": named},
         "store_id": return_data.store_id,
         "receipt_disposition": "REJECTED",
-    })) if named else []
-    if any(open_return_of(db, u) for u in rejected):
+    }):
         raise HTTPException(status_code=409, detail="Rejected receipt pieces already have a return draft. Open that return instead.")
 
     # A repeat of the same form submission names the same return: an earlier
@@ -714,24 +758,43 @@ async def create_vendor_return(
     # that loses the claim touches nothing.
     actor = current_user.get("user_id")
     collection = db.get_collection("vendor_returns")
+    _sweep_dead_claims(db, return_data.store_id, actor)
     request_id = (return_data.client_request_id or "").strip() or None
     fingerprint = _request_fingerprint(return_data)
     if request_id:
         same = collection.find_one({"client_request_id": request_id, "created_by": actor})
+        if same and _claim_expired(same):
+            _abandon_claim(db, same, actor)  # its request died: start afresh
+            same = None
         if same:
             return _same_submission(same, fingerprint)
-    lines, no_receipt = _pieces_for_lines(db, return_data, current_user)
     return_id = generate_return_id(f"{actor}|{request_id}" if request_id else None)
+    dead = collection.find_one({"_id": return_id})
+    if dead and _claim_expired(dead):
+        _abandon_claim(db, dead, actor)  # a dead save on this id: undone first
+    # The pieces are checked only now, after every dead save was undone.
+    lines, no_receipt = _pieces_for_lines(db, return_data, current_user)
     token = uuid.uuid4().hex
-    holder = _claim_return(collection, return_id, actor, request_id, fingerprint, token)
+    units = [u for pieces in lines for u in pieces]
+    holder = _claim_return(db, return_id, {
+        "store_id": return_data.store_id, "created_by": actor,
+        "client_request_id": request_id, "request_fingerprint": fingerprint,
+        "claim_token": token,
+        # What this save will touch, written before it touches it.
+        "stock_ids": [u["stock_id"] for u in units],
+        "set_aside_stock_ids": [u["stock_id"] for u in units if not _is_set_aside(u)],
+        "prior_links": [{"stock_id": u["stock_id"], "rtv_vendor_id": u.get("rtv_vendor_id")}
+                        for u in units if u.get("rtv_vendor_id")],
+    })
     if holder is not None:
         return _same_submission(holder, fingerprint)
 
     # The pieces each line sends back, set aside under the won claim -- all or
-    # nothing (a refusal gives the claim up).
+    # nothing (a refusal gives the claim up; a request that dies here leaves
+    # the claim for the sweep to undo).
     try:
         linked, taken, prior = _set_aside(db, lines, return_id, return_data.store_id, actor)
-    except BaseException:
+    except Exception:
         _drop_claim(collection, return_id, token)
         raise
 
@@ -928,16 +991,6 @@ async def update_return_status(
                 raise HTTPException(status_code=409, detail=(
                     f"Part of this return already left stock ({', '.join(sent)}). "
                     "Press Ship to finish it."))
-        # A cancelled receiving-rejection draft reopens only while it still
-        # holds its pieces -- a new return may have taken them since.
-        if current_status == "cancelled" and status_update.status == "draft":
-            gone = [sid for sid in return_doc.get("stock_ids") or []
-                    if sid not in _named_units(db, return_doc)]
-            if gone:
-                taken_by = (db.get_collection("stock_units").find_one({"stock_id": gone[0]}) or {})
-                raise HTTPException(status_code=409, detail=(
-                    f"Its pieces are now on supplier return {taken_by.get('rtv_vendor_id') or '-'}; "
-                    "that return goes to the supplier instead."))
 
         # Update document
         update_dict = {

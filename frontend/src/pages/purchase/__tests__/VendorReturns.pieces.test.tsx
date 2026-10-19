@@ -117,12 +117,13 @@ describe('VendorReturns - the add-item step names the pieces', () => {
     expect(body.items[0]).toMatchObject({ product_id: 'P1', quantity: 1, stock_ids: ['U1'] });
   });
 
-  it('dated stock is pre-ticked set-aside first, then earliest expiry; a piece on another open return is never offered', async () => {
+  it('dated stock is pre-ticked set-aside first, then earliest expiry; a piece on another open return or rejected at receiving is never offered', async () => {
     shelf = [
       { stock_id: 'L3', barcode: 'CL-2028', status: 'AVAILABLE', expiry_date: '2028-01-31' },
       { stock_id: 'L1', barcode: 'CL-2026', status: 'AVAILABLE', expiry_date: '2026-11-30' },
       { stock_id: 'L2', barcode: 'CL-ASIDE', status: 'QUARANTINED', expiry_date: '2027-06-30' },
       { stock_id: 'LR', barcode: 'CL-ON-VR', status: 'QUARANTINED', expiry_date: '2025-01-31', on_supplier_return: 'VR-1' },
+      { stock_id: 'LX', barcode: 'CL-REJ', status: 'QUARANTINED', expiry_date: '2024-01-31', rejected: true },
     ];
     await openForm();
     fireEvent.change(screen.getByDisplayValue('1'), { target: { value: '2' } });
