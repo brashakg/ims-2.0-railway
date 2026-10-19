@@ -128,6 +128,14 @@ vi.mock('../../../../components/customers/AddCustomerModal', () => ({
   AddCustomerModal: () => null,
 }));
 vi.mock('../PosWidgets', () => ({ PosWidgets: () => null }));
+// The ask-a-manager panel stands in as one button meaning "the manager
+// approved this bill" -- what the SURFACE does with that is under test here
+// (the panel itself: discountApprovalAtTill.test.tsx).
+vi.mock('../../../../components/pos/DiscountApprovalPanel', () => ({
+  DiscountApprovalPanel: ({ onApproved }: { onApproved: (id: string) => void }) => (
+    <button type="button" onClick={() => onApproved('REQ-9')}>manager-approved</button>
+  ),
+}));
 
 import { MemoryRouter } from 'react-router-dom';
 import { GeneralCounterSurface } from '../GeneralCounterSurface';
@@ -381,5 +389,51 @@ describe("F46: the counter's tiles and cart use this shop's sellable count", () 
     } finally {
       usePOSStore.getState().setStoreId('');
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A discount over the seller's limit (owner 2026-10-18): once a manager
+// approves, the SAME sale is resubmitted carrying the approval id; an approval
+// the server refuses is dropped, so the next try asks again.
+// ---------------------------------------------------------------------------
+describe('a discount a manager must approve', () => {
+  const NEED = {
+    code: 'DISCOUNT_NEEDS_APPROVAL', message: 'needs a manager',
+    requested_percent: 18, max_percent: 10,
+  };
+
+  it('resubmits the same sale with the approval id once a manager approves', async () => {
+    submitPosOrder
+      .mockResolvedValueOnce({ ok: false, error: 'needs a manager', discountApproval: NEED })
+      .mockResolvedValueOnce({ ok: true, orderId: 'o-9', orderNumber: 'ORD-9' });
+    putSomethingInTheCart();
+    renderCounter();
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(screen.getByText('manager-approved')).toBeTruthy());
+    expect(submitPosOrder.mock.calls[0][2]).toBeNull();
+
+    fireEvent.click(screen.getByText('manager-approved'));
+    await waitFor(() => expect(submitPosOrder).toHaveBeenCalledTimes(2));
+    expect(submitPosOrder.mock.calls[1][2]).toBe('REQ-9');
+  });
+
+  it('drops an approval the server refused, so the next try asks again', async () => {
+    submitPosOrder
+      .mockResolvedValueOnce({ ok: false, error: 'needs a manager', discountApproval: NEED })
+      .mockResolvedValueOnce({ ok: false, error: 'already used', discountApprovalRejected: true })
+      .mockResolvedValueOnce({ ok: false, error: 'needs a manager', discountApproval: NEED });
+    putSomethingInTheCart();
+    renderCounter();
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(screen.getByText('manager-approved')).toBeTruthy());
+    fireEvent.click(screen.getByText('manager-approved'));
+    await waitFor(() => expect(submitPosOrder).toHaveBeenCalledTimes(2));
+    expect(submitPosOrder.mock.calls[1][2]).toBe('REQ-9');
+
+    await waitFor(() => expect((completeButton() as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(submitPosOrder).toHaveBeenCalledTimes(3));
+    expect(submitPosOrder.mock.calls[2][2]).toBeNull();
   });
 });

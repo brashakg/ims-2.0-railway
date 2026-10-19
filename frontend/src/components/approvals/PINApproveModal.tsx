@@ -153,7 +153,10 @@ export function PINApproveModal({ request, mode, onClose, onDone }: Props) {
               </span>
             </div>
             {request.reason && (
-              <p className="mt-1 text-xs text-gray-600">{request.reason}</p>
+              <p className="mt-1 text-xs text-gray-600">
+                {request.action_type === 'discount_override' ? "Cashier's note: " : ''}
+                {request.reason}
+              </p>
             )}
           </div>
 

@@ -1,9 +1,11 @@
 // A discount over the seller's own limit, at the till (owner 2026-10-18).
 //
 // WHO approved a discount is the server's decision: the till never sends a
-// typed approver. Over the limit, order create refuses with
-// DISCOUNT_NEEDS_APPROVAL; the till asks a manager through the E4 approvals
-// flow and resubmits the same sale with the approved request's id.
+// typed approver, and never writes the approval request either. Over the
+// limit, order create refuses with DISCOUNT_NEEDS_APPROVAL; "Ask a manager to
+// approve" re-sends THIS bill with request_approval and the SERVER raises the
+// request from its own pricing. Once a manager approves, the same sale is
+// resubmitted with the request id -- unless the bill changed meanwhile.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 
@@ -31,28 +33,24 @@ import { orderApi } from '../../../services/api';
 import { buildApiError } from '../../../services/api/client';
 import { approvalsApi } from '../../../services/api/approvals';
 import { usePOSStore } from '../../../stores/posStore';
-import { submitPosOrder } from '../submitOrder';
-import { DiscountApprovalPanel, APPROVAL_POLL_MS, type DiscountApprovalNeed } from '../DiscountApprovalPanel';
+import { submitPosOrder, askManagerForDiscount } from '../submitOrder';
+import {
+  DiscountApprovalPanel, APPROVAL_POLL_MS, BILL_CHANGED_MESSAGE, type DiscountApprovalNeed,
+} from '../DiscountApprovalPanel';
 
 const NEED: DiscountApprovalNeed = {
   code: 'DISCOUNT_NEEDS_APPROVAL',
-  message: 'The discount on Frame comes to 18.00% ..., which exceeds your limit of 10%. A manager must approve it.',
+  message: 'The discount on Frame comes to 18.00% (item and bill discounts together), which exceeds your limit of 10%. A manager must approve it.',
   requested_percent: 18,
   max_percent: 10,
   zero_total: false,
-  approval_request: {
-    action_type: 'discount_override',
-    store_id: 'BV-TEST-01',
-    required_tier: 'auto',
-    context: { discount_percent: 18, zero_total: false, product_ids: 'p-frame' },
-  },
 };
 
-/** The refusal exactly as the API client delivers it (the real transform). */
-function refusal(code: string, detail: Record<string, unknown>) {
+/** A refusal exactly as the API client delivers it (the real transform). */
+function refusal(status: number, code: string, detail: Record<string, unknown> = {}) {
   return buildApiError({
-    message: 'Request failed with status code 403',
-    response: { status: 403, data: { detail: { ...detail, code } } },
+    message: `Request failed with status code ${status}`,
+    response: { status, data: { detail: { message: `refused: ${code}`, ...detail, code } } },
   } as unknown as AxiosError<{ detail?: string }>);
 }
 
@@ -68,6 +66,8 @@ function cartAt18() {
   usePOSStore.getState().addPayment({ method: 'CASH', amount: 820 } as never);
 }
 
+const createOrder = () => vi.mocked(orderApi.createOrder);
+
 describe('submitPosOrder and the discount approver', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -80,9 +80,9 @@ describe('submitPosOrder and the discount approver', () => {
 
   it('never sends a typed approver, and sends the approval id on the retry', async () => {
     cartAt18();
-    vi.mocked(orderApi.createOrder).mockResolvedValue({ order_id: 'o1', order_number: 'BV-1' } as never);
+    createOrder().mockResolvedValue({ order_id: 'o1', order_number: 'BV-1' } as never);
     await submitPosOrder(usePOSStore.getState(), 'idem-1', 'REQ-abc');
-    const body = vi.mocked(orderApi.createOrder).mock.calls[0][0] as Record<string, unknown>;
+    const body = createOrder().mock.calls[0][0] as Record<string, unknown>;
     expect(body).not.toHaveProperty('cart_discount_approved_by');
     expect(body.discount_approval_id).toBe('REQ-abc');
     for (const line of body.items as Record<string, unknown>[]) {
@@ -92,26 +92,47 @@ describe('submitPosOrder and the discount approver', () => {
 
   it('hands DISCOUNT_NEEDS_APPROVAL back as an actionable refusal', async () => {
     cartAt18();
-    vi.mocked(orderApi.createOrder).mockRejectedValue(
-      refusal('DISCOUNT_NEEDS_APPROVAL', { ...NEED }),
-    );
+    createOrder().mockRejectedValue(refusal(403, 'DISCOUNT_NEEDS_APPROVAL', { ...NEED }));
     const res = await submitPosOrder(usePOSStore.getState(), 'idem-2');
     expect(res.ok).toBe(false);
-    expect(res.discountApproval?.approval_request.context.discount_percent).toBe(18);
+    expect(res.discountApproval?.requested_percent).toBe(18);
     expect(res.error).toMatch(/exceeds your limit of 10%/);
   });
 
-  it('marks an approval the server would not take, so the till drops it', async () => {
+  it.each([
+    [409, 'DISCOUNT_APPROVAL_USED'],
+    [410, 'DISCOUNT_APPROVAL_EXPIRED'],
+    [404, 'DISCOUNT_APPROVAL_NOT_FOUND'],
+    [403, 'DISCOUNT_APPROVAL_INVALID'],
+  ])('drops an approval the server refuses with %s %s', async (status, code) => {
     cartAt18();
-    vi.mocked(orderApi.createOrder).mockRejectedValue(
-      refusal('DISCOUNT_APPROVAL_INVALID', {
-        message: 'That manager approval cannot be used: it has already been used on a sale. Ask a manager again.',
-      }),
-    );
-    const res = await submitPosOrder(usePOSStore.getState(), 'idem-3', 'REQ-used');
+    createOrder().mockRejectedValue(refusal(status, code));
+    const res = await submitPosOrder(usePOSStore.getState(), 'idem-3', 'REQ-dead');
     expect(res.ok).toBe(false);
     expect(res.discountApprovalRejected).toBe(true);
-    expect(res.discountApproval).toBeUndefined();
+  });
+
+  it('keeps the approval when the approvals store is only unavailable', async () => {
+    cartAt18();
+    createOrder().mockRejectedValue(refusal(503, 'DISCOUNT_APPROVAL_UNAVAILABLE'));
+    const res = await submitPosOrder(usePOSStore.getState(), 'idem-4', 'REQ-live');
+    expect(res.ok).toBe(false);
+    expect(res.discountApprovalRejected).toBeUndefined();
+  });
+
+  it('asks by re-sending THIS bill; the till writes no request of its own', async () => {
+    cartAt18();
+    createOrder().mockResolvedValue({ code: 'DISCOUNT_APPROVAL_REQUESTED', request_id: 'REQ-7', status: 'REQUESTED' } as never);
+    const res = await askManagerForDiscount(usePOSStore.getState(), ' regular customer ');
+    expect(res).toEqual({ requestId: 'REQ-7', status: 'REQUESTED' });
+    const body = createOrder().mock.calls[0][0] as Record<string, unknown>;
+    expect(body.request_approval).toBe(true);
+    expect(body.approval_note).toBe('regular customer');
+    expect((body.items as unknown[]).length).toBe(1);
+    expect(body).not.toHaveProperty('action_type');
+    expect(body).not.toHaveProperty('context');
+    expect(createOrder().mock.calls[0][1]).toBeUndefined(); // no idempotency key: never a sale
+    expect(approvalsApi.createRequest).not.toHaveBeenCalled();
   });
 });
 
@@ -123,44 +144,64 @@ describe('DiscountApprovalPanel', () => {
   });
   afterEach(() => vi.useRealTimers());
 
-  it('asks through E4, waits for the manager, then hands back the request id', async () => {
-    vi.mocked(approvalsApi.createRequest).mockResolvedValue({
-      ok: true, request_id: 'REQ-1', status: 'REQUESTED',
-    } as never);
+  async function ask(note?: string) {
+    if (note) fireEvent.change(screen.getByLabelText('Note for the manager'), { target: { value: note } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Ask a manager to approve' }));
+    });
+  }
+  const tick = () => act(async () => { await vi.advanceTimersByTimeAsync(APPROVAL_POLL_MS); });
+
+  it('asks through the server, waits for the manager, then hands back the request id', async () => {
+    createOrder().mockResolvedValue({ request_id: 'REQ-1', status: 'REQUESTED' } as never);
     vi.mocked(approvalsApi.getRequest)
       .mockResolvedValueOnce({ request_id: 'REQ-1', status: 'REQUESTED' } as never)
       .mockResolvedValueOnce({ request_id: 'REQ-1', status: 'APPROVED' } as never);
     const onApproved = vi.fn();
     render(<DiscountApprovalPanel need={NEED} onApproved={onApproved} onClose={vi.fn()} />);
 
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Ask a manager to approve' }));
-    });
-    const sent = vi.mocked(approvalsApi.createRequest).mock.calls[0][0];
-    // Exactly the request the server said would cover this bill.
-    expect(sent.action_type).toBe('discount_override');
-    expect(sent.store_id).toBe('BV-TEST-01');
-    expect(sent.context).toEqual({ ...NEED.approval_request.context, requested_by_name: 'Priya Staff' });
-    expect(sent.reason).toBe('price match');
+    await ask('regular customer');
+    expect((createOrder().mock.calls[0][0] as Record<string, unknown>).approval_note).toBe('regular customer');
     expect(screen.getByText(/Waiting for a manager/)).toBeTruthy();
-
-    await act(async () => { await vi.advanceTimersByTimeAsync(APPROVAL_POLL_MS); });
+    await tick();
     expect(onApproved).not.toHaveBeenCalled();
-    await act(async () => { await vi.advanceTimersByTimeAsync(APPROVAL_POLL_MS); });
+    await tick();
     expect(onApproved).toHaveBeenCalledWith('REQ-1');
   });
 
+  it('does NOT complete a bill that changed after asking -- it says ask again', async () => {
+    createOrder().mockResolvedValue({ request_id: 'REQ-2', status: 'REQUESTED' } as never);
+    vi.mocked(approvalsApi.getRequest).mockResolvedValue({ request_id: 'REQ-2', status: 'APPROVED' } as never);
+    const onApproved = vi.fn();
+    render(<DiscountApprovalPanel need={NEED} onApproved={onApproved} onClose={vi.fn()} />);
+    await ask();
+    // The cashier adds a second frame while the manager is deciding.
+    act(() => {
+      usePOSStore.getState().updateQuantity(usePOSStore.getState().cart[0].id, 2);
+    });
+    await tick();
+    expect(onApproved).not.toHaveBeenCalled();
+    expect(screen.getByText(BILL_CHANGED_MESSAGE)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Ask a manager to approve' })).toBeTruthy();
+  });
+
+  it('uses an already-approved request for the same bill straight away', async () => {
+    createOrder().mockResolvedValue({ request_id: 'REQ-3', status: 'APPROVED' } as never);
+    const onApproved = vi.fn();
+    render(<DiscountApprovalPanel need={NEED} onApproved={onApproved} onClose={vi.fn()} />);
+    await ask();
+    expect(onApproved).toHaveBeenCalledWith('REQ-3');
+  });
+
   it('says so when the manager rejects, and lets the cashier ask again', async () => {
-    vi.mocked(approvalsApi.createRequest).mockResolvedValue({ ok: true, request_id: 'REQ-2', status: 'REQUESTED' } as never);
+    createOrder().mockResolvedValue({ request_id: 'REQ-4', status: 'REQUESTED' } as never);
     vi.mocked(approvalsApi.getRequest).mockResolvedValue({
-      request_id: 'REQ-2', status: 'REJECTED', reject_reason: 'too much',
+      request_id: 'REQ-4', status: 'REJECTED', reject_reason: 'too much',
     } as never);
     const onApproved = vi.fn();
     render(<DiscountApprovalPanel need={NEED} onApproved={onApproved} onClose={vi.fn()} />);
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Ask a manager to approve' }));
-    });
-    await act(async () => { await vi.advanceTimersByTimeAsync(APPROVAL_POLL_MS); });
+    await ask();
+    await tick();
     expect(onApproved).not.toHaveBeenCalled();
     expect(screen.getByText(/did not approve it: too much/)).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Ask a manager to approve' })).toBeTruthy();

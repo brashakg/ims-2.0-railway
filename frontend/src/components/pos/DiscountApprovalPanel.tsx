@@ -3,17 +3,18 @@
 // ============================================================================
 // Owner decision 2026-10-18: who approved a discount is the SERVER's call.
 // A discount over the seller's own limit is refused by order create with
-// DISCOUNT_NEEDS_APPROVAL; its detail carries the exact E4 request that would
-// cover this bill (`approval_request`). This panel sends it through the
-// existing E4 flow (POST /approvals/requests), waits while a manager approves
-// it with their PIN in Approvals, and hands the request id back so the till
-// resubmits the same sale with it. No second PIN system, no typed names.
+// DISCOUNT_NEEDS_APPROVAL. "Ask a manager to approve" re-sends THIS bill with
+// request_approval: the server prices it and raises the E4 discount_override
+// request from its own figures (the cashier adds only a note). A manager
+// approves it with their PIN under Approvals; the till then resubmits the same
+// sale with the request id -- unless the bill changed meanwhile, in which case
+// the approval no longer fits and the cashier is told to ask again.
 
 import { useEffect, useRef, useState } from 'react';
 import { Loader2, ShieldCheck, X } from 'lucide-react';
-import { useAuth } from '../../context/AuthContext';
 import { approvalsApi } from '../../services/api/approvals';
 import { usePOSStore } from '../../stores/posStore';
+import { askManagerForDiscount, billFingerprint } from './submitOrder';
 
 /** The server's DISCOUNT_NEEDS_APPROVAL refusal detail. */
 export interface DiscountApprovalNeed {
@@ -22,48 +23,53 @@ export interface DiscountApprovalNeed {
   requested_percent: number;
   max_percent: number;
   zero_total?: boolean;
-  approval_request: {
-    action_type: string;
-    store_id?: string | null;
-    required_tier?: string;
-    context: Record<string, unknown>;
-  };
 }
 
 /** How often the till re-reads the request while a manager decides. */
 export const APPROVAL_POLL_MS = 4000;
 
+export const BILL_CHANGED_MESSAGE = 'The bill changed - ask the manager again.';
+
 interface Props {
   need: DiscountApprovalNeed;
-  /** The manager approved: resubmit the sale with this request id. */
+  /** The manager approved THIS bill: resubmit the sale with this request id. */
   onApproved: (requestId: string) => void;
   onClose: () => void;
 }
 
 export function DiscountApprovalPanel({ need, onApproved, onClose }: Props) {
-  const { user } = useAuth();
   const [requestId, setRequestId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState<string | null>(null);
+  const [note, setNote] = useState('');
+  const [message, setMessage] = useState<string | null>(null);
+  // The bill the manager was asked about.
+  const askedFor = useRef<string | null>(null);
   // The surface passes a fresh closure each render; the poll must not restart.
   const onApprovedRef = useRef(onApproved);
-  onApprovedRef.current = onApproved;
+  useEffect(() => {
+    onApprovedRef.current = onApproved;
+  });
+
+  const approved = (id: string) => {
+    if (billFingerprint(usePOSStore.getState()) !== askedFor.current) {
+      setRequestId(null);
+      setMessage(BILL_CHANGED_MESSAGE);
+      return;
+    }
+    onApprovedRef.current(id);
+  };
 
   const ask = async () => {
     setBusy(true);
-    setNote(null);
-    const s = usePOSStore.getState();
-    const reasons = [s.cart_discount_reason, ...(s.cart || []).map((l) => l.discount_reason)]
-      .filter((r): r is string => !!r && !!r.trim());
+    setMessage(null);
+    const live = usePOSStore.getState();
+    askedFor.current = billFingerprint(live);
     try {
-      const res = await approvalsApi.createRequest({
-        ...need.approval_request,
-        context: { ...need.approval_request.context, requested_by_name: user?.name },
-        reason: reasons.length ? reasons.join('; ') : need.message,
-      });
-      setRequestId(res.request_id);
+      const res = await askManagerForDiscount(live, note);
+      if (res.status === 'APPROVED') approved(res.requestId);
+      else setRequestId(res.requestId);
     } catch (e) {
-      setNote(e instanceof Error && e.message ? e.message : 'Could not send the request. Try again.');
+      setMessage(e instanceof Error && e.message ? e.message : 'Could not send the request. Try again.');
     } finally {
       setBusy(false);
     }
@@ -79,12 +85,12 @@ export function DiscountApprovalPanel({ need, onApproved, onClose }: Props) {
         if (r.status === 'APPROVED') {
           done = true;
           clearInterval(timer);
-          onApprovedRef.current(requestId);
+          approved(requestId);
         } else if (r.status === 'REJECTED' || r.status === 'EXPIRED') {
           done = true;
           clearInterval(timer);
           setRequestId(null);
-          setNote(
+          setMessage(
             r.status === 'REJECTED'
               ? `The manager did not approve it${r.reject_reason ? `: ${r.reject_reason}` : ''}. Lower the discount, or ask again.`
               : 'The request expired before a manager approved it. Ask again.',
@@ -118,16 +124,27 @@ export function DiscountApprovalPanel({ need, onApproved, onClose }: Props) {
           Waiting for a manager to approve it under Approvals. The sale completes as soon as they do.
         </p>
       ) : (
-        <button
-          type="button"
-          onClick={ask}
-          disabled={busy}
-          className="min-h-[44px] px-3 rounded-lg bg-amber-600 text-white text-sm font-medium hover:bg-amber-700 disabled:opacity-50"
-        >
-          {busy ? 'Sending…' : 'Ask a manager to approve'}
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            type="text"
+            value={note}
+            maxLength={300}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="Note for the manager (optional)"
+            aria-label="Note for the manager"
+            className="flex-1 min-w-[12rem] min-h-[44px] px-2 border border-amber-300 rounded text-xs text-gray-900 bg-white"
+          />
+          <button
+            type="button"
+            onClick={ask}
+            disabled={busy}
+            className="min-h-[44px] px-3 rounded-lg bg-amber-600 text-white text-sm font-medium hover:bg-amber-700 disabled:opacity-50"
+          >
+            {busy ? 'Sending…' : 'Ask a manager to approve'}
+          </button>
+        </div>
       )}
-      {note && <p className="text-xs text-red-700">{note}</p>}
+      {message && <p className="text-xs text-red-700">{message}</p>}
     </div>
   );
 }
