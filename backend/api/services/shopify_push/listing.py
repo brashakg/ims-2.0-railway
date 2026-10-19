@@ -419,7 +419,9 @@ def first_publish_not_ready(db, product: Dict[str, Any]) -> Optional[str]:
     is_spine = bool(product.get("product_id")) and not product.get("id")
     spine = product if is_spine else lead_spine(db, product)
     if spine is None:
-        return "no product record for it in IMS"
+        # No product row (none on prod, 2026-10-19): the twin is judged as
+        # before this gate -- its archived check above.
+        return None
     return _not_ready(pm, spine, None if is_spine else product)
 
 

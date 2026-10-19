@@ -332,9 +332,8 @@ def _seed_counts_db():
             {"id": "C", "category": "FR", "images": [HTTP], "ecom": {"status": "DRAFT", "locally_modified": True}},
             # own, photo, clean -> OFF
             {"id": "D", "category": "SUNGLASS", "image_url": HTTP, "ecom": {"status": "DRAFT"}},
-            # inactive and never on the website: OUT of the population, and
-            # NOT pending -- a switched-off product is never first-published
-            # (listing.first_publish_not_ready, owner 2026-10-19)
+            # inactive: OUT of the catalog population, but its dirty flag is
+            # still what the sweep walks -> pending only
             {"id": "E", "category": "SUNGLASS", "is_active": False,
              "ecom": {"status": "DRAFT", "locally_modified": True}},
             # an import awaiting review: OUT of the population, counted as needs_review
@@ -352,7 +351,7 @@ def test_catalog_counts_tally_the_population_with_the_row_rule():
         "own": 3,
         "no_photo": 1,
         "live": 1,
-        "pending": 2,
+        "pending": 3,
         "needs_review": 1,
     }
 

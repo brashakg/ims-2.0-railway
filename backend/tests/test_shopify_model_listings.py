@@ -1680,11 +1680,3 @@ def test_ai_paragraph_is_cut_at_a_sentence_never_mid_sentence():
     assert clip_to_sentence(text, 70) == "Reflect your style with the RB3025. It comes in 3 colours."
     assert clip_to_sentence(text, 20) is None
     assert clip_to_sentence(text, 500) == text
-
-
-def test_a_catalogue_row_with_no_product_record_is_never_first_published():
-    db = _world()
-    pid = _item(db, 1, "Gold", "001")
-    twin = _twin(db, pid)
-    db["products"].delete_one({"product_id": pid})
-    assert "no product record" in (shopify_push.product_push_refusal(db, twin) or "")
