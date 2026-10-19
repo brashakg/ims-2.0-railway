@@ -226,3 +226,35 @@ def test_an_attributes_only_brand_change_on_the_catalogue_is_refused(env):  # no
         _catalog_put(doc["id"], {"attributes": {"brand_name": "Cartier"}})
     assert exc.value.status_code == 400 and REFUSED in str(exc.value.detail)
     assert catalog_mod.CATALOG_PRODUCTS[doc["id"]]["brand"] == "Vogue"
+
+
+def test_a_blank_brand_name_with_a_legacy_brand_key_is_a_brand_change(db):  # noqa: F811
+    """Round-4 review: {brand_name: "", brand: "Cartier"} -- the save derives
+    the brand from the legacy `brand` key when brand_name is blank, so the
+    check must read the brand the SAME way (_derive_brand_model_color_size)."""
+    from database.repositories.product_repository import ProductRepository
+
+    solo = _family_create(db, {"brand_name": "Ray-Ban", "model_no": "RB3447", "colour_code": "001"},
+                          offer_price=4400)
+    sneaky = {**solo["attributes"], "brand_name": "", "brand": "Cartier"}
+    with pytest.raises(HTTPException) as exc:
+        _family_put(solo["product_id"], attributes=sneaky)
+    assert exc.value.status_code == 400 and REFUSED in str(exc.value.detail)
+    with pytest.raises(pm.ProductMasterError):
+        pm.update_product(product_id=solo["product_id"], patch={"attributes": sneaky},
+                          actor="u1", product_repo=ProductRepository(db["products"]), db=_Conn(db))
+    assert _p(db, solo["product_id"])["brand"] == "Ray-Ban"
+
+
+def test_moving_a_discounted_frame_to_hearing_aid_is_refused(db):  # noqa: F811
+    """A hearing aid is NON_DISCOUNTABLE (0%) whatever tier the row stored:
+    the category's forced tier is the cap the moved product is judged on."""
+    from database.repositories.product_repository import ProductRepository
+
+    frame = _family_create(db, {"brand_name": "Ray-Ban", "model_no": "RB5154", "colour_code": "2000",
+                                "lens_size": "49"}, category="FRAME", offer_price=4400)
+    with pytest.raises(pm.ProductMasterError) as exc:
+        pm.update_product(product_id=frame["product_id"], patch={"category": "HEARING_AID"},
+                          actor="u1", product_repo=ProductRepository(db["products"]), db=_Conn(db))
+    assert exc.value.status == 400 and "Non_Discountable" in exc.value.message
+    assert _p(db, frame["product_id"])["category"] == "FRAME"

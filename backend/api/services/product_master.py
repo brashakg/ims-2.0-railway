@@ -4704,22 +4704,34 @@ def offer_problem_after_edit(current: Dict[str, Any], patch: Dict[str, Any]) -> 
     """THE offer-write check (pricing_caps.offer_write_problem) on the product
     an edit RESULTS in -- PUT /products and update_product both call it.
 
-    The brand an edit can leave is the flat brand it sends OR the attributes'
-    brand_name (rekey_on_edit re-derives the flat brand from a changed
-    attribute, so an attributes-only edit renames the product too): every
+    The brand an edit can leave is the flat brand it sends OR the brand the
+    save derives from the attributes -- THE derivation
+    (_derive_brand_model_color_size, brand_name else a legacy `brand` key,
+    over the merged attributes and the resulting category) that rekey_on_edit
+    writes back, so an attributes-only edit renames the product too. Every
     such brand that differs from the stored one is judged, so whichever the
-    save keeps is covered. The tier is the edit's, else the category's forced
-    tier, else the stored one. The cap is judged only when the MRP, offer,
-    tier, brand or category CHANGES (the edit form re-sends unchanged values);
-    otherwise just the MRP rule, so a legacy offer never blocks an unrelated
-    edit."""
+    save keeps is covered. The tier is the edit's, else the resulting
+    category's forced tier (a frame moved to Hearing Aid is NON_DISCOUNTABLE),
+    else the stored one. The cap is judged only when the MRP, offer, tier or
+    brand CHANGES (the edit form re-sends unchanged values; a category moves
+    the cap only through its forced tier); otherwise just the MRP rule, so a
+    legacy offer never blocks an unrelated edit."""
     patch = {k: v for k, v in (patch or {}).items() if v is not None}
-    attrs = patch.get("attributes") if isinstance(patch.get("attributes"), dict) else {}
+    attrs = patch.get("attributes") if isinstance(patch.get("attributes"), dict) else None
     canon = normalise_identity_component
-    before = current.get("brand") or (current.get("attributes") or {}).get("brand_name")
-    brands = [b for b in (patch.get("brand"), attrs.get("brand_name")) if not _is_blank(b)]
-    new_brands = [b for b in brands if canon(b) != canon(before)]
     category = patch.get("category", current.get("category"))
+    before = current.get("brand") or _derive_brand_model_color_size(
+        current.get("attributes") or {}, current.get("category")
+    )["brand"]
+    derived = (
+        _derive_brand_model_color_size({**(current.get("attributes") or {}), **attrs}, category)["brand"]
+        if attrs is not None
+        else None
+    )
+    new_brands = [
+        b for b in (patch.get("brand"), derived)
+        if not _is_blank(b) and canon(b) != canon(before)
+    ]
     canonical = resolve_category(category)
     spec = _CATEGORY_SPECS.get(canonical) if canonical else None
     tier = (
@@ -4732,7 +4744,7 @@ def offer_problem_after_edit(current: Dict[str, Any], patch: Dict[str, Any]) -> 
     offer = patch.get("offer_price", current.get("offer_price"))
     terms_moved = offer_terms_changed(
         {"mrp": mrp, "offer_price": offer, "discount_category": tier}, current
-    ) or canonical != resolve_category(current.get("category"))
+    )
     for brand in new_brands or [before]:
         problem = offer_write_problem(
             mrp, offer, tier, brand, judge_cap=bool(new_brands) or terms_moved
