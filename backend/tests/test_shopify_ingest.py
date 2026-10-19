@@ -135,6 +135,9 @@ def _match(doc, filter_) -> bool:
                 elif op == "$ne":
                     if actual == op_val:
                         return False
+                elif op == "$in":
+                    if actual not in op_val:
+                        return False
                 else:
                     return False
         else:
@@ -529,6 +532,7 @@ def test_a_pre_order_line_with_no_unit_waits_for_stock_not_an_oversell(wired, mo
         "product_id": "P-RB", "sku": "RB-1234",
         "attributes": {"web_page_type": "PRE_ORDER", "preorder_ship_days": 12},
     })
+    wired["db"].get_collection("system_settings").insert_one({"_id": "default", "web_page_types_enabled": True})
 
     res = shopify_ingest.ingest_shopify_order(
         wired["db"], _frame_order(7103, buyer_state="20"), topic="orders/create"
@@ -537,13 +541,13 @@ def test_a_pre_order_line_with_no_unit_waits_for_stock_not_an_oversell(wired, mo
     assert wired["db"].get_collection("online_stock_miss").docs == []
     order = wired["orders"].find_one({"shopify_order_id": "7103"})
     assert order["preorder_awaiting_stock"] == [
-        {"product_id": "P-RB", "sku": "RB-1234", "qty": 1, "ship_days": 12}
+        {"product_id": "P-RB", "sku": "RB-1234", "qty": 1, "ship_days": 12, "store_id": "ST-BOKARO-2"}
     ]
     assert order["fulfillment_hold"] is True
     assert order["stock_miss_reason"] == shopify_ingest.PREORDER_WAIT_REASON
     assert order["stock_hold_reason"] == shopify_ingest.PREORDER_WAIT_REASON
     refs = [t["source_ref"] for t in task_repo.created]
-    assert f"online_preorder:{order['order_id']}" in refs
+    assert f"online_preorder:{order['order_id']}:ST-BOKARO-2" in refs
     assert not [r for r in refs if r.startswith("online_stock_miss")]
 
     # A standard product: the same shortfall is the oversell it always was.

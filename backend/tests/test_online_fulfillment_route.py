@@ -5813,3 +5813,99 @@ def test_a_replayed_order_whose_status_sync_did_not_land_is_a_failure(world, mon
     row = _sf03_drain(db, "cancel-full")
     assert row["status"] == "succeeded"
     assert db.orders.find_one({"shopify_order_id": "53106"}).get("shopify_cancelled_at")
+
+
+# ---------------------------------------------------------------------------
+# Website page types (owner 2026-10-19): a PRE-ORDER line waits for stock
+# ---------------------------------------------------------------------------
+
+
+def _pre_order_world(world, *, rb="PRE_ORDER"):
+    """RB is a Pre-order model (OA standard) and the SUPERADMIN gate is on.
+    RB's own spine is a SIZE of its lead and carries no page type: the lead
+    decides (review P3)."""
+    db = world["db"]
+    db.system_settings.insert_one({"_id": "default", "web_page_types_enabled": True})
+    db.products.insert_many([
+        {"product_id": "P-RB-LEAD", "sku": "RB-1234-50", "attributes": {"web_page_type": rb, "preorder_ship_days": 9}},
+        {"product_id": "P-RB", "sku": "RB-1234", "variant_of": "P-RB-LEAD", "attributes": {}},
+        {"product_id": "P-OA", "sku": "OA-5", "attributes": {}},
+    ])
+    return db
+
+
+def _preorder_tasks(world, oid, status="OPEN"):
+    return [t["store_id"] for t in world["tasks"].created
+            if t["source_ref"].startswith(f"online_preorder:{oid}:") and t["status"] == status]
+
+
+def test_a_mixed_order_waits_for_the_pre_order_and_names_the_oversell(world):
+    """RB x2 (Pre-order, Bokaro holds 1) + OA x1 (standard, none): the RB
+    unit is claimed, the missing RB waits at the shop its line was routed to,
+    and only the OA is the oversell -- its own count, its own P1 task."""
+    from api.services import shopify_ingest
+
+    db = _pre_order_world(world)
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 2), (9001, 1)])
+    res, order = _book(world, _order(64001, lines=(("RB-1234", 2), ("OA-5", 1))))
+    oid = res["order_id"]
+    assert _sold_at(db, oid) == ["BV-BOK-01"]
+    assert order["preorder_awaiting_stock"] == [
+        {"product_id": "P-RB", "sku": "RB-1234", "qty": 1, "ship_days": 9, "store_id": "BV-BOK-01"}]
+    miss = db.online_stock_miss.find_one({"order_id": oid})
+    assert (miss["detail"]["expected"], miss["detail"]["claimed"]) == (2, 1)
+    assert order["stock_miss_reason"] == shopify_ingest.STOCK_MISS_REASON  # the oversell leads
+    assert _open_miss_tasks(world, oid) == ["BV-BOK-01"] and _preorder_tasks(world, oid) == ["BV-BOK-01"]
+
+
+def test_a_pre_order_is_held_until_its_stock_is_received_and_clear_hold_claims_it(world, monkeypatch):
+    """Clear hold end to end: refused while the unit is not in; once it is
+    received the release claims it, the awaiting-stock lines go and the
+    pre-order task closes (review P6). No oversell anywhere."""
+    from api.services import shopify_ingest
+
+    db = _pre_order_world(world)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1)])
+    res, order = _book(world, _order(64002))
+    oid = res["order_id"]
+    assert order["fulfillment_hold"] is True and order["stock_hold_reason"] == shopify_ingest.PREORDER_WAIT_REASON
+    assert db.online_stock_miss.count_documents({"order_id": oid}) == 0
+    assert _preorder_tasks(world, oid) == ["BV-BOK-01"] and _open_miss_tasks(world, oid) == []
+
+    out = _clear_hold(world, monkeypatch, oid)
+    assert getattr(out, "status_code", None) == 409, out
+    assert _preorder_tasks(world, oid) == ["BV-BOK-01"]
+
+    _stock(db, "BV-BOK-01", "P-RB", 1)  # received
+    out = _clear_hold(world, monkeypatch, oid)
+    assert not isinstance(out, Exception), out.detail
+    assert out["fulfillment_hold"] is False
+    assert _sold_at(db, oid) == ["BV-BOK-01"]
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert "preorder_awaiting_stock" not in after
+    assert _preorder_tasks(world, oid) == [] and _preorder_tasks(world, oid, "COMPLETED") == ["BV-BOK-01"]
+
+
+def test_a_cancelled_pre_order_closes_its_wait(world):
+    """Cancelled on Shopify while it waits: the awaiting-stock lines go and
+    the pre-order task closes (review P6)."""
+    from api.services import online_order_status
+
+    db = _pre_order_world(world)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1)])
+    res, order = _book(world, _order(64003))
+    oid = res["order_id"]
+    assert _preorder_tasks(world, oid) == ["BV-BOK-01"]
+    out = online_order_status.apply_fact(db, order, online_order_status.CANCEL, source="test")
+    assert out["to"] == "CANCELLED", out
+    assert "preorder_awaiting_stock" not in db.orders.find_one({"order_id": oid})
+    assert _preorder_tasks(world, oid) == []
+
+
+def test_a_standard_model_short_is_the_oversell_even_with_the_gate_on(world):
+    db = _pre_order_world(world, rb="STANDARD")
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1)])
+    res, order = _book(world, _order(64004))
+    assert "preorder_awaiting_stock" not in order
+    assert db.online_stock_miss.count_documents({"order_id": res["order_id"]}) == 1
