@@ -40,15 +40,19 @@ def test_products_carry_the_tags_the_collection_rules_use():
 def _db():
     db = StrictDB()
     db.seed("brand_masters", [{"name": "Ray-Ban", "is_active": True}, {"name": "Polaroid", "is_active": True},
-                              {"name": "Idee", "is_active": True}])
+                              {"name": "Idee", "is_active": True}, {"name": "Dolce & Gabbana", "is_active": True}])
     live = {"shopify_product_id": "gid://shopify/Product/1"}
     db.seed("catalog_products", [
         {"id": "a", "sku": "A", "brand": "RAY-BAN", "ecom": dict(live)},
         {"id": "b", "sku": "B", "brand": "Polaroid", "ecom": dict(live)},
+        {"id": "e", "sku": "E", "brand": "Dolce & Gabbana", "ecom": dict(live)},
         {"id": "c", "sku": "C", "brand": "Idee", "ecom": {}},  # not on the website: no collection
         {"id": "d", "sku": "D", "brand": "Idee", "deleted_at": "x", "ecom": dict(live)},
     ])
     db.seed("ecom_collections", [
+        {"title": "D&G", "handle": "dg", "collection_type": "SMART", "locally_modified": False,
+         "rules": [{"field": "tag", "relation": "EQUALS", "value": "brand_dolce-gabbana"}],
+         "shopify_collection_id": "gid://shopify/Collection/8"},
         {"title": "rayban", "handle": "rayban", "collection_type": "SMART",
          "rules": [{"field": "tag", "relation": "EQUALS", "value": "brand_rayban"}],
          "shopify_collection_id": "gid://shopify/Collection/9", "locally_modified": False},
@@ -62,9 +66,9 @@ def _db():
 def test_one_brand_collection_per_brand_on_the_website_reusing_the_existing_one():
     db = _db()
     out = shopify_push.ensure_brand_collections(db)
-    assert out == {"created": ["polaroid"], "reused": ["rayban"]}
+    assert out == {"created": ["polaroid"], "reused": ["dg", "rayban"]}
     rows = {d["handle"]: d for d in db["ecom_collections"].find({})}
-    assert len(rows) == 3, "Ray-Ban reused, never duplicated; Idee (nothing live) gets none"
+    assert len(rows) == 4, "Ray-Ban / D&G reused, never duplicated; Idee (nothing live) gets none"
     pol = rows["polaroid"]
     assert pol["title"] == "Polaroid" and pol["collection_type"] == "SMART" and pol["collection_id"]
     assert pol["rules"] == [{"field": "tag", "relation": "EQUALS", "value": "brand_polaroid"}]

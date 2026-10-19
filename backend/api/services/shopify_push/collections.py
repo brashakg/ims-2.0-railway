@@ -383,8 +383,9 @@ def _brand_tag(brand: Any) -> str:
 
 def _is_brand_collection(doc: Dict[str, Any], brand_tag: str, slug_handle: str) -> bool:
     """An existing collection that already IS this brand's: its handle is the
-    brand's, or it is SMART with exactly one rule -- the brand tag, or the
-    brand as vendor."""
+    brand's, or it is SMART with exactly one rule -- the brand tag (or the
+    storefront's spelling of it, shopify_tag_gen._TAG_ALIASES), or the brand
+    as vendor."""
     if str(doc.get("handle") or "").strip().lower() == slug_handle:
         return True
     if str(doc.get("collection_type") or "").upper() != "SMART":
@@ -392,8 +393,10 @@ def _is_brand_collection(doc: Dict[str, Any], brand_tag: str, slug_handle: str) 
     rules, lost = convert_rule_set(doc.get("rules") or [])
     if lost or len(rules) != 1 or rules[0]["relation"] != "EQUALS":
         return False
-    col, cond = rules[0]["column"], rules[0]["condition"]
-    return (col == "TAG" and cond.strip().lower() == brand_tag) or (
+    from ..shopify_tag_gen import _TAG_ALIASES
+
+    col, cond = rules[0]["column"], rules[0]["condition"].strip().lower()
+    return (col == "TAG" and cond in (brand_tag, *_TAG_ALIASES.get(brand_tag, ()))) or (
         col == "VENDOR" and _brand_tag(cond) == brand_tag
     )
 
