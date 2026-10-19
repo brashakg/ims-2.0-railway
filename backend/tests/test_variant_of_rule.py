@@ -1500,12 +1500,13 @@ def test_g1_new_colour_under_a_live_lead_never_touches_its_listing(monkeypatch):
     res = _run(shopify_push.push_product(db, parent, rows, blocked=False))
     (create,) = spy.calls_for("productVariantsBulkCreate")
     made = {(v.get("inventoryItem") or {}).get("sku"): v for v in create["variables"]["variants"]}
-    # The colour typed in Add Product is still a catalogue DRAFT (no cost /
-    # HSN yet): it WAITS -- a colour goes on the website only once a person
-    # has finished it (review of #1233); the finished one is created.
-    assert set(made) == {NEW_SKU}
-    assert made[NEW_SKU]["price"] == "41000.00"
-    assert [w["sku"] for w in res.listing["waiting"]] == [created["sku"]]
+    # The colour typed in Add Product is a catalogue DRAFT only for its cost
+    # price: that counts as finished (owner 2026-10-19 -- cost is internal),
+    # so it is created too, at its own price.
+    assert pm.gaps_before_cost(_spine(db, created["product_id"])) == []
+    assert set(made) == {NEW_SKU, created["sku"]}
+    assert made[NEW_SKU]["price"] == "41000.00" and made[created["sku"]]["price"] == "42000.00"
+    assert res.listing["waiting"] == []
     assert all("id" not in v for v in made.values()), "created, never an existing variant"
     assert create["variables"]["strategy"] == "PRESERVE_STANDALONE_VARIANT"
     # (the canned listing also has a 'Large' variant B: only tracking reaches it)
