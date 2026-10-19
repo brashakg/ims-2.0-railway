@@ -218,8 +218,6 @@ def test_response_keys_and_empty_month_remain_unchanged(world):
 @pytest.mark.parametrize("extra", [
     # No company: GSTR-3B places it on no return (the Cross-Check lists it).
     {"recipient_entity_id": None, "recipient_gstin": None},
-    # A date no month's return holds.
-    {"recipient_gstin": None, "bill_date": datetime(2026, 5, 12)},
     # Tax with no stored heads: Table 4 sums the heads.
     "no heads",
 ])

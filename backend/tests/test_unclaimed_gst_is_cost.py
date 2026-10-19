@@ -64,6 +64,15 @@ def test_counter_roles_never_read_the_unclaimed_gst(client, stamped, role, path)
     assert not _leaks(r.text), (role, path, r.status_code, _leaks(r.text))
 
 
+def test_the_stock_read_hands_counter_staff_the_unit_without_it(client, stamped):
+    """Pinned on one route that really returns the unit: the counter sees U1,
+    not its unclaimed GST; an admin sees both."""
+    path = "/api/v1/inventory/stock?product_id=P1"
+    counter = client.get(path, headers=_headers("SALES_STAFF"))
+    assert counter.status_code == 200 and "U1" in counter.text and not _leaks(counter.text)
+    assert "unclaimed_gst" in client.get(path, headers=_headers("ADMIN")).text
+
+
 def test_the_accounts_roles_still_read_it(client, stamped):
     seen = [path for path in UNIT_READS
             if "unclaimed_gst" in json.dumps(client.get(path, headers=_headers("ADMIN")).json())]

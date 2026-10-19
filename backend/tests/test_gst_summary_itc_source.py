@@ -130,11 +130,11 @@ def test_itc_excludes_bills_outside_the_tax_period(client, auth_headers, gst_db)
     assert body["gst_input_credit"] == 900.0, body
 
 
-def test_a_datetime_bill_date_refuses_rather_than_drops_the_credit(client, auth_headers, gst_db):
+def test_a_datetime_bill_date_is_on_no_return_and_is_warned_not_refused(client, auth_headers, gst_db):
     """GSTR-3B places a bill in its month by its written date (every bill
-    door writes YYYY-MM-DD). A legacy BSON datetime is on no month's return,
-    so the summary refuses (409, the Cross-Check names the bill) instead of
-    quietly leaving Rs 300 of credit out."""
+    door writes YYYY-MM-DD). A legacy BSON datetime is on no month's return:
+    the cards count the dated bill only, and the GST table warns that the
+    other needs a date (review round 2: a warning, not a refusal)."""
     gst_db.seed(
         "vendor_bills",
         [
@@ -142,7 +142,10 @@ def test_a_datetime_bill_date_refuses_rather_than_drops_the_credit(client, auth_
             _bill("BILL-STR", 200.0, "2026-06-13"),
         ],
     )
-    assert client.get(_URL, headers=auth_headers).status_code == 409
+    body = client.get(_URL, headers=auth_headers).json()
+    assert body["gst_input_credit"] == 200.0, body
+    table = client.get(_URL.replace("summary", "reconciliation"), headers=auth_headers).json()
+    assert any("BILL-DT" in w for w in table["warnings"]), table
 
 
 def test_ineligible_bills_are_held_back_and_reported(client, auth_headers, gst_db):

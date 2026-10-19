@@ -197,6 +197,90 @@ def test_gstr1_fails_loudly_when_transfers_cannot_be_read(world, monkeypatch):
     assert refused.value.status_code == 503
 
 
+def test_one_gstins_return_is_the_same_whichever_shop_is_asked(shared_gstin):
+    """Round 2: each till sale is split by its OWN shop's state as a code --
+    'Jharkhand', 'JH' or a blank online shop -- never the asked shop's
+    string. A Jharkhand buyer is intra-state, a Maharashtra buyer IGST."""
+    db = shared_gstin["db"]
+    db.stores.update_one({"store_id": SISTER}, {"$set": {"state": "", "state_code": ""}})
+    db.customers.insert_many([{"customer_id": "C-JH", "state": "JH"},
+                              {"customer_id": "C-MH", "state": "Maharashtra"}])
+    _sale(db, SISTER, 100.0, "O-1")
+    db.orders.update_one({"order_id": "O-1"}, {"$set": {"customer_id": "C-JH"}})
+    _sale(db, STORE, 50.0, "O-2")
+    db.orders.update_one({"order_id": "O-2"}, {"$set": {"customer_id": "C-MH"}})
+    via_store = r3b._compute_gstr3b(MONTH, STORE)["outwardTaxableSupplies"]
+    via_sister = r3b._compute_gstr3b(MONTH, SISTER)["outwardTaxableSupplies"]
+    assert via_store == via_sister
+    assert (via_store["centralTax"], via_store["stateTax"], via_store["integratedTax"]) == (50.0, 50.0, 50.0)
+
+
+def test_gstr1_is_refused_to_a_reader_who_cannot_see_every_shop_on_the_gstin(shared_gstin, monkeypatch):
+    """Round 2, item 3 (stopgap): GSTR-1 is still one shop's, so a shared
+    GSTIN's reader must see every shop on it."""
+    from api.routers.reports import gstr1 as r1
+
+    monkeypatch.setattr(r1, "_get_raw_db", lambda: shared_gstin["db"])
+
+    for door in (lambda u: r1.gstr1_report(month=MONTH, store_id=STORE, current_user=u),
+                 lambda u: r1.gstr1_gstn_json(month=MONTH, year=None, store_id=STORE,
+                                              entity_id=None, current_user=u)):
+        with pytest.raises(HTTPException) as refused:
+            _run(door(_user("ACCOUNTANT", STORE)))
+        assert (refused.value.status_code, refused.value.detail) == (
+            403, "GSTR-1 covers 2 shops on this GSTIN - ask an admin.")
+        _run(door(_user("ACCOUNTANT", STORE, SISTER)))
+
+
+def test_one_gstr3b_helper_fails_loudly_on_its_own(world, monkeypatch):
+    """M7 pinned at a single helper: Table 4(D) / 5 cannot be read -> it
+    raises (it used to return zeros)."""
+    import mongomock
+
+    real = mongomock.collection.Collection.find
+
+    def unreadable(self, *args, **kwargs):
+        flt = args[0] if args else {}
+        # Only Table 4(D) / 5's own read of the placed purchase bills.
+        if self.name == "vendor_bills" and "$nor" in flt and flt.get("source_transfer_id", "x") is None:
+            raise RuntimeError("vendor_bills unavailable")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(mongomock.collection.Collection, "find", unreadable)
+    from api.routers.reports.gst_itc import _no_credit_inward
+
+    with pytest.raises(RuntimeError):
+        _no_credit_inward(world["db"], STORE, 2026, 9, 30)
+
+
+def test_an_unreadable_legacy_bill_check_is_a_503_not_assign_your_bills(world, monkeypatch):
+    monkeypatch.setattr(r3b, "_unallocated_legacy_bills", lambda *_a, **_k: {"count": 0, "failed": True})
+    with pytest.raises(HTTPException) as refused:
+        _portal()
+    assert refused.value.status_code == 503
+
+
+def test_undated_and_already_excluded_bills_warn_rather_than_refuse(world):
+    """Round 2: an undated bill (no month can hold it) and an unregistered
+    supplier's bill with credit left on (GSTR-3B already leaves it out) are
+    warnings on the table; the figures still show."""
+    db = world["db"]
+    _sale(db, STORE, 1000.0, "O-JH")
+    _booked(db, "B-OK", SHOP_GSTIN, cgst=150.0)
+    _booked(db, "B-UNDATED", SHOP_GSTIN, cgst=10.0, day="", bill_number="UND-1")
+    _booked(db, "B-NOGSTIN", SHOP_GSTIN, cgst=20.0, vendor_gstin=None, bill_number="URP-1")
+    table = _table()
+    assert _rows()[SHOP_GSTIN] == (1000.0, 300.0, 700.0)
+    assert any("UND-1" in w and "date" in w for w in table["warnings"])
+    assert any("URP-1" in w and "no valid GSTIN" in w for w in table["warnings"])
+    assert _cards()["gst_input_credit"] == 300.0
+    # A DATED bill of the month that no return holds (no company) refuses.
+    _booked(db, "B-NOCO", SHOP_GSTIN, cgst=5.0, recipient_entity_id=None)
+    with pytest.raises(HTTPException) as refused:
+        _table()
+    assert refused.value.status_code == 409
+
+
 # ---------------------------------------------------------------------------
 # A04-3 / M3 / M4: the Finance GST table and cards are those returns
 # ---------------------------------------------------------------------------
@@ -380,8 +464,9 @@ def test_the_17_5_tick_reaches_only_the_callers_own_shops(world):
 def test_goods_bought_without_a_po_may_carry_the_tick_a_po_stock_bill_may_not(world):
     """LOW 13: a walk-in goods bill ticked when booked claims no credit, its
     GST in 4(B)(1) and in the goods' cost; a PO receipt's stock bill keeps its
-    credit switch. A goods bill's tick is not changed afterwards (its stock
-    is costed by then)."""
+    credit switch. Round 2: the booked tick may be UNticked -- the GST leaves
+    the units' and the product's cost and is credit again; it is never
+    ticked after booking."""
     db = world["db"]
     from tests.test_receipt_without_po import _on_the_shelf
 
@@ -393,8 +478,15 @@ def test_goods_bought_without_a_po_may_carry_the_tick_a_po_stock_bill_may_not(wo
     ret = r3b._compute_gstr3b(MONTH, STORE)
     assert (_heads(ret["itcAvailable"]), _heads(ret["itcBlocked"])) == (0.0, 373.0)
     assert db.products.find_one({"product_id": FRAME})["cost_price"] == 3255.0
-    with pytest.raises(HTTPException) as refused:
-        _tick(booked, False)
+    assert {u["landed_cost"] for u in db.stock_units.find({"product_id": FRAME, "grn_id": walk_in})} == {3255.0}
+
+    assert _tick(booked, False)["itc_eligible"] is True
+    ret = r3b._compute_gstr3b(MONTH, STORE)
+    assert (_heads(ret["itcAvailable"]), _heads(ret["itcBlocked"])) == (373.0, 0.0)
+    assert db.products.find_one({"product_id": FRAME})["cost_price"] == 3100.0
+    assert {u["landed_cost"] for u in db.stock_units.find({"product_id": FRAME, "grn_id": walk_in})} == {3100.0}
+    with pytest.raises(HTTPException) as refused:  # never ticked after booking
+        _tick(booked, True)
     assert refused.value.status_code == 422
 
     _po_receipt(db, "GRN-STD-0170")
@@ -433,6 +525,9 @@ def test_a_po_bill_booked_without_credit_puts_its_gst_into_the_units_cost(world)
     # A unit of the receipt sold before the bill: it keeps its receipt cost
     # (its GST reaches later units through the moving average, LOW 10).
     db.stock_units.update_one({"stock_id": "SU-GRN-STD-0401-1"}, {"$set": {"status": "SOLD"}})
+    # A held unit stored under the legacy token: on hand by THE rule
+    # (item_events.is_on_hand), so it takes the GST too.
+    db.stock_units.update_one({"stock_id": "SU-GRN-STD-0401-0"}, {"$set": {"status": "IN_STOCK"}})
     off = _invoice_body("GRN-STD-0401", "TAX-401")
     off.itc_eligible = False
     _run(pi.create_purchase_invoice(off, current_user=ACCOUNTANT))

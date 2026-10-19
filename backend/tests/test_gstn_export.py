@@ -520,7 +520,11 @@ class TestGstnEndpointGating:
         resp = _reports_client_as(["SUPERADMIN"]).get(path)
         assert resp.status_code != 403
 
-    def test_gstr1_gstn_json_shape_no_db(self):
+    def test_gstr1_gstn_json_shape_no_db(self, monkeypatch):
+        from api.routers.reports import gstr1 as r1
+
+        # No database on any box (CI has a real Mongo).
+        monkeypatch.setattr(r1, "_get_raw_db", lambda: None)
         """With no DB the endpoint still returns a valid GSTN skeleton."""
         resp = _reports_client_as(["ADMIN"]).get(
             "/reports/gstr1/gstn-json?month=2026-04"
@@ -542,7 +546,11 @@ class TestGstnEndpointGating:
         )
         assert resp.status_code == 503
 
-    def test_gstr1_numeric_month_plus_year(self):
+    def test_gstr1_numeric_month_plus_year(self, monkeypatch):
+        from api.routers.reports import gstr1 as r1
+
+        # No database on any box (CI has a real Mongo).
+        monkeypatch.setattr(r1, "_get_raw_db", lambda: None)
         """month=4&year=2026 normalises to fp 042026."""
         resp = _reports_client_as(["ADMIN"]).get(
             "/reports/gstr1/gstn-json?month=4&year=2026"
