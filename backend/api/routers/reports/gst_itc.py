@@ -363,8 +363,15 @@ def _no_credit_inward(db, active_store, year, mon, last_day) -> dict:
       * Table 4(D) (ineligible ITC): the GST on every other bill that claims
         no input credit -- paid, never claimed. Table 4 (_itc_match) counts
         the claiming bills, so a bill's GST is in one of the two.
-    Returns {"inter", "intra", "igst", "cgst", "sgst"}; fail-soft zeros."""
-    out = dict.fromkeys(("inter", "intra", "igst", "cgst", "sgst"), 0.0)
+      * ...except a bill the accountant ticked 'credit not claimable, section
+        17(5)' (itc_blocked): its GST is the blocked_* heads, the return's
+        Table 4(B)(1) (CBIC Circular 170/02/2022: blocked credit shown in
+        4(A)(5) and reversed in 4(B)(1), never 4(D)).
+    Returns {"inter", "intra", "igst", "cgst", "sgst", "blocked_igst",
+    "blocked_cgst", "blocked_sgst"}; fail-soft zeros."""
+    out = dict.fromkeys(
+        ("inter", "intra", "igst", "cgst", "sgst", "blocked_igst", "blocked_cgst", "blocked_sgst"), 0.0
+    )
     if db is None:
         return out
     try:
@@ -401,8 +408,9 @@ def _no_credit_inward(db, active_store, year, mon, last_day) -> dict:
                 side = "inter" if b.get("interstate") else "intra"
                 out[side] += float(b.get("taxable_amount") or 0)
             elif b.get("itc_eligible") is False:
+                blocked = "blocked_" if b.get("itc_blocked") else ""
                 for head in ("igst", "cgst", "sgst"):
-                    out[head] += float(b.get(f"{head}_total") or 0)
+                    out[blocked + head] += float(b.get(f"{head}_total") or 0)
     except Exception:
         return dict.fromkeys(out, 0.0)
     return {k: round(v, 2) for k, v in out.items()}

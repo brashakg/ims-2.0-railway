@@ -3580,12 +3580,13 @@ def _load_purchase_invoice_or_404(db, invoice_id: str) -> dict:
 
 
 def _check_bill_period_open(db, doc: dict) -> None:
-    """F19 period-lock guard, mirroring the F9 DC-date check: 423 when the
+    """THE period-lock guard of a change to a booked bill (F19 landed costs,
+    the section 17(5) tick), mirroring the F9 DC-date check: 423 when the
     bill's posting month (invoice_date, else bill_date) is in a locked
     accounting period.
 
-    FAIL-CLOSED on a missing/unusable posting date: a landed-cost mutation in
-    an unverifiable period must not proceed (the lock would otherwise be
+    FAIL-CLOSED on a missing/unusable posting date: a mutation in an
+    unverifiable period must not proceed (the lock would otherwise be
     silently bypassed by a bill with no date). check_period_locked itself is
     fail-soft on DB errors -- infrastructure noise still never blocks."""
     try:
@@ -3600,7 +3601,7 @@ def _check_bill_period_open(db, doc: dict) -> None:
                 "This bill has no usable posting date (invoice_date/bill_date "
                 "as YYYY-MM-DD, from 1 July 2017 to today), so the "
                 "accounting-period lock cannot be checked. Set the bill's date "
-                "before capturing or allocating landed costs."
+                "before changing the bill."
             ),
         ) from None
     try:

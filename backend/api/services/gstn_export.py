@@ -532,15 +532,21 @@ def to_gstr3b_json(
     itc_block = {k: _num(itc.get(src)) for k, src in keys.items()}
     isrc = {k: _num(itc_rcm.get(src)) for k, src in keys.items()}
     reversal = {k: _num(reversed_itc.get(src)) for k, src in keys.items()}
+    # Section 17(5) blocked credit: in 4(A)(5) as GSTR-2B shows it, reversed in
+    # 4(B)(1) (CBIC Circular 170/02/2022), so 4(C) stays the claimable credit.
+    # ponytail: a blocked reverse-charge bill lands in 4(A)(5), not 4(A)(3);
+    # same net, split it out if one is ever booked.
+    blocked = {k: _num((data.get("itcBlocked") or {}).get(src)) for k, src in keys.items()}
     itc_elg = {
         "itc_avl": [
-            {"ty": "OTH", **{k: round(itc_block[k] + reversal[k] - isrc[k], 2) for k in keys}},
+            {"ty": "OTH", **{k: round(itc_block[k] + reversal[k] + blocked[k] - isrc[k], 2) for k in keys}},
             {"ty": "ISRC", **isrc},
         ],
         "itc_net": dict(itc_block),
-        "itc_rev": [{"ty": "OTH", **reversal}],
-        # 4(D) Ineligible ITC: (1) s.17(5) blocked, (2) others -- the GST paid
-        # on purchase bills that claim no input credit (G3).
+        "itc_rev": [{"ty": "OTH", **reversal}, {"ty": "RUL", **blocked}],
+        # 4(D) Ineligible ITC: (1) reclaimed credit (none here), (2) others --
+        # the GST paid on purchase bills that claim no input credit (G3).
+        # Section 17(5) blocked credit is 4(B)(1) above, never here.
         "itc_inelg": [
             {"ty": "RUL", "iamt": 0.0, "camt": 0.0, "samt": 0.0, "csamt": 0.0},
             {

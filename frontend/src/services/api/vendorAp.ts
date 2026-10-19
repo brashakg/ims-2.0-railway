@@ -41,6 +41,11 @@ export interface VendorBill {
   // bill is the receipt's shop; anyone else's is their own. The saved bill
   // carries the shop it was booked to.
   store_id?: string | null;
+  // Section 17(5) 'credit not claimable' (owner + CA 2026-10-18): a services
+  // bill's tick, accounts roles only. Ticked, the bill claims no input credit
+  // (itc_eligible false) and its GST stays in what it costs.
+  itc_blocked?: boolean;
+  itc_eligible?: boolean;
 }
 
 // A goods receipt row (STANDARD GRN or Delivery Challan) as returned by
@@ -444,6 +449,12 @@ export const vendorApApi = {
   },
   createBill: async (vendorId: string, payload: Partial<VendorBill>) => {
     const res = await api.post(`/vendors/${vendorId}/bills`, payload);
+    return res.data as VendorBill;
+  },
+  // Tick / untick 'credit not claimable (section 17(5))' on a booked services
+  // bill. The server refuses a goods bill (422) and a locked month (423).
+  setItcBlocked: async (vendorId: string, billId: string, itcBlocked: boolean) => {
+    const res = await api.put(`/vendors/${vendorId}/bills/${billId}/itc-blocked`, { itc_blocked: itcBlocked });
     return res.data as VendorBill;
   },
   // ACCEPTED goods receipts for one vendor (STANDARD GRNs + Delivery

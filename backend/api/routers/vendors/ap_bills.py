@@ -12,6 +12,7 @@ from ._shared import (
     _AP_ROLES,
     _get_db,
     ap_engine,
+    get_audit_repository,
     datetime,
     field_validator,
     get_grn_repository,
@@ -24,6 +25,17 @@ from ._shared import (
     can_access_store_scoped,
 )
 from .models import GRN_SUBTYPE_DC
+
+# The 17(5) tick is a services / expense bill's: a goods bill's unclaimed GST
+# goes into its stock cost through the bill's own credit switch instead.
+_ITC_BLOCKED_SERVICES_ONLY = {
+    "code": "ITC_BLOCKED_SERVICES_ONLY",
+    "message": (
+        "'Credit not claimable (section 17(5))' is for services and expense "
+        "bills (food, vehicles, club fees). For a goods bill, switch its input "
+        "credit off when booking it under Purchase > Invoices."
+    ),
+}
 
 
 # ============================================================================
@@ -65,6 +77,13 @@ class VendorBillCreate(BaseModel):
     # freight): never his topbar shop. A receipt's bill keeps the receipt's
     # shop; anyone else's is their own. See purchase_invoices._bill_shop.
     store_id: Optional[str] = None
+    # Section 17(5): the accountant's "credit not claimable" tick for a
+    # services / expense bill (food, motor vehicles, club fees ...; owner and
+    # CA 2026-10-18). Ticked, the bill's GST is never input credit (GSTR-3B
+    # Table 4, the Finance GST tab, the ITC register) -- it stays in what the
+    # bill costs. Default unticked; changeable later through
+    # PUT /{vendor_id}/bills/{bill_id}/itc-blocked until the month is locked.
+    itc_blocked: bool = False
 
     @field_validator("bill_kind", mode="before")
     @classmethod
@@ -371,6 +390,9 @@ async def create_vendor_bill(
                 },
             )
 
+    if bill.itc_blocked and (bill.grn_id or bill.bill_kind != ap_engine.BILL_KIND_SERVICES):
+        raise HTTPException(status_code=422, detail=_ITC_BLOCKED_SERVICES_ONLY)
+
     linked = None  # the goods receipt this bill names, read below
     # This door accepts a grn_id but validated NOTHING about it -- so the same
     # two money leaks the first-class purchase-invoice door had were reachable
@@ -530,8 +552,10 @@ async def create_vendor_bill(
         "outstanding": round(bill.total_amount, 2),
         # No valid supplier GSTIN, no input credit (a bill for goods bought
         # without a PO, G2, the same) -- purchase_invoices does the same on
-        # its doors: one rule, org_validation.itc_claimable.
-        "itc_eligible": itc_claimable(supplier_gstin),
+        # its doors: one rule, org_validation.itc_claimable. A 17(5) tick
+        # switches it off too, and says why (itc_blocked).
+        "itc_eligible": itc_claimable(supplier_gstin, False, not bill.itc_blocked),
+        "itc_blocked": bool(bill.itc_blocked),
         "po_id": bill.po_id,
         "grn_id": bill.grn_id,
         # A receipt-linked bill IS a goods bill whatever the caller declared;
@@ -664,6 +688,88 @@ async def list_vendor_bills(
         b["total_amount"] = ap_engine.vendor_payable(b)
         b["left_to_pay"] = _left_to_pay(b)
     return {"bills": bills, "total": len(bills)}
+
+
+class VendorBillItcBlocked(BaseModel):
+    itc_blocked: bool
+
+
+@router.put("/{vendor_id}/bills/{bill_id}/itc-blocked")
+async def set_vendor_bill_itc_blocked(
+    vendor_id: str,
+    bill_id: str,
+    body: VendorBillItcBlocked,
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
+):
+    """Tick or untick 'credit not claimable (section 17(5))' on a booked
+    services / expense bill (owner + CA 2026-10-18). Ticked, its GST is no
+    input credit anywhere (itc_eligible False, itc_blocked True); unticked,
+    the bill gets back the credit decision it had before the tick. Accounts
+    roles only; 404 outside the caller's shops; 423 once the bill's month is
+    locked (the one bill-period guard, fail-closed on an unusable date)."""
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Bills are unavailable; please retry.")
+    bills = db.get_collection("vendor_bills")
+    bill = bills.find_one({"bill_id": bill_id, "vendor_id": vendor_id}, {"_id": 0})
+    if bill is None or not can_access_store_scoped(bill.get("store_id"), current_user):
+        raise HTTPException(status_code=404, detail="Bill not found")
+    if (
+        bill.get("grn_id")
+        or bill.get("source_transfer_id")
+        or bill.get("bill_kind") != ap_engine.BILL_KIND_SERVICES
+    ):
+        raise HTTPException(status_code=422, detail=_ITC_BLOCKED_SERVICES_ONLY)
+    from ..purchase_invoices import _check_bill_period_open
+
+    _check_bill_period_open(db, bill)
+    was_blocked = bool(bill.get("itc_blocked"))
+    if body.itc_blocked == was_blocked:
+        return _clean(bill)
+    if body.itc_blocked:
+        update = {
+            "itc_blocked": True,
+            "itc_eligible": False,
+            # The credit decision the tick overrides, given back on untick
+            # (a bill booked with credit switched off stays off).
+            "itc_eligible_before_17_5": bill.get("itc_eligible") is not False,
+        }
+    else:
+        from ...services.org_validation import itc_claimable
+
+        before = bill.get("itc_eligible_before_17_5")
+        if before is None:  # ticked when booked: the booking rule decides
+            gstin = ap_engine.bill_supplier_gstin(
+                bill, lambda vid: ((db.get_collection("vendors").find_one({"vendor_id": vid}) or {}).get("gstin"))
+            )
+            before = itc_claimable(gstin, bill.get("reverse_charge"))
+        update = {"itc_blocked": False, "itc_eligible": bool(before)}
+    when = utc_now_iso()
+    update.update({"itc_blocked_by": current_user.get("user_id"), "itc_blocked_at": when})
+    # Guarded on the state read above: two accountants clicking at once
+    # cannot interleave a stale 'before' value.
+    done = bills.update_one(
+        {"bill_id": bill_id, "itc_blocked": True if was_blocked else {"$ne": True}},
+        {"$set": update, **({} if body.itc_blocked else {"$unset": {"itc_eligible_before_17_5": ""}})},
+    )
+    if not done.matched_count:
+        raise HTTPException(status_code=409, detail="This bill changed meanwhile. Refresh and try again.")
+    try:
+        repo = get_audit_repository()
+        if repo is not None:
+            repo.create({
+                "action": "vendor_bill.itc_blocked" if body.itc_blocked else "vendor_bill.itc_unblocked",
+                "entity_type": "vendor_bill",
+                "entity_id": bill_id,
+                "user_id": current_user.get("user_id"),
+                "severity": "INFO",
+                "source": "vendors",
+                "before_state": {k: bill.get(k) for k in ("itc_blocked", "itc_eligible")},
+                "after_state": {k: update[k] for k in ("itc_blocked", "itc_eligible")},
+            })
+    except Exception:  # noqa: BLE001 - the audit row never undoes the change
+        logger.warning("[AP] audit of the 17(5) tick on %s failed", bill_id, exc_info=True)
+    return _clean(bills.find_one({"bill_id": bill_id}, {"_id": 0}) or {**bill, **update})
 
 
 def _rejected_goods_hold(db, bill_id: Optional[str]) -> Optional[str]:

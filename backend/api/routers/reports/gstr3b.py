@@ -342,6 +342,7 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
                 (gst_itc._itc_match).
                 Returns zeros when no purchase data is present.
     Table 4(D) - ineligible ITC: GST paid on a bill that claims no credit.
+    Table 4(B)(1) - section 17(5) blocked credit (the accountant's tick).
     Table 5   - exempt, nil, non-GST and composition inward supplies, with
                 purchases from unregistered suppliers (gst_itc._no_credit_inward,
                 owner 2026-10-13 G3).
@@ -665,6 +666,15 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
             "integratedTax": no_credit["igst"],
             "centralTax": no_credit["cgst"],
             "stateTax": no_credit["sgst"],
+            "cess": 0.0,
+        },
+        # Table 4(B)(1): GST on bills ticked 'credit not claimable, section
+        # 17(5)'. Never in itcAvailable (the net credit); the portal file
+        # shows it in 4(A)(5) and reverses it here (gstn_export).
+        "itcBlocked": {
+            "integratedTax": no_credit["blocked_igst"],
+            "centralTax": no_credit["blocked_cgst"],
+            "stateTax": no_credit["blocked_sgst"],
             "cess": 0.0,
         },
         # Table 5: exempt, nil-rated, non-GST and composition inward supplies,

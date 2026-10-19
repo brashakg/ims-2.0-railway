@@ -399,6 +399,8 @@ function VendorLedgerDrawer({ vendorId, vendorName, onClose, onChanged }: { vend
                 <RecordForm key={recording} kind={recording} vendorId={vendorId} onClose={() => setRecording(null)} onSaved={() => { setRecording(null); refresh(); }} />
               )}
 
+              <ServicesBillsCredit vendorId={vendorId} refreshKey={ledger} />
+
               <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Ledger</p>
               <table className="w-full text-xs">
                 <thead className="text-gray-400">
@@ -495,6 +497,9 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: RecordKind; ve
   // The choice is REQUIRED; GOODS then requires picking one of the vendor's
   // ACCEPTED receipts (a PO-backed GRN or a no-PO Delivery Challan).
   const [billKind, setBillKind] = useState<'' | 'GOODS' | 'SERVICES'>('');
+  // Section 17(5) (owner + CA 2026-10-18): a services bill whose GST cannot be
+  // claimed (food, vehicles, club fees). Unticked by default.
+  const [itcBlocked, setItcBlocked] = useState(false);
   // null = not loaded yet / load failed (distinct from a real empty list).
   const [receipts, setReceipts] = useState<VendorReceiptRow[] | null>(null);
   const [receiptsFailed, setReceiptsFailed] = useState(false);
@@ -593,6 +598,7 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: RecordKind; ve
           bill_kind: billKind as 'GOODS' | 'SERVICES',
           grn_id: billKind === 'GOODS' ? receiptId : undefined,
           store_id: sendBillShop ? billShop : undefined,
+          itc_blocked: billKind === 'SERVICES' && itcBlocked,
         });
         toast.success(bookedTo('Bill', saved, shopName));
       } else if (kind === 'payment') {
@@ -673,6 +679,12 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: RecordKind; ve
           <input className={cls} type="date" defaultValue={today} onChange={(e) => set('bill_date', e.target.value)} />
           <input className={cls} type="number" placeholder="Taxable amount" onChange={(e) => set('taxable_amount', e.target.value)} />
           <input className={cls} type="number" placeholder="Tax (GST)" onChange={(e) => set('tax_amount', e.target.value)} />
+          {billKind === 'SERVICES' && (
+            <label className="col-span-2 flex items-start gap-2 text-sm text-gray-700">
+              <input type="checkbox" className="mt-1" checked={itcBlocked} onChange={(e) => setItcBlocked(e.target.checked)} data-testid="bill-itc-blocked" />
+              <span>Credit not claimable (section 17(5)) <span className="text-xs text-gray-500">food, vehicles, club fees and other blocked credit: this GST is not claimed in GSTR-3B and stays part of the expense</span></span>
+            </label>
+          )}
           <div className="col-span-2 text-xs text-gray-500">Total: {inr((Number(f.taxable_amount) || 0) + (Number(f.tax_amount) || 0))}. Due date set from vendor credit terms.</div>
         </>}
         {kind === 'payment' && <>
@@ -762,6 +774,66 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: RecordKind; ve
           {saving && <Loader2 className="w-4 h-4 animate-spin" />} Save
         </button>}
       </div>
+    </div>
+  );
+}
+
+/** This supplier's services / expense bills with their section 17(5) tick
+ *  (owner + CA 2026-10-18): ticked, the bill's GST is no input credit. The
+ *  accountant changes it here until the bill's month is locked -- the server
+ *  refuses a locked month (423) and says so. Hidden when there are none. */
+function ServicesBillsCredit({ vendorId, refreshKey }: { vendorId: string; refreshKey: unknown }) {
+  const toast = useToast();
+  const [bills, setBills] = useState<VendorBill[]>([]);
+  const [busy, setBusy] = useState('');
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await vendorApApi.listBills(vendorId);
+        if (!cancelled) setBills((res?.bills ?? []).filter((b) => b.bill_kind === 'SERVICES' && !b.grn_id));
+      } catch {
+        if (!cancelled) setBills([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [vendorId, refreshKey]);
+  if (bills.length === 0) return null;
+  const change = async (bill: VendorBill, blocked: boolean) => {
+    setBusy(bill.bill_id);
+    try {
+      const saved = await vendorApApi.setItcBlocked(vendorId, bill.bill_id, blocked);
+      setBills((rows) => rows.map((b) => (b.bill_id === bill.bill_id ? { ...b, ...saved } : b)));
+      toast.success(blocked ? `Bill ${bill.bill_number}: GST credit not claimed (17(5))` : `Bill ${bill.bill_number}: GST credit claimable again`);
+    } catch (e) { toast.error(errMsg(e, 'Could not change the bill')); }
+    finally { setBusy(''); }
+  };
+  return (
+    <div className="mb-4" data-testid="services-bills-credit">
+      <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Services bills: GST credit</p>
+      <table className="w-full text-xs">
+        <thead className="text-gray-400">
+          <tr><th className="text-left py-1">Bill</th><th className="text-left py-1">Date</th><th className="text-right py-1">GST</th><th className="text-right py-1">Credit not claimable (17(5))</th></tr>
+        </thead>
+        <tbody className="divide-y divide-gray-100">
+          {bills.map((b) => (
+            <tr key={b.bill_id}>
+              <td className="py-1 text-gray-700">{b.bill_number}</td>
+              <td className="py-1 text-gray-600">{(b.bill_date || '').slice(0, 10)}</td>
+              <td className="py-1 text-right">{inr(b.tax_amount)}</td>
+              <td className="py-1 text-right">
+                <input
+                  type="checkbox"
+                  aria-label={`Credit not claimable on bill ${b.bill_number}`}
+                  checked={!!b.itc_blocked}
+                  disabled={busy === b.bill_id}
+                  onChange={(e) => change(b, e.target.checked)}
+                />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
