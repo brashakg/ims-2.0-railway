@@ -59,10 +59,12 @@ def db(monkeypatch):
     return raw
 
 
-def _create(db, colour, **page):
+def _create(db, colour, *, size=None, door=None, **page):
     return pm.create_product(
         category="SUNGLASS",
-        attributes={"brand_name": "Ray-Ban", "model_no": "RB4165", "colour_code": colour, **page},
+        attributes={"brand_name": "Ray-Ban", "model_no": "RB4165", "colour_code": colour,
+                    **({"lens_size": size} if size else {}), **page},
+        **(door or {}),
         mrp=5000,
         offer_price=5000,
         actor="u-admin",
@@ -103,6 +105,12 @@ def test_the_door_refuses_a_pre_order_without_ship_days(db):
                           patch={"attributes": {**lead["attributes"], "preorder_ship_days": ""}},
                           actor="u1", product_repo=repo, db=_Conn(db))
     assert e.value.field == "preorder_ship_days"
+    # Review P7: a patch carrying only the ship days is judged as the stored
+    # Pre-order it edits.
+    with pytest.raises(pm.ProductMasterError) as e:
+        pm.update_product(product_id=lead["product_id"], patch={"attributes": {"preorder_ship_days": 0}},
+                          actor="u1", product_repo=repo, db=_Conn(db))
+    assert e.value.field == "preorder_ship_days"
     # PUT /products (the form's edit door) runs the same rule.
     with pytest.raises(products_mod.HTTPException) as e:
         asyncio.run(products_mod.update_product(
@@ -136,6 +144,32 @@ def test_the_page_is_the_models_and_reaches_every_colour(db):
     assert _attrs(db, child["product_id"])["web_page_type"] == "PREVIEW_ONLY"
 
 
+def test_a_runbook_size_on_a_live_listing_takes_the_models_page(db):
+    """Review P3: the MASTER runbook (variant_of + live_lead_rows) skipped the
+    model-level copy, so a size disagreed with its lead's page."""
+    lead = _create(db, "601", size="50", web_page_type="PRE_ORDER", preorder_ship_days=10)
+    size = _create(db, "601", size="54", door={"variant_of": lead["product_id"], "live_lead_rows": True})
+    assert size["variant_of"] == lead["product_id"]
+    assert (_attrs(db, size["product_id"]).get("web_page_type"),
+            _attrs(db, size["product_id"]).get("preorder_ship_days")) == ("PRE_ORDER", 10)
+
+
+def test_the_catalogue_review_editor_never_moves_the_page(db, monkeypatch):
+    """Review P3: PUT /catalog/products edits the catalogue copy only, so it
+    must not move the website page (the spine's, the model's)."""
+    from api.routers import catalog as catalog_mod
+
+    monkeypatch.setattr(catalog_mod, "_get_db", lambda: _Conn(db))
+    monkeypatch.setattr(deps, "get_product_repository", lambda: ProductRepository(db["products"]))
+    lead = _create(db, "601", web_page_type="PRE_ORDER", preorder_ship_days=10)
+    twin_id = lead["pim_product_id"]
+    with pytest.raises(catalog_mod.HTTPException) as e:
+        asyncio.run(catalog_mod.update_catalog_product(
+            twin_id, catalog_mod.ProductUpdateInput(attributes={"web_page_type": "STANDARD"}), ADMIN))
+    assert e.value.status_code == 422 and "website page" in str(e.value.detail)
+    assert db["catalog_products"].find_one({"id": twin_id})["attributes"]["web_page_type"] == "PRE_ORDER"
+
+
 def _twin(page=None, days=None, theme_suffix=None):
     attrs = {"brand_name": "Ray-Ban"}
     if page:
@@ -149,14 +183,44 @@ def _twin(page=None, days=None, theme_suffix=None):
 
 
 def test_the_push_picks_the_theme_template_and_sends_the_ship_days():
-    suffix = lambda doc: shopify_push.build_product_input(doc, [])["templateSuffix"]  # noqa: E731
-    assert suffix(_twin("PRE_ORDER", 10)) == "preorder"
-    assert suffix(_twin("PREVIEW_ONLY")) == "preview-only"
-    assert suffix(_twin()) == ""
-    assert suffix(_twin("STANDARD", theme_suffix="rayban-meta")) == "rayban-meta"
-    assert suffix(_twin("PRE_ORDER", 10, theme_suffix="rayban-meta")) == "preorder"
+    """templateSuffix: the page type's template; a standard page sends a
+    hand-set theme_suffix, else NOTHING (an admin-set template stays) --
+    '' only to move a page IMS had made pre-order / preview-only back."""
+    def sent(doc, page):
+        inp = shopify_push.build_product_input(doc, [], page_type=page)
+        return inp.get("templateSuffix", "<not sent>")
+
+    assert sent(_twin("PRE_ORDER", 10), "PRE_ORDER") == "preorder"
+    assert sent(_twin("PREVIEW_ONLY"), "PREVIEW_ONLY") == "preview-only"
+    assert sent(_twin(), "STANDARD") == "<not sent>"
+    assert sent(_twin("STANDARD", theme_suffix="rayban-meta"), "STANDARD") == "rayban-meta"
+    assert sent(_twin("PRE_ORDER", 10, theme_suffix="rayban-meta"), "PRE_ORDER") == "preorder"
+    back = _twin("STANDARD")
+    back["ecom"]["template_suffix_sent"] = "preorder"
+    assert sent(back, "STANDARD") == ""
+    back["ecom"]["template_suffix_sent"] = ""
+    assert sent(back, "STANDARD") == "<not sent>"
     mf = {m["key"]: m["value"] for m in shopify_push.build_product_metafields(_twin("PRE_ORDER", 10))}
     assert mf["preorder_ship_days"] == "10" and mf["web_page_type"] == "PRE_ORDER"
+
+
+def test_the_gate_keeps_every_page_standard_until_superadmin_switches_it_on(db):
+    from api.services.web_page_type import effective_page_type
+
+    twin = _twin("PRE_ORDER", 10)
+    assert effective_page_type(_Conn(db), twin) == "STANDARD"
+    db["system_settings"].insert_one({"_id": "default", "web_page_types_enabled": True})
+    assert effective_page_type(_Conn(db), twin) == "PRE_ORDER"
+    out = asyncio.run(products_mod.get_website_verdict(brand="", current_user=ADMIN))
+    assert out["web_page_types_enabled"] is True
+
+
+def test_the_writeback_records_the_template_it_sent(db):
+    from api.services.shopify_push.writeback import _writeback_product
+
+    db["catalog_products"].insert_one({"id": "cat-1", "ecom": {}})
+    _writeback_product(_Conn(db), "cat-1", "gid://shopify/Product/1", template_suffix="")
+    assert db["catalog_products"].find_one({"id": "cat-1"})["ecom"]["template_suffix_sent"] == ""
 
 
 def test_product_templates_are_gone():

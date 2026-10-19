@@ -3378,12 +3378,16 @@ def create_product(
             logger.warning("[PM] family lookup failed for %s", spine.get("sku"), exc_info=True)
     if parent is not None:
         spine["variant_of"] = parent.get("product_id")
-        if not variant_of or not live_lead_rows:
-            # Model-level fields are the model's (owner 2026-10-18).
-            lead_attrs = parent.get("attributes") or {}
-            for key in ("shape", "gender", "web_page_type", "preorder_ship_days"):
-                if not _is_blank(lead_attrs.get(key)):
-                    spine.setdefault("attributes", {})[key] = lead_attrs[key]
+        lead_attrs = parent.get("attributes") or {}
+        # Model-level fields are the model's (owner 2026-10-18); the website
+        # page always (owner 2026-10-19 -- a runbook size too), the rest
+        # unless the runbook adds sizes to a live listing.
+        inherited = ("web_page_type", "preorder_ship_days") + (
+            ("shape", "gender") if not variant_of or not live_lead_rows else ()
+        )
+        for key in inherited:
+            if not _is_blank(lead_attrs.get(key)):
+                spine.setdefault("attributes", {})[key] = lead_attrs[key]
     # The row goes under the lead's listing only while that listing is not on
     # Shopify (or no one can check: then it waits too).
     row_parent = parent
@@ -5085,6 +5089,9 @@ def update_product(
             category=clean.get("category"),
         )
     if "attributes" in clean:
+        # Judged on what the product ends up with: a patch carrying only the
+        # ship days of a stored Pre-order is judged as that Pre-order.
+        _enforce_page_type({**(current.get("attributes") or {}), **(clean["attributes"] or {})})
         clean["attributes"] = _enforce_page_type(clean["attributes"])
         model_changes = model_field_changes(current.get("attributes") or {}, clean["attributes"] or {})
 
