@@ -22,13 +22,18 @@ vi.mock('../../../context/ToastContext', () => ({
 vi.mock('../../../services/api', () => ({
   inventoryApi: { getTransfers: (...a: unknown[]) => getTransfers(...a) },
 }));
+const openTransferChallan = vi.fn();
+const openTransferInvoice = vi.fn();
 vi.mock('../../../services/api/printDocuments', () => ({
-  printDocumentsApi: { openTransferChallan: vi.fn() },
+  printDocumentsApi: {
+    openTransferChallan: (...a: unknown[]) => openTransferChallan(...a),
+    openTransferInvoice: (...a: unknown[]) => openTransferInvoice(...a),
+  },
 }));
 
 import { StockTransferManagement } from '../StockTransferManagement';
 
-const transfer = (canPrintChallan: boolean) => ({
+const transfer = (canPrintChallan: boolean, taxInvoiceNumber?: string) => ({
   id: 'trf_1',
   transfer_number: 'TRF-202610-0001',
   from_location_id: 'ST-DHN-1',
@@ -41,10 +46,11 @@ const transfer = (canPrintChallan: boolean) => ({
   created_at: '2026-10-13T05:00:00',
   total_items: 2,
   can_print_challan: canPrintChallan,
+  tax_invoice_number: taxInvoiceNumber,
 });
 
-async function openDetails(canPrintChallan: boolean) {
-  getTransfers.mockResolvedValue({ transfers: [transfer(canPrintChallan)] });
+async function openDetails(canPrintChallan: boolean, taxInvoiceNumber?: string) {
+  getTransfers.mockResolvedValue({ transfers: [transfer(canPrintChallan, taxInvoiceNumber)] });
   const view = render(<StockTransferManagement />);
   fireEvent.click(await screen.findByText('#TRF-202610-0001'));
   expect(await screen.findByText('Transfer #TRF-202610-0001')).toBeInTheDocument();
@@ -59,5 +65,13 @@ describe('the transfer details modal', () => {
 
     await openDetails(true);
     expect(screen.getByRole('button', { name: /Delivery Challan/ })).toBeInTheDocument();
+  });
+
+  it('offers the Tax Invoice instead for a move between two GST registrations', async () => {
+    await openDetails(true, 'DHN01/T2627/0001');
+    expect(screen.queryByRole('button', { name: /Delivery Challan/ })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /Tax Invoice/ }));
+    expect(openTransferInvoice).toHaveBeenCalledWith('trf_1');
+    expect(openTransferChallan).not.toHaveBeenCalled();
   });
 });
