@@ -10,8 +10,10 @@ made since PR #1234) is finished by pressing Ship again on its return; a piece
 only linked (an older return that named none) needs a decision.
 
 It also lists every return still 'saving' after 10 minutes (a create whose
-request died): the next supplier return raised at that shop undoes it and
-puts its pieces back on the shelf.
+request died) with the pieces it named: pressing Create again on the same
+form undoes it; otherwise a manager acts on its pieces (lift them on the
+Quarantine screen -- the dead link is cleared -- or name them on a new
+return).
 
   railway run --service <backend> -- .venv\\Scripts\\python.exe backend\\scripts\\count_stuck_return_pieces.py
 """

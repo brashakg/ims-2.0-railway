@@ -25,19 +25,40 @@ def stamp(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
 
 
+# The claim rows a create writes before it is a return: being saved, being
+# undone (its request died), or the tombstone of an undone save.
+UNSAVED = ("saving", "abandoning", "abandoned")
+
+
+def claim_is_dead(ret: Dict) -> bool:
+    """A claim whose request died: an undone tombstone, or a claim (being
+    saved or being undone) older than SAVING_MINUTES. A return is never one."""
+    status = (ret or {}).get("status")
+    if status == "abandoned":
+        return True
+    dead = stamp(datetime.now(timezone.utc) - timedelta(minutes=SAVING_MINUTES))
+    return status in ("saving", "abandoning") and str(ret.get("claimed_at") or "") < dead
+
+
 def open_return_of(db, unit: Dict) -> Optional[str]:
-    """The open (not cancelled) vendor return a piece is on, if any."""
+    """The open (not cancelled) vendor return a piece is on, if any. A dead
+    claim holds nothing (a manager may lift its pieces)."""
     rid = (unit or {}).get("rtv_vendor_id")
     if not rid or db is None:
         return None
     ret = db.get_collection("vendor_returns").find_one({"return_id": rid})
-    if not ret or ret.get("status") == "cancelled":
+    if not ret or ret.get("status") == "cancelled" or claim_is_dead(ret):
         return None
-    if ret.get("status") == "saving":
-        dead = stamp(datetime.now(timezone.utc) - timedelta(minutes=SAVING_MINUTES))
-        if str(ret.get("claimed_at") or "") < dead:
-            return None
     return rid
+
+
+def stale_claim_link(db, unit: Dict) -> bool:
+    """The piece's rtv_vendor_id names a dead claim -- a link to clear (a
+    VENDOR id the Quarantine screen wrote names no return, and stays)."""
+    rid = (unit or {}).get("rtv_vendor_id")
+    if not rid or db is None:
+        return False
+    return claim_is_dead(db.get_collection("vendor_returns").find_one({"return_id": rid}) or {})
 
 
 def release_refusal(db, unit: Dict) -> Optional[Dict]:

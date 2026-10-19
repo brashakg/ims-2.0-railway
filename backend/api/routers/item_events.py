@@ -207,6 +207,7 @@ async def quarantine_in(
             detail={"code": "illegal_transition",
                     "message": f"A unit in {frm.value} cannot be quarantined."},
         )
+    _clear_stale_claim_link(db, unit)
     return {"event": ev, "message": "Stock unit quarantined"}
 
 
@@ -258,7 +259,20 @@ async def quarantine_release(
             detail={"code": "not_quarantined",
                     "message": "Unit is not quarantined (or the disposition is illegal)."},
         )
+    _clear_stale_claim_link(db, unit)
     return {"event": ev, "message": f"Quarantine released ({disp})"}
+
+
+def _clear_stale_claim_link(db, unit) -> None:
+    """A link to a supplier-return save that died never survives a fresh
+    quarantine or a release (services/quarantine_hold.stale_claim_link)."""
+    from ..services.quarantine_hold import stale_claim_link
+
+    if stale_claim_link(db, unit):
+        db.get_collection("stock_units").update_one(
+            {"stock_id": unit.get("stock_id"), "rtv_vendor_id": unit.get("rtv_vendor_id")},
+            {"$set": {"rtv_vendor_id": None}},
+        )
 
 
 # ---------------------------------------------------------------------------

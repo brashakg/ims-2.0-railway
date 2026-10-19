@@ -29,7 +29,9 @@ from ..services.payables_mask import require_payables
 from ..services.rtv_debit_note import debit_note_issued
 from ..services import item_events as _ie
 from ..services.org_validation import shop_gstins
-from ..services.quarantine_hold import SAVING_MINUTES, open_return_of, stamp as _stamp
+from ..services.quarantine_hold import (
+    SAVING_MINUTES, UNSAVED as _UNSAVED, claim_is_dead, open_return_of, stamp as _stamp,
+)
 from .inventory.accountability import _STOCK_MANAGER_ROLES
 
 logger = logging.getLogger(__name__)
@@ -411,50 +413,42 @@ class _PieceChanged(Exception):
         self.unit = unit
 
 
-def _set_aside(db, lines, return_id, store_id, actor_id):
-    """Put every piece on the return, all or nothing. An AVAILABLE piece is
-    first quarantined through the ledger; each piece is then linked. A piece
-    that changed since it was checked -- or any failure -- undoes every piece
-    already touched (by id, linked or not) and refuses.
-    Returns (linked ids, ids taken off the shelf, earlier links)."""
+def _set_aside(db, lines, return_id, store_id, actor_id, generations, progress):
+    """Put every piece on the return, in order. An AVAILABLE piece is first
+    quarantined through the ledger (stamped with the quarantine generation
+    the claim recorded for it); each piece is then linked. `progress` holds
+    what was touched (linked, taken, prior) as it goes; the CALLER undoes it
+    on a failure, and only while it still owns the claim. A piece that changed
+    since it was checked raises _PieceChanged."""
     stock = db.get_collection("stock_units")
-    linked, taken, prior = [], [], {}
-    try:
-        for unit in (u for pieces in lines for u in pieces):
-            sid = unit["stock_id"]
-            prior[sid] = unit.get("rtv_vendor_id")
-            aside = {}
-            if not _is_set_aside(unit):
-                if not _ledger_move(db, unit, _STATE.AVAILABLE, _STATE.QUARANTINED,
-                                    _ie.ItemEventType.QUARANTINE_IN, return_id, actor_id,
-                                    {"quarantine_reason": "OTHER"}):
-                    raise _PieceChanged(unit)
-                taken.append(sid)
-                aside = {"quarantine_at": datetime.now(timezone.utc), "quarantine_by": actor_id,
-                         "quarantine_generation": uuid.uuid4().hex,
-                         "quarantine_notes": f"On supplier return {return_id}",
-                         "quarantine_label_printed": False}
-            res = stock.update_one(
-                {"stock_id": sid, "store_id": store_id, "rtv_vendor_id": prior[sid],
-                 **_ie.status_match(_STATE.QUARANTINED)},
-                {"$set": {"rtv_vendor_id": return_id, **aside}},
-            )
-            if not getattr(res, "matched_count", 0):
+    linked, taken, prior = progress["linked"], progress["taken"], progress["prior"]
+    for unit in (u for pieces in lines for u in pieces):
+        sid = unit["stock_id"]
+        prior[sid] = unit.get("rtv_vendor_id")
+        aside = {}
+        if not _is_set_aside(unit):
+            if not _ledger_move(db, unit, _STATE.AVAILABLE, _STATE.QUARANTINED,
+                                _ie.ItemEventType.QUARANTINE_IN, return_id, actor_id,
+                                {"quarantine_reason": "OTHER"}):
                 raise _PieceChanged(unit)
-            linked.append(sid)
-            _audit_link(sid, store_id, actor_id, prior[sid], return_id)
-    except _PieceChanged as lost:
-        _release_pieces(db, return_id, prior, set(taken), actor_id, prior)
-        raise HTTPException(status_code=409, detail=(
-            f"Piece {_label(lost.unit, lost.unit.get('stock_id'))} changed while the return "
-            "was being saved. Check it and try again."))
-    except Exception:
-        _release_pieces(db, return_id, prior, set(taken), actor_id, prior)
-        raise
+            taken.append(sid)
+            aside = {"quarantine_at": datetime.now(timezone.utc), "quarantine_by": actor_id,
+                     "quarantine_generation": generations[sid],
+                     "quarantine_notes": f"On supplier return {return_id}",
+                     "quarantine_label_printed": False}
+        res = stock.update_one(
+            {"stock_id": sid, "store_id": store_id, "rtv_vendor_id": prior[sid],
+             **_ie.status_match(_STATE.QUARANTINED)},
+            {"$set": {"rtv_vendor_id": return_id, **aside}},
+        )
+        if not getattr(res, "matched_count", 0):
+            raise _PieceChanged(unit)
+        linked.append(sid)
+        _audit_link(sid, store_id, actor_id, prior[sid], return_id)
     return linked, taken, prior
 
 
-def _release_pieces(db, return_id, ids, taken, actor_id, prior=None) -> List[str]:
+def _release_pieces(db, return_id, ids, taken, actor_id, prior=None, note=None) -> List[str]:
     """Take the given pieces off the return -- these ids only, never by link
     alone: a piece this return took off the shelf goes back on it through the
     ledger (unless another return holds it now), and each piece gets its
@@ -468,7 +462,7 @@ def _release_pieces(db, return_id, ids, taken, actor_id, prior=None) -> List[str
         if sid in taken and mine and _ledger_move(
                 db, unit, _STATE.QUARANTINED, _STATE.AVAILABLE,
                 _ie.ItemEventType.QUARANTINE_OUT, return_id, actor_id,
-                {"disposition": "RESTOCK"}):
+                {"disposition": "RESTOCK", **(note or {})}):
             back.append(unit)
         res = stock.update_one({"stock_id": sid, "rtv_vendor_id": return_id},
                                {"$set": {"rtv_vendor_id": prior.get(sid)}})
@@ -528,6 +522,10 @@ def _ship_pieces(db, return_doc, actor_id) -> List[str]:
     return stuck
 
 
+def _dead_stamp() -> str:
+    return _stamp(datetime.now(timezone.utc) - timedelta(minutes=SAVING_MINUTES))
+
+
 def _no_live_ship_fence() -> dict:
     """Mongo condition: no Ship is moving this return's pieces right now (a
     fence older than _SHIP_FENCE_MINUTES is a crashed one and is ignored)."""
@@ -557,76 +555,130 @@ def _request_fingerprint(data) -> str:
 def _same_submission(held: dict, fingerprint: str) -> dict:
     """The answer to a repeat of a submission already saved: its return --
     touching nothing -- unless it said something else. A submission still
-    being saved is no success yet."""
+    being saved (or being undone) is no success yet."""
     if held.get("request_fingerprint") != fingerprint:
         raise HTTPException(status_code=409, detail=(
             "This form was already saved with different details - refresh the page."))
-    if held.get("status") == "saving":
+    if held.get("status") in _UNSAVED:
         raise HTTPException(status_code=409, detail=(
             "This return is still being saved - try again in a moment."))
     return {"return_id": held.get("return_id"), "message": "Vendor return created successfully"}
 
 
-def _claim_expired(claim: dict) -> bool:
-    """A 'saving' claim older than SAVING_MINUTES: its request died."""
-    dead = _stamp(datetime.now(timezone.utc) - timedelta(minutes=SAVING_MINUTES))
-    return claim.get("status") == "saving" and str(claim.get("claimed_at") or "") < dead
+# The undo of a save whose request died is the system's, not the retrying user's.
+_RECOVERY_ACTOR = "system:vendor-return-recovery"
 
 
-def _abandon_claim(db, claim: dict, actor_id) -> None:
-    """Undo a claim whose request died mid-save, the cancel's way: every piece
-    it named that is still linked to it -- or that it quarantined itself (its
-    own ledger row is the piece's last) before linking -- gets its earlier
-    link back, a piece it took off the shelf goes back on it (website count
-    re-pushed), then the claim is deleted. Pieces another door holds now stay
-    where they are."""
-    rid = claim.get("return_id")
-    prior = {p.get("stock_id"): p.get("rtv_vendor_id") for p in claim.get("prior_links") or []}
-    mine = []
-    for unit in db.get_collection("stock_units").find({"stock_id": {"$in": claim.get("stock_ids") or []}}):
-        sid = unit.get("stock_id")
-        if unit.get("rtv_vendor_id") == rid:
-            mine.append(sid)
-        elif unit.get("rtv_vendor_id") == prior.get(sid) and _is_set_aside(unit):
-            last = list(db.get_collection("item_events").find({"stock_id": sid})
-                        .sort("event_seq", -1).limit(1))
-            if last and last[0].get("source_id") == rid and last[0].get("to_state") == "QUARANTINED":
-                mine.append(sid)
-    _release_pieces(db, rid, mine, set(claim.get("set_aside_stock_ids") or []), actor_id, prior)
-    db.get_collection("vendor_returns").delete_one(
-        {"_id": claim.get("_id"), "status": "saving", "claim_token": claim.get("claim_token")})
+def _untouched_since(db, unit, rid, generation) -> bool:
+    """The piece is exactly as the dead save left it: its last ledger row is
+    that save's own, and it carries the quarantine generation the save wrote
+    (or, when the save died before writing it, the one it had before).
+    Anything a person did since (a lift, a fresh quarantine, a sale) shows in
+    one or the other -- and is left exactly as it is."""
+    if not generation:
+        return False
+    last = list(db.get_collection("item_events").find({"stock_id": unit.get("stock_id")})
+                .sort("event_seq", -1).limit(1))
+    return bool(last) and last[0].get("source_id") == rid \
+        and last[0].get("source_type") == "VENDOR_RETURN" \
+        and unit.get("quarantine_generation") in (generation.get("quarantine_generation"),
+                                                  generation.get("before"))
 
 
-def _sweep_dead_claims(db, store_id, actor_id) -> None:
-    """Every create first undoes its shop's dead claims, so an abandoned save
-    never leaves pieces off sale."""
-    for claim in list(db.get_collection("vendor_returns").find({"status": "saving", "store_id": store_id})):
-        if _claim_expired(claim):
-            _abandon_claim(db, claim, actor_id)
+def _undo_dead_claim(db, claim: dict, retried_by) -> None:
+    """Undo a save whose request died, when the same submission is retried.
+    The dead claim is TAKEN first (one atomic flip to 'abandoning' with a new
+    token): only the request that wins it undoes anything. A piece is put
+    back -- the cancel's way -- only if it is untouched since the dead save
+    (_untouched_since); every other piece stays exactly as it is. The claim
+    is left as an 'abandoned' tombstone (a retry claims its id afresh, and a
+    stale link to it is known for what it is). Recorded as the system's act,
+    with the retrying user noted."""
+    collection = db.get_collection("vendor_returns")
+    token = uuid.uuid4().hex
+    taken = collection.find_one_and_update(
+        {"_id": claim.get("_id"), "status": {"$in": ["saving", "abandoning"]},
+         "claim_token": claim.get("claim_token"), "claimed_at": {"$lt": _dead_stamp()}},
+        {"$set": {"status": "abandoning", "claim_token": token,
+                  "claimed_at": _stamp(datetime.now(timezone.utc))}},
+    )
+    if taken is None:
+        return  # another request is undoing it, or it is not dead
+    rid = taken.get("return_id")
+    generations = {g.get("stock_id"): g for g in taken.get("generations") or []}
+    prior = {p.get("stock_id"): p.get("rtv_vendor_id") for p in taken.get("prior_links") or []}
+    ours = [u.get("stock_id") for u in db.get_collection("stock_units").find(
+        {"stock_id": {"$in": taken.get("stock_ids") or []}})
+        if _untouched_since(db, u, rid, generations.get(u.get("stock_id")))]
+    _release_pieces(db, rid, ours, set(taken.get("set_aside_stock_ids") or []), _RECOVERY_ACTOR,
+                    prior, note={"recovery_requested_by": retried_by})
+    collection.update_one(
+        {"_id": claim.get("_id"), "status": "abandoning", "claim_token": token},
+        {"$set": {"status": "abandoned", "abandoned_at": _stamp(datetime.now(timezone.utc)),
+                  "abandoned_by": _RECOVERY_ACTOR, "recovery_requested_by": retried_by}},
+    )
+
+
+def _settle_held(db, held: Optional[dict], retried_by) -> Optional[dict]:
+    """A row holding this submission's id: undone first when its save died;
+    None when the id is free to claim (an 'abandoned' tombstone), else the
+    row as it now stands."""
+    if held and claim_is_dead(held) and held.get("status") != "abandoned":
+        _undo_dead_claim(db, held, retried_by)
+        held = db.get_collection("vendor_returns").find_one({"_id": held.get("_id")})
+    if held and held.get("status") == "abandoned":
+        return None
+    return held
 
 
 def _claim_return(db, return_id, plan: dict) -> Optional[dict]:
     """Insert the return's claim row ('saving', its id unique) BEFORE any
-    piece is touched -- recording the pieces it will set aside, so a request
-    that dies mid-save can be undone. None when this request won it; else the
-    row that holds the id (a repeat of the same submission, or a different
-    one). A dead claim on the id was undone before the pieces were checked
-    (create); one that died since answers 'still being saved' until then."""
+    piece is touched -- recording the pieces it will set aside, their earlier
+    links and the quarantine generation it will stamp, so a request that dies
+    mid-save can be undone. An 'abandoned' tombstone on the id is replaced
+    atomically. None when this request won the id; else the row that holds
+    it (a repeat of the same submission, or a different one)."""
     collection = db.get_collection("vendor_returns")
-    claim = {"_id": return_id, "return_id": return_id, "status": "saving",
+    claim = {"return_id": return_id, "status": "saving", "claim": True,
              "claimed_at": _stamp(datetime.now(timezone.utc)), **plan}
     try:
-        collection.insert_one(claim)
+        collection.insert_one({"_id": return_id, **claim})
         return None
     except Exception as exc:
         if exc.__class__.__name__ != "DuplicateKeyError":
             raise
-        return collection.find_one({"_id": return_id}) or {"request_fingerprint": None}
+    held = collection.find_one({"_id": return_id}) or {"request_fingerprint": None}
+    if held.get("status") == "abandoned":
+        won = collection.find_one_and_update(
+            {"_id": return_id, "status": "abandoned", "claim_token": held.get("claim_token")},
+            {"$set": claim, "$unset": {"abandoned_at": "", "abandoned_by": "",
+                                       "recovery_requested_by": ""}},
+        )
+        if won is not None:
+            return None
+        held = collection.find_one({"_id": return_id}) or {"request_fingerprint": None}
+    return held
 
 
-def _drop_claim(collection, return_id, token) -> None:
-    """Give up a claim whose return was never saved (this request's only)."""
-    collection.delete_one({"_id": return_id, "status": "saving", "claim_token": token})
+def _undo_own(db, return_id, token, progress, actor_id) -> bool:
+    """A live save that failed undoes what IT touched -- only while it still
+    owns its claim (taken atomically, so a retry that took over a slow save
+    is never undone by it). False when the claim was lost."""
+    collection = db.get_collection("vendor_returns")
+    mine = collection.find_one_and_update(
+        {"_id": return_id, "status": "saving", "claim_token": token},
+        {"$set": {"status": "abandoning"}},
+    )
+    if mine is None:
+        return False
+    _release_pieces(db, return_id, progress["prior"], set(progress["taken"]), actor_id,
+                    progress["prior"])
+    collection.delete_one({"_id": return_id, "status": "abandoning", "claim_token": token})
+    return True
+
+
+_CLAIM_LOST = HTTPException(status_code=409, detail=(
+    "This return was saved by a retry of the same form - refresh the page."))
 
 
 def _priced_total(items) -> Optional[float]:
@@ -690,8 +742,9 @@ async def list_vendor_returns(
         if status:
             filter_dict["status"] = status
         else:
-            # A return still being saved is not a return yet.
-            filter_dict["status"] = {"$ne": "saving"}
+            # A claim row (a return still being saved, or a save being undone)
+            # is not a return.
+            filter_dict["claim"] = {"$ne": True}
 
         # Get total count
         total = collection.count_documents(filter_dict)
@@ -755,34 +808,37 @@ async def create_vendor_return(
     # A repeat of the same form submission names the same return: an earlier
     # save is found by its request id; otherwise the return's id is CLAIMED
     # (a 'saving' row, unique id) before any piece is touched, and a request
-    # that loses the claim touches nothing.
+    # that loses the claim touches nothing. A dead save is undone ONLY when
+    # its own submission is retried (same request id or same return id).
     actor = current_user.get("user_id")
     collection = db.get_collection("vendor_returns")
-    _sweep_dead_claims(db, return_data.store_id, actor)
     request_id = (return_data.client_request_id or "").strip() or None
     fingerprint = _request_fingerprint(return_data)
     if request_id:
-        same = collection.find_one({"client_request_id": request_id, "created_by": actor})
-        if same and _claim_expired(same):
-            _abandon_claim(db, same, actor)  # its request died: start afresh
-            same = None
+        same = _settle_held(db, collection.find_one(
+            {"client_request_id": request_id, "created_by": actor}), actor)
         if same:
             return _same_submission(same, fingerprint)
     return_id = generate_return_id(f"{actor}|{request_id}" if request_id else None)
-    dead = collection.find_one({"_id": return_id})
-    if dead and _claim_expired(dead):
-        _abandon_claim(db, dead, actor)  # a dead save on this id: undone first
-    # The pieces are checked only now, after every dead save was undone.
+    held = _settle_held(db, collection.find_one({"_id": return_id}), actor)
+    if held:
+        return _same_submission(held, fingerprint)
+    # The pieces are checked only now, after a dead save of this submission
+    # was undone.
     lines, no_receipt = _pieces_for_lines(db, return_data, current_user)
     token = uuid.uuid4().hex
     units = [u for pieces in lines for u in pieces]
+    generations = {u["stock_id"]: uuid.uuid4().hex for u in units if not _is_set_aside(u)}
     holder = _claim_return(db, return_id, {
         "store_id": return_data.store_id, "created_by": actor,
         "client_request_id": request_id, "request_fingerprint": fingerprint,
         "claim_token": token,
         # What this save will touch, written before it touches it.
         "stock_ids": [u["stock_id"] for u in units],
-        "set_aside_stock_ids": [u["stock_id"] for u in units if not _is_set_aside(u)],
+        "set_aside_stock_ids": list(generations),
+        "generations": [{"stock_id": u["stock_id"], "quarantine_generation": generations[u["stock_id"]],
+                         "before": u.get("quarantine_generation")}
+                        for u in units if u["stock_id"] in generations],
         "prior_links": [{"stock_id": u["stock_id"], "rtv_vendor_id": u.get("rtv_vendor_id")}
                         for u in units if u.get("rtv_vendor_id")],
     })
@@ -790,12 +846,22 @@ async def create_vendor_return(
         return _same_submission(holder, fingerprint)
 
     # The pieces each line sends back, set aside under the won claim -- all or
-    # nothing (a refusal gives the claim up; a request that dies here leaves
-    # the claim for the sweep to undo).
+    # nothing: a failure undoes what this request touched, only while it still
+    # owns the claim; a request that dies here is undone when its submission
+    # is retried.
+    progress = {"linked": [], "taken": [], "prior": {}}
     try:
-        linked, taken, prior = _set_aside(db, lines, return_id, return_data.store_id, actor)
+        linked, taken, prior = _set_aside(db, lines, return_id, return_data.store_id, actor,
+                                          generations, progress)
+    except _PieceChanged as lost:
+        if not _undo_own(db, return_id, token, progress, actor):
+            raise _CLAIM_LOST
+        raise HTTPException(status_code=409, detail=(
+            f"Piece {_label(lost.unit, lost.unit.get('stock_id'))} changed while the return "
+            "was being saved. Check it and try again."))
     except Exception:
-        _drop_claim(collection, return_id, token)
+        if not _undo_own(db, return_id, token, progress, actor):
+            raise _CLAIM_LOST
         raise
 
     try:
@@ -851,7 +917,8 @@ async def create_vendor_return(
         }
         saved = collection.update_one(
             {"_id": return_id, "status": "saving", "claim_token": token},
-            {"$set": return_doc, "$unset": {"claim_token": "", "claimed_at": ""}},
+            {"$set": return_doc,
+             "$unset": {"claim": "", "claim_token": "", "claimed_at": "", "generations": ""}},
         )
         if not getattr(saved, "matched_count", 0):
             raise RuntimeError("the return's claim was lost before it was saved")
@@ -862,9 +929,10 @@ async def create_vendor_return(
         }
 
     except Exception as e:
-        # The pieces were set aside for a return that was never saved.
-        _release_pieces(db, return_id, prior, set(taken), actor, prior)
-        _drop_claim(collection, return_id, token)
+        # The pieces were set aside for a return that was never saved -- put
+        # back only while this request still owns the claim.
+        if not _undo_own(db, return_id, token, progress, actor):
+            raise _CLAIM_LOST
         raise HTTPException(
             status_code=500, detail="Failed to create return. Please try again."
         )

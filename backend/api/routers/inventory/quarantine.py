@@ -193,6 +193,12 @@ async def quarantine_stock_unit(
     }
     if req.rtv_vendor_id:
         update["rtv_vendor_id"] = req.rtv_vendor_id
+    else:
+        # A link to a save that died never survives a fresh quarantine.
+        from ...services.quarantine_hold import stale_claim_link
+
+        if stale_claim_link(_get_db(), unit):
+            update["rtv_vendor_id"] = None
 
     if not stock_repo.update_if(stock_id, _quarantine_snapshot(unit), update):
         raise _stock_changed()
@@ -317,6 +323,11 @@ async def lift_quarantine_stock_unit(
         "quarantine_lift_reason": req.lift_reason,
         "quarantine_label_printed": False,
     }
+    # A link to a save that died never survives the lift.
+    from ...services.quarantine_hold import stale_claim_link
+
+    if stale_claim_link(_get_db(), unit):
+        update["rtv_vendor_id"] = None
     if not stock_repo.update_if(stock_id, _quarantine_snapshot(unit), update):
         raise _stock_changed()
 

@@ -504,11 +504,20 @@ def test_a_failed_save_gives_its_claim_up_so_the_form_can_be_sent_again(w, monke
     assert state(w, "U1")["rtv_vendor_id"] == again.json()["return_id"]
 
 
-def test_a_return_being_saved_is_not_listed(w):
-    w["db"].vendor_returns.insert_one({"_id": "VR-SAVING", "return_id": "VR-SAVING", "status": "saving",
-                                       "store_id": STORE, "created_at": "2026-10-19"})
+def test_a_return_being_saved_is_not_listed_and_appears_once_saved(w, monkeypatch):
+    unit(w, "U1")
+    listed_mid_save = []
+    real = vr._set_aside
+
+    def list_now(*a, **k):
+        listed_mid_save.append(w["as_"](MANAGER).get("/vendor-returns/", params={"store_id": STORE}).json())
+        return real(*a, **k)
+
+    monkeypatch.setattr(vr, "_set_aside", list_now)
+    rid = create(w, line(stock_ids=["U1"])).json()["return_id"]
+    assert listed_mid_save[0]["returns"] == [] and listed_mid_save[0]["total"] == 0
     listed = w["as_"](MANAGER).get("/vendor-returns/", params={"store_id": STORE}).json()
-    assert [r["return_id"] for r in listed["returns"]] == []
+    assert [r["return_id"] for r in listed["returns"]] == [rid]
 
 
 def test_a_release_never_puts_back_a_piece_another_return_now_holds(w):
@@ -633,106 +642,193 @@ def test_a_piece_from_another_shop_with_no_gstin_on_file_is_refused_loudly(w):
 
 
 # --------------------------------------------------------------------------
-# Review round 3: a save whose request died
+# Review rounds 3-4: a save whose request died
 # --------------------------------------------------------------------------
 
 OLD = "2026-01-01T00:00:00.000000"
+RECOVERY = "system:vendor-return-recovery"
 
 
-def _dead_claim(w, *sids, request_id="form-dead", taken=None, linked=True, fingerprint=None, **extra):
-    """The state a create leaves when its worker dies after setting pieces
-    aside: a 'saving' claim naming them, the pieces quarantined and linked."""
+class _Died(Exception):
+    """The worker process dies: nothing after this point runs."""
+
+
+def _crash_mid_save(w, monkeypatch, sids, request_id="form-dead", during=None):
+    """Run a REAL create for `sids` whose worker dies after setting the
+    pieces aside (or `during` the set-aside): no save, no undo. Then the
+    claim is aged past 10 minutes. Returns the return id."""
+    with monkeypatch.context() as m:
+        real = vr._set_aside
+
+        def dies(*a, **k):
+            if during:
+                during(m)
+            real(*a, **k)
+            raise _Died
+
+        m.setattr(vr, "_set_aside", dies)
+        m.setattr(vr, "_undo_own", lambda *a, **k: True)  # a dead process undoes nothing
+        with pytest.raises(_Died):
+            create(w, line(qty=len(sids), stock_ids=list(sids)), client_request_id=request_id)
     rid = vr.generate_return_id(f"{MANAGER['user_id']}|{request_id}")
-    w["db"].vendor_returns.insert_one({
-        "_id": rid, "return_id": rid, "status": "saving", "store_id": STORE,
-        "created_by": MANAGER["user_id"], "client_request_id": request_id,
-        "request_fingerprint": fingerprint, "claim_token": "dead-worker", "claimed_at": OLD,
-        "stock_ids": list(sids), "set_aside_stock_ids": list(sids if taken is None else taken), **extra})
-    for sid in sids:
-        unit(w, sid, status="QUARANTINED", **({"rtv_vendor_id": rid} if linked else {}))
+    w["db"].vendor_returns.update_one({"_id": rid}, {"$set": {"claimed_at": OLD}})
     return rid
 
 
-def _fp(*lines_, **extra):
-    body = {"vendor_id": DEALER, "vendor_name": "Bank More", "store_id": STORE,
-            "return_type": "credit_note", "items": list(lines_), **extra}
-    return vr._request_fingerprint(vr.VendorReturnCreate(**body))
-
-
-def test_create_again_after_a_crash_undoes_the_dead_save_and_saves_for_real(w):
-    body = dict(client_request_id="form-s1")
-    rid = _dead_claim(w, "U1", request_id="form-s1", fingerprint=_fp(line(stock_ids=["U1"]), **body))
-    again = create(w, line(stock_ids=["U1"]), **body)
+def test_create_again_after_a_crash_undoes_the_dead_save_as_the_system_and_saves_for_real(w, monkeypatch):
+    unit(w, "U1")
+    rid = _crash_mid_save(w, monkeypatch, ["U1"], "form-s1")
+    assert returned(w, rid)["status"] == "saving" and state(w, "U1")["rtv_vendor_id"] == rid
+    again = create(w, line(stock_ids=["U1"]), client_request_id="form-s1")
     assert again.status_code == 201, again.text
     assert again.json()["return_id"] == rid
     doc = returned(w, rid)
     assert doc["status"] == "created" and doc["stock_ids"] == ["U1"]
     assert state(w, "U1")["status"] == "QUARANTINED" and state(w, "U1")["rtv_vendor_id"] == rid
-    # The dead save's piece went back on the shelf (website re-pushed) before
-    # the real save set it aside again.
+    # The dead save's piece went back on the shelf (website re-pushed) -- as
+    # the system's act, the retrying user noted -- before the real save set
+    # it aside again.
     assert ([FRAME], STORE, "vendor_return_release") in w["website"]
-    assert events(w, "U1")[-2:] == [("quarantine.out", "QUARANTINED", "AVAILABLE", "VENDOR_RETURN"),
-                                    ("quarantine.in", "AVAILABLE", "QUARANTINED", "VENDOR_RETURN")]
+    undo = [e for e in w["db"].item_events.find({"stock_id": "U1"}).sort("event_seq", 1)][-2]
+    assert (undo["event_type"], undo["to_state"], undo["actor_id"]) == ("quarantine.out", "AVAILABLE", RECOVERY)
+    assert undo["payload"]["recovery_requested_by"] == MANAGER["user_id"]
+    unlinked = list(w["db"].audit_logs.find({"action": "QUARANTINE_LINKED_RTV", "entity_id": "U1",
+                                             "before_state": {"rtv_vendor_id": rid}}))
+    assert [r["user_id"] for r in unlinked] == [RECOVERY]
 
 
-def test_a_save_still_in_progress_is_no_success_yet(w):
-    body = dict(client_request_id="form-live")
-    rid = _dead_claim(w, "U1", request_id="form-live", fingerprint=_fp(line(stock_ids=["U1"]), **body))
+def test_t7_a_piece_a_manager_re_quarantined_after_the_crash_stays_exactly_as_they_left_it(w, monkeypatch):
+    unit(w, "U1")
+    rid = _crash_mid_save(w, monkeypatch, ["U1"], "form-t7")
+    http = w["as_"](MANAGER)
+    lifted = http.patch("/inventory/stock/U1/lift-quarantine", json={"lift_reason": "Back on the shelf"})
+    assert lifted.status_code == 200, lifted.text
+    assert state(w, "U1")["rtv_vendor_id"] is None  # the dead link does not survive the lift
+    requar = http.patch("/inventory/stock/U1/quarantine", json={"reason": "DEFECTIVE", "notes": "cracked hinge"})
+    assert requar.status_code == 200, requar.text
+    again = create(w, line(stock_ids=["U1"]), client_request_id="form-t7")
+    assert again.status_code == 201, again.text
+    u1 = state(w, "U1")
+    assert (u1["status"], u1["quarantine_reason"], u1["quarantine_notes"]) == (
+        "QUARANTINED", "DEFECTIVE", "cracked hinge")
+    assert on_hand(w) == 0 and ([FRAME], STORE, "vendor_return_release") not in w["website"]
+    # The new return named it as already set aside: a cancel keeps it there.
+    assert returned(w, rid)["set_aside_stock_ids"] == []
+
+
+def test_a_save_still_in_progress_is_no_success_yet(w, monkeypatch):
+    unit(w, "U1")
+    rid = _crash_mid_save(w, monkeypatch, ["U1"], "form-live")
     w["db"].vendor_returns.update_one({"_id": rid}, {"$set": {"claimed_at": "9999-01-01T00:00:00.000000"}})
-    busy = create(w, line(stock_ids=["U1"]), **body)
+    busy = create(w, line(stock_ids=["U1"]), client_request_id="form-live")
     assert busy.status_code == 409 and "still being saved" in busy.json()["detail"]
     assert returned(w, rid)["status"] == "saving"
     assert state(w, "U1")["rtv_vendor_id"] == rid
 
 
 @pytest.mark.parametrize("found_by", ["request id", "return id"])
-def test_a_dead_claim_on_the_id_is_taken_over_even_past_the_sweep(w, monkeypatch, found_by):
-    # The claim expired between this request's sweep and its own claim.
-    monkeypatch.setattr(vr, "_sweep_dead_claims", lambda *a, **k: None)
-    body = dict(client_request_id="form-t")
-    rid = _dead_claim(w, "U1", request_id="form-t", fingerprint=_fp(line(stock_ids=["U1"]), **body))
+def test_a_dead_claim_is_undone_when_its_own_submission_is_retried(w, monkeypatch, found_by):
+    unit(w, "U1")
+    rid = _crash_mid_save(w, monkeypatch, ["U1"], "form-t")
     if found_by == "return id":
         w["db"].vendor_returns.update_one({"_id": rid}, {"$unset": {"client_request_id": ""}})
-    again = create(w, line(stock_ids=["U1"]), **body)
+    again = create(w, line(stock_ids=["U1"]), client_request_id="form-t")
     assert again.status_code == 201, again.text
     assert returned(w, rid)["status"] == "created"
     assert state(w, "U1")["rtv_vendor_id"] == rid
 
 
-def test_any_create_at_the_shop_first_puts_a_dead_saves_pieces_back_on_sale(w):
-    dead = _dead_claim(w, "U1", "ASIDE", taken=["U1"],
-                       prior_links=[{"stock_id": "ASIDE", "rtv_vendor_id": DEALER}])
+def test_an_unrelated_create_never_touches_a_dead_save(w, monkeypatch):
+    unit(w, "U1")
+    rid = _crash_mid_save(w, monkeypatch, ["U1"], "form-dead")
     unit(w, "U9")
-    made = create(w, line(stock_ids=["U9"]))
-    assert made.status_code == 201, made.text
-    assert w["db"].vendor_returns.find_one({"_id": dead}) is None
-    assert state(w, "U1")["status"] == "AVAILABLE" and state(w, "U1")["rtv_vendor_id"] is None
-    # A piece already quarantined before the dead save keeps its quarantine
-    # and gets its earlier link back.
-    assert state(w, "ASIDE")["status"] == "QUARANTINED" and state(w, "ASIDE")["rtv_vendor_id"] == DEALER
+    assert create(w, line(stock_ids=["U9"]), client_request_id="other-form").status_code == 201
+    assert returned(w, rid)["status"] == "saving"
+    assert state(w, "U1")["status"] == "QUARANTINED" and state(w, "U1")["rtv_vendor_id"] == rid
+
+
+def test_t1_a_slow_worker_never_undoes_the_retry_that_took_its_claim_over(w, monkeypatch):
+    unit(w, "U1")
+    real = vr._set_aside
+    retry, fired = [], []
+
+    def slow(db, lines, return_id, store_id, actor_id, generations, progress):
+        out = real(db, lines, return_id, store_id, actor_id, generations, progress)
+        if not fired:
+            fired.append(True)  # the retry's own pass runs straight through
+            # Ten minutes pass; the user presses Create again.
+            w["db"].vendor_returns.update_one({"_id": return_id}, {"$set": {"claimed_at": OLD}})
+            retry.append(create(w, line(stock_ids=["U1"]), client_request_id="form-slow"))
+        return out
+
+    monkeypatch.setattr(vr, "_set_aside", slow)
+    first = create(w, line(stock_ids=["U1"]), client_request_id="form-slow")
+    assert retry[0].status_code == 201, retry[0].text
+    rid = retry[0].json()["return_id"]
+    # The slow worker lost its claim: it reports that and touches nothing.
+    assert first.status_code == 409 and "saved by a retry" in first.json()["detail"]
+    assert w["db"].vendor_returns.count_documents({}) == 1
+    assert returned(w, rid)["status"] == "created"
+    assert state(w, "U1")["status"] == "QUARANTINED" and state(w, "U1")["rtv_vendor_id"] == rid
+
+
+def test_two_retries_of_one_dead_save_undo_it_once(w, monkeypatch):
+    unit(w, "U1")
+    rid = _crash_mid_save(w, monkeypatch, ["U1"], "form-two")
+    real = vr._release_pieces
+    second = []
+
+    fired = []
+
+    def second_retry_lands(*a, **k):
+        if k.get("note") and not fired:
+            fired.append(True)
+            second.append(create(w, line(stock_ids=["U1"]), client_request_id="form-two"))
+        return real(*a, **k)
+
+    monkeypatch.setattr(vr, "_release_pieces", second_retry_lands)
+    first = create(w, line(stock_ids=["U1"]), client_request_id="form-two")
+    assert first.status_code == 201, first.text
+    assert second[0].status_code == 409 and "still being saved" in second[0].json()["detail"]
+    undos = [e for e in w["db"].item_events.find({"stock_id": "U1", "actor_id": RECOVERY})]
+    assert len(undos) == 1
+    assert returned(w, rid)["status"] == "created" and state(w, "U1")["rtv_vendor_id"] == rid
+
+
+def test_the_retry_frees_a_piece_the_dead_save_quarantined_but_never_linked(w, monkeypatch):
+    unit(w, "U1")
+    real_update = w["db"].stock_units.update_one
+
+    def link_never_written(m):
+        def dies_on_link(flt, change, *a, **k):
+            if str(change.get("$set", {}).get("rtv_vendor_id", "")).startswith("VR-"):
+                raise _Died
+            return real_update(flt, change, *a, **k)
+        m.setattr(w["db"].stock_units, "update_one", dies_on_link)
+
+    rid = _crash_mid_save(w, monkeypatch, ["U1"], "form-ul", during=link_never_written)
+    assert state(w, "U1")["status"] == "QUARANTINED" and not state(w, "U1").get("rtv_vendor_id")
+    again = create(w, line(stock_ids=["U1"]), client_request_id="form-ul")
+    assert again.status_code == 201, again.text
     assert ([FRAME], STORE, "vendor_return_release") in w["website"]
+    assert state(w, "U1")["rtv_vendor_id"] == rid
 
 
-def test_the_sweep_also_frees_a_piece_the_dead_save_quarantined_but_never_linked(w):
-    dead = _dead_claim(w, "U1", "U2", linked=False)
-    w["db"].item_events.insert_many([
-        {"stock_id": "U1", "event_seq": 10 ** 9, "event_type": "quarantine.in", "source_id": dead,
-         "to_state": "QUARANTINED"},
-        # U2 was quarantined by someone else (the Quarantine screen): it stays.
-        {"stock_id": "U2", "event_seq": 10 ** 9 + 1, "event_type": "quarantine.in", "source_id": None,
-         "to_state": "QUARANTINED"},
-    ])
-    unit(w, "U9")
-    assert create(w, line(stock_ids=["U9"])).status_code == 201
-    assert state(w, "U1")["status"] == "AVAILABLE"
-    assert state(w, "U2")["status"] == "QUARANTINED"
+def test_a_dead_saves_link_never_survives_a_ledger_release_either(w, monkeypatch):
+    unit(w, "U1")
+    rid = _crash_mid_save(w, monkeypatch, ["U1"], "form-rel")
+    out = w["as_"](MANAGER).post("/items/U1/quarantine/release", json={"disposition": "RESTOCK"})
+    assert out.status_code == 200, out.text
+    assert state(w, "U1")["status"] == "AVAILABLE" and state(w, "U1")["rtv_vendor_id"] is None
+    assert returned(w, rid)["status"] == "saving"
 
 
-def test_the_count_script_lists_saves_that_never_finished(w):
+def test_the_count_script_lists_saves_that_never_finished(w, monkeypatch):
     from scripts.count_stuck_return_pieces import dead_claims
 
-    dead = _dead_claim(w, "U1")
-    assert dead_claims(w["db"]) == [(dead, STORE, OLD, ["U1"])]
+    unit(w, "U1")
+    rid = _crash_mid_save(w, monkeypatch, ["U1"])
+    assert dead_claims(w["db"]) == [(rid, STORE, OLD, ["U1"])]
 
 
 def test_the_claim_records_what_it_will_touch_before_touching_it(w, monkeypatch):
@@ -741,15 +837,20 @@ def test_the_claim_records_what_it_will_touch_before_touching_it(w, monkeypatch)
     seen = []
     real = vr._set_aside
 
-    def look_first(db, lines, return_id, store_id, actor_id):
+    def look_first(db, lines, return_id, *rest):
         seen.append(dict(w["db"].vendor_returns.find_one({"_id": return_id})))
-        return real(db, lines, return_id, store_id, actor_id)
+        return real(db, lines, return_id, *rest)
 
     monkeypatch.setattr(vr, "_set_aside", look_first)
     assert create(w, line(qty=2, stock_ids=["SHELF", "ASIDE"])).status_code == 201
     claim = seen[0]
     assert claim["status"] == "saving" and claim["store_id"] == STORE
     assert claim["stock_ids"] == ["SHELF", "ASIDE"] and claim["set_aside_stock_ids"] == ["SHELF"]
+    # The quarantine generation it will stamp on the shelf piece, and the one
+    # it had before, are written down first too.
+    [gen] = claim["generations"]
+    assert gen["stock_id"] == "SHELF" and gen["before"] is None
+    assert state(w, "SHELF")["quarantine_generation"] == gen["quarantine_generation"]
     assert claim["prior_links"] == [{"stock_id": "ASIDE", "rtv_vendor_id": DEALER}]
 
 
@@ -758,3 +859,63 @@ def test_a_typed_line_whose_only_pieces_are_held_by_a_receiving_rejection_says_s
     typed = create(w, line(product="x", name="Acme Aviator 5420"), notes=NOTE)
     assert typed.status_code == 422
     assert "held by its receiving rejection" in typed.json()["detail"]
+
+
+def test_t7_via_the_ledger_door_too_the_manager_s_quarantine_stays(w, monkeypatch):
+    unit(w, "U1")
+    _crash_mid_save(w, monkeypatch, ["U1"], "form-t7b")
+    http = w["as_"](MANAGER)
+    assert http.post("/items/U1/quarantine/release", json={"disposition": "RESTOCK"}).status_code == 200
+    again_q = http.post("/items/U1/quarantine", json={"reason": "DEFECTIVE", "notes": "cracked hinge"})
+    assert again_q.status_code == 200, again_q.text
+    assert create(w, line(stock_ids=["U1"]), client_request_id="form-t7b").status_code == 201
+    u1 = state(w, "U1")
+    assert (u1["status"], u1["quarantine_reason"]) == ("QUARANTINED", "DEFECTIVE")
+    assert ([FRAME], STORE, "vendor_return_release") not in w["website"]
+
+
+def test_a_piece_whose_quarantine_generation_changed_since_stays_put(w, monkeypatch):
+    unit(w, "U1")
+    rid = _crash_mid_save(w, monkeypatch, ["U1"], "form-gen")
+    # Something re-quarantined it without a ledger row of its own.
+    w["db"].stock_units.update_one({"stock_id": "U1"}, {"$set": {"quarantine_generation": "someone-else"}})
+    vr._undo_dead_claim(w["db"], returned(w, rid), MANAGER["user_id"])
+    assert state(w, "U1")["status"] == "QUARANTINED" and state(w, "U1")["rtv_vendor_id"] == rid
+    assert returned(w, rid)["status"] == "abandoned"
+
+
+def test_a_stale_snapshot_of_a_dead_save_can_never_undo_the_return_saved_since(w, monkeypatch):
+    unit(w, "U1")
+    rid = _crash_mid_save(w, monkeypatch, ["U1"], "form-snap")
+    stale = returned(w, rid)  # read by a second retry before the first took it
+    assert create(w, line(stock_ids=["U1"]), client_request_id="form-snap").status_code == 201
+    vr._undo_dead_claim(w["db"], stale, "u-late")
+    assert returned(w, rid)["status"] == "created"
+    assert state(w, "U1")["status"] == "QUARANTINED" and state(w, "U1")["rtv_vendor_id"] == rid
+
+
+def test_a_piece_already_set_aside_before_the_dead_save_is_named_again_on_the_retry(w, monkeypatch):
+    unit(w, "U1")
+    unit(w, "ASIDE", status="QUARANTINED", quarantine_reason="DEFECTIVE")
+    rid = _crash_mid_save(w, monkeypatch, ["U1", "ASIDE"], "form-aside")
+    again = create(w, line(qty=2, stock_ids=["U1", "ASIDE"]), client_request_id="form-aside")
+    assert again.status_code == 201, again.text
+    assert state(w, "ASIDE")["rtv_vendor_id"] == rid
+    assert state(w, "ASIDE")["quarantine_reason"] == "DEFECTIVE"
+
+
+@pytest.mark.parametrize("door", ["screen", "ledger"])
+def test_a_fresh_quarantine_clears_a_link_to_a_dead_save(w, monkeypatch, door):
+    w["db"].vendor_returns.insert_one({"_id": "VR-GONE", "return_id": "VR-GONE", "status": "abandoned",
+                                       "store_id": STORE})
+    unit(w, "U1", rtv_vendor_id="VR-GONE")
+    unit(w, "U2", rtv_vendor_id=DEALER)  # a supplier the Quarantine screen named: kept
+    http = w["as_"](MANAGER)
+    for sid in ("U1", "U2"):
+        if door == "screen":
+            out = http.patch(f"/inventory/stock/{sid}/quarantine", json={"reason": "DEFECTIVE"})
+        else:
+            out = http.post(f"/items/{sid}/quarantine", json={"reason": "DEFECTIVE"})
+        assert out.status_code == 200, out.text
+    assert state(w, "U1")["rtv_vendor_id"] is None
+    assert state(w, "U2")["rtv_vendor_id"] == DEALER
