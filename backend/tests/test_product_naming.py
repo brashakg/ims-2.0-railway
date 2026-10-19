@@ -14,6 +14,10 @@ os.environ.setdefault("ENVIRONMENT", "test")
 from api.services.product_naming import (  # noqa: E402
     MAX_NAME_LEN,
     build_handle,
+    build_model_handle,
+    build_model_seo_description,
+    build_model_seo_title,
+    build_model_title,
     build_product_name,
     build_seo_description,
     build_seo_title,
@@ -292,3 +296,120 @@ def test_needs_name():
     assert needs_name({"name": ""}) is True
     assert needs_name({"name": "   "}) is True
     assert needs_name({"name": "Ray-Ban RB3025 Sunglasses"}) is False
+
+
+# ---------------------------------------------------------------------------
+# Brand repeated inside the model number / name (real Carrera data)
+# ---------------------------------------------------------------------------
+
+
+def _m(brand, no="", name="", category="SUNGLASSES"):
+    a = {"brand_name": brand}
+    if no:
+        a["model_no"] = no
+    if name:
+        a["model_name"] = name
+    return {"category": category, "attributes": a}
+
+
+import pytest  # noqa: E402
+
+CARRERA_CASES = [
+    # (brand, model_no, model_name, expected model title)
+    ("Carrera", "Carrera Victory C 02/S", "", "Carrera Victory C 02/S"),
+    ("Carrera", "Carrera 3044/S", "", "Carrera 3044/S"),
+    ("Carrera", "Carrera Carduc 037/S", "Ducati", "Carrera Carduc 037/S Ducati"),
+    ("Carrera", "Victory C 01/S", "Victory", "Carrera Victory C 01/S"),
+    ("Carrera", "Carrera 333/S", "", "Carrera 333/S"),
+    ("Carrera", "Carrera 8031/S", "Carrera", "Carrera 8031/S"),
+    ("Carrera", "CARRERA 5046/S", "", "Carrera 5046/S"),
+    ("Carrera", "Carrera-2006", "Flag", "Carrera 2006 Flag"),
+    ("Carrera", "Hyperfit 10/S", "Hyperfit", "Carrera Hyperfit 10/S"),
+    ("Carrera", "Carrera Champion", "Champion", "Carrera Champion"),
+]
+
+
+@pytest.mark.parametrize("brand,no,name,expected", CARRERA_CASES)
+def test_model_title_no_doubled_brand(brand, no, name, expected):
+    assert build_model_title(_m(brand, no, name)) == expected
+
+
+def test_model_handle_and_seo_follow_the_clean_title():
+    p = _m("Carrera", "Carrera 3044/S")
+    assert build_model_handle(p) == "carrera-3044-s"
+    assert "Carrera Carrera" not in build_model_seo_title(p)
+    assert build_model_seo_title(p).startswith("Carrera 3044/S Sunglasses")
+    assert "Carrera Carrera" not in build_model_seo_description(p, 3, 2)
+
+
+def test_brand_only_prefix_of_a_word_is_not_stripped():
+    assert build_model_title(_m("Ray", "Rayon 3025")) == "Ray Rayon 3025"
+    assert build_model_title(_m("Ray", "Ray 3025")) == "Ray 3025"
+
+
+def test_model_name_equal_to_number_not_repeated():
+    assert build_model_title(_m("Oakley", "Holbrook", "holbrook")) == "Oakley Holbrook"
+
+
+def test_number_empty_after_strip_is_dropped_name_kept():
+    assert build_model_title(_m("Carrera", "Carrera", "Ducati")) == "Carrera Ducati"
+    assert build_model_title(_m("Carrera", "Carrera")) == "Carrera"
+
+
+def test_name_partly_inside_number_is_kept():
+    # 'Ducati' is not in the number; 'Victory D' is not an in-order subset.
+    assert build_model_title(_m("Carrera", "Victory C 01/S", "Victory D")) == "Carrera Victory C 01/S Victory D"
+
+
+def test_brands_with_spaces_and_hyphens():
+    assert build_model_title(_m("Ray-Ban", "Ray-Ban RB3025")) == "Ray-Ban RB3025"
+    assert build_model_title(_m("Ray-Ban", "Ray Ban RB3025")) == "Ray-Ban RB3025"
+    assert build_model_title(_m("Ray-Ban", "RB3025", "Aviator")) == "Ray-Ban RB3025 Aviator"
+    assert build_model_title(_m("Emporio Armani", "Emporio Armani EA4137")) == "Emporio Armani EA4137"
+    assert build_model_title(_m("Emporio Armani", "EA4137", "Emporio Armani")) == "Emporio Armani EA4137"
+
+
+def test_per_item_name_has_no_doubled_brand_either():
+    doc = {
+        "category": "SUNGLASSES",
+        "attributes": {"brand_name": "Carrera", "model_no": "Carrera 3044/S", "frame_color": "Black"},
+    }
+    assert build_product_name(doc) == "Carrera 3044/S Sunglasses - Black"
+
+
+def test_partial_brand_overlap_for_multi_word_brands():
+    assert build_model_title(_m("Hugo Boss", "Boss 1234")) == "Hugo Boss 1234"
+    assert build_model_title(_m("Vogue Eyewear", "Vogue VO5051")) == "Vogue Eyewear VO5051"
+    assert build_model_title(_m("Emporio Armani", "Armani EA4115")) == "Emporio Armani EA4115"
+    assert build_model_title(_m("Hugo Boss", "1234", "Boss")) == "Hugo Boss 1234"
+    # a single-word brand has no partial overlap; a different leading word stays
+    assert build_model_title(_m("Carrera", "Carr 12")) == "Carrera Carr 12"
+    assert build_model_title(_m("Hugo Boss", "Bossy 12")) == "Hugo Boss Bossy 12"
+
+
+def _t(brand, no, name=""):
+    # lower-cased: the title-caser's casing of an accented capital is not what this tests
+    return build_model_title(_m(brand, no, name)).lower()
+
+
+def test_accented_words_are_whole_words():
+    # a letter with an accent is a letter: "Eclat" is only a prefix of these words
+    assert _t("Eclat", "Éclatant 12") == "eclat éclatant 12"
+    assert _t("Eclat", "Eclaté 12") == "eclat eclaté 12"
+    assert _t("Eclat", "Eclat 12") == "eclat 12"
+    assert _t("Éclat", "Éclat 12") == "éclat 12"
+    assert _t("Éclat", "Façade", "Façade") == "éclat façade"
+
+
+def test_partial_overlap_never_leaves_a_fragment_of_a_hyphenated_brand():
+    # the longest leading run of the brand, hyphen/space-insensitive
+    assert build_model_title(_m("Ray-Ban Meta", "Ray-Ban Wayfarer")) == "Ray-Ban Meta Wayfarer"
+    assert build_model_title(_m("Ray-Ban Meta", "Ray Ban Wayfarer")) == "Ray-Ban Meta Wayfarer"
+    assert build_model_title(_m("Ray-Ban Meta", "Ray-Ban Meta Wayfarer")) == "Ray-Ban Meta Wayfarer"
+    assert build_model_title(_m("Ray-Ban Meta", "RB4000", "Ray-Ban Wayfarer")) == "Ray-Ban Meta RB4000 Wayfarer"
+    # or the brand's last word
+    assert build_model_title(_m("Hugo Boss", "Boss 1234")) == "Hugo Boss 1234"
+    assert build_model_title(_m("Tom Ford", "Ford Mustang")) == "Tom Ford Mustang"
+    # a cut that would stop inside a hyphenated word is refused, not garbled
+    assert build_model_title(_m("Ray", "Ray-Ban 3025")) == "Ray Ray-Ban 3025"
+    assert build_model_title(_m("Hugo Boss", "Boss-Orange 12")) == "Hugo Boss Boss-Orange 12"
