@@ -103,7 +103,7 @@ describe('the Finance GST table is one row per GSTIN', () => {
     const jh = (await screen.findByText('20AABCB1234C1ZS')).closest('tr') as HTMLElement;
     expect(within(jh).getByText('₹700')).toBeInTheDocument();
     const mh = screen.getByText('27AABCB1234C1ZQ').closest('tr') as HTMLElement;
-    expect(within(mh).getByText('—')).toHaveAttribute('title', expect.stringMatching(/1 shop\(s\) outside your view/));
+    expect(within(mh).getByText('—')).toHaveAttribute('title', expect.stringMatching(/1 other shop\(s\) not in this view/));
   });
 });
 

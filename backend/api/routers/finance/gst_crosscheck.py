@@ -100,8 +100,9 @@ async def get_gst_reconciliation(
     rows = []
     for (eid, gstin), reports in returns.items():
         agg = _xc.aggregate_gstr3b(reports, [eid] * len(reports), [gstin] * len(reports))
-        # A GSTIN also filing for shops this login cannot see: its output tax
-        # here is only the visible shops', so no cash figure -- never a wrong one.
+        # A GSTIN also filing for shops outside this view (an accountant reads
+        # his own shop): its output tax here is only this view's shops', so
+        # no cash figure -- never a wrong one.
         hidden = sum(
             1 for sid, g in s2g.items()
             if g == gstin and s2e.get(sid) == eid and sid not in store_ids

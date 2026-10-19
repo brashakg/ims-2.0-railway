@@ -614,7 +614,7 @@ export default function FinanceDashboard() {
                           <td className="px-3 py-2 text-right">₹{Math.round(e.reverse_charge || 0).toLocaleString('en-IN')}</td>
                           <td className="px-3 py-2 text-right font-semibold">
                             {e.net_payable == null
-                              ? <span title={`This GSTIN also files for ${e.shops_outside_view || 0} shop(s) outside your view - see its GSTR-3B`}>—</span>
+                              ? <span title={`This GSTIN also files for ${e.shops_outside_view || 0} other shop(s) not in this view - see its GSTR-3B`}>—</span>
                               : `₹${Math.round(e.net_payable).toLocaleString('en-IN')}`}
                           </td>
                         </tr>
