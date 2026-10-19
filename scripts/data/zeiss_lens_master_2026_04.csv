@@ -1,0 +1,736 @@
+brand,family,series,lens_type,index,material,coating,coating_name,sph_min,sph_max,cyl_max,add_min,add_max,add_step,diameters_mm,srp_inr_per_pair_incl_gst,pdf_page,notes
+ZEISS,Progressive ClearMind,Progressive ClearMind Individual 3,PROGRESSIVE,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),87300,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Individual 3,PROGRESSIVE,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),89300,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Individual 3,PROGRESSIVE,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),89800,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Individual 3,PROGRESSIVE,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),90300,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Individual 3,PROGRESSIVE,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,101100,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Individual 3,PROGRESSIVE,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,103100,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Individual 3,PROGRESSIVE,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,103600,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Individual 3,PROGRESSIVE,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,104100,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Individual 3,PROGRESSIVE,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,101100,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Individual 3,PROGRESSIVE,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,103100,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Individual 3,PROGRESSIVE,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,103600,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Individual 3,PROGRESSIVE,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,104100,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Individual 3,PROGRESSIVE,1.67,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,117400,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Individual 3,PROGRESSIVE,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,119400,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Individual 3,PROGRESSIVE,1.67,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,119900,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Individual 3,PROGRESSIVE,1.67,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,120400,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Individual 3,PROGRESSIVE,1.74,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-20,16,6,0.75,3.5,0.25,55-60 (-20/+16) / 60-65 (-15/+13),150000,10,International order (~14 days)
+ZEISS,Progressive ClearMind,Progressive ClearMind Individual 3,PROGRESSIVE,1.74,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-20,16,6,0.75,3.5,0.25,55-60 (-20/+16) / 60-65 (-15/+13),151000,10,International order (~14 days)
+ZEISS,Progressive ClearMind,Progressive ClearMind Pure,PROGRESSIVE,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),28500,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Pure,PROGRESSIVE,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),30500,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Pure,PROGRESSIVE,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),31000,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Pure,PROGRESSIVE,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),31500,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Pure,PROGRESSIVE,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,37000,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Pure,PROGRESSIVE,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,39000,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Pure,PROGRESSIVE,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,39500,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Pure,PROGRESSIVE,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,40000,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Pure,PROGRESSIVE,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,37000,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Pure,PROGRESSIVE,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,39000,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Pure,PROGRESSIVE,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,39500,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Pure,PROGRESSIVE,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,40000,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Pure,PROGRESSIVE,1.67,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,48600,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Pure,PROGRESSIVE,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,50600,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Pure,PROGRESSIVE,1.67,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,51100,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Pure,PROGRESSIVE,1.67,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,51600,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Pure,PROGRESSIVE,1.74,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-20,16,6,0.75,3.5,0.25,55-60 (-20/+16) / 60-65 (-15/+13),65500,10,International order (~14 days)
+ZEISS,Progressive ClearMind,Progressive ClearMind Pure,PROGRESSIVE,1.74,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-20,16,6,0.75,3.5,0.25,55-60 (-20/+16) / 60-65 (-15/+13),66500,10,International order (~14 days)
+ZEISS,Progressive ClearMind,Progressive ClearMind Superb,PROGRESSIVE,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),53400,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Superb,PROGRESSIVE,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),55400,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Superb,PROGRESSIVE,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),55900,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Superb,PROGRESSIVE,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),56400,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Superb,PROGRESSIVE,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,62500,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Superb,PROGRESSIVE,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,64500,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Superb,PROGRESSIVE,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,65000,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Superb,PROGRESSIVE,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,65500,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Superb,PROGRESSIVE,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,62500,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Superb,PROGRESSIVE,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,64500,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Superb,PROGRESSIVE,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,65000,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Superb,PROGRESSIVE,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,65500,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Superb,PROGRESSIVE,1.67,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,75300,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Superb,PROGRESSIVE,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,77300,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Superb,PROGRESSIVE,1.67,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,77800,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Superb,PROGRESSIVE,1.67,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,78300,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Superb,PROGRESSIVE,1.74,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-20,16,6,0.75,3.5,0.25,55-60 (-20/+16) / 60-65 (-15/+13),88200,10,International order (~14 days)
+ZEISS,Progressive ClearMind,Progressive ClearMind Superb,PROGRESSIVE,1.74,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-20,16,6,0.75,3.5,0.25,55-60 (-20/+16) / 60-65 (-15/+13),89200,10,International order (~14 days)
+ZEISS,Progressive ClearMind,Progressive ClearMind Plus,PROGRESSIVE,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),39300,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Plus,PROGRESSIVE,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),41300,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Plus,PROGRESSIVE,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),41800,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Plus,PROGRESSIVE,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),42300,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Plus,PROGRESSIVE,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,46900,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Plus,PROGRESSIVE,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,48900,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Plus,PROGRESSIVE,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,49400,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Plus,PROGRESSIVE,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,49900,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Plus,PROGRESSIVE,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,46900,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Plus,PROGRESSIVE,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,48900,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Plus,PROGRESSIVE,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,49400,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Plus,PROGRESSIVE,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,49900,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Plus,PROGRESSIVE,1.67,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,58700,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Plus,PROGRESSIVE,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,60700,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Plus,PROGRESSIVE,1.67,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,61200,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Plus,PROGRESSIVE,1.67,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,61700,10,
+ZEISS,Progressive ClearMind,Progressive ClearMind Plus,PROGRESSIVE,1.74,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-20,16,6,0.75,3.5,0.25,55-60 (-20/+16) / 60-65 (-15/+13),74500,10,International order (~14 days)
+ZEISS,Progressive ClearMind,Progressive ClearMind Plus,PROGRESSIVE,1.74,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-20,16,6,0.75,3.5,0.25,55-60 (-20/+16) / 60-65 (-15/+13),75500,10,International order (~14 days)
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual 3,PROGRESSIVE,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),79300,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual 3,PROGRESSIVE,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),81300,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual 3,PROGRESSIVE,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),81800,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual 3,PROGRESSIVE,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),82300,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual 3,PROGRESSIVE,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,91900,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual 3,PROGRESSIVE,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,93900,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual 3,PROGRESSIVE,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,94400,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual 3,PROGRESSIVE,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,94900,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual 3,PROGRESSIVE,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,91900,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual 3,PROGRESSIVE,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,93900,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual 3,PROGRESSIVE,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,94400,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual 3,PROGRESSIVE,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,94900,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual 3,PROGRESSIVE,1.67,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,106700,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual 3,PROGRESSIVE,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,108700,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual 3,PROGRESSIVE,1.67,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,109200,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual 3,PROGRESSIVE,1.67,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,109700,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual 3,PROGRESSIVE,1.74,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-20,16,6,0.75,3.5,0.25,55-60 (-20/+16) / 60-65 (-15/+13),136500,14,International order (~14 days)
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual 3,PROGRESSIVE,1.74,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-20,16,6,0.75,3.5,0.25,55-60 (-20/+16) / 60-65 (-15/+13),137500,14,International order (~14 days)
+ZEISS,Progressive SmartLife,Progressive SmartLife Plus,PROGRESSIVE,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),34100,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Plus,PROGRESSIVE,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),36100,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Plus,PROGRESSIVE,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),36600,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Plus,PROGRESSIVE,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),37100,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Plus,PROGRESSIVE,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,40700,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Plus,PROGRESSIVE,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,42700,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Plus,PROGRESSIVE,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,43200,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Plus,PROGRESSIVE,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,43700,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Plus,PROGRESSIVE,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,40700,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Plus,PROGRESSIVE,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,42700,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Plus,PROGRESSIVE,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,43200,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Plus,PROGRESSIVE,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,43700,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Plus,PROGRESSIVE,1.67,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,51000,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Plus,PROGRESSIVE,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,53000,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Plus,PROGRESSIVE,1.67,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,53500,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Plus,PROGRESSIVE,1.67,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,54000,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Plus,PROGRESSIVE,1.74,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-20,16,6,0.75,3.5,0.25,55-60 (-20/+16) / 60-65 (-15/+13),65000,14,International order (~14 days)
+ZEISS,Progressive SmartLife,Progressive SmartLife Plus,PROGRESSIVE,1.74,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-20,16,6,0.75,3.5,0.25,55-60 (-20/+16) / 60-65 (-15/+13),66000,14,International order (~14 days)
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual,PROGRESSIVE,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),65700,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual,PROGRESSIVE,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),67700,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual,PROGRESSIVE,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),68200,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual,PROGRESSIVE,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),68700,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual,PROGRESSIVE,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,76800,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual,PROGRESSIVE,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,78800,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual,PROGRESSIVE,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,79300,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual,PROGRESSIVE,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,79800,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual,PROGRESSIVE,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,76800,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual,PROGRESSIVE,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,78800,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual,PROGRESSIVE,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,79300,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual,PROGRESSIVE,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,79800,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual,PROGRESSIVE,1.67,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,89100,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual,PROGRESSIVE,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,91100,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual,PROGRESSIVE,1.67,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,91500,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual,PROGRESSIVE,1.67,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,92000,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual,PROGRESSIVE,1.74,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-20,16,6,0.75,3.5,0.25,55-60 (-20/+16) / 60-65 (-15/+13),93600,14,International order (~14 days)
+ZEISS,Progressive SmartLife,Progressive SmartLife Individual,PROGRESSIVE,1.74,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-20,16,6,0.75,3.5,0.25,55-60 (-20/+16) / 60-65 (-15/+13),94600,14,International order (~14 days)
+ZEISS,Progressive SmartLife,Progressive SmartLife Pure,PROGRESSIVE,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),24700,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Pure,PROGRESSIVE,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),26700,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Pure,PROGRESSIVE,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),27200,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Pure,PROGRESSIVE,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),27700,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Pure,PROGRESSIVE,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,32100,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Pure,PROGRESSIVE,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,34100,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Pure,PROGRESSIVE,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,34600,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Pure,PROGRESSIVE,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,35100,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Pure,PROGRESSIVE,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,32100,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Pure,PROGRESSIVE,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,34100,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Pure,PROGRESSIVE,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,34600,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Pure,PROGRESSIVE,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,35100,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Pure,PROGRESSIVE,1.67,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,42200,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Pure,PROGRESSIVE,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,44200,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Pure,PROGRESSIVE,1.67,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,44700,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Pure,PROGRESSIVE,1.67,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,45200,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Pure,PROGRESSIVE,1.74,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-20,16,6,0.75,3.5,0.25,55-60 (-20/+16) / 60-65 (-15/+13),57200,14,International order (~14 days)
+ZEISS,Progressive SmartLife,Progressive SmartLife Pure,PROGRESSIVE,1.74,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-20,16,6,0.75,3.5,0.25,55-60 (-20/+16) / 60-65 (-15/+13),58200,14,International order (~14 days)
+ZEISS,Progressive SmartLife,Progressive SmartLife Superb,PROGRESSIVE,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),46400,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Superb,PROGRESSIVE,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),48400,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Superb,PROGRESSIVE,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),48900,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Superb,PROGRESSIVE,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),49400,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Superb,PROGRESSIVE,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,54300,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Superb,PROGRESSIVE,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,56300,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Superb,PROGRESSIVE,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,56800,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Superb,PROGRESSIVE,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,57300,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Superb,PROGRESSIVE,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,54300,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Superb,PROGRESSIVE,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,56300,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Superb,PROGRESSIVE,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,56800,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Superb,PROGRESSIVE,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,57300,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Superb,PROGRESSIVE,1.67,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,65400,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Superb,PROGRESSIVE,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,67400,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Superb,PROGRESSIVE,1.67,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,67900,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Superb,PROGRESSIVE,1.67,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,68400,14,
+ZEISS,Progressive SmartLife,Progressive SmartLife Superb,PROGRESSIVE,1.74,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-20,16,6,0.75,3.5,0.25,55-60 (-20/+16) / 60-65 (-15/+13),76900,14,International order (~14 days)
+ZEISS,Progressive SmartLife,Progressive SmartLife Superb,PROGRESSIVE,1.74,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-20,16,6,0.75,3.5,0.25,55-60 (-20/+16) / 60-65 (-15/+13),77900,14,International order (~14 days)
+ZEISS,Progressive Precision,Progressive Precision Individual 2,PROGRESSIVE,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),43400,18,
+ZEISS,Progressive Precision,Progressive Precision Individual 2,PROGRESSIVE,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),45400,18,
+ZEISS,Progressive Precision,Progressive Precision Individual 2,PROGRESSIVE,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),45900,18,
+ZEISS,Progressive Precision,Progressive Precision Individual 2,PROGRESSIVE,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),46400,18,
+ZEISS,Progressive Precision,Progressive Precision Individual 2,PROGRESSIVE,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,48700,18,
+ZEISS,Progressive Precision,Progressive Precision Individual 2,PROGRESSIVE,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,50700,18,
+ZEISS,Progressive Precision,Progressive Precision Individual 2,PROGRESSIVE,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,51200,18,
+ZEISS,Progressive Precision,Progressive Precision Individual 2,PROGRESSIVE,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,51700,18,
+ZEISS,Progressive Precision,Progressive Precision Individual 2,PROGRESSIVE,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,48700,18,
+ZEISS,Progressive Precision,Progressive Precision Individual 2,PROGRESSIVE,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,50700,18,
+ZEISS,Progressive Precision,Progressive Precision Individual 2,PROGRESSIVE,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,51200,18,
+ZEISS,Progressive Precision,Progressive Precision Individual 2,PROGRESSIVE,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,51700,18,
+ZEISS,Progressive Precision,Progressive Precision Individual 2,PROGRESSIVE,1.67,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,52100,18,
+ZEISS,Progressive Precision,Progressive Precision Individual 2,PROGRESSIVE,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,54100,18,
+ZEISS,Progressive Precision,Progressive Precision Individual 2,PROGRESSIVE,1.67,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,54600,18,
+ZEISS,Progressive Precision,Progressive Precision Individual 2,PROGRESSIVE,1.67,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,55100,18,
+ZEISS,Progressive Precision,Progressive Precision Individual 2,PROGRESSIVE,1.74,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-20,16,6,0.75,3.5,0.25,55-60 (-20/+16) / 60-65 (-15/+13),65200,18,International order (~14 days)
+ZEISS,Progressive Precision,Progressive Precision Individual 2,PROGRESSIVE,1.74,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-20,16,6,0.75,3.5,0.25,55-60 (-20/+16) / 60-65 (-15/+13),66200,18,International order (~14 days)
+ZEISS,Progressive Precision,Progressive Precision Pure,PROGRESSIVE,1.5,CLEAR,HC_UV,Hard Coat UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),16700,18,
+ZEISS,Progressive Precision,Progressive Precision Pure,PROGRESSIVE,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),18500,18,
+ZEISS,Progressive Precision,Progressive Precision Pure,PROGRESSIVE,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),20500,18,
+ZEISS,Progressive Precision,Progressive Precision Pure,PROGRESSIVE,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),21000,18,
+ZEISS,Progressive Precision,Progressive Precision Pure,PROGRESSIVE,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),21500,18,
+ZEISS,Progressive Precision,Progressive Precision Pure,PROGRESSIVE,1.59,CLEAR,HC_UV,Hard Coat UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,20300,18,
+ZEISS,Progressive Precision,Progressive Precision Pure,PROGRESSIVE,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,22100,18,
+ZEISS,Progressive Precision,Progressive Precision Pure,PROGRESSIVE,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,24100,18,
+ZEISS,Progressive Precision,Progressive Precision Pure,PROGRESSIVE,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,24600,18,
+ZEISS,Progressive Precision,Progressive Precision Pure,PROGRESSIVE,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,25100,18,
+ZEISS,Progressive Precision,Progressive Precision Pure,PROGRESSIVE,1.6,CLEAR,HC_UV,Hard Coat UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,20300,18,
+ZEISS,Progressive Precision,Progressive Precision Pure,PROGRESSIVE,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,22100,18,
+ZEISS,Progressive Precision,Progressive Precision Pure,PROGRESSIVE,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,24100,18,
+ZEISS,Progressive Precision,Progressive Precision Pure,PROGRESSIVE,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,24600,18,
+ZEISS,Progressive Precision,Progressive Precision Pure,PROGRESSIVE,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,25100,18,
+ZEISS,Progressive Precision,Progressive Precision Pure,PROGRESSIVE,1.67,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,25200,18,
+ZEISS,Progressive Precision,Progressive Precision Pure,PROGRESSIVE,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,27200,18,
+ZEISS,Progressive Precision,Progressive Precision Pure,PROGRESSIVE,1.67,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,27700,18,
+ZEISS,Progressive Precision,Progressive Precision Pure,PROGRESSIVE,1.67,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,28200,18,
+ZEISS,Progressive Precision,Progressive Precision Pure,PROGRESSIVE,1.74,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-20,16,6,0.75,3.5,0.25,55-60 (-20/+16) / 60-65 (-15/+13),42400,18,International order (~14 days)
+ZEISS,Progressive Precision,Progressive Precision Pure,PROGRESSIVE,1.74,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-20,16,6,0.75,3.5,0.25,55-60 (-20/+16) / 60-65 (-15/+13),43400,18,International order (~14 days)
+ZEISS,Progressive Precision,Progressive Precision Superb,PROGRESSIVE,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),33200,18,
+ZEISS,Progressive Precision,Progressive Precision Superb,PROGRESSIVE,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),35200,18,
+ZEISS,Progressive Precision,Progressive Precision Superb,PROGRESSIVE,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),35700,18,
+ZEISS,Progressive Precision,Progressive Precision Superb,PROGRESSIVE,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),36200,18,
+ZEISS,Progressive Precision,Progressive Precision Superb,PROGRESSIVE,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,36800,18,
+ZEISS,Progressive Precision,Progressive Precision Superb,PROGRESSIVE,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,38800,18,
+ZEISS,Progressive Precision,Progressive Precision Superb,PROGRESSIVE,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,39300,18,
+ZEISS,Progressive Precision,Progressive Precision Superb,PROGRESSIVE,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,39800,18,
+ZEISS,Progressive Precision,Progressive Precision Superb,PROGRESSIVE,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,36800,18,
+ZEISS,Progressive Precision,Progressive Precision Superb,PROGRESSIVE,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,38800,18,
+ZEISS,Progressive Precision,Progressive Precision Superb,PROGRESSIVE,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,39300,18,
+ZEISS,Progressive Precision,Progressive Precision Superb,PROGRESSIVE,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,39800,18,
+ZEISS,Progressive Precision,Progressive Precision Superb,PROGRESSIVE,1.67,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,39900,18,
+ZEISS,Progressive Precision,Progressive Precision Superb,PROGRESSIVE,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,41900,18,
+ZEISS,Progressive Precision,Progressive Precision Superb,PROGRESSIVE,1.67,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,42400,18,
+ZEISS,Progressive Precision,Progressive Precision Superb,PROGRESSIVE,1.67,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,42900,18,
+ZEISS,Progressive Precision,Progressive Precision Superb,PROGRESSIVE,1.74,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-20,16,6,0.75,3.5,0.25,55-60 (-20/+16) / 60-65 (-15/+13),55200,18,International order (~14 days)
+ZEISS,Progressive Precision,Progressive Precision Superb,PROGRESSIVE,1.74,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-20,16,6,0.75,3.5,0.25,55-60 (-20/+16) / 60-65 (-15/+13),56200,18,International order (~14 days)
+ZEISS,Progressive Precision,Progressive Precision Plus,PROGRESSIVE,1.5,CLEAR,HC_UV,Hard Coat UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),21600,18,
+ZEISS,Progressive Precision,Progressive Precision Plus,PROGRESSIVE,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),23400,18,
+ZEISS,Progressive Precision,Progressive Precision Plus,PROGRESSIVE,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),25400,18,
+ZEISS,Progressive Precision,Progressive Precision Plus,PROGRESSIVE,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),25900,18,
+ZEISS,Progressive Precision,Progressive Precision Plus,PROGRESSIVE,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised AdaptiveSun std colours),26400,18,
+ZEISS,Progressive Precision,Progressive Precision Plus,PROGRESSIVE,1.59,CLEAR,HC_UV,Hard Coat UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,26000,18,
+ZEISS,Progressive Precision,Progressive Precision Plus,PROGRESSIVE,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,27800,18,
+ZEISS,Progressive Precision,Progressive Precision Plus,PROGRESSIVE,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,29800,18,
+ZEISS,Progressive Precision,Progressive Precision Plus,PROGRESSIVE,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,30300,18,
+ZEISS,Progressive Precision,Progressive Precision Plus,PROGRESSIVE,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,30800,18,
+ZEISS,Progressive Precision,Progressive Precision Plus,PROGRESSIVE,1.6,CLEAR,HC_UV,Hard Coat UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,26000,18,
+ZEISS,Progressive Precision,Progressive Precision Plus,PROGRESSIVE,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,27800,18,
+ZEISS,Progressive Precision,Progressive Precision Plus,PROGRESSIVE,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,29800,18,
+ZEISS,Progressive Precision,Progressive Precision Plus,PROGRESSIVE,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,30300,18,
+ZEISS,Progressive Precision,Progressive Precision Plus,PROGRESSIVE,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,30800,18,
+ZEISS,Progressive Precision,Progressive Precision Plus,PROGRESSIVE,1.67,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,30900,18,
+ZEISS,Progressive Precision,Progressive Precision Plus,PROGRESSIVE,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,32900,18,
+ZEISS,Progressive Precision,Progressive Precision Plus,PROGRESSIVE,1.67,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,33400,18,
+ZEISS,Progressive Precision,Progressive Precision Plus,PROGRESSIVE,1.67,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,33900,18,
+ZEISS,Progressive Precision,Progressive Precision Plus,PROGRESSIVE,1.74,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-20,16,6,0.75,3.5,0.25,55-60 (-20/+16) / 60-65 (-15/+13),48300,18,International order (~14 days)
+ZEISS,Progressive Precision,Progressive Precision Plus,PROGRESSIVE,1.74,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-20,16,6,0.75,3.5,0.25,55-60 (-20/+16) / 60-65 (-15/+13),49300,18,International order (~14 days)
+ZEISS,Progressive Light 2,Progressive Light 2 3Dv,PROGRESSIVE,1.5,CLEAR,HC_UV,Hard Coat UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75 / 80 (polarised),14600,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3Dv,PROGRESSIVE,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75 / 80 (polarised),16400,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3Dv,PROGRESSIVE,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75 / 80 (polarised),18400,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3Dv,PROGRESSIVE,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75 / 80 (polarised),18900,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3Dv,PROGRESSIVE,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75 / 80 (polarised),19400,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3Dv,PROGRESSIVE,1.59,CLEAR,HC_UV,Hard Coat UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,17300,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3Dv,PROGRESSIVE,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,19100,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3Dv,PROGRESSIVE,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,21100,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3Dv,PROGRESSIVE,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,21600,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3Dv,PROGRESSIVE,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,22100,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3Dv,PROGRESSIVE,1.6,CLEAR,HC_UV,Hard Coat UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,17300,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3Dv,PROGRESSIVE,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,19100,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3Dv,PROGRESSIVE,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,21100,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3Dv,PROGRESSIVE,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,21600,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3Dv,PROGRESSIVE,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,22100,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3Dv,PROGRESSIVE,1.67,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,21900,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3Dv,PROGRESSIVE,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,23900,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3Dv,PROGRESSIVE,1.67,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,24400,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3Dv,PROGRESSIVE,1.67,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,24900,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3Dv,PROGRESSIVE,1.74,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-14,9,6,0.75,3.5,0.25,55-60 / 60-65,37700,24,International order (~14 days)
+ZEISS,Progressive Light 2,Progressive Light 2 3Dv,PROGRESSIVE,1.74,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-14,9,6,0.75,3.5,0.25,55-60 / 60-65,38700,24,International order (~14 days)
+ZEISS,Progressive Light 2,Progressive Light 2 3D,PROGRESSIVE,1.5,CLEAR,HC_UV,Hard Coat UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75 / 80 (polarised),10200,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3D,PROGRESSIVE,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75 / 80 (polarised),12100,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3D,PROGRESSIVE,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75 / 80 (polarised),14000,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3D,PROGRESSIVE,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75 / 80 (polarised),14500,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3D,PROGRESSIVE,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75 / 80 (polarised),15000,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3D,PROGRESSIVE,1.59,CLEAR,HC_UV,Hard Coat UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,13300,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3D,PROGRESSIVE,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,15100,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3D,PROGRESSIVE,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,17100,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3D,PROGRESSIVE,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,17600,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3D,PROGRESSIVE,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,18100,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3D,PROGRESSIVE,1.6,CLEAR,HC_UV,Hard Coat UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,13300,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3D,PROGRESSIVE,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,15100,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3D,PROGRESSIVE,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,17100,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3D,PROGRESSIVE,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,17600,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3D,PROGRESSIVE,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,18100,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3D,PROGRESSIVE,1.67,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,17800,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3D,PROGRESSIVE,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,19800,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3D,PROGRESSIVE,1.67,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,20300,24,
+ZEISS,Progressive Light 2,Progressive Light 2 3D,PROGRESSIVE,1.67,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,20800,24,
+ZEISS,Progressive Light 2,Progressive Light 2 D,PROGRESSIVE,1.5,CLEAR,HC_UV,Hard Coat UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75 / 80 (polarised),6700,24,
+ZEISS,Progressive Light 2,Progressive Light 2 D,PROGRESSIVE,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75 / 80 (polarised),8500,24,
+ZEISS,Progressive Light 2,Progressive Light 2 D,PROGRESSIVE,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75 / 80 (polarised),10500,24,
+ZEISS,Progressive Light 2,Progressive Light 2 D,PROGRESSIVE,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75 / 80 (polarised),11000,24,
+ZEISS,Progressive Light 2,Progressive Light 2 D,PROGRESSIVE,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75 / 80 (polarised),11500,24,
+ZEISS,Progressive Light 2,Progressive Light 2 D,PROGRESSIVE,1.59,CLEAR,HC_UV,Hard Coat UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,10000,24,
+ZEISS,Progressive Light 2,Progressive Light 2 D,PROGRESSIVE,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,11800,24,
+ZEISS,Progressive Light 2,Progressive Light 2 D,PROGRESSIVE,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,13800,24,
+ZEISS,Progressive Light 2,Progressive Light 2 D,PROGRESSIVE,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,14300,24,
+ZEISS,Progressive Light 2,Progressive Light 2 D,PROGRESSIVE,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,14800,24,
+ZEISS,Progressive Light 2,Progressive Light 2 D,PROGRESSIVE,1.6,CLEAR,HC_UV,Hard Coat UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,10000,24,
+ZEISS,Progressive Light 2,Progressive Light 2 D,PROGRESSIVE,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,11800,24,
+ZEISS,Progressive Light 2,Progressive Light 2 D,PROGRESSIVE,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,13800,24,
+ZEISS,Progressive Light 2,Progressive Light 2 D,PROGRESSIVE,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,14300,24,
+ZEISS,Progressive Light 2,Progressive Light 2 D,PROGRESSIVE,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,14800,24,
+ZEISS,Progressive Light 2,Progressive Light 2 D,PROGRESSIVE,1.67,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,13300,24,
+ZEISS,Progressive Light 2,Progressive Light 2 D,PROGRESSIVE,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,15300,24,
+ZEISS,Progressive Light 2,Progressive Light 2 D,PROGRESSIVE,1.67,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,15800,24,
+ZEISS,Progressive Light 2,Progressive Light 2 D,PROGRESSIVE,1.67,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,16300,24,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.5,CLEAR,HC_UV,Hard Coat UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,4700,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,6500,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,8900,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,9400,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,9900,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.5,PHOTO_GREY,HC_UV,Hard Coat UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,8700,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.5,PHOTO_GREY,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,10500,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.5,PHOTO_GREY,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,12900,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.5,PHOTO_GREY,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,13400,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.5,PHOTO_GREY,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,13900,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.59,CLEAR,HC_UV,Hard Coat UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,7700,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,9500,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,11000,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,11500,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,12000,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.6,CLEAR,HC_UV,Hard Coat UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,7700,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,9500,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,11000,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,11500,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,12000,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.6,PHOTO_GREY,HC_UV,Hard Coat UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,11700,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.6,PHOTO_GREY,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,13500,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.6,PHOTO_GREY,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,15000,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.6,PHOTO_GREY,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,15500,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.6,PHOTO_GREY,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,16000,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.67,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,11300,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,13300,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.67,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,13800,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus V,PROGRESSIVE,1.67,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,14300,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.5,CLEAR,HC_UV,Hard Coat UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,3400,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,4700,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,6000,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,6500,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,7000,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.5,PHOTO_GREY,HC_UV,Hard Coat UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,8200,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.5,PHOTO_GREY,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,8800,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.5,PHOTO_GREY,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,10000,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.5,PHOTO_GREY,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,10500,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.5,PHOTO_GREY,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,11000,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.59,CLEAR,HC_UV,Hard Coat UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,5200,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,6900,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,8800,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,9300,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,9800,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.6,CLEAR,HC_UV,Hard Coat UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,5200,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,6900,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,8800,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,9300,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,9800,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.6,PHOTO_GREY,HC_UV,Hard Coat UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,10200,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.6,PHOTO_GREY,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,10900,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.6,PHOTO_GREY,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,12800,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.6,PHOTO_GREY,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,13300,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.6,PHOTO_GREY,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,13800,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.67,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,9000,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,10600,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.67,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,11100,26,
+ZEISS,Progressive ClassicPlus,Progressive ClassicPlus,PROGRESSIVE,1.67,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,11600,26,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.5,CLEAR,HC_UV,Hard Coat UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,3800,28,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,5100,28,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,7700,28,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,8200,28,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,8700,28,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.5,PHOTO_GREY,HC_UV,Hard Coat UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,8700,28,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.5,PHOTO_GREY,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,9300,28,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.5,PHOTO_GREY,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,11700,28,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.5,PHOTO_GREY,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,12200,28,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.5,PHOTO_GREY,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.75,3.5,0.25,55-70 / 55-65 photo / 75,12700,28,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.59,CLEAR,HC_UV,Hard Coat UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,5700,28,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,7400,28,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,9300,28,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,9800,28,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,10300,28,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.6,CLEAR,HC_UV,Hard Coat UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,5700,28,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,7400,28,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,9300,28,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,9800,28,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,10300,28,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.6,PHOTO_GREY,HC_UV,Hard Coat UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,10800,28,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.6,PHOTO_GREY,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,11400,28,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.6,PHOTO_GREY,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,13300,28,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.6,PHOTO_GREY,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,13800,28,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.6,PHOTO_GREY,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,14300,28,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.67,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,9600,28,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,11200,28,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.67,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,11700,28,
+ZEISS,Progressive GT2 FreeForm,GT2 FreeForm Progressive,PROGRESSIVE,1.67,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,12200,28,
+ZEISS,Bifocal,Rx Bifocal FT28,BIFOCAL,1.5,CLEAR,HC_UV,Hard Coat UV,-10,8,4,1,3,0.25,65/70 (Clear -10/+8; also -6/+6 and -4/+4 rows - PDF layout ambiguous),4100,29,BlueProtect price printed higher than Gold UV (as in PDF)
+ZEISS,Bifocal,Rx Bifocal FT28,BIFOCAL,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,8,4,1,3,0.25,65/70 (Clear -10/+8; also -6/+6 and -4/+4 rows - PDF layout ambiguous),5800,29,BlueProtect price printed higher than Gold UV (as in PDF)
+ZEISS,Bifocal,Rx Bifocal FT28,BIFOCAL,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,8,4,1,3,0.25,65/70 (Clear -10/+8; also -6/+6 and -4/+4 rows - PDF layout ambiguous),7800,29,BlueProtect price printed higher than Gold UV (as in PDF)
+ZEISS,Bifocal,Rx Bifocal FT28,BIFOCAL,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,8,4,1,3,0.25,65/70 (Clear -10/+8; also -6/+6 and -4/+4 rows - PDF layout ambiguous),9700,29,BlueProtect price printed higher than Gold UV (as in PDF)
+ZEISS,Bifocal,Rx Bifocal FT28,BIFOCAL,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,8,4,1,3,0.25,65/70 (Clear -10/+8; also -6/+6 and -4/+4 rows - PDF layout ambiguous),8800,29,BlueProtect price printed higher than Gold UV (as in PDF)
+ZEISS,Bifocal,Rx Bifocal FT28,BIFOCAL,1.5,PHOTOFUSION_GREY,HC_UV,Hard Coat UV,-10,8,4,1,3,0.25,65/70 (Clear -10/+8; also -6/+6 and -4/+4 rows - PDF layout ambiguous),9100,29,BlueProtect price printed higher than Gold UV (as in PDF)
+ZEISS,Bifocal,Rx Bifocal FT28,BIFOCAL,1.5,PHOTOFUSION_GREY,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,8,4,1,3,0.25,65/70 (Clear -10/+8; also -6/+6 and -4/+4 rows - PDF layout ambiguous),10800,29,BlueProtect price printed higher than Gold UV (as in PDF)
+ZEISS,Bifocal,Rx Bifocal FT28,BIFOCAL,1.5,PHOTOFUSION_GREY,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,8,4,1,3,0.25,65/70 (Clear -10/+8; also -6/+6 and -4/+4 rows - PDF layout ambiguous),12800,29,BlueProtect price printed higher than Gold UV (as in PDF)
+ZEISS,Bifocal,Rx Bifocal FT28,BIFOCAL,1.5,PHOTOFUSION_GREY,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,8,4,1,3,0.25,65/70 (Clear -10/+8; also -6/+6 and -4/+4 rows - PDF layout ambiguous),14700,29,BlueProtect price printed higher than Gold UV (as in PDF)
+ZEISS,Bifocal,Rx Bifocal FT28,BIFOCAL,1.5,PHOTOFUSION_GREY,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,8,4,1,3,0.25,65/70 (Clear -10/+8; also -6/+6 and -4/+4 rows - PDF layout ambiguous),13800,29,BlueProtect price printed higher than Gold UV (as in PDF)
+ZEISS,Single Vision ClearMind,Single Vision ClearMind Individual 3,SV,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),24000,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind Individual 3,SV,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),26000,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind Individual 3,SV,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),26500,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind Individual 3,SV,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),27000,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind Individual 3,SV,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,8,6,,,,55-70 / 75,29600,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind Individual 3,SV,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,8,6,,,,55-70 / 75,31600,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind Individual 3,SV,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,8,6,,,,55-70 / 75,32100,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind Individual 3,SV,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,8,6,,,,55-70 / 75,32600,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind Individual 3,SV,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,8,6,,,,55-70 / 75,29600,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind Individual 3,SV,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,8,6,,,,55-70 / 75,31600,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind Individual 3,SV,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,8,6,,,,55-70 / 75,32100,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind Individual 3,SV,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,8,6,,,,55-70 / 75,32600,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind Individual 3,SV,1.67,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-12,8,6,,,,55-65 / 70 / 80,33400,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind Individual 3,SV,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-12,8,6,,,,55-65 / 70 / 80,35400,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind Individual 3,SV,1.67,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-12,8,6,,,,55-65 / 70 / 80,35900,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind Individual 3,SV,1.67,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-12,8,6,,,,55-65 / 70 / 80,36400,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind Individual 3,SV,1.74,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-20,16,6,,,,55-60 (-20/+16) / 60-65 (-15/+13),75000,30,International order (~14 days)
+ZEISS,Single Vision ClearMind,Single Vision ClearMind Individual 3,SV,1.74,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-20,16,6,,,,55-60 (-20/+16) / 60-65 (-15/+13),76000,30,International order (~14 days)
+ZEISS,Single Vision ClearMind,Single Vision ClearMind,SV,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),15800,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind,SV,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),17800,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind,SV,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),18300,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind,SV,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),18800,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind,SV,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,8,6,,,,55-70 / 75,19400,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind,SV,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,8,6,,,,55-70 / 75,21400,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind,SV,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,8,6,,,,55-70 / 75,21900,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind,SV,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,8,6,,,,55-70 / 75,22400,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind,SV,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,8,6,,,,55-70 / 75,19400,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind,SV,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,8,6,,,,55-70 / 75,21400,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind,SV,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,8,6,,,,55-70 / 75,21900,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind,SV,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,8,6,,,,55-70 / 75,22400,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind,SV,1.67,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-12,8,6,,,,55-65 / 70 / 80,22400,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind,SV,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-12,8,6,,,,55-65 / 70 / 80,24400,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind,SV,1.67,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-12,8,6,,,,55-65 / 70 / 80,24900,30,
+ZEISS,Single Vision ClearMind,Single Vision ClearMind,SV,1.67,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-12,8,6,,,,55-65 / 70 / 80,25400,30,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual 3,SV,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),21800,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual 3,SV,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),23800,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual 3,SV,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),24300,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual 3,SV,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),24800,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual 3,SV,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,8,6,,,,55-70 / 75,26900,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual 3,SV,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,8,6,,,,55-70 / 75,28900,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual 3,SV,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,8,6,,,,55-70 / 75,29400,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual 3,SV,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,8,6,,,,55-70 / 75,29900,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual 3,SV,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,8,6,,,,55-70 / 75,26900,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual 3,SV,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,8,6,,,,55-70 / 75,28900,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual 3,SV,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,8,6,,,,55-70 / 75,29400,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual 3,SV,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,8,6,,,,55-70 / 75,29900,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual 3,SV,1.67,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-12,8,6,,,,55-65 / 70 / 80,30300,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual 3,SV,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-12,8,6,,,,55-65 / 70 / 80,32300,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual 3,SV,1.67,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-12,8,6,,,,55-65 / 70 / 80,32800,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual 3,SV,1.67,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-12,8,6,,,,55-65 / 70 / 80,33300,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual 3,SV,1.74,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-20,16,6,,,,55-60 (-20/+16) / 60-65 (-15/+13),68300,32,International order (~14 days)
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual 3,SV,1.74,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-20,16,6,,,,55-60 (-20/+16) / 60-65 (-15/+13),69300,32,International order (~14 days)
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Young,SV,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),13700,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Young,SV,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),15700,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Young,SV,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),16200,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Young,SV,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),16700,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Young,SV,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,8,6,,,,55-70 / 75,16800,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Young,SV,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,8,6,,,,55-70 / 75,18800,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Young,SV,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,8,6,,,,55-70 / 75,19300,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Young,SV,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,8,6,,,,55-70 / 75,19800,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Young,SV,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,8,6,,,,55-70 / 75,16800,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Young,SV,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,8,6,,,,55-70 / 75,18800,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Young,SV,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,8,6,,,,55-70 / 75,19300,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Young,SV,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,8,6,,,,55-70 / 75,19800,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Young,SV,1.67,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-12,8,6,,,,55-65 / 70 / 80,19400,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Young,SV,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-12,8,6,,,,55-65 / 70 / 80,21400,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Young,SV,1.67,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-12,8,6,,,,55-65 / 70 / 80,21900,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Young,SV,1.67,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-12,8,6,,,,55-65 / 70 / 80,22400,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual,SV,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),16400,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual,SV,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),18400,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual,SV,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),18900,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual,SV,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),19400,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual,SV,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,8,6,,,,55-70 / 75,21100,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual,SV,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,8,6,,,,55-70 / 75,23100,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual,SV,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,8,6,,,,55-70 / 75,23600,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual,SV,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,8,6,,,,55-70 / 75,24100,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual,SV,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,8,6,,,,55-70 / 75,21100,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual,SV,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,8,6,,,,55-70 / 75,23100,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual,SV,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,8,6,,,,55-70 / 75,23600,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual,SV,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,8,6,,,,55-70 / 75,24100,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual,SV,1.67,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-12,8,6,,,,55-65 / 70 / 80,23800,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual,SV,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-12,8,6,,,,55-65 / 70 / 80,25800,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual,SV,1.67,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-12,8,6,,,,55-65 / 70 / 80,26300,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife Individual,SV,1.67,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-12,8,6,,,,55-65 / 70 / 80,26800,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife,SV,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),13700,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife,SV,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),15700,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife,SV,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),16200,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife,SV,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),16700,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife,SV,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,8,6,,,,55-70 / 75,16800,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife,SV,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,8,6,,,,55-70 / 75,18800,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife,SV,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,8,6,,,,55-70 / 75,19300,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife,SV,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,8,6,,,,55-70 / 75,19800,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife,SV,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,8,6,,,,55-70 / 75,16800,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife,SV,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,8,6,,,,55-70 / 75,18800,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife,SV,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,8,6,,,,55-70 / 75,19300,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife,SV,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,8,6,,,,55-70 / 75,19800,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife,SV,1.67,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-12,8,6,,,,55-65 / 70 / 80,19400,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife,SV,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-12,8,6,,,,55-65 / 70 / 80,21400,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife,SV,1.67,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-12,8,6,,,,55-65 / 70 / 80,21900,32,
+ZEISS,Single Vision SmartLife,Single Vision SmartLife,SV,1.67,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-12,8,6,,,,55-65 / 70 / 80,22400,32,
+ZEISS,Single Vision Rx,Single Vision Individual,SV,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),13000,34,
+ZEISS,Single Vision Rx,Single Vision Individual,SV,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),15000,34,
+ZEISS,Single Vision Rx,Single Vision Individual,SV,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),15500,34,
+ZEISS,Single Vision Rx,Single Vision Individual,SV,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),16000,34,
+ZEISS,Single Vision Rx,Single Vision Individual,SV,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,8,6,,,,55-70 / 75,16600,34,
+ZEISS,Single Vision Rx,Single Vision Individual,SV,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,8,6,,,,55-70 / 75,18600,34,
+ZEISS,Single Vision Rx,Single Vision Individual,SV,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,8,6,,,,55-70 / 75,19100,34,
+ZEISS,Single Vision Rx,Single Vision Individual,SV,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,8,6,,,,55-70 / 75,19600,34,
+ZEISS,Single Vision Rx,Single Vision Individual,SV,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,8,6,,,,55-70 / 75,16600,34,
+ZEISS,Single Vision Rx,Single Vision Individual,SV,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,8,6,,,,55-70 / 75,18600,34,
+ZEISS,Single Vision Rx,Single Vision Individual,SV,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,8,6,,,,55-70 / 75,19100,34,
+ZEISS,Single Vision Rx,Single Vision Individual,SV,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,8,6,,,,55-70 / 75,19600,34,
+ZEISS,Single Vision Rx,Single Vision Individual,SV,1.67,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-12,8,6,,,,55-65 / 70 / 80,18800,34,
+ZEISS,Single Vision Rx,Single Vision Individual,SV,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-12,8,6,,,,55-65 / 70 / 80,20800,34,
+ZEISS,Single Vision Rx,Single Vision Individual,SV,1.67,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-12,8,6,,,,55-65 / 70 / 80,21300,34,
+ZEISS,Single Vision Rx,Single Vision Individual,SV,1.67,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-12,8,6,,,,55-65 / 70 / 80,21800,34,
+ZEISS,Single Vision Rx,Single Vision Individual,SV,1.74,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-20,16,6,,,,55-60 (-20/+16) / 60-65 (-15/+13),34800,34,International order (~14 days)
+ZEISS,Single Vision Rx,Single Vision Individual,SV,1.74,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-20,16,6,,,,55-60 (-20/+16) / 60-65 (-15/+13),35800,34,International order (~14 days)
+ZEISS,Single Vision Rx,Single Vision Individual,SV,1.74,PHOTOFUSION_X,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-14,9,6,,,,55-60 / 60-65,42800,34,International order (~14 days)
+ZEISS,Single Vision Rx,Single Vision Individual,SV,1.74,PHOTOFUSION_X,DVP_GOLD_UV,DuraVision Plus Gold UV,-14,9,6,,,,55-60 / 60-65,43800,34,International order (~14 days)
+ZEISS,Single Vision Rx,Single Vision Superb,SV,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),9400,34,
+ZEISS,Single Vision Rx,Single Vision Superb,SV,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),11400,34,
+ZEISS,Single Vision Rx,Single Vision Superb,SV,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),11900,34,
+ZEISS,Single Vision Rx,Single Vision Superb,SV,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-6,6,4,,,,55-70 / 75 / 80 (polarised),12400,34,
+ZEISS,Single Vision Rx,Single Vision Superb,SV,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,8,6,,,,55-70 / 75,11000,34,
+ZEISS,Single Vision Rx,Single Vision Superb,SV,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,8,6,,,,55-70 / 75,13000,34,
+ZEISS,Single Vision Rx,Single Vision Superb,SV,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,8,6,,,,55-70 / 75,13500,34,
+ZEISS,Single Vision Rx,Single Vision Superb,SV,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,8,6,,,,55-70 / 75,14000,34,
+ZEISS,Single Vision Rx,Single Vision Superb,SV,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,8,6,,,,55-70 / 75,11000,34,
+ZEISS,Single Vision Rx,Single Vision Superb,SV,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,8,6,,,,55-70 / 75,13000,34,
+ZEISS,Single Vision Rx,Single Vision Superb,SV,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,8,6,,,,55-70 / 75,13500,34,
+ZEISS,Single Vision Rx,Single Vision Superb,SV,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,8,6,,,,55-70 / 75,14000,34,
+ZEISS,Single Vision Rx,Single Vision Superb,SV,1.67,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-12,8,6,,,,55-65 / 70 / 80,14900,34,
+ZEISS,Single Vision Rx,Single Vision Superb,SV,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-12,8,6,,,,55-65 / 70 / 80,16900,34,
+ZEISS,Single Vision Rx,Single Vision Superb,SV,1.67,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-12,8,6,,,,55-65 / 70 / 80,17400,34,
+ZEISS,Single Vision Rx,Single Vision Superb,SV,1.67,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-12,8,6,,,,55-65 / 70 / 80,17900,34,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.5,CLEAR,HC_UV,Hard Coat UV,-7,6,4,,,,65-70 / 65-75 Sph,3800,35,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,6,4,,,,65-70 / 65-75 Sph,5800,35,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,6,4,,,,65-70 / 65-75 Sph,7300,35,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,6,4,,,,65-70 / 65-75 Sph,7800,35,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,6,4,,,,65-70 / 65-75 Sph,8300,35,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.59,CLEAR,HC_UV,Hard Coat UV,-9,6,4,,,,75 Asph,5700,35,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-9,6,4,,,,75 Asph,7600,35,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-9,6,4,,,,75 Asph,9200,35,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-9,6,4,,,,75 Asph,9700,35,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-9,6,4,,,,75 Asph,10200,35,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.6,CLEAR,HC_UV,Hard Coat UV,-9,6,4,,,,75 Asph,5700,35,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-9,6,4,,,,75 Asph,7600,35,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-9,6,4,,,,75 Asph,9200,35,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-9,6,4,,,,75 Asph,9700,35,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-9,6,4,,,,75 Asph,10200,35,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.67,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-15,8,6,,,,55-70 Asph (-12/+8) / 65-70 Asph (-10/+8) / 50-65 Sph (-15/+8) / 70 Sph (-12/+8),9700,35,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-15,8,6,,,,55-70 Asph (-12/+8) / 65-70 Asph (-10/+8) / 50-65 Sph (-15/+8) / 70 Sph (-12/+8),11700,35,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.67,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-15,8,6,,,,55-70 Asph (-12/+8) / 65-70 Asph (-10/+8) / 50-65 Sph (-15/+8) / 70 Sph (-12/+8),12200,35,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.67,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-15,8,6,,,,55-70 Asph (-12/+8) / 65-70 Asph (-10/+8) / 50-65 Sph (-15/+8) / 70 Sph (-12/+8),12700,35,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.5,PHOTO_GREY,HC_UV,Hard Coat UV,-6,6,4,,,,55-65 Sph,7800,35,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.5,PHOTO_GREY,DVP_CHROME_UV,DuraVision Plus Chrome UV,-6,6,4,,,,55-65 Sph,9800,35,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.5,PHOTO_GREY,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-6,6,4,,,,55-65 Sph,11300,35,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.5,PHOTO_GREY,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-6,6,4,,,,55-65 Sph,11800,35,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.5,PHOTO_GREY,DVP_GOLD_UV,DuraVision Plus Gold UV,-6,6,4,,,,55-65 Sph,12300,35,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.6,PHOTO_GREY,HC_UV,Hard Coat UV,-9,6,6,,,,75 Asph,9700,35,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.6,PHOTO_GREY,DVP_CHROME_UV,DuraVision Plus Chrome UV,-9,6,6,,,,75 Asph,11600,35,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.6,PHOTO_GREY,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-9,6,6,,,,75 Asph,13200,35,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.6,PHOTO_GREY,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-9,6,6,,,,75 Asph,13700,35,
+ZEISS,Single Vision Rx,Single Vision AS/Sph,SV,1.6,PHOTO_GREY,DVP_GOLD_UV,DuraVision Plus Gold UV,-9,6,6,,,,75 Asph,14200,35,
+ZEISS,Finished Single Vision ClearView,FSV ClearView,SV,1.5,BLUEGUARD,DV_PLATINUM_UV,DuraVision Platinum UV,-6,4,2,,,,-73 / +65,4600,37,Finished (stock) lens; Gold UV BlueGuard marked New
+ZEISS,Finished Single Vision ClearView,FSV ClearView,SV,1.5,BLUEGUARD,DV_GOLD_UV,DuraVision Gold UV,-6,4,2,,,,-73 / +65,5100,37,Finished (stock) lens; Gold UV BlueGuard marked New
+ZEISS,Finished Single Vision ClearView,FSV ClearView,SV,1.56,BLUEGUARD,DV_PLATINUM_UV,DuraVision Platinum UV,-6,4,2,,,,-73 / +65,6400,37,Finished (stock) lens; Gold UV BlueGuard marked New
+ZEISS,Finished Single Vision ClearView,FSV ClearView,SV,1.59,BLUEGUARD,DV_PLATINUM_UV,DuraVision Platinum UV,-6,4,2,,,,-73 / +65,6600,37,Finished (stock) lens; Gold UV BlueGuard marked New
+ZEISS,Finished Single Vision ClearView,FSV ClearView,SV,1.59,BLUEGUARD,DV_GOLD_UV,DuraVision Gold UV,-6,4,2,,,,-73 / +65,7100,37,Finished (stock) lens; Gold UV BlueGuard marked New
+ZEISS,Finished Single Vision ClearView,FSV ClearView,SV,1.6,BLUEGUARD,DV_PLATINUM_UV,DuraVision Platinum UV,-10,6,3,,,,-70/75 / +65,7600,37,Finished (stock) lens; Gold UV BlueGuard marked New
+ZEISS,Finished Single Vision ClearView,FSV ClearView,SV,1.6,BLUEGUARD,DV_GOLD_UV,DuraVision Gold UV,-10,6,3,,,,-70/75 / +65,8100,37,Finished (stock) lens; Gold UV BlueGuard marked New
+ZEISS,Finished Single Vision ClearView,FSV ClearView,SV,1.67,BLUEGUARD,DV_PLATINUM_UV,DuraVision Platinum UV,-10,0,4,,,,-70/75,8600,37,Finished (stock) lens; Gold UV BlueGuard marked New
+ZEISS,Finished Single Vision ClearView,FSV ClearView,SV,1.67,BLUEGUARD,DV_GOLD_UV,DuraVision Gold UV,-10,0,4,,,,-70/75,9100,37,Finished (stock) lens; Gold UV BlueGuard marked New
+ZEISS,Finished Single Vision ClearView,FSV ClearView,SV,1.56,UVPROTECT,DV_PLATINUM_UV,DuraVision Platinum UV,-6,4,2,,,,-73 / +65,5800,37,Finished (stock) lens
+ZEISS,Finished Single Vision ClearView,FSV ClearView,SV,1.6,UVPROTECT,DV_PLATINUM_UV,DuraVision Platinum UV,-8,4,2,,,,-70/75 / +65,7000,37,Finished (stock) lens
+ZEISS,Finished Single Vision ClearView,FSV ClearView,SV,1.67,UVPROTECT,DV_PLATINUM_UV,DuraVision Platinum UV,-10,0,4,,,,-70/75,7600,37,Finished (stock) lens
+ZEISS,Finished Single Vision ClearView,FSV ClearView,SV,1.74,UVPROTECT,DV_PLATINUM_UV,DuraVision Platinum UV,-14,-3,2,,,,70/75 (-12..-3 cyl 2; -14..-12 cyl 0),20000,37,Finished (stock) lens; International order (~14 days)
+ZEISS,Finished Single Vision ClearView,FSV ClearView,SV,1.56,PHOTOFUSION_X,DV_PLATINUM_UV,DuraVision Platinum UV,-6,4,2,,,,-70 / +65,13500,37,Finished (stock) lens; PhotoFusion X Extra Grey
+ZEISS,Finished Single Vision ClearView,FSV ClearView,SV,1.6,PHOTOFUSION_X,DV_PLATINUM_UV,DuraVision Platinum UV,-8,4,2,,,,-75/+65 / -70,16000,37,Finished (stock) lens; PhotoFusion X Extra Grey
+ZEISS,Finished Single Vision ClassicPlus,FSV ClassicPlus,SV,1.5,BLUEGUARD,DV_CHROME_UV,DuraVision Chrome UV,-6,4,2,,,,-70 / +65,2500,39,Finished (stock) lens
+ZEISS,Finished Single Vision ClassicPlus,FSV ClassicPlus,SV,1.5,BLUEGUARD,DV_PLATINUM_UV,DuraVision Platinum UV,-6,4,2,,,,-70 / +65,3800,39,Finished (stock) lens
+ZEISS,Finished Single Vision ClassicPlus,FSV ClassicPlus,SV,1.56,BLUEGUARD,DV_CHROME_UV,DuraVision Chrome UV,-6,4,2,,,,-70 / +65,3600,39,Finished (stock) lens
+ZEISS,Finished Single Vision ClassicPlus,FSV ClassicPlus,SV,1.56,BLUEGUARD,DV_PLATINUM_UV,DuraVision Platinum UV,-6,4,2,,,,-70 / +65,4300,39,Finished (stock) lens
+ZEISS,Finished Single Vision ClassicPlus,FSV ClassicPlus,SV,1.59,BLUEGUARD,DV_CHROME_UV,DuraVision Chrome UV,-6,4,2,,,,-73 / +65,4700,39,Finished (stock) lens
+ZEISS,Finished Single Vision ClassicPlus,FSV ClassicPlus,SV,1.6,BLUEGUARD,DV_CHROME_UV,DuraVision Chrome UV,-8,6,3,,,,-70/75 / +65,4700,39,Finished (stock) lens
+ZEISS,Finished Single Vision ClassicPlus,FSV ClassicPlus,SV,1.6,BLUEGUARD,DV_PLATINUM_UV,DuraVision Platinum UV,-8,6,3,,,,-70/75 / +65,5500,39,Finished (stock) lens
+ZEISS,Finished Single Vision ClassicPlus,FSV ClassicPlus,SV,1.67,BLUEGUARD,DV_CHROME_UV,DuraVision Chrome UV,-10,0,4,,,,-70/75,6600,39,Finished (stock) lens
+ZEISS,Finished Single Vision,FSV BlueGuard ClearAR UV,SV,1.56,BLUEGUARD,CLEARAR_UV,ClearAR UV,-6,4,2,,,,-73 / +65,2000,39,Finished (stock) lens; no cross compound
+ZEISS,Finished Single Vision,FSV BlueGuard ClearAR UV,SV,1.6,BLUEGUARD,CLEARAR_UV,ClearAR UV,-8,6,3,,,,-70/75 / +65,2900,39,Finished (stock) lens; no cross compound
+ZEISS,Finished Single Vision,Finished Single Vision,SV,1.5,CLEAR,DV_CHROME_UV,DuraVision Chrome UV,-6,4,2,,,,-70 / +65,2300,40,Finished (stock) lens
+ZEISS,Finished Single Vision,Finished Single Vision,SV,1.5,CLEAR,DV_BLUEPROTECT_UV,DuraVision BlueProtect UV,-6,4,2,,,,-70 / +65,2700,40,Finished (stock) lens
+ZEISS,Finished Single Vision,Finished Single Vision,SV,1.5,CLEAR,DV_DRIVESAFE_UV,DuraVision DriveSafe UV,-6,4,2,,,,-70 / +65,3800,40,Finished (stock) lens
+ZEISS,Finished Single Vision,Finished Single Vision,SV,1.56,CLEAR,DV_DRIVESAFE_UV,DuraVision DriveSafe UV,-6,4,2,,,,-70 / +65,4900,40,Finished (stock) lens
+ZEISS,Finished Single Vision,Finished Single Vision,SV,1.56,PHOTO,LOTUTEC,LotuTec,-6,4,2,,,,-70 / +65,4500,40,Finished (stock) lens
+ZEISS,Finished Single Vision,Finished Single Vision,SV,1.6,CLEAR,DV_PLATINUM_UV,DuraVision Platinum UV,-8,6,3,,,,-75/+65 (-6/+6) / -70 (-8/+4),5500,40,Finished (stock) lens
+ZEISS,Finished Single Vision,Finished Single Vision,SV,1.6,CLEAR,DV_DRIVESAFE_UV,DuraVision DriveSafe UV,-8,4,2,,,,-75/+65 (-6/+4) / -70 (-8/+4),6000,40,Finished (stock) lens
+ZEISS,Finished Single Vision,FSV Sun (Tint Grey/Brown/Pioneer 85%),SV,1.5,CLEAR,DV_SUN_UV,DuraVision Sun UV,-4,0,2,,,,-75,4700,40,"Finished sun lens, international order"
+ZEISS,MyoCare,FSV MyoCare,SV,1.59,CLEAR,DV_PLATINUM_UV,DuraVision Platinum UV,-6,0,2,,,,73,7500,41,"Myopia control, finished (stock) lens"
+ZEISS,MyoCare,MyoCare Single Vision Rx,SV,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-9,0,6,,,,65 (-9) / 70 (-7),16000,41,"Myopia control, international order"
+ZEISS,MyoCare,MyoCare Single Vision Rx,SV,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-9,0,6,,,,65 (-9) / 70 (-7) / 73 (-6),24000,41,"Myopia control, international order"
+ZEISS,MyoCare,MyoCare Single Vision Rx,SV,1.67,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,-2,6,,,,65 (-10) / 70 (-9) / 73 (-8),28000,41,"Myopia control, international order"
+ZEISS,MyoCare,MyoCare Single Vision S Rx,SV,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-9,0,6,,,,65 (-9) / 70 (-7),16000,41,"Myopia control, international order"
+ZEISS,Digital ClearMind,Digital ClearMind Individual 3,DIGITAL,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.5,1.25,0.25,55-70 / 75,27500,42,
+ZEISS,Digital ClearMind,Digital ClearMind Individual 3,DIGITAL,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.5,1.25,0.25,55-70 / 75,29500,42,
+ZEISS,Digital ClearMind,Digital ClearMind Individual 3,DIGITAL,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.5,1.25,0.25,55-70 / 75,30000,42,
+ZEISS,Digital ClearMind,Digital ClearMind Individual 3,DIGITAL,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.5,1.25,0.25,55-70 / 75,30500,42,
+ZEISS,Digital ClearMind,Digital ClearMind Individual 3,DIGITAL,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,31100,42,
+ZEISS,Digital ClearMind,Digital ClearMind Individual 3,DIGITAL,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,33100,42,
+ZEISS,Digital ClearMind,Digital ClearMind Individual 3,DIGITAL,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,33600,42,
+ZEISS,Digital ClearMind,Digital ClearMind Individual 3,DIGITAL,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,34100,42,
+ZEISS,Digital ClearMind,Digital ClearMind Individual 3,DIGITAL,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,31100,42,
+ZEISS,Digital ClearMind,Digital ClearMind Individual 3,DIGITAL,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,33100,42,
+ZEISS,Digital ClearMind,Digital ClearMind Individual 3,DIGITAL,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,33600,42,
+ZEISS,Digital ClearMind,Digital ClearMind Individual 3,DIGITAL,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,34100,42,
+ZEISS,Digital ClearMind,Digital ClearMind,DIGITAL,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.5,1.25,0.25,55-70 / 75,15200,42,
+ZEISS,Digital ClearMind,Digital ClearMind,DIGITAL,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.5,1.25,0.25,55-70 / 75,17200,42,
+ZEISS,Digital ClearMind,Digital ClearMind,DIGITAL,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.5,1.25,0.25,55-70 / 75,17700,42,
+ZEISS,Digital ClearMind,Digital ClearMind,DIGITAL,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.5,1.25,0.25,55-70 / 75,18200,42,
+ZEISS,Digital ClearMind,Digital ClearMind,DIGITAL,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,18600,42,
+ZEISS,Digital ClearMind,Digital ClearMind,DIGITAL,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,20600,42,
+ZEISS,Digital ClearMind,Digital ClearMind,DIGITAL,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,21100,42,
+ZEISS,Digital ClearMind,Digital ClearMind,DIGITAL,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,21600,42,
+ZEISS,Digital ClearMind,Digital ClearMind,DIGITAL,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,18600,42,
+ZEISS,Digital ClearMind,Digital ClearMind,DIGITAL,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,20600,42,
+ZEISS,Digital ClearMind,Digital ClearMind,DIGITAL,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,21100,42,
+ZEISS,Digital ClearMind,Digital ClearMind,DIGITAL,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,21600,42,
+ZEISS,Digital SmartLife,Digital SmartLife Individual 3,DIGITAL,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.5,1.25,0.25,55-70 / 75,25000,44,
+ZEISS,Digital SmartLife,Digital SmartLife Individual 3,DIGITAL,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.5,1.25,0.25,55-70 / 75,27000,44,
+ZEISS,Digital SmartLife,Digital SmartLife Individual 3,DIGITAL,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.5,1.25,0.25,55-70 / 75,27500,44,
+ZEISS,Digital SmartLife,Digital SmartLife Individual 3,DIGITAL,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.5,1.25,0.25,55-70 / 75,28000,44,
+ZEISS,Digital SmartLife,Digital SmartLife Individual 3,DIGITAL,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,28200,44,
+ZEISS,Digital SmartLife,Digital SmartLife Individual 3,DIGITAL,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,30200,44,
+ZEISS,Digital SmartLife,Digital SmartLife Individual 3,DIGITAL,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,30700,44,
+ZEISS,Digital SmartLife,Digital SmartLife Individual 3,DIGITAL,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,31200,44,
+ZEISS,Digital SmartLife,Digital SmartLife Individual 3,DIGITAL,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,28200,44,
+ZEISS,Digital SmartLife,Digital SmartLife Individual 3,DIGITAL,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,30200,44,
+ZEISS,Digital SmartLife,Digital SmartLife Individual 3,DIGITAL,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,30700,44,
+ZEISS,Digital SmartLife,Digital SmartLife Individual 3,DIGITAL,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,31200,44,
+ZEISS,Digital SmartLife,Digital SmartLife Individual,DIGITAL,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.5,1.25,0.25,55-70 / 75,18000,44,
+ZEISS,Digital SmartLife,Digital SmartLife Individual,DIGITAL,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.5,1.25,0.25,55-70 / 75,20000,44,
+ZEISS,Digital SmartLife,Digital SmartLife Individual,DIGITAL,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.5,1.25,0.25,55-70 / 75,20500,44,
+ZEISS,Digital SmartLife,Digital SmartLife Individual,DIGITAL,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.5,1.25,0.25,55-70 / 75,21000,44,
+ZEISS,Digital SmartLife,Digital SmartLife Individual,DIGITAL,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,22100,44,
+ZEISS,Digital SmartLife,Digital SmartLife Individual,DIGITAL,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,24100,44,
+ZEISS,Digital SmartLife,Digital SmartLife Individual,DIGITAL,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,24600,44,
+ZEISS,Digital SmartLife,Digital SmartLife Individual,DIGITAL,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,25100,44,
+ZEISS,Digital SmartLife,Digital SmartLife Individual,DIGITAL,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,22100,44,
+ZEISS,Digital SmartLife,Digital SmartLife Individual,DIGITAL,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,24100,44,
+ZEISS,Digital SmartLife,Digital SmartLife Individual,DIGITAL,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,24600,44,
+ZEISS,Digital SmartLife,Digital SmartLife Individual,DIGITAL,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,25100,44,
+ZEISS,Digital SmartLife,Digital SmartLife,DIGITAL,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.5,1.25,0.25,55-70 / 75,13200,44,
+ZEISS,Digital SmartLife,Digital SmartLife,DIGITAL,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.5,1.25,0.25,55-70 / 75,15200,44,
+ZEISS,Digital SmartLife,Digital SmartLife,DIGITAL,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.5,1.25,0.25,55-70 / 75,15700,44,
+ZEISS,Digital SmartLife,Digital SmartLife,DIGITAL,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.5,1.25,0.25,55-70 / 75,16200,44,
+ZEISS,Digital SmartLife,Digital SmartLife,DIGITAL,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,16100,44,
+ZEISS,Digital SmartLife,Digital SmartLife,DIGITAL,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,18100,44,
+ZEISS,Digital SmartLife,Digital SmartLife,DIGITAL,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,18600,44,
+ZEISS,Digital SmartLife,Digital SmartLife,DIGITAL,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,19100,44,
+ZEISS,Digital SmartLife,Digital SmartLife,DIGITAL,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,16100,44,
+ZEISS,Digital SmartLife,Digital SmartLife,DIGITAL,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,18100,44,
+ZEISS,Digital SmartLife,Digital SmartLife,DIGITAL,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,18600,44,
+ZEISS,Digital SmartLife,Digital SmartLife,DIGITAL,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.5,1.25,0.25,55-70 / 75,19100,44,
+ZEISS,Digital Light 2,Digital Light 2 3Dve,DIGITAL,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.5,1,0.5,55-70 / 75,11800,46,Addition 0.50 and 1.00 only
+ZEISS,Digital Light 2,Digital Light 2 3Dve,DIGITAL,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.5,1,0.5,55-70 / 75,13800,46,Addition 0.50 and 1.00 only
+ZEISS,Digital Light 2,Digital Light 2 3Dve,DIGITAL,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.5,1,0.5,55-70 / 75,14300,46,Addition 0.50 and 1.00 only
+ZEISS,Digital Light 2,Digital Light 2 3Dve,DIGITAL,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.5,1,0.5,55-70 / 75,14800,46,Addition 0.50 and 1.00 only
+ZEISS,Digital Light 2,Digital Light 2 3Dve,DIGITAL,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.5,1,0.5,55-70 / 75,14400,46,Addition 0.50 and 1.00 only
+ZEISS,Digital Light 2,Digital Light 2 3Dve,DIGITAL,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.5,1,0.5,55-70 / 75,16400,46,Addition 0.50 and 1.00 only
+ZEISS,Digital Light 2,Digital Light 2 3Dve,DIGITAL,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.5,1,0.5,55-70 / 75,16900,46,Addition 0.50 and 1.00 only
+ZEISS,Digital Light 2,Digital Light 2 3Dve,DIGITAL,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.5,1,0.5,55-70 / 75,17400,46,Addition 0.50 and 1.00 only
+ZEISS,Digital Light 2,Digital Light 2 3Dve,DIGITAL,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.5,1,0.5,55-70 / 75,14400,46,Addition 0.50 and 1.00 only
+ZEISS,Digital Light 2,Digital Light 2 3Dve,DIGITAL,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.5,1,0.5,55-70 / 75,16400,46,Addition 0.50 and 1.00 only
+ZEISS,Digital Light 2,Digital Light 2 3Dve,DIGITAL,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.5,1,0.5,55-70 / 75,16900,46,Addition 0.50 and 1.00 only
+ZEISS,Digital Light 2,Digital Light 2 3Dve,DIGITAL,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.5,1,0.5,55-70 / 75,17400,46,Addition 0.50 and 1.00 only
+ZEISS,Digital Light 2,Digital Light 2 3D,DIGITAL,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-7,5,4,0.5,1,0.5,55-70 / 75,6700,46,Addition 0.50 and 1.00 only
+ZEISS,Digital Light 2,Digital Light 2 3D,DIGITAL,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-7,5,4,0.5,1,0.5,55-70 / 75,8700,46,Addition 0.50 and 1.00 only
+ZEISS,Digital Light 2,Digital Light 2 3D,DIGITAL,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-7,5,4,0.5,1,0.5,55-70 / 75,9200,46,Addition 0.50 and 1.00 only
+ZEISS,Digital Light 2,Digital Light 2 3D,DIGITAL,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-7,5,4,0.5,1,0.5,55-70 / 75,9700,46,Addition 0.50 and 1.00 only
+ZEISS,Digital Light 2,Digital Light 2 3D,DIGITAL,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.5,1,0.5,55-70 / 75,10200,46,Addition 0.50 and 1.00 only
+ZEISS,Digital Light 2,Digital Light 2 3D,DIGITAL,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.5,1,0.5,55-70 / 75,12200,46,Addition 0.50 and 1.00 only
+ZEISS,Digital Light 2,Digital Light 2 3D,DIGITAL,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.5,1,0.5,55-70 / 75,12700,46,Addition 0.50 and 1.00 only
+ZEISS,Digital Light 2,Digital Light 2 3D,DIGITAL,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.5,1,0.5,55-70 / 75,13200,46,Addition 0.50 and 1.00 only
+ZEISS,Digital Light 2,Digital Light 2 3D,DIGITAL,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.5,1,0.5,55-70 / 75,10200,46,Addition 0.50 and 1.00 only
+ZEISS,Digital Light 2,Digital Light 2 3D,DIGITAL,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.5,1,0.5,55-70 / 75,12200,46,Addition 0.50 and 1.00 only
+ZEISS,Digital Light 2,Digital Light 2 3D,DIGITAL,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.5,1,0.5,55-70 / 75,12700,46,Addition 0.50 and 1.00 only
+ZEISS,Digital Light 2,Digital Light 2 3D,DIGITAL,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.5,1,0.5,55-70 / 75,13200,46,Addition 0.50 and 1.00 only
+ZEISS,DriveSafe,Progressive DriveSafe,PROGRESSIVE,1.5,CLEAR,DV_DRIVESAFE_UV,DuraVision DriveSafe UV,-6,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised),19800,48,PDF column 'Standard'; coating assumed DuraVision DriveSafe UV
+ZEISS,DriveSafe,Progressive DriveSafe,PROGRESSIVE,1.59,CLEAR,DV_DRIVESAFE_UV,DuraVision DriveSafe UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,22400,48,PDF column 'Standard'; coating assumed DuraVision DriveSafe UV
+ZEISS,DriveSafe,Progressive DriveSafe,PROGRESSIVE,1.6,CLEAR,DV_DRIVESAFE_UV,DuraVision DriveSafe UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,22400,48,PDF column 'Standard'; coating assumed DuraVision DriveSafe UV
+ZEISS,DriveSafe,Progressive DriveSafe,PROGRESSIVE,1.67,CLEAR,DV_DRIVESAFE_UV,DuraVision DriveSafe UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,26400,48,PDF column 'Standard'; coating assumed DuraVision DriveSafe UV
+ZEISS,DriveSafe,Progressive DriveSafe Individual,PROGRESSIVE,1.5,CLEAR,DV_DRIVESAFE_UV,DuraVision DriveSafe UV,-6,5,4,0.75,3.5,0.25,55-70 / 75 / 80 (polarised),32300,48,PDF column 'Individual'; coating assumed DuraVision DriveSafe UV
+ZEISS,DriveSafe,Progressive DriveSafe Individual,PROGRESSIVE,1.59,CLEAR,DV_DRIVESAFE_UV,DuraVision DriveSafe UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,35500,48,PDF column 'Individual'; coating assumed DuraVision DriveSafe UV
+ZEISS,DriveSafe,Progressive DriveSafe Individual,PROGRESSIVE,1.6,CLEAR,DV_DRIVESAFE_UV,DuraVision DriveSafe UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,35500,48,PDF column 'Individual'; coating assumed DuraVision DriveSafe UV
+ZEISS,DriveSafe,Progressive DriveSafe Individual,PROGRESSIVE,1.67,CLEAR,DV_DRIVESAFE_UV,DuraVision DriveSafe UV,-12,8,6,0.75,3.5,0.25,55-70 / 75,39600,48,PDF column 'Individual'; coating assumed DuraVision DriveSafe UV
+ZEISS,DriveSafe,Single Vision DriveSafe,SV,1.5,CLEAR,DV_DRIVESAFE_UV,DuraVision DriveSafe UV,,,,,,,,10800,48,PDF column 'Standard'; coating assumed DuraVision DriveSafe UV; no SV power table in PDF
+ZEISS,DriveSafe,Single Vision DriveSafe,SV,1.59,CLEAR,DV_DRIVESAFE_UV,DuraVision DriveSafe UV,,,,,,,,13700,48,PDF column 'Standard'; coating assumed DuraVision DriveSafe UV; no SV power table in PDF
+ZEISS,DriveSafe,Single Vision DriveSafe,SV,1.6,CLEAR,DV_DRIVESAFE_UV,DuraVision DriveSafe UV,,,,,,,,13700,48,PDF column 'Standard'; coating assumed DuraVision DriveSafe UV; no SV power table in PDF
+ZEISS,DriveSafe,Single Vision DriveSafe,SV,1.67,CLEAR,DV_DRIVESAFE_UV,DuraVision DriveSafe UV,,,,,,,,18100,48,PDF column 'Standard'; coating assumed DuraVision DriveSafe UV; no SV power table in PDF
+ZEISS,DriveSafe,Single Vision DriveSafe Individual,SV,1.5,CLEAR,DV_DRIVESAFE_UV,DuraVision DriveSafe UV,,,,,,,,18700,48,PDF column 'Individual'; coating assumed DuraVision DriveSafe UV; no SV power table in PDF
+ZEISS,DriveSafe,Single Vision DriveSafe Individual,SV,1.59,CLEAR,DV_DRIVESAFE_UV,DuraVision DriveSafe UV,,,,,,,,21500,48,PDF column 'Individual'; coating assumed DuraVision DriveSafe UV; no SV power table in PDF
+ZEISS,DriveSafe,Single Vision DriveSafe Individual,SV,1.6,CLEAR,DV_DRIVESAFE_UV,DuraVision DriveSafe UV,,,,,,,,21500,48,PDF column 'Individual'; coating assumed DuraVision DriveSafe UV; no SV power table in PDF
+ZEISS,DriveSafe,Single Vision DriveSafe Individual,SV,1.67,CLEAR,DV_DRIVESAFE_UV,DuraVision DriveSafe UV,,,,,,,,25800,48,PDF column 'Individual'; coating assumed DuraVision DriveSafe UV; no SV power table in PDF
+ZEISS,Office,Office lens Individual,OFFICE,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-6,5,4,0.75,3.5,0.25,55-70 / 75,17100,49,
+ZEISS,Office,Office lens Individual,OFFICE,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-6,5,4,0.75,3.5,0.25,55-70 / 75,19100,49,
+ZEISS,Office,Office lens Individual,OFFICE,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-6,5,4,0.75,3.5,0.25,55-70 / 75,19600,49,
+ZEISS,Office,Office lens Individual,OFFICE,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-6,5,4,0.75,3.5,0.25,55-70 / 75,20100,49,
+ZEISS,Office,Office lens Individual,OFFICE,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,19900,49,
+ZEISS,Office,Office lens Individual,OFFICE,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,21900,49,
+ZEISS,Office,Office lens Individual,OFFICE,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,22400,49,
+ZEISS,Office,Office lens Individual,OFFICE,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,22900,49,
+ZEISS,Office,Office lens Individual,OFFICE,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,19900,49,
+ZEISS,Office,Office lens Individual,OFFICE,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,21900,49,
+ZEISS,Office,Office lens Individual,OFFICE,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,22400,49,
+ZEISS,Office,Office lens Individual,OFFICE,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,22900,49,
+ZEISS,Office,Office lens Superb,OFFICE,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-6,5,4,0.75,3.5,0.25,55-70 / 75,14000,49,Room / Near / Book variant chosen at order
+ZEISS,Office,Office lens Superb,OFFICE,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-6,5,4,0.75,3.5,0.25,55-70 / 75,16000,49,Room / Near / Book variant chosen at order
+ZEISS,Office,Office lens Superb,OFFICE,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-6,5,4,0.75,3.5,0.25,55-70 / 75,16500,49,Room / Near / Book variant chosen at order
+ZEISS,Office,Office lens Superb,OFFICE,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-6,5,4,0.75,3.5,0.25,55-70 / 75,17000,49,Room / Near / Book variant chosen at order
+ZEISS,Office,Office lens Superb,OFFICE,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,16800,49,Room / Near / Book variant chosen at order
+ZEISS,Office,Office lens Superb,OFFICE,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,18800,49,Room / Near / Book variant chosen at order
+ZEISS,Office,Office lens Superb,OFFICE,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,19300,49,Room / Near / Book variant chosen at order
+ZEISS,Office,Office lens Superb,OFFICE,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,19800,49,Room / Near / Book variant chosen at order
+ZEISS,Office,Office lens Superb,OFFICE,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,16800,49,Room / Near / Book variant chosen at order
+ZEISS,Office,Office lens Superb,OFFICE,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,18800,49,Room / Near / Book variant chosen at order
+ZEISS,Office,Office lens Superb,OFFICE,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,19300,49,Room / Near / Book variant chosen at order
+ZEISS,Office,Office lens Superb,OFFICE,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,19800,49,Room / Near / Book variant chosen at order
+ZEISS,Office,Office lens Plus,OFFICE,1.5,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-6,5,4,0.75,3.5,0.25,55-70 / 75,8700,49,Room / Near / Book variant chosen at order
+ZEISS,Office,Office lens Plus,OFFICE,1.5,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-6,5,4,0.75,3.5,0.25,55-70 / 75,10700,49,Room / Near / Book variant chosen at order
+ZEISS,Office,Office lens Plus,OFFICE,1.5,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-6,5,4,0.75,3.5,0.25,55-70 / 75,11200,49,Room / Near / Book variant chosen at order
+ZEISS,Office,Office lens Plus,OFFICE,1.5,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-6,5,4,0.75,3.5,0.25,55-70 / 75,11700,49,Room / Near / Book variant chosen at order
+ZEISS,Office,Office lens Plus,OFFICE,1.59,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,11000,49,Room / Near / Book variant chosen at order
+ZEISS,Office,Office lens Plus,OFFICE,1.59,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,13000,49,Room / Near / Book variant chosen at order
+ZEISS,Office,Office lens Plus,OFFICE,1.59,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,13500,49,Room / Near / Book variant chosen at order
+ZEISS,Office,Office lens Plus,OFFICE,1.59,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,14000,49,Room / Near / Book variant chosen at order
+ZEISS,Office,Office lens Plus,OFFICE,1.6,CLEAR,DVP_CHROME_UV,DuraVision Plus Chrome UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,11000,49,Room / Near / Book variant chosen at order
+ZEISS,Office,Office lens Plus,OFFICE,1.6,CLEAR,DVP_PLATINUM_UV,DuraVision Plus Platinum UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,13000,49,Room / Near / Book variant chosen at order
+ZEISS,Office,Office lens Plus,OFFICE,1.6,CLEAR,DVP_BLUEPROTECT_UV,DuraVision Plus BlueProtect UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,13500,49,Room / Near / Book variant chosen at order
+ZEISS,Office,Office lens Plus,OFFICE,1.6,CLEAR,DVP_GOLD_UV,DuraVision Plus Gold UV,-10,6,6,0.75,3.5,0.25,55-70 / 75,14000,49,Room / Near / Book variant chosen at order
