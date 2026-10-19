@@ -345,7 +345,9 @@ def collection_rows(shop, monkeypatch):
     monkeypatch.setattr(ci, "_get_db", lambda: shop)
     monkeypatch.setattr(ci, "_load_collection_or_404",
                         lambda db, cid: {"collection_id": cid, "title": "Aviators"})
-    monkeypatch.setattr(ci, "_scope_store", lambda user, store_id: None)
+    # This file asks about the ORDER of the rows; whose shops they are is
+    # test_shop_scope_rules_1018.py's question.
+    monkeypatch.setattr(ci, "filter_docs_by_store", lambda rows, user: rows)
     monkeypatch.setattr(svc, "member_ids", lambda db, cid, collection=None: {
         "product_ids": ["PA", "PB"], "skus": [], "capped": False})
     monkeypatch.setattr(svc, "_stock_rollup", lambda db, pids, store_id=None, by_store=False: {

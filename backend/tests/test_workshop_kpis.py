@@ -69,12 +69,13 @@ class FakeRepo:
         self._jobs = jobs
 
     def find_by_store(self, store_id):
-        return [j for j in self._jobs if j.get("store_id") == store_id]
+        # None = every shop, as the real repo (an admin with no shop named).
+        return [j for j in self._jobs if store_id is None or j.get("store_id") == store_id]
 
     def find_pending(self, store_id):
         return [
             j for j in self._jobs
-            if j.get("store_id") == store_id
+            if (store_id is None or j.get("store_id") == store_id)
             and j.get("status") in ("PENDING", "IN_PROGRESS")
         ]
 
@@ -153,7 +154,8 @@ class TestKpisAuthAndEnvelope:
         assert body["pending"] == 0
         assert body["overdue"] == 0
         assert body["avg_turnaround_days"] is None
-        assert body["store_id"] == "BV-TEST-01"
+        # An admin with no shop named reads every shop (owner 2026-10-18).
+        assert body["store_id"] is None
         assert "as_of" in body
 
 

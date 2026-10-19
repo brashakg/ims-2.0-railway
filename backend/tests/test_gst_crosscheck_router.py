@@ -182,10 +182,23 @@ def test_run_cross_check_itc_leg_failed_flag(patch_compute):
 # ---------------------------------------------------------------------------
 
 
-# An accountant who holds a shop: one with none is refused the org-wide
-# sign-off (R4, finance._require_org_finance).
-_USER = {"roles": ["ACCOUNTANT"], "user_id": "u1", "name": "Acc",
+# The sign-off is the company's month: an admin's (owner 2026-10-18 --
+# company-wide needs an admin). An accountant assigned to a shop sees only that
+# shop's check and is refused the sign-off; one with no shop is refused (R4).
+_USER = {"roles": ["ADMIN"], "user_id": "u1", "name": "Acc",
          "store_ids": ["S1"], "active_store_id": "S1"}
+
+
+def test_a_shop_accountant_cannot_sign_off_the_companys_month(monkeypatch):
+    accountant = {"roles": ["ACCOUNTANT"], "user_id": "u2", "name": "Acc",
+                  "store_ids": ["S1"], "active_store_id": "S1"}
+    monkeypatch.setattr(finance, "_require_finance_admin", lambda u: None)
+    monkeypatch.setattr(finance, "_get_db", lambda: FakeDB({}))
+    body = finance.GstCrossCheckSignoff(month=4, year=2026, entity_id="E1")
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(finance.gst_cross_check_signoff(body, accountant))
+    assert ei.value.status_code == 403
+    assert "admin" in ei.value.detail
 
 
 def _signoff(monkeypatch, server_result, *, prior=None, db_none=False):

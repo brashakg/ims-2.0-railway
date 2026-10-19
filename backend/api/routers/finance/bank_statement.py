@@ -15,6 +15,7 @@ from ...utils.ist import ist_today
 from typing import Optional, List
 from fastapi import Depends, HTTPException, Query, UploadFile, File, Form
 from ..auth import get_current_user
+from ...dependencies import in_reach_or_404, store_in_view
 from ._shared import _get_db, _require_org_finance, router
 
 # ============================================================================
@@ -275,8 +276,11 @@ async def import_bank_statement(
     the accountant calls POST /finance/bank-statement/{id}/confirm.
 
     ADMIN / ACCOUNTANT only (the rbac row), not the finance router's manager set.
+    The statement is the shop's it is imported at: a named shop must be the
+    caller's, else his own -- an accountant's shop only (owner 2026-10-18), an
+    admin's top-bar shop.
     """
-    _require_org_finance(current_user)
+    _require_org_finance(current_user, store_id)
     if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=422, detail="Only CSV files are accepted")
 
@@ -300,7 +304,7 @@ async def import_bank_statement(
         )
 
     db = _get_db()
-    effective_store = store_id or current_user.get("active_store_id") or ""
+    effective_store = store_in_view(store_id, current_user, writing=True) or ""
 
     # Fetch recorded receipts and vendor payments for the date range in the statement
     dates = [r["date"] for r in rows if r.get("date")]
@@ -409,13 +413,14 @@ async def list_bank_statements(
     limit: int = Query(20, ge=1, le=100),
     current_user: dict = Depends(get_current_user),
 ):
-    """FIND-5: List previously imported bank statements. ADMIN / ACCOUNTANT."""
-    _require_org_finance(current_user)
+    """FIND-5: List previously imported bank statements. ADMIN / ACCOUNTANT:
+    an accountant his own shop's only (owner 2026-10-18), an admin every
+    shop's or the one he names."""
+    shop = _require_org_finance(current_user, store_id)
     db = _get_db()
     if db is None:
         return {"statements": []}
-    effective_store = store_id or current_user.get("active_store_id") or ""
-    flt = {"store_id": effective_store} if effective_store else {}
+    flt = {"store_id": shop} if shop else {}
     try:
         docs = list(
             db.get_collection("bank_statements").find(
@@ -456,6 +461,5 @@ async def get_bank_statement(
         )
     except Exception:
         doc = None
-    if not doc:
-        raise HTTPException(status_code=404, detail="Statement not found")
-    return doc
+    # Another shop's statement reads as one that does not exist.
+    return in_reach_or_404(doc, current_user, "Statement not found")

@@ -13,6 +13,7 @@ from ..auth import get_current_user
 from ...dependencies import (
     get_customer_repository,
     get_order_repository,
+    no_shop_scope_for,
     validate_store_access,
 )
 from ._shared import (
@@ -29,6 +30,17 @@ from ._shared import (
 # counter may Mark Delivered a SHIPPED order). The queue and its search
 # both filter on it, so they never drift from each other or the deliver door.
 DELIVERABLE_STATUSES = sorted(s for s, to in VALID_TRANSITIONS.items() if "DELIVERED" in to)
+
+
+def _order_shop(store_id: Optional[str], current_user: dict) -> Optional[str]:
+    """The shop an order list reads: the one named (403 outside the caller's
+    shops), else the active shop. A non-admin login with NO shop reads no
+    shop (owner-approved 2026-10-18, R4): the reserved no-shop id, which no
+    order carries -- it used to fall through to every shop's orders."""
+    return validate_store_access(store_id, current_user) or no_shop_scope_for(
+        store_id, current_user
+    )
+
 
 # ============================================================================
 # ENDPOINTS
@@ -48,7 +60,7 @@ async def list_orders(
 ):
     """List orders with filters"""
     repo = get_order_repository()
-    active_store = validate_store_access(store_id, current_user)
+    active_store = _order_shop(store_id, current_user)
 
     # 30-DAY BROWSE HORIZON (owner ruling 2026-09-01). Everyone except ADMIN /
     # SUPERADMIN sees only the last 30 days when BROWSING. Asking for ONE
@@ -147,7 +159,7 @@ async def get_pending_deliveries(
     SUPERADMIN keep the full queue (is_unrestricted).
     """
     repo = get_order_repository()
-    active_store = validate_store_access(store_id, current_user)
+    active_store = _order_shop(store_id, current_user)
 
     if repo is not None:
         from ...services.data_horizon import drop_rows_before_horizon
@@ -185,7 +197,7 @@ async def get_unpaid_orders(
 ):
     """Get unpaid/partially paid orders"""
     repo = get_order_repository()
-    active_store = validate_store_access(store_id, current_user)
+    active_store = _order_shop(store_id, current_user)
 
     if repo is not None:
         orders = repo.find_unpaid(active_store)
@@ -203,7 +215,7 @@ async def get_overdue_orders(
 ):
     """Get overdue orders (past expected delivery)"""
     repo = get_order_repository()
-    active_store = validate_store_access(store_id, current_user)
+    active_store = _order_shop(store_id, current_user)
 
     if repo is not None:
         orders = repo.find_overdue(active_store)
@@ -276,7 +288,7 @@ async def search_orders(
 ):
     """Search orders by number, customer name, or phone"""
     repo = get_order_repository()
-    active_store = validate_store_access(store_id, current_user)
+    active_store = _order_shop(store_id, current_user)
 
     if repo is not None:
         from ...services.data_horizon import drop_rows_before_horizon
@@ -332,7 +344,7 @@ async def get_status_counts(
 ):
     """Get order counts by status"""
     repo = get_order_repository()
-    active_store = validate_store_access(store_id, current_user)
+    active_store = _order_shop(store_id, current_user)
 
     if repo is not None:
         counts = repo.get_status_counts(active_store)

@@ -7,7 +7,7 @@ Append-only points log with controlled soft-delete. The DB-level
 backend/database/connection.py::ensure_indexes.
 
 Design notes (docs/PUNE_INCENTIVE_BUILD_PLAN.md §Module ii):
-  - log_id format: PL-{STORE3}-{YYYY-MM-DD}-{STAFF}-{6HEX}
+  - log_id format: PL-{STORE_CODE}-{YYYY-MM-DD}-{STAFF}-{6HEX}
   - eligibility + eligibility_thresholds_used are SNAPSHOTTED at
     write-time (settings change later doesn't rewrite history)
   - visufit_gate_applied + visufit_usage_pct_mtd are stamped on the
@@ -36,13 +36,6 @@ class PointsLogRepository(BaseRepository):
     # ------------------------------------------------------------------
     # ID generation
     # ------------------------------------------------------------------
-    @staticmethod
-    def _store_code(store_id: str) -> str:
-        raw = (store_id or "").strip().upper()
-        parts = [p for p in raw.split("-") if p and p not in ("BV", "WO", "BVO")]
-        code = (parts[0][:3] if parts else "XXX") or "XXX"
-        return "".join(c for c in code if c.isalnum()) or "XXX"
-
     @staticmethod
     def _staff_code(staff_id: str) -> str:
         raw = (staff_id or "").strip().upper()

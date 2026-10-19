@@ -289,7 +289,9 @@ class TestReorderMinus1Passthrough:
             mongo_db, reorder_quantity=12, reorder_levels={"ST-CORR": 4, "ST-X": 9}
         )
 
-        resp = inv_client.get("/inventory/stock")
+        # THIS shop's ledger: an admin with no shop named reads every shop
+        # (owner 2026-10-18), where no one shop's level applies.
+        resp = inv_client.get("/inventory/stock?store_id=ST-CORR")
         assert resp.status_code == 200, resp.text
         rows = {r["product_id"]: r for r in resp.json()["items"]}
 

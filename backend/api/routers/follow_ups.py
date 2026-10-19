@@ -194,8 +194,8 @@ async def list_follow_ups(
 
     collection = db.get_collection("follow_ups")
 
-    # Build query filter
-    query = {"store_id": store_id}
+    # Build query filter (every shop's when none is in view: an admin)
+    query = {"store_id": store_id} if store_id else {}
 
     if type_filter:
         query["type"] = type_filter
@@ -352,7 +352,7 @@ async def get_due_today(
     follow_ups = list(
         collection.find(
             {
-                "store_id": store_id,
+                **({"store_id": store_id} if store_id else {}),
                 "status": "pending",
                 "scheduled_date": {"$lte": today},
             }
@@ -575,37 +575,38 @@ async def get_follow_up_summary(
     store_id = store_in_view(store_id, current_user)
 
     collection = db.get_collection("follow_ups")
+    shop = {"store_id": store_id} if store_id else {}
     today = date.today().isoformat()
     week_from_today = (date.today() + timedelta(days=7)).isoformat()
     month_from_today = (date.today() + timedelta(days=30)).isoformat()
 
     due_today = collection.count_documents(
-        {"store_id": store_id, "status": "pending", "scheduled_date": {"$lte": today}}
+        {**shop, "status": "pending", "scheduled_date": {"$lte": today}}
     )
 
     this_week = collection.count_documents(
         {
-            "store_id": store_id,
+            **shop,
             "status": "pending",
             "scheduled_date": {"$gte": today, "$lte": week_from_today},
         }
     )
 
     overdue = collection.count_documents(
-        {"store_id": store_id, "status": "pending", "scheduled_date": {"$lt": today}}
+        {**shop, "status": "pending", "scheduled_date": {"$lt": today}}
     )
 
     month_ago = (date.today() - timedelta(days=30)).isoformat()
     completed_this_month = collection.count_documents(
         {
-            "store_id": store_id,
+            **shop,
             "status": "completed",
             "completed_at": {"$gte": month_ago},
         }
     )
 
     pending_total = collection.count_documents(
-        {"store_id": store_id, "status": "pending"}
+        {**shop, "status": "pending"}
     )
 
     return FollowUpSummary(

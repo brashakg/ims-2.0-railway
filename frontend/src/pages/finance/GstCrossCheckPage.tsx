@@ -123,7 +123,7 @@ export default function GstCrossCheckPage() {
         entity_id: entityId || undefined,
         note: note || undefined,
         mismatch_count: data.summary.mismatch_count,
-        gst_payable: data.summary.gst_payable,
+        gst_payable: data.summary.gst_payable ?? undefined,
       });
       toast.success('Month marked CHECKED');
       setData({ ...data, signoff: res.signoff });
@@ -224,10 +224,18 @@ export default function GstCrossCheckPage() {
               {data.entity_name} · {data.store_count} store
               {data.store_count === 1 ? '' : 's'} · net payable{' '}
               <span className="font-semibold text-gray-900">
-                {inr(data.summary.gst_payable)}
+                {data.summary.gst_payable == null
+                  ? 'filed for the whole GSTIN - admin view'
+                  : inr(data.summary.gst_payable)}
               </span>
             </div>
           </div>
+
+          {data.gstin_note && (
+            <div className="mb-5 px-4 py-3 rounded-lg border border-gray-200 bg-gray-50 text-sm text-gray-700">
+              {data.gstin_note}
+            </div>
+          )}
 
           {/* Partial-data warning: some stores failed to compute, so the GSTR
               columns are understated. Sign-off is blocked until it clears. */}
@@ -416,7 +424,7 @@ export default function GstCrossCheckPage() {
               <button
                 type="button"
                 onClick={doSignoff}
-                disabled={signingOff || data.partial}
+                disabled={signingOff || data.partial || !!data.store_id}
                 className="inline-flex items-center gap-1.5 text-sm font-medium text-white bg-bv hover:bg-bv-600 rounded-lg px-4 py-1.5 disabled:opacity-60"
               >
                 {signingOff ? (
@@ -426,6 +434,11 @@ export default function GstCrossCheckPage() {
                 )}
                 {data.signoff?.checked ? 'Re-check month' : 'Mark month CHECKED'}
               </button>
+              {data.store_id && (
+                <span className="text-xs text-gray-600">
+                  This check covers your shop only. Signing off the company&apos;s month needs an admin.
+                </span>
+              )}
               {data.partial && (
                 <span className="text-xs text-red-700">
                   Sign-off blocked: some stores failed to compute.

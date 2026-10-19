@@ -211,7 +211,7 @@ async def profit_by_category(
     # so a string filter never matched and this report came back empty.
     orders = order_repo.find_many(
         {
-            "store_id": active_store,
+            **({"store_id": active_store} if active_store else {}),
             "created_at": {"$gte": from_dt, "$lte": to_dt},
             "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]},
         },

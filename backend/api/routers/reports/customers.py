@@ -120,7 +120,9 @@ async def customer_acquisition(
     )
 
     # Get all customers (small enough N to walk in-process)
-    all_customers = customer_repo.find_many({"store_id": active_store}, limit=0) or []
+    all_customers = customer_repo.find_many(
+        {"store_id": active_store} if active_store else {}, limit=0
+    ) or []
 
     # New customers — created_at within window. Mongo stamps `created_at`
     # as a real datetime, but legacy seeds may have it as ISO string.
@@ -222,7 +224,9 @@ async def brand_sellthrough(
 
     # Get current stock by brand
     if stock_repo:
-        current_stock = stock_repo.find_many({"store_id": active_store}, limit=0)
+        current_stock = stock_repo.find_many(
+            {"store_id": active_store} if active_store else {}, limit=0
+        )
         by_brand_stock = {}
         for item in current_stock:
             brand = item.get("brand", "Unbranded")
@@ -264,7 +268,7 @@ async def get_targets(
     Get sales targets for a store (daily and monthly).
     Returns configurable defaults or targets from database.
     """
-    active_store = store_in_view(store_id, current_user) or "store-001"
+    active_store = store_in_view(store_id, current_user, one_shop=True) or "store-001"
 
     # Default targets
     targets = {

@@ -73,7 +73,8 @@ class FakeRepo:
         self._jobs = jobs
 
     def find_by_store(self, store_id):
-        return [j for j in self._jobs if j.get("store_id") == store_id]
+        # None = every shop, as the real repo (an admin with no shop named).
+        return [j for j in self._jobs if store_id is None or j.get("store_id") == store_id]
 
 
 class FakeDB:

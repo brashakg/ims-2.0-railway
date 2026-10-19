@@ -309,7 +309,7 @@ async def workshop_productivity(
     }
 
     db = get_db()
-    if db is None or not getattr(db, "is_connected", True) or not active_store:
+    if db is None or not getattr(db, "is_connected", True):
         return empty
 
     try:

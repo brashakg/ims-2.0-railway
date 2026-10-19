@@ -32,17 +32,10 @@ class PayoutSnapshotRepository(BaseRepository):
     def id_field(self) -> str:
         return "snapshot_id"
 
-    @staticmethod
-    def _store_code(store_id: str) -> str:
-        raw = (store_id or "").strip().upper()
-        parts = [p for p in raw.split("-") if p and p not in ("BV", "WO", "BVO")]
-        code = (parts[0][:3] if parts else "XXX") or "XXX"
-        return "".join(c for c in code if c.isalnum()) or "XXX"
-
     def _generate_snapshot_id(
         self, store_id: str, year: int, month: int, status: str
     ) -> str:
-        # LOCKED snapshots get the canonical PAY-{STORE3}-{YYYY-MM} id
+        # LOCKED snapshots get the canonical PAY-{STORE_CODE}-{YYYY-MM} id
         # so the human refs in audit logs are stable. DRAFTs get a
         # unique suffix because multiple DRAFTs may coexist.
         base = f"PAY-{self._store_code(store_id)}-{year:04d}-{month:02d}"

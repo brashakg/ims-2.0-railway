@@ -91,7 +91,8 @@ async def clinical_patient_queue(
     current_user: dict = Depends(get_current_user),
 ):
     coll = _coll("eye_test_queue")
-    sid = store_in_view(store_id, current_user)
+    # Today's queue at ONE shop: an admin's top-bar shop when none is named.
+    sid = store_in_view(store_id, current_user, one_shop=True)
     if coll is None:
         return {"waiting": 0, "in_progress": 0, "queue": []}
     q = (
@@ -496,7 +497,8 @@ async def analytics_store_target_today(
     current_user: dict = Depends(get_current_user),
 ):
     orders = _coll("orders")
-    sid = store_in_view(store_id, current_user)
+    # ONE shop's target for today: an admin's top-bar shop when none is named.
+    sid = store_in_view(store_id, current_user, one_shop=True)
     achieved = 0.0
     if orders is not None:
         q: Dict[str, Any] = {"created_at": {"$gte": _today_start()}}
