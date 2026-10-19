@@ -26,7 +26,6 @@ from fastapi import HTTPException
 from api.routers.finance import gst as fin_gst
 from api.routers.finance import gst_crosscheck as fin_xc
 from api.routers.finance import itc as fin_itc
-from api.routers.reports import gst_itc
 from api.routers.reports import gstr3b as r3b
 from api.routers import purchase_invoices as pi
 from api.routers import vendors as vd
@@ -167,11 +166,17 @@ def test_a_reader_who_cannot_see_every_shop_on_the_gstin_is_refused(shared_gstin
 def test_a_gstr3b_read_failure_is_a_503_never_a_zero_return(world, monkeypatch):
     """M7 / LOW 12: a failed read used to return zero credit (an overstated
     cash figure) or a whole all-zero portal file."""
-    def unreadable(*_a, **_k):
-        raise RuntimeError("vendor_bills unavailable")
+    import mongomock
 
-    monkeypatch.setattr(gst_itc, "_sum_heads", unreadable)
-    monkeypatch.setattr(r3b, "_sum_heads", unreadable)
+    real = mongomock.collection.Collection.aggregate
+
+    def unreadable(self, *args, **kwargs):
+        if self.name == "vendor_bills":
+            raise RuntimeError("vendor_bills unavailable")
+        return real(self, *args, **kwargs)
+
+    # The database read itself fails (not a helper): every reader must say so.
+    monkeypatch.setattr(mongomock.collection.Collection, "aggregate", unreadable)
     for call in (_page, _portal, _table, _cards):
         with pytest.raises(HTTPException) as refused:
             call()
@@ -249,6 +254,9 @@ def test_a_gstin_shared_with_a_hidden_shop_shows_no_input_side_figure(shared_gst
 
 @pytest.mark.parametrize("month", [0, 13])
 def test_a_month_that_is_not_one_is_a_400(world, month):
+    with pytest.raises(HTTPException) as refused:
+        fin_xc.gst_period(month, 2026)
+    assert refused.value.status_code == 400
     for call in (_table, _cards):
         with pytest.raises(HTTPException) as refused:
             call(month=month)
@@ -488,6 +496,7 @@ def test_a_multi_piece_unit_billed_in_parts_takes_each_parts_share(world):
         return db.stock_units.find_one({"stock_id": "B-BOXES"})
 
     assert part("P1", 4)["landed_cost"] == 102.0
+    assert part("P1", 4)["landed_cost"] == 102.0  # the same part again: nothing
     boxes = part("P2", 6)
     assert (boxes["landed_cost"], boxes["unclaimed_gst"]["pieces"]) == (105.0, 10)
     assert part("P2", 6)["landed_cost"] == 105.0  # the same bill again: nothing
