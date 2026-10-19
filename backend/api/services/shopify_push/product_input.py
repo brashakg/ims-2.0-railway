@@ -18,6 +18,7 @@ from ..gtin import (
     sanitise_gtin,
 )
 from ..shopify_tag_gen import generate_attribute_tags, merge_tag_lists
+from ..web_page_type import STANDARD, TEMPLATE_SUFFIX, page_type_of
 
 from ._shared import logger
 from .transport import _graphql
@@ -98,8 +99,13 @@ def build_product_input(
     body_html = seo.get("html") or product.get("description")
     if body_html:
         inp["descriptionHtml"] = body_html
-    if ecom.get("theme_suffix"):
-        inp["templateSuffix"] = ecom["theme_suffix"]
+    # The website page type picks the theme template (owner 2026-10-19):
+    # 'pre-order' / 'preview-only', '' = the default page. A standard page
+    # keeps a hand-set ecom.theme_suffix.
+    page_type = page_type_of(product)
+    inp["templateSuffix"] = (
+        (ecom.get("theme_suffix") or "") if page_type == STANDARD else TEMPLATE_SUFFIX[page_type]
+    )
     if seo.get("title") or seo.get("description"):
         inp["seo"] = {
             "title": seo.get("title") or title,

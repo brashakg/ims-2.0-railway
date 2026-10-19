@@ -98,6 +98,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from agents.nexus_providers import _as_shopify_gid
 from ..catalog_ecom import update_ecom
+from ..web_page_type import is_preorder
 
 from ._shared import (
     MODE_LIVE,
@@ -295,9 +296,12 @@ async def list_locations(db) -> Dict[str, Any]:
 
 
 def inventory_policy_for(product: Dict[str, Any]) -> str:
-    """DENY (never oversell) unless the product explicitly opts out via
-    ``ecom.allow_oversell`` (a made-to-order line, say)."""
-    return _POLICY_CONTINUE if (product.get("ecom") or {}).get("allow_oversell") else _POLICY_DENY
+    """THE inventoryPolicy rule, for every writer (the push's tracking re-send,
+    the stock pass, a size created on a live listing): DENY -- oversell blocks
+    (owner ruling 2026-08-25) -- unless the listing is a PRE-ORDER page
+    (owner 2026-10-19, services/web_page_type), the ONLY page type that sells
+    at 0 stock. A retired size's delist sends DENY on its own (it is off sale)."""
+    return _POLICY_CONTINUE if is_preorder(product) else _POLICY_DENY
 
 
 def product_skus(product: Dict[str, Any], variants: Optional[List[Dict[str, Any]]]) -> List[str]:

@@ -434,6 +434,22 @@ def test_T1_press_writes_each_shop_at_its_own_location_including_an_explicit_zer
     assert base["tracked"] is True and "location_id" not in base
 
 
+def test_the_stock_pass_never_flips_a_pre_order_listing_back_to_deny(monkeypatch):
+    """Owner 2026-10-19: the 01:00/09:00 stock pass re-sends tracking with
+    THE policy rule (inventory_policy_for) -- a Pre-order page stays
+    CONTINUE, every other listing DENY. Hardcode DENY in the pass -> fails."""
+    for page, policy in (("PRE_ORDER", "CONTINUE"), ("STANDARD", "DENY")):
+        db = _listed(_db(a=0, b=0, c=0, sold=0))
+        db.get_collection("catalog_products").update_one(
+            {"id": "cat-1"}, {"$set": {"attributes": {"web_page_type": page, "preorder_ship_days": 7}}}
+        )
+        spy = _Spy(_responses())
+        _live(monkeypatch, spy)
+        res = _run(shopify_push.sync_stock_levels(db))
+        assert res.mode == "LIVE" and res.payload["synced"] == 1, res
+        _assert_tracked(spy, policy=policy)
+
+
 def test_T2_unmapped_holder_is_named_the_mapped_rows_still_go_out_one_task(monkeypatch):
     db = _listed(_db(a=2, b=1, c=0, d=1))
     spy = _Spy(_responses())
@@ -1005,10 +1021,16 @@ def test_live_create_tracks_denies_and_writes_each_shops_quantity(monkeypatch):
     assert db.get_collection("catalog_products").find_one({"id": "cat-1"})["ecom"]["locally_modified"] is False
 
 
-def test_live_update_also_writes_stock_and_allow_oversell_selects_continue(monkeypatch):
+def test_live_update_also_writes_stock_and_only_a_pre_order_page_selects_continue(monkeypatch):
+    """Owner 2026-10-19: ONLY a Pre-order page sells at 0 stock -- every
+    other page type (and the retired ecom.allow_oversell switch) is DENY."""
+    pre = {"attributes": {"web_page_type": "PRE_ORDER", "preorder_ship_days": 10}}
     assert shopify_push.inventory_policy_for({"ecom": {}}) == "DENY"
-    assert shopify_push.inventory_policy_for({"ecom": {"allow_oversell": True}}) == "CONTINUE"
-    db = _listed(_db(a=2, b=1, c=0), allow_oversell=True)
+    assert shopify_push.inventory_policy_for({"ecom": {"allow_oversell": True}}) == "DENY"
+    assert shopify_push.inventory_policy_for({"attributes": {"web_page_type": "PREVIEW_ONLY"}}) == "DENY"
+    assert shopify_push.inventory_policy_for(pre) == "CONTINUE"
+    db = _listed(_db(a=2, b=1, c=0))
+    db.get_collection("catalog_products").update_one({"id": "cat-1"}, {"$set": pre})
     spy = _Spy(_responses())
     _live(monkeypatch, spy)
     res = _run(shopify_push.push_product(db, db.get_collection("catalog_products").find_one({"id": "cat-1"}), []))
