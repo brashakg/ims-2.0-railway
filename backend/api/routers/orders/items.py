@@ -6,7 +6,7 @@ rounding or validation was changed.
 """
 
 import uuid
-from typing import Optional
+from typing import Annotated, Optional
 from fastapi import Depends, HTTPException, Query
 from ..auth import get_current_user
 from ...dependencies import (
@@ -48,10 +48,16 @@ async def add_order_item(
     order_id: str,
     item: OrderItemCreate,
     current_user: dict = Depends(get_current_user),
-    # A line discount over the seller's own limit: the request_id of a
-    # manager-approved E4 discount_override approval for this product, spent
-    # once (services/discount_approval -- the same rule as order create).
-    discount_approval_id: Optional[str] = Query(None, max_length=64),
+    # A discount over the seller's own limit (or a Rs 0 line): the request_id
+    # of a manager-approved E4 discount_override approval for exactly this
+    # change, spent once; request_approval=true raises that request from the
+    # server's own figures instead (services/discount_approval -- the same rule
+    # as order create).
+    # Annotated so a direct call (tests, other doors) gets the plain default,
+    # not a truthy Query() object.
+    discount_approval_id: Annotated[Optional[str], Query(max_length=64)] = None,
+    request_approval: Annotated[bool, Query()] = False,
+    approval_note: Annotated[Optional[str], Query(max_length=300)] = None,
 ):
     """Add item to order (only DRAFT orders)"""
     # BUG-119/BUG-118: real price-integrity validation is below (after the DRAFT
@@ -238,24 +244,45 @@ async def add_order_item(
             user=current_user,
         )
 
-        # The seller's ROLE limit on the line's stacked figure, and who is
-        # recorded as approving it: THE rule order create uses. After every
-        # hard limit above, before anything is reserved below.
-        _approver = discount_approval.resolve_discount_approver(
-            current_user,
+        # The seller's ROLE limit on the line's stacked figure, the Rs 0 rule,
+        # and who is recorded as approving them: THE rule order create uses.
+        # After every hard limit above, before anything is reserved below. The
+        # line is a Rs 0 change when it is a giveaway line itself (100% off, or
+        # Rs 0 with no MRP) or it leaves the draft at Rs 0.
+        _cart_pct = float(cart_discount_percent or 0.0)
+        _zero = discount_approval.is_full_line(item_data) or round(float(grand_total), 2) <= 0.0
+        _zero_reason = (
+            discount_approval.zero_total_reason(order.get("cart_discount_reason"), [item_data])
+            if _zero
+            else None
+        )
+        _bill = discount_approval.bill_of(
             store_id=order.get("store_id"),
-            approval_id=discount_approval_id,
             lines=[
                 {
                     "product_id": item.product_id,
                     "product_name": item.product_name,
-                    "discount_percent": combined_discount_pct(
-                        _eff_disc, float(order.get("cart_discount_percent") or 0.0)
-                    ),
+                    "quantity": item.quantity,
+                    "mrp": _line_gate["mrp"],
+                    "unit_price": item.unit_price,
+                    "discount_percent": item.discount_percent,
+                    "combined_percent": combined_discount_pct(_eff_disc, _cart_pct),
                 }
             ],
+            cart_discount_percent=_cart_pct,
+            discount_rupees=discount_amount + item_subtotal * _cart_pct / 100.0,
+            bill_before=_f(order.get("grand_total")),
+            bill_after=grand_total,
+            zero_total=_zero,
+            order_id=order_id,
+            change="add",
         )
-        if _eff_disc > 1e-9:
+        if request_approval:
+            return discount_approval.ask_manager(current_user, _bill, approval_note)
+        _approver = discount_approval.resolve_discount_approver(
+            current_user, _bill, discount_approval_id
+        )
+        if _eff_disc > 1e-9 or _zero:
             item_data["discount_approved_by"] = (_approver or {}).get("user_id")
             item_data["discount_approved_by_name"] = (_approver or {}).get("name")
 
@@ -320,9 +347,10 @@ async def add_order_item(
         claimed = _claim_scanned_units(order_id, [item_data], _store_id)
         try:
             # Spend the manager's approval (if one lifted the limit) last thing
-            # before the save -- atomic, single use, as at create.
+            # before the save -- atomic, single use, as at create. ANY failure
+            # here gives back the claimed unit and the lens cell.
             discount_approval.spend(_approver, current_user, _store_id)
-        except HTTPException:
+        except Exception:
             _release_claimed_units(order_id, claimed)
             try:
                 await release_for_cancel(
@@ -348,6 +376,15 @@ async def add_order_item(
                     "grand_total": grand_total,
                     "round_off": gst["round_off"],
                     "balance_due": grand_total - order.get("amount_paid", 0),
+                    **(
+                        {
+                            "zero_total": True,
+                            "zero_total_approved_by": (_approver or {}).get("user_id"),
+                            "zero_total_approved_by_name": (_approver or {}).get("name"),
+                        }
+                        if _zero
+                        else {}
+                    ),
                 },
             )
         except Exception as upd_exc:  # noqa: BLE001
@@ -359,7 +396,15 @@ async def add_order_item(
             # The line never landed on the order -> give the lens cell back so
             # the reservation cannot leak against a line that does not exist.
             _release_claimed_units(order_id, claimed)
-            discount_approval.give_back(_approver, current_user)
+            # Only once it is confirmed the line did NOT land on the order.
+            discount_approval.give_back(
+                _approver,
+                current_user,
+                lambda: any(
+                    ln.get("item_id") == item_data["item_id"]
+                    for ln in (repo.find_by_id(order_id) or {}).get("items", [])
+                ),
+            )
             try:
                 await release_for_cancel(
                     order_item=item_data,
@@ -371,6 +416,17 @@ async def add_order_item(
             except Exception:  # noqa: BLE001
                 pass  # fail-soft compensating action
             raise HTTPException(status_code=500, detail="Failed to add item to order")
+
+        if _zero:
+            discount_approval.audit_zero_total(
+                order_id=order_id,
+                store_id=_store_id,
+                user_id=current_user.get("user_id"),
+                approver=_approver,
+                reason=_zero_reason,
+                details={"grand_total": grand_total, "door": "add_line",
+                         "item_id": item_data["item_id"]},
+            )
 
         # Serialized units -> SOLD with this order_id stamped (fail-soft: a
         # stock-side failure must never lose the line the user just added).
@@ -398,7 +454,16 @@ async def add_order_item(
 
 @router.delete("/{order_id}/items/{item_id}")
 async def remove_order_item(
-    order_id: str, item_id: str, current_user: dict = Depends(get_current_user)
+    order_id: str,
+    item_id: str,
+    current_user: dict = Depends(get_current_user),
+    # Deleting a line can leave a DRAFT at Rs 0: that needs the same manager
+    # sign-off as a Rs 0 sale (services/discount_approval), carried here.
+    # Annotated so a direct call (tests, other doors) gets the plain default,
+    # not a truthy Query() object.
+    discount_approval_id: Annotated[Optional[str], Query(max_length=64)] = None,
+    request_approval: Annotated[bool, Query()] = False,
+    approval_note: Annotated[Optional[str], Query(max_length=300)] = None,
 ):
     """Remove item from order (only DRAFT orders)"""
     repo = get_order_repository()
@@ -436,6 +501,52 @@ async def remove_order_item(
         gst = _compute_per_category_gst(items, cart_discount_percent, rounded=bills_round_off(order))
         grand_total = gst["grand_total"]
 
+        # C-4 on the delete door: a deletion that leaves the draft at Rs 0 is a
+        # Rs 0 sale reached in two steps -- the same reason + MANAGER sign-off +
+        # ORDER_ZERO_TOTAL_APPROVED row as create. The surviving lines'
+        # discounts were approved when they were added, so only the Rs 0
+        # sign-off is asked for here (their combined % is not re-measured).
+        try:
+            _was_paid = round(float(order.get("grand_total") or 0.0), 2) > 0.0
+        except (TypeError, ValueError):
+            _was_paid = True
+        _zero = bool(items) and _was_paid and round(float(grand_total), 2) <= 0.0
+        _approver = None
+        _zero_reason = None
+        if _zero:
+            _zero_reason = discount_approval.zero_total_reason(
+                order.get("cart_discount_reason"),
+                [ln for ln in items if discount_approval.is_full_line(ln)],
+            )
+            _bill = discount_approval.bill_of(
+                store_id=order.get("store_id"),
+                lines=[
+                    {
+                        "product_id": ln.get("product_id"),
+                        "product_name": ln.get("product_name"),
+                        "quantity": ln.get("quantity"),
+                        "mrp": ln.get("mrp"),
+                        "unit_price": ln.get("unit_price"),
+                        "discount_percent": ln.get("discount_percent"),
+                        "combined_percent": 0.0,
+                    }
+                    for ln in items
+                ],
+                cart_discount_percent=float(cart_discount_percent or 0.0),
+                discount_rupees=gst["total_discount"],
+                bill_before=float(order.get("grand_total") or 0.0),
+                bill_after=grand_total,
+                zero_total=True,
+                order_id=order_id,
+                change=f"remove:{item_id}",
+            )
+            if request_approval:
+                return discount_approval.ask_manager(current_user, _bill, approval_note)
+            _approver = discount_approval.resolve_discount_approver(
+                current_user, _bill, discount_approval_id
+            )
+            discount_approval.spend(_approver, current_user, order.get("store_id"))
+
         # PERSIST FIRST, THEN RELEASE (panel must-fix 6). This used to release
         # the stock BEFORE the write and discard repo.update's return value --
         # and base_repository.update swallows exceptions and returns False, so a
@@ -457,6 +568,15 @@ async def remove_order_item(
                     "grand_total": grand_total,
                     "round_off": gst["round_off"],
                     "balance_due": grand_total - order.get("amount_paid", 0),
+                    **(
+                        {
+                            "zero_total": True,
+                            "zero_total_approved_by": (_approver or {}).get("user_id"),
+                            "zero_total_approved_by_name": (_approver or {}).get("name"),
+                        }
+                        if _zero
+                        else {}
+                    ),
                 },
             )
         except Exception as upd_exc:  # noqa: BLE001
@@ -469,9 +589,28 @@ async def remove_order_item(
             )
         if not persisted:
             # Nothing was removed -> release NOTHING. The line is still billed
-            # and its unit must stay SOLD to match.
+            # and its unit must stay SOLD to match. A spent Rs 0 approval goes
+            # back only once it is confirmed the line is still on the order.
+            discount_approval.give_back(
+                _approver,
+                current_user,
+                lambda: not any(
+                    ln.get("item_id") == item_id
+                    for ln in (repo.find_by_id(order_id) or {}).get("items", [])
+                ),
+            )
             raise HTTPException(
                 status_code=500, detail="Failed to remove item from order"
+            )
+        if _zero:
+            discount_approval.audit_zero_total(
+                order_id=order_id,
+                store_id=order.get("store_id"),
+                user_id=current_user.get("user_id"),
+                approver=_approver,
+                reason=_zero_reason,
+                details={"grand_total": grand_total, "door": "remove_line",
+                         "item_id": item_id},
             )
 
         # F15 (symmetry): the removed line's stock must go BACK. create_order /

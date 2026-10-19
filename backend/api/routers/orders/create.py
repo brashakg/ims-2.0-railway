@@ -37,7 +37,6 @@ from .pricing import (
     _enforce_line_pricing,
     assert_stack_within_cap,
     combined_discount_pct,
-    effective_line_discount_pct,
 )
 from ...services import discount_approval
 from .models import OrderCreate
@@ -627,7 +626,7 @@ async def create_order(
                 effective_discount_cap as _line_discount_cap,
             )
 
-            for _it in order.items:
+            for _it, _it_eff in zip(order.items, line_effs):
                 _pid = getattr(_it, "product_id", None)
                 if not _pid or _pid.startswith(("custom-", "lens-", "lens-sug-")):
                     # A lens / custom line resolves to no product doc, so no
@@ -669,13 +668,10 @@ async def create_order(
                     # A cap that two controls can each satisfy while their
                     # product breaks it is not a cap. The bill discount lands on
                     # an already-discounted line, so the terms MULTIPLY.
+                    # The line's own figure is the gate's (one measure).
                     assert_stack_within_cap(
                         getattr(_it, "product_name", None) or _pid,
-                        effective_line_discount_pct(
-                            getattr(_it, "discount_percent", 0) or 0,
-                            getattr(_it, "unit_price", 0) or 0,
-                            _mrp_by_pid.get(_pid) or 0,
-                        ),
+                        _it_eff,
                         cart_discount_percent,
                         _this_cap,
                     )
@@ -778,65 +774,55 @@ async def create_order(
             user=current_user,
         )
 
-        # C-4 (DELTA 2): a fully-discounted / Rs 0 order (100% line or cart
-        # discount, or a grand_total that rounds to 0) is a sensitive giveaway:
-        # it needs a written reason at the level that triggered it (the bill's,
-        # or a 100% line's) and an approver, and writes the immutable
-        # ORDER_ZERO_TOTAL_APPROVED audit row below.
+        # C-4 (DELTA 2): a Rs 0 bill -- a grand_total that rounds to 0, a 100%
+        # bill discount, or any giveaway line (100% off, or priced Rs 0 with no
+        # MRP) -- needs a written reason (the bill's, or a giveaway line's), a
+        # MANAGER's sign-off (below) and writes the immutable
+        # ORDER_ZERO_TOTAL_APPROVED audit row after the save.
         acting_user_id = current_user.get("user_id")
-
-        def _nonempty(value) -> bool:
-            return bool(value is not None and str(value).strip())
-
-        full_line_items = [
-            it
-            for it in items_data
-            if float((it or {}).get("discount_percent") or 0) >= 100.0
-        ]
+        is_zero_total, full_line_items = discount_approval.zero_total_state(
+            items_data, grand_total, cart_discount_percent
+        )
         has_full_line_discount = bool(full_line_items)
-        cart_level_zero = round(grand_total, 2) <= 0.0 or cart_discount_percent >= 100.0
-        is_zero_total = cart_level_zero or has_full_line_discount
-
         cart_discount_reason = order.cart_discount_reason
-        zero_total_reason = None
-        if is_zero_total:
-            zero_total_reason = (
-                cart_discount_reason if _nonempty(cart_discount_reason) else None
-            )
-            if zero_total_reason is None:
-                zero_total_reason = next(
-                    (
-                        it["discount_reason"]
-                        for it in full_line_items
-                        if _nonempty((it or {}).get("discount_reason"))
-                    ),
-                    None,
-                )
-            if zero_total_reason is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Zero-total or 100% discount requires a reason.",
-                )
+        zero_total_reason = (
+            discount_approval.zero_total_reason(cart_discount_reason, full_line_items)
+            if is_zero_total
+            else None
+        )
 
         # WHO APPROVED THE DISCOUNT (owner 2026-10-18): the server decides --
-        # the seller when their own role limit covers each line's combined
-        # (item x bill) discount, else the manager behind a discount_override
-        # approval this request carries. Refuses 403 otherwise. Runs BEFORE any
-        # lens cell or unit is reserved, so a refusal leaks nothing. The
-        # approval is only READ here; it is spent just before the save below.
-        discount_approver = discount_approval.resolve_discount_approver(
-            current_user,
+        # the seller when their own limit covers each line's combined (item x
+        # bill) discount, else the manager behind a discount_override approval
+        # for EXACTLY this bill (its hash). Runs BEFORE any lens cell or unit is
+        # reserved, so a refusal leaks nothing. The approval is only READ here;
+        # it is spent just before the save below.
+        bill = discount_approval.bill_of(
             store_id=store_id,
-            zero_total=is_zero_total,
-            approval_id=order.discount_approval_id,
             lines=[
                 {
                     "product_id": it.product_id,
                     "product_name": it.product_name,
-                    "discount_percent": combined_discount_pct(eff, cart_discount_percent),
+                    "quantity": it.quantity,
+                    "mrp": _mrp_by_pid.get(it.product_id or ""),
+                    "unit_price": it.unit_price,
+                    "discount_percent": it.discount_percent,
+                    "combined_percent": combined_discount_pct(eff, cart_discount_percent),
                 }
                 for it, eff in zip(order.items, line_effs)
             ],
+            cart_discount_percent=cart_discount_percent,
+            discount_rupees=total_discount,
+            bill_before=sum(it.unit_price * it.quantity for it in order.items),
+            bill_after=grand_total,
+            zero_total=is_zero_total,
+        )
+        if order.request_approval:
+            # "Ask a manager to approve": the SERVER raises the request from
+            # this pricing of the bill. Nothing is reserved or saved.
+            return discount_approval.ask_manager(current_user, bill, order.approval_note)
+        discount_approver = discount_approval.resolve_discount_approver(
+            current_user, bill, order.discount_approval_id
         )
         approver_id = (discount_approver or {}).get("user_id")
         approver_name = (discount_approver or {}).get("name")
@@ -1043,6 +1029,10 @@ async def create_order(
 
         claimed_units: set = set()
         approval_spent = False
+
+        def _order_was_saved() -> bool:
+            return bool(order_repo.find_one({"order_id": precomputed_order_id}))
+
         try:
             # Scanned units are claimed (atomic) BEFORE the save: a till that
             # lost its unit to another till since the gate gets a 409 here, and
@@ -1080,8 +1070,11 @@ async def create_order(
             )
             _release_claimed_units(precomputed_order_id, claimed_units)
             if approval_spent:
-                # No order was written: the approval did not cover a sale.
-                discount_approval.give_back(discount_approver, current_user)
+                # Give the approval back -- only once it is confirmed that no
+                # order was written (an approval never re-arms under a sale).
+                discount_approval.give_back(
+                    discount_approver, current_user, _order_was_saved
+                )
             try:
                 from ...services.lens_stock_hook import release_for_cancel
 
@@ -1113,39 +1106,19 @@ async def create_order(
             # (returns / payouts / price edits). Fail-soft: an audit failure
             # must NEVER block the sale.
             if is_zero_total:
-                try:
-                    from ...dependencies import get_audit_repository
-
-                    audit = get_audit_repository()
-                    if audit is not None:
-                        audit.create(
-                            {
-                                "action": "ORDER_ZERO_TOTAL_APPROVED",
-                                "entity_type": "order",
-                                "entity_id": created_order_id,
-                                "store_id": store_id,
-                                "user_id": acting_user_id,
-                                "severity": "WARNING",
-                                "details": {
-                                    "grand_total": grand_total,
-                                    "subtotal": subtotal,
-                                    "cart_discount_percent": cart_discount_percent,
-                                    "has_full_line_discount": has_full_line_discount,
-                                    # The SERVER-resolved approver (the seller
-                                    # within their limit, or the manager behind
-                                    # the spent approval) + the written reason.
-                                    "approved_by": zero_total_approved_by,
-                                    "approved_by_name": approver_name,
-                                    "approval_id": (discount_approver or {}).get(
-                                        "approval_id"
-                                    ),
-                                    "reason": zero_total_reason,
-                                },
-                                "created_at": utc_now_iso(),
-                            }
-                        )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("[ORDERS] zero-total audit skipped: %s", exc)
+                discount_approval.audit_zero_total(
+                    order_id=created_order_id,
+                    store_id=store_id,
+                    user_id=acting_user_id,
+                    approver=discount_approver,
+                    reason=zero_total_reason,
+                    details={
+                        "grand_total": grand_total,
+                        "subtotal": subtotal,
+                        "cart_discount_percent": cart_discount_percent,
+                        "has_full_line_discount": has_full_line_discount,
+                    },
+                )
 
             # Flip serialized stock units to SOLD with this order_id stamped on
             # them. This is what lets returns.py reactivate THE EXACT unit that
@@ -1236,7 +1209,7 @@ async def create_order(
             return _order_create_response(created)
 
         _release_claimed_units(precomputed_order_id, claimed_units)
-        discount_approval.give_back(discount_approver, current_user)
+        discount_approval.give_back(discount_approver, current_user, _order_was_saved)
         raise HTTPException(status_code=500, detail="Failed to create order")
 
     return {
