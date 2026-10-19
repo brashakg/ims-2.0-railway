@@ -50,7 +50,8 @@ def _input(payload, *, allow_zero=False):
     from .ap_engine import iso_bill_date
 
     try:
-        note_date = iso_bill_date(str(payload.get("credit_note_date") or "")[:10])
+        # The WHOLE value (LOW 18): '2026-08-31junk' is no date.
+        note_date = iso_bill_date(str(payload.get("credit_note_date") or ""))
     except (ValueError, TypeError) as exc:
         raise SupplierCreditError(
             "SUPPLIER_NOTE_DATE_REQUIRED",
