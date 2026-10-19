@@ -759,7 +759,9 @@ def test_flat_model_folds_into_the_model_fields_the_form_shows():
     # The door fills the model field(s) the category's form shows from a flat
     # top-level `model`: Model Name for categories keying on it (CL,
     # SMARTWATCH, ...), which would otherwise 422 on a flat create, and never
-    # a hidden model_no copy the form cannot show or clear. A frame shows both.
+    # a hidden model_no copy the form cannot show or clear. A frame's flat
+    # model is its Model No only: its optional Model Name is what staff typed
+    # (owner 10-19), never a copy of the number.
     out = pm.normalise_door_payload(
         {
             "category": "CONTACT_LENS",
@@ -775,7 +777,8 @@ def test_flat_model_folds_into_the_model_fields_the_form_shows():
         {"category": "FRAME", "brand": "Ray-Ban", "model": "RB2140", "attributes": {}},
         source="FORM",
     )
-    assert (frame["attributes"]["model_no"], frame["attributes"]["model_name"]) == ("RB2140", "RB2140")
+    assert frame["attributes"]["model_no"] == "RB2140"
+    assert "model_name" not in frame["attributes"]
 
 
 def test_flat_model_create_of_model_name_category_not_falsely_422():
