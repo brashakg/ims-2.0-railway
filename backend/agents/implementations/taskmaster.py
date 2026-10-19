@@ -992,7 +992,7 @@ class TaskmasterAgent(JarvisAgent):
                 store_id=event.get("store_id") or unit.get("store_id"),
                 dedupe_ref=key,
                 assigned_to="STORE_MANAGER",
-                due_at=datetime.now() + timedelta(days=7),
+                due_at=datetime.now(timezone.utc) + timedelta(days=7),
                 extra={"auto_created_by": self.agent_id, "link": "/inventory/quarantine",
                        "payload": {"stock_id": stock_id}},
                 task_id="TSK-Q" + hashlib.sha256(key.encode()).hexdigest()[:12].upper(),

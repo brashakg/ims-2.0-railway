@@ -12,7 +12,17 @@ and a VENDOR id when the Quarantine screen named one -- so a link is believed
 only when it names a return that exists and is not cancelled.
 """
 
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
+
+# A return being saved holds its pieces; a save that never finished (a
+# crashed request) stops holding them after this.
+SAVING_MINUTES = 10
+
+
+def stamp(dt: datetime) -> str:
+    """The sortable UTC time string the claims are stamped with."""
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
 
 
 def open_return_of(db, unit: Dict) -> Optional[str]:
@@ -21,7 +31,13 @@ def open_return_of(db, unit: Dict) -> Optional[str]:
     if not rid or db is None:
         return None
     ret = db.get_collection("vendor_returns").find_one({"return_id": rid})
-    return rid if ret and ret.get("status") != "cancelled" else None
+    if not ret or ret.get("status") == "cancelled":
+        return None
+    if ret.get("status") == "saving":
+        dead = stamp(datetime.now(timezone.utc) - timedelta(minutes=SAVING_MINUTES))
+        if str(ret.get("claimed_at") or "") < dead:
+            return None
+    return rid
 
 
 def release_refusal(db, unit: Dict) -> Optional[Dict]:

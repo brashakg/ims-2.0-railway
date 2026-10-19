@@ -4,7 +4,7 @@ stock.quarantined and raises ONE task per piece per quarantine, due in 7 days,
 to the shop's store manager. Every worker hearing the event raises the same
 task id, so the database keeps one. No live Mongo: mongomock."""
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import mongomock
 import pytest
@@ -41,17 +41,20 @@ def test_one_seven_day_follow_up_per_piece_for_the_shop_manager(db):
     assert "BOK0001" in task["title"] and task["source_ref"] == "quarantine_follow_up:U1:g1"
     assert task["assigned_to"] == "u-mgr" and task["store_id"] == "S1"
     assert task["status"] == "OPEN" and task["link"] == "/inventory/quarantine"
-    due = task["due_at"] - datetime.now()
+    # Stored timezone-aware (UTC); Mongo hands it back as UTC.
+    due = task["due_at"].replace(tzinfo=None) - datetime.now(timezone.utc).replace(tzinfo=None)
     assert timedelta(days=6, hours=23) < due <= timedelta(days=7)
 
 
-def test_two_workers_hearing_the_same_event_at_once_keep_one_task(db, monkeypatch):
+def test_two_workers_hearing_the_same_event_at_once_keep_one_task(db, monkeypatch, capsys):
     # Both pass the read-before-write (it is racy across workers); the task id
-    # derived from the piece and its quarantine is what keeps one.
+    # derived from the piece and its quarantine is what keeps one -- and the
+    # refused copy is expected, so nothing is logged as an error.
     monkeypatch.setattr(task_triggers, "active_tasks", lambda repo, ref: [])
     for _worker in range(2):
         asyncio.run(TaskmasterAgent(db=db).on_event("stock.quarantined", EVENT))
     assert db.tasks.count_documents({}) == 1
+    assert "Error creating" not in capsys.readouterr().out
 
 
 def test_a_new_quarantine_of_the_same_piece_gets_its_own_follow_up(db):

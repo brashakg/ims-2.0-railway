@@ -12,6 +12,7 @@ from collections import Counter
 from typing import Annotated, Dict, List, Optional, Literal
 from datetime import date, datetime, timedelta, timezone
 import hashlib
+import json
 import logging
 import re
 import uuid
@@ -27,7 +28,8 @@ from ..services.cost_mask import AP_ROLES, PURCHASE_ROLES, RETURN_READERS, mask_
 from ..services.payables_mask import require_payables
 from ..services.rtv_debit_note import debit_note_issued
 from ..services import item_events as _ie
-from ..services.quarantine_hold import open_return_of
+from ..services.org_validation import shop_gstins
+from ..services.quarantine_hold import open_return_of, stamp as _stamp
 from .inventory.accountability import _STOCK_MANAGER_ROLES
 
 logger = logging.getLogger(__name__)
@@ -252,33 +254,54 @@ def _not_returnable(db, unit) -> Optional[str]:
 
 
 def _receipt_of(db, unit):
-    """(receipt id, supplier) the piece was received with; (None, None) when it
-    has no receipt (opening stock, a piece minted by a customer return)."""
+    """(receipt id, supplier, receiving shop) the piece was received with;
+    (None, None, None) when it has no receipt (opening stock, a piece minted
+    by a customer return). A transfer keeps the piece's origin receipt."""
     gid = unit.get("grn_id") or (unit.get("source_id") if unit.get("source_type") == "GRN" else None)
     if not gid:
-        return None, None
+        return None, None, None
     grn = db.get_collection("grns").find_one({"grn_id": gid}) or {}
-    return gid, grn.get("vendor_id")
+    return gid, grn.get("vendor_id"), grn.get("store_id")
+
+
+def _bought_on_other_gstin(db, receipt_store, store_id, gstins) -> Optional[str]:
+    """The receiving shop's name when the piece was bought on a GSTIN other
+    than the returning shop's (CA ruling: a move between two registrations is
+    a sale between distinct persons -- the goods go back from the GSTIN that
+    bought them). None when the same shop, the same GSTIN, or either GSTIN is
+    not on file. `gstins` caches org_validation.shop_gstins for the request."""
+    if not receipt_store or receipt_store == store_id:
+        return None
+    if "map" not in gstins:
+        gstins["map"] = shop_gstins(db)
+    bought, here = gstins["map"].get(receipt_store), gstins["map"].get(store_id)
+    if not bought or not here or bought == here:
+        return None
+    shop = db.get_collection("stores").find_one({"store_id": receipt_store}) or {}
+    return shop.get("store_name") or shop.get("name") or receipt_store
 
 
 def _typed_line_problem(db, item, store_id) -> Optional[str]:
-    """A line naming no piece is refused when it is (by id, name or SKU) a
-    catalogued product this shop holds a piece of that could go back -- that
-    piece is scanned instead."""
+    """A line naming no piece is refused when it is (by id, exact name or SKU)
+    a catalogued product this shop holds pieces of -- they are scanned
+    instead; when none of them can go on this return, it says so."""
     pids = {item.product_id}
     name = (item.product_name or "").strip()
     if name:
         exact = {"$regex": f"^{re.escape(name)}$", "$options": "i"}
         pids |= {p.get("product_id") for p in db.get_collection("products").find(
             {"$or": [{"name": exact}, {"sku": exact}]})}
-    held = db.get_collection("stock_units").find_one({
+    held = list(db.get_collection("stock_units").find({
         "product_id": {"$in": sorted(p for p in pids if p)}, "store_id": store_id,
         "$or": [_ie.on_hand_match(), _ie.status_match(_STATE.QUARANTINED)],
-    })
-    if held:
+    }))
+    if not held:
+        return None
+    if any(_not_returnable(db, u) is None for u in held):
         return (f"{item.product_name} is a product this shop holds pieces of: scan or "
                 "pick the pieces going back.")
-    return None
+    return (f"{item.product_name} is a product this shop holds pieces of, but every one is "
+            "already on another supplier return, so none can go on this one.")
 
 
 def _pieces_for_lines(db, data: "VendorReturnCreate", user):
@@ -294,7 +317,7 @@ def _pieces_for_lines(db, data: "VendorReturnCreate", user):
         _refuse(f"Piece {twice[0]} is named twice on this return.")
     units = {u.get("stock_id"): u for u in db.get_collection("stock_units").find(
         {"stock_id": {"$in": every}})} if every else {}
-    no_receipt = set()
+    no_receipt, gstins = set(), {}
     for sid in every:
         unit = units.get(sid)
         if unit is None or unit.get("store_id") != data.store_id:
@@ -302,10 +325,18 @@ def _pieces_for_lines(db, data: "VendorReturnCreate", user):
         why = _not_returnable(db, unit)
         if why:
             _refuse(f"Piece {_label(unit, sid)} {why}.")
-        gid, vendor = _receipt_of(db, unit)
+        gid, vendor, receipt_store = _receipt_of(db, unit)
         if vendor and vendor != data.vendor_id:
             _refuse(f"Piece {_label(unit, sid)} was received from a different supplier "
                     f"(receipt {gid}). Return it to the supplier it came from.")
+        if unit.get("receipt_disposition") == "REJECTED" and not vendor:
+            # Rejected at receiving: it goes back to the supplier that sent it.
+            _refuse(f"Piece {_label(unit, sid)} was rejected at receiving and its supplier "
+                    "could not be checked. Open its receiving rejection instead.")
+        other_shop = _bought_on_other_gstin(db, receipt_store, data.store_id, gstins)
+        if other_shop:
+            _refuse(f"Piece {_label(unit, sid)} was bought on {other_shop}'s GSTIN - transfer "
+                    "it back there first.")
         if not vendor:
             no_receipt.add(sid)
     if not _may_take_from_shelf(user) and any(_ie.is_on_hand(units[s].get("status")) for s in every):
@@ -490,10 +521,6 @@ def _ship_pieces(db, return_doc, actor_id) -> List[str]:
     return stuck
 
 
-def _stamp(dt: datetime) -> str:
-    return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")
-
-
 def _no_live_ship_fence() -> dict:
     """Mongo condition: no Ship is moving this return's pieces right now (a
     fence older than _SHIP_FENCE_MINUTES is a crashed one and is ignored)."""
@@ -511,6 +538,44 @@ def _fence_ship(collection, return_id, status) -> Optional[str]:
         {"$set": {"ship_fence": {"token": token, "at": _stamp(datetime.now(timezone.utc))}}},
     )
     return token if getattr(res, "matched_count", 0) else None
+
+
+def _request_fingerprint(data) -> str:
+    """What one form submission says, so its repeat is recognised and a
+    different form reusing its request id is refused."""
+    body = data.model_dump(mode="json", exclude={"client_request_id"})
+    return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
+
+
+def _same_submission(held: dict, fingerprint: str) -> dict:
+    """The answer to a repeat of a submission already saved (or being saved):
+    its return -- touching nothing -- unless it said something else."""
+    if held.get("request_fingerprint") != fingerprint:
+        raise HTTPException(status_code=409, detail=(
+            "This form was already saved with different details - refresh the page."))
+    return {"return_id": held.get("return_id"), "message": "Vendor return created successfully"}
+
+
+def _claim_return(collection, return_id, actor, request_id, fingerprint, token) -> Optional[dict]:
+    """Insert the return's claim row ('saving', its id unique) BEFORE any
+    piece is touched. None when this request won it; else the row that holds
+    the id (a repeat of the same submission, or a different one)."""
+    claim = {"_id": return_id, "return_id": return_id, "status": "saving",
+             "created_by": actor, "client_request_id": request_id,
+             "request_fingerprint": fingerprint, "claim_token": token,
+             "claimed_at": _stamp(datetime.now(timezone.utc))}
+    try:
+        collection.insert_one(claim)
+        return None
+    except Exception as exc:
+        if exc.__class__.__name__ != "DuplicateKeyError":
+            raise
+        return collection.find_one({"_id": return_id}) or {"request_fingerprint": None}
+
+
+def _drop_claim(collection, return_id, token) -> None:
+    """Give up a claim whose return was never saved (this request's only)."""
+    collection.delete_one({"_id": return_id, "status": "saving", "claim_token": token})
 
 
 def _priced_total(items) -> Optional[float]:
@@ -573,6 +638,9 @@ async def list_vendor_returns(
             filter_dict["vendor_id"] = vendor_id
         if status:
             filter_dict["status"] = status
+        else:
+            # A return still being saved is not a return yet.
+            filter_dict["status"] = {"$ne": "saving"}
 
         # Get total count
         total = collection.count_documents(filter_dict)
@@ -624,27 +692,40 @@ async def create_vendor_return(
         require_payables(current_user, "Pricing a vendor return")
     named = [sid for item in return_data.items for sid in item.stock_ids or []]
     named += return_data.stock_ids or []
-    if named and db.get_collection("stock_units").find_one({
+    rejected = list(db.get_collection("stock_units").find({
         "stock_id": {"$in": named},
         "store_id": return_data.store_id,
         "receipt_disposition": "REJECTED",
-        "rtv_vendor_id": {"$ne": None},
-    }):
+    })) if named else []
+    if any(open_return_of(db, u) for u in rejected):
         raise HTTPException(status_code=409, detail="Rejected receipt pieces already have a return draft. Open that return instead.")
 
-    # The pieces each line sends back (422 for any that cannot go), then set
-    # aside for this return before it is saved -- all or nothing. A repeat of
-    # the same form submission names the same return.
+    # A repeat of the same form submission names the same return: an earlier
+    # save is found by its request id; otherwise the return's id is CLAIMED
+    # (a 'saving' row, unique id) before any piece is touched, and a request
+    # that loses the claim touches nothing.
     actor = current_user.get("user_id")
     collection = db.get_collection("vendor_returns")
     request_id = (return_data.client_request_id or "").strip() or None
+    fingerprint = _request_fingerprint(return_data)
     if request_id:
         same = collection.find_one({"client_request_id": request_id, "created_by": actor})
         if same:
-            return {"return_id": same["return_id"], "message": "Vendor return created successfully"}
+            return _same_submission(same, fingerprint)
     lines, no_receipt = _pieces_for_lines(db, return_data, current_user)
     return_id = generate_return_id(f"{actor}|{request_id}" if request_id else None)
-    linked, taken, prior = _set_aside(db, lines, return_id, return_data.store_id, actor)
+    token = uuid.uuid4().hex
+    holder = _claim_return(collection, return_id, actor, request_id, fingerprint, token)
+    if holder is not None:
+        return _same_submission(holder, fingerprint)
+
+    # The pieces each line sends back, set aside under the won claim -- all or
+    # nothing (a refusal gives the claim up).
+    try:
+        linked, taken, prior = _set_aside(db, lines, return_id, return_data.store_id, actor)
+    except BaseException:
+        _drop_claim(collection, return_id, token)
+        raise
 
     try:
         items = [
@@ -685,6 +766,7 @@ async def create_vendor_return(
             "prior_links": [{"stock_id": sid, "rtv_vendor_id": before}
                             for sid, before in prior.items() if before],
             "client_request_id": request_id,
+            "request_fingerprint": fingerprint,
             "created_at": utc_now_iso(),
             "created_by": actor,
             "status_history": [
@@ -696,11 +778,12 @@ async def create_vendor_return(
                 }
             ],
         }
-        if request_id:
-            # The database refuses a second copy of the same submission.
-            return_doc["_id"] = return_id
-
-        collection.insert_one(return_doc)
+        saved = collection.update_one(
+            {"_id": return_id, "status": "saving", "claim_token": token},
+            {"$set": return_doc, "$unset": {"claim_token": "", "claimed_at": ""}},
+        )
+        if not getattr(saved, "matched_count", 0):
+            raise RuntimeError("the return's claim was lost before it was saved")
 
         return {
             "return_id": return_id,
@@ -710,8 +793,7 @@ async def create_vendor_return(
     except Exception as e:
         # The pieces were set aside for a return that was never saved.
         _release_pieces(db, return_id, prior, set(taken), actor, prior)
-        if request_id and e.__class__.__name__ == "DuplicateKeyError":
-            return {"return_id": return_id, "message": "Vendor return created successfully"}
+        _drop_claim(collection, return_id, token)
         raise HTTPException(
             status_code=500, detail="Failed to create return. Please try again."
         )
@@ -829,14 +911,25 @@ async def update_return_status(
                 raise HTTPException(status_code=409, detail=(
                     f"These pieces could not be moved out of stock: {', '.join(stuck)}. "
                     "The return stays approved; press Ship again once they are sorted."))
-        # Cancelling puts the pieces back -- not once any of them has left.
-        if status_update.status == "cancelled" and not return_doc.get("receipt_rejection"):
+        # Cancelling puts the pieces back -- not once any of them has left
+        # (a receiving rejection's draft included).
+        if status_update.status == "cancelled":
             sent = [_label(u, sid) for sid, u in _named_units(db, return_doc).items()
                     if _ie.canonical_state(u.get("status")) is _STATE.RTV]
             if sent:
                 raise HTTPException(status_code=409, detail=(
                     f"Part of this return already left stock ({', '.join(sent)}). "
                     "Press Ship to finish it."))
+        # A cancelled receiving-rejection draft reopens only while it still
+        # holds its pieces -- a new return may have taken them since.
+        if current_status == "cancelled" and status_update.status == "draft":
+            gone = [sid for sid in return_doc.get("stock_ids") or []
+                    if sid not in _named_units(db, return_doc)]
+            if gone:
+                taken_by = (db.get_collection("stock_units").find_one({"stock_id": gone[0]}) or {})
+                raise HTTPException(status_code=409, detail=(
+                    f"Its pieces are now on supplier return {taken_by.get('rtv_vendor_id') or '-'}; "
+                    "that return goes to the supplier instead."))
 
         # Update document
         update_dict = {

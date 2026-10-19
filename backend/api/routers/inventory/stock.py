@@ -644,7 +644,9 @@ async def list_units(
     docs.sort(key=lambda d: (not _in_shop(d), str(d.get("created_at") or "")))
 
     from ...services.product_master import existing_product_summary
+    from ...services.quarantine_hold import open_return_of
 
+    db = _get_db()
     products: Dict[str, Dict] = {}
     units = []
     for d in docs:
@@ -677,6 +679,7 @@ async def list_units(
             # receiving belongs to its own return draft; dated stock goes
             # earliest expiry first.
             "rejected": d.get("receipt_disposition") == "REJECTED",
+            "on_supplier_return": open_return_of(db, d) if d.get("rtv_vendor_id") else None,
             "expiry_date": d.get("expiry_date"),
             "location_code": d.get("location_code") or "",
             "name": p.get("name") or "",

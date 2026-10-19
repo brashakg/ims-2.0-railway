@@ -117,12 +117,12 @@ describe('VendorReturns - the add-item step names the pieces', () => {
     expect(body.items[0]).toMatchObject({ product_id: 'P1', quantity: 1, stock_ids: ['U1'] });
   });
 
-  it('dated stock is pre-ticked set-aside first, then earliest expiry; rejected pieces are never offered', async () => {
+  it('dated stock is pre-ticked set-aside first, then earliest expiry; a piece on another open return is never offered', async () => {
     shelf = [
       { stock_id: 'L3', barcode: 'CL-2028', status: 'AVAILABLE', expiry_date: '2028-01-31' },
       { stock_id: 'L1', barcode: 'CL-2026', status: 'AVAILABLE', expiry_date: '2026-11-30' },
       { stock_id: 'L2', barcode: 'CL-ASIDE', status: 'QUARANTINED', expiry_date: '2027-06-30' },
-      { stock_id: 'LR', barcode: 'CL-REJ', status: 'QUARANTINED', expiry_date: '2025-01-31', rejected: true },
+      { stock_id: 'LR', barcode: 'CL-ON-VR', status: 'QUARANTINED', expiry_date: '2025-01-31', on_supplier_return: 'VR-1' },
     ];
     await openForm();
     fireEvent.change(screen.getByDisplayValue('1'), { target: { value: '2' } });
@@ -134,6 +134,22 @@ describe('VendorReturns - the add-item step names the pieces', () => {
     expect(boxes.map((b) => b.checked)).toEqual([true, true, false]);
     const body = await submit();
     expect(body.items[0]).toMatchObject({ quantity: 2, stock_ids: ['L2', 'L1'] });
+  });
+
+  it('Create waits while a save is in flight: a second click sends nothing', async () => {
+    let finish: (v: unknown) => void = () => {};
+    apiMock.post.mockImplementation(() => new Promise((r) => { finish = r; }));
+    await openForm();
+    scan('BC1');
+    await screen.findByText('BC1');
+    const buttons = screen.getAllByRole('button', { name: /create return/i });
+    const create = buttons[buttons.length - 1] as HTMLButtonElement;
+    fireEvent.click(create);
+    await waitFor(() => expect(create.disabled).toBe(true));
+    fireEvent.click(create);
+    expect(apiMock.post).toHaveBeenCalledTimes(1);
+    finish({ data: { return_id: 'VR2' } });
+    await waitFor(() => expect(toastMock.success).toHaveBeenCalled());
   });
 
   it('an item with no piece scanned needs a note before it is sent', async () => {

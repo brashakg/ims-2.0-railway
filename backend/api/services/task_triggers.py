@@ -240,6 +240,7 @@ def create_system_task(
         grace = sla_for(priority)["grace_minutes"]
         due_at = now + timedelta(minutes=grace)
 
+    fixed_id = task_id is not None
     task_id = task_id or f"TSK-{uuid.uuid4().hex[:10].upper()}"
     task = {
         "task_id": task_id,
@@ -274,6 +275,10 @@ def create_system_task(
         for k, v in extra.items():
             task.setdefault(k, v)
     try:
+        if fixed_id:
+            # Another worker raising the same deterministic task is expected:
+            # the database refuses the copy, quietly (no error line).
+            return repo.create(task, raise_on_duplicate=True) or None
         return repo.create(task) or None
     except Exception:  # noqa: BLE001
         return None

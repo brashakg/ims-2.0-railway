@@ -49,6 +49,8 @@ interface Piece {
   status?: string;
   expiry_date?: string | null;
   rejected?: boolean;
+  /** The open supplier return this piece is already on (never offered). */
+  on_supplier_return?: string | null;
   no_receipt?: boolean;
 }
 
@@ -240,6 +242,8 @@ export function VendorReturns() {
   const [scanText, setScanText] = useState<Record<number, string>>({});
   // One id per form: a double click names the same return (server dedupe).
   const [requestId, setRequestId] = useState('');
+  // A save in flight: the Create button waits for it (no second click).
+  const [creating, setCreating] = useState(false);
   const [notes, setNotes] = useState('');
   // Accounts pricing an unpriced return (one input per line, in line order).
   const [pricing, setPricing] = useState<VendorReturn | null>(null);
@@ -387,7 +391,7 @@ export function VendorReturns() {
       })).data?.units || [];
       const options: Piece[] = units
         .map((u: Piece) => ({ ...u, status: pieceState(u.status) }))
-        .filter((u: Piece) => RETURNABLE.includes(u.status as string) && !u.rejected)
+        .filter((u: Piece) => RETURNABLE.includes(u.status as string) && !u.on_supplier_return)
         .sort(pickOrder);
       const dated = options.some((u) => u.expiry_date);
       setPieces(idx, (l) => ({
@@ -421,8 +425,10 @@ export function VendorReturns() {
       return;
     }
 
+    if (creating) return;
     const vendor = vendors.find(v => v.vendor_id === selectedVendor);
 
+    setCreating(true);
     try {
       await api.post('/vendor-returns/', {
         vendor_id: selectedVendor,
@@ -463,6 +469,8 @@ export function VendorReturns() {
         .filter((ret: VendorReturn) => !linkedVendorId || ret.vendor_id === linkedVendorId).map(shownReturn));
     } catch (e) {
       toast.error(errMsg(e, 'Failed to create vendor return'));
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -1236,7 +1244,8 @@ export function VendorReturns() {
               </button>
               <button
                 onClick={handleCreateReturn}
-                className="flex-1 px-4 py-2 bg-bv-red-600 hover:bg-bv-red-700 text-white rounded-lg font-medium transition"
+                disabled={creating}
+                className="flex-1 px-4 py-2 bg-bv-red-600 hover:bg-bv-red-700 disabled:opacity-50 text-white rounded-lg font-medium transition"
               >
                 Create Return
               </button>

@@ -13,7 +13,7 @@ import pytest
 
 from tests.test_receipt_rejection_handoff_a08 import app_world, world  # noqa: F401
 from tests.test_receipt_without_po import (
-    ACCOUNTANT, DEALER, FRAME, LENS, MANAGER, SHARMA, STORE,
+    ACCOUNTANT, DEALER, ENTITY, FRAME, LENS, MANAGER, SHARMA, SHOP_GSTIN, STORE,
 )
 from api.routers import item_events as items_router
 from api.routers import vendor_returns as vr
@@ -185,6 +185,8 @@ def test_a_piece_already_on_another_open_return_is_refused(w):
 
 
 def test_a_piece_rejected_at_receiving_stays_with_its_own_draft(w):
+    w["db"].vendor_returns.insert_one({"return_id": "VR-GRN-X", "status": "draft", "receipt_rejection": True,
+                                       "store_id": STORE, "stock_ids": ["REJ"]})
     unit(w, "REJ", status="QUARANTINED", receipt_disposition="REJECTED", rtv_vendor_id="VR-GRN-X")
     refused = create(w, line(stock_ids=["REJ"]))
     assert refused.status_code == 409
@@ -318,10 +320,11 @@ def test_a_return_that_could_not_be_saved_gives_its_pieces_back(w, monkeypatch):
     def offline(*_a, **_k):
         raise RuntimeError("offline")
 
-    monkeypatch.setattr(w["db"].vendor_returns, "insert_one", offline)
+    monkeypatch.setattr(w["db"].vendor_returns, "update_one", offline)
     failed = create(w, line(stock_ids=["U1"]))
     assert failed.status_code == 500
     assert state(w, "U1")["status"] == "AVAILABLE" and state(w, "U1")["rtv_vendor_id"] is None
+    assert w["db"].vendor_returns.count_documents({}) == 0  # the claim was given up
 
 
 # --------------------------------------------------------------------------
@@ -430,3 +433,177 @@ def test_the_ledger_release_also_refuses_a_piece_rejected_at_receiving(w):
     out = w["as_"](MANAGER).post("/items/REJ/quarantine/release", json={"disposition": "RTV"})
     assert out.status_code == 409 and out.json()["detail"]["code"] == "receipt_rejected"
     assert state(w, "REJ")["status"] == "QUARANTINED"
+
+
+# --------------------------------------------------------------------------
+# Review round 2
+# --------------------------------------------------------------------------
+
+def _overlap(w, monkeypatch, hook):
+    """Two submissions of ONE form naming the same piece, the second landing
+    inside the first at `hook` (Q1: while the first sets its pieces aside;
+    Q2: before the first claims the return's id)."""
+    unit(w, "U1")
+    real = getattr(vr, hook)
+    inner, fired = [], []
+
+    def second_lands_here(*args, **kwargs):
+        if not fired:
+            fired.append(True)  # before the call: the second's own pass runs straight through
+            inner.append(create(w, line(stock_ids=["U1"]), client_request_id="form-q"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(vr, hook, second_lands_here)
+    outer = create(w, line(stock_ids=["U1"]), client_request_id="form-q")
+    monkeypatch.setattr(vr, hook, real)
+    return outer, inner[0]
+
+
+@pytest.mark.parametrize("hook", ["_set_aside", "_claim_return"])
+def test_overlapping_submissions_of_one_form_save_one_return_holding_its_pieces(w, monkeypatch, hook):
+    outer, inner = _overlap(w, monkeypatch, hook)
+    assert outer.status_code == 201 and inner.status_code == 201, (outer.text, inner.text)
+    rid = outer.json()["return_id"]
+    assert inner.json()["return_id"] == rid
+    assert w["db"].vendor_returns.count_documents({}) == 1
+    doc = returned(w, rid)
+    assert doc["status"] == "created" and doc["stock_ids"] == ["U1"]
+    assert state(w, "U1")["status"] == "QUARANTINED" and state(w, "U1")["rtv_vendor_id"] == rid
+    assert on_hand(w) == 0
+    assert move(w, rid, "approved").status_code == 200
+    assert move(w, rid, "shipped").status_code == 200
+    assert state(w, "U1")["status"] == "RTV"
+
+
+def test_the_same_request_id_with_different_details_is_refused(w):
+    unit(w, "U1")
+    unit(w, "U2")
+    first = create(w, line(stock_ids=["U1"]), client_request_id="form-x")
+    assert first.status_code == 201
+    other = create(w, line(stock_ids=["U2"]), client_request_id="form-x")
+    assert other.status_code == 409 and "different details" in other.json()["detail"]
+    assert state(w, "U2")["status"] == "AVAILABLE"
+    assert w["db"].vendor_returns.count_documents({}) == 1
+
+
+def test_a_failed_save_gives_its_claim_up_so_the_form_can_be_sent_again(w, monkeypatch):
+    unit(w, "U1")
+    real = vr._ie.record_event_atomic
+    monkeypatch.setattr(vr._ie, "record_event_atomic", lambda db, **kw: (False, None))
+    assert create(w, line(stock_ids=["U1"]), client_request_id="form-r").status_code == 409
+    assert w["db"].vendor_returns.count_documents({}) == 0
+    monkeypatch.setattr(vr._ie, "record_event_atomic", real)
+    again = create(w, line(stock_ids=["U1"]), client_request_id="form-r")
+    assert again.status_code == 201, again.text
+    assert state(w, "U1")["rtv_vendor_id"] == again.json()["return_id"]
+
+
+def test_a_return_being_saved_is_not_listed(w):
+    w["db"].vendor_returns.insert_one({"_id": "VR-SAVING", "return_id": "VR-SAVING", "status": "saving",
+                                       "store_id": STORE, "created_at": "2026-10-19"})
+    listed = w["as_"](MANAGER).get("/vendor-returns/", params={"store_id": STORE}).json()
+    assert [r["return_id"] for r in listed["returns"]] == []
+
+
+def test_a_release_never_puts_back_a_piece_another_return_now_holds(w):
+    unit(w, "U1")
+    rid = create(w, line(stock_ids=["U1"])).json()["return_id"]
+    # The piece is now held by another return (e.g. relinked since).
+    w["db"].stock_units.update_one({"stock_id": "U1"}, {"$set": {"rtv_vendor_id": "VR-OTHER"}})
+    vr._release_pieces(w["db"], rid, ["U1"], {"U1"}, "u-mgr", {})
+    assert state(w, "U1")["status"] == "QUARANTINED" and state(w, "U1")["rtv_vendor_id"] == "VR-OTHER"
+
+
+def _second_registration(w):
+    """A shop of another GSTIN (BV-PUN-X) and a shop under the SAME GSTIN
+    as the returning shop (BV-ONL-X), with a receipt at each."""
+    w["db"].entities.insert_one({"entity_id": "ENT-MH", "legal_name": "MH Co",
+                                 "gstins": [{"state_code": "27", "gstin": "27AABCB1234C1ZT"}]})
+    w["db"].stores.insert_many([
+        {"store_id": "BV-PUN-X", "store_name": "BV Pune", "state_code": "27", "entity_id": "ENT-MH",
+         "gstin": "27AABCB1234C1ZT", "is_active": True},
+        {"store_id": "BV-ONL-X", "store_name": "BV Online", "state_code": "20", "entity_id": ENTITY,
+         "gstin": SHOP_GSTIN, "is_active": True},
+    ])
+    w["db"].grns.insert_many([{"grn_id": "GRN-PUN", "vendor_id": DEALER, "store_id": "BV-PUN-X"},
+                              {"grn_id": "GRN-ONL", "vendor_id": DEALER, "store_id": "BV-ONL-X"}])
+
+
+def test_a_piece_bought_on_another_gstin_goes_back_from_there(w):
+    _second_registration(w)
+    unit(w, "PUN1", grn_id="GRN-PUN")   # moved here by a transfer
+    unit(w, "ONL1", grn_id="GRN-ONL")
+    refused = create(w, line(stock_ids=["PUN1"]))
+    assert refused.status_code == 422
+    assert "bought on BV Pune's GSTIN - transfer it back there first" in refused.json()["detail"]
+    assert state(w, "PUN1")["status"] == "AVAILABLE"
+    same_gstin = create(w, line(stock_ids=["ONL1"]))
+    assert same_gstin.status_code == 201, same_gstin.text
+
+
+def test_a_typed_line_whose_pieces_are_all_on_other_returns_says_so(w):
+    unit(w, "U1")
+    create(w, line(stock_ids=["U1"]))
+    typed = create(w, line(product="x", name="Acme Aviator 5420"), notes=NOTE)
+    assert typed.status_code == 422
+    assert "already on another supplier return" in typed.json()["detail"]
+
+
+def test_the_unit_list_marks_pieces_already_on_an_open_return(w):
+    unit(w, "U1")
+    unit(w, "U2")
+    rid = create(w, line(stock_ids=["U1"])).json()["return_id"]
+    units = w["as_"](MANAGER).get("/inventory/units", params={"product_id": FRAME, "store_id": STORE}).json()["units"]
+    marks = {u["stock_id"]: u["on_supplier_return"] for u in units}
+    assert marks == {"U1": rid, "U2": None}
+
+
+def _rejection_draft(w, status="cancelled", unit_status="QUARANTINED"):
+    w["db"].grns.insert_one({"grn_id": "GRN-R", "vendor_id": DEALER, "store_id": STORE})
+    w["db"].vendor_returns.insert_one({
+        "return_id": "VR-GRN-R", "status": status, "receipt_rejection": True, "store_id": STORE,
+        "vendor_id": DEALER, "stock_ids": ["REJ1"], "return_type": "credit_note",
+        "items": [{"product_id": FRAME, "product_name": "Frame", "quantity": 1, "reason": "damaged"}],
+        "debit_note_draft_status": "CANCELLED" if status == "cancelled" else "DRAFT"})
+    unit(w, "REJ1", status=unit_status, receipt_disposition="REJECTED", rtv_vendor_id="VR-GRN-R",
+         grn_id="GRN-R")
+
+
+def test_a_cancelled_rejection_draft_piece_can_go_on_a_new_return_to_its_supplier(w):
+    _rejection_draft(w)
+    other = w["as_"](MANAGER).post("/vendor-returns/", json={
+        "vendor_id": SHARMA, "vendor_name": "Sharma", "store_id": STORE, "return_type": "credit_note",
+        "items": [line(stock_ids=["REJ1"])]})
+    assert other.status_code == 422 and "different supplier" in other.json()["detail"]
+    made = create(w, line(stock_ids=["REJ1"]))
+    assert made.status_code == 201, made.text
+    assert state(w, "REJ1")["rtv_vendor_id"] == made.json()["return_id"]
+    lifted = w["as_"](MANAGER).patch("/inventory/stock/REJ1/lift-quarantine",
+                                     json={"lift_reason": "Looks fine now"})
+    assert lifted.status_code == 409 and lifted.json()["detail"]["code"] == "receipt_rejected"
+    reopened = move(w, "VR-GRN-R", "draft")
+    assert reopened.status_code == 409 and made.json()["return_id"] in reopened.json()["detail"]
+    assert returned(w, "VR-GRN-R")["status"] == "cancelled"
+
+
+def test_a_rejection_draft_with_a_piece_already_shipped_cannot_be_cancelled(w):
+    _rejection_draft(w, status="approved", unit_status="RTV")
+    refused = move(w, "VR-GRN-R", "cancelled")
+    assert refused.status_code == 409 and "already left stock" in refused.json()["detail"]
+    assert returned(w, "VR-GRN-R")["status"] == "approved"
+
+
+def test_a_save_that_never_finished_stops_holding_its_pieces(w):
+    # A crashed request left its claim 'saving' with the piece linked to it.
+    w["db"].vendor_returns.insert_one({"_id": "VR-DEAD", "return_id": "VR-DEAD", "status": "saving",
+                                       "store_id": STORE, "claimed_at": "2026-01-01T00:00:00.000000"})
+    unit(w, "U1", status="QUARANTINED", rtv_vendor_id="VR-DEAD")
+    made = create(w, line(stock_ids=["U1"]))
+    assert made.status_code == 201, made.text
+    assert state(w, "U1")["rtv_vendor_id"] == made.json()["return_id"]
+    # A save still in progress holds them.
+    w["db"].vendor_returns.insert_one({"_id": "VR-LIVE", "return_id": "VR-LIVE", "status": "saving",
+                                       "store_id": STORE, "claimed_at": "9999-01-01T00:00:00.000000"})
+    unit(w, "U2", status="QUARANTINED", rtv_vendor_id="VR-LIVE")
+    held = create(w, line(stock_ids=["U2"]))
+    assert held.status_code == 422 and "VR-LIVE" in held.json()["detail"]
