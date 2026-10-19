@@ -29,6 +29,7 @@ def _writeback_product(
     *,
     sent_rev: Optional[str] = None,
     clear_claim: bool = False,
+    template_suffix: Optional[str] = None,
 ) -> bool:
     """Persist ecom.shopify_product_id (+ stamps) on the catalog_products doc and
     clear the dirty flag, for idempotent re-push. Returns True when written.
@@ -40,6 +41,11 @@ def _writeback_product(
     and the flag stays True: the newer edit goes out on the next run. The
     whole write is a compare-and-set (catalog_ecom.update_ecom), so a sibling
     ecom field written meanwhile is never lost either.
+
+    `template_suffix` (set-only; '' is a value) records
+    ecom.template_suffix_sent -- the theme template this write sent
+    (product_input.page_template_suffix moves a page back to standard only
+    off it, so an admin-set template is never wiped).
 
     `clear_claim` drops ecom.create_claim (the durable first-publish claim,
     SF-02) in the SAME write that stores the Shopify id.
@@ -88,6 +94,8 @@ def _writeback_product(
         ecom["shopify_product_id"] = shopify_id
         if clear_claim:
             ecom.pop("create_claim", None)
+        if template_suffix is not None:
+            ecom["template_suffix_sent"] = template_suffix
         if variant_gid:
             ecom["shopify_variant_id"] = variant_gid
         if inventory_item_gid:

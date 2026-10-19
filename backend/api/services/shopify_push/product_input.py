@@ -18,7 +18,7 @@ from ..gtin import (
     sanitise_gtin,
 )
 from ..shopify_tag_gen import generate_attribute_tags, merge_tag_lists
-from ..web_page_type import STANDARD, TEMPLATE_SUFFIX, page_type_of
+from ..web_page_type import STANDARD, TEMPLATE_SUFFIX
 
 from ._shared import logger
 from .transport import _graphql
@@ -50,11 +50,13 @@ def ims_product_tags(product: Dict[str, Any]) -> List[str]:
 
 
 def build_product_input(
-    product: Dict[str, Any], variants: List[Dict[str, Any]]
+    product: Dict[str, Any], variants: List[Dict[str, Any]], *, page_type: str = STANDARD
 ) -> Dict[str, Any]:
     """Build a Shopify ProductInput from a catalog_products doc (+ its ecom
     sub-doc) and its catalog_variants. The Shopify gid (if already mapped) is set
-    so the SAME object is updated rather than duplicated."""
+    so the SAME object is updated rather than duplicated. ``page_type`` is the
+    listing's EFFECTIVE page (web_page_type.effective_page_type -- the caller
+    holds the db and the gate); it picks the theme template."""
     ecom = product.get("ecom") or {}
     seo = ecom.get("seo") or {}
     title = (
@@ -99,13 +101,13 @@ def build_product_input(
     body_html = seo.get("html") or product.get("description")
     if body_html:
         inp["descriptionHtml"] = body_html
-    # The website page type picks the theme template (owner 2026-10-19):
-    # 'pre-order' / 'preview-only', '' = the default page. A standard page
-    # keeps a hand-set ecom.theme_suffix.
-    page_type = page_type_of(product)
-    inp["templateSuffix"] = (
-        (ecom.get("theme_suffix") or "") if page_type == STANDARD else TEMPLATE_SUFFIX[page_type]
-    )
+    # The website page type picks the theme template (owner 2026-10-19). A
+    # standard page sends a hand-set ecom.theme_suffix as before; otherwise
+    # it sends NOTHING (a template set in Shopify admin stays) -- except ''
+    # when the suffix IMS last sent was a page type's, to move it back.
+    suffix = page_template_suffix(product, page_type)
+    if suffix is not None:
+        inp["templateSuffix"] = suffix
     if seo.get("title") or seo.get("description"):
         inp["seo"] = {
             "title": seo.get("title") or title,
@@ -137,6 +139,21 @@ def build_product_input(
         else:
             inp["productOptions"] = _derive_options(variants)
     return inp
+
+
+def page_template_suffix(product: Dict[str, Any], page_type: str) -> Optional[str]:
+    """The templateSuffix a push sends, or None to leave Shopify's alone:
+    the page type's template; else a hand-set ecom.theme_suffix; else '' only
+    when ecom.template_suffix_sent (what IMS last sent, writeback) was a page
+    type's -- a page moved back to Standard."""
+    ecom = product.get("ecom") or {}
+    if page_type != STANDARD:
+        return TEMPLATE_SUFFIX[page_type]
+    if ecom.get("theme_suffix"):
+        return ecom["theme_suffix"]
+    if ecom.get("template_suffix_sent") in set(TEMPLATE_SUFFIX.values()) - {""}:
+        return ""
+    return None
 
 
 # Owner 2026-07-05 ("CREATE WITH METAFIELDS"): category attributes (frame

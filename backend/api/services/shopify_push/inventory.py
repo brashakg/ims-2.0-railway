@@ -98,7 +98,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from agents.nexus_providers import _as_shopify_gid
 from ..catalog_ecom import update_ecom
-from ..web_page_type import is_preorder
+from ..web_page_type import PRE_ORDER, effective_page_type
 
 from ._shared import (
     MODE_LIVE,
@@ -295,13 +295,15 @@ async def list_locations(db) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def inventory_policy_for(product: Dict[str, Any]) -> str:
+def inventory_policy_for(db, product: Dict[str, Any]) -> str:
     """THE inventoryPolicy rule, for every writer (the push's tracking re-send,
     the stock pass, a size created on a live listing): DENY -- oversell blocks
     (owner ruling 2026-08-25) -- unless the listing is a PRE-ORDER page
     (owner 2026-10-19, services/web_page_type), the ONLY page type that sells
-    at 0 stock. A retired size's delist sends DENY on its own (it is off sale)."""
-    return _POLICY_CONTINUE if is_preorder(product) else _POLICY_DENY
+    at 0 stock. A retired size's delist sends DENY on its own (it is off sale).
+    The page is the listing's (the lead twin) behind the SUPERADMIN gate
+    (web_page_type.effective_page_type): gate off -> DENY."""
+    return _POLICY_CONTINUE if effective_page_type(db, product) == PRE_ORDER else _POLICY_DENY
 
 
 def product_skus(product: Dict[str, Any], variants: Optional[List[Dict[str, Any]]]) -> List[str]:
@@ -353,12 +355,15 @@ def stock_changed(
     product: Dict[str, Any],
     quantities: Dict[str, Dict[str, int]],
     skus: Optional[Iterable[str]] = None,
+    policy: Optional[str] = None,
 ) -> bool:
     """True when the per-store quantities (the MAPPED slice -- the caller
     builds it with ``mapped_slice``) differ from the ones last sent, or the
     product was never sent / never had tracking switched on. Nested dicts
     compare deep; the pre-per-store flat ``{sku: qty}`` baseline never equals
     the nested shape, so the first pass after deploy re-sends everything.
+    ``policy`` (inventory_policy_for, from the caller that holds the db): a
+    policy last sent that is not it is changed too.
 
     ``skus`` is the product's CURRENT SKU list and BOTH sides of the compare
     are restricted to it. The baseline is written per SKU (a POS write-back
@@ -371,6 +376,12 @@ def stock_changed(
     the slice while present in the baseline, so it still re-sends."""
     last = _last_sent(product)
     if not last.get("tracked"):
+        return True
+    # The page type moved (Pre-order <-> any other, owner 2026-10-19): the
+    # policy last sent is not THE rule's any more -- re-send it, or a page
+    # switched back to Standard keeps selling at 0 until a full re-push. A
+    # baseline from before the policy was recorded was DENY.
+    if policy is not None and (last.get("policy") or _POLICY_DENY) != policy:
         return True
     prev = dict(last.get("quantities") or {})
     if skus is not None:
@@ -597,7 +608,7 @@ async def plan_product_stock(db, product: Dict[str, Any], variants: Optional[Lis
         "code": out["code"],
         "error": out["error"],
         "tracked": True,
-        "policy": inventory_policy_for(product),
+        "policy": inventory_policy_for(db, product),
         "quantities": out["quantities"],
         "stores_mapped": out["stores_mapped"],
         "stores_total": out["stores_total"],
@@ -2407,7 +2418,7 @@ async def sync_product_stock(
     only on it. A size Shopify says no longer exists is cleared from IMS and
     named, so the next press re-creates it."""
     pid = product.get("id") or product.get("product_id")
-    policy = inventory_policy_for(product)
+    policy = inventory_policy_for(db, product)
     gids = product_variant_gids(product, variants, extra_variant_gids)
     tracked: Dict[str, Any] = {"updated": 0, "errors": [], "verdicts": {}, "deleted": [], "confirmed": set()}
     # Tracking + DENY go on even when no quantity can follow (no shop mapped):
@@ -2613,7 +2624,7 @@ async def sync_stock_levels(db, *, dry_run: bool = False) -> PushResult:
     for product, variants in pairs:
         skus = product_skus(product, variants)
         mine = mapped_slice(quantities, mapped, skus)
-        if stock_changed(product, mine, skus):
+        if stock_changed(product, mine, skus, policy=inventory_policy_for(db, product)):
             changed.append((product, variants, skus, mine))
     holders = unmapped_holders(db, quantities, stores, all_skus, mapped)
     conflicts = _location_conflicts(stores)

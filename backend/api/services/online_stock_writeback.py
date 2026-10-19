@@ -180,7 +180,8 @@ def product_ids_without_sku(items_data: List[dict]) -> List[str]:
 
 
 def _sku_to_pid(db, skus: List[str]):
-    """``({sku: product_id}, {sku deactivated in IMS})`` from the spine, or
+    """``({sku: product_id}, {sku deactivated in IMS or on a PREVIEW-ONLY
+    page})`` from the spine, or
     ``None`` when the lookup itself failed (UNKNOWN, never an empty result).
 
     A product IMS stopped selling (is_active False -- the retire hook's
@@ -195,19 +196,33 @@ def _sku_to_pid(db, skus: List[str]):
         return None
     if prod_coll is None:
         return None
+    from .web_page_type import PREVIEW_ONLY, effective_page_type, lead_attributes, pages_enabled
+
     sku_to_pid: Dict[str, str] = {}
     inactive: set = set()
+    spines: Dict[str, Dict[str, Any]] = {}
     try:
         for p in prod_coll.find(
             {"sku": {"$in": list(skus)}},
-            {"_id": 0, "product_id": 1, "sku": 1, "is_active": 1},
+            {"_id": 0, "product_id": 1, "sku": 1, "is_active": 1, "variant_of": 1, "attributes": 1},
         ):
             sku = str(p.get("sku") or "").strip()
             pid = p.get("product_id")
             if sku and pid and sku not in sku_to_pid:
                 sku_to_pid[sku] = pid
+                spines[sku] = p
                 if p.get("is_active") is False:
                     inactive.add(sku)
+        # A PREVIEW-ONLY page (owner 2026-10-19) sells nothing online: its
+        # sizes list 0 wherever the shelves hold them, so no cart, Shop app
+        # or other channel can buy one. The page is the model's (its lead's).
+        enabled = pages_enabled(db)
+        if enabled and spines:
+            page_attrs = lead_attributes(db, spines)
+            inactive |= {
+                sku for sku in spines
+                if effective_page_type(db, {"attributes": page_attrs[sku]}, enabled=True) == PREVIEW_ONLY
+            }
     except Exception as exc:  # noqa: BLE001
         logger.debug("[STOCK_WRITEBACK] sku->product lookup failed: %s", exc)
         return None

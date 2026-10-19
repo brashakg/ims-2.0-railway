@@ -771,6 +771,7 @@ def test_1_a_pre_order_listing_gaining_a_size_confirms_against_its_own_policy(mo
     against a literal DENY -> a Draft + 'did not confirm' -> fails."""
     db, variants, upd = _live_listing_gets_size_l()
     db.get_collection("catalog_products").update_one({"id": "cat-1"}, {"$set": {"attributes": {"web_page_type": "PRE_ORDER", "preorder_ship_days": 10}}})
+    db.seed("system_settings", [{"_id": "default", "web_page_types_enabled": True}])
     spy = _Spy(_responses(**{"productUpdate(": upd, "productVariantsBulkCreate": _created(policy="CONTINUE")}))
     _live(monkeypatch, spy)
     res = _run(shopify_push.push_product(db, _cat(db), variants))

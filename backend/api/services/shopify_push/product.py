@@ -26,6 +26,7 @@ from ._shared import (
     product_push_refusal,
 )
 from ..catalog_ecom import EDIT_REV
+from ..web_page_type import effective_page_type
 from .transport import ShopifyOutcomeUnknown, _graphql, _user_errors
 from .create_claim import (
     CREATE_ID_NOT_SAVED,
@@ -258,7 +259,7 @@ async def push_product(
         )
 
     existing_gid = ecom.get("shopify_product_id")
-    payload = build_product_input(product, variants)
+    payload = build_product_input(product, variants, page_type=effective_page_type(db, product))
     # THE TAGS (sync audit gap #4): the create input carries the full list;
     # an update carries none -- the diff against what IMS last sent runs
     # after the write (tags.sync_product_tags), so hand-added admin tags
@@ -511,7 +512,8 @@ async def push_product(
             )
         if new_gid and pid:
             saved = _writeback_product(
-                db, pid, new_gid, sent_rev=sent_rev, clear_claim=claim is not None
+                db, pid, new_gid, sent_rev=sent_rev, clear_claim=claim is not None,
+                template_suffix=payload.get("templateSuffix"),
             )
             if claim and not saved:
                 # Made on Shopify, link not saved: the claim stays, so the next
@@ -746,7 +748,7 @@ async def push_product(
             # Each size by its IMS SKU, never a Shopify id.
             names_of = {**sku_by_variant_gid(product, variants), **((seed_summary or {}).get("size_names") or {})}
             names = ", ".join(sorted({names_of.get(g) or "a new size" for g in unconfirmed})) or "its sizes"
-            rule = "stop selling at 0" if inventory_policy_for(product) == "DENY" else "keep selling at 0"
+            rule = "stop selling at 0" if inventory_policy_for(db, product) == "DENY" else "keep selling at 0"
             why = f"Shopify did not confirm stock tracking + {rule} on {names}"
             pub_summary = {
                 "published": False,
