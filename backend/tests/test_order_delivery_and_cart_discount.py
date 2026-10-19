@@ -8,7 +8,9 @@ fields and defaults them sanely when omitted:
   - delivery_time_slot (optional)
   - delivery_priority (NORMAL | EXPRESS | URGENT, default NORMAL)
   - cart_discount_percent / cart_discount_amount (default 0)
-  - cart_discount_reason / cart_discount_approved_by (optional)
+  - cart_discount_reason (optional); discount_approval_id (optional). A
+    client-typed cart_discount_approved_by is NOT a field any more (owner
+    2026-10-18: the server decides who approved) -- it is dropped at the door.
 
 Also verifies cart_discount_percent is clamped to [0, 100] by pydantic.
 
@@ -56,7 +58,7 @@ def test_order_create_defaults_phase_67_fields_when_omitted():
     assert order.cart_discount_percent == 0.0
     assert order.cart_discount_amount == 0.0
     assert order.cart_discount_reason is None
-    assert order.cart_discount_approved_by is None
+    assert order.discount_approval_id is None
 
 
 def test_order_create_accepts_delivery_fields():
@@ -87,7 +89,9 @@ def test_order_create_accepts_cart_discount():
     assert order.cart_discount_percent == 7.5
     assert order.cart_discount_amount == 375.0
     assert order.cart_discount_reason == "Loyal customer"
-    assert order.cart_discount_approved_by == "U-manager-01"
+    # A typed approver is never trusted: the model drops it at the door.
+    assert not hasattr(order, "cart_discount_approved_by")
+    assert "cart_discount_approved_by" not in order.model_dump()
 
 
 def test_order_create_rejects_negative_cart_discount_percent():

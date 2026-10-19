@@ -236,3 +236,55 @@ def evaluate_offer_price(
         "effective_cap_pct": cap,
         "implied_discount_pct": round(pct, 2),
     }
+
+
+def offer_write_problem(
+    mrp: Optional[float],
+    offer_price: Optional[float],
+    discount_category: Optional[str] = None,
+    brand: Optional[str] = None,
+    judge_cap: bool = True,
+) -> Optional[str]:
+    """THE check every door that WRITES an HQ offer runs -- single product
+    create / edit, catalog create / edit / promote, the product-master edit,
+    every import through the canonical door, and the bulk price / offer tools
+    (which report the same evaluate_offer_price verdict per row).
+
+    None when the offer may be saved; else the refusal, in words. An offer
+    above MRP is refused, and so is one deeper than the item's category /
+    luxury-brand cap: an HQ offer is sold as-is at the till without counting
+    against anyone's limit (orders/pricing measures store discount from it),
+    so the cap has to hold where the offer is set. Nothing to judge (no MRP or
+    no offer) -> None; a non-positive MRP is each door's own concern.
+    ``judge_cap=False`` -- an edit that moves no price, tier or brand
+    (offer_terms_changed): only the MRP rule, so a legacy offer never blocks
+    an unrelated edit.
+    """
+    if mrp is None or offer_price is None:
+        return None
+    verdict = evaluate_offer_price(mrp, offer_price, discount_category, brand)
+    if verdict["reason"] == "MRP_BELOW_OFFER":
+        return "Offer price cannot exceed MRP"
+    if verdict["reason"] == "CAP_EXCEEDED" and judge_cap:
+        return (
+            f"Offer price refused: {verdict['message']} An HQ offer may not go "
+            f"deeper than the item's discount cap."
+        )
+    return None
+
+
+def offer_terms_changed(patch: dict, current: dict) -> bool:
+    """Does an edit change what the standing offer is judged on -- the MRP,
+    the offer, the tier or the brand? An edit form re-sends every field; a
+    value equal to the stored one is not a change (a legacy offer never blocks
+    an unrelated edit), a new value is."""
+    def same(a, b) -> bool:
+        try:
+            return abs(float(a) - float(b)) <= _EPS
+        except (TypeError, ValueError):
+            return str(a or "").strip().upper() == str(b or "").strip().upper()
+
+    return any(
+        k in (patch or {}) and not same(patch[k], (current or {}).get(k))
+        for k in ("mrp", "offer_price", "discount_category", "brand")
+    )

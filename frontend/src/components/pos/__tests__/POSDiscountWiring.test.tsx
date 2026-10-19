@@ -58,7 +58,6 @@ describe('POS discount wiring', () => {
       cart_discount_percent: 0,
       cart_discount_amount: 0,
       cart_discount_reason: null,
-      cart_discount_approved_by: null,
     });
   });
 
@@ -77,12 +76,18 @@ describe('POS discount wiring', () => {
     expect(onOpen.mock.calls[0][0].id).toBe('a');
   });
 
-  it('clamps the bill discount to the role cap', () => {
+  it('lets a bill discount over the role cap through, flagged for a manager', () => {
+    // Owner 2026-10-18: over the seller's limit is no longer clamped away --
+    // the server refuses it with DISCOUNT_NEEDS_APPROVAL and the till asks a
+    // manager. The card says so up front.
     render(<BillDiscountCard />);
     const pct = screen.getByLabelText('Overall discount percent') as HTMLInputElement;
-    // 40% from a 10%-cap user must not reach the store.
     fireEvent.change(pct, { target: { value: '40' } });
-    expect(usePOSStore.getState().cart_discount_percent).toBe(10);
+    expect(usePOSStore.getState().cart_discount_percent).toBe(40);
+    expect(screen.getByText(/Over your 10% limit\. A manager approves it/)).toBeTruthy();
+    // Still never above 100%.
+    fireEvent.change(pct, { target: { value: '140' } });
+    expect(usePOSStore.getState().cart_discount_percent).toBe(100);
   });
 
   it('asks for a reason before a bill discount is usable', () => {

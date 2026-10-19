@@ -115,8 +115,11 @@ ACTION_TYPES: frozenset = frozenset({
 # supplier credit and approve its 'rtv' approval, so whoever raises one cannot
 # also PIN-approve it -- the E4 two-person control on a large supplier credit
 # (services/vendor_rma.credit_requires_approval) needs a second accounts person.
+# discount_override (owner 2026-10-18): a seller asks for a discount over their
+# own limit and a DIFFERENT manager approves it (services/discount_approval.py
+# also refuses to spend one its own requester approved).
 MAKER_CHECKER_ACTIONS: frozenset = frozenset(
-    {"journal_entry", "petty_cash", "REFUND_APPROVAL_MATRIX", "rtv"}
+    {"journal_entry", "petty_cash", "REFUND_APPROVAL_MATRIX", "rtv", "discount_override"}
 )
 
 # Role tiers. A request resolved to a tier may be approved by any role at or
@@ -513,10 +516,15 @@ class ApprovalEngine:
         reason: str = "",
         required_tier: Optional[str] = None,
         dedupe_key: Optional[str] = None,
+        only_roles: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Record a REQUESTED approval with a 60-min TTL. Dedupes an identical
         live (REQUESTED) request via dedupe_key. Fail-soft -> {"ok": False,
-        "error": "no_db"} with no DB."""
+        "error": "no_db"} with no DB.
+
+        ``only_roles`` may NARROW the roles the tier routes to (never widen):
+        a discount over an area manager's cap goes to ADMIN / SUPERADMIN only
+        (services/discount_approval)."""
         coll = self._coll()
         if coll is None:
             return {"ok": False, "error": "no_db"}
@@ -549,6 +557,8 @@ class ApprovalEngine:
         required_roles = approver_roles_for(
             {"action_type": action_type, "required_roles": self._tier_to_roles(tier)}
         )
+        if only_roles:
+            required_roles = [r for r in required_roles if r in set(only_roles)]
         now = _now()
         expires_at = now + timedelta(minutes=_validity_minutes())
         is_mc = action_type in MAKER_CHECKER_ACTIONS
@@ -1003,25 +1013,45 @@ class ApprovalEngine:
                 mismatch = "tier_too_low"
 
         if mismatch:
-            try:
-                coll.find_one_and_update(
-                    {"request_id": updated.get("request_id"), "consumed": True,
-                     "consumed_by": consumed_by},
-                    {"$set": {
-                        "status": ApprovalStatus.APPROVED.value,
-                        "consumed": False,
-                        "consumed_at": None,
-                        "consumed_by": None,
-                    }},
-                )
-            except Exception:  # noqa: BLE001
-                pass
+            self._unconsume(updated.get("request_id"), consumed_by)
             return {"ok": False, "error": mismatch}
 
         audit_id = self._write_audit("consumed", updated, actor=consumed_by)
         self._set(updated.get("request_id"), {"audit_log_id": audit_id})
         logger.info("[APPROVALS] %s CONSUMED by %s", updated.get("request_id"), consumed_by)
         return {"ok": True, "request": _jsonable(updated)}
+
+    def _unconsume(self, request_id: Optional[str], consumed_by: str) -> bool:
+        """Put a spent approval back to APPROVED -- only the spender's own
+        spend (atomic, guarded on consumed_by). True when it was given back."""
+        coll = self._coll()
+        if coll is None or not request_id:
+            return False
+        try:
+            back = coll.find_one_and_update(
+                {"request_id": request_id, "consumed": True,
+                 "consumed_by": consumed_by},
+                {"$set": {
+                    "status": ApprovalStatus.APPROVED.value,
+                    "consumed": False,
+                    "consumed_at": None,
+                    "consumed_by": None,
+                }},
+            )
+        except Exception:  # noqa: BLE001
+            return False
+        return back is not None
+
+    def release_consumption(self, request_id: str, *, consumed_by: str) -> bool:
+        """Give back an approval whose action then failed to save (the order
+        that spent it was never written), so it is not burned for nothing.
+        Audited as ``consume_released``."""
+        if not self._unconsume(request_id, consumed_by):
+            return False
+        doc = self._raw(request_id)
+        if doc:
+            self._write_audit("consume_released", doc, actor=consumed_by)
+        return True
 
     def _consume_failure(self, ident: Dict[str, Any]) -> Dict[str, Any]:
         doc = None

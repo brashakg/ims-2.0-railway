@@ -546,7 +546,7 @@ class TestSpinePutCorrectionsClassification:
         product = _product("pid-1", "u-a", name="asha", mrp=1000.0,
                            offer_price=900.0)
         recorder = self._run_put(
-            monkeypatch, _SpineRepo(product), {"mrp": 1500.0}, self._editor()
+            monkeypatch, _SpineRepo(product), {"mrp": 1050.0}, self._editor()
         )
         rows = [r for r in recorder.rows if r.get("action") == "product.updated"]
         assert len(rows) == 1
@@ -653,7 +653,7 @@ class TestCatalogPutCorrectionsClassification:
     def test_pricing_only_catalog_edit_not_counted(self, monkeypatch):
         doc = self._catalog_doc()
         _, recorder = self._run_put(
-            monkeypatch, doc, {"pricing": {"offer_price": 4200.0}}, self._editor()
+            monkeypatch, doc, {"pricing": {"offer_price": 4400.0}}, self._editor()
         )
         rows = [r for r in recorder.rows if r.get("action") == "product.updated"]
         assert len(rows) == 1

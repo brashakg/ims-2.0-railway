@@ -177,7 +177,20 @@ async def create_request(
     body: RequestCreate,
     current_user: Dict[str, Any] = Depends(get_current_user),
 ):
-    """Open an approval request (any authenticated maker)."""
+    """Open an approval request (any authenticated maker).
+
+    A discount_override request is NEVER built here: the till's order check
+    builds it from the server's own pricing of the bill
+    (services/discount_approval.ask_manager), so a manager never approves
+    figures the cashier typed."""
+    if body.action_type == "discount_override":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "A discount approval is raised from the till (Complete sale -> "
+                "Ask a manager to approve), not directly."
+            ),
+        )
     res = _engine().request(
         action_type=body.action_type,
         requested_by=current_user.get("user_id"),

@@ -831,7 +831,7 @@ class TestGtinAttributeOnTheEditDoor:
         (key, code), = sent.items()
         assert mock_db["products"].find_one({"product_id": pid})["attributes"][key] == code
         assert key not in mock_db["catalog_products"].find_one({"id": twin_id})["attributes"]
-        assert _update(pid, mrp=1100.0)["product_id"] == pid  # not a barcode
+        assert _update(pid, mrp=1050.0)["product_id"] == pid  # not a barcode
         down["on"] = False
         _update(pid, attributes=sent)
         assert mock_db["catalog_products"].find_one({"id": twin_id})["attributes"][key] == code
