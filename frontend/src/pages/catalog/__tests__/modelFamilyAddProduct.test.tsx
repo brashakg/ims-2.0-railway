@@ -77,9 +77,6 @@ vi.mock('../../../services/api/inventory', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../services/api/inventory')>()),
   reorderApi: { setShopLevel: vi.fn(async () => ({})) },
 }));
-vi.mock('../../../services/api/productTemplates', () => ({
-  productTemplatesApi: { list: vi.fn(async () => ({ templates: [] })) },
-}));
 vi.mock('../../../services/api/catalog', () => ({
   CatalogRequestError: class CatalogRequestError extends Error { status = 0; },
   catalogProductsApi: { get: vi.fn(), list: vi.fn(async () => ({ products: [] })), promoteDryRun: vi.fn() },

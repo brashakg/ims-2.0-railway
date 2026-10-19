@@ -28,7 +28,6 @@ SITES = [
     ("catalog_products", "category", None),
     ("orders", "items.category", "items"),
     ("orders", "items.item_type", "items"),
-    ("product_templates", "category", None),
     ("brand_masters", "categories", "categories"),
     ("hsn_gst_master", "category", None),
     ("catalog_field_options", "category", None),

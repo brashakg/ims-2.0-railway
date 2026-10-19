@@ -22,9 +22,6 @@ import {
   type FamilyHint,
   type SimilarProductSummary,
 } from '../../../services/api/products';
-// Import the templates service DIRECTLY from its module (not the api barrel —
-// the barrel re-export fails to resolve for new services, TS2614).
-import { productTemplatesApi, type ProductTemplate } from '../../../services/api/productTemplates';
 // Catalog-products (imported review docs) API — DIRECT module import (TS2614).
 import {
   catalogProductsApi,
@@ -53,7 +50,6 @@ import {
   validateReviewForm,
   variantFieldRule,
   variantFlaggedFormFields,
-  withoutManufacturerBarcodes,
 } from '../productAddShared';
 import {
   backToQueueAddress,
@@ -121,13 +117,8 @@ export function useQuickAddForm() {
     inventory: true,
   });
 
-  // ---- Templates + clone state (Phase C) -----------------------------------
+  // ---- Clone popover state (the header's Templates button) -----------------
   const [templatesOpen, setTemplatesOpen] = useState(false);
-  const [templates, setTemplates] = useState<ProductTemplate[]>([]);
-  const [templatesLoading, setTemplatesLoading] = useState(false);
-  const [templatesLoaded, setTemplatesLoaded] = useState(false);
-  const [saveName, setSaveName] = useState('');
-  const [savingTemplate, setSavingTemplate] = useState(false);
   const [cloneSku, setCloneSku] = useState('');
   const [cloning, setCloning] = useState(false);
 
@@ -397,8 +388,8 @@ export function useQuickAddForm() {
   );
 
   // Apply a ProductFormValues blob to every form field. The inverse of
-  // currentValues(); used by BOTH "load template" and "clone product" so the
-  // two prefill paths stay identical. Does NOT touch the SKU/barcode/qty
+  // currentValues(); used by "clone product" and the other prefills. Does
+  // NOT touch the SKU/barcode/qty
   // (inventory) fields — a loaded shape is a starting point, not a real SKU.
   const applyFormValues = useCallback((v: ProductFormValues) => {
     // Preserve the loaded HSN/GST: skip the next category-driven autofill so a
@@ -1229,78 +1220,6 @@ export function useQuickAddForm() {
     handleReviewSkip,
   ]);
 
-  // ---- Templates: list / load / save / delete ------------------------------
-  const loadTemplates = useCallback(async () => {
-    setTemplatesLoading(true);
-    try {
-      const res = await productTemplatesApi.list();
-      setTemplates(res.templates || []);
-      setTemplatesLoaded(true);
-    } catch {
-      toast.error('Could not load templates.');
-    } finally {
-      setTemplatesLoading(false);
-    }
-  }, [toast]);
-
-  // Lazy-load the list the first time the panel is opened.
-  useEffect(() => {
-    if (templatesOpen && !templatesLoaded && !templatesLoading) {
-      void loadTemplates();
-    }
-  }, [templatesOpen, templatesLoaded, templatesLoading, loadTemplates]);
-
-  const handleLoadTemplate = useCallback(
-    (tpl: ProductTemplate) => {
-      // A template load replaces the whole form — leave variant mode if active.
-      setVariantCtx(null);
-      setFlaggedFields(new Set());
-      // A template starts a NEW SKU: never with a maker's barcode (same strip as Clone).
-      applyFormValues(withoutManufacturerBarcodes(tpl.payload));
-      setTemplatesOpen(false);
-      toast.success(`Loaded template "${tpl.name}". Edit and save as a new product.`);
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    },
-    [applyFormValues, toast]
-  );
-
-  const handleSaveTemplate = useCallback(async () => {
-    const name = saveName.trim();
-    if (!name) {
-      toast.error('Give the template a name first.');
-      return;
-    }
-    if (!selectedCategory) {
-      toast.error('Pick a category before saving a template.');
-      return;
-    }
-    setSavingTemplate(true);
-    try {
-      const created = await productTemplatesApi.create(name, currentValues(), selectedCategory);
-      // Prepend so it shows at the top of the (newest-first) list.
-      setTemplates((prev) => [created, ...prev.filter((t) => t.template_id !== created.template_id)]);
-      setSaveName('');
-      toast.success(`Saved template "${created.name}".`);
-    } catch {
-      toast.error('Failed to save template.');
-    } finally {
-      setSavingTemplate(false);
-    }
-  }, [saveName, selectedCategory, currentValues, toast]);
-
-  const handleDeleteTemplate = useCallback(
-    async (tpl: ProductTemplate) => {
-      try {
-        await productTemplatesApi.remove(tpl.template_id);
-        setTemplates((prev) => prev.filter((t) => t.template_id !== tpl.template_id));
-        toast.success(`Deleted template "${tpl.name}".`);
-      } catch {
-        toast.error('Could not delete this template (you may not own it).');
-      }
-    },
-    [toast]
-  );
-
   // ---- Clone: prefill from an existing product -----------------------------
   const cloneFromProduct = useCallback(
     (product: ProductDoc) => {
@@ -1628,11 +1547,9 @@ export function useQuickAddForm() {
     // modes
     editMode, isReviewMode, variantCtx, exitVariantMode, leaveFamily, familyHint, optedOutLeadId,
     flaggedFields, clearFlag,
-    // templates + clone
-    templatesOpen, setTemplatesOpen, templates, templatesLoading,
-    saveName, setSaveName, savingTemplate, handleSaveTemplate,
+    // clone popover
+    templatesOpen, setTemplatesOpen,
     cloneSku, setCloneSku, cloning, handleCloneFromSku,
-    handleLoadTemplate, handleDeleteTemplate,
     // duplicate rescue
     dupInfo, setDupInfo, dupBusy, handleDupAddVariant, handleDupOpenExisting,
     // similar products

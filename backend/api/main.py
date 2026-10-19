@@ -124,7 +124,6 @@ from .routers import (
     lens_stock_router,
     lens_enums_router,
     catalog_field_options_router,
-    product_templates_router,
     audit_router,
     budgets_router,
     online_store_router,
@@ -1299,11 +1298,6 @@ app.include_router(products_router, prefix="/api/v1/products", tags=["Products"]
 # first-registered-wins on a path collision).
 app.include_router(
     product_master_router, prefix="/api/v1/products", tags=["Product Master"]
-)
-app.include_router(
-    product_templates_router,
-    prefix="/api/v1/product-templates",
-    tags=["Product Templates"],
 )
 app.include_router(inventory_router, prefix="/api/v1/inventory", tags=["Inventory"])
 app.include_router(customers_router, prefix="/api/v1/customers", tags=["Customers"])

@@ -58,9 +58,6 @@ vi.mock('../../../services/api/products', () => {
     },
   };
 });
-vi.mock('../../../services/api/productTemplates', () => ({
-  productTemplatesApi: { list: vi.fn(async () => ({ templates: [] })) },
-}));
 vi.mock('../../../services/api/catalog', () => ({
   CatalogRequestError: class CatalogRequestError extends Error {
     status = 0;

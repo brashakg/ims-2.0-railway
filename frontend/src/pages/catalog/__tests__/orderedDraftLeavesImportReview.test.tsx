@@ -52,9 +52,6 @@ vi.mock('../../../services/api/products', () => ({
     getWebsiteVerdict: vi.fn(async (brand: string) => ({ brand, online: true, reason: null })),
   },
 }));
-vi.mock('../../../services/api/productTemplates', () => ({
-  productTemplatesApi: { list: vi.fn(async () => ({ templates: [] })) },
-}));
 
 const DOCS: Record<string, Record<string, unknown>> = {
   'CAT-ORDERED': {
