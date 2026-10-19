@@ -477,6 +477,31 @@ async def superadmin_invoice_change(
         if not repo.update_if(
             order_id, {"invoice_number": original_invoice}, update_data
         ):
+            # The serial this press minted is never printed: record the gap
+            # (Rule 46(b) -- every serial accounted for) next to the audit row
+            # above that announced it, and void its link record.
+            _write_order_edit_audit(
+                action="ORDER_INVOICE_REVISION_REFUSED",
+                order=order,
+                before=before,
+                after=before,
+                reason="revision refused, serial unused: another request "
+                "revised this invoice first",
+                user_id=current_user.get("user_id"),
+                extra={
+                    "original_invoice_number": original_invoice,
+                    "unused_invoice_number": new_invoice_number,
+                    "revision_id": revised_doc["revision_id"],
+                },
+            )
+            if db is not None:
+                try:
+                    db.get_collection("revised_invoices").update_one(
+                        {"revision_id": revised_doc["revision_id"]},
+                        {"$set": {"status": "REFUSED_SERIAL_UNUSED"}},
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[ORDERS] revised_invoices void failed: %s", exc)
             raise HTTPException(
                 status_code=409,
                 detail=(

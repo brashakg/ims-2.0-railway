@@ -22,6 +22,7 @@ invoice-serial counter exercise their real atomic paths.
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 import pytest
@@ -689,3 +690,25 @@ def test_revised_invoice_write_is_compare_and_set(client, auth_headers, wired, m
     assert resp.status_code == 409, resp.text
     saved = repo.collection.find_one({"order_id": "ord-16"})
     assert saved["invoice_number"] == "TES01/2627/00001"
+
+
+def test_refused_revision_records_the_unused_serial(client, auth_headers, wired, monkeypatch):
+    """#1231 review: the refused press minted a serial it never prints -- an
+    audit row says so (revision refused, serial unused) and its link record
+    is voided, so every serial in the series is accounted for."""
+    _seed_order(wired["order_repo"], invoice_number="INV/BOK-01/26-27/0001")
+    repo = wired["order_repo"]
+    stale = repo.find_by_id("ord-16")
+    repo.collection.update_one({"order_id": "ord-16"},
+                               {"$set": {"invoice_number": "TES01/2627/00099"}})
+    monkeypatch.setattr(repo, "find_by_id", lambda _oid: dict(stale))
+    assert _revise(client, auth_headers).status_code == 409
+    rows = [d for d in wired["db"].get_collection("audit_logs").docs
+            if d.get("action") == "ORDER_INVOICE_REVISION_REFUSED"]
+    assert len(rows) == 1
+    assert "revision refused, serial unused" in rows[0]["detail"]
+    unused = rows[0]["context"]["unused_invoice_number"]
+    # the mint's first serial, never printed
+    assert re.fullmatch(r"TES01/\d{4}/00001", unused), unused
+    rev = wired["db"].get_collection("revised_invoices").docs
+    assert [d["status"] for d in rev] == ["REFUSED_SERIAL_UNUSED"]
