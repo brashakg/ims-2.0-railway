@@ -239,6 +239,12 @@ _POLARIZATION = {
     "true": "yes", "polarized": "yes", "polarised": "yes",
     "false": "no", "non-polarized": "no", "non-polarised": "no",
 }
+# One spelling per gender, so ONE rule (gender_men) finds every men's frame.
+_GENDER = {
+    "m": "men", "male": "men", "man": "men", "mens": "men", "men-s": "men", "gents": "men",
+    "f": "women", "female": "women", "woman": "women", "womens": "women", "women-s": "women",
+    "ladies": "women", "uni-sex": "unisex", "u": "unisex",
+}
 
 
 def _canonical_category(category: Any) -> Optional[str]:
@@ -310,11 +316,22 @@ def generate_attribute_tags(
                 # One spelling per meaning, so ONE collection rule
                 # (polarization_yes) finds every polarized product.
                 value = _POLARIZATION.get(value, value)
+            elif prefix == "gender":
+                value = _GENDER.get(value, value)
             token = f"{prefix}_{value}"
             if token in seen:
                 continue
             seen.add(token)
             out.append(token)
+            if (
+                prefix == "uvprotection"
+                and "polari" in value
+                and ("polarization", "polarization") in tag_map
+                and not any(t.startswith("polarization_") for t in out)
+            ):
+                # 'Polarized' typed under UV protection is a polarized lens.
+                seen.add("polarization_yes")
+                out.append("polarization_yes")
         return out
     except Exception:  # noqa: BLE001 -- pure payload helper, never raise
         return []
