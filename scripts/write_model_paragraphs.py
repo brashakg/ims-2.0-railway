@@ -14,7 +14,9 @@ for every model (a lead with colours / sizes linked to it) it asks the
 (product_description.generate_model_paragraph: model-level fields and the
 NUMBER of colours / sizes only -- no colour name is sent, and an answer that
 names one is thrown away) and stores it on the lead's twin as
-ecom.model_paragraph, queueing the listing (the next press / scheduled sync
+ecom.model_paragraph (with the colour / size counts it was written for:
+the press uses it only while the listing still carries those), queueing the
+listing (the next press / scheduled sync
 carries it; a first publish stays the explicit run).
 
 DRY-RUN (DEFAULT): lists the models and whether each has a paragraph --
@@ -41,22 +43,25 @@ sys.path.insert(
 from api.services import product_master as pm  # noqa: E402
 from api.services.catalog_ecom import dirty_marks  # noqa: E402
 from api.services.product_description import generate_model_paragraph  # noqa: E402
+from api.services.shopify_live_sync import variants_for_product  # noqa: E402
+from api.services.shopify_push.listing import PARAGRAPH_COUNTS, model_listing  # noqa: E402
 
 BACKUP = "model_paragraph_backup"
 
 
 def plan(db, model_sku: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Every model: its lead, twin, colours and sizes."""
+    """Every model: its lead, twin, and the colours and sizes ON its listing
+    (listing.model_listing -- the press's own reader: a linked colour still
+    waiting to be finished is not counted)."""
     out = []
     for lead in db["products"].find({}):
         if lead.get("variant_of") or lead.get("deleted_at") or (model_sku and lead.get("sku") != model_sku):
             continue
-        members = pm.family_members(db, lead["product_id"])
-        if len(members) < 2:
-            continue
-        values, _clashes = pm.family_option_values([m for m in members if not m.get("deleted_at")])
         twin = db["catalog_products"].find_one({"id": lead.get("pim_product_id") or lead.get("product_id")})
         if twin is None:
+            continue
+        listing = model_listing(db, twin, variants_for_product(db, twin))
+        if not listing or listing.get("variant_of"):
             continue
         spec = pm.category_spec(lead.get("category"))
         out.append({
@@ -64,8 +69,8 @@ def plan(db, model_sku: Optional[str] = None) -> List[Dict[str, Any]]:
             "twin_id": twin["id"],
             "category": spec.display if spec is not None else str(lead.get("category")),
             "attributes": lead.get("attributes") or {},
-            "colours": list(dict.fromkeys(v["option_color"] for v in values.values() if v["option_color"])),
-            "sizes": list(dict.fromkeys(v["option_size"] for v in values.values() if v["option_size"])),
+            "colours": listing["colours"],
+            "sizes": listing["sizes"],
             "has_paragraph": bool((twin.get("ecom") or {}).get("model_paragraph")),
         })
     return out
@@ -85,7 +90,9 @@ async def apply(db, models: List[Dict[str, Any]]) -> Dict[str, Any]:
                                "at": datetime.now(timezone.utc)})
         db["catalog_products"].update_one(
             {"id": m["twin_id"]},
-            {"$set": {"ecom.model_paragraph": text, **{f"ecom.{k}": v for k, v in dirty_marks().items()}}},
+            {"$set": {"ecom.model_paragraph": text,
+                      f"ecom.{PARAGRAPH_COUNTS}": [len(m["colours"]), len(m["sizes"])],
+                      **{f"ecom.{k}": v for k, v in dirty_marks().items()}}},
         )
         done.append(m["lead_sku"])
     return {"run_id": run_id, "written": done, "kept_deterministic": skipped}

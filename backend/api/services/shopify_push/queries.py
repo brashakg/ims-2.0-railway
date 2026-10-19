@@ -399,3 +399,25 @@ _ONLINE_STORE_PUBLICATION_NAME = "Online Store"
 # Resolved once per process (a publication id is stable for the shop).
 _publication_id_cache: Dict[str, str] = {}
 
+
+
+# The collection rebuild (collection_registry / scripts/rebuild_collections.py):
+# every collection on the shop with IMS's key metafield (set on the ones IMS
+# keeps), and the delete of one that is not IMS's.
+_COLLECTIONS_READ = """
+query imsCollectionsRead($after: String) {
+  collections(first: 250, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes { id handle title productsCount { count } imsKey: metafield(namespace: "ims", key: "collection_key") { value } }
+  }
+}
+"""
+
+_COLLECTION_DELETE = """
+mutation imsCollectionDelete($input: CollectionDeleteInput!) {
+  collectionDelete(input: $input) {
+    deletedCollectionId
+    userErrors { field message }
+  }
+}
+"""

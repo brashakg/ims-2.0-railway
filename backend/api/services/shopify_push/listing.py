@@ -27,7 +27,8 @@ else (review of #1233: one bad colour never freezes a live listing).
 
 ONLY FINISHED COLOURS GO ON BY THEMSELVES (review of #1233): a colour not
 yet on the listing joins it only when it is active, not archived, not a
-purchase-order draft, not a catalogue draft and not in Needs review -- the
+purchase-order draft, not a catalogue draft (a missing cost price aside:
+the purchase brings it, owner 2026-10-19) and not in Needs review -- the
 catalogue review's approval is the human press. The others WAIT (named in
 the plan). A colour already on the listing keeps syncing whatever its state
 (switched off or archived: it sells 0, never deleted); an archived one never
@@ -79,6 +80,9 @@ ARCHIVED = "_archived"
 # A colour held back from a LIVE listing this press (named on the result).
 HELD = "_held"
 UNPRICED_SIZE = "UNPRICED_SIZE"
+# ecom field on the lead's twin: [colours, sizes] the AI paragraph was written
+# for (the colours / sizes ON the listing, never linked drafts that wait).
+PARAGRAPH_COUNTS = "model_paragraph_counts"
 
 _ID_FIELDS = ("shopify_variant_id", "shopify_inventory_item_id")
 _BARCODE_KEYS = ("gtin", "upc")
@@ -388,11 +392,37 @@ def _not_ready(pm, spine: Dict[str, Any], twin: Optional[Dict[str, Any]]) -> Opt
         return "switched off"
     if pm.is_ordered_draft(spine):
         return "a purchase-order draft -- finish it in Needs review"
-    if pm.effective_catalog_status(spine) != "ACTIVE":
+    # Finished = every catalogue field but the cost price (owner 2026-10-19:
+    # cost is internal; the purchase brings it) -- gaps_before_cost, the one
+    # rule the bill gate and send_po already ask.
+    if pm.effective_catalog_status(spine) != "ACTIVE" and pm.gaps_before_cost(spine):
         return "a catalogue draft -- finish it first"
     if (twin or {}).get("needs_review"):
         return "waiting in Needs review"
     return None
+
+
+def first_publish_not_ready(db, product: Dict[str, Any]) -> Optional[str]:
+    """Why this listing (a model's lead or a single product) may not go on the
+    website for the FIRST time, or None -- the SAME rule a colour joining a
+    listing is held to (_not_ready). A listing already on Shopify keeps
+    syncing whatever its state (it is taken down by its own door). Raises on
+    a read failure."""
+    if (product.get("ecom") or {}).get("shopify_product_id"):
+        return None
+    from .. import product_master as pm
+
+    if pm._is_archived(product):
+        return "archived"
+    # A caller holding the product row itself (product_id, no twin id) asks
+    # about it directly; a catalogue twin reads its product.
+    is_spine = bool(product.get("product_id")) and not product.get("id")
+    spine = product if is_spine else lead_spine(db, product)
+    if spine is None:
+        # No product row (none on prod, 2026-10-19): the twin is judged as
+        # before this gate -- its archived check above.
+        return None
+    return _not_ready(pm, spine, None if is_spine else product)
 
 
 def _ecom_ids_are_the_leads(db, ecom: Dict[str, Any], lead_sku: str) -> bool:
@@ -479,9 +509,14 @@ def _model_content(db, product, lead, members, values, axes, twins=None) -> Dict
         }
         for m in members
     ]
-    paragraph = ecom.get("model_paragraph") or default_model_paragraph(
-        category_name, lead_doc["attributes"], len(colours), len(sizes)
-    )
+    # The AI paragraph says how many colours / sizes the model comes in: it is
+    # used only while that is still what the listing carries (the count it
+    # was written for, scripts/write_model_paragraphs.py) -- else the
+    # deterministic one, which counts this listing's own.
+    written_for = ecom.get(PARAGRAPH_COUNTS)
+    paragraph = (
+        ecom.get("model_paragraph") if written_for == [len(colours), len(sizes)] else None
+    ) or default_model_paragraph(category_name, lead_doc["attributes"], len(colours), len(sizes))
     attr_sets = [m.get("attributes") or {} for m in members]
     keys = list(dict.fromkeys(k for a in attr_sets for k in a))
     shared = {

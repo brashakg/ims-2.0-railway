@@ -41,6 +41,7 @@ zeros; a Shopify error becomes a structured {ok:false} result, never a 500.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -52,6 +53,8 @@ from ..services import shopify_push
 from ..services import shopify_live_sync as live_sync
 from ..services.online_catalog import doc_online_state
 from ..services.stores_util import physical_stores
+
+logger = logging.getLogger(__name__)
 # The DB / audit / doc helpers and the product-sweep core live in the
 # live-sync service so the manual sweep and the scheduled sync run ONE code
 # path; re-imported by their old names so nothing else here moved.
@@ -823,7 +826,18 @@ async def push_all_pending(
         if start + processed < eligible_total:
             next_offset = start + processed
 
+    collection_registry: Optional[Dict[str, Any]] = None
     if "collections" in selected:
+        # THE IMS collection set (owner 2026-10-19), derived from the listings
+        # on the website AFTER the product sweep above, so a press that puts
+        # a brand's / shape's first product live queues its collection too.
+        # LIVE only: a dark press changes nothing.
+        try:
+            live, why = shopify_push._live_or_reason(db)
+            collection_registry = shopify_push.apply_collection_registry(db) if live else {"dark": why}
+        except Exception as exc:  # noqa: BLE001 -- reported, never stops the sweep
+            logger.warning("[PUSH] collection registry skipped: %s", exc)
+            collection_registry = {"error": str(exc)}
         for doc in _all_docs(db, "ecom_collections"):
             if len(results) >= limit:
                 break
@@ -891,6 +905,9 @@ async def push_all_pending(
         # when no products were swept. {mode, action, ok, payload{changed,
         # synced, failed, stores_mapped, ...}, code, error}.
         "stock": stock,
+        # The collection registry for this press ({created, updated,
+        # unchanged, skipped}), None when collections were not selected.
+        "collection_registry": collection_registry,
         "results": results,
     }
 
