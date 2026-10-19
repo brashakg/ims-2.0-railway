@@ -632,18 +632,7 @@ def _transfer_b2b_rows(bills):
             bucket["igst"] = round(bucket["igst"] + float(ln.get("igst", 0) or 0), 2)
         rate_lines = [rate_map[r] for r in sorted(rate_map)]
 
-        # The date printed on the transfer tax invoice (ship) when it has
-        # one; the bill's own date (complete) for a legacy mirror bill.
-        raw_date = str(
-            b.get("tax_invoice_date") or b.get("invoice_date") or b.get("bill_date") or ""
-        )
-        row_extra = (
-            # What the tax invoice was issued for (units SHIPPED, taxable) --
-            # GSTR-1 warns when the bill books a different (received) value.
-            {"issuedTaxableValue": round(float(b.get("challan_value") or 0), 2)}
-            if b.get("tax_invoice_date")
-            else {}
-        )
+        raw_date = str(b.get("invoice_date") or b.get("bill_date") or "")
         rows.append(
             {
                 "invoiceNumber": str(
@@ -673,7 +662,6 @@ def _transfer_b2b_rows(bills):
                 "deemedSupply": True,
                 "documentType": "STOCK_TRANSFER",
                 "sourceTransferId": b.get("source_transfer_id"),
-                **row_extra,
             }
         )
 

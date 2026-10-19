@@ -350,6 +350,12 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                 db, active_store, year, mon, monthrange(year, mon)[1]
             )
             _t_rows, transfer_hsn_lines = _transfer_b2b_rows(_t_bills)
+            # The transfer tax invoice a bill carries (minted at ship): its
+            # row files the date printed on it, and what it was issued for
+            # (the units SHIPPED) is checked against what the bill books.
+            _t_issued = {
+                _b.get("source_transfer_id"): _b for _b in _t_bills if _b.get("tax_invoice_date")
+            }
             for _t_row in _t_rows:
                 # The transfer tax invoice number against GSTN's rule, the
                 # same check every sale's number gets (an old TRF/ number is
@@ -357,21 +363,24 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                 _gstr1_bill_number(
                     {"invoice_number": _t_row.get("invoiceNumber")}, validation_issues
                 )
-                _issued = _t_row.get("issuedTaxableValue")
-                if _issued is not None and abs(_issued - _t_row["taxableValue"]) > 0.01:
-                    validation_issues.append(
-                        {
-                            "level": "warn",
-                            "invoice": _t_row.get("invoiceNumber"),
-                            "issue": (
-                                f"Transfer tax invoice was issued at dispatch for "
-                                f"Rs {_issued:.2f} (taxable); Rs "
-                                f"{_t_row['taxableValue']:.2f} was received and is "
-                                "filed here. Issue a credit note for the difference "
-                                "or file the invoice value - ask the CA."
-                            ),
-                        }
-                    )
+                _t_bill = _t_issued.get(_t_row.get("sourceTransferId"))
+                if _t_bill:
+                    _t_row["invoiceDate"] = str(_t_bill["tax_invoice_date"])[:10]
+                    _issued = round(float(_t_bill.get("challan_value") or 0), 2)
+                    if abs(_issued - _t_row["taxableValue"]) > 0.01:
+                        validation_issues.append(
+                            {
+                                "level": "warn",
+                                "invoice": _t_row.get("invoiceNumber"),
+                                "issue": (
+                                    f"Transfer tax invoice was issued at dispatch for "
+                                    f"Rs {_issued:.2f} (taxable); Rs "
+                                    f"{_t_row['taxableValue']:.2f} was received and is "
+                                    "filed here. Issue a credit note for the difference "
+                                    "or file the invoice value - ask the CA."
+                                ),
+                            }
+                        )
                 if not _t_row.get("customerGSTIN"):
                     validation_issues.append(
                         {
