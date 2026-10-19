@@ -72,6 +72,7 @@ from .catalog_ecom import dirty_marks
 from .product_naming import (
     build_handle,
     build_product_name,
+    legacy_product_name,
     build_seo_description,
     build_seo_title,
     needs_name,
@@ -1470,17 +1471,20 @@ def identity_key_of(doc: Dict[str, Any]) -> Optional[str]:
     )
 
 
-def minted_name(doc: Dict[str, Any]) -> str:
+def minted_name(doc: Dict[str, Any], *, legacy: bool = False) -> str:
     """The name the create door mints for a product doc, its stored name aside.
     A contact lens is named by the parts its SKU and key read (owner
-    2026-09-28: power, base curve, diameter and pack in the name too)."""
+    2026-09-28: power, base curve, diameter and pack in the name too).
+    `legacy=True` gives the name made BEFORE the brand was stripped from the
+    model ("Carrera Carrera 3044/S ..."): for recognising old minted names only."""
     doc = doc or {}
     detail = ""
     if resolve_category(doc.get("category")) in _CONTACT_LENSES:
         detail = " ".join(name for _, name in _cl_parts(doc.get("attributes") or {}))
     # The name reads the model the form shows, never a hidden copy (_shown_attributes).
     attrs = _shown_attributes(doc.get("attributes") or {}, doc.get("category"))
-    return build_product_name({**doc, "name": None, "attributes": attrs}, detail=detail)
+    build = legacy_product_name if legacy else build_product_name
+    return build({**doc, "name": None, "attributes": attrs}, detail=detail)
 
 
 def name_was_minted(doc: Dict[str, Any]) -> bool:
@@ -1492,10 +1496,14 @@ def name_was_minted(doc: Dict[str, Any]) -> bool:
     name = doc.get("name")
     if not name:
         return False
-    if name == build_product_name({**doc, "name": None}):
+    bare = {**doc, "name": None}
+    # Today's formula, then the legacy one (a doubled-brand name minted before
+    # the brand was stripped from the model still counts as minted, so an edit
+    # re-mints it in the clean form instead of leaving it stale).
+    if name in (build_product_name(bare), legacy_product_name(bare)):
         return True
     try:
-        return name == minted_name(doc)
+        return name in (minted_name(doc), minted_name(doc, legacy=True))
     except ProductMasterError:
         return False
 

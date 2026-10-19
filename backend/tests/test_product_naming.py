@@ -375,3 +375,27 @@ def test_per_item_name_has_no_doubled_brand_either():
         "attributes": {"brand_name": "Carrera", "model_no": "Carrera 3044/S", "frame_color": "Black"},
     }
     assert build_product_name(doc) == "Carrera 3044/S Sunglasses - Black"
+
+
+def test_partial_brand_overlap_for_multi_word_brands():
+    assert build_model_title(_m("Hugo Boss", "Boss 1234")) == "Hugo Boss 1234"
+    assert build_model_title(_m("Vogue Eyewear", "Vogue VO5051")) == "Vogue Eyewear VO5051"
+    assert build_model_title(_m("Emporio Armani", "Armani EA4115")) == "Emporio Armani EA4115"
+    assert build_model_title(_m("Hugo Boss", "1234", "Boss")) == "Hugo Boss 1234"
+    # a single-word brand has no partial overlap; a different leading word stays
+    assert build_model_title(_m("Carrera", "Carr 12")) == "Carrera Carr 12"
+    assert build_model_title(_m("Hugo Boss", "Bossy 12")) == "Hugo Boss Bossy 12"
+
+
+def _t(brand, no, name=""):
+    # lower-cased: the title-caser's casing of an accented capital is not what this tests
+    return build_model_title(_m(brand, no, name)).lower()
+
+
+def test_accented_words_are_whole_words():
+    # a letter with an accent is a letter: "Eclat" is only a prefix of these words
+    assert _t("Eclat", "Éclatant 12") == "eclat éclatant 12"
+    assert _t("Eclat", "Eclaté 12") == "eclat eclaté 12"
+    assert _t("Eclat", "Eclat 12") == "eclat 12"
+    assert _t("Éclat", "Éclat 12") == "éclat 12"
+    assert _t("Éclat", "Façade", "Façade") == "éclat façade"

@@ -384,6 +384,19 @@ def _explicit_name(product: Dict[str, Any]) -> str:
 
 
 def build_product_name(product: Dict[str, Any], detail: str = "") -> str:
+    """Deterministic display name for a product-like dict (see _build_product_name)."""
+    return _build_product_name(product, detail, strip_brand=True)
+
+
+def legacy_product_name(product: Dict[str, Any], detail: str = "") -> str:
+    """The name build_product_name minted BEFORE the brand was stripped from the
+    model ("Carrera Carrera 3044/S Sunglasses - Black"). LEGACY: only for
+    recognising a stored name as minted (product_master.name_was_minted) and
+    for the doubled-brand backfill; never use it to build a new name."""
+    return _build_product_name(product, detail, strip_brand=False)
+
+
+def _build_product_name(product: Dict[str, Any], detail: str, *, strip_brand: bool) -> str:
     """Deterministic display name for a product-like dict.
 
     "{Brand} {Model} {Shape} {Gender} {Category-word} {Detail} - {Colour}",
@@ -405,7 +418,9 @@ def build_product_name(product: Dict[str, Any], detail: str = "") -> str:
 
     a = _attrs(product)
     brand = _brand(product)
-    model = _strip_brand(_model(product), brand)
+    model = _model(product)
+    if strip_brand:
+        model = _strip_brand(model, brand)
     shape = _first(a.get("shape"), a.get("frame_type"))
     gender = _gender_qualifier(product)
     category_word = resolve_category_word(product.get("category"))
@@ -494,25 +509,36 @@ def build_seo_description(product: Dict[str, Any]) -> str:
 # bill line of ONE item (it carries its colour), so it is never read here.
 
 
+# A word is a run of letters/digits in ANY script (accents included); "_" is a
+# separator, not a letter.
+_WORD = r"[^\W_]"
+_WORDS_RE = re.compile(rf"{_WORD}+")
+
+
 def _strip_brand(piece: str, brand: str) -> str:
     """Drop a leading brand from a model number / name ("Carrera 3044/S" with
     brand "Carrera" -> "3044/S"). Only at a word boundary, so brand "Ray" never
-    cuts "Rayban...", and a brand with a space or hyphen ("Ray-Ban") also
-    matches its other spelling ("Ray Ban 3025")."""
-    words = re.findall(r"[0-9A-Za-z]+", brand)
+    cuts "Rayon...", and a brand with a space or hyphen ("Ray-Ban") also
+    matches its other spelling ("Ray Ban 3025"). A brand of two or more words
+    also loses a leading model word equal to its FIRST or LAST word ("Hugo
+    Boss" + "Boss 1234" -> "1234"; "Emporio Armani" + "Armani EA4115")."""
+    words = _WORDS_RE.findall(brand)
     if not piece or not words:
         return piece
-    pat = r"[^0-9A-Za-z]+".join(re.escape(w) for w in words)
-    return re.sub(rf"^{pat}(?![0-9A-Za-z])[^0-9A-Za-z]*", "", piece, flags=re.I).strip()
+    alts = [r"[\W_]+".join(re.escape(w) for w in words)]
+    if len(words) > 1:
+        alts += [re.escape(words[0]), re.escape(words[-1])]
+    pat = "|".join(alts)
+    return re.sub(rf"^(?:{pat})(?!{_WORD})[\W_]*", "", piece, flags=re.I).strip()
 
 
 def _words_inside(piece: str, earlier: str) -> bool:
     """True when every word of `piece` appears in `earlier`, in order, on word
     boundaries ('Victory' inside 'Victory C 01/S'; 'Ducati' is not)."""
-    words = re.findall(r"[0-9A-Za-z]+", piece)
+    words = _WORDS_RE.findall(piece)
     pos = 0
     for w in words:
-        m = re.compile(rf"(?<![0-9A-Za-z]){re.escape(w)}(?![0-9A-Za-z])", re.I).search(earlier, pos)
+        m = re.compile(rf"(?<!{_WORD}){re.escape(w)}(?!{_WORD})", re.I).search(earlier, pos)
         if not m:
             return False
         pos = m.end()
