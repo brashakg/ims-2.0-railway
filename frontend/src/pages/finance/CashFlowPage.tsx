@@ -519,6 +519,11 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: RecordKind; ve
   const pickedReceipt = (receipts ?? []).find((r) => r.grn_id === receiptId);
   const billNeedsShop = billKind === 'SERVICES' || (billKind === 'GOODS' && !!pickedReceipt && !pickedReceipt.store_id);
   const sendBillShop = canPick && billNeedsShop;
+  // The 17(5) tick: a services bill, or goods bought without a purchase order
+  // (gifts, samples, personal use) -- their GST then goes into their cost. A
+  // PO stock bill keeps its credit switch (Purchase > Invoices).
+  const canTick175 = billKind === 'SERVICES' || (billKind === 'GOODS' && !!pickedReceipt && !pickedReceipt.po_id
+    && (pickedReceipt.grn_subtype === 'NO_PO' || pickedReceipt.grn_subtype === 'DELIVERY_CHALLAN'));
 
   useEffect(() => {
     if (kind !== 'bill' || billKind !== 'GOODS') return;
@@ -598,7 +603,7 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: RecordKind; ve
           bill_kind: billKind as 'GOODS' | 'SERVICES',
           grn_id: billKind === 'GOODS' ? receiptId : undefined,
           store_id: sendBillShop ? billShop : undefined,
-          itc_blocked: billKind === 'SERVICES' && itcBlocked,
+          itc_blocked: canTick175 && itcBlocked,
         });
         toast.success(bookedTo('Bill', saved, shopName));
       } else if (kind === 'payment') {
@@ -679,7 +684,7 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: RecordKind; ve
           <input className={cls} type="date" defaultValue={today} onChange={(e) => set('bill_date', e.target.value)} />
           <input className={cls} type="number" placeholder="Taxable amount" onChange={(e) => set('taxable_amount', e.target.value)} />
           <input className={cls} type="number" placeholder="Tax (GST)" onChange={(e) => set('tax_amount', e.target.value)} />
-          {billKind === 'SERVICES' && (
+          {canTick175 && (
             <label className="col-span-2 flex items-start gap-2 text-sm text-gray-700">
               <input type="checkbox" className="mt-1" checked={itcBlocked} onChange={(e) => setItcBlocked(e.target.checked)} data-testid="bill-itc-blocked" />
               <span>Credit not claimable (section 17(5)) <span className="text-xs text-gray-500">food, vehicles, club fees and other blocked credit: this GST is not claimed in GSTR-3B and stays part of the expense</span></span>

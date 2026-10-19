@@ -1,6 +1,7 @@
 """Accounts payable: bill models, AP aging and vendor bills."""
 
 from api.utils.event_time import utc_now_iso
+from api.utils.ist import now_ist_naive
 
 from ._shared import (
     BaseModel,
@@ -26,14 +27,17 @@ from ._shared import (
 )
 from .models import GRN_SUBTYPE_DC
 
-# The 17(5) tick is a services / expense bill's: a goods bill's unclaimed GST
-# goes into its stock cost through the bill's own credit switch instead.
+# The 17(5) tick: a services / expense bill's, or -- when it is booked -- a
+# bill for goods bought WITHOUT a purchase order (gifts, samples, personal
+# use; LOW 13), whose GST then goes into those goods' cost. A purchase-order
+# stock bill keeps its input-credit switch (Purchase > Invoices).
 _ITC_BLOCKED_SERVICES_ONLY = {
     "code": "ITC_BLOCKED_SERVICES_ONLY",
     "message": (
         "'Credit not claimable (section 17(5))' is for services and expense "
-        "bills (food, vehicles, club fees). For a goods bill, switch its input "
-        "credit off when booking it under Purchase > Invoices."
+        "bills (food, vehicles, club fees), and for goods bought without a "
+        "purchase order when their bill is booked. A purchase-order stock bill "
+        "keeps its input-credit switch under Purchase > Invoices."
     ),
 }
 
@@ -390,7 +394,7 @@ async def create_vendor_bill(
                 },
             )
 
-    if bill.itc_blocked and (bill.grn_id or bill.bill_kind != ap_engine.BILL_KIND_SERVICES):
+    if bill.itc_blocked and not bill.grn_id and bill.bill_kind != ap_engine.BILL_KIND_SERVICES:
         raise HTTPException(status_code=422, detail=_ITC_BLOCKED_SERVICES_ONLY)
 
     linked = None  # the goods receipt this bill names, read below
@@ -447,6 +451,12 @@ async def create_vendor_bill(
             if unnamed is exc:
                 raise
             raise unnamed from None
+        # LOW 13: goods bought without a PO may carry the 17(5) tick; a PO
+        # receipt's stock bill may not.
+        if bill.itc_blocked and ((linked or {}).get("po_id") or (linked or {}).get("grn_subtype") not in (
+            ap_engine.GRN_SUBTYPE_NO_PO, GRN_SUBTYPE_DC,
+        )):
+            raise HTTPException(status_code=422, detail=_ITC_BLOCKED_SERVICES_ONLY)
         if (linked or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO:
             from ...services.purchase_invoice_engine import lines_from_grn
 
@@ -642,10 +652,22 @@ async def create_vendor_bill(
         if not walk_in and linked.get("po_id"):
             po = db.get_collection("purchase_orders").find_one({"po_id": linked["po_id"]}, {"_id": 0})
         share = ap_engine.header_bill_gst_rate(bill.tax_amount, bill.taxable_amount) or 0.0
+        lines = lines_from_grn(linked, po)
+        if not walk_in:
+            # LOW 17: a PO receipt costs at the BILL's price -- its taxable
+            # value spread over the receipt's lines in their order-price
+            # proportion (evenly per piece when the order names no prices).
+            value = sum(float(ln.get("qty") or 0) * float(ln.get("unit_price") or 0) for ln in lines)
+            pieces = sum(float(ln.get("qty") or 0) for ln in lines)
+            if value > 0:
+                lines = [{**ln, "unit_price": round(float(ln.get("unit_price") or 0) * bill.taxable_amount / value, 2)}
+                         for ln in lines]
+            elif pieces > 0:
+                lines = [{**ln, "unit_price": round(bill.taxable_amount / pieces, 2)} for ln in lines]
         _apply_valuation_trueup(
             db,
             {**doc, "invoice_id": bill_id},
-            {"lines": [{**ln, "gst_rate": share} for ln in lines_from_grn(linked, po)]},
+            {"lines": [{**ln, "gst_rate": share} for ln in lines]},
             _resolved_purchase_config(db),
         )
     return _clean(doc)
@@ -694,6 +716,25 @@ class VendorBillItcBlocked(BaseModel):
     itc_blocked: bool
 
 
+def _refuse_after_return_due(bill: dict) -> None:
+    """M6 (GST review 2026-10-19): the 17(5) tick decides what the bill's
+    month's GSTR-3B claims, so it cannot change once that return is due --
+    the 20th of the following month, IST -- or filed. 422 in words; the
+    change is the CA's, in the current return."""
+    from datetime import date
+
+    day = date.fromisoformat(ap_engine.iso_bill_date(bill.get("invoice_date") or bill.get("bill_date")))
+    due = date(day.year + (day.month == 12), day.month % 12 + 1, 20)
+    if now_ist_naive().date() > due:
+        raise HTTPException(status_code=422, detail={
+            "code": "GSTR3B_DUE_PASSED",
+            "message": (
+                f"GSTR-3B for {day.strftime('%B %Y')} is due/filed - record the change "
+                "in the current return with your CA."
+            ),
+        })
+
+
 @router.put("/{vendor_id}/bills/{bill_id}/itc-blocked")
 async def set_vendor_bill_itc_blocked(
     vendor_id: str,
@@ -723,6 +764,7 @@ async def set_vendor_bill_itc_blocked(
     from ..purchase_invoices import _check_bill_period_open
 
     _check_bill_period_open(db, bill)
+    _refuse_after_return_due(bill)
     was_blocked = bool(bill.get("itc_blocked"))
     if body.itc_blocked == was_blocked:
         return _clean(bill)

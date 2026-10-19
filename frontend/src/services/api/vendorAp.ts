@@ -61,6 +61,9 @@ export interface VendorReceiptRow {
   vendor_invoice_no?: string;
   created_at?: string;
   total_accepted?: number;
+  // The order the receipt is against, when there is one: a PO stock bill
+  // keeps its credit switch, never the 17(5) tick.
+  po_id?: string | null;
   // The shop that received the goods. An admin's list covers every shop
   // (no store_id sent), so the Bill form names it on each receipt.
   store_id?: string | null;
