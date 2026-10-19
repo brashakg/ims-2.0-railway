@@ -185,6 +185,21 @@ describe('DiscountApprovalPanel', () => {
     expect(screen.getByRole('button', { name: 'Ask a manager to approve' })).toBeTruthy();
   });
 
+  it('does NOT complete when the customer changed after asking', async () => {
+    usePOSStore.setState({ customer: { id: 'cust-a', name: 'Asha' } as never });
+    createOrder().mockResolvedValue({ request_id: 'REQ-5', status: 'REQUESTED' } as never);
+    vi.mocked(approvalsApi.getRequest).mockResolvedValue({ request_id: 'REQ-5', status: 'APPROVED' } as never);
+    const onApproved = vi.fn();
+    render(<DiscountApprovalPanel need={NEED} onApproved={onApproved} onClose={vi.fn()} />);
+    await ask();
+    act(() => {
+      usePOSStore.setState({ customer: { id: 'cust-b', name: 'Bina' } as never });
+    });
+    await tick();
+    expect(onApproved).not.toHaveBeenCalled();
+    expect(screen.getByText(BILL_CHANGED_MESSAGE)).toBeTruthy();
+  });
+
   it('uses an already-approved request for the same bill straight away', async () => {
     createOrder().mockResolvedValue({ request_id: 'REQ-3', status: 'APPROVED' } as never);
     const onApproved = vi.fn();

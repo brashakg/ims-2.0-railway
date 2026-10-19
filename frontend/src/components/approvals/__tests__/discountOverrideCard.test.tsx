@@ -48,13 +48,15 @@ const DISCOUNT: ApprovalRequest = {
     discount_rupees: 3600,
     bill_before: 20000,
     bill_after: 16400,
+    customer_id: 'cust-x',
+    customer_name: 'Rohan Mehta',
   },
 };
 
 describe('a discount_override request shows the bill the manager approves', () => {
-  it('names the shop, the cashier and every line, with the money', () => {
+  it('names the shop, the cashier, the customer and every line, with the money', () => {
     render(<ApprovalRequestCard request={DISCOUNT} showActions />);
-    for (const text of ['Better Vision Bokaro', 'Ray-Ban RB3025', '₹16,400', '₹20,000']) {
+    for (const text of ['Better Vision Bokaro', 'Rohan Mehta', 'Ray-Ban RB3025', '₹16,400', '₹20,000']) {
       expect(screen.getAllByText(new RegExp(text)).length).toBeGreaterThan(0);
     }
     expect(screen.getAllByText('₹10,000').length).toBe(2); // MRP + price

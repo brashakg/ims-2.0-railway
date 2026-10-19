@@ -86,10 +86,14 @@ export function orderPayloadOf(store: any, discountApprovalId?: string | null) {
   };
 }
 
-/** The bill as the till will send it, for "has the cart changed since the
-    manager was asked?" -- the lines and the bill %. */
+/** The bill as the till will send it, for "has the bill changed since the
+    manager was asked?" -- whose bill, its lines and the bill %. */
 export function billFingerprint(store: any): string {
-  return JSON.stringify([orderLinesOf(store.cart), store.cart_discount_percent || 0]);
+  return JSON.stringify([
+    store.customer?.id ?? null,
+    orderLinesOf(store.cart),
+    store.cart_discount_percent || 0,
+  ]);
 }
 
 /** "Ask a manager to approve": re-send THIS bill with request_approval. The

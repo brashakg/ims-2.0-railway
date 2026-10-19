@@ -101,6 +101,8 @@ interface DiscountContext {
   bill_before?: number;
   bill_after?: number;
   zero_total?: boolean;
+  customer_id?: string | null;
+  customer_name?: string | null;
 }
 
 /** What a manager approves for a discount: shop, cashier, every line (name,
@@ -116,6 +118,10 @@ function DiscountBill({ request }: { request: ApprovalRequest }) {
         {' · '}Cashier{' '}
         <span className="font-medium text-gray-900">
           {request.requested_by_name || request.requested_by || '—'}
+        </span>
+        {' · '}Customer{' '}
+        <span className="font-medium text-gray-900">
+          {c.customer_name || c.customer_id || '—'}
         </span>
       </div>
       <table className="w-full text-left">
