@@ -855,6 +855,8 @@ def _return_body(**item_over):
         "store_id": STORE,
         "items": [item],
         "return_type": "credit_note",
+        # No piece of P1 at the shop: a typed line, with its note (PR #1234).
+        "notes": "Made-to-order lens, never held in stock",
     }
 
 
@@ -1008,6 +1010,11 @@ from tests.test_counter_roles_no_purchase_reads import (  # noqa: E402
     _COST_CELL,
     _assert_screens_read,
 )
+
+# The doors under test number their GST documents (a return's credit note,
+# a debit note): these fakes hold no store records, so a stub mint numbers
+# them (conftest.gst_numbers). The mint is tested in test_gst_document_numbers.
+pytestmark = pytest.mark.usefixtures("gst_numbers")
 
 
 @pytest.mark.skipif(not os.path.exists(_COST_CELL), reason="frontend/ not shipped here")

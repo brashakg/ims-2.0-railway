@@ -22,6 +22,7 @@ invoice-serial counter exercise their real atomic paths.
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 import pytest
@@ -667,6 +668,17 @@ def _revise(client, auth_headers):
     )
 
 
+def test_revised_invoice_refused_for_a_cancelled_order(client, auth_headers, wired):
+    """Owner 2026-10-19: a cancelled order never takes a number -- not a
+    revised one either."""
+    _seed_order(wired["order_repo"], invoice_number="INV/BOK-01/26-27/0001", status="CANCELLED")
+    resp = _revise(client, auth_headers)
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "Cannot issue a revised invoice: this order was cancelled"
+    assert wired["db"].get_collection("counters").docs == []
+    assert wired["order_repo"].find_by_id("ord-16")["invoice_number"] == "INV/BOK-01/26-27/0001"
+
+
 def test_revised_invoice_refused_for_a_historical_import(client, auth_headers, wired):
     _seed_order(wired["order_repo"], invoice_number="INV/BOK-01/26-27/0001", historical=True)
     resp = _revise(client, auth_headers)
@@ -689,3 +701,67 @@ def test_revised_invoice_write_is_compare_and_set(client, auth_headers, wired, m
     assert resp.status_code == 409, resp.text
     saved = repo.collection.find_one({"order_id": "ord-16"})
     assert saved["invoice_number"] == "TES01/2627/00001"
+
+
+def test_refused_revision_records_the_unused_serial(client, auth_headers, wired, monkeypatch):
+    """#1231 review: the refused press minted a serial it never prints -- an
+    audit row says so (revision refused, serial unused) and its link record
+    is voided, so every serial in the series is accounted for."""
+    _seed_order(wired["order_repo"], invoice_number="INV/BOK-01/26-27/0001")
+    repo = wired["order_repo"]
+    stale = repo.find_by_id("ord-16")
+    repo.collection.update_one({"order_id": "ord-16"},
+                               {"$set": {"invoice_number": "TES01/2627/00099"}})
+    monkeypatch.setattr(repo, "find_by_id", lambda _oid: dict(stale))
+    assert _revise(client, auth_headers).status_code == 409
+    rows = [d for d in wired["db"].get_collection("audit_logs").docs
+            if d.get("action") == "ORDER_INVOICE_REVISION_REFUSED"]
+    assert len(rows) == 1
+    assert "revision refused, serial unused" in rows[0]["detail"]
+    unused = rows[0]["context"]["unused_invoice_number"]
+    # the mint's first serial, never printed
+    assert re.fullmatch(r"TES01/\d{4}/00001", unused), unused
+    rev = wired["db"].get_collection("revised_invoices").docs
+    assert [d["status"] for d in rev] == ["REFUSED_SERIAL_UNUSED"]
+
+
+@pytest.mark.parametrize("price,series,coll", [
+    (800.0, "C", "credit_note_ledger"),   # overcharged: a credit note
+    (1500.0, "D", "debit_note_ledger"),   # undercharged: a debit note
+])
+def test_admin_note_numbers_are_the_shops_c_and_d_series(
+    client, auth_headers, wired, price, series, coll
+):
+    """Rule 53 (owner 2026-10-18): the note takes the next number in the sale
+    shop's credit-note / debit-note series -- 16 characters, never the old
+    CN-/DN-yymmdd-xxxxxx id -- and the CDNR ledger row files that number."""
+    _seed_order(wired["order_repo"], invoice_number="INV/BOK-01/26-27/0021")
+    resp = client.put(
+        "/api/v1/orders/ord-16/superadmin-invoice-change",
+        json={"mode": "CREDIT_NOTE", "reason": "Price corrected",
+              "items": [_edit_item(unit_price=price)]},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    number = resp.json()["note_number"]
+    assert re.fullmatch(rf"TES01/{series}\d{{4}}/0001", number), number
+    docs = wired["db"].get_collection(coll).docs
+    assert [d["note_number"] for d in docs if d.get("note_type")] == [number]
+    if series == "C":
+        (issued,) = [d for d in docs if d.get("type") == "ISSUED"]
+        assert issued["note_number"] == number
+
+
+def test_admin_note_refused_when_the_shop_cannot_number_it(client, auth_headers, wired):
+    _seed_order(wired["order_repo"], invoice_number="INV/BOK-01/26-27/0022")
+    wired["db"].get_collection("stores").docs[0]["invoice_code"] = "BAD"
+    resp = client.put(
+        "/api/v1/orders/ord-16/superadmin-invoice-change",
+        json={"mode": "CREDIT_NOTE", "reason": "Price corrected",
+              "items": [_edit_item(unit_price=800.0)]},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 400 and "Cannot issue the note" in resp.json()["detail"]
+    assert wired["db"].get_collection("credit_note_ledger").docs == []
+    assert not any(d.get("action") == "ORDER_INVOICE_CREDIT_NOTE"
+                   for d in wired["db"].get_collection("audit_logs").docs)

@@ -405,7 +405,8 @@ def test_correction_note_taxable_excludes_the_round_off_change():
     before = {"grand_total": 1000.0, "round_off": -0.49, "tax_amount": 47.64}
     after = {"grand_total": 1201.0, "round_off": 0.50, "tax_amount": 57.17}
     delta = compute_invoice_delta(before, after)
-    note = build_credit_note_doc(order={}, delta=delta, reason="r", user_id="u")
+    note = build_credit_note_doc(order={}, delta=delta, reason="r", user_id="u",
+                                 note_number="TES01/C2627/0001")
     # taxable moved 1143.33 - 952.85 = 190.48; GST 9.53; round off 0.99.
     assert note["amount"] == 201.0
     assert note["tax_amount"] == 9.53

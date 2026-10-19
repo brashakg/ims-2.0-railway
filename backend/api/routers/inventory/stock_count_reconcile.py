@@ -70,6 +70,24 @@ async def get_stock_count(
 # because reconciliation is a stock-altering write, not a read.
 
 
+def _ledger_void(db, unit, count_id, actor_id) -> None:
+    """One VOID row in the item-event ledger for a unit the write-off took.
+    Additive (the conditional write above already happened); fail-soft."""
+    try:
+        from ...services import item_events as ie
+
+        ie.record_post_write_event(
+            db, event_type=ie.ItemEventType.VOID, actor_id=actor_id,
+            stock_id=str(unit.get("stock_id") or unit["_id"]),
+            from_state=ie.StockState.AVAILABLE, to_state=ie.StockState.VOID,
+            store_id=unit.get("store_id"), product_id=unit.get("product_id"),
+            source_type="STOCK_COUNT", source_id=count_id,
+            payload={"void_reason": f"cycle-count-reconcile:{count_id}"},
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[INVENTORY] write-off ledger row failed: %s", e)
+
+
 class ReconcileStockCountRequest(BaseModel):
     notes: Optional[str] = None
     # Per-item overrides: the reviewer can accept a different final quantity
@@ -282,11 +300,13 @@ async def reconcile_stock_count(
                         limit=shrinkage_qty,
                     )
                 )
-                ids_to_void = [c["_id"] for c in candidates if "_id" in c]
-                voided = 0
-                if ids_to_void:
-                    res = stock_coll.update_many(
-                        {"_id": {"$in": ids_to_void}, "status": "AVAILABLE"},
+                # E3-5: one conditional write per unit, so every write-off
+                # names the frame it took -- on the shrinkage row and as one
+                # VOID row per unit in the item-event ledger.
+                voided_ids = []
+                for c in (c for c in candidates if "_id" in c):
+                    res = stock_coll.update_one(
+                        {"_id": c["_id"], "status": "AVAILABLE"},
                         {
                             "$set": {
                                 "status": "VOID",
@@ -295,7 +315,10 @@ async def reconcile_stock_count(
                             }
                         },
                     )
-                    voided = int(getattr(res, "modified_count", 0) or 0)
+                    if int(getattr(res, "modified_count", 0) or 0):
+                        voided_ids.append(str(c.get("stock_id") or c["_id"]))
+                        _ledger_void(db, c, count_id, current_user.get("user_id", ""))
+                voided = len(voided_ids)
 
                 not_voided = shrinkage_qty - voided
                 units_voided_total += voided
@@ -320,6 +343,8 @@ async def reconcile_stock_count(
                         # could not be voided is the old silent failure.
                         "units_voided": voided,
                         "units_not_voided": not_voided,
+                        # E3-5: exactly which units this row wrote off.
+                        "voided_stock_ids": voided_ids,
                         # A loss with no rupee figure is not a loss anyone can
                         # act on: this is what the row is worth at cost.
                         "unit_cost": round(unit_cost, 2),

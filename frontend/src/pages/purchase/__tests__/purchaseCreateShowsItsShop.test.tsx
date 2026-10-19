@@ -121,6 +121,7 @@ describe('F63: a new PO or return shows in its own shop', () => {
     await within(vendorBox).findByText('Jharkhand Optical');
     fireEvent.change(vendorBox, { target: { value: 'v1' } });
     fireEvent.change(screen.getByPlaceholderText('Enter product name'), { target: { value: 'Frame' } });
+    fireEvent.change(screen.getByPlaceholderText('Add any additional notes...'), { target: { value: 'Made-to-order lens, never in stock' } });
     const buttons = screen.getAllByRole('button', { name: /create return/i });
     fireEvent.click(buttons[buttons.length - 1]);
     await waitFor(() => expect(http.post).toHaveBeenCalled());

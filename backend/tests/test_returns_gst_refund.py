@@ -49,7 +49,10 @@ from api.services import returns_engine as engine  # noqa: E402
 from api.routers import returns as returns_router  # noqa: E402
 from api.routers import auth as auth_mod  # noqa: E402
 
-pytestmark = pytest.mark.asyncio
+# The doors under test number their GST documents (a return's credit note,
+# a debit note): these fakes hold no store records, so a stub mint numbers
+# them (conftest.gst_numbers). The mint is tested in test_gst_document_numbers.
+pytestmark = [pytest.mark.asyncio, pytest.mark.usefixtures("gst_numbers")]
 
 
 # ============================================================================

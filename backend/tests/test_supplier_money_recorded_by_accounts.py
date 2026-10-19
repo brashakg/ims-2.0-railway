@@ -65,6 +65,11 @@ from tests.test_supplier_money_masked_for_managers import (  # noqa: E402
     _keys,
 )
 
+# The doors under test number their GST documents (a return's credit note,
+# a debit note): these fakes hold no store records, so a stub mint numbers
+# them (conftest.gst_numbers). The mint is tested in test_gst_document_numbers.
+pytestmark = pytest.mark.usefixtures("gst_numbers")
+
 
 # The ruling's list: who records (and reads) supplier money.
 RECORDERS = ("ACCOUNTANT", "ADMIN", "SUPERADMIN")
@@ -446,7 +451,7 @@ def test_return_create_stays_with_managers(vret, role):
     res = _run(r.create_vendor_return(r.VendorReturnCreate(
         vendor_id="V1", vendor_name="GKB", store_id="S1", return_type="credit_note",
         items=[r.ReturnItemCreate(product_id="P9", product_name="Lens", quantity=1,
-                                  reason="defective")]),
+                                  reason="defective")], notes="Made-to-order lens, never held in stock"),
         current_user=_user(role)))
     assert set(res) == {"return_id", "message"}
 

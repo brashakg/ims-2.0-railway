@@ -408,6 +408,31 @@ def test_door_refuses_a_historical_order(door, flag):
     assert db.get_collection("orders").find_one({"order_id": "O-HIST"})["invoice_number"] is None
 
 
+@pytest.mark.parametrize("status", ["CANCELLED", "cancelled"])
+def test_door_refuses_a_cancelled_order_without_a_number(door, status):
+    """Owner 2026-10-19: a cancelled order is never invoiced -- opening its
+    invoice mints nothing (two cancelled go-live test bills must never get
+    numbers)."""
+    client, db = door
+    db.get_collection("orders").insert_one(_order("O-CXL", status=status, invoice_number=None))
+    r = client.get("/orders/O-CXL/invoice")
+    assert r.status_code == 400
+    assert r.json()["detail"] == "Cannot generate invoice: this order was cancelled"
+    assert db.get_collection("counters").docs == []
+    assert db.get_collection("orders").find_one({"order_id": "O-CXL"})["invoice_number"] is None
+
+
+def test_door_still_prints_a_cancelled_orders_number(door):
+    client, db = door
+    db.get_collection("orders").insert_one(
+        _order("O-CXL2", status="CANCELLED", invoice_number="BOK02/2627/00007")
+    )
+    r = client.get("/orders/O-CXL2/invoice")
+    assert r.status_code == 200, r.text
+    assert r.json()["invoiceNumber"] == "BOK02/2627/00007"
+    assert db.get_collection("counters").docs == []
+
+
 def test_double_tap_set_invoice_keeps_the_first_number():
     repo, db = _world()
     db.get_collection("orders").insert_one(_order("O-TAP", invoice_number=None))

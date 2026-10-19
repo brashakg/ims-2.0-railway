@@ -69,9 +69,9 @@ manager gets 404).
 |---|---|
 | PUBLIC (no IMS role gate) | 46 |
 | AUTHENTICATED | 394 |
-| Role-gated (one or more roles) | 871 |
-| **Total `/api/v1` (method x path)** | **1311** |
-| ...of which `store_scoped` | 240 |
+| Role-gated (one or more roles) | 872 |
+| **Total `/api/v1` (method x path)** | **1312** |
+| ...of which `store_scoped` | 241 |
 | ...of which `self_enforced` | 47 |
 
 ## Full matrix (method x path -> policy entry)
@@ -1213,6 +1213,7 @@ entry exactly; see the manual interpretation notes above.
 | `GET` | `/api/v1/print/delivery-challan/transfer/{transfer_id}` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, SALES_CASHIER, SALES_STAFF, ACCOUNTANT | S |  |
 | `GET` | `/api/v1/print/qz/cert` | AUTH |  |  |
 | `POST` | `/api/v1/print/qz/sign` | AUTH |  |  |
+| `GET` | `/api/v1/print/transfer-invoice/{transfer_id}` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, SALES_CASHIER, SALES_STAFF, ACCOUNTANT | S |  |
 
 ### `/api/v1/product-templates`
 

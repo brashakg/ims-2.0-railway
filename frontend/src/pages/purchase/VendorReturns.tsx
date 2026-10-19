@@ -42,7 +42,55 @@ interface ReturnItem {
 
 type ReturnLine = ReturnItem;
 
-const newLine = (): ReturnItem => ({ product_id: '', product_name: '', quantity: 1, reason: 'defective' });
+/** One physical piece going back (a stock unit and its own barcode). */
+interface Piece {
+  stock_id: string;
+  barcode: string;
+  status?: string;
+  expiry_date?: string | null;
+  /** Rejected at receiving: goes back on its own rejection draft (never offered). */
+  rejected?: boolean;
+  /** The open supplier return this piece is already on (never offered). */
+  on_supplier_return?: string | null;
+  no_receipt?: boolean;
+}
+
+/** A line on the create form: the pieces named, and the shop's pieces of the
+ *  product found by SKU that can be picked. Owner decision 2026-10-18: a frame
+ *  (every piece IMS holds has its own unit barcode) goes back piece by piece; the server
+ *  (vendor_returns._pieces_for_lines) is the one rule, this only helps name
+ *  them. */
+interface FormLine extends ReturnItem {
+  pieces: Piece[];
+  options: Piece[];
+}
+
+const newLine = (): FormLine => ({
+  product_id: '', product_name: '', quantity: 1, reason: 'defective', pieces: [], options: [],
+});
+
+/** GET /inventory/barcode/{code}: the scanned piece and its product. */
+interface ScannedUnit {
+  stock_id?: string;
+  barcode?: string;
+  status?: string;
+  product_id: string;
+  cross_store?: boolean;
+  product?: { name?: string };
+}
+
+// A piece that can go back: on the shelf or already set aside. The status in
+// the server's own spellings: none / IN_STOCK / any case = on the shelf.
+const RETURNABLE = ['AVAILABLE', 'QUARANTINED'];
+const pieceState = (raw?: string | null) => {
+  const s = String(raw ?? '').trim().toUpperCase();
+  return !s || s === 'IN_STOCK' ? 'AVAILABLE' : s;
+};
+// Dated stock (contact lenses, solutions): the pieces already set aside
+// first, then the earliest expiry -- the order the form pre-ticks them in.
+const pickOrder = (a: Piece, b: Piece) =>
+  Number(a.status !== 'QUARANTINED') - Number(b.status !== 'QUARANTINED')
+  || String(a.expiry_date || '9999').localeCompare(String(b.expiry_date || '9999'));
 
 // Settled returns keep the prices they were settled at (the server refuses).
 const SETTLED = ['credit_issued', 'replaced', 'cancelled'];
@@ -66,6 +114,8 @@ interface VendorReturn {
   created_at: string;
   created_by: string;
   notes: string;
+  /** The pieces going back (barcodes; flagged when they have no receipt). */
+  pieces?: Piece[];
 }
 
 interface Vendor {
@@ -164,6 +214,7 @@ export function VendorReturns() {
   const [searchParams] = useSearchParams();
   const linkedVendorId = searchParams.get('vendor_id');
   const linkedStockId = searchParams.get('stock_id');
+  const linkedBarcode = searchParams.get('barcode');
   const linkedReturnId = searchParams.get('return_id');
   // Workshop staff log a return (item, quantity, reason) and nothing more
   // (owner ruling 2026-10-12): moving it along -- approve, ship, received by
@@ -188,7 +239,12 @@ export function VendorReturns() {
   // Form state
   const [selectedVendor, setSelectedVendor] = useState('');
   const [returnType, setReturnType] = useState<'credit_note' | 'replacement'>('credit_note');
-  const [items, setItems] = useState<ReturnItem[]>([newLine()]);
+  const [items, setItems] = useState<FormLine[]>([newLine()]);
+  const [scanText, setScanText] = useState<Record<number, string>>({});
+  // One id per form: a double click names the same return (server dedupe).
+  const [requestId, setRequestId] = useState('');
+  // A save in flight: the Create button waits for it (no second click).
+  const [creating, setCreating] = useState(false);
   const [notes, setNotes] = useState('');
   // Accounts pricing an unpriced return (one input per line, in line order).
   const [pricing, setPricing] = useState<VendorReturn | null>(null);
@@ -258,6 +314,7 @@ export function VendorReturns() {
 
   const handleRemoveItem = (idx: number) => {
     setItems(items.filter((_, i) => i !== idx));
+    setScanText({});
   };
 
   const handleItemChange = (idx: number, field: keyof ReturnItem, value: any) => {
@@ -266,14 +323,113 @@ export function VendorReturns() {
     setItems(newItems);
   };
 
+  // A line's pieces decide its product and its quantity.
+  const setPieces = (idx: number, change: (line: FormLine) => Partial<FormLine>) =>
+    setItems((cur) => cur.map((line, i) => {
+      if (i !== idx) return line;
+      const next = { ...line, ...change(line) };
+      return next.pieces.length ? { ...next, quantity: next.pieces.length } : next;
+    }));
+
+  const togglePiece = (idx: number, piece: Piece) =>
+    setPieces(idx, (line) => ({
+      pieces: line.pieces.some((p) => p.stock_id === piece.stock_id)
+        ? line.pieces.filter((p) => p.stock_id !== piece.stock_id)
+        : [...line.pieces, piece],
+    }));
+
+  // Scan a piece's own barcode (or type a SKU / product barcode to list the
+  // shop's pieces of that product to pick). The server checks every piece
+  // again on create; this only names them.
+  const scanLine = async (idx: number, code: string) => {
+    const text = code.trim();
+    if (!text) return;
+    setScanText((s) => ({ ...s, [idx]: '' }));
+    let unit: ScannedUnit | null = null;
+    try {
+      unit = (await api.get(`/inventory/barcode/${encodeURIComponent(text)}`, {
+        params: { store_id: ownStoreId ?? undefined },
+      })).data;
+    } catch (e) {
+      if ((e as { response?: { status?: number } })?.response?.status !== 404) {
+        toast.error(errMsg(e, 'Could not look that barcode up'));
+        return;
+      }
+    }
+    if (unit?.stock_id) {
+      const found = unit;
+      const piece: Piece = {
+        stock_id: unit.stock_id,
+        barcode: unit.barcode || text,
+        status: pieceState(unit.status),
+      };
+      const line = items[idx];
+      if (found.cross_store) return toast.error(`Piece ${text} belongs to another shop.`);
+      if (!RETURNABLE.includes(piece.status as string)) {
+        return toast.error(`Piece ${text} is ${String(piece.status).toLowerCase()} - only a piece on the shelf or set aside can go back.`);
+      }
+      if (items.some((l) => l.pieces.some((p) => p.stock_id === piece.stock_id))) {
+        return toast.error(`Piece ${text} is already on this return.`);
+      }
+      if (line.pieces.length && line.product_id !== found.product_id) {
+        return toast.error('That piece is a different product - add it on a new line.');
+      }
+      setPieces(idx, (l) => ({
+        product_id: found.product_id,
+        product_name: found.product?.name || l.product_name || found.product_id,
+        pieces: [...l.pieces, piece],
+      }));
+      return;
+    }
+    try {
+      const found = (await api.get('/products', { params: { search: text, limit: 2 } })).data?.products || [];
+      if (found.length !== 1) {
+        return toast.error(found.length ? 'More than one product matches - scan the piece itself.' : `Nothing found for ${text}.`);
+      }
+      const product = found[0];
+      const units = (await api.get('/inventory/units', {
+        params: { product_id: product.product_id, store_id: ownStoreId ?? undefined },
+      })).data?.units || [];
+      const options: Piece[] = units
+        .map((u: Piece) => ({ ...u, status: pieceState(u.status) }))
+        .filter((u: Piece) => RETURNABLE.includes(u.status as string) && !u.on_supplier_return && !u.rejected)
+        .sort(pickOrder);
+      const dated = options.some((u) => u.expiry_date);
+      setPieces(idx, (l) => ({
+        product_id: product.product_id,
+        product_name: product.name || product.product_id,
+        // Dated stock: pre-tick in pick order for the user to confirm/change.
+        pieces: dated ? options.slice(0, Math.max(1, l.quantity)) : [],
+        options,
+      }));
+    } catch (e) {
+      toast.error(errMsg(e, 'Could not look that product up'));
+    }
+  };
+
+  // The Quarantine Queue's "Create RTV" names its piece: start the form with it.
+  const openCreate = () => {
+    setShowModal(true);
+    setRequestId(globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`);
+    if (linkedBarcode && !items[0].pieces.length && !items[0].product_id) {
+      void scanLine(0, linkedBarcode);
+    }
+  };
+
   const handleCreateReturn = async () => {
     if (!selectedVendor || items.some(i => !i.product_name.trim() || i.quantity <= 0)) {
       toast.error('Please fill all required fields');
       return;
     }
+    if (items.some((i) => !i.pieces.length) && !notes.trim()) {
+      toast.error('An item with no piece scanned needs a note: say what it is and why it has no barcode.');
+      return;
+    }
 
+    if (creating) return;
     const vendor = vendors.find(v => v.vendor_id === selectedVendor);
 
+    setCreating(true);
     try {
       await api.post('/vendor-returns/', {
         vendor_id: selectedVendor,
@@ -281,14 +437,19 @@ export function VendorReturns() {
         store_id: ownStoreId ?? '',
         // A line's price is sent only by an accounts role (the server refuses
         // one from anyone else, R2 + R3); a blank price is left for later.
-        items: items.map(({ unit_price, ...i }) => ({
+        items: items.map(({ unit_price, pieces, options: _options, ...i }) => ({
           ...i,
           product_id: i.product_id || i.product_name.toLowerCase().replace(/\s+/g, '-'),
+          ...(pieces.length ? { stock_ids: pieces.map((p) => p.stock_id) } : {}),
           ...(canSeePayables && unit_price != null ? { unit_price } : {}),
         })),
         return_type: returnType,
         notes,
-        ...(linkedStockId ? { stock_ids: [linkedStockId] } : {}),
+        client_request_id: requestId || undefined,
+        // An older link without the barcode: the server joins the piece to
+        // the line of its product.
+        ...(linkedStockId && !items.some((l) => l.pieces.some((p) => p.stock_id === linkedStockId))
+          ? { stock_ids: [linkedStockId] } : {}),
       });
 
       toast.success('Vendor return created successfully');
@@ -296,6 +457,7 @@ export function VendorReturns() {
       setSelectedVendor('');
       setReturnType('credit_note');
       setItems([newLine()]);
+      setScanText({});
       setNotes('');
 
       // Refresh the list -- an admin viewing another shop is shown the shop
@@ -308,6 +470,8 @@ export function VendorReturns() {
         .filter((ret: VendorReturn) => !linkedVendorId || ret.vendor_id === linkedVendorId).map(shownReturn));
     } catch (e) {
       toast.error(errMsg(e, 'Failed to create vendor return'));
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -462,7 +626,7 @@ export function VendorReturns() {
           <p className="text-gray-500">Manage defective products and debit notes</p>
         </div>
         <button
-          onClick={() => setShowModal(true)}
+          onClick={openCreate}
           className="flex items-center gap-2 bg-bv-red-600 hover:bg-bv-red-700 text-white px-4 py-2 rounded-lg transition"
         >
           <Plus className="w-5 h-5" />
@@ -669,6 +833,11 @@ export function VendorReturns() {
                         </div>
                       ))}
                     </div>
+                    {!!ret.pieces?.length && (
+                      <p className="mt-2 text-xs text-gray-600">
+                        Pieces: {ret.pieces.map((p) => `${p.barcode || p.stock_id}${p.no_receipt ? ' (no receipt - supplier not checked)' : ''}`).join(', ')}
+                      </p>
+                    )}
                   </div>
 
                   {/* Notes & Credit Info */}
@@ -907,15 +1076,72 @@ export function VendorReturns() {
                 <div className="space-y-3">
                   {items.map((item, idx) => (
                     <div key={idx} className="bg-gray-50 border border-gray-200 rounded-lg p-4 space-y-3">
+                      {/* Owner decision 2026-10-18: a frame goes back piece by
+                          piece -- scan each one's own barcode, or find the
+                          product by SKU and tick its pieces. */}
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">Scan each piece (or type a SKU to pick)</label>
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={scanText[idx] ?? ''}
+                            onChange={(e) => setScanText((s) => ({ ...s, [idx]: e.target.value }))}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                void scanLine(idx, scanText[idx] ?? '');
+                              }
+                            }}
+                            placeholder="Piece barcode or SKU"
+                            className="flex-1 min-w-0 px-3 py-2 bg-white border border-gray-300 rounded text-gray-900 text-sm placeholder-gray-500 outline-none focus:border-blue-500"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => void scanLine(idx, scanText[idx] ?? '')}
+                            className="px-3 py-2 rounded border border-gray-300 bg-white text-sm font-medium text-gray-700 hover:bg-gray-100"
+                          >
+                            Add
+                          </button>
+                        </div>
+                        {item.pieces.length > 0 && (
+                          <div className="flex flex-wrap gap-2 mt-2">
+                            {item.pieces.map((p) => (
+                              <span key={p.stock_id} className="inline-flex items-center gap-1 px-2 py-1 rounded bg-white border border-gray-300 text-xs text-gray-800">
+                                {p.barcode}
+                                <button type="button" aria-label={`Remove ${p.barcode}`} onClick={() => togglePiece(idx, p)} className="text-gray-500 hover:text-red-600">
+                                  <XIcon className="w-3 h-3" />
+                                </button>
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        {item.options.length > 0 && (
+                          <div className="mt-2 max-h-32 overflow-y-auto border border-gray-200 rounded bg-white p-2 space-y-1">
+                            {item.options.map((p) => (
+                              <label key={p.stock_id} className="flex items-center gap-2 text-xs text-gray-800 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={item.pieces.some((x) => x.stock_id === p.stock_id)}
+                                  onChange={() => togglePiece(idx, p)}
+                                />
+                                {p.barcode}
+                                <span className="text-gray-500">{p.status === 'QUARANTINED' ? 'set aside' : 'on shelf'}</span>
+                              </label>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                       <div className="grid grid-cols-2 gap-3">
                         <div>
                           <label className="block text-xs text-gray-500 mb-1">Product Name</label>
                           <input
                             type="text"
                             value={item.product_name}
+                            readOnly={!!item.product_id}
                             onChange={(e) => handleItemChange(idx, 'product_name', e.target.value)}
                             placeholder="Enter product name"
-                            className="w-full px-3 py-2 bg-white border border-gray-300 rounded text-gray-900 text-sm placeholder-gray-500 outline-none focus:border-blue-500"
+                            title={item.product_id ? undefined : 'Only for something not in stock, e.g. a made-to-order lens'}
+                            className="w-full px-3 py-2 bg-white border border-gray-300 rounded text-gray-900 text-sm placeholder-gray-500 outline-none focus:border-blue-500 read-only:bg-gray-100"
                           />
                         </div>
                         <div>
@@ -924,8 +1150,9 @@ export function VendorReturns() {
                             type="number"
                             min="1"
                             value={item.quantity}
+                            readOnly={item.pieces.length > 0}
                             onChange={(e) => handleItemChange(idx, 'quantity', parseInt(e.target.value) || 0)}
-                            className="w-full px-3 py-2 bg-white border border-gray-300 rounded text-gray-900 text-sm outline-none focus:border-blue-500"
+                            className="w-full px-3 py-2 bg-white border border-gray-300 rounded text-gray-900 text-sm outline-none focus:border-blue-500 read-only:bg-gray-100"
                           />
                         </div>
                       </div>
@@ -1018,7 +1245,8 @@ export function VendorReturns() {
               </button>
               <button
                 onClick={handleCreateReturn}
-                className="flex-1 px-4 py-2 bg-bv-red-600 hover:bg-bv-red-700 text-white rounded-lg font-medium transition"
+                disabled={creating}
+                className="flex-1 px-4 py-2 bg-bv-red-600 hover:bg-bv-red-700 disabled:opacity-50 text-white rounded-lg font-medium transition"
               >
                 Create Return
               </button>

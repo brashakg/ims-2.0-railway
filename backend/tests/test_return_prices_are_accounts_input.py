@@ -92,8 +92,9 @@ def world(monkeypatch):
 
 _LINE = {"product_id": "P1", "product_name": "Zeiss Lens", "quantity": 3,
          "reason": "defective"}
+# The shop holds no piece of P1: a typed line, with its note (PR #1234).
 _RETURN = {"vendor_id": "V1", "vendor_name": "GKB Optical", "store_id": DHN,
-           "return_type": "credit_note", "items": [_LINE]}
+           "return_type": "credit_note", "items": [_LINE], "notes": "Made-to-order lens, never held in stock"}
 
 
 def _create_return(w, user, **line):

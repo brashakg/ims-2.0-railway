@@ -193,6 +193,12 @@ async def quarantine_stock_unit(
     }
     if req.rtv_vendor_id:
         update["rtv_vendor_id"] = req.rtv_vendor_id
+    else:
+        # A link to a save that died never survives a fresh quarantine.
+        from ...services.quarantine_hold import stale_claim_link
+
+        if stale_claim_link(_get_db(), unit):
+            update["rtv_vendor_id"] = None
 
     if not stock_repo.update_if(stock_id, _quarantine_snapshot(unit), update):
         raise _stock_changed()
@@ -294,15 +300,13 @@ async def lift_quarantine_stock_unit(
         raise HTTPException(status_code=404, detail="Stock unit not found")
 
     current_status = (unit.get("status") or "").strip().upper()
-    if unit.get("receipt_disposition") == "REJECTED":
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "receipt_rejected",
-                "message": "This piece was rejected at receiving. Follow its supplier return; "
-                           "lifting quarantine cannot accept it into sellable stock.",
-            },
-        )
+    # A piece rejected at receiving or on an open supplier return is held by
+    # that return -- the ONE check every release door asks.
+    from ...services.quarantine_hold import release_refusal
+
+    held = release_refusal(_get_db(), unit)
+    if held:
+        raise HTTPException(status_code=409, detail=held)
     if current_status != STOCK_STATUS_QUARANTINED:
         raise HTTPException(
             status_code=409,
@@ -319,6 +323,11 @@ async def lift_quarantine_stock_unit(
         "quarantine_lift_reason": req.lift_reason,
         "quarantine_label_printed": False,
     }
+    # A link to a save that died never survives the lift.
+    from ...services.quarantine_hold import stale_claim_link
+
+    if stale_claim_link(_get_db(), unit):
+        update["rtv_vendor_id"] = None
     if not stock_repo.update_if(stock_id, _quarantine_snapshot(unit), update):
         raise _stock_changed()
 

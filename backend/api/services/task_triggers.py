@@ -204,6 +204,7 @@ def create_system_task(
     assigned_to: Optional[str] = None,
     due_at: Optional[datetime] = None,
     extra: Optional[Dict[str, Any]] = None,
+    task_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Create a SYSTEM task, deduped by source_ref: if an ACTIVE task already
     exists for the same source_ref, do nothing (avoids a task per re-run).
@@ -219,7 +220,11 @@ def create_system_task(
     is resolved here to the person holding it at ``store_id`` -- owner rule
     2026-09-03: tasks go to PEOPLE, not titles. A title stored verbatim matched
     nobody's "Mine" (audit F33). Nobody holds it -> None: unassigned, which the
-    store's managers see on the Team list."""
+    store's managers see on the Team list.
+
+    ``task_id``: a DETERMINISTIC id for a task that must exist once however
+    many workers raise it at the same moment -- it is the Mongo _id, so the
+    second insert is refused by the database, not by a read-then-write."""
     if repo is None:
         return None
     if str(assigned_to or "").upper() in VALID_ROLES:
@@ -235,7 +240,8 @@ def create_system_task(
         grace = sla_for(priority)["grace_minutes"]
         due_at = now + timedelta(minutes=grace)
 
-    task_id = f"TSK-{uuid.uuid4().hex[:10].upper()}"
+    fixed_id = task_id is not None
+    task_id = task_id or f"TSK-{uuid.uuid4().hex[:10].upper()}"
     task = {
         "task_id": task_id,
         # The tasks schema declares a unique human-facing task_number; system
@@ -269,6 +275,10 @@ def create_system_task(
         for k, v in extra.items():
             task.setdefault(k, v)
     try:
+        if fixed_id:
+            # Another worker raising the same deterministic task is expected:
+            # the database refuses the copy, quietly (no error line).
+            return repo.create(task, raise_on_duplicate=True) or None
         return repo.create(task) or None
     except Exception:  # noqa: BLE001
         return None
