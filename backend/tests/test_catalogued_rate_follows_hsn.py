@@ -158,7 +158,9 @@ def test_the_purchase_order_charges_exactly_what_the_catalogue_stored(category, 
         category=category,
         attributes={"brand_name": "Ray-Ban", "model_no": "M1", "model_name": "M1"},
         mrp=5000,
-        offer_price=4500,
+        # Offer = MRP: a hearing aid (NON_DISCOUNTABLE) takes no offer below MRP
+        # (pricing_caps.offer_write_problem); this test is about the tax.
+        offer_price=5000,
         sku="TESTSKU1",
         hsn_code=hsn,
         as_draft=True,

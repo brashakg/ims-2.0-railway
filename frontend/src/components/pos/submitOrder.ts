@@ -15,6 +15,7 @@ import { canonicalCategory } from '../../utils/categoryNormalize';
 import type { CashTenderCapture } from '../../stores/posStore';
 import { buildPaymentBody } from './paymentBody';
 import { orderLinesOf, refreshBillQuote } from './billQuote';
+import type { DiscountApprovalNeed } from './DiscountApprovalPanel';
 
 // The order-line vocabulary lives with the line builder the quote shares.
 export { mapCategory } from './billQuote';
@@ -31,6 +32,13 @@ export interface SubmitPosOrderResult {
   warning?: string;
   /** Fatal — order was NOT created. */
   error?: string;
+  /** Fatal, and actionable: the discount is over the seller's own limit. The
+      caller asks a manager (DiscountApprovalPanel) and resubmits with the
+      approved request's id. */
+  discountApproval?: DiscountApprovalNeed;
+  /** Fatal: the approval sent with this try cannot be used (already spent,
+      expired, or for another bill) -- the caller drops it. */
+  discountApprovalRejected?: boolean;
 }
 
 /** The cart lines a workshop job is built from. ONE predicate: the job
@@ -48,11 +56,78 @@ export function workshopItemsOf(cart: any[]): { frameItem?: any; lensItem?: any 
   };
 }
 
+/** THE order body the till sends -- for the sale, and for "Ask a manager to
+    approve" (the same bill, so the server prices exactly what will be sold).
+    WHO approved a discount is the server's decision: no approver name is
+    ever sent from here (owner 2026-10-18). */
+export function orderPayloadOf(store: any, discountApprovalId?: string | null) {
+  return {
+    customer_id: store.customer?.id,
+    // BILL-TO-MEMBER P1: send the selected member so the order bills to a
+    // member, not the bare account. Omitted for walk-ins (the backend
+    // synthesizes a Primary for the synthetic account).
+    patient_id: store.patient?.id || undefined,
+    store_id: store.store_id,
+    order_type: store.sale_type,
+    salesperson_id: store.salesperson_id,
+    salesperson_name: store.salesperson_name,
+    items: orderLinesOf(store.cart),
+    notes: store.cart_note || undefined,
+    // Phase 6.7 — pass delivery + cart-discount fields through to backend
+    delivery_date: store.delivery_date || undefined,
+    delivery_time_slot: store.delivery_time_slot || undefined,
+    delivery_priority: store.delivery_priority || 'NORMAL',
+    cart_discount_percent: store.cart_discount_percent || 0,
+    cart_discount_amount: store.cart_discount_amount || 0,
+    cart_discount_reason: store.cart_discount_reason || undefined,
+    // Over the seller's limit the sale carries a manager-approved request id
+    // for exactly this bill.
+    discount_approval_id: discountApprovalId || undefined,
+  };
+}
+
+/** The bill as the till will send it, for "has the bill changed since the
+    manager was asked?" -- whose bill, its lines and the bill %. */
+export function billFingerprint(store: any): string {
+  return JSON.stringify([
+    store.customer?.id ?? null,
+    orderLinesOf(store.cart),
+    store.cart_discount_percent || 0,
+  ]);
+}
+
+/** "Ask a manager to approve": re-send THIS bill with request_approval. The
+    SERVER prices it and raises the discount_override request from its own
+    figures (the cashier adds only a note). Never creates an order. */
+export async function askManagerForDiscount(
+  store: any,
+  note?: string,
+): Promise<{ requestId: string; status?: string }> {
+  const data = await orderApi.createOrder({
+    ...orderPayloadOf(store),
+    request_approval: true,
+    approval_note: note?.trim() || undefined,
+  } as any);
+  return { requestId: data.request_id, status: data.status };
+}
+
+/** Refusal codes that mean "the approval sent with this try is spent, gone or
+    for another bill" -- the till drops it and asks again. */
+const DEAD_APPROVAL_CODES = new Set([
+  'DISCOUNT_APPROVAL_INVALID',
+  'DISCOUNT_APPROVAL_USED',
+  'DISCOUNT_APPROVAL_EXPIRED',
+  'DISCOUNT_APPROVAL_NOT_FOUND',
+]);
+
 /** `store` is the bound posStore instance (usePOSStore()). Validations run
     here too so both surfaces refuse identically. */
 export async function submitPosOrder(
   store: any,
   idempotencyKey: string,
+  /** The request id of a manager-approved discount_override approval, when a
+      refused sale is retried after one (owner 2026-10-18). */
+  discountApprovalId?: string | null,
 ): Promise<SubmitPosOrderResult> {
   if (store.sale_type === 'prescription_order') {
     const hasLens = (store.cart || []).some((i: any) =>
@@ -119,27 +194,10 @@ export async function submitPosOrder(
   }
 
   try {
-    const result = await orderApi.createOrder({
-      customer_id: store.customer?.id,
-      // BILL-TO-MEMBER P1: send the selected member so the order bills to a
-      // member, not the bare account. Omitted for walk-ins (the backend
-      // synthesizes a Primary for the synthetic account).
-      patient_id: store.patient?.id || undefined,
-      store_id: store.store_id,
-      order_type: store.sale_type,
-      salesperson_id: store.salesperson_id,
-      salesperson_name: store.salesperson_name,
-      items: orderLinesOf(store.cart),
-      notes: store.cart_note || undefined,
-      // Phase 6.7 — pass delivery + cart-discount fields through to backend
-      delivery_date: store.delivery_date || undefined,
-      delivery_time_slot: store.delivery_time_slot || undefined,
-      delivery_priority: store.delivery_priority || 'NORMAL',
-      cart_discount_percent: store.cart_discount_percent || 0,
-      cart_discount_amount: store.cart_discount_amount || 0,
-      cart_discount_reason: store.cart_discount_reason || undefined,
-      cart_discount_approved_by: store.cart_discount_approved_by || undefined,
-    } as any, idempotencyKey || undefined);
+    const result = await orderApi.createOrder(
+      orderPayloadOf(store, discountApprovalId) as any,
+      idempotencyKey || undefined,
+    );
 
     if (!result?.order_id) {
       return { ok: false, error: 'Order created but no ID returned. Check order list.' };
@@ -318,6 +376,13 @@ export async function submitPosOrder(
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    const { code, detail } = (err || {}) as { code?: string; detail?: unknown };
+    if (code === 'DISCOUNT_NEEDS_APPROVAL') {
+      return { ok: false, error: msg, discountApproval: detail as DiscountApprovalNeed };
+    }
+    if (code && DEAD_APPROVAL_CODES.has(code)) {
+      return { ok: false, error: msg, discountApprovalRejected: true };
+    }
     return { ok: false, error: 'Failed to create order: ' + (msg || 'Network error') };
   }
 }

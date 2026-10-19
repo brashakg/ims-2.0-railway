@@ -94,18 +94,27 @@ def _write_order_edit_audit(
     return True
 
 
-def _rebuilt_items_or_existing(body_items, existing_items: list) -> list:
+def _rebuilt_items_or_existing(
+    body_items, existing_items: list, editor: Optional[dict] = None
+) -> list:
     """Resolve the corrected line set for an edit. When the caller supplies
     ``items`` it REPLACES the whole set (each normalised via rebuild_edited_line
     so item_total/discount are recomputed server-side); when omitted, the
-    existing lines are kept (a customer-only / cart-discount-only edit)."""
+    existing lines are kept (a customer-only / cart-discount-only edit).
+
+    ``editor`` -- the admin making the edit: a line whose discount or price
+    the edit CHANGES (or a new line) is now approved by them; an untouched
+    line keeps the approver the server stamped at sale."""
     from ...services.order_superadmin_edit import rebuild_edited_line
+    from ...services.discount_approval import who
 
     if body_items is None:
         return [dict(it) for it in (existing_items or [])]
     # SuperadminEditLine carries no discount_reason/discount_approved_by
     # (Pydantic strips unknown keys), so merge them from the STORED line by
-    # item_id — an edit must not wipe the accountability trail.
+    # item_id — an edit must not wipe the accountability trail. The approver
+    # is only ever the one the server stamped at sale
+    # (services/discount_approval); this door never takes one from a client.
     _stored_by_id = {
         it.get("item_id"): it for it in (existing_items or []) if it.get("item_id")
     }
@@ -113,15 +122,47 @@ def _rebuilt_items_or_existing(body_items, existing_items: list) -> list:
     for line in body_items:
         payload = line.model_dump() if hasattr(line, "model_dump") else dict(line)
         stored = _stored_by_id.get(payload.get("item_id")) or {}
-        for _k in ("discount_reason", "discount_approved_by"):
+        for _k in ("discount_reason", "discount_approved_by", "discount_approved_by_name"):
             if payload.get(_k) is None and stored.get(_k) is not None:
                 payload[_k] = stored.get(_k)
-        rebuilt.append(rebuild_edited_line(payload))
+        line = rebuild_edited_line(payload)
+        if editor is not None and _discount_changed(line, stored):
+            # The admin changed what this line sells for: they answer for it.
+            approver = who(editor)
+            line["discount_approved_by"] = approver["user_id"]
+            line["discount_approved_by_name"] = approver["name"]
+        rebuilt.append(line)
     if not rebuilt:
         raise HTTPException(
             status_code=400, detail="An edited order must keep at least one item."
         )
     return rebuilt
+
+
+def _discount_changed(line: dict, stored: dict) -> bool:
+    """Did the edit change what this line is discounted by (its % or its
+    price)? A new line counts as changed."""
+    if not stored:
+        return True
+    try:
+        return (
+            abs(float(line.get("discount_percent") or 0) - float(stored.get("discount_percent") or 0)) > 1e-9
+            or abs(float(line.get("unit_price") or 0) - float(stored.get("unit_price") or 0)) > 1e-9
+        )
+    except (TypeError, ValueError):
+        return True
+
+
+def _cart_approver_fields(body_pct, order: dict, editor: dict) -> Dict[str, Any]:
+    """An edit that changes the bill discount is approved by the editing admin."""
+    if body_pct is None:
+        return {}
+    if abs(float(body_pct) - float(order.get("cart_discount_percent") or 0.0)) <= 1e-9:
+        return {}
+    from ...services.discount_approval import who
+
+    a = who(editor) if float(body_pct) > 0 else {"user_id": None, "name": None}
+    return {"cart_discount_approved_by": a["user_id"], "cart_discount_approved_by_name": a["name"]}
 
 
 @router.put("/{order_id}/superadmin-edit")
@@ -197,7 +238,7 @@ async def superadmin_edit_order(
     before = order_money_snapshot(order)
 
     # Resolve corrected lines + cart discount + customer.
-    new_items = _rebuilt_items_or_existing(body.items, order.get("items"))
+    new_items = _rebuilt_items_or_existing(body.items, order.get("items"), current_user)
     cart_discount_pct = (
         body.cart_discount_percent
         if body.cart_discount_percent is not None
@@ -227,6 +268,7 @@ async def superadmin_edit_order(
     }
     if body.cart_discount_reason is not None:
         update_data["cart_discount_reason"] = body.cart_discount_reason
+    update_data.update(_cart_approver_fields(body.cart_discount_percent, order, current_user))
     if body.notes is not None:
         update_data["notes"] = body.notes
     if body.customer_id is not None:
@@ -349,7 +391,7 @@ async def superadmin_invoice_change(
         check_period_locked(db, ist_today())
 
     before = order_money_snapshot(order)
-    new_items = _rebuilt_items_or_existing(body.items, order.get("items"))
+    new_items = _rebuilt_items_or_existing(body.items, order.get("items"), current_user)
     cart_discount_pct = (
         body.cart_discount_percent
         if body.cart_discount_percent is not None
@@ -374,6 +416,7 @@ async def superadmin_invoice_change(
             "total_discount": gst["total_discount"],
             "grand_total": gst["grand_total"],
             "round_off": gst["round_off"],
+            **_cart_approver_fields(body.cart_discount_percent, order, current_user),
         }
     )
     if body.customer_id is not None:
@@ -441,6 +484,9 @@ async def superadmin_invoice_change(
             update_data["customer_id"] = body.customer_id
         if body.customer_name is not None:
             update_data["customer_name"] = body.customer_name
+        update_data.update(
+            _cart_approver_fields(body.cart_discount_percent, order, current_user)
+        )
         # Recompute the receivable against the revised grand_total.
         amount_paid = float(order.get("amount_paid") or 0.0)
         balance_due = round(gst["grand_total"] - amount_paid, 2)

@@ -432,7 +432,8 @@ def test_put_never_touches_review_flags(env):
         {
             "category": "SUNGLASS",
             "attributes": {"gender": "Men"},
-            "pricing": {"mrp": 9000.0},
+            # A small MRP move: the standing offer stays inside the cap.
+            "pricing": {"mrp": 4600.0},
             "description": "New copy",
             "is_active": True,
         },

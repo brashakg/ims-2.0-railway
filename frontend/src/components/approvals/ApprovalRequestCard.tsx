@@ -71,11 +71,99 @@ const SUPPLIER_MONEY_ACTIONS = new Set(['rtv']);
  *  em-dash). The server already drops it for them; this keeps a stale or wider
  *  answer off the screen too. Every other action type keeps its amount. */
 export function shownAmount(
-  request: Pick<ApprovalRequest, 'action_type' | 'amount'>,
+  request: Pick<ApprovalRequest, 'action_type' | 'amount'> & Pick<Partial<ApprovalRequest>, 'context'>,
   canSeePayables: boolean,
 ): number | null | undefined {
   if (!canSeePayables && SUPPLIER_MONEY_ACTIONS.has(request.action_type)) return null;
+  // A discount approval's money is the rupees it takes off the bill -- the
+  // server's own figure (services/discount_approval), not a routing amount.
+  if (request.action_type === 'discount_override') {
+    const off = Number((request.context as DiscountContext | undefined)?.discount_rupees);
+    return Number.isFinite(off) ? off : request.amount;
+  }
   return request.amount;
+}
+
+/** The bill a discount_override approval covers, exactly as the SERVER priced
+ *  it when it raised the request. The cashier wrote none of it. */
+interface DiscountContext {
+  lines?: {
+    product_id?: string;
+    product_name?: string | null;
+    quantity?: number;
+    mrp?: number | null;
+    unit_price?: number;
+    discount_percent?: number;
+  }[];
+  cart_discount_percent?: number;
+  discount_percent?: number;
+  discount_rupees?: number;
+  bill_before?: number;
+  bill_after?: number;
+  zero_total?: boolean;
+  customer_id?: string | null;
+  customer_name?: string | null;
+}
+
+/** What a manager approves for a discount: shop, cashier, every line (name,
+ *  qty, MRP, price, line %), the bill %, rupees off, the bill before/after,
+ *  and the cashier's note -- labelled as theirs. */
+function DiscountBill({ request }: { request: ApprovalRequest }) {
+  const c = (request.context || {}) as DiscountContext;
+  const pct = (v?: number) => `${Number(v || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}%`;
+  return (
+    <div className="mt-2 space-y-1.5 text-xs text-gray-700">
+      <div>
+        Shop <span className="font-medium text-gray-900">{request.store_name || request.store_id || '—'}</span>
+        {' · '}Cashier{' '}
+        <span className="font-medium text-gray-900">
+          {request.requested_by_name || request.requested_by || '—'}
+        </span>
+        {' · '}Customer{' '}
+        <span className="font-medium text-gray-900">
+          {c.customer_name || c.customer_id || '—'}
+        </span>
+      </div>
+      <table className="w-full text-left">
+        <thead className="text-gray-500">
+          <tr>
+            <th className="font-normal py-0.5">Item</th>
+            <th className="font-normal py-0.5 text-right">Qty</th>
+            <th className="font-normal py-0.5 text-right">MRP</th>
+            <th className="font-normal py-0.5 text-right">Price</th>
+            <th className="font-normal py-0.5 text-right">Line off</th>
+          </tr>
+        </thead>
+        <tbody>
+          {(c.lines || []).map((ln, i) => (
+            <tr key={`${ln.product_id}-${i}`} className="border-t border-gray-100">
+              <td className="py-0.5 pr-2 text-gray-900">{ln.product_name || ln.product_id}</td>
+              <td className="py-0.5 text-right">{ln.quantity}</td>
+              <td className="py-0.5 text-right">{ln.mrp != null ? formatRupees(ln.mrp) : '—'}</td>
+              <td className="py-0.5 text-right">{formatRupees(ln.unit_price)}</td>
+              <td className="py-0.5 text-right">{pct(ln.discount_percent)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div>
+        Bill discount <span className="font-medium text-gray-900">{pct(c.cart_discount_percent)}</span>
+        {' · '}Total off <span className="font-medium text-gray-900">{formatRupees(c.discount_rupees)}</span>
+        {' '}({pct(c.discount_percent)} at most on a line)
+      </div>
+      <div>
+        Bill <span className="font-medium text-gray-900">{formatRupees(c.bill_before)}</span>
+        {' → '}
+        <span className="font-medium text-gray-900">{formatRupees(c.bill_after)}</span>
+        {c.zero_total && <span className="ml-1 font-medium text-red-700">(Rs 0 bill)</span>}
+      </div>
+      {request.reason && (
+        <p className="text-gray-700">
+          <span className="text-gray-500">Cashier&apos;s note:</span> {request.reason}
+        </p>
+      )}
+    </div>
+  );
 }
 
 /** Human countdown to a deadline relative to `now`. Returns null once past. */
@@ -135,7 +223,8 @@ export function ApprovalRequestCard({
     else if (minsLeft <= 10) countdownCls = 'text-amber-600 font-medium';
   }
 
-  const ctxSummary = summariseContext(request.context);
+  const isDiscount = request.action_type === 'discount_override';
+  const ctxSummary = isDiscount ? null : summariseContext(request.context);
 
   return (
     <div className="border border-gray-200 rounded-lg bg-white p-4">
@@ -194,7 +283,8 @@ export function ApprovalRequestCard({
         </div>
       </div>
 
-      {request.reason && (
+      {isDiscount && <DiscountBill request={request} />}
+      {!isDiscount && request.reason && (
         <p className="mt-2 text-sm text-gray-700 leading-relaxed">
           {request.reason}
         </p>

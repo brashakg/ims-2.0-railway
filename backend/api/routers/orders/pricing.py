@@ -60,11 +60,10 @@ class OrderItemCreate(BaseModel):
     quantity: int = Field(default=1, ge=1, le=1000)
     unit_price: float = Field(..., ge=0, le=10_000_000)
     discount_percent: float = Field(default=0, ge=0, le=100)
-    # C-4 (DELTA 2): per-line discount accountability. The POS already sends
-    # these (posStore CartLineItem.discount_approved_by / discount_reason);
-    # they were silently dropped before. Captured here so a 100%-line-discount
-    # order can carry its own approver + reason for the required-approval gate.
-    discount_approved_by: Optional[str] = None
+    # Per-line discount accountability: the written reason. WHO approved a
+    # discount is never taken from the request (owner 2026-10-18) -- the server
+    # decides it (services/discount_approval.py); a client-sent
+    # discount_approved_by is an unknown key and is dropped.
     # POS-9: cap discount_reason at 200 chars (free text, shown on audit rows).
     discount_reason: Optional[str] = Field(None, max_length=200)
     prescription_id: Optional[str] = None
@@ -200,7 +199,10 @@ def combined_discount_pct(line_pct: float, cart_pct: float) -> float:
 def assert_stack_within_cap(
     label: str, line_pct: float, cart_pct: float, cap: float
 ) -> None:
-    """Raise 403 when a line discount and the bill discount MULTIPLY past ``cap``.
+    """Raise 403 when a line discount and the bill discount MULTIPLY past the
+    item's own ``cap`` (category / luxury-brand: a hard limit no approval
+    lifts; the seller's ROLE limit on the same combined figure is checked by
+    services/discount_approval.py).
 
     ONE implementation, called by every door that can change what a line or a
     bill is discounted by. create_order checked the stack and
@@ -215,14 +217,13 @@ def assert_stack_within_cap(
                 f"{label}: a {line_pct:.2f}% item discount and a "
                 f"{cart_pct}% bill discount together come to "
                 f"{combined:.2f}%, over the {cap}% allowed for this item "
-                f"(role + category/brand caps). Lower one of them, or get "
-                f"a manager's approval."
+                f"(category/brand cap). Lower one of them."
             ),
         )
 
 
 def _enforce_line_pricing(
-    item, product, *, is_admin: bool, role_cap: float, user: Optional[dict] = None
+    item, product, *, is_admin: bool, user: Optional[dict] = None
 ) -> dict:
     """THE per-line price-integrity + discount-cap gate.
 
@@ -247,8 +248,12 @@ def _enforce_line_pricing(
       * NO further store discount on an HQ-discounted item
         (offer < MRP), non-admin                            -> 403
       * effective discount (explicit %, or implied by a unit_price under
-        MRP -- effective_line_discount_pct) <= min(role cap, category cap,
+        MRP -- effective_line_discount_pct) <= min(category cap,
         luxury-brand cap), non-admin                        -> 403
+        (NOT the seller's role limit: whether the seller's own limit or a
+        manager's approval covers a discount is
+        services/discount_approval.resolve_discount_approver, run on each
+        line's combined figure once the bill discount is known)
       * owner ruling 2026-08-30: any manual discount (explicit % OR a typed
         price below the catalog ceiling) carries a written reason
         (>= 4 chars)                                        -> 400
@@ -257,8 +262,9 @@ def _enforce_line_pricing(
       eff_disc      -- effective discount % for the cap math
       loyalty_eff   -- loyalty-engine effective discount (vs the ceiling)
       below_ceiling -- typed unit_price under the catalog price
-      cap           -- the tightened cap (ALWAYS computed; the stacking
-                       check needs it even when the line discount is 0)
+      cap           -- the item's own category/brand cap (100 when none
+                       applies; ALWAYS computed: the stacking check needs it
+                       even when the line discount is 0)
       cost / mrp / offer -- normalised catalog snapshot (None when unknown)
     """
 
@@ -330,9 +336,15 @@ def _enforce_line_pricing(
                     f"discount is allowed. Contact an administrator to override."
                 ),
             )
-        # Effective discount for the cap check (max of explicit + implied).
-        if mrp and up < mrp - 1e-6:
-            eff_disc = effective_line_discount_pct(item.discount_percent, up, mrp)
+        # Effective STORE discount for the caps (max of explicit + implied),
+        # measured from the CEILING -- the HQ offer when there is one, else
+        # MRP. An HQ offer (offer < MRP) is HQ's price, not a store discount:
+        # selling at it is 0% here and never counts against anyone's limit.
+        # (Measured from MRP it read as a 20% discount on a Rs 10,000 frame
+        # offered at Rs 8,000 and refused the plain offer-price sale.) Any
+        # further discount on an offer item is refused just above (BUG-118).
+        if ceiling and up < ceiling - 1e-6:
+            eff_disc = effective_line_discount_pct(item.discount_percent, up, ceiling)
         from api.services.loyalty_engine import implied_ceiling_discount
 
         loyalty_eff = max(loyalty_eff, implied_ceiling_discount(up, mrp, offer))
@@ -340,7 +352,7 @@ def _enforce_line_pricing(
     # Category + luxury-brand cap. ALWAYS computed (not only when a discount
     # is present): the stacking check downstream measures a 0%-discount line
     # against a bill discount too.
-    cap = role_cap
+    cap = 100.0
     if is_real:
         if product:
             try:
@@ -348,17 +360,14 @@ def _enforce_line_pricing(
                     effective_discount_cap as product_discount_cap,
                 )
 
-                cap = min(
-                    role_cap,
-                    product_discount_cap(
-                        product.get("discount_category"), product.get("brand")
-                    ),
+                cap = product_discount_cap(
+                    product.get("discount_category"), product.get("brand")
                 )
             except Exception:  # noqa: BLE001
                 # FAIL-CLOSED on the cap-TIGHTENING path: a thrown resolver
-                # must never widen the discount back to the loose role cap.
-                # Tighten from the strongest signal left on the payload -- its
-                # brand (pure, DB-free). A plain/MASS line keeps the role cap.
+                # must never widen the discount. Tighten from the strongest
+                # signal left on the payload -- its brand (pure, DB-free). A
+                # plain/MASS line is then held to the seller's role limit.
                 try:
                     from api.services.pricing_caps import (
                         brand_cap_for as _luxury_brand_cap,
@@ -391,8 +400,8 @@ def _enforce_line_pricing(
             detail=(
                 f"Discount {round(eff_disc, 2)}% on "
                 f"{item.product_name or pid or 'this line'} (explicit discount "
-                f"and/or unit price below MRP) exceeds your limit of {cap}%. "
-                f"Contact a manager for approval."
+                f"and/or unit price below MRP) exceeds your limit of {cap}% "
+                f"for this item (category/brand cap; no approval lifts it)."
             ),
         )
 

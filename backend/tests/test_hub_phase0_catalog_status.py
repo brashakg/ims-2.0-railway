@@ -651,7 +651,7 @@ def test_http_put_attributes_promotes_cl_draft(client):
             "model": "Oasys",
             "attributes": {"expiry_date": "2027-01-01"},
             "mrp": 1200.0,
-            "offer_price": 1000.0,
+            "offer_price": 1100.0,
             "cost_price": 500.0,
         },
     )
@@ -788,7 +788,7 @@ def test_flat_model_create_of_model_name_category_not_falsely_422():
             "model": "Oasys",
             "attributes": {"power": "-2.00", "expiry_date": "2027-01-01"},
             "mrp": 1200.0,
-            "offer_price": 1000.0,
+            "offer_price": 1100.0,
             "cost_price": 500.0,
             "sku": "CL-FLAT-1",
         },
