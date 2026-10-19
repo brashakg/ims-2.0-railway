@@ -540,6 +540,7 @@ class TestOtherReaders:
         db, _cli = _world()
         db["vendor_bills"].insert_one(
             {"bill_id": "C", "vendor_id": "V1", "store_id": "S1", "bill_date": "2026-05-04", "status": "RECEIVED",
+             "recipient_entity_id": "E1", "recipient_gstin": BUY_JH,
              "taxable_amount": 1000.0, "tax_amount": 100.0, "cgst_total": 100.0, "sgst_total": 0.0}
         )
         db["orders"].insert_one(
