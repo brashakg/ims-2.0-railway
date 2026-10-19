@@ -47,6 +47,11 @@ from tests.test_returns_gst_refund import (  # noqa: E402
     _qa_payload,
 )
 
+# The doors under test number their GST documents (a return's credit note,
+# a debit note): these fakes hold no store records, so a stub mint numbers
+# them (conftest.gst_numbers). The mint is tested in test_gst_document_numbers.
+pytestmark = pytest.mark.usefixtures("gst_numbers")
+
 OWN_STORE = "BV-PUN-01"
 OTHER_STORE = "BV-BOK-01"
 

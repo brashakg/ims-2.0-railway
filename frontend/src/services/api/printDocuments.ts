@@ -112,6 +112,17 @@ export const printDocumentsApi = {
       `/print/delivery-challan/transfer/${transferId}?copy=${encodeURIComponent(copy)}`,
     );
   },
+
+  // Open the tax invoice (+ e-way bill data) of a transfer between two GST
+  // registrations -- the paper such a move travels on (owner / CA 2026-10-18).
+  async openTransferInvoice(
+    transferId: string,
+    copy: 'ORIGINAL' | 'DUPLICATE' | 'TRIPLICATE' = 'ORIGINAL',
+  ): Promise<void> {
+    await _openHtml(
+      `/print/transfer-invoice/${transferId}?copy=${encodeURIComponent(copy)}`,
+    );
+  },
 };
 
 export default printDocumentsApi;

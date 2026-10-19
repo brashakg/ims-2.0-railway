@@ -40,7 +40,6 @@ from __future__ import annotations
 from api.utils.event_time import utc_now_iso
 
 import uuid
-from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 
@@ -238,18 +237,6 @@ def compute_invoice_delta(
     }
 
 
-def generate_note_number(note_type: str) -> str:
-    """Short, human-friendly credit/debit-note id, e.g. CN-250618-AB12CD.
-
-    A SEPARATE series from the GST invoice serial: a note is not an invoice and
-    must not consume an invoice number (it references one). Distinct CN/DN
-    prefixes keep the two ledgers unambiguous in Tally + GSTR-1 CDNR.
-    """
-    prefix = "DN" if note_type == DEBIT_NOTE else "CN"
-    stamp = datetime.now().strftime("%y%m%d")
-    return f"{prefix}-{stamp}-{uuid.uuid4().hex[:6].upper()}"
-
-
 def build_money_diff(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any]:
     """A small, human-readable change summary for the audit row.
 
@@ -322,10 +309,12 @@ def build_credit_note_doc(
     delta: Dict[str, Any],
     reason: str,
     user_id: Optional[str],
-    note_number: Optional[str] = None,
+    note_number: str,
 ) -> Dict[str, Any]:
     """Build a credit-note (reduction) or debit-note (increase) document linked
-    to the original ISSUED invoice. The ORIGINAL invoice stays intact; this note
+    to the original ISSUED invoice. ``note_number``: the caller's, minted from
+    the sale shop's C / D series (Rule 53) -- a note is not an invoice and
+    never takes an invoice number (it references one). The ORIGINAL invoice stays intact; this note
     carries ONLY the signed delta + its GST component so GSTR-1 CDNR + Tally
     reconcile against the original invoice number.
 
@@ -338,7 +327,7 @@ def build_credit_note_doc(
     amount = delta["abs_delta"]
     now = utc_now_iso()
     return {
-        "note_number": note_number or generate_note_number(note_type),
+        "note_number": note_number,
         "note_type": note_type,  # CREDIT_NOTE | DEBIT_NOTE
         "order_id": order.get("order_id"),
         "order_number": order.get("order_number"),

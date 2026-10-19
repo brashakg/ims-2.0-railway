@@ -68,6 +68,10 @@ from ..services.tender_routing import canonicalize_tender
 # (store_type == ONLINE, e.g. BV-ONLINE-01 / WO-ONLINE-01). Same detector the
 # POS / PO / GRN / till / add-stock guards use -- do NOT add a second one here.
 from ..services.stores_util import is_online_store
+from database.repositories.order_repository import (
+    InvoiceNumberError,
+    next_document_number,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -1527,9 +1531,17 @@ def _issue_store_credit(
     interstate: Optional[bool] = None,
     store_id: Optional[str] = None,
     order_id: Optional[str] = None,
+    note_number: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Append an ISSUED credit-note ledger entry (the GSTR-1 CDNR source) and,
     by default, bump the customer's running store-credit balance.
+
+    ``note_number``: the credit note's Rule 53 number (owner 2026-10-18), the
+    one GSTR-1 files -- the caller's when it already numbered the note (a
+    return numbers itself once, whatever the refund tender), else the next in
+    the booked store's credit-note series (next_document_number "C", e.g.
+    BOK02/C2627/0001). A refused number is a refused note (None): never one
+    filed without a legal number.
 
     ``order_id``: the order the note reverses, stamped on the row by a door
     whose note has no returns doc (no RET- ref) -- the GST returns find its
@@ -1591,6 +1603,13 @@ def _issue_store_credit(
     except ValueError as exc:
         logger.warning("[RETURNS] credit entry rejected: %s", exc)
         return None
+    if not note_number:
+        try:
+            note_number = next_document_number(_get_db(), entry.get("store_id"), "C")
+        except InvoiceNumberError as exc:
+            logger.warning("[RETURNS] credit note not numbered, not issued: %s", exc)
+            return None
+    entry["note_number"] = note_number
 
     # Stamp the gross / fee / net trail onto the ledger row for the credit note.
     if gross is not None:
@@ -3654,6 +3673,27 @@ async def create_return(
             )
         claimed.append(rl)
 
+    # Rule 53 (owner 2026-10-18): a return that reverses output tax is a
+    # credit note -- numbered ONCE from the sale shop's series, whatever the
+    # refund tender (a cash refund writes no ledger row; GSTR-1 files the
+    # return under this number). Refused -> nothing recorded, retryable.
+    credit_note_number: Optional[str] = None
+    if float(gst_view.get("tax") or 0) > 0 or float(gst_view.get("taxable") or 0) > 0:
+        try:
+            credit_note_number = next_document_number(_get_db(), store_id, "C")
+        except InvoiceNumberError as exc:
+            for done in claimed:
+                _release_returnable_qty(
+                    resolved_order_id,
+                    done["orig_line"],
+                    float(done["ret_line"].return_qty),
+                )
+            raise HTTPException(
+                status_code=400,
+                detail=f"This return's credit note cannot be numbered, so NOTHING "
+                f"was recorded: {exc}",
+            ) from exc
+
     # The order's refund/return mark before any credit or restock (multi-
     # location PR 5): a Re-map running on another worker never moves its
     # claims under this return. Fail-soft.
@@ -3723,6 +3763,7 @@ async def create_return(
             # The ORDER's store: the credit note reverses under the GSTIN the
             # sale was filed under, not the counter it was processed at.
             store_id=store_id,
+            note_number=credit_note_number,
         )
         if entry is None:
             # Release the qty claim so the return stays retryable, then say so.
@@ -3951,6 +3992,8 @@ async def create_return(
         "restocking_fee": restocking_fee,
         "net_refund": net_amount,
         "gst_breakup": gst_view,
+        # The credit note's Rule 53 number (None when nothing reverses tax).
+        "credit_note_number": credit_note_number,
         "refund_amount": refund_amount,
         "refund_method": refund_method,
         # DRAWER-TRUTH: the explicit refund-tender breakdown the Day-End readers
@@ -4069,6 +4112,7 @@ async def create_return(
         "restocking_fee": restocking_fee,
         "net_refund": net_amount,
         "gst_breakup": gst_view,
+        "credit_note_number": credit_note_number,
         "refund_amount": refund_amount,
         "refund_method": refund_method,
         "refund_tenders": refund_tenders,

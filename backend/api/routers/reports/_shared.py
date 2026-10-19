@@ -158,7 +158,7 @@ def _note_over_cap_serial(validation_issues: list, serial: str, problem: str) ->
             "invoice": serial,
             "count": 1,
             "issue": (
-                f"Invoice numbers break GSTN's rule (example: {problem}) -- "
+                f"Invoice or note numbers break GSTN's rule (example: {problem}) -- "
                 "the portal may reject the upload"
             ),
         }
@@ -216,20 +216,25 @@ def _gstr1_bill_number(order: dict, validation_issues: Optional[list] = None) ->
     return str(order.get("order_id") or "").strip()[:16]
 
 
-def _cdnr_note_number(entry: dict) -> str:
-    """16-char-safe CDNR note number for a GSTR-1 credit-note row.
+def _cdnr_note_number(entry: dict, validation_issues: Optional[list] = None) -> str:
+    """The CDNR note number of a GSTR-1 credit-note row, filed VERBATIM.
 
-    GSTN caps note numbers at 16 chars like invoice numbers. Synthesized
-    historical credit notes (shopify_ingest) stamp a dedicated GSTN-legal
-    ``note_number`` ('CNH-<refund-id tail>', <=16 chars) at insert -- prefer it.
-    Legacy rows carry only the internal ``ref`` (e.g. 'RET-250415-ABC123', 17
-    chars; 'SHOPIFY-HIST-REFUND-<id>', ~33 chars) -- cap it at 16 for the filing.
-    The internal ``ref`` itself (the idempotency key) is NEVER changed."""
-    note = str(entry.get("note_number") or "").strip()
-    if note and len(note) <= 16:
-        return note
-    ref = str(entry.get("ref", entry.get("entry_id", "")) or "").strip()
-    return ref[:16]
+    The number of the note actually issued: its ``note_number`` -- the shop's
+    credit-note series (Rule 53, owner 2026-10-18: e.g. BOK02/C2627/0001) or a
+    synthesized historical note's 'CNH-<refund-id tail>' -- else, for a note
+    issued before numbering, the internal ``ref`` it was issued under (e.g.
+    'RET-250415-ABC123', 17 chars). Never truncated: a cut number is one that
+    was never issued. A number that breaks GSTN's rule (over 16 characters or
+    a character outside capitals/digits/'-'/'/') is FLAGGED on the report's
+    one aggregated issue (_note_over_cap_serial) when `validation_issues` is
+    passed -- the rule the mint refuses on."""
+    number = str(
+        entry.get("note_number") or entry.get("ref") or entry.get("entry_id") or ""
+    ).strip()
+    problem = gst_invoice_number_problem(number)
+    if problem and validation_issues is not None:
+        _note_over_cap_serial(validation_issues, number, problem)
+    return number
 
 
 def _credit_note_date_ist(raw) -> str:

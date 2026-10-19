@@ -36,6 +36,7 @@ from .print_legal import (
     LegalHeader,
     amount_in_words,
     copy_marker_block,
+    declarations,
     format_date,
     hsn_tax_summary,
     statutory_footer,
@@ -593,6 +594,207 @@ def render_delivery_challan(
         + footer
     )
     return _page("Delivery Challan " + (challan_number or ""), body, auto_print)
+
+
+# ===========================================================================
+# TRANSFER TAX INVOICE + E-WAY BILL DATA -- a move between two registrations
+# ===========================================================================
+
+# Rule 138: a consignment over Rs 50,000 (its invoice value, tax included)
+# moves on an e-way bill. A state may set its own intra-state limit.
+EWAY_BILL_LIMIT = 50000.0
+
+
+def _state_label(gstin: str) -> str:
+    code = (gstin or "")[:2]
+    return " / ".join(p for p in (state_name(code), code) if p)
+
+
+def render_transfer_tax_invoice(
+    *,
+    entity: Optional[Dict[str, Any]],
+    store: Optional[Dict[str, Any]],
+    invoice_number: str,
+    invoice_date: Any,
+    supplier_name: str,
+    supplier_address: str,
+    supplier_gstin: str,
+    recipient_name: str,
+    recipient_address: str,
+    recipient_gstin: str,
+    lines: List[Dict[str, Any]],
+    transfer_number: str = "",
+    copy_marker: str = "ORIGINAL",
+    overrides: Optional[Dict[str, Any]] = None,
+    auto_print: bool = False,
+) -> str:
+    """The tax invoice a stock move between two GST registrations travels on
+    (owner / CA 2026-10-18), then the data the GST portal's e-way bill form
+    asks for. `lines` are the transfer's per-line taxable + GST rows
+    (transfers._mirror_bill_lines on the units shipped: description, hsn,
+    qty, unit_price, taxable, gst_rate, cgst, sgst, igst, line_total), so the
+    paper and the books price the same way. Rule 46 header (both GSTINs, the
+    place of supply = the recipient registration's state), Rule 48 copies."""
+    lines = [ln for ln in (lines or []) if isinstance(ln, dict)]
+    place = _state_label(recipient_gstin)
+    code = recipient_gstin[:2]
+    header = LegalHeader(
+        entity=entity,
+        store=store,
+        doc_type="tax_invoice",
+        doc_number=invoice_number,
+        doc_date=invoice_date,
+        # Where the goods go: the recipient registration's state.
+        place_of_supply="{0} ({1})".format(state_name(code) or "", code).strip()
+        if code
+        else None,
+        copy_marker=copy_marker,
+        overrides=overrides,
+        extra_meta=[("Transfer No.", transfer_number)] if transfer_number else None,
+    )
+    # One supplier registration and one place of supply per page (the same
+    # overrides the delivery challan makes): the sending shop's GSTIN, and
+    # its address is where the goods are dispatched from.
+    mine = (
+        {"GSTIN / UIN": supplier_gstin, "State / Code": _state_label(supplier_gstin)}
+        if supplier_gstin
+        else {}
+    )
+    header["supplier_kv"] = [
+        ("Dispatched from" if k == "Place of supply" else k, mine.get(k, v))
+        for k, v in header.get("supplier_kv") or []
+    ]
+    head = _header_fragment(header, "Tax Invoice")
+
+    def _party(title: str, name: str, address: str, gstin: str) -> str:
+        return (
+            "<div><h3>" + _e(title) + "</h3><div><strong>" + _e(name) + "</strong></div>"
+            + ("<div>" + _e(address) + "</div>" if address else "")
+            + "<div>GSTIN: " + _e(gstin) + "</div>"
+            + "<div>State: " + _e(_state_label(gstin)) + "</div></div>"
+        )
+
+    party = (
+        '<div class="party-grid">'
+        + _party("Supplier (Dispatched from)", supplier_name, supplier_address, supplier_gstin)
+        + _party("Recipient (Bill to / Ship to)", recipient_name, recipient_address, recipient_gstin)
+        + "</div>"
+    )
+
+    money_cols = ("unit_price", "taxable", "gst_rate", "cgst", "sgst", "igst", "line_total")
+    t = {k: 0.0 for k in ("qty", "taxable", "cgst", "sgst", "igst", "line_total")}
+    rows = ""
+    for idx, ln in enumerate(lines, start=1):
+        for k in t:
+            t[k] = round(t[k] + float(ln.get(k) or 0), 2)
+        cells = "".join(
+            '<td class="num">'
+            + (_qty(ln.get(k)) + "%" if k == "gst_rate" else _money(ln.get(k)))
+            + "</td>"
+            for k in money_cols
+        )
+        serials = ", ".join(str(b) for b in ln.get("serials") or [])
+        rows += (
+            '<tr><td class="ctr">' + str(idx) + "</td><td>" + _e(ln.get("description"))
+            + ('<div class="muted">' + _e(serials) + "</div>" if serials else "")
+            + "</td><td>" + _e(ln.get("hsn")) + '</td><td class="num">'
+            + _qty(ln.get("qty")) + "</td>" + cells + "</tr>"
+        )
+    total_cells = "".join(
+        '<td class="num"><strong>' + _money(t[k]) + "</strong></td>"
+        + ("<td></td>" if k == "taxable" else "")
+        for k in ("taxable", "cgst", "sgst", "igst", "line_total")
+    )
+    table = (
+        '<table class="lines"><thead><tr>'
+        '<th class="ctr">Sr.</th><th>Description of Goods</th><th>HSN</th>'
+        '<th class="num">Qty</th><th class="num">Rate (at cost)</th>'
+        '<th class="num">Taxable value</th><th class="num">GST</th>'
+        '<th class="num">CGST</th><th class="num">SGST</th><th class="num">IGST</th>'
+        '<th class="num">Total</th></tr></thead><tbody>'
+        + rows
+        + '</tbody><tfoot><tr><td colspan="3" class="right"><strong>Total</strong></td>'
+        + '<td class="num"><strong>' + _qty(t["qty"]) + "</strong></td><td></td>"
+        + total_cells
+        + "</tr></tfoot></table>"
+    )
+    total = t["line_total"]
+    rupees = int(total)
+    words = (
+        '<div class="words">Amount in words: '
+        + _e(amount_in_words(rupees, int(round((total - rupees) * 100))))
+        + "</div>"
+    )
+    declaration = (
+        '<div class="declaration">Stock transferred between two GST registrations '
+        "(a supply under Schedule I of the CGST Act), valued at cost. "
+        + _e(declarations("tax_invoice"))
+        + "</div>"
+    )
+    signs = _signs(
+        "Dispatched by",
+        "Transporter",
+        (header.get("signatory_designation") or "Authorised Signatory"),
+    )
+    footer = _footer("tax_invoice", int(header.get("retention_years") or 7))
+
+    # E-way bill data: what the portal's form asks for. Part B (the vehicle)
+    # is written in by hand at dispatch.
+    if total > EWAY_BILL_LIMIT:
+        flag = (
+            '<div class="not-invoice">E-way bill REQUIRED: this consignment is worth '
+            + _money(total) + ", over " + _money(EWAY_BILL_LIMIT)
+            + ". Generate it on ewaybillgst.gov.in before the goods leave.</div>"
+        )
+    else:
+        flag = (
+            '<div class="declaration">Consignment value ' + _money(total)
+            + " is not over " + _money(EWAY_BILL_LIMIT)
+            + ": the central rule needs no e-way bill (check the state's own limit).</div>"
+        )
+    part_a = [
+        ("Supply type / Sub type", "Outward / Supply"),
+        ("Document type", "Tax Invoice"),
+        ("Document No. / Date", invoice_number + " / " + format_date(invoice_date)),
+        ("From GSTIN / State", supplier_gstin + " / " + _state_label(supplier_gstin)),
+        ("From (dispatch) address", supplier_address),
+        ("To GSTIN / State", recipient_gstin + " / " + place),
+        ("To (ship to) address", recipient_address),
+        ("Taxable value", _money(t["taxable"])),
+        ("CGST / SGST / IGST", " / ".join(_money(t[k]) for k in ("cgst", "sgst", "igst"))),
+        ("Total invoice value", _money(total)),
+    ]
+    goods = "".join(
+        "<tr><td>" + _e(ln.get("hsn")) + "</td><td>" + _e(ln.get("description"))
+        + '</td><td class="num">' + _qty(ln.get("qty")) + ' NOS</td><td class="num">'
+        + _money(ln.get("taxable")) + '</td><td class="num">' + _qty(ln.get("gst_rate"))
+        + "%</td></tr>"
+        for ln in lines
+    )
+    blank = (
+        '<span style="display:inline-block;min-width:220px;'
+        'border-bottom:1px solid #6b7280">&nbsp;</span>'
+    )
+    part_b = (
+        "Transport mode", "Transporter name", "Transporter ID", "Vehicle No.",
+        "Transport doc No. / Date", "Approx. distance (km)", "E-way bill No. / Date",
+    )
+    eway = (
+        '<div style="page-break-before:always"></div>'
+        '<div class="title-band"><h2>E-way Bill Data</h2></div>'
+        + flag
+        + '<h3>Part A</h3><table class="kv">'
+        + "".join('<tr><td class="k">' + _e(k) + "</td><td>" + _e(v) + "</td></tr>" for k, v in part_a)
+        + '</table><table class="lines"><thead><tr><th>HSN</th><th>Product</th>'
+        '<th class="num">Quantity</th><th class="num">Taxable value</th>'
+        '<th class="num">Tax rate</th></tr></thead><tbody>'
+        + goods
+        + '</tbody></table><h3>Part B (fill in at dispatch)</h3><table class="kv">'
+        + "".join('<tr><td class="k">' + _e(k) + "</td><td>" + blank + "</td></tr>" for k in part_b)
+        + "</table>"
+    )
+    body = head + party + table + words + declaration + signs + footer + eway
+    return _page("Tax Invoice " + (invoice_number or ""), body, auto_print)
 
 
 # ===========================================================================

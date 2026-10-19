@@ -1011,6 +1011,11 @@ from tests.test_counter_roles_no_purchase_reads import (  # noqa: E402
     _assert_screens_read,
 )
 
+# The doors under test number their GST documents (a return's credit note,
+# a debit note): these fakes hold no store records, so a stub mint numbers
+# them (conftest.gst_numbers). The mint is tested in test_gst_document_numbers.
+pytestmark = pytest.mark.usefixtures("gst_numbers")
+
 
 @pytest.mark.skipif(not os.path.exists(_COST_CELL), reason="frontend/ not shipped here")
 def test_frontend_cost_roles_are_the_purchase_context():

@@ -10,7 +10,8 @@ from api.utils.event_time import utc_now_iso
 from database.repositories.order_repository import (
     InvoiceNumberError,
     derive_bill_type,
-    historical_order_problem,
+    order_mint_problem,
+    next_document_number,
 )
 from datetime import datetime
 from fastapi import Depends, HTTPException
@@ -392,10 +393,11 @@ async def superadmin_invoice_change(
 
     if body.mode == "REVISED_INVOICE":
         # Allocate a fresh GST serial for the revised invoice.
-        historical = historical_order_problem(order)
-        if historical:
+        # A historical import or a CANCELLED order never takes a number.
+        problem = order_mint_problem(order)
+        if problem:
             raise HTTPException(
-                status_code=400, detail=f"Cannot issue a revised invoice: {historical}"
+                status_code=400, detail=f"Cannot issue a revised invoice: {problem}"
             )
         try:
             new_invoice_number = repo.next_invoice_number(
@@ -477,6 +479,31 @@ async def superadmin_invoice_change(
         if not repo.update_if(
             order_id, {"invoice_number": original_invoice}, update_data
         ):
+            # The serial this press minted is never printed: record the gap
+            # (Rule 46(b) -- every serial accounted for) next to the audit row
+            # above that announced it, and void its link record.
+            _write_order_edit_audit(
+                action="ORDER_INVOICE_REVISION_REFUSED",
+                order=order,
+                before=before,
+                after=before,
+                reason="revision refused, serial unused: another request "
+                "revised this invoice first",
+                user_id=current_user.get("user_id"),
+                extra={
+                    "original_invoice_number": original_invoice,
+                    "unused_invoice_number": new_invoice_number,
+                    "revision_id": revised_doc["revision_id"],
+                },
+            )
+            if db is not None:
+                try:
+                    db.get_collection("revised_invoices").update_one(
+                        {"revision_id": revised_doc["revision_id"]},
+                        {"$set": {"status": "REFUSED_SERIAL_UNUSED"}},
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[ORDERS] revised_invoices void failed: %s", exc)
             raise HTTPException(
                 status_code=409,
                 detail=(
@@ -521,11 +548,26 @@ async def superadmin_invoice_change(
             ),
         )
 
+    # Rule 53 (owner 2026-10-18): the note's number from the sale shop's
+    # credit-note (C) or debit-note (D) series -- refused, never guessed,
+    # before anything is written.
+    try:
+        note_number = next_document_number(
+            db,
+            order.get("store_id"),
+            "D" if delta["note_type"] == "DEBIT_NOTE" else "C",
+            store_doc=store_doc,
+        )
+    except InvoiceNumberError as exc:
+        raise HTTPException(
+            status_code=400, detail=f"Cannot issue the note: {exc}"
+        ) from exc
     note_doc = build_credit_note_doc(
         order=order,
         delta=delta,
         reason=body.reason,
         user_id=current_user.get("user_id"),
+        note_number=note_number,
     )
 
     # SYNCHRONOUS immutable audit BEFORE issuing the note.
@@ -591,6 +633,7 @@ async def superadmin_invoice_change(
                 # No returns doc behind this note: the row names its parent,
                 # so the GST returns hold it with a held sale (never filed).
                 order_id=order.get("order_id"),
+                note_number=note_doc["note_number"],
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ORDERS] store-credit bump skipped: %s", exc)

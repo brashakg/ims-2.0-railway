@@ -10,7 +10,7 @@ from fastapi import Depends, HTTPException
 from typing import Optional
 from database.repositories.order_repository import (
     InvoiceNumberError,
-    historical_order_problem,
+    order_mint_problem,
 )
 from ..auth import get_current_user
 from ...dependencies import (
@@ -267,10 +267,11 @@ def _assemble_invoice(order_id: str, current_user: dict):
         # carry; a stored number is never rewritten.
         invoice_number = order.get("invoice_number")
         if not invoice_number:
-            historical = historical_order_problem(order)
-            if historical:
+            # A historical import or a CANCELLED order never takes a number.
+            problem = order_mint_problem(order)
+            if problem:
                 raise HTTPException(
-                    status_code=400, detail=f"Cannot generate invoice: {historical}"
+                    status_code=400, detail=f"Cannot generate invoice: {problem}"
                 )
             # Best-effort unique index (idempotent; no-op if already present).
             try:

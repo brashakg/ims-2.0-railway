@@ -312,6 +312,29 @@ def brand_is_for_the_website(monkeypatch):
 
 
 @pytest.fixture
+def gst_numbers(monkeypatch):
+    """Each GST document door gets the next number of a stub mint.
+
+    For suites that test a return's, refund's or debit note's OTHER mechanics
+    over fake DBs that hold no store records or counters (no record, no
+    number: the real mint refuses). The mint itself -- formats, one series per
+    shop, atomicity, FY, refusals -- is tested on the real code in
+    test_gst_document_numbers.py and test_gst_invoice_number_16.py."""
+    import itertools
+
+    serial = itertools.count(1)
+
+    def mint(db, store_id, series="", when=None, store_doc=None):
+        n = next(serial)
+        return f"TST01/{series}2627/{n:04d}" if series else f"TST01/2627/{n:05d}"
+
+    for door in ("api.routers.returns", "api.services.rtv_debit_note",
+                 "api.routers.orders.admin_edit"):
+        monkeypatch.setattr(f"{door}.next_document_number", mint)
+    return mint
+
+
+@pytest.fixture
 def auth_headers(client):
     """Get a valid JWT for an admin user by calling login.
     Falls back to creating a token directly if login requires a DB.

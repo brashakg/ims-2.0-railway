@@ -99,6 +99,9 @@ def _store(sid, name, entity, gstin, state, code, address, city, pin):
         "store_id": sid, "store_name": name, "name": name, "entity_id": entity,
         "gstin": gstin, "state": state, "state_code": code, "address": address,
         "city": city, "pincode": pin, "phone": "9000000001", "store_type": "PHYSICAL",
+        # The shop code its GST documents carry (a crossing move's tax
+        # invoice is numbered from the sender's T series).
+        "invoice_code": sid.replace("ST-", "").replace("-", "0"),
     }
 
 

@@ -160,6 +160,24 @@ ROWS: List[Dict[str, object]] = [
         ],
         "store_scoped": True,
     },
+    # Transfer tax invoice + e-way bill data (owner / CA 2026-10-18): a move
+    # between two GST registrations. The handler prints it by the valued
+    # challan's own rule (print_documents.challan_gate: the cost roles, once
+    # shipped), either side of the move.
+    {
+        "method": "GET",
+        "path": "/api/v1/print/transfer-invoice/{transfer_id}",
+        "allowed": [
+            "SUPERADMIN",
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "SALES_CASHIER",
+            "SALES_STAFF",
+            "ACCOUNTANT",
+        ],
+        "store_scoped": True,
+    },
     # --- /api/v1/print-overrides ---
     {"method": "GET", "path": "/api/v1/print-overrides", "allowed": "AUTHENTICATED"},
     {
