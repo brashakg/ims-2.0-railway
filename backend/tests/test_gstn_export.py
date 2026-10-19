@@ -530,9 +530,13 @@ class TestGstnEndpointGating:
         assert body["fp"] == "042026"
         assert "b2b" in body and "hsn" in body
 
-    def test_gstr3b_gstn_json_no_db_is_no_file(self):
+    def test_gstr3b_gstn_json_no_db_is_no_file(self, monkeypatch):
         """No database, no return: an all-zero upload would file as a nil
-        return with no credit (M7, GST review 2026-10-19) -- 503 instead."""
+        return with no credit (M7, GST review 2026-10-19) -- 503 instead.
+        (No database whatever the box: CI has a real Mongo.)"""
+        from api.routers.reports import gstr3b as r3b
+
+        monkeypatch.setattr(r3b, "_get_raw_db", lambda: None)
         resp = _reports_client_as(["ADMIN"]).get(
             "/reports/gstr3b/gstn-json?month=2026-04"
         )
