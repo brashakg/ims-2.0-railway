@@ -33,6 +33,10 @@ export function mapGst(d: any): GSTSummaryData | null {
     sgst_collected: Number(d.sgst || 0),
     igst_collected: igst,
     total_gst: Number(d.gst_collected || 0),
+    // null = withheld: the caller's GSTIN also files for shops outside his
+    // view, so its credit and cash are the whole return's (M4). Absent keys
+    // (a reader outside the accounts rule) stay 0 and are not drawn.
+    input_withheld: 'net_gst_payable' in d && d.net_gst_payable === null,
     gst_payable: Number(d.net_gst_payable || 0),
     input_tax_credit: Number(d.gst_input_credit || 0),
     credit_carried_forward: Number(d.gst_input_credit_carried_forward || 0),

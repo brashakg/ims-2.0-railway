@@ -122,6 +122,9 @@ class _FakeRawCol:
     def find_one(self, *args, **kwargs):
         return self._docs[0] if self._docs else None
 
+    def aggregate(self, *args, **kwargs):  # GSTR-3B sums bills (M7: no swallow)
+        return iter([])
+
 
 class _FakeRawDB:
     def __init__(self, **collections):
@@ -129,6 +132,8 @@ class _FakeRawDB:
 
     def __getitem__(self, name):
         return self._cols.get(name) or _FakeRawCol([])
+
+    get_collection = __getitem__
 
 
 def _gst_fake_order():

@@ -133,10 +133,16 @@ def _seed(db) -> None:
     )
 
     def bill(bill_id, vendor, store, on, due, total, taxable, tax, **extra):
+        # Received on the shop's GSTIN with its tax heads, as the bill doors
+        # store it: the GST summary is GSTR-3B's figure (M3), placed so.
+        entity, gstin = (("E-MH", "27ABCDE1234F1Z5") if store == PUN
+                         else ("E-JH", "20ABCDE1234F1Z5"))
         return {
             "bill_id": bill_id, "vendor_id": vendor, "store_id": store,
             "bill_number": f"INV-{bill_id}", "bill_date": on, "due_date": due,
             "total_amount": total, "taxable_amount": taxable, "tax_amount": tax,
+            "recipient_entity_id": entity, "recipient_gstin": gstin,
+            "cgst_total": tax / 2, "sgst_total": tax / 2, "igst_total": 0.0,
             "status": "OUTSTANDING", **extra,
         }
 

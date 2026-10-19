@@ -204,7 +204,10 @@ export default function FinanceDashboard() {
   // One row per GST registration, read off its GSTR-3B (audit A04-3). A
   // null net_payable: the GSTIN also files for shops outside this login's
   // view, so no cash figure rather than a wrong one.
-  const [gstRecon, setGstRecon] = useState<Array<{ entity_name?: string; gstin?: string; gst_collected?: number; input_credit?: number; reverse_charge?: number; net_payable?: number | null; shops_outside_view?: number }>>([]);
+  const [gstRecon, setGstRecon] = useState<Array<{ entity_name?: string; gstin?: string; gst_collected?: number; input_credit?: number | null; reverse_charge?: number | null; net_payable?: number | null; shops_outside_view?: number }>>([]);
+  // The table's own refusal (503 unreadable, 409 a registration to correct),
+  // shown in its place -- never an empty table that reads as "no GST".
+  const [gstReconError, setGstReconError] = useState<string | null>(null);
   // The backend tells us when it has withheld an expense head from this reader.
   // THREE separate flags on three separate responses -- /pnl, /budget and
   // /cash-flow -- and they are kept as three pieces of state on purpose: two of
@@ -310,6 +313,9 @@ export default function FinanceDashboard() {
         setPnlByStore(ps2.status === 'fulfilled' ? (ps2.value?.stores || []) : []);
         setPnlByCategory(pc2.status === 'fulfilled' ? (pc2.value?.categories || []) : []);
         setGstRecon(gr2.status === 'fulfilled' ? (gr2.value?.registrations || []) : []);
+        setGstReconError(gr2.status === 'rejected'
+          ? (gr2.reason instanceof Error ? gr2.reason.message : 'The GST table could not be worked out. Please retry.')
+          : null);
       } catch {
         /* non-fatal */
       }
@@ -592,7 +598,12 @@ export default function FinanceDashboard() {
                 </div>
               )}
               <GSTPanel gstSummary={gstSummary} />
-              {gstRecon.length > 0 && (
+              {gstReconError && (
+                <div role="alert" className="card mt-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800" data-testid="gst-recon-error">
+                  GST by registration: {gstReconError}
+                </div>
+              )}
+              {!gstReconError && gstRecon.length > 0 && (
                 <div className="card mt-4 overflow-x-auto">
                   <div className="px-4 py-2 text-sm font-medium text-gray-700 border-b border-gray-100">GST by registration, as each GSTR-3B (file via Tally)</div>
                   <table className="min-w-full text-sm">
@@ -610,13 +621,15 @@ export default function FinanceDashboard() {
                           <td className="px-3 py-2">{e.entity_name}</td>
                           <td className="px-3 py-2 font-mono text-xs">{e.gstin || 'No GSTIN'}</td>
                           <td className="px-3 py-2 text-right">₹{Math.round(e.gst_collected || 0).toLocaleString('en-IN')}</td>
-                          <td className="px-3 py-2 text-right">₹{Math.round(e.input_credit || 0).toLocaleString('en-IN')}</td>
-                          <td className="px-3 py-2 text-right">₹{Math.round(e.reverse_charge || 0).toLocaleString('en-IN')}</td>
-                          <td className="px-3 py-2 text-right font-semibold">
-                            {e.net_payable == null
-                              ? <span title={`This GSTIN also files for ${e.shops_outside_view || 0} other shop(s) not in this view - see its GSTR-3B`}>—</span>
-                              : `₹${Math.round(e.net_payable).toLocaleString('en-IN')}`}
-                          </td>
+                          {e.net_payable == null ? (
+                            <td colSpan={3} className="px-3 py-2 text-right text-xs text-gray-600" data-testid="gst-recon-withheld">
+                              — Input credit, reverse charge and net payable are this GSTIN&rsquo;s whole return, which also covers {e.shops_outside_view || 0} other shop(s) not in this view. Ask an admin.
+                            </td>
+                          ) : (<>
+                            <td className="px-3 py-2 text-right">₹{Math.round(e.input_credit || 0).toLocaleString('en-IN')}</td>
+                            <td className="px-3 py-2 text-right">₹{Math.round(e.reverse_charge || 0).toLocaleString('en-IN')}</td>
+                            <td className="px-3 py-2 text-right font-semibold">₹{Math.round(e.net_payable).toLocaleString('en-IN')}</td>
+                          </>)}
                         </tr>
                       ))}
                     </tbody>

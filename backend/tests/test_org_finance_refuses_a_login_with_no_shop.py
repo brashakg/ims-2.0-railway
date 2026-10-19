@@ -72,6 +72,10 @@ def world(monkeypatch):
         {"store_id": DHN, "store_name": "Dhanbad", "state": "Jharkhand", "entity_id": "E1"},
         {"store_id": PUN, "store_name": "Pune", "state": "Maharashtra", "entity_id": "E1"},
     ])
+    # Each shop's GST registration (the GST tab refuses a shop with sales and
+    # none, A04 / M3).
+    db["entities"].insert_one({"entity_id": "E1", "gstins": [
+        {"gstin": "20ABCDE1234F1Z5"}, {"gstin": "27ABCDE1234F1Z5"}]})
     now = datetime.utcnow()
     for sid, amt in ((DHN, 1000), (PUN, 2000)):
         db["orders"].insert_one({

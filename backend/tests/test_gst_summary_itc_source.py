@@ -29,22 +29,33 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-key-itc-source")
 
-from strict_fakes import StrictDB  # noqa: E402
+import mongomock  # noqa: E402
 
 MONTH, YEAR = 6, 2026
 _URL = f"/api/v1/finance/gst/summary?month={MONTH}&year={YEAR}"
 
 
+class _Seeded:
+    """The in-memory DB behind the finance router's _get_db(). mongomock, not
+    strict_fakes.StrictDB: the summary now runs GSTR-3B's own placement query
+    ($nor / regex months, M3), which StrictDB does not evaluate."""
+
+    def __init__(self, db):
+        self.db = db
+
+    def seed(self, name, docs):
+        self.db[name].insert_many([dict(d) for d in docs])
+
+
 @pytest.fixture
 def gst_db(monkeypatch):
-    """Strict in-memory DB behind the finance router's _get_db()."""
     from api.routers import finance as finance_mod
 
-    db = StrictDB()
-    db.seed("entities", [{"entity_id": "E1", "gstins": [{"gstin": "20ABCDE1234F1Z5"}]}])
-    db.seed("stores", [{"store_id": "S1", "entity_id": "E1", "gstin": "20ABCDE1234F1Z5"}])
-    monkeypatch.setattr(finance_mod, "_get_db", lambda: db)
-    return db
+    seeded = _Seeded(mongomock.MongoClient().db)
+    seeded.seed("entities", [{"entity_id": "E1", "gstins": [{"gstin": "20ABCDE1234F1Z5"}]}])
+    seeded.seed("stores", [{"store_id": "S1", "entity_id": "E1", "gstin": "20ABCDE1234F1Z5"}])
+    monkeypatch.setattr(finance_mod, "_get_db", lambda: seeded.db)
+    return seeded
 
 
 def _bill(bill_id, tax, bill_date, **extra):
@@ -57,6 +68,13 @@ def _bill(bill_id, tax, bill_date, **extra):
         "taxable_amount": 5000.0,
         "tax_amount": tax,
         "total_amount": 5000.0 + tax,
+        # As the bill doors store it (GSTR-3B places it by these, M3).
+        "recipient_entity_id": "E1",
+        "recipient_gstin": "20ABCDE1234F1Z5",
+        "vendor_gstin": "20AAAAA0000A1Z5",
+        "cgst_total": tax / 2,
+        "sgst_total": tax / 2,
+        "igst_total": 0.0,
     }
     doc.update(extra)
     return doc
@@ -112,13 +130,11 @@ def test_itc_excludes_bills_outside_the_tax_period(client, auth_headers, gst_db)
     assert body["gst_input_credit"] == 900.0, body
 
 
-def test_itc_accepts_a_datetime_bill_date(client, auth_headers, gst_db):
-    """bill_date may be stored as a BSON datetime OR an ISO string.
-
-    Replaces a grep for the literal "parse_date": what matters is that BOTH
-    storage shapes are counted, which a Mongo range bound on one type would
-    silently fail to do.
-    """
+def test_a_datetime_bill_date_refuses_rather_than_drops_the_credit(client, auth_headers, gst_db):
+    """GSTR-3B places a bill in its month by its written date (every bill
+    door writes YYYY-MM-DD). A legacy BSON datetime is on no month's return,
+    so the summary refuses (409, the Cross-Check names the bill) instead of
+    quietly leaving Rs 300 of credit out."""
     gst_db.seed(
         "vendor_bills",
         [
@@ -126,8 +142,7 @@ def test_itc_accepts_a_datetime_bill_date(client, auth_headers, gst_db):
             _bill("BILL-STR", 200.0, "2026-06-13"),
         ],
     )
-    body = client.get(_URL, headers=auth_headers).json()
-    assert body["gst_input_credit"] == 500.0, body
+    assert client.get(_URL, headers=auth_headers).status_code == 409
 
 
 def test_ineligible_bills_are_held_back_and_reported(client, auth_headers, gst_db):
@@ -137,7 +152,7 @@ def test_ineligible_bills_are_held_back_and_reported(client, auth_headers, gst_d
         "vendor_bills",
         [
             _bill("BILL-OK", 900.0, "2026-06-10"),
-            _bill("BILL-BLOCKED", 400.0, "2026-06-11", itc_blocked=True),
+            _bill("BILL-BLOCKED", 400.0, "2026-06-11", itc_blocked=True, itc_eligible=False),
         ],
     )
     body = client.get(_URL, headers=auth_headers).json()

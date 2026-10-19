@@ -100,6 +100,9 @@ export interface GSTSummaryData {
   igst_collected: number;
   total_gst: number;
   gst_payable: number;
+  // True when the input-side figures are withheld (the GSTIN also files for
+  // shops outside this login's view): the panel says so instead of a 0.
+  input_withheld?: boolean;
   input_tax_credit: number;
   // Input credit left over after setting off the GST collected (next month's).
   credit_carried_forward: number;

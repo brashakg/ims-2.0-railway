@@ -92,10 +92,10 @@ beforeEach(() => {
 });
 
 describe('the Finance GST table is one row per GSTIN', () => {
-  it('shows each registration, and no cash figure for a GSTIN shared with hidden shops', async () => {
+  it('shows each registration, and says inline why a shared GSTIN has no input-side figure', async () => {
     fin.getGstReconciliation.mockResolvedValue({ registrations: [
       { entity_name: 'Better Vision', gstin: '20AABCB1234C1ZS', gst_collected: 1000, input_credit: 300, reverse_charge: 0, net_payable: 700 },
-      { entity_name: 'Better Vision', gstin: '27AABCB1234C1ZQ', gst_collected: 500, input_credit: 100, reverse_charge: 0, net_payable: null, shops_outside_view: 1 },
+      { entity_name: 'Better Vision', gstin: '27AABCB1234C1ZQ', gst_collected: 500, input_credit: null, reverse_charge: null, net_payable: null, shops_outside_view: 1 },
     ] });
     render(<FinanceDashboard />);
     await waitFor(() => expect(fin.getGstReconciliation).toHaveBeenCalled());
@@ -103,7 +103,28 @@ describe('the Finance GST table is one row per GSTIN', () => {
     const jh = (await screen.findByText('20AABCB1234C1ZS')).closest('tr') as HTMLElement;
     expect(within(jh).getByText('₹700')).toBeInTheDocument();
     const mh = screen.getByText('27AABCB1234C1ZQ').closest('tr') as HTMLElement;
-    expect(within(mh).getByText('—')).toHaveAttribute('title', expect.stringMatching(/1 other shop\(s\) not in this view/));
+    expect(within(mh).getByTestId('gst-recon-withheld')).toHaveTextContent(/also covers 1 other shop\(s\) not in this view/);
+    expect(within(mh).queryByText('₹0')).toBeNull();
+  });
+
+  it('a refused table says so in its place, never an empty table', async () => {
+    fin.getGstReconciliation.mockRejectedValue(new Error('The GST figures could not be read for every shop; please retry.'));
+    render(<FinanceDashboard />);
+    await waitFor(() => expect(fin.getGstReconciliation).toHaveBeenCalled());
+    await userEvent.setup().click(screen.getByRole('button', { name: /gst management/i }));
+    expect(await screen.findByTestId('gst-recon-error')).toHaveTextContent('could not be read for every shop');
+  });
+
+  it('the cards say why input credit and net payable are not shown, never a 0', async () => {
+    fin.getGstReconciliation.mockResolvedValue({ registrations: [] });
+    fin.getGstSummary.mockResolvedValue({ cgst: 450, sgst: 450, igst: 0, gst_collected: 900,
+      gst_input_credit: null, net_gst_payable: null, reverse_charge_tax: null, gst_input_credit_carried_forward: null });
+    render(<FinanceDashboard />);
+    await waitFor(() => expect(fin.getGstSummary).toHaveBeenCalled());
+    await userEvent.setup().click(screen.getByRole('button', { name: /gst management/i }));
+    expect(await screen.findByTestId('gst-input-withheld')).toBeInTheDocument();
+    expect(screen.queryByText('Net GST Payable')).toBeNull();
+    expect(screen.queryByText('Less: Input Tax Credit')).toBeNull();
   });
 });
 

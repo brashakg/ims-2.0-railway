@@ -71,6 +71,10 @@ class _FakeCollection:
         )
         return None
 
+    def count_documents(self, filter=None, *args, **kwargs):
+        self._recorder.setdefault(self._name, []).append(dict(filter or {}))
+        return 0
+
     def aggregate(self, pipeline, *args, **kwargs):
         match = {}
         for stage in pipeline or []:

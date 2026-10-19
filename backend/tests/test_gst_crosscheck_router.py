@@ -103,7 +103,7 @@ def _base_collections(*, empty_stores=False, po_raises=False):
     }
 
 
-def _fake_gstr3b(period, sid):
+def _fake_gstr3b(period, sid, **_kw):
     return {
         "outwardTaxableValue": 10000.0,
         "outwardTaxableSupplies": {

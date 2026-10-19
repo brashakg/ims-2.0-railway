@@ -530,14 +530,13 @@ class TestGstnEndpointGating:
         assert body["fp"] == "042026"
         assert "b2b" in body and "hsn" in body
 
-    def test_gstr3b_gstn_json_shape_no_db(self):
+    def test_gstr3b_gstn_json_no_db_is_no_file(self):
+        """No database, no return: an all-zero upload would file as a nil
+        return with no credit (M7, GST review 2026-10-19) -- 503 instead."""
         resp = _reports_client_as(["ADMIN"]).get(
             "/reports/gstr3b/gstn-json?month=2026-04"
         )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["ret_period"] == "042026"
-        assert "sup_details" in body
+        assert resp.status_code == 503
 
     def test_gstr1_numeric_month_plus_year(self):
         """month=4&year=2026 normalises to fp 042026."""
