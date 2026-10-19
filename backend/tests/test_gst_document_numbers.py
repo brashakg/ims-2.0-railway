@@ -13,13 +13,23 @@ Revert-proof map (revert the named piece -> the named test goes red):
   * the lettered format -> test_each_series_is_16_chars
   * one counter per series -> test_series_are_independent
   * one code per shop across series -> test_series_code_is_one_per_shop
-  * the DuplicateKeyError retry -> test_duplicate_key_*
-  * ship mints the T number -> test_inter_gstin_ship_mints_*
-  * the mirror bill carries it -> test_inter_gstin_transfer_in_gstr1_b2b
+  * the DuplicateKeyError retry / its reason -> test_duplicate_key_*
+  * ship mints the T number, across GSTINs only -> test_inter_gstin_ship_mints_*,
+    test_ship_refused_when_the_sender_cannot_number_it,
+    test_same_gstin_transfer_stays_on_a_challan_not_in_gstr1
+  * the mirror bill carries it -> test_inter_gstin_transfer_in_gstr1_b2b,
+    test_a_move_shipped_before_numbering_is_numbered_at_complete
+  * the invoice frozen at ship -> test_reprint_and_books_keep_the_lines_frozen_at_ship,
+    test_a_short_receipt_books_at_the_invoiced_rate
+  * the printed date on the row -> test_month_boundary_row_carries_the_ship_date
   * GSTR-1 checks transfer numbers -> test_gstr1_flags_an_old_transfer_number
-  * the debit-note doors -> test_rtv_debit_note_*, test_ap_debit_note_*
-  * the credit-note doors -> test_store_credit_note_*, test_admin_note_*
+  * the short-receipt warning -> test_short_receipt_is_flagged_against_the_issued_invoice
+  * the e-way flag -> test_eway_flag_boundary_is_strictly_over_50000
+  * the credit-note doors -> test_store_credit_note_*,
+    test_credit_note_number_comes_from_the_sale_shop
   * no truncation in CDNR -> test_cdnr_files_the_full_number
+  Elsewhere: the RTV debit-note door in test_f20_rtv_debit_note.py; the admin
+  C/D notes and the refused-revision audit row in test_superadmin_order_edit.py.
 
 Run: JWT_SECRET_KEY=test ENVIRONMENT=test python -m pytest backend/tests/test_gst_document_numbers.py -q
 """
@@ -433,7 +443,11 @@ def test_short_receipt_is_flagged_against_the_issued_invoice(world):
     rep = _gstr1(world)
     assert rep["b2b"][0]["taxableValue"] == UNIT_COST
     issues = [i["issue"] for i in rep["validation"]["issues"]]
-    assert any("issued at dispatch for Rs 3700.00" in i for i in issues), issues
+    assert (
+        "IMS files the RECEIVED value Rs 1850.00 (taxable) under DHN01/T2627/0001; "
+        "the printed invoice and e-way bill show the SHIPPED value Rs 3700.00. "
+        "Ask the CA whether to amend."
+    ) in issues, issues
 
 
 def test_a_move_shipped_before_numbering_is_numbered_at_complete(world):
@@ -447,6 +461,80 @@ def test_a_move_shipped_before_numbering_is_numbered_at_complete(world):
     assert bill["invoice_number"] == "DHN01/T2627/0001"
     stored = world["stock_transfers"].find_one({"id": t["id"]})
     assert stored["tax_invoice_number"] == "DHN01/T2627/0001"
+
+
+def test_reprint_and_books_keep_the_lines_frozen_at_ship(world, monkeypatch):
+    """The invoice behind a number is the one issued at ship: an HSN or rate
+    edited afterwards changes neither its reprint nor the books."""
+    from api.routers import print_documents
+    from api.services import gst_rates
+
+    t = _ship_to("ST-PUN-1")
+    (line,) = world["stock_transfers"].find_one({"id": t["id"]})["tax_invoice_lines"]
+    assert (line["hsn"], line["gst_rate"], line["taxable"], line["igst"]) == (
+        "900311", 5, 3700.0, 185.0)
+    # After ship: the rate table now says 18% and the product a new HSN.
+    monkeypatch.setattr(gst_rates, "resolve_gst_rate", lambda **_k: 18.0)
+    world["products"].update_one({"product_id": "P-1"}, {"$set": {"hsn_code": "900410"}})
+    # ...and the line's stamped HSN and cost are edited behind the screen.
+    world["stock_transfers"].update_one(
+        {"id": t["id"]}, {"$set": {"items.0.hsn_code": "", "items.0.unit_cost": 1900.0}}
+    )
+    html = _run(print_documents.tax_invoice_for_transfer(
+        t["id"], "ORIGINAL", False, ACCOUNTS)).body.decode()
+    assert "3,885.00" in html  # 3,700 + 5%: never 3,990 (1,900 a unit) or 4,366 (18%)
+    assert "3,990.00" not in html and "4,366.00" not in html
+    assert "<td>900311</td>" in html and "900410" not in html
+    _receive_complete(t)
+    (bill,) = world["vendor_bills"].find({})
+    assert (bill["igst_total"], bill["lines"][0]["gst_rate"], bill["lines"][0]["hsn"]) == (
+        185.0, 5, "900311")
+
+
+def test_a_short_receipt_books_at_the_invoiced_rate(world, monkeypatch):
+    """Two shipped at 5%, the rate table then says 18%, one arrives: the bill
+    books the one received at the invoice's 5% (IGST 92.50), never 18%."""
+    from api.services import gst_rates
+
+    t = _ship_to("ST-PUN-1")
+    monkeypatch.setattr(gst_rates, "resolve_gst_rate", lambda **_k: 18.0)
+    _receive_complete(t, received=1)
+    (bill,) = world["vendor_bills"].find({})
+    assert (bill["taxable_amount"], bill["igst_total"], bill["lines"][0]["gst_rate"]) == (
+        UNIT_COST, 92.5, 5)
+
+
+def _ship_and_complete_across_month_end(monkeypatch):
+    """Ship 30 Sep 23:30 IST (18:00 UTC), complete 2 Oct."""
+    from api.routers import transfers
+
+    monkeypatch.setattr(transfers, "utc_now_iso", lambda: "2026-09-30T18:00:00+00:00")
+    t = _ship_to("ST-PUN-1")
+    monkeypatch.setattr(transfers, "utc_now_iso", lambda: "2026-10-02T06:00:00+00:00")
+    _receive_complete(t)
+    return t
+
+
+def test_month_boundary_row_carries_the_ship_date(world, monkeypatch):
+    from api.routers import reports
+
+    _ship_and_complete_across_month_end(monkeypatch)
+    (row,) = reports._compute_gstr1("2026-10", "ST-DHN-1")["b2b"]
+    assert (row["invoiceNumber"], row["invoiceDate"]) == ("DHN01/T2627/0001", "2026-09-30")
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="known gap: a transfer lands on the GSTR-1 (and 3B) of the month it is "
+    "COMPLETED -- the mirror bill's bill_date -- not the month its tax invoice was "
+    "issued; the sender's outward row at ship is the follow-up after #1238",
+)
+def test_month_boundary_row_files_in_the_ship_month(world, monkeypatch):
+    from api.routers import reports
+
+    _ship_and_complete_across_month_end(monkeypatch)
+    sep = reports._compute_gstr1("2026-09", "ST-DHN-1")["b2b"]
+    assert [r["invoiceNumber"] for r in sep] == ["DHN01/T2627/0001"]
 
 
 def test_gstr1_flags_an_old_transfer_number(world):
@@ -542,11 +630,39 @@ def test_store_credit_note_refused_return_records_nothing(ctx):
     assert r.status_code == 400
     assert "credit note cannot be numbered" in r.json()["detail"]
     assert ctx["returns_coll"].docs == [] and ctx["ledger_coll"].docs == []
+    # The order line's returnable quantity, claimed before the number was
+    # asked for, is released: nothing stays booked as returned.
+    (line,) = ctx["order_repo"].collection.docs[0]["items"]
+    assert line["returned_qty"] == 0
     # The quantity claim was released: the same return goes through once fixed.
     ctx["numbering"].get_collection("stores").update_one(
         {"store_id": "BV-PUN-01"}, {"$set": {"invoice_code": None}}
     )
     assert _return(ctx, return_type="CREDIT_NOTE", customer_id="CUST-1").status_code == 201
+
+
+def test_credit_note_number_comes_from_the_sale_shop(ctx):
+    """A sale of Pune's returned at Dhanbad's counter: the credit note reverses
+    Pune's invoice, so it takes PUN01's C series (the real mint), never the
+    processing counter's."""
+    ctx["numbering"].get_collection("stores").insert_one(
+        {"store_id": "BV-DHN-02", "store_code": "BV-DHN-02"}
+    )
+    tok = _staff_token(["ADMIN"], store_id="BV-DHN-02")
+    r = ctx["client"].post(
+        "/api/v1/returns",
+        # The return names the sale's shop (the door refuses any other); the
+        # counter it is processed at is the cashier's, Dhanbad.
+        json=_payload(return_type="CREDIT_NOTE", customer_id="CUST-1"),
+        headers={"Authorization": f"Bearer {tok}"},
+    )
+    assert r.status_code == 201, r.text
+    number = r.json()["credit_note_number"]
+    assert NOTE_C.match(number), number
+    (row,) = ctx["ledger_coll"].docs
+    assert (row["store_id"], row["note_number"]) == ("BV-PUN-01", number)
+    ids = [d["_id"] for d in ctx["numbering"].get_collection("counters").docs]
+    assert ids == ["gstdoc-C:PUN01:" + ids[0].rsplit(":", 1)[1]]
 
 
 def test_store_credit_note_door_numbers_an_unnumbered_note(ctx):

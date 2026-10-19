@@ -373,11 +373,11 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                                 "level": "warn",
                                 "invoice": _t_row.get("invoiceNumber"),
                                 "issue": (
-                                    f"Transfer tax invoice was issued at dispatch for "
-                                    f"Rs {_issued:.2f} (taxable); Rs "
-                                    f"{_t_row['taxableValue']:.2f} was received and is "
-                                    "filed here. Issue a credit note for the difference "
-                                    "or file the invoice value - ask the CA."
+                                    f"IMS files the RECEIVED value Rs "
+                                    f"{_t_row['taxableValue']:.2f} (taxable) under "
+                                    f"{_t_row.get('invoiceNumber')}; the printed "
+                                    "invoice and e-way bill show the SHIPPED value "
+                                    f"Rs {_issued:.2f}. Ask the CA whether to amend."
                                 ),
                             }
                         )

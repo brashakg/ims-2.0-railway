@@ -348,7 +348,10 @@ async def delivery_challan_for_transfer(
             recipient_name=to_label,
             recipient_address=consignee_address,
             recipient_gstin=to_gstin,
-            lines=_mirror_bill_lines(_get_db(), transfer, interstate, shipped=True),
+            # The invoice as issued (frozen at ship); a move numbered before
+            # the freeze is priced afresh.
+            lines=transfer.get("tax_invoice_lines")
+            or _mirror_bill_lines(_get_db(), transfer, interstate, shipped=True),
             transfer_number=transfer.get("transfer_number") or "",
             copy_marker=copy,
             overrides=load_overrides(entity, "tax_invoice"),
