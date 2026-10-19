@@ -208,6 +208,7 @@ INPUT_TAX_KEYS = frozenset({
     "itcAvailableGstin",
     "itcReverseCharge",
     "itcIneligible",
+    "itcBlocked",
     "inwardExemptNilNonGst",
     "itcUtilized",
     "inwardSuppliesReverseChargeValue",

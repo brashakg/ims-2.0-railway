@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from api.routers import finance  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
 from api.routers.finance import _shared, gst, gst_crosscheck  # noqa: E402
+from api.routers.reports import gstr3b  # noqa: E402
 
 DHN, PUN = "BV-DHN-01", "WO-PUN-01"
 OCT = {"month": 10, "year": 2026}
@@ -49,16 +50,27 @@ def get(monkeypatch):
         {"entity_id": "WO", "name": "WizOpt", "gstins": [{"gstin": "27ABCDE1234F1Z5"}]},
     ])
     on = datetime(2026, 10, 10, 6, 0, 0)
-    for shop, sale_tax, input_tax in ((PUN, 100.0, 40.0), (DHN, 900.0, 300.0)):
+    for shop, ent, gstin, sale_tax, input_tax in (
+        (PUN, "WO", "27ABCDE1234F1Z5", 100.0, 40.0), (DHN, "BV", "20ABCDE1234F1Z5", 900.0, 300.0),
+    ):
         db["orders"].insert_one({"order_id": f"O-{shop}", "store_id": shop, "status": "DELIVERED",
                                  "created_at": on, "tax_amount": sale_tax})
+        # A booked bill as the bill doors write it: received on the shop's
+        # GSTIN, by its company, with its tax heads (GSTR-3B places it so).
         db["vendor_bills"].insert_one({"bill_id": f"B-{shop}", "store_id": shop,
-                                       "bill_date": "2026-10-05", "tax_amount": input_tax})
+                                       "bill_date": "2026-10-05", "tax_amount": input_tax,
+                                       "recipient_entity_id": ent, "recipient_gstin": gstin,
+                                       "vendor_gstin": gstin[:2] + "AAAAA0000A1Z5",
+                                       "cgst_total": input_tax / 2, "sgst_total": input_tax / 2,
+                                       "igst_total": 0.0, "itc_eligible": True,
+                                       "status": "OUTSTANDING"})
         db["purchase_orders"].insert_one({"po_id": f"PO-{shop}", "delivery_store_id": shop,
                                           "status": "RECEIVED", "created_at": on,
                                           "tax_amount": input_tax})
     for mod in (finance, _shared, gst, gst_crosscheck):
         monkeypatch.setattr(mod, "_get_db", lambda: db, raising=False)
+    # The table reads THE return (GSTR-3B), on its own handle.
+    monkeypatch.setattr(gstr3b, "_get_raw_db", lambda: db)
     app = FastAPI()
     app.include_router(finance.router, prefix="/finance")
     who = {}
@@ -85,7 +97,7 @@ def _cards(get, user):
 
 def _table(get, user):
     return {e["entity_name"]: (e["gst_collected"], e["input_credit"], e["net_payable"])
-            for e in get("/finance/gst/reconciliation", user)["entities"]}
+            for e in get("/finance/gst/reconciliation", user)["registrations"]}
 
 
 def test_a_pune_accountant_reads_pune_on_the_cards_and_in_the_table(get):
@@ -102,4 +114,4 @@ def test_an_admin_reads_every_shop_on_the_cards_and_in_the_table(get):
 def test_an_accountant_asking_for_another_entity_reads_nothing_of_it(get):
     """?entity_id narrows inside the caller's shops, never past them."""
     r = get("/finance/gst/reconciliation", ACCT_PUN, entity_id="BV")
-    assert r["entities"] == [], r
+    assert r["registrations"] == [], r

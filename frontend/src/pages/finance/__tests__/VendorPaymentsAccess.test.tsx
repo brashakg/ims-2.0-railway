@@ -59,7 +59,7 @@ function primeApi() {
   api.getPeriodStatus.mockResolvedValue({ locked: false });
   api.getPnlByStore.mockResolvedValue({ stores: [] });
   api.getPnlByCategory.mockResolvedValue({ categories: [] });
-  api.getGstReconciliation.mockResolvedValue({ entities: [] });
+  api.getGstReconciliation.mockResolvedValue({ registrations: [] });
 }
 
 async function openOutstanding() {

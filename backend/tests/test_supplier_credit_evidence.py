@@ -51,12 +51,22 @@ def test_original_tax_reader_accepts_production_connection_collection_interface(
     assert credit_preview(Connection(), ready)["source_status"] == "RESOLVED"
 
 
-@pytest.mark.parametrize("patch", [{"bill_date": datetime(2026, 1, 1)}, {"itc_blocked": True}])
+@pytest.mark.parametrize("patch", [{"bill_date": datetime(2026, 1, 1)}])
 def test_disagreeing_legacy_tax_readers_require_reconciliation_not_a_guessed_reversal(db, ready, patch):
     db.vendor_bills.update_one({}, {"$set": patch})
     preview = credit_preview(db, ready)
     assert preview["source_status"] == "PENDING_EVIDENCE"
     assert preview["pending_reasons"][0]["code"] == "ORIGINAL_TAX_CLAIM_INCONSISTENT"
+
+
+def test_a_17_5_blocked_bill_is_no_credit_to_both_readers(db, ready):
+    """GSTR-3B Table 4 now leaves a blocked bill out as the input register
+    does (one rule, GST review 2026-10-19): the two readers agree it claimed
+    no credit, so there is no credit to reverse -- no reconciliation stop."""
+    db.vendor_bills.update_one({}, {"$set": {"itc_blocked": True}})
+    preview = credit_preview(db, ready)
+    assert preview["source_status"] == "RESOLVED"
+    assert preview["sources"][0]["claims_credit"] is False
 
 
 @pytest.mark.parametrize("patch,code", [

@@ -91,6 +91,11 @@ _COST_FIELDS = {
     # stock ledger rows), so the one mask hides it with cost_value.
     "uncosted_units", "valuation_cost_pending", "cost_valuation_pending",
     "cost_price_is_catalogue_only",
+    # The GST a bill claiming no credit added to a unit's cost (F04,
+    # purchase_invoices._add_unclaimed_gst_to_units) -- a fraction of what we
+    # paid -- and the supplier bill a cost came from (H1, GST review
+    # 2026-10-19).
+    "unclaimed_gst", "cost_source_id",
 }
 # Derived margin / COGS figures emitted by analytics + finance payloads.
 _MARGIN_FIELDS = {

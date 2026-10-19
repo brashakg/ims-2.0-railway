@@ -520,7 +520,11 @@ class TestGstnEndpointGating:
         resp = _reports_client_as(["SUPERADMIN"]).get(path)
         assert resp.status_code != 403
 
-    def test_gstr1_gstn_json_shape_no_db(self):
+    def test_gstr1_gstn_json_shape_no_db(self, monkeypatch):
+        from api.routers.reports import gstr1 as r1
+
+        # No database on any box (CI has a real Mongo).
+        monkeypatch.setattr(r1, "_get_raw_db", lambda: None)
         """With no DB the endpoint still returns a valid GSTN skeleton."""
         resp = _reports_client_as(["ADMIN"]).get(
             "/reports/gstr1/gstn-json?month=2026-04"
@@ -530,16 +534,23 @@ class TestGstnEndpointGating:
         assert body["fp"] == "042026"
         assert "b2b" in body and "hsn" in body
 
-    def test_gstr3b_gstn_json_shape_no_db(self):
+    def test_gstr3b_gstn_json_no_db_is_no_file(self, monkeypatch):
+        """No database, no return: an all-zero upload would file as a nil
+        return with no credit (M7, GST review 2026-10-19) -- 503 instead.
+        (No database whatever the box: CI has a real Mongo.)"""
+        from api.routers.reports import gstr3b as r3b
+
+        monkeypatch.setattr(r3b, "_get_raw_db", lambda: None)
         resp = _reports_client_as(["ADMIN"]).get(
             "/reports/gstr3b/gstn-json?month=2026-04"
         )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["ret_period"] == "042026"
-        assert "sup_details" in body
+        assert resp.status_code == 503
 
-    def test_gstr1_numeric_month_plus_year(self):
+    def test_gstr1_numeric_month_plus_year(self, monkeypatch):
+        from api.routers.reports import gstr1 as r1
+
+        # No database on any box (CI has a real Mongo).
+        monkeypatch.setattr(r1, "_get_raw_db", lambda: None)
         """month=4&year=2026 normalises to fp 042026."""
         resp = _reports_client_as(["ADMIN"]).get(
             "/reports/gstr1/gstn-json?month=4&year=2026"

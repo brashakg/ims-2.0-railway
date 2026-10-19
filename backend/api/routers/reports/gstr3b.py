@@ -88,15 +88,13 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
         had no ledger row, and Rs 3,209.96 of output tax was never reversed.
     Deduped on return_id so a refund that DID mint store credit is counted
     once; double-counting here would over-reverse and UNDER-declare, which is
-    worse than the bug being fixed. Fail-soft -> zeros.
+    worse than the bug being fixed. A read failure RAISES (M7): a missed
+    refund overstates the tax, a missed dedup understates it.
     """
     igst = cgst = sgst = taxable = 0.0
     if db is None:
         return 0.0, 0.0, 0.0, 0.0
-    try:
-        from_dt, to_dt = ist_month_window_utc(year, mon)
-    except Exception:  # noqa: BLE001
-        return 0.0, 0.0, 0.0, 0.0
+    from_dt, to_dt = ist_month_window_utc(year, mon)
 
     # Which returns already have a credit-note ledger row -- scanned WITHOUT a
     # date window, deliberately.
@@ -110,18 +108,13 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
     # store credit is minted the next morning is an ordinary shop event, not an
     # edge case. Attribution follows the ledger row, which IS the credit note.
     seen_returns = set()
-    try:
-        _all_ledger = db.get_collection("credit_note_ledger")
-        if _all_ledger is not None:
-            for _row in _all_ledger.find(
-                {"store_id": active_store, "type": "ISSUED"}, {"ref": 1, "reason": 1}
-            ):
-                for _f in ("ref", "reason"):
-                    for _tok in str(_row.get(_f) or "").replace(",", " ").split():
-                        if _tok.startswith("RET-"):
-                            seen_returns.add(_tok.strip(".:;"))
-    except Exception:  # noqa: BLE001 -- dedup is best-effort, totals are not
-        pass
+    for _row in db.get_collection("credit_note_ledger").find(
+        {"store_id": active_store, "type": "ISSUED"}, {"ref": 1, "reason": 1}
+    ):
+        for _f in ("ref", "reason"):
+            for _tok in str(_row.get(_f) or "").replace(",", " ").split():
+                if _tok.startswith("RET-"):
+                    seen_returns.add(_tok.strip(".:;"))
 
     def _split(tax, is_inter):
         if is_inter:
@@ -137,68 +130,58 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
     # max(0, ...) clamp downstream swallowed the CGST/SGST over-reversal.
     order_inter: dict = {}
     held: dict = {}  # order_id -> parent held on the seller check
-    store_state = ""
-    try:
-        st = db.get_collection("stores").find_one({"store_id": active_store}) or {}
-        store_state = str(st.get("state") or "")
-    except Exception:  # noqa: BLE001
-        pass
+    st = db.get_collection("stores").find_one({"store_id": active_store}) or {}
+    store_state = str(st.get("state") or "")
 
-    try:
-        ledger = db.get_collection("credit_note_ledger")
-    except Exception:  # noqa: BLE001
-        ledger = None
+    ledger = db.get_collection("credit_note_ledger")
     if ledger is not None:
-        try:
-            for row in ledger.find(
-                {
-                    "store_id": active_store,
-                    "type": "ISSUED",
-                    # Half-open [from_dt, to_dt): the month's last microsecond
-                    # is IN, next month's first is OUT (audit R03). Rows are
-                    # ISO strings (naive-UTC legacy or '+00:00') or BSON dates.
-                    **instant_in_window_query("created_at", from_dt, to_dt),
-                }
-            ):
-                for f in ("ref", "reason"):
-                    for tok in str(row.get(f) or "").replace(",", " ").split():
-                        if tok.startswith("RET-"):
-                            seen_returns.add(tok.strip(".:;"))
-                t = row.get("tax")
-                if t is None:
-                    gross = float(row.get("gross_refund") or 0.0)
-                    net = float(row.get("net_refund", row.get("amount", 0)) or 0.0)
-                    t = gross - net if gross > 0 else 0.0
-                t = round(float(t or 0.0), 2)
-                tv = row.get("taxable")
-                tv = round(float(tv if tv is not None else row.get("amount", 0) or 0.0), 2)
-                ret_doc = _ledger_row_return_doc(db, row)
-                if _cn_foreign_store(ret_doc, active_store):
-                    # Legacy cashier-store booking: the sale store's report
-                    # owns this reversal (its returns leg counts the return
-                    # doc). Counting it here too reversed one refund under
-                    # two GSTINs.
-                    continue
-                if _cn_parent_held(db, ret_doc, held):
-                    # The refund of a sale held off the returns on the seller
-                    # check (GSTR-1 files neither): no reversal of output tax
-                    # that was never declared.
-                    continue
-                inter = row.get("interstate")
-                if not isinstance(inter, bool):
-                    inter = _return_interstate_flag(
-                        db,
-                        ret_doc or {"customer_id": row.get("customer_id")},
-                        store_state,
-                        order_inter,
-                    )
-                i, c, sg = _split(t, inter)
-                igst += i
-                cgst += c
-                sgst += sg
-                taxable += tv
-        except Exception:  # noqa: BLE001
-            pass
+        for row in ledger.find(
+            {
+                "store_id": active_store,
+                "type": "ISSUED",
+                # Half-open [from_dt, to_dt): the month's last microsecond
+                # is IN, next month's first is OUT (audit R03). Rows are
+                # ISO strings (naive-UTC legacy or '+00:00') or BSON dates.
+                **instant_in_window_query("created_at", from_dt, to_dt),
+            }
+        ):
+            for f in ("ref", "reason"):
+                for tok in str(row.get(f) or "").replace(",", " ").split():
+                    if tok.startswith("RET-"):
+                        seen_returns.add(tok.strip(".:;"))
+            t = row.get("tax")
+            if t is None:
+                gross = float(row.get("gross_refund") or 0.0)
+                net = float(row.get("net_refund", row.get("amount", 0)) or 0.0)
+                t = gross - net if gross > 0 else 0.0
+            t = round(float(t or 0.0), 2)
+            tv = row.get("taxable")
+            tv = round(float(tv if tv is not None else row.get("amount", 0) or 0.0), 2)
+            ret_doc = _ledger_row_return_doc(db, row)
+            if _cn_foreign_store(ret_doc, active_store):
+                # Legacy cashier-store booking: the sale store's report
+                # owns this reversal (its returns leg counts the return
+                # doc). Counting it here too reversed one refund under
+                # two GSTINs.
+                continue
+            if _cn_parent_held(db, ret_doc, held):
+                # The refund of a sale held off the returns on the seller
+                # check (GSTR-1 files neither): no reversal of output tax
+                # that was never declared.
+                continue
+            inter = row.get("interstate")
+            if not isinstance(inter, bool):
+                inter = _return_interstate_flag(
+                    db,
+                    ret_doc or {"customer_id": row.get("customer_id")},
+                    store_state,
+                    order_inter,
+                )
+            i, c, sg = _split(t, inter)
+            igst += i
+            cgst += c
+            sgst += sg
+            taxable += tv
 
     # A refund must reverse the SAME head the sale was filed under. Deriving it
     # afresh from the customer's state would re-answer a question the parent
@@ -208,46 +191,40 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
     # Caught by mutation testing: hardcoding returns as intra-state reversed
     # CGST/SGST on a sale that sat in IGST, leaving BOTH heads wrong.
     # (`order_inter` + `store_state` are shared with the ledger leg above.)
-    try:
-        returns_col = db.get_collection("returns")
-    except Exception:  # noqa: BLE001
-        returns_col = None
+    returns_col = db.get_collection("returns")
     if returns_col is not None:
-        try:
-            for ret in returns_col.find(
-                {
-                    "store_id": active_store,
-                    "status": {"$in": ["COMPLETED", "completed"]},
-                }
-            ):
-                rid = str(ret.get("return_id") or "")
-                if rid and rid in seen_returns:
-                    continue
-                # Parse to the naive-UTC instant whatever the stored shape
-                # (BSON naive or aware, ISO string with or without offset),
-                # then the half-open month test. Comparing an aware datetime
-                # to the naive bound used to raise and silently drop the row.
-                when = parse_event_utc_naive(ret.get("created_at"))
-                if when is None or not (from_dt <= when < to_dt):
-                    continue
-                gb = ret.get("gst_breakup") or {}
-                if not isinstance(gb, dict):
-                    continue
-                t = round(float(gb.get("tax") or 0.0), 2)
-                tv = round(float(gb.get("taxable") or 0.0), 2)
-                if t <= 0 and tv <= 0:
-                    continue
-                if _cn_parent_held(db, ret, held):  # its sale was not filed
-                    continue
-                i, c, sg = _split(
-                    t, _return_interstate_flag(db, ret, store_state, order_inter)
-                )
-                igst += i
-                cgst += c
-                sgst += sg
-                taxable += tv
-        except Exception:  # noqa: BLE001
-            pass
+        for ret in returns_col.find(
+            {
+                "store_id": active_store,
+                "status": {"$in": ["COMPLETED", "completed"]},
+            }
+        ):
+            rid = str(ret.get("return_id") or "")
+            if rid and rid in seen_returns:
+                continue
+            # Parse to the naive-UTC instant whatever the stored shape
+            # (BSON naive or aware, ISO string with or without offset),
+            # then the half-open month test. Comparing an aware datetime
+            # to the naive bound used to raise and silently drop the row.
+            when = parse_event_utc_naive(ret.get("created_at"))
+            if when is None or not (from_dt <= when < to_dt):
+                continue
+            gb = ret.get("gst_breakup") or {}
+            if not isinstance(gb, dict):
+                continue
+            t = round(float(gb.get("tax") or 0.0), 2)
+            tv = round(float(gb.get("taxable") or 0.0), 2)
+            if t <= 0 and tv <= 0:
+                continue
+            if _cn_parent_held(db, ret, held):  # its sale was not filed
+                continue
+            i, c, sg = _split(
+                t, _return_interstate_flag(db, ret, store_state, order_inter)
+            )
+            igst += i
+            cgst += c
+            sgst += sg
+            taxable += tv
 
     return round(igst, 2), round(cgst, 2), round(sgst, 2), round(taxable, 2)
 
@@ -256,8 +233,8 @@ def _transfer_outward_totals(db, active_store, year, mon, last_day):
     """Sum (igst, cgst, sgst, taxable) of the sender-side transfer mirror bills
     for GSTR-3B Table 3.1(a). Sums the SAME header fields the receiver's ITC
     aggregation reads (igst/cgst/sgst_total, taxable_amount), so the sender's
-    outward figure equals the receiver's ITC claim to the paisa. Fail-soft ->
-    zeros (via _transfer_outward_bills)."""
+    outward figure equals the receiver's ITC claim to the paisa. A read
+    failure raises (via _transfer_outward_bills, M7)."""
     igst = cgst = sgst = taxable = 0.0
     for b in _transfer_outward_bills(db, active_store, year, mon, last_day):
         igst = round(igst + float(b.get("igst_total", 0) or 0), 2)
@@ -287,28 +264,20 @@ def _rcm_from_vendor_bills(db, active_store, year, mon, last_day):
     bill was received on), so a Maharashtra bill's liability and its credit
     are on the Maharashtra return -- never the liability on the company's
     Jharkhand return with nothing to offset it. Returns (igst, cgst, sgst,
-    taxable). Fail-soft -> zeros."""
+    taxable). A read failure raises (M7)."""
     if db is None:
         return 0.0, 0.0, 0.0, 0.0
-    try:
-        return _sum_heads(db, _rcm_placed(db, active_store, year, mon, last_day)[0])
-    except Exception:
-        pass
-    return 0.0, 0.0, 0.0, 0.0
+    return _sum_heads(db, _rcm_placed(db, active_store, year, mon, last_day)[0])
 
 
 def _rcm_gstin_from_vendor_bills(db, active_store, year, mon, last_day):
     """R1 for Table 3.1(d): the GSTIN-bound slice of _rcm_from_vendor_bills, so
     the Cross-Check counts it once per GSTIN and the company-wide remainder
     (legacy bills naming no GSTIN) once per company -- exactly as it counts
-    the credit. Returns (igst, cgst, sgst, taxable); fail-soft -> zeros."""
+    the credit. Returns (igst, cgst, sgst, taxable); a read failure raises."""
     if db is None:
         return 0.0, 0.0, 0.0, 0.0
-    try:
-        return _sum_heads(db, _rcm_placed(db, active_store, year, mon, last_day)[1])
-    except Exception:
-        pass
-    return 0.0, 0.0, 0.0, 0.0
+    return _sum_heads(db, _rcm_placed(db, active_store, year, mon, last_day)[1])
 
 
 def _rcm_credit_from_vendor_bills(db, active_store, year, mon, last_day):
@@ -316,20 +285,24 @@ def _rcm_credit_from_vendor_bills(db, active_store, year, mon, last_day):
     -- the reverse-charge bills Table 4 itself keeps (_itc_match: credit
     cleared by org_validation.itc_claimable at booking, never a bill whose
     credit was switched off). A slice of itcAvailable, never added to it.
-    Returns (igst, cgst, sgst); fail-soft -> zeros."""
+    Returns (igst, cgst, sgst); a read failure raises."""
     if db is None:
         return 0.0, 0.0, 0.0
-    try:
-        entity_id, store_gstin, shops = _itc_store_scope(db, active_store)
-        match = _itc_match(shops, entity_id, store_gstin, year, mon, last_day, db)
-        return _sum_heads(db, {**match, "reverse_charge": True})[:3]
-    except Exception:
-        pass
-    return 0.0, 0.0, 0.0
+    entity_id, store_gstin, shops = _itc_store_scope(db, active_store)
+    match = _itc_match(shops, entity_id, store_gstin, year, mon, last_day, db)
+    return _sum_heads(db, {**match, "reverse_charge": True})[:3]
 
 
-def _compute_gstr3b(month: str, active_store: str) -> dict:
-    """Compute the IMS GSTR-3B report dict for a (month, store).
+def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
+    """Compute the IMS GSTR-3B return for a month: THE return of
+    `active_store`'s GSTIN (H2, owner + CA 2026-10-19 -- GSTR-3B is a
+    per-GSTIN return). Its outward supplies are every shop's on that GSTIN
+    (gst_itc._itc_store_scope: BV-PUN-01 + BV-ONLINE-01 file one return),
+    its credit the GSTIN's. `shops` narrows the outward side to those shops
+    (the Cross-Check of an accountant who sees one shop of a shared GSTIN,
+    whose GSTIN-wide figures it withholds); omitted, the whole GSTIN. `db`:
+    the handle the caller already reads (the Finance GST tab, the
+    Cross-Check), so one view never reads two databases; else its own.
 
     Extracted from the `/gstr3b` endpoint so the JSON-report endpoint and
     the GSTN portal-export endpoint share the SAME aggregation. Reads
@@ -342,11 +315,13 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
                 (gst_itc._itc_match).
                 Returns zeros when no purchase data is present.
     Table 4(D) - ineligible ITC: GST paid on a bill that claims no credit.
+    Table 4(B)(1) - section 17(5) blocked credit (the accountant's tick).
     Table 5   - exempt, nil, non-GST and composition inward supplies, with
                 purchases from unregistered suppliers (gst_itc._no_credit_inward,
                 owner 2026-10-13 G3).
     Table 6.1 - Payment of tax: net cash liability = output tax - ITC.
-    Returns all-zero figures when no data exists for the period.
+    Returns all-zero figures when no data exists for the period. A read
+    failure RAISES (M7) -- the doors answer 503 -- never a zero figure.
     """
     try:
         year, mon = int(month[:4]), int(month[5:7])
@@ -403,89 +378,95 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
     store_gstin = ""
     store_legal_name = ""
     store_state = ""
+    filing = [active_store]
 
-    db = _get_raw_db()
+    db = db if db is not None else _get_raw_db()
     if db is not None:
         # The header/export must name the same resolved registration that
         # receives Table 4 credit, including the entity/state fallback.
-        entity_id, store_gstin, _shops = _itc_store_scope(db, active_store)
-        try:
-            stores_col = db["stores"]
-            store_doc = stores_col.find_one({"store_id": active_store})
-            if store_doc:
-                store_legal_name = str(
-                    store_doc.get("store_name") or store_doc.get("name", "") or ""
-                )
-                store_state = str(store_doc.get("state", "") or "")
-        except Exception:
-            pass
+        entity_id, store_gstin, gstin_shops = _itc_store_scope(db, active_store)
+        filing = sorted(shops) if shops is not None else gstin_shops
+        store_doc = db["stores"].find_one({"store_id": active_store})
+        if store_doc:
+            store_legal_name = str(
+                store_doc.get("store_name") or store_doc.get("name", "") or ""
+            )
+            store_state = str(store_doc.get("state", "") or "")
 
-        try:
-            # --- Output tax from orders (Phase I-5 field-name fix).
-            #     Orders stamp `taxable` (taxable value) and `tax`
-            #     (total GST), via _compute_per_category_gst — there are
-            #     no `taxable_amount` / `cgst_amount` etc. fields. We
-            #     split tax by deriving intra/inter from store vs
-            #     customer state, in the same loop as GSTR-1 above.
-            orders_col = db["orders"]
-            customers_col = db["customers"]
+        # --- Output tax from orders (Phase I-5 field-name fix).
+        #     Orders stamp `taxable` (taxable value) and `tax`
+        #     (total GST), via _compute_per_category_gst — there are
+        #     no `taxable_amount` / `cgst_amount` etc. fields. We
+        #     split tax by deriving intra/inter from store vs
+        #     customer state, in the same loop as GSTR-1 above.
+        orders_col = db["orders"]
+        customers_col = db["customers"]
 
-            cust_state_map: dict = {}
-            try:
-                for cust in customers_col.find({}, {"customer_id": 1, "state": 1}):
-                    cust_state_map[str(cust.get("customer_id", ""))] = str(
-                        cust.get("state", "") or ""
-                    )
-            except Exception:
-                pass
+        cust_state_map: dict = {}
+        for cust in customers_col.find({}, {"customer_id": 1, "state": 1}):
+            cust_state_map[str(cust.get("customer_id", ""))] = str(
+                cust.get("state", "") or ""
+            )
+        # Each order's OWN shop state as a GST state code (review round 2):
+        # the same GSTIN's return must not change with which of its shops is
+        # asked ('Jharkhand' / 'JH' / a blank online shop). A shop with no
+        # usable state is in its registration's state.
+        from ...services.org_validation import resolve_state_code
 
-            for order in orders_col.find(
-                {
-                    "store_id": active_store,
-                    "status": {"$nin": ["CANCELLED", "DRAFT", "cancelled", "draft", "HISTORICAL", "historical"]},
-                    "created_at": {"$gte": from_dt, "$lt": to_dt},
-                }
-            ):
-                # A routed online order held on the seller check is not an
-                # outward supply of THIS GSTIN until Re-map re-routes it --
-                # the one question GSTR-1 and Tally ask too, so the returns
-                # of one GSTIN never disagree on it.
-                if _order_held_off_returns(db, order):
-                    continue
-                # Orders carry `tax_amount` + `grand_total`, NOT `taxable` /
-                # `taxable_amount`; derive taxable = grand_total - tax_amount.
-                taxable, tax = _order_taxable_and_tax(order)
-                if taxable <= 0 and tax <= 0:
-                    continue
-                out_taxable += taxable
+        gstin_code = store_gstin[:2] if store_gstin else ""
+        shop_code = {
+            sd.get("store_id"): resolve_state_code(sd.get("state_code"), sd.get("state")) or gstin_code
+            for sd in db["stores"].find({"store_id": {"$in": filing}}, {"_id": 0, "store_id": 1, "state_code": 1, "state": 1})
+        }
 
-                cust_id = str(order.get("customer_id", ""))
-                customer_state = cust_state_map.get(cust_id, "") or store_state
-                # OS-008: the order's own interstate flag wins (online orders
-                # carry it), keeping 3.1(a) heads consistent with GSTR-1 and
-                # the cross-check; state comparison stays the fallback.
-                is_inter_state = _order_is_interstate(
-                    order, store_state, customer_state
-                )
-                if is_inter_state:
-                    out_igst += tax
-                else:
-                    out_cgst += tax / 2
-                    out_sgst += tax / 2
-        except Exception:
-            pass
+        for order in orders_col.find(
+            {
+                # Every shop this return files for (H2).
+                "store_id": {"$in": filing},
+                "status": {"$nin": ["CANCELLED", "DRAFT", "cancelled", "draft", "HISTORICAL", "historical"]},
+                "created_at": {"$gte": from_dt, "$lt": to_dt},
+            }
+        ):
+            # A routed online order held on the seller check is not an
+            # outward supply of THIS GSTIN until Re-map re-routes it --
+            # the one question GSTR-1 and Tally ask too, so the returns
+            # of one GSTIN never disagree on it.
+            if _order_held_off_returns(db, order):
+                continue
+            # Orders carry `tax_amount` + `grand_total`, NOT `taxable` /
+            # `taxable_amount`; derive taxable = grand_total - tax_amount.
+            taxable, tax = _order_taxable_and_tax(order)
+            if taxable <= 0 and tax <= 0:
+                continue
+            out_taxable += taxable
+
+            cust_id = str(order.get("customer_id", ""))
+            seller = shop_code.get(order.get("store_id")) or gstin_code
+            customer_state = resolve_state_code(cust_state_map.get(cust_id, "")) or seller
+            # OS-008: the order's own interstate flag wins (online orders
+            # carry it), keeping 3.1(a) heads consistent with GSTR-1 and
+            # the cross-check; state comparison stays the fallback.
+            is_inter_state = _order_is_interstate(
+                order, seller, customer_state
+            )
+            if is_inter_state:
+                out_igst += tax
+            else:
+                out_cgst += tax / 2
+                out_sgst += tax / 2
 
         # NEW-GST-TRANSFER-OUTWARD (GAP A): the sender's deemed outward supply
         # on inter-GSTIN stock transfers -> Table 3.1(a). Reads the SAME mirror
         # vendor_bills docs the receiver claims ITC from, so sender outward tax
         # == receiver ITC claim by construction (paisa-exact).
-        t_igst, t_cgst, t_sgst, t_taxable = _transfer_outward_totals(
-            db, active_store, year, mon, last_day
-        )
-        out_igst += t_igst
-        out_cgst += t_cgst
-        out_sgst += t_sgst
-        out_taxable += t_taxable
+        for shop in filing:
+            t_igst, t_cgst, t_sgst, t_taxable = _transfer_outward_totals(
+                db, shop, year, mon, last_day
+            )
+            out_igst += t_igst
+            out_cgst += t_cgst
+            out_sgst += t_sgst
+            out_taxable += t_taxable
 
         # Table 3.1(a) is NET of credit notes - goods that came back are not an
         # outward supply. Clamped at zero: a month with more refunds than sales
@@ -496,9 +477,11 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
         # entity paid IGST on refunded goods. Whatever each head cannot absorb
         # is reported in `creditNoteCarryForward` (and logged) for the
         # accountant to carry into the next period's return.
-        cn_igst, cn_cgst, cn_sgst, cn_taxable = _credit_note_totals(
-            db, active_store, year, mon, last_day
-        )
+        # Every shop's credit notes, netted against the return's outward tax.
+        for shop in filing:
+            n_i, n_c, n_s, n_t = _credit_note_totals(db, shop, year, mon, last_day)
+            cn_igst, cn_cgst = round(cn_igst + n_i, 2), round(cn_cgst + n_c, 2)
+            cn_sgst, cn_taxable = round(cn_sgst + n_s, 2), round(cn_taxable + n_t, 2)
         cn_carry = {
             "integratedTax": round(max(0.0, cn_igst - out_igst), 2),
             "centralTax": round(max(0.0, cn_cgst - out_cgst), 2),
@@ -577,6 +560,8 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
     return {
         "period": month,
         "unallocatedLegacyBills": unallocated,
+        # The shops this return files for (H2): every shop on the GSTIN.
+        "shops": filing,
         "gstin": store_gstin,
         "legalName": store_legal_name,
         "storeState": store_state,
@@ -667,6 +652,15 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
             "stateTax": no_credit["sgst"],
             "cess": 0.0,
         },
+        # Table 4(B)(1): GST on bills ticked 'credit not claimable, section
+        # 17(5)'. Never in itcAvailable (the net credit); the portal file
+        # shows it in 4(A)(5) and reverses it here (gstn_export).
+        "itcBlocked": {
+            "integratedTax": no_credit["blocked_igst"],
+            "centralTax": no_credit["blocked_cgst"],
+            "stateTax": no_credit["blocked_sgst"],
+            "cess": 0.0,
+        },
         # Table 5: exempt, nil-rated, non-GST and composition inward supplies,
         # purchases from unregistered suppliers among them.
         "inwardExemptNilNonGst": {
@@ -708,18 +702,58 @@ def _compute_gstr3b(month: str, active_store: str) -> dict:
     }
 
 
+def _gstin_return_shop(store_id: Optional[str], current_user: dict) -> str:
+    """The shop whose GSTIN's GSTR-3B is asked for (_return_shop), once the
+    caller is shown to see EVERY shop on that GSTIN (H2, owner + CA
+    2026-10-19): the return files for all of them, so a reader who sees only
+    some would read -- and could upload -- other shops' sales tax, or a
+    return short of it. 403 in words otherwise; 503 when the shops cannot be
+    read."""
+    from ...dependencies import user_store_scope
+
+    shop = _return_shop(store_id, current_user)
+    db = _get_raw_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="GSTR-3B is unavailable; please retry.")
+    try:
+        filing = _itc_store_scope(db, shop)[2]
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail="GSTR-3B is unavailable; please retry.") from exc
+    every, mine = user_store_scope(current_user)
+    if not every and not all(s in mine for s in filing):
+        raise HTTPException(
+            status_code=403,
+            detail=f"GSTR-3B covers {len(filing)} shops on this GSTIN - ask an admin.",
+        )
+    return shop
+
+
+def _gstin_return(month: str, shop: str) -> dict:
+    """THE GSTIN return for the doors: a read failure is a 503, never zeros."""
+    try:
+        return _compute_gstr3b(month, shop)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[GSTR-3B] %s %s could not be read", shop, month)
+        raise HTTPException(
+            status_code=503, detail="GSTR-3B figures could not be read; please retry."
+        ) from exc
+
+
 @router.get("/gstr3b")
 async def gstr3b_report(
     month: str = Query(..., description="Tax period in YYYY-MM format"),
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(require_roles(*AP_ROLES)),
 ):
-    """GSTR-3B summary return (IMS internal shape). See _compute_gstr3b.
-    The accounts roles' alone (R1, owner ruling 2026-10-07): it carries input
-    tax from supplier bills; a manager is a 403. A non-admin login with no
-    shop is refused (R4, _return_shop)."""
-    active_store = _return_shop(store_id, current_user)
-    return strip_input_tax(_compute_gstr3b(month, active_store), current_user)
+    """GSTR-3B summary return (IMS internal shape) of the shop's GSTIN -- every
+    shop on it (H2). See _compute_gstr3b. The accounts roles' alone (R1,
+    owner ruling 2026-10-07): it carries input tax from supplier bills; a
+    manager is a 403. A non-admin login with no shop is refused (R4,
+    _return_shop); one who cannot see every shop on the GSTIN too (H2)."""
+    active_store = _gstin_return_shop(store_id, current_user)
+    return strip_input_tax(_gstin_return(month, active_store), current_user)
 
 
 @router.get("/gstr3b/gstn-json")
@@ -734,7 +768,8 @@ async def gstr3b_gstn_json(
     ),
     current_user: dict = Depends(require_roles(*AP_ROLES)),
 ):
-    """GSTR-3B shaped for the GST portal's offline upload tool.
+    """GSTR-3B shaped for the GST portal's offline upload tool -- the return of
+    the shop's GSTIN, every shop on it (H2).
 
     Reuses _compute_gstr3b (no duplicated aggregation) and runs the pure
     mapping in services/gstn_export.py.
@@ -744,22 +779,20 @@ async def gstr3b_gstn_json(
     whatever it is handed -- an export without the credit would carry a zero
     ITC that files as "no credit claimed". The filer is accounts; a manager is
     refused rather than handed that document. So is an accountant login
-    with no shop (R4, _return_shop): it holds no shop whose return to file.
+    with no shop (R4, _return_shop): it holds no shop whose return to file;
+    and one who cannot see every shop on the GSTIN (H2).
     """
     from ...services.gstn_export import to_gstr3b_json
 
-    active_store = _return_shop(store_id, current_user)
+    active_store = _gstin_return_shop(store_id, current_user)
     period = _normalise_period(month, year)
-    data = _compute_gstr3b(period, active_store)
+    data = _gstin_return(period, active_store)
     unallocated = data.get("unallocatedLegacyBills") or {}
-    if unallocated.get("count") or unallocated.get("failed"):
+    if unallocated.get("failed"):  # unread is not "unallocated" (review round 2)
+        raise HTTPException(status_code=503, detail="GSTR-3B figures could not be read; please retry.")
+    if unallocated.get("count"):
         raise HTTPException(
             status_code=409,
             detail="Assign each unallocated legacy purchase bill to its receiving GSTIN before downloading GSTN JSON. Open the GST cross-check and correct the bill allocation.",
         )
-    try:
-        return to_gstr3b_json(data, gstin=data.get("gstin", ""), period=period)
-    except Exception:
-        return to_gstr3b_json({}, gstin="", period=period)
-
-
+    return to_gstr3b_json(data, gstin=data.get("gstin", ""), period=period)

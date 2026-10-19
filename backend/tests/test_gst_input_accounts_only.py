@@ -60,7 +60,7 @@ GSTR3B_INPUT_KEYS = {
     "inwardSuppliesReverseChargeValue", "inwardSuppliesReverseCharge",
     "inwardSuppliesReverseChargeGstin", "taxPaidCash",
     "itcReverseCharge", "itcReversed",
-    "itcIneligible", "inwardExemptNilNonGst",
+    "itcIneligible", "itcBlocked", "inwardExemptNilNonGst",
 }
 # ...and by shape, so one added later under another name is caught too.
 _INPUTISH = re.compile(r"itc|input|reverse|inward|paidcash|tax_?paid|net_?gst", re.I)
@@ -139,6 +139,8 @@ def _world() -> Any:
          "recipient_entity_id": "E1", "recipient_gstin": None,
          "taxable_amount": 300.0, "tax_amount": 33.0, "cgst_total": 16.5,
          "sgst_total": 16.5, "igst_total": 0.0, "itc_blocked": True,
+         # A registered supplier's (an unregistered one's "tax" is no GST).
+         "vendor_gstin": "20AAAAA0000A1Z5",
          "itc_eligible": False, "status": "OUTSTANDING"}
     )
     return db

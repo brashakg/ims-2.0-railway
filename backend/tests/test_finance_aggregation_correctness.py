@@ -71,6 +71,10 @@ class _FakeCollection:
         )
         return None
 
+    def count_documents(self, filter=None, *args, **kwargs):
+        self._recorder.setdefault(self._name, []).append(dict(filter or {}))
+        return 0
+
     def aggregate(self, pipeline, *args, **kwargs):
         match = {}
         for stage in pipeline or []:
@@ -376,9 +380,17 @@ def test_tally_sales_jv_excludes_draft_cancelled():
     assert isinstance(matches[0]["created_at"]["$gte"], datetime)
 
 
-def test_gst_reconciliation_endpoint_excludes_draft_cancelled():
+def test_gst_reconciliation_endpoint_excludes_draft_cancelled(monkeypatch):
+    """The table reads each shop's GSTR-3B (one rule, audit A04-3): the
+    orders query it runs there still drops drafts / cancelled sales and uses
+    datetime bounds."""
+    from api.routers.reports import gstr3b
+
     rec: dict = {}
     client = _finance_client(rec)
+    shops = _FakeDB(rec, {"stores": [{"store_id": "store-fin-test", "entity_id": "E1"}]})
+    finance._get_db = lambda: shops  # type: ignore[assignment]
+    monkeypatch.setattr(gstr3b, "_get_raw_db", lambda: shops)
     resp = client.get("/finance/gst/reconciliation?month=3&year=2026")
     assert resp.status_code == 200
     matches = _all_order_matches(rec)

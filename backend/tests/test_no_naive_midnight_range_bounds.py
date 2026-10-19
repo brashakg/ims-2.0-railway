@@ -392,21 +392,6 @@ ALLOWED = {
         "duration, never a query bound."
     ),
     (
-        "api/routers/finance/gst.py",
-        "bill_start = datetime(y, m, 1)",
-    ): (
-        "ITC register: bill_date is an operator-typed CALENDAR date (the "
-        "date printed on the vendor bill), not a stored instant -- the "
-        "comment at the site rules the frame. Calendar bounds are correct."
-    ),
-    (
-        "api/routers/finance/gst.py",
-        "bill_end = datetime(y + 1, 1, 1) if m == 12 else datetime(y, m + 1, 1)",
-    ): (
-        "Upper half of the bill_date calendar month bound above -- same "
-        "ruling."
-    ),
-    (
         "api/routers/finance/cash_flow.py",
         "event_date = datetime(y, m, 1)",
     ): (

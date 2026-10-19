@@ -76,7 +76,7 @@ beforeEach(() => {
   api.getPeriodStatus.mockResolvedValue({ locked: false });
   api.getPnlByStore.mockResolvedValue({ stores: [] });
   api.getPnlByCategory.mockResolvedValue({ categories: [] });
-  api.getGstReconciliation.mockResolvedValue({ entities: [] });
+  api.getGstReconciliation.mockResolvedValue({ registrations: [] });
 });
 
 function openReport(path: string, role: string) {

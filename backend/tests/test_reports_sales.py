@@ -128,6 +128,9 @@ class FakeCollection:
     def count_documents(self, filter=None):
         return sum(1 for d in self.docs if _doc_matches(d, filter))
 
+    def aggregate(self, pipeline):  # no bill to sum (GSTR-3B reads, M7)
+        return iter([])
+
 
 class FakeDB:
     is_connected = True

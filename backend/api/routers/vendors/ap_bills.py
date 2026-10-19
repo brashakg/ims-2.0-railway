@@ -1,6 +1,7 @@
 """Accounts payable: bill models, AP aging and vendor bills."""
 
 from api.utils.event_time import utc_now_iso
+from api.utils.ist import now_ist_naive
 
 from ._shared import (
     BaseModel,
@@ -12,6 +13,7 @@ from ._shared import (
     _AP_ROLES,
     _get_db,
     ap_engine,
+    get_audit_repository,
     datetime,
     field_validator,
     get_grn_repository,
@@ -24,6 +26,20 @@ from ._shared import (
     can_access_store_scoped,
 )
 from .models import GRN_SUBTYPE_DC
+
+# The 17(5) tick: a services / expense bill's, or -- when it is booked -- a
+# bill for goods bought WITHOUT a purchase order (gifts, samples, personal
+# use; LOW 13), whose GST then goes into those goods' cost. A purchase-order
+# stock bill keeps its input-credit switch (Purchase > Invoices).
+_ITC_BLOCKED_SERVICES_ONLY = {
+    "code": "ITC_BLOCKED_SERVICES_ONLY",
+    "message": (
+        "'Credit not claimable (section 17(5))' is for services and expense "
+        "bills (food, vehicles, club fees), and for goods bought without a "
+        "purchase order when their bill is booked. A purchase-order stock bill "
+        "keeps its input-credit switch under Purchase > Invoices."
+    ),
+}
 
 
 # ============================================================================
@@ -65,6 +81,13 @@ class VendorBillCreate(BaseModel):
     # freight): never his topbar shop. A receipt's bill keeps the receipt's
     # shop; anyone else's is their own. See purchase_invoices._bill_shop.
     store_id: Optional[str] = None
+    # Section 17(5): the accountant's "credit not claimable" tick for a
+    # services / expense bill (food, motor vehicles, club fees ...; owner and
+    # CA 2026-10-18). Ticked, the bill's GST is never input credit (GSTR-3B
+    # Table 4, the Finance GST tab, the ITC register) -- it stays in what the
+    # bill costs. Default unticked; changeable later through
+    # PUT /{vendor_id}/bills/{bill_id}/itc-blocked until the month is locked.
+    itc_blocked: bool = False
 
     @field_validator("bill_kind", mode="before")
     @classmethod
@@ -371,6 +394,9 @@ async def create_vendor_bill(
                 },
             )
 
+    if bill.itc_blocked and not bill.grn_id and bill.bill_kind != ap_engine.BILL_KIND_SERVICES:
+        raise HTTPException(status_code=422, detail=_ITC_BLOCKED_SERVICES_ONLY)
+
     linked = None  # the goods receipt this bill names, read below
     # This door accepts a grn_id but validated NOTHING about it -- so the same
     # two money leaks the first-class purchase-invoice door had were reachable
@@ -425,6 +451,12 @@ async def create_vendor_bill(
             if unnamed is exc:
                 raise
             raise unnamed from None
+        # LOW 13: goods bought without a PO may carry the 17(5) tick; a PO
+        # receipt's stock bill may not.
+        if bill.itc_blocked and ((linked or {}).get("po_id") or (linked or {}).get("grn_subtype") not in (
+            ap_engine.GRN_SUBTYPE_NO_PO, GRN_SUBTYPE_DC,
+        )):
+            raise HTTPException(status_code=422, detail=_ITC_BLOCKED_SERVICES_ONLY)
         if (linked or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO:
             from ...services.purchase_invoice_engine import lines_from_grn
 
@@ -530,8 +562,10 @@ async def create_vendor_bill(
         "outstanding": round(bill.total_amount, 2),
         # No valid supplier GSTIN, no input credit (a bill for goods bought
         # without a PO, G2, the same) -- purchase_invoices does the same on
-        # its doors: one rule, org_validation.itc_claimable.
-        "itc_eligible": itc_claimable(supplier_gstin),
+        # its doors: one rule, org_validation.itc_claimable. A 17(5) tick
+        # switches it off too, and says why (itc_blocked).
+        "itc_eligible": itc_claimable(supplier_gstin, False, not bill.itc_blocked),
+        "itc_blocked": bool(bill.itc_blocked),
         "po_id": bill.po_id,
         "grn_id": bill.grn_id,
         # A receipt-linked bill IS a goods bill whatever the caller declared;
@@ -606,18 +640,42 @@ async def create_vendor_bill(
     # carries the bill's tax share as its rate.
     # ponytail: one share for every line; a mixed-rate walk-in bill wants the
     # line-detail door (Purchase -> Invoices -> Create from GRN).
-    if db is not None and (linked or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO:
-        from ..purchase_invoices import _apply_valuation_trueup, _resolved_purchase_config
-        from ...services.purchase_invoice_engine import lines_from_grn
-
-        share = ap_engine.header_bill_gst_rate(bill.tax_amount, bill.taxable_amount) or 0.0
-        _apply_valuation_trueup(
-            db,
-            {**doc, "invoice_id": bill_id},
-            {"lines": [{**ln, "gst_rate": share} for ln in lines_from_grn(linked, None)]},
-            _resolved_purchase_config(db),
-        )
+    # F04 (owner + CA 2026-10-18): a PO receipt's bill claiming no credit (an
+    # unregistered supplier's, on this door) trues up the same way, priced
+    # from its order; one claiming credit leaves the cost as received.
+    walk_in = (linked or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO
+    if db is not None and linked and (walk_in or doc["itc_eligible"] is False):
+        _true_up_header_bill(db, {**doc, "invoice_id": bill_id}, linked)
     return _clean(doc)
+
+
+def _true_up_header_bill(db, doc: dict, linked: dict) -> None:
+    """The cost true-up of a header-only bill on its receipt (G1 / F04): the
+    receipt's lines carry the bill's tax share as their rate. A walk-in buy
+    costs at the price paid; a PO receipt at the BILL's price -- its taxable
+    value spread over the receipt's lines in their order-price proportion
+    (evenly per piece when the order names no prices; LOW 17)."""
+    from ..purchase_invoices import _apply_valuation_trueup, _resolved_purchase_config
+    from ...services.purchase_invoice_engine import lines_from_grn
+
+    walk_in = linked.get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO
+    po = None
+    if not walk_in and linked.get("po_id"):
+        po = db.get_collection("purchase_orders").find_one({"po_id": linked["po_id"]}, {"_id": 0})
+    taxable = float(doc.get("taxable_amount") or 0)
+    share = ap_engine.header_bill_gst_rate(doc.get("tax_amount"), taxable) or 0.0
+    lines = lines_from_grn(linked, po)
+    if not walk_in:
+        value = sum(float(ln.get("qty") or 0) * float(ln.get("unit_price") or 0) for ln in lines)
+        pieces = sum(float(ln.get("qty") or 0) for ln in lines)
+        if value > 0:
+            lines = [{**ln, "unit_price": round(float(ln.get("unit_price") or 0) * taxable / value, 2)}
+                     for ln in lines]
+        elif pieces > 0:
+            lines = [{**ln, "unit_price": round(taxable / pieces, 2)} for ln in lines]
+    _apply_valuation_trueup(
+        db, doc, {"lines": [{**ln, "gst_rate": share} for ln in lines]}, _resolved_purchase_config(db),
+    )
 
 
 @router.get("/{vendor_id}/bills")
@@ -657,6 +715,128 @@ async def list_vendor_bills(
         b["total_amount"] = ap_engine.vendor_payable(b)
         b["left_to_pay"] = _left_to_pay(b)
     return {"bills": bills, "total": len(bills)}
+
+
+class VendorBillItcBlocked(BaseModel):
+    itc_blocked: bool
+
+
+def _refuse_after_return_due(bill: dict) -> None:
+    """M6 (GST review 2026-10-19): the 17(5) tick decides what the bill's
+    month's GSTR-3B claims, so it cannot change once that return is due --
+    the 20th of the following month, IST -- or filed. 422 in words; the
+    change is the CA's, in the current return."""
+    from datetime import date
+
+    day = date.fromisoformat(ap_engine.iso_bill_date(bill.get("invoice_date") or bill.get("bill_date")))
+    due = date(day.year + (day.month == 12), day.month % 12 + 1, 20)
+    if now_ist_naive().date() > due:
+        raise HTTPException(status_code=422, detail={
+            "code": "GSTR3B_DUE_PASSED",
+            "message": (
+                f"GSTR-3B for {day.strftime('%B %Y')} is due/filed - record the change "
+                "in the current return with your CA."
+            ),
+        })
+
+
+@router.put("/{vendor_id}/bills/{bill_id}/itc-blocked")
+async def set_vendor_bill_itc_blocked(
+    vendor_id: str,
+    bill_id: str,
+    body: VendorBillItcBlocked,
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
+):
+    """Tick or untick 'credit not claimable (section 17(5))' on a booked
+    services / expense bill (owner + CA 2026-10-18). Ticked, its GST is no
+    input credit anywhere (itc_eligible False, itc_blocked True); unticked,
+    the bill gets back the credit decision it had before the tick. Accounts
+    roles only; 404 outside the caller's shops; 423 once the bill's month is
+    locked (the one bill-period guard, fail-closed on an unusable date)."""
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Bills are unavailable; please retry.")
+    bills = db.get_collection("vendor_bills")
+    bill = bills.find_one({"bill_id": bill_id, "vendor_id": vendor_id}, {"_id": 0})
+    if bill is None or not can_access_store_scoped(bill.get("store_id"), current_user):
+        raise HTTPException(status_code=404, detail="Bill not found")
+    # A goods bill bought without a PO, ticked when booked, may be UNTICKED
+    # (review round 2): its unclaimed GST then leaves its units' cost and,
+    # for a walk-in buy, the product's. It is never ticked after booking.
+    goods_untick = bool(
+        bill.get("grn_id") and bill.get("itc_blocked") and not body.itc_blocked
+        and not bill.get("source_transfer_id")
+    )
+    if not goods_untick and (
+        bill.get("grn_id")
+        or bill.get("source_transfer_id")
+        or bill.get("bill_kind") != ap_engine.BILL_KIND_SERVICES
+    ):
+        raise HTTPException(status_code=422, detail=_ITC_BLOCKED_SERVICES_ONLY)
+    from ..purchase_invoices import _check_bill_period_open
+
+    _check_bill_period_open(db, bill)
+    _refuse_after_return_due(bill)
+    was_blocked = bool(bill.get("itc_blocked"))
+    if body.itc_blocked == was_blocked:
+        return _clean(bill)
+    if body.itc_blocked:
+        update = {
+            "itc_blocked": True,
+            "itc_eligible": False,
+            # The credit decision the tick overrides, given back on untick
+            # (a bill booked with credit switched off stays off).
+            "itc_eligible_before_17_5": bill.get("itc_eligible") is not False,
+        }
+    else:
+        from ...services.org_validation import itc_claimable
+
+        before = bill.get("itc_eligible_before_17_5")
+        if before is None:  # ticked when booked: the booking rule decides
+            gstin = ap_engine.bill_supplier_gstin(
+                bill, lambda vid: ((db.get_collection("vendors").find_one({"vendor_id": vid}) or {}).get("gstin"))
+            )
+            before = itc_claimable(gstin, bill.get("reverse_charge"))
+        update = {"itc_blocked": False, "itc_eligible": bool(before)}
+    when = utc_now_iso()
+    update.update({"itc_blocked_by": current_user.get("user_id"), "itc_blocked_at": when})
+    # Guarded on the state read above: two accountants clicking at once
+    # cannot interleave a stale 'before' value.
+    done = bills.update_one(
+        {"bill_id": bill_id, "itc_blocked": True if was_blocked else {"$ne": True}},
+        {"$set": update, **({} if body.itc_blocked else {"$unset": {"itc_eligible_before_17_5": ""}})},
+    )
+    if not done.matched_count:
+        raise HTTPException(status_code=409, detail="This bill changed meanwhile. Refresh and try again.")
+    # Only when the untick really gives the credit back (round 3): an
+    # unregistered supplier's GST stays no credit, so it stays in the cost.
+    if goods_untick and update["itc_eligible"]:
+        from ..purchase_invoices import _remove_unclaimed_gst
+
+        _remove_unclaimed_gst(db, bill_id)
+        linked = db.get_collection("grns").find_one({"grn_id": bill["grn_id"]}, {"_id": 0})
+        if (linked or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO:
+            # The walk-in cost is the latest price paid (re-settable): the
+            # product's cost goes back to the price without the GST.
+            # ponytail: a challan bill's moving average keeps the GST until
+            # its next bill (logged by the review: DC moving-average blend).
+            _true_up_header_bill(db, {**bill, **update, "invoice_id": bill_id}, linked)
+    try:
+        repo = get_audit_repository()
+        if repo is not None:
+            repo.create({
+                "action": "vendor_bill.itc_blocked" if body.itc_blocked else "vendor_bill.itc_unblocked",
+                "entity_type": "vendor_bill",
+                "entity_id": bill_id,
+                "user_id": current_user.get("user_id"),
+                "severity": "INFO",
+                "source": "vendors",
+                "before_state": {k: bill.get(k) for k in ("itc_blocked", "itc_eligible")},
+                "after_state": {k: update[k] for k in ("itc_blocked", "itc_eligible")},
+            })
+    except Exception:  # noqa: BLE001 - the audit row never undoes the change
+        logger.warning("[AP] audit of the 17(5) tick on %s failed", bill_id, exc_info=True)
+    return _clean(bills.find_one({"bill_id": bill_id}, {"_id": 0}) or {**bill, **update})
 
 
 def _rejected_goods_hold(db, bill_id: Optional[str]) -> Optional[str]:

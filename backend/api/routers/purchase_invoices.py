@@ -88,6 +88,7 @@ from ..services import landed_cost as lc
 from ..services import purchase_invoice_engine as pinv
 from ..services import purchase_match as pmatch
 from ..services import stock_value
+from ..services.item_events import is_on_hand
 from ..services import product_master as _pm
 from ..services.cost_mask import AP_ROLES
 
@@ -1090,6 +1091,127 @@ def _preserve_unpriced_layers(db, product_ids):
                     raise RuntimeError("Could not preserve an unpriced stock layer")
 
 
+def _cost_lines(bill: dict, lines: list) -> list:
+    """THE unclaimed-GST cost rule (G1, owner 2026-10-13, for walk-in bills;
+    F04, owner + CA 2026-10-18, for every bill): a bill that claims no input
+    credit -- credit switched off, an unregistered supplier, a section 17(5)
+    tick -- costs its goods at the price PLUS each line's GST, since tax that
+    cannot be claimed back is part of what the goods cost. A bill claiming
+    credit costs them at the price (unchanged). Every cost a bill writes reads
+    it: the product's cost (_apply_valuation_trueup), each received unit's
+    (_resolve_billed_receipt_costs, _add_unclaimed_gst_to_units) and the
+    landed-cost allocation. An unknown price stays unknown."""
+    if (bill or {}).get("itc_eligible") is not False:
+        return lines
+
+    def gross(value, rate):
+        return None if value in (None, "") else round(float(value) * (1 + rate / 100), 2)
+
+    out = []
+    for ln in lines or []:
+        rate = float(ln.get("gst_rate") or 0)
+        costed = {**ln, "unit_price": gross(ln.get("unit_price"), rate)}
+        if ln.get("taxable") is not None:
+            costed["taxable"] = gross(ln.get("taxable"), rate)
+        out.append(costed)
+    return out
+
+
+def _add_unclaimed_gst_to_units(db, receipts, bill, lines) -> None:
+    """F04 on the units: a bill claiming no input credit adds each line's GST
+    to the units of its receipts -- the goods receipt, or every Delivery
+    Challan a consolidated bill names (M5) -- that were costed when received.
+    The unit keeps unit_cost (the supplier's price, which the last-paid quote
+    reads); landed_cost carries price + GST and is what stock is valued at
+    (stock_value._own_cost). Units received unpriced are priced by
+    _resolve_billed_receipt_costs through the same rule.
+
+    Up to the billed quantity per product. `unclaimed_gst` on the unit
+    records the GST added per piece, how many of its pieces carry it and the
+    bills that added it: a bill never adds twice, and a multi-piece unit
+    billed in parts takes each part's share of its pieces (LOW 8).
+    ponytail: units SOLD before the bill is booked keep their receipt cost
+    (the sale's cost was taken then); their GST reaches future units through
+    the product's moving average, which _apply_valuation_trueup blends at
+    price + GST over the whole billed quantity (LOW 10). Which held pieces a
+    part bill's GST lands on is arbitrary; the total is exact."""
+    receipts = [g for g in receipts or [] if g and g.get("grn_id")]
+    if not receipts or (bill or {}).get("itc_eligible") is not False:
+        return
+    bill_id = bill.get("invoice_id") or bill.get("bill_id")
+    stock = db.get_collection("stock_units")
+    numbered = [(g, _valuation_unique_number(db, g)) for g in receipts]
+    for line in lines or []:
+        pid = line.get("product_id")
+        price = pmatch._valuation_cost(line.get("unit_price"))
+        left = pmatch._valuation_cost(line.get("qty")) or 0
+        gst = round((price or 0) * float(line.get("gst_rate") or 0) / 100, 2)
+        if not pid or gst <= 0 or left <= 0:
+            continue
+        # This receipt's own held units FIRST, then the piece count (LOW 8).
+        units = sorted(
+            (u for u in stock.find({"product_id": pid})
+             if any(_valuation_receipt_unit(u, g, n) for g, n in numbered)
+             and u.get("receipt_disposition") != "REJECTED"
+             # Still held: THE on-hand rule (item_events), reserved included.
+             and is_on_hand(u.get("status"), include_reserved=True)),
+            key=lambda u: str(u.get("stock_id") or u.get("_id")),
+        )
+        for unit in units:
+            if left <= 0:
+                break
+            mark = unit.get("unclaimed_gst")
+            pieces = stock_value._pieces(unit)
+            covered = float((mark or {}).get("pieces") or 0)
+            base = stock_value._price(unit.get("unit_cost")) or stock_value._price(unit.get("cost_price"))
+            if (
+                not base
+                or bill_id in ((mark or {}).get("bills") or [])
+                or covered >= pieces
+                # Priced by a bill already, its GST in landed_cost (pending
+                # units, _resolve_billed_receipt_costs).
+                or (unit.get("cost_source") == "PURCHASE_INVOICE" and mark is None)
+            ):
+                continue
+            take = min(left, pieces - covered)
+            per_piece = round(float((mark or {}).get("per_piece") or 0) + gst * take / pieces, 2)
+            identity = {"stock_id": unit["stock_id"]} if unit.get("stock_id") else {"_id": unit["_id"]}
+            done = stock.update_one(
+                {**identity, "unclaimed_gst": mark if mark is not None else {"$exists": False}},
+                {"$set": {
+                    "landed_cost": round(base + per_piece, 2),
+                    "unclaimed_gst": {"per_piece": per_piece, "pieces": covered + take,
+                                      "bills": [*((mark or {}).get("bills") or []), bill_id],
+                                      # each bill's own part, so an untick takes back only it
+                                      "shares": {**((mark or {}).get("shares") or {}),
+                                                 bill_id: [round(gst * take / pieces, 2), take]}},
+                    "cost_source": "PURCHASE_INVOICE", "cost_source_id": bill_id,
+                }},
+            )
+            if done.modified_count:
+                left -= take
+
+
+def _remove_unclaimed_gst(db, bill_id) -> None:
+    """Take back the unclaimed GST one bill added to its units (its 17(5)
+    tick undone): each unit's landed_cost loses that bill's share only."""
+    stock = db.get_collection("stock_units")
+    for unit in stock.find({"unclaimed_gst.bills": bill_id}):
+        mark = unit["unclaimed_gst"]
+        share, take = (mark.get("shares") or {}).get(bill_id, [0.0, 0])
+        per_piece = round(float(mark.get("per_piece") or 0) - float(share), 2)
+        base = stock_value._price(unit.get("unit_cost")) or stock_value._price(unit.get("cost_price"))
+        identity = {"stock_id": unit["stock_id"]} if unit.get("stock_id") else {"_id": unit["_id"]}
+        stock.update_one({**identity, "unclaimed_gst": mark}, {"$set": {
+            "landed_cost": round(base + per_piece, 2),
+            "unclaimed_gst": {
+                "per_piece": per_piece, "pieces": float(mark.get("pieces") or 0) - take,
+                "bills": [b for b in mark.get("bills") or [] if b != bill_id],
+                "shares": {k: v for k, v in (mark.get("shares") or {}).items() if k != bill_id},
+            },
+        }})
+
+
 def _resolve_billed_receipt_costs(db, grn):
     """Price missing accepted units only with complete, unambiguous bill evidence.
 
@@ -1115,37 +1237,45 @@ def _resolve_billed_receipt_costs(db, grn):
                  and u.get("receipt_disposition") != "REJECTED"]
         if not math.isclose(sum(stock_value._pieces(u) for u in units), qty, abs_tol=0.001):
             continue
-        prices = set()
+        parts = []  # [landed price, pieces] per billed line, in booking order
+        bases = set()
         billed_qty = 0.0
         invalid = False
-        for bill in bills:
+        for bill in sorted(bills, key=lambda b: (str(b.get("created_at") or ""), str(b.get("bill_id") or ""))):
             if str(bill.get("status") or "").upper() not in {"OUTSTANDING", "PARTIAL", "PAID"}:
                 continue
             if grn.get("vendor_id") and bill.get("vendor_id") != grn["vendor_id"]:
                 continue
-            for line in bill.get("lines") or []:
+            lines = bill.get("lines") or []
+            for line, costed in zip(lines, _cost_lines(bill, lines)):
                 if line.get("product_id") != pid:
                     continue
-                cost = pmatch._valuation_cost(line.get("unit_price"))
+                base_price = pmatch._valuation_cost(line.get("unit_price"))
                 count = pmatch._valuation_cost(line.get("qty"))
-                if cost is None or cost <= 0 or count is None or count <= 0:
+                if base_price is None or base_price <= 0 or count is None or count <= 0:
                     invalid = True
                     continue
-                base_price = cost
-                if grn.get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO and bill.get("itc_eligible") is False:
-                    rate = pmatch._valuation_cost(line.get("gst_rate"))
-                    if rate is None:
-                        invalid = True
-                        continue
-                    cost *= 1 + rate / 100
-                prices.add((round(base_price, 2), round(cost, 2)))
+                # A bill claiming no credit must say each line's rate: its GST
+                # is part of the cost (_cost_lines).
+                if bill.get("itc_eligible") is False and pmatch._valuation_cost(line.get("gst_rate")) is None:
+                    invalid = True
+                    continue
+                bases.add(round(base_price, 2))
+                parts.append([round(costed["unit_price"], 2), count])
                 billed_qty += count
-        if invalid or len(prices) != 1 or not math.isclose(billed_qty, qty, abs_tol=0.001):
+        # One price, every piece billed. Parts that differ only by the GST one
+        # of them cannot claim (one with credit, one without) each price their
+        # own pieces (LOW 9); two different prices still leave them pending.
+        if invalid or len(bases) != 1 or not math.isclose(billed_qty, qty, abs_tol=0.001):
             continue
-        base_price, landed_price = prices.pop()
+        base_price = bases.pop()
         for unit in units:
             if stock_value._own_cost(unit):
                 continue
+            while len(parts) > 1 and parts[0][1] <= 0:
+                parts.pop(0)
+            landed_price = parts[0][0]
+            parts[0][1] -= stock_value._pieces(unit)
             identity = {"stock_id": unit["stock_id"]} if unit.get("stock_id") else {"_id": unit["_id"]}
             stock.update_one(
                 {**identity, "unit_cost": unit.get("unit_cost"), "cost_price": unit.get("cost_price")},
@@ -1206,12 +1336,12 @@ def _apply_valuation_trueup(db, invoice_doc, computed, config) -> Optional[list]
             except Exception:
                 store_id = None
         # A walk-in buy's cost is ONE rule at receiving and at booking: the
-        # LATEST PRICE PAID (owner 2026-10-12), never the configured blend --
-        # plus, G1 (owner 2026-10-13), the GST its bill charged when that bill
-        # claims no input credit: tax that cannot be claimed back is part of
-        # what the goods cost. THE place G1 is decided: the units went on the
-        # shelf at the price paid, and both bill doors true up through here (a
-        # 0% cash memo leaves the price paid).
+        # LATEST PRICE PAID (owner 2026-10-12), never the configured blend.
+        # Every bill -- walk-in (G1) or PO (F04, owner + CA 2026-10-18) --
+        # then adds the GST it charged when it claims no input credit
+        # (_cost_lines), to the product's cost here and to its receipt's units
+        # below; both bill doors true up through here (a 0% cash memo leaves
+        # the price paid).
         walk_in = (grn or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO
         if walk_in:
             # The latest price paid is the newest ACCEPTED receipt's, dated by
@@ -1223,23 +1353,22 @@ def _apply_valuation_trueup(db, invoice_doc, computed, config) -> Optional[list]
                 for ln in lines
                 if not _bought_since(db, ln.get("product_id"), grn.get("accepted_at"))
             ]
-        if walk_in and invoice_doc.get("itc_eligible") is False:
-            lines = [
-                {
-                    **ln,
-                    "unit_price": round(
-                        float(ln.get("unit_price") or 0)
-                        * (1 + float(ln.get("gst_rate") or 0) / 100),
-                        2,
-                    ),
-                }
-                for ln in lines
-            ]
+        lines = _cost_lines(invoice_doc, lines)
         method = pmatch.VALUATION_LATEST_PRICE if walk_in else pmatch.normalize_valuation_method(config.get("valuation_method"))
         # Every method may update the master price. Preserve unknown layers
         # first without changing FIFO or walk-in latest-price arithmetic.
         _preserve_unpriced_layers(db, pids)
         _resolve_billed_receipt_costs(db, grn)
+        try:
+            receipts = [grn] if grn else list(db.get_collection("grns").find(
+                {"grn_id": {"$in": list(invoice_doc.get("linked_dc_ids") or [])}}, {"_id": 0}))
+            _add_unclaimed_gst_to_units(db, receipts, invoice_doc, computed.get("lines"))
+        except Exception:  # noqa: BLE001 - fail-soft like the true-up, but said
+            logger.warning(
+                "[PI] adding the unclaimed GST of %s to its units failed",
+                invoice_doc.get("invoice_id") or invoice_doc.get("bill_id"),
+                exc_info=True,
+            )
         product_state = _product_state_for_valuation(
             db, pids, store_id, exclude_grn_id=grn_id
         )
@@ -3512,12 +3641,13 @@ def _load_purchase_invoice_or_404(db, invoice_id: str) -> dict:
 
 
 def _check_bill_period_open(db, doc: dict) -> None:
-    """F19 period-lock guard, mirroring the F9 DC-date check: 423 when the
+    """THE period-lock guard of a change to a booked bill (F19 landed costs,
+    the section 17(5) tick), mirroring the F9 DC-date check: 423 when the
     bill's posting month (invoice_date, else bill_date) is in a locked
     accounting period.
 
-    FAIL-CLOSED on a missing/unusable posting date: a landed-cost mutation in
-    an unverifiable period must not proceed (the lock would otherwise be
+    FAIL-CLOSED on a missing/unusable posting date: a mutation in an
+    unverifiable period must not proceed (the lock would otherwise be
     silently bypassed by a bill with no date). check_period_locked itself is
     fail-soft on DB errors -- infrastructure noise still never blocks."""
     try:
@@ -3532,7 +3662,7 @@ def _check_bill_period_open(db, doc: dict) -> None:
                 "This bill has no usable posting date (invoice_date/bill_date "
                 "as YYYY-MM-DD, from 1 July 2017 to today), so the "
                 "accounting-period lock cannot be checked. Set the bill's date "
-                "before capturing or allocating landed costs."
+                "before changing the bill."
             ),
         ) from None
     try:
@@ -3663,7 +3793,9 @@ async def preview_invoice_landed_costs(
             ),
         )
     method = doc.get("allocation_method") or "BY_VALUE"
-    lines = doc.get("lines") or []
+    # The goods' cost the freight lands on: with the GST a bill claiming no
+    # credit charged (_cost_lines, as the units and the product carry it).
+    lines = _cost_lines(doc, doc.get("lines") or [])
     try:
         rows = lc.allocate_landed_costs(lines, components, method)
         per_product = lc.landed_unit_cost_by_product(lines, rows)
@@ -3736,8 +3868,10 @@ async def allocate_invoice_landed_costs(
             detail="Invoice has no lines to allocate landed costs against.",
         )
     method = doc.get("allocation_method") or "BY_VALUE"
+    # The goods' cost the freight lands on (_cost_lines, as in the preview).
+    costed = _cost_lines(doc, lines)
     try:
-        rows = lc.allocate_landed_costs(lines, components, method)
+        rows = lc.allocate_landed_costs(costed, components, method)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -3801,7 +3935,7 @@ async def allocate_invoice_landed_costs(
     # docstring for why this writes landed_cost and NOT cost_price.
     rolled_in = []
     try:
-        per_product = lc.landed_unit_cost_by_product(lines, rows)
+        per_product = lc.landed_unit_cost_by_product(costed, rows)
     except Exception:
         per_product = {}
     if per_product:

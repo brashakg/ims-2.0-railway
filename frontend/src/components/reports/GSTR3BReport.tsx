@@ -57,6 +57,9 @@ interface GSTR3BData {
   // 2026-10-12, R5): GET /reports/gstr3b leaves it, ITC utilised and the tax
   // paid in cash out for everyone else, so these three may be absent.
   itcAvailable?: GSTR3BITCAvailable;
+  // Table 4(B)(1): GST on bills ticked 'credit not claimable, section 17(5)'
+  // -- never inside itcAvailable. Accounts roles only, like the rest of 4.
+  itcBlocked?: GSTR3BITCAvailable;
 
   // Table 5: Exempt, Nil rated and Non-GST supplies
   exemptSupplies: number;
@@ -142,6 +145,7 @@ export function GSTR3BReport() {
   };
 
   const itcAvailable = canSeeInputTax ? reportData?.itcAvailable : undefined;
+  const itcBlocked = canSeeInputTax ? reportData?.itcBlocked : undefined;
   const itcUtilized = canSeeInputTax ? reportData?.itcUtilized : undefined;
   const taxPaidCash = canSeeInputTax ? reportData?.taxPaidCash : undefined;
 
@@ -388,6 +392,8 @@ export function GSTR3BReport() {
                 </thead>
                 <tbody>
                   {renderTaxLiabilityRow('ITC Available', itcAvailable, true)}
+                  {itcBlocked && getTotalTax(itcBlocked) > 0 &&
+                    renderTaxLiabilityRow('Not claimable, section 17(5) - Table 4(B)(1), not in the ITC above', itcBlocked)}
                 </tbody>
               </table>
             </div>

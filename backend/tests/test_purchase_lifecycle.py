@@ -1247,7 +1247,10 @@ class TestTheInvoiceIsTheGate:
         assert out["invoice_number"] == "INV-GATE-1"
         # and the booked cost must actually land on the product
         p = db.get_collection("products").find_one({"product_id": "P1"})
-        assert p["cost_price"] == 3400.0
+        # Rs 3400 + its 5% GST: this supplier has no GSTIN, so the bill claims
+        # no input credit and that GST is part of the cost (F04, owner + CA
+        # 2026-10-18, purchase_invoices._cost_lines).
+        assert p["cost_price"] == 3570.0
         assert p["cost_source"] == "PURCHASE_INVOICE"
         assert p["cost_source_id"] == out["invoice_id"]
 

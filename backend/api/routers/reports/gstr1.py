@@ -1,6 +1,6 @@
 """GSTR-1 (outward supplies): computation plus the two endpoints."""
 
-from fastapi import Depends, Query
+from fastapi import Depends, HTTPException, Query
 from typing import Optional
 from ...utils.event_time import parse_event_utc_naive
 from ...utils.ist import (
@@ -21,6 +21,7 @@ from ._shared import (
     _cdnr_note_number,
     _credit_note_date_ist,
     _gstr1_bill_number,
+    logger,
     router,
 )
 from .gst_base import (
@@ -83,8 +84,6 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
         year, mon = int(month[:4]), int(month[5:7])
         from_dt, to_dt = ist_month_window_utc(year, mon)
     except Exception:
-        from fastapi import HTTPException
-
         raise HTTPException(status_code=400, detail="month must be in YYYY-MM format")
 
     b2b: list = []
@@ -393,8 +392,14 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                         }
                     )
             b2b.extend(_t_rows)
-        except Exception:
-            transfer_hsn_lines = []
+        except Exception as exc:  # noqa: BLE001
+            # Fail LOUDLY (GST review 2026-10-19, M7): GSTR-3B already 503s
+            # when transfers cannot be read; dropping every deemed supply
+            # from GSTR-1 here would file the two returns differently.
+            logger.exception("[GSTR-1] %s %s: transfers could not be read", active_store, month)
+            raise HTTPException(
+                status_code=503, detail="GSTR-1 transfer invoices could not be read; please retry."
+            ) from exc
 
     b2cs = [
         {
@@ -811,6 +816,32 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
     }
 
 
+def _gstr1_shop(store_id, current_user) -> str:
+    """The shop whose GSTR-1 is asked for. Stopgap until GSTR-1 is computed
+    per GSTIN (review round 2, item 3): it is still ONE shop's sales, so a
+    reader who cannot see every shop on that shop's GSTIN is refused -- the
+    GSTR-3B door's rule (gstr3b._gstin_return_shop). 503 when the shops
+    cannot be read."""
+    from ...dependencies import user_store_scope
+    from .gst_itc import _itc_store_scope
+
+    shop = store_in_view(store_id, current_user, one_shop=True) or "store-001"
+    db = _get_raw_db()
+    if db is None:
+        return shop
+    try:
+        filing = _itc_store_scope(db, shop)[2]
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail="GSTR-1 is unavailable; please retry.") from exc
+    every, mine = user_store_scope(current_user)
+    if not every and not all(s in mine for s in filing):
+        raise HTTPException(
+            status_code=403,
+            detail=f"GSTR-1 covers {len(filing)} shops on this GSTIN - ask an admin.",
+        )
+    return shop
+
+
 @router.get("/gstr1")
 async def gstr1_report(
     month: str = Query(..., description="Tax period in YYYY-MM format"),
@@ -818,7 +849,7 @@ async def gstr1_report(
     current_user: dict = Depends(require_roles(*AP_ROLES)),
 ):
     """GSTR-1 report (IMS internal shape). See _compute_gstr1 for details."""
-    active_store = store_in_view(store_id, current_user, one_shop=True) or "store-001"
+    active_store = _gstr1_shop(store_id, current_user)
     return _compute_gstr1(month, active_store)
 
 
@@ -846,7 +877,7 @@ async def gstr1_gstn_json(
     """
     from ...services.gstn_export import to_gstr1_json
 
-    active_store = store_in_view(store_id, current_user, one_shop=True) or "store-001"
+    active_store = _gstr1_shop(store_id, current_user)
     period = _normalise_period(month, year)
     data = _compute_gstr1(period, active_store)
     try:

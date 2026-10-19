@@ -21,7 +21,7 @@ interface GSTPanelProps {
 
 export default function GSTPanel({ gstSummary }: GSTPanelProps) {
   const { user } = useAuth();
-  const canSeeInputTax = (user?.roles || []).some((r) => COST_ROLES.includes(r));
+  const canSeeInputTax = (user?.roles || []).some((r) => COST_ROLES.includes(r)) && !gstSummary?.input_withheld;
   // THE Purchase / Finance shop scope: who sees every shop, and the shop the
   // server scopes anyone else to.
   const { canPick: isAdmin, ownStoreId: ownShop } = usePurchaseShop();
@@ -54,6 +54,12 @@ export default function GSTPanel({ gstSummary }: GSTPanelProps) {
               : 'Your own shop, this month — not affected by the date filters above.'}
         </span>
       </div>
+
+      {gstSummary.input_withheld && (
+        <p className="text-xs text-gray-600" data-testid="gst-input-withheld">
+          Input credit and net payable are not shown: your shop&rsquo;s GSTIN files one return with other shops not in your view. Ask an admin.
+        </p>
+      )}
 
       {/* GST Summary Cards — unified neutral chrome (was indigo/violet/cyan). */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">

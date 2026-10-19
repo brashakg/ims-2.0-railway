@@ -49,12 +49,10 @@ def _itc_store_scope(db, active_store):
     store whose GSTIN is the same (just this one when it has none) -- the
     shops whose receipts that one filing covers. Reading the raw stores.gstin
     here put a bill booked on a GSTIN-less shop's company number on no return
-    at all. Fail-soft."""
-    try:
-        gstins = shop_gstins(db)
-        row = db["stores"].find_one({"store_id": active_store}, {"entity_id": 1})
-    except Exception:
-        return None, "", [active_store]
+    at all. A read failure RAISES (M7): a return with no GSTIN read as one
+    with no credit."""
+    gstins = shop_gstins(db)
+    row = db["stores"].find_one({"store_id": active_store}, {"entity_id": 1})
     gstin = gstins.get(active_store, "")
     shops = {active_store}
     if gstin:
@@ -242,6 +240,9 @@ def _itc_match(shops, entity_id, store_gstin, year, mon, last_day, db=None) -> d
     match = {
         **_placement(shops, entity_id, store_gstin, year, mon, last_day, db),
         "itc_eligible": {"$ne": False},
+        # Section 17(5) blocked credit is never credit, whatever else the bill
+        # says (the register's own rule, finance.gst._itc_eligible_bill).
+        "itc_blocked": {"$ne": True},
     }
     if db is not None:
         # Legacy bills may predate itc_eligible. A supplier GSTIN recorded as
@@ -308,40 +309,32 @@ def _itc_from_vendor_bills(db, active_store, year, mon, last_day):
     (vendor_bills cgst/sgst/igst_total), placed on the store's GSTIN by
     _itc_match. Returns (igst, cgst, sgst). The old code summed the `grns`
     collection -- quantity-only with NO tax fields -- so ITC was always 0 and
-    the business over-paid GST. Fail-soft -> (0.0, 0.0, 0.0)."""
+    the business over-paid GST. A read failure raises (M7): zero credit read
+    as the month's credit overstates the cash due."""
     if db is None:
         return 0.0, 0.0, 0.0
-    try:
-        entity_id, store_gstin, shops = _itc_store_scope(db, active_store)
-        return _sum_heads(
-            db, _itc_match(shops, entity_id, store_gstin, year, mon, last_day, db)
-        )[:3]
-    except Exception:
-        pass
-    return 0.0, 0.0, 0.0
+    entity_id, store_gstin, shops = _itc_store_scope(db, active_store)
+    return _sum_heads(
+        db, _itc_match(shops, entity_id, store_gstin, year, mon, last_day, db)
+    )[:3]
 
 
 def _itc_gstin_from_vendor_bills(db, active_store, year, mon, last_day):
     """R1: the GSTIN-BOUND slice of Table-4 ITC -- every bill received on this
     store's GSTIN (purchase bills and transfer mirrors alike), plus transfer
     mirrors with no GSTIN received at any shop carrying that GSTIN (nothing
-    when it has none). Returns (igst, cgst, sgst); fail-soft ->
-    zeros.
+    when it has none). Returns (igst, cgst, sgst); a read failure raises.
 
     Every placed bill, including inferred legacy purchases, belongs to one
     GSTIN. This equals _itc_from_vendor_bills; the old company-wide remainder
     is zero. The Cross-Check deduplicates it once per registration."""
     if db is None:
         return 0.0, 0.0, 0.0
-    try:
-        entity_id, store_gstin, shops = _itc_store_scope(db, active_store)
-        # Every placed bill now belongs to exactly one GSTIN, including an
-        # inferred legacy bill. There is no company-wide credit remainder.
-        match = _itc_match(shops, entity_id, store_gstin, year, mon, last_day, db)
-        return _sum_heads(db, match)[:3]
-    except Exception:
-        pass
-    return 0.0, 0.0, 0.0
+    entity_id, store_gstin, shops = _itc_store_scope(db, active_store)
+    # Every placed bill now belongs to exactly one GSTIN, including an
+    # inferred legacy bill. There is no company-wide credit remainder.
+    match = _itc_match(shops, entity_id, store_gstin, year, mon, last_day, db)
+    return _sum_heads(db, match)[:3]
 
 
 def _no_credit_inward(db, active_store, year, mon, last_day) -> dict:
@@ -363,48 +356,53 @@ def _no_credit_inward(db, active_store, year, mon, last_day) -> dict:
       * Table 4(D) (ineligible ITC): the GST on every other bill that claims
         no input credit -- paid, never claimed. Table 4 (_itc_match) counts
         the claiming bills, so a bill's GST is in one of the two.
-    Returns {"inter", "intra", "igst", "cgst", "sgst"}; fail-soft zeros."""
-    out = dict.fromkeys(("inter", "intra", "igst", "cgst", "sgst"), 0.0)
+      * ...except a bill the accountant ticked 'credit not claimable, section
+        17(5)' (itc_blocked): its GST is the blocked_* heads, the return's
+        Table 4(B)(1) (CBIC Circular 170/02/2022: blocked credit shown in
+        4(A)(5) and reversed in 4(B)(1), never 4(D)).
+    Returns {"inter", "intra", "igst", "cgst", "sgst", "blocked_igst",
+    "blocked_cgst", "blocked_sgst"}; a read failure raises (M7)."""
+    out = dict.fromkeys(
+        ("inter", "intra", "igst", "cgst", "sgst", "blocked_igst", "blocked_cgst", "blocked_sgst"), 0.0
+    )
     if db is None:
         return out
-    try:
-        entity_id, store_gstin, shops = _itc_store_scope(db, active_store)
-        placed = {
-            **_placement(shops, entity_id, store_gstin, year, mon, last_day, db),
-            "source_transfer_id": None,
-        }
+    entity_id, store_gstin, shops = _itc_store_scope(db, active_store)
+    placed = {
+        **_placement(shops, entity_id, store_gstin, year, mon, last_day, db),
+        "source_transfer_id": None,
+    }
 
-        suppliers: dict = {}
+    suppliers: dict = {}
 
-        def supplier(vendor_id):
-            if vendor_id not in suppliers:
-                suppliers[vendor_id] = db["vendors"].find_one(
-                    {"vendor_id": vendor_id}, {"_id": 0, "gstin": 1, "state_code": 1, "state": 1}
-                ) or {}
-            return suppliers[vendor_id]
+    def supplier(vendor_id):
+        if vendor_id not in suppliers:
+            suppliers[vendor_id] = db["vendors"].find_one(
+                {"vendor_id": vendor_id}, {"_id": 0, "gstin": 1, "state_code": 1, "state": 1}
+            ) or {}
+        return suppliers[vendor_id]
 
-        for b in db["vendor_bills"].find(placed, {"_id": 0}):
-            tax = b.get("tax_amount")
-            no_gst = tax is not None and float(tax or 0) <= 0
-            unregistered = not has_valid_gstin(
-                bill_supplier_gstin(b, lambda vid: supplier(vid).get("gstin"))
+    for b in db["vendor_bills"].find(placed, {"_id": 0}):
+        tax = b.get("tax_amount")
+        no_gst = tax is not None and float(tax or 0) <= 0
+        unregistered = not has_valid_gstin(
+            bill_supplier_gstin(b, lambda vid: supplier(vid).get("gstin"))
+        )
+        if not b.get("reverse_charge") and unregistered:
+            sup = supplier(b.get("vendor_id"))
+            _pos, inter = determine_place_of_supply(
+                sup.get("state_code") or sup.get("state"),
+                b.get("recipient_gstin") or store_gstin,
             )
-            if not b.get("reverse_charge") and unregistered:
-                sup = supplier(b.get("vendor_id"))
-                _pos, inter = determine_place_of_supply(
-                    sup.get("state_code") or sup.get("state"),
-                    b.get("recipient_gstin") or store_gstin,
-                )
-                total = float(b.get("taxable_amount") or 0) + float(tax or 0)
-                out["inter" if inter else "intra"] += float(b.get("total_amount") or 0) or total
-            elif not b.get("reverse_charge") and no_gst:
-                side = "inter" if b.get("interstate") else "intra"
-                out[side] += float(b.get("taxable_amount") or 0)
-            elif b.get("itc_eligible") is False:
-                for head in ("igst", "cgst", "sgst"):
-                    out[head] += float(b.get(f"{head}_total") or 0)
-    except Exception:
-        return dict.fromkeys(out, 0.0)
+            total = float(b.get("taxable_amount") or 0) + float(tax or 0)
+            out["inter" if inter else "intra"] += float(b.get("total_amount") or 0) or total
+        elif not b.get("reverse_charge") and no_gst:
+            side = "inter" if b.get("interstate") else "intra"
+            out[side] += float(b.get("taxable_amount") or 0)
+        elif b.get("itc_eligible") is False or b.get("itc_blocked") is True:
+            blocked = "blocked_" if b.get("itc_blocked") else ""
+            for head in ("igst", "cgst", "sgst"):
+                out[blocked + head] += float(b.get(f"{head}_total") or 0)
     return {k: round(v, 2) for k, v in out.items()}
 
 
@@ -473,7 +471,8 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None, shops=None) -> dict:
                 b.get("bill_id")
                 for b in db["vendor_bills"].find(match, {"_id": 0, "bill_id": 1})
             )
-        q: dict = {"status": {"$nin": _DEAD_BILL}, "itc_eligible": {"$ne": False}}
+        q: dict = {"status": {"$nin": _DEAD_BILL}, "itc_eligible": {"$ne": False},
+                   "itc_blocked": {"$ne": True}}
         if entity_id:
             q["recipient_entity_id"] = {"$in": [entity_id, None]}
         if shops is not None:
@@ -503,6 +502,8 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None, shops=None) -> dict:
             has_heads = any(k in b for k in ("cgst_total", "sgst_total", "igst_total"))
             if b.get("bill_id") not in placed or not has_heads:
                 _add(out, b, tax)
+                if not in_month:  # no month's return can hold it: needs a date
+                    out.setdefault("undated_bill_numbers", []).append(b.get("bill_number") or b.get("bill_id"))
         # Transfer mirrors whose credit IS denied (the sending shop has no valid
         # GSTIN): the right verdict, but the filer must be told, so they are
         # listed for the Cross-Check. Same scope and month window as above.
@@ -552,20 +553,17 @@ def _transfer_outward_bills(db, active_store, year, mon, last_day):
     reports the outward supply in the SAME period the receiver claims the ITC.
     Only forward-charge deemed supply lives here -- RCM inward supplies are a
     separate flow (_rcm_from_vendor_bills; vendor_bills.reverse_charge=True).
-    Fail-soft -> [].
+    A read failure raises (M7): no outward supply read as none.
     """
     if db is None:
         return []
-    try:
-        query = {
-            "source_transfer_id": {"$exists": True, "$ne": None},
-            "from_store_id": active_store,
-            "status": {"$nin": _DEAD_BILL},
-            "$or": _itc_month(year, mon, last_day),
-        }
-        return [b for b in db["vendor_bills"].find(query) if isinstance(b, dict)]
-    except Exception:
-        return []
+    query = {
+        "source_transfer_id": {"$exists": True, "$ne": None},
+        "from_store_id": active_store,
+        "status": {"$nin": _DEAD_BILL},
+        "$or": _itc_month(year, mon, last_day),
+    }
+    return [b for b in db["vendor_bills"].find(query) if isinstance(b, dict)]
 
 
 def _transfer_b2b_rows(bills):

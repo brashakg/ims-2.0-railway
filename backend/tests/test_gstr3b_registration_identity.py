@@ -9,6 +9,7 @@ import importlib
 
 import mongomock
 import pytest
+from fastapi import HTTPException
 
 
 gstr3b = importlib.import_module("api.routers.reports.gstr3b")
@@ -141,16 +142,15 @@ def test_registration_lookup_failure_does_not_fall_back_to_raw_number(db, monkey
         raise RuntimeError("registration lookup unavailable")
 
     monkeypatch.setattr(gst_itc, "shop_gstins", unavailable)
-    report, portal = _report_and_export("PUNE")
+    # Never a return under no GSTIN (it used to be one with no credit): 503
+    # on both doors (M7, GST review 2026-10-19).
+    with pytest.raises(HTTPException) as refused:
+        _report_and_export("PUNE")
+    assert refused.value.status_code == 503
 
-    assert report["gstin"] == portal["gstin"] == ""
 
-
-def test_no_database_preserves_empty_report_and_export(monkeypatch):
+def test_no_database_is_no_report_and_no_export(monkeypatch):
     monkeypatch.setattr(gstr3b, "_get_raw_db", lambda: None)
-
-    report, portal = _report_and_export("PUNE")
-
-    assert report["gstin"] == portal["gstin"] == ""
-    assert sum(report["itcAvailable"].values()) == 0.0
-    assert sum(portal["itc_elg"]["itc_net"].values()) == 0.0
+    with pytest.raises(HTTPException) as refused:
+        _report_and_export("PUNE")
+    assert refused.value.status_code == 503

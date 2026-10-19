@@ -1,4 +1,12 @@
-"""A04: cash set-off stays within a verified registration, or is refused."""
+"""A04: cash set-off stays within a verified registration, or is refused.
+
+Since the GST review of 2026-10-19 (M3) the summary cards ARE the GSTR-3B
+returns of the caller's registrations (finance.gst_crosscheck.
+gst_by_registration): a bill is credit on the return of the GSTIN it was
+received on, by the bill's stored tax heads and written date. Credit no
+return can place -- a bill with no company, a GSTIN that is no shop's, an
+unproven legacy allocation, a date no month holds -- refuses the figures
+(409) rather than leaving that credit out unseen."""
 import asyncio
 from datetime import datetime
 
@@ -41,9 +49,11 @@ def sale(db, shop="M1", tax=500, **extra):
 
 
 def bill(db, shop="J1", tax=500, **extra):
+    # As the bill doors store it: its tax heads (inter-state IGST here).
     db.vendor_bills.insert_one({"bill_id": "B1", "store_id": shop,
                                "recipient_entity_id": "E1", "recipient_gstin": JH,
                                "bill_date": "2026-05-12", "tax_amount": tax,
+                               "igst_total": tax, "cgst_total": 0, "sgst_total": 0,
                                "status": "OUTSTANDING", **extra})
 
 
@@ -137,8 +147,8 @@ def test_existing_entity_state_fallback_is_used(world):
     assert summary()["net_gst_payable"] == 500
 
 
-def test_ambiguous_same_state_registration_is_refused(world):
-    world.entities.update_one({"entity_id": "E1"}, {"$push": {"gstins": {"gstin": "20ABCDE1234F1Z5"}}})
+def test_a_shop_with_sales_and_no_registration_is_refused(world):
+    world.entities.update_one({"entity_id": "E1"}, {"$set": {"gstins": [{"gstin": MH}]}})
     world.stores.update_one({"store_id": "J1"}, {"$set": {"gstin": ""}})
     sale(world, "J1")
     with pytest.raises(HTTPException) as exc:
@@ -147,17 +157,30 @@ def test_ambiguous_same_state_registration_is_refused(world):
 
 
 def test_accountant_visibility_is_still_own_shop(world):
+    """J2's GSTIN files one return with J1, which the accountant cannot see:
+    his own shop's sales tax, and NO input-side figure (the whole GSTIN's,
+    M4) -- never J1's credit, nor a payable short of it."""
     sale(world, "J2")
     bill(world)
     accountant = {"roles": ["ACCOUNTANT"], "active_store_id": "J2", "store_ids": ["J2"]}
     result = summary(accountant)
-    assert (result["gst_input_credit"], result["net_gst_payable"]) == (0, 500)
+    assert result["gst_collected"] == 500
+    assert (result["gst_input_credit"], result["net_gst_payable"]) == (None, None)
     assert summary({"roles": ["ACCOUNTANT"], "store_ids": []})["gst_collected"] == 0
 
 
 def test_ineligible_and_out_of_period_bills_do_not_require_allocation(world):
+    """A blocked bill claims no credit, so it needs no GSTIN to be placed on;
+    another month's bill is that month's. Neither refuses this month."""
     bill(world, recipient_gstin=None, store_id=None, itc_blocked=True)
     bill(world, recipient_gstin=None, store_id=None, bill_date="2026-04-12")
+    result = summary()
+    assert (result["gst_input_credit"], result["gst_input_credit_excluded"]) == (0, 0)
+
+
+def test_a_blocked_bill_on_a_return_is_held_back(world):
+    # A registered supplier's bill (an unregistered one's "tax" is no GST).
+    bill(world, itc_blocked=True, vendor_gstin="20AAAAA0000A1Z5")
     result = summary()
     assert (result["gst_input_credit"], result["gst_input_credit_excluded"]) == (0, 500)
 
@@ -192,16 +215,20 @@ def test_response_keys_and_empty_month_remain_unchanged(world):
     }
 
 
-def test_missing_bill_entity_is_inferred_only_from_verified_receiving_shop(world):
+@pytest.mark.parametrize("extra", [
+    # No company: GSTR-3B places it on no return (the Cross-Check lists it).
+    {"recipient_entity_id": None, "recipient_gstin": None},
+    # Tax with no stored heads: Table 4 sums the heads.
+    "no heads",
+])
+def test_credit_no_return_places_refuses_the_figures(world, extra):
     sale(world, "J2")
-    bill(world, recipient_entity_id=None, recipient_gstin=None)
-    assert summary()["net_gst_payable"] == 0
-
-
-def test_legacy_datetime_bill_is_still_counted(world):
-    sale(world, "J2")
-    bill(world, recipient_gstin=None, bill_date=datetime(2026, 5, 12))
-    assert summary()["gst_input_credit"] == 500
+    bill(world, **({} if extra == "no heads" else extra))
+    if extra == "no heads":
+        world.vendor_bills.update_one({}, {"$unset": {"igst_total": "", "cgst_total": "", "sgst_total": ""}})
+    with pytest.raises(HTTPException) as exc:
+        summary()
+    assert exc.value.status_code == 409
 
 
 @pytest.mark.parametrize("collection", ["orders", "vendor_bills", "stores", "grns", "customers"])

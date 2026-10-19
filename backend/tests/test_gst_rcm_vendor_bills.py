@@ -73,6 +73,9 @@ class _SmartVB:
     def find_one(self, flt, proj=None):
         return None
 
+    def find(self, *args, **kwargs):  # no bill to list (GSTR-3B reads, M7)
+        return iter([])
+
     def aggregate(self, pipeline):
         if pipeline[0]["$match"].get("reverse_charge") is True:
             return iter([self._rcm] if self._rcm else [])

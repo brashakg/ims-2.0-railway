@@ -69,8 +69,8 @@ manager gets 404).
 |---|---|
 | PUBLIC (no IMS role gate) | 46 |
 | AUTHENTICATED | 394 |
-| Role-gated (one or more roles) | 871 |
-| **Total `/api/v1` (method x path)** | **1311** |
+| Role-gated (one or more roles) | 872 |
+| **Total `/api/v1` (method x path)** | **1312** |
 | ...of which `store_scoped` | 241 |
 | ...of which `self_enforced` | 47 |
 
@@ -1693,6 +1693,7 @@ entry exactly; see the manual interpretation notes above.
 | `PUT` | `/api/v1/vendors/{vendor_id}` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
 | `GET` | `/api/v1/vendors/{vendor_id}/bills` | ACCOUNTANT, ADMIN |  |  |
 | `POST` | `/api/v1/vendors/{vendor_id}/bills` | ACCOUNTANT, ADMIN |  |  |
+| `PUT` | `/api/v1/vendors/{vendor_id}/bills/{bill_id}/itc-blocked` | ACCOUNTANT, ADMIN |  |  |
 | `GET` | `/api/v1/vendors/{vendor_id}/debit-notes` | ACCOUNTANT, ADMIN |  |  |
 | `POST` | `/api/v1/vendors/{vendor_id}/debit-notes` | ACCOUNTANT, ADMIN |  |  |
 | `GET` | `/api/v1/vendors/{vendor_id}/ledger` | ACCOUNTANT, ADMIN |  |  |

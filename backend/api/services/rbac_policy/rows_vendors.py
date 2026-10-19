@@ -568,6 +568,13 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/{vendor_id}/bills",
         "allowed": ACCOUNTS,
     },
+    # The section 17(5) 'credit not claimable' tick on a services bill
+    # (owner + CA 2026-10-18): an accounts decision, the bills' own gate.
+    {
+        "method": "PUT",
+        "path": "/api/v1/vendors/{vendor_id}/bills/{bill_id}/itc-blocked",
+        "allowed": ACCOUNTS,
+    },
     {
         "method": "GET",
         "path": "/api/v1/vendors/{vendor_id}/debit-notes",

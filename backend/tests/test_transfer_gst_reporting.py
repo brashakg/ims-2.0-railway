@@ -583,8 +583,10 @@ def test_roundtrip_same_entity_cross_state_odd_paise(static_rates, monkeypatch):
     # 20... GSTIN as the sender, so it claims nothing either.
     assert sender_3b["itcAvailable"]["integratedTax"] == 0.0
     assert sender_sister_3b["itcAvailable"]["integratedTax"] == 0.0
-    # And the sister store reports no outward either (it didn't send anything).
-    assert sender_sister_3b["outwardTaxableSupplies"]["integratedTax"] == 0.0
+    # GSTR-3B is the GSTIN's return (H2): asked through the sister shop it is
+    # the SAME return, the sender's outward supply on it.
+    assert sender_sister_3b["outwardTaxableSupplies"] == sender_3b["outwardTaxableSupplies"]
+    assert sender_sister_3b["shops"] == sender_3b["shops"] == ["jh_store", "jh_store_2"]
 
 
 def test_regular_purchase_bill_itc_unaffected(static_rates, monkeypatch):

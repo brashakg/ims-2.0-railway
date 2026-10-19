@@ -30,6 +30,144 @@ from ._shared import (
 # === GST Reconciliation (per entity) + Tally export ===
 
 
+def gst_period(month: Optional[int], year: Optional[int]) -> tuple:
+    """(month, year) of a GST view, the current IST month by default; 400 for
+    a month that is not 1-12 or a year outside 2017-2100 (LOW 11)."""
+    now = now_ist()
+    m = now.month if month is None else month
+    y = now.year if year is None else year
+    if not (1 <= int(m) <= 12 and 2017 <= int(y) <= 2100):
+        raise HTTPException(status_code=400, detail="month must be 1-12 and year a real year")
+    return int(m), int(y)
+
+
+def gstin_groups(store_ids, s2e: dict, s2g: dict) -> dict:
+    """{(entity_id, gstin): [shops]} -- one GSTR-3B return per company + GSTIN
+    (H2), in the order the shops come. A shop with no GSTIN files none; such
+    shops share one group per company."""
+    groups: dict = {}
+    for sid in store_ids:
+        groups.setdefault((s2e.get(sid), s2g.get(sid, "")), []).append(sid)
+    return groups
+
+
+_REGISTRATION_REFUSAL = (
+    "GST figures cannot be calculated because a registration is missing or ambiguous. "
+    "Accounts must correct the shop/entity GST registration or the supplier bill's "
+    "receiving registration, then retry."
+)
+
+
+def _unavailable(exc=None):
+    err = HTTPException(
+        status_code=503,
+        detail="The GST figures could not be read for every shop; please retry.",
+    )
+    if exc is not None:
+        logger.exception("GST by registration could not be read")
+    return err
+
+
+def gst_by_registration(db, m: int, y: int, scope: Optional[str],
+                        entity_id: Optional[str] = None) -> tuple:
+    """THE Finance GST figures, one row per GST registration, read off each
+    GSTIN's GSTR-3B return (reports._compute_gstr3b, H2) -- the table AND the
+    summary cards above it (M3), so neither keeps a rule of its own.
+
+    `scope` is the caller's shop by the one shop rule (None = every shop, an
+    admin). A GSTIN that also files for shops outside the scope shows its
+    outward tax for the scope's shops only and NO input-side figure (credit,
+    held-back credit, reverse charge, cash): those are the whole GSTIN's (M4).
+
+    Returns (rows, warnings). Refused (409, owner-approved A04 wording)
+    rather than guessed only where a DATED bill of this month is missing
+    from this month's return (no company, a GSTIN that is no shop's, an
+    unproven legacy allocation, tax without heads -- gst_itc._itc_unplaced),
+    a shop with sales and no GSTIN, or (all shops) sales booked to a shop
+    that does not exist. Bills no month can hold (undated) and bills GSTR-3B
+    already leaves out (an unregistered supplier's with credit left on) are
+    a warning, not a refusal (review round 2). 503 when a source cannot be
+    read -- never a zero figure (M7)."""
+    from ..reports import _compute_gstr3b, _itc_unplaced
+
+    try:
+        stores = list(db.get_collection("stores").find({}, {"_id": 0, "store_id": 1, "entity_id": 1}))
+        enames = {e.get("entity_id"): e.get("name") for e in db.get_collection("entities").find(
+            {}, {"_id": 0, "entity_id": 1, "name": 1})}
+        s2g = shop_gstins(db)
+    except Exception as exc:  # noqa: BLE001
+        raise _unavailable(exc) from exc
+    s2e = {st["store_id"]: st.get("entity_id") for st in stores if st.get("store_id")}
+    store_ids = [sid for sid in s2e if not entity_id or s2e[sid] == entity_id]
+    if scope:
+        store_ids = [scope] if scope in store_ids else []
+    period = f"{y:04d}-{m:02d}"
+    rows = []
+    try:
+        for (eid, gstin), shops in gstin_groups(store_ids, s2e, s2g).items():
+            ret = _compute_gstr3b(period, shops[0], shops=shops, db=db)
+            out = ret["outwardTaxableSupplies"]
+            hidden = sum(1 for sid, g in s2g.items()
+                         if gstin and g == gstin and s2e.get(sid) == eid and sid not in shops)
+
+            def head_sum(block):
+                return round(sum(float((block or {}).get(k) or 0)
+                                 for k in ("integratedTax", "centralTax", "stateTax")), 2)
+
+            credit = head_sum(ret["itcAvailable"])
+            collected = head_sum(out)
+            if not gstin and collected:
+                raise HTTPException(status_code=409, detail=_REGISTRATION_REFUSAL)
+            rows.append({
+                "entity_id": eid or "_unassigned",
+                "entity_name": enames.get(eid, eid) or "No company",
+                "gstin": gstin,
+                "shops": len(shops),
+                "gst_collected": collected,
+                "cgst": round(float(out.get("centralTax") or 0), 2),
+                "sgst": round(float(out.get("stateTax") or 0), 2),
+                "igst": round(float(out.get("integratedTax") or 0), 2),
+                "shops_outside_view": hidden,
+                # The whole GSTIN's: withheld when it files for shops outside
+                # this view (M4) -- never part of a return shown as the whole.
+                **{key: (None if hidden else value) for key, value in {
+                    "input_credit": credit,
+                    "input_credit_excluded": round(head_sum(ret["itcIneligible"]) + head_sum(ret["itcBlocked"]), 2),
+                    "reverse_charge": head_sum(ret["inwardSuppliesReverseCharge"]),
+                    "net_payable": head_sum(ret["taxPaidCash"]),
+                    "credit_carried_forward": round(max(0.0, credit - head_sum(ret["itcUtilized"])), 2),
+                }.items()},
+            })
+        last_day = monthrange(y, m)[1]
+        unplaced = _itc_unplaced(db, y, m, last_day, s2e.get(scope) if scope else entity_id,
+                                 shops=store_ids if scope else None)
+        stray = 0 if scope else db.get_collection("orders").count_documents({
+            "created_at": {"$gte": ist_month_window_utc(y, m)[0], "$lt": ist_month_window_utc(y, m)[1]},
+            "status": _REAL_ORDER_STATUS_FILTER,
+            "store_id": {"$nin": list(s2e)},
+        })
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - one shop short is a wrong total
+        raise _unavailable(exc) from exc
+    if unplaced.get("failed"):
+        raise _unavailable()
+    undated = set(unplaced.get("undated_bill_numbers") or [])
+    excluded = set((unplaced.get("unregistered") or {}).get("excluded_bill_numbers") or [])
+    if set(unplaced.get("bill_numbers") or []) - undated - excluded or stray:
+        raise HTTPException(status_code=409, detail=_REGISTRATION_REFUSAL)
+    warnings = []
+    if undated:
+        warnings.append(f"{len(undated)} bill(s) need a date written as YYYY-MM-DD - no month's "
+                        f"return can count them: {', '.join(sorted(map(str, undated)))}. Fix them.")
+    if excluded - undated:
+        warnings.append(f"{len(excluded - undated)} bill(s) from a supplier with no valid GSTIN have "
+                        f"credit left on and are excluded from GSTR-3B: "
+                        f"{', '.join(sorted(map(str, excluded - undated)))}. Fix them.")
+    rows.sort(key=lambda r: (-r["gst_collected"], r["entity_name"], r["gstin"]))
+    return rows, warnings
+
+
 @router.get("/gst/reconciliation")
 async def get_gst_reconciliation(
     month: Optional[int] = None,
@@ -37,104 +175,55 @@ async def get_gst_reconciliation(
     entity_id: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
 ):
-    """GST output (sales tax) vs input credit (purchase tax), grouped by entity.
-    You file the actual returns through Tally; this is the cross-check."""
+    """The Finance GST tab's table: one row per GST registration (company +
+    GSTIN), each its GSTR-3B return (gst_by_registration -- the cards above
+    read the same rows). Output tax net of credit notes; input credit from
+    booked supplier bills placed on the GSTIN they were received on, leaving
+    out credit switched off / not claimable (section 17(5)), less supplier
+    credit notes in their note's month; reverse charge; cash due after
+    set-off.
+
+    It used to take input credit from purchase-ORDER tax pooled per company,
+    so 'net payable' could be wrong (audit A04-3). You file the actual returns
+    through Tally; this is the cross-check."""
     # Entity-grouped GST reconciliation is a filing/accounting view --
     # finance-admin only (owner decision 2026-06-16), so a single-store
     # STORE_MANAGER/AREA_MANAGER cannot read any entity's GST position.
     scope = _require_org_finance(current_user)
+    m, y = gst_period(month, year)
     db = _get_db()
-    now = now_ist()
-    m = month or now.month
-    y = year or now.year
-    # IST calendar month -> naive-UTC created_at bounds (same as /gst/summary),
-    # so the reconciliation and GSTR-1/3B agree on the period's invoices.
-    start, end = ist_month_window_utc(y, m)
-
-    s2e, enames = _store_maps(db)
-    store_ids = None
-    if entity_id:
-        store_ids = [sid for sid, eid in s2e.items() if eid == entity_id]
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
     # THE shop rule the GST summary cards above this table read
     # (resolve_store_scope, via _require_org_finance): ADMIN / SUPERADMIN
     # every shop, an accountant his own shop -- so one tab never shows one
     # login two scopes (a Pune accountant read Pune's input credit on the
     # cards and every entity's in this table, round 4).
-    if scope:
-        store_ids = [scope] if store_ids is None or scope in store_ids else []
+    rows, warnings = gst_by_registration(db, m, y, scope, entity_id)
 
-    # Orders persist created_at as a BSON datetime; the previous .isoformat()
-    # string bound matched nothing, so GST-collected per entity read zero.
-    # Exclude DRAFT/CANCELLED -- only real sales carry GST liability.
-    o_match = {
-        "created_at": {"$gte": start, "$lt": end},
-        "status": _REAL_ORDER_STATUS_FILTER,
-    }
-    if store_ids is not None:
-        o_match["store_id"] = {"$in": store_ids}
-    # A held online order is no GSTIN's output tax (tally._filed_orders).
-    from .tally import _filed_orders
+    def total(key):
+        if any(r[key] is None for r in rows):
+            return None
+        return round(sum(r[key] for r in rows), 2)
 
-    orders = _filed_orders(
-        db,
-        db.get_collection("orders").find(
-            o_match,
-            {
-                "_id": 0,
-                "store_id": 1,
-                "customer_id": 1,
-                "tax_amount": 1,
-                "tax_total": 1,
-                # OS-008: the order-carried inter-state flag (online orders).
-                "interstate": 1,
-                "fulfillment_route": 1,
-                "fulfillment_hold": 1,
-                "stock_hold_reason": 1,
-            },
+    return {
+        "registrations": rows,
+        # Bills the return cannot count that need fixing (never a refusal).
+        "warnings": warnings,
+        "total_collected": total("gst_collected"),
+        "total_input_credit": total("input_credit"),
+        "total_reverse_charge": total("reverse_charge"),
+        "total_net_payable": total("net_payable"),
+        "month": m,
+        "year": y,
+        "note": (
+            "One row per GST registration, as its GSTR-3B: output tax after "
+            "credit notes, input credit from booked supplier bills (credit not "
+            "claimable left out, supplier credit notes taken off in their "
+            "note's month), cash due after set-off plus reverse charge. File "
+            "via Tally."
         ),
-    )
-
-    # purchase_orders persist created_at as a BSON datetime (BaseRepository
-    # _add_timestamps). No writer ever set a top-level `date` field, so the old
-    # {"date": <string>} filter matched NOTHING and input_credit read a permanent
-    # 0. Use the SAME IST created_at window as the orders side, and map a PO to an
-    # entity via delivery_store_id OR store_id (gst_reconciliation's own mapping).
-    # HR-3: exclude DRAFT / CANCELLED POs so a human draft or cancelled PO with
-    # tax_amount does not inflate input_credit (parity with the cross-check leg).
-    p_match = {
-        "created_at": {"$gte": start, "$lt": end},
-        "status": {"$nin": ["DRAFT", "draft", "CANCELLED", "cancelled"]},
     }
-    if store_ids is not None:
-        p_match["$or"] = [
-            {"delivery_store_id": {"$in": store_ids}},
-            {"store_id": {"$in": store_ids}},
-        ]
-    purchases = list(
-        db.get_collection("purchase_orders").find(
-            p_match, {"_id": 0, "delivery_store_id": 1, "store_id": 1, "tax_amount": 1}
-        )
-    )
-
-    recon = gst_reconciliation(
-        orders,
-        purchases,
-        s2e,
-        enames,
-        store_state_by_id=_store_state_map(db),
-        customer_state_by_id=_customer_state_map(db),
-    )
-    recon.update(
-        {
-            "month": m,
-            "year": y,
-            "note": (
-                "Output tax split intra-state (CGST+SGST) vs inter-state (IGST) "
-                "by store vs customer state; file via Tally."
-            ),
-        }
-    )
-    return recon
 
 
 # ---------------------------------------------------------------------------
@@ -347,13 +436,16 @@ def _run_gst_cross_check(
         except Exception:  # noqa: BLE001 -- one bad store must not sink the view
             logger.exception("cross-check: GSTR-1 compute failed for %s", sid)
             failed.add(sid)
+    # GSTR-3B is a per-GSTIN return (H2): one per company + GSTIN, over the
+    # shops of that GSTIN this check covers.
+    for (eid, gstin), shops in gstin_groups(store_ids, s2e, s2g).items():
         try:
-            g3_reports.append(_compute_gstr3b(period, sid))
-            g3_entities.append(s2e.get(sid))
-            g3_gstins.append(s2g.get(sid))
+            g3_reports.append(_compute_gstr3b(period, shops[0], shops=shops, db=db))
+            g3_entities.append(eid)
+            g3_gstins.append(gstin)
         except Exception:  # noqa: BLE001
-            logger.exception("cross-check: GSTR-3B compute failed for %s", sid)
-            failed.add(sid)
+            logger.exception("cross-check: GSTR-3B compute failed for %s", gstin or shops)
+            failed.update(shops)
 
     gstr1 = _xc.aggregate_gstr1(g1_reports)
     # Company-wide ITC / RCM are identical for every sibling store, so pass the

@@ -2612,6 +2612,10 @@ def test_every_gst_view_leaves_out_what_the_returns_leave_out(world, monkeypatch
     summary = asyncio.run(fgst.get_gst_summary(month=m, year=y, current_user=user))
     assert summary["gst_collected"] == pytest.approx(tax, abs=0.011)
     monkeypatch.setattr(xc, "_get_db", lambda: db)
+    # The table reads each shop's GSTR-3B (one rule), on its own handle.
+    from api.routers.reports import gstr3b as _g3
+
+    monkeypatch.setattr(_g3, "_get_raw_db", lambda: db)
     recon = asyncio.run(xc.get_gst_reconciliation(month=m, year=y, entity_id=None, current_user=user))
     assert recon["total_collected"] == pytest.approx(tax, abs=0.011)
     books, tally = xc._books_and_tally_for_stores(db, None, *xc._gst_month_window(y, m))

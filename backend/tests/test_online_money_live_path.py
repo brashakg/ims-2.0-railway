@@ -774,6 +774,9 @@ class _Coll:
                 out.append(dict(d))
         return out
 
+    def aggregate(self, pipeline):  # no bill to sum (GSTR-3B reads, M7)
+        return iter([])
+
 
 class _DB:
     def __init__(self, mapping):
