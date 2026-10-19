@@ -37,7 +37,7 @@ def test_dry_run_lists_only_the_old_formula_rows_and_writes_nothing():
     db = _db()
     out = plan(db)
     assert [(r["sku"], r["old"], r["new"]) for r in out["rows"]] == [("S1", OLD, NEW)]
-    assert out["typed"] == 1
+    assert out["other"] == 2  # P2 typed, P3 already clean
     assert db.products.find_one({"product_id": "P1"})["name"] == OLD
     assert db.doubled_brand_name_backups.count_documents({}) == 0
 
@@ -62,3 +62,38 @@ def test_revert_never_overwrites_a_later_edit():
     db.products.update_one({"product_id": "P1"}, {"$set": {"name": "Renamed later"}})
     assert revert(db, "run2") == 0
     assert db.products.find_one({"product_id": "P1"})["name"] == "Renamed later"
+
+
+_CL = {"brand_name": "Acuvue", "model_name": "Oasys", "power": "-2.00",
+       "base_curve": "8.4", "diameter": "14.0", "pack": "6"}
+
+
+def _cl(pid, model_name, name):
+    return {"product_id": pid, "sku": pid, "category": "CL", "brand": "Acuvue", "model": model_name,
+            "name": name, "attributes": dict(_CL, model_name=model_name)}
+
+
+def test_a_contact_lens_with_no_doubled_brand_is_never_planned():
+    from api.services.product_master import minted_name
+
+    db = mongomock.MongoClient().db
+    clean = _cl("C1", "Oasys", "")
+    clean["name"] = minted_name(clean)  # made today, power and fit in the name
+    main_named = _cl("C2", "Oasys", "Acuvue Oasys Contact Lenses")  # main's door: no power yet
+    db.products.insert_many([clean, main_named])
+    assert plan(db)["rows"] == []
+
+
+def test_a_contact_lens_whose_model_starts_with_its_brand_loses_only_the_duplicate():
+    from api.services.product_master import minted_name
+
+    db = mongomock.MongoClient().db
+    doubled = _cl("C3", "Acuvue Oasys", "")
+    doubled["name"] = minted_name(doubled, legacy=True)  # power + fit, brand twice
+    main_doubled = _cl("C4", "Acuvue Oasys", "Acuvue Acuvue Oasys Contact Lenses")
+    db.products.insert_many([doubled, main_doubled])
+    assert "Acuvue Acuvue" in doubled["name"]
+    got = {r["sku"]: (r["old"], r["new"]) for r in plan(db)["rows"]}
+    assert got["C3"] == (doubled["name"], doubled["name"].replace("Acuvue Acuvue", "Acuvue", 1))
+    assert "Oasys" in got["C3"][1] and "-2.00" in got["C3"][1]
+    assert got["C4"] == ("Acuvue Acuvue Oasys Contact Lenses", "Acuvue Oasys Contact Lenses")

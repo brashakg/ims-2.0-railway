@@ -399,3 +399,17 @@ def test_accented_words_are_whole_words():
     assert _t("Eclat", "Eclat 12") == "eclat 12"
     assert _t("Éclat", "Éclat 12") == "éclat 12"
     assert _t("Éclat", "Façade", "Façade") == "éclat façade"
+
+
+def test_partial_overlap_never_leaves_a_fragment_of_a_hyphenated_brand():
+    # the longest leading run of the brand, hyphen/space-insensitive
+    assert build_model_title(_m("Ray-Ban Meta", "Ray-Ban Wayfarer")) == "Ray-Ban Meta Wayfarer"
+    assert build_model_title(_m("Ray-Ban Meta", "Ray Ban Wayfarer")) == "Ray-Ban Meta Wayfarer"
+    assert build_model_title(_m("Ray-Ban Meta", "Ray-Ban Meta Wayfarer")) == "Ray-Ban Meta Wayfarer"
+    assert build_model_title(_m("Ray-Ban Meta", "RB4000", "Ray-Ban Wayfarer")) == "Ray-Ban Meta RB4000 Wayfarer"
+    # or the brand's last word
+    assert build_model_title(_m("Hugo Boss", "Boss 1234")) == "Hugo Boss 1234"
+    assert build_model_title(_m("Tom Ford", "Ford Mustang")) == "Tom Ford Mustang"
+    # a cut that would stop inside a hyphenated word is refused, not garbled
+    assert build_model_title(_m("Ray", "Ray-Ban 3025")) == "Ray Ray-Ban 3025"
+    assert build_model_title(_m("Hugo Boss", "Boss-Orange 12")) == "Hugo Boss Boss-Orange 12"

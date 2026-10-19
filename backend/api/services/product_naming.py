@@ -517,19 +517,37 @@ _WORDS_RE = re.compile(rf"{_WORD}+")
 
 def _strip_brand(piece: str, brand: str) -> str:
     """Drop a leading brand from a model number / name ("Carrera 3044/S" with
-    brand "Carrera" -> "3044/S"). Only at a word boundary, so brand "Ray" never
-    cuts "Rayon...", and a brand with a space or hyphen ("Ray-Ban") also
-    matches its other spelling ("Ray Ban 3025"). A brand of two or more words
-    also loses a leading model word equal to its FIRST or LAST word ("Hugo
-    Boss" + "Boss 1234" -> "1234"; "Emporio Armani" + "Armani EA4115")."""
-    words = _WORDS_RE.findall(brand)
-    if not piece or not words:
+    brand "Carrera" -> "3044/S"). Whole words only, hyphen/space-insensitive
+    ("Ray-Ban" == "Ray Ban"), so brand "Ray" never cuts "Rayon...". Strips the
+    LONGEST leading run of the model that matches the start of the brand
+    ("Ray-Ban Meta" + "Ray-Ban Wayfarer" -> "Wayfarer"), else, for a brand of
+    two or more words, a leading word equal to its LAST word ("Hugo Boss" +
+    "Boss 1234" -> "1234"; "Tom Ford" + "Ford Mustang" -> "Mustang"). A cut that
+    would stop inside a hyphenated word and leave a letter-word fragment behind
+    ("Ray-Ban 3025" under brand "Ray" -> "Ban 3025") is refused."""
+    bw = [w.casefold() for w in _WORDS_RE.findall(brand)]
+    ms = list(_WORDS_RE.finditer(piece or ""))
+    if not bw or not ms or ms[0].start() != 0:
         return piece
-    alts = [r"[\W_]+".join(re.escape(w) for w in words)]
-    if len(words) > 1:
-        alts += [re.escape(words[0]), re.escape(words[-1])]
-    pat = "|".join(alts)
-    return re.sub(rf"^(?:{pat})(?!{_WORD})[\W_]*", "", piece, flags=re.I).strip()
+
+    def cut(k: int) -> Optional[str]:
+        rest = piece[ms[k - 1].end():]
+        if re.match(rf"-[^\W\d_]", rest):
+            return None
+        return re.sub(r"^[\W_]+", "", rest).strip()
+
+    run = 0
+    while run < min(len(ms), len(bw)) and ms[run].group().casefold() == bw[run]:
+        run += 1
+    for k in range(run, 0, -1):
+        out = cut(k)
+        if out is not None:
+            return out
+    if len(bw) > 1 and ms[0].group().casefold() == bw[-1]:
+        out = cut(1)
+        if out is not None:
+            return out
+    return piece
 
 
 def _words_inside(piece: str, earlier: str) -> bool:

@@ -8,7 +8,9 @@ products and for a re-mint on edit; this script renames the EXISTING rows whose
 stored name is exactly what the old formula minted and differs from what the
 create door mints today.
 
-It renames only:
+It renames only a name whose ONLY fault is the repeated brand (the new
+name is the old one built the same way, minus the duplicate; nothing else about
+a name is ever changed). It renames only:
   * products.name  (the spine's display name)
   * the catalog twin's name + title, and only when they still equal the old name
 It never touches order lines, printed labels, SKUs, barcodes or identity keys,
@@ -44,33 +46,42 @@ BACKUPS = "doubled_brand_name_backups"
 
 
 def plan(db) -> dict:
-    """Every product whose stored name is the OLD minted form and differs from
-    today's. Pure read. Returns {"rows": [...], "scanned": n, "typed": n}."""
+    """Every product whose stored name is an OLD minted form that differs from
+    the same formula WITH the brand stripped -- the brand strip is the ONLY
+    difference allowed (a contact lens keeps its power and fit if it had them,
+    and loses nothing else). Pure read.
+    Returns {"rows": [...], "scanned": n, "other": n}."""
     from api.services.product_master import ProductMasterError, minted_name
-    from api.services.product_naming import legacy_product_name
+    from api.services.product_naming import build_product_name, legacy_product_name
 
-    rows, scanned, typed = [], 0, 0
+    rows, scanned, other = [], 0, 0
     for doc in db["products"].find({"name": {"$type": "string", "$ne": ""}}):
         scanned += 1
         name = doc["name"]
+        bare = {**doc, "name": None}
         try:
-            new = minted_name(doc)
-            old_forms = {minted_name(doc, legacy=True), legacy_product_name({**doc, "name": None})}
+            # (old, new) pairs built from the SAME inputs; only the brand strip differs.
+            pairs = [
+                (legacy_product_name(bare), build_product_name(bare)),
+                (minted_name(doc, legacy=True), minted_name(doc)),
+            ]
         except ProductMasterError:
             continue
-        if not new or name == new:
-            continue
-        if name not in old_forms:
-            typed += 1  # a typed / different name: never ours to change
+        pairs = [(o, n) for o, n in pairs if o and n and o != n]
+        if not pairs:
+            continue  # no doubled brand to remove in this row
+        hit = next((n for o, n in pairs if o == name), None)
+        if hit is None:
+            other += 1  # a typed / differently made name: never ours to change
             continue
         rows.append({
             "product_id": doc.get("product_id"),
             "sku": doc.get("sku"),
             "twin_id": doc.get("pim_product_id") or doc.get("product_id"),
             "old": name,
-            "new": new,
+            "new": hit,
         })
-    return {"rows": rows, "scanned": scanned, "typed": typed}
+    return {"rows": rows, "scanned": scanned, "other": other}
 
 
 def apply(db, rows: list, run_id: str) -> int:
@@ -139,7 +150,7 @@ def main() -> int:
     out = plan(db)
     for r in out["rows"]:
         print(f"  {r['sku']}: {r['old']} -> {r['new']}")
-    print(f"scanned {out['scanned']}, to rename {len(out['rows'])}, typed names left alone {out['typed']}")
+    print(f"scanned {out['scanned']}, to rename {len(out['rows'])}, other names left alone {out['other']}")
     if not args.apply:
         print("[DRY RUN] nothing written. Re-run with --apply to rename.")
         return 0
