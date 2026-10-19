@@ -591,6 +591,15 @@ async def sync_live_products(
         stock = {"ok": False, "error": str(e), "payload": {}}
     stock_payload = stock.get("payload") or {}
 
+    # THE IMS COLLECTIONS (owner 2026-10-19): re-derived from the listings
+    # now on the website and the changed ones sent, so a collection appears
+    # with its first product without anyone pressing. Fail-soft, like stock.
+    try:
+        collections = await shopify_push.sync_collections(db)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[LIVE-SYNC] collections pass failed: %s", e)
+        collections = {"error": str(e)}
+
     summary = {
         "finished_at": _utc_now(),
         "status": "done",
@@ -610,6 +619,7 @@ async def sync_live_products(
         "limit": limit,
         "limit_reached": batch["limit_reached"],
         "failures": failures,
+        "collections": collections,
         "stock": {
             "ok": bool(stock.get("ok")),
             # A pass that counted nothing (an unread catalogue) has no

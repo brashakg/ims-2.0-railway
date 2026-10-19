@@ -466,15 +466,33 @@ def test_build_product_input_maps_status_and_options():
     assert opts["Size"] == ["M"]
 
 
-def test_build_rule_set_skips_unknown_columns():
-    rules = [
+def test_rule_set_all_or_nothing():
+    """A ruleSet REPLACES Shopify's rules: a collection with a rule IMS cannot
+    carry sends NO ruleSet (Shopify keeps its own), never a lossy subset."""
+    ok = [
         {"field": "brand", "relation": "EQUALS", "value": "Ray-Ban"},
-        {"field": "nonsense", "relation": "EQUALS", "value": "x"},  # dropped
+        {"column": "VARIANT_PRICE", "relation": "GREATER_THAN", "condition": "5000"},
+        {"column": "variant_inventory", "relation": "greater_than", "condition": "0"},
         {"field": "tag", "relation": "CONTAINS", "value": "sale"},
     ]
-    out = shopify_push._build_rule_set(rules)
-    cols = [r["column"] for r in out]
-    assert cols == ["VENDOR", "TAG"]  # nonsense skipped, never pushed
+    out, lost = shopify_push.convert_rule_set(ok)
+    assert lost == []
+    assert [(r["column"], r["relation"], r["condition"]) for r in out] == [
+        ("VENDOR", "EQUALS", "Ray-Ban"),
+        ("VARIANT_PRICE", "GREATER_THAN", "5000"),
+        ("VARIANT_INVENTORY", "GREATER_THAN", "0"),
+        ("TAG", "CONTAINS", "sale"),
+    ]
+    smart = {"collection_type": "SMART", "title": "x", "handle": "x"}
+    inp = shopify_push.build_collection_input({**smart, "rules": ok})
+    assert len(inp["ruleSet"]["rules"]) == 4
+    lossy = ok + [{"field": "nonsense", "relation": "EQUALS", "value": "x"}]
+    assert "ruleSet" not in shopify_push.build_collection_input({**smart, "rules": lossy})
+    assert "nonsense" in shopify_push.rules_left_alone({**smart, "rules": lossy})
+    # No rules in IMS (the price bands): Shopify's rules are left alone too.
+    assert "ruleSet" not in shopify_push.build_collection_input({**smart, "rules": []})
+    assert shopify_push.rules_left_alone({**smart, "rules": []})
+    assert shopify_push.rules_left_alone({**smart, "rules": ok}) is None
 
 
 # ===========================================================================

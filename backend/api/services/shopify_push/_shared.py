@@ -131,6 +131,12 @@ class PushResult:
     # colour/size with its option values, whether it is on Shopify, its photo
     # (listing.plan_summary). None for a product that leads no model.
     listing: Optional[Any] = None
+    # SMART collection pushes only: why the push left the collection's rules
+    # on Shopify as they are (collections.rules_left_alone), else None.
+    rules_note: Optional[str] = None
+    # Collection pushes only: the Online-Store publish of a collection IMS
+    # created or a brand collection (collections.push_collection).
+    collection_publication: Optional[Any] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -381,6 +387,18 @@ def product_push_refusal(db, product: Dict[str, Any]) -> Optional[str]:
     lock = push_lock_reason(db, "product", product)
     if lock:
         return lock
+    # A FIRST publish only of a finished, live-in-IMS product: never an
+    # archived one, a draft, a switched-off one or one in Needs review
+    # (listing.first_publish_not_ready -- the rule a new colour is held to).
+    # Fail-closed on a read error, like the brand check below.
+    from .listing import first_publish_not_ready
+
+    try:
+        why = first_publish_not_ready(db, product)
+    except Exception as exc:  # noqa: BLE001
+        why = f"its catalogue row could not be read ({exc})"
+    if why:
+        return f"not put on the website: {why}"
     from .. import catalog_dictionary
 
     return catalog_dictionary.brand_website_refusal(db, _product_brand(product))

@@ -189,13 +189,20 @@ class _Coll:
     def find(self, *a, **k):
         return iter([dict(d) for d in self._docs])
 
+    def find_one(self, flt):
+        return next((dict(d) for d in self._docs if all(d.get(k) == v for k, v in flt.items())), None)
+
 
 class _DB:
-    def __init__(self, twins=()):
+    def __init__(self, twins=(), products=()):
         self._twins = twins
+        self._products = products
 
     def get_collection(self, n):
         return _Coll(self._twins if n == "catalog_products" else ())
+
+    def __getitem__(self, n):  # the push gate reads a twin's product row
+        return _Coll(self._products if n == "products" else ())
 
 
 def test_rows_endpoint_assembles_and_surfaces_push_lock(monkeypatch):
@@ -250,7 +257,7 @@ def test_rows_endpoint_assembles_and_surfaces_push_lock(monkeypatch):
          "ecom": {"status": "PUBLISHED", "shopify_product_id": "gid://shopify/Product/4"}},
     ]
     monkeypatch.setattr(bdr, "get_product_repository", lambda: _Repo(products))
-    monkeypatch.setattr(bdr, "_get_db", lambda: _DB(twins))
+    monkeypatch.setattr(bdr, "_get_db", lambda: _DB(twins, products))
     # P2's brand Cartier is push-locked
     from api.services.shopify_push import _shared
 

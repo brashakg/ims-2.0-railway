@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from agents.nexus_providers import _as_shopify_gid
 
 from ._shared import (
+    MODE_BLOCKED,
     MODE_LIVE,
     MODE_SIMULATED,
     PushResult,
@@ -29,6 +30,16 @@ from .queries import (
 from .writeback import _writeback_simple
 
 logger = logging.getLogger(__name__)
+
+# ecom_collections fields of the IMS collection registry (collection_registry):
+# IMS_MANAGED marks a collection IMS derives and keeps; IMS_KEY is its stable
+# key, also written on Shopify as the ims.collection_key metafield so a
+# rebuild tells IMS's collections from anyone else's. RETIRED marks an old
+# collection (deleted on Shopify by scripts/rebuild_collections.py) that is
+# never pushed again.
+IMS_MANAGED = "ims_managed"
+IMS_KEY = "ims_key"
+RETIRED = "retired"
 
 # Shopify GraphQL CollectionSortOrder. The stored value is often REST-style
 # ("manual", "best-selling", "alpha-asc"); GraphQL rejects anything but these.
@@ -92,9 +103,18 @@ def build_collection_input(collection: Dict[str, Any]) -> Dict[str, Any]:
             "src": image_src,
             "altText": collection.get("image_alt") or collection.get("title") or "",
         }
+    if collection.get(IMS_MANAGED) and collection.get(IMS_KEY):
+        inp["metafields"] = [{
+            "namespace": "ims", "key": "collection_key",
+            "type": "single_line_text_field", "value": str(collection[IMS_KEY]),
+        }]
     if (collection.get("collection_type") or "").upper() == "SMART":
-        rules = _build_rule_set(collection.get("rules") or [])
-        if rules:
+        # ALL OR NOTHING: a ruleSet REPLACES the collection's rules on Shopify,
+        # so a subset (price / stock rules dropped) would quietly change who is
+        # in it. Rules IMS cannot carry faithfully -- or none at all (price
+        # bands imported without rules) -- leave Shopify's rules untouched.
+        rules, lost = convert_rule_set(collection.get("rules") or [])
+        if rules and not lost:
             inp["ruleSet"] = {
                 "appliedDisjunctively": bool(collection.get("disjunctive", False)),
                 "rules": rules,
@@ -102,7 +122,21 @@ def build_collection_input(collection: Dict[str, Any]) -> Dict[str, Any]:
     return inp
 
 
-# Map IMS smart-rule fields -> Shopify CollectionRuleColumn + relation.
+def rules_left_alone(collection: Dict[str, Any]) -> Optional[str]:
+    """Why a SMART collection's push leaves its rules on Shopify as they are,
+    or None (the rules are sent). Pure."""
+    if (collection.get("collection_type") or "").upper() != "SMART":
+        return None
+    rules, lost = convert_rule_set(collection.get("rules") or [])
+    if lost:
+        return "rules kept as they are on Shopify: IMS cannot send " + "; ".join(lost)
+    if not rules:
+        return "rules kept as they are on Shopify: IMS holds none for this collection"
+    return None
+
+
+# IMS rule field (ecom_smart_rules.normalize_rule's) -> Shopify
+# CollectionRuleColumn. Shopify's own column spellings pass straight through.
 _RULE_COLUMN = {
     "brand": "VENDOR",
     "vendor": "VENDOR",
@@ -110,28 +144,48 @@ _RULE_COLUMN = {
     "product_type": "TYPE",
     "type": "TYPE",
     "tag": "TAG",
+    "tags": "TAG",
     "title": "TITLE",
+    "price": "VARIANT_PRICE",
+    "variant_price": "VARIANT_PRICE",
+    "variant_compare_at_price": "VARIANT_COMPARE_AT_PRICE",
+    "variant_inventory": "VARIANT_INVENTORY",
+    "inventory": "VARIANT_INVENTORY",
+    "variant_weight": "VARIANT_WEIGHT",
+    "variant_title": "VARIANT_TITLE",
+    "is_price_reduced": "IS_PRICE_REDUCED",
 }
-_RULE_RELATION = {
-    "EQUALS": "EQUALS",
-    "CONTAINS": "CONTAINS",
-}
+_SHOPIFY_RELATIONS = frozenset(
+    {"EQUALS", "NOT_EQUALS", "CONTAINS", "NOT_CONTAINS", "STARTS_WITH", "ENDS_WITH",
+     "GREATER_THAN", "LESS_THAN", "IS_SET", "IS_NOT_SET"}
+)
 
 
-def _build_rule_set(rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Translate IMS {field, relation, value} smart rules into Shopify
-    CollectionRuleInput {column, relation, condition}. Unknown columns are
-    skipped (we never push a rule Shopify can't evaluate)."""
+def convert_rule_set(rules: List[Any]) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """IMS smart rules (either stored shape) -> Shopify CollectionRuleInput
+    list, plus the rules that could NOT be carried faithfully (unknown column
+    or relation, a list value). The caller sends nothing when anything is
+    lost. Pure."""
+    from ..ecom_smart_rules import normalize_rule
+
     out: List[Dict[str, Any]] = []
-    for r in rules:
-        col = _RULE_COLUMN.get(str(r.get("field") or "").lower())
-        if not col:
+    lost: List[str] = []
+    for raw in rules:
+        if not isinstance(raw, dict):
+            lost.append(repr(raw)[:40])  # never a partial set
             continue
-        rel = _RULE_RELATION.get(str(r.get("relation") or "EQUALS").upper(), "EQUALS")
-        out.append(
-            {"column": col, "relation": rel, "condition": str(r.get("value") or "")}
+        r = normalize_rule(raw)
+        field = str(r.get("column") or r.get("field") or "").strip()
+        col = _RULE_COLUMN.get(field.lower().replace(" ", "_")) or (
+            field.upper() if field.upper() in _RULE_COLUMN.values() else None
         )
-    return out
+        rel = str(r.get("relation") or "EQUALS").strip().upper()
+        value = r.get("value")
+        if not col or rel not in _SHOPIFY_RELATIONS or isinstance(value, (list, tuple, dict)):
+            lost.append(f"{field or '?'} {rel} {value}")
+            continue
+        out.append({"column": col, "relation": rel, "condition": "" if value is None else str(value)})
+    return out, lost
 
 
 def _member_product_gids(db, collection: Dict[str, Any]) -> Tuple[List[str], int]:
@@ -212,6 +266,11 @@ async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
     first sync). The membership push is a fail-soft side channel: an error is
     reported in `membership` but never flips the collection push's ok."""
     cid = collection.get("collection_id")
+    if collection.get(RETIRED):
+        return PushResult(
+            mode=MODE_BLOCKED, entity="collection", action="skip", target_id=cid, ok=False,
+            error="retired: deleted from the website by the collection rebuild", reason="retired",
+        )
     # Hub Phase 5: push-lock first -- a locked collection handle is NEVER pushed.
     _lock = push_lock_reason(db, "collection", collection)
     if _lock:
@@ -219,6 +278,15 @@ async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
     existing_gid = collection.get("shopify_collection_id")
     payload = build_collection_input(collection)
     action = "update" if existing_gid else "create"
+    rules_note = rules_left_alone(collection)
+    if rules_note and not existing_gid:
+        # A NEW smart collection without its full rules would be born an
+        # empty manual one on Shopify: refused, nothing sent.
+        return PushResult(
+            mode=MODE_BLOCKED, entity="collection", action="skip", target_id=cid, ok=False,
+            payload=payload, error="refused: " + rules_note.replace("kept as they are on Shopify", "missing"),
+            reason="rules_unsendable", rules_note=rules_note,
+        )
     # CUSTOM manual membership plan (empty for SMART).
     member_gids, member_skipped = _member_product_gids(db, collection)
     is_custom = str(collection.get("collection_type") or "CUSTOM").upper() == "CUSTOM"
@@ -239,6 +307,7 @@ async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
                 if is_custom
                 else None
             ),
+            rules_note=rules_note,
         )
 
     query = _COLLECTION_UPDATE if existing_gid else _COLLECTION_CREATE
@@ -270,6 +339,32 @@ async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
                 new_gid,
                 sent_rev=collection.get("edit_rev"),
             )
+        # A collection IMS just CREATED, and every registry collection, goes on
+        # the Online Store (idempotent). A failed publish keeps the row queued
+        # (below). An existing collection keeps whatever channels Shopify has
+        # it on.
+        publication = None
+        if new_gid and collection.get("published") is not False and (
+            action == "create" or collection.get(IMS_MANAGED)
+        ):
+            from .publish import _publish_to_online_store
+
+            publication = await _publish_to_online_store(db, new_gid)
+        # NOT DONE YET -> stays queued for the next push, never marked clean:
+        # Shopify made the collection under another handle (it appends "-1"
+        # when the one sent is taken), or the Online Store publish failed.
+        problem = None
+        got_handle = coll_obj.get("handle")
+        if got_handle and payload.get("handle") and got_handle != payload["handle"]:
+            problem = f"handle mismatch: sent {payload['handle']}, Shopify has {got_handle}"
+        elif publication is not None and not publication.get("published"):
+            problem = f"Online Store publish failed: {publication.get('error')}"
+        if cid and (problem or collection.get("push_problem")):
+            db["ecom_collections"].update_one(
+                {"collection_id": cid},
+                {"$set": {"locally_modified": True, "push_problem": problem}} if problem
+                else {"$unset": {"push_problem": ""}},
+            )
         # CUSTOM manual membership rides AFTER the collection upsert (the gid must
         # exist to attach products to). Fail-soft side channel: reported in
         # `membership`, never flips the collection push's ok. push never raises.
@@ -288,10 +383,13 @@ async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
             entity="collection",
             action=action,
             target_id=cid,
-            ok=True,
+            ok=problem is None,
+            error=problem,
             shopify_id=new_gid,
             payload=payload,
             membership=membership_summary,
+            rules_note=rules_note,
+            collection_publication=publication,
         )
     except Exception as e:  # noqa: BLE001
         return PushResult(
@@ -303,4 +401,3 @@ async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
             payload=payload,
             error=str(e),
         )
-

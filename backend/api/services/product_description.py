@@ -376,6 +376,15 @@ async def generate_model_paragraph(
     text = (text or "").strip()
     if not text or names_a_colour(text, colours):
         return None
-    if len(text) > max_length:
-        text = text[:max_length].rsplit(" ", 1)[0].rstrip(" ,;:.") + "."
-    return text
+    return clip_to_sentence(text, max_length)
+
+
+def clip_to_sentence(text: str, max_length: int) -> Optional[str]:
+    """``text`` cut to its last WHOLE sentence that fits ``max_length`` --
+    never mid-sentence ('Discover your.'). None when not even the first
+    sentence fits (the caller keeps the deterministic paragraph). Pure."""
+    text = (text or "").strip()
+    if len(text) <= max_length:
+        return text or None
+    ends = [m.end() for m in re.finditer(r"[.!?](?=\s|$)", text) if m.end() <= max_length]
+    return text[: ends[-1]].strip() if ends else None
