@@ -208,6 +208,9 @@ export default function FinanceDashboard() {
   // The table's own refusal (503 unreadable, 409 a registration to correct),
   // shown in its place -- never an empty table that reads as "no GST".
   const [gstReconError, setGstReconError] = useState<string | null>(null);
+  // Bills the return cannot count that need fixing (undated, or a supplier
+  // with no valid GSTIN and credit left on) -- a warning, never a refusal.
+  const [gstReconWarnings, setGstReconWarnings] = useState<string[]>([]);
   // The backend tells us when it has withheld an expense head from this reader.
   // THREE separate flags on three separate responses -- /pnl, /budget and
   // /cash-flow -- and they are kept as three pieces of state on purpose: two of
@@ -313,6 +316,7 @@ export default function FinanceDashboard() {
         setPnlByStore(ps2.status === 'fulfilled' ? (ps2.value?.stores || []) : []);
         setPnlByCategory(pc2.status === 'fulfilled' ? (pc2.value?.categories || []) : []);
         setGstRecon(gr2.status === 'fulfilled' ? (gr2.value?.registrations || []) : []);
+        setGstReconWarnings(gr2.status === 'fulfilled' ? (gr2.value?.warnings || []) : []);
         setGstReconError(gr2.status === 'rejected'
           ? (gr2.reason instanceof Error ? gr2.reason.message : 'The GST table could not be worked out. Please retry.')
           : null);
@@ -603,6 +607,11 @@ export default function FinanceDashboard() {
                   GST by registration: {gstReconError}
                 </div>
               )}
+              {!gstReconError && gstReconWarnings.map((w) => (
+                <div key={w} role="status" className="card mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800" data-testid="gst-recon-warning">
+                  {w}
+                </div>
+              ))}
               {!gstReconError && gstRecon.length > 0 && (
                 <div className="card mt-4 overflow-x-auto">
                   <div className="px-4 py-2 text-sm font-medium text-gray-700 border-b border-gray-100">GST by registration, as each GSTR-3B (file via Tally)</div>

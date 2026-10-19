@@ -69,7 +69,7 @@ def _unavailable(exc=None):
 
 
 def gst_by_registration(db, m: int, y: int, scope: Optional[str],
-                        entity_id: Optional[str] = None) -> list:
+                        entity_id: Optional[str] = None) -> tuple:
     """THE Finance GST figures, one row per GST registration, read off each
     GSTIN's GSTR-3B return (reports._compute_gstr3b, H2) -- the table AND the
     summary cards above it (M3), so neither keeps a rule of its own.
@@ -79,11 +79,15 @@ def gst_by_registration(db, m: int, y: int, scope: Optional[str],
     outward tax for the scope's shops only and NO input-side figure (credit,
     held-back credit, reverse charge, cash): those are the whole GSTIN's (M4).
 
-    Refused (409, owner-approved A04 wording) rather than guessed when a
-    registration is missing or ambiguous: booked credit no GSTIN's return
-    counts (gst_itc._itc_unplaced), a shop with sales and no GSTIN, or (all
-    shops) sales booked to a shop that does not exist. 503 when a source
-    cannot be read -- never a zero figure (M7)."""
+    Returns (rows, warnings). Refused (409, owner-approved A04 wording)
+    rather than guessed only where a DATED bill of this month is missing
+    from this month's return (no company, a GSTIN that is no shop's, an
+    unproven legacy allocation, tax without heads -- gst_itc._itc_unplaced),
+    a shop with sales and no GSTIN, or (all shops) sales booked to a shop
+    that does not exist. Bills no month can hold (undated) and bills GSTR-3B
+    already leaves out (an unregistered supplier's with credit left on) are
+    a warning, not a refusal (review round 2). 503 when a source cannot be
+    read -- never a zero figure (M7)."""
     from ..reports import _compute_gstr3b, _itc_unplaced
 
     try:
@@ -148,10 +152,20 @@ def gst_by_registration(db, m: int, y: int, scope: Optional[str],
         raise _unavailable(exc) from exc
     if unplaced.get("failed"):
         raise _unavailable()
-    if unplaced.get("count") or stray:
+    undated = set(unplaced.get("undated_bill_numbers") or [])
+    excluded = set((unplaced.get("unregistered") or {}).get("excluded_bill_numbers") or [])
+    if set(unplaced.get("bill_numbers") or []) - undated - excluded or stray:
         raise HTTPException(status_code=409, detail=_REGISTRATION_REFUSAL)
+    warnings = []
+    if undated:
+        warnings.append(f"{len(undated)} bill(s) need a date written as YYYY-MM-DD - no month's "
+                        f"return can count them: {', '.join(sorted(map(str, undated)))}. Fix them.")
+    if excluded - undated:
+        warnings.append(f"{len(excluded - undated)} bill(s) from a supplier with no valid GSTIN have "
+                        f"credit left on and are excluded from GSTR-3B: "
+                        f"{', '.join(sorted(map(str, excluded - undated)))}. Fix them.")
     rows.sort(key=lambda r: (-r["gst_collected"], r["entity_name"], r["gstin"]))
-    return rows
+    return rows, warnings
 
 
 @router.get("/gst/reconciliation")
@@ -185,7 +199,7 @@ async def get_gst_reconciliation(
     # every shop, an accountant his own shop -- so one tab never shows one
     # login two scopes (a Pune accountant read Pune's input credit on the
     # cards and every entity's in this table, round 4).
-    rows = gst_by_registration(db, m, y, scope, entity_id)
+    rows, warnings = gst_by_registration(db, m, y, scope, entity_id)
 
     def total(key):
         if any(r[key] is None for r in rows):
@@ -194,6 +208,8 @@ async def get_gst_reconciliation(
 
     return {
         "registrations": rows,
+        # Bills the return cannot count that need fixing (never a refusal).
+        "warnings": warnings,
         "total_collected": total("gst_collected"),
         "total_input_credit": total("input_credit"),
         "total_reverse_charge": total("reverse_charge"),

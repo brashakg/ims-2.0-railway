@@ -502,6 +502,8 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None, shops=None) -> dict:
             has_heads = any(k in b for k in ("cgst_total", "sgst_total", "igst_total"))
             if b.get("bill_id") not in placed or not has_heads:
                 _add(out, b, tax)
+                if not in_month:  # no month's return can hold it: needs a date
+                    out.setdefault("undated_bill_numbers", []).append(b.get("bill_number") or b.get("bill_id"))
         # Transfer mirrors whose credit IS denied (the sending shop has no valid
         # GSTIN): the right verdict, but the filer must be told, so they are
         # listed for the Cross-Check. Same scope and month window as above.

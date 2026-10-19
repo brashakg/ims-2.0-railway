@@ -796,7 +796,9 @@ function ServicesBillsCredit({ vendorId, refreshKey }: { vendorId: string; refre
     (async () => {
       try {
         const res = await vendorApApi.listBills(vendorId);
-        if (!cancelled) setBills((res?.bills ?? []).filter((b) => b.bill_kind === 'SERVICES' && !b.grn_id));
+        // Services bills; and goods bought without a PO that were ticked when
+        // booked -- those can only be UNticked (their stock is costed).
+        if (!cancelled) setBills((res?.bills ?? []).filter((b) => (b.bill_kind === 'SERVICES' && !b.grn_id) || (!!b.grn_id && b.itc_blocked)));
       } catch {
         if (!cancelled) setBills([]);
       }
@@ -831,7 +833,7 @@ function ServicesBillsCredit({ vendorId, refreshKey }: { vendorId: string; refre
                   type="checkbox"
                   aria-label={`Credit not claimable on bill ${b.bill_number}`}
                   checked={!!b.itc_blocked}
-                  disabled={busy === b.bill_id}
+                  disabled={busy === b.bill_id || (!!b.grn_id && !b.itc_blocked)}
                   onChange={(e) => change(b, e.target.checked)}
                 />
               </td>

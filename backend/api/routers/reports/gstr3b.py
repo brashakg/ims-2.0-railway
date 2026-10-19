@@ -407,6 +407,17 @@ def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
             cust_state_map[str(cust.get("customer_id", ""))] = str(
                 cust.get("state", "") or ""
             )
+        # Each order's OWN shop state as a GST state code (review round 2):
+        # the same GSTIN's return must not change with which of its shops is
+        # asked ('Jharkhand' / 'JH' / a blank online shop). A shop with no
+        # usable state is in its registration's state.
+        from ...services.org_validation import resolve_state_code
+
+        gstin_code = store_gstin[:2] if store_gstin else ""
+        shop_code = {
+            sd.get("store_id"): resolve_state_code(sd.get("state_code"), sd.get("state")) or gstin_code
+            for sd in db["stores"].find({"store_id": {"$in": filing}}, {"_id": 0, "store_id": 1, "state_code": 1, "state": 1})
+        }
 
         for order in orders_col.find(
             {
@@ -430,12 +441,13 @@ def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
             out_taxable += taxable
 
             cust_id = str(order.get("customer_id", ""))
-            customer_state = cust_state_map.get(cust_id, "") or store_state
+            seller = shop_code.get(order.get("store_id")) or gstin_code
+            customer_state = resolve_state_code(cust_state_map.get(cust_id, "")) or seller
             # OS-008: the order's own interstate flag wins (online orders
             # carry it), keeping 3.1(a) heads consistent with GSTR-1 and
             # the cross-check; state comparison stays the fallback.
             is_inter_state = _order_is_interstate(
-                order, store_state, customer_state
+                order, seller, customer_state
             )
             if is_inter_state:
                 out_igst += tax
@@ -776,7 +788,9 @@ async def gstr3b_gstn_json(
     period = _normalise_period(month, year)
     data = _gstin_return(period, active_store)
     unallocated = data.get("unallocatedLegacyBills") or {}
-    if unallocated.get("count") or unallocated.get("failed"):
+    if unallocated.get("failed"):  # unread is not "unallocated" (review round 2)
+        raise HTTPException(status_code=503, detail="GSTR-3B figures could not be read; please retry.")
+    if unallocated.get("count"):
         raise HTTPException(
             status_code=409,
             detail="Assign each unallocated legacy purchase bill to its receiving GSTIN before downloading GSTN JSON. Open the GST cross-check and correct the bill allocation.",

@@ -88,6 +88,7 @@ from ..services import landed_cost as lc
 from ..services import purchase_invoice_engine as pinv
 from ..services import purchase_match as pmatch
 from ..services import stock_value
+from ..services.item_events import is_on_hand
 from ..services import product_master as _pm
 from ..services.cost_mask import AP_ROLES
 
@@ -1116,9 +1117,6 @@ def _cost_lines(bill: dict, lines: list) -> list:
     return out
 
 
-_HELD = {"AVAILABLE", "RESERVED"}
-
-
 def _add_unclaimed_gst_to_units(db, receipts, bill, lines) -> None:
     """F04 on the units: a bill claiming no input credit adds each line's GST
     to the units of its receipts -- the goods receipt, or every Delivery
@@ -1155,7 +1153,8 @@ def _add_unclaimed_gst_to_units(db, receipts, bill, lines) -> None:
             (u for u in stock.find({"product_id": pid})
              if any(_valuation_receipt_unit(u, g, n) for g, n in numbered)
              and u.get("receipt_disposition") != "REJECTED"
-             and str(u.get("status") or "AVAILABLE").upper() in _HELD),
+             # Still held: THE on-hand rule (item_events), reserved included.
+             and is_on_hand(u.get("status"), include_reserved=True)),
             key=lambda u: str(u.get("stock_id") or u.get("_id")),
         )
         for unit in units:
@@ -1182,12 +1181,35 @@ def _add_unclaimed_gst_to_units(db, receipts, bill, lines) -> None:
                 {"$set": {
                     "landed_cost": round(base + per_piece, 2),
                     "unclaimed_gst": {"per_piece": per_piece, "pieces": covered + take,
-                                      "bills": [*((mark or {}).get("bills") or []), bill_id]},
+                                      "bills": [*((mark or {}).get("bills") or []), bill_id],
+                                      # each bill's own part, so an untick takes back only it
+                                      "shares": {**((mark or {}).get("shares") or {}),
+                                                 bill_id: [round(gst * take / pieces, 2), take]}},
                     "cost_source": "PURCHASE_INVOICE", "cost_source_id": bill_id,
                 }},
             )
             if done.modified_count:
                 left -= take
+
+
+def _remove_unclaimed_gst(db, bill_id) -> None:
+    """Take back the unclaimed GST one bill added to its units (its 17(5)
+    tick undone): each unit's landed_cost loses that bill's share only."""
+    stock = db.get_collection("stock_units")
+    for unit in stock.find({"unclaimed_gst.bills": bill_id}):
+        mark = unit["unclaimed_gst"]
+        share, take = (mark.get("shares") or {}).get(bill_id, [0.0, 0])
+        per_piece = round(float(mark.get("per_piece") or 0) - float(share), 2)
+        base = stock_value._price(unit.get("unit_cost")) or stock_value._price(unit.get("cost_price"))
+        identity = {"stock_id": unit["stock_id"]} if unit.get("stock_id") else {"_id": unit["_id"]}
+        stock.update_one({**identity, "unclaimed_gst": mark}, {"$set": {
+            "landed_cost": round(base + per_piece, 2),
+            "unclaimed_gst": {
+                "per_piece": per_piece, "pieces": float(mark.get("pieces") or 0) - take,
+                "bills": [b for b in mark.get("bills") or [] if b != bill_id],
+                "shares": {k: v for k, v in (mark.get("shares") or {}).items() if k != bill_id},
+            },
+        }})
 
 
 def _resolve_billed_receipt_costs(db, grn):

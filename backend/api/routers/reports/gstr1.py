@@ -816,6 +816,32 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
     }
 
 
+def _gstr1_shop(store_id, current_user) -> str:
+    """The shop whose GSTR-1 is asked for. Stopgap until GSTR-1 is computed
+    per GSTIN (review round 2, item 3): it is still ONE shop's sales, so a
+    reader who cannot see every shop on that shop's GSTIN is refused -- the
+    GSTR-3B door's rule (gstr3b._gstin_return_shop). 503 when the shops
+    cannot be read."""
+    from ...dependencies import user_store_scope
+    from .gst_itc import _itc_store_scope
+
+    shop = store_in_view(store_id, current_user, one_shop=True) or "store-001"
+    db = _get_raw_db()
+    if db is None:
+        return shop
+    try:
+        filing = _itc_store_scope(db, shop)[2]
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail="GSTR-1 is unavailable; please retry.") from exc
+    every, mine = user_store_scope(current_user)
+    if not every and not all(s in mine for s in filing):
+        raise HTTPException(
+            status_code=403,
+            detail=f"GSTR-1 covers {len(filing)} shops on this GSTIN - ask an admin.",
+        )
+    return shop
+
+
 @router.get("/gstr1")
 async def gstr1_report(
     month: str = Query(..., description="Tax period in YYYY-MM format"),
@@ -823,7 +849,7 @@ async def gstr1_report(
     current_user: dict = Depends(require_roles(*AP_ROLES)),
 ):
     """GSTR-1 report (IMS internal shape). See _compute_gstr1 for details."""
-    active_store = store_in_view(store_id, current_user, one_shop=True) or "store-001"
+    active_store = _gstr1_shop(store_id, current_user)
     return _compute_gstr1(month, active_store)
 
 
@@ -851,7 +877,7 @@ async def gstr1_gstn_json(
     """
     from ...services.gstn_export import to_gstr1_json
 
-    active_store = store_in_view(store_id, current_user, one_shop=True) or "store-001"
+    active_store = _gstr1_shop(store_id, current_user)
     period = _normalise_period(month, year)
     data = _compute_gstr1(period, active_store)
     try:

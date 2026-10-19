@@ -645,32 +645,37 @@ async def create_vendor_bill(
     # from its order; one claiming credit leaves the cost as received.
     walk_in = (linked or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO
     if db is not None and linked and (walk_in or doc["itc_eligible"] is False):
-        from ..purchase_invoices import _apply_valuation_trueup, _resolved_purchase_config
-        from ...services.purchase_invoice_engine import lines_from_grn
-
-        po = None
-        if not walk_in and linked.get("po_id"):
-            po = db.get_collection("purchase_orders").find_one({"po_id": linked["po_id"]}, {"_id": 0})
-        share = ap_engine.header_bill_gst_rate(bill.tax_amount, bill.taxable_amount) or 0.0
-        lines = lines_from_grn(linked, po)
-        if not walk_in:
-            # LOW 17: a PO receipt costs at the BILL's price -- its taxable
-            # value spread over the receipt's lines in their order-price
-            # proportion (evenly per piece when the order names no prices).
-            value = sum(float(ln.get("qty") or 0) * float(ln.get("unit_price") or 0) for ln in lines)
-            pieces = sum(float(ln.get("qty") or 0) for ln in lines)
-            if value > 0:
-                lines = [{**ln, "unit_price": round(float(ln.get("unit_price") or 0) * bill.taxable_amount / value, 2)}
-                         for ln in lines]
-            elif pieces > 0:
-                lines = [{**ln, "unit_price": round(bill.taxable_amount / pieces, 2)} for ln in lines]
-        _apply_valuation_trueup(
-            db,
-            {**doc, "invoice_id": bill_id},
-            {"lines": [{**ln, "gst_rate": share} for ln in lines]},
-            _resolved_purchase_config(db),
-        )
+        _true_up_header_bill(db, {**doc, "invoice_id": bill_id}, linked)
     return _clean(doc)
+
+
+def _true_up_header_bill(db, doc: dict, linked: dict) -> None:
+    """The cost true-up of a header-only bill on its receipt (G1 / F04): the
+    receipt's lines carry the bill's tax share as their rate. A walk-in buy
+    costs at the price paid; a PO receipt at the BILL's price -- its taxable
+    value spread over the receipt's lines in their order-price proportion
+    (evenly per piece when the order names no prices; LOW 17)."""
+    from ..purchase_invoices import _apply_valuation_trueup, _resolved_purchase_config
+    from ...services.purchase_invoice_engine import lines_from_grn
+
+    walk_in = linked.get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO
+    po = None
+    if not walk_in and linked.get("po_id"):
+        po = db.get_collection("purchase_orders").find_one({"po_id": linked["po_id"]}, {"_id": 0})
+    taxable = float(doc.get("taxable_amount") or 0)
+    share = ap_engine.header_bill_gst_rate(doc.get("tax_amount"), taxable) or 0.0
+    lines = lines_from_grn(linked, po)
+    if not walk_in:
+        value = sum(float(ln.get("qty") or 0) * float(ln.get("unit_price") or 0) for ln in lines)
+        pieces = sum(float(ln.get("qty") or 0) for ln in lines)
+        if value > 0:
+            lines = [{**ln, "unit_price": round(float(ln.get("unit_price") or 0) * taxable / value, 2)}
+                     for ln in lines]
+        elif pieces > 0:
+            lines = [{**ln, "unit_price": round(taxable / pieces, 2)} for ln in lines]
+    _apply_valuation_trueup(
+        db, doc, {"lines": [{**ln, "gst_rate": share} for ln in lines]}, _resolved_purchase_config(db),
+    )
 
 
 @router.get("/{vendor_id}/bills")
@@ -755,7 +760,14 @@ async def set_vendor_bill_itc_blocked(
     bill = bills.find_one({"bill_id": bill_id, "vendor_id": vendor_id}, {"_id": 0})
     if bill is None or not can_access_store_scoped(bill.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="Bill not found")
-    if (
+    # A goods bill bought without a PO, ticked when booked, may be UNTICKED
+    # (review round 2): its unclaimed GST then leaves its units' cost and,
+    # for a walk-in buy, the product's. It is never ticked after booking.
+    goods_untick = bool(
+        bill.get("grn_id") and bill.get("itc_blocked") and not body.itc_blocked
+        and not bill.get("source_transfer_id")
+    )
+    if not goods_untick and (
         bill.get("grn_id")
         or bill.get("source_transfer_id")
         or bill.get("bill_kind") != ap_engine.BILL_KIND_SERVICES
@@ -796,6 +808,17 @@ async def set_vendor_bill_itc_blocked(
     )
     if not done.matched_count:
         raise HTTPException(status_code=409, detail="This bill changed meanwhile. Refresh and try again.")
+    if goods_untick:
+        from ..purchase_invoices import _remove_unclaimed_gst
+
+        _remove_unclaimed_gst(db, bill_id)
+        linked = db.get_collection("grns").find_one({"grn_id": bill["grn_id"]}, {"_id": 0})
+        if (linked or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO and update["itc_eligible"]:
+            # The walk-in cost is the latest price paid (re-settable): the
+            # product's cost goes back to the price without the GST.
+            # ponytail: a challan bill's moving average keeps the GST until
+            # its next bill (logged by the review: DC moving-average blend).
+            _true_up_header_bill(db, {**bill, **update, "invoice_id": bill_id}, linked)
     try:
         repo = get_audit_repository()
         if repo is not None:

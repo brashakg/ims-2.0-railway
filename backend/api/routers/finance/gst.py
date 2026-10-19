@@ -99,7 +99,7 @@ async def get_gst_summary(
         raise _summary_unavailable() from exc
     if db is None:
         raise _summary_unavailable()
-    rows = [] if is_no_shop_scope(scope) else gst_by_registration(db, m, y, scope)
+    rows = [] if is_no_shop_scope(scope) else gst_by_registration(db, m, y, scope)[0]
 
     def total(key):
         if any(r[key] is None for r in rows):
