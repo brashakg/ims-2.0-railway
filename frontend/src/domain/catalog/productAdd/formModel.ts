@@ -115,6 +115,15 @@ export function validateProductForm(values: ProductFormValues): Record<string, s
     }
   }
 
+  // Website page (owner 2026-10-19): a Pre-order page promises a ship time.
+  // Mirrors the server (services/web_page_type.clean_page_type).
+  if (values.attributes.web_page_type === 'PRE_ORDER') {
+    const days = Number(values.attributes.preorder_ship_days);
+    if (!Number.isInteger(days) || days < 1 || days > 365) {
+      errors.preorder_ship_days = 'A Pre-order needs "Ships in about N days" (1 to 365)';
+    }
+  }
+
   // Discount tier is no longer picked per product (owner rule: it is set
   // brand-wise in the Brand Master + forced category-wise). The backend
   // derives it (category force > brand tier); when it cannot, the product
@@ -130,7 +139,16 @@ const FORM_LEVEL_LABELS: Record<string, string> = {
   mrp: 'MRP',
   offer_price: 'Offer Price',
   hsn_code: 'HSN Code',
+  web_page_type: 'Website page',
+  preorder_ship_days: 'Ships in (days)',
 };
+
+// The website page types (owner 2026-10-19; server: services/web_page_type).
+export const WEB_PAGE_TYPES = [
+  { value: 'STANDARD', label: 'Standard' },
+  { value: 'PRE_ORDER', label: 'Pre-order' },
+  { value: 'PREVIEW_ONLY', label: 'Preview only' },
+] as const;
 
 // The human label for any key the validator / review card can name: form-level
 // keys first, then the category registry (the same list the form renders
