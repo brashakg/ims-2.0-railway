@@ -408,7 +408,7 @@ def _no_credit_inward(db, active_store, year, mon, last_day) -> dict:
     return {k: round(v, 2) for k, v in out.items()}
 
 
-def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
+def _itc_unplaced(db, year, mon, last_day, entity_id=None, shops=None) -> dict:
     """Booked input credit that NO GSTIN's GSTR-3B counts this month: a bill
     with no company (recipient_entity_id null -- every screen bill before F40),
     a bill whose GSTIN is no shop's, a bill with tax but no stored heads
@@ -420,7 +420,9 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
     GSTR-3B has no company filter, so it would mark every company's
     GSTIN-less bill as placed while the Cross-Check counts none of its credit.
     Scoped to `entity_id` plus the company-less bills (they belong to nobody,
-    so every view shows them).
+    so every view shows them). `shops` (an accountant's cross-check, owner
+    2026-10-18) narrows it to the bills OF those shops (a bill's store_id):
+    another shop's bill number and tax are never shown to him.
 
     Also `unregistered`: legacy books claiming credit although the bill names no
     supplier GSTIN and is not reverse charge -- an unregistered supplier's tax
@@ -474,6 +476,8 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
         q: dict = {"status": {"$nin": _DEAD_BILL}, "itc_eligible": {"$ne": False}}
         if entity_id:
             q["recipient_entity_id"] = {"$in": [entity_id, None]}
+        if shops is not None:
+            q["store_id"] = {"$in": list(shops)}
         # ponytail: reads every live bill of the scope -- an undated bill is
         # in no month's window, yet is listed in every month; add a
         # "this month or undated" prefilter if this grows slow.
@@ -509,6 +513,8 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None) -> dict:
         }
         if entity_id:
             dq["recipient_entity_id"] = {"$in": [entity_id, None]}
+        if shops is not None:
+            dq["store_id"] = {"$in": list(shops)}
         denied["transfers"] = []
         for b in db["vendor_bills"].find(dq, {"_id": 0}):
             dates = (b.get("invoice_date"), b.get("bill_date"))

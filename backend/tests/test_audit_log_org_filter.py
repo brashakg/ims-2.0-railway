@@ -11,6 +11,7 @@ it was handed so we can assert exactly how org_id / store_id shape the query.
 """
 
 import asyncio
+import sys
 
 from api.routers import settings as settings_mod
 
@@ -26,6 +27,8 @@ STORES = [
 
 class _FakeStoreRepo:
     def find_many(self, filt, **kwargs):
+        if "$or" in filt:  # a store by its id or its code
+            return [s for s in STORES if any(s.get(k) == v for c in filt["$or"] for k, v in c.items())]
         eid = filt.get("entity_id")
         return [s for s in STORES if s.get("entity_id") == eid]
 
@@ -103,21 +106,44 @@ def test_org_lookup_failure_is_failsoft_not_500(monkeypatch):
     assert audit.last_filter["store_id"] == {"$in": []}
 
 
-# --- (3) explicit store_id still works (and wins over org) ----------------------
+# --- (3) explicit store_id: that store by its id AND its code (wins over org) ---
+# Pune's store_id is a UUID and its code BV-PUN-01 (owner 2026-10-18): a row
+# may carry either, so naming the store by either finds both.
 
-def test_explicit_store_id_filters_exactly(monkeypatch):
+
+def test_explicit_store_id_matches_the_store_by_id_and_code(monkeypatch):
     audit = _EchoAuditRepo()
     _patch(monkeypatch, audit)
     _run(audit, store_id="BV-BOK-01")
-    assert audit.last_filter["store_id"] == "BV-BOK-01"
+    assert audit.last_filter["store_id"] == {"$in": ["BV-BOK-01", "uuid-bok"]}
+    _run(audit, store_id="uuid-bok")
+    assert audit.last_filter["store_id"] == {"$in": ["BV-BOK-01", "uuid-bok"]}
+
+
+def test_a_uuid_store_is_found_by_its_code(monkeypatch):
+    pune = {"store_id": "4dc49c44-08a1-46e1-85fb-8b7eca55f560",
+            "store_code": "BV-PUN-01", "entity_id": "ent_bv"}
+    monkeypatch.setattr(sys.modules[__name__], "STORES", STORES + [pune])
+    audit = _EchoAuditRepo()
+    _patch(monkeypatch, audit)
+    for named in (pune["store_id"], "BV-PUN-01"):
+        _run(audit, store_id=named)
+        assert set(audit.last_filter["store_id"]["$in"]) == {pune["store_id"], "BV-PUN-01"}
+
+
+def test_an_unknown_store_still_filters_on_what_was_named(monkeypatch):
+    audit = _EchoAuditRepo()
+    _patch(monkeypatch, audit)
+    _run(audit, store_id="BV-XYZ-09")
+    assert audit.last_filter["store_id"] == {"$in": ["BV-XYZ-09"]}
 
 
 def test_explicit_store_id_wins_over_org(monkeypatch):
     audit = _EchoAuditRepo()
     _patch(monkeypatch, audit)
     _run(audit, store_id="BV-BOK-01", org_id="ent_wz")
-    # Explicit store applied as-is; the org clause is skipped (no $in).
-    assert audit.last_filter["store_id"] == "BV-BOK-01"
+    # The explicit store; the org clause is skipped (no WizOpt store).
+    assert audit.last_filter["store_id"] == {"$in": ["BV-BOK-01", "uuid-bok"]}
 
 
 # --- (4) no store/org filter -> no store_id clause (regression) -----------------

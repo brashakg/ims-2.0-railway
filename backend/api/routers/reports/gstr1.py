@@ -784,7 +784,7 @@ async def gstr1_report(
     current_user: dict = Depends(require_roles(*AP_ROLES)),
 ):
     """GSTR-1 report (IMS internal shape). See _compute_gstr1 for details."""
-    active_store = store_in_view(store_id, current_user) or "store-001"
+    active_store = store_in_view(store_id, current_user, one_shop=True) or "store-001"
     return _compute_gstr1(month, active_store)
 
 
@@ -812,7 +812,7 @@ async def gstr1_gstn_json(
     """
     from ...services.gstn_export import to_gstr1_json
 
-    active_store = store_in_view(store_id, current_user) or "store-001"
+    active_store = store_in_view(store_id, current_user, one_shop=True) or "store-001"
     period = _normalise_period(month, year)
     data = _compute_gstr1(period, active_store)
     try:

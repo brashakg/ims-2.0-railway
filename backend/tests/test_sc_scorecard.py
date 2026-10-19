@@ -770,7 +770,7 @@ def test_sc_t11_csv_formula_injection_safe(client, patched):
         "store_ids": [STORE], "active_store_id": STORE,
     })
     r = client.get(
-        f"/api/v1/payout/export/PAY-TES-2026-05.csv",
+        f"/api/v1/payout/export/PAY-BV-TEST-01-2026-05.csv",
         headers={"Authorization": f"Bearer {admin}"},
     )
     assert r.status_code == 200, r.text

@@ -415,8 +415,9 @@ async def list_cells(
     current_user: dict = Depends(get_current_user),
 ):
     """Full power matrix for a lens line at one store. Returns the raw
-    cells -- the FE builds the (sph, cyl, add) grid."""
-    active_store = store_in_view(store_id, current_user)
+    cells -- the FE builds the (sph, cyl, add) grid. ONE shop's grid (a cell
+    is edited at its shop), so an admin's top-bar shop when none is named."""
+    active_store = store_in_view(store_id, current_user, one_shop=True)
     coll = _stock_coll()
     if coll is None:
         return {"cells": [], "total": 0, "lens_line_id": lens_line_id}

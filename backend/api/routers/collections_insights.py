@@ -20,10 +20,12 @@ ROLE GATE: ADMIN / AREA_MANAGER / STORE_MANAGER / CATALOG_MANAGER (SUPERADMIN
 auto-passes via require_roles). Catalogued in rbac_policy.POLICY with the same
 set.
 
-STORE SCOPING: a caller whose roles include none of SUPERADMIN / ADMIN /
-AREA_MANAGER / CATALOG_MANAGER (i.e. a STORE_MANAGER here) is FORCED to their
-token's active_store_id on every endpoint -- a requested ?store_id= is
-overridden, not 403'd. The effective store is echoed back as `store_id`.
+STORE SCOPING (owner 2026-10-18): THE shop rule, api.dependencies.
+resolve_store_scope -- ADMIN / SUPERADMIN read every shop or the one they name;
+everyone else (an AREA_MANAGER and a CATALOG_MANAGER too) reads their own shop,
+a shop they name must be theirs (403), and a login with no shop reads none
+(R4). The per-store breakdown lists only the caller's shops
+(filter_docs_by_store). The effective store is echoed back as `store_id`.
 
 Everything is FAIL-SOFT (mirrors collections_browse): no DB -> zeroed
 envelopes, never a 500. An unknown collection_id on a live DB -> 404.
@@ -38,6 +40,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .auth import require_roles
+from ..dependencies import filter_docs_by_store, resolve_store_scope
 from ..services import collection_insights as _svc
 from ..services.cost_mask import can_see_cost, mask_cost
 
@@ -46,9 +49,6 @@ router = APIRouter()
 # Roles allowed into the insights surface (SUPERADMIN auto-passes via
 # require_roles but IS listed in the POLICY rows, per that file's convention).
 _INSIGHT_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER", "CATALOG_MANAGER")
-
-# Roles that may look across stores; anyone else is pinned to their own store.
-_HQ_ROLES = frozenset({"SUPERADMIN", "ADMIN", "AREA_MANAGER", "CATALOG_MANAGER"})
 
 # How many collections the batched summary will evaluate before ranking.
 # Must cover the full catalogue: ~1,160 BVI-migrated collections exist, and
@@ -80,15 +80,6 @@ def _repo(db):
         return None
 
 
-def _scope_store(current_user: dict, store_id: Optional[str]) -> Optional[str]:
-    """Force non-HQ callers onto their own store. HQ roles keep whatever they
-    asked for (None = chain-wide)."""
-    roles = set((current_user or {}).get("roles") or [])
-    if roles & _HQ_ROLES:
-        return store_id or None
-    return (current_user or {}).get("active_store_id")
-
-
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -115,7 +106,7 @@ async def collections_insights_summary(
     """Batched per-collection roll-up (members / on-hand / stock value /
     sold_30d), sorted by sold_30d desc. No N+1: one membership read, one stock
     rollup and one movement aggregation over the union."""
-    store = _scope_store(current_user, store_id)
+    store = resolve_store_scope(store_id, current_user)
     envelope = {
         "collections": [],
         "total": 0,
@@ -150,7 +141,7 @@ async def preview_collection_rules(
     products + catalog_products union the materializer resolves against,
     scan-capped) and report the would-be membership + its on-hand stock and a
     12-row sample. Nothing is persisted."""
-    store = _scope_store(current_user, store_id)
+    store = resolve_store_scope(store_id, current_user)
     db = _get_db()
     result = _svc.preview(
         db, payload.rules, disjunctive=payload.disjunctive, store_id=store
@@ -217,7 +208,7 @@ async def collection_insights(
     (labelled basis), d7/d30/d90 sold, 30-day revenue/margin, sell-through and
     days-of-cover. 404 for an unknown collection on a live DB; zeroed envelope
     when no DB is available (fail-soft)."""
-    store = _scope_store(current_user, store_id)
+    store = resolve_store_scope(store_id, current_user)
     db = _get_db()
     if db is None:
         return _masked(
@@ -250,10 +241,10 @@ async def collection_insights_stores(
     current_user: dict = Depends(require_roles(*_INSIGHT_ROLES)),
 ):
     """Per-store breakdown for one collection (on-hand, valuation + basis,
-    sold_30d, sell-through, days-of-cover). A store-pinned caller sees only
-    their own store's row. Store names resolve from the `stores` collection,
+    sold_30d, sell-through, days-of-cover). Anyone but an admin sees only
+    their own shops' rows. Store names resolve from the `stores` collection,
     failing soft to the raw id."""
-    store = _scope_store(current_user, None)
+    store = resolve_store_scope(None, current_user)
     db = _get_db()
     if db is None:
         return {
@@ -263,8 +254,12 @@ async def collection_insights_stores(
             "store_id": store,
         }
     doc = _load_collection_or_404(db, collection_id)
-    rows = _svc.store_breakdown(
-        db, doc, store_id=store, cost_ok=can_see_cost(current_user, "product")
+    # Every shop's row, then only the caller's shops (all for an admin).
+    rows = filter_docs_by_store(
+        _svc.store_breakdown(
+            db, doc, store_id=None, cost_ok=can_see_cost(current_user, "product")
+        ),
+        current_user,
     )
     return _masked(
         {

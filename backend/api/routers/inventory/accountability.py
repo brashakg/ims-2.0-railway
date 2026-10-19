@@ -51,7 +51,7 @@ async def transfer_recommendations(
     from ...services.inventory_intel import recommend_transfers
 
     stock_repo = get_stock_repository()
-    active_store = store_in_view(store_id, current_user)
+    active_store = store_in_view(store_id, current_user, one_shop=True)
     if stock_repo is None or not active_store:
         return {"recommendations": [], "store_id": active_store}
 

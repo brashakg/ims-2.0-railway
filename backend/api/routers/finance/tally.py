@@ -12,6 +12,7 @@ from fastapi import Depends, HTTPException, Query, Body
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from ..auth import get_current_user
+from ...dependencies import filter_docs_by_store
 from ._shared import (
     _REAL_ORDER_STATUS_FILTER,
     _apply_created_at_range,
@@ -377,6 +378,20 @@ def _b2b_fetch_orders(db, order_ids: List[str]) -> List[dict]:
     return out
 
 
+def _ids_in_reach(db, order_ids, current_user: dict) -> List[str]:
+    """The orders among `order_ids` the caller may export or mark: an admin's
+    every shop's, an accountant's his own shops' only (owner 2026-10-18). An
+    order of another shop reads as one that does not exist. Fail-soft []."""
+    try:
+        docs = db.get_collection("orders").find(
+            {"order_id": {"$in": list(order_ids or [])}},
+            {"_id": 0, "order_id": 1, "store_id": 1},
+        )
+        return [d["order_id"] for d in filter_docs_by_store(list(docs), current_user)]
+    except Exception:  # noqa: BLE001
+        return []
+
+
 @router.get("/b2b-invoices")
 async def list_b2b_invoices(
     from_date: Optional[str] = None,
@@ -393,8 +408,9 @@ async def list_b2b_invoices(
     the 'Tally worklist'. Each row carries the GST split (CGST/SGST/IGST),
     needs_eway, tally_status, exported flag, and the PENDING-age reminder.
 
-    Accountant material -- ADMIN / ACCOUNTANT / SUPERADMIN only."""
-    _require_org_finance(current_user)
+    Accountant material -- ADMIN / ACCOUNTANT / SUPERADMIN only; an
+    accountant reads his own shop's book (owner 2026-10-18)."""
+    store_id = _require_org_finance(current_user, store_id, entity_id)
     db = _get_db()
     rows = _b2b_invoices(
         db,
@@ -420,7 +436,7 @@ async def get_b2b_invoice_tally_xml(
     accountant imports it into Tally, which then issues the e-invoice/e-way."""
     _require_org_finance(current_user)
     db = _get_db()
-    orders = _b2b_fetch_orders(db, [order_id])
+    orders = _b2b_fetch_orders(db, _ids_in_reach(db, [order_id], current_user))
     if not orders:
         raise HTTPException(status_code=404, detail="B2B invoice not found")
 
@@ -447,7 +463,8 @@ async def export_b2b_invoices_to_tally(
     accountant imports it into Tally (which issues the e-invoice/e-way bill)."""
     _require_org_finance(current_user)
     db = _get_db()
-    orders = _b2b_fetch_orders(db, body.order_ids)
+    order_ids = _ids_in_reach(db, body.order_ids, current_user)
+    orders = _b2b_fetch_orders(db, order_ids)
     if not orders:
         raise HTTPException(
             status_code=404, detail="No B2B invoices found for the selection"
@@ -463,7 +480,7 @@ async def export_b2b_invoices_to_tally(
         try:
             db.get_collection("orders").update_many(
                 {
-                    "order_id": {"$in": list(body.order_ids)},
+                    "order_id": {"$in": order_ids},
                     "tally_status": {"$in": [None, "PENDING"]},
                 },
                 {
@@ -497,8 +514,9 @@ async def mark_b2b_invoices_exported(
     who = current_user.get("user_id") or current_user.get("username") or "system"
     now = now_ist_naive()
     try:
+        order_ids = _ids_in_reach(db, body.order_ids, current_user)
         res = db.get_collection("orders").update_many(
-            {"order_id": {"$in": list(body.order_ids)}},
+            {"order_id": {"$in": order_ids}},
             {
                 "$set": {
                     "exported_to_tally": True,
@@ -510,7 +528,7 @@ async def mark_b2b_invoices_exported(
         # Advance any still-PENDING rows to IN_TALLY (DONE is left intact).
         db.get_collection("orders").update_many(
             {
-                "order_id": {"$in": list(body.order_ids)},
+                "order_id": {"$in": order_ids},
                 "tally_status": {"$in": [None, "PENDING"]},
             },
             {"$set": {"tally_status": "IN_TALLY", "tally_in_tally_at": now}},
@@ -535,6 +553,8 @@ async def mark_b2b_invoice_done(
     _require_org_finance(current_user)
     db = _get_db()
     who = current_user.get("user_id") or current_user.get("username") or "system"
+    if not _ids_in_reach(db, [order_id], current_user):
+        raise HTTPException(status_code=404, detail="B2B invoice not found")
     try:
         res = db.get_collection("orders").update_one(
             {"order_id": order_id},
@@ -570,6 +590,8 @@ async def set_b2b_attention_note(
     db = _get_db()
     note = (body.note or "").strip()
     who = current_user.get("user_id") or current_user.get("username") or "system"
+    if not _ids_in_reach(db, [order_id], current_user):
+        raise HTTPException(status_code=404, detail="B2B invoice not found")
     try:
         res = db.get_collection("orders").update_one(
             {"order_id": order_id},
@@ -602,10 +624,11 @@ async def get_tally_sales_jv(
     current_user: dict = Depends(get_current_user),
 ):
     """Tally sales-voucher XML for a period + scope, ready to import into Tally."""
-    # Org-wide sales-voucher export is an accounting function -- finance-admin
-    # only (owner decision 2026-06-16); a store-level role can't export all
-    # stores' sales JV. Mirror of the tender-receipt-jv sibling gate.
-    _require_org_finance(current_user)
+    # The sales-voucher export is an accounting function -- finance-admin
+    # only (owner decision 2026-06-16); company-wide needs an admin, an
+    # accountant exports his own shop's (owner 2026-10-18). Mirror of the
+    # tender-receipt-jv sibling gate.
+    store_id = _require_org_finance(current_user, store_id, entity_id)
     db = _get_db()
     # Never export DRAFT/CANCELLED orders to Tally -- they aren't real sales
     # vouchers. created_at is a BSON datetime so the range is built as datetimes

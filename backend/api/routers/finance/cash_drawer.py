@@ -503,7 +503,7 @@ async def list_cash_register_sessions(
     if db is None:
         return {"sessions": [], "open_session": None, "expected_preview": None}
 
-    scoped_store = store_in_view(store_id, current_user)
+    scoped_store = store_in_view(store_id, current_user, one_shop=True)
     coll = db.get_collection(_CASH_SESSIONS)
 
     match: Dict = {}

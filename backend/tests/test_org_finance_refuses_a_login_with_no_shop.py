@@ -10,7 +10,8 @@ views (with the B2B invoice book, the cross-check sign-off and bank
 statements) apply no shop rule, so they now share ONE gate,
 finance._require_org_finance: the accounts roles AND a login that holds a
 shop. ADMIN / SUPERADMIN pass with or without one; a shop-holding accountant
-keeps the org-wide view (an owner question, like R8).
+reads his own shop only (owner 2026-10-18 -- company-wide needs an admin;
+test_shop_scope_rules_1018.py).
 """
 import os
 import re
@@ -111,11 +112,15 @@ def test_a_login_with_no_shop_is_refused_every_org_wide_view(world, method, path
 def test_the_sales_jv_no_longer_hands_a_login_with_no_shop_every_shops_vouchers(world):
     path = f"/finance/tally/sales-jv?from_date={FROM}&to_date={TO}"
     assert world(NO_SHOP_ACCOUNTANT, "GET", path).status_code == 403
-    # The org view is the accounts roles' with a shop, and an admin's.
-    for user in (_user("ACCOUNTANT", [PUN]), _user("ADMIN"), _user("SUPERADMIN")):
+    # Every shop is an admin's (owner 2026-10-18: company-wide needs an admin).
+    for user in (_user("ADMIN"), _user("SUPERADMIN"), _user("ADMIN", [DHN])):
         r = world(user, "GET", path)
         assert r.status_code == 200, (user["roles"], r.text[:200])
         assert "O-BV-DHN-01" in r.text and "O-WO-PUN-01" in r.text
+    # An accountant assigned to a shop exports that shop only.
+    r = world(_user("ACCOUNTANT", [PUN]), "GET", path)
+    assert r.status_code == 200, r.text[:200]
+    assert "O-WO-PUN-01" in r.text and "O-BV-DHN-01" not in r.text
 
 
 def test_the_reconciliation_and_cross_check_stay_open_to_a_shop_accountant_and_an_admin(world):

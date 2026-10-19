@@ -100,7 +100,7 @@ async def get_stock(
     # THE validate-or-active shop (store_in_view): a non-admin login with NO
     # shop reads no shop's stock (R4) -- validate_store_access alone gave it
     # None, every shop.
-    active_store = store_in_view(store_id, current_user)
+    active_store = store_in_view(store_id, current_user, one_shop=bool(product_id))
 
     # Cataloguer attribution is a MANAGER surface (panel finding 4): mirrors
     # the GET /products/cataloguers gate so the roster + per-user activity
@@ -604,7 +604,7 @@ async def list_units(
     # the caller's active store (an admin receiving for another shop). Without
     # an explicit store, a receipt read is scoped per unit below instead.
     if store_id or not grn_id:
-        active_store = store_in_view(store_id, current_user)
+        active_store = store_in_view(store_id, current_user, one_shop=True)
         if not active_store:
             raise HTTPException(status_code=400, detail="Pick a store first")
         flt["store_id"] = active_store

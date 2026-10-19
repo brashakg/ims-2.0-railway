@@ -62,6 +62,9 @@ export interface GstCrossCheck {
   period: string;
   entity_id: string | null;
   entity_name: string | null;
+  /** The one shop this check covers (an accountant's, owner 2026-10-18);
+   *  null = every shop (an admin). */
+  store_id?: string | null;
   store_count: number;
   stores_computed: number;
   failed_store_ids: string[];
@@ -76,8 +79,11 @@ export interface GstCrossCheck {
     mismatch_count: number;
     mismatch_metrics: string[];
     all_matched: boolean;
-    gst_payable: number;
+    /** null: filed for the whole GSTIN, which other shops share - admin view. */
+    gst_payable: number | null;
   };
+  /** Set when the GSTIN-wide GSTR-3B figures are withheld from this check. */
+  gstin_note?: string | null;
   gstr1: { totalTaxableValue: number; totalTax: number; cgst: number; sgst: number; igst: number };
   gstr3b: {
     outwardTaxableValue: number;

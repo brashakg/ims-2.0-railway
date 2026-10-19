@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 from .auth import get_current_user, require_roles
 from ..dependencies import (
+    resolve_store_scope,
     get_customer_repository,
     get_loyalty_account_repository,
     get_order_repository,
@@ -382,7 +383,10 @@ async def get_rfm_segmentation(
     always scoped by store. ADMIN and SUPERADMIN keep the company-wide view.
     """
     try:
-        store_id = current_user.get("active_store_id")
+        # THE shop rule: a non-admin's own shop; a login with no shop the
+        # reserved no-shop id, so it segments nobody (R4) -- it used to fall
+        # through to every shop's customers.
+        store_id = resolve_store_scope(None, current_user)
         roles = current_user.get("roles", []) or []
         sees_all = any(r in ("SUPERADMIN", "ADMIN") for r in roles)
         if not sees_all and store_id and hasattr(db, "query_customers_by_store"):
@@ -515,7 +519,10 @@ async def get_churn_risk_customers(
     - low: Minor engagement decline
     """
     try:
-        store_id = current_user.get("active_store_id")
+        # THE shop rule (resolve_store_scope): an admin every shop, anyone else
+        # their own shop, a login with no shop nobody (R4) -- it used to fall
+        # through to every shop's customers.
+        store_id = resolve_store_scope(None, current_user)
         # Filter customers by store to prevent cross-store data leakage
         if store_id and hasattr(db, "query_customers_by_store"):
             all_customers = db.query_customers_by_store(store_id)

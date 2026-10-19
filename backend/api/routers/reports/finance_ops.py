@@ -56,7 +56,7 @@ async def attendance_report(
 
     records = attendance_repo.find_many(
         {
-            "store_id": active_store,
+            **({"store_id": active_store} if active_store else {}),
             "date": {
                 "$gte": start_date.isoformat()[:10],
                 "$lt": end_date.isoformat()[:10],
@@ -94,7 +94,7 @@ async def outstanding_report(
     # Get orders with balance due
     orders = order_repo.find_many(
         {
-            "store_id": active_store,
+            **({"store_id": active_store} if active_store else {}),
             "balance_due": {"$gt": 0},
             "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]},
         },
@@ -203,7 +203,7 @@ async def gst_report(
     `created_at` as a BSON datetime, so the previous `.isoformat()` STRING
     filter never matched a single order.
     """
-    active_store = store_in_view(store_id, current_user)
+    active_store = store_in_view(store_id, current_user, one_shop=True)
     order_repo = get_order_repository()
 
     if order_repo is None:

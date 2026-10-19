@@ -502,7 +502,7 @@ async def get_dashboard_summary(
         start_date, end_date = get_date_range(period)
         # BUG-062: 403 on cross-store access; validate_store_access returns the
         # caller's active store when store_id is omitted (admins/area-mgrs pass).
-        store_id = store_in_view(store_id, current_user)
+        store_id = store_in_view(store_id, current_user, one_shop=True)
         if not store_id:
             raise HTTPException(
                 status_code=422,
@@ -615,7 +615,7 @@ async def get_revenue_trends(
     try:
         # BUG-062: 403 on cross-store access; validate_store_access returns the
         # caller's active store when store_id is omitted (admins/area-mgrs pass).
-        store_id = store_in_view(store_id, current_user)
+        store_id = store_in_view(store_id, current_user, one_shop=True)
         if not store_id:
             raise HTTPException(
                 status_code=422,
@@ -922,7 +922,7 @@ async def get_inventory_intelligence(
     try:
         # BUG-062: 403 on cross-store access; validate_store_access returns the
         # caller's active store when store_id is omitted (admins/area-mgrs pass).
-        store_id = store_in_view(store_id, current_user)
+        store_id = store_in_view(store_id, current_user, one_shop=True)
         if not store_id:
             raise HTTPException(
                 status_code=422,
@@ -1068,7 +1068,7 @@ async def get_customer_insights(
         start_date, end_date = get_date_range(period)
         # BUG-062: 403 on cross-store access; validate_store_access returns the
         # caller's active store when store_id is omitted (admins/area-mgrs pass).
-        store_id = store_in_view(store_id, current_user)
+        store_id = store_in_view(store_id, current_user, one_shop=True)
         if not store_id:
             raise HTTPException(
                 status_code=422,
@@ -1225,7 +1225,7 @@ async def get_enterprise_kpis(
     try:
         # BUG-062: 403 on cross-store access; validate_store_access returns the
         # caller's active store when store_id is omitted (admins/area-mgrs pass).
-        store_id = store_in_view(store_id, current_user)
+        store_id = store_in_view(store_id, current_user, one_shop=True)
         if not store_id:
             raise HTTPException(
                 status_code=422,

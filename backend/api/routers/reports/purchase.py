@@ -94,7 +94,7 @@ async def purchase_recommendations(
 
     Spec: docs/TECHCHERRY_PORT_SCOPE.md §6.
     """
-    active_store = store_in_view(store_id, current_user) or "store-001"
+    active_store = store_in_view(store_id, current_user, one_shop=True) or "store-001"
     db = get_db()
     if db is None:
         return {

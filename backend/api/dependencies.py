@@ -211,7 +211,7 @@ def resolve_store_scope(store_id, current_user: dict):
     return NO_SHOP_SCOPE
 
 
-def store_in_view(store_id, current_user: dict, *, writing: bool = False):
+def store_in_view(store_id, current_user: dict, *, writing: bool = False, one_shop: bool = False):
     """The shop a store-level screen reads (or writes) -- THE validate-or-active
     rule the reports, HR, payroll, tasks, workshop, expenses, inventory and
     clinical routes share, once ~60 hand-written copies of
@@ -219,25 +219,28 @@ def store_in_view(store_id, current_user: dict, *, writing: bool = False):
 
     - an explicit store_id: validate_store_access (403 outside the caller's
       shops; NO_SHOP_DETAIL for a login with none);
-    - none named: the caller's active shop -- an ADMIN / SUPERADMIN's too (his
-      topbar shop; None = every shop when he has none). This is where it
-      differs from resolve_store_scope, which gives an admin every shop (the
-      Purchase / Finance org view with a shop filter);
-    - a non-admin with no active shop: its first own shop, and with NO shop at
-      all the reserved NO_SHOP_SCOPE (owner ruling 2026-10-12, R4) -- a filter
-      no document matches, so its lists come back EMPTY. The copies returned
-      None there: every shop's jobs, expenses, tasks and reports.
+    - none named, ADMIN / SUPERADMIN: None = EVERY shop (owner 2026-10-18:
+      an admin with no shop picked sees all shops, with a shop filter), the
+      Purchase / Finance rule (resolve_store_scope). Except where the record
+      is ONE shop's -- a write (``writing=True``: it stamps a shop), or a
+      screen of one shop's own (``one_shop=True``: a GST return, a day's
+      close, a checklist, an open till, a queue): there it is his top-bar
+      (active) shop, None only when he has none;
+    - a non-admin: its active shop, else its first own shop, and with NO shop
+      at all the reserved NO_SHOP_SCOPE (owner ruling 2026-10-12, R4) -- a
+      filter no document matches, so its lists come back EMPTY. The copies
+      returned None there: every shop's jobs, expenses, tasks and reports.
       ``writing=True`` refuses that login instead (403 NO_SHOP_DETAIL): a
       write never stamps the reserved id onto a record.
     """
     from fastapi import HTTPException
 
     shop = validate_store_access(store_id, current_user)
-    if shop:
-        return shop
     roles = set(current_user.get("roles") or [])
     if "SUPERADMIN" in roles or "ADMIN" in roles:
-        return None
+        return shop if (store_id or writing or one_shop) else None
+    if shop:
+        return shop
     own = resolve_store_scope(None, current_user)
     if writing and is_no_shop_scope(own):
         raise HTTPException(status_code=403, detail=NO_SHOP_DETAIL)
