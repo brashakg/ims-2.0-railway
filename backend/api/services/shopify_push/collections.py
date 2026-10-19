@@ -340,8 +340,9 @@ async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
                 sent_rev=collection.get("edit_rev"),
             )
         # A collection IMS just CREATED, and every registry collection, goes on
-        # the Online Store (idempotent; fail-soft, never flips ok). An existing
-        # collection keeps whatever channels Shopify has it on.
+        # the Online Store (idempotent). A failed publish keeps the row queued
+        # (below). An existing collection keeps whatever channels Shopify has
+        # it on.
         publication = None
         if new_gid and collection.get("published") is not False and (
             action == "create" or collection.get(IMS_MANAGED)
@@ -349,6 +350,21 @@ async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
             from .publish import _publish_to_online_store
 
             publication = await _publish_to_online_store(db, new_gid)
+        # NOT DONE YET -> stays queued for the next push, never marked clean:
+        # Shopify made the collection under another handle (it appends "-1"
+        # when the one sent is taken), or the Online Store publish failed.
+        problem = None
+        got_handle = coll_obj.get("handle")
+        if got_handle and payload.get("handle") and got_handle != payload["handle"]:
+            problem = f"handle mismatch: sent {payload['handle']}, Shopify has {got_handle}"
+        elif publication is not None and not publication.get("published"):
+            problem = f"Online Store publish failed: {publication.get('error')}"
+        if cid and (problem or collection.get("push_problem")):
+            db["ecom_collections"].update_one(
+                {"collection_id": cid},
+                {"$set": {"locally_modified": True, "push_problem": problem}} if problem
+                else {"$unset": {"push_problem": ""}},
+            )
         # CUSTOM manual membership rides AFTER the collection upsert (the gid must
         # exist to attach products to). Fail-soft side channel: reported in
         # `membership`, never flips the collection push's ok. push never raises.
@@ -367,7 +383,8 @@ async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
             entity="collection",
             action=action,
             target_id=cid,
-            ok=True,
+            ok=problem is None,
+            error=problem,
             shopify_id=new_gid,
             payload=payload,
             membership=membership_summary,

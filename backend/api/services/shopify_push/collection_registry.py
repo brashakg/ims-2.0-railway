@@ -96,7 +96,10 @@ def listing_facts(db, include_ready: bool = False) -> List[Dict[str, Any]]:
             or str(ecom.get("status") or "").upper() == "ARCHIVED"
         ):
             continue
-        if not ecom.get("shopify_product_id") and not (include_ready and product_push_refusal(db, doc) is None):
+        if ecom.get("shopify_product_id"):
+            if str(ecom.get("status") or "").upper() == "DRAFT":
+                continue  # on Shopify but a Draft: not on the website
+        elif not (include_ready and product_push_refusal(db, doc) is None):
             continue
         out.append(_facts(db, doc))
     return out
@@ -176,6 +179,32 @@ def derive_definitions(facts: List[Dict[str, Any]], names: Dict[str, str]) -> Li
 
 
 # ---------------------------------------------------------------------------
+# The rebuild marker. Until scripts/rebuild_collections.py --apply has deleted
+# the old collections once, the registry writes nothing (push-all and the
+# scheduled sync included), so the old set and the IMS set never coexist and
+# every natural handle is free when the IMS set is first made.
+# ---------------------------------------------------------------------------
+
+REBUILD_STATE = "ecom_collection_rebuild"
+
+
+def rebuild_state(db) -> Optional[Dict[str, Any]]:
+    """The first --apply's record ({rebuilt_at, old_ids}), or None."""
+    return db[REBUILD_STATE].find_one({"_id": "rebuild"})
+
+
+def mark_rebuilt(db, old_ids: List[str]) -> None:
+    """Set once, by the first --apply, after its deletes all succeeded."""
+    from datetime import datetime, timezone
+
+    db[REBUILD_STATE].replace_one(
+        {"_id": "rebuild"},
+        {"_id": "rebuild", "rebuilt_at": datetime.now(timezone.utc), "old_ids": list(old_ids)},
+        upsert=True,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Definitions -> ecom_collections rows (IMS only; the push sends them).
 # ---------------------------------------------------------------------------
 
@@ -187,9 +216,12 @@ def apply_collection_registry(db, definitions: Optional[List[Dict[str, Any]]] = 
     alone. A handle still held by an old collection is skipped and named --
     scripts/rebuild_collections.py frees it. Collections whose products have
     all gone stay as they are (Shopify empties a smart collection itself).
-    Returns {created, updated, unchanged, skipped}."""
+    Returns {created, updated, unchanged, skipped}; {waiting} and nothing
+    written until the rebuild has run once."""
     from database.repositories.ecom_collection_repository import EcomCollectionRepository
 
+    if rebuild_state(db) is None:
+        return {"waiting": "scripts/rebuild_collections.py --apply has not run yet"}
     if definitions is None:
         definitions = derive_definitions(listing_facts(db), brand_names(db))
     coll = db["ecom_collections"]
@@ -233,6 +265,8 @@ async def sync_collections(db) -> Dict[str, Any]:
     if not live:
         return {"dark": reason}
     out = apply_collection_registry(db)
+    if out.get("waiting"):
+        return out
     out["pushed"], out["failed"] = [], []
     for doc in db["ecom_collections"].find({IMS_MANAGED: True, "locally_modified": True, RETIRED: {"$ne": True}}):
         doc.pop("_id", None)
@@ -324,3 +358,66 @@ def retire_old_collections(db) -> int:
             "$unset": {"handle": "", "shopify_collection_id": ""},
         }).modified_count
     return n
+
+
+# ---------------------------------------------------------------------------
+# What a delete would break (the rebuild's dry run). Read-only.
+# ---------------------------------------------------------------------------
+
+_MENUS_READ = """
+query imsMenusRead {
+  menus(first: 50) { nodes { handle title items { title url resourceId
+    items { title url resourceId items { title url resourceId } } } } }
+}
+"""
+_THEME_HOME_READ = """
+query imsThemeHomeRead {
+  themes(first: 1, roles: [MAIN]) { nodes { name files(filenames: ["templates/index.json"]) {
+    nodes { filename body { ... on OnlineStoreThemeFileBodyText { content } } } } } }
+}
+"""
+
+
+def _hits(items, ids, handles, where, out, kids="children", rid="resource_id"):
+    for it in items or []:
+        url = str(it.get("url") or "")
+        gid = _as_shopify_gid(it[rid], "Collection") if it.get(rid) else None
+        if gid in ids or any(url.rstrip("/").endswith(f"/collections/{h}") for h in handles):
+            out.append(f"{where} > {it.get('title')} ({url or gid})")
+        _hits(it.get(kids), ids, handles, where, out, kids, rid)
+
+
+async def references_to(db, doomed: List[Dict[str, Any]]) -> List[str]:
+    """Every IMS menu item, Shopify menu item and home-page theme setting that
+    points at a collection about to be deleted. Shopify reads are fail-soft:
+    an unreadable source is named, never silently skipped."""
+    import re
+
+    ids = {_as_shopify_gid(c["id"], "Collection") for c in doomed}
+    handles = {c["handle"] for c in doomed if c.get("handle")}
+    out: List[str] = []
+    if not ids:
+        return out
+    for m in db["ecom_menus"].find({}):
+        _hits(m.get("items"), ids, handles, f"IMS menu {m.get('handle')}", out)
+    try:
+        body = await _graphql(db, _MENUS_READ, {})
+        for m in (((body or {}).get("data") or {}).get("menus") or {}).get("nodes") or []:
+            _hits(m.get("items"), ids, handles, f"Shopify menu {m.get('handle')}", out, "items", "resourceId")
+        if (body or {}).get("errors"):
+            out.append(f"[could not read Shopify menus: {body['errors']}]")
+    except Exception as e:  # noqa: BLE001 -- the dry run reports, never stops
+        out.append(f"[could not read Shopify menus: {e}]")
+    try:
+        body = await _graphql(db, _THEME_HOME_READ, {})
+        for t in (((body or {}).get("data") or {}).get("themes") or {}).get("nodes") or []:
+            for f in (t.get("files") or {}).get("nodes") or []:
+                text = ((f.get("body") or {}).get("content")) or ""
+                for h in sorted(handles):
+                    if re.search(r'"%s"' % re.escape(h), text):
+                        out.append(f"theme {t.get('name')} {f.get('filename')} uses collection {h}")
+        if (body or {}).get("errors"):
+            out.append(f"[could not read the theme home page: {body['errors']}]")
+    except Exception as e:  # noqa: BLE001
+        out.append(f"[could not read the theme home page: {e}]")
+    return out
