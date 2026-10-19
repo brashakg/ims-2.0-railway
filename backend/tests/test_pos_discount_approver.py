@@ -829,3 +829,75 @@ def test_the_spend_itself_refuses_a_different_bill(client, staff_headers, env):
     good = _approval(env, rid)["context"]["bill_hash"]
     discount_approval.spend({"approval_id": rid, "bill_hash": good}, user, STORE)
     assert _approval(env, rid)["status"] == "CONSUMED"
+
+
+# ---------------------------------------------------------------------------
+# Round-2 review LOWs: whose bill, whose names, a Rs 0 reason, waiting cap
+# ---------------------------------------------------------------------------
+
+
+def test_an_approval_is_for_one_customers_bill(client, staff_headers, env):
+    """The same lines rung for another customer are a different bill."""
+    from api.routers import orders as orders_module
+
+    orders_module.get_customer_repository().create(
+        {"customer_id": "cust-y", "name": "Other", "mobile": "9100000098", "phone": "9100000098"})
+    pid = _premium(env, "FR-WHOSE")
+    sale = [_item(pid, discount_percent=18)]
+    rid = _approve(env, _ask(client, staff_headers, sale))
+    ctx = _approval(env, rid)["context"]
+    assert ctx["customer_id"] == "cust-x" and ctx["customer_name"] == "Test"
+    r = client.post("/api/v1/orders", headers=staff_headers, json={
+        "customer_id": "cust-y", "items": sale, "discount_approval_id": rid})
+    assert r.status_code == 403, r.text
+    assert "different bill" in r.json()["detail"]["message"]
+    assert _approval(env, rid)["consumed"] is False
+
+
+def test_the_manager_sees_the_catalogue_name_not_the_tills(client, staff_headers, env):
+    pid = _premium(env, "FR-NAMED")
+    it = {**_item(pid, discount_percent=18), "product_name": "anything the till typed"}
+    rid = _ask(client, staff_headers, [it])
+    assert _approval(env, rid)["context"]["lines"][0]["product_name"] == "Priced Frame"
+
+
+def test_a_typed_line_renamed_after_approval_is_a_different_bill(client, staff_headers, env):
+    """A lens / custom line has no catalogue name: the till's name is part of
+    the bill the manager approved."""
+    rid = _approve(env, _ask(client, staff_headers, [_lens(18)]))
+    renamed = {**_lens(18), "product_name": "Premium Progressive Pair"}
+    r = _post(client, staff_headers, [renamed], discount_approval_id=rid)
+    assert r.status_code == 403, r.text
+    assert "different bill" in r.json()["detail"]["message"]
+
+
+def test_a_manager_can_take_a_draft_to_rs0_with_a_reason(client, env):
+    """LOW-4: the draft carries no reason of its own; the delete door takes
+    one. Without it the door still refuses."""
+    from api.routers import orders as orders_module
+
+    _draft(env, "ORD-DEL-R", [_line("l-paid", 1000.0, pid="custom-paid"),
+                              _line("l-free", 0.0, pid="custom-free")], grand_total=1000.0)
+    mgr = _token("mgr-001", ["STORE_MANAGER"])
+    url = "/api/v1/orders/ORD-DEL-R/items/l-paid"
+    r = client.delete(url, headers=mgr)
+    assert r.status_code == 400, r.text
+    assert "reason" in r.text.lower()
+    r = client.delete(url + "?reason=goodwill%20replacement", headers=mgr)
+    assert r.status_code == 200, r.text
+    doc = orders_module.get_order_repository().find_by_id("ORD-DEL-R")
+    assert doc["zero_total"] is True and doc["zero_total_approved_by"] == "mgr-001"
+    assert _zero_rows(env)[-1]["details"]["reason"] == "goodwill replacement"
+
+
+def test_a_cashier_may_have_three_requests_waiting_at_once(client, staff_headers, env):
+    """LOW-5: a fourth waiting request is refused 429; asking again for a bill
+    already waiting is not a new request."""
+    for pct in (12, 13, 14):
+        _ask(client, staff_headers, [_lens(pct)])
+    assert _ask(client, staff_headers, [_lens(12)])  # same bill: handed back
+    r = _post(client, staff_headers, [_lens(15)], request_approval=True)
+    assert r.status_code == 429, r.text
+    assert r.json()["detail"]["code"] == "DISCOUNT_APPROVAL_TOO_MANY"
+    assert "3 requests waiting" in r.json()["detail"]["message"]
+    assert len(env["adb"].get_collection("approval_requests").docs) == 3

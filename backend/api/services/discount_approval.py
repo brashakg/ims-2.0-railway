@@ -52,6 +52,9 @@ logger = logging.getLogger(__name__)
 
 ACTION = "discount_override"
 
+# Discount requests one cashier may have waiting for a manager at a time.
+MAX_WAITING = 3
+
 # Who may sign off a Rs 0 bill: the managers (E4's own discount-approver tier).
 MANAGER_ROLES = frozenset({"SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"})
 
@@ -127,13 +130,20 @@ def bill_of(
     zero_total: bool = False,
     order_id: Optional[str] = None,
     change: Optional[str] = None,
+    customer_id: Optional[str] = None,
+    customer_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """The server's own pricing of a bill, and its canonical hash.
 
     ``lines`` -- product_id, product_name, quantity, mrp, unit_price,
     discount_percent (the line's own %) and combined_percent (the line's TOTAL
     manual discount, item x bill: pricing.combined_discount_pct) -- the figure
-    the seller's limit is measured on.
+    the seller's limit is measured on. ``name_from_till`` marks a line with no
+    catalogue product (a lens / custom line), whose name the till typed: that
+    name is part of the bill an approval covers. A catalogue product's name is
+    the catalogue's (the product id already pins it).
+    ``customer_id`` -- whose bill it is: an approval for one customer's bill
+    cannot be spent on another's.
     ``order_id`` / ``change`` -- set by the doors that edit a saved draft, so
     an approval for one draft change cannot be spent on another.
     """
@@ -144,9 +154,11 @@ def bill_of(
                 int(ln.get("quantity") or 0),
                 round(float(ln.get("unit_price") or 0.0), 2),
                 round(float(ln.get("discount_percent") or 0.0), 2),
+                str(ln.get("product_name") or "") if ln.get("name_from_till") else "",
             ]
             for ln in lines
         ),
+        "customer_id": customer_id,
         "cart_discount_percent": round(float(cart_discount_percent or 0.0), 2),
         "discount_rupees": round(float(discount_rupees or 0.0), 2),
         "zero_total": bool(zero_total),
@@ -168,6 +180,8 @@ def bill_of(
         "bill_before": round(float(bill_before or 0.0), 2),
         "bill_after": round(float(bill_after or 0.0), 2),
         "order_id": order_id,
+        "customer_id": customer_id,
+        "customer_name": customer_name,
     }
 
 
@@ -346,6 +360,30 @@ def ask_manager(current_user: dict, bill: Dict[str, Any], note: Optional[str] = 
             content={"code": "DISCOUNT_APPROVAL_REQUESTED", "request_id": live["request_id"],
                      "status": "APPROVED", "bill_hash": bill["bill_hash"]},
         )
+    coll = db.get_collection(ApprovalEngine.COLLECTION)
+    waiting_q = {
+        "action_type": ACTION,
+        "requested_by": uid,
+        "status": "REQUESTED",
+        "expires_at": {"$gt": datetime.now(timezone.utc)},
+    }
+    try:
+        same = coll.find_one(
+            {**waiting_q, "context.bill_hash": bill["bill_hash"], "store_id": bill["store_id"]},
+            {"_id": 0, "request_id": 1},
+        )
+        waiting = 0 if same else len(list(coll.find(waiting_q, {"_id": 0, "request_id": 1})))
+    except Exception:  # noqa: BLE001
+        same, waiting = None, 0
+    # The same bill already waiting is not a new request (the engine's
+    # dedupe_key below hands it back), so it never counts against the cap.
+    if waiting >= MAX_WAITING:
+        raise _refuse(
+            "DISCOUNT_APPROVAL_TOO_MANY",
+            f"You have {waiting} requests waiting for a manager. Wait for them, "
+            f"or let them expire, before asking again.",
+            status=429,
+        )
     me = who(current_user)
     context = {
         "bill_hash": bill["bill_hash"],
@@ -361,6 +399,8 @@ def ask_manager(current_user: dict, bill: Dict[str, Any], note: Optional[str] = 
         "bill_before": bill["bill_before"],
         "bill_after": bill["bill_after"],
         "order_id": bill.get("order_id"),
+        "customer_id": bill.get("customer_id"),
+        "customer_name": bill.get("customer_name"),
         "requested_by_name": me["name"],
     }
     routing = _routing(bill["need"])

@@ -261,7 +261,8 @@ async def add_order_item(
             lines=[
                 {
                     "product_id": item.product_id,
-                    "product_name": item.product_name,
+                    "product_name": (product or {}).get("name") or item.product_name,
+                    "name_from_till": product is None,
                     "quantity": item.quantity,
                     "mrp": _line_gate["mrp"],
                     "unit_price": item.unit_price,
@@ -276,6 +277,8 @@ async def add_order_item(
             zero_total=_zero,
             order_id=order_id,
             change="add",
+            customer_id=order.get("customer_id"),
+            customer_name=order.get("billed_to_member_name") or order.get("customer_name"),
         )
         if request_approval:
             return discount_approval.ask_manager(current_user, _bill, approval_note)
@@ -464,6 +467,9 @@ async def remove_order_item(
     discount_approval_id: Annotated[Optional[str], Query(max_length=64)] = None,
     request_approval: Annotated[bool, Query()] = False,
     approval_note: Annotated[Optional[str], Query(max_length=300)] = None,
+    # The written reason for taking the draft to Rs 0 (the C-4 rule): needed
+    # when the draft carries none of its own; still refused without one.
+    reason: Annotated[Optional[str], Query(max_length=200)] = None,
 ):
     """Remove item from order (only DRAFT orders)"""
     repo = get_order_repository()
@@ -515,7 +521,7 @@ async def remove_order_item(
         _zero_reason = None
         if _zero:
             _zero_reason = discount_approval.zero_total_reason(
-                order.get("cart_discount_reason"),
+                reason if (reason or "").strip() else order.get("cart_discount_reason"),
                 [ln for ln in items if discount_approval.is_full_line(ln)],
             )
             _bill = discount_approval.bill_of(
@@ -539,6 +545,8 @@ async def remove_order_item(
                 zero_total=True,
                 order_id=order_id,
                 change=f"remove:{item_id}",
+                customer_id=order.get("customer_id"),
+                customer_name=order.get("billed_to_member_name") or order.get("customer_name"),
             )
             if request_approval:
                 return discount_approval.ask_manager(current_user, _bill, approval_note)

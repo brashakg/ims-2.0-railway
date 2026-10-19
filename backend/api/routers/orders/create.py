@@ -802,7 +802,13 @@ async def create_order(
             lines=[
                 {
                     "product_id": it.product_id,
-                    "product_name": it.product_name,
+                    # The CATALOGUE's name for a real product (what the manager
+                    # must see), the till's only for a lens / custom line.
+                    "product_name": (
+                        (_pdoc_by_pid.get(it.product_id or "") or {}).get("name")
+                        or it.product_name
+                    ),
+                    "name_from_till": (it.product_id or "") not in _pdoc_by_pid,
                     "quantity": it.quantity,
                     "mrp": _mrp_by_pid.get(it.product_id or ""),
                     "unit_price": it.unit_price,
@@ -816,6 +822,8 @@ async def create_order(
             bill_before=sum(it.unit_price * it.quantity for it in order.items),
             bill_after=grand_total,
             zero_total=is_zero_total,
+            customer_id=order.customer_id,
+            customer_name=billed_to_member_name or customer_name,
         )
         if order.request_approval:
             # "Ask a manager to approve": the SERVER raises the request from
