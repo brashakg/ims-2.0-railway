@@ -336,9 +336,15 @@ def _enforce_line_pricing(
                     f"discount is allowed. Contact an administrator to override."
                 ),
             )
-        # Effective discount for the cap check (max of explicit + implied).
-        if mrp and up < mrp - 1e-6:
-            eff_disc = effective_line_discount_pct(item.discount_percent, up, mrp)
+        # Effective STORE discount for the caps (max of explicit + implied),
+        # measured from the CEILING -- the HQ offer when there is one, else
+        # MRP. An HQ offer (offer < MRP) is HQ's price, not a store discount:
+        # selling at it is 0% here and never counts against anyone's limit.
+        # (Measured from MRP it read as a 20% discount on a Rs 10,000 frame
+        # offered at Rs 8,000 and refused the plain offer-price sale.) Any
+        # further discount on an offer item is refused just above (BUG-118).
+        if ceiling and up < ceiling - 1e-6:
+            eff_disc = effective_line_discount_pct(item.discount_percent, up, ceiling)
         from api.services.loyalty_engine import implied_ceiling_discount
 
         loyalty_eff = max(loyalty_eff, implied_ceiling_discount(up, mrp, offer))
