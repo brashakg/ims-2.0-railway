@@ -303,8 +303,10 @@ from .publish import (  # noqa: F401
 from .collections import (  # noqa: F401
     build_collection_input,
     _RULE_COLUMN,
-    _RULE_RELATION,
-    _build_rule_set,
+    AUTO_BRAND,
+    convert_rule_set,
+    ensure_brand_collections,
+    rules_left_alone,
     _member_product_gids,
     _push_collection_membership,
     push_collection,

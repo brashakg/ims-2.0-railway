@@ -1599,3 +1599,84 @@ def test_a_listing_with_an_option_ims_does_not_manage_names_it_and_does_not_loop
     assert res.ok and res.code == "LISTING_OPTIONS_UNKNOWN", (res.error, res.code)
     assert "Lens" in res.error and fake.ops("imsVariantsBulkCreate") == []
     assert _twin(db, lead)["ecom"]["locally_modified"] is False
+
+
+# ---------------------------------------------------------------------------
+# 10. publish prep (owner 2026-10-19): cost is internal
+# ---------------------------------------------------------------------------
+
+_ALL_BUT_COST = {"catalog_status": "DRAFT", "hsn_code": "90041000", "gst_rate": 18}
+
+
+def test_a_draft_missing_only_its_cost_price_joins_and_one_with_other_gaps_waits(monkeypatch):
+    """Decision (a): everything filled in except the cost price = finished;
+    the colours of a model and its lead are held to that ONE rule."""
+    db = _world()
+    pids = _family(db, [("Gold", "001"), ("Black", "002/58"), ("Silver", "003/32")])
+    for pid in pids[:2]:
+        db["products"].update_one({"product_id": pid}, {"$set": _ALL_BUT_COST})
+    db["products"].update_one({"product_id": pids[2]}, {"$set": {"catalog_status": "DRAFT"}})  # no HSN/GST
+    _dark(monkeypatch)
+    res = _push(db, pids[0])
+    assert res.ok, (res.error, res.code)
+    skus = [db["products"].find_one({"product_id": p})["sku"] for p in pids]
+    assert [w["sku"] for w in res.listing["waiting"]] == [skus[2]]
+    assert [v["sku"] for v in res.listing["variants"]] == skus[:2]
+    # The lead itself: a first publish waits for the same rule.
+    db["products"].update_one({"product_id": pids[0]}, {"$unset": {"hsn_code": ""}})
+    res = _push(db, pids[0])
+    assert res.ok is False and "catalogue draft" in res.error
+
+
+def test_an_archived_product_is_never_published_and_leaves_the_queue(monkeypatch):
+    db = _world()
+    pid = _item(db, 1, "Gold", "001")
+    twin = _twin(db, pid)
+    db["catalog_products"].update_one({"id": twin["id"]}, {"$set": {"deleted_at": "2026-10-19T00:00:00+00:00"}})
+    db["products"].update_one({"product_id": pid}, {"$set": {"deleted_at": "2026-10-19T00:00:00+00:00"}})
+    fake = FakeShopify()
+    _live(monkeypatch, fake)
+    twin = _twin(db, pid)
+    assert "archived" in (shopify_push.product_push_refusal(db, twin) or "")
+    res = _push(db, pid)
+    assert res.ok is False and fake.calls == [] and not fake.products
+    from api.services.online_catalog import doc_online_state
+
+    assert doc_online_state(db, twin)["queued"] is False
+
+
+def test_model_paragraph_counts_the_colours_on_the_listing_never_waiting_drafts(monkeypatch):
+    db = _world()
+    pids = _family(db, [("Gold", "001"), ("Black", "002/58"), ("Silver", "003/32")])
+    db["products"].update_one({"product_id": pids[2]}, {"$set": {"catalog_status": "DRAFT"}})  # waits
+    spec = importlib.util.spec_from_file_location(
+        "write_model_paragraphs", os.path.join(os.path.dirname(_SCRIPT), "write_model_paragraphs.py")
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    (m,) = mod.plan(db)
+    assert len(m["colours"]) == 2, "the waiting draft is not counted"
+
+    async def _para(category, attrs, colours, sizes, max_length=350):  # noqa: ARG001
+        return f"Reflect your style, in {len(colours)} colours."
+
+    monkeypatch.setattr(mod, "generate_model_paragraph", _para)
+    _run(mod.apply(db, [m]))
+    twin = _twin(db, pids[0])
+    assert twin["ecom"][model.PARAGRAPH_COUNTS] == [2, 1]
+    lst = model.model_listing(db, twin, ls.variants_for_product(db, twin))
+    assert "in 2 colours." in lst["description_html"]
+    # The third colour is finished later: the listing now carries 3, so the
+    # stale '2 colours' paragraph gives way to the counted one.
+    db["products"].update_one({"product_id": pids[2]}, {"$set": {"catalog_status": "ACTIVE"}})
+    lst = model.model_listing(db, twin, ls.variants_for_product(db, twin))
+    assert "in 2 colours." not in lst["description_html"] and "3 colours" in lst["description_html"]
+
+
+def test_ai_paragraph_is_cut_at_a_sentence_never_mid_sentence():
+    from api.services.product_description import clip_to_sentence
+
+    text = "Reflect your style with the RB3025. It comes in 3 colours. Discover your look today at Better Vision."
+    assert clip_to_sentence(text, 70) == "Reflect your style with the RB3025. It comes in 3 colours."
+    assert clip_to_sentence(text, 20) is None
+    assert clip_to_sentence(text, 500) == text

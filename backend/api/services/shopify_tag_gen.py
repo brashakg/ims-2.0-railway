@@ -254,6 +254,44 @@ def _canonical_category(category: Any) -> Optional[str]:
     return raw if raw in _CATEGORY_TAG_MAP else None
 
 
+# THE STOREFRONT'S SPELLINGS (owner 2026-10-19). The smart collections on
+# bettervision.in were built on tags written by the old app and by hand, and
+# several spell a value differently from the token above. A product carries
+# BOTH, so the collections fill without anyone rewriting their rules (Shopify
+# matches tags case-insensitively). Add a line here when a collection rule
+# names a new spelling.
+_POLARIZED = ("polarization_polarized", "polarization_polarised", "polarized")
+_TAG_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "polarization_yes": _POLARIZED,
+    "polarization_polarized": _POLARIZED,
+    "polarization_polarised": _POLARIZED,
+    "polarization_no": ("polarization_non-polarized",),
+    "uvprotection_100": ("uvprotection_100-uv-protection",),
+    "shape_cat-eye": ("shape_cat eye", "cat eye"),
+    "shape_wrap-around": ("shape_wrap around",),
+    "shape_wayfarer": ("wayfarer",),
+    "brand_dolcegabbana": ("brand_dolce-gabbana",),
+    "brand_hugoboss": ("brand_hugo",),
+    "brand_philippplein": ("philipp_plein",),
+}
+# The '<brand>-sunglasses' tags some collections use.
+_SUNGLASS_BRAND_TAG = {"brand_prada": "prada-sunglasses", "brand_carrera": "carrera-sunglasses"}
+# The product-type tags the collections use (IMS sends the type as Shopify's
+# productType too). Added per LISTING by product_input.ims_product_tags --
+# never here, where an empty attribute set stays an empty list. Smart glasses
+# carry theirs from smartglass_listing.
+CATEGORY_TAG = {"SUNGLASS": "product_sunglass", "FRAME": "product_spectacles"}
+
+
+def _storefront_aliases(canonical: str, tokens: List[str]) -> List[str]:
+    out: List[str] = []
+    for t in tokens:
+        out.extend(_TAG_ALIASES.get(t, ()))
+        if canonical == "SUNGLASS" and t in _SUNGLASS_BRAND_TAG:
+            out.append(_SUNGLASS_BRAND_TAG[t])
+    return [a for a in dict.fromkeys(out) if a not in tokens]
+
+
 def generate_attribute_tags(
     category: Any,
     attributes: Optional[Dict[str, Any]] = None,
@@ -305,7 +343,7 @@ def generate_attribute_tags(
                 continue
             seen.add(token)
             out.append(token)
-        return out
+        return out + _storefront_aliases(canonical, out)
     except Exception:  # noqa: BLE001 -- pure payload helper, never raise
         return []
 

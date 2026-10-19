@@ -45,7 +45,13 @@ def ims_product_tags(product: Dict[str, Any]) -> List[str]:
         # emitted even when `attributes` has no brand_name.
         extras["brand_name"] = product["brand"]
     generated_tags = generate_attribute_tags(product.get("category"), attrs, extras)
-    return merge_tag_lists(seo.get("tags") or [], generated_tags)
+    # The product-type tag the storefront's collections are built on
+    # (product_sunglass / product_spectacles, owner 2026-10-19).
+    from ..product_master import resolve_category
+    from ..shopify_tag_gen import CATEGORY_TAG
+
+    kind = CATEGORY_TAG.get(resolve_category(product.get("category")) or "")
+    return merge_tag_lists(seo.get("tags") or [], generated_tags + ([kind] if kind else []))
 
 
 def build_product_input(

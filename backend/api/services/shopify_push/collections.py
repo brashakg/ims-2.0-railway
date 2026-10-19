@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from agents.nexus_providers import _as_shopify_gid
 
 from ._shared import (
+    MODE_BLOCKED,
     MODE_LIVE,
     MODE_SIMULATED,
     PushResult,
@@ -29,6 +30,9 @@ from .queries import (
 from .writeback import _writeback_simple
 
 logger = logging.getLogger(__name__)
+
+# ecom_collections field: the brand slug a brand collection is kept for.
+AUTO_BRAND = "auto_brand"
 
 # Shopify GraphQL CollectionSortOrder. The stored value is often REST-style
 # ("manual", "best-selling", "alpha-asc"); GraphQL rejects anything but these.
@@ -93,8 +97,12 @@ def build_collection_input(collection: Dict[str, Any]) -> Dict[str, Any]:
             "altText": collection.get("image_alt") or collection.get("title") or "",
         }
     if (collection.get("collection_type") or "").upper() == "SMART":
-        rules = _build_rule_set(collection.get("rules") or [])
-        if rules:
+        # ALL OR NOTHING: a ruleSet REPLACES the collection's rules on Shopify,
+        # so a subset (price / stock rules dropped) would quietly change who is
+        # in it. Rules IMS cannot carry faithfully -- or none at all (price
+        # bands imported without rules) -- leave Shopify's rules untouched.
+        rules, lost = convert_rule_set(collection.get("rules") or [])
+        if rules and not lost:
             inp["ruleSet"] = {
                 "appliedDisjunctively": bool(collection.get("disjunctive", False)),
                 "rules": rules,
@@ -102,7 +110,21 @@ def build_collection_input(collection: Dict[str, Any]) -> Dict[str, Any]:
     return inp
 
 
-# Map IMS smart-rule fields -> Shopify CollectionRuleColumn + relation.
+def rules_left_alone(collection: Dict[str, Any]) -> Optional[str]:
+    """Why a SMART collection's push leaves its rules on Shopify as they are,
+    or None (the rules are sent). Pure."""
+    if (collection.get("collection_type") or "").upper() != "SMART":
+        return None
+    rules, lost = convert_rule_set(collection.get("rules") or [])
+    if lost:
+        return "rules kept as they are on Shopify: IMS cannot send " + "; ".join(lost)
+    if not rules:
+        return "rules kept as they are on Shopify: IMS holds none for this collection"
+    return None
+
+
+# IMS rule field (ecom_smart_rules.normalize_rule's) -> Shopify
+# CollectionRuleColumn. Shopify's own column spellings pass straight through.
 _RULE_COLUMN = {
     "brand": "VENDOR",
     "vendor": "VENDOR",
@@ -110,28 +132,47 @@ _RULE_COLUMN = {
     "product_type": "TYPE",
     "type": "TYPE",
     "tag": "TAG",
+    "tags": "TAG",
     "title": "TITLE",
+    "price": "VARIANT_PRICE",
+    "variant_price": "VARIANT_PRICE",
+    "variant_compare_at_price": "VARIANT_COMPARE_AT_PRICE",
+    "variant_inventory": "VARIANT_INVENTORY",
+    "inventory": "VARIANT_INVENTORY",
+    "variant_weight": "VARIANT_WEIGHT",
+    "variant_title": "VARIANT_TITLE",
+    "is_price_reduced": "IS_PRICE_REDUCED",
 }
-_RULE_RELATION = {
-    "EQUALS": "EQUALS",
-    "CONTAINS": "CONTAINS",
-}
+_SHOPIFY_RELATIONS = frozenset(
+    {"EQUALS", "NOT_EQUALS", "CONTAINS", "NOT_CONTAINS", "STARTS_WITH", "ENDS_WITH",
+     "GREATER_THAN", "LESS_THAN", "IS_SET", "IS_NOT_SET"}
+)
 
 
-def _build_rule_set(rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Translate IMS {field, relation, value} smart rules into Shopify
-    CollectionRuleInput {column, relation, condition}. Unknown columns are
-    skipped (we never push a rule Shopify can't evaluate)."""
+def convert_rule_set(rules: List[Any]) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """IMS smart rules (either stored shape) -> Shopify CollectionRuleInput
+    list, plus the rules that could NOT be carried faithfully (unknown column
+    or relation, a list value). The caller sends nothing when anything is
+    lost. Pure."""
+    from ..ecom_smart_rules import normalize_rule
+
     out: List[Dict[str, Any]] = []
-    for r in rules:
-        col = _RULE_COLUMN.get(str(r.get("field") or "").lower())
-        if not col:
+    lost: List[str] = []
+    for raw in rules:
+        if not isinstance(raw, dict):
             continue
-        rel = _RULE_RELATION.get(str(r.get("relation") or "EQUALS").upper(), "EQUALS")
-        out.append(
-            {"column": col, "relation": rel, "condition": str(r.get("value") or "")}
+        r = normalize_rule(raw)
+        field = str(r.get("column") or r.get("field") or "").strip()
+        col = _RULE_COLUMN.get(field.lower().replace(" ", "_")) or (
+            field.upper() if field.upper() in _RULE_COLUMN.values() else None
         )
-    return out
+        rel = str(r.get("relation") or "EQUALS").strip().upper()
+        value = r.get("value")
+        if not col or rel not in _SHOPIFY_RELATIONS or isinstance(value, (list, tuple, dict)):
+            lost.append(f"{field or '?'} {rel} {value}")
+            continue
+        out.append({"column": col, "relation": rel, "condition": "" if value is None else str(value)})
+    return out, lost
 
 
 def _member_product_gids(db, collection: Dict[str, Any]) -> Tuple[List[str], int]:
@@ -219,6 +260,15 @@ async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
     existing_gid = collection.get("shopify_collection_id")
     payload = build_collection_input(collection)
     action = "update" if existing_gid else "create"
+    rules_note = rules_left_alone(collection)
+    if rules_note and not existing_gid:
+        # A NEW smart collection without its full rules would be born an
+        # empty manual one on Shopify: refused, nothing sent.
+        return PushResult(
+            mode=MODE_BLOCKED, entity="collection", action="skip", target_id=cid, ok=False,
+            payload=payload, error="refused: " + rules_note.replace("kept as they are on Shopify", "missing"),
+            reason="rules_unsendable", rules_note=rules_note,
+        )
     # CUSTOM manual membership plan (empty for SMART).
     member_gids, member_skipped = _member_product_gids(db, collection)
     is_custom = str(collection.get("collection_type") or "CUSTOM").upper() == "CUSTOM"
@@ -239,6 +289,7 @@ async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
                 if is_custom
                 else None
             ),
+            rules_note=rules_note,
         )
 
     query = _COLLECTION_UPDATE if existing_gid else _COLLECTION_CREATE
@@ -260,16 +311,30 @@ async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
             "collection"
         ) or {}
         new_gid = coll_obj.get("id") or existing_gid
-        if new_gid and cid:
+        # Keyed by collection_id, else (a collection imported from the old
+        # app without one) by its Shopify id -- so a clean push always leaves
+        # the queue instead of being re-sent by every push-all.
+        key = ("collection_id", cid) if cid else ("shopify_collection_id", existing_gid)
+        if new_gid and key[1]:
             _writeback_simple(
                 db,
                 "ecom_collections",
-                "collection_id",
-                cid,
+                key[0],
+                key[1],
                 "shopify_collection_id",
                 new_gid,
                 sent_rev=collection.get("edit_rev"),
             )
+        # A collection IMS just CREATED, and every brand collection, goes on
+        # the Online Store (idempotent; fail-soft, never flips ok). An existing
+        # collection keeps whatever channels Shopify has it on.
+        publication = None
+        if new_gid and collection.get("published") is not False and (
+            action == "create" or collection.get(AUTO_BRAND)
+        ):
+            from .publish import _publish_to_online_store
+
+            publication = await _publish_to_online_store(db, new_gid)
         # CUSTOM manual membership rides AFTER the collection upsert (the gid must
         # exist to attach products to). Fail-soft side channel: reported in
         # `membership`, never flips the collection push's ok. push never raises.
@@ -292,6 +357,8 @@ async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
             shopify_id=new_gid,
             payload=payload,
             membership=membership_summary,
+            rules_note=rules_note,
+            collection_publication=publication,
         )
     except Exception as e:  # noqa: BLE001
         return PushResult(
@@ -304,3 +371,101 @@ async def push_collection(db, collection: Dict[str, Any]) -> PushResult:
             error=str(e),
         )
 
+
+
+def _brand_tag(brand: Any) -> str:
+    """The brand tag every product push sends (shopify_tag_gen's brand rule)."""
+    from ..shopify_tag_gen import slugify_brand_value
+
+    slug = slugify_brand_value(brand)
+    return f"brand_{slug}" if slug else ""
+
+
+def _is_brand_collection(doc: Dict[str, Any], brand_tag: str, slug_handle: str) -> bool:
+    """An existing collection that already IS this brand's: its handle is the
+    brand's, or it is SMART with exactly one rule -- the brand tag, or the
+    brand as vendor."""
+    if str(doc.get("handle") or "").strip().lower() == slug_handle:
+        return True
+    if str(doc.get("collection_type") or "").upper() != "SMART":
+        return False
+    rules, lost = convert_rule_set(doc.get("rules") or [])
+    if lost or len(rules) != 1 or rules[0]["relation"] != "EQUALS":
+        return False
+    col, cond = rules[0]["column"], rules[0]["condition"]
+    return (col == "TAG" and cond.strip().lower() == brand_tag) or (
+        col == "VENDOR" and _brand_tag(cond) == brand_tag
+    )
+
+
+def ensure_brand_collections(db) -> Dict[str, Any]:
+    """ONE brand collection per brand with at least one listing ON the website
+    (owner 2026-10-19: 'auto populate brands and publish collections'). Runs
+    on every push-all, before the collections are sent, so a new brand gets
+    its collection on the press that puts its first product live -- never an
+    empty one. An existing collection that is already the brand's (its handle,
+    or its one rule on the brand tag / vendor) is REUSED and marked, never
+    duplicated; a missing one is created SMART on the brand tag the product
+    push sends, titled with the Brand Master name, queued (the push sends and
+    publishes it). Returns {created: [handle], reused: [handle]}. Raises on a
+    read failure (the caller reports it; nothing half-written matters: every
+    write is keyed and re-runnable)."""
+    from ..shopify_tag_gen import slugify_tag_value
+    from ._shared import _product_brand, is_variant_of
+
+    brands: Dict[str, str] = {}
+    for doc in db["catalog_products"].find({"ecom.shopify_product_id": {"$nin": [None, ""]}}):
+        ecom = doc.get("ecom") or {}
+        if (
+            is_variant_of(doc)
+            or doc.get("deleted_at")
+            or ecom.get("taken_down_at")
+            or str(ecom.get("status") or "").upper() == "ARCHIVED"
+        ):
+            continue
+        brand = str(_product_brand(doc) or "").strip()
+        tag = _brand_tag(brand)
+        if tag:
+            brands.setdefault(tag, brand)
+    if not brands:
+        return {"created": [], "reused": []}
+
+    names: Dict[str, str] = {}
+    for row in db["brand_masters"].find({}):
+        if row.get("is_active") is not False and row.get("name"):
+            names.setdefault(_brand_tag(row["name"]), str(row["name"]).strip())
+
+    colls = db["ecom_collections"]
+    existing = [d for d in colls.find({}) if not d.get("is_temporary")]
+    created: List[str] = []
+    reused: List[str] = []
+    for tag, brand in sorted(brands.items()):
+        title = names.get(tag) or brand
+        handle = slugify_tag_value(title)
+        mine = [d for d in existing if d.get(AUTO_BRAND) == tag]
+        if mine:
+            continue
+        found = next((d for d in existing if _is_brand_collection(d, tag, handle)), None)
+        if found is not None:
+            # Marked AND queued once, so the push sends it and puts it on the
+            # Online Store (its rules are sent only when carried faithfully).
+            key = {"_id": found["_id"]} if "_id" in found else {"handle": found.get("handle")}
+            colls.update_one(key, {"$set": {AUTO_BRAND: tag, "locally_modified": True}})
+            found[AUTO_BRAND] = tag
+            reused.append(str(found.get("handle") or found.get("title")))
+            continue
+        from database.repositories.ecom_collection_repository import EcomCollectionRepository
+
+        doc = EcomCollectionRepository(colls).create({
+            "title": title,
+            "handle": handle,
+            "collection_type": "SMART",
+            "rules": [{"field": "tag", "relation": "EQUALS", "value": tag}],
+            "disjunctive": False,
+            "sort_order": "BEST_SELLING",
+            AUTO_BRAND: tag,
+        })
+        if doc:
+            existing.append(doc)
+            created.append(handle)
+    return {"created": created, "reused": reused}

@@ -41,6 +41,7 @@ zeros; a Shopify error becomes a structured {ok:false} result, never a 500.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -52,6 +53,8 @@ from ..services import shopify_push
 from ..services import shopify_live_sync as live_sync
 from ..services.online_catalog import doc_online_state
 from ..services.stores_util import physical_stores
+
+logger = logging.getLogger(__name__)
 # The DB / audit / doc helpers and the product-sweep core live in the
 # live-sync service so the manual sweep and the scheduled sync run ONE code
 # path; re-imported by their old names so nothing else here moved.
@@ -823,7 +826,16 @@ async def push_all_pending(
         if start + processed < eligible_total:
             next_offset = start + processed
 
+    brand_collections: Optional[Dict[str, Any]] = None
     if "collections" in selected:
+        # Every brand with a listing on the website has its collection
+        # (owner 2026-10-19) -- made or found BEFORE the sweep below sends
+        # the queue, so a brand's first press carries its collection too.
+        try:
+            brand_collections = shopify_push.ensure_brand_collections(db)
+        except Exception as exc:  # noqa: BLE001 -- reported, never stops the sweep
+            logger.warning("[PUSH] brand collections skipped: %s", exc)
+            brand_collections = {"error": str(exc)}
         for doc in _all_docs(db, "ecom_collections"):
             if len(results) >= limit:
                 break
@@ -891,6 +903,9 @@ async def push_all_pending(
         # when no products were swept. {mode, action, ok, payload{changed,
         # synced, failed, stores_mapped, ...}, code, error}.
         "stock": stock,
+        # Brand collections made / found for this press ({created, reused}),
+        # None when collections were not selected.
+        "brand_collections": brand_collections,
         "results": results,
     }
 
