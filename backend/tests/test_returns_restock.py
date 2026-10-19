@@ -583,7 +583,22 @@ def test_return_mint_goes_through_the_one_minter(ctx, monkeypatch):
     assert db is not None and calls == [(db, "BV-PUN-01")], calls
 
 
-def test_damaged_return_does_not_restock(ctx):
+def test_damaged_return_does_not_restock_and_sets_the_piece_aside(ctx, monkeypatch):
+    """F21-3: a DAMAGED piece is never put back on sale -- and never left SOLD
+    either: it comes back QUARANTINED (tracked, can go to the supplier) and
+    the task agent is told so it raises the 7-day follow-up."""
+    import agents.registry as registry
+
+    told = []
+
+    async def _capture(event, payload, source=""):
+        told.append((event, payload))
+
+    monkeypatch.setattr(registry, "dispatch_event", _capture)
+    from api.services import item_events as ie
+
+    ledger = []
+    monkeypatch.setattr(ie, "record_post_write_event", lambda db, **kw: ledger.append(kw))
     tok = _staff_token(["ADMIN"])
     payload = _payload()
     payload["items"][0]["condition"] = "DAMAGED"
@@ -592,10 +607,52 @@ def test_damaged_return_does_not_restock(ctx):
     )
     assert r.status_code == 201
     data = r.json()
-    # Nothing reactivated/minted; the SOLD unit stays SOLD.
+    # Nothing reactivated onto the shelf / minted.
     assert data["restock_stock_ids"] == []
     old = [u for u in ctx["stock_repo"].units if u["stock_id"] == "STK-OLD-1"][0]
-    assert old["status"] == "SOLD"
+    assert old["status"] == "QUARANTINED"
+    assert old["quarantine_reason"] == "CUSTOMER_RETURN_DAMAGED"
+    assert old["order_id"] is None and old["returned_from_order_id"] == "ORD-1"
+    saved = ctx["returns_coll"].docs[-1]
+    assert saved["quarantined_stock_ids"] == ["STK-OLD-1"]
+    assert told == [("stock.quarantined", {"stock_id": "STK-OLD-1", "store_id": "BV-PUN-01",
+                                           "reason": "CUSTOMER_RETURN_DAMAGED", "actor_id": "u1"})]
+    # The piece's history says it came back damaged (SOLD -> QUARANTINED).
+    assert [(e["stock_id"], e["from_state"], e["to_state"], e["source_type"]) for e in ledger] == [
+        ("STK-OLD-1", ie.StockState.SOLD, ie.StockState.QUARANTINED, "RETURN")]
+
+
+def test_a_damaged_piece_with_no_shop_on_record_is_chased_at_the_returns_shop(ctx, monkeypatch):
+    import agents.registry as registry
+
+    told = []
+
+    async def _capture(event, payload, source=""):
+        told.append(payload)
+
+    monkeypatch.setattr(registry, "dispatch_event", _capture)
+    ctx["stock_repo"].units[0].pop("store_id")
+    payload = _payload()
+    payload["items"][0]["condition"] = "DAMAGED"
+    r = ctx["client"].post("/api/v1/returns", json=payload,
+                           headers={"Authorization": f"Bearer {_staff_token(['ADMIN'])}"})
+    assert r.status_code == 201
+    assert [t["store_id"] for t in told] == ["BV-PUN-01"]
+
+
+def test_a_damaged_return_never_takes_another_orders_piece(ctx):
+    """Only the unit THIS order sold is set aside: a SOLD piece of the same
+    frame on another customer's order stays exactly where it is."""
+    ctx["stock_repo"].units[0]["order_id"] = "ORD-OTHER"
+    tok = _staff_token(["ADMIN"])
+    payload = _payload()
+    payload["items"][0]["condition"] = "DAMAGED"
+    r = ctx["client"].post(
+        "/api/v1/returns", json=payload, headers={"Authorization": f"Bearer {tok}"}
+    )
+    assert r.status_code == 201
+    assert ctx["stock_repo"].units[0]["status"] == "SOLD"
+    assert ctx["returns_coll"].docs[-1]["quarantined_stock_ids"] == []
 
 
 def test_restock_idempotent_on_retry(ctx):

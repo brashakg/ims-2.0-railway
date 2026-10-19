@@ -489,30 +489,9 @@ def test_accountant_can_read_queue(env):
     assert res["total"] == 1
 
 
-# ---------------------------------------------------------------------------
-# 7. RTV backfill links QUARANTINED units + audits; skips non-quarantined
-# ---------------------------------------------------------------------------
-
-def test_rtv_backfill_links_quarantined_and_skips_others(env):
-    from api.routers.vendor_returns import _link_stock_units_to_rtv
-
-    env["add_product"]()
-    env["add_unit"]("STO-RTV1", status="QUARANTINED")
-    env["add_unit"]("STO-RTV2", status="AVAILABLE")  # not quarantined -> skipped
-
-    _link_stock_units_to_rtv(
-        env["db"], ["STO-RTV1", "STO-RTV2"], "VR-1", "S-A", "mgr-1"
-    )
-
-    linked = env["stock_repo"].find_by_id("STO-RTV1")
-    skipped = env["stock_repo"].find_by_id("STO-RTV2")
-    assert linked["rtv_vendor_id"] == "VR-1"
-    assert skipped.get("rtv_vendor_id") is None
-
-    rows = _audit_rows(env, "QUARANTINE_LINKED_RTV")
-    assert len(rows) == 1  # exactly one -- the skipped unit writes no row
-    assert rows[0]["entity_id"] == "STO-RTV1"
-    assert rows[0]["entity_type"] == "STOCK_UNIT"
+# 7. RTV linkage: a supplier return names its pieces (owner 2026-10-18) --
+#    an AVAILABLE piece is set aside, never silently skipped. Covered on the
+#    real routes in tests/test_vendor_return_pieces.py.
 
 
 # ---------------------------------------------------------------------------

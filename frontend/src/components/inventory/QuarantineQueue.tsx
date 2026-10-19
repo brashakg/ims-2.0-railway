@@ -155,9 +155,10 @@ export function QuarantineQueue() {
   };
 
   const handleCreateRtv = (unit: QuarantineUnit) => {
-    // Pre-fill the vendor-returns form with this defective unit's stock id; the
-    // manager picks the vendor on that screen.
-    navigate(`/purchase/vendor-returns?stock_id=${encodeURIComponent(unit.stock_id)}`);
+    // Pre-fill the vendor-returns form with this defective piece (its barcode
+    // names it on the form's first line); the manager picks the vendor there.
+    const barcode = unit.barcode ? `&barcode=${encodeURIComponent(unit.barcode)}` : '';
+    navigate(`/purchase/vendor-returns?stock_id=${encodeURIComponent(unit.stock_id)}${barcode}`);
   };
 
   return (

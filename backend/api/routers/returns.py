@@ -30,7 +30,7 @@ from api.utils.event_time import utc_now_iso
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Path, Query
@@ -1689,9 +1689,12 @@ def _reactivate_original_unit(
     exact_order_only: bool = False,
     own_stock_id: Optional[str] = None,
     named_ids: Optional[set] = None,
+    set_aside: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """Find the original serialized unit sold for this product and flip it back
     to AVAILABLE. Returns its stock_id, or None when no candidate is found.
+    ``set_aside`` (F21-3, a DAMAGED return) is merged over the flip instead:
+    the unit comes back QUARANTINED, off sale, never left SOLD.
 
     Preference order (most-specific first):
       1. a unit for (product_id, store_id) tied to THIS order_id with status
@@ -1775,6 +1778,7 @@ def _reactivate_original_unit(
                     # Preserve the lineage for audit / reconciliation.
                     "returned_from_order_id": prior_order_id,
                     "prior_sold_order_id": prior_order_id,
+                    **(set_aside or {}),
                 },
                 id_field="stock_id" if unit.get("stock_id") else "_id",
             )
@@ -2675,6 +2679,80 @@ def _restock_good_items(
     # later retry can finish the job (the stock_ids already added are recorded).
     result["applied"] = all_ok
     return result
+
+
+def _quarantine_damaged_units(
+    items: List[ReturnLine],
+    order_id: Optional[str],
+    order: Optional[Dict[str, Any]],
+    return_id: str,
+    user_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    """F21-3: a returned piece marked DAMAGED comes back QUARANTINED -- off
+    sale, tracked, ready to go to the supplier -- never left SOLD. Only the
+    unit THIS order sold (exact_order_only: never another customer's piece);
+    a line whose sold unit cannot be found (a historical import) moves
+    nothing. Fail-soft per unit. Returns the units set aside.
+
+    The unit stays quarantined at the shop it was sold from (an online
+    order's damaged piece handed in at another counter is not moved)."""
+    lines = [it for it in items or [] if it.condition == "DAMAGED" and it.product_id]
+    if not order_id or not lines:
+        return []
+    try:
+        stock_repo = get_stock_repository()
+    except Exception:  # noqa: BLE001
+        stock_repo = None
+    if stock_repo is None:
+        return []
+    line_units, named_ids = _order_line_units(order)
+    used: set = set()
+    out: List[Dict[str, Any]] = []
+    for line in lines:
+        for _ in range(int(round(line.return_qty))):
+            try:
+                sid = _reactivate_original_unit(
+                    stock_repo, line.product_id, None, order_id, used,
+                    exact_order_only=True,
+                    own_stock_id=line_units.get(str(line.order_item_id or "")),
+                    named_ids=named_ids,
+                    set_aside={
+                        "status": "QUARANTINED",
+                        "quarantine_reason": "CUSTOMER_RETURN_DAMAGED",
+                        "quarantine_at": datetime.now(timezone.utc),
+                        "quarantine_by": user_id,
+                        "quarantine_generation": uuid.uuid4().hex,
+                        "quarantine_notes": f"Damaged, customer return {return_id}"[:200],
+                        "quarantine_label_printed": False,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[RETURNS] damaged unit not set aside: %s", exc)
+                continue
+            if not sid:
+                break
+            try:
+                unit = (_find_stock(stock_repo, {"stock_id": sid}) or [{}])[0]
+            except Exception:  # noqa: BLE001 -- the flip landed; only the shop is unknown
+                unit = {}
+            out.append({"stock_id": sid, "store_id": unit.get("store_id"),
+                        "product_id": line.product_id})
+            _audit_stock_transition(sid, "SOLD", "QUARANTINED", return_id,
+                                    unit.get("store_id"), user_id)
+            try:
+                from ..services import item_events as ie
+
+                ie.record_post_write_event(
+                    _get_db(), event_type=ie.ItemEventType.QUARANTINE_IN,
+                    actor_id=user_id or "", stock_id=sid,
+                    from_state=ie.StockState.SOLD, to_state=ie.StockState.QUARANTINED,
+                    store_id=unit.get("store_id"), product_id=line.product_id,
+                    source_type="RETURN", source_id=return_id,
+                    payload={"quarantine_reason": "CUSTOMER_RETURN_DAMAGED"},
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[RETURNS] damaged unit ledger row failed: %s", exc)
+    return out
 
 
 def _reason_summary(items: List[ReturnLine]) -> str:
@@ -3797,6 +3875,22 @@ async def create_return(
         # A stock-write failure must never break the return record - leave
         # applied=False so it can be retried later.
         logger.warning("[RETURNS] restock failed (recorded, not applied): %s", exc)
+    # F21-3: a DAMAGED piece comes back QUARANTINED (tracked, can go to the
+    # supplier), and the task agent raises its 7-day follow-up.
+    quarantined = _quarantine_damaged_units(
+        active_lines, resolved_order_id, order, return_id, current_user.get("user_id"))
+    for unit in quarantined:
+        try:
+            from agents.registry import dispatch_event
+
+            await dispatch_event(
+                "stock.quarantined",
+                {"stock_id": unit["stock_id"], "store_id": unit["store_id"] or store_id,
+                 "reason": "CUSTOMER_RETURN_DAMAGED", "actor_id": current_user.get("user_id")},
+                source="returns_router",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[RETURNS] stock.quarantined dispatch failed: %s", exc)
     restocked = restock_result.get("restocked", [])
     restock_applied = bool(restock_result.get("applied"))
     restock_stock_ids = restock_result.get("restock_stock_ids", [])
@@ -3875,6 +3969,8 @@ async def create_return(
         "restocked": restocked,
         "restock_applied": restock_applied,
         "restock_stock_ids": restock_stock_ids,
+        # F21-3: the DAMAGED pieces this return set aside (QUARANTINED).
+        "quarantined_stock_ids": [u["stock_id"] for u in quarantined],
         # F9 audit stamp: WHICH store the returned units were put back on, and
         # -- when the order billed to a stockless ONLINE store -- what it was
         # redirected from and why.

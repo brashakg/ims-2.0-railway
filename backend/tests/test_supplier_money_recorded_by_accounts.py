@@ -446,7 +446,7 @@ def test_return_create_stays_with_managers(vret, role):
     res = _run(r.create_vendor_return(r.VendorReturnCreate(
         vendor_id="V1", vendor_name="GKB", store_id="S1", return_type="credit_note",
         items=[r.ReturnItemCreate(product_id="P9", product_name="Lens", quantity=1,
-                                  reason="defective")]),
+                                  reason="defective")], notes="Made-to-order lens, never held in stock"),
         current_user=_user(role)))
     assert set(res) == {"return_id", "message"}
 
