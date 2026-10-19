@@ -946,11 +946,6 @@ async def clear_rx_hold(
             )
     if not getattr(written, "matched_count", 0):
         raise changed
-    if order.get("preorder_awaiting_stock") and not stock_left:
-        # The stock hold released: the pre-order's units are claimed now.
-        from ..services.shopify_ingest import end_preorder_wait
-
-        end_preorder_wait(db, order_id, "Pre-order stock received and claimed; the hold was cleared.")
 
     _write_rx_hold_audit(
         order,

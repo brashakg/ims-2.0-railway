@@ -5909,3 +5909,70 @@ def test_a_standard_model_short_is_the_oversell_even_with_the_gate_on(world):
     res, order = _book(world, _order(64004))
     assert "preorder_awaiting_stock" not in order
     assert db.online_stock_miss.count_documents({"order_id": res["order_id"]}) == 1
+
+
+def test_the_ims_cancel_door_closes_a_pre_order_wait(world, monkeypatch):
+    """Review of #1244: the counter's cancel door ends the wait too."""
+    import api.dependencies as deps
+    from api.routers.orders import cancel as cancel_mod
+    from database.repositories.product_repository import StockRepository
+
+    db = _pre_order_world(world)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1)])
+    res, _order_doc = _book(world, _order(64099))
+    oid = res["order_id"]
+    assert _preorder_tasks(world, oid) == ["BV-BOK-01"]
+    monkeypatch.setattr(deps, "get_db", lambda: db)
+    monkeypatch.setattr(cancel_mod, "get_stock_repository", lambda: StockRepository(db.stock_units))
+    asyncio.run(cancel_mod.cancel_order(
+        oid, reason="customer changed their mind",
+        current_user={"user_id": "u1", "roles": ["ADMIN"], "store_ids": []}))
+    after = db.orders.find_one({"order_id": oid})
+    assert after["status"] == "CANCELLED" and "preorder_awaiting_stock" not in after
+    assert _preorder_tasks(world, oid) == [] and _preorder_tasks(world, oid, "COMPLETED") == ["BV-BOK-01"]
+
+
+def test_a_remap_that_claims_the_pre_order_unit_ends_the_wait(world):
+    """Review of #1244 (MEDIUM): Re-map claimed the unit but the wait, its
+    lines and the shop's task stayed. The one claim ends it now."""
+    db = _pre_order_world(world)
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": ""}})  # a seller hold: Re-map's door
+    world["shop"].fo(FO_1, LOC_BOK, units=1)
+    res, order = _book(world, _order(64098))
+    oid = res["order_id"]
+    assert _preorder_tasks(world, oid) == ["BV-BOK-01"] and order["preorder_awaiting_stock"]
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": "20AAAAA0000A1Z5"}})
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+
+    out = asyncio.run(route_mod.reroute_held_order(db, oid))
+
+    assert out["status"] == "rerouted", out
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert _sold_at(db, oid) == ["BV-BOK-01"] and after["fulfillment_hold"] is False
+    assert "preorder_awaiting_stock" not in after
+    assert _preorder_tasks(world, oid) == [] and _preorder_tasks(world, oid, "COMPLETED") == ["BV-BOK-01"]
+
+
+def test_a_remap_that_moves_the_pre_order_line_closes_the_old_shops_task(world):
+    """Review of #1244: Re-map moves the waiting line to another shop (the
+    human moved its fulfillment order): the wait follows it and the shop it
+    left has its task closed, never orphaned."""
+    db = _pre_order_world(world)
+    _stock(db, "BV-BOK-01", "P-OA", 1)
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": ""}})  # a seller hold: Re-map's door
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9001, 1)])
+    world["shop"].fo(FO_2, LOC_RAN, lines=[(9000, 1)])
+    res, order = _book(world, _order(64097, lines=(("RB-1234", 1), ("OA-5", 1))))
+    oid = res["order_id"]
+    assert [w["store_id"] for w in order["preorder_awaiting_stock"]] == ["BV-RAN-01"], order
+    assert _preorder_tasks(world, oid) == ["BV-RAN-01"]
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": "20AAAAA0000A1Z5"}})
+    world["shop"].fos[1]["assignedLocation"]["location"]["id"] = LOC_BOK  # the human's move
+
+    out = asyncio.run(route_mod.reroute_held_order(db, oid))
+
+    assert out["status"] == "rerouted", out
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert [w["store_id"] for w in after["preorder_awaiting_stock"]] == ["BV-BOK-01"]
+    assert _preorder_tasks(world, oid) == ["BV-BOK-01"]
+    assert _preorder_tasks(world, oid, "COMPLETED") == ["BV-RAN-01"]

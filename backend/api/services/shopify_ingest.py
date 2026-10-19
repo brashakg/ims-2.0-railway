@@ -550,6 +550,10 @@ def _claim_online_units(
                     "route": route.get("reason"),
                 },
             )
+        # THE end of a pre-order wait, for every claim (the booking, Re-map,
+        # clear-hold's claim_the_missing): a shop no longer waiting has its
+        # task closed; nothing waiting any more ends the wait.
+        _settle_preorder_wait(db, order_id, waiting)
         if waiting:
             _record_preorder_wait(db, order_id, order_ref, waiting, hold=not missed)
     except Exception as exc:  # noqa: BLE001
@@ -749,6 +753,31 @@ def _record_preorder_wait(db, order_id, order_ref, waiting, *, hold=True) -> Non
             )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SHOPIFY_INGEST] pre-order task skipped for %s: %s", order_id, exc)
+
+
+def _settle_preorder_wait(db, order_id: Any, waiting: List[Dict[str, Any]]) -> None:
+    """After a claim, before its wait is recorded: the shops the order WAS
+    waiting at that this claim no longer waits at get their task closed (a unit claimed, or Re-map moved
+    the line); nothing waiting any more ends the wait (end_preorder_wait).
+    Touches no hold field (clear-hold and Re-map condition their writes on
+    those). Fail-soft."""
+    try:
+        orders = db.get_collection("orders") if hasattr(db, "get_collection") else db["orders"]
+        before = (orders.find_one({"order_id": order_id}) or {}).get("preorder_awaiting_stock") or []
+        if not before:
+            return
+        if not waiting:
+            end_preorder_wait(db, order_id, "The pre-order's units are claimed.")
+            return
+        now = {w["store_id"] for w in waiting}
+        gone = sorted({str(w.get("store_id")) for w in before} - now)
+        if gone:
+            from .online_fulfillment_route import _close_tasks
+
+            _close_tasks([_preorder_task_ref(order_id, s) for s in gone],
+                         "This shop no longer waits for this pre-order (claimed, or moved to another shop).")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[SHOPIFY_INGEST] pre-order settle skipped for %s: %s", order_id, exc)
 
 
 def end_preorder_wait(db, order_id: Any, note: str) -> None:
