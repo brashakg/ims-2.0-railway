@@ -34,6 +34,7 @@ Q5: enum config drives ALL string fields except brand/series (which are
 
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -141,9 +142,12 @@ def _ensure_float(name: str, value: Any) -> float:
     if value is None:
         raise ValueError("{name} is required".format(name=name))
     try:
-        return float(value)
+        out = float(value)
     except (TypeError, ValueError):
         raise ValueError("{name} must be a number".format(name=name))
+    if not math.isfinite(out):  # NaN / inf would poison every price sum
+        raise ValueError("{name} must be a finite number".format(name=name))
+    return out
 
 
 def _ensure_int_ge_zero(name: str, value: Any) -> int:

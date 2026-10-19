@@ -44,13 +44,13 @@ ZEISS,Progressive GT2 FreeForm,BlueGuard,"1.5, 1.59, 1.6, 1.67",1000,,28,350,7
 ZEISS,Progressive GT2 FreeForm,Tint,"1.5, 1.6, 1.67",800,,28,400,7
 ZEISS,Progressive GT2 FreeForm,Prism,"1.5, 1.59, 1.6, 1.67",0,No additional cost,28,0,7
 ZEISS,Single Vision ClearMind,Mirror,"1.5, 1.6",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for tint/polarised,30,6500,8
-ZEISS,Single Vision ClearMind,Flash,"1.5, 1.6",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for PhotoFusion X,30,6500,8
+ZEISS,Single Vision ClearMind,Flash,"1.5, 1.6, 1.67",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for PhotoFusion X; 1.67 as the WSP lists it (owner 10-19),30,6500,8
 ZEISS,Single Vision ClearMind,AdaptiveSun,"1.5, 1.6",10000,International order; only with DuraVision Plus Sun UV; on top of Platinum price,30,5000,8
-ZEISS,Single Vision ClearMind,PhotoFusion X,"1.5, 1.59, 1.6",8000,Not with BlueGuard / BlueProtect / Mirror / AdaptiveSun,30,4000,8
+ZEISS,Single Vision ClearMind,PhotoFusion X,"1.5, 1.59, 1.6, 1.67",8000,Not with BlueGuard / BlueProtect / Mirror / AdaptiveSun; 1.67 as the WSP lists it (owner 10-19),30,4000,8
 ZEISS,Single Vision ClearMind,PhotoFusion X,1.74,8000,International order,30,4000,8
 ZEISS,Single Vision ClearMind,Polarised,"1.5, 1.6 (intl), 1.67 (intl)",6500,Not with BlueProtect / BlueGuard,30,3500,8
-ZEISS,Single Vision ClearMind,BlueGuard,"1.5, 1.59, 1.6",1000,Not with PhotoFusion X / Polarised / Tint / BlueProtect,30,350,8
-ZEISS,Single Vision ClearMind,Tint,"1.5, 1.6",800,,30,400,8
+ZEISS,Single Vision ClearMind,BlueGuard,"1.5, 1.59, 1.6, 1.67",1000,Not with PhotoFusion X / Polarised / Tint / BlueProtect; 1.67 as the WSP lists it (owner 10-19),30,350,8
+ZEISS,Single Vision ClearMind,Tint,"1.5, 1.6, 1.67",800,1.67 as the WSP lists it (owner 10-19),30,400,8
 ZEISS,Single Vision ClearMind,Prism,"1.5, 1.59, 1.6",0,No additional cost,30,0,8
 ZEISS,Single Vision SmartLife,Mirror,"1.5, 1.6",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for tint/polarised,33,6500,9
 ZEISS,Single Vision SmartLife,Flash,"1.5, 1.6, 1.67",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for PhotoFusion X,33,6500,9

@@ -95,6 +95,53 @@ def test_upgrade_lists_follow_zeiss_rules():
     assert "Mirror" not in names(_line(docs, "Digital SmartLife", 1.5, "DVP_PLATINUM_UV"))
 
 
+def test_sv_clearmind_167_takes_the_wsp_upgrades():
+    """Owner 10-19: Flash, PhotoFusion X, BlueGuard and Tint on SV ClearMind
+    1.67 too, at the 1.5 / 1.6 MRP and the WSP cost printed for 1.67."""
+    docs, _, _, _ = script.build(ROWS, script.live_enums(_db()))
+    plat = {u["name"]: u for u in _line(docs, "Single Vision ClearMind", 1.67, "DVP_PLATINUM_UV")["upgrades"]}
+    low = {u["name"]: u for u in _line(docs, "Single Vision ClearMind", 1.6, "DVP_PLATINUM_UV")["upgrades"]}
+    for name, cost in (("Flash", 6500.0), ("PhotoFusion X", 4000.0), ("BlueGuard", 350.0), ("Tint", 400.0)):
+        assert plat[name]["mrp"] == low[name]["mrp"] and plat[name]["cost_price"] == cost
+    assert "Mirror" not in plat  # not part of the ruling (ZEISS lists Mirror for 1.5 / 1.6 only)
+
+
+def test_upgrade_validation_rejects_bad_rows():
+    from api.services.lens_catalog_validation import DEFAULT_ENUM_ITEMS, validate_lens_catalog_payload
+    cfg = {**DEFAULT_ENUM_ITEMS, "brands": ["B"]}
+
+    def v(payload):
+        return validate_lens_catalog_payload(payload, enum_config=cfg)
+
+    base = {"brand": "B", "series": "S", "index": 1.5, "material": "CR39",
+            "lens_type": "SV", "coating": "HC", "mrp": 100}
+    ok = v({**base, "upgrades": [{"name": "Tint", "mrp": 800, "cost_price": 400}]})
+    assert ok["upgrades"] == [{"name": "Tint", "mrp": 800.0, "cost_price": 400.0}]
+    bad = [
+        [{"name": "Tint", "mrp": 800}, {"name": "tint", "mrp": 900}],  # same name twice
+        [{"name": "Tint", "mrp": -1}],
+        [{"name": "Tint", "mrp": float("nan")}],
+        [{"name": "Tint", "mrp": float("inf")}],
+        [{"name": "Tint", "mrp": 800, "cost_price": float("nan")}],
+        [{"name": "Tint", "mrp": 800, "cost_price": float("-inf")}],
+        [{"name": "", "mrp": 800}],
+        "Tint",
+    ]
+    for ups in bad:
+        try:
+            v({**base, "upgrades": ups})
+        except ValueError:
+            continue
+        raise AssertionError("accepted %r" % (ups,))
+    # the same finite-number rule guards the line's own price
+    for mrp in (float("nan"), float("inf")):
+        try:
+            v({**base, "mrp": mrp})
+        except ValueError:
+            continue
+        raise AssertionError("accepted mrp %r" % mrp)
+
+
 def test_upgrade_cost_is_masked_like_the_line_cost():
     from api.services.cost_mask import mask_cost
     docs, _, _, _ = script.build(ROWS, script.live_enums(_db()))
@@ -127,11 +174,59 @@ def test_apply_rerun_and_revert():
 
     stocked = docs[0]["lens_line_id"]
     db.seed("lens_stock_lines", [{"lens_line_id": stocked, "on_hand": 2}])
-    db["lens_enum_config"].update_one({"enum_id": "coatings"}, {"$set": {"items": ["OWNER_EDIT"]}})
     out = script.revert(db, "run1")
     assert out["deleted"] == 734 and out["kept_with_stock"] == [stocked]
-    assert "coatings" in out["enums_edited_since"]
-    assert db["lens_enum_config"].find_one({"enum_id": "coatings"})["items"] == ["OWNER_EDIT"]
+    # the kept line still uses ZEISS / 1.59 / the coatings: no enum list is put back
+    assert out["enums_restored"] == [] and out["enums_not_restored"]
+    assert db["lens_enum_config"].find_one({"enum_id": "brands"})["items"] == ["Essilor", "ZEISS"]
+    assert 1.59 in db["lens_enum_config"].find_one({"enum_id": "indexes"})["items"]
+
+
+def test_revert_after_a_run_that_died_part_way():
+    """apply crashes on insert 400 (a network blip): revert must still find
+    every line by import_run_id and put the enum lists back."""
+    db = _db()
+    docs, enums, added, _ = script.build(ROWS, script.live_enums(db))
+    coll = db["lens_catalog"]
+    real, n = coll.insert_one, [0]
+
+    def flaky(doc, *a, **k):
+        n[0] += 1
+        if n[0] == 400:
+            raise RuntimeError("network blip")
+        return real(doc, *a, **k)
+
+    coll.insert_one = flaky
+    try:
+        script.apply(db, docs, enums, added, "runX")
+        raise AssertionError("apply should have crashed")
+    except RuntimeError:
+        pass
+    coll.insert_one = real
+    assert coll.count_documents({"import_run_id": "runX"}) == 399
+    db["lens_enum_config"].update_one({"enum_id": "coatings"}, {"$set": {"items": ["OWNER_EDIT"]}})
+    out = script.revert(db, "runX")
+    assert out["deleted"] == 399 and out["kept_with_stock"] == []
+    assert coll.count_documents({"brand": "ZEISS"}) == 0
     assert db["lens_enum_config"].find_one({"enum_id": "brands"})["items"] == ["Essilor"]
     # an enum the run created from nothing (indexes was a code default) is removed again
     assert db["lens_enum_config"].find_one({"enum_id": "indexes"}) is None
+    # a list the owner edited since the run is left alone
+    assert "coatings" in out["enums_edited_since"]
+    assert db["lens_enum_config"].find_one({"enum_id": "coatings"})["items"] == ["OWNER_EDIT"]
+
+
+def test_main_prints_the_run_id_before_the_first_write(monkeypatch, capsys):
+    db = _db()
+    seen = []
+    real = db["lens_import_backups"].insert_one
+
+    def spy(doc, *a, **k):
+        seen.append(capsys.readouterr().out)
+        return real(doc, *a, **k)
+
+    db["lens_import_backups"].insert_one = spy
+    monkeypatch.setattr("pymongo.MongoClient", lambda *a, **k: {"ims_2_0": db})
+    assert script.main(["--mongo-uri", "mongodb://fake", "--apply"]) == 0
+    assert "[RUN] zeiss-2026-04-" in seen[0]
+

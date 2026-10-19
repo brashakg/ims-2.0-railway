@@ -47,9 +47,12 @@ SAFETY CONTRACT
   lists (DEFAULT_ENUM_ITEMS) instead of the live ones.
 - --apply: backs up the enum lists it will change into `lens_import_backups`
   (run id), then writes enums + lens lines, stamping `import_run_id`.
-- --revert --run-id X: deletes the lens lines that run created (only those
-  with no lens_stock_lines row) and puts each enum list back IF nobody edited
-  it since the run (else it is left alone and reported).
+- --apply prints the run id BEFORE its first write, so a run that dies
+  part-way can be undone.
+- --revert --run-id X: deletes the lens lines stamped with that run id (only
+  those with no lens_stock_lines row). Only when none is kept, it puts each
+  enum list back IF nobody edited it since the run (else it is left alone
+  and reported); a kept line would otherwise lose its enum values.
 - Plain pymongo, no app start-up (no init_db / ensure_indexes).
 
 USAGE
@@ -276,24 +279,24 @@ def live_enums(db) -> Dict[str, List[Any]]:
 def apply(db, docs, enums, added, run_id: str) -> Dict[str, int]:
     now = datetime.now(timezone.utc)
     before = {d["enum_id"]: d.get("items") for d in db[ENUMS].find({"enum_id": {"$in": list(added)}})}
+    # The backup is the FIRST write: a run that dies part-way can still be
+    # reverted, because revert finds the lines by import_run_id, not by a list.
     db[BACKUPS].insert_one({"run_id": run_id, "at": now, "actor": ACTOR, "source": SOURCE,
-                            "enum_before": before, "enum_after": {k: enums[k] for k in added},
-                            "lens_line_ids": []})
+                            "enum_before": before, "enum_after": {k: enums[k] for k in added}})
     for enum_id in added:
         db[ENUMS].update_one({"enum_id": enum_id},
                              {"$set": {"items": enums[enum_id], "updated_at": now, "updated_by": ACTOR}},
                              upsert=True)
     existing = {d["lens_line_id"] for d in db[CATALOG].find(
         {"lens_line_id": {"$in": [x["lens_line_id"] for x in docs]}}, {"lens_line_id": 1})}
-    created = []
+    created = 0
     for d in docs:
         if d["lens_line_id"] in existing:
             continue
         db[CATALOG].insert_one({**d, "created_at": now, "updated_at": now,
                                 "created_by": ACTOR, "import_run_id": run_id})
-        created.append(d["lens_line_id"])
-    db[BACKUPS].update_one({"run_id": run_id}, {"$set": {"lens_line_ids": created}})
-    return {"created": len(created), "skipped_existing": len(existing)}
+        created += 1
+    return {"created": created, "skipped_existing": len(existing)}
 
 
 def revert(db, run_id: str) -> Dict[str, Any]:
@@ -301,11 +304,18 @@ def revert(db, run_id: str) -> Dict[str, Any]:
     if not b:
         raise SystemExit("[ERROR] no backup for run %s" % run_id)
     deleted, kept = 0, []
-    for lid in b.get("lens_line_ids") or []:
+    for d in list(db[CATALOG].find({"import_run_id": run_id}, {"lens_line_id": 1})):
+        lid = d["lens_line_id"]
         if db[STOCK].count_documents({"lens_line_id": lid}):
             kept.append(lid)
             continue
         deleted += db[CATALOG].delete_one({"lens_line_id": lid, "import_run_id": run_id}).deleted_count
+    if kept:
+        # A kept line still uses ZEISS / 1.59 / the coating codes; taking them
+        # out of the lists would leave it un-editable. Restore nothing.
+        return {"deleted": deleted, "kept_with_stock": kept, "enums_restored": [],
+                "enums_edited_since": [],
+                "enums_not_restored": "lines from this run are kept (they have stock)"}
     restored, untouched = [], []
     for enum_id, after in (b.get("enum_after") or {}).items():
         cur = db[ENUMS].find_one({"enum_id": enum_id}) or {}
@@ -343,7 +353,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         from pymongo import MongoClient
         db = MongoClient(uri, serverSelectionTimeoutMS=10000)[args.db]
     if args.revert:
-        print("[REVERTED] run %s: %s" % (args.run_id, json.dumps(revert(db, args.run_id))))
+        res = revert(db, args.run_id)
+        print("[REVERTED] run %s: %s" % (args.run_id, json.dumps(res)))
+        if res.get("enums_not_restored"):
+            print("[NOTE] enum lists NOT restored: " + res["enums_not_restored"])
         return 0
 
     rows = load_rows(args.csv)
@@ -381,6 +394,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("DRY RUN - nothing written. Re-run with --apply to import.")
         return 0
     run_id = "zeiss-2026-04-" + uuid.uuid4().hex[:8]
+    print("[RUN] %s - if this stops part-way, undo with: --revert --run-id %s" % (run_id, run_id))
+    sys.stdout.flush()
     res = apply(db, docs, enums, added, run_id)
     print("[APPLIED] run %s: %s (undo: --revert --run-id %s)" % (run_id, json.dumps(res), run_id))
     return 0
