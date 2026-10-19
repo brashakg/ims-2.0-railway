@@ -1098,6 +1098,22 @@ def frame_size_of(value: Any) -> Any:
 _MODEL_KEYS = ("model_no", "model_name")
 
 
+def _model_home(category: Any) -> Optional[str]:
+    """The ONE attribute a flat `model` fills for `category`: its required
+    model key (a frame's model_no, a contact lens's / smartglass's
+    model_name), else its optional one, else an Optical Lens's subbrand. An
+    unknown category: model_no. Never two keys -- a second one is a copy no
+    one typed."""
+    spec = category_spec(category)
+    if spec is None:
+        return "model_no"
+    for keys in (spec.required, spec.optional):
+        for k in _MODEL_KEYS:
+            if k in keys:
+                return k
+    return "subbrand" if "subbrand" in spec.required + spec.optional else None
+
+
 def _shown_attributes(attributes: Dict[str, Any], category: Any) -> Dict[str, Any]:
     """`attributes` less a model_no / model_name its category has no field
     for. main's create door folded a flat `model` into both, and main's form
@@ -2979,20 +2995,23 @@ def normalise_door_payload(payload: Dict[str, Any], *, source: str) -> Dict[str,
                 if attr_key is None:
                     continue
             attrs.setdefault(attr_key, val)
-    # The model lands in the field its category's form shows: Model No and/or
-    # Model Name (a frame shows both: both, as before), else an Optical Lens's
-    # Sub Brand. A flat `model` (the PO 'new item' line) or a model_no /
-    # model_name the form has no field for (a price-list import, a clone of a
-    # main-era row) moves there, so the door stores no hidden copy and the SKU,
-    # the name and the duplicate key read what was typed (_shown_attributes).
+    # The model lands in ONE field its category's form shows (_model_home):
+    # a frame's Model No, a contact lens's Model Name, an Optical Lens's Sub
+    # Brand -- and only when that field is blank. A flat
+    # `model` (the PO 'new item' line, or the form's own echo of its Model No)
+    # or a model_no / model_name the form has no field for (a price-list
+    # import, a clone of a main-era row) moves there, so the door stores no
+    # hidden copy and the SKU, the name and the duplicate key read what was
+    # typed (_shown_attributes). A frame's optional Model Name is never filled
+    # from its number: it is what staff typed, blank if nothing (owner 10-19;
+    # the old fill-both copied the number into 583 Model Names).
     spec = category_spec(p.get("category"))
     fields = spec.required + spec.optional if spec else _MODEL_KEYS
     copies = [attrs.pop(k) for k in _MODEL_KEYS if k not in fields and k in attrs]
     model = next((v for v in (*copies, p.get("model")) if not _is_blank(v)), None)
-    shown = [k for k in _MODEL_KEYS if k in fields] or [k for k in ("subbrand",) if k in fields]
-    for k in shown if model is not None else ():
-        if _is_blank(attrs.get(k)):
-            attrs[k] = model
+    home = _model_home(p.get("category"))
+    if model is not None and home and _is_blank(attrs.get(home)):
+        attrs[home] = model
     p["attributes"] = attrs
     p["_source"] = source if source in VALID_DOOR_SOURCES else "FORM"
     return p
@@ -5247,10 +5266,13 @@ def _overlay_attributes(product_doc: Dict[str, Any]) -> Dict[str, Any]:
     doc = product_doc or {}
     attrs: Dict[str, Any] = dict(doc.get("attributes") or {})
     # Flat top-level identity -> canonical attribute keys (fill-only).
+    # The flat model fills ONE model key (_model_home), fill-only like every
+    # overlay key: overlaying both copied a frame's number into its Model Name
+    # on every clone ("add another colour", create_variations).
+    model_home = _model_home(doc.get("category"))
     overlay = {
         "brand_name": doc.get("brand"),
-        "model_no": doc.get("model"),
-        "model_name": doc.get("model"),
+        **({model_home: doc.get("model")} if model_home else {}),
         "colour_code": doc.get("color") or doc.get("colour"),
         "size": doc.get("size"),
         "name": doc.get("name"),
