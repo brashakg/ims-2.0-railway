@@ -37,24 +37,38 @@ async def get_gst_reconciliation(
     entity_id: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
 ):
-    """GST output (sales tax) vs input credit (purchase tax), grouped by entity.
-    You file the actual returns through Tally; this is the cross-check."""
+    """The Finance GST tab's table: one row per GST registration (company +
+    GSTIN), read off THE return -- each shop's GSTR-3B (reports.
+    _compute_gstr3b), set off per GSTIN by the Cross-Check's own aggregator
+    (gst_crosscheck.aggregate_gstr3b). So the table and GSTR-3B agree by
+    construction: output tax net of credit notes; input credit from booked
+    supplier bills placed on the GSTIN they were received on, leaving out
+    credit switched off / not claimable (section 17(5)), less supplier credit
+    notes in their note's month; reverse charge; cash due after set-off.
+
+    It used to take input credit from purchase-ORDER tax pooled per company,
+    so 'net payable' could be wrong (audit A04-3). You file the actual returns
+    through Tally; this is the cross-check."""
     # Entity-grouped GST reconciliation is a filing/accounting view --
     # finance-admin only (owner decision 2026-06-16), so a single-store
     # STORE_MANAGER/AREA_MANAGER cannot read any entity's GST position.
     _require_org_finance(current_user)
     db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
     now = now_ist()
     m = month or now.month
     y = year or now.year
-    # IST calendar month -> naive-UTC created_at bounds (same as /gst/summary),
-    # so the reconciliation and GSTR-1/3B agree on the period's invoices.
-    start, end = ist_month_window_utc(y, m)
+    period = f"{y:04d}-{m:02d}"
 
     s2e, enames = _store_maps(db)
-    store_ids = None
+    try:
+        s2g = shop_gstins(db)
+    except Exception as exc:  # noqa: BLE001 - no GSTINs, no per-GSTIN figure
+        raise HTTPException(status_code=503, detail="Shop GST registrations are unavailable; please retry.") from exc
+    store_ids = list(s2e)
     if entity_id:
-        store_ids = [sid for sid, eid in s2e.items() if eid == entity_id]
+        store_ids = [sid for sid in store_ids if s2e.get(sid) == entity_id]
     # THE shop rule the GST summary cards above this table read
     # (resolve_store_scope): ADMIN / SUPERADMIN every shop, an accountant
     # his own shop -- so one tab never shows one login two scopes (a Pune
@@ -62,80 +76,71 @@ async def get_gst_reconciliation(
     # this table, round 4).
     scope = resolve_store_scope(None, current_user)
     if scope:
-        store_ids = [scope] if store_ids is None or scope in store_ids else []
+        store_ids = [scope] if scope in store_ids else []
 
-    # Orders persist created_at as a BSON datetime; the previous .isoformat()
-    # string bound matched nothing, so GST-collected per entity read zero.
-    # Exclude DRAFT/CANCELLED -- only real sales carry GST liability.
-    o_match = {
-        "created_at": {"$gte": start, "$lt": end},
-        "status": _REAL_ORDER_STATUS_FILTER,
-    }
-    if store_ids is not None:
-        o_match["store_id"] = {"$in": store_ids}
-    # A held online order is no GSTIN's output tax (tally._filed_orders).
-    from .tally import _filed_orders
+    from ...services import gst_crosscheck as _xc
+    from ..reports import _compute_gstr3b
+    from ..reports import gstr3b as _gstr3b
 
-    orders = _filed_orders(
-        db,
-        db.get_collection("orders").find(
-            o_match,
-            {
-                "_id": 0,
-                "store_id": 1,
-                "customer_id": 1,
-                "tax_amount": 1,
-                "tax_total": 1,
-                # OS-008: the order-carried inter-state flag (online orders).
-                "interstate": 1,
-                "fulfillment_route": 1,
-                "fulfillment_hold": 1,
-                "stock_hold_reason": 1,
-            },
+    # GSTR-3B reads its own handle; without one it returns an all-zero return,
+    # which this table must never show as the month's figures.
+    if store_ids and _gstr3b._get_raw_db() is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    returns: dict = {}
+    for sid in store_ids:
+        try:
+            report = _compute_gstr3b(period, sid)
+        except Exception as exc:  # noqa: BLE001 - one shop short is a wrong total
+            logger.exception("GST table: GSTR-3B failed for %s", sid)
+            raise HTTPException(
+                status_code=503,
+                detail="The GST figures could not be worked out for every shop; please retry.",
+            ) from exc
+        returns.setdefault((s2e.get(sid), s2g.get(sid, "")), []).append(report)
+
+    rows = []
+    for (eid, gstin), reports in returns.items():
+        agg = _xc.aggregate_gstr3b(reports, [eid] * len(reports), [gstin] * len(reports))
+        # A GSTIN also filing for shops this login cannot see: its output tax
+        # here is only the visible shops', so no cash figure -- never a wrong one.
+        hidden = sum(
+            1 for sid, g in s2g.items()
+            if g == gstin and s2e.get(sid) == eid and sid not in store_ids
+        ) if gstin else 0
+        rows.append({
+            "entity_id": eid or "_unassigned",
+            "entity_name": enames.get(eid, eid) or "No company",
+            "gstin": gstin,
+            "shops": len(reports),
+            "gst_collected": agg["outwardTax"],
+            "input_credit": agg["itc"]["total"],
+            "reverse_charge": agg["rcm"]["total"],
+            "net_payable": None if hidden else agg["netCash"]["total"],
+            "shops_outside_view": hidden,
+        })
+    rows.sort(key=lambda r: (-r["gst_collected"], r["entity_name"], r["gstin"]))
+
+    def total(key):
+        return round(sum(r[key] for r in rows), 2)
+
+    return {
+        "registrations": rows,
+        "total_collected": total("gst_collected"),
+        "total_input_credit": total("input_credit"),
+        "total_reverse_charge": total("reverse_charge"),
+        "total_net_payable": (
+            None if any(r["net_payable"] is None for r in rows) else total("net_payable")
         ),
-    )
-
-    # purchase_orders persist created_at as a BSON datetime (BaseRepository
-    # _add_timestamps). No writer ever set a top-level `date` field, so the old
-    # {"date": <string>} filter matched NOTHING and input_credit read a permanent
-    # 0. Use the SAME IST created_at window as the orders side, and map a PO to an
-    # entity via delivery_store_id OR store_id (gst_reconciliation's own mapping).
-    # HR-3: exclude DRAFT / CANCELLED POs so a human draft or cancelled PO with
-    # tax_amount does not inflate input_credit (parity with the cross-check leg).
-    p_match = {
-        "created_at": {"$gte": start, "$lt": end},
-        "status": {"$nin": ["DRAFT", "draft", "CANCELLED", "cancelled"]},
+        "month": m,
+        "year": y,
+        "note": (
+            "One row per GST registration, as its GSTR-3B: output tax after "
+            "credit notes, input credit from booked supplier bills (credit not "
+            "claimable left out, supplier credit notes taken off in their "
+            "note's month), cash due after set-off plus reverse charge. File "
+            "via Tally."
+        ),
     }
-    if store_ids is not None:
-        p_match["$or"] = [
-            {"delivery_store_id": {"$in": store_ids}},
-            {"store_id": {"$in": store_ids}},
-        ]
-    purchases = list(
-        db.get_collection("purchase_orders").find(
-            p_match, {"_id": 0, "delivery_store_id": 1, "store_id": 1, "tax_amount": 1}
-        )
-    )
-
-    recon = gst_reconciliation(
-        orders,
-        purchases,
-        s2e,
-        enames,
-        store_state_by_id=_store_state_map(db),
-        customer_state_by_id=_customer_state_map(db),
-    )
-    recon.update(
-        {
-            "month": m,
-            "year": y,
-            "note": (
-                "Output tax split intra-state (CGST+SGST) vs inter-state (IGST) "
-                "by store vs customer state; file via Tally."
-            ),
-        }
-    )
-    return recon
 
 
 # ---------------------------------------------------------------------------

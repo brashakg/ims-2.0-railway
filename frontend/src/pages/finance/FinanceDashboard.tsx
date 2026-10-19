@@ -201,7 +201,10 @@ export default function FinanceDashboard() {
   // own sort) but every column header is clickable to re-sort.
   const [pnlStoreSort, setPnlStoreSort] = useState<{ key: 'store_id' | 'revenue' | 'cogs' | 'gross_profit' | 'margin' | 'expenses' | 'payroll' | 'net_profit'; dir: 'asc' | 'desc' }>({ key: 'revenue', dir: 'desc' });
   const [pnlByCategory, setPnlByCategory] = useState<Array<{ category?: string; revenue?: number; cogs?: number; gross_profit?: number }>>([]);
-  const [gstRecon, setGstRecon] = useState<Array<{ entity_name?: string; gst_collected?: number; input_credit?: number; net_payable?: number }>>([]);
+  // One row per GST registration, read off its GSTR-3B (audit A04-3). A
+  // null net_payable: the GSTIN also files for shops outside this login's
+  // view, so no cash figure rather than a wrong one.
+  const [gstRecon, setGstRecon] = useState<Array<{ entity_name?: string; gstin?: string; gst_collected?: number; input_credit?: number; reverse_charge?: number; net_payable?: number | null; shops_outside_view?: number }>>([]);
   // The backend tells us when it has withheld an expense head from this reader.
   // THREE separate flags on three separate responses -- /pnl, /budget and
   // /cash-flow -- and they are kept as three pieces of state on purpose: two of
@@ -302,11 +305,11 @@ export default function FinanceDashboard() {
           financeApi.getPnlByCategory({ from_date: dateFrom, to_date: dateTo, store_id: storeId }),
           canSeeWhatWePay
             ? financeApi.getGstReconciliation({ month: d.getMonth() + 1, year: d.getFullYear() })
-            : Promise.resolve({ entities: [] }),
+            : Promise.resolve({ registrations: [] }),
         ]);
         setPnlByStore(ps2.status === 'fulfilled' ? (ps2.value?.stores || []) : []);
         setPnlByCategory(pc2.status === 'fulfilled' ? (pc2.value?.categories || []) : []);
-        setGstRecon(gr2.status === 'fulfilled' ? (gr2.value?.entities || []) : []);
+        setGstRecon(gr2.status === 'fulfilled' ? (gr2.value?.registrations || []) : []);
       } catch {
         /* non-fatal */
       }
@@ -591,25 +594,36 @@ export default function FinanceDashboard() {
               <GSTPanel gstSummary={gstSummary} />
               {gstRecon.length > 0 && (
                 <div className="card mt-4 overflow-x-auto">
-                  <div className="px-4 py-2 text-sm font-medium text-gray-700 border-b border-gray-100">GST reconciliation by entity (file via Tally)</div>
+                  <div className="px-4 py-2 text-sm font-medium text-gray-700 border-b border-gray-100">GST by registration, as each GSTR-3B (file via Tally)</div>
                   <table className="min-w-full text-sm">
                     <thead className="bg-gray-50 text-gray-600"><tr>
                       <th className="px-3 py-2 text-left">Entity</th>
-                      <th className="px-3 py-2 text-right">GST collected</th>
+                      <th className="px-3 py-2 text-left">GSTIN</th>
+                      <th className="px-3 py-2 text-right">Output tax</th>
                       <th className="px-3 py-2 text-right">Input credit</th>
-                      <th className="px-3 py-2 text-right">Net payable</th>
+                      <th className="px-3 py-2 text-right">Reverse charge</th>
+                      <th className="px-3 py-2 text-right">Net payable (cash)</th>
                     </tr></thead>
                     <tbody>
                       {gstRecon.map((e, i) => (
                         <tr key={i} className="border-t border-gray-100">
                           <td className="px-3 py-2">{e.entity_name}</td>
+                          <td className="px-3 py-2 font-mono text-xs">{e.gstin || 'No GSTIN'}</td>
                           <td className="px-3 py-2 text-right">₹{Math.round(e.gst_collected || 0).toLocaleString('en-IN')}</td>
                           <td className="px-3 py-2 text-right">₹{Math.round(e.input_credit || 0).toLocaleString('en-IN')}</td>
-                          <td className="px-3 py-2 text-right font-semibold">₹{Math.round(e.net_payable || 0).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2 text-right">₹{Math.round(e.reverse_charge || 0).toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2 text-right font-semibold">
+                            {e.net_payable == null
+                              ? <span title={`This GSTIN also files for ${e.shops_outside_view || 0} shop(s) outside your view - see its GSTR-3B`}>—</span>
+                              : `₹${Math.round(e.net_payable).toLocaleString('en-IN')}`}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
+                  <p className="px-4 py-2 text-xs text-gray-500 border-t border-gray-100">
+                    Output tax after credit notes; input credit from booked supplier bills (credit not claimable left out, supplier credit notes taken off in their note&rsquo;s month); net payable is the cash due after set-off, plus reverse charge.
+                  </p>
                 </div>
               )}
             </>

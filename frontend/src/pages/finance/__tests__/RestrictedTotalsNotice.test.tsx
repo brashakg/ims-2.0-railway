@@ -129,7 +129,7 @@ function primeApi(pnl: unknown, budget: unknown, cashFlow: unknown = CASHFLOW_WH
   api.getPeriodStatus.mockResolvedValue({ locked: false });
   api.getPnlByStore.mockResolvedValue({ stores: [] });
   api.getPnlByCategory.mockResolvedValue({ categories: [] });
-  api.getGstReconciliation.mockResolvedValue({ entities: [] });
+  api.getGstReconciliation.mockResolvedValue({ registrations: [] });
 }
 
 const NOTICE = 'restricted-totals-notice';
