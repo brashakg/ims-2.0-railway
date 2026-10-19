@@ -516,10 +516,15 @@ class ApprovalEngine:
         reason: str = "",
         required_tier: Optional[str] = None,
         dedupe_key: Optional[str] = None,
+        only_roles: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Record a REQUESTED approval with a 60-min TTL. Dedupes an identical
         live (REQUESTED) request via dedupe_key. Fail-soft -> {"ok": False,
-        "error": "no_db"} with no DB."""
+        "error": "no_db"} with no DB.
+
+        ``only_roles`` may NARROW the roles the tier routes to (never widen):
+        a discount over an area manager's cap goes to ADMIN / SUPERADMIN only
+        (services/discount_approval)."""
         coll = self._coll()
         if coll is None:
             return {"ok": False, "error": "no_db"}
@@ -552,6 +557,8 @@ class ApprovalEngine:
         required_roles = approver_roles_for(
             {"action_type": action_type, "required_roles": self._tier_to_roles(tier)}
         )
+        if only_roles:
+            required_roles = [r for r in required_roles if r in set(only_roles)]
         now = _now()
         expires_at = now + timedelta(minutes=_validity_minutes())
         is_mc = action_type in MAKER_CHECKER_ACTIONS
