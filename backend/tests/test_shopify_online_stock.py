@@ -1083,6 +1083,10 @@ def test_live_update_also_writes_stock_and_only_a_pre_order_page_selects_continu
     assert res.action == "update" and res.mode == "LIVE"
     _assert_tracked(spy, policy="CONTINUE")
     assert res.stock["quantities"] == {"SP-1": {"BV-A": 2, "BV-B": 1, "BV-C": 0}}
+    # The template it sent is recorded (what a move back to Standard reads):
+    # drop the writeback's template_suffix -> this fails.
+    assert res.payload["templateSuffix"] == "preorder"
+    assert db.get_collection("catalog_products").find_one({"id": "cat-1"})["ecom"]["template_suffix_sent"] == "preorder"
 
 
 def test_live_push_with_no_mapped_shop_writes_nothing_and_names_the_holder(monkeypatch):

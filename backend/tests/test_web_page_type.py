@@ -215,6 +215,33 @@ def test_the_gate_keeps_every_page_standard_until_superadmin_switches_it_on(db):
     assert out["web_page_types_enabled"] is True
 
 
+def test_switching_page_types_off_runs_the_stock_pass_at_once(db, monkeypatch):
+    """Review of #1244: on -> off re-sends stock now (THE pass), so a
+    Pre-order listing stops selling at 0 immediately; off -> on, or any
+    other system setting, does not run it."""
+    from api.routers import settings as settings_mod
+
+    ran = []
+
+    async def _pass(_db, **_kw):
+        ran.append(1)
+
+    monkeypatch.setattr(settings_mod, "_get_settings_collection", lambda name: db[name])
+    monkeypatch.setattr(shopify_push, "sync_stock_levels", _pass)
+    su = {"user_id": "su", "roles": ["SUPERADMIN"]}
+
+    async def _put(body):
+        await settings_mod.update_system_settings(body, current_user=su)
+        await asyncio.sleep(0)
+
+    asyncio.run(_put({"web_page_types_enabled": True}))
+    asyncio.run(_put({"maintenance_mode": False}))
+    assert ran == []
+    asyncio.run(_put({"web_page_types_enabled": False}))
+    assert ran == [1]
+    assert db["system_settings"].find_one({"_id": "default"})["maintenance_mode"] is False
+
+
 def test_the_writeback_records_the_template_it_sent(db):
     from api.services.shopify_push.writeback import _writeback_product
 

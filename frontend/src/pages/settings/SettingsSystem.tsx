@@ -132,7 +132,8 @@ function SystemSection({ systemStatus }: { systemStatus: { database: string; api
 // Website page types (owner 2026-10-19): Pre-order / Preview only stay off
 // (the form hides them, the push sends every page standard) until SUPERADMIN
 // switches them on -- after the theme with their templates is published.
-// system_settings.web_page_types_enabled, merged on save like AutoLogout.
+// system_settings.web_page_types_enabled; only that key is sent (the server
+// merges). Switching it off runs the stock pass at once (settings.py).
 function WebPageTypesSetting() {
   const toast = useToast();
   const { hasRole } = useAuth();
@@ -145,10 +146,10 @@ function WebPageTypesSetting() {
 
   const enabled = current?.web_page_types_enabled === true;
   const toggle = async (on: boolean) => {
-    const merged = { ...(current || {}), web_page_types_enabled: on };
     try {
-      await settingsApi.updateSystemSettings(merged);
-      setCurrent(merged);
+      // Only this key: the server merges it into the settings record.
+      await settingsApi.updateSystemSettings({ web_page_types_enabled: on });
+      setCurrent((prev) => ({ ...(prev || {}), web_page_types_enabled: on }));
       toast.success(on ? 'Pre-order and Preview only pages are on.' : 'Every website page is Standard again.');
     } catch {
       toast.error('Could not save the website page setting.');
