@@ -42,10 +42,21 @@ def _input(payload, *, allow_zero=False):
     number = str(payload.get("credit_note_number") or "").strip()
     if not number or len(number) > 120:
         _error("SUPPLIER_NOTE_NUMBER_REQUIRED", "Enter the supplier's actual credit-note number (up to 120 characters).")
+    # The supplier's note date places the input-credit reversal on GSTR-3B
+    # (owner/CA 2026-10-18: the month of the SUPPLIER'S note), so it is read
+    # by THE bill-date rule (ap_engine.iso_bill_date: a real day from the
+    # start of GST to today in IST) -- a mistyped future year would otherwise
+    # move the reversal onto a return nobody files.
+    from .ap_engine import iso_bill_date
+
     try:
-        note_date = date.fromisoformat(str(payload.get("credit_note_date"))).isoformat()
+        note_date = iso_bill_date(str(payload.get("credit_note_date") or "")[:10])
     except (ValueError, TypeError) as exc:
-        raise SupplierCreditError("SUPPLIER_NOTE_DATE_REQUIRED", "Enter the supplier credit-note date as YYYY-MM-DD.") from exc
+        raise SupplierCreditError(
+            "SUPPLIER_NOTE_DATE_REQUIRED",
+            "Enter the date printed on the supplier's credit note as YYYY-MM-DD, "
+            "between 1 July 2017 and today.",
+        ) from exc
     allocations, keys = [], set()
     for allocation in payload.get("allocations") or []:
         key = allocation.get("source_key")
