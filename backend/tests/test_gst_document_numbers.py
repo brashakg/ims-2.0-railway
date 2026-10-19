@@ -412,7 +412,9 @@ def test_inter_gstin_transfer_in_gstr1_b2b(world, to_store, heads):
     assert row["customerGSTIN"] == bill["recipient_gstin"]
     assert row["taxableValue"] == 3700.0
     assert (row["cgst"], row["sgst"], row["igst"]) == heads
-    assert row["invoiceDate"] == bill["tax_invoice_date"][:10]
+    # The date printed on the tax invoice (an IST wall-clock stamp).
+    assert len(row["invoiceDate"]) == 10
+    assert bill["tax_invoice_date"].startswith(row["invoiceDate"])
     assert not any(i.get("issue_code") == "INVOICE_SERIAL_OVER_16"
                    for i in rep["validation"]["issues"])
     # The portal JSON files the same number.
