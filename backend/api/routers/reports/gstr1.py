@@ -351,6 +351,27 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
             )
             _t_rows, transfer_hsn_lines = _transfer_b2b_rows(_t_bills)
             for _t_row in _t_rows:
+                # The transfer tax invoice number against GSTN's rule, the
+                # same check every sale's number gets (an old TRF/ number is
+                # over 16 characters).
+                _gstr1_bill_number(
+                    {"invoice_number": _t_row.get("invoiceNumber")}, validation_issues
+                )
+                _issued = _t_row.get("issuedTaxableValue")
+                if _issued is not None and abs(_issued - _t_row["taxableValue"]) > 0.01:
+                    validation_issues.append(
+                        {
+                            "level": "warn",
+                            "invoice": _t_row.get("invoiceNumber"),
+                            "issue": (
+                                f"Transfer tax invoice was issued at dispatch for "
+                                f"Rs {_issued:.2f} (taxable); Rs "
+                                f"{_t_row['taxableValue']:.2f} was received and is "
+                                "filed here. Issue a credit note for the difference "
+                                "or file the invoice value - ask the CA."
+                            ),
+                        }
+                    )
                 if not _t_row.get("customerGSTIN"):
                     validation_issues.append(
                         {

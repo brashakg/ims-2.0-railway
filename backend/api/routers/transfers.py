@@ -30,6 +30,10 @@ from ..services import org_validation as ov
 from ..services.cost_mask import mask_cost
 from ..services.purchase_invoice_engine import classify_supply
 from ..services.stores_util import is_online_store
+from database.repositories.order_repository import (
+    InvoiceNumberError,
+    next_document_number,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -368,6 +372,38 @@ def generate_transfer_number() -> str:
         return f"TRF-{datetime.now().strftime('%Y%m')}-{seq}"
     TRANSFER_COUNTER["count"] += 1
     return f"TRF-{datetime.now().strftime('%Y%m')}-{TRANSFER_COUNTER['count']}"
+
+
+def _transfer_tax_invoice(transfer: Dict) -> str:
+    """THE tax invoice number of a move between two GST registrations (owner /
+    CA 2026-10-18: a stock move between our shops with DIFFERENT GSTINs is a
+    supply on a TAX INVOICE + e-way bill; one inside one GSTIN stays on a
+    delivery challan and its TRF- number). From the SENDING shop's "T" series
+    of the one mint (order_repository.next_document_number), e.g.
+    BOK02/T2627/0001. Minted ONCE: a number already on the transfer is
+    returned; else one is minted and written only if none landed meanwhile
+    (compare-and-set), so two presses share one number -- the loser's serial
+    is an unused gap, never a second invoice. Stamps tax_invoice_number /
+    tax_invoice_date on `transfer`. Raises InvoiceNumberError (no database, no
+    shop code, ...): the caller refuses, never guesses."""
+    if transfer.get("tax_invoice_number"):
+        return transfer["tax_invoice_number"]
+    db = _get_db()
+    number = next_document_number(db, transfer.get("from_location_id"), "T")
+    issued = utc_now_iso()
+    coll = db.get_collection("stock_transfers")
+    claimed = coll.update_one(
+        {"id": transfer.get("id"), "tax_invoice_number": None},
+        {"$set": {"tax_invoice_number": number, "tax_invoice_date": issued}},
+    )
+    if not claimed.modified_count:
+        stored = coll.find_one({"id": transfer.get("id")}, {"_id": 0}) or {}
+        if stored.get("tax_invoice_number"):
+            number = stored["tax_invoice_number"]
+            issued = stored.get("tax_invoice_date") or issued
+    transfer["tax_invoice_number"] = number
+    transfer["tax_invoice_date"] = issued
+    return number
 
 
 # ============================================================================
@@ -1607,6 +1643,16 @@ async def ship_transfer(
     transfer["gst_registrations"] = {
         "source": list(src), "destination": list(dst), "crosses": crosses,
     }
+    if crosses:
+        # The tax invoice travels with the goods: numbered before any unit
+        # moves, so a refusal leaves nothing shipped.
+        try:
+            _transfer_tax_invoice(transfer)
+        except InvoiceNumberError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot issue this transfer's tax invoice: {exc}",
+            ) from exc
 
     # Create Shiprocket shipment if requested
     if create_shiprocket:
@@ -2413,7 +2459,9 @@ def _bill_date_ist(completed_at_raw) -> str:
     return now_ist_naive().isoformat()
 
 
-def _mirror_bill_lines(db, transfer: Dict, interstate: bool) -> List[Dict]:
+def _mirror_bill_lines(
+    db, transfer: Dict, interstate: bool, shipped: bool = False
+) -> List[Dict]:
     """Per-line taxable + GST for a transfer mirror bill (NEW-GST-TRANSFER-RATES).
 
     Resolves each transferred product's GST rate the SAME way the rest of the
@@ -2440,6 +2488,9 @@ def _mirror_bill_lines(db, transfer: Dict, interstate: bool) -> List[Dict]:
     cost or no quantity are skipped (the caller falls back to the legacy
     aggregate on total_value only when NO item carried usable cost data).
 
+    `shipped`: the units that LEFT the shop instead (_line_expected_qty) --
+    the transfer tax invoice, which travels with the goods, prints these.
+
     Fail-soft: any product-master lookup error degrades that line to the
     app-wide resolve_gst_rate fallback (optical-dominant 5%); never raises.
     """
@@ -2460,7 +2511,7 @@ def _mirror_bill_lines(db, transfer: Dict, interstate: bool) -> List[Dict]:
         qty_raw = item.get("quantity_received")
         if qty_raw is None:
             qty_raw = item.get("quantity_requested")
-        qty = _qty(qty_raw)
+        qty = _line_expected_qty(item) if shipped else _qty(qty_raw)
         cost = _first_cost(item.get("unit_cost"))
         if qty <= 0 or cost <= 0:
             continue
@@ -2496,6 +2547,8 @@ def _mirror_bill_lines(db, transfer: Dict, interstate: bool) -> List[Dict]:
                 "sgst": split["sgst"],
                 "igst": split["igst"],
                 "line_total": split["line_total"],
+                # The units' barcodes (the tax invoice's serial numbers).
+                **({"serials": item.get("shipped_barcodes") or []} if shipped else {}),
             }
         )
     return lines
@@ -2637,8 +2690,19 @@ def _book_mirror_purchase(transfer: Dict) -> None:
                 ]
 
         bill_id = f"mbill_{uuid.uuid4().hex[:12]}"
-        # Bill number mirrors the transfer number so it is traceable.
-        bill_number = f"TRF/{transfer.get('transfer_number', transfer.get('id', ''))}"
+        # The bill IS the sender's transfer tax invoice (GSTR-1 B2B) and the
+        # receiver's inward copy of it: it carries that invoice's number --
+        # minted at ship, or here for a move shipped before ship minted one.
+        # A refused mint books the legacy number, which GSTR-1 flags (over 16
+        # characters): the goods moved, so the supply is never left off unseen.
+        try:
+            bill_number = _transfer_tax_invoice(transfer)
+        except InvoiceNumberError as exc:
+            logger.error(
+                "[TRANSFER] no tax invoice number for transfer %s: %s",
+                transfer.get("id"), exc,
+            )
+            bill_number = f"TRF/{transfer.get('transfer_number', transfer.get('id', ''))}"
         now_iso = utc_now_iso()
         # Filing date in IST frame (the GST tax period is the IST calendar
         # month); completed_at is a naive-UTC stamp -- see _bill_date_ist.
@@ -2650,6 +2714,11 @@ def _book_mirror_purchase(transfer: Dict) -> None:
             "invoice_number": bill_number,
             "bill_date": bill_date_iso,
             "invoice_date": bill_date_iso,
+            # The date printed on the tax invoice (ship); bill_date (complete,
+            # the receipt) still places the bill on both returns.
+            "tax_invoice_date": _bill_date_ist(
+                transfer.get("tax_invoice_date") or transfer.get("completed_at")
+            ),
             # Link back to the transfer for traceability.
             "source_transfer_id": transfer.get("id"),
             "source_transfer_number": transfer.get("transfer_number"),

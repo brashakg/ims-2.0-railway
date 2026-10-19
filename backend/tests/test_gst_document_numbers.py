@@ -209,3 +209,291 @@ def test_duplicate_key_from_another_shop_names_it():
                        match="already used this financial year by store BV-PUN-01"):
         next_document_number(db, "BV-BOK-02", "", MAY_2026)
     assert calls["n"] == 2  # one retry, then the real reason
+
+
+# ===========================================================================
+# 1. Inter-GSTIN stock transfer = a TAX INVOICE from the sender's T series
+# ===========================================================================
+
+mongomock = pytest.importorskip("mongomock")
+
+GSTIN_Z_JH = "20AAACZ1111A1ZH"  # company Z, Jharkhand (both Dhanbad shops)
+GSTIN_Z_MH = "27AAACZ1111A1Z3"  # company Z, Maharashtra (Pune)
+GSTIN_Y_JH = "20AAACY2222B1ZA"  # company Y, Jharkhand (Bokaro)
+UNIT_COST = 1850.0
+
+
+def _shop(sid, code, name, entity, gstin, state, pin):
+    return {
+        "store_id": sid, "store_name": name, "name": name, "entity_id": entity,
+        "gstin": gstin, "state": state, "state_code": gstin[:2], "address": f"{name} Road",
+        "city": name.split()[-1], "pincode": pin, "store_type": "PHYSICAL",
+        "invoice_code": code,
+    }
+
+
+SHOPS = [
+    _shop("ST-DHN-1", "DHN01", "Hirapur Dhanbad", "ENT-Z", GSTIN_Z_JH, "Jharkhand", "826001"),
+    _shop("ST-DHN-2", "DHN02", "Bank More Dhanbad", "ENT-Z", GSTIN_Z_JH, "Jharkhand", "826009"),
+    _shop("ST-BOK-1", "BOK01", "Sector 4 Bokaro", "ENT-Y", GSTIN_Y_JH, "Jharkhand", "827004"),
+    _shop("ST-PUN-1", "PUN01", "FC Road Pune", "ENT-Z", GSTIN_Z_MH, "Maharashtra", "411004"),
+]
+ADMIN = {"user_id": "u-admin", "username": "admin", "roles": ["ADMIN"],
+         "store_ids": [], "active_store_id": None}
+ACCOUNTS = {"user_id": "u-acc", "username": "acc", "roles": ["ACCOUNTANT"],
+            "store_ids": ["ST-DHN-1"], "active_store_id": "ST-DHN-1"}
+
+
+class _Conn:
+    is_connected = True
+
+    def __init__(self, db):
+        self.db = db
+
+    def __getattr__(self, name):
+        return self.db[name]
+
+
+@pytest.fixture
+def world(monkeypatch):
+    from api import dependencies as deps
+    from api.routers import reports, transfers
+    from database.repositories import order_repository as repo_module
+
+    handle = mongomock.MongoClient()["ims_gstnum"]
+    handle["entities"].insert_many([
+        {"entity_id": "ENT-Z", "legal_name": "Zed Opticals Pvt Ltd", "gstins": [
+            {"gstin": GSTIN_Z_JH, "state_code": "20", "is_primary": True},
+            {"gstin": GSTIN_Z_MH, "state_code": "27"}]},
+        {"entity_id": "ENT-Y", "legal_name": "Wye Vision LLP",
+         "gstins": [{"gstin": GSTIN_Y_JH, "state_code": "20"}]},
+    ])
+    handle["stores"].insert_many([dict(s) for s in SHOPS])
+    handle["products"].insert_one({
+        "product_id": "P-1", "sku": "FR-1", "name": "Carrera Frame", "category": "FRAME",
+        "hsn_code": "900311", "cost_price": 2000.0,
+    })
+    handle["stock_units"].insert_many([
+        {"stock_id": f"SU-{n}", "product_id": "P-1", "store_id": "ST-DHN-1",
+         "status": "AVAILABLE", "barcode": f"BVQX0{n}", "unit_cost": UNIT_COST}
+        for n in range(1, 41)
+    ])
+    monkeypatch.setattr(deps, "get_db", lambda: _Conn(handle))
+    monkeypatch.setattr(reports, "_get_raw_db", lambda: handle)
+    monkeypatch.setattr(transfers, "_writeback_units_left", lambda *a, **k: None)
+    # The FY of every number minted here (the books' dates stay real time).
+    monkeypatch.setattr(repo_module, "now_ist", lambda: MAY_2026)
+    transfers.STOCK_TRANSFERS.clear()
+    return handle
+
+
+def _run(coro):
+    import asyncio
+
+    return asyncio.run(coro)
+
+
+def _ship_to(to_store, qty=2, frm="ST-DHN-1"):
+    from api.routers import transfers
+
+    body = transfers.TransferInput(
+        transfer_type="store_to_store",
+        from_location_id=frm, from_location_name="Hirapur Dhanbad",
+        to_location_id=to_store,
+        to_location_name=next(s["store_name"] for s in SHOPS if s["store_id"] == to_store),
+        items=[transfers.TransferItemInput(product_id="P-1", sku="FR-1",
+                                           product_name="Carrera Frame",
+                                           quantity_requested=qty)],
+    )
+    t = _run(transfers.create_transfer(body, ADMIN))["transfer"]
+    return _run(transfers.ship_transfer(t["id"], None, None, None, False, ADMIN))["transfer"]
+
+
+def _receive_complete(t, received=None):
+    from api.routers import transfers
+
+    line = transfers._get_transfer(t["id"])["items"][0]
+    qty = line["quantity_shipped"] if received is None else received
+    _run(transfers.receive_transfer(
+        t["id"], [transfers.TransferItemReceive(transfer_item_id=line["id"],
+                                                quantity_received=qty)], ADMIN))
+    _run(transfers.complete_transfer(t["id"], None, ADMIN))
+
+
+def _gstr1(world, store="ST-DHN-1"):
+    from api.routers import reports
+
+    bill = world["vendor_bills"].find_one({}) or {}
+    month = str(bill.get("bill_date") or datetime.now(IST).isoformat())[:7]
+    return reports._compute_gstr1(month, store)
+
+
+def test_inter_gstin_ship_mints_the_senders_t_number(world):
+    t = _ship_to("ST-BOK-1")
+    assert t["tax_invoice_number"] == "DHN01/T2627/0001"
+    assert len(t["tax_invoice_number"]) == 16
+    stored = world["stock_transfers"].find_one({"id": t["id"]})
+    assert stored["tax_invoice_number"] == "DHN01/T2627/0001" and stored["tax_invoice_date"]
+    # The transfer keeps its own TRF- number; the tax invoice is separate.
+    assert t["transfer_number"].startswith("TRF-")
+
+
+def test_inter_gstin_ship_mints_once_on_retry_and_race(world):
+    from api.routers import transfers
+
+    t = _ship_to("ST-BOK-1")
+    again = transfers._get_transfer(t["id"])
+    assert transfers._transfer_tax_invoice(again) == "DHN01/T2627/0001"
+    # Two presses racing on a transfer with no number yet: one number lands,
+    # both answer it, the other serial is a gap.
+    world["stock_transfers"].update_one(
+        {"id": t["id"]}, {"$unset": {"tax_invoice_number": "", "tax_invoice_date": ""}}
+    )
+    copies = [transfers._get_transfer(t["id"]) for _ in range(2)]
+    barrier = threading.Barrier(2, timeout=20)
+    real = transfers.next_document_number
+
+    def slow(*a, **k):
+        n = real(*a, **k)
+        barrier.wait()
+        return n
+
+    transfers.next_document_number = slow
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            got = list(pool.map(transfers._transfer_tax_invoice, copies))
+    finally:
+        transfers.next_document_number = real
+    stored = world["stock_transfers"].find_one({"id": t["id"]})["tax_invoice_number"]
+    assert got == [stored, stored]
+    assert world["counters"].find_one({"_id": "gstdoc-T:DHN01:2026"})["seq"] == 3
+
+
+def test_ship_refused_when_the_sender_cannot_number_it(world):
+    world["stores"].update_one({"store_id": "ST-DHN-1"}, {"$set": {"invoice_code": "BOK01"}})
+    with pytest.raises(Exception) as exc:
+        _ship_to("ST-BOK-1")
+    assert getattr(exc.value, "status_code", None) == 400
+    assert "tax invoice" in exc.value.detail and "BOK01" in exc.value.detail
+    assert world["stock_units"].count_documents({"status": "AVAILABLE"}) == 40
+
+
+def test_same_gstin_transfer_stays_on_a_challan_not_in_gstr1(world):
+    from api.routers import print_documents
+
+    t = _ship_to("ST-DHN-2")
+    assert "tax_invoice_number" not in t
+    _receive_complete(t)
+    assert world["vendor_bills"].count_documents({}) == 0
+    assert world["counters"].count_documents({"_id": {"$regex": "^(invoice|gstdoc)"}}) == 0, list(world["counters"].find())
+    rep = _gstr1(world)
+    assert rep["b2b"] == [] and rep["totalTax"] == 0.0
+    html = _run(print_documents.delivery_challan_for_transfer(
+        t["id"], "ORIGINAL", False, ACCOUNTS)).body.decode()
+    assert "Delivery Challan" in html and t["transfer_number"] in html
+    assert "<h2>Tax Invoice</h2>" not in html and "Not a Tax Invoice" in html
+    with pytest.raises(Exception) as exc:
+        _run(print_documents.tax_invoice_for_transfer(t["id"], "ORIGINAL", False, ACCOUNTS))
+    assert exc.value.status_code == 409
+
+
+@pytest.mark.parametrize("to_store,heads", [
+    ("ST-BOK-1", (92.5, 92.5, 0.0)),   # two companies, one state: CGST + SGST
+    ("ST-PUN-1", (0.0, 0.0, 185.0)),   # one company, two states: IGST
+])
+def test_inter_gstin_transfer_in_gstr1_b2b(world, to_store, heads):
+    t = _ship_to(to_store)
+    _receive_complete(t)
+    (bill,) = world["vendor_bills"].find({"source_transfer_id": t["id"]})
+    assert bill["invoice_number"] == bill["bill_number"] == "DHN01/T2627/0001"
+    rep = _gstr1(world)
+    (row,) = rep["b2b"]
+    assert row["invoiceNumber"] == "DHN01/T2627/0001"
+    assert row["customerGSTIN"] == bill["recipient_gstin"]
+    assert row["taxableValue"] == 3700.0
+    assert (row["cgst"], row["sgst"], row["igst"]) == heads
+    assert row["invoiceDate"] == bill["tax_invoice_date"][:10]
+    assert not any(i.get("issue_code") == "INVOICE_SERIAL_OVER_16"
+                   for i in rep["validation"]["issues"])
+    # The portal JSON files the same number.
+    from api.services.gstn_export import to_gstr1_json
+
+    out = to_gstr1_json(rep, gstin=GSTIN_Z_JH, period="2026-10")
+    assert [inv["inum"] for b in out["b2b"] for inv in b["inv"]] == ["DHN01/T2627/0001"]
+    # The receiver's inward copy: the same doc, booked to the receiving shop.
+    assert (bill["to_store_id"], bill["store_id"], bill["recipient_entity_id"]) == (
+        to_store, to_store, "ENT-Y" if to_store == "ST-BOK-1" else "ENT-Z")
+
+
+def test_short_receipt_is_flagged_against_the_issued_invoice(world):
+    t = _ship_to("ST-BOK-1")
+    _receive_complete(t, received=1)
+    rep = _gstr1(world)
+    assert rep["b2b"][0]["taxableValue"] == UNIT_COST
+    issues = [i["issue"] for i in rep["validation"]["issues"]]
+    assert any("issued at dispatch for Rs 3700.00" in i for i in issues), issues
+
+
+def test_a_move_shipped_before_numbering_is_numbered_at_complete(world):
+    t = _ship_to("ST-BOK-1")
+    world["stock_transfers"].update_one(
+        {"id": t["id"]}, {"$unset": {"tax_invoice_number": "", "tax_invoice_date": ""}}
+    )
+    world["counters"].delete_many({})
+    _receive_complete(t)
+    (bill,) = world["vendor_bills"].find({})
+    assert bill["invoice_number"] == "DHN01/T2627/0001"
+    stored = world["stock_transfers"].find_one({"id": t["id"]})
+    assert stored["tax_invoice_number"] == "DHN01/T2627/0001"
+
+
+def test_gstr1_flags_an_old_transfer_number(world):
+    """A mirror bill booked before T numbers (TRF/TRF-YYYYMM-NNNN, 19 chars)
+    is filed verbatim and FLAGGED, never passed unchecked."""
+    t = _ship_to("ST-BOK-1")
+    _receive_complete(t)
+    world["vendor_bills"].update_one({}, {"$set": {"invoice_number": "TRF/TRF-202610-1001",
+                                                   "bill_number": "TRF/TRF-202610-1001"}})
+    rep = _gstr1(world)
+    assert rep["b2b"][0]["invoiceNumber"] == "TRF/TRF-202610-1001"
+    (issue,) = [i for i in rep["validation"]["issues"]
+                if i.get("issue_code") == "INVOICE_SERIAL_OVER_16"]
+    assert "19 characters" in issue["issue"]
+
+
+def test_transfer_tax_invoice_prints_with_eway_data(world):
+    from api.routers import print_documents
+
+    t = _ship_to("ST-PUN-1")
+    html = _run(print_documents.tax_invoice_for_transfer(
+        t["id"], "ORIGINAL", False, ACCOUNTS)).body.decode()
+    assert "<h2>Tax Invoice</h2>" in html and "DHN01/T2627/0001" in html
+    assert GSTIN_Z_JH in html and GSTIN_Z_MH in html and "411004" in html
+    assert "<td>900311</td>" in html and "BVQX01" in html
+    assert "E-way Bill Data" in html and "Vehicle No." in html
+    assert "E-way bill REQUIRED" not in html  # Rs 3,885 consignment
+
+
+def test_eway_bill_flag_over_rs_50000(world):
+    from api.routers import print_documents
+
+    t = _ship_to("ST-PUN-1", qty=26)  # 26 x 1850 = 48,100 + 5% IGST = 50,505
+    html = _run(print_documents.tax_invoice_for_transfer(
+        t["id"], "ORIGINAL", False, ACCOUNTS)).body.decode()
+    assert "E-way bill REQUIRED" in html and "50,505.00" in html
+
+
+def test_eway_flag_boundary_is_strictly_over_50000():
+    from api.services.print_render import render_transfer_tax_invoice
+
+    def page(total):
+        return render_transfer_tax_invoice(
+            entity={}, store={}, invoice_number="DHN01/T2627/0001", invoice_date=MAY_2026,
+            supplier_name="Z", supplier_address="", supplier_gstin=GSTIN_Z_JH,
+            recipient_name="Y", recipient_address="", recipient_gstin=GSTIN_Y_JH,
+            lines=[{"description": "Frame", "hsn": "900311", "qty": 1, "unit_price": total,
+                    "taxable": total, "gst_rate": 0, "line_total": total}],
+        )
+
+    assert "E-way bill REQUIRED" not in page(50000.0)
+    assert "E-way bill REQUIRED" in page(50000.01)

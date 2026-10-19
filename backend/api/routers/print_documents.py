@@ -16,6 +16,9 @@ media_type="text/html" so the browser prints it directly.
 Routes (mounted at /api/v1/print):
   GET /api/v1/print/delivery-challan/order/{order_id}
   GET /api/v1/print/delivery-challan/transfer/{transfer_id}
+  GET /api/v1/print/transfer-invoice/{transfer_id}  (owner / CA 2026-10-18: a
+      move between two GST registrations travels on a TAX INVOICE + e-way bill
+      data instead of a challan)
 
 Auth: POS-capable roles + ACCOUNTANT (the challan render is read-only but
 surfaces party + line data, so it sits one tier wider than POS writes); a
@@ -41,7 +44,10 @@ from ..dependencies import (
     validate_store_access,
 )
 from ..services.cost_mask import can_see_cost
-from ..services.print_render import render_delivery_challan
+from ..services.print_render import (
+    render_delivery_challan,
+    render_transfer_tax_invoice,
+)
 from ..services.print_identity import (
     assert_issuing_identity,
     load_entity_for_store,
@@ -237,16 +243,18 @@ async def delivery_challan_for_transfer(
     auto_print: bool = Query(False, description="Auto-trigger the print dialog on load"),
     current_user: dict = Depends(get_current_user),
 ) -> HTMLResponse:
-    """Render a delivery challan for an inter-store stock transfer.
+    """Render the paper an inter-store stock transfer travels on.
 
-    D13 (owner ruling 2026-09-29, until the CA confirms): a move between two
-    GST registrations -- transfers._transfer_registrations, the rule the FIN-3
-    mirror bill books on -- travels on a VALUED delivery challan: the units'
-    own cost (stamped at ship), HSN, both GSTINs. If the CA rules it a tax
-    invoice, the `valued` branch below is the one place that changes. A move
-    inside one registration keeps the unvalued challan. Every challan carries
-    the transfer's own number, what shipped and the units' barcodes. Printing
-    writes nothing: the challan is a paper, never a sale or a GSTR-1 row."""
+    A move inside one GST registration: the unvalued delivery challan. A move
+    between two registrations (transfers._transfer_registrations, the rule
+    the FIN-3 mirror bill books on): the owner / CA ruled it a TAX INVOICE
+    (2026-10-18, replacing D13's valued challan), so the `valued` branch
+    prints the transfer tax invoice + e-way bill data, numbered at ship from
+    the sending shop's T series -- the units' own cost (stamped at ship),
+    HSN, both GSTINs. A crossing move shipped before ship numbered it keeps
+    D13's valued challan (its paper travelled). Every paper carries the
+    transfer's own number, what shipped and the units' barcodes. Printing
+    writes nothing: the books are the mirror bill's (GSTR-1 B2B)."""
     _require_challan_role(current_user)
 
     # Reuse the transfers router persistence + access guard + the one rule.
@@ -321,16 +329,32 @@ async def delivery_challan_for_transfer(
         )
 
     to_legal = str((to_entity or {}).get("legal_name") or "").strip()
-    consignee_address = ", ".join(
-        str(p)
-        for p in (
-            (to_store or {}).get("address"),
-            (to_store or {}).get("city"),
-            (to_store or {}).get("state"),
-            (to_store or {}).get("pincode"),
+    consignee_address = _address(to_store)
+    to_label = f"{to_legal} ({to_name})" if to_legal and to_name else (to_legal or to_name)
+
+    if valued and transfer.get("tax_invoice_number"):
+        from .transfers import _get_db, _mirror_bill_lines
+        from ..services.purchase_invoice_engine import classify_supply
+
+        interstate = bool(classify_supply(from_gstin, to_gstin)["interstate"])
+        html = render_transfer_tax_invoice(
+            entity=entity,
+            store=store,
+            invoice_number=transfer["tax_invoice_number"],
+            invoice_date=transfer.get("tax_invoice_date") or transfer.get("shipped_at"),
+            supplier_name=str((entity or {}).get("legal_name") or "").strip() or from_name,
+            supplier_address=_address(store),
+            supplier_gstin=from_gstin,
+            recipient_name=to_label,
+            recipient_address=consignee_address,
+            recipient_gstin=to_gstin,
+            lines=_mirror_bill_lines(_get_db(), transfer, interstate, shipped=True),
+            transfer_number=transfer.get("transfer_number") or "",
+            copy_marker=copy,
+            overrides=load_overrides(entity, "tax_invoice"),
+            auto_print=bool(auto_print),
         )
-        if p
-    )
+        return HTMLResponse(content=html)
 
     html = render_delivery_challan(
         entity=entity,
@@ -341,7 +365,7 @@ async def delivery_challan_for_transfer(
         or transfer.get("created_at")
         or datetime.now(timezone.utc),
         from_label=from_name,
-        to_label=f"{to_legal} ({to_name})" if to_legal and to_name else (to_legal or to_name),
+        to_label=to_label,
         consignee_name=to_name,
         consignee_address=consignee_address,
         consignor_gstin=from_gstin,
@@ -358,3 +382,46 @@ async def delivery_challan_for_transfer(
         auto_print=bool(auto_print),
     )
     return HTMLResponse(content=html)
+
+
+def _address(store: Dict[str, Any]) -> str:
+    return ", ".join(
+        str(p)
+        for p in (
+            (store or {}).get("address"),
+            (store or {}).get("city"),
+            (store or {}).get("state"),
+            (store or {}).get("pincode"),
+        )
+        if p
+    )
+
+
+@router.get("/transfer-invoice/{transfer_id}", response_class=HTMLResponse)
+async def tax_invoice_for_transfer(
+    transfer_id: str,
+    copy: str = Query("ORIGINAL", description="ORIGINAL | DUPLICATE | TRIPLICATE"),
+    auto_print: bool = Query(False, description="Auto-trigger the print dialog on load"),
+    current_user: dict = Depends(get_current_user),
+) -> HTMLResponse:
+    """The tax invoice (and e-way bill data) of a stock move between two GST
+    registrations -- owner / CA 2026-10-18; numbered at ship from the sending
+    shop's T series (transfers._transfer_tax_invoice). The one transfer paper
+    route prints it (its valued branch: who prints it, the lines, the
+    refusals); this door only refuses a transfer that has no tax invoice.
+    Either side of the move prints it, so the receiving shop keeps its
+    inward copy."""
+    from .transfers import _assert_transfer_access, _get_transfer
+
+    transfer = _get_transfer(transfer_id)
+    if not transfer:
+        raise HTTPException(status_code=404, detail="Transfer not found")
+    _assert_transfer_access(transfer, current_user, side="either")
+    if not transfer.get("tax_invoice_number"):
+        raise HTTPException(
+            status_code=409,
+            detail="This transfer has no tax invoice: a move inside one GST "
+            "registration travels on a delivery challan, and one shipped before "
+            "transfer tax invoices began on its valued challan.",
+        )
+    return await delivery_challan_for_transfer(transfer_id, copy, auto_print, current_user)
