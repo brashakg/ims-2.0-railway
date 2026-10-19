@@ -52,9 +52,17 @@ def test_every_row_passes_the_door_validator():
     assert all(0 < d["cost_price"] < d["mrp"] for d in docs)
     # material follows the index, never the old CLEAR / BLUEGUARD option
     assert {(d["index"], d["material"]) for d in docs} == {
-        (1.5, "CR39"), (1.56, "PLASTIC_156"), (1.59, "POLY"), (1.6, "MR8"),
+        (1.5, "CR39"), (1.56, "KOC55"), (1.59, "POLY"), (1.6, "MR8"),
         (1.67, "MR7_MR10"), (1.74, "MR174")}
-    assert added["materials"] == ["MR7_MR10", "PLASTIC_156"]
+    assert added["materials"] == ["MR7_MR10", "KOC55"]
+    koc = [d for d in docs if d["material"] == "KOC55"]
+    assert len(koc) == 8 and all("Material: KOC 55 Plastic." in d["notes"] for d in koc)
+    # DriveSafe: DuraVision DriveSafe UV (owner 10-19); SV DriveSafe keeps the IMS default range
+    drive = [d for d in docs if "DriveSafe" in d["series"]]
+    assert len(drive) == 16 and all(d["coating"] == "DV_DRIVESAFE_UV" for d in drive)
+    sv = [d for d in drive if d["series"].startswith("Single Vision")]
+    assert len(sv) == 8 and all(d["sph_range"] == {"min": -8.0, "max": 6.0, "step": 0.25}
+                                and "IMS default range applied (owner 10-19)" in d["notes"] for d in sv)
     # the priced option lives in the series, so both lines survive
     assert any(d["series"] == "Progressive ClassicPlus V Photo Grey" for d in docs)
 
@@ -81,6 +89,10 @@ def test_upgrade_lists_follow_zeiss_rules():
     assert "Polarised" not in names(_line(docs, "Progressive ClearMind Individual 3", 1.59, "DVP_PLATINUM_UV"))
     assert "Mirror" in names(_line(docs, "Progressive Light 2 3Dv", 1.5, "DVP_PLATINUM_UV"))
     assert "Mirror" not in names(_line(docs, "Progressive Light 2 3D", 1.5, "DVP_PLATINUM_UV"))
+    # "(Individual)" on Digital SmartLife covers Individual AND Individual 3 (owner 10-19)
+    for series in ("Digital SmartLife Individual", "Digital SmartLife Individual 3"):
+        assert {"Mirror", "Flash"} <= set(names(_line(docs, series, 1.5, "DVP_PLATINUM_UV")))
+    assert "Mirror" not in names(_line(docs, "Digital SmartLife", 1.5, "DVP_PLATINUM_UV"))
 
 
 def test_upgrade_cost_is_masked_like_the_line_cost():

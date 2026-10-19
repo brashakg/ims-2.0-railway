@@ -18,8 +18,8 @@ routers/lens_catalog.py) uses:
   * mrp = the ZEISS SRP, INR per PAIR, GST-inclusive (owner 10-19: per pair,
     as ZEISS prints it); cost_price = the ZEISS WSP (our purchase price),
     INR per PAIR, EXCLUSIVE of GST (the WSP's own wording);
-  * material = the substrate ZEISS publishes for the index (MATERIAL_BY_INDEX,
-    owner 10-19); the ZEISS option the PDF prices separately (Photo Grey,
+  * material = the CSV `material`: the substrate of the index (owner 10-19,
+    see MATERIAL_LABEL); the ZEISS option the PDF prices separately (Photo Grey,
     BlueGuard, UVProtect, PhotoFusion X...) is the CSV `variant` and goes into
     the series name, so each priced line keeps its own lens_line_id;
   * upgrades = the add-ons staff may tick at billing (owner 10-19: a LIST on
@@ -94,14 +94,16 @@ SOURCE = "ZEISS SRP Price with ClearMind April 2026 (INR/pair incl. GST)"
 COST_SOURCE = "ZEISS WSP with ClearMind April 2026 (INR/pair excl. GST)"
 HSN = "900150"  # gst_rates.py: OPTICAL_LENS -> ("900150", 5.0)
 GST = 5.0
-# The substrate ZEISS publishes per index (owner 10-19: "material depends on
-# lens index"). Sources: ZEISS ClearView lens spec 6/23 (1.50 ADC hard resin,
-# 1.59 polycarbonate, 1.60 MR-8, 1.67 MR-7, 1.74 MR-174 episulphide), ZEISS
-# semi-finished SV fact sheets 06/23 (1.67 in both MR-10 and MR-7),
-# zeiss.co.in ("Polycarbonate 1.59"). ZEISS publishes no substrate for 1.56:
-# PLASTIC_156 is ZEISS India's own "Plastic" wording until ZEISS names it.
-MATERIAL_BY_INDEX = {1.5: "CR39", 1.56: "PLASTIC_156", 1.59: "POLY", 1.6: "MR8",
-                     1.67: "MR7_MR10", 1.74: "MR174"}
+# The CSV `material` is the substrate of the index (owner 10-19: "material
+# depends on lens index"). Sources: ZEISS ClearView lens spec 6/23 (1.50 ADC
+# hard resin, 1.59 polycarbonate, 1.60 MR-8, 1.67 MR-7, 1.74 MR-174
+# episulphide), ZEISS semi-finished SV fact sheets 06/23 (1.67 in both MR-10
+# and MR-7), zeiss.co.in ("Polycarbonate 1.59"); 1.56 = KOC 55 Plastic (owner
+# 10-19 -- ZEISS publishes no 1.56 resin). Enum lists hold bare codes, so the
+# readable name goes into the line's notes.
+MATERIAL_LABEL = {"CR39": "CR-39 type hard resin", "KOC55": "KOC 55 Plastic",
+                  "POLY": "Polycarbonate", "MR8": "MR-8", "MR7_MR10": "MR-7 / MR-10",
+                  "MR174": "MR-174"}
 # CSV variant -> the words appended to the series (as ZEISS names the product).
 VARIANT_LABEL = {"PHOTO_GREY": "Photo Grey", "PHOTOFUSION_GREY": "PhotoFusion Grey",
                  "PHOTOFUSION_X": "PhotoFusion X", "BLUEGUARD": "BlueGuard",
@@ -186,12 +188,12 @@ def upgrades_for(row: Dict[str, str], upgrades: List[Dict[str, str]]) -> List[Di
 
 def to_payload(row: Dict[str, str], upgrades: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
     """CSV row -> the POST /lens-catalog body the door would receive."""
-    index = round(float(row["index"]), 2)
     series = row["series"]
     label = VARIANT_LABEL.get(row["variant"])
     if label and label.lower() not in series.lower():
         series = "%s %s" % (series, label)
-    notes = ["%s. Family: %s. Coating: %s." % (SOURCE, row["family"], row["coating_name"])]
+    notes = ["%s. Family: %s. Coating: %s. Material: %s." % (
+        SOURCE, row["family"], row["coating_name"], MATERIAL_LABEL[row["material"]])]
     if row["wsp_inr_per_pair_excl_gst"].strip():
         notes.append("Cost = %s, WSP p%s." % (COST_SOURCE, row["wsp_pdf_page"]))
     if row["diameters_mm"]:
@@ -201,7 +203,7 @@ def to_payload(row: Dict[str, str], upgrades: Optional[List[Dict[str, str]]] = N
         notes.append(row["notes"] + ".")
     p: Dict[str, Any] = {
         "brand": row["brand"], "series": series, "index": float(row["index"]),
-        "material": MATERIAL_BY_INDEX[index], "lens_type": row["lens_type"], "coating": row["coating"],
+        "material": row["material"], "lens_type": row["lens_type"], "coating": row["coating"],
         "mrp": float(row["srp_inr_per_pair_incl_gst"]), "gst_rate": GST, "hsn_code": HSN,
         "notes": " ".join(notes),
         "upgrades": upgrades_for(row, upgrades or []),
@@ -212,7 +214,7 @@ def to_payload(row: Dict[str, str], upgrades: Optional[List[Dict[str, str]]] = N
         p["sph_range"] = {"min": float(row["sph_min"]), "max": float(row["sph_max"]), "step": 0.25}
         p["cyl_range"] = {"min": -float(row["cyl_max"]), "max": 0.0, "step": 0.25}
     else:
-        p["notes"] += " Power range not printed in the PDF - IMS default range applied, confirm with ZEISS."
+        p["notes"] += " ZEISS prints no power range - IMS default range applied (owner 10-19)."
     add_min = _f(row["add_min"])
     p["has_add"] = add_min is not None
     if add_min is not None:
