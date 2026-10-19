@@ -264,21 +264,30 @@ def _receipt_of(db, unit):
     return gid, grn.get("vendor_id"), grn.get("store_id")
 
 
-def _bought_on_other_gstin(db, receipt_store, store_id, gstins) -> Optional[str]:
-    """The receiving shop's name when the piece was bought on a GSTIN other
-    than the returning shop's (CA ruling: a move between two registrations is
-    a sale between distinct persons -- the goods go back from the GSTIN that
-    bought them). None when the same shop, the same GSTIN, or either GSTIN is
-    not on file. `gstins` caches org_validation.shop_gstins for the request."""
+def _shop_name(db, store_id) -> str:
+    shop = db.get_collection("stores").find_one({"store_id": store_id}) or {}
+    return shop.get("store_name") or shop.get("name") or store_id
+
+
+def _gstin_refusal(db, receipt_store, store_id, gstins, label) -> Optional[str]:
+    """Why a piece received at ANOTHER shop cannot go back from this one; None
+    when it can. CA ruling: a move between two registrations is a sale
+    between distinct persons, so the goods go back from the GSTIN that bought
+    them -- the same shop or a shop under the same GSTIN only. As the transfer
+    rule, never a guess: a GSTIN not on file for either shop refuses loudly.
+    `gstins` caches org_validation.shop_gstins for the request."""
     if not receipt_store or receipt_store == store_id:
         return None
     if "map" not in gstins:
         gstins["map"] = shop_gstins(db)
-    bought, here = gstins["map"].get(receipt_store), gstins["map"].get(store_id)
-    if not bought or not here or bought == here:
-        return None
-    shop = db.get_collection("stores").find_one({"store_id": receipt_store}) or {}
-    return shop.get("store_name") or shop.get("name") or receipt_store
+    for shop in (receipt_store, store_id):
+        if not gstins["map"].get(shop):
+            return (f"GSTIN missing for {_shop_name(db, shop)} - set it in Settings before "
+                    "returning this piece")
+    if gstins["map"][receipt_store] != gstins["map"][store_id]:
+        return (f"Piece {label} was bought on {_shop_name(db, receipt_store)}'s GSTIN - "
+                "transfer it back there first.")
+    return None
 
 
 def _typed_line_problem(db, item, store_id) -> Optional[str]:
@@ -333,10 +342,9 @@ def _pieces_for_lines(db, data: "VendorReturnCreate", user):
             # Rejected at receiving: it goes back to the supplier that sent it.
             _refuse(f"Piece {_label(unit, sid)} was rejected at receiving and its supplier "
                     "could not be checked. Open its receiving rejection instead.")
-        other_shop = _bought_on_other_gstin(db, receipt_store, data.store_id, gstins)
-        if other_shop:
-            _refuse(f"Piece {_label(unit, sid)} was bought on {other_shop}'s GSTIN - transfer "
-                    "it back there first.")
+        why_not_here = _gstin_refusal(db, receipt_store, data.store_id, gstins, _label(unit, sid))
+        if why_not_here:
+            _refuse(why_not_here)
         if not vendor:
             no_receipt.add(sid)
     if not _may_take_from_shelf(user) and any(_ie.is_on_hand(units[s].get("status")) for s in every):

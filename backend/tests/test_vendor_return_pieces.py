@@ -607,3 +607,23 @@ def test_a_save_that_never_finished_stops_holding_its_pieces(w):
     unit(w, "U2", status="QUARANTINED", rtv_vendor_id="VR-LIVE")
     held = create(w, line(stock_ids=["U2"]))
     assert held.status_code == 422 and "VR-LIVE" in held.json()["detail"]
+
+
+def test_a_piece_from_another_shop_with_no_gstin_on_file_is_refused_loudly(w):
+    # Another shop, no GSTIN on file: IMS cannot tell the registration -> refuse.
+    # (A shop whose company holds no registration for its state.)
+    w["db"].stores.insert_one({"store_id": "BV-NOGST", "store_name": "BV No GST", "state_code": "27",
+                               "entity_id": ENTITY, "is_active": True})
+    w["db"].grns.insert_many([{"grn_id": "GRN-NOGST", "vendor_id": DEALER, "store_id": "BV-NOGST"},
+                              {"grn_id": "GRN-HERE", "vendor_id": DEALER, "store_id": STORE}])
+    unit(w, "NG1", grn_id="GRN-NOGST")
+    refused = create(w, line(stock_ids=["NG1"]))
+    assert refused.status_code == 422
+    assert refused.json()["detail"] == (
+        "GSTIN missing for BV No GST - set it in Settings before returning this piece")
+    assert state(w, "NG1")["status"] == "AVAILABLE"
+    # The same shop needs no GSTIN check at all, even with none on file.
+    w["db"].stores.update_one({"store_id": STORE}, {"$unset": {"gstin": "", "state_code": "", "state": ""}})
+    unit(w, "HERE1", grn_id="GRN-HERE")
+    same_shop = create(w, line(stock_ids=["HERE1"]))
+    assert same_shop.status_code == 201, same_shop.text
