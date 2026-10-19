@@ -99,7 +99,7 @@ async def get_technician_workload(
     repo = get_workshop_repository()
     active_store = store_in_view(store_id, current_user)
 
-    if repo and active_store:
+    if repo:
         workload = repo.get_technician_workload(active_store)
         return {"workload": workload}
 
@@ -159,7 +159,7 @@ async def get_dashboard_kpis(
         "as_of": datetime.now().isoformat(),
     }
 
-    if repo is None or not active_store:
+    if repo is None:
         return mask_cost(empty, current_user, "product")
 
     try:

@@ -65,7 +65,7 @@ async def list_lab_stations(
     Seeds the 6 defaults on first use. Fail-soft: no DB -> empty list."""
     from ...services import lab_routing
 
-    active_store = store_in_view(store_id, current_user)
+    active_store = store_in_view(store_id, current_user, one_shop=True)
     db = get_db()
     if db is None or not active_store:
         return {"stations": [], "store_id": active_store}
@@ -164,7 +164,7 @@ async def get_station_queue(
     Each row carries time-at-station + an SLA colour chip. Store-scoped."""
     from ...services import lab_routing
 
-    active_store = store_in_view(store_id, current_user)
+    active_store = store_in_view(store_id, current_user, one_shop=True)
     db = get_db()
     if db is None or not active_store:
         return {"station": code.upper(), "store_id": active_store, "jobs": [], "total": 0}

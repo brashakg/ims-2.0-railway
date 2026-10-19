@@ -216,6 +216,9 @@ def initialize_registry(db=None):
     # TASKMASTER acts on actionable signals (the only agent that writes state)
     subscribe_event("anomaly.detected",    "taskmaster")
     subscribe_event("sla.breached",        "taskmaster")
+    # F21: a piece set aside (quarantine screen, damaged customer return) gets
+    # its 7-day "send it to the supplier or clear it" follow-up.
+    subscribe_event("stock.quarantined",   "taskmaster")
 
     # NEXUS handles inbound webhooks
     subscribe_event("webhook.received",  "nexus")

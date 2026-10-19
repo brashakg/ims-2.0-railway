@@ -3,8 +3,11 @@
 from api.utils.event_time import utc_now_iso
 
 from ._shared import (
+    BaseModel,
     Depends,
+    Field,
     HTTPException,
+    logger,
     Optional,
     Query,
     _AP_ROLES,
@@ -23,6 +26,7 @@ from .ap_bills import (
     VendorPaymentCreate,
     _clean,
     _recompute_bill_status,
+    _refuse_more_than_bill_left,
     _rejected_goods_hold,
 )
 from ._shared import in_reach_or_404
@@ -210,6 +214,52 @@ def _money_shop(
     return _shop_by_the_suppliers_bills(db, vendor_id, money or {})
 
 
+def _month(day) -> Optional[tuple]:
+    """(year, month) of a stored day on the IST clock (ap_engine.parse_date:
+    '2026-09-30T20:00:00+00:00' is 1 October in India), else None."""
+    d = ap_engine.parse_date(day)
+    return (d.year, d.month) if d else None
+
+
+def _refuse_restating_a_closed_month(db, money_day, bill_day, *, adds_line: bool) -> None:
+    """THE period-lock rule for money put on a bill -- a payment naming it or
+    an advance applied to it (owner 2026-10-18, review B2). Allocating money
+    to a bill changes figures only from the LATER of the money's day and the
+    bill's day onward (before that the bill or the money is not yet counted).
+    Refused (423) when that month is locked or any locked month lies after it
+    (locks need not be contiguous); and, when a ledger line is added on the
+    money's day (a new payment, or a part-applied advance's split row), when
+    that month is locked. Fail-soft like check_period_locked."""
+    now = ap_engine.now_ist_naive()
+    try:
+        locked = {
+            (int(row["year"]), int(row["month"]))
+            for row in db.get_collection("period_locks").find({}, {"_id": 0, "year": 1, "month": 1})
+        }
+    except Exception:  # noqa: BLE001 - as check_period_locked: unreadable locks never block
+        return
+    # A mistyped lock (month 13, or 05/2062) is no closed month: it would
+    # block every bill-named payment, and lock_period now refuses to write one.
+    locked = {m for m in locked if 1 <= m[1] <= 12 and m <= (now.year, now.month)}
+    days = [m for m in (_month(money_day), _month(bill_day)) if m]
+    if not locked or not days:
+        return
+    start = max(days)
+    if any(m >= start for m in locked) or (adds_line and _month(money_day) in locked):
+        raise HTTPException(status_code=423, detail="That month is closed - ask an admin to reopen it.")
+
+
+def _refuse_held_bill(db, bill_id: Optional[str]) -> None:
+    """Owner ruling 7: no money is applied to a bill while its rejected goods
+    have no confirmed supplier credit (receipt_payment_hold) -- 409."""
+    hold = _rejected_goods_hold(db, bill_id)
+    if hold:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "REJECTED_GOODS_NO_DEBIT_NOTE", "message": hold},
+        )
+
+
 def _ledger_rows(db, vendor_id: str, scope: Optional[str]) -> tuple:
     """EVERY recorded (bill, payment, debit note) of one supplier by THE row
     rule every 'what we owe' figure reads (ap_engine.supplier_rows): no
@@ -273,8 +323,19 @@ async def create_vendor_payment(
     else:
         tds_amount = 0.0
 
-    # Accounting period lock: cannot record vendor payments into a closed month.
+    # A retried request (the client retries a 5xx; a 504 may come after the
+    # save) answers the payment it already recorded -- the same payment only.
     db = _get_db()
+    sent = {
+        "vendor_id": vendor_id, "amount": round(payment.amount, 2), "bill_id": payment.bill_id,
+        "payment_date": payment.payment_date, "tds_amount": tds_amount, "reference": payment.reference,
+    }
+    if payment.request_id and db is not None:
+        done = _replayed_payment(db, payment.request_id, sent, current_user)
+        if done is not None:
+            return done
+
+    # Accounting period lock: cannot record vendor payments into a closed month.
     if db is not None:
         from ..finance import check_period_locked
 
@@ -299,15 +360,14 @@ async def create_vendor_payment(
     # Owner ruling 7: HOLD the bill while goods were rejected and no debit note
     # exists. Until now a rejection inside the 5% match tolerance was paid in
     # full, silently -- we paid for the defects AND claimed the ITC on them.
-    hold = _rejected_goods_hold(db, payment.bill_id)
-    if hold:
-        raise HTTPException(
-            status_code=409,
-            detail={"code": "REJECTED_GOODS_NO_DEBIT_NOTE", "message": hold},
-        )
+    _refuse_held_bill(db, payment.bill_id)
+    if named is not None and db is not None:
+        _refuse_restating_a_closed_month(db, payment.payment_date, named.get("bill_date"), adds_line=True)
+    _refuse_more_than_bill_left(db, named, round(payment.amount, 2) + tds_amount)
 
     payment_id = str(uuid.uuid4())
     doc = {
+        **({"request_id": payment.request_id} if payment.request_id else {}),
         "payment_id": payment_id,
         "vendor_id": vendor_id,
         "vendor_name": (vendor or {}).get("trade_name")
@@ -328,13 +388,184 @@ async def create_vendor_payment(
     db = _get_db()
     if db is not None:
         try:
+            if payment.request_id:
+                _ensure_request_index(db)
             db.get_collection("vendor_payments").insert_one(dict(doc))
         except Exception as exc:
+            # The same request racing itself: the unique request_id index let
+            # one through -- answer with that one (or refuse, as above).
+            done = _replayed_payment(db, payment.request_id, sent, current_user) if payment.request_id else None
+            if done is not None:
+                return done
             raise HTTPException(
                 status_code=500, detail="Failed to save payment"
             ) from exc
         _recompute_bill_status(db, payment.bill_id)
     return _clean(doc)
+
+
+def _replayed_payment(db, request_id: str, sent: dict, current_user: dict) -> Optional[dict]:
+    """The payment this request id already recorded, answered again -- only
+    to a caller who can see it (in_reach_or_404, as any payment read) and only
+    when it is the same payment: supplier, amount, bill, date, TDS, reference.
+    The same id with anything else is a stale form saved twice with different
+    details: 409, never the earlier payment passed off as this one. None when
+    the id recorded nothing."""
+    try:
+        row = db.get_collection("vendor_payments").find_one({"request_id": request_id}, {"_id": 0})
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Database unavailable") from exc
+    if row is None:
+        return None
+    in_reach_or_404(row, current_user, "Payment not found")
+
+    def same(recorded, value) -> bool:
+        if isinstance(value, float):
+            return round(float(recorded or 0), 2) == round(value, 2)
+        return (recorded or None) == (value or None)
+
+    if not all(same(row.get(k), v) for k, v in sent.items()):
+        raise HTTPException(
+            status_code=409,
+            detail="This form was already saved with different details - refresh.",
+        )
+    return _clean(row)
+
+
+def _ensure_request_index(db) -> None:
+    """Unique on request_id (sparse: older payments carry none), so the same
+    request racing itself can record only one payment. create_index is a
+    no-op once the index exists; payments are few, so it runs each time.
+    Never blocks a payment: without it the read-first check still answers a
+    retry that arrives after the save."""
+    try:
+        db.get_collection("vendor_payments").create_index("request_id", unique=True, sparse=True)
+    except Exception:  # noqa: BLE001
+        logger.warning("[AP] vendor_payments.request_id index could not be ensured", exc_info=True)
+
+
+class AdvanceApply(BaseModel):
+    bill_id: str = Field(..., min_length=1)
+    amount: float = Field(..., gt=0)  # gross: cash + TDS, as a bill counts it
+    # What the form showed was left of the advance: a repeated request (a
+    # retried 5xx after the save) finds less left and is refused, never
+    # applied twice.
+    advance_left: float = Field(..., ge=0)
+
+
+@router.post("/{vendor_id}/payments/{payment_id}/apply")
+async def apply_advance_to_bill(
+    vendor_id: str,
+    payment_id: str,
+    body: AdvanceApply,
+    current_user: dict = Depends(require_roles(*_AP_ROLES)),
+):
+    """Apply an advance (a payment that named no bill) to one of this
+    supplier's bills -- all of it, or part (owner 2026-10-18, A12). Nothing is
+    ever applied on its own: an advance settles a bill only through this door.
+
+    The same checks as a payment naming the bill: the bill is this supplier's
+    and in the caller's shop (404), not held for rejected goods (409), and not
+    paid beyond what is left on it (422). The advance must be in the caller's
+    reach (404), still unapplied, and of the bill's shop (422).
+
+    The money keeps its payment date. All of it: the payment now names the
+    bill. Part: the payment keeps the rest as its advance and a new payment
+    row of the applied part names the bill (`applied_from`), so every reader
+    sees two ordinary payments summing to what was paid. A compare-and-set on
+    the advance's amount makes two racing applications of it one (409)."""
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    coll = db.get_collection("vendor_payments")
+    try:
+        adv = coll.find_one({"payment_id": payment_id, "vendor_id": vendor_id}, {"_id": 0})
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Database unavailable") from exc
+    in_reach_or_404(adv, current_user, "Payment not found")
+    if ap_engine._has_bill_id(adv.get("bill_id")):
+        raise HTTPException(status_code=409, detail="This payment is already applied to a bill.")
+    bill = _named_bill_in_scope_or_404(db, vendor_id, body.bill_id, current_user)
+    # The advance's shop: the one stamped on it, else (a legacy row with none)
+    # the shop the ledger's old rule counts it under today. Applying it to
+    # another shop's bill would move the money between shops' books.
+    adv_shop = adv.get("store_id") or _shop_by_the_suppliers_bills(
+        db, vendor_id, {"payment_date": adv.get("payment_date"), "created_at": adv.get("created_at")}
+    )
+    if adv_shop != bill.get("store_id"):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "This advance was paid for another shop. Apply it to a bill of the same shop."
+                if adv.get("store_id") else
+                "This advance has no shop on record and is counted under another shop's "
+                "books. Apply it to a bill of that shop."
+            ),
+        )
+    _refuse_held_bill(db, body.bill_id)
+
+    applied = round(body.amount, 2)
+    if applied <= 0:
+        raise HTTPException(status_code=422, detail="Enter an amount to apply.")
+    cash, tds = round(float(adv.get("amount") or 0), 2), round(float(adv.get("tds_amount") or 0), 2)
+    gross = round(cash + tds, 2)
+    if round(body.advance_left, 2) != gross:
+        raise HTTPException(
+            status_code=409,
+            detail="This advance was already applied - refresh to see what is left of it.",
+        )
+    if applied > gross:
+        raise HTTPException(
+            status_code=422, detail=f"This advance has only Rs {gross:,.2f} to apply."
+        )
+    # ponytail: TDS is one deduction on one row (26Q lists rows); an advance
+    # with TDS applies whole. Split it by section if part-application is needed.
+    if tds and applied != gross:
+        raise HTTPException(
+            status_code=422,
+            detail="TDS was withheld on this advance, so it can only be applied whole, to one bill.",
+        )
+    _refuse_restating_a_closed_month(
+        db, adv.get("payment_date") or adv.get("created_at"), bill.get("bill_date"),
+        adds_line=applied != gross,  # a part-application splits the advance's row
+    )
+    _refuse_more_than_bill_left(db, bill, applied)
+    # ponytail: two racing applies of DIFFERENT money to one bill can both
+    # pass the bill-left check; the excess stays visible as unapplied credit.
+
+    now, actor = utc_now_iso(), current_user.get("user_id")
+    unchanged = {"payment_id": payment_id, "amount": adv.get("amount"), "bill_id": adv.get("bill_id")}
+    stamp = {"bill_id": body.bill_id, "store_id": bill.get("store_id"), "applied_at": now, "applied_by": actor}
+    if applied == gross:
+        moved = coll.update_one(unchanged, {"$set": stamp})
+        row = {**adv, **stamp}
+    else:
+        # The split row is a new payment row: not the advance's applications
+        # log, nor its form's request_id (unique -- the copy would be refused).
+        row = {**{k: v for k, v in adv.items() if k not in ("applications", "request_id")}, **stamp,
+               "payment_id": str(uuid.uuid4()), "amount": applied, "applied_from": payment_id}
+        moved = coll.update_one(unchanged, {
+            "$set": {"amount": round(cash - applied, 2)},
+            "$push": {"applications": {"payment_id": row["payment_id"], "bill_id": body.bill_id,
+                                       "amount": applied, "at": now, "by": actor}},
+        })
+        if moved.matched_count:  # the advance's `applications` names the row below
+            try:
+                coll.insert_one(dict(row))
+            except Exception as exc:
+                coll.update_one(  # give the advance back what this call took
+                    {"payment_id": payment_id},
+                    {"$inc": {"amount": applied},
+                     "$pull": {"applications": {"payment_id": row["payment_id"]}}},
+                )
+                raise HTTPException(status_code=500, detail="Failed to apply the advance") from exc
+    if not moved.matched_count:
+        raise HTTPException(
+            status_code=409,
+            detail="This advance changed while you were applying it. Reload and try again.",
+        )
+    _recompute_bill_status(db, body.bill_id)
+    return {"payment": _clean(row), "advance_left": round(gross - applied, 2)}
 
 
 @router.get("/{vendor_id}/payments")

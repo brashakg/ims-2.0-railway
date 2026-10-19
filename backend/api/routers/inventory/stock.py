@@ -100,7 +100,7 @@ async def get_stock(
     # THE validate-or-active shop (store_in_view): a non-admin login with NO
     # shop reads no shop's stock (R4) -- validate_store_access alone gave it
     # None, every shop.
-    active_store = store_in_view(store_id, current_user)
+    active_store = store_in_view(store_id, current_user, one_shop=bool(product_id))
 
     # Cataloguer attribution is a MANAGER surface (panel finding 4): mirrors
     # the GET /products/cataloguers gate so the roster + per-user activity
@@ -604,7 +604,7 @@ async def list_units(
     # the caller's active store (an admin receiving for another shop). Without
     # an explicit store, a receipt read is scoped per unit below instead.
     if store_id or not grn_id:
-        active_store = store_in_view(store_id, current_user)
+        active_store = store_in_view(store_id, current_user, one_shop=True)
         if not active_store:
             raise HTTPException(status_code=400, detail="Pick a store first")
         flt["store_id"] = active_store
@@ -644,7 +644,9 @@ async def list_units(
     docs.sort(key=lambda d: (not _in_shop(d), str(d.get("created_at") or "")))
 
     from ...services.product_master import existing_product_summary
+    from ...services.quarantine_hold import open_return_of
 
+    db = _get_db()
     products: Dict[str, Dict] = {}
     units = []
     for d in docs:
@@ -673,6 +675,12 @@ async def list_units(
                 d.get("received_at") or d.get("created_at")
             ),
             "barcode_printed": bool(d.get("barcode_printed")),
+            # The supplier-return form picks from these: a piece rejected at
+            # receiving belongs to its own return draft; dated stock goes
+            # earliest expiry first.
+            "rejected": d.get("receipt_disposition") == "REJECTED",
+            "on_supplier_return": open_return_of(db, d) if d.get("rtv_vendor_id") else None,
+            "expiry_date": d.get("expiry_date"),
             "location_code": d.get("location_code") or "",
             "name": p.get("name") or "",
             "brand": p.get("brand") or "",

@@ -72,6 +72,7 @@ from .catalog_ecom import dirty_marks
 from .product_naming import (
     build_handle,
     build_product_name,
+    legacy_product_name,
     build_seo_description,
     build_seo_title,
     needs_name,
@@ -1470,17 +1471,20 @@ def identity_key_of(doc: Dict[str, Any]) -> Optional[str]:
     )
 
 
-def minted_name(doc: Dict[str, Any]) -> str:
+def minted_name(doc: Dict[str, Any], *, legacy: bool = False) -> str:
     """The name the create door mints for a product doc, its stored name aside.
     A contact lens is named by the parts its SKU and key read (owner
-    2026-09-28: power, base curve, diameter and pack in the name too)."""
+    2026-09-28: power, base curve, diameter and pack in the name too).
+    `legacy=True` gives the name made BEFORE the brand was stripped from the
+    model ("Carrera Carrera 3044/S ..."): for recognising old minted names only."""
     doc = doc or {}
     detail = ""
     if resolve_category(doc.get("category")) in _CONTACT_LENSES:
         detail = " ".join(name for _, name in _cl_parts(doc.get("attributes") or {}))
     # The name reads the model the form shows, never a hidden copy (_shown_attributes).
     attrs = _shown_attributes(doc.get("attributes") or {}, doc.get("category"))
-    return build_product_name({**doc, "name": None, "attributes": attrs}, detail=detail)
+    build = legacy_product_name if legacy else build_product_name
+    return build({**doc, "name": None, "attributes": attrs}, detail=detail)
 
 
 def name_was_minted(doc: Dict[str, Any]) -> bool:
@@ -1492,10 +1496,14 @@ def name_was_minted(doc: Dict[str, Any]) -> bool:
     name = doc.get("name")
     if not name:
         return False
-    if name == build_product_name({**doc, "name": None}):
+    bare = {**doc, "name": None}
+    # Today's formula, then the legacy one (a doubled-brand name minted before
+    # the brand was stripped from the model still counts as minted, so an edit
+    # re-mints it in the clean form instead of leaving it stale).
+    if name in (build_product_name(bare), legacy_product_name(bare)):
         return True
     try:
-        return name == minted_name(doc)
+        return name in (minted_name(doc), minted_name(doc, legacy=True))
     except ProductMasterError:
         return False
 
@@ -3404,6 +3412,9 @@ def create_product(
             _settle_lead(db, row_parent)
         except Exception:  # noqa: BLE001
             logger.warning("[PM] family options refresh failed for %s", product_id, exc_info=True)
+    if parent is not None and db is not None:
+        # A new colour / size of a model: the model's listing is queued (G2).
+        queue_model_listing(db, parent)
 
     # --- STEP 3: record compensation/sync status back on the spine ---
     sync_status = _sync_status_dict(targets)
@@ -4110,6 +4121,48 @@ def refresh_family_options(db, lead_id: str) -> List[List[str]]:
     return clashes
 
 
+def queue_model_listing(db, lead: Optional[Dict[str, Any]]) -> None:
+    """The model's website listing -- its LEAD's twin -- goes in the push
+    queue with a fresh edit revision (G2, owner 2026-10-18: a colour or size
+    added to, edited in or taken out of a model changes the model's listing:
+    its colours, prices, photos, 'Available colours'). Queuing is not
+    publishing: the scheduled sync only updates listings already on Shopify,
+    a first publish stays the explicit press. A lead twin that is itself a
+    variant is never queued. Fail-soft (the IMS write stands)."""
+    if db is None or not lead:
+        return
+    try:
+        cat = db.get_collection("catalog_products")
+        twin_id = _twin_id(lead)
+        twin = cat.find_one({"id": twin_id}) if twin_id else None
+        if twin is None or (twin.get("ecom") or {}).get("variant_of"):
+            return
+        patch = {f"ecom.{k}": v for k, v in dirty_marks().items()}
+        if not (twin.get("ecom") or {}).get("status"):
+            patch["ecom.status"] = "DRAFT"
+        cat.update_one({"id": twin_id}, {"$set": patch})
+    except Exception:  # noqa: BLE001
+        logger.warning("[PM] model listing queue skipped for %s", (lead or {}).get("sku"), exc_info=True)
+
+
+def queue_model_listing_of(db, doc: Optional[Dict[str, Any]]) -> None:
+    """``doc`` is a colour/size of a model -- its spine (variant_of = the
+    lead's product_id) or its twin (ecom.variant_of): its MODEL's listing is
+    queued (queue_model_listing). Any edit of it counts (review of #1233: the
+    cost / HSN / GST / switch / status edits that finish a waiting colour
+    used to queue nothing, so it never reached the website). A product that
+    is no colour of a model: nothing. Fail-soft."""
+    try:
+        link = ((doc or {}).get("ecom") or {}).get("variant_of")
+        lead_id = link.get("product_id") if isinstance(link, dict) else None
+        lead_id = lead_id or (doc or {}).get("variant_of")
+        if db is None or not lead_id:
+            return
+        queue_model_listing(db, db.get_collection("products").find_one({"product_id": lead_id}))
+    except Exception:  # noqa: BLE001
+        logger.warning("[PM] model listing queue skipped for %s", (doc or {}).get("sku"), exc_info=True)
+
+
 def _family_audit(audit_repo, action: str, product_id: Any, actor: Any, detail: Dict[str, Any]) -> None:
     if audit_repo is None:
         return
@@ -4165,6 +4218,10 @@ def _link_one(db, child: Dict[str, Any], parent: Dict[str, Any]) -> bool:
         {"$set": {"variant_of": parent.get("product_id")}, "$unset": {"family_opt_out": ""}},
     )
     _set_twin_link(db, child, parent)
+    # The model's listing changed (a new colour / size): queued, so the next
+    # press -- or, for a listing already live, the scheduled sync -- adds it
+    # (G2: shopify_push.listing).
+    queue_model_listing(db, parent)
     if has_listing(db, parent):
         _own_row(db, child)
         return False
@@ -4290,6 +4347,8 @@ def unlink_from_family(
     _set_twin_link(db, child, None)
     _own_row(db, child)
     refresh_family_options(db, lead_id)
+    # The model's listing no longer lists it ('Available colours').
+    queue_model_listing(db, products.find_one({"product_id": lead_id}))
     _family_audit(
         audit_repo, "product.unlinked_from_model", child_id, actor, {"sku": child.get("sku"), "lead_id": lead_id}
     )
@@ -4312,6 +4371,18 @@ def promote_new_lead(
     if old is None or not live:
         return None
     new = min(live, key=lead_order)
+    if has_listing(db, old):
+        # The model is on the website: its LISTING moves to the new lead
+        # (same Shopify product, same handle -- G2), never re-created.
+        _hand_over_listing(db, old, new, children)
+        _family_audit(
+            audit_repo,
+            "product.model_lead_promoted",
+            new["product_id"],
+            actor,
+            {"sku": new.get("sku"), "old_lead_id": old_lead_id, "old_lead_sku": old.get("sku"), "listing_moved": True},
+        )
+        return new["product_id"]
     products.update_one({"product_id": new["product_id"]}, {"$unset": {"variant_of": ""}})
     new.pop("variant_of", None)
     _set_twin_link(db, new, None)
@@ -4327,6 +4398,102 @@ def promote_new_lead(
         {"sku": new.get("sku"), "old_lead_id": old_lead_id, "old_lead_sku": old.get("sku")},
     )
     return new["product_id"]
+
+
+# What belongs to a website LISTING rather than to one item (G2): moved
+# whole to the new lead when the lead is archived, so the listing keeps its
+# Shopify product, handle, photos it owns, tag ledger, per-shop stock
+# baseline and tracking record. The old lead keeps only its OWN variant's
+# ids, which move to its catalog_variants row.
+LISTING_FIELDS: Tuple[str, ...] = (
+    "shopify_product_id",
+    "handle",
+    "status",
+    "theme_suffix",
+    "media_map",
+    "shopify_tags_sent",
+    "confirmed_sizes",
+    "online_stock",
+    "taken_down_at",
+    "last_pushed_at",
+    "online_state",
+    "delisted_at",
+    "delist_reason",
+    "delist_error",
+    "delist_mode",
+    "create_claim",
+    "model_paragraph",
+    "model_description_html",
+)
+_VARIANT_IDS = ("shopify_variant_id", "shopify_inventory_item_id")
+
+
+def _hand_over_listing(
+    db, old: Dict[str, Any], new: Dict[str, Any], children: List[Dict[str, Any]]
+) -> None:
+    """The archived lead's LISTING becomes the new lead's (G2, owner
+    2026-10-18): the Shopify product id and handle never change, and no
+    colour on it ever leaves it.
+
+      1. The new lead's twin takes every LISTING_FIELDS value and is queued
+         (its photo now leads the listing) -- FIRST, so the listing is never
+         left with no IMS owner (a re-press would create a second one).
+      2. The old lead's twin lets go of the listing: its own variant's ids
+         go onto its catalog_variants row (a listing made before the row had
+         them), its twin becomes a variant of the new lead.
+      3. Every row on the listing re-points to the new twin, its Shopify ids
+         KEPT -- the same variants, on the same listing.
+      4. The spines: the new lead leads, every other member (the archived old
+         lead too) is a variant of it.
+    The old lead's variant stays on the listing and sells 0 (an archived spine
+    lists 0 -- the archive door takes it off sale through the variant
+    take-down). Raises on a write failure (the caller's door is fail-soft)."""
+    from .catalog_ecom import update_ecom_in
+
+    products = db.get_collection("products")
+    cat = db.get_collection("catalog_products")
+    rows = db.get_collection("catalog_variants")
+    old_twin_id, new_twin_id = _twin_id(old), _twin_id(new)
+    old_ecom = (cat.find_one({"id": old_twin_id}) or {}).get("ecom") or {}
+    moved = {k: old_ecom[k] for k in LISTING_FIELDS if k in old_ecom}
+    own_ids = {k: old_ecom[k] for k in _VARIANT_IDS if old_ecom.get(k)}
+
+    def _take(ecom: Dict[str, Any]) -> Dict[str, Any]:
+        ecom.pop("variant_of", None)
+        ecom.update(moved)
+        ecom.update(dirty_marks())
+        return ecom
+
+    update_ecom_in(cat, new_twin_id, _take)
+
+    old_row = rows.find_one({"sku": old.get("sku")}) if old.get("sku") else None
+    if old.get("sku") and old_row is None:
+        rows.insert_one({"sku": old["sku"], "parent_product_id": old_twin_id, "parent_sku": old["sku"], **own_ids})
+    elif old_row is not None and own_ids and not any(old_row.get(k) for k in _VARIANT_IDS):
+        rows.update_one({"sku": old["sku"]}, {"$set": own_ids})
+
+    new_link = {"product_id": new.get("product_id"), "twin_id": new_twin_id, "sku": new.get("sku")}
+
+    def _release(ecom: Dict[str, Any]) -> Dict[str, Any]:
+        for k in LISTING_FIELDS:
+            ecom.pop(k, None)
+        ecom["listing_moved_to"] = new_twin_id
+        ecom["variant_of"] = new_link
+        ecom["locally_modified"] = False
+        return ecom
+
+    update_ecom_in(cat, old_twin_id, _release)
+
+    for flt in ({"parent_product_id": old_twin_id}, {"parent_sku": old.get("sku")}):
+        if any(flt.values()):
+            for r in list(rows.find(flt)):
+                rows.update_one({"sku": r["sku"]}, {"$set": {"parent_product_id": new_twin_id, "parent_sku": new.get("sku")}})
+
+    products.update_one({"product_id": new["product_id"]}, {"$unset": {"variant_of": ""}})
+    for member in [c for c in children if c.get("product_id") != new["product_id"]] + [old]:
+        products.update_one({"product_id": member["product_id"]}, {"$set": {"variant_of": new["product_id"]}})
+        if member is not old:
+            _set_twin_link(db, member, new)
 
 
 def family_summary(db, product_id: str) -> Dict[str, Any]:
@@ -4622,6 +4789,12 @@ def mirror_update_to_catalog_twin(
             row_ok = _mirror_variant_row_update(
                 current=current, patch=patch, db=db, mark_dirty=mark_dirty
             )
+            if mark_dirty and patch:
+                # ANY edit of a colour/size -- its price, photo, attributes,
+                # but also its cost / HSN / GST, catalogue status or switch
+                # (the edits that FINISH a waiting colour) -- queues its
+                # MODEL's listing (G2; review of #1233).
+                queue_model_listing_of(db, current)
         if not cat_patch:
             return row_ok
         if cat_patch.get("ecom.locally_modified"):

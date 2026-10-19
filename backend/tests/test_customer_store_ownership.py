@@ -88,7 +88,7 @@ def test_the_money_doors_specifically():
     """Called out separately because these move rupees and loyalty balances,
     and because three of them were the ones actually found unprotected."""
     bodies = {(m, p): b for m, p, b in _per_customer_doors()}
-    for path in ("/{customer_id}/loyalty/add", "/{customer_id}/store-credit/add"):
+    for path in ("/{customer_id}/store-credit/add",):
         body = bodies[("POST", path)]
         assert "_scoped_customer_or_404" in body, f"{path} moves money unscoped"
         assert "write=True" in body, f"{path} must take the WRITE scope, not the read one"

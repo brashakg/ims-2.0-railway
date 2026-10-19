@@ -1525,3 +1525,36 @@ def test_e_an_edit_renames_a_contact_lens_main_named(door):
         "Bausch Lomb Lacelle Colour Contact Lenses -2.00 - Ocean Blue")
     again = door(_form_post("CCL", attrs))
     assert again["name"] == "Bausch Lomb Lacelle Colour Contact Lenses -2.00 - Hazel Brown"
+
+
+def test_title_legacy_doubled_brand_name_is_reminted_on_an_edit(door):
+    """Rows named before the brand was stripped from the model ("Carrera
+    Carrera 3044/S ...") are still minted names: a colour edit and a contact
+    lens power edit re-mint them in the clean form instead of leaving them."""
+    # A frame: the stored name is the legacy doubled form.
+    attrs = {"brand_name": "Carrera", "model_no": "Carrera 3044/S", "colour_code": "Black", "lens_size": "54"}
+    door.repo.collection.insert_one({
+        "product_id": "P-FR", "sku": "FR-CARRERA-3044S-BLACK-54", "category": "FRAME", "is_active": True,
+        "brand": "Carrera", "model": "Carrera 3044/S", "color": "Black",
+        "name": "Carrera Carrera 3044/S Eyeglasses - Black",
+        "identity_key": "carrera|carrera3044s|black|54", "mrp": 5000.0, "offer_price": 4500.0,
+        "attributes": dict(attrs),
+    })
+    assert pm.name_was_minted(door.repo.find_by_id("P-FR"))
+    _put("P-FR", attributes={"colour_code": "Tortoise"})
+    assert door.repo.find_by_id("P-FR")["name"] == "Carrera 3044/S Eyeglasses - Tortoise"
+    # A typed name that merely looks like it is not claimed.
+    assert not pm.name_was_minted({**door.repo.find_by_id("P-FR"), "name": "Carrera Carrera Special"})
+
+    # A contact lens whose model name repeats the brand.
+    cl = dict(_FIT, model_name="Acuvue Oasys")
+    cl.pop("model_no", None)
+    doc = {"product_id": "P-CL", "sku": "CL-ACUVUE-OASYS-M125", "category": "CL", "is_active": True,
+           "brand": "Acuvue", "model": "Acuvue Oasys", "mrp": 1000.0, "offer_price": 900.0,
+           "identity_key": "acuvue|acuvueoasys|m125|bc84|dia14|pk6", "attributes": cl}
+    old = pm.minted_name(doc, legacy=True)
+    assert "Acuvue Acuvue" in old
+    door.repo.collection.insert_one({**doc, "name": old})
+    _put("P-CL", brand="Acuvue", model="Acuvue Oasys", attributes=dict(cl, power="-1.50"))
+    name = door.repo.find_by_id("P-CL")["name"]
+    assert "Acuvue Acuvue" not in name and "-1.50" in name

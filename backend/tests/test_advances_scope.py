@@ -198,7 +198,10 @@ class TestAdvanceReadScope:
 
         assert resp.status_code == 200
         body = resp.json()
-        assert _ids(body) == {"adv-mine", "adv-colleague"}
+        # An admin with no shop named reads every shop (owner 2026-10-18);
+        # every other approver the shop in view.
+        every_shop = {"adv-other-store"} if role in ("ADMIN", "SUPERADMIN") else set()
+        assert _ids(body) == {"adv-mine", "adv-colleague"} | every_shop
         rows = {a["advance_id"]: a for a in body["advances"]}
         assert rows["adv-colleague"]["employee_id"] == "u2-colleague"
         assert rows["adv-colleague"]["amount"] == 4321.0

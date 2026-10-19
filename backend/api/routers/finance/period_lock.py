@@ -30,6 +30,17 @@ async def lock_period(
     if db is None:
         raise HTTPException(503, "Database not available")
 
+    # Only a real month that has started can close: a mistyped lock (month
+    # 13, or 05/2062) would block every payment put on a bill, and nothing
+    # reopens it. The month is the IST one, as every other money date.
+    from ...utils.ist import now_ist_naive
+
+    now = now_ist_naive()
+    if not 1 <= month <= 12 or not 2017 <= year or (year, month) > (now.year, now.month):
+        raise HTTPException(
+            422, f"{month}/{year} is not a month that has started - check the month and year"
+        )
+
     existing = db.get_collection("period_locks").find_one(
         {"month": month, "year": year}
     )

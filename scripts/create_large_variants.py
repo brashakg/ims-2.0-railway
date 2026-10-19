@@ -385,7 +385,9 @@ def create_variant_of(db, row: Dict[str, Any], current_user: Dict[str, Any], *,
     assert sorted(v["sku"] for v in prow) == sorted([parent["sku"], sku]), f"{sku}: parent row set {[v['sku'] for v in prow]}"
     assert shopify_push.product_skus(parent_twin, prow) == [parent["sku"], sku]
     assert shopify_push._needs_repair(parent_twin, prow) is False, f"{sku}: parent still needs repair"
-    assert not (parent_twin.get("ecom") or {}).get("locally_modified"), f"{sku}: parent got queued"
+    # G2 (owner 2026-10-18): the create door now queues the model's listing on
+    # purpose -- its next push carries the Large size it already holds (the
+    # row carries the Large variant's gid, so nothing is created twice).
     return {"sku": sku, "product_id": spine["product_id"], "twin_id": spine["pim_product_id"],
             "variant_row_id": vrow.get("variant_id"), "parent_product_id": parent["product_id"],
             "parent_twin_id": parent_twin_id, "sync_status": created.get("sync_status")}

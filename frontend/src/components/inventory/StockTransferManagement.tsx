@@ -83,6 +83,9 @@ interface Transfer {
   courier_name?: string;
   /** The server's answer: may this user print this transfer's challan. */
   can_print_challan?: boolean;
+  /** Set when the move is between two GST registrations: it travels on this
+   * tax invoice (numbered at ship) instead of a delivery challan. */
+  tax_invoice_number?: string;
 }
 
 const errMsg = (e: any): string =>
@@ -560,20 +563,31 @@ export function StockTransferManagement() {
                 </p>
               </div>
               <div className="flex items-center gap-2">
+                {/* A move between two GST registrations travels on its tax
+                    invoice (numbered at ship); one inside a GSTIN on a challan. */}
                 {gates.canPrintChallan(selectedTransfer) && (
                   <button
                     onClick={async () => {
+                      const invoice = Boolean(selectedTransfer.tax_invoice_number);
                       try {
-                        await printDocumentsApi.openTransferChallan(selectedTransfer.id);
+                        await (invoice
+                          ? printDocumentsApi.openTransferInvoice
+                          : printDocumentsApi.openTransferChallan)(selectedTransfer.id);
                       } catch (e) {
-                        toast.error(`Could not open delivery challan: ${errMsg(e)}`);
+                        toast.error(
+                          `Could not open ${invoice ? 'tax invoice' : 'delivery challan'}: ${errMsg(e)}`,
+                        );
                       }
                     }}
                     className="btn-outline flex items-center gap-2 text-sm"
-                    title="Print Rule 55 Delivery Challan"
+                    title={
+                      selectedTransfer.tax_invoice_number
+                        ? `Print tax invoice ${selectedTransfer.tax_invoice_number} with e-way bill data`
+                        : 'Print Rule 55 Delivery Challan'
+                    }
                   >
                     <Truck className="w-4 h-4" />
-                    Delivery Challan
+                    {selectedTransfer.tax_invoice_number ? 'Tax Invoice' : 'Delivery Challan'}
                   </button>
                 )}
                 <button

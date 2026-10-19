@@ -22,6 +22,7 @@ CI-robust: every accessor monkeypatched + docs seeded; no whole-JSON substring.
 from __future__ import annotations
 
 import asyncio
+import re
 import os
 import sys
 import xml.etree.ElementTree as ET
@@ -37,7 +38,6 @@ from api.services import rtv_debit_note as dn  # noqa: E402
 from api.services.rtv_debit_note import (  # noqa: E402
     DebitNoteEngine,
     build_debit_note,
-    next_debit_note_number,
     render_debit_note_html,
     tally_build_debit_note_xml,
     state_code_of,
@@ -240,7 +240,7 @@ def db():
     )
     d.get_collection("stores").insert_one(
         {"store_id": "S1", "entity_id": "E1", "name": "BV Ranchi",
-         "gstin": "20ABCDE1234F1Z5", "state_code": "20"}
+         "gstin": "20ABCDE1234F1Z5", "state_code": "20", "invoice_code": "RAN01"}
     )
     # Intra-state vendor (state 20 == seller 20) and an inter-state vendor (27).
     d.get_collection("vendors").insert_one(
@@ -352,50 +352,65 @@ def test_unresolvable_gst_fails_loud(db):
     assert res.get("error") == "PRODUCT_REQUIRED"
 
 
+def _issue_for(db, return_id, store_id="S1"):
+    _seed_return(db, return_id=return_id, store_id=store_id)
+    rtv = db.get_collection("vendor_returns").find_one({"return_id": return_id})
+    vendor = db.get_collection("vendors").find_one({"vendor_id": "V1"})
+    res = DebitNoteEngine(db=db).issue(rtv, vendor, actor="acc", seller=_seller())
+    assert res["ok"] is True, res
+    return res["debit_note"]["debit_note_number"]
+
+
 def test_fy_serial_uses_ist_at_apr_boundary(db, monkeypatch):
     """P1-2: a debit note issued ~02:00 IST on 1-Apr lands in the NEW FY series
-    (Rule 46(b)) -- a UTC clock would mis-assign the prior FY."""
+    (Rule 53) -- a UTC clock would mis-assign the prior FY."""
     import api.services.rtv_debit_note as ram
     from datetime import datetime, timezone, timedelta
 
     ist = timezone(timedelta(hours=5, minutes=30))
     monkeypatch.setattr(ram, "_now_ist", lambda: datetime(2026, 4, 1, 2, 0, tzinfo=ist))
-    serial = ram.next_debit_note_number(db, "E1")
     # 2026-04-01 IST -> FY 2026-27 (NOT 2025-26 that a UTC 2026-03-31 would give).
-    assert "/2026-27/" in serial
+    assert _issue_for(db, "VR-APR") == "RAN01/D2627/0001"
 
 
 # ============================================================================
-# 1. FY serial: consecutive per entity+FY + collision-safe (atomic)
+# 1. The number: the returning shop's D series (Rule 53, owner 2026-10-18)
 # ============================================================================
 
 
-def test_serial_consecutive_per_entity_fy(db):
-    n1 = next_debit_note_number(db, "E1")
-    n2 = next_debit_note_number(db, "E1")
-    n3 = next_debit_note_number(db, "E1")
-    assert n1.endswith("/000001")
-    assert n2.endswith("/000002")
-    assert n3.endswith("/000003")
-    # Format DN/{prefix}/{FY}/{serial}: entity code prefix + FY label.
-    parts = n1.split("/")
-    assert parts[0] == "DN" and parts[1] == "BV"
-    assert parts[2] == financial_year_label()
+@pytest.fixture
+def may_2026(monkeypatch):
+    import api.services.rtv_debit_note as ram
+    from datetime import datetime, timezone, timedelta
+
+    ist = timezone(timedelta(hours=5, minutes=30))
+    monkeypatch.setattr(ram, "_now_ist", lambda: datetime(2026, 5, 1, 11, 0, tzinfo=ist))
 
 
-def test_serial_separate_series_per_entity(db):
-    db.get_collection("entities").insert_one({"entity_id": "E2", "code": "WZ"})
-    a1 = next_debit_note_number(db, "E1")
-    b1 = next_debit_note_number(db, "E2")
-    # Distinct entities have independent counters -> both start at 1.
-    assert a1.endswith("/000001") and "/BV/" in a1
-    assert b1.endswith("/000001") and "/WZ/" in b1
+def test_serial_consecutive_per_shop_fy(db, may_2026):
+    assert [_issue_for(db, f"VR-{n}") for n in (1, 2, 3)] == [
+        "RAN01/D2627/0001", "RAN01/D2627/0002", "RAN01/D2627/0003",
+    ]
 
 
-def test_serial_atomic_no_collision(db):
-    # The atomic $inc counter means N allocations are N distinct serials.
-    serials = {next_debit_note_number(db, "E1") for _ in range(25)}
-    assert len(serials) == 25
+def test_serial_separate_series_per_shop(db, may_2026):
+    db.get_collection("stores").insert_one(
+        {"store_id": "S2", "entity_id": "E1", "name": "BV Dhanbad",
+         "gstin": "20ABCDE1234F1Z5", "state_code": "20", "invoice_code": "DHN01"}
+    )
+    assert _issue_for(db, "VR-A") == "RAN01/D2627/0001"
+    assert _issue_for(db, "VR-B", store_id="S2") == "DHN01/D2627/0001"
+
+
+def test_a_shop_that_cannot_number_it_is_refused_never_guessed(db, may_2026):
+    db.get_collection("stores").docs[0]["invoice_code"] = "BAD"
+    _seed_return(db, return_id="VR-X")
+    rtv = db.get_collection("vendor_returns").find_one({"return_id": "VR-X"})
+    vendor = db.get_collection("vendors").find_one({"vendor_id": "V1"})
+    res = DebitNoteEngine(db=db).issue(rtv, vendor, actor="acc", seller=_seller())
+    assert (res["ok"], res["http"], res["error"]) == (False, 400, "debit_note_number_refused")
+    assert "no valid invoice code" in res["message"]
+    assert db.get_collection("debit_notes").docs == []
 
 
 # ============================================================================
@@ -630,7 +645,7 @@ def test_router_issue_and_list(rt, db):
     res = _run(issue_debit_note(body, current_user=_user(["ACCOUNTANT"])))
     assert res["idempotent"] is False
     dn_doc = res["debit_note"]
-    assert dn_doc["debit_note_number"].startswith("DN/BV/")
+    assert re.fullmatch(r"RAN01/D\d{4}/0001", dn_doc["debit_note_number"])
     # rupee display block alongside paise integers
     assert dn_doc["totals_rupees"]["grand_total"] == dn.paise_to_rupees(
         dn_doc["totals"]["grand_total_paise"])

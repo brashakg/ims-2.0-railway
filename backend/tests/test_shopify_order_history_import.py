@@ -1284,7 +1284,10 @@ def test_hist_cn_note_number_and_cdnr_resolver_are_gstn_legal():
     assert _cdnr_note_number(
         {"note_number": n1, "ref": "SHOPIFY-HIST-REFUND-8804212345678"}
     ) == n1
-    # ...and caps legacy refs (no note_number) at the GSTN 16-char limit.
-    legacy = _cdnr_note_number({"ref": "SHOPIFY-HIST-REFUND-8804212345678"})
-    assert len(legacy) <= 16
-    assert len(_cdnr_note_number({"ref": "RET-250415-ABC123"})) <= 16
+    # ...and files a legacy ref (no note_number) VERBATIM, flagged -- never
+    # truncated to a number that was never issued (owner 2026-10-18).
+    issues: list = []
+    legacy = _cdnr_note_number({"ref": "SHOPIFY-HIST-REFUND-8804212345678"}, issues)
+    assert legacy == "SHOPIFY-HIST-REFUND-8804212345678"
+    assert _cdnr_note_number({"ref": "RET-250415-ABC123"}, issues) == "RET-250415-ABC123"
+    assert len(issues) == 1 and issues[0]["count"] == 2

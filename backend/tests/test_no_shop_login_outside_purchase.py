@@ -71,13 +71,22 @@ def test_store_in_view_gives_a_login_with_no_shop_no_shop(role):
 
 
 def test_store_in_view_keeps_every_login_that_holds_a_shop():
-    # The active shop for anyone holding one -- an admin's topbar shop too.
+    # The active shop for anyone else holding one.
     assert store_in_view(None, _user("STORE_MANAGER", [DHN])) == DHN
-    assert store_in_view(None, _user("ADMIN", [DHN])) == DHN
-    # An admin with none: every shop (None), as before.
+    # An admin with no shop named reads EVERY shop (None) -- his top-bar shop
+    # no longer narrows it (owner 2026-10-18) -- except on a write or a screen
+    # of one shop's own, where it is still his top-bar shop.
+    assert store_in_view(None, _user("ADMIN", [DHN])) is None
+    assert store_in_view(None, _user("SUPERADMIN", [DHN])) is None
+    assert store_in_view(None, _user("ADMIN", [DHN]), one_shop=True) == DHN
+    assert store_in_view(None, _user("ADMIN", [DHN]), writing=True) == DHN
     assert store_in_view(None, _user("ADMIN")) is None
     assert store_in_view(None, _user("SUPERADMIN")) is None
     assert store_in_view(PUN, _user("ADMIN")) == PUN
+    assert store_in_view(PUN, _user("ADMIN", [DHN])) == PUN
+    # one_shop changes nothing for anyone else.
+    assert store_in_view(None, _user("STORE_MANAGER", [DHN]), one_shop=True) == DHN
+    assert store_in_view(None, _user("ACCOUNTANT"), one_shop=True) == NO_SHOP_SCOPE
     # A multi-store login without an active shop: its first own shop, never
     # every shop (the copies gave it None).
     assert store_in_view(None, _user("AREA_MANAGER", [PUN, DHN], active=None)) == PUN

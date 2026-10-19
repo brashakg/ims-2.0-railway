@@ -350,7 +350,37 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                 db, active_store, year, mon, monthrange(year, mon)[1]
             )
             _t_rows, transfer_hsn_lines = _transfer_b2b_rows(_t_bills)
+            # The transfer tax invoice a bill carries (minted at ship): its
+            # row files the date printed on it, and what it was issued for
+            # (the units SHIPPED) is checked against what the bill books.
+            _t_issued = {
+                _b.get("source_transfer_id"): _b for _b in _t_bills if _b.get("tax_invoice_date")
+            }
             for _t_row in _t_rows:
+                # The transfer tax invoice number against GSTN's rule, the
+                # same check every sale's number gets (an old TRF/ number is
+                # over 16 characters).
+                _gstr1_bill_number(
+                    {"invoice_number": _t_row.get("invoiceNumber")}, validation_issues
+                )
+                _t_bill = _t_issued.get(_t_row.get("sourceTransferId"))
+                if _t_bill:
+                    _t_row["invoiceDate"] = str(_t_bill["tax_invoice_date"])[:10]
+                    _issued = round(float(_t_bill.get("challan_value") or 0), 2)
+                    if abs(_issued - _t_row["taxableValue"]) > 0.01:
+                        validation_issues.append(
+                            {
+                                "level": "warn",
+                                "invoice": _t_row.get("invoiceNumber"),
+                                "issue": (
+                                    f"IMS files the RECEIVED value Rs "
+                                    f"{_t_row['taxableValue']:.2f} (taxable) under "
+                                    f"{_t_row.get('invoiceNumber')}; the printed "
+                                    "invoice and e-way bill show the SHIPPED value "
+                                    f"Rs {_issued:.2f}. Ask the CA whether to amend."
+                                ),
+                            }
+                        )
                 if not _t_row.get("customerGSTIN"):
                     validation_issues.append(
                         {
@@ -484,10 +514,9 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                             cn_sgst = round(cn_tax / 2, 2)
                             cn_igst = 0.0
 
-                        # GSTN-legal note number (<=16 chars): prefer the
-                        # dedicated note_number stamped on synthesized
-                        # historical CNs, else the internal ref capped at 16.
-                        ref = _cdnr_note_number(entry)
+                        # The note's own number, verbatim (flagged when it
+                        # breaks GSTN's rule) -- see _cdnr_note_number.
+                        ref = _cdnr_note_number(entry, validation_issues)
                         cn_date = _credit_note_date_ist(
                             entry.get("created_at")
                         ) or (month + "-01")
@@ -620,7 +649,12 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
 
                     cdnr.append(
                         {
-                            "refReference": (rid or "RET")[:16],
+                            # The return's credit-note number (its shop's C
+                            # series); a return before numbering: its id.
+                            "refReference": _cdnr_note_number(
+                                {"note_number": ret.get("credit_note_number"), "ref": rid},
+                                validation_issues,
+                            ),
                             "creditNoteDate": (
                                 r_when[:10]
                                 if isinstance(r_when, str)
@@ -784,7 +818,7 @@ async def gstr1_report(
     current_user: dict = Depends(require_roles(*AP_ROLES)),
 ):
     """GSTR-1 report (IMS internal shape). See _compute_gstr1 for details."""
-    active_store = store_in_view(store_id, current_user) or "store-001"
+    active_store = store_in_view(store_id, current_user, one_shop=True) or "store-001"
     return _compute_gstr1(month, active_store)
 
 
@@ -812,7 +846,7 @@ async def gstr1_gstn_json(
     """
     from ...services.gstn_export import to_gstr1_json
 
-    active_store = store_in_view(store_id, current_user) or "store-001"
+    active_store = store_in_view(store_id, current_user, one_shop=True) or "store-001"
     period = _normalise_period(month, year)
     data = _compute_gstr1(period, active_store)
     try:

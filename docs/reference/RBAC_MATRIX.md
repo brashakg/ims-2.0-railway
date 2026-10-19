@@ -71,7 +71,7 @@ manager gets 404).
 | AUTHENTICATED | 394 |
 | Role-gated (one or more roles) | 871 |
 | **Total `/api/v1` (method x path)** | **1311** |
-| ...of which `store_scoped` | 240 |
+| ...of which `store_scoped` | 241 |
 | ...of which `self_enforced` | 47 |
 
 ## Full matrix (method x path -> policy entry)
@@ -412,7 +412,6 @@ entry exactly; see the manual interpretation notes above.
 | `GET` | `/api/v1/crm/customers/{customer_id}/interactions` | AUTH |  |  |
 | `POST` | `/api/v1/crm/customers/{customer_id}/interactions` | AUTH |  |  |
 | `GET` | `/api/v1/crm/customers/{customer_id}/lifecycle` | AUTH |  |  |
-| `POST` | `/api/v1/crm/customers/{customer_id}/loyalty-points` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
 | `GET` | `/api/v1/crm/customers/{customer_id}/prescriptions` | AUTH |  |  |
 | `GET` | `/api/v1/crm/customers/{customer_id}/return-risk` | AUTH |  |  |
 | `GET` | `/api/v1/crm/customers/{customer_id}/vip` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN, CATALOG_MANAGER, OPTOMETRIST |  |  |
@@ -447,7 +446,6 @@ entry exactly; see the manual interpretation notes above.
 | `GET` | `/api/v1/customers/{customer_id}/consent/ledger` | AUTH |  |  |
 | `POST` | `/api/v1/customers/{customer_id}/consent/withdraw` | AUTH |  |  |
 | `GET` | `/api/v1/customers/{customer_id}/credit-summary` | AUTH |  |  |
-| `POST` | `/api/v1/customers/{customer_id}/loyalty/add` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
 | `GET` | `/api/v1/customers/{customer_id}/orders` | AUTH |  |  |
 | `POST` | `/api/v1/customers/{customer_id}/patients` | AUTH |  |  |
 | `POST` | `/api/v1/customers/{customer_id}/patients/{patient_id}/promote` | AUTH |  |  |
@@ -1215,6 +1213,7 @@ entry exactly; see the manual interpretation notes above.
 | `GET` | `/api/v1/print/delivery-challan/transfer/{transfer_id}` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, SALES_CASHIER, SALES_STAFF, ACCOUNTANT | S |  |
 | `GET` | `/api/v1/print/qz/cert` | AUTH |  |  |
 | `POST` | `/api/v1/print/qz/sign` | AUTH |  |  |
+| `GET` | `/api/v1/print/transfer-invoice/{transfer_id}` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, SALES_CASHIER, SALES_STAFF, ACCOUNTANT | S |  |
 
 ### `/api/v1/product-templates`
 
@@ -1699,6 +1698,7 @@ entry exactly; see the manual interpretation notes above.
 | `GET` | `/api/v1/vendors/{vendor_id}/ledger` | ACCOUNTANT, ADMIN |  |  |
 | `GET` | `/api/v1/vendors/{vendor_id}/payments` | ACCOUNTANT, ADMIN |  |  |
 | `POST` | `/api/v1/vendors/{vendor_id}/payments` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/vendors/{vendor_id}/payments/{payment_id}/apply` | ACCOUNTANT, ADMIN |  |  |
 | `GET` | `/api/v1/vendors/{vendor_id}/performance` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
 | `POST` | `/api/v1/vendors/{vendor_id}/portal-token` | ADMIN, SUPERADMIN |  |  |
 | `DELETE` | `/api/v1/vendors/{vendor_id}/portal-token/{token_id}` | ADMIN, SUPERADMIN |  |  |

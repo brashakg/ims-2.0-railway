@@ -384,6 +384,19 @@ def _explicit_name(product: Dict[str, Any]) -> str:
 
 
 def build_product_name(product: Dict[str, Any], detail: str = "") -> str:
+    """Deterministic display name for a product-like dict (see _build_product_name)."""
+    return _build_product_name(product, detail, strip_brand=True)
+
+
+def legacy_product_name(product: Dict[str, Any], detail: str = "") -> str:
+    """The name build_product_name minted BEFORE the brand was stripped from the
+    model ("Carrera Carrera 3044/S Sunglasses - Black"). LEGACY: only for
+    recognising a stored name as minted (product_master.name_was_minted) and
+    for the doubled-brand backfill; never use it to build a new name."""
+    return _build_product_name(product, detail, strip_brand=False)
+
+
+def _build_product_name(product: Dict[str, Any], detail: str, *, strip_brand: bool) -> str:
     """Deterministic display name for a product-like dict.
 
     "{Brand} {Model} {Shape} {Gender} {Category-word} {Detail} - {Colour}",
@@ -406,6 +419,8 @@ def build_product_name(product: Dict[str, Any], detail: str = "") -> str:
     a = _attrs(product)
     brand = _brand(product)
     model = _model(product)
+    if strip_brand:
+        model = _strip_brand(model, brand)
     shape = _first(a.get("shape"), a.get("frame_type"))
     gender = _gender_qualifier(product)
     category_word = resolve_category_word(product.get("category"))
@@ -481,6 +496,147 @@ def build_seo_description(product: Dict[str, Any]) -> str:
         else f" -- genuine {category_word.lower()} with authenticity assured."
     )
     return _clamp(lead + tail, MAX_DESC_LEN)
+
+
+# ---------------------------------------------------------------------------
+# MODEL-LEVEL builders (G2, owner 2026-10-18): one website listing per model
+# ---------------------------------------------------------------------------
+# A model's listing carries every colour and size, so its title, SEO and
+# handle read the MODEL-LEVEL fields only (product_master.MODEL_LEVEL_FIELDS:
+# brand, model number, model name, shape, gender -- plus the category word).
+# Never a colour, a colour code, an eye size or a lens: "Ray-Ban RB3025
+# Aviator Large Metal", never "... - Polished Gold". A set `name` is the
+# bill line of ONE item (it carries its colour), so it is never read here.
+
+
+# A word is a run of letters/digits in ANY script (accents included); "_" is a
+# separator, not a letter.
+_WORD = r"[^\W_]"
+_WORDS_RE = re.compile(rf"{_WORD}+")
+
+
+def _strip_brand(piece: str, brand: str) -> str:
+    """Drop a leading brand from a model number / name ("Carrera 3044/S" with
+    brand "Carrera" -> "3044/S"). Whole words only, hyphen/space-insensitive
+    ("Ray-Ban" == "Ray Ban"), so brand "Ray" never cuts "Rayon...". Strips the
+    LONGEST leading run of the model that matches the start of the brand
+    ("Ray-Ban Meta" + "Ray-Ban Wayfarer" -> "Wayfarer"), else, for a brand of
+    two or more words, a leading word equal to its LAST word ("Hugo Boss" +
+    "Boss 1234" -> "1234"; "Tom Ford" + "Ford Mustang" -> "Mustang"). A cut that
+    would stop inside a hyphenated word and leave a letter-word fragment behind
+    ("Ray-Ban 3025" under brand "Ray" -> "Ban 3025") is refused."""
+    bw = [w.casefold() for w in _WORDS_RE.findall(brand)]
+    ms = list(_WORDS_RE.finditer(piece or ""))
+    if not bw or not ms or ms[0].start() != 0:
+        return piece
+
+    def cut(k: int) -> Optional[str]:
+        rest = piece[ms[k - 1].end():]
+        if re.match(rf"-[^\W\d_]", rest):
+            return None
+        return re.sub(r"^[\W_]+", "", rest).strip()
+
+    run = 0
+    while run < min(len(ms), len(bw)) and ms[run].group().casefold() == bw[run]:
+        run += 1
+    for k in range(run, 0, -1):
+        out = cut(k)
+        if out is not None:
+            return out
+    if len(bw) > 1 and ms[0].group().casefold() == bw[-1]:
+        out = cut(1)
+        if out is not None:
+            return out
+    return piece
+
+
+def _words_inside(piece: str, earlier: str) -> bool:
+    """True when every word of `piece` appears in `earlier`, in order, on word
+    boundaries ('Victory' inside 'Victory C 01/S'; 'Ducati' is not)."""
+    words = _WORDS_RE.findall(piece)
+    pos = 0
+    for w in words:
+        m = re.compile(rf"(?<!{_WORD}){re.escape(w)}(?!{_WORD})", re.I).search(earlier, pos)
+        if not m:
+            return False
+        pos = m.end()
+    return bool(words)
+
+
+def _model_pieces(product: Dict[str, Any]) -> list:
+    """Brand, model number, model name. The brand is stripped from the front of
+    the number and name (real data keeps it there: "Carrera 3044/S"), and a
+    model name already contained in what came before is not repeated."""
+    a = _attrs(product)
+    brand = _brand(product)
+    pieces: list = [brand] if brand else []
+    for piece in (
+        _first(a.get("model_no"), product.get("model")),
+        _first(a.get("model_name")),
+    ):
+        piece = _strip_brand(piece, brand)
+        if piece and not _words_inside(piece, " ".join(pieces)):
+            pieces.append(piece)
+    return pieces
+
+
+def build_model_title(product: Dict[str, Any]) -> str:
+    """The listing title of a MODEL (owner 2026-10-18): Brand + Model number +
+    Model name, title-cased, no colour, no size. Falls back to the category
+    word when the model carries nothing else."""
+    if not isinstance(product, dict):
+        return ""
+    core = " ".join(_model_pieces(product))
+    if not core:
+        core = resolve_category_word(product.get("category"))
+    return _clamp(_smart_title(core), MAX_NAME_LEN)
+
+
+def build_model_seo_title(product: Dict[str, Any]) -> str:
+    """The model's <title>: its title + shape + gender + category word (what
+    a shopper searches), still no colour or size."""
+    if not isinstance(product, dict):
+        return ""
+    a = _attrs(product)
+    parts = _model_pieces(product)
+    seen = {p.lower() for p in parts}
+    shape = _first(a.get("shape"), a.get("frame_type"))
+    for piece in (shape, _gender_qualifier(product), resolve_category_word(product.get("category"))):
+        if piece and piece.lower() not in seen and not any(piece.lower() in p.lower() for p in parts):
+            seen.add(piece.lower())
+            parts.append(piece)
+    return _clamp(_smart_title(" ".join(parts)), MAX_NAME_LEN)
+
+
+def build_model_handle(product: Dict[str, Any]) -> str:
+    """URL slug of the model title (a NEW listing only -- a live listing keeps
+    its handle, so no URL ever breaks)."""
+    base = build_model_title(product) or _first((product or {}).get("sku"))
+    return re.sub(r"-{2,}", "-", re.sub(r"[^a-z0-9]+", "-", base.lower())).strip("-")
+
+
+def build_model_seo_description(
+    product: Dict[str, Any], colours: int = 0, sizes: int = 0
+) -> str:
+    """The model's meta description: names the model and how many colours /
+    sizes it comes in -- never one colour. <= MAX_DESC_LEN."""
+    if not isinstance(product, dict):
+        return ""
+    title = build_model_seo_title(product)
+    if not title:
+        return ""
+    choice = []
+    if colours > 1:
+        choice.append(f"{colours} colours")
+    if sizes > 1:
+        choice.append(f"{sizes} sizes")
+    brand = _brand(product)
+    word = (resolve_category_word(product.get("category")) or "product").lower()
+    text = f"Buy {title} online"
+    if choice:
+        text += " in " + " and ".join(choice)
+    text += f" -- genuine {brand + ' ' if brand else ''}{word} with authenticity assured."
+    return _clamp(text, MAX_DESC_LEN)
 
 
 def needs_name(product: Dict[str, Any]) -> bool:

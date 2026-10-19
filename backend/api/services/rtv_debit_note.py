@@ -17,10 +17,11 @@ What this REUSES (no fork)
   * State code extraction -- ``org_validation.resolve_state_code``, the same
     parser the purchase order, the purchase bill and the sale invoice call
     (``state_code_of`` below is a three-line delegate, not a copy).
-  * Atomic FY-scoped consecutive serial -- the ``counters`` collection
-    ``find_one_and_update($inc)`` pattern from ``je_service._next_je_number`` /
-    ``order_repository.next_invoice_number`` (Rule 46(b): a unique serial per
-    financial year). Backed by a UNIQUE index on ``debit_note_number``.
+  * The number -- the issuing shop's debit-note series of the one GST
+    number mint, ``order_repository.next_document_number(db, store_id, "D")``
+    (Rule 53, owner 2026-10-18): 16 characters, consecutive per shop per IST
+    financial year, atomic, refused rather than guessed. Backed by a UNIQUE
+    index on ``debit_note_number``. Notes issued before keep their number.
   * Tally voucher -- mirrors ``tally_tender_receipt.tally_build_tender_receipt_xml``
     (``_ledger_entry`` sign convention: negative AMOUNT + ISDEEMEDPOSITIVE Yes ==
     debit). Emits a SEPARATE ``VCHTYPE="Debit Note"`` voucher; touches nothing on
@@ -29,7 +30,7 @@ What this REUSES (no fork)
 Debit-note document shape (returned by ``build_debit_note``)::
 
     {
-        "debit_note_number": "DN/BV/2026-27/000001",  # consecutive serial per entity+FY
+        "debit_note_number": "BOK02/D2627/0001",  # the shop's D series, per FY
         "financial_year": "2026-27",
         "issue_date": "2026-06-12",
         "entity_id": "...", "store_id": "...",
@@ -79,12 +80,16 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional
 from xml.sax.saxutils import escape
 
+from database.repositories.order_repository import (
+    InvoiceNumberError,
+    next_document_number,
+)
+
 from .purchase_invoice_engine import classify_supply
 
 logger = logging.getLogger(__name__)
 
 COLLECTION = "debit_notes"
-COUNTERS_COLLECTION = "counters"
 AUDIT_COLLECTION = "audit_logs"
 
 
@@ -632,76 +637,6 @@ def tally_build_debit_note_xml(
 # ============================================================================
 
 
-def _counters_coll(db):
-    if db is None:
-        return None
-    try:
-        return db.get_collection(COUNTERS_COLLECTION)
-    except Exception:  # noqa: BLE001
-        try:
-            return db[COUNTERS_COLLECTION]
-        except Exception:  # noqa: BLE001
-            return None
-
-
-def _entity_prefix(db, entity_id: Optional[str]) -> str:
-    """Short entity prefix for the debit-note number (best-effort; default GEN).
-    Mirrors je_service._entry_prefix."""
-    if not entity_id:
-        return "GEN"
-    if db is not None:
-        try:
-            ent = db.get_collection("entities").find_one({"entity_id": entity_id}) or {}
-            code = (
-                ent.get("code")
-                or ent.get("entity_code")
-                or ent.get("short_code")
-                or ""
-            ).strip()
-            if code:
-                return code.upper()[:6]
-        except Exception:  # noqa: BLE001
-            pass
-    return str(entity_id).upper()[:6]
-
-
-def next_debit_note_number(
-    db, entity_id: Optional[str], issue_dt: Optional[datetime] = None
-) -> str:
-    """Mint an FY-scoped consecutive debit-note number via an atomic counter
-    (``counters.find_one_and_update($inc)``) -- the SAME pattern as
-    ``je_service._next_je_number`` / ``order_repository.next_invoice_number``.
-
-    Format ``DN/{prefix}/{FY}/{serial:06d}`` e.g. DN/BV/2026-27/000001. The
-    counter key is per (entity, FY-start) so each legal entity gets its own
-    consecutive series per financial year (Rule 46(b))."""
-    from pymongo import ReturnDocument
-
-    # P1-2: derive the FY from an IST instant (Rule 46(b)). A UTC ``now`` near the
-    # 1-Apr boundary (00:00-05:30 IST) would mis-assign the PRIOR FY's series.
-    dt = issue_dt or _now_ist()
-    fy_label = financial_year_label(dt)
-    fy_start = fy_label.split("-")[0]
-    prefix = _entity_prefix(db, entity_id)
-    key = f"debit_note:{entity_id or 'GEN'}:{fy_start}"
-
-    seq = 1
-    coll = _counters_coll(db)
-    if coll is not None:
-        try:
-            doc = coll.find_one_and_update(
-                {"_id": key},
-                {"$inc": {"seq": 1}},
-                upsert=True,
-                return_document=ReturnDocument.AFTER,
-            )
-            seq = int((doc or {}).get("seq") or 1)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("[RTV_DN] counter %s failed: %s", key, e)
-            seq = int(_now().timestamp())  # fail-soft unique-ish fallback
-    return f"DN/{prefix}/{fy_label}/{seq:06d}"
-
-
 def debit_note_issued(db, rtv_id: str) -> bool:
     """True when the GST debit note was issued for this RTV (a vendor return
     or an RMA; one note per RTV). The note carries the line rates it was
@@ -1063,11 +998,14 @@ class DebitNoteEngine:
         from .return_request_document import prepare_request, build_request
         try:
             prepared = prepare_request(self._db, rtv_doc, vendor, seller, src_lines)
-            entity_id = prepared["seller"].get("entity_id")
-            serial = next_debit_note_number(self._db, entity_id)
+            # The RETURNING shop's debit-note series (Rule 53), IST FY.
+            serial = next_document_number(self._db, rtv_doc.get("store_id"), "D", _now_ist())
             note = build_request(rtv_doc, prepared, serial)
         except ReturnProvenanceError as exc:
             return {"ok": False, "http": 422, "error": exc.code, "message": str(exc)}
+        except InvoiceNumberError as exc:
+            return {"ok": False, "http": 400, "error": "debit_note_number_refused",
+                    "message": f"This debit note cannot be numbered: {exc}"}
         except Exception:
             return {"ok": False, "http": 503, "error": "original_bill_verification_unavailable",
                     "message": "Original purchase evidence could not be verified. Retry the same return."}

@@ -345,8 +345,8 @@ class EyeTestRepository(BaseRepository):
         test_date: Optional[str] = None,
         status: Optional[str] = None
     ) -> List[Dict]:
-        """Get eye tests for a store"""
-        filter_dict = {"store_id": store_id}
+        """Get eye tests for a store (every shop's when store_id is None)"""
+        filter_dict = {"store_id": store_id} if store_id else {}
         if test_date:
             filter_dict["test_date"] = test_date
         if status:
@@ -383,7 +383,7 @@ class EyeTestRepository(BaseRepository):
         Today / Week / Month / All-Time filters querying the range on the server
         instead of pulling only today's rows and filtering in the browser.
         """
-        filter_dict: Dict = {"store_id": store_id}
+        filter_dict: Dict = {"store_id": store_id} if store_id else {}
         if status:
             filter_dict["status"] = status
         date_range: Dict = {}

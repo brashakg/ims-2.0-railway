@@ -46,6 +46,20 @@ interface GSTR1B2CSummary {
   totalTax: number;
 }
 
+// A credit / debit note (GSTR-1 CDNR). refReference is the note's own number
+// (its shop's C / D series, e.g. BOK02/C2627/0001), filed in full.
+interface GSTR1Note {
+  refReference: string;
+  creditNoteDate: string;
+  customerName: string;
+  customerGSTIN?: string;
+  taxableValue: number;
+  cgst: number;
+  sgst: number;
+  igst: number;
+  taxValue: number;
+}
+
 interface GSTR1ValidationIssue {
   level: string;
   issue: string;
@@ -70,6 +84,7 @@ interface GSTR1Data {
   b2b: GSTR1Invoice[];
   b2cl: GSTR1Invoice[];
   b2cs: GSTR1B2CSummary[];
+  cdnr?: GSTR1Note[];
   period: string;
   gstin: string;
   legalName: string;
@@ -86,7 +101,7 @@ export function GSTR1Report() {
   const [isLoading, setIsLoading] = useState(false);
   const [reportData, setReportData] = useState<GSTR1Data | null>(null);
   const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7)); // YYYY-MM
-  const [activeSection, setActiveSection] = useState<'b2b' | 'b2cl' | 'b2cs'>('b2b');
+  const [activeSection, setActiveSection] = useState<'b2b' | 'b2cl' | 'b2cs' | 'cdnr'>('b2b');
 
   useEffect(() => {
     if (selectedMonth) {
@@ -173,6 +188,11 @@ export function GSTR1Report() {
       csv = 'Invoice Number,Date,Customer Name,State,Place of Supply,Invoice Value,Taxable Value,CGST,SGST,IGST,Total Tax,HSN Code,GST Rate\n';
       reportData.b2cl.forEach(inv => {
         csv += `${inv.invoiceNumber},${inv.invoiceDate},${neutralizeFormula(inv.customerName)},${inv.customerState},${inv.placeOfSupply},${inv.invoiceValue},${inv.taxableValue},${inv.cgst},${inv.sgst},${inv.igst},${inv.totalTax},${inv.hsnCode},${inv.gstRate}%\n`;
+      });
+    } else if (activeSection === 'cdnr' && (reportData.cdnr ?? []).length > 0) {
+      csv = 'Note Number,Date,Customer Name,GSTIN,Taxable Value,CGST,SGST,IGST,Total Tax\n';
+      (reportData.cdnr ?? []).forEach(n => {
+        csv += `${n.refReference},${n.creditNoteDate},${neutralizeFormula(n.customerName)},${n.customerGSTIN ?? ''},${n.taxableValue},${n.cgst},${n.sgst},${n.igst},${n.taxValue}\n`;
       });
     } else if (activeSection === 'b2cs' && reportData.b2cs.length > 0) {
       csv = 'Place of Supply,GST Rate,Taxable Value,CGST,SGST,IGST,Total Tax\n';
@@ -361,6 +381,46 @@ export function GSTR1Report() {
     );
   };
 
+  const renderNotesTable = () => {
+    const notes = reportData?.cdnr ?? [];
+    if (notes.length === 0) {
+      return (
+        <div className="text-center py-12 text-gray-500">
+          <FileText className="w-12 h-12 mx-auto mb-2 opacity-50" />
+          <p>No credit or debit notes found for the selected period</p>
+        </div>
+      );
+    }
+    return (
+      <div className="overflow-x-auto">
+        <table className="w-full border-collapse">
+          <thead>
+            <tr className="bg-gray-100 border-b border-gray-200">
+              <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">Note No</th>
+              <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">Date</th>
+              <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">Customer Name</th>
+              <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">GSTIN</th>
+              <th className="px-4 py-3 text-right text-sm font-medium text-gray-700">Taxable Value</th>
+              <th className="px-4 py-3 text-right text-sm font-medium text-gray-700">Total Tax</th>
+            </tr>
+          </thead>
+          <tbody>
+            {notes.map((note, idx) => (
+              <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50">
+                <td className="px-4 py-3 text-sm font-mono text-gray-900">{note.refReference}</td>
+                <td className="px-4 py-3 text-sm text-gray-600">{new Date(note.creditNoteDate).toLocaleDateString('en-IN')}</td>
+                <td className="px-4 py-3 text-sm text-gray-900">{note.customerName}</td>
+                <td className="px-4 py-3 text-sm font-mono text-gray-600">{note.customerGSTIN}</td>
+                <td className="px-4 py-3 text-sm text-right text-gray-900">₹{note.taxableValue.toLocaleString('en-IN')}</td>
+                <td className="px-4 py-3 text-sm text-right font-medium text-gray-900">₹{note.taxValue.toLocaleString('en-IN')}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+  };
+
   return (
     <div className="space-y-4">
       {/* Header */}
@@ -478,9 +538,9 @@ export function GSTR1Report() {
               </ul>
               {hasSerialLengthIssue && (
                 <p className="mt-2 text-xs text-amber-700">
-                  The GSTN portal caps invoice numbers at 16 characters; the GSTN
-                  JSON download will warn before generating. Fixing the minted
-                  serial format is tracked separately.
+                  The GSTN portal caps invoice and note numbers at 16 characters;
+                  the GSTN JSON download will warn before generating. Numbers
+                  issued before the 16-character format stay as they were issued.
                 </p>
               )}
             </div>
@@ -524,6 +584,17 @@ export function GSTR1Report() {
             B2C Small (Summary)
             {reportData && <span className="ml-2 text-xs bg-gray-100 px-2 py-1 rounded-full">{reportData.b2cs.length}</span>}
           </button>
+          <button
+            onClick={() => setActiveSection('cdnr')}
+            className={`shrink-0 whitespace-nowrap px-4 py-3 font-medium text-sm transition-colors ${
+              activeSection === 'cdnr'
+                ? 'border-b-2 border-purple-600 text-purple-600'
+                : 'text-gray-600 hover:text-gray-900'
+            }`}
+          >
+            Credit / Debit Notes
+            {reportData && <span className="ml-2 text-xs bg-gray-100 px-2 py-1 rounded-full">{(reportData.cdnr ?? []).length}</span>}
+          </button>
         </div>
 
         <div className="p-4">
@@ -536,6 +607,7 @@ export function GSTR1Report() {
               {activeSection === 'b2b' && renderB2BTable()}
               {activeSection === 'b2cl' && renderB2CLTable()}
               {activeSection === 'b2cs' && renderB2CSTable()}
+              {activeSection === 'cdnr' && renderNotesTable()}
             </>
           )}
         </div>

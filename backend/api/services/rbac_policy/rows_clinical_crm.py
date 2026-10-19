@@ -440,15 +440,6 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/crm/customers/{customer_id}/lifecycle",
         "allowed": "AUTHENTICATED",
     },
-    # Loyalty points redeem against real money. NARROWED from AUTHENTICATED to
-    # match its twin POST /customers/{customer_id}/loyalty/add and the route's
-    # own require_roles(*_CREDIT_ROLES) gate -- a stale AUTHENTICATED row here
-    # would let the middleware wave through a caller the route then 403s.
-    {
-        "method": "POST",
-        "path": "/api/v1/crm/customers/{customer_id}/loyalty-points",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
-    },
     {
         "method": "GET",
         "path": "/api/v1/crm/customers/{customer_id}/prescriptions",

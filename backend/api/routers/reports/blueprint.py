@@ -160,7 +160,7 @@ async def growth_blueprint(
     import json as _json
     from agents import llm_provider  # local import — agents pkg may be optional
 
-    active_store = store_in_view(store_id, current_user) or "store-001"
+    active_store = store_in_view(store_id, current_user, one_shop=True) or "store-001"
     month_key = now_ist().strftime("%Y-%m")
     cache_key = f"{active_store}::{month_key}::{model_id or 'default'}"
     db = get_db()

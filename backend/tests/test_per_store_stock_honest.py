@@ -410,7 +410,11 @@ def test_1_a_draft_listing_with_an_unconfirmed_size_is_never_taken_down_and_ever
     sent = _tracking_sent(spy)
     assert {VARIANT_GID, "gid://shopify/ProductVariant/6", MINTED} <= sent, sent
     (pub,) = _index(spy, "publishablePublish")
-    assert max(_index(spy, "productVariantsBulkUpdate")) < pub
+    # The tracking re-send lands before the publish. (Since G2 a repair
+    # press also re-sends today's PRICE to the sizes already on the listing
+    # -- imsVariantPricesUpdate, after the publish like every non-seeding
+    # press's price step -- so the marker is the tracking mutation's own.)
+    assert max(_index(spy, "imsVariantInventoryUpdate")) < pub
     assert res.ok is True, res
 
 

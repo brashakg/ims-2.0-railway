@@ -52,7 +52,7 @@ async def list_stock_counts(
     if db is not None:
         try:
             collection = db.get_collection("stock_counts")
-            query: Dict = {"store_id": active_store}
+            query: Dict = {"store_id": active_store} if active_store else {}
             if status:
                 query["status"] = status
             counts = list(collection.find(query).sort("created_at", -1).limit(50))

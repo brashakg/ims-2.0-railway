@@ -35,7 +35,9 @@ from ._shared import (
 # have. All compute live off Mongo — no XLS importer, no caching layer.
 #
 # Conventions match the existing /reports/* endpoints:
-#   - store_id query param, fall back to user.active_store_id, fall back to "store-001"
+#   - store_id query param (store_in_view): a non-admin's own shop; an admin
+#     with none named reads every shop (owner 2026-10-18) -- the footfall
+#     audit excepted (one shop's door), his top-bar shop there
 #   - Period: year/month for monthly, years_back for multi-year
 #   - Response always wraps the payload in a dict with store_id echoed
 #   - Empty results never raise — return zeroed structures so the UI
@@ -146,7 +148,9 @@ async def footfall_audit(
 
     Spec: docs/TECHCHERRY_PORT_SCOPE.md §5.1.
     """
-    active_store = store_in_view(store_id, current_user) or "store-001"
+    # A shop's door count against its own sales: ONE shop's (online orders
+    # have no walk-in to compare with), so an admin's top-bar shop.
+    active_store = store_in_view(store_id, current_user, one_shop=True) or "store-001"
     db = get_db()
 
     now = now_ist_naive()
@@ -314,7 +318,7 @@ async def sales_price_bands(
 
     Spec: docs/TECHCHERRY_PORT_SCOPE.md §5.2.
     """
-    active_store = store_in_view(store_id, current_user) or "store-001"
+    active_store = store_in_view(store_id, current_user)
     order_repo = get_order_repository()
     now = now_ist_naive()
     # Start of FY (fy_count - 1) years before the current FY.
@@ -491,7 +495,7 @@ async def sales_lens_deep_dive(
 
     Spec: docs/TECHCHERRY_PORT_SCOPE.md §5.3.
     """
-    active_store = store_in_view(store_id, current_user) or "store-001"
+    active_store = store_in_view(store_id, current_user)
     order_repo = get_order_repository()
     db = get_db()
 
@@ -638,7 +642,7 @@ async def sales_seasonality(
 
     Spec: docs/TECHCHERRY_PORT_SCOPE.md §5.4.
     """
-    active_store = store_in_view(store_id, current_user) or "store-001"
+    active_store = store_in_view(store_id, current_user)
     order_repo = get_order_repository()
     # BUG-104, BOUND rule (backward) for the window, VALUE rule (forward) for
     # the day-of-week / month-of-year buckets below. Both halves live in this

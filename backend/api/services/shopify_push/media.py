@@ -585,6 +585,99 @@ async def sync_product_media(
     return summary
 
 
+VARIANT_PHOTOS_PENDING = "VARIANT_PHOTOS_PENDING"
+
+
+async def sync_variant_media(
+    db,
+    product: Dict[str, Any],
+    product_gid: str,
+    variant_photos: Dict[str, str],
+    gid_by_sku: Dict[str, str],
+    nodes: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """LIVE-only (G2, owner 2026-10-18): each colour/size of a model listing
+    shows ITS photo when chosen -- its first photo (already on the listing
+    through the photo pass) attached to its variant with
+    productVariantAppendMedia. Shopify allows one media per variant: a
+    variant holding a different IMS-owned photo has it detached first; one a
+    person attached in Shopify admin (media IMS does not own) is left alone.
+    A photo Shopify is still processing cannot be attached yet
+    (NON_READY_MEDIA): the line says so and the press re-queues, so the next
+    run attaches it. Fail-soft summary, never raises; None when there is
+    nothing to attach."""
+    if not variant_photos:
+        return None
+    pid = product.get("id") or product.get("product_id")
+    try:
+        fresh = db["catalog_products"].find_one({"id": pid}) if pid else None
+    except Exception:  # noqa: BLE001
+        fresh = None
+    by_url = {r["url"]: r["id"] for r in owned_media(fresh or product)}
+    owned_ids = set(by_url.values())
+    current: Dict[str, Optional[str]] = {}
+    for n in nodes or []:
+        if isinstance(n, dict) and n.get("id"):
+            media = ((n.get("media") or {}).get("nodes")) or []
+            current[_as_shopify_gid(n["id"], "ProductVariant")] = (
+                str(media[0].get("id")) if media and isinstance(media[0], dict) and media[0].get("id") else None
+            )
+    detach: List[Dict[str, Any]] = []
+    append: List[Dict[str, Any]] = []
+    summary: Dict[str, Any] = {"attached": 0, "detached": 0, "hands_off": 0, "not_on_shopify": 0}
+    for sku, url in variant_photos.items():
+        vgid = gid_by_sku.get(sku)
+        media_id = by_url.get(url)
+        if not vgid or not media_id:
+            summary["not_on_shopify"] += 1
+            continue
+        vgid = _as_shopify_gid(vgid, "ProductVariant")
+        have = current.get(vgid)
+        if have == media_id:
+            continue
+        if have and have not in owned_ids:
+            summary["hands_off"] += 1
+            continue
+        if have:
+            detach.append({"variantId": vgid, "mediaIds": [have]})
+        append.append({"variantId": vgid, "mediaIds": [media_id]})
+    if not append:
+        return summary
+    from .queries import _VARIANT_APPEND_MEDIA, _VARIANT_DETACH_MEDIA
+
+    for query, field, rows, counter in (
+        (_VARIANT_DETACH_MEDIA, "productVariantDetachMedia", detach, "detached"),
+        (_VARIANT_APPEND_MEDIA, "productVariantAppendMedia", append, "attached"),
+    ):
+        if not rows:
+            continue
+        try:
+            body = await _graphql(
+                db, query, {"productId": _as_shopify_gid(product_gid, "Product"), "variantMedia": rows}
+            )
+            obj = ((body or {}).get("data") or {}).get(field) or {}
+            errors = [e for e in obj.get("userErrors") or [] if isinstance(e, dict)]
+            err = (
+                f"graphql errors: {str(body['errors'])[:300]}"
+                if (body or {}).get("errors")
+                else "; ".join(str(e.get("message") or e.get("code")) for e in errors)
+            )
+            not_ready = any(str(e.get("code") or "") == "NON_READY_MEDIA" for e in errors)
+        except Exception as exc:  # noqa: BLE001 -- fail-soft side channel
+            err, not_ready = str(exc), False
+        if err:
+            summary["code"] = VARIANT_PHOTOS_PENDING if not_ready else None
+            summary["error"] = (
+                "each colour's photo is still being processed by Shopify -- it is attached to its "
+                "colour on the next run"
+                if not_ready
+                else f"a colour's photo could not be set on its variant ({err})"
+            )
+            return summary
+        summary[counter] = len(rows)
+    return summary
+
+
 def build_media_inputs(images: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Build Shopify CreateMediaInput[] from APPROVED product_images. Prefer the
     designer's edited asset; fall back to the source url."""
@@ -725,16 +818,26 @@ def _recorded_elsewhere(db, image: Dict[str, Any]) -> tuple:
     pid = image.get("product_id")
     parent = db["catalog_products"].find_one({"id": pid}) or {}
     out = {r["id"] for r in owned_media(parent)}
+    owners = [pid]
+    # A colour's photo goes on its MODEL's listing (G2): the media the
+    # listing's own photos and the listing's design rows own are someone
+    # else's there too.
+    link = (parent.get("ecom") or {}).get("variant_of")
+    listing_id = link.get("twin_id") if isinstance(link, dict) else None
+    if listing_id and listing_id != pid:
+        out |= {r["id"] for r in owned_media(db["catalog_products"].find_one({"id": listing_id}) or {})}
+        owners.append(listing_id)
     flying: List[str] = []
     me = (image.get("image_id"), image.get("url"))
-    for row in db["product_images"].find({"product_id": pid}):
-        if (row.get("image_id"), row.get("url")) == me:
-            continue
-        if row.get("shopify_image_id"):
-            out.add(str(row["shopify_image_id"]))
-        out.update(_answered(row))
-        if row.get("shopify_image_sent"):
-            flying.append(str(row["shopify_image_sent"]))
+    for owner in owners:
+        for row in db["product_images"].find({"product_id": owner}):
+            if (row.get("image_id"), row.get("url")) == me:
+                continue
+            if row.get("shopify_image_id"):
+                out.add(str(row["shopify_image_id"]))
+            out.update(_answered(row))
+            if row.get("shopify_image_sent"):
+                flying.append(str(row["shopify_image_sent"]))
     return out, flying
 
 
@@ -1129,17 +1232,29 @@ def _resolve_product_doc(db, product_id: Optional[str]) -> Optional[Dict[str, An
 
 def _resolve_product_gid(db, product_id: Optional[str]) -> Optional[str]:
     """Look up the parent catalog_products' ecom.shopify_product_id (the gid the
-    image media attaches to). A SIZE VARIANT's twin resolves to None whatever
-    it carries: it owns no listing, so its image must never attach to the
-    PARENT's (a twin repair that stamps the parent gid on a child twin would
-    otherwise route the child's APPROVED photo onto the parent's media through
-    push_image / the images sweep). Fail-soft -> None."""
+    image media attaches to). A VARIANT's twin (a colour/size of a model) owns
+    no listing, so whatever gid IT carries is never read (a twin repair that
+    stamps the parent gid on a child twin must not route its photo anywhere).
+    Its photo goes on its MODEL's listing (G2, owner 2026-10-18) only through
+    its catalog_variants row: the row sits under that listing and carries the
+    Shopify variant id -- the colour IS on the listing. A colour not yet on
+    it resolves to None (no photo of a colour the website does not sell).
+    Fail-soft -> None."""
     if not product_id:
         return None
     try:
         doc = db["catalog_products"].find_one({"id": product_id})
-        if doc is None or is_variant_of(doc):
+        if doc is None:
             return None
+        if is_variant_of(doc):
+            link = (doc.get("ecom") or {}).get("variant_of") or {}
+            listing_id = link.get("twin_id") if isinstance(link, dict) else None
+            row = db["catalog_variants"].find_one({"sku": doc.get("sku")}) if doc.get("sku") else None
+            if not (listing_id and row and row.get("shopify_variant_id") and row.get("parent_product_id") == listing_id):
+                return None
+            doc = db["catalog_products"].find_one({"id": listing_id})
+            if doc is None or is_variant_of(doc):
+                return None
         gid = (doc.get("ecom") or {}).get("shopify_product_id")
         return _as_shopify_gid(gid, "Product") if gid else None
     except Exception:  # noqa: BLE001

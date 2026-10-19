@@ -153,6 +153,19 @@ describe('each expenses section renders at its own URL', () => {
     await expectActiveLink(/^Pending Approval/);
   });
 
+  it('approvals: a petty approval cut off mid-way stays in the queue, shown as being approved', async () => {
+    // The server lists PENDING and APPROVING (a claim whose worker was cut
+    // off); Approve finishes it and Reject follows the takeover rules.
+    api.getPendingApproval.mockResolvedValue({
+      expenses: [row('EXP-APR-2', 'ZZ float tea', 'APPROVING', { category: 'PETTY_CASH', amount: 150 })],
+    });
+    renderSection('/finance/expenses/approvals');
+    expect(await screen.findByText('ZZ float tea', undefined, FIND)).toBeInTheDocument();
+    expect(screen.getByText('Being approved')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Approve/ })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /Reject/ })).toBeInTheDocument();
+  });
+
   it('entry: the ledger-entry queue', async () => {
     renderSection('/finance/expenses/entry');
     expect(await screen.findByText('ZZ courier charges', undefined, FIND)).toBeInTheDocument();

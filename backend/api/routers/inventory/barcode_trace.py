@@ -79,13 +79,16 @@ async def barcode_lifecycle_trace(
     sold_on = None
     every_shop, my_shops = user_store_scope(current_user)
     shops = sorted(s for s in my_shops if isinstance(s, str) and s)
+    if not every_shop and not shops:
+        # A login with no shop sees no shop's unit (R4): nothing to look up.
+        return result
 
     def _mine(query: dict, *fields: str) -> dict:
-        """`query` held to the caller's shops on any of `fields`; a login with
-        no shop matches nothing."""
+        """`query` held to the caller's shops on any of `fields`."""
         if every_shop:
             return query
         return {"$and": [query, {"$or": [{f: {"$in": shops}} for f in fields]}]}
+
     try:
         # 1. Stock unit
         su = db.get_collection("stock_units").find_one(barcode_svc.unit_barcode_match(barcode))

@@ -137,7 +137,8 @@ class TestPriceBandsEndpoint:
         )
         assert r.status_code == 200
         body = r.json()
-        assert body["store_id"] == "BV-TEST-01"
+        # An admin with no shop named reads every shop (owner 2026-10-18).
+        assert body["store_id"] is None
         # Exactly 11 named bands, in order
         assert body["bands"] == [
             "<1K", "1K-2.5K", "2.5K-5K", "5K-10K", "10K-15K", "15K-20K",

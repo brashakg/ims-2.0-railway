@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 from .auth import get_current_user, require_roles
 from ..dependencies import (
+    resolve_store_scope,
     get_customer_repository,
     get_loyalty_account_repository,
     get_order_repository,
@@ -30,10 +31,10 @@ from ..dependencies import (
 from ..services.online_order_status import SALE_DONE_ANY_CASE
 from ..services.task_triggers import create_system_task
 
-# Customer store-ownership + the credit-role set are single-sourced in the
-# customers router; import them rather than re-deriving the rule here (this
-# file previously had neither on the 360 and loyalty doors).
-from .customers import _CREDIT_ROLES, customer_in_scope
+# Customer store-ownership is single-sourced in the customers router; import
+# it rather than re-deriving the rule here (this file previously had none on
+# the 360 door).
+from .customers import customer_in_scope
 
 router = APIRouter()
 
@@ -158,13 +159,6 @@ class LoyaltyTierResponse(BaseModel):
     total_points_earned: int
     member_since: str
     birthday_month: Optional[int] = None
-
-
-class AddLoyaltyPointsRequest(BaseModel):
-    """Request to add loyalty points to customer"""
-
-    points: int = Field(..., gt=0, description="Loyalty points to add")
-    reason: str = Field(default="Purchase", description="Reason for adding points")
 
 
 class PrescriptionWithStatusResponse(BaseModel):
@@ -389,7 +383,10 @@ async def get_rfm_segmentation(
     always scoped by store. ADMIN and SUPERADMIN keep the company-wide view.
     """
     try:
-        store_id = current_user.get("active_store_id")
+        # THE shop rule: a non-admin's own shop; a login with no shop the
+        # reserved no-shop id, so it segments nobody (R4) -- it used to fall
+        # through to every shop's customers.
+        store_id = resolve_store_scope(None, current_user)
         roles = current_user.get("roles", []) or []
         sees_all = any(r in ("SUPERADMIN", "ADMIN") for r in roles)
         if not sees_all and store_id and hasattr(db, "query_customers_by_store"):
@@ -522,7 +519,10 @@ async def get_churn_risk_customers(
     - low: Minor engagement decline
     """
     try:
-        store_id = current_user.get("active_store_id")
+        # THE shop rule (resolve_store_scope): an admin every shop, anyone else
+        # their own shop, a login with no shop nobody (R4) -- it used to fall
+        # through to every shop's customers.
+        store_id = resolve_store_scope(None, current_user)
         # Filter customers by store to prevent cross-store data leakage
         if store_id and hasattr(db, "query_customers_by_store"):
             all_customers = db.query_customers_by_store(store_id)
@@ -1663,54 +1663,6 @@ async def get_customer_return_risk(
             "risk_level": "NONE",
             "note": "Error computing return risk",
         }
-
-
-@router.post(
-    "/customers/{customer_id}/loyalty-points", response_model=LoyaltyTierResponse
-)
-async def add_loyalty_points(
-    customer_id: str = Path(..., description="Customer ID"),
-    request: AddLoyaltyPointsRequest = Body(...),
-    current_user: dict = Depends(require_roles(*_CREDIT_ROLES)),
-):
-    """Add loyalty points to customer account.
-
-    Points redeem against real money, so this door carries the SAME gate as its
-    twin POST /customers/{id}/loyalty/add: credit roles only, and the customer
-    must belong to a store the caller owns.
-    """
-    try:
-        repo = get_customer_repository()
-        if not repo:
-            raise HTTPException(status_code=500, detail="Database connection failed")
-
-        customer = repo.find_by_id(customer_id)
-        if not customer:
-            raise HTTPException(status_code=404, detail="Customer not found")
-        if not customer_in_scope(customer, current_user):
-            raise HTTPException(
-                status_code=403, detail="No access to this customer's store"
-            )
-
-        updated_customer = repo.increment_loyalty_points(customer_id, request.points)
-        if updated_customer is None:
-            raise HTTPException(
-                status_code=500, detail="Failed to update loyalty points"
-            )
-
-        return _calculate_loyalty_tier(
-            updated_customer.get("loyalty_points", 0),
-            updated_customer.get("created_at", ""),
-            customer_id=customer_id,
-            customer_doc=updated_customer,
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("CRM operation failed: %s", e)
-        raise HTTPException(
-            status_code=500, detail="An internal error occurred. Please try again."
-        )
 
 
 # ============================================================================

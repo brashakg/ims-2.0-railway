@@ -15,7 +15,7 @@ import {
 import {
   cashFlowApi, vendorApApi,
   type OwnerDashboard, type CashFlowForecast, type ApAgingByVendor, type VendorLedger,
-  type VendorReceiptRow,
+  type VendorReceiptRow, type VendorBill, type VendorPayment,
 } from '../../services/api/vendorAp';
 import { useToast } from '../../context/ToastContext';
 import { PurchaseShopName, usePurchaseShop } from '../purchase/purchaseShop';
@@ -348,7 +348,7 @@ function VendorLedgerDrawer({ vendorId, vendorName, onClose, onChanged }: { vend
   const toast = useToast();
   const [ledger, setLedger] = useState<VendorLedger | null>(null);
   const [loading, setLoading] = useState(true);
-  const [recording, setRecording] = useState<'bill' | 'payment' | 'debit' | null>(null);
+  const [recording, setRecording] = useState<RecordKind | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -389,6 +389,7 @@ function VendorLedgerDrawer({ vendorId, vendorName, onClose, onChanged }: { vend
                 <button type="button" onClick={() => setRecording('bill')} className="inline-flex items-center gap-1 text-xs font-medium text-bv bg-bv-soft hover:bg-bv-50 rounded-lg px-2.5 py-1.5"><Plus className="w-3 h-3" /> Bill</button>
                 <button type="button" onClick={() => setRecording('payment')} className="inline-flex items-center gap-1 text-xs font-medium text-green-700 bg-green-50 hover:bg-green-100 rounded-lg px-2.5 py-1.5"><Plus className="w-3 h-3" /> Payment</button>
                 <button type="button" onClick={() => setRecording('debit')} className="inline-flex items-center gap-1 text-xs font-medium text-amber-700 bg-amber-50 hover:bg-amber-100 rounded-lg px-2.5 py-1.5"><Plus className="w-3 h-3" /> Debit note</button>
+                <button type="button" onClick={() => setRecording('apply')} className="inline-flex items-center gap-1 text-xs font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg px-2.5 py-1.5">Apply advance</button>
               </div>
 
               {/* key: each kind mounts its own fresh form. Kept mounted across
@@ -447,12 +448,41 @@ function VendorLedgerDrawer({ vendorId, vendorName, onClose, onChanged }: { vend
   );
 }
 
-function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'payment' | 'debit'; vendorId: string; onClose: () => void; onSaved: () => void }) {
+type RecordKind = 'bill' | 'payment' | 'debit' | 'apply';
+
+// The payment form's "Apply this payment to" choice for money that names no
+// bill (owner 2026-10-18, A12): an advance, applied to a bill later.
+const ADVANCE = '__advance__';
+const RECORD_TITLES: Record<RecordKind, string> = {
+  bill: 'Bill', payment: 'Payment', debit: 'Debit note', apply: 'Apply an advance to a bill',
+};
+const gross = (p: VendorPayment) => Math.round(((p.amount || 0) + (p.tds_amount || 0)) * 100) / 100;
+// What can still be paid on a bill: the server's left_to_pay -- the figure its
+// over-payment refusal tests (a post-dated cheque already counted) -- so the form
+// never offers an amount the server then refuses. Older servers: outstanding.
+const billLeft = (b: VendorBill) => b.left_to_pay ?? b.outstanding ?? 0;
+
+function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: RecordKind; vendorId: string; onClose: () => void; onSaved: () => void }) {
   const toast = useToast();
   const shopName = usePurchaseShopNamer();
   const { canPick } = usePurchaseShop();
   const [saving, setSaving] = useState(false);
   const [f, setF] = useState<Record<string, string | number>>({});
+  // Payments pick their bill (owner 2026-10-18): this supplier's open bills
+  // (null = loading), the bill picked ('' = not chosen yet, ADVANCE = no bill),
+  // and for 'apply' the unapplied advance picked plus the amount to apply.
+  const [bills, setBills] = useState<VendorBill[] | null>(null);
+  const [billsFailed, setBillsFailed] = useState(false);
+  const [applyTo, setApplyTo] = useState('');
+  const [advances, setAdvances] = useState<VendorPayment[] | null>(null);
+  const [advanceId, setAdvanceId] = useState('');
+  const [applyAmount, setApplyAmount] = useState('');
+  const pickedBill = (bills ?? []).find((b) => b.bill_id === applyTo);
+  const pickedAdvance = (advances ?? []).find((p) => p.payment_id === advanceId);
+  // One id for the payment this form records, kept across the client's
+  // automatic retries and a second click after an error: the server records
+  // it once (owner 2026-10-18 review).
+  const [requestId] = useState(() => globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`);
   const [creditType, setCreditType] = useState<'' | 'RETURN_CN' | 'SCHEME_CN' | 'DISCOUNT_CN' | 'QUALITY_CN'>('');
   // The IST business day, like every other bill door: toISOString() is the
   // UTC day, so a bill keyed at 01:00 IST on 1 October booked 30 September
@@ -496,7 +526,44 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
     return () => { cancelled = true; };
   }, [kind, billKind, vendorId]);
 
+  useEffect(() => {
+    if (kind !== 'payment' && kind !== 'apply') return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await vendorApApi.listBills(vendorId);
+        if (!cancelled) setBills((res?.bills ?? []).filter((b) => billLeft(b) > 0));
+      } catch {
+        if (!cancelled) { setBills([]); setBillsFailed(true); }
+      }
+      if (kind !== 'apply') return;
+      try {
+        const res = await vendorApApi.listPayments(vendorId);
+        if (!cancelled) setAdvances((res?.payments ?? []).filter((p) => !String(p.bill_id ?? '').trim() && gross(p) > 0));
+      } catch {
+        if (!cancelled) setAdvances([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [kind, vendorId]);
+
+  // Apply: offer the most that can go, never more than the advance or the bill.
+  const pickForApply = (advId: string, billId: string) => {
+    setAdvanceId(advId); setApplyTo(billId);
+    const adv = (advances ?? []).find((p) => p.payment_id === advId);
+    const bill = (bills ?? []).find((b) => b.bill_id === billId);
+    if (adv && bill) setApplyAmount(String(Math.min(gross(adv), billLeft(bill))));
+  };
+
   const save = async () => {
+    if (kind === 'payment' && !applyTo) {
+      toast.error('Pick the bill this payment is for, or choose Advance (no bill yet)');
+      return;
+    }
+    if (kind === 'apply' && (!pickedAdvance || !pickedBill)) {
+      toast.error('Pick the advance and the bill to apply it to');
+      return;
+    }
     if (kind === 'debit' && (!creditType || creditType === 'RETURN_CN')) {
       toast.error(creditType === 'RETURN_CN'
         ? 'Record the supplier’s confirmed goods-return credit in Vendor Returns.'
@@ -534,9 +601,22 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
           mode: String(f.mode || 'BANK'), tds_section: String(f.tds_section || 'NONE'),
           tds_amount: f.tds_amount !== undefined ? Number(f.tds_amount) : undefined,
           reference: String(f.reference || ''),
-          store_id: moneyShop || undefined,
+          // A bill's money is the bill's shop's: no shop is sent with it.
+          bill_id: pickedBill ? pickedBill.bill_id : undefined,
+          request_id: requestId,
+          store_id: pickedBill ? undefined : moneyShop || undefined,
         });
-        toast.success(bookedTo('Payment', saved, shopName));
+        // What the server recorded, not what the form holds (a replayed
+        // request answers the payment it saved the first time).
+        const paidBill = saved?.bill_id ? (bills ?? []).find((b) => b.bill_id === saved.bill_id) : undefined;
+        toast.success(bookedTo(saved?.bill_id ? `Payment against bill ${paidBill?.bill_number ?? saved.bill_id}` : 'Payment', saved, shopName));
+      } else if (kind === 'apply' && pickedAdvance && pickedBill) {
+        const out = await vendorApApi.applyAdvance(vendorId, pickedAdvance.payment_id, {
+          bill_id: pickedBill.bill_id, amount: Number(applyAmount) || 0, advance_left: gross(pickedAdvance),
+        });
+        toast.success(out.advance_left > 0
+          ? `Applied to bill ${pickedBill.bill_number}; ${inr(out.advance_left)} of the advance is still unapplied`
+          : `Advance applied to bill ${pickedBill.bill_number}`);
       } else {
         const saved = await vendorApApi.createDebitNote(vendorId, {
           amount: Number(f.amount) || 0, date: String(f.date || today), reason: String(f.reason || ''),
@@ -554,7 +634,7 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
   return (
     <div className="border border-gray-200 rounded-lg p-3 mb-4 bg-gray-50/60">
       <div className="flex items-center justify-between mb-2">
-        <h4 className="text-sm font-medium capitalize">{kind === 'debit' ? 'Debit note' : kind}</h4>
+        <h4 className="text-sm font-medium">{RECORD_TITLES[kind]}</h4>
         <button type="button" onClick={onClose} className="text-gray-400 hover:text-gray-700"><X className="w-4 h-4" /></button>
       </div>
       <div className="grid grid-cols-2 gap-2">
@@ -596,6 +676,11 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
           <div className="col-span-2 text-xs text-gray-500">Total: {inr((Number(f.taxable_amount) || 0) + (Number(f.tax_amount) || 0))}. Due date set from vendor credit terms.</div>
         </>}
         {kind === 'payment' && <>
+          <BillPicker
+            bills={bills} failed={billsFailed} value={applyTo} onChange={setApplyTo}
+            className={cls} shopName={shopName} canPick={canPick}
+            label="Apply this payment to" placeholder="Apply this payment to…" withAdvance
+          />
           <input className={cls} type="number" placeholder="Amount paid" onChange={(e) => set('amount', e.target.value)} />
           <input className={cls} type="date" defaultValue={today} onChange={(e) => set('payment_date', e.target.value)} />
           <select className={cls} defaultValue="BANK" onChange={(e) => set('mode', e.target.value)}>
@@ -606,14 +691,41 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: 'bill' | 'paym
           </select>
           <input className={cls} type="number" placeholder="TDS amount (optional)" onChange={(e) => set('tds_amount', e.target.value)} />
           <input className={cls} placeholder="Reference / UTR" onChange={(e) => set('reference', e.target.value)} />
-          <PurchaseShopField
-            value={moneyShop}
-            onChange={setMoneyShop}
-            label="Shop this money is for"
-            emptyLabel={'The supplier\u2019s shop (by its bills)'}
-            className="col-span-2"
-            testId="money-shop"
-          />
+          {pickedBill ? (
+            <p className="col-span-2 text-xs text-gray-500">The money goes to this bill&rsquo;s shop.</p>
+          ) : (
+            <PurchaseShopField
+              value={moneyShop}
+              onChange={setMoneyShop}
+              label="Shop this money is for"
+              emptyLabel={'The supplier\u2019s shop (by its bills)'}
+              className="col-span-2"
+              testId="money-shop"
+            />
+          )}
+        </>}
+        {kind === 'apply' && <>
+          {advances !== null && advances.length === 0 ? (
+            <p className="col-span-2 text-sm text-gray-600" data-testid="no-advances">This supplier has no unapplied advance.</p>
+          ) : <>
+            <select className={`${cls} col-span-2`} aria-label="Advance" value={advanceId} onChange={(e) => pickForApply(e.target.value, applyTo)}>
+              <option value="">{advances === null ? 'Loading advances\u2026' : 'Pick the advance\u2026'}</option>
+              {(advances ?? []).map((p) => (
+                <option key={p.payment_id} value={p.payment_id}>
+                  {inr(gross(p))} paid {(p.payment_date || '').slice(0, 10)}{p.reference ? ` \u00b7 ${p.reference}` : ''}
+                  {canPick ? ` \u00b7 ${p.store_id ? `for ${shopName(p.store_id)}` : 'no shop on record'}` : ''}
+                </option>
+              ))}
+            </select>
+            <BillPicker
+              bills={bills} failed={billsFailed} value={applyTo} onChange={(id) => pickForApply(advanceId, id)}
+              className={cls} shopName={shopName} canPick={canPick}
+              label="Bill to apply it to" placeholder="Pick the bill\u2026"
+            />
+            <label className="col-span-2 text-sm">Amount to apply
+              <input className={cls} type="number" value={applyAmount} onChange={(e) => setApplyAmount(e.target.value)} />
+            </label>
+          </>}
         </>}
         {kind === 'debit' && <>
           <label className="col-span-2 text-sm">Credit type
@@ -665,6 +777,43 @@ function bookedTo(what: string, saved: { store_id?: string | null } | null | und
   if (shop) return `${what} recorded for ${shopName(shop)}`;
   if (shop === null) return `${what} recorded with no shop on record`;
   return 'Recorded';
+}
+
+/** This supplier's open bills to put money against (owner 2026-10-18: a
+ *  payment picks its bill). An admin's list covers every shop, so each bill
+ *  names its shop. `withAdvance` adds the "no bill yet" choice -- money the
+ *  supplier keeps as an advance until Apply advance puts it on a bill. */
+function BillPicker({ bills, failed, value, onChange, className, shopName, canPick, label, placeholder, withAdvance }: {
+  bills: VendorBill[] | null;
+  failed: boolean;
+  value: string;
+  onChange: (billId: string) => void;
+  className: string;
+  shopName: (id: string) => string;
+  canPick: boolean;
+  label: string;
+  placeholder: string;
+  withAdvance?: boolean;
+}) {
+  return (
+    <div className="col-span-2">
+      <select className={className} value={value} onChange={(e) => onChange(e.target.value)} aria-label={label}>
+        <option value="">{bills === null ? 'Loading bills…' : placeholder}</option>
+        {(bills ?? []).map((b) => (
+          <option key={b.bill_id} value={b.bill_id}>
+            Bill {b.bill_number} · {(b.bill_date || '').slice(0, 10)} · {inr(billLeft(b))} left
+            {canPick ? ` · ${b.store_id ? `for ${shopName(b.store_id)}` : 'no shop on record'}` : ''}
+          </option>
+        ))}
+        {withAdvance && <option value={ADVANCE}>Advance (no bill yet)</option>}
+      </select>
+      {failed ? (
+        <p className="text-xs text-red-600 mt-1">Could not load this supplier&rsquo;s bills — try again in a moment.</p>
+      ) : bills !== null && bills.length === 0 ? (
+        <p className="text-xs text-gray-500 mt-1" data-testid="no-open-bills">No unpaid bills for this supplier.</p>
+      ) : null}
+    </div>
+  );
 }
 
 /** The Bill form's goods-receipt list (owner ruling 15). The list is the

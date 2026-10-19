@@ -54,16 +54,22 @@ def gst_invoice_number_problem(number: object) -> Optional[str]:
     return None
 
 
-def historical_order_problem(order: Optional[Dict]) -> Optional[str]:
+def order_mint_problem(order: Optional[Dict]) -> Optional[str]:
     """Why ``order`` may never take a number from the live invoice series, else
-    None: a historical import (``historical`` / the order-history import) was
-    billed before IMS, so no door mints for it (CGST Rule 46(b))."""
+    None -- asked by every door before it mints for an order:
+      * a historical import (``historical`` / the order-history import) was
+        billed before IMS (CGST Rule 46(b));
+      * a CANCELLED order is never invoiced (owner 2026-10-19: cancelled test
+        bills must never get numbers). One that already carries a number
+        keeps it -- a door asks this only before minting."""
     o = order or {}
     if o.get("historical") or o.get("import_source") == "shopify_order_history":
         return (
             "this is a historical imported order -- it was billed before IMS "
             "and never takes a number from this year's invoice series"
         )
+    if str(o.get("status") or "").upper() == "CANCELLED":
+        return "this order was cancelled"
     return None
 
 
@@ -123,28 +129,37 @@ def invoice_fy_start(when: Optional[datetime] = None) -> int:
     return fy_start_year(now.astimezone(IST))
 
 
-def invoice_series_key(code: str, fy: int) -> str:
-    """The ``counters`` _id of one shop code's series in one FY."""
-    return f"invoice:{code}:{fy}"
+# The shop's GST document series (owner/CA 2026-10-18), one counter each per
+# shop per FY, all under the shop's ONE code: "" = tax invoice
+# (BOK02/2627/00001), "T" = inter-GSTIN stock-transfer tax invoice
+# (BOK02/T2627/0001), "D" = debit note, "C" = credit note (Rule 53) -- the
+# letter keeps each series apart; every number is exactly 16 characters.
+DOCUMENT_SERIES = ("", "T", "D", "C")
+
+
+def invoice_series_key(code: str, fy: int, series: str = "") -> str:
+    """The ``counters`` _id of one shop code's ``series`` in one FY."""
+    return f"invoice:{code}:{fy}" if not series else f"gstdoc-{series}:{code}:{fy}"
 
 
 def invoice_series_problem(counters, code: str, store_id: str, fy: int) -> Optional[str]:
     """Why ``store_id`` may not issue under ``code`` in FY ``fy``, else None.
 
-    ONE series per shop per financial year, never shared: the counter doc
-    records the store that opened it, so a code another store issued under
-    this FY stays theirs (even after they moved off it), and a shop that issued
-    under one code cannot open a second series before 1 April. The mint and
-    the store form both ask this one question."""
-    key = invoice_series_key(code, fy)
-    held = counters.find_one({"_id": key})
-    if held and held.get("store_id") != store_id:
+    ONE code per shop per financial year, never shared, across ALL its
+    document series: each counter doc records the store that opened it, so a
+    code another store issued under this FY (any series) stays theirs (even
+    after they moved off it), and a shop that issued under one code cannot
+    open a second before 1 April. The mint and the store form both ask this
+    one question."""
+    keys = [invoice_series_key(code, fy, s) for s in DOCUMENT_SERIES]
+    held = counters.find_one({"_id": {"$in": keys}, "store_id": {"$ne": store_id}})
+    if held:
         return (
             f"invoice code {code} was already used this financial year by store "
             f"{held.get('store_code') or held.get('store_id')}"
         )
     other = counters.find_one(
-        {"store_id": store_id, "fy": fy, "seq": {"$gt": 0}, "_id": {"$ne": key}}
+        {"store_id": store_id, "fy": fy, "seq": {"$gt": 0}, "_id": {"$nin": keys}}
     )
     if other:
         used = str(other.get("_id") or "").split(":")
@@ -153,6 +168,128 @@ def invoice_series_problem(counters, code: str, store_id: str, fy: int) -> Optio
             "this financial year -- its invoice code can change only from 1 April"
         )
     return None
+
+
+def next_document_number(
+    db,
+    store_id: Optional[str],
+    series: str = "",
+    when: Optional[datetime] = None,
+    store_doc: Optional[Dict] = None,
+) -> str:
+    """Allocate the next number in ``store_id``'s GST document ``series``.
+
+    THE one mint -- tax invoices (the counter, online and admin-edit doors,
+    through OrderRepository.next_invoice_number), inter-GSTIN transfer tax
+    invoices ("T"), debit notes ("D") and credit notes ("C"). Format (owner
+    rulings 2026-10-18), 16 characters each -- Rule 46(b) / Rule 53's cap:
+      * tax invoice  ``SHOPCODE/FYFY/NNNNN``  e.g. ``BOK01/2627/00001``
+      * lettered     ``SHOPCODE/SFYFY/NNNN``  e.g. ``BOK02/T2627/0001``
+    where
+      * SHOPCODE -- the store RECORD's 5-character code
+        (``store_invoice_code``), refused if another store carries it, so
+        shops sharing a GSTIN can never print the same number.
+      * FYFY -- the Indian financial year in IST (``invoice_fy_start``):
+        Apr 2026-Mar 2027 = 2627.
+      * the serial -- consecutive in the shop's series for the FY: the
+        ``counters`` doc ``invoice_series_key(code, fy, series)``, opened by
+        and owned by this store (``invoice_series_problem``), claimed with ONE
+        atomic ``find_one_and_update($inc)``; restarts at 1 each FY. Mongo
+        serialises the $inc, so concurrent mints get distinct serials. A
+        duplicate key on the upsert (the series doc was opened between the
+        check and the claim) is retried once -- a racing mint of this shop
+        then $incs it -- and a second one is answered with the real reason
+        (another store holds the code).
+
+    REFUSES with InvoiceNumberError -- never guesses, never truncates: no
+    store record, no valid shop code, a code another store carries or issued
+    under this FY, a second code for the shop this FY, an unreadable
+    stores/counters collection or no database (fail CLOSED), or a number that
+    breaks the GST rule (serial 100000 / 10000 is 17 chars). Callers mint only
+    for a document with no stored number; an issued number (old format
+    included) is never rewritten.
+    """
+    if series not in DOCUMENT_SERIES:
+        raise ValueError(f"unknown GST document series {series!r}")
+    start = invoice_fy_start(when)
+    fy = f"{start % 100:02d}{(start + 1) % 100:02d}"
+    if db is None:  # DB-less: no atomic counter, so no number
+        raise InvoiceNumberError("invoice counter unavailable -- try again in a minute")
+    try:
+        stores = db.get_collection("stores")
+        if store_doc is None and store_id:
+            store_doc = stores.find_one({"store_id": store_id}) or stores.find_one(
+                {"store_code": store_id}
+            )
+        docs = list(
+            stores.find({}, {"_id": 0, "store_id": 1, "store_code": 1, "invoice_code": 1})
+        )
+    except Exception as exc:  # noqa: BLE001 - fail CLOSED
+        raise InvoiceNumberError(
+            "store records unreadable -- try again in a minute"
+        ) from exc
+    if not store_doc:
+        raise InvoiceNumberError(f"store {store_id} has no store record")
+    name = store_doc.get("store_code") or store_id
+    owner = store_doc.get("store_id") or store_id
+    code = store_invoice_code(store_doc)
+    if not code:
+        raise InvoiceNumberError(
+            f"store {name} has no valid invoice code -- set a 5-character "
+            "invoice code (capital letters/digits) on the store"
+        )
+    other = invoice_code_clash(code, (store_id, owner, name), docs)
+    if other:
+        raise InvoiceNumberError(
+            f"invoice code {code} of store {name} is also store {other}'s "
+            "-- give one of them a different invoice code"
+        )
+    from pymongo import ReturnDocument
+    from pymongo.errors import DuplicateKeyError
+
+    counters = db.get_collection("counters")
+    key = invoice_series_key(code, start, series)
+
+    def claim():
+        # The filter names the owner: a series another store opened in a race
+        # is a duplicate _id on upsert -- refused, not shared.
+        return counters.find_one_and_update(
+            {"_id": key, "store_id": owner, "fy": start},
+            {"$inc": {"seq": 1}, "$setOnInsert": {"store_code": name}},
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
+        )
+
+    doc = None
+    try:
+        problem = invoice_series_problem(counters, code, owner, start)
+        if problem is None:
+            try:
+                doc = claim()
+            except DuplicateKeyError:
+                try:
+                    doc = claim()
+                except DuplicateKeyError:
+                    problem = invoice_series_problem(counters, code, owner, start) or (
+                        f"invoice code {code}'s series this financial year is "
+                        "held by another store's record"
+                    )
+    except Exception as exc:  # noqa: BLE001
+        raise InvoiceNumberError(
+            "invoice counter unavailable -- try again in a minute"
+        ) from exc
+    if problem:
+        raise InvoiceNumberError(problem)
+    seq = (doc or {}).get("seq")
+    if not isinstance(seq, int) or seq < 1:
+        raise InvoiceNumberError(f"invoice counter returned {seq!r}")
+    number = (
+        f"{code}/{fy}/{seq:05d}" if not series else f"{code}/{series}{fy}/{seq:04d}"
+    )
+    problem = gst_invoice_number_problem(number)
+    if problem:
+        raise InvoiceNumberError(problem)
+    return number
 
 
 def fy_start_year(dt: datetime) -> int:
@@ -532,96 +669,18 @@ class OrderRepository(BaseRepository):
         when: Optional[datetime] = None,
         store_doc: Optional[Dict] = None,
     ) -> str:
-        """Allocate the next GST tax invoice number for ``store_id``.
-
-        THE one mint -- the counter, online and admin-edit doors all call it.
-        Format (owner ruling 2026-10-18): ``SHOPCODE/FYFY/NNNNN``, e.g.
-        ``BOK01/2627/00001`` -- 16 characters, Rule 46(b)'s cap.
-          * SHOPCODE -- the store RECORD's 5-character code
-            (``store_invoice_code``), refused if another store carries it, so
-            shops sharing a GSTIN can never print the same number.
-          * FYFY -- the Indian financial year in IST (``invoice_fy_start``):
-            Apr 2026-Mar 2027 = 2627.
-          * NNNNN -- consecutive in the shop's ONE series for the FY: the
-            ``counters`` doc ``invoice:{code}:{fy}``, opened by and owned by
-            this store (``invoice_series_problem``), claimed with ONE atomic
-            ``find_one_and_update($inc)``; restarts at 00001 each FY. Mongo
-            serialises the $inc, so concurrent bills get distinct serials.
-
-        REFUSES with InvoiceNumberError -- never guesses, never truncates: no
-        store record, no valid shop code, a code another store carries or
-        issued under this FY, a second series for the shop this FY, an
-        unreadable stores/counters collection (fail CLOSED), or a number that
-        breaks the GST rule (serial 100000 is 17 chars). Callers mint only for
-        an order with no stored number (``set_invoice`` keeps the first);
-        an issued number (old format included) is never rewritten.
-        """
-        start = invoice_fy_start(when)
-        fy = f"{start % 100:02d}{(start + 1) % 100:02d}"
+        """Allocate the next GST tax invoice number for ``store_id``
+        (``SHOPCODE/FYFY/NNNNN``, e.g. ``BOK01/2627/00001``) -- the shop's
+        tax-invoice series of the ONE mint, ``next_document_number``, which
+        documents the format and every refusal (InvoiceNumberError). Callers
+        mint only for an order with no stored number (``set_invoice`` keeps
+        the first); an issued number (old format included) is never
+        rewritten."""
         try:
             db = getattr(self.collection, "database", None)
         except Exception:  # noqa: BLE001
             db = None
-        if db is None:  # DB-less: no atomic counter, so no number
-            raise InvoiceNumberError("invoice counter unavailable -- try again in a minute")
-        try:
-            stores = db.get_collection("stores")
-            if store_doc is None and store_id:
-                store_doc = stores.find_one({"store_id": store_id}) or stores.find_one(
-                    {"store_code": store_id}
-                )
-            docs = list(
-                stores.find({}, {"_id": 0, "store_id": 1, "store_code": 1, "invoice_code": 1})
-            )
-        except Exception as exc:  # noqa: BLE001 - fail CLOSED
-            raise InvoiceNumberError(
-                "store records unreadable -- try again in a minute"
-            ) from exc
-        if not store_doc:
-            raise InvoiceNumberError(f"store {store_id} has no store record")
-        name = store_doc.get("store_code") or store_id
-        owner = store_doc.get("store_id") or store_id
-        code = store_invoice_code(store_doc)
-        if not code:
-            raise InvoiceNumberError(
-                f"store {name} has no valid invoice code -- set a 5-character "
-                "invoice code (capital letters/digits) on the store"
-            )
-        other = invoice_code_clash(code, (store_id, owner, name), docs)
-        if other:
-            raise InvoiceNumberError(
-                f"invoice code {code} of store {name} is also store {other}'s "
-                "-- give one of them a different invoice code"
-            )
-        counters = db.get_collection("counters")
-        doc = None
-        try:
-            problem = invoice_series_problem(counters, code, owner, start)
-            if problem is None:
-                from pymongo import ReturnDocument
-
-                # The filter names the owner: a series another store opened in
-                # a race is a duplicate _id on upsert -- refused, not shared.
-                doc = counters.find_one_and_update(
-                    {"_id": invoice_series_key(code, start), "store_id": owner, "fy": start},
-                    {"$inc": {"seq": 1}, "$setOnInsert": {"store_code": name}},
-                    upsert=True,
-                    return_document=ReturnDocument.AFTER,
-                )
-        except Exception as exc:  # noqa: BLE001
-            raise InvoiceNumberError(
-                "invoice counter unavailable -- try again in a minute"
-            ) from exc
-        if problem:
-            raise InvoiceNumberError(problem)
-        seq = (doc or {}).get("seq")
-        if not isinstance(seq, int) or seq < 1:
-            raise InvoiceNumberError(f"invoice counter returned {seq!r}")
-        number = f"{code}/{fy}/{seq:05d}"
-        problem = gst_invoice_number_problem(number)
-        if problem:
-            raise InvoiceNumberError(problem)
-        return number
+        return next_document_number(db, store_id, "", when, store_doc)
 
     def create_unique(
         self, data: Dict, number_field: str, regenerate, max_retries: int = 6

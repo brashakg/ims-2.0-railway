@@ -90,6 +90,15 @@ class VendorPaymentCreate(BaseModel):
     # The shop the money is paid for (F63) when no bill is named; a named
     # bill's shop wins. See ap_payments._money_shop.
     store_id: Optional[str] = None
+    # One id per payment the form records: a retried request (the client
+    # retries a 5xx, a 504 can come after the save) answers the payment it
+    # already recorded, never a second one. See ap_payments.create_vendor_payment.
+    request_id: Optional[str] = Field(default=None, min_length=8, max_length=64)
+
+    @field_validator("payment_date", mode="before")
+    @classmethod
+    def _iso_payment_date(cls, v):
+        return ap_engine.iso_payment_date(v)
 
 
 # Recognized vendor credit-note / debit-note types. Every type lands in the
@@ -131,6 +140,51 @@ class DebitNoteCreate(BaseModel):
 def _clean(doc: dict) -> dict:
     """Strip Mongo's _id so a freshly-inserted doc is JSON-serialisable."""
     return {k: v for k, v in doc.items() if k != "_id"}
+
+
+def _left_to_pay(stamped: dict) -> float:
+    """What can still be paid on a bill stamped by stamp_bills_as_of: today's
+    outstanding less the money recorded for later days (a post-dated cheque),
+    i.e. what is left once everything recorded clears. THE figure: the
+    payment form shows it (list_vendor_bills' left_to_pay) and
+    _refuse_more_than_bill_left tests money against it."""
+    out = float(stamped.get("outstanding") or 0) - float(stamped.get("post_dated_money") or 0)
+    return round(max(out, 0.0), 2)
+
+
+# A payment may pass what is left on its bill by up to Re 1 (rounding on the
+# supplier's side or ours); beyond that it is refused.
+_LEFT_TOLERANCE = 1.0
+
+
+def _refuse_more_than_bill_left(db, bill: Optional[dict], gross: float) -> None:
+    """Money applied to a bill can never exceed what is left on it once every
+    recorded payment and credit naming it clears (A12-2): the excess would sit
+    against this bill, out of reach of the supplier's other bills. 422 with
+    what is left, before anything is written; 503 when unreadable."""
+    if bill is None or db is None:
+        return
+    from ..purchase_invoices import stamp_bills_as_of
+
+    try:
+        left = _left_to_pay(stamp_bills_as_of(db, [dict(bill)])[0])
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=503, detail="What is left on this bill could not be read. Try again."
+        ) from exc
+    if round(gross - left, 2) > _LEFT_TOLERANCE:
+        number = bill.get("bill_number") or bill.get("bill_id")
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "MORE_THAN_BILL_LEFT",
+                "message": (
+                    f"Only Rs {left:,.2f} is left to pay on bill {number}. Apply up to "
+                    "that to the bill, and record the rest as an advance (no bill)."
+                ),
+                "left": left,
+            },
+        )
 
 
 def _recompute_bill_status(db, bill_id: Optional[str]) -> None:
@@ -601,6 +655,7 @@ async def list_vendor_bills(
     # outstanding/status are restamped by scripts/repair_rcm_bill_payable.py).
     for b in bills:
         b["total_amount"] = ap_engine.vendor_payable(b)
+        b["left_to_pay"] = _left_to_pay(b)
     return {"bills": bills, "total": len(bills)}
 
 

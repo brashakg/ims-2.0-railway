@@ -1683,7 +1683,7 @@ def test_narrowing_the_accounts_set_moves_every_supplier_payment_read(monkeypatc
 # plus R4's no-shop refusal), /finance/vendor-payments' can_see_cost
 # refusal, and vendor_rebates' _require.
 _ACCOUNTS_GATE = re.compile(
-    r"^    _require_(?:finance_admin|org_finance)\(current_user\)"
+    r"^    (?:if |\w+ = )?_require_(?:finance_admin|org_finance)\(current_user[,)]"
     r'|^    if not can_see_cost\(current_user, "payables"\)'
     r'|^    _require\(current_user, "',
     re.M,

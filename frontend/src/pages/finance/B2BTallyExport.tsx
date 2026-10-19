@@ -16,6 +16,8 @@ import {
 import { financeApi, type B2BInvoice, type B2BInvoiceSummary } from '../../services/api/finance';
 import { storeApi } from '../../services/api/stores';
 import { useToast } from '../../context/ToastContext';
+import { useAuth } from '../../context/AuthContext';
+import { userSeesAllStores } from '../../utils/storeAccess';
 import {
   inr, downloadBlob, currentMonthRange, TALLY_STATUS_STYLE, TALLY_STATUS_LABEL,
 } from './b2bTallyShared';
@@ -24,6 +26,8 @@ interface StoreOpt { store_id: string; store_name?: string; store_code?: string 
 
 export default function B2BTallyExport() {
   const toast = useToast();
+  const { user } = useAuth();
+  const seesAllStores = userSeesAllStores(user?.roles);
   const def = useMemo(() => currentMonthRange(), []);
   const [fromDate, setFromDate] = useState(def.from);
   const [toDate, setToDate] = useState(def.to);
@@ -147,6 +151,9 @@ export default function B2BTallyExport() {
           <input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)}
             className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm" />
         </Field>
+        {/* Only an admin picks a shop: an accountant's book is his own
+            shop's on the server (owner 2026-10-18). */}
+        {seesAllStores && (
         <Field label="Store">
           <select value={storeId} onChange={(e) => setStoreId(e.target.value)}
             className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm bg-white">
@@ -158,6 +165,7 @@ export default function B2BTallyExport() {
             ))}
           </select>
         </Field>
+        )}
         <button type="button" onClick={load} disabled={loading}
           className="inline-flex items-center gap-1.5 text-sm font-medium text-white bg-bv hover:bg-bv-600 rounded-lg px-4 py-2 disabled:opacity-60">
           {loading && <Loader2 className="w-4 h-4 animate-spin" />} Refresh

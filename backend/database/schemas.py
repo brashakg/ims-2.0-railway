@@ -601,9 +601,10 @@ EXPENSE_SCHEMA = {
         "payment_mode": {"bsonType": ["string", "null"]},
         "advance_id": {"bsonType": ["string", "null"]},
         "idempotency_key": {"bsonType": ["string", "null"]},
-        # DRAFT is read-only (the /submit gate); the other five are persisted.
+        # DRAFT is read-only (the /submit gate); the others are persisted.
+        # APPROVING: a petty-cash approval claimed it before paying out.
         "status": {
-            "enum": ["DRAFT", "PENDING", "APPROVED", "REJECTED",
+            "enum": ["DRAFT", "PENDING", "APPROVING", "APPROVED", "REJECTED",
                      "SENT_TO_ACCOUNTANT", "ENTERED"]
         },
         # --- bill upload (expenses.py:1089, :1114) -- ISO strings ---
@@ -619,6 +620,10 @@ EXPENSE_SCHEMA = {
         "approved_by": {"bsonType": "string"},
         "approved_at": {"bsonType": "string"},
         "petty_cash_txn_id": {"bsonType": ["string", "null"]},
+        # The petty approval's claim, unset when it lands or lets go.
+        "approving_claim": {"bsonType": "string"},
+        "approving_by": {"bsonType": "string"},
+        "approving_at": {"bsonType": "string"},
         "rejected_by": {"bsonType": "string"},
         "rejected_at": {"bsonType": "string"},
         "rejection_reason": {"bsonType": "string"},

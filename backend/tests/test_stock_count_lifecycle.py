@@ -557,6 +557,29 @@ def test_the_shrinkage_record_carries_a_rupee_value(admin_client, mongo_db):
     assert doc["units_voided"] == 2
 
 
+def test_every_write_off_names_its_units_on_the_row_and_in_the_ledger(
+    admin_client, mongo_db
+):
+    """E3-5: a write-off is traceable frame by frame -- the shrinkage row lists
+    the units it voided and each has its own VOID row in the item ledger."""
+    pid, count_id, _ = _counted_short(admin_client, mongo_db, on_hand=4, counted=2)
+
+    r = admin_client.post(f"/inventory/stock-count/{count_id}/reconcile", json={})
+    assert r.status_code == 200, r.text
+
+    voided = {
+        u["stock_id"]
+        for u in mongo_db["stock_units"].find({"product_id": pid, "status": "VOID"})
+    }
+    assert len(voided) == 2
+    row = mongo_db["stock_shrinkage"].find_one({"count_id": count_id})
+    assert set(row["voided_stock_ids"]) == voided
+    ledger = list(mongo_db["item_events"].find({"source_id": count_id}))
+    assert {e["stock_id"] for e in ledger} == voided
+    assert {(e["event_type"], e["from_state"], e["to_state"], e["source_type"])
+            for e in ledger} == {("void", "AVAILABLE", "VOID", "STOCK_COUNT")}
+
+
 # ============================================================================
 # 4b. THE RACE ITSELF -- a sale landing INSIDE the write-off's window
 # ============================================================================

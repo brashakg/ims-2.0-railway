@@ -257,11 +257,13 @@ async def get_tally_tender_receipt_jv(
     ``order.payments[]`` -- no stamp, no capture mutation. The order set is
     selected with the SAME filters as the sales-JV (real orders only, same
     created_at range semantics) so the two exports cover identical days."""
-    # Org-wide accounting export -- finance-admin only (owner decision
-    # 2026-06-16; mirrors the /finance/tally/sales-jv sibling gate).
-    from .finance import _require_finance_admin
+    # Accounting export -- finance-admin only (owner decision 2026-06-16);
+    # company-wide needs an admin, an accountant exports his own shop's and a
+    # login with no shop none (owner 2026-10-18): THE /finance/tally/sales-jv
+    # sibling gate.
+    from .finance import _require_org_finance
 
-    _require_finance_admin(current_user)
+    store_id = _require_org_finance(current_user, store_id, entity_id)
     if not tender_receipt_policy_enabled(store_id=store_id, entity_id=entity_id):
         raise HTTPException(
             status_code=403,

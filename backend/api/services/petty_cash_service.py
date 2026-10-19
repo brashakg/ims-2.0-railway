@@ -494,6 +494,24 @@ def reverse_payout(db, *, store_id: str, txn_id: str, actor: str,
     return {"ok": True, "balance": res.balance, "txn_id": rev_txn, "reverses": txn_id}
 
 
+def live_payout_for(db, store_id: Optional[str], expense_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The float's payout DEBIT row for this expense that no reversal undoes,
+    else None. An expense still PENDING with one was paid out by an approval
+    whose APPROVED stamp never landed: approving again finishes it, a reject
+    hands it back (expenses.approve_expense / reject_expense). Read-only."""
+    coll = _coll(db)
+    if coll is None or not store_id or not expense_id:
+        return None
+    doc = coll.find_one({"store_id": store_id}) or {}
+    ledger = doc.get("ledger") or []
+    undone = {r.get("reverses") for r in ledger if r.get("reverses")}
+    return next(
+        (r for r in ledger if r.get("type") == "DEBIT" and r.get("expense_id") == expense_id
+         and r.get("txn_id") not in undone),
+        None,
+    )
+
+
 def get_balance(db, store_id: str, *, ledger_limit: int = 20) -> Dict[str, Any]:
     """Read-only float view: balance, limit, threshold, status, is_low, and the
     most recent ledger entries. Fail-soft -> a not_open envelope."""

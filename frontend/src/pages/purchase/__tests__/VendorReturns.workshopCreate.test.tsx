@@ -60,6 +60,7 @@ async function fillAndCreate() {
   fireEvent.click(await screen.findByRole('button', { name: /create return/i }));
   fireEvent.change(screen.getAllByRole('combobox')[0], { target: { value: 'V1' } });
   fireEvent.change(screen.getByPlaceholderText('Enter product name'), { target: { value: 'RB Frame' } });
+  fireEvent.change(screen.getByPlaceholderText('Add any additional notes...'), { target: { value: 'Made-to-order lens, never in stock' } });
   const buttons = screen.getAllByRole('button', { name: /create return/i });
   fireEvent.click(buttons[buttons.length - 1]);
   await waitFor(() => expect(apiMock.post).toHaveBeenCalled());

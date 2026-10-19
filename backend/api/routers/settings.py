@@ -2261,11 +2261,18 @@ def _org_store_values(org_id: str) -> list:
     returns []. The caller treats [] as "no matching stores" (empty result set),
     never a 500.
     """
+    return _audit_store_values({"entity_id": org_id})
+
+
+def _audit_store_values(store_query: dict) -> list:
+    """Every audit `store_id` value of the stores `store_query` matches: each
+    one's store_id AND its store_code (a row may carry either -- Pune's id is
+    a UUID, its code BV-PUN-01). Fail-soft: [] (the caller's empty match)."""
     try:
         store_repo = get_store_repository()
         if store_repo is None:
             return []
-        stores = store_repo.find_many({"entity_id": org_id})
+        stores = store_repo.find_many(store_query)
         values: set = set()
         for s in stores:
             sid = s.get("store_id")
@@ -2303,7 +2310,7 @@ async def get_audit_logs(
     Organization (`org_id` = legal entity) resolves to the set of its stores'
     audit `store_id` values and constrains the query to `store_id IN {those}`.
     If BOTH `org_id` and an explicit `store_id` are given, the explicit store
-    wins (it is applied as-is and the org clause is skipped). If the org has no
+    wins (matched by its store_id or store_code; the org clause is skipped). If the org has no
     stores or the lookup fails, the result is an empty set — never a 500.
     """
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
@@ -2326,8 +2333,18 @@ async def get_audit_logs(
             filter_dict["action"] = action
         if store_id:
             # Explicit store wins over org (intersect to the simplest correct
-            # behavior: just that store, even when an org is also supplied).
-            filter_dict["store_id"] = store_id
+            # behavior: just that store, even when an org is also supplied) --
+            # matched by its id OR its code, whichever the row wrote.
+            filter_dict["store_id"] = {
+                "$in": sorted(
+                    {store_id}
+                    | set(
+                        _audit_store_values(
+                            {"$or": [{"store_id": store_id}, {"store_code": store_id}]}
+                        )
+                    )
+                )
+            }
         elif org_id:
             # Constrain to the org's stores; an org with no stores yields [],
             # i.e. an impossible match -> empty result set (fail-soft, no 500).
