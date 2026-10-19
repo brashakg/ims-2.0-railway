@@ -399,3 +399,14 @@ _ONLINE_STORE_PUBLICATION_NAME = "Online Store"
 # Resolved once per process (a publication id is stable for the shop).
 _publication_id_cache: Dict[str, str] = {}
 
+
+# Read-only: every collection on the shop with its smart rules (brand
+# collections are matched against these before one is ever created).
+_COLLECTIONS_READ = """
+query imsCollectionsRead($after: String) {
+  collections(first: 250, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes { id handle title ruleSet { appliedDisjunctively rules { column relation condition } } }
+  }
+}
+"""

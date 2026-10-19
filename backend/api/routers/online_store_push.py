@@ -832,7 +832,7 @@ async def push_all_pending(
         # (owner 2026-10-19) -- made or found BEFORE the sweep below sends
         # the queue, so a brand's first press carries its collection too.
         try:
-            brand_collections = shopify_push.ensure_brand_collections(db)
+            brand_collections = await shopify_push.ensure_brand_collections(db)
         except Exception as exc:  # noqa: BLE001 -- reported, never stops the sweep
             logger.warning("[PUSH] brand collections skipped: %s", exc)
             brand_collections = {"error": str(exc)}

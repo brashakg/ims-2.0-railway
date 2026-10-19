@@ -160,6 +160,7 @@ def convert_rule_set(rules: List[Any]) -> Tuple[List[Dict[str, Any]], List[str]]
     lost: List[str] = []
     for raw in rules:
         if not isinstance(raw, dict):
+            lost.append(repr(raw)[:40])  # never a partial set
             continue
         r = normalize_rule(raw)
         field = str(r.get("column") or r.get("field") or "").strip()
@@ -381,39 +382,56 @@ def _brand_tag(brand: Any) -> str:
     return f"brand_{slug}" if slug else ""
 
 
+def _rules_are_the_brands(rules: List[Dict[str, Any]], brand_tag: str) -> bool:
+    """Every rule names this brand: its tag (or the storefront's spelling of
+    it, shopify_tag_gen._TAG_ALIASES) or the brand as vendor -- so 'brand tag
+    OR vendor' is the brand's, 'brand tag AND sunglass' is not."""
+    from ..shopify_tag_gen import _TAG_ALIASES
+
+    tags = (brand_tag, *_TAG_ALIASES.get(brand_tag, ()))
+
+    def _one(r: Dict[str, Any]) -> bool:
+        col = str(r.get("column") or "").upper()
+        cond = str(r.get("condition") or "").strip().lower()
+        if str(r.get("relation") or "").upper() != "EQUALS":
+            return False
+        return (col == "TAG" and cond in tags) or (col == "VENDOR" and _brand_tag(cond) == brand_tag)
+
+    return bool(rules) and all(_one(r) for r in rules)
+
+
 def _is_brand_collection(doc: Dict[str, Any], brand_tag: str, slug_handle: str) -> bool:
-    """An existing collection that already IS this brand's: its handle is the
-    brand's, or it is SMART with exactly one rule -- the brand tag (or the
-    storefront's spelling of it, shopify_tag_gen._TAG_ALIASES), or the brand
-    as vendor."""
+    """An IMS collection row that already IS this brand's: its handle is the
+    brand's, or every one of its smart rules names the brand."""
     if str(doc.get("handle") or "").strip().lower() == slug_handle:
         return True
     if str(doc.get("collection_type") or "").upper() != "SMART":
         return False
     rules, lost = convert_rule_set(doc.get("rules") or [])
-    if lost or len(rules) != 1 or rules[0]["relation"] != "EQUALS":
-        return False
-    from ..shopify_tag_gen import _TAG_ALIASES
-
-    col, cond = rules[0]["column"], rules[0]["condition"].strip().lower()
-    return (col == "TAG" and cond in (brand_tag, *_TAG_ALIASES.get(brand_tag, ()))) or (
-        col == "VENDOR" and _brand_tag(cond) == brand_tag
-    )
+    return not lost and _rules_are_the_brands(rules, brand_tag)
 
 
-def ensure_brand_collections(db) -> Dict[str, Any]:
-    """ONE brand collection per brand with at least one listing ON the website
-    (owner 2026-10-19: 'auto populate brands and publish collections'). Runs
-    on every push-all, before the collections are sent, so a new brand gets
-    its collection on the press that puts its first product live -- never an
-    empty one. An existing collection that is already the brand's (its handle,
-    or its one rule on the brand tag / vendor) is REUSED and marked, never
-    duplicated; a missing one is created SMART on the brand tag the product
-    push sends, titled with the Brand Master name, queued (the push sends and
-    publishes it). Returns {created: [handle], reused: [handle]}. Raises on a
-    read failure (the caller reports it; nothing half-written matters: every
-    write is keyed and re-runnable)."""
-    from ..shopify_tag_gen import slugify_tag_value
+async def _shopify_collections(db) -> List[Dict[str, Any]]:
+    """Every collection on the shop (read-only, paged). Raises on a read
+    failure: no brand collection is created on a half-read shop."""
+    from .queries import _COLLECTIONS_READ
+
+    out: List[Dict[str, Any]] = []
+    after = None
+    while True:
+        body = await _graphql(db, _COLLECTIONS_READ, {"after": after})
+        page = ((body or {}).get("data") or {}).get("collections")
+        if page is None:
+            raise RuntimeError(f"collections read failed: {(body or {}).get('errors')}")
+        out.extend(page.get("nodes") or [])
+        info = page.get("pageInfo") or {}
+        if not info.get("hasNextPage"):
+            return out
+        after = info.get("endCursor")
+
+
+def _live_brands(db) -> Dict[str, str]:
+    """{brand tag: brand} for every brand with a listing ON the website."""
     from ._shared import _product_brand, is_variant_of
 
     brands: Dict[str, str] = {}
@@ -430,8 +448,39 @@ def ensure_brand_collections(db) -> Dict[str, Any]:
         tag = _brand_tag(brand)
         if tag:
             brands.setdefault(tag, brand)
-    if not brands:
-        return {"created": [], "reused": []}
+    return brands
+
+
+def _key(doc: Dict[str, Any]) -> Dict[str, Any]:
+    return {"_id": doc["_id"]} if "_id" in doc else {"handle": doc.get("handle")}
+
+
+async def ensure_brand_collections(db) -> Dict[str, Any]:
+    """ONE brand collection per brand with at least one listing ON the website
+    (owner 2026-10-19: 'auto populate brands and publish collections'). Runs
+    on every push-all, before the collections are sent, so a brand's first
+    live product brings its collection -- never an empty one.
+
+    A brand's EXISTING collection is never overwritten (review of #1241): one
+    in IMS (its handle, or every rule naming the brand), else one found on
+    Shopify itself (read-only, by handle or rules -- made in the admin after
+    the import), is only MARKED as the brand's and put on the Online Store;
+    its content is never sent. A collection another brand already claims is
+    never taken. Only when none exists in IMS or on Shopify is one created:
+    SMART on the brand tag the product push sends, titled from Brand Master,
+    queued (the push creates and publishes it).
+
+    LIVE only: a dark press sends nothing, so nothing is matched or made (it
+    returns the brands that would be checked). One brand's failure is logged
+    and never stops the rest. Returns {created, reused, adopted, errors}."""
+    from ..shopify_tag_gen import slugify_tag_value
+    from .publish import _publish_to_online_store
+    from database.repositories.ecom_collection_repository import EcomCollectionRepository
+
+    brands = _live_brands(db)
+    live, _reason = _live_or_reason(db)
+    if not live or not brands:
+        return {"dark": not live, "brands": sorted(brands)}
 
     names: Dict[str, str] = {}
     for row in db["brand_masters"].find({}):
@@ -439,36 +488,83 @@ def ensure_brand_collections(db) -> Dict[str, Any]:
             names.setdefault(_brand_tag(row["name"]), str(row["name"]).strip())
 
     colls = db["ecom_collections"]
+    repo = EcomCollectionRepository(colls)
     existing = [d for d in colls.find({}) if not d.get("is_temporary")]
-    created: List[str] = []
-    reused: List[str] = []
-    for tag, brand in sorted(brands.items()):
-        title = names.get(tag) or brand
-        handle = slugify_tag_value(title)
-        mine = [d for d in existing if d.get(AUTO_BRAND) == tag]
-        if mine:
-            continue
-        found = next((d for d in existing if _is_brand_collection(d, tag, handle)), None)
-        if found is not None:
-            # Marked AND queued once, so the push sends it and puts it on the
-            # Online Store (its rules are sent only when carried faithfully).
-            key = {"_id": found["_id"]} if "_id" in found else {"handle": found.get("handle")}
-            colls.update_one(key, {"$set": {AUTO_BRAND: tag, "locally_modified": True}})
-            found[AUTO_BRAND] = tag
-            reused.append(str(found.get("handle") or found.get("title")))
-            continue
-        from database.repositories.ecom_collection_repository import EcomCollectionRepository
+    shop = await _shopify_collections(db)
+    out: Dict[str, List[str]] = {"created": [], "reused": [], "adopted": [], "errors": []}
 
-        doc = EcomCollectionRepository(colls).create({
-            "title": title,
-            "handle": handle,
-            "collection_type": "SMART",
-            "rules": [{"field": "tag", "relation": "EQUALS", "value": tag}],
-            "disjunctive": False,
-            "sort_order": "BEST_SELLING",
-            AUTO_BRAND: tag,
-        })
-        if doc:
+    def _gid(value: Any) -> str:
+        return _as_shopify_gid(value, "Collection") if value else ""
+
+    async def _publish(gid: str) -> None:
+        pub = await _publish_to_online_store(db, gid)
+        if not pub.get("published"):
+            raise RuntimeError(pub.get("error") or "not published to the Online Store")
+
+    def _mark(doc: Dict[str, Any], tag: str) -> None:
+        colls.update_one(_key(doc), {"$set": {AUTO_BRAND: tag}})
+        doc[AUTO_BRAND] = tag
+
+    for tag, brand in sorted(brands.items()):
+        try:
+            if any(d.get(AUTO_BRAND) == tag for d in existing):
+                continue
+            title = names.get(tag) or brand
+            handle = slugify_tag_value(title)
+            free = [d for d in existing if d.get(AUTO_BRAND) in (None, "")]
+            claimed = {_gid(d.get("shopify_collection_id")) for d in existing if d.get(AUTO_BRAND)}
+            found = next((d for d in free if _is_brand_collection(d, tag, handle)), None)
+            if found is not None:
+                if found.get("shopify_collection_id"):
+                    await _publish(_gid(found["shopify_collection_id"]))
+                else:
+                    # In IMS only (never pushed): nothing on Shopify to overwrite.
+                    colls.update_one(_key(found), {"$set": {"locally_modified": True}})
+                _mark(found, tag)
+                out["reused"].append(str(found.get("handle") or found.get("title")))
+                continue
+            on_shop = next((
+                c for c in shop
+                if _gid(c.get("id")) not in claimed and (
+                    str(c.get("handle") or "").lower() == handle
+                    or _rules_are_the_brands(((c.get("ruleSet") or {}).get("rules")) or [], tag))
+            ), None)
+            if on_shop is not None:
+                await _publish(on_shop["id"])
+                mine = next((d for d in existing if _gid(d.get("shopify_collection_id")) == _gid(on_shop["id"])), None)
+                if mine is not None:
+                    _mark(mine, tag)
+                else:
+                    rule_set = on_shop.get("ruleSet") or {}
+                    doc = repo.create({
+                        "title": on_shop.get("title"),
+                        "handle": on_shop.get("handle"),
+                        "shopify_collection_id": on_shop["id"],
+                        "collection_type": "SMART" if rule_set.get("rules") else "CUSTOM",
+                        "rules": list(rule_set.get("rules") or []),
+                        "disjunctive": bool(rule_set.get("appliedDisjunctively")),
+                        "locally_modified": False,
+                        AUTO_BRAND: tag,
+                    })
+                    if not doc:
+                        raise RuntimeError(f"could not record collection '{on_shop.get('handle')}'")
+                    existing.append(doc)
+                out["adopted"].append(str(on_shop.get("handle")))
+                continue
+            doc = repo.create({
+                "title": title,
+                "handle": handle,
+                "collection_type": "SMART",
+                "rules": [{"field": "tag", "relation": "EQUALS", "value": tag}],
+                "disjunctive": False,
+                "sort_order": "BEST_SELLING",
+                AUTO_BRAND: tag,
+            })
+            if not doc:
+                raise RuntimeError(f"could not save collection '{handle}'")
             existing.append(doc)
-            created.append(handle)
-    return {"created": created, "reused": reused}
+            out["created"].append(handle)
+        except Exception as exc:  # noqa: BLE001 -- one brand never stops the rest
+            logger.warning("[SHOPIFY_PUSH] brand collection for %s skipped: %s", tag, exc)
+            out["errors"].append(f"{brand}: {exc}")
+    return out

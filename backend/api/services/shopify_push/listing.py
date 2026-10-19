@@ -417,7 +417,9 @@ def first_publish_not_ready(db, product: Dict[str, Any]) -> Optional[str]:
     # A caller holding the product row itself (product_id, no twin id) asks
     # about it directly; a catalogue twin reads its product.
     is_spine = bool(product.get("product_id")) and not product.get("id")
-    spine = product if is_spine else (lead_spine(db, product) or product)
+    spine = product if is_spine else lead_spine(db, product)
+    if spine is None:
+        return "no product record for it in IMS"
     return _not_ready(pm, spine, None if is_spine else product)
 
 
