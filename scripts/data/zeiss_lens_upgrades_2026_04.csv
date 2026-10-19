@@ -1,99 +1,99 @@
-brand,family,upgrade,indexes,srp_inr_per_pair_incl_gst,notes,pdf_page
-ZEISS,Progressive ClearMind,Mirror,"1.5, 1.6",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for tint/polarised,11
-ZEISS,Progressive ClearMind,AdaptiveSun,"1.5, 1.6",10000,International order; only with DuraVision Plus Sun UV; on top of Platinum price,11
-ZEISS,Progressive ClearMind,PhotoFusion X,"1.5, 1.59, 1.6, 1.67",8000,Not with BlueGuard / BlueProtect / Mirror / AdaptiveSun,11
-ZEISS,Progressive ClearMind,PhotoFusion X,1.74,8000,International order,11
-ZEISS,Progressive ClearMind,Polarised,"1.5, 1.6 (intl), 1.67 (intl)",6500,Not with BlueProtect / BlueGuard,11
-ZEISS,Progressive ClearMind,BlueGuard,"1.5, 1.59, 1.6, 1.67, 1.74 (intl)",1000,Not with PhotoFusion X / Polarised / Tint / BlueProtect,11
-ZEISS,Progressive ClearMind,Tint,"1.5, 1.6, 1.67",800,Clear lenses only,11
-ZEISS,Progressive ClearMind,Prism,"1.5, 1.59, 1.6, 1.67, 1.74 (intl)",0,"No additional cost, up to 5 prism dioptres per lens",11
-ZEISS,Progressive ClearMind,Flash,"1.5, 1.6, 1.67",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for PhotoFusion X,11
-ZEISS,Progressive SmartLife,Mirror,"1.5, 1.6",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for tint/polarised,15
-ZEISS,Progressive SmartLife,Flash,"1.5, 1.6, 1.67",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for PhotoFusion X,15
-ZEISS,Progressive SmartLife,AdaptiveSun,"1.5, 1.6",10000,International order; only with DuraVision Plus Sun UV; on top of Platinum price,15
-ZEISS,Progressive SmartLife,PhotoFusion X,"1.5, 1.59, 1.6, 1.67",8000,Not with BlueGuard / BlueProtect / Mirror / AdaptiveSun,15
-ZEISS,Progressive SmartLife,PhotoFusion X,1.74,8000,International order,15
-ZEISS,Progressive SmartLife,Polarised,"1.5, 1.6 (intl), 1.67 (intl)",6500,Not with BlueProtect / BlueGuard,15
-ZEISS,Progressive SmartLife,BlueGuard,"1.5, 1.59, 1.6, 1.67, 1.74 (intl)",1000,Not with PhotoFusion X / Polarised / Tint / BlueProtect,15
-ZEISS,Progressive SmartLife,Tint,"1.5, 1.6, 1.67",800,Clear lenses only,15
-ZEISS,Progressive SmartLife,Prism,"1.5, 1.59, 1.6, 1.67, 1.74 (intl)",0,"No additional cost, up to 5 prism dioptres per lens",15
-ZEISS,Progressive Precision,Mirror,"1.5, 1.6",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for tint/polarised,19
-ZEISS,Progressive Precision,Flash,"1.5, 1.6",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for PhotoFusion X,19
-ZEISS,Progressive Precision,AdaptiveSun,"1.5, 1.6",10000,International order; only with DuraVision Plus Sun UV; on top of Platinum price,19
-ZEISS,Progressive Precision,PhotoFusion X,"1.5, 1.59, 1.6, 1.67",8000,Not with BlueGuard / BlueProtect / Mirror / AdaptiveSun,19
-ZEISS,Progressive Precision,PhotoFusion X,1.74,8000,International order,19
-ZEISS,Progressive Precision,Polarised,1.5,6500,Not with BlueProtect / BlueGuard,19
-ZEISS,Progressive Precision,BlueGuard,"1.5, 1.59, 1.6, 1.67, 1.74 (intl)",1000,Not with PhotoFusion X / Polarised / Tint / BlueProtect,19
-ZEISS,Progressive Precision,Tint,"1.5, 1.6, 1.67",800,Clear lenses only,19
-ZEISS,Progressive Precision,Sports lenses,"1.5, 1.6 (Individual 2, Superb)",600,"Wrap frames, see p50",19
-ZEISS,Progressive Precision,Prism,"1.5, 1.59, 1.6, 1.67, 1.74 (intl)",0,"No additional cost, up to 5 prism dioptres per lens",19
-ZEISS,Progressive Light 2,Mirror,"1.5, 1.6 (3Dv only)",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for tint/polarised,25
-ZEISS,Progressive Light 2,Flash,"1.5, 1.6 (3Dv only)",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for PhotoFusion X,25
-ZEISS,Progressive Light 2,AdaptiveSun,"1.5, 1.6 (3Dv only)",10000,International order; only with DuraVision Plus Sun UV; on top of Platinum price,25
-ZEISS,Progressive Light 2,PhotoFusion X,"1.5, 1.59, 1.6, 1.67",8000,Not with BlueGuard / BlueProtect / Mirror / AdaptiveSun,25
-ZEISS,Progressive Light 2,PhotoFusion X,1.74,8000,International order,25
-ZEISS,Progressive Light 2,Polarised,"1.5, 1.6 (intl), 1.67 (intl) (3Dv only)",6500,Not with BlueProtect / BlueGuard,25
-ZEISS,Progressive Light 2,Photo,"1.5, 1.6",4000,"Light sensitive, grey only",25
-ZEISS,Progressive Light 2,BlueGuard,"1.5, 1.59, 1.6, 1.67, 1.74 (intl)",1000,Not with PhotoFusion X / Polarised / Tint / BlueProtect,25
-ZEISS,Progressive Light 2,Tint,"1.5, 1.6, 1.67",800,Clear lenses only,25
-ZEISS,Progressive Light 2,Prism,"1.5, 1.59, 1.6, 1.67, 1.74 (intl)",0,"No additional cost, up to 5 prism dioptres per lens",25
-ZEISS,Progressive ClassicPlus,BlueGuard,"1.5, 1.59, 1.6, 1.67",1000,,26
-ZEISS,Progressive ClassicPlus,Tint,"1.5, 1.6, 1.67",800,,26
-ZEISS,Progressive ClassicPlus,Prism,"1.5, 1.59, 1.6, 1.67",0,No additional cost,26
-ZEISS,Progressive GT2 FreeForm,BlueGuard,"1.5, 1.59, 1.6, 1.67",1000,,28
-ZEISS,Progressive GT2 FreeForm,Tint,"1.5, 1.6, 1.67",800,,28
-ZEISS,Progressive GT2 FreeForm,Prism,"1.5, 1.59, 1.6, 1.67",0,No additional cost,28
-ZEISS,Single Vision ClearMind,Mirror,"1.5, 1.6",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for tint/polarised,30
-ZEISS,Single Vision ClearMind,Flash,"1.5, 1.6",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for PhotoFusion X,30
-ZEISS,Single Vision ClearMind,AdaptiveSun,"1.5, 1.6",10000,International order; only with DuraVision Plus Sun UV; on top of Platinum price,30
-ZEISS,Single Vision ClearMind,PhotoFusion X,"1.5, 1.59, 1.6",8000,Not with BlueGuard / BlueProtect / Mirror / AdaptiveSun,30
-ZEISS,Single Vision ClearMind,PhotoFusion X,1.74,8000,International order,30
-ZEISS,Single Vision ClearMind,Polarised,"1.5, 1.6 (intl), 1.67 (intl)",6500,Not with BlueProtect / BlueGuard,30
-ZEISS,Single Vision ClearMind,BlueGuard,"1.5, 1.59, 1.6",1000,Not with PhotoFusion X / Polarised / Tint / BlueProtect,30
-ZEISS,Single Vision ClearMind,Tint,"1.5, 1.6",800,,30
-ZEISS,Single Vision ClearMind,Prism,"1.5, 1.59, 1.6",0,No additional cost,30
-ZEISS,Single Vision SmartLife,Mirror,"1.5, 1.6",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for tint/polarised,33
-ZEISS,Single Vision SmartLife,Flash,"1.5, 1.6, 1.67",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for PhotoFusion X,33
-ZEISS,Single Vision SmartLife,AdaptiveSun,"1.5, 1.6",10000,International order; only with DuraVision Plus Sun UV; on top of Platinum price,33
-ZEISS,Single Vision SmartLife,PhotoFusion X,"1.5, 1.59, 1.6, 1.67",8000,Not with BlueGuard / BlueProtect / Mirror / AdaptiveSun,33
-ZEISS,Single Vision SmartLife,PhotoFusion X,1.74,8000,International order,33
-ZEISS,Single Vision SmartLife,Polarised,"1.5, 1.6 (intl), 1.67 (intl)",6500,Not with BlueProtect / BlueGuard,33
-ZEISS,Single Vision SmartLife,BlueGuard,"1.5, 1.59, 1.6, 1.67, 1.74 (intl)",1000,Not with PhotoFusion X / Polarised / Tint / BlueProtect,33
-ZEISS,Single Vision SmartLife,Tint,"1.5, 1.6, 1.67",800,Clear lenses only,33
-ZEISS,Single Vision SmartLife,Prism,"1.5, 1.59, 1.6, 1.67, 1.74 (intl)",0,"No additional cost, up to 5 prism dioptres per lens",33
-ZEISS,Single Vision Rx,Mirror,"1.5, 1.6 (Individual)",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for tint/polarised,35
-ZEISS,Single Vision Rx,Flash,"1.5, 1.6 (Individual)",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for PhotoFusion X,35
-ZEISS,Single Vision Rx,AdaptiveSun,"1.5, 1.6 (Individual, Superb)",10000,International order; only with DuraVision Plus Sun UV; on top of Platinum price,35
-ZEISS,Single Vision Rx,PhotoFusion X,"1.5, 1.59, 1.6, 1.67",8000,Black not in 1.67 Sph; 1.74 priced in table,35
-ZEISS,Single Vision Rx,Polarised,1.5,6500,Not with BlueProtect / BlueGuard,35
-ZEISS,Single Vision Rx,BlueGuard,"1.5, 1.59, 1.6, 1.67, 1.74 (intl)",1000,Not with PhotoFusion X / Polarised / Tint / BlueProtect,35
-ZEISS,Single Vision Rx,Tint,"1.5, 1.6, 1.67",800,Clear lenses only,35
-ZEISS,Single Vision Rx,Sports lenses,"1.5, 1.6 (Individual, Superb)",600,"Wrap frames, see p50",35
-ZEISS,Single Vision Rx,Prism,"1.5, 1.59, 1.6, 1.67, 1.74 (intl)",0,"No additional cost, up to 5 prism dioptres per lens",35
-ZEISS,Digital ClearMind,Mirror,"1.5, 1.6",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for tint/polarised,42
-ZEISS,Digital ClearMind,Flash,"1.5, 1.6",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for PhotoFusion X,42
-ZEISS,Digital ClearMind,AdaptiveSun,"1.5, 1.6 (solid, gradient)",10000,International order; only with DuraVision Plus Sun UV; on top of Platinum price,42
-ZEISS,Digital ClearMind,PhotoFusion X,"1.5, 1.59, 1.6",8000,Not with BlueGuard / BlueProtect / Mirror / AdaptiveSun,42
-ZEISS,Digital ClearMind,Tint,"1.5, 1.6",800,,42
-ZEISS,Digital ClearMind,BlueGuard,"1.5, 1.59, 1.6",1000,Not with PhotoFusion X / Polarised / Tint / BlueProtect,42
-ZEISS,Digital ClearMind,Prism,"1.5, 1.59, 1.6",0,No additional cost,42
-ZEISS,Digital SmartLife,Mirror,"1.5, 1.6 (Individual)",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for tint/polarised,44
-ZEISS,Digital SmartLife,Flash,"1.5, 1.6 (Individual)",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for PhotoFusion X,44
-ZEISS,Digital SmartLife,AdaptiveSun,"1.5, 1.6 (solid, gradient)",10000,International order; only with DuraVision Plus Sun UV; on top of Platinum price,44
-ZEISS,Digital SmartLife,PhotoFusion X,"1.5, 1.59, 1.6",8000,Not with BlueGuard / BlueProtect / Mirror / AdaptiveSun,44
-ZEISS,Digital SmartLife,Tint,"1.5, 1.6",800,,44
-ZEISS,Digital SmartLife,BlueGuard,"1.5, 1.59, 1.6",1000,Not with PhotoFusion X / Polarised / Tint / BlueProtect,44
-ZEISS,Digital SmartLife,Prism,"1.5, 1.59, 1.6",0,No additional cost,44
-ZEISS,Digital Light 2,PhotoFusion X,"1.5, 1.59, 1.6",8000,Not with BlueGuard / BlueProtect / Mirror / AdaptiveSun,46
-ZEISS,Digital Light 2,Photo,"1.5, 1.6",4000,Grey only,46
-ZEISS,Digital Light 2,BlueGuard,"1.5, 1.59, 1.6",1000,Not with PhotoFusion X / Polarised / Tint / BlueProtect,46
-ZEISS,Digital Light 2,Tint,"1.5, 1.6",800,,46
-ZEISS,Digital Light 2,Prism,"1.5, 1.59, 1.6",0,No additional cost,46
-ZEISS,DriveSafe,AdaptiveSun,"1.5, 1.6",10000,International order; on top of DuraVision Platinum price,48
-ZEISS,DriveSafe,PhotoFusion X,"1.5, 1.59, 1.6, 1.67",8000,Not with BlueGuard / BlueProtect / Mirror / AdaptiveSun,48
-ZEISS,DriveSafe,Polarised,1.5,6500,,48
-ZEISS,DriveSafe,Tint,"1.5, 1.6, 1.67",800,,48
-ZEISS,DriveSafe,Sports lenses,"1.5, 1.6",600,"Wrap frames, see p50",48
-ZEISS,DriveSafe,Prism,"1.5, 1.59, 1.6, 1.67",0,No additional cost,48
-ZEISS,Office,BlueGuard,all,1000,Not with DuraVision Plus BlueProtect,49
-ZEISS,Office,Prism,all,0,No additional cost,49
+brand,family,upgrade,indexes,srp_inr_per_pair_incl_gst,notes,pdf_page,wsp_inr_per_pair_excl_gst,wsp_pdf_page
+ZEISS,Progressive ClearMind,Mirror,"1.5, 1.6",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for tint/polarised,11,6500,3
+ZEISS,Progressive ClearMind,AdaptiveSun,"1.5, 1.6",10000,International order; only with DuraVision Plus Sun UV; on top of Platinum price,11,5000,3
+ZEISS,Progressive ClearMind,PhotoFusion X,"1.5, 1.59, 1.6, 1.67",8000,Not with BlueGuard / BlueProtect / Mirror / AdaptiveSun,11,4000,3
+ZEISS,Progressive ClearMind,PhotoFusion X,1.74,8000,International order,11,4000,3
+ZEISS,Progressive ClearMind,Polarised,"1.5, 1.6 (intl), 1.67 (intl)",6500,Not with BlueProtect / BlueGuard,11,3500,3
+ZEISS,Progressive ClearMind,BlueGuard,"1.5, 1.59, 1.6, 1.67, 1.74 (intl)",1000,Not with PhotoFusion X / Polarised / Tint / BlueProtect,11,350,3
+ZEISS,Progressive ClearMind,Tint,"1.5, 1.6, 1.67",800,Clear lenses only,11,400,3
+ZEISS,Progressive ClearMind,Prism,"1.5, 1.59, 1.6, 1.67, 1.74 (intl)",0,"No additional cost, up to 5 prism dioptres per lens",11,0,3
+ZEISS,Progressive ClearMind,Flash,"1.5, 1.6, 1.67",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for PhotoFusion X,11,6500,3
+ZEISS,Progressive SmartLife,Mirror,"1.5, 1.6",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for tint/polarised,15,6500,4
+ZEISS,Progressive SmartLife,Flash,"1.5, 1.6, 1.67",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for PhotoFusion X,15,6500,4
+ZEISS,Progressive SmartLife,AdaptiveSun,"1.5, 1.6",10000,International order; only with DuraVision Plus Sun UV; on top of Platinum price,15,5000,4
+ZEISS,Progressive SmartLife,PhotoFusion X,"1.5, 1.59, 1.6, 1.67",8000,Not with BlueGuard / BlueProtect / Mirror / AdaptiveSun,15,4000,4
+ZEISS,Progressive SmartLife,PhotoFusion X,1.74,8000,International order,15,4000,4
+ZEISS,Progressive SmartLife,Polarised,"1.5, 1.6 (intl), 1.67 (intl)",6500,Not with BlueProtect / BlueGuard,15,3500,4
+ZEISS,Progressive SmartLife,BlueGuard,"1.5, 1.59, 1.6, 1.67, 1.74 (intl)",1000,Not with PhotoFusion X / Polarised / Tint / BlueProtect,15,350,4
+ZEISS,Progressive SmartLife,Tint,"1.5, 1.6, 1.67",800,Clear lenses only,15,400,4
+ZEISS,Progressive SmartLife,Prism,"1.5, 1.59, 1.6, 1.67, 1.74 (intl)",0,"No additional cost, up to 5 prism dioptres per lens",15,0,4
+ZEISS,Progressive Precision,Mirror,"1.5, 1.6",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for tint/polarised,19,6500,5
+ZEISS,Progressive Precision,Flash,"1.5, 1.6",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for PhotoFusion X,19,6500,5
+ZEISS,Progressive Precision,AdaptiveSun,"1.5, 1.6",10000,International order; only with DuraVision Plus Sun UV; on top of Platinum price,19,5000,5
+ZEISS,Progressive Precision,PhotoFusion X,"1.5, 1.59, 1.6, 1.67",8000,Not with BlueGuard / BlueProtect / Mirror / AdaptiveSun,19,4000,5
+ZEISS,Progressive Precision,PhotoFusion X,1.74,8000,International order,19,4000,5
+ZEISS,Progressive Precision,Polarised,1.5,6500,Not with BlueProtect / BlueGuard,19,3500,5
+ZEISS,Progressive Precision,BlueGuard,"1.5, 1.59, 1.6, 1.67, 1.74 (intl)",1000,Not with PhotoFusion X / Polarised / Tint / BlueProtect,19,350,5
+ZEISS,Progressive Precision,Tint,"1.5, 1.6, 1.67",800,Clear lenses only,19,400,5
+ZEISS,Progressive Precision,Sports lenses,"1.5, 1.6 (Individual 2, Superb)",600,"Wrap frames, see p50",19,300,5
+ZEISS,Progressive Precision,Prism,"1.5, 1.59, 1.6, 1.67, 1.74 (intl)",0,"No additional cost, up to 5 prism dioptres per lens",19,0,5
+ZEISS,Progressive Light 2,Mirror,"1.5, 1.6 (3Dv only)",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for tint/polarised,25,6500,6
+ZEISS,Progressive Light 2,Flash,"1.5, 1.6 (3Dv only)",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for PhotoFusion X,25,6500,6
+ZEISS,Progressive Light 2,AdaptiveSun,"1.5, 1.6 (3Dv only)",10000,International order; only with DuraVision Plus Sun UV; on top of Platinum price,25,5000,6
+ZEISS,Progressive Light 2,PhotoFusion X,"1.5, 1.59, 1.6, 1.67",8000,Not with BlueGuard / BlueProtect / Mirror / AdaptiveSun,25,4000,6
+ZEISS,Progressive Light 2,PhotoFusion X,1.74,8000,International order,25,4000,6
+ZEISS,Progressive Light 2,Polarised,"1.5, 1.6 (intl), 1.67 (intl) (3Dv only)",6500,Not with BlueProtect / BlueGuard,25,3500,6
+ZEISS,Progressive Light 2,Photo,"1.5, 1.6",4000,"Light sensitive, grey only",25,2000,6
+ZEISS,Progressive Light 2,BlueGuard,"1.5, 1.59, 1.6, 1.67, 1.74 (intl)",1000,Not with PhotoFusion X / Polarised / Tint / BlueProtect,25,350,6
+ZEISS,Progressive Light 2,Tint,"1.5, 1.6, 1.67",800,Clear lenses only,25,400,6
+ZEISS,Progressive Light 2,Prism,"1.5, 1.59, 1.6, 1.67, 1.74 (intl)",0,"No additional cost, up to 5 prism dioptres per lens",25,0,6
+ZEISS,Progressive ClassicPlus,BlueGuard,"1.5, 1.59, 1.6, 1.67",1000,,26,350,7
+ZEISS,Progressive ClassicPlus,Tint,"1.5, 1.6, 1.67",800,,26,400,7
+ZEISS,Progressive ClassicPlus,Prism,"1.5, 1.59, 1.6, 1.67",0,No additional cost,26,0,7
+ZEISS,Progressive GT2 FreeForm,BlueGuard,"1.5, 1.59, 1.6, 1.67",1000,,28,350,7
+ZEISS,Progressive GT2 FreeForm,Tint,"1.5, 1.6, 1.67",800,,28,400,7
+ZEISS,Progressive GT2 FreeForm,Prism,"1.5, 1.59, 1.6, 1.67",0,No additional cost,28,0,7
+ZEISS,Single Vision ClearMind,Mirror,"1.5, 1.6",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for tint/polarised,30,6500,8
+ZEISS,Single Vision ClearMind,Flash,"1.5, 1.6",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for PhotoFusion X,30,6500,8
+ZEISS,Single Vision ClearMind,AdaptiveSun,"1.5, 1.6",10000,International order; only with DuraVision Plus Sun UV; on top of Platinum price,30,5000,8
+ZEISS,Single Vision ClearMind,PhotoFusion X,"1.5, 1.59, 1.6",8000,Not with BlueGuard / BlueProtect / Mirror / AdaptiveSun,30,4000,8
+ZEISS,Single Vision ClearMind,PhotoFusion X,1.74,8000,International order,30,4000,8
+ZEISS,Single Vision ClearMind,Polarised,"1.5, 1.6 (intl), 1.67 (intl)",6500,Not with BlueProtect / BlueGuard,30,3500,8
+ZEISS,Single Vision ClearMind,BlueGuard,"1.5, 1.59, 1.6",1000,Not with PhotoFusion X / Polarised / Tint / BlueProtect,30,350,8
+ZEISS,Single Vision ClearMind,Tint,"1.5, 1.6",800,,30,400,8
+ZEISS,Single Vision ClearMind,Prism,"1.5, 1.59, 1.6",0,No additional cost,30,0,8
+ZEISS,Single Vision SmartLife,Mirror,"1.5, 1.6",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for tint/polarised,33,6500,9
+ZEISS,Single Vision SmartLife,Flash,"1.5, 1.6, 1.67",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for PhotoFusion X,33,6500,9
+ZEISS,Single Vision SmartLife,AdaptiveSun,"1.5, 1.6",10000,International order; only with DuraVision Plus Sun UV; on top of Platinum price,33,5000,9
+ZEISS,Single Vision SmartLife,PhotoFusion X,"1.5, 1.59, 1.6, 1.67",8000,Not with BlueGuard / BlueProtect / Mirror / AdaptiveSun,33,4000,9
+ZEISS,Single Vision SmartLife,PhotoFusion X,1.74,8000,International order,33,4000,9
+ZEISS,Single Vision SmartLife,Polarised,"1.5, 1.6 (intl), 1.67 (intl)",6500,Not with BlueProtect / BlueGuard,33,3500,9
+ZEISS,Single Vision SmartLife,BlueGuard,"1.5, 1.59, 1.6, 1.67, 1.74 (intl)",1000,Not with PhotoFusion X / Polarised / Tint / BlueProtect,33,350,9
+ZEISS,Single Vision SmartLife,Tint,"1.5, 1.6, 1.67",800,Clear lenses only,33,400,9
+ZEISS,Single Vision SmartLife,Prism,"1.5, 1.59, 1.6, 1.67, 1.74 (intl)",0,"No additional cost, up to 5 prism dioptres per lens",33,0,9
+ZEISS,Single Vision Rx,Mirror,"1.5, 1.6 (Individual)",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for tint/polarised,35,6500,10
+ZEISS,Single Vision Rx,Flash,"1.5, 1.6 (Individual)",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for PhotoFusion X,35,6500,10
+ZEISS,Single Vision Rx,AdaptiveSun,"1.5, 1.6 (Individual, Superb)",10000,International order; only with DuraVision Plus Sun UV; on top of Platinum price,35,5000,10
+ZEISS,Single Vision Rx,PhotoFusion X,"1.5, 1.59, 1.6, 1.67",8000,Black not in 1.67 Sph; 1.74 priced in table,35,4000,10
+ZEISS,Single Vision Rx,Polarised,1.5,6500,Not with BlueProtect / BlueGuard,35,3500,10
+ZEISS,Single Vision Rx,BlueGuard,"1.5, 1.59, 1.6, 1.67, 1.74 (intl)",1000,Not with PhotoFusion X / Polarised / Tint / BlueProtect,35,350,10
+ZEISS,Single Vision Rx,Tint,"1.5, 1.6, 1.67",800,Clear lenses only,35,400,10
+ZEISS,Single Vision Rx,Sports lenses,"1.5, 1.6 (Individual, Superb)",600,"Wrap frames, see p50",35,300,10
+ZEISS,Single Vision Rx,Prism,"1.5, 1.59, 1.6, 1.67, 1.74 (intl)",0,"No additional cost, up to 5 prism dioptres per lens",35,0,10
+ZEISS,Digital ClearMind,Mirror,"1.5, 1.6",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for tint/polarised,42,6500,13
+ZEISS,Digital ClearMind,Flash,"1.5, 1.6",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for PhotoFusion X,42,6500,13
+ZEISS,Digital ClearMind,AdaptiveSun,"1.5, 1.6 (solid, gradient)",10000,International order; only with DuraVision Plus Sun UV; on top of Platinum price,42,5000,13
+ZEISS,Digital ClearMind,PhotoFusion X,"1.5, 1.59, 1.6",8000,Not with BlueGuard / BlueProtect / Mirror / AdaptiveSun,42,4000,13
+ZEISS,Digital ClearMind,Tint,"1.5, 1.6",800,,42,400,13
+ZEISS,Digital ClearMind,BlueGuard,"1.5, 1.59, 1.6",1000,Not with PhotoFusion X / Polarised / Tint / BlueProtect,42,350,13
+ZEISS,Digital ClearMind,Prism,"1.5, 1.59, 1.6",0,No additional cost,42,0,13
+ZEISS,Digital SmartLife,Mirror,"1.5, 1.6 (Individual)",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for tint/polarised,44,6500,14
+ZEISS,Digital SmartLife,Flash,"1.5, 1.6 (Individual)",15000,International order; on top of DuraVision Plus Platinum price; no extra cost for PhotoFusion X,44,6500,14
+ZEISS,Digital SmartLife,AdaptiveSun,"1.5, 1.6 (solid, gradient)",10000,International order; only with DuraVision Plus Sun UV; on top of Platinum price,44,5000,14
+ZEISS,Digital SmartLife,PhotoFusion X,"1.5, 1.59, 1.6",8000,Not with BlueGuard / BlueProtect / Mirror / AdaptiveSun,44,4000,14
+ZEISS,Digital SmartLife,Tint,"1.5, 1.6",800,,44,400,14
+ZEISS,Digital SmartLife,BlueGuard,"1.5, 1.59, 1.6",1000,Not with PhotoFusion X / Polarised / Tint / BlueProtect,44,350,14
+ZEISS,Digital SmartLife,Prism,"1.5, 1.59, 1.6",0,No additional cost,44,0,14
+ZEISS,Digital Light 2,PhotoFusion X,"1.5, 1.59, 1.6",8000,Not with BlueGuard / BlueProtect / Mirror / AdaptiveSun,46,4000,14
+ZEISS,Digital Light 2,Photo,"1.5, 1.6",4000,Grey only,46,2000,14
+ZEISS,Digital Light 2,BlueGuard,"1.5, 1.59, 1.6",1000,Not with PhotoFusion X / Polarised / Tint / BlueProtect,46,350,14
+ZEISS,Digital Light 2,Tint,"1.5, 1.6",800,,46,400,14
+ZEISS,Digital Light 2,Prism,"1.5, 1.59, 1.6",0,No additional cost,46,0,14
+ZEISS,DriveSafe,AdaptiveSun,"1.5, 1.6",10000,International order; on top of DuraVision Platinum price,48,5000,15
+ZEISS,DriveSafe,PhotoFusion X,"1.5, 1.59, 1.6, 1.67",8000,Not with BlueGuard / BlueProtect / Mirror / AdaptiveSun,48,4000,15
+ZEISS,DriveSafe,Polarised,1.5,6500,,48,3500,15
+ZEISS,DriveSafe,Tint,"1.5, 1.6, 1.67",800,,48,400,15
+ZEISS,DriveSafe,Sports lenses,"1.5, 1.6",600,"Wrap frames, see p50",48,300,15
+ZEISS,DriveSafe,Prism,"1.5, 1.59, 1.6, 1.67",0,No additional cost,48,0,15
+ZEISS,Office,BlueGuard,all,1000,Not with DuraVision Plus BlueProtect,49,350,15
+ZEISS,Office,Prism,all,0,No additional cost,49,,

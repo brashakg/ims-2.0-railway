@@ -7,15 +7,25 @@ Runbook-only script. NOT in CI. ASCII only (Windows cp1252).
 WHAT
 ----
 Reads scripts/data/zeiss_lens_master_2026_04.csv (one row per sellable ZEISS
-lens line: series x index x material x coating, transcribed from "ZEISS SRP
-Price with ClearMind April 2026" and cross-checked against a second text
-extraction of the PDF) and creates one `lens_catalog` LINE per row -- the same
+lens line: series x index x variant x coating, transcribed from "ZEISS SRP
+Price with ClearMind April 2026" + "ZEISS WSP with ClearMind April 2026" and
+cross-checked against a second text extraction of each PDF) and creates one
+`lens_catalog` LINE per row -- the same
 collection, slug and validator the "+ New lens line" door (POST /lens-catalog,
 routers/lens_catalog.py) uses:
   * every payload goes through validate_lens_catalog_payload() and
     slugify_lens_line() -- the door's own pure functions;
-  * mrp = the ZEISS SRP, INR per PAIR, GST-inclusive (the PDF's own wording);
-    cost_price is NOT set (an SRP list carries no cost);
+  * mrp = the ZEISS SRP, INR per PAIR, GST-inclusive (owner 10-19: per pair,
+    as ZEISS prints it); cost_price = the ZEISS WSP (our purchase price),
+    INR per PAIR, EXCLUSIVE of GST (the WSP's own wording);
+  * material = the substrate ZEISS publishes for the index (MATERIAL_BY_INDEX,
+    owner 10-19); the ZEISS option the PDF prices separately (Photo Grey,
+    BlueGuard, UVProtect, PhotoFusion X...) is the CSV `variant` and goes into
+    the series name, so each priced line keeps its own lens_line_id;
+  * upgrades = the add-ons staff may tick at billing (owner 10-19: a LIST on
+    the line, never one line per combination): the family's upgrades whose
+    index list covers the line, minus the combinations ZEISS rules out
+    (UPGRADE_RULES), each {name, mrp (SRP), cost_price (WSP), notes};
   * gst_rate 5 / hsn_code 900150 = the gst_rates registry row for OPTICAL_LENS;
   * diameters, family, coating full name, page and caveats go to `notes`.
 The lens_enum_config lists (brands / indexes / materials / lens_types /
@@ -23,9 +33,8 @@ coatings) are extended with the values the rows need (e.g. ZEISS, 1.59,
 DIGITAL, DVP_PLATINUM_UV) -- union only, owner values never removed.
 
 Insert-only: a lens_line_id that already exists is SKIPPED and reported,
-never overwritten. Upgrades (PhotoFusion X, BlueGuard, Mirror, Polarised...)
-are NOT imported -- lens_catalog has no add-on concept; they are listed in
-scripts/data/zeiss_lens_upgrades_2026_04.csv for the owner's decision.
+never overwritten. POS does not sell lens_catalog lines yet; the upgrade list
+is data for when it does.
 
 No audit_logs row is written (the chained audit log is the app's to write);
 the run is traceable through `import_run_id` on every row it created and
@@ -58,6 +67,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -74,14 +84,44 @@ from api.services.lens_catalog_validation import (  # noqa: E402
 )
 
 CSV_PATH = os.path.join(_REPO, "scripts", "data", "zeiss_lens_master_2026_04.csv")
+UPGRADES_PATH = os.path.join(_REPO, "scripts", "data", "zeiss_lens_upgrades_2026_04.csv")
 CATALOG = "lens_catalog"
 ENUMS = "lens_enum_config"
 STOCK = "lens_stock_lines"
 BACKUPS = "lens_import_backups"
 ACTOR = "import_zeiss_lens_master"
 SOURCE = "ZEISS SRP Price with ClearMind April 2026 (INR/pair incl. GST)"
+COST_SOURCE = "ZEISS WSP with ClearMind April 2026 (INR/pair excl. GST)"
 HSN = "900150"  # gst_rates.py: OPTICAL_LENS -> ("900150", 5.0)
 GST = 5.0
+# The substrate ZEISS publishes per index (owner 10-19: "material depends on
+# lens index"). Sources: ZEISS ClearView lens spec 6/23 (1.50 ADC hard resin,
+# 1.59 polycarbonate, 1.60 MR-8, 1.67 MR-7, 1.74 MR-174 episulphide), ZEISS
+# semi-finished SV fact sheets 06/23 (1.67 in both MR-10 and MR-7),
+# zeiss.co.in ("Polycarbonate 1.59"). ZEISS publishes no substrate for 1.56:
+# PLASTIC_156 is ZEISS India's own "Plastic" wording until ZEISS names it.
+MATERIAL_BY_INDEX = {1.5: "CR39", 1.56: "PLASTIC_156", 1.59: "POLY", 1.6: "MR8",
+                     1.67: "MR7_MR10", 1.74: "MR174"}
+# CSV variant -> the words appended to the series (as ZEISS names the product).
+VARIANT_LABEL = {"PHOTO_GREY": "Photo Grey", "PHOTOFUSION_GREY": "PhotoFusion Grey",
+                 "PHOTOFUSION_X": "PhotoFusion X", "BLUEGUARD": "BlueGuard",
+                 "UVPROTECT": "UVProtect", "PHOTO": "Photo"}
+# Combinations ZEISS rules out ("NOT AVAILABLE COMBINATIONS" / upgrade notes):
+#   coating_has -> only on a line whose coating code contains it (Mirror,
+#                  Flash, AdaptiveSun are priced "on top of Platinum");
+#   coating_not -> never on such a coating (BlueProtect excludes BlueGuard,
+#                  PhotoFusion X and Polarised);
+#   clear_only  -> only on a CLEAR variant (no photochromic on photochromic,
+#                  "Tint: clear lenses only").
+# Upgrade-vs-upgrade rules (BlueGuard vs PhotoFusion X ...) stay in the notes.
+UPGRADE_RULES = {
+    "Mirror": {"coating_has": "PLATINUM"}, "Flash": {"coating_has": "PLATINUM"},
+    "AdaptiveSun": {"coating_has": "PLATINUM"},
+    "BlueGuard": {"coating_not": "BLUEPROTECT", "clear_only": True},
+    "PhotoFusion X": {"coating_not": "BLUEPROTECT", "clear_only": True},
+    "Polarised": {"coating_not": "BLUEPROTECT", "clear_only": True},
+    "Photo": {"clear_only": True}, "Tint": {"clear_only": True},
+}
 # CSV column -> lens_enum_config enum_id it must be a member of.
 ENUM_FIELDS = (("brand", "brands"), ("index", "indexes"), ("material", "materials"),
                ("lens_type", "lens_types"), ("coating", "coatings"))
@@ -96,20 +136,78 @@ def load_rows(path: str = CSV_PATH) -> List[Dict[str, str]]:
         return list(csv.DictReader(fh))
 
 
-def to_payload(row: Dict[str, str]) -> Dict[str, Any]:
+def _parse_indexes(text: str) -> Tuple[Optional[set], set, List[str]]:
+    """'1.5, 1.6 (intl), 1.67 (intl) (3Dv only)' -> ({1.5, 1.6, 1.67},
+    {1.6, 1.67} international, ['3Dv']). 'all' -> (None, set(), [])."""
+    if text.strip().lower() == "all":
+        return None, set(), []
+    idx, intl, only = set(), set(), []
+    for num, paren in re.findall(r"(\d\.\d+)\*?\s*(?:\(([^)]*)\))?", text):
+        idx.add(round(float(num), 2))
+        if "intl" in paren:
+            intl.add(round(float(num), 2))
+    for paren in re.findall(r"\(([^)]*)\)", text):
+        if "intl" in paren or "solid" in paren:
+            continue  # international flag / colour choice, not a series limit
+        only += [w.replace(" only", "").strip() for w in paren.split(",")]
+    return idx, intl, only
+
+
+def upgrades_for(row: Dict[str, str], upgrades: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    """The family's upgrades this line may carry (see UPGRADE_RULES)."""
+    index = round(float(row["index"]), 2)
+    out = []
+    for u in upgrades:
+        if u["family"] != row["family"]:
+            continue
+        idx, intl, only = _parse_indexes(u["indexes"])
+        if idx is not None and index not in idx:
+            continue
+        if only and not any(w in row["series"] for w in only):
+            continue
+        rule = UPGRADE_RULES.get(u["upgrade"], {})
+        if rule.get("coating_has") and rule["coating_has"] not in row["coating"]:
+            continue
+        if rule.get("coating_not") and rule["coating_not"] in row["coating"]:
+            continue
+        if rule.get("clear_only") and row["variant"] != "CLEAR":
+            continue
+        notes = [u["notes"]] if u["notes"] else []
+        if index in intl:
+            notes.append("International order at this index")
+        item: Dict[str, Any] = {"name": u["upgrade"], "mrp": float(u["srp_inr_per_pair_incl_gst"])}
+        if u["wsp_inr_per_pair_excl_gst"].strip():
+            item["cost_price"] = float(u["wsp_inr_per_pair_excl_gst"])
+        if notes:
+            item["notes"] = "; ".join(notes)
+        out.append(item)
+    return out
+
+
+def to_payload(row: Dict[str, str], upgrades: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
     """CSV row -> the POST /lens-catalog body the door would receive."""
+    index = round(float(row["index"]), 2)
+    series = row["series"]
+    label = VARIANT_LABEL.get(row["variant"])
+    if label and label.lower() not in series.lower():
+        series = "%s %s" % (series, label)
     notes = ["%s. Family: %s. Coating: %s." % (SOURCE, row["family"], row["coating_name"])]
+    if row["wsp_inr_per_pair_excl_gst"].strip():
+        notes.append("Cost = %s, WSP p%s." % (COST_SOURCE, row["wsp_pdf_page"]))
     if row["diameters_mm"]:
         notes.append("Dia (mm): %s." % row["diameters_mm"])
     notes.append("Ranges are ZEISS resultant power (sph+cyl). PDF p%s." % row["pdf_page"])
     if row["notes"]:
         notes.append(row["notes"] + ".")
     p: Dict[str, Any] = {
-        "brand": row["brand"], "series": row["series"], "index": float(row["index"]),
-        "material": row["material"], "lens_type": row["lens_type"], "coating": row["coating"],
+        "brand": row["brand"], "series": series, "index": float(row["index"]),
+        "material": MATERIAL_BY_INDEX[index], "lens_type": row["lens_type"], "coating": row["coating"],
         "mrp": float(row["srp_inr_per_pair_incl_gst"]), "gst_rate": GST, "hsn_code": HSN,
         "notes": " ".join(notes),
+        "upgrades": upgrades_for(row, upgrades or []),
     }
+    if row["wsp_inr_per_pair_excl_gst"].strip():
+        p["cost_price"] = float(row["wsp_inr_per_pair_excl_gst"])
     if row["sph_min"].strip():
         p["sph_range"] = {"min": float(row["sph_min"]), "max": float(row["sph_max"]), "step": 0.25}
         p["cyl_range"] = {"min": -float(row["cyl_max"]), "max": 0.0, "step": 0.25}
@@ -141,10 +239,13 @@ def merged_enums(current: Dict[str, List[Any]], payloads: List[Dict[str, Any]]
     return merged, added
 
 
-def build(rows: List[Dict[str, str]], current_enums: Dict[str, List[Any]]):
+def build(rows: List[Dict[str, str]], current_enums: Dict[str, List[Any]],
+          upgrades: Optional[List[Dict[str, str]]] = None):
     """Validate every row through the door's validator. Returns
     (docs, enum config to write, enum additions, errors)."""
-    payloads = [to_payload(r) for r in rows]
+    if upgrades is None:
+        upgrades = load_rows(UPGRADES_PATH)
+    payloads = [to_payload(r, upgrades) for r in rows]
     enums, added = merged_enums(current_enums, payloads)
     docs, errors = [], []
     for r, p in zip(rows, payloads):
@@ -154,7 +255,7 @@ def build(rows: List[Dict[str, str]], current_enums: Dict[str, List[Any]]):
                                                   d["material"], d["lens_type"], d["coating"])
             docs.append(d)
         except ValueError as exc:
-            errors.append("%s %s %s %s: %s" % (r["series"], r["index"], r["material"], r["coating"], exc))
+            errors.append("%s %s %s %s: %s" % (r["series"], r["index"], r["variant"], r["coating"], exc))
     slugs = [d["lens_line_id"] for d in docs]
     if len(set(slugs)) != len(slugs):
         errors.append("duplicate lens_line_id inside the CSV")
@@ -248,6 +349,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     docs, enums, added, errors = build(rows, current)
     print("CSV rows: %d  valid lens lines: %d  errors: %d  (enums from %s)"
           % (len(rows), len(docs), len(errors), "live DB" if db is not None else "code defaults"))
+    print("with cost_price (WSP excl GST): %d  without: %d  lines with upgrades: %d  upgrade entries: %d"
+          % (sum("cost_price" in d for d in docs), sum("cost_price" not in d for d in docs),
+             sum(bool(d.get("upgrades")) for d in docs), sum(len(d.get("upgrades") or []) for d in docs)))
+    for d in docs:
+        if d.get("cost_price") is not None and d["cost_price"] >= d["mrp"]:
+            print("  [WARN] cost >= MRP: %s" % d["lens_line_id"])
     for e in errors:
         print("  [INVALID] " + e)
     by_family: Dict[str, int] = {}
