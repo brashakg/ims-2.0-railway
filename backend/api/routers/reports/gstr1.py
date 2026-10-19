@@ -505,10 +505,9 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                             cn_sgst = round(cn_tax / 2, 2)
                             cn_igst = 0.0
 
-                        # GSTN-legal note number (<=16 chars): prefer the
-                        # dedicated note_number stamped on synthesized
-                        # historical CNs, else the internal ref capped at 16.
-                        ref = _cdnr_note_number(entry)
+                        # The note's own number, verbatim (flagged when it
+                        # breaks GSTN's rule) -- see _cdnr_note_number.
+                        ref = _cdnr_note_number(entry, validation_issues)
                         cn_date = _credit_note_date_ist(
                             entry.get("created_at")
                         ) or (month + "-01")
@@ -641,7 +640,12 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
 
                     cdnr.append(
                         {
-                            "refReference": (rid or "RET")[:16],
+                            # The return's credit-note number (its shop's C
+                            # series); a return before numbering: its id.
+                            "refReference": _cdnr_note_number(
+                                {"note_number": ret.get("credit_note_number"), "ref": rid},
+                                validation_issues,
+                            ),
                             "creditNoteDate": (
                                 r_when[:10]
                                 if isinstance(r_when, str)

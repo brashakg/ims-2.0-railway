@@ -26,6 +26,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from strict_fakes import StrictDB  # noqa: E402
 from api.services import returns_engine as engine  # noqa: E402
 from api.routers import returns as returns_router  # noqa: E402
 from api.routers import auth as auth_mod  # noqa: E402
@@ -373,6 +375,10 @@ def ctx(monkeypatch):
     products_coll = _FakeProductsColl()
     returns_coll = _FakeColl()
     ledger_coll = _FakeColl()
+    # The sale shop's record + the counters its credit-note series counts in
+    # (a return that reverses tax is a Rule 53 credit note: PUN01/C2627/0001).
+    numbering = StrictDB()
+    numbering.seed("stores", [{"store_id": "BV-PUN-01", "store_code": "BV-PUN-01"}])
 
     class _FakeDB:
         is_connected = True
@@ -385,6 +391,8 @@ def ctx(monkeypatch):
                 "returns": returns_coll,
                 "credit_note_ledger": ledger_coll,
                 "products": products_coll,
+                "stores": numbering.get_collection("stores"),
+                "counters": numbering.get_collection("counters"),
             }.get(name, _FakeColl())
 
     fake_db = _FakeDB()
@@ -413,6 +421,7 @@ def ctx(monkeypatch):
         "products_coll": products_coll,
         "returns_coll": returns_coll,
         "ledger_coll": ledger_coll,
+        "numbering": numbering,
     }
 
 

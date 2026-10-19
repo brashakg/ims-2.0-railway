@@ -497,3 +497,105 @@ def test_eway_flag_boundary_is_strictly_over_50000():
 
     assert "E-way bill REQUIRED" not in page(50000.0)
     assert "E-way bill REQUIRED" in page(50000.01)
+
+
+# ===========================================================================
+# 2. Rule 53: debit notes (D) and credit notes (C), filed in full
+# ===========================================================================
+
+from test_returns import ctx, _payload, _staff_token  # noqa: E402,F401  (fixture)
+
+NOTE_C = re.compile(r"^PUN01/C\d{4}/(\d{4})$")
+
+
+def _return(ctx, **over):
+    tok = _staff_token(["STORE_MANAGER"])
+    payload = _payload(**over)
+    return ctx["client"].post("/api/v1/returns", json=payload,
+                              headers={"Authorization": f"Bearer {tok}"})
+
+
+def test_store_credit_note_numbered_once_per_return_whatever_the_tender(ctx):
+    """A return that reverses tax is a credit note numbered from the SALE
+    shop's C series -- a store-credit refund (its ledger row carries the same
+    number) and a cash refund (no ledger row; GSTR-1 files the return) alike."""
+    credit = _return(ctx, return_type="CREDIT_NOTE", customer_id="CUST-1")
+    assert credit.status_code == 201, credit.text
+    first = credit.json()["credit_note_number"]
+    assert NOTE_C.match(first).group(1) == "0001" and len(first) == 16
+    (row,) = ctx["ledger_coll"].docs
+    assert row["note_number"] == first
+    assert ctx["returns_coll"].docs[0]["credit_note_number"] == first
+    cash = _return(ctx)  # RETURN to the order's UPI
+    assert cash.status_code == 201, cash.text
+    assert NOTE_C.match(cash.json()["credit_note_number"]).group(1) == "0002"
+    assert len(ctx["ledger_coll"].docs) == 1  # a cash refund writes no ledger row
+
+
+def test_store_credit_note_refused_return_records_nothing(ctx):
+    ctx["numbering"].get_collection("stores").update_one(
+        {"store_id": "BV-PUN-01"}, {"$set": {"invoice_code": "BAD"}}
+    )
+    r = _return(ctx, return_type="CREDIT_NOTE", customer_id="CUST-1")
+    assert r.status_code == 400
+    assert "credit note cannot be numbered" in r.json()["detail"]
+    assert ctx["returns_coll"].docs == [] and ctx["ledger_coll"].docs == []
+    # The quantity claim was released: the same return goes through once fixed.
+    ctx["numbering"].get_collection("stores").update_one(
+        {"store_id": "BV-PUN-01"}, {"$set": {"invoice_code": None}}
+    )
+    assert _return(ctx, return_type="CREDIT_NOTE", customer_id="CUST-1").status_code == 201
+
+
+def test_store_credit_note_door_numbers_an_unnumbered_note(ctx):
+    """The online refund door passes no number: the store-credit issuer
+    numbers the note from the BOOKED store's series, or refuses it."""
+    from api.routers import returns as returns_router
+
+    user = {"user_id": "SYSTEM", "active_store_id": "BV-PUN-01"}
+    entry = returns_router._issue_store_credit("CUST-1", 100.0, reason="Shopify refund",
+                                               ref="RET-X", current_user=user)
+    assert NOTE_C.match(entry["note_number"])
+    kept = returns_router._issue_store_credit("CUST-1", 50.0, reason="r", ref="RET-Y",
+                                              current_user=user, note_number="PUN01/C2627/0042")
+    assert kept["note_number"] == "PUN01/C2627/0042"
+    nowhere = returns_router._issue_store_credit("CUST-1", 50.0, reason="r", ref="RET-Z",
+                                                 current_user={"active_store_id": "NO-SUCH"})
+    assert nowhere is None
+    assert [d["ref"] for d in ctx["ledger_coll"].docs] == ["RET-X", "RET-Y"]
+
+
+def test_cdnr_files_the_full_number(world):
+    """GSTR-1 CDNR (screen + portal JSON) files the note's own 16-character
+    number -- the ledger pass and the cash-refund returns pass alike -- and a
+    note issued before numbering verbatim and flagged, never cut to 16."""
+    from api.routers import reports
+    from api.services.gstn_export import to_gstr1_json
+
+    when = datetime(2026, 10, 5, 6, 0)  # naive UTC, 11:30 IST
+    world["customers"].insert_one({"customer_id": "C-B2B", "name": "Opti Traders",
+                                   "gstin": GSTIN_Y_JH, "state": "Jharkhand"})
+    world["credit_note_ledger"].insert_many([
+        {"entry_id": "e1", "type": "ISSUED", "store_id": "ST-DHN-1", "customer_id": "C-B2B",
+         "ref": "RET-261005-AAAAAA", "note_number": "DHN01/C2627/0001",
+         "created_at": when.isoformat(), "amount": 1050.0, "net_refund": 1050.0,
+         "taxable": 1000.0, "tax": 50.0, "gst_rate": 5},
+        {"entry_id": "e2", "type": "ISSUED", "store_id": "ST-DHN-1", "customer_id": "C-B2B",
+         "ref": "RET-261005-BBBBBB", "created_at": when.isoformat(), "amount": 105.0,
+         "net_refund": 105.0, "taxable": 100.0, "tax": 5.0, "gst_rate": 5},
+    ])
+    world["returns"].insert_one({
+        "return_id": "RET-261005-CCCCCC", "store_id": "ST-DHN-1", "status": "COMPLETED",
+        "customer_id": "C-B2B", "credit_note_number": "DHN01/C2627/0002",
+        "created_at": when, "gst_breakup": {"gross": 210.0, "taxable": 200.0, "tax": 10.0,
+                                            "gst_rate": 5},
+    })
+    rep = reports._compute_gstr1("2026-10", "ST-DHN-1")
+    refs = sorted(r["refReference"] for r in rep["cdnr"])
+    assert refs == ["DHN01/C2627/0001", "DHN01/C2627/0002", "RET-261005-BBBBBB"]
+    (issue,) = [i for i in rep["validation"]["issues"]
+                if i.get("issue_code") == "INVOICE_SERIAL_OVER_16"]
+    assert issue["count"] == 1 and "17 characters" in issue["issue"]
+    out = to_gstr1_json(rep, gstin=GSTIN_Z_JH, period="2026-10")
+    nums = sorted(n["nt_num"] for c in out["cdnr"] for n in c["nt"])
+    assert nums == refs

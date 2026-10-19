@@ -11,6 +11,7 @@ from database.repositories.order_repository import (
     InvoiceNumberError,
     derive_bill_type,
     historical_order_problem,
+    next_document_number,
 )
 from datetime import datetime
 from fastapi import Depends, HTTPException
@@ -546,11 +547,26 @@ async def superadmin_invoice_change(
             ),
         )
 
+    # Rule 53 (owner 2026-10-18): the note's number from the sale shop's
+    # credit-note (C) or debit-note (D) series -- refused, never guessed,
+    # before anything is written.
+    try:
+        note_number = next_document_number(
+            db,
+            order.get("store_id"),
+            "D" if delta["note_type"] == "DEBIT_NOTE" else "C",
+            store_doc=store_doc,
+        )
+    except InvoiceNumberError as exc:
+        raise HTTPException(
+            status_code=400, detail=f"Cannot issue the note: {exc}"
+        ) from exc
     note_doc = build_credit_note_doc(
         order=order,
         delta=delta,
         reason=body.reason,
         user_id=current_user.get("user_id"),
+        note_number=note_number,
     )
 
     # SYNCHRONOUS immutable audit BEFORE issuing the note.
@@ -616,6 +632,7 @@ async def superadmin_invoice_change(
                 # No returns doc behind this note: the row names its parent,
                 # so the GST returns hold it with a held sale (never filed).
                 order_id=order.get("order_id"),
+                note_number=note_doc["note_number"],
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ORDERS] store-credit bump skipped: %s", exc)

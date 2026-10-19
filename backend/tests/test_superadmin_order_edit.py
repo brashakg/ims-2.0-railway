@@ -712,3 +712,45 @@ def test_refused_revision_records_the_unused_serial(client, auth_headers, wired,
     assert re.fullmatch(r"TES01/\d{4}/00001", unused), unused
     rev = wired["db"].get_collection("revised_invoices").docs
     assert [d["status"] for d in rev] == ["REFUSED_SERIAL_UNUSED"]
+
+
+@pytest.mark.parametrize("price,series,coll", [
+    (800.0, "C", "credit_note_ledger"),   # overcharged: a credit note
+    (1500.0, "D", "debit_note_ledger"),   # undercharged: a debit note
+])
+def test_admin_note_numbers_are_the_shops_c_and_d_series(
+    client, auth_headers, wired, price, series, coll
+):
+    """Rule 53 (owner 2026-10-18): the note takes the next number in the sale
+    shop's credit-note / debit-note series -- 16 characters, never the old
+    CN-/DN-yymmdd-xxxxxx id -- and the CDNR ledger row files that number."""
+    _seed_order(wired["order_repo"], invoice_number="INV/BOK-01/26-27/0021")
+    resp = client.put(
+        "/api/v1/orders/ord-16/superadmin-invoice-change",
+        json={"mode": "CREDIT_NOTE", "reason": "Price corrected",
+              "items": [_edit_item(unit_price=price)]},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    number = resp.json()["note_number"]
+    assert re.fullmatch(rf"TES01/{series}\d{{4}}/0001", number), number
+    docs = wired["db"].get_collection(coll).docs
+    assert [d["note_number"] for d in docs if d.get("note_type")] == [number]
+    if series == "C":
+        (issued,) = [d for d in docs if d.get("type") == "ISSUED"]
+        assert issued["note_number"] == number
+
+
+def test_admin_note_refused_when_the_shop_cannot_number_it(client, auth_headers, wired):
+    _seed_order(wired["order_repo"], invoice_number="INV/BOK-01/26-27/0022")
+    wired["db"].get_collection("stores").docs[0]["invoice_code"] = "BAD"
+    resp = client.put(
+        "/api/v1/orders/ord-16/superadmin-invoice-change",
+        json={"mode": "CREDIT_NOTE", "reason": "Price corrected",
+              "items": [_edit_item(unit_price=800.0)]},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 400 and "Cannot issue the note" in resp.json()["detail"]
+    assert wired["db"].get_collection("credit_note_ledger").docs == []
+    assert not any(d.get("action") == "ORDER_INVOICE_CREDIT_NOTE"
+                   for d in wired["db"].get_collection("audit_logs").docs)
