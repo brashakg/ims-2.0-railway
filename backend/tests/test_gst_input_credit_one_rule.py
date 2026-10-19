@@ -209,10 +209,14 @@ def test_one_gstins_return_is_the_same_whichever_shop_is_asked(shared_gstin):
     db.orders.update_one({"order_id": "O-1"}, {"$set": {"customer_id": "C-JH"}})
     _sale(db, STORE, 50.0, "O-2")
     db.orders.update_one({"order_id": "O-2"}, {"$set": {"customer_id": "C-MH"}})
+    # The blank shop selling to Maharashtra: its state is its GSTIN's (20),
+    # so the sale is IGST -- not intra-state for want of a shop state.
+    _sale(db, SISTER, 30.0, "O-3")
+    db.orders.update_one({"order_id": "O-3"}, {"$set": {"customer_id": "C-MH"}})
     via_store = r3b._compute_gstr3b(MONTH, STORE)["outwardTaxableSupplies"]
     via_sister = r3b._compute_gstr3b(MONTH, SISTER)["outwardTaxableSupplies"]
     assert via_store == via_sister
-    assert (via_store["centralTax"], via_store["stateTax"], via_store["integratedTax"]) == (50.0, 50.0, 50.0)
+    assert (via_store["centralTax"], via_store["stateTax"], via_store["integratedTax"]) == (50.0, 50.0, 80.0)
 
 
 def test_gstr1_is_refused_to_a_reader_who_cannot_see_every_shop_on_the_gstin(shared_gstin, monkeypatch):
@@ -610,6 +614,43 @@ def test_a_multi_piece_unit_billed_in_parts_takes_each_parts_share(world):
     assert (boxes["landed_cost"], boxes["unclaimed_gst"]["pieces"]) == (105.0, 10)
     assert part("P2", 6)["landed_cost"] == 105.0  # the same bill again: nothing
     assert "landed_cost" not in db.stock_units.find_one({"stock_id": "A-OTHER"})
+
+
+def test_unticking_one_of_two_bills_takes_back_only_its_share(world):
+    """Round 3: a 10-box unit carries GST from two bills (4 + 6 boxes);
+    taking back the first leaves exactly the second's share."""
+    db = world["db"]
+    _seed_receipt(db, grn_id="GRN-STD-0810", subtype="STANDARD", po_id="PO-0810",
+                  items=[{"product_id": FRAME, "received_qty": 10, "accepted_qty": 10,
+                          "rejected_qty": 0, "unit_price": 100.0}])
+    db.stock_units.insert_one({"stock_id": "BOXES", "product_id": FRAME, "store_id": STORE,
+                               "status": "AVAILABLE", "quantity": 10, "unit_cost": 100.0,
+                               "grn_id": "GRN-STD-0810"})
+    grn = db.grns.find_one({"grn_id": "GRN-STD-0810"})
+    for bill_id, qty in (("A", 4), ("B", 6)):
+        pi._add_unclaimed_gst_to_units(db, [grn], {"bill_id": bill_id, "itc_eligible": False},
+                                       [{"product_id": FRAME, "qty": qty, "unit_price": 100.0, "gst_rate": 5.0}])
+    assert db.stock_units.find_one({"stock_id": "BOXES"})["landed_cost"] == 105.0
+    pi._remove_unclaimed_gst(db, "A")
+    boxes = db.stock_units.find_one({"stock_id": "BOXES"})
+    assert (boxes["landed_cost"], boxes["unclaimed_gst"]["pieces"], boxes["unclaimed_gst"]["bills"]) == (
+        103.0, 6, ["B"])
+
+
+def test_unticking_an_unregistered_suppliers_goods_bill_keeps_the_gst_in_cost(world):
+    """Round 3: Sharma has no GSTIN, so unticking 17(5) gives no credit back --
+    the GST stays in the units' and the product's cost (it used to leave the
+    units only: 3255 -> 3100 while the product stayed 3255)."""
+    db = world["db"]
+    from tests.test_receipt_without_po import _on_the_shelf
+
+    walk_in = _on_the_shelf(world, vendor_id=SHARMA, vendor_invoice_no="SH-GIFT")
+    gift = vd.VendorBillCreate(bill_number="SH-GIFT", bill_date="2026-09-14", taxable_amount=7460.0,
+                               tax_amount=373.0, total_amount=7833.0, grn_id=walk_in, itc_blocked=True)
+    booked = _run(vd.create_vendor_bill(SHARMA, gift, current_user=ACCOUNTANT))
+    assert _tick(booked, False)["itc_eligible"] is False
+    assert db.products.find_one({"product_id": FRAME})["cost_price"] == 3255.0
+    assert {u["landed_cost"] for u in db.stock_units.find({"product_id": FRAME, "grn_id": walk_in})} == {3255.0}
 
 
 def test_an_unpriced_receipt_billed_in_two_parts_prices_every_unit(world):

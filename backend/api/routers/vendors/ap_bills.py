@@ -808,12 +808,14 @@ async def set_vendor_bill_itc_blocked(
     )
     if not done.matched_count:
         raise HTTPException(status_code=409, detail="This bill changed meanwhile. Refresh and try again.")
-    if goods_untick:
+    # Only when the untick really gives the credit back (round 3): an
+    # unregistered supplier's GST stays no credit, so it stays in the cost.
+    if goods_untick and update["itc_eligible"]:
         from ..purchase_invoices import _remove_unclaimed_gst
 
         _remove_unclaimed_gst(db, bill_id)
         linked = db.get_collection("grns").find_one({"grn_id": bill["grn_id"]}, {"_id": 0})
-        if (linked or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO and update["itc_eligible"]:
+        if (linked or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO:
             # The walk-in cost is the latest price paid (re-settable): the
             # product's cost goes back to the price without the GST.
             # ponytail: a challan bill's moving average keeps the GST until
