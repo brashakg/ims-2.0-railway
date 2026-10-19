@@ -649,7 +649,46 @@ def test_pre_invoice_edit_keeps_line_discount_reason(client, auth_headers, wired
     doc = wired["order_repo"].find_by_id("ord-16")
     line = doc["items"][0]
     assert line["discount_reason"] == "price match - Titan quote"
+    # The edit CHANGED what this line sells for (1000 -> 900): the editing
+    # admin now answers for it (owner 2026-10-18), not the sale's approver.
+    assert line["discount_approved_by"] == "test-admin-001"
+
+
+def test_pre_invoice_edit_keeps_the_approver_of_an_untouched_line(client, auth_headers, wired):
+    """An edit that leaves a line's price and % alone keeps the approver the
+    server stamped at sale."""
+    _seed_order(
+        wired["order_repo"],
+        items=[
+            {
+                "item_id": "line-1",
+                "item_type": "FRAME",
+                "category": "FRAME",
+                "product_name": "Test Frame",
+                "quantity": 1,
+                "unit_price": 1000.0,
+                "discount_percent": 10,
+                "discount_amount": 100.0,
+                "discount_reason": "price match - Titan quote",
+                "discount_approved_by": "mgr-7",
+                "discount_approved_by_name": "Meera",
+                "item_total": 900.0,
+                "gst_rate": 5.0,
+            }
+        ],
+    )
+    r = client.put(
+        "/api/v1/orders/ord-16/superadmin-edit",
+        json={
+            "reason": "test: fix the quantity note only",
+            "items": [_edit_item(unit_price=1000.0, discount=10)],
+        },
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    line = wired["order_repo"].find_by_id("ord-16")["items"][0]
     assert line["discount_approved_by"] == "mgr-7"
+    assert line["discount_approved_by_name"] == "Meera"
 
 
 # ============================================================================
@@ -689,3 +728,17 @@ def test_revised_invoice_write_is_compare_and_set(client, auth_headers, wired, m
     assert resp.status_code == 409, resp.text
     saved = repo.collection.find_one({"order_id": "ord-16"})
     assert saved["invoice_number"] == "TES01/2627/00001"
+
+
+def test_pre_invoice_edit_that_changes_the_bill_discount_is_the_admins(client, auth_headers, wired):
+    """Changing the bill discount in an edit: the editing admin approved it."""
+    _seed_order(wired["order_repo"])
+    r = client.put(
+        "/api/v1/orders/ord-16/superadmin-edit",
+        json={"reason": "test: goodwill on the bill", "cart_discount_percent": 5,
+              "cart_discount_reason": "test: goodwill"},
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    doc = wired["order_repo"].find_by_id("ord-16")
+    assert doc["cart_discount_approved_by"] == "test-admin-001"
