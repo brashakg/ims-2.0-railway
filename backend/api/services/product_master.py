@@ -2997,7 +2997,7 @@ def normalise_door_payload(payload: Dict[str, Any], *, source: str) -> Dict[str,
             attrs.setdefault(attr_key, val)
     # The model lands in ONE field its category's form shows (_model_home):
     # a frame's Model No, a contact lens's Model Name, an Optical Lens's Sub
-    # Brand -- and only when the form left every model field blank. A flat
+    # Brand -- and only when that field is blank. A flat
     # `model` (the PO 'new item' line, or the form's own echo of its Model No)
     # or a model_no / model_name the form has no field for (a price-list
     # import, a clone of a main-era row) moves there, so the door stores no
@@ -3010,8 +3010,7 @@ def normalise_door_payload(payload: Dict[str, Any], *, source: str) -> Dict[str,
     copies = [attrs.pop(k) for k in _MODEL_KEYS if k not in fields and k in attrs]
     model = next((v for v in (*copies, p.get("model")) if not _is_blank(v)), None)
     home = _model_home(p.get("category"))
-    shown = [k for k in _MODEL_KEYS if k in fields] or [home]
-    if model is not None and home and all(_is_blank(attrs.get(k)) for k in shown):
+    if model is not None and home and _is_blank(attrs.get(home)):
         attrs[home] = model
     p["attributes"] = attrs
     p["_source"] = source if source in VALID_DOOR_SOURCES else "FORM"
@@ -5267,14 +5266,10 @@ def _overlay_attributes(product_doc: Dict[str, Any]) -> Dict[str, Any]:
     doc = product_doc or {}
     attrs: Dict[str, Any] = dict(doc.get("attributes") or {})
     # Flat top-level identity -> canonical attribute keys (fill-only).
-    # The flat model fills ONE model key (_model_home), and only when the row
-    # has neither: overlaying both copied a frame's number into its Model Name
+    # The flat model fills ONE model key (_model_home), fill-only like every
+    # overlay key: overlaying both copied a frame's number into its Model Name
     # on every clone ("add another colour", create_variations).
-    model_home = (
-        None
-        if any(not _is_blank(attrs.get(k)) for k in _MODEL_KEYS)
-        else _model_home(doc.get("category"))
-    )
+    model_home = _model_home(doc.get("category"))
     overlay = {
         "brand_name": doc.get("brand"),
         **({model_home: doc.get("model")} if model_home else {}),
