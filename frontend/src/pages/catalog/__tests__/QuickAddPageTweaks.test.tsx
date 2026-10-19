@@ -345,7 +345,19 @@ describe('11 - the Templates button (owner 2026-10-19)', () => {
 });
 
 describe('12 - the Website page (owner 2026-10-19)', () => {
+  it('stays hidden until SUPERADMIN switches page types on', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByText('Sunglass'));
+    fill(screen.getByLabelText(/^Brand Name/), 'Ray-Ban');
+    await waitFor(() => expect(productApi.getWebsiteVerdict).toHaveBeenCalled());
+    expect(screen.queryByLabelText(/^Website page/)).toBeNull();
+  });
+
   it('a Pre-order needs its ship days, and the page type rides the attributes', async () => {
+    vi.mocked(productApi.getWebsiteVerdict).mockImplementation(async (brand: string) => ({
+      brand, online: true, reason: null, web_page_types_enabled: true,
+    }));
     const user = userEvent.setup();
     renderPage();
     await user.click(screen.getByText('Sunglass'));
@@ -353,7 +365,7 @@ describe('12 - the Website page (owner 2026-10-19)', () => {
     fill(screen.getByLabelText(/^Model No/), 'RB4165');
     fill(screen.getByLabelText(/^Colour Code/), '601');
     fill(screen.getByLabelText(/^MRP/), '7890');
-    expect(screen.getByLabelText(/^Website page/)).toHaveValue('STANDARD');
+    expect(await screen.findByLabelText(/^Website page/)).toHaveValue('STANDARD');
     expect(screen.queryByLabelText(/^Ships in about/)).toBeNull();
 
     fill(screen.getByLabelText(/^Website page/), 'PRE_ORDER');

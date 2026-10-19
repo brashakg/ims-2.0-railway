@@ -19,6 +19,9 @@ export function OnlineStrip({ form }: { form: QuickAddForm }) {
   const { isReviewMode, attributes, websiteVerdict, setAttr, errors, editMode, variantCtx } = form;
   const brand = (attributes.brand_name || '').trim();
   const pageType = attributes.web_page_type || 'STANDARD';
+  // Pre-order / Preview only stay hidden until SUPERADMIN switches them on
+  // (Settings > System); a product already carrying one still shows it.
+  const pagesOn = Boolean(websiteVerdict?.web_page_types_enabled) || pageType !== 'STANDARD';
   const onModel = Boolean(variantCtx) || (editMode?.kind === 'spine' && Boolean(editMode.variantOf));
 
   return (
@@ -42,6 +45,7 @@ export function OnlineStrip({ form }: { form: QuickAddForm }) {
                     : `Website: no - ${websiteVerdict.reason || 'the push refuses it'}.`}
           </p>
         </div>
+        {pagesOn && (
         <div className="mt-3 flex flex-wrap items-start gap-4">
           <div>
             <label className="block text-xs font-medium text-gray-700 mb-1" htmlFor="qa-field-web_page_type">
@@ -91,6 +95,7 @@ export function OnlineStrip({ form }: { form: QuickAddForm }) {
                 : 'The normal page: sells only what is in stock.'}
           </p>
         </div>
+        )}
       </div>
       )}
     </>

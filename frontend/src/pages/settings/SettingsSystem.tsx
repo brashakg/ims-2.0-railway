@@ -14,6 +14,8 @@ import { useToast } from '../../context/ToastContext';
 import { adminSystemApi, policiesApi } from '../../services/api';
 import { financeApi } from '../../services/api/finance';
 import { AutoLogoutSettings } from '../../components/settings/AutoLogoutSettings';
+import { settingsApi } from '../../services/api/settings';
+import { useAuth } from '../../context/AuthContext';
 
 export function SystemSettingsPage() {
   const [isLoading, setIsLoading] = useState(true);
@@ -121,6 +123,56 @@ function SystemSection({ systemStatus }: { systemStatus: { database: string; api
       {/* Idle auto-logout policy (SUPERADMIN-editable; persisted to the
           system_settings singleton, served on /health to every user). */}
       <AutoLogoutSettings />
+
+      <WebPageTypesSetting />
+    </div>
+  );
+}
+
+// Website page types (owner 2026-10-19): Pre-order / Preview only stay off
+// (the form hides them, the push sends every page standard) until SUPERADMIN
+// switches them on -- after the theme with their templates is published.
+// system_settings.web_page_types_enabled, merged on save like AutoLogout.
+function WebPageTypesSetting() {
+  const toast = useToast();
+  const { hasRole } = useAuth();
+  const canEdit = hasRole(['SUPERADMIN']);
+  const [current, setCurrent] = useState<Record<string, unknown> | null>(null);
+
+  useEffect(() => {
+    settingsApi.getSystemSettings().then((d: Record<string, unknown>) => setCurrent(d || {})).catch(() => setCurrent({}));
+  }, []);
+
+  const enabled = current?.web_page_types_enabled === true;
+  const toggle = async (on: boolean) => {
+    const merged = { ...(current || {}), web_page_types_enabled: on };
+    try {
+      await settingsApi.updateSystemSettings(merged);
+      setCurrent(merged);
+      toast.success(on ? 'Pre-order and Preview only pages are on.' : 'Every website page is Standard again.');
+    } catch {
+      toast.error('Could not save the website page setting.');
+    }
+  };
+
+  return (
+    <div className="card">
+      <h2 className="text-lg font-semibold text-gray-900 mb-1">Website page types</h2>
+      <p className="text-sm text-gray-500 mb-3">
+        Lets products use a Pre-order or Preview only page on the website. Switch on only after the
+        theme with those pages is published.
+      </p>
+      <label className="flex items-center gap-3">
+        <input
+          type="checkbox"
+          checked={enabled}
+          disabled={!canEdit || current === null}
+          onChange={(e) => void toggle(e.target.checked)}
+          className="h-4 w-4"
+        />
+        <span className="text-sm font-medium text-gray-700">Pre-order and Preview only pages</span>
+      </label>
+      {!canEdit && <p className="text-xs text-gray-400 mt-2">Superadmin can change this.</p>}
     </div>
   );
 }

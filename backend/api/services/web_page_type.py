@@ -11,9 +11,14 @@ bettervision.in does. One value per MODEL: a model-level attribute
 Stored as attributes.web_page_type (+ attributes.preorder_ship_days, a whole
 number of days, required for PRE_ORDER; it reaches the theme as the
 ims.preorder_ship_days metafield like every attribute). Read by the product
-door (clean_page_type), the Shopify push (templateSuffix + inventoryPolicy)
-and the online order claim (a pre-order line with no unit waits for stock).
-Pure; no IMS imports.
+door (clean_page_type), the Shopify push (templateSuffix + inventoryPolicy +
+a preview-only listing's 0 quantity) and the online order claim (a pre-order
+line with no unit waits for stock).
+
+THE GATE: ``system_settings.web_page_types_enabled`` (SUPERADMIN, Settings >
+System; default False). While it is off every reader takes STANDARD --
+``effective_page_type`` is the one door every behaviour reads, always off the
+model's LEAD (a colour/size never decides its listing's page). No IMS imports.
 """
 
 from typing import Any, Dict, Optional, Tuple
@@ -63,6 +68,45 @@ def _whole_days(raw: Any) -> Optional[int]:
 def ship_days_of(doc: Optional[Dict[str, Any]]) -> Optional[int]:
     attrs = (doc or {}).get("attributes")
     return _whole_days(attrs.get("preorder_ship_days")) if isinstance(attrs, dict) else None
+
+
+def pages_enabled(db) -> bool:
+    """The SUPERADMIN switch (system_settings 'default' doc). Fail-closed:
+    unreadable or unset -> False (every page reads STANDARD)."""
+    try:
+        coll = db.get_collection("system_settings") if hasattr(db, "get_collection") else db["system_settings"]
+        doc = coll.find_one({"_id": "default"}) if coll is not None else None
+    except Exception:  # noqa: BLE001
+        return False
+    return bool((doc or {}).get("web_page_types_enabled") is True)
+
+
+def lead_attributes(db, spines: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """{key: the attributes its LISTING's page is read from} for spine docs
+    under any key (product_id, sku): a colour/size (variant_of) reads its
+    lead's, one read for every lead. A lead that cannot be found falls back to the doc's
+    own. Raises when the products read fails (the caller decides)."""
+    leads = {str(d.get("variant_of")) for d in spines.values() if d.get("variant_of")}
+    found: Dict[str, Dict[str, Any]] = {}
+    if leads:
+        coll = db.get_collection("products") if hasattr(db, "get_collection") else db["products"]
+        for doc in coll.find({"product_id": {"$in": sorted(leads)}}, {"product_id": 1, "attributes": 1}):
+            found[str(doc.get("product_id"))] = doc.get("attributes") or {}
+    return {
+        pid: found.get(str(d.get("variant_of")), d.get("attributes") or {})
+        if d.get("variant_of") else (d.get("attributes") or {})
+        for pid, d in spines.items()
+    }
+
+
+def effective_page_type(db, doc: Optional[Dict[str, Any]], *, enabled: Optional[bool] = None) -> str:
+    """THE page type behaviour follows: STANDARD while the gate is off, else
+    the doc's own (a listing twin or a lead spine -- callers holding a
+    colour/size resolve its lead with lead_attributes first). ``enabled``
+    skips the gate read when the caller already has it (a batch)."""
+    if not (pages_enabled(db) if enabled is None else enabled):
+        return STANDARD
+    return page_type_of(doc)
 
 
 def clean_page_type(

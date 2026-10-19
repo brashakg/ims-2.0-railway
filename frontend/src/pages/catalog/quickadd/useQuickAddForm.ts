@@ -207,7 +207,7 @@ export function useQuickAddForm() {
   // Brand Master default), never worked out here, so the line cannot disagree
   // with the push. undefined = being asked; null = could not be asked.
   const [websiteVerdict, setWebsiteVerdict] = useState<
-    { online: boolean; reason: string | null } | null | undefined
+    { online: boolean; reason: string | null; web_page_types_enabled?: boolean } | null | undefined
   >(undefined);
   const verdictBrand = String(attributes.brand_name || '').trim();
   useEffect(() => {
@@ -217,7 +217,7 @@ export function useQuickAddForm() {
     const t = window.setTimeout(() => {
       productApi
         .getWebsiteVerdict(verdictBrand)
-        .then((r) => { if (alive) setWebsiteVerdict({ online: r.online === true, reason: r.reason ?? null }); })
+        .then((r) => { if (alive) setWebsiteVerdict({ online: r.online === true, reason: r.reason ?? null, web_page_types_enabled: r.web_page_types_enabled === true }); })
         .catch(() => { if (alive) setWebsiteVerdict(null); });
     }, 300);
     return () => { alive = false; window.clearTimeout(t); };
