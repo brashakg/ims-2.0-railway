@@ -414,7 +414,11 @@ def first_publish_not_ready(db, product: Dict[str, Any]) -> Optional[str]:
 
     if pm._is_archived(product):
         return "archived"
-    return _not_ready(pm, lead_spine(db, product) or product, product)
+    # A caller holding the product row itself (product_id, no twin id) asks
+    # about it directly; a catalogue twin reads its product.
+    is_spine = bool(product.get("product_id")) and not product.get("id")
+    spine = product if is_spine else (lead_spine(db, product) or product)
+    return _not_ready(pm, spine, None if is_spine else product)
 
 
 def _ecom_ids_are_the_leads(db, ecom: Dict[str, Any], lead_sku: str) -> bool:
