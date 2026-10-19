@@ -1,6 +1,6 @@
 """GSTR-1 (outward supplies): computation plus the two endpoints."""
 
-from fastapi import Depends, Query
+from fastapi import Depends, HTTPException, Query
 from typing import Optional
 from ...utils.event_time import parse_event_utc_naive
 from ...utils.ist import (
@@ -21,6 +21,7 @@ from ._shared import (
     _cdnr_note_number,
     _credit_note_date_ist,
     _gstr1_bill_number,
+    logger,
     router,
 )
 from .gst_base import (
@@ -83,8 +84,6 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
         year, mon = int(month[:4]), int(month[5:7])
         from_dt, to_dt = ist_month_window_utc(year, mon)
     except Exception:
-        from fastapi import HTTPException
-
         raise HTTPException(status_code=400, detail="month must be in YYYY-MM format")
 
     b2b: list = []
@@ -393,8 +392,14 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                         }
                     )
             b2b.extend(_t_rows)
-        except Exception:
-            transfer_hsn_lines = []
+        except Exception as exc:  # noqa: BLE001
+            # Fail LOUDLY (GST review 2026-10-19, M7): GSTR-3B already 503s
+            # when transfers cannot be read; dropping every deemed supply
+            # from GSTR-1 here would file the two returns differently.
+            logger.exception("[GSTR-1] %s %s: transfers could not be read", active_store, month)
+            raise HTTPException(
+                status_code=503, detail="GSTR-1 transfer invoices could not be read; please retry."
+            ) from exc
 
     b2cs = [
         {

@@ -183,6 +183,20 @@ def test_a_gstr3b_read_failure_is_a_503_never_a_zero_return(world, monkeypatch):
         assert refused.value.status_code == 503, call
 
 
+def test_gstr1_fails_loudly_when_transfers_cannot_be_read(world, monkeypatch):
+    """GSTR-3B 503s on a failed transfer read; GSTR-1 used to drop every
+    deemed supply silently, filing the two returns differently."""
+    from api.routers.reports import gstr1 as r1
+
+    def unreadable(*_a, **_k):
+        raise RuntimeError("vendor_bills unavailable")
+
+    monkeypatch.setattr(r1, "_transfer_outward_bills", unreadable)
+    with pytest.raises(HTTPException) as refused:
+        r1._compute_gstr1(MONTH, STORE)
+    assert refused.value.status_code == 503
+
+
 # ---------------------------------------------------------------------------
 # A04-3 / M3 / M4: the Finance GST table and cards are those returns
 # ---------------------------------------------------------------------------
