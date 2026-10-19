@@ -160,14 +160,22 @@ export function TopNav({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
   // The group dropdown is position:fixed (anchored to its trigger), so it would
   // visually detach if the page scrolls, the window resizes, or the menu scrolls
   // horizontally. Close it on any of those instead of trying to re-track.
+  // Scroll is captured (scroll doesn't bubble) but only closes when the thing that
+  // scrolled CONTAINS the open trigger, i.e. the anchor actually moved. Scrolling
+  // INSIDE the dropdown, or the page body below the fixed bar, leaves it open --
+  // closing on every captured scroll made a long menu impossible to scroll.
   useEffect(() => {
     if (!openGroup) return;
     const close = () => setOpenGroup(null);
+    const onScroll = (e: Event) => {
+      const anchor = navRef.current?.querySelector('.top-nav-group.open');
+      if (anchor && e.target instanceof Node && e.target.contains(anchor)) close();
+    };
     window.addEventListener('resize', close);
-    window.addEventListener('scroll', close, true); // capture: catch the menu's own scroll too
+    window.addEventListener('scroll', onScroll, true);
     return () => {
       window.removeEventListener('resize', close);
-      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('scroll', onScroll, true);
     };
   }, [openGroup]);
 

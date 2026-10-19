@@ -140,4 +140,36 @@ describe('TopNav group dropdowns (tap/click)', () => {
     expect(screen.queryByRole('menuitem', { name: /Orders/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
   });
+
+  it('(f) scrolling INSIDE an open dropdown keeps it open (long-menu scroll bug)', async () => {
+    const user = userEvent.setup();
+    renderTopNav();
+    await user.click(trigger('Stock & supply'));
+    const menu = screen.getByRole('menu', { name: /Stock & supply/i });
+    fireEvent.wheel(menu, { deltaY: 120 });
+    fireEvent.scroll(menu);
+    expect(screen.getByRole('menu', { name: /Stock & supply/i })).toBeInTheDocument();
+    // A page-body scroll (below the fixed bar) does not move the anchor either.
+    const body = document.createElement('div');
+    document.body.appendChild(body);
+    fireEvent.scroll(body);
+    expect(screen.getByRole('menu', { name: /Stock & supply/i })).toBeInTheDocument();
+    body.remove();
+  });
+
+  it('(g) scrolling the menu bar itself (anchor moves) closes the dropdown', async () => {
+    const user = userEvent.setup();
+    const { container } = renderTopNav();
+    await user.click(trigger('Stock & supply'));
+    fireEvent.scroll(container.querySelector('.top-nav-menu')!);
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
+
+  it('(h) Esc closes the open dropdown', async () => {
+    const user = userEvent.setup();
+    renderTopNav();
+    await user.click(trigger('Stock & supply'));
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
 });
