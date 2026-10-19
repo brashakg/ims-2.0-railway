@@ -1084,3 +1084,29 @@ def test_guest_checkout_mapper_books_order_as_guest(wired, monkeypatch):
     assert order["customer_id"] is None
     assert order["is_guest_order"] is True
     assert order["grand_total"] == 483.0
+
+
+# ---------------------------------------------------------------------------
+# An order first seen already cancelled (orders/cancelled booked as a create)
+# ---------------------------------------------------------------------------
+
+
+def test_cancelled_never_fulfilled_order_takes_no_invoice_serial(wired):
+    """Never a sale -> no live GST serial (a cancelled serial is a gap in the
+    run). The next real sale still takes the first serial."""
+    payload = {**_frame_order(1101, buyer_state="20"),
+               "cancelled_at": "2026-10-19T10:00:00+05:30", "fulfillment_status": None}
+    res = shopify_ingest.ingest_shopify_order(wired["db"], payload, topic="orders/create")
+    assert res["status"] == "created"
+    assert res["invoice_number"] is None
+    sale = shopify_ingest.ingest_shopify_order(
+        wired["db"], _frame_order(1102, buyer_state="20"), topic="orders/create"
+    )
+    assert sale["invoice_number"] and sale["invoice_number"].endswith("1")
+
+
+def test_cancelled_after_fulfilment_keeps_its_invoice_serial(wired):
+    payload = {**_frame_order(1103, buyer_state="20"),
+               "cancelled_at": "2026-10-19T10:00:00+05:30", "fulfillment_status": "fulfilled"}
+    res = shopify_ingest.ingest_shopify_order(wired["db"], payload, topic="orders/create")
+    assert res["invoice_number"]

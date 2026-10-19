@@ -1917,7 +1917,14 @@ def ingest_shopify_order(
     # that would corrupt the live serial run. invoice_number stays None; GST
     # reconciliation falls back to order_number and flags has_invoice_number=False.
     invoice_number: Optional[str] = None
-    if not historical:
+    # An order FIRST seen already cancelled and never fulfilled (the create
+    # webhook was missed; online_order_mapper books it from orders/cancelled)
+    # was never a sale: it must not take a live invoice serial -- a cancelled
+    # serial is a hole in the GST run that has to be explained.
+    never_sold = bool(payload.get("cancelled_at")) and not (
+        payload.get("fulfillment_status") or payload.get("fulfillments")
+    )
+    if not historical and not never_sold:
         try:
             from ..dependencies import get_order_repository
 
