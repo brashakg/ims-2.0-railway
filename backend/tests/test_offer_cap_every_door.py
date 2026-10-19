@@ -154,3 +154,75 @@ def test_the_product_master_edit_refuses_it():
         pm.update_product(product_id=created2["product_id"],
                           patch={"discount_category": "LUXURY"}, actor="u1", product_repo=repo)
 
+
+
+# ---------------------------------------------------------------------------
+# Round-3 HIGH: a brand change sent only in attributes.brand_name is a brand
+# change -- on the product, and on every variant a model edit reaches.
+# ---------------------------------------------------------------------------
+
+from test_model_families import (  # noqa: E402
+    _Conn,
+    _create as _family_create,
+    _p,
+    _put as _family_put,
+    db,  # noqa: F401  (pytest fixture)
+)
+
+
+def _family(db):  # noqa: F811
+    """A Ray-Ban model: the lead at MRP, a variant 12% off (inside MASS 15%)."""
+    lead = _family_create(db, {"brand_name": "Ray-Ban", "model_no": "RB4165", "colour_code": "601"})
+    child = _family_create(db, {"brand_name": "Ray-Ban", "model_no": "RB4165", "colour_code": "710"},
+                           offer_price=4400)
+    assert child["variant_of"] == lead["product_id"]
+    return lead, child
+
+
+def test_a_model_renamed_to_cartier_is_refused_whole_on_the_master_door(db):  # noqa: F811
+    from database.repositories.product_repository import ProductRepository
+
+    lead, child = _family(db)
+    repo = ProductRepository(db["products"])
+    with pytest.raises(pm.ProductMasterError) as exc:
+        pm.update_product(product_id=lead["product_id"],
+                          patch={"attributes": {**lead["attributes"], "brand_name": "Cartier"}},
+                          actor="u1", product_repo=repo, db=_Conn(db))
+    assert exc.value.status == 400
+    assert child["sku"] in exc.value.message and "nothing was changed" in exc.value.message
+    assert _p(db, lead["product_id"])["brand"] == "Ray-Ban"  # nothing changed
+    assert _p(db, child["product_id"])["attributes"]["brand_name"] == "Ray-Ban"
+
+
+def test_a_model_renamed_to_cartier_is_refused_whole_on_the_edit_form(db):  # noqa: F811
+    lead, child = _family(db)
+    with pytest.raises(HTTPException) as exc:
+        _family_put(lead["product_id"], attributes={**lead["attributes"], "brand_name": "Cartier"})
+    assert exc.value.status_code == 400 and child["sku"] in str(exc.value.detail)
+    assert _p(db, lead["product_id"])["brand"] == "Ray-Ban"
+    assert _p(db, child["product_id"])["attributes"]["brand_name"] == "Ray-Ban"
+
+
+def test_an_attributes_only_brand_change_on_a_deep_offer_is_refused(db):  # noqa: F811
+    """No flat brand in the request -- the server renames from the attribute."""
+    from database.repositories.product_repository import ProductRepository
+
+    solo = _family_create(db, {"brand_name": "Ray-Ban", "model_no": "RB3025", "colour_code": "001"},
+                          offer_price=4400)
+    with pytest.raises(HTTPException) as exc:
+        _family_put(solo["product_id"], attributes={**solo["attributes"], "brand_name": "Cartier"})
+    assert exc.value.status_code == 400 and REFUSED in str(exc.value.detail)
+    with pytest.raises(pm.ProductMasterError):
+        pm.update_product(product_id=solo["product_id"],
+                          patch={"attributes": {**solo["attributes"], "brand_name": "Cartier"}},
+                          actor="u1", product_repo=ProductRepository(db["products"]), db=_Conn(db))
+    assert _p(db, solo["product_id"])["brand"] == "Ray-Ban"
+
+
+def test_an_attributes_only_brand_change_on_the_catalogue_is_refused(env):  # noqa: F811
+    doc = _bvi_doc(doc_id="clx0capbrand1")  # LUXURY, offer 4% off -- over Cartier's 2%
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+    with pytest.raises(HTTPException) as exc:
+        _catalog_put(doc["id"], {"attributes": {"brand_name": "Cartier"}})
+    assert exc.value.status_code == 400 and REFUSED in str(exc.value.detail)
+    assert catalog_mod.CATALOG_PRODUCTS[doc["id"]]["brand"] == "Vogue"

@@ -2395,6 +2395,9 @@ async def update_catalog_product(
     # lands). Shallow is enough -- every field below is REPLACED, not mutated
     # in place.
     existing = dict(existing)
+    # The brand before this edit: an attributes-only brand_name change renames
+    # the product too, and is judged against its offer below.
+    _brand_before = existing.get("brand") or (existing.get("attributes") or {}).get("brand_name")
     # Pre-edit snapshot for the scorecard audit row written after the save:
     # top-level values are REPLACED below (never mutated in place), so a
     # second shallow copy preserves the original values.
@@ -2653,6 +2656,19 @@ async def update_catalog_product(
             existing["mrp"] = merged_pricing["mrp"]
         if "offer_price" in existing and merged_pricing.get("offer_price") is not None:
             existing["offer_price"] = merged_pricing["offer_price"]
+    # A brand change -- attributes-only included -- is judged against the
+    # standing offer (THE offer-write check), pricing patch or not.
+    _brand_now = existing.get("brand") or (existing.get("attributes") or {}).get("brand_name")
+    if _pm.normalise_identity_component(_brand_now) != _pm.normalise_identity_component(_brand_before):
+        _p = existing.get("pricing") or {}
+        _problem = offer_write_problem(
+            _p.get("mrp", existing.get("mrp")),
+            _p.get("offer_price", existing.get("offer_price")),
+            _p.get("discount_category") or existing.get("discount_category"),
+            _brand_now,
+        )
+        if _problem:
+            raise HTTPException(status_code=400, detail=_problem)
     if product.images is not None:
         existing["images"] = product.images
     if product.is_active is not None:

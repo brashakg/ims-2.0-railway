@@ -3518,23 +3518,12 @@ async def update_product(
         # judge the EFFECTIVE offer against the effective cap whenever one
         # moves; otherwise only the MRP rule (a legacy offer never blocks an
         # unrelated edit the form re-sends unchanged prices with).
-        from ..services.pricing_caps import offer_terms_changed
-
-        if offer_terms_changed(update_data, existing):
-            eff_mrp = update_data.get("mrp", existing.get("mrp"))
-            eff_offer = update_data.get("offer_price", existing.get("offer_price"))
-            _assert_mrp_ge_offer(
-                eff_mrp,
-                eff_offer,
-                update_data.get("discount_category", existing.get("discount_category")),
-                update_data.get("brand", existing.get("brand")),
-            )
-        elif "mrp" in update_data or "offer_price" in update_data:
-            _assert_mrp_ge_offer(
-                update_data.get("mrp", existing.get("mrp")),
-                update_data.get("offer_price", existing.get("offer_price")),
-                judge_cap=False,
-            )
+        # THE check on the product the edit RESULTS in -- its brand included
+        # when only attributes.brand_name moves (product_master.
+        # offer_problem_after_edit, shared with update_product).
+        _offer_problem = _pm.offer_problem_after_edit(existing, update_data)
+        if _offer_problem:
+            raise HTTPException(status_code=400, detail=_offer_problem)
 
         # Step-12: normalise tags on edit so the stored shape is identical to the
         # canonical create (lowercase/trim/dedupe). An explicit [] clears tags.
@@ -3560,6 +3549,12 @@ async def update_product(
             _model_changes = _pm.model_field_changes(
                 existing.get("attributes") or {}, update_data["attributes"]
             )
+        # The model edit reaches every variant after the save: refuse it whole,
+        # before anything is written, if a variant's offer would break the cap.
+        if _model_changes and not existing.get("variant_of"):
+            _family = _pm.family_offer_problem(existing, _model_changes, repo)
+            if _family:
+                raise HTTPException(status_code=400, detail=_family)
 
         # An identity edit (eye size, CL power...) re-keys the product by the
         # create rule; a clash with another product is the create door's 409.

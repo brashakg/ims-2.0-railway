@@ -4700,6 +4700,74 @@ def assert_variant_model_fields(
         )
 
 
+def offer_problem_after_edit(current: Dict[str, Any], patch: Dict[str, Any]) -> Optional[str]:
+    """THE offer-write check (pricing_caps.offer_write_problem) on the product
+    an edit RESULTS in -- PUT /products and update_product both call it.
+
+    The brand an edit can leave is the flat brand it sends OR the attributes'
+    brand_name (rekey_on_edit re-derives the flat brand from a changed
+    attribute, so an attributes-only edit renames the product too): every
+    such brand that differs from the stored one is judged, so whichever the
+    save keeps is covered. The tier is the edit's, else the category's forced
+    tier, else the stored one. The cap is judged only when the MRP, offer,
+    tier, brand or category CHANGES (the edit form re-sends unchanged values);
+    otherwise just the MRP rule, so a legacy offer never blocks an unrelated
+    edit."""
+    patch = {k: v for k, v in (patch or {}).items() if v is not None}
+    attrs = patch.get("attributes") if isinstance(patch.get("attributes"), dict) else {}
+    canon = normalise_identity_component
+    before = current.get("brand") or (current.get("attributes") or {}).get("brand_name")
+    brands = [b for b in (patch.get("brand"), attrs.get("brand_name")) if not _is_blank(b)]
+    new_brands = [b for b in brands if canon(b) != canon(before)]
+    category = patch.get("category", current.get("category"))
+    canonical = resolve_category(category)
+    spec = _CATEGORY_SPECS.get(canonical) if canonical else None
+    tier = (
+        spec.forced_discount_category
+        if spec is not None and spec.forced_discount_category
+        else patch.get("discount_category", current.get("discount_category"))
+    )
+    tier = str(tier).strip().upper() if tier else None
+    mrp = patch.get("mrp", current.get("mrp"))
+    offer = patch.get("offer_price", current.get("offer_price"))
+    terms_moved = offer_terms_changed(
+        {"mrp": mrp, "offer_price": offer, "discount_category": tier}, current
+    ) or canonical != resolve_category(current.get("category"))
+    for brand in new_brands or [before]:
+        problem = offer_write_problem(
+            mrp, offer, tier, brand, judge_cap=bool(new_brands) or terms_moved
+        )
+        if problem:
+            return problem
+    return None
+
+
+def family_offer_problem(
+    lead: Dict[str, Any], changes: Dict[str, Any], product_repo=None
+) -> Optional[str]:
+    """A model-level edit on a LEAD reaches every variant
+    (propagate_model_fields). Judged BEFORE the lead saves: when it would put
+    any variant's offer over the cap (the model renamed to Cartier, 2%), the
+    edit is refused as a whole, naming those SKUs -- never half a family on the
+    new brand. None when every variant fits."""
+    if not changes or product_repo is None or lead.get("variant_of"):
+        return None
+    bad = [
+        str(child.get("sku") or child.get("product_id"))
+        for child in strict_find_many(product_repo, {"variant_of": lead.get("product_id")})
+        if offer_problem_after_edit(
+            child, {"attributes": {**(child.get("attributes") or {}), **changes}}
+        )
+    ]
+    if not bad:
+        return None
+    return (
+        f"This change would put the offer on {', '.join(bad)} deeper than the "
+        f"item's discount cap, so nothing was changed. Fix those offers first, "
+        f"then make the change on the model."
+    )
+
+
 def propagate_model_fields(
     *,
     lead: Dict[str, Any],
@@ -4768,18 +4836,9 @@ def update_product(
     # Merge price fields against the current doc for the both-directions check.
     new_mrp = clean.get("mrp", current.get("mrp"))
     new_offer = clean.get("offer_price", current.get("offer_price"))
-    # THE offer-write check, against the EFFECTIVE tier and brand. The cap is
-    # judged when the edit CHANGES the MRP, offer, tier or brand (any can make
-    # the standing offer too deep); otherwise only the MRP rule -- a legacy
-    # row's offer never blocks an unrelated edit (a rename, a model edit
-    # reaching its variants).
-    _cap_problem = offer_write_problem(
-        new_mrp,
-        new_offer,
-        str(clean.get("discount_category") or current.get("discount_category") or "") or None,
-        clean.get("brand", current.get("brand")),
-        judge_cap=offer_terms_changed(clean, current),
-    )
+    # THE offer-write check on the product this edit RESULTS in (its brand
+    # included when only attributes.brand_name moves): offer_problem_after_edit.
+    _cap_problem = offer_problem_after_edit(current, clean)
     if _cap_problem:
         raise ProductMasterError(_cap_problem, status=400, field="offer_price")
 
@@ -4821,6 +4880,12 @@ def update_product(
     if "attributes" in clean:
         model_changes = model_field_changes(current.get("attributes") or {}, clean["attributes"] or {})
 
+    # A model-level edit on a lead reaches its variants after the save: refuse
+    # it whole, before anything is written, if a variant's offer would break.
+    if model_changes and not from_model:
+        _family = family_offer_problem(current, model_changes, product_repo)
+        if _family:
+            raise ProductMasterError(_family, status=400, field="offer_price")
     rekey_on_edit(current, clean, product_repo=product_repo)
 
     # Cataloguer attribution: stamp WHO edited (id + display name) on the doc.

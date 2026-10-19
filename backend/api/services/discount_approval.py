@@ -377,6 +377,9 @@ def ask_manager(current_user: dict, bill: Dict[str, Any], note: Optional[str] = 
         same, waiting = None, 0
     # The same bill already waiting is not a new request (the engine's
     # dedupe_key below hands it back), so it never counts against the cap.
+    # ponytail: a count, not an atomic guard -- two asks racing past it can
+    # leave a 4th waiting (harmless: each still needs a manager's PIN). Make
+    # it a counter doc with a conditional $inc if that ever matters.
     if waiting >= MAX_WAITING:
         raise _refuse(
             "DISCOUNT_APPROVAL_TOO_MANY",
