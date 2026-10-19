@@ -281,7 +281,9 @@ class TestTierDerivation:
         category="FRAME",
         attributes={"brand_name": "Ray-Ban", "model_no": "RX1", "colour_code": "BLK"},
         mrp=5000,
-        offer_price=4500,
+        # Inside the LUXURY 5% cap the tier test derives (every offer write is
+        # judged against the item's cap -- pricing_caps.offer_write_problem).
+        offer_price=4800,
         sku="FRTIER1",
     )
 

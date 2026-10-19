@@ -261,11 +261,14 @@ def test_same_colour_and_size_are_told_apart_by_the_lens():
 
 
 def _create(db, attrs, category="SUNGLASS", **kw):
+    mrp = kw.pop("mrp", 5000)
     return pm.create_product(
         category=category,
         attributes=attrs,
-        mrp=kw.pop("mrp", 5000),
-        offer_price=kw.pop("offer_price", 5000),
+        mrp=mrp,
+        # Offer = MRP unless a test says otherwise (an offer deeper than the
+        # item's cap is refused -- pricing_caps.offer_write_problem).
+        offer_price=kw.pop("offer_price", mrp),
         actor="u-admin",
         actor_name="admin",
         product_repo=ProductRepository(db["products"]),

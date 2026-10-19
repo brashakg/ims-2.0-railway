@@ -153,7 +153,8 @@ def _frame_payload(sku="FR-QUEUE-001", model="RB-2140"):
         "model": model,
         "color": "BLK",
         "mrp": 5000.0,
-        "offer_price": 4000.0,
+        # 10% off: inside the MASS 15% cap every offer write is judged on.
+        "offer_price": 4500.0,
         "hsn_code": "9003",
         "gst_rate": 12.0,
         "attributes": {"frame_material": "Acetate", "frame_shape": "Round"},
@@ -288,7 +289,7 @@ def _seed_pushed(db, product_id="P1"):
             # this file is about.
             "images": ["https://cdn.example.com/rb2140.jpg"],
             "mrp": 5000.0,
-            "offer_price": 4000.0,
+            "offer_price": 4500.0,
 
             "inventory": {"locations": {"BV-01": 3}, "total_quantity": 3},
             "ecom": {
@@ -568,10 +569,10 @@ def test_price_edit_on_the_billing_spine_queues_the_twin(db, monkeypatch):
     """Owner priority: change the MRP in IMS and the website follows. The spine
     edit mirrors the price onto the catalog twin -- so it must queue it too."""
     _seed_pushed(db)
-    _edit_spine(db, monkeypatch, mrp=6000.0)
+    _edit_spine(db, monkeypatch, mrp=5200.0)
 
     saved = db["catalog_products"].find_one({"id": "P1"})
-    assert saved["pricing"]["mrp"] == 6000.0, "the mirror write must still land"
+    assert saved["pricing"]["mrp"] == 5200.0, "the mirror write must still land"
     assert saved["ecom"]["locally_modified"] is True
     assert _pending(db) == 1
 
@@ -622,11 +623,11 @@ def test_a_door_created_products_price_edit_reaches_its_pim_keyed_twin(
         monkeypatch,
         repo=_door_created_spine_repo(),
         spine_id="SPINE-77",
-        mrp=6000.0,
+        mrp=5200.0,
     )
 
     saved = db["catalog_products"].find_one({"id": "P1"})
-    assert saved["pricing"]["mrp"] == 6000.0, (
+    assert saved["pricing"]["mrp"] == 5200.0, (
         "the price edit must reach the pim-keyed twin, not silently miss it"
     )
     assert saved["ecom"]["locally_modified"] is True, (
@@ -664,7 +665,7 @@ def test_the_spine_edit_leaves_a_queued_row_in_a_status_bucket(db, monkeypatch):
         }
     )
 
-    _edit_spine(db, monkeypatch, mrp=6000.0)
+    _edit_spine(db, monkeypatch, mrp=5200.0)
 
     saved = db["catalog_products"].find_one({"id": "P1"})
     assert saved["ecom"]["locally_modified"] is True
@@ -677,7 +678,7 @@ def test_the_spine_edit_never_demotes_a_live_products_status(db, monkeypatch):
     IS on the storefront must not tell the screen it went back to draft."""
     _seed_pushed(db)
 
-    _edit_spine(db, monkeypatch, mrp=6000.0)
+    _edit_spine(db, monkeypatch, mrp=5200.0)
 
     saved = db["catalog_products"].find_one({"id": "P1"})
     assert saved["ecom"]["status"] == "PUBLISHED"
@@ -720,7 +721,7 @@ def test_a_price_change_on_the_product_master_door_queues_the_twin(db, monkeypat
 
     pm.update_product(
         product_id="PM1",
-        patch={"mrp": 6000.0},
+        patch={"mrp": 5200.0},
         actor="u1",
         product_repo=_pm_spine_repo(),
         audit_repo=AuditRepository(MockCollection("audit_logs")),
@@ -728,7 +729,7 @@ def test_a_price_change_on_the_product_master_door_queues_the_twin(db, monkeypat
     )
 
     saved = db["catalog_products"].find_one({"id": "P1"})
-    assert saved["mrp"] == 6000.0, "the mirror write must still land"
+    assert saved["mrp"] == 5200.0, "the mirror write must still land"
     assert saved["ecom"]["locally_modified"] is True
     assert _pending(db) == 1
 
@@ -785,28 +786,28 @@ def test_spine_price_edit_updates_the_top_level_price_the_push_reads(db, monkeyp
     the queued push would have shipped the OLD price. The mirror must write
     BOTH spellings."""
     _seed_pushed(db)  # twin has top-level mrp 5000.0 and NO pricing sub-doc
-    _edit_spine(db, monkeypatch, mrp=6000.0)
+    _edit_spine(db, monkeypatch, mrp=5200.0)
 
     saved = db["catalog_products"].find_one({"id": "P1"})
-    assert saved["mrp"] == 6000.0, (
+    assert saved["mrp"] == 5200.0, (
         "top-level mrp is what the push resolves first; leaving it stale "
         "ships the OLD price"
     )
-    assert saved["pricing"]["mrp"] == 6000.0
+    assert saved["pricing"]["mrp"] == 5200.0
     # The push-side resolution actually lands on the new price.
     price, mrp = shopify_push._resolve_variant_pricing(saved, {})
-    assert mrp == 6000.0
+    assert mrp == 5200.0
 
 
 def test_master_door_price_edit_lands_in_both_price_spellings(db):
     """Same rule, other door: the service used to write ONLY the top-level
     spelling, so a catalog-door twin's pricing.mrp went stale."""
     _seed_pushed(db)
-    _pm_edit(db, {"mrp": 6000.0})
+    _pm_edit(db, {"mrp": 5200.0})
 
     saved = db["catalog_products"].find_one({"id": "P1"})
-    assert saved["mrp"] == 6000.0
-    assert saved["pricing"]["mrp"] == 6000.0
+    assert saved["mrp"] == 5200.0
+    assert saved["pricing"]["mrp"] == 5200.0
     assert saved["ecom"]["locally_modified"] is True
 
 
@@ -817,10 +818,10 @@ def test_master_door_mirrors_with_the_mirror_flag_off(db):
     edited through /products/master moved in IMS and NEVER reached the twin
     or the queue. The autouse _mirror_off fixture keeps the flag OFF here."""
     _seed_pushed(db)
-    _pm_edit(db, {"mrp": 6000.0})
+    _pm_edit(db, {"mrp": 5200.0})
 
     saved = db["catalog_products"].find_one({"id": "P1"})
-    assert saved["mrp"] == 6000.0, "flag OFF must not silence the local twin mirror"
+    assert saved["mrp"] == 5200.0, "flag OFF must not silence the local twin mirror"
     assert saved["ecom"]["locally_modified"] is True
     assert _pending(db) == 1
 
@@ -849,7 +850,7 @@ def test_master_door_reaches_a_legacy_spine_keyed_twin(db):
     _seed_pushed(db)  # twin at id P1
     pm.update_product(
         product_id="P1",
-        patch={"mrp": 6000.0},
+        patch={"mrp": 5200.0},
         actor="u1",
         product_repo=ProductRepository(coll),
         audit_repo=AuditRepository(MockCollection("audit_logs")),
@@ -857,7 +858,7 @@ def test_master_door_reaches_a_legacy_spine_keyed_twin(db):
     )
 
     saved = db["catalog_products"].find_one({"id": "P1"})
-    assert saved["mrp"] == 6000.0, "a legacy-keyed twin must not be silently missed"
+    assert saved["mrp"] == 5200.0, "a legacy-keyed twin must not be silently missed"
     assert saved["ecom"]["locally_modified"] is True
 
 
@@ -866,8 +867,8 @@ def test_a_missing_twin_is_never_upserted_into_a_fragment(db, monkeypatch):
     UPSERTED the patch, minting a fragment doc (no sku, no name, no ecom
     identity) invisible to every sku-joined consumer. Both doors: a missing
     twin is a NO-OP."""
-    _edit_spine(db, monkeypatch, mrp=6000.0)  # no twin seeded
-    _pm_edit(db, {"mrp": 6500.0})
+    _edit_spine(db, monkeypatch, mrp=5200.0)  # no twin seeded
+    _pm_edit(db, {"mrp": 5250.0})
 
     assert db["catalog_products"].find_one({"id": "P1"}) is None
     assert len(db["catalog_products"]._data) == 0, "no fragment twin may be minted"
@@ -882,8 +883,8 @@ def test_both_doors_write_the_identical_twin(db, monkeypatch):
     db2 = _DB()
     _run_seed = _seed_pushed(db2, "P1")  # noqa: F841 -- same starting twin
 
-    _edit_spine(db, monkeypatch, offer_price=4200.0)
-    _pm_edit(db2, {"offer_price": 4200.0})
+    _edit_spine(db, monkeypatch, offer_price=4300.0)
+    _pm_edit(db2, {"offer_price": 4300.0})
 
     spine_twin = _load(db, "P1")
     master_twin = copy.deepcopy(db2["catalog_products"].find_one({"id": "P1"}))

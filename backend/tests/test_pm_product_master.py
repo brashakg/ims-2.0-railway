@@ -154,7 +154,7 @@ def test_legacy_sku_with_slash_is_accepted():
 
 def test_create_with_legacy_sku_not_remined(product_repo, audit_repo):
     created = pm.create_product(
-        category="FRAME", attributes=_frame_attrs(), mrp=1000, offer_price=900,
+        category="FRAME", attributes=_frame_attrs(), mrp=1000, offer_price=950,
         sku="FRBURBERRYB31421109/7155", actor="u1",
         product_repo=product_repo, audit_repo=audit_repo,
     )
@@ -170,7 +170,7 @@ def test_create_with_legacy_sku_not_remined(product_repo, audit_repo):
 def test_spine_write_succeeds_with_mirror_off(product_repo, variant_repo, audit_repo):
     """Mirror OFF (fresh deploy): the Mongo spine is STILL written + persisted."""
     created = pm.create_product(
-        category="FRAME", attributes=_frame_attrs(), mrp=2000, offer_price=1800, actor="u1",
+        category="FRAME", attributes=_frame_attrs(), mrp=2000, offer_price=1900, actor="u1",
         product_repo=product_repo, variant_repo=variant_repo, audit_repo=audit_repo,
     )
     pid = created["product_id"]
@@ -191,7 +191,7 @@ def test_no_external_write_attempted_when_dispatch_off(product_repo, audit_repo,
     # external_mirror_enabled must be False (no live external write).
     assert pm.external_mirror_enabled() is False
     created = pm.create_product(
-        category="FRAME", attributes=_frame_attrs(), mrp=1000, offer_price=900, actor="u1",
+        category="FRAME", attributes=_frame_attrs(), mrp=1000, offer_price=950, actor="u1",
         product_repo=product_repo, audit_repo=audit_repo,
     )
     assert created["sync_status"]["targets"]["external"]["status"] == "SKIPPED"
@@ -202,7 +202,7 @@ def test_internal_mirror_runs_when_flag_on(product_repo, variant_repo, audit_rep
     written + linked to the spine's pim_product_id."""
     monkeypatch.setenv("PM_MIRROR_ENABLED", "1")
     created = pm.create_product(
-        category="FRAME", attributes=_frame_attrs(), mrp=1000, offer_price=900, actor="u1",
+        category="FRAME", attributes=_frame_attrs(), mrp=1000, offer_price=950, actor="u1",
         product_repo=product_repo, variant_repo=variant_repo, audit_repo=audit_repo,
     )
     variant = variant_repo.get_by_sku(created["sku"])
@@ -220,14 +220,14 @@ def test_mirror_failure_never_corrupts_spine(product_repo, audit_repo, monkeypat
             raise RuntimeError("mirror target down")
 
     created = pm.create_product(
-        category="FRAME", attributes=_frame_attrs(), mrp=1000, offer_price=900, actor="u1",
+        category="FRAME", attributes=_frame_attrs(), mrp=1000, offer_price=950, actor="u1",
         product_repo=product_repo, variant_repo=_BoomVariantRepo(), audit_repo=audit_repo,
     )
     pid = created["product_id"]
     # Spine intact + persisted despite the mirror blowing up.
     spine = product_repo.find_by_id(pid)
     assert spine is not None
-    assert spine["mrp"] == 1000 and spine["offer_price"] == 900
+    assert spine["mrp"] == 1000 and spine["offer_price"] == 950
     # Compensation recorded the FAILED target.
     assert created["sync_status"]["targets"]["catalog_variants"]["status"] == "FAILED"
 
@@ -239,7 +239,7 @@ def test_mirror_failure_never_corrupts_spine(product_repo, audit_repo, monkeypat
 
 def test_gst_derived_for_frame(product_repo, audit_repo):
     created = pm.create_product(
-        category="FRAME", attributes=_frame_attrs(), mrp=1000, offer_price=900, actor="u1",
+        category="FRAME", attributes=_frame_attrs(), mrp=1000, offer_price=950, actor="u1",
         product_repo=product_repo, audit_repo=audit_repo,
     )
     assert created["gst_rate"] == 5.0
@@ -293,7 +293,7 @@ def test_offer_above_mrp_blocked_on_create(product_repo, audit_repo):
 
 def test_update_raise_offer_above_existing_mrp_blocked(product_repo, audit_repo):
     created = pm.create_product(
-        category="FRAME", attributes=_frame_attrs(), mrp=1000, offer_price=900, actor="u1",
+        category="FRAME", attributes=_frame_attrs(), mrp=1000, offer_price=950, actor="u1",
         product_repo=product_repo, audit_repo=audit_repo,
     )
     with pytest.raises(pm.ProductMasterError) as ei:
@@ -306,7 +306,7 @@ def test_update_raise_offer_above_existing_mrp_blocked(product_repo, audit_repo)
 
 def test_update_lower_mrp_below_existing_offer_blocked(product_repo, audit_repo):
     created = pm.create_product(
-        category="FRAME", attributes=_frame_attrs(), mrp=1000, offer_price=900, actor="u1",
+        category="FRAME", attributes=_frame_attrs(), mrp=1000, offer_price=950, actor="u1",
         product_repo=product_repo, audit_repo=audit_repo,
     )
     with pytest.raises(pm.ProductMasterError) as ei:
@@ -367,7 +367,7 @@ def test_pim_superset_attributes_preserved(product_repo, audit_repo):
     created = pm.create_product(
         category="SUNGLASS",
         attributes={**attrs, "model_no": "RB1", "colour_code": "G15"},
-        mrp=5000, offer_price=4500, actor="u1",
+        mrp=5000, offer_price=4750, actor="u1",
         product_repo=product_repo, audit_repo=audit_repo,
     )
     stored = product_repo.find_by_id(created["product_id"])
@@ -385,7 +385,7 @@ def test_pim_superset_attributes_preserved(product_repo, audit_repo):
 
 def test_audit_on_create(product_repo, audit_repo):
     created = pm.create_product(
-        category="FRAME", attributes=_frame_attrs(), mrp=1000, offer_price=900, actor="actor-1",
+        category="FRAME", attributes=_frame_attrs(), mrp=1000, offer_price=950, actor="actor-1",
         product_repo=product_repo, audit_repo=audit_repo,
     )
     rows = audit_repo.find_by_action("product.created")
@@ -396,11 +396,11 @@ def test_audit_on_create(product_repo, audit_repo):
 
 def test_audit_on_update_and_delete(product_repo, audit_repo):
     created = pm.create_product(
-        category="FRAME", attributes=_frame_attrs(), mrp=1000, offer_price=900, actor="u1",
+        category="FRAME", attributes=_frame_attrs(), mrp=1000, offer_price=950, actor="u1",
         product_repo=product_repo, audit_repo=audit_repo,
     )
     pm.update_product(
-        product_id=created["product_id"], patch={"mrp": 1200}, actor="u1",
+        product_id=created["product_id"], patch={"mrp": 990}, actor="u1",
         product_repo=product_repo, audit_repo=audit_repo,
     )
     upd_rows = audit_repo.find_by_action("product.updated")
@@ -422,7 +422,7 @@ def test_audit_on_update_and_delete(product_repo, audit_repo):
 
 def test_get_and_list_products(product_repo, audit_repo):
     created = pm.create_product(
-        category="FRAME", attributes=_frame_attrs(), mrp=1000, offer_price=900, actor="u1",
+        category="FRAME", attributes=_frame_attrs(), mrp=1000, offer_price=950, actor="u1",
         product_repo=product_repo, audit_repo=audit_repo,
     )
     assert pm.get_product(created["product_id"], product_repo=product_repo) is not None

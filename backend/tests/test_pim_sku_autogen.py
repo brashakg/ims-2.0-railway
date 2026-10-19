@@ -133,7 +133,7 @@ def _form_payload(**over) -> Dict[str, Any]:
         "model": "B 3142",
         "color": "1109/71",
         "mrp": 5000.0,
-        "offer_price": 4500.0,
+        "offer_price": 4800.0,  # inside the Burberry 5% cap
     }
     p.update(over)
     return p
@@ -183,7 +183,7 @@ def test_master_door_create_product_directly_lands_sku(
         category="FRAME",
         attributes=_frame_attrs(),
         mrp=1000,
-        offer_price=900,
+        offer_price=960,  # inside the Burberry 5% cap
         actor="u1",
         product_repo=product_repo,
         catalog_repo=None,  # exactly what the router hardcodes

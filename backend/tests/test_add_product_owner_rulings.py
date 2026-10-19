@@ -460,10 +460,16 @@ def _form_post(category, attrs):
     frontend test 'previews an Optical Lens (no model) too, and its save
     invents no model' (addProductOwnerRulings.test.tsx) pins the form to this
     shape -- the form used to send model_no || model_name || subbrand || 'STD'."""
+    # A NON_DISCOUNTABLE category (hearing aids) takes no offer below MRP
+    # (pricing_caps.offer_write_problem, the one offer-write check).
+    canonical = pm.resolve_category(category)
+    no_offer = bool(canonical) and (
+        pm.category_spec(canonical).forced_discount_category == "NON_DISCOUNTABLE"
+    )
     return prod_router.ProductCreate(
         category=category, brand=attrs.get("brand_name", ""),
         model=attrs.get("model_no") or attrs.get("model_name") or "",
-        attributes=dict(attrs), mrp=1000.0, offer_price=900.0,
+        attributes=dict(attrs), mrp=1000.0, offer_price=1000.0 if no_offer else 900.0,
     )
 
 
@@ -1093,8 +1099,8 @@ def test_b_an_eye_size_edit_rekeys_the_frame(door):
     assert exc.value.detail["existing"]["product_id"] == first["product_id"]
     assert door.repo.find_by_id(second["product_id"])["attributes"]["lens_size"] == "52"
     # Re-saving its own identity (a price edit through the full form) is no clash.
-    _put(first["product_id"], attributes=dict(_CARRERA), mrp=1200.0)
-    assert door.repo.find_by_id(first["product_id"])["mrp"] == 1200.0
+    _put(first["product_id"], attributes=dict(_CARRERA), mrp=1055.0)
+    assert door.repo.find_by_id(first["product_id"])["mrp"] == 1055.0
 
 
 @pytest.mark.parametrize("edit", [{"power": "-1.50"}, {"base_curve": "8.8"}, {"pack": "30"}])
@@ -1135,9 +1141,9 @@ def test_b_guard_an_edit_that_touches_no_identity_leaves_a_bad_old_power_alone(d
         "brand": "Acuvue", "model": "Oasys", "identity_key": "acuvue|oasys|junk",
         "mrp": 1000.0, "offer_price": 900.0, "attributes": dict(_OASYS, power="ask"),
     })
-    _put("P-JUNK", mrp=1100.0)
+    _put("P-JUNK", mrp=1050.0)
     after = door.repo.find_by_id("P-JUNK")
-    assert (after["mrp"], after["identity_key"]) == (1100.0, "acuvue|oasys|junk")
+    assert (after["mrp"], after["identity_key"]) == (1050.0, "acuvue|oasys|junk")
 
 
 def test_b_guard_an_edit_form_price_save_leaves_a_stale_key_alone(door):
@@ -1166,10 +1172,10 @@ def test_b_guard_an_edit_form_price_save_leaves_a_stale_key_alone(door):
         "size": "54", "identity_key": "carrera|ca8895|807|54",
         "mrp": 1000.0, "offer_price": 900.0, "attributes": dict(_CARRERA),
     })
-    _put("P-MAIN", brand="Carrera", model="CA8895", attributes=dict(_CARRERA), mrp=1200.0)
+    _put("P-MAIN", brand="Carrera", model="CA8895", attributes=dict(_CARRERA), mrp=1055.0)
     after = door.repo.find_by_id("P-MAIN")
     assert (after["mrp"], after["identity_key"], after["name"]) == (
-        1200.0, "carrera|ca8895|807", "Carrera CA8895 Eyeglasses")
+        1055.0, "carrera|ca8895|807", "Carrera CA8895 Eyeglasses")
 
 
 @pytest.mark.parametrize("category,attrs,edit,key,column,word", [
@@ -1191,7 +1197,7 @@ def test_b_a_sub_brand_or_colour_name_edit_rekeys_it(door, category, attrs, edit
     # The Edit form's PUT: brand, the model when the category has one, the
     # whole attributes bag (no hidden model_no for a lens), a price.
     model = edited.get("model_no") or edited.get("model_name")
-    _put(first["product_id"], brand=edited["brand_name"], attributes=edited, mrp=1100.0,
+    _put(first["product_id"], brand=edited["brand_name"], attributes=edited, mrp=1050.0,
          **({"model": model} if model else {}))
     after = door.repo.find_by_id(first["product_id"])
     assert (after["identity_key"], after[column], after["sku"]) == (key, word, first["sku"])
@@ -1229,11 +1235,11 @@ def test_b_a_main_made_lens_rekeys_on_the_sub_brand_its_form_shows(door, row, ed
     door.repo.collection.insert_one(dict(row))
     pid = row["product_id"]
     edited = dict(row["attributes"], **edit)
-    _put(pid, brand=row["brand"], model=row["model"], attributes=edited, mrp=1100.0)
+    _put(pid, brand=row["brand"], model=row["model"], attributes=edited, mrp=1050.0)
     after = door.repo.find_by_id(pid)
     assert (after["identity_key"], after["model"], after["sku"]) == (key, word, pid)
     assert word in after["name"] and old_word not in after["name"]
-    _put(pid, brand=row["brand"], model=row["model"], attributes=dict(after["attributes"]), mrp=1200.0)
+    _put(pid, brand=row["brand"], model=row["model"], attributes=dict(after["attributes"]), mrp=1055.0)
     again = door.repo.find_by_id(pid)
     assert (again["identity_key"], again["model"], again["name"]) == (key, word, after["name"])
     old = {k: v for k, v in row["attributes"].items() if k not in ("model_no", "model_name")}
@@ -1253,12 +1259,12 @@ def test_b_a_contact_lens_model_name_edit_rekeys_it(door):
     stored = door.repo.find_by_id(pid)["attributes"]
     assert "model_no" not in stored  # no hidden copy
     edited = dict(stored, model_name="Oasys Max")
-    _put(pid, brand="Acuvue", model="Oasys", attributes=edited, mrp=1100.0)
+    _put(pid, brand="Acuvue", model="Oasys", attributes=edited, mrp=1050.0)
     after = door.repo.find_by_id(pid)
     key = pm.compute_identity_key(*pm.identity_parts(dict(_FIT, model_name="Oasys Max"), "CL"))
     assert (after["identity_key"], after["model"], after["sku"]) == (key, "Oasys Max", first["sku"])
     assert after["name"].startswith("Acuvue Oasys Max Contact Lenses")
-    _put(pid, brand="Acuvue", model="Oasys Max", attributes=dict(after["attributes"]), mrp=1200.0)
+    _put(pid, brand="Acuvue", model="Oasys Max", attributes=dict(after["attributes"]), mrp=1055.0)
     again = door.repo.find_by_id(pid)
     assert (again["identity_key"], again["model"], again["name"]) == (key, "Oasys Max", after["name"])
     door(_form_post("CL", _FIT))  # free again
@@ -1279,7 +1285,7 @@ def test_b_a_lens_made_with_mains_payload_rekeys_on_its_sub_brand(door):
     assert stored["identity_key"] == "essilor|crizal|hc|156"
     assert not {"model_no", "model_name"} & set(stored["attributes"])
     _put(first["product_id"], brand="Essilor", model="Crizal",
-         attributes=dict(stored["attributes"], subbrand="Varilux"), mrp=1100.0)
+         attributes=dict(stored["attributes"], subbrand="Varilux"), mrp=1050.0)
     after = door.repo.find_by_id(first["product_id"])
     assert (after["identity_key"], after["model"], after["name"]) == (
         "essilor|varilux|hc|156", "Varilux", "Essilor Varilux Lenses")
@@ -1457,9 +1463,9 @@ def test_d_the_edit_form_saves_a_price_on_a_lens_with_an_old_bad_value(door, bad
         "brand": "Acuvue", "model": "Oasys", "identity_key": "acuvue|oasys|junk", "name": "Old Lens",
         "mrp": 1000.0, "offer_price": 900.0, "attributes": dict(attrs),
     })
-    _put("P-JUNK", brand="Acuvue", model="Oasys", attributes=dict(attrs), mrp=1100.0)
+    _put("P-JUNK", brand="Acuvue", model="Oasys", attributes=dict(attrs), mrp=1050.0)
     after = door.repo.find_by_id("P-JUNK")
-    assert (after["mrp"], after["identity_key"], after["name"]) == (1100.0, "acuvue|oasys|junk", "Old Lens")
+    assert (after["mrp"], after["identity_key"], after["name"]) == (1050.0, "acuvue|oasys|junk", "Old Lens")
     # Guard: a bad value the edit TYPES is still the 422 naming it.
     with pytest.raises(HTTPException) as exc:
         _put("P-JUNK", attributes=dict(attrs, cl_add="lots"))
@@ -1512,7 +1518,7 @@ def test_e_an_edit_renames_a_contact_lens_main_named(door):
         "attributes": dict(attrs, model_no="Lacelle"),  # main's door copied the model
     })
     edited = dict(attrs, model_no="Lacelle", colour_name="Ocean Blue")
-    _put("P-CCL", brand="Bausch Lomb", model="Lacelle", attributes=edited, mrp=1100.0)
+    _put("P-CCL", brand="Bausch Lomb", model="Lacelle", attributes=edited, mrp=1050.0)
     after = door.repo.find_by_id("P-CCL")
     assert (after["identity_key"], after["color"], after["name"]) == (
         "bauschlomb|lacelle|oceanblue|m200", "Ocean Blue",

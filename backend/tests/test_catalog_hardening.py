@@ -215,7 +215,8 @@ class TestCatalogPricingSchema:
         it matches what the cap resolver expects."""
         resp = client.post(
             "/api/v1/catalog/products",
-            json=_frame_payload(mrp=4000, offer_price=3600, discount_category="luxury"),
+            # 3.75% off: inside the LUXURY 5% cap (pricing_caps.offer_write_problem).
+            json=_frame_payload(mrp=4000, offer_price=3850, discount_category="luxury"),
             headers=auth_headers,
         )
         assert resp.status_code == 200, resp.text

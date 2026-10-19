@@ -55,7 +55,9 @@ def _user():
 
 def _bvi_doc(doc_id="clx0review001", sku="RVSKU1", **over):
     """A BVI-import-shaped catalog_products doc (long-form category, top-level
-    AND nested pricing, needs_review=True) -- see test_catalog_promote._bvi_doc."""
+    AND nested pricing, needs_review=True) -- see test_catalog_promote._bvi_doc.
+    Its offer sits inside the LUXURY 5% cap: every offer write is judged
+    against the item's cap (pricing_caps.offer_write_problem)."""
     doc = {
         "id": doc_id,
         "bvi_product_id": doc_id,
@@ -66,10 +68,10 @@ def _bvi_doc(doc_id="clx0review001", sku="RVSKU1", **over):
         "hsn_code": "900311",
         "gst_rate": 5.0,
         "mrp": 5000.0,
-        "offer_price": 4500.0,
+        "offer_price": 4800.0,
         "pricing": {
             "mrp": 5000.0,
-            "offer_price": 4500.0,
+            "offer_price": 4800.0,
             "discount_category": "LUXURY",
         },
         "images": ["https://cdn.shopify.com/s/files/1/vo5051.jpg"],
@@ -158,14 +160,14 @@ def test_offer_only_patch_preserves_tier_and_needs_no_mrp(env):
     doc = _bvi_doc()
     catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
 
-    _put(doc["id"], {"pricing": {"offer_price": 4200.0}})
+    _put(doc["id"], {"pricing": {"offer_price": 4750.0}})
 
     updated = catalog_mod.CATALOG_PRODUCTS[doc["id"]]
-    assert updated["pricing"]["offer_price"] == 4200.0
+    assert updated["pricing"]["offer_price"] == 4750.0
     assert updated["pricing"]["mrp"] == 5000.0  # untouched
     assert updated["pricing"]["discount_category"] == "LUXURY"  # NOT 'MASS'
     # Top-level mirror stays in sync for the promote payload.
-    assert updated["offer_price"] == 4200.0
+    assert updated["offer_price"] == 4750.0
 
 
 def test_offer_only_patch_spine_mirror_keeps_luxury_tier(env):
@@ -181,15 +183,15 @@ def test_offer_only_patch_spine_mirror_keeps_luxury_tier(env):
             "sku": "RVSPINE1",
             "discount_category": "LUXURY",
             "mrp": 5000.0,
-            "offer_price": 4500.0,
+            "offer_price": 4800.0,
         }
     )
 
-    _put(doc["id"], {"pricing": {"offer_price": 4200.0}})
+    _put(doc["id"], {"pricing": {"offer_price": 4750.0}})
 
     spine = env["repo"].find_by_id(doc["id"])
     assert spine["discount_category"] == "LUXURY"
-    assert spine["offer_price"] == 4200.0
+    assert spine["offer_price"] == 4750.0
     # A person's price change through this door is a catalogue edit of the
     # product: its spine carries THE edit stamp (catalog_list.edit_stamp).
     assert spine["updated_by"] == _user()["user_id"] and spine["edited_at"]
@@ -208,7 +210,7 @@ def test_mrp_below_existing_offer_still_400s(env):
     doc = _bvi_doc(doc_id="clx0rvmrplo1")
     catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
     with pytest.raises(HTTPException) as exc:
-        _put(doc["id"], {"pricing": {"mrp": 4000.0}})  # stored offer is 4500
+        _put(doc["id"], {"pricing": {"mrp": 4000.0}})  # stored offer is 4800
     assert exc.value.status_code == 400
 
 
@@ -259,7 +261,7 @@ def test_offer_patch_falls_back_to_top_level_mrp_mirror(env):
     # fallback instead of concluding the MRP is absent.
     doc = _bvi_doc(
         doc_id="clx0rvtop001",
-        pricing={"offer_price": 4500.0, "discount_category": "LUXURY"},
+        pricing={"offer_price": 4800.0, "discount_category": "LUXURY"},
     )  # top-level mrp stays 5000.0 from _bvi_doc
     catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
 
@@ -269,8 +271,8 @@ def test_offer_patch_falls_back_to_top_level_mrp_mirror(env):
     assert "cannot exceed MRP" in str(exc.value.detail)
 
     # A legal offer against the top-level mirror still saves.
-    _put(doc["id"], {"pricing": {"offer_price": 4200.0}})
-    assert catalog_mod.CATALOG_PRODUCTS[doc["id"]]["pricing"]["offer_price"] == 4200.0
+    _put(doc["id"], {"pricing": {"offer_price": 4750.0}})
+    assert catalog_mod.CATALOG_PRODUCTS[doc["id"]]["pricing"]["offer_price"] == 4750.0
 
 
 def test_non_offer_saves_stay_lenient_on_priceless_import(env):
@@ -588,7 +590,7 @@ def test_put_writes_compact_classified_audit_row(env):
     doc = _bvi_doc(doc_id="clx0rvaud001")
     catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
 
-    _put(doc["id"], {"pricing": {"offer_price": 4200.0}, "hsn_code": "900410"})
+    _put(doc["id"], {"pricing": {"offer_price": 4750.0}, "hsn_code": "900410"})
 
     rows = [r for r in env["audit"].rows if r.get("action") == "product.updated"]
     assert len(rows) == 1
@@ -602,8 +604,8 @@ def test_put_writes_compact_classified_audit_row(env):
     assert set(row["after"].keys()) == {"pricing", "hsn_code"}
     assert row["before"]["hsn_code"] == "900311"
     assert row["after"]["hsn_code"] == "900410"
-    assert row["before"]["pricing"]["offer_price"] == 4500.0
-    assert row["after"]["pricing"]["offer_price"] == 4200.0
+    assert row["before"]["pricing"]["offer_price"] == 4800.0
+    assert row["after"]["pricing"]["offer_price"] == 4750.0
 
 
 def test_put_audit_row_elides_heavy_fields(env):
@@ -855,16 +857,16 @@ def test_a_spine_gtin_write_that_changes_nothing_is_no_failure(gtin_env, monkeyp
     monkeypatch.setattr(base_repo, "datetime", _SameMs)
     _put("twin-g1", {"attributes": {"gtin": _GTIN}})
     gtin_env.collection.update_one({"product_id": "spine-g1"}, {"$set": {"barcode": _UPC}})
-    _put("twin-g1", {"attributes": {"gtin": _GTIN}, "pricing": {"mrp": 5200.0}})
+    _put("twin-g1", {"attributes": {"gtin": _GTIN}, "pricing": {"mrp": 5020.0}})
     spine = gtin_env.find_by_id("spine-g1")
-    assert spine["attributes"]["gtin"] == _GTIN and spine["mrp"] == 5200.0
+    assert spine["attributes"]["gtin"] == _GTIN and spine["mrp"] == 5020.0
     assert "barcode" not in spine
 
 
 @pytest.mark.parametrize(
     "later",
     [
-        {"pricing": {"mrp": 5200.0}},
+        {"pricing": {"mrp": 5020.0}},
         {"attributes": {"colour_code": "RED"}},
         {"is_active": False},
     ],
@@ -1108,7 +1110,7 @@ def test_a_twin_sharing_only_a_sku_never_writes_or_excuses_that_spine(gtin_env):
     doc = _bvi_doc(doc_id="twin-imp", sku="DUP1")
     doc["attributes"]["gtin"] = _GTIN
     catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
-    _put("twin-imp", {"pricing": {"mrp": 5200.0}})
+    _put("twin-imp", {"pricing": {"mrp": 5020.0}})
     other = gtin_env.find_by_id("spine-other")
     assert other["attributes"]["gtin"] == _UPC and other["mrp"] == 9000.0
     # The other product's code is another holder's ...

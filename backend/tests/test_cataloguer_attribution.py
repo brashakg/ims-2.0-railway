@@ -291,7 +291,7 @@ class TestUpdateStampsAttribution:
         repo = self._seed_repo()
         updated = pm.update_product(
             product_id="pid-1",
-            patch={"mrp": 1200.0},
+            patch={"mrp": 1050.0},
             actor="u-editor",
             actor_name="editor",
             product_repo=repo,
@@ -309,7 +309,7 @@ class TestUpdateStampsAttribution:
         updated = pm.update_product(
             product_id="pid-1",
             patch={
-                "mrp": 1100.0,
+                "mrp": 1040.0,
                 "created_by": "u-hijack",
                 "created_by_name": "hijack",
             },
@@ -347,7 +347,7 @@ class TestUpdateStampsAttribution:
             products_mod, "_refresh_collections_after_product", lambda *a, **k: None
         )
 
-        body = products_mod.ProductUpdate(mrp=1300.0)
+        body = products_mod.ProductUpdate(mrp=1030.0)
         out = asyncio.run(
             products_mod.update_product(
                 "pid-1",
