@@ -668,6 +668,17 @@ def _revise(client, auth_headers):
     )
 
 
+def test_revised_invoice_refused_for_a_cancelled_order(client, auth_headers, wired):
+    """Owner 2026-10-19: a cancelled order never takes a number -- not a
+    revised one either."""
+    _seed_order(wired["order_repo"], invoice_number="INV/BOK-01/26-27/0001", status="CANCELLED")
+    resp = _revise(client, auth_headers)
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "Cannot issue a revised invoice: this order was cancelled"
+    assert wired["db"].get_collection("counters").docs == []
+    assert wired["order_repo"].find_by_id("ord-16")["invoice_number"] == "INV/BOK-01/26-27/0001"
+
+
 def test_revised_invoice_refused_for_a_historical_import(client, auth_headers, wired):
     _seed_order(wired["order_repo"], invoice_number="INV/BOK-01/26-27/0001", historical=True)
     resp = _revise(client, auth_headers)

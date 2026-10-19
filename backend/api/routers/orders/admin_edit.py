@@ -10,7 +10,7 @@ from api.utils.event_time import utc_now_iso
 from database.repositories.order_repository import (
     InvoiceNumberError,
     derive_bill_type,
-    historical_order_problem,
+    order_mint_problem,
     next_document_number,
 )
 from datetime import datetime
@@ -393,10 +393,11 @@ async def superadmin_invoice_change(
 
     if body.mode == "REVISED_INVOICE":
         # Allocate a fresh GST serial for the revised invoice.
-        historical = historical_order_problem(order)
-        if historical:
+        # A historical import or a CANCELLED order never takes a number.
+        problem = order_mint_problem(order)
+        if problem:
             raise HTTPException(
-                status_code=400, detail=f"Cannot issue a revised invoice: {historical}"
+                status_code=400, detail=f"Cannot issue a revised invoice: {problem}"
             )
         try:
             new_invoice_number = repo.next_invoice_number(

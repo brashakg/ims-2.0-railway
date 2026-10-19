@@ -54,16 +54,22 @@ def gst_invoice_number_problem(number: object) -> Optional[str]:
     return None
 
 
-def historical_order_problem(order: Optional[Dict]) -> Optional[str]:
+def order_mint_problem(order: Optional[Dict]) -> Optional[str]:
     """Why ``order`` may never take a number from the live invoice series, else
-    None: a historical import (``historical`` / the order-history import) was
-    billed before IMS, so no door mints for it (CGST Rule 46(b))."""
+    None -- asked by every door before it mints for an order:
+      * a historical import (``historical`` / the order-history import) was
+        billed before IMS (CGST Rule 46(b));
+      * a CANCELLED order is never invoiced (owner 2026-10-19: cancelled test
+        bills must never get numbers). One that already carries a number
+        keeps it -- a door asks this only before minting."""
     o = order or {}
     if o.get("historical") or o.get("import_source") == "shopify_order_history":
         return (
             "this is a historical imported order -- it was billed before IMS "
             "and never takes a number from this year's invoice series"
         )
+    if str(o.get("status") or "").upper() == "CANCELLED":
+        return "this order was cancelled"
     return None
 
 
