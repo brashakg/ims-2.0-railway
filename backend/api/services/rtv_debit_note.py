@@ -80,6 +80,11 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional
 from xml.sax.saxutils import escape
 
+from database.repositories.order_repository import (
+    InvoiceNumberError,
+    next_document_number,
+)
+
 from .purchase_invoice_engine import classify_supply
 
 logger = logging.getLogger(__name__)
@@ -989,10 +994,6 @@ class DebitNoteEngine:
 
         # A03: every unit keeps its original booked bill and tax heads.
         # Rejected/unbilled custody supports only an explicit internal request.
-        from database.repositories.order_repository import (
-            InvoiceNumberError,
-            next_document_number,
-        )
         from .return_provenance import ReturnProvenanceError
         from .return_request_document import prepare_request, build_request
         try:

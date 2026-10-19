@@ -44,6 +44,11 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
+# The doors under test number their GST documents (a return's credit note,
+# a debit note): these fakes hold no store records, so a stub mint numbers
+# them (conftest.gst_numbers). The mint is tested in test_gst_document_numbers.
+pytestmark = pytest.mark.usefixtures("gst_numbers")
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("JWT_SECRET_KEY", "test_x")
 os.environ.setdefault("ENVIRONMENT", "test")

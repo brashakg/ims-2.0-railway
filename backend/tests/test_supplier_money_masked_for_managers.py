@@ -28,6 +28,7 @@ import asyncio
 import copy
 import operator
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -45,6 +46,11 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from api.services import payables_mask as pm  # noqa: E402
 from api.services.cost_mask import can_see_cost  # noqa: E402
+
+# The doors under test number their GST documents (a return's credit note,
+# a debit note): these fakes hold no store records, so a stub mint numbers
+# them (conftest.gst_numbers). The mint is tested in test_gst_document_numbers.
+pytestmark = pytest.mark.usefixtures("gst_numbers")
 
 
 MANAGERS = ("STORE_MANAGER", "AREA_MANAGER")
@@ -400,7 +406,7 @@ def test_rtv_reads_have_no_money_outside_accounts(rtv, role):
     for body in (listed, detail):
         assert not _keys(body) & DEBIT_NOTE_MONEY, (role, _keys(body) & DEBIT_NOTE_MONEY)
     assert listed["total"] == 1
-    assert detail["debit_note_number"].startswith("DN/BV/")
+    assert re.fullmatch(r"[A-Z0-9]{5}/D\d{4}/\d{4}", detail["debit_note_number"])
     assert detail["lines"][0]["qty"] == 2  # the item and quantity still read
 
 

@@ -6,6 +6,11 @@ import pytest
 
 from api.services.rtv_debit_note import DebitNoteEngine, tally_build_debit_note_xml
 
+# The doors under test number their GST documents (a return's credit note,
+# a debit note): these fakes hold no store records, so a stub mint numbers
+# them (conftest.gst_numbers). The mint is tested in test_gst_document_numbers.
+pytestmark = pytest.mark.usefixtures("gst_numbers")
+
 
 @pytest.fixture(autouse=True)
 def _isolate_db():
