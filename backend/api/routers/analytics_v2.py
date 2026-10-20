@@ -27,6 +27,7 @@ from .auth import get_current_user
 from .points import self_only_rows
 from ..dependencies import get_db as _dep_get_db, validate_store_access
 from ..services.cost_mask import mask_cost_list, can_see_cost
+from ..services.margin_basis import margin_pct_ex_gst, price_ex_gst, product_gst_rate
 from ..services.notification_service import send_notification
 from ..services.reorder_policy import auto_reorder_disabled as _reorder_disabled
 from ..utils.ist import ist_date_str, ist_day_start_utc, ist_today, now_ist
@@ -1392,7 +1393,11 @@ async def vendor_margins(
         if cost <= 0 or sell <= 0:
             continue
 
-        margin_pct = round((sell - cost) / sell * 100, 2)
+        # cost_price is ex-GST, selling_price / MRP incl-GST: margin and the
+        # revenue roll-up are both on the ex-GST price (services/margin_basis).
+        rate = product_gst_rate(p)
+        sell_ex_gst = price_ex_gst(sell, rate)
+        margin_pct = margin_pct_ex_gst(sell, cost, rate)
         vendor = (
             p.get("vendor_name")
             or p.get("vendor", "")
@@ -1411,7 +1416,7 @@ async def vendor_margins(
                 "product_count": 0,
                 "margins": [],
             }
-        vendor_map[vkey]["total_revenue"] += sell
+        vendor_map[vkey]["total_revenue"] += sell_ex_gst
         vendor_map[vkey]["total_cost"] += cost
         vendor_map[vkey]["product_count"] += 1
         vendor_map[vkey]["margins"].append(margin_pct)

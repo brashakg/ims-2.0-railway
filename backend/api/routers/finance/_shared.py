@@ -55,6 +55,7 @@ from ...services import ap_engine, cashflow, itc_reconcile, cash_register, csv_s
 from ...services.stores_util import is_online_store
 from ...services import survival_cashflow
 from ...services.cost_mask import can_see_cost
+from ...services.margin_basis import line_revenue_ex_gst
 from ...services.salary_visibility import (
     SALARY_RESTRICTED_MESSAGE,
     is_payroll_shaped_expense,
@@ -108,6 +109,21 @@ APPROVED_STATUSES = ["APPROVED", "approved"]
 _REVENUE_EXPR = {"$ifNull": ["$grand_total", {"$ifNull": ["$total", 0]}]}
 _TAX_EXPR = {"$ifNull": ["$tax_amount", {"$ifNull": ["$tax_total", 0]}]}
 _DISCOUNT_EXPR = {"$ifNull": ["$discount_total", {"$ifNull": ["$discount_amount", 0]}]}
+# What services/margin_basis.order_revenue_ex_gst reads (the bill's taxable
+# value) plus the line items COGS reads -- the P&L order fetches.
+_ORDER_REVENUE_PROJECTION = {
+    "_id": 0,
+    "store_id": 1,
+    "items": 1,
+    "grand_total": 1,
+    "total_amount": 1,
+    "round_off": 1,
+    "tax": 1,
+    "tax_amount": 1,
+    "tax_total": 1,
+    "taxable": 1,
+    "taxable_amount": 1,
+}
 
 # Order lifecycle: DRAFT -> CONFIRMED -> ... -> DELIVERED, plus terminal
 # CANCELLED (see orders.OrderStatus). A DRAFT was never booked and a CANCELLED
@@ -235,7 +251,7 @@ def compute_cogs(orders, cost_by_product: dict, fallback_rate: float = 0.0) -> f
             if cost is not None:
                 cogs += cost * float(qty)
             elif fallback_rate:
-                cogs += float(it.get("total", 0) or 0) * fallback_rate
+                cogs += line_revenue_ex_gst(it) * fallback_rate
     return round(cogs, 2)
 
 
@@ -257,7 +273,7 @@ def compute_cogs_with_flag(
             if cost is not None:
                 cogs += cost * float(qty)
             elif fallback_rate:
-                cogs += float(it.get("total", 0) or 0) * fallback_rate
+                cogs += line_revenue_ex_gst(it) * fallback_rate
                 estimated_lines += 1
     return round(cogs, 2), estimated_lines, total_lines
 
@@ -532,7 +548,9 @@ def pnl_by_category(orders, cost_by_product: dict) -> list:
         for it in o.get("items") or []:
             cat = it.get("item_type") or it.get("category") or "OTHER"
             qty = it.get("quantity", 1) or 1
-            rev = float(it.get("total", 0) or 0)
+            # Net of GST, as COGS is. (This read `total`, which no order line
+            # carries -- every category's revenue was 0.)
+            rev = line_revenue_ex_gst(it)
             d = acc.setdefault(cat, {"revenue": 0.0, "cogs": 0.0, "estimated_lines": 0})
             d["revenue"] += rev
             cost = _item_cost(it, cost_by_product)

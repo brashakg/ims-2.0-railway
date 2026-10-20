@@ -28,9 +28,11 @@ from ._shared import (
     _get_db,
     _je_cal_day,
     _payroll_cost,
+    _ORDER_REVENUE_PROJECTION,
     compute_cogs_with_flag,
     router,
 )
+from ...services.margin_basis import order_revenue_ex_gst
 
 
 @router.get("/revenue")
@@ -237,7 +239,9 @@ async def get_pnl(
         },
     ]
     rev = list(db.get_collection("orders").aggregate(rev_pipeline))
-    revenue = rev[0]["revenue"] if rev else 0
+    # What the customers paid, GST included. NOT the P&L revenue: COGS is
+    # ex-GST, so revenue is the bills' taxable value (computed below).
+    gross_sales = rev[0]["revenue"] if rev else 0
     tax = rev[0]["tax"] if rev else 0
 
     # Expenses. Expense docs store the date on `expense_date` (a 'YYYY-MM-DD'
@@ -265,12 +269,15 @@ async def get_pnl(
     # never show fabricated numbers without flagging them as estimates).
     cost_map = _cost_by_product(db)
     period_orders = list(
-        db.get_collection("orders").find(match, {"_id": 0, "items": 1})
+        db.get_collection("orders").find(match, _ORDER_REVENUE_PROJECTION)
     )
     cogs, cogs_est_lines, cogs_total_lines = compute_cogs_with_flag(
         period_orders, cost_map, fallback_rate=0.6
     )
     cogs_is_estimated = cogs_est_lines > 0
+    # Revenue net of GST (the GST is owed to the government): COGS is ex-GST,
+    # so gross profit and both margins are measured on the same side of GST.
+    revenue = round(sum(order_revenue_ex_gst(o) for o in period_orders), 2)
     gross_profit = revenue - cogs
 
     # Payroll cost-to-company for the period's months.
@@ -301,6 +308,7 @@ async def get_pnl(
 
     pnl = {
         "revenue": revenue,
+        "gross_sales_incl_gst": gross_sales,
         "cogs": round(cogs, 2),
         # When cogs_is_estimated=True, some cost lines used a 60%-of-revenue
         # fallback because the product cost_price is not set. Gross margin shown

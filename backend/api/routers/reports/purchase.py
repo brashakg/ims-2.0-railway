@@ -13,6 +13,7 @@ from ...dependencies import (
     validate_store_access,
 )
 from ...services.cost_mask import mask_cost, mask_cost_list
+from ...services.margin_basis import price_ex_gst, product_gst_rate
 from ...services.reorder_policy import auto_reorder_disabled as _auto_reorder_disabled
 from ...services.reorder_policy import (
     is_low_stock,
@@ -299,7 +300,11 @@ async def purchase_recommendations(
             prod.get("offer_price") or prod.get("mrp") or stats["avg_price"] or 0.0
         )
         cost_price = float(prod.get("cost_price") or prod.get("landed_cost") or 0.0)
-        unit_margin = max(0.0, avg_price - cost_price)
+        # avg_price is GST-inclusive, cost_price ex-GST: the margin is on the
+        # price net of GST (services/margin_basis).
+        unit_margin = max(
+            0.0, price_ex_gst(avg_price, product_gst_rate(prod)) - cost_price
+        )
         est_revenue_impact = round(suggested_qty * avg_price, 2)
         est_purchase_cost = round(suggested_qty * cost_price, 2)
         est_margin = round(suggested_qty * unit_margin, 2)

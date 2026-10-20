@@ -26,8 +26,10 @@ def test_cogs_from_real_cost():
 
 
 def test_cogs_fallback_when_cost_unknown():
-    orders = [{"items": [{"product_id": "PX", "quantity": 1, "total": 1000}]}]
-    assert compute_cogs(orders, {}, fallback_rate=0.6) == 600.0  # 60% of line total
+    orders = [{"items": [{"product_id": "PX", "quantity": 1, "item_total": 1050,
+                          "taxable_value": 1000}]}]
+    # 60% of the line's revenue net of GST (taxable_value), not of the 1050 paid
+    assert compute_cogs(orders, {}, fallback_rate=0.6) == 600.0
     assert compute_cogs(orders, {}) == 0.0  # no fallback -> 0 (not counted)
 
 
@@ -80,10 +82,14 @@ def test_gst_reconciliation_unassigned_store():
 def test_pnl_by_category():
     orders = [
         {"items": [
-            {"item_type": "FRAME", "product_id": "P1", "quantity": 2, "total": 1000},
-            {"item_type": "LENS", "product_id": "P2", "quantity": 1, "total": 500},
+            # real line shape: item_total incl 5% GST, taxable_value net of it
+            {"item_type": "FRAME", "product_id": "P1", "quantity": 2,
+             "item_total": 1050, "taxable_value": 1000},
+            {"item_type": "LENS", "product_id": "P2", "quantity": 1,
+             "item_total": 525, "taxable_value": 500},
         ]},
-        {"items": [{"item_type": "FRAME", "product_id": "P1", "quantity": 1, "total": 500}]},
+        {"items": [{"item_type": "FRAME", "product_id": "P1", "quantity": 1,
+                    "item_total": 525, "taxable_value": 500}]},
     ]
     cats = pnl_by_category(orders, {"P1": 200.0, "P2": 150.0})
     frame = next(c for c in cats if c["category"] == "FRAME")
