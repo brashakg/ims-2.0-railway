@@ -10,6 +10,11 @@ from ...utils.ist import (
 from ..auth import get_current_user, require_roles
 from ...dependencies import store_in_view
 from ...services.cost_mask import mask_cost
+from ...services.margin_basis import (
+    line_revenue_ex_gst,
+    line_unit_cost,
+    order_revenue_ex_gst,
+)
 from ...dependencies import (
     get_order_repository,
     validate_store_access,
@@ -230,10 +235,11 @@ async def profit_by_category(
                     "profit": 0,
                     "margin_percent": 0,
                 }
-            # _item_revenue reads item_total first (the field orders.py
-            # actually stamps), falling back to legacy total / price*qty.
-            selling_price = _item_revenue(item)
-            cost_price = item.get("cost_price", 0) * item.get("quantity", 1)
+            # Both sides ex-GST (services/margin_basis): the line's taxable
+            # value against its cost_at_sale. (item_total is GST-inclusive, and
+            # a line never carries cost_price -- cost read 0, margin 100%.)
+            selling_price = line_revenue_ex_gst(item)
+            cost_price = line_unit_cost(item) * (item.get("quantity") or 1)
             profit = selling_price - cost_price
 
             profit_by_cat[category]["revenue"] += selling_price
@@ -307,13 +313,13 @@ async def profit_by_store(
                 "orders": 0,
             }
         profit_by_st[store]["orders"] += 1
-        # Canonical revenue reader (grand_total first).
-        order_amount = _order_revenue(order)
+        # Both sides ex-GST (services/margin_basis): the bill's taxable value
+        # against its lines' cost_at_sale.
+        order_amount = order_revenue_ex_gst(order)
         profit_by_st[store]["revenue"] += order_amount
 
-        # Calculate cost from items
         cost = sum(
-            item.get("cost_price", 0) * item.get("quantity", 1)
+            line_unit_cost(item) * (item.get("quantity") or 1)
             for item in order.get("items", [])
         )
         profit_by_st[store]["cost"] += cost

@@ -49,7 +49,7 @@ export default function FinanceSummary({ revenueData, plStatement }: FinanceSumm
             <div>
               <p className="text-green-700 text-sm font-medium">Total Revenue</p>
               <p className="text-2xl font-bold mt-2">{money(revenue)}</p>
-              <p className="text-xs text-green-700 mt-2">Selected period</p>
+              <p className="text-xs text-green-700 mt-2">Before GST, selected period</p>
             </div>
             <TrendingUp className="w-10 h-10 text-green-600 opacity-50" />
           </div>
