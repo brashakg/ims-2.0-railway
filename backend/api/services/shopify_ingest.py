@@ -553,7 +553,7 @@ def _claim_online_units(
         # THE end of a pre-order wait, for every claim (the booking, Re-map,
         # clear-hold's claim_the_missing): a shop no longer waiting has its
         # task closed; nothing waiting any more ends the wait.
-        _settle_preorder_wait(db, order_id, waiting, breakdown)
+        _settle_preorder_wait(db, order_id, waiting, _line_shortfall(plan, breakdown))
         if waiting:
             _record_preorder_wait(db, order_id, order_ref, waiting, hold=not missed)
     except Exception as exc:  # noqa: BLE001
@@ -648,6 +648,23 @@ def _raise_fallback_ship_tasks(
         )
 
 
+def _line_shortfall(
+    plan: Dict[str, List[Dict[str, Any]]], breakdown: List[Dict[str, Any]]
+) -> Dict[Tuple[str, str], int]:
+    """{(shop, product_id): units the route wants there minus units claimed
+    there} for every line the plan routes (0 = whole)."""
+    out: Dict[Tuple[str, str], int] = {}
+    for shop, lines in plan.items():
+        for ln in lines:
+            key = (str(shop), str(ln["product_id"]))
+            out[key] = out.get(key, 0) + int(ln.get("quantity") or 1)
+    for r in breakdown:
+        key = (str(r["store_id"]), str(r["product_id"]))
+        if key in out:
+            out[key] -= int(r.get("qty") or 0)
+    return out
+
+
 def _preorder_shortfall(
     db, plan: Dict[str, List[Dict[str, Any]]], breakdown: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
@@ -658,15 +675,7 @@ def _preorder_shortfall(
     Any other product's shortfall stays an oversell."""
     from .web_page_type import PRE_ORDER, effective_page_type, lead_attributes, pages_enabled, ship_days_of
 
-    want: Dict[Tuple[str, str], int] = {}
-    for shop, lines in plan.items():
-        for ln in lines:
-            key = (shop, ln["product_id"])
-            want[key] = want.get(key, 0) + int(ln.get("quantity") or 1)
-    for r in breakdown:
-        key = (r["store_id"], r["product_id"])
-        want[key] = want.get(key, 0) - int(r.get("qty") or 0)
-    short = {k: q for k, q in want.items() if q > 0}
+    short = {k: q for k, q in _line_shortfall(plan, breakdown).items() if q > 0}
     if not short or not pages_enabled(db):
         return []
     products = db.get_collection("products") if hasattr(db, "get_collection") else db["products"]
@@ -756,13 +765,15 @@ def _record_preorder_wait(db, order_id, order_ref, waiting, *, hold=True) -> Non
 
 
 def _settle_preorder_wait(
-    db, order_id: Any, waiting: List[Dict[str, Any]], breakdown: List[Dict[str, Any]]
+    db, order_id: Any, waiting: List[Dict[str, Any]], shortfall: Dict[Tuple[str, str], int]
 ) -> None:
     """After a claim, before its wait is recorded: each shop the order WAS
     waiting at that this claim no longer waits at gets its task closed, the
-    note saying what happened -- its units claimed, the line moved to another
-    shop (Re-map), or no longer a pre-order (the page changed, or page types
-    were switched off: the line is a normal order now, an oversell if short).
+    note saying what happened, per product (``shortfall``: _line_shortfall of
+    this claim) -- every product still routed here and nothing short:
+    claimed; every product now waiting at, or filled by, another shop: moved
+    (Re-map); else no longer a pre-order (the page changed, or page types
+    were switched off: a normal order now, an oversell if short).
     Nothing waiting any more drops ``preorder_awaiting_stock``. Touches no
     hold field (clear-hold and Re-map condition their writes on those).
     Fail-soft."""
@@ -773,14 +784,19 @@ def _settle_preorder_wait(
             return
         from .online_fulfillment_route import _close_tasks
 
-        claimed = {(str(r.get("store_id")), str(r.get("product_id"))) for r in breakdown}
         still = {str(w["product_id"]) for w in waiting}
+
+        def _elsewhere(shop: str, pid: str) -> bool:
+            return pid in still or any(
+                s != shop and p == pid and q <= 0 for (s, p), q in shortfall.items()
+            )
+
         for shop in sorted({str(w.get("store_id")) for w in before} - {str(w["store_id"]) for w in waiting}):
             pids = {str(w.get("product_id")) for w in before if str(w.get("store_id")) == shop}
-            if all((shop, pid) in claimed for pid in pids):
+            if all(shortfall.get((shop, pid), 1) <= 0 for pid in pids):
                 note = "The pre-order's units are claimed."
-            elif pids <= still:
-                note = "This pre-order now waits at another shop."
+            elif all(_elsewhere(shop, pid) for pid in pids):
+                note = "This pre-order now waits at, or was filled by, another shop."
             else:
                 note = ("No longer a pre-order (its website page changed, or page types were "
                         "switched off): it is handled as a normal order now.")

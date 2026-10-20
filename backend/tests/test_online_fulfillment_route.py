@@ -5977,7 +5977,7 @@ def test_a_remap_that_moves_the_pre_order_line_closes_the_old_shops_task(world):
     assert [w["store_id"] for w in after["preorder_awaiting_stock"]] == ["BV-BOK-01"]
     assert _preorder_tasks(world, oid) == ["BV-BOK-01"]
     assert _preorder_tasks(world, oid, "COMPLETED") == ["BV-RAN-01"]
-    assert _preorder_notes(world, oid) == {"BV-RAN-01": "This pre-order now waits at another shop."}
+    assert _preorder_notes(world, oid) == {"BV-RAN-01": "This pre-order now waits at, or was filled by, another shop."}
 
 
 def _preorder_notes(world, oid):
@@ -6008,3 +6008,46 @@ def test_a_wait_that_stops_being_a_pre_order_says_so_and_is_an_oversell(world, m
     assert _preorder_notes(world, oid)["BV-BOK-01"].startswith("No longer a pre-order")
     assert "preorder_awaiting_stock" not in db.orders.find_one({"order_id": oid})
     assert _open_miss_tasks(world, oid) == ["BV-BOK-01"]
+
+
+def test_a_part_claimed_wait_switched_off_never_closes_as_claimed(world, monkeypatch):
+    """Delta review of #1244 (a): RB x2, Bokaro holds 1 -> 1 sold, 1 waits.
+    Page types switched off, clear-hold: 409 and the oversell, and Bokaro's
+    task says it is no longer a pre-order -- never "claimed" because the
+    shop holds the OTHER unit."""
+    db = _pre_order_world(world)
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 2)])
+    res, order = _book(world, _order(64095, lines=(("RB-1234", 2),)))
+    oid = res["order_id"]
+    assert _sold_at(db, oid) == ["BV-BOK-01"] and order["preorder_awaiting_stock"][0]["qty"] == 1
+    db.system_settings.update_one({"_id": "default"}, {"$set": {"web_page_types_enabled": False}})
+
+    out = _clear_hold(world, monkeypatch, oid)
+
+    assert getattr(out, "status_code", None) == 409, out
+    assert _open_miss_tasks(world, oid) == ["BV-BOK-01"]
+    assert _preorder_notes(world, oid)["BV-BOK-01"].startswith("No longer a pre-order")
+
+
+def test_a_remap_that_fills_the_moved_line_at_the_new_shop_says_so(world):
+    """Delta review of #1244 (b): Re-map moves RB from Ranchi to Bokaro and
+    Bokaro holds one: claimed there. Ranchi's task closes as filled by
+    another shop -- not "no longer a pre-order"."""
+    db = _pre_order_world(world)
+    _stock(db, "BV-BOK-01", "P-OA", 1)
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": ""}})
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9001, 1)])
+    world["shop"].fo(FO_2, LOC_RAN, lines=[(9000, 1)])
+    res, order = _book(world, _order(64094, lines=(("RB-1234", 1), ("OA-5", 1))))
+    oid = res["order_id"]
+    assert _preorder_tasks(world, oid) == ["BV-RAN-01"]
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": "20AAAAA0000A1Z5"}})
+    world["shop"].fos[1]["assignedLocation"]["location"]["id"] = LOC_BOK
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+
+    out = asyncio.run(route_mod.reroute_held_order(db, oid))
+
+    assert out["status"] == "rerouted", out
+    assert "preorder_awaiting_stock" not in db.orders.find_one({"order_id": oid})
+    assert _preorder_notes(world, oid) == {"BV-RAN-01": "This pre-order now waits at, or was filled by, another shop."}
