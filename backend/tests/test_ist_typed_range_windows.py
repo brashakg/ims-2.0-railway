@@ -272,6 +272,7 @@ def _order(created_at, total=1000.0, tax=0.0, staff="ZZ-S1", brand="ZZ-Brand",
                 "category": category,
                 "brand": brand,
                 "item_total": total,
+                "taxable_value": total - tax,  # net of GST, as orders stamp it
                 "quantity": 1,
                 "cost_price": 0.0,
                 "discount_amount": discount,
@@ -285,7 +286,7 @@ JUNE_CAST = [
            category="FRAMES", discount=10.0, oid="ZZ-O-EARLY"),
     _order(J_NOON, total=500.0, tax=120.0, staff="ZZ-NOON", brand="B-NOON",
            category="LENSES", discount=5.0, oid="ZZ-O-NOON"),
-    _order(J_AFTER, total=999.0, tax=999.0, staff="ZZ-AFTER", brand="B-AFTER",
+    _order(J_AFTER, total=999.0, tax=99.0, staff="ZZ-AFTER", brand="B-AFTER",
            category="SUNGLASSES", discount=99.0, oid="ZZ-O-AFTER"),
 ]
 
@@ -342,7 +343,7 @@ def test_by_category_june_window_is_the_ist_month():
 def test_gst_report_june_window_is_the_ist_month():
     with _PatchAttrs(reports_mod, _get_raw_db=lambda: None):
         out = _june(reports_mod.gst_report, store_id=STORE)
-    # tax 180 (early) + 120 (control); the 999 day-after invoice stays out.
+    # tax 180 (early) + 120 (control); the 99 day-after invoice stays out.
     assert out["summary"]["total_tax"] == 300.0, out["summary"]
     dates = {r["date"] for r in out["data"]}
     # And each row's printed date is the IST day (round-1 VALUE fix intact).
@@ -437,13 +438,14 @@ def test_comparison_seam_no_order_dropped_or_double_counted():
 
 def test_profit_by_category_june_window_is_the_ist_month():
     out = _june(reports_mod.profit_by_category, store_id=STORE)
-    # cost_price 0 -> profit == revenue: 1000 (early) + 500 (control).
-    assert out["total_profit"] == 1500.0, out
+    # cost 0 -> profit == revenue net of GST: (1000-180) early + (500-120)
+    # control; the day-after order's 900 stays out.
+    assert out["total_profit"] == 1200.0, out
 
 
 def test_profit_by_store_june_window_is_the_ist_month():
     out = _june(reports_mod.profit_by_store)
-    assert [s["revenue"] for s in out["data"]] == [1500.0], out
+    assert [s["revenue"] for s in out["data"]] == [1200.0], out  # net of GST
     assert out["data"][0]["orders"] == 2
 
 
@@ -460,7 +462,7 @@ def test_staff_ranking_june_window_is_the_ist_month():
 
 def test_expense_vs_revenue_june_window_is_the_ist_month():
     out = _june(reports_mod.expense_vs_revenue, store_id=STORE)
-    assert out["revenue"] == 1500.0, out
+    assert out["revenue"] == 1200.0, out  # net of GST: 820 + 380
 
 
 def test_brand_sellthrough_june_window_is_the_ist_month():

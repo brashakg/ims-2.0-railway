@@ -70,7 +70,8 @@ def two_shops(shop):
             {"order_id": oid, "order_number": f"BV-{oid}", "store_id": store,
              "status": "CONFIRMED", "grand_total": total, "created_at": datetime.now(),
              "items": [{"product_id": "P1", "item_type": "FRAME", "quantity": 1,
-                        "unit_price": total, "total": total}]}
+                        "unit_price": total, "item_total": total,
+                        "taxable_value": total}]}  # the shape orders stamp
         )
     shop.stock_units.insert_one(
         {"stock_id": "U9", "product_id": "P1", "store_id": OTHER,
@@ -97,8 +98,12 @@ def _revenue(client, headers, query=""):
 def test_category_pnl_reads_only_the_managers_shop(client, two_shops, role):
     admin_all = _revenue(client, _headers("ADMIN"))
     own = _revenue(client, _headers(role))
-    assert own == pytest.approx(OWN_REVENUE), own
-    assert admin_all == pytest.approx(OWN_REVENUE + OTHER_REVENUE), admin_all
+    # The shop fixture's own seeded sales (O1/O2) count too now that the
+    # category P&L reads the line's real taxable_value (it read `total`,
+    # which only this file's rows carried). The scope rule is the difference:
+    # everything the admin sees beyond the manager is exactly the other shop.
+    assert own >= OWN_REVENUE, own
+    assert admin_all - own == pytest.approx(OTHER_REVENUE), (admin_all, own)
     # entity_id does not widen a manager's reach either.
     assert _revenue(client, _headers(role), "?entity_id=entity-other") == own
     # Naming another shop is a 403.
