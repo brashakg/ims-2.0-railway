@@ -22,9 +22,12 @@ export function PricingSection({ form }: { form: QuickAddForm }) {
     offerPrice && mrp && Number.isFinite(offerNum) && Number.isFinite(mrpNum) && offerNum < mrpNum
       ? Math.round(((mrpNum - offerNum) / mrpNum) * 100)
       : null;
+  // MRP includes GST, cost does not: take the GST out of the MRP first, or
+  // the tax owed to the government reads as margin.
+  const mrpExGst = mrpNum / (1 + (parseFloat(form.gstRate) || 0) / 100);
   const marginPct =
     costPrice && mrp && Number.isFinite(costNum) && Number.isFinite(mrpNum) && mrpNum > 0
-      ? Math.round(((mrpNum - costNum) / mrpNum) * 100)
+      ? Math.round(((mrpExGst - costNum) / mrpExGst) * 100)
       : null;
 
   return (
@@ -105,7 +108,7 @@ export function PricingSection({ form }: { form: QuickAddForm }) {
               />
             </div>
             {marginPct !== null && (
-              <p className="text-bv text-xs mt-1">Margin: {marginPct}%</p>
+              <p className="text-bv text-xs mt-1">Margin on MRP before GST: {marginPct}%</p>
             )}
           </div>
         )}
