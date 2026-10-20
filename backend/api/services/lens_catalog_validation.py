@@ -34,6 +34,7 @@ Q5: enum config drives ALL string fields except brand/series (which are
 
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -141,9 +142,12 @@ def _ensure_float(name: str, value: Any) -> float:
     if value is None:
         raise ValueError("{name} is required".format(name=name))
     try:
-        return float(value)
+        out = float(value)
     except (TypeError, ValueError):
         raise ValueError("{name} must be a number".format(name=name))
+    if not math.isfinite(out):  # NaN / inf would poison every price sum
+        raise ValueError("{name} must be a finite number".format(name=name))
+    return out
 
 
 def _ensure_int_ge_zero(name: str, value: Any) -> int:
@@ -444,6 +448,14 @@ def validate_lens_catalog_payload(
             raise ValueError("mrp_table must be a list")
         out["mrp_table"] = mrp_table
 
+    # upgrades optional: the add-ons staff may tick on this line at billing
+    # (owner 2026-10-19: an add-on LIST, never one line per combination).
+    # Each {name, mrp, cost_price?, notes?}; a nested cost_price is masked by
+    # cost_mask like the line's own (it strips at any depth).
+    upgrades = _pick("upgrades")
+    if upgrades is not None:
+        out["upgrades"] = _normalize_upgrades(upgrades)
+
     # GST + HSN -- defaulted to 5 / 9001 per the owner's optical-lens band.
     gst_raw = _pick("gst_rate")
     if gst_raw is None:
@@ -478,6 +490,36 @@ def validate_lens_catalog_payload(
     elif existing is not None and "notes" in existing:
         out["notes"] = existing.get("notes")
 
+    return out
+
+
+def _normalize_upgrades(items: Any) -> List[Dict[str, Any]]:
+    if not isinstance(items, list):
+        raise ValueError("upgrades must be a list")
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for u in items:
+        if not isinstance(u, dict):
+            raise ValueError("each upgrade must be an object")
+        name = _trim_str(u.get("name"))
+        if not name:
+            raise ValueError("upgrade name is required")
+        if name.lower() in seen:
+            raise ValueError("upgrade {!r} listed twice".format(name))
+        seen.add(name.lower())
+        item: Dict[str, Any] = {"name": name, "mrp": _ensure_float("upgrade mrp", u.get("mrp"))}
+        if item["mrp"] < 0:
+            raise ValueError("upgrade mrp must be non-negative")
+        if u.get("cost_price") is not None:
+            item["cost_price"] = _ensure_float("upgrade cost_price", u["cost_price"])
+            if item["cost_price"] < 0:
+                raise ValueError("upgrade cost_price must be non-negative")
+        notes = u.get("notes")
+        if notes is not None and not isinstance(notes, str):
+            raise ValueError("upgrade notes must be a string")
+        if notes and notes.strip():
+            item["notes"] = notes.strip()
+        out.append(item)
     return out
 
 

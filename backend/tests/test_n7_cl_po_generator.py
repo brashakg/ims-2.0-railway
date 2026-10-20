@@ -575,3 +575,14 @@ def test_db_absent_fail_soft_returns_empty_draft(monkeypatch):
     ))
     assert res["pos_created"] == 0
     assert "nothing was written" in res["message"].lower()
+
+
+def test_gap_planner_prices_one_lens_at_half_the_per_pair_cost(env):
+    """A stock cell is one lens; a lens line's cost_price is per PAIR (ZEISS
+    WSP, owner 2026-10-19). The draft line must not price a lens as a pair."""
+    db, _, _, _ = env
+    _seed_gap_cells(db)
+    db.get_collection("lens_catalog").docs[0]["cost_price"] = 3060.0  # LL-OASYS, per pair
+    needs = {n["lens_line_id"]: n for n in cl_po._read_gap_planner_needs("BV-1")}
+    assert needs["LL-OASYS"]["unit_price"] == 1530.0
+    assert needs["LL-NOVEND"]["unit_price"] == 0.0  # no cost -> nothing invented
