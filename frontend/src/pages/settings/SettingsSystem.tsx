@@ -134,7 +134,7 @@ function SystemSection({ systemStatus }: { systemStatus: { database: string; api
 // switches them on -- after the theme with their templates is published.
 // system_settings.web_page_types_enabled; only that key is sent (the server
 // merges). Switching it off runs the stock pass at once (settings.py).
-function WebPageTypesSetting() {
+export function WebPageTypesSetting() {
   const toast = useToast();
   const { hasRole } = useAuth();
   const canEdit = hasRole(['SUPERADMIN']);
