@@ -15,7 +15,7 @@ Each test is red when its site's fix is reverted.
 import asyncio
 import os
 import sys
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("JWT_SECRET_KEY", "test")
@@ -24,6 +24,7 @@ os.environ.setdefault("ENVIRONMENT", "test")
 import pytest  # noqa: E402
 
 from api.services import gst_rates, margin_basis as mb  # noqa: E402
+from api.utils.ist import ist_today  # noqa: E402
 
 SU = {"user_id": "su", "roles": ["SUPERADMIN"], "active_store_id": "S1",
       "store_ids": ["S1"]}
@@ -201,7 +202,7 @@ def test_cogs_fallback_is_on_revenue_net_of_gst():
 
 
 def _period():
-    d = date.today()
+    d = ist_today()  # the business day, not the box clock (BUG-104)
     return d - timedelta(days=1), d + timedelta(days=1)
 
 
