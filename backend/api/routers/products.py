@@ -1964,9 +1964,11 @@ async def get_website_verdict(
     from ..dependencies import get_db as _get_db_dep
     from ..services.shopify_push import product_push_refusal
 
-    db = _get_db_dep()
-    if db is not None and not getattr(db, "is_connected", False):
-        db = None
+    conn = _get_db_dep()
+    # The gate reads collections as db[name] (listing.lead_spine), so it takes
+    # the raw database, like every other caller -- never the connection
+    # wrapper, which is not subscriptable.
+    db = conn.db if conn is not None and getattr(conn, "is_connected", False) else None
     reason = product_push_refusal(db, {"brand": brand})
     return {"brand": brand, "online": reason is None, "reason": reason}
 
