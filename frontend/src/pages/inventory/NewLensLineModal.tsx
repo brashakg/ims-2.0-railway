@@ -238,7 +238,7 @@ export default function NewLensLineModal({ meta, onClose, onCreated }: Props) {
               <input type="number" step="0.01" value={mrp} onChange={(e) => setMrp(e.target.value)}
                 className="border border-line rounded-lg px-2 py-1.5 text-sm w-full" placeholder="0.00" />
             ))}
-            {canSeeCost && field('Cost price (₹)', 'cost', (
+            {canSeeCost && field('Cost price per pair (₹, excl. GST)', 'cost', (
               <input type="number" step="0.01" value={cost} onChange={(e) => setCost(e.target.value)}
                 className="border border-line rounded-lg px-2 py-1.5 text-sm w-full" placeholder="optional" />
             ))}
