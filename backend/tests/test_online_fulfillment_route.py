@@ -5951,6 +5951,7 @@ def test_a_remap_that_claims_the_pre_order_unit_ends_the_wait(world):
     assert _sold_at(db, oid) == ["BV-BOK-01"] and after["fulfillment_hold"] is False
     assert "preorder_awaiting_stock" not in after
     assert _preorder_tasks(world, oid) == [] and _preorder_tasks(world, oid, "COMPLETED") == ["BV-BOK-01"]
+    assert _preorder_notes(world, oid) == {"BV-BOK-01": "The pre-order's units are claimed."}
 
 
 def test_a_remap_that_moves_the_pre_order_line_closes_the_old_shops_task(world):
@@ -5976,3 +5977,34 @@ def test_a_remap_that_moves_the_pre_order_line_closes_the_old_shops_task(world):
     assert [w["store_id"] for w in after["preorder_awaiting_stock"]] == ["BV-BOK-01"]
     assert _preorder_tasks(world, oid) == ["BV-BOK-01"]
     assert _preorder_tasks(world, oid, "COMPLETED") == ["BV-RAN-01"]
+    assert _preorder_notes(world, oid) == {"BV-RAN-01": "This pre-order now waits at another shop."}
+
+
+def _preorder_notes(world, oid):
+    return {t["store_id"]: t.get("completion_notes") for t in world["tasks"].created
+            if t["source_ref"].startswith(f"online_preorder:{oid}:") and t["status"] == "COMPLETED"}
+
+
+@pytest.mark.parametrize("change", ["switched_off", "page_standard"])
+def test_a_wait_that_stops_being_a_pre_order_says_so_and_is_an_oversell(world, monkeypatch, change):
+    """Re-review of #1244: page types switched off (or the model set back to
+    Standard) while an order waits. The next claim (clear-hold here) finds
+    no pre-order: the shop's task closes saying so -- never "claimed" -- and
+    the still-missing unit is the oversell it now is."""
+    db = _pre_order_world(world)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1)])
+    res, _o = _book(world, _order(64096))
+    oid = res["order_id"]
+    assert _preorder_tasks(world, oid) == ["BV-BOK-01"]
+    if change == "switched_off":
+        db.system_settings.update_one({"_id": "default"}, {"$set": {"web_page_types_enabled": False}})
+    else:
+        db.products.update_one({"product_id": "P-RB-LEAD"}, {"$set": {"attributes.web_page_type": "STANDARD"}})
+
+    out = _clear_hold(world, monkeypatch, oid)
+
+    assert getattr(out, "status_code", None) == 409, out  # nothing in stock: the hold stands
+    assert _preorder_tasks(world, oid) == []
+    assert _preorder_notes(world, oid)["BV-BOK-01"].startswith("No longer a pre-order")
+    assert "preorder_awaiting_stock" not in db.orders.find_one({"order_id": oid})
+    assert _open_miss_tasks(world, oid) == ["BV-BOK-01"]

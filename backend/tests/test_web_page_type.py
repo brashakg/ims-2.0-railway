@@ -222,10 +222,12 @@ def test_switching_page_types_off_runs_the_stock_pass_at_once(db, monkeypatch):
     from api.routers import settings as settings_mod
 
     ran = []
+    the_db = _Conn(db)
 
-    async def _pass(_db, **_kw):
-        ran.append(1)
+    async def _pass(pass_db, **_kw):
+        ran.append(pass_db)
 
+    monkeypatch.setattr(deps, "get_db", lambda: the_db)  # never the real one
     monkeypatch.setattr(settings_mod, "_get_settings_collection", lambda name: db[name])
     monkeypatch.setattr(shopify_push, "sync_stock_levels", _pass)
     su = {"user_id": "su", "roles": ["SUPERADMIN"]}
@@ -238,7 +240,7 @@ def test_switching_page_types_off_runs_the_stock_pass_at_once(db, monkeypatch):
     asyncio.run(_put({"maintenance_mode": False}))
     assert ran == []
     asyncio.run(_put({"web_page_types_enabled": False}))
-    assert ran == [1]
+    assert ran == [the_db]
     assert db["system_settings"].find_one({"_id": "default"})["maintenance_mode"] is False
 
 

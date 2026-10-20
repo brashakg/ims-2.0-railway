@@ -553,7 +553,7 @@ def _claim_online_units(
         # THE end of a pre-order wait, for every claim (the booking, Re-map,
         # clear-hold's claim_the_missing): a shop no longer waiting has its
         # task closed; nothing waiting any more ends the wait.
-        _settle_preorder_wait(db, order_id, waiting)
+        _settle_preorder_wait(db, order_id, waiting, breakdown)
         if waiting:
             _record_preorder_wait(db, order_id, order_ref, waiting, hold=not missed)
     except Exception as exc:  # noqa: BLE001
@@ -755,27 +755,38 @@ def _record_preorder_wait(db, order_id, order_ref, waiting, *, hold=True) -> Non
         logger.warning("[SHOPIFY_INGEST] pre-order task skipped for %s: %s", order_id, exc)
 
 
-def _settle_preorder_wait(db, order_id: Any, waiting: List[Dict[str, Any]]) -> None:
-    """After a claim, before its wait is recorded: the shops the order WAS
-    waiting at that this claim no longer waits at get their task closed (a unit claimed, or Re-map moved
-    the line); nothing waiting any more ends the wait (end_preorder_wait).
-    Touches no hold field (clear-hold and Re-map condition their writes on
-    those). Fail-soft."""
+def _settle_preorder_wait(
+    db, order_id: Any, waiting: List[Dict[str, Any]], breakdown: List[Dict[str, Any]]
+) -> None:
+    """After a claim, before its wait is recorded: each shop the order WAS
+    waiting at that this claim no longer waits at gets its task closed, the
+    note saying what happened -- its units claimed, the line moved to another
+    shop (Re-map), or no longer a pre-order (the page changed, or page types
+    were switched off: the line is a normal order now, an oversell if short).
+    Nothing waiting any more drops ``preorder_awaiting_stock``. Touches no
+    hold field (clear-hold and Re-map condition their writes on those).
+    Fail-soft."""
     try:
         orders = db.get_collection("orders") if hasattr(db, "get_collection") else db["orders"]
         before = (orders.find_one({"order_id": order_id}) or {}).get("preorder_awaiting_stock") or []
         if not before:
             return
-        if not waiting:
-            end_preorder_wait(db, order_id, "The pre-order's units are claimed.")
-            return
-        now = {w["store_id"] for w in waiting}
-        gone = sorted({str(w.get("store_id")) for w in before} - now)
-        if gone:
-            from .online_fulfillment_route import _close_tasks
+        from .online_fulfillment_route import _close_tasks
 
-            _close_tasks([_preorder_task_ref(order_id, s) for s in gone],
-                         "This shop no longer waits for this pre-order (claimed, or moved to another shop).")
+        claimed = {(str(r.get("store_id")), str(r.get("product_id"))) for r in breakdown}
+        still = {str(w["product_id"]) for w in waiting}
+        for shop in sorted({str(w.get("store_id")) for w in before} - {str(w["store_id"]) for w in waiting}):
+            pids = {str(w.get("product_id")) for w in before if str(w.get("store_id")) == shop}
+            if all((shop, pid) in claimed for pid in pids):
+                note = "The pre-order's units are claimed."
+            elif pids <= still:
+                note = "This pre-order now waits at another shop."
+            else:
+                note = ("No longer a pre-order (its website page changed, or page types were "
+                        "switched off): it is handled as a normal order now.")
+            _close_tasks([_preorder_task_ref(order_id, shop)], note)
+        if not waiting:
+            orders.update_one({"order_id": order_id}, {"$unset": {"preorder_awaiting_stock": ""}})
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SHOPIFY_INGEST] pre-order settle skipped for %s: %s", order_id, exc)
 
