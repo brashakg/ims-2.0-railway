@@ -267,6 +267,20 @@ def test_all_healthy_reads_green_in_plain_english(happy):
     assert items["Products on the website"][1].startswith("Shopify has 3 products. IMS has 5 set up")
 
 
+def test_a_preview_run_says_would_be_published_and_names_the_unchecked(happy, monkeypatch):
+    """A DARK run sent nothing: its first publishes are plans; rows the cap
+    stopped are told apart from refused ones (review of #1251)."""
+    monkeypatch.setattr(live_sync, "last_run", lambda db, trigger=None: {
+        "status": "done", "mode": "SIMULATED", "finished_at": "2026-10-18T03:30:00+00:00",
+        "pushed_ok": 0, "first_published": 100, "failed": 0, "awaiting_first_publish": 433,
+        "first_publish_not_checked": 333, "stock": {"ok": True},
+    })
+    line = _items(happy)["Last scheduled sync"][1]
+    assert "100 would be published for the first time" in line
+    assert "433 awaiting their first publish (333 not yet checked this run)." in line
+    assert "It was a preview run" in line
+
+
 def test_the_sync_line_reads_the_scheduled_runs(happy, monkeypatch):
     seen = []
     monkeypatch.setattr(live_sync, "last_run", lambda db, trigger=None: seen.append(trigger))

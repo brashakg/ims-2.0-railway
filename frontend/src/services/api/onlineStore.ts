@@ -1561,6 +1561,8 @@ export interface LiveSyncRun {
   first_published?: number | null;
   /** Never-published products the product gate refused this run (named in failures). */
   first_publish_refused?: number | null;
+  /** Never-published products the cap / run ceiling stopped before they were checked (not refused). */
+  first_publish_not_checked?: number | null;
   /** Dirty products with NO Shopify id still waiting after this run (refused, failed, or past the batch cap). */
   awaiting_first_publish?: number | null;
   taken_down_skipped?: number | null;

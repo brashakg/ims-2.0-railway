@@ -450,7 +450,7 @@ def test_a_refused_product_is_not_first_published_and_is_named(world, live_engin
 
     assert [c[0] for c in live_engine] == ["N1"]
     assert run["first_published"] == 1 and run["first_publish_refused"] == 2
-    assert run["awaiting_first_publish"] == 2
+    assert run["awaiting_first_publish"] == 2 and run["first_publish_not_checked"] == 0
     refused = {f["product_id"]: f for f in run["failures"] if f["code"] == ls.FIRST_PUBLISH_REFUSED}
     assert set(refused) == {"N2", "N3"}
     assert "has not allowed online selling" in refused["N2"]["reason"]
@@ -473,6 +473,7 @@ def test_the_scheduled_first_publish_cap_is_100_and_the_rest_stay_queued(world, 
     assert len(live_engine) == cap and run["first_published"] == cap
     assert run["first_publish_cap"] == cap and run["first_publish_cap_reached"] is True
     assert run["awaiting_first_publish"] == 3
+    assert run["first_publish_not_checked"] == 3 and run["first_publish_refused"] == 0
     left = [d for d in db["catalog_products"].docs if not d["ecom"].get("shopify_product_id")]
     assert len(left) == 3 and all(d["ecom"]["locally_modified"] for d in left)
     # The next slot continues where this one stopped.
@@ -493,6 +494,49 @@ def test_the_manual_sync_button_runs_in_the_request_so_keeps_the_press_cap(
     assert len(live_engine) == ls.PRODUCT_BATCH_CAP == 25
     assert run["first_published"] == 25 and run["first_publish_cap"] == 25
     assert run["first_publish_cap_reached"] is True and run["awaiting_first_publish"] == 3
+
+
+@pytest.fixture
+def photo_checking_engine(monkeypatch):
+    """The engine's own photo refusal (returns before any Shopify call, writes
+    nothing back) in front of a LIVE create -- the reviewer's #1251 probe."""
+    calls = []
+
+    async def _push(db, product, variants, blocked=None):
+        if not product.get("images"):
+            return shopify_push.PushResult(mode="BLOCKED", entity="product", action="skip",
+                                           target_id=product["id"], ok=False, reason="no_photo")
+        calls.append(product["id"])
+        db["catalog_products"].update_one({"id": product["id"]}, {"$set": {
+            "ecom.shopify_product_id": f"gid://shopify/Product/{product['id']}",
+            "ecom.locally_modified": False}})
+        return shopify_push.PushResult(mode="LIVE", entity="product", action="create",
+                                       target_id=product["id"], ok=True)
+
+    monkeypatch.setattr(shopify_push, "push_product", _push)
+    return calls
+
+
+def test_photo_less_rows_never_starve_the_first_publish(world, photo_checking_engine):
+    """210 photo-less never-pushed rows sit at the front of the queue (they
+    share queue_order's key and are never written back). They must not use
+    up the 200 run ceiling: the 5 photographed products behind them go out."""
+    db, _ = world
+    photoless = [_new_row(i) for i in range(210)]
+    for d in photoless:
+        d.pop("images")
+    good = [_new_row(1000 + i) for i in range(5)]
+    db.seed("catalog_products", photoless + good)
+
+    first = _run(ls.scheduled_tick(ist(2026, 10, 21, 1, 0)))
+    second = _run(ls.scheduled_tick(ist(2026, 10, 21, 9, 0)))
+
+    assert sorted(photo_checking_engine) == sorted(d["id"] for d in good)
+    assert first["first_published"] == 5 and first["refused_no_photo"] == 210
+    assert first["limit_reached"] is False and first["first_publish_not_checked"] == 0
+    assert first["awaiting_first_publish"] == 210
+    # The next slot: nothing new to publish, the photo-less still waiting.
+    assert second["first_published"] == 0 and second["awaiting_first_publish"] == 210
 
 
 def test_the_push_all_door_and_the_sync_read_one_cap_and_one_order():

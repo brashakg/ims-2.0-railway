@@ -597,21 +597,31 @@ async def sync_live_products(
 
     # FIRST PUBLISH (owner ruling 2026-10-20). The never-pushed rows, in the
     # Push-all queue order, through the Push-all core with the caller's cap:
-    # one gate, one engine -- never a second publish path. The
-    # run ceiling bounds attempts across both passes (live re-pushes first).
-    # A gate refusal never takes a slot, so off-brand / unfinished rows can
-    # not starve the ones behind them; they stay queued and are named below.
+    # one gate, one engine -- never a second publish path.
+    #
+    # THE PASS MUST MAKE PROGRESS (review of #1251). Every never-pushed row
+    # shares queue_order's key and a photo-less / unpriced refusal writes
+    # nothing back, so if those refusals counted against the run ceiling, 200
+    # photo-less rows at the front would use it up on every run and the
+    # photographed products behind them would never go out. Such a refusal
+    # reaches nobody (it returns before any Shopify call), so here the
+    # ceiling -- what the live pass left of it -- bounds SENDS only, like the
+    # cap: max_sent is the smaller of the two, and max_results is not set.
+    # A gate refusal never takes a slot either; both stay queued and named.
     never = sorted(
         (d for d in dirty if not (d.get("ecom") or {}).get("shopify_product_id")),
         key=queue_order,
     )
+    room = max(0, limit - len(batch["results"]))
     first = await push_product_docs(
         db,
         never,
         current_user={"user_id": actor},
-        max_results=max(0, limit - len(batch["results"])),
-        max_sent=first_publish_cap,
+        max_sent=min(first_publish_cap, room),
     )
+    # 4. What the cap / ceiling left UNCHECKED this run (neither pushed nor
+    #    refused) -- told apart from the refused rows in the report.
+    first_not_checked = len(never) - len(first["results"]) - first["blocked_skipped"]
     first_published = sum(1 for r in first["results"] if r.get("ok"))
     # Only a LIVE success leaves the queue (a SIMULATED plan published
     # nothing); every other row is still waiting for its first publish.
@@ -722,13 +732,16 @@ async def sync_live_products(
         "first_published": first_published,
         "first_publish_refused": len(first["refused"]),
         "first_publish_cap": first_publish_cap,
-        "first_publish_cap_reached": first["cap_reached"],
+        "first_publish_cap_reached": first["cap_reached"] and room >= first_publish_cap,
+        "first_publish_not_checked": first_not_checked,
         "awaiting_first_publish": awaiting_first_publish,
         "taken_down_skipped": taken_down_skipped,
         "blocked_skipped": batch["blocked_skipped"] + first["blocked_skipped"],
         "live_not_pushed": len(batch["refused"]),
         "limit": limit,
-        "limit_reached": batch["limit_reached"] or first["limit_reached"],
+        # The ceiling (not the cap) stopped the first-publish pass early.
+        "limit_reached": batch["limit_reached"]
+        or (first["cap_reached"] and room < first_publish_cap),
         "failures": failures,
         "collections": collections,
         "stock": {
@@ -750,10 +763,12 @@ async def sync_live_products(
     logger.info(
         "[LIVE-SYNC] %s run (%s) mode=%s selected=%s ok=%s failed=%s "
         "refused=%s withheld=%s price_not_synced=%s photos_not_synced=%s "
-        "first_published=%s first_publish_refused=%s awaiting_first_publish=%s",
+        "first_published=%s first_publish_refused=%s not_checked=%s "
+        "awaiting_first_publish=%s",
         trigger, slot, mode, len(live), pushed_ok, failed,
         refused_no_photo, publish_withheld, price_not_synced, photos_not_synced,
-        first_published, len(first["refused"]), awaiting_first_publish,
+        first_published, len(first["refused"]), first_not_checked,
+        awaiting_first_publish,
     )
     return _serialise_run(run)
 
