@@ -96,9 +96,14 @@ export interface Brand {
   /** Default Shopify-sync INTENT stamped on new products of this brand
    *  (nothing pushes from IMS -- the BVI app owns Shopify). */
   syncToShopifyDefault: boolean;
+  /** SUPERADMIN hard block: the brand has not allowed online selling. Wins
+   *  over syncToShopifyDefault in the server's one website gate. */
+  neverSellOnline: boolean;
   /** Products in the master matching this brand (backend enrichment;
    *  undefined when the count aggregation was unavailable). */
   productCount?: number;
+  /** Last edit time (ISO, from the server's updated_at); undefined if none. */
+  updatedAt?: string;
 }
 
 export interface Subbrand {

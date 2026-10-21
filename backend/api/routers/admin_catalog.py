@@ -34,6 +34,7 @@ from datetime import datetime
 import uuid
 
 from .admin import _require_admin_role
+from .auth import get_current_user
 from ..services.gst_rates import (
     seed_hsn_gst_master,
     invalidate_cache as invalidate_gst_cache,
@@ -292,6 +293,10 @@ class BrandCreate(BaseModel):
     # default ALWAYS decides). The Shopify push reads it live for every
     # product (shopify_push.product_push_refusal); products store no copy.
     sync_to_shopify_default: bool = False
+    # SUPERADMIN-only hard block: the brand has not allowed online selling.
+    # Wins over sync_to_shopify_default in the one website gate
+    # (catalog_dictionary.brand_website_refusal).
+    never_sell_online: bool = False
 
 
 class BrandUpdate(BaseModel):
@@ -303,6 +308,7 @@ class BrandUpdate(BaseModel):
     description: Optional[str] = None
     status: Optional[str] = None
     sync_to_shopify_default: Optional[bool] = None
+    never_sell_online: Optional[bool] = None
 
 
 def _attach_subbrands(brands: List[Dict]) -> List[Dict]:
@@ -398,8 +404,121 @@ async def get_brand(brand_id: str):
     return _get_doc("brand_masters", "brand_id", brand_id)
 
 
+def _is_superadmin(user: Any) -> bool:
+    return isinstance(user, dict) and "SUPERADMIN" in set(user.get("roles") or [])
+
+
+def _with_is_active(data: Dict) -> Dict:
+    """Keep `is_active` in step with `status`: the Brand Master form saves
+    `status`, while every server reader (the website gate, the Add-Product
+    brand list, sub-brand options, the collection registry) reads is_active."""
+    if data.get("status") is not None:
+        status = str(data["status"]).strip().upper()
+        if status not in ("ACTIVE", "INACTIVE"):
+            raise HTTPException(status_code=422, detail="status must be ACTIVE or INACTIVE")
+        data["status"] = status
+        data["is_active"] = status == "ACTIVE"
+    return data
+
+
+def _refuse_blocked_name(user: Any, name: Optional[str], own_id: Optional[str] = None) -> None:
+    """A brand may not be created or renamed to a Never-sell-online brand's
+    name (case, spaces and hyphens ignored) by anyone but SUPERADMIN: a
+    near-spelling twin would be a way round the block."""
+    if not name or _is_superadmin(user):
+        return
+    from ..services.catalog_dictionary import blocked_brand_row
+
+    coll = _coll("brand_masters")
+    hit = blocked_brand_row(coll.find({}), name) if coll is not None else None
+    if hit is not None and hit.get("brand_id") != own_id:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"'{name}' matches '{hit.get('name')}', a brand marked Never sell online. "
+                "Only SUPERADMIN can add or rename a brand to that name"
+            ),
+        )
+
+
+def _guard_never_sell_online(user: Any, wanted: Optional[bool], current: bool) -> bool:
+    """True when this request changes never_sell_online. Only SUPERADMIN may
+    (owner 2026-10-19); anyone else gets a 403, so a crafted request cannot
+    flip it either way."""
+    if wanted is None or bool(wanted) == bool(current):
+        return False
+    if not _is_superadmin(user):
+        raise HTTPException(
+            status_code=403,
+            detail="Only SUPERADMIN can change 'Never sell online' for a brand",
+        )
+    return True
+
+
+def _live_listings_of_brand(name: str) -> List[str]:
+    """SKUs of this brand's listings live on the website now (the collection
+    registry's own live predicate). Blocking does NOT take them down -- they
+    are reported so a person can decide (owner 2026-10-19). Fail-soft: []."""
+    try:
+        from ..dependencies import get_db
+        from ..services.shopify_push.collection_registry import listing_facts
+
+        conn = get_db()
+        # listing_facts reads db[name]: hand it the raw database, never the
+        # connection wrapper (not subscriptable -- the #1248 bug class).
+        if conn is None or not getattr(conn, "is_connected", False):
+            return []
+        db = conn.db
+        from ..services.catalog_dictionary import brand_name_key
+
+        probe = brand_name_key(name)
+        return [
+            str(f.get("sku") or "")
+            for f in listing_facts(db)
+            if probe and brand_name_key(f.get("brand")) == probe
+        ]
+    except Exception:  # noqa: BLE001 - a report, never a blocker
+        return []
+
+
+def _audit_never_sell_online(user: Dict, brand: Dict, blocked: bool, live: List[str]) -> None:
+    """Audit row for a Never-sell-online change. Fail-soft."""
+    try:
+        from ..dependencies import get_audit_repository
+
+        audit = get_audit_repository()
+        if audit is None:
+            return
+        audit.create(
+            {
+                "action": "BRAND_NEVER_SELL_ONLINE_ON" if blocked else "BRAND_NEVER_SELL_ONLINE_OFF",
+                "entity_type": "brand_master",
+                "entity_id": brand.get("brand_id"),
+                "user_id": user.get("user_id"),
+                "severity": "WARNING" if blocked else "INFO",
+                "details": {
+                    "brand": brand.get("name"),
+                    "never_sell_online": blocked,
+                    "live_listings_not_taken_down": live,
+                },
+            }
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _after_never_sell_online_change(user: Dict, doc: Dict) -> Dict:
+    blocked = doc.get("never_sell_online") is True
+    live = _live_listings_of_brand(doc.get("name") or "") if blocked else []
+    _audit_never_sell_online(user, doc, blocked, live)
+    doc["live_listings_not_taken_down"] = live
+    return doc
+
+
 @router.post("/brands", status_code=201)
-async def create_brand(payload: BrandCreate):
+async def create_brand(payload: BrandCreate, current_user: dict = Depends(get_current_user)):
+    changed = _guard_never_sell_online(current_user, payload.never_sell_online, False)
+    _refuse_blocked_name(current_user, payload.name)
     coll = _coll("brand_masters")
     if coll is not None and coll.find_one({"code": payload.code}):
         raise HTTPException(
@@ -409,14 +528,31 @@ async def create_brand(payload: BrandCreate):
         raise HTTPException(
             status_code=400, detail="tier must be MASS, PREMIUM, or LUXURY"
         )
-    return _create_doc("brand_masters", payload.model_dump(), "brand_id")
+    doc = _create_doc("brand_masters", _with_is_active(payload.model_dump()), "brand_id")
+    return _after_never_sell_online_change(current_user, doc) if changed else doc
 
 
 @router.put("/brands/{brand_id}")
-async def update_brand(brand_id: str, payload: BrandUpdate):
-    return _update_doc(
-        "brand_masters", "brand_id", brand_id, payload.model_dump(exclude_unset=True)
+async def update_brand(
+    brand_id: str, payload: BrandUpdate, current_user: dict = Depends(get_current_user)
+):
+    coll = _coll("brand_masters")
+    existing = (coll.find_one({"brand_id": brand_id}) if coll is not None else None) or {}
+    was_blocked = existing.get("never_sell_online") is True
+    changed = _guard_never_sell_online(current_user, payload.never_sell_online, was_blocked)
+    renamed = payload.name is not None and payload.name.strip() != str(existing.get("name") or "").strip()
+    if renamed and was_blocked and not _is_superadmin(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="Only SUPERADMIN can rename a brand marked Never sell online",
+        )
+    if renamed:
+        _refuse_blocked_name(current_user, payload.name, own_id=brand_id)
+    doc = _update_doc(
+        "brand_masters", "brand_id", brand_id,
+        _with_is_active(payload.model_dump(exclude_unset=True)),
     )
+    return _after_never_sell_online_change(current_user, doc) if changed else doc
 
 
 def _cascade_delete_subbrands(brand_id: str) -> int:
@@ -433,7 +569,14 @@ def _cascade_delete_subbrands(brand_id: str) -> int:
 
 
 @router.delete("/brands/{brand_id}")
-async def delete_brand(brand_id: str):
+async def delete_brand(brand_id: str, current_user: dict = Depends(get_current_user)):
+    coll = _coll("brand_masters")
+    existing = coll.find_one({"brand_id": brand_id}) if coll is not None else None
+    if (existing or {}).get("never_sell_online") is True and not _is_superadmin(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="Only SUPERADMIN can delete a brand marked Never sell online",
+        )
     out = _delete_doc("brand_masters", "brand_id", brand_id)
     # Cascade AFTER the parent delete succeeded (a missing brand 404s above).
     out["subbrands_deleted"] = _cascade_delete_subbrands(brand_id)
