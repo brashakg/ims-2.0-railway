@@ -1958,11 +1958,14 @@ async def get_website_verdict(
     Add/Edit form's read-only line can never disagree with the push. The form
     works nothing out itself.
 
-    Shape: {"brand": str, "online": bool, "reason": str|None}. Fail-closed
+    Shape: {"brand": str, "online": bool, "reason": str|None,
+    "web_page_types_enabled": bool} -- the last is the SUPERADMIN switch the
+    form's Website page select follows (web_page_type.pages_enabled). Fail-closed
     like the gate: no db -> online false, reason says Brand Master could not
-    be read."""
+    be read, page types off."""
     from ..dependencies import get_db as _get_db_dep
     from ..services.shopify_push import product_push_refusal
+    from ..services.web_page_type import pages_enabled
 
     conn = _get_db_dep()
     # The gate reads collections as db[name] (listing.lead_spine), so it takes
@@ -1970,7 +1973,8 @@ async def get_website_verdict(
     # wrapper, which is not subscriptable.
     db = conn.db if conn is not None and getattr(conn, "is_connected", False) else None
     reason = product_push_refusal(db, {"brand": brand})
-    return {"brand": brand, "online": reason is None, "reason": reason}
+    return {"brand": brand, "online": reason is None, "reason": reason,
+            "web_page_types_enabled": db is not None and pages_enabled(db)}
 
 
 # NOTE: registered here (with the other literal /products/* paths like

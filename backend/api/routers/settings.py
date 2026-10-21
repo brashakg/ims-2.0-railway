@@ -2112,6 +2112,27 @@ async def get_system_settings(current_user: dict = Depends(get_current_user)):
     }
 
 
+_STOCK_PASSES: set = set()  # strong refs: a fire-and-forget task is not garbage-collected
+
+
+def _resend_stock_now() -> None:
+    """Website page types switched OFF: run THE stock pass now (the one the
+    01:00 / 09:00 sync runs; it re-sends every listing whose last-sent policy
+    is not the rule's), so a Pre-order listing stops selling at 0 at once
+    instead of at the next slot. Fire-and-forget, fail-soft."""
+    import asyncio
+
+    from ..dependencies import get_db
+    from ..services import shopify_push
+
+    try:
+        task = asyncio.get_running_loop().create_task(shopify_push.sync_stock_levels(get_db()))
+        _STOCK_PASSES.add(task)
+        task.add_done_callback(_STOCK_PASSES.discard)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[SETTINGS] page types off: stock pass not started: %s", exc)
+
+
 @router.put("/system")
 async def update_system_settings(
     settings: Dict, current_user: dict = Depends(get_current_user)
@@ -2127,6 +2148,7 @@ async def update_system_settings(
     settings_clean = {k: v for k, v in settings.items() if k != "_id"}
     collection = _get_settings_collection("system_settings")
     if collection is not None:
+        before = collection.find_one({"_id": "default"}) or {}
         collection.update_one(
             {"_id": "default"},
             {
@@ -2137,6 +2159,8 @@ async def update_system_settings(
             },
             upsert=True,
         )
+        if before.get("web_page_types_enabled") is True and settings_clean.get("web_page_types_enabled") is False:
+            _resend_stock_now()
         return {"message": "System settings updated", "settings": settings_clean}
     return {"message": "System settings updated (no DB)", "settings": settings_clean}
 

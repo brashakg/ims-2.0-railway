@@ -762,15 +762,16 @@ def test_1_a_live_listing_recorded_untracked_gaining_an_unconfirmed_size_is_take
     assert _cat(db)["ecom"]["status"] == "DRAFT"
 
 
-def test_1_an_allow_oversell_listing_gaining_a_size_confirms_against_its_own_policy(monkeypatch):
-    """Round-3 finding (test pin, M2 / M3). A made-to-order listing
-    (ecom.allow_oversell -> policy CONTINUE) gains L; Shopify answers L
+def test_1_a_pre_order_listing_gaining_a_size_confirms_against_its_own_policy(monkeypatch):
+    """Round-3 finding (test pin, M2 / M3). A pre-order listing
+    (web_page_type PRE_ORDER -> policy CONTINUE) gains L; Shopify answers L
     tracked=true + CONTINUE. The create row asks for the listing's OWN policy
     and the answer is confirmed against it, so the listing stays live and
     green. Hardcode DENY on the create row -> the row assert fails; confirm
     against a literal DENY -> a Draft + 'did not confirm' -> fails."""
     db, variants, upd = _live_listing_gets_size_l()
-    db.get_collection("catalog_products").update_one({"id": "cat-1"}, {"$set": {"ecom.allow_oversell": True}})
+    db.get_collection("catalog_products").update_one({"id": "cat-1"}, {"$set": {"attributes": {"web_page_type": "PRE_ORDER", "preorder_ship_days": 10}}})
+    db.seed("system_settings", [{"_id": "default", "web_page_types_enabled": True}])
     spy = _Spy(_responses(**{"productUpdate(": upd, "productVariantsBulkCreate": _created(policy="CONTINUE")}))
     _live(monkeypatch, spy)
     res = _run(shopify_push.push_product(db, _cat(db), variants))

@@ -434,6 +434,66 @@ def test_T1_press_writes_each_shop_at_its_own_location_including_an_explicit_zer
     assert base["tracked"] is True and "location_id" not in base
 
 
+def test_the_stock_pass_never_flips_a_pre_order_listing_back_to_deny(monkeypatch):
+    """Owner 2026-10-19: the 01:00/09:00 stock pass re-sends tracking with
+    THE policy rule (inventory_policy_for) -- a Pre-order page stays
+    CONTINUE, every other listing DENY. Hardcode DENY in the pass -> fails."""
+    for page, gate, policy in (("PRE_ORDER", True, "CONTINUE"), ("STANDARD", True, "DENY"),
+                               ("PRE_ORDER", False, "DENY")):
+        db = _listed(_db(a=0, b=0, c=0, sold=0))
+        _pages_on(db, gate)
+        db.get_collection("catalog_products").update_one(
+            {"id": "cat-1"}, {"$set": {"attributes": {"web_page_type": page, "preorder_ship_days": 7}}}
+        )
+        spy = _Spy(_responses())
+        _live(monkeypatch, spy)
+        res = _run(shopify_push.sync_stock_levels(db))
+        assert res.mode == "LIVE" and res.payload["synced"] == 1, res
+        _assert_tracked(spy, policy=policy)
+
+
+def _pages_on(db, on=True):
+    """The SUPERADMIN switch (system_settings.web_page_types_enabled)."""
+    db.get_collection("system_settings").update_one(
+        {"_id": "default"}, {"$set": {"web_page_types_enabled": on}}, upsert=True)
+
+
+def test_a_page_switched_back_to_standard_is_re_sent_deny_with_unchanged_stock(monkeypatch):
+    """Review P1: the pass diffed quantities only, so a Pre-order switched
+    back to Standard (same stock) kept CONTINUE until a full re-push. The
+    policy last sent is part of the diff: unchanged quantities, a policy
+    that is not THE rule's -> sent. Drop the policy compare -> nothing sent."""
+    db = _listed(_db(a=2, b=1, c=0), online_stock={
+        "quantities": {"SP-1": {"BV-A": 2, "BV-B": 1, "BV-C": 0}}, "tracked": True, "policy": "CONTINUE"})
+    _pages_on(db)
+    spy = _Spy(_responses())
+    _live(monkeypatch, spy)
+    res = _run(shopify_push.sync_stock_levels(db))
+    assert res.payload["changed"] == 1 and res.payload["synced"] == 1, res
+    _assert_tracked(spy, policy="DENY")
+    assert _baseline(db)["policy"] == "DENY"
+    # The next pass: nothing to say.
+    spy2 = _Spy(_responses())
+    _live(monkeypatch, spy2)
+    assert _run(shopify_push.sync_stock_levels(db)).payload["changed"] == 0
+
+
+def test_a_preview_only_model_lists_0_online_even_on_its_sizes(monkeypatch):
+    """Review P5: a Preview-only page sells nothing anywhere -- every shop
+    writes 0 for it, read off the MODEL's lead (a size whose own row lacks
+    the field included). Gate off -> the shelf counts as before."""
+    from api.services import online_stock_writeback as wb
+
+    db = _db(a=2, b=1, c=0)
+    db.get_collection("products").update_one({"product_id": "spine-1"}, {"$set": {"variant_of": "lead-1"}})
+    db.get_collection("products").insert_one(
+        {"product_id": "lead-1", "sku": "SP-LEAD", "attributes": {"web_page_type": "PREVIEW_ONLY"}})
+    _pages_on(db, False)
+    assert wb.online_quantities_for_skus(db, ["SP-1"]) == {"SP-1": {"BV-A": 2, "BV-B": 1, "BV-C": 0}}
+    _pages_on(db, True)
+    assert wb.online_quantities_for_skus(db, ["SP-1"]) == {"SP-1": {"BV-A": 0, "BV-B": 0, "BV-C": 0}}
+
+
 def test_T2_unmapped_holder_is_named_the_mapped_rows_still_go_out_one_task(monkeypatch):
     db = _listed(_db(a=2, b=1, c=0, d=1))
     spy = _Spy(_responses())
@@ -1005,16 +1065,28 @@ def test_live_create_tracks_denies_and_writes_each_shops_quantity(monkeypatch):
     assert db.get_collection("catalog_products").find_one({"id": "cat-1"})["ecom"]["locally_modified"] is False
 
 
-def test_live_update_also_writes_stock_and_allow_oversell_selects_continue(monkeypatch):
-    assert shopify_push.inventory_policy_for({"ecom": {}}) == "DENY"
-    assert shopify_push.inventory_policy_for({"ecom": {"allow_oversell": True}}) == "CONTINUE"
-    db = _listed(_db(a=2, b=1, c=0), allow_oversell=True)
+def test_live_update_also_writes_stock_and_only_a_pre_order_page_selects_continue(monkeypatch):
+    """Owner 2026-10-19: ONLY a Pre-order page sells at 0 stock -- every
+    other page type (and the retired ecom.allow_oversell switch) is DENY."""
+    pre = {"attributes": {"web_page_type": "PRE_ORDER", "preorder_ship_days": 10}}
+    db = _listed(_db(a=2, b=1, c=0))
+    assert shopify_push.inventory_policy_for(db, pre) == "DENY"  # the gate is off
+    _pages_on(db)
+    assert shopify_push.inventory_policy_for(db, {"ecom": {}}) == "DENY"
+    assert shopify_push.inventory_policy_for(db, {"ecom": {"allow_oversell": True}}) == "DENY"
+    assert shopify_push.inventory_policy_for(db, {"attributes": {"web_page_type": "PREVIEW_ONLY"}}) == "DENY"
+    assert shopify_push.inventory_policy_for(db, pre) == "CONTINUE"
+    db.get_collection("catalog_products").update_one({"id": "cat-1"}, {"$set": pre})
     spy = _Spy(_responses())
     _live(monkeypatch, spy)
     res = _run(shopify_push.push_product(db, db.get_collection("catalog_products").find_one({"id": "cat-1"}), []))
     assert res.action == "update" and res.mode == "LIVE"
     _assert_tracked(spy, policy="CONTINUE")
     assert res.stock["quantities"] == {"SP-1": {"BV-A": 2, "BV-B": 1, "BV-C": 0}}
+    # The template it sent is recorded (what a move back to Standard reads):
+    # drop the writeback's template_suffix -> this fails.
+    assert res.payload["templateSuffix"] == "preorder"
+    assert db.get_collection("catalog_products").find_one({"id": "cat-1"})["ecom"]["template_suffix_sent"] == "preorder"
 
 
 def test_live_push_with_no_mapped_shop_writes_nothing_and_names_the_holder(monkeypatch):

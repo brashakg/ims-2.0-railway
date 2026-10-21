@@ -95,9 +95,6 @@ vi.mock('../../../services/api/inventory', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../services/api/inventory')>()),
   reorderApi: { setShopLevel: (...a: unknown[]) => setShopLevel(...a) },
 }));
-vi.mock('../../../services/api/productTemplates', () => ({
-  productTemplatesApi: { list: vi.fn(async () => ({ templates: [] })) },
-}));
 // An imported price-list row waiting for review (/catalog/add?review=C-IMP).
 const getCatalogDoc = vi.fn(async () => ({
   id: 'C-IMP', sku: 'SG-RAYBAN-RB4165-601', category: 'SUNGLASS', pos_ready: false,

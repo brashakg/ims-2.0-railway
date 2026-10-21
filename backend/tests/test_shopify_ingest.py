@@ -135,6 +135,9 @@ def _match(doc, filter_) -> bool:
                 elif op == "$ne":
                     if actual == op_val:
                         return False
+                elif op == "$in":
+                    if actual not in op_val:
+                        return False
                 else:
                     return False
         else:
@@ -508,6 +511,57 @@ def test_online_order_underclaim_records_loud_stock_miss(wired, monkeypatch):
     assert misses[0]["resolved"] is False
     assert misses[0]["detail"]["expected"] == 1
     assert misses[0]["detail"]["claimed"] == 0
+
+
+def test_a_pre_order_line_with_no_unit_waits_for_stock_not_an_oversell(wired, monkeypatch):
+    """Owner 2026-10-19: a PRE-ORDER product sells at 0 stock. Its line with no
+    unit to claim is booked as a pre-order awaiting stock -- no
+    online_stock_miss row, no P1 oversell task -- held under its own text so
+    clear-hold claims the unit once it is in. The same order for a STANDARD
+    product (no page type) is still the oversell above. Drop the pre-order
+    branch in _claim_online_units -> the miss row appears -> fails."""
+    import api.dependencies as deps
+    from api.routers import orders as orders_mod
+
+    monkeypatch.setenv("ONLINE_FULFILLMENT_STORE_ID", "ST-BOKARO-2")
+    monkeypatch.setattr(deps, "get_product_repository", lambda: _FakeProductRepo())
+    monkeypatch.setattr(orders_mod, "get_stock_repository", lambda: _FakeStockRepoNoStock())
+    task_repo = _FakeTaskRepo()
+    monkeypatch.setattr(deps, "get_task_repository", lambda: task_repo)
+    wired["db"].get_collection("products").insert_one({
+        "product_id": "P-RB", "sku": "RB-1234",
+        "attributes": {"web_page_type": "PRE_ORDER", "preorder_ship_days": 12},
+    })
+    wired["db"].get_collection("system_settings").insert_one({"_id": "default", "web_page_types_enabled": True})
+
+    res = shopify_ingest.ingest_shopify_order(
+        wired["db"], _frame_order(7103, buyer_state="20"), topic="orders/create"
+    )
+    assert res["status"] == "created"
+    assert wired["db"].get_collection("online_stock_miss").docs == []
+    order = wired["orders"].find_one({"shopify_order_id": "7103"})
+    assert order["preorder_awaiting_stock"] == [
+        {"product_id": "P-RB", "sku": "RB-1234", "qty": 1, "ship_days": 12, "store_id": "ST-BOKARO-2"}
+    ]
+    assert order["fulfillment_hold"] is True
+    assert order["stock_miss_reason"] == shopify_ingest.PREORDER_WAIT_REASON
+    assert order["stock_hold_reason"] == shopify_ingest.PREORDER_WAIT_REASON
+    refs = [t["source_ref"] for t in task_repo.created]
+    assert f"online_preorder:{order['order_id']}:ST-BOKARO-2" in refs
+    assert not [r for r in refs if r.startswith("online_stock_miss")]
+
+    # A standard product: the same shortfall is the oversell it always was.
+    wired["db"].get_collection("products").update_one(
+        {"product_id": "P-RB"}, {"$set": {"attributes": {"web_page_type": "STANDARD"}}}
+    )
+    shopify_ingest.ingest_shopify_order(
+        wired["db"], _frame_order(7104, buyer_state="20"), topic="orders/create"
+    )
+    misses = wired["db"].get_collection("online_stock_miss").docs
+    assert len(misses) == 1 and misses[0]["reason"] == "under_claim"
+    std = wired["orders"].find_one({"shopify_order_id": "7104"})
+    assert std["stock_miss_reason"] == shopify_ingest.STOCK_MISS_REASON
+    assert "preorder_awaiting_stock" not in std
 
 
 # ---------------------------------------------------------------------------

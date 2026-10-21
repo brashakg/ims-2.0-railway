@@ -69,8 +69,8 @@ manager gets 404).
 |---|---|
 | PUBLIC (no IMS role gate) | 46 |
 | AUTHENTICATED | 394 |
-| Role-gated (one or more roles) | 872 |
-| **Total `/api/v1` (method x path)** | **1312** |
+| Role-gated (one or more roles) | 867 |
+| **Total `/api/v1` (method x path)** | **1307** |
 | ...of which `store_scoped` | 241 |
 | ...of which `self_enforced` | 47 |
 
@@ -1214,16 +1214,6 @@ entry exactly; see the manual interpretation notes above.
 | `GET` | `/api/v1/print/qz/cert` | AUTH |  |  |
 | `POST` | `/api/v1/print/qz/sign` | AUTH |  |  |
 | `GET` | `/api/v1/print/transfer-invoice/{transfer_id}` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, SALES_CASHIER, SALES_STAFF, ACCOUNTANT | S |  |
-
-### `/api/v1/product-templates`
-
-| Method | Path | Allowed | S | E |
-|---|---|---|---|---|
-| `GET` | `/api/v1/product-templates` | ADMIN, CATALOG_MANAGER |  |  |
-| `POST` | `/api/v1/product-templates` | ADMIN, CATALOG_MANAGER |  |  |
-| `GET` | `/api/v1/product-templates/` | ADMIN, CATALOG_MANAGER |  |  |
-| `POST` | `/api/v1/product-templates/` | ADMIN, CATALOG_MANAGER |  |  |
-| `DELETE` | `/api/v1/product-templates/{template_id}` | ADMIN, CATALOG_MANAGER |  |  |
 
 ### `/api/v1/products`
 

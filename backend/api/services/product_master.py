@@ -69,6 +69,7 @@ from .gtin import (
 )
 from .pricing_caps import evaluate_offer_price, offer_terms_changed, offer_write_problem
 from .catalog_ecom import dirty_marks
+from .web_page_type import clean_page_type
 from .product_naming import (
     build_handle,
     build_product_name,
@@ -521,6 +522,10 @@ _FIELD_LABELS: Dict[str, str] = {
     "hsn_code": "HSN Code",
     "gst_rate": "GST Rate",
     "MRP_BELOW_OFFER": "Selling price is above MRP",
+    # Website page type (owner 2026-10-19): model-level attributes edited in
+    # the form's Online strip, not per-category registry fields.
+    "web_page_type": "Website page",
+    "preorder_ship_days": "Ships in (days)",
 }
 
 
@@ -914,6 +919,15 @@ def apply_field_casing(attributes: Any, *, only: Any = None) -> Dict[str, Any]:
     return out
 
 
+def _enforce_page_type(attributes: Any) -> Dict[str, Any]:
+    """attributes with the website page type canonical (web_page_type.
+    clean_page_type), or ProductMasterError 422 naming the field."""
+    attrs, problem = clean_page_type(attributes or {})
+    if problem:
+        raise ProductMasterError(problem[1], status=422, field=problem[0])
+    return attrs
+
+
 def enforce_dictionary_values(
     category: Any, attributes: Dict[str, Any], *, db=None
 ) -> Dict[str, Any]:
@@ -934,7 +948,10 @@ def enforce_dictionary_values(
     or a config read error -> attributes returned unchanged. Raises
     ProductMasterError(422, field=<name>) on a value outside its list.
     """
-    attrs = dict(attributes or {})
+    # The website page type is a fixed list (no Settings, no db): every door
+    # that runs the dictionary (create, PUT /products, PUT /catalog/products)
+    # validates it here; update_product calls _enforce_page_type itself.
+    attrs = _enforce_page_type(attributes)
     if db is None:
         return attrs
     # Lazy import (module attribute access kept so tests can monkeypatch the
@@ -3380,12 +3397,16 @@ def create_product(
             logger.warning("[PM] family lookup failed for %s", spine.get("sku"), exc_info=True)
     if parent is not None:
         spine["variant_of"] = parent.get("product_id")
-        if not variant_of or not live_lead_rows:
-            # Model-level fields are the model's (owner 2026-10-18).
-            lead_attrs = parent.get("attributes") or {}
-            for key in ("shape", "gender"):
-                if not _is_blank(lead_attrs.get(key)):
-                    spine.setdefault("attributes", {})[key] = lead_attrs[key]
+        lead_attrs = parent.get("attributes") or {}
+        # Model-level fields are the model's (owner 2026-10-18); the website
+        # page always (owner 2026-10-19 -- a runbook size too), the rest
+        # unless the runbook adds sizes to a live listing.
+        inherited = ("web_page_type", "preorder_ship_days") + (
+            ("shape", "gender") if not variant_of or not live_lead_rows else ()
+        )
+        for key in inherited:
+            if not _is_blank(lead_attrs.get(key)):
+                spine.setdefault("attributes", {})[key] = lead_attrs[key]
     # The row goes under the lead's listing only while that listing is not on
     # Shopify (or no one can check: then it waits too).
     row_parent = parent
@@ -3840,6 +3861,11 @@ MODEL_LEVEL_FIELDS: Tuple[str, ...] = (
     "model_name",
     "shape",
     "gender",
+    # The website page (owner 2026-10-19, services/web_page_type): one page
+    # per model listing. Not in any category's field list -- the form's
+    # Online strip edits them -- so all_category_specs' model_fields omit them.
+    "web_page_type",
+    "preorder_ship_days",
 )
 
 
@@ -5082,6 +5108,10 @@ def update_product(
             category=clean.get("category"),
         )
     if "attributes" in clean:
+        # Judged on what the product ends up with: a patch carrying only the
+        # ship days of a stored Pre-order is judged as that Pre-order.
+        _enforce_page_type({**(current.get("attributes") or {}), **(clean["attributes"] or {})})
+        clean["attributes"] = _enforce_page_type(clean["attributes"])
         model_changes = model_field_changes(current.get("attributes") or {}, clean["attributes"] or {})
 
     # A model-level edit on a lead reaches its variants after the save: refuse

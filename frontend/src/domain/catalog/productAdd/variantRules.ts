@@ -47,6 +47,8 @@ const VARIANT_COPY_SILENT = new Set<string>([
   // watches / clocks / hearing aids / accessories / smart devices
   'watch_category', 'clock_category', 'battery_size',
   'machine_capacity', 'machine_type', 'accessory_type', 'year_of_launch',
+  // the website page is the model's (owner 2026-10-19; the Online strip)
+  'web_page_type', 'preorder_ship_days',
 ]);
 
 // Sizes carry over but stay amber-FLAGGED until the operator confirms them —

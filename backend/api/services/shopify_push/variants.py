@@ -686,7 +686,7 @@ async def _seed_variants_after_write(
     # it exists, so tracking + the stop-at-0 policy go in THE SAME call that
     # creates it -- never a second call that can be refused while the size
     # sells without limit. Shopify's answer must confirm both (below).
-    policy = inventory_policy_for(product)
+    policy = inventory_policy_for(db, product)
     create_rows = [
         {**row, "inventoryPolicy": policy,
          "inventoryItem": {**(row.get("inventoryItem") or {}), "tracked": True}}

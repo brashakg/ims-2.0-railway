@@ -150,8 +150,8 @@ export function isManufacturerBarcodeKey(key: string): boolean {
 }
 
 /** `values` minus the manufacturer barcodes: THE strip for every prefill that
- *  starts a NEW SKU from another's data (Clone, a saved template). */
-export function withoutManufacturerBarcodes(values: ProductFormValues): ProductFormValues {
+ *  starts a NEW SKU from another's data (Clone). */
+function withoutManufacturerBarcodes(values: ProductFormValues): ProductFormValues {
   const attributes = Object.fromEntries(
     Object.entries(values.attributes || {}).filter(([k]) => !isManufacturerBarcodeKey(k))
   );

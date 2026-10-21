@@ -323,6 +323,14 @@ async def cancel_order(
                     stock_released,
                 )
 
+        # A pre-order's wait ends with the order (owner 2026-10-19): its
+        # task closes, its awaiting-stock lines go. Fail-soft, online only.
+        if order.get("preorder_awaiting_stock"):
+            from ...dependencies import get_db as _preorder_db
+            from ...services.shopify_ingest import end_preorder_wait
+
+            end_preorder_wait(_preorder_db(), order_id, "The order was cancelled.")
+
         # Audit alert (May 2026) — every cancellation is CRITICAL severity
         try:
             from ...services.audit_alerts import alert_order_cancelled

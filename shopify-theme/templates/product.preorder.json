@@ -1,0 +1,80 @@
+{
+  "sections": {
+    "main": {
+      "type": "main-product",
+      "blocks": {
+        "title_and_price": {
+          "type": "title_and_price",
+          "settings": {
+            "show_tax_and_shipping": true
+          }
+        },
+        "vendor": {
+          "type": "vendor",
+          "settings": {}
+        },
+        "type": {
+          "type": "type",
+          "settings": {}
+        },
+        "variant_picker": {
+          "type": "variant_picker",
+          "settings": {}
+        },
+        "buy_buttons": {
+          "type": "buy_buttons",
+          "settings": {
+            "enable_payment_button": false,
+            "show_backorder_text": false
+          }
+        },
+        "preorder_ship": {
+          "type": "custom_liquid",
+          "settings": {
+            "custom_liquid": "{%- assign bv_days = product.metafields.ims.preorder_ship_days.value -%}<p class=\"bv-preorder-note\"><strong>Pre-order</strong>{%- if bv_days != blank %} &middot; ships in about {{ bv_days }} days{%- endif -%}. Order now; we dispatch it as soon as it reaches us.</p><style>.bv-preorder-note{margin:4px 0 0;padding:10px 14px;border-radius:10px;background:#f4f1ec;color:#3f3025;font-size:14px;line-height:1.4}</style>",
+            "variant_content": false
+          }
+        },
+        "trust_strip": {
+          "type": "richtext",
+          "settings": {
+            "richtext": "<p><strong>100% genuine brands | Free shipping across India | 7-day defect returns | Secure payments</strong></p>"
+          }
+        },
+        "description": {
+          "type": "description",
+          "settings": {}
+        },
+        "sharing": {
+          "type": "sharing",
+          "settings": {}
+        }
+      },
+      "block_order": [
+        "title_and_price",
+        "vendor",
+        "type",
+        "variant_picker",
+        "buy_buttons",
+        "preorder_ship",
+        "trust_strip",
+        "description",
+        "sharing"
+      ],
+      "settings": {}
+    },
+    "recommendations": {
+      "type": "product-recommendations",
+      "settings": {}
+    },
+    "recent": {
+      "type": "recently-viewed",
+      "settings": {}
+    }
+  },
+  "order": [
+    "main",
+    "recommendations",
+    "recent"
+  ]
+}

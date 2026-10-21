@@ -1,0 +1,73 @@
+{
+  "sections": {
+    "main": {
+      "type": "main-product",
+      "blocks": {
+        "title_and_price": {
+          "type": "title_and_price",
+          "settings": {
+            "show_tax_and_shipping": true
+          }
+        },
+        "vendor": {
+          "type": "vendor",
+          "settings": {}
+        },
+        "type": {
+          "type": "type",
+          "settings": {}
+        },
+        "variant_picker": {
+          "type": "variant_picker",
+          "settings": {}
+        },
+        "buy_buttons": {
+          "type": "buy_buttons",
+          "disabled": true,
+          "settings": {
+            "enable_payment_button": false
+          }
+        },
+        "preview_cta": {
+          "type": "custom_liquid",
+          "settings": {
+            "custom_liquid": "<div class=\"bv-preview\"><p class=\"bv-preview__note\">Not sold online - see it and try it on in our stores.</p><div class=\"bv-preview__btns\"><a class=\"btn bv-preview__wa\" href=\"https://wa.me/919767231817?text={{ 'Hi Better Vision, I am interested in ' | append: product.title | url_encode }}\" target=\"_blank\" rel=\"noopener\">Enquire on WhatsApp</a><a class=\"btn btn--secondary\" href=\"{{ pages['contact-us'].url | default: '/pages/contact-us' }}\">See it in store</a></div></div><style>.bv-preview__note{margin:0 0 12px;font-size:14px;color:#574331}.bv-preview__btns{display:flex;flex-wrap:wrap;gap:12px}.bv-preview__btns a{flex:1 1 180px;text-align:center}.bv-preview__wa{background:#1faf52!important;border-color:#1faf52!important;color:#fff!important}</style>",
+            "variant_content": false
+          }
+        },
+        "description": {
+          "type": "description",
+          "settings": {}
+        },
+        "sharing": {
+          "type": "sharing",
+          "settings": {}
+        }
+      },
+      "block_order": [
+        "title_and_price",
+        "vendor",
+        "type",
+        "variant_picker",
+        "buy_buttons",
+        "preview_cta",
+        "description",
+        "sharing"
+      ],
+      "settings": {}
+    },
+    "recommendations": {
+      "type": "product-recommendations",
+      "settings": {}
+    },
+    "recent": {
+      "type": "recently-viewed",
+      "settings": {}
+    }
+  },
+  "order": [
+    "main",
+    "recommendations",
+    "recent"
+  ]
+}

@@ -5,8 +5,9 @@
 // singleton (keys: auto_logout_enabled / auto_logout_minutes /
 // auto_logout_warn_seconds) and served to every user on /health. SUPERADMIN can
 // edit; everyone else (the System tab is ADMIN/SUPERADMIN-gated) sees it
-// read-only. We fetch the FULL system settings object first and merge our keys
-// in on save so other system keys are never wiped.
+// read-only. A save sends ONLY these three keys -- the server merges them into
+// the record -- so a sibling key read at page load (web_page_types_enabled,
+// maintenance_mode ...) is never written back stale.
 
 import { useEffect, useState } from 'react';
 import { LogOut } from 'lucide-react';
@@ -22,9 +23,6 @@ export function AutoLogoutSettings() {
   const { hasRole } = useAuth();
   const canEdit = hasRole(['SUPERADMIN']);
 
-  // The full system settings object, kept so we can merge-on-save (never wipe
-  // sibling keys like maintenance_mode / max_login_attempts).
-  const [current, setCurrent] = useState<Record<string, unknown>>({});
   const [enabled, setEnabled] = useState(DEFAULTS.enabled);
   const [minutes, setMinutes] = useState(DEFAULTS.minutes);
   const [warnSeconds, setWarnSeconds] = useState(DEFAULTS.warnSeconds);
@@ -37,7 +35,6 @@ export function AutoLogoutSettings() {
       .getSystemSettings()
       .then((data: Record<string, unknown>) => {
         if (!alive) return;
-        setCurrent(data || {});
         if (typeof data?.auto_logout_enabled === 'boolean') setEnabled(data.auto_logout_enabled);
         const m = Number(data?.auto_logout_minutes);
         if (Number.isFinite(m) && m > 0) setMinutes(m);
@@ -72,15 +69,11 @@ export function AutoLogoutSettings() {
     }
     setSaving(true);
     try {
-      const merged = {
-        ...current,
+      await settingsApi.updateSystemSettings({
         auto_logout_enabled: enabled,
         auto_logout_minutes: m,
         auto_logout_warn_seconds: w,
-      };
-      const res = await settingsApi.updateSystemSettings(merged);
-      // The PUT echoes back the cleaned settings; keep our local copy in sync.
-      setCurrent((prev) => ({ ...prev, ...(res?.settings || merged) }));
+      });
       setMinutes(m);
       setWarnSeconds(w);
       toast.success('Auto-logout settings saved. Applies to each user on their next sign-in / page load.');

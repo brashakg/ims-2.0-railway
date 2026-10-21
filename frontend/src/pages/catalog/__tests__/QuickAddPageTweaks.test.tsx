@@ -56,9 +56,6 @@ vi.mock('../../../services/api/products', () => ({
     updateProduct: vi.fn(async () => ({})),
   },
 }));
-vi.mock('../../../services/api/productTemplates', () => ({
-  productTemplatesApi: { list: vi.fn(async () => ({ templates: [] })) },
-}));
 vi.mock('../../../services/api/catalog', () => ({
   CatalogRequestError: class CatalogRequestError extends Error { status = 0; },
   catalogProductsApi: {},
@@ -78,7 +75,6 @@ vi.mock('../../../constants/gstRuntime', () => ({
 
 import { QuickAddPage } from '../QuickAddPage';
 import { productApi } from '../../../services/api/products';
-import { productTemplatesApi } from '../../../services/api/productTemplates';
 import {
   getCategoryFields,
   validateProductForm,
@@ -335,34 +331,54 @@ describe('10 - Clone', () => {
   });
 });
 
-describe('11 - a saved template', () => {
-  it('loads the shape but never a manufacturer barcode (the same strip as Clone)', async () => {
-    // A template saved from a product with a GTIN carried it into every new SKU.
-    vi.mocked(productTemplatesApi.list).mockResolvedValueOnce({
-      templates: [
-        {
-          template_id: 'T1',
-          name: 'RB4165 shape',
-          category: 'SG',
-          payload: {
-            ...blankSunglass({ mrp: '7890' }),
-            attributes: {
-              brand_name: 'Ray-Ban', model_no: 'RB4165', lens_size: '54',
-              gtin: '5901234123457', upc: '036000291452',
-            },
-          },
-        },
-      ],
-      total: 1,
-    });
+describe('11 - the Templates button (owner 2026-10-19)', () => {
+  it('offers only "Clone a product" - no save-as-template, no saved list', async () => {
     const user = userEvent.setup();
     renderPage();
     await user.click(screen.getByRole('button', { name: /^Templates/ }));
-    await user.click(await screen.findByText('RB4165 shape'));
-    const card = screen.getByRole('heading', { name: 'Review' }).closest('.card')!;
-    await waitFor(() => expect(within(card).getByText('Lens Size (mm)')).toBeInTheDocument());
-    expect(within(card).queryByText('GTIN (mfr)')).toBeNull();
-    expect(within(card).queryByText('UPC (mfr)')).toBeNull();
-    expect(screen.queryByDisplayValue('5901234123457')).toBeNull();
+    const panel = screen.getByRole('dialog', { name: 'Templates and clone' });
+    expect(within(panel).getByText('Clone a product')).toBeInTheDocument();
+    expect(within(panel).queryByText('Save as template')).toBeNull();
+    expect(within(panel).queryByText('Saved templates')).toBeNull();
+    expect(within(panel).queryByPlaceholderText('Template name')).toBeNull();
+  });
+});
+
+describe('12 - the Website page (owner 2026-10-19)', () => {
+  it('stays hidden until SUPERADMIN switches page types on', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByText('Sunglass'));
+    fill(screen.getByLabelText(/^Brand Name/), 'Ray-Ban');
+    await waitFor(() => expect(productApi.getWebsiteVerdict).toHaveBeenCalled());
+    expect(screen.queryByLabelText(/^Website page/)).toBeNull();
+  });
+
+  it('a Pre-order needs its ship days, and the page type rides the attributes', async () => {
+    vi.mocked(productApi.getWebsiteVerdict).mockImplementation(async (brand: string) => ({
+      brand, online: true, reason: null, web_page_types_enabled: true,
+    }));
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByText('Sunglass'));
+    fill(screen.getByLabelText(/^Brand Name/), 'Ray-Ban');
+    fill(screen.getByLabelText(/^Model No/), 'RB4165');
+    fill(screen.getByLabelText(/^Colour Code/), '601');
+    fill(screen.getByLabelText(/^MRP/), '7890');
+    expect(await screen.findByLabelText(/^Website page/)).toHaveValue('STANDARD');
+    expect(screen.queryByLabelText(/^Ships in about/)).toBeNull();
+
+    fill(screen.getByLabelText(/^Website page/), 'PRE_ORDER');
+    expect(stillMissing()).toEqual(['Ships in (days)']);
+    await user.click(screen.getByRole('button', { name: /Save product/ }));
+    expect(createProduct).not.toHaveBeenCalled();
+
+    fill(screen.getByLabelText(/^Ships in about/), '10');
+    expect(screen.queryByTestId('qa-still-missing')).toBeNull();
+    await user.click(screen.getByRole('button', { name: /Save product/ }));
+    await waitFor(() => expect(createProduct).toHaveBeenCalledTimes(1));
+    const payload = createProduct.mock.calls[0][0] as { attributes: Record<string, string> };
+    expect(payload.attributes.web_page_type).toBe('PRE_ORDER');
+    expect(payload.attributes.preorder_ship_days).toBe('10');
   });
 });

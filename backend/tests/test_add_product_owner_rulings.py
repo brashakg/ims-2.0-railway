@@ -353,7 +353,8 @@ def test_f12_the_form_line_is_the_push_gate_answer(monkeypatch):
     verdict for the brand, so a push-locked brand with Brand Master ticked
     reads 'no' on the form exactly as the push refuses it."""
     db = _up_db()
-    assert _verdict(monkeypatch, db, "Ray-Ban") == {"brand": "Ray-Ban", "online": True, "reason": None}
+    assert _verdict(monkeypatch, db, "Ray-Ban") == {"brand": "Ray-Ban", "online": True, "reason": None,
+                                                   "web_page_types_enabled": False}
     assert _verdict(monkeypatch, db, "RAY-BAN")["online"] is True  # the gate's own casefold match
     locked = _verdict(monkeypatch, db, "Cartier", locks={"brands": ["cartier"]})
     assert locked["online"] is False and "push-locked" in locked["reason"]

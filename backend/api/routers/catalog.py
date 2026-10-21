@@ -2523,6 +2523,18 @@ async def update_catalog_product(
             )
         except _pm.ProductMasterError as err:
             raise HTTPException(status_code=err.status, detail=err.message) from err
+        # The website page (owner 2026-10-19) is the model's and lives on the
+        # spine: this door edits the catalogue copy only, so it never moves it.
+        _pre_attrs = (pre_edit.get("attributes") or {}) if isinstance(pre_edit, dict) else {}
+        _page_moved = [
+            k for k in ("web_page_type", "preorder_ship_days")
+            if k in (product.attributes or {}) and str(merged_attrs.get(k) or "") != str(_pre_attrs.get(k) or "")
+        ]
+        if _page_moved:
+            raise HTTPException(
+                status_code=422,
+                detail="The website page is set on the product (Edit Product, on the model), not here.",
+            )
         existing["attributes"] = merged_attrs
         if gtin_written:
             # The twin's top-level barcode fields follow (the same projection

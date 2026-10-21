@@ -531,9 +531,9 @@ export const productApi = {
   // works it out itself.
   getWebsiteVerdict: async (
     brand: string
-  ): Promise<{ brand: string; online: boolean; reason: string | null }> => {
+  ): Promise<{ brand: string; online: boolean; reason: string | null; web_page_types_enabled?: boolean }> => {
     const response = await api.get('/products/website-verdict', { params: { brand } });
-    return response.data as { brand: string; online: boolean; reason: string | null };
+    return response.data as { brand: string; online: boolean; reason: string | null; web_page_types_enabled?: boolean };
   },
 
   // The SKU a NEW product will get, from the server's one minter

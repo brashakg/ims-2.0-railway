@@ -180,6 +180,11 @@ def apply_fact(
                 extra={**(marks or {}), **(fields or {})} or None,  # nosec B610 - a Mongo field dict for our own helper, not Django QuerySet.extra()
             ):
                 out["to"], out["from"] = to, order.get("status")
+                if to in ("CANCELLED", "REFUNDED", "VOID") and order.get("preorder_awaiting_stock"):
+                    # A pre-order's wait ends with the order (owner 2026-10-19).
+                    from .shopify_ingest import end_preorder_wait
+
+                    end_preorder_wait(db, oid, f"The order is {to.lower()} on Shopify.")
                 return out
             # Lost a race (staff moved it): read again and decide again.
             order = repo.collection.find_one({"order_id": oid}) or {}

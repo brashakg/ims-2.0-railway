@@ -1,5 +1,5 @@
 """
-POLICY rows: /portal, /prescriptions, /labels, /print, /print-overrides, /product-templates, /products, product-master.
+POLICY rows: /portal, /prescriptions, /labels, /print, /print-overrides, /products, product-master.
 
 Moved VERBATIM from the flat ``api/services/rbac_policy.py`` lines 5345-5696.
 These rows are load-bearing DATA. Their ORDER is preserved (``policy_for``
@@ -199,32 +199,6 @@ ROWS: List[Dict[str, object]] = [
         "method": "PUT",
         "path": "/api/v1/print-overrides/{entity_id}/{template_key}",
         "allowed": ["ADMIN", "SUPERADMIN"],
-    },
-    # --- /api/v1/product-templates ---
-    {
-        "method": "GET",
-        "path": "/api/v1/product-templates",
-        "allowed": ["ADMIN", "CATALOG_MANAGER"],
-    },
-    {
-        "method": "POST",
-        "path": "/api/v1/product-templates",
-        "allowed": ["ADMIN", "CATALOG_MANAGER"],
-    },
-    {
-        "method": "GET",
-        "path": "/api/v1/product-templates/",
-        "allowed": ["ADMIN", "CATALOG_MANAGER"],
-    },
-    {
-        "method": "POST",
-        "path": "/api/v1/product-templates/",
-        "allowed": ["ADMIN", "CATALOG_MANAGER"],
-    },
-    {
-        "method": "DELETE",
-        "path": "/api/v1/product-templates/{template_id}",
-        "allowed": ["ADMIN", "CATALOG_MANAGER"],
     },
     # --- /api/v1/products ---
     {"method": "GET", "path": "/api/v1/products", "allowed": "AUTHENTICATED"},

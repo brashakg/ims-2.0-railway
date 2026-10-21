@@ -69,9 +69,6 @@ vi.mock('../../../services/api/client', async (importOriginal) => ({
     delete: vi.fn(async () => ({ data: {} })),
   },
 }));
-vi.mock('../../../services/api/productTemplates', () => ({
-  productTemplatesApi: { list: vi.fn(async () => ({ templates: [] })) },
-}));
 // The review editor (?review=) loads and saves through the catalog door.
 const catalogSpies = vi.hoisted(() => ({
   get: vi.fn(),

@@ -491,6 +491,7 @@ def _claim_online_units(
         expected = sum(int(ln.get("quantity") or 1) for lines in plan.values() for ln in lines)
         claimed = 0
         short: List[str] = []  # the shops that could not claim their own part
+        gaps: Dict[str, int] = {}  # how many units each of them is short
         new: List[str] = []  # the shops that claimed a unit now
         for shop, lines in plan.items():
             have = dict((held or {}).get(shop) or {})
@@ -509,8 +510,10 @@ def _claim_online_units(
             breakdown.extend(rows)
             if n:
                 new.append(shop)
-            if n < sum(int(ln.get("quantity") or 1) for ln in todo):
+            gap = sum(int(ln.get("quantity") or 1) for ln in todo) - n
+            if gap > 0:
                 short.append(shop)
+                gaps[shop] = gap
         if new:
             from .online_fulfillment_route import fallback_store_id
 
@@ -521,7 +524,17 @@ def _claim_online_units(
                 [r for r in breakdown if r["store_id"] in new],
                 fallback_store_id() or "",
             )
-        if claimed < expected:
+        # A PRE-ORDER line with no unit is not an oversell (owner 2026-10-19:
+        # only a Pre-order page sells at 0 stock): it waits for stock.
+        waiting = _preorder_shortfall(db, plan, breakdown) if claimed < expected else []
+        missed = claimed + sum(w["qty"] for w in waiting) < expected
+        if waiting:
+            # The oversell is named at the shops short of something OTHER
+            # than a pre-order.
+            for w in waiting:
+                gaps[w["store_id"]] = gaps.get(w["store_id"], 0) - w["qty"]
+            short = [s for s in short if gaps.get(s, 0) > 0]
+        if missed:
             # ponytail: one task per order -- a split short at two shops
             # tasks the first and names both.
             _record_stock_miss(
@@ -530,13 +543,19 @@ def _claim_online_units(
                 (short or [fulfillment_store])[0],
                 "under_claim",
                 {
-                    "expected": expected,
+                    "expected": expected - sum(w["qty"] for w in waiting),
                     "claimed": claimed,
                     "stores_tried": list(plan),
                     "short_stores": short,
                     "route": route.get("reason"),
                 },
             )
+        # THE end of a pre-order wait, for every claim (the booking, Re-map,
+        # clear-hold's claim_the_missing): a shop no longer waiting has its
+        # task closed; nothing waiting any more ends the wait.
+        _settle_preorder_wait(db, order_id, waiting, _line_shortfall(plan, breakdown))
+        if waiting:
+            _record_preorder_wait(db, order_id, order_ref, waiting, hold=not missed)
     except Exception as exc:  # noqa: BLE001
         _record_stock_miss(db, order_id, fulfillment_store, "exception", str(exc))
     return breakdown, sorted({str(r["store_id"]) for r in breakdown})
@@ -627,6 +646,185 @@ def _raise_fallback_ship_tasks(
         logger.warning(
             "[SHOPIFY_INGEST] fallback ship task skipped for %s: %s", order_id, exc
         )
+
+
+def _line_shortfall(
+    plan: Dict[str, List[Dict[str, Any]]], breakdown: List[Dict[str, Any]]
+) -> Dict[Tuple[str, str], int]:
+    """{(shop, product_id): units the route wants there minus units claimed
+    there} for every line the plan routes (0 = whole)."""
+    out: Dict[Tuple[str, str], int] = {}
+    for shop, lines in plan.items():
+        for ln in lines:
+            key = (str(shop), str(ln["product_id"]))
+            out[key] = out.get(key, 0) + int(ln.get("quantity") or 1)
+    for r in breakdown:
+        key = (str(r["store_id"]), str(r["product_id"]))
+        if key in out:
+            out[key] -= int(r.get("qty") or 0)
+    return out
+
+
+def _preorder_shortfall(
+    db, plan: Dict[str, List[Dict[str, Any]]], breakdown: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """The units of PRE-ORDER products the claim could not find, per shop the
+    route sent that line to: [{product_id, sku, qty, ship_days, store_id}].
+    The page is the model's -- read off the LEAD (variant_of) behind the
+    SUPERADMIN gate, as the push reads it (web_page_type.effective_page_type).
+    Any other product's shortfall stays an oversell."""
+    from .web_page_type import PRE_ORDER, effective_page_type, lead_attributes, pages_enabled, ship_days_of
+
+    short = {k: q for k, q in _line_shortfall(plan, breakdown).items() if q > 0}
+    if not short or not pages_enabled(db):
+        return []
+    products = db.get_collection("products") if hasattr(db, "get_collection") else db["products"]
+    spines = {
+        str(d.get("product_id")): d
+        for d in products.find(
+            {"product_id": {"$in": sorted({pid for _s, pid in short})}},
+            {"product_id": 1, "sku": 1, "attributes": 1, "variant_of": 1},
+        )
+    }
+    pages = lead_attributes(db, spines)
+    out: List[Dict[str, Any]] = []
+    for (shop, pid), qty in sorted(short.items()):
+        page = {"attributes": pages.get(pid) or {}}
+        if effective_page_type(db, page, enabled=True) == PRE_ORDER:
+            out.append({"product_id": pid, "sku": (spines.get(pid) or {}).get("sku"), "qty": qty,
+                        "ship_days": ship_days_of(page), "store_id": shop})
+    return out
+
+
+# A pre-order waiting for stock rides the stock hold (the ship transitions
+# refuse it) under its own text; clear-hold claims the units once they are
+# in (online_fulfillment_route.claim_the_missing, keyed on stock_miss_reason).
+# Nothing reserves a unit meanwhile: the till can sell it, so clear the hold
+# the moment it is received.
+PREORDER_WAIT_REASON = (
+    "Pre-order awaiting stock - clear the hold as soon as the units are "
+    "received (that claims them for this order)."
+)
+
+
+def _preorder_task_ref(order_id: Any, store_id: Any) -> str:
+    return f"online_preorder:{order_id}:{store_id}"
+
+
+def _record_preorder_wait(db, order_id, order_ref, waiting, *, hold=True) -> None:
+    """A paid online PRE-ORDER whose units are not in yet: NOT an oversell (no
+    online_stock_miss row, no ERROR, no P1). The order carries
+    ``preorder_awaiting_stock`` (the lines, each at the shop its route sent
+    it to) and -- unless a real stock miss already holds it (``hold`` False)
+    -- the stock hold under PREORDER_WAIT_REASON; one task per shop tells it
+    to get the units in. Fail-soft: the booking already stands."""
+    logger.info("[SHOPIFY_INGEST] pre-order awaiting stock order=%s lines=%s", order_id, waiting)
+    try:
+        orders = db.get_collection("orders") if hasattr(db, "get_collection") else db["orders"]
+        order = orders.find_one({"order_id": order_id}) or {}
+        mark: Dict[str, Any] = {"preorder_awaiting_stock": waiting}
+        if hold:
+            mark.update({"fulfillment_hold": True, "stock_miss_reason": PREORDER_WAIT_REASON})
+            if order.get("stock_hold_reason") in (
+                None,
+                "",
+                (order.get("fulfillment_route") or {}).get("hold_reason"),
+            ):
+                mark["stock_hold_reason"] = PREORDER_WAIT_REASON
+        orders.update_one({"order_id": order_id}, {"$set": mark})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[SHOPIFY_INGEST] pre-order mark skipped for %s: %s", order_id, exc)
+    try:
+        from ..dependencies import get_task_repository
+        from .task_triggers import create_system_task
+
+        repo = get_task_repository()
+        for shop in sorted({w["store_id"] for w in waiting}):
+            lines = [w for w in waiting if w["store_id"] == shop]
+            days = max((w.get("ship_days") or 0) for w in lines)
+            what = ", ".join(f"{w['qty']} x {w.get('sku') or w['product_id']}" for w in lines)
+            create_system_task(
+                repo,
+                title=f"Pre-order {order_ref}: get the stock in",
+                description=(
+                    f"Online pre-order {order_ref} is paid; its units are not in stock at "
+                    f"this shop yet: {what}."
+                    + (f" The customer was told it ships in about {days} days." if days else "")
+                    + " Order or transfer them in, and clear the order's hold AS SOON AS "
+                    "they are received -- that claims them for this order (until then "
+                    "nothing keeps the till from selling them)."
+                ),
+                priority="P2",
+                category="ONLINE_ORDER",
+                store_id=shop,
+                dedupe_ref=_preorder_task_ref(order_id, shop),
+                extra={"link": "/orders", "payload": {"order_id": order_id}},
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[SHOPIFY_INGEST] pre-order task skipped for %s: %s", order_id, exc)
+
+
+def _settle_preorder_wait(
+    db, order_id: Any, waiting: List[Dict[str, Any]], shortfall: Dict[Tuple[str, str], int]
+) -> None:
+    """After a claim, before its wait is recorded: each shop the order WAS
+    waiting at that this claim no longer waits at gets its task closed, the
+    note saying what happened, per product (``shortfall``: _line_shortfall of
+    this claim) -- every product still routed here and nothing short:
+    claimed; every product now waiting at, or filled by, another shop: moved
+    (Re-map); else no longer a pre-order (the page changed, or page types
+    were switched off: a normal order now, an oversell if short).
+    Nothing waiting any more drops ``preorder_awaiting_stock``. Touches no
+    hold field (clear-hold and Re-map condition their writes on those).
+    Fail-soft."""
+    try:
+        orders = db.get_collection("orders") if hasattr(db, "get_collection") else db["orders"]
+        before = (orders.find_one({"order_id": order_id}) or {}).get("preorder_awaiting_stock") or []
+        if not before:
+            return
+        from .online_fulfillment_route import _close_tasks
+
+        still = {str(w["product_id"]) for w in waiting}
+
+        def _elsewhere(shop: str, pid: str) -> bool:
+            # Only once this shop is no longer routed for it: a split's other
+            # shop filling ITS share says nothing about this shop's.
+            return (shop, pid) not in shortfall and (pid in still or any(
+                s != shop and p == pid and q <= 0 for (s, p), q in shortfall.items()
+            ))
+
+        for shop in sorted({str(w.get("store_id")) for w in before} - {str(w["store_id"]) for w in waiting}):
+            pids = {str(w.get("product_id")) for w in before if str(w.get("store_id")) == shop}
+            if all(shortfall.get((shop, pid), 1) <= 0 for pid in pids):
+                note = "The pre-order's units are claimed."
+            elif all(_elsewhere(shop, pid) for pid in pids):
+                note = "This pre-order now waits at, or was filled by, another shop."
+            else:
+                note = ("No longer a pre-order (its website page changed, or page types were "
+                        "switched off): it is handled as a normal order now.")
+            _close_tasks([_preorder_task_ref(order_id, shop)], note)
+        if not waiting:
+            orders.update_one({"order_id": order_id}, {"$unset": {"preorder_awaiting_stock": ""}})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[SHOPIFY_INGEST] pre-order settle skipped for %s: %s", order_id, exc)
+
+
+def end_preorder_wait(db, order_id: Any, note: str) -> None:
+    """The pre-order wait is over -- its units claimed (clear-hold), or the
+    order cancelled / refunded: ``preorder_awaiting_stock`` goes and each
+    shop's pre-order task is closed. Fail-soft."""
+    try:
+        orders = db.get_collection("orders") if hasattr(db, "get_collection") else db["orders"]
+        order = orders.find_one({"order_id": order_id}) or {}
+        waiting = order.get("preorder_awaiting_stock") or []
+        if not waiting:
+            return
+        orders.update_one({"order_id": order_id}, {"$unset": {"preorder_awaiting_stock": ""}})
+        from .online_fulfillment_route import _close_tasks
+
+        _close_tasks(sorted({_preorder_task_ref(order_id, w.get("store_id")) for w in waiting}), note)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[SHOPIFY_INGEST] pre-order close skipped for %s: %s", order_id, exc)
 
 
 # The stock miss's hold text, and its own marker on the order (stock_miss_reason).

@@ -5813,3 +5813,264 @@ def test_a_replayed_order_whose_status_sync_did_not_land_is_a_failure(world, mon
     row = _sf03_drain(db, "cancel-full")
     assert row["status"] == "succeeded"
     assert db.orders.find_one({"shopify_order_id": "53106"}).get("shopify_cancelled_at")
+
+
+# ---------------------------------------------------------------------------
+# Website page types (owner 2026-10-19): a PRE-ORDER line waits for stock
+# ---------------------------------------------------------------------------
+
+
+def _pre_order_world(world, *, rb="PRE_ORDER"):
+    """RB is a Pre-order model (OA standard) and the SUPERADMIN gate is on.
+    RB's own spine is a SIZE of its lead and carries no page type: the lead
+    decides (review P3)."""
+    db = world["db"]
+    db.system_settings.insert_one({"_id": "default", "web_page_types_enabled": True})
+    db.products.insert_many([
+        {"product_id": "P-RB-LEAD", "sku": "RB-1234-50", "attributes": {"web_page_type": rb, "preorder_ship_days": 9}},
+        {"product_id": "P-RB", "sku": "RB-1234", "variant_of": "P-RB-LEAD", "attributes": {}},
+        {"product_id": "P-OA", "sku": "OA-5", "attributes": {}},
+    ])
+    return db
+
+
+def _preorder_tasks(world, oid, status="OPEN"):
+    return [t["store_id"] for t in world["tasks"].created
+            if t["source_ref"].startswith(f"online_preorder:{oid}:") and t["status"] == status]
+
+
+def test_a_mixed_order_waits_for_the_pre_order_and_names_the_oversell(world):
+    """RB x2 (Pre-order, Bokaro holds 1) + OA x1 (standard, none): the RB
+    unit is claimed, the missing RB waits at the shop its line was routed to,
+    and only the OA is the oversell -- its own count, its own P1 task."""
+    from api.services import shopify_ingest
+
+    db = _pre_order_world(world)
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 2), (9001, 1)])
+    res, order = _book(world, _order(64001, lines=(("RB-1234", 2), ("OA-5", 1))))
+    oid = res["order_id"]
+    assert _sold_at(db, oid) == ["BV-BOK-01"]
+    assert order["preorder_awaiting_stock"] == [
+        {"product_id": "P-RB", "sku": "RB-1234", "qty": 1, "ship_days": 9, "store_id": "BV-BOK-01"}]
+    miss = db.online_stock_miss.find_one({"order_id": oid})
+    assert (miss["detail"]["expected"], miss["detail"]["claimed"]) == (2, 1)
+    assert order["stock_miss_reason"] == shopify_ingest.STOCK_MISS_REASON  # the oversell leads
+    assert _open_miss_tasks(world, oid) == ["BV-BOK-01"] and _preorder_tasks(world, oid) == ["BV-BOK-01"]
+
+
+def test_a_pre_order_is_held_until_its_stock_is_received_and_clear_hold_claims_it(world, monkeypatch):
+    """Clear hold end to end: refused while the unit is not in; once it is
+    received the release claims it, the awaiting-stock lines go and the
+    pre-order task closes (review P6). No oversell anywhere."""
+    from api.services import shopify_ingest
+
+    db = _pre_order_world(world)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1)])
+    res, order = _book(world, _order(64002))
+    oid = res["order_id"]
+    assert order["fulfillment_hold"] is True and order["stock_hold_reason"] == shopify_ingest.PREORDER_WAIT_REASON
+    assert db.online_stock_miss.count_documents({"order_id": oid}) == 0
+    assert _preorder_tasks(world, oid) == ["BV-BOK-01"] and _open_miss_tasks(world, oid) == []
+
+    out = _clear_hold(world, monkeypatch, oid)
+    assert getattr(out, "status_code", None) == 409, out
+    assert _preorder_tasks(world, oid) == ["BV-BOK-01"]
+
+    _stock(db, "BV-BOK-01", "P-RB", 1)  # received
+    out = _clear_hold(world, monkeypatch, oid)
+    assert not isinstance(out, Exception), out.detail
+    assert out["fulfillment_hold"] is False
+    assert _sold_at(db, oid) == ["BV-BOK-01"]
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert "preorder_awaiting_stock" not in after
+    assert _preorder_tasks(world, oid) == [] and _preorder_tasks(world, oid, "COMPLETED") == ["BV-BOK-01"]
+
+
+def test_a_cancelled_pre_order_closes_its_wait(world):
+    """Cancelled on Shopify while it waits: the awaiting-stock lines go and
+    the pre-order task closes (review P6)."""
+    from api.services import online_order_status
+
+    db = _pre_order_world(world)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1)])
+    res, order = _book(world, _order(64003))
+    oid = res["order_id"]
+    assert _preorder_tasks(world, oid) == ["BV-BOK-01"]
+    out = online_order_status.apply_fact(db, order, online_order_status.CANCEL, source="test")
+    assert out["to"] == "CANCELLED", out
+    assert "preorder_awaiting_stock" not in db.orders.find_one({"order_id": oid})
+    assert _preorder_tasks(world, oid) == []
+
+
+def test_a_standard_model_short_is_the_oversell_even_with_the_gate_on(world):
+    db = _pre_order_world(world, rb="STANDARD")
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1)])
+    res, order = _book(world, _order(64004))
+    assert "preorder_awaiting_stock" not in order
+    assert db.online_stock_miss.count_documents({"order_id": res["order_id"]}) == 1
+
+
+def test_the_ims_cancel_door_closes_a_pre_order_wait(world, monkeypatch):
+    """Review of #1244: the counter's cancel door ends the wait too."""
+    import api.dependencies as deps
+    from api.routers.orders import cancel as cancel_mod
+    from database.repositories.product_repository import StockRepository
+
+    db = _pre_order_world(world)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1)])
+    res, _order_doc = _book(world, _order(64099))
+    oid = res["order_id"]
+    assert _preorder_tasks(world, oid) == ["BV-BOK-01"]
+    monkeypatch.setattr(deps, "get_db", lambda: db)
+    monkeypatch.setattr(cancel_mod, "get_stock_repository", lambda: StockRepository(db.stock_units))
+    asyncio.run(cancel_mod.cancel_order(
+        oid, reason="customer changed their mind",
+        current_user={"user_id": "u1", "roles": ["ADMIN"], "store_ids": []}))
+    after = db.orders.find_one({"order_id": oid})
+    assert after["status"] == "CANCELLED" and "preorder_awaiting_stock" not in after
+    assert _preorder_tasks(world, oid) == [] and _preorder_tasks(world, oid, "COMPLETED") == ["BV-BOK-01"]
+
+
+def test_a_remap_that_claims_the_pre_order_unit_ends_the_wait(world):
+    """Review of #1244 (MEDIUM): Re-map claimed the unit but the wait, its
+    lines and the shop's task stayed. The one claim ends it now."""
+    db = _pre_order_world(world)
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": ""}})  # a seller hold: Re-map's door
+    world["shop"].fo(FO_1, LOC_BOK, units=1)
+    res, order = _book(world, _order(64098))
+    oid = res["order_id"]
+    assert _preorder_tasks(world, oid) == ["BV-BOK-01"] and order["preorder_awaiting_stock"]
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": "20AAAAA0000A1Z5"}})
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+
+    out = asyncio.run(route_mod.reroute_held_order(db, oid))
+
+    assert out["status"] == "rerouted", out
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert _sold_at(db, oid) == ["BV-BOK-01"] and after["fulfillment_hold"] is False
+    assert "preorder_awaiting_stock" not in after
+    assert _preorder_tasks(world, oid) == [] and _preorder_tasks(world, oid, "COMPLETED") == ["BV-BOK-01"]
+    assert _preorder_notes(world, oid) == {"BV-BOK-01": "The pre-order's units are claimed."}
+
+
+def test_a_remap_that_moves_the_pre_order_line_closes_the_old_shops_task(world):
+    """Review of #1244: Re-map moves the waiting line to another shop (the
+    human moved its fulfillment order): the wait follows it and the shop it
+    left has its task closed, never orphaned."""
+    db = _pre_order_world(world)
+    _stock(db, "BV-BOK-01", "P-OA", 1)
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": ""}})  # a seller hold: Re-map's door
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9001, 1)])
+    world["shop"].fo(FO_2, LOC_RAN, lines=[(9000, 1)])
+    res, order = _book(world, _order(64097, lines=(("RB-1234", 1), ("OA-5", 1))))
+    oid = res["order_id"]
+    assert [w["store_id"] for w in order["preorder_awaiting_stock"]] == ["BV-RAN-01"], order
+    assert _preorder_tasks(world, oid) == ["BV-RAN-01"]
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": "20AAAAA0000A1Z5"}})
+    world["shop"].fos[1]["assignedLocation"]["location"]["id"] = LOC_BOK  # the human's move
+
+    out = asyncio.run(route_mod.reroute_held_order(db, oid))
+
+    assert out["status"] == "rerouted", out
+    after = db.orders.find_one({"order_id": oid}, {"_id": 0})
+    assert [w["store_id"] for w in after["preorder_awaiting_stock"]] == ["BV-BOK-01"]
+    assert _preorder_tasks(world, oid) == ["BV-BOK-01"]
+    assert _preorder_tasks(world, oid, "COMPLETED") == ["BV-RAN-01"]
+    assert _preorder_notes(world, oid) == {"BV-RAN-01": "This pre-order now waits at, or was filled by, another shop."}
+
+
+def _preorder_notes(world, oid):
+    return {t["store_id"]: t.get("completion_notes") for t in world["tasks"].created
+            if t["source_ref"].startswith(f"online_preorder:{oid}:") and t["status"] == "COMPLETED"}
+
+
+@pytest.mark.parametrize("change", ["switched_off", "page_standard"])
+def test_a_wait_that_stops_being_a_pre_order_says_so_and_is_an_oversell(world, monkeypatch, change):
+    """Re-review of #1244: page types switched off (or the model set back to
+    Standard) while an order waits. The next claim (clear-hold here) finds
+    no pre-order: the shop's task closes saying so -- never "claimed" -- and
+    the still-missing unit is the oversell it now is."""
+    db = _pre_order_world(world)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1)])
+    res, _o = _book(world, _order(64096))
+    oid = res["order_id"]
+    assert _preorder_tasks(world, oid) == ["BV-BOK-01"]
+    if change == "switched_off":
+        db.system_settings.update_one({"_id": "default"}, {"$set": {"web_page_types_enabled": False}})
+    else:
+        db.products.update_one({"product_id": "P-RB-LEAD"}, {"$set": {"attributes.web_page_type": "STANDARD"}})
+
+    out = _clear_hold(world, monkeypatch, oid)
+
+    assert getattr(out, "status_code", None) == 409, out  # nothing in stock: the hold stands
+    assert _preorder_tasks(world, oid) == []
+    assert _preorder_notes(world, oid)["BV-BOK-01"].startswith("No longer a pre-order")
+    assert "preorder_awaiting_stock" not in db.orders.find_one({"order_id": oid})
+    assert _open_miss_tasks(world, oid) == ["BV-BOK-01"]
+
+
+def test_a_part_claimed_wait_switched_off_never_closes_as_claimed(world, monkeypatch):
+    """Delta review of #1244 (a): RB x2, Bokaro holds 1 -> 1 sold, 1 waits.
+    Page types switched off, clear-hold: 409 and the oversell, and Bokaro's
+    task says it is no longer a pre-order -- never "claimed" because the
+    shop holds the OTHER unit."""
+    db = _pre_order_world(world)
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 2)])
+    res, order = _book(world, _order(64095, lines=(("RB-1234", 2),)))
+    oid = res["order_id"]
+    assert _sold_at(db, oid) == ["BV-BOK-01"] and order["preorder_awaiting_stock"][0]["qty"] == 1
+    db.system_settings.update_one({"_id": "default"}, {"$set": {"web_page_types_enabled": False}})
+
+    out = _clear_hold(world, monkeypatch, oid)
+
+    assert getattr(out, "status_code", None) == 409, out
+    assert _open_miss_tasks(world, oid) == ["BV-BOK-01"]
+    assert _preorder_notes(world, oid)["BV-BOK-01"].startswith("No longer a pre-order")
+
+
+def test_a_remap_that_fills_the_moved_line_at_the_new_shop_says_so(world):
+    """Delta review of #1244 (b): Re-map moves RB from Ranchi to Bokaro and
+    Bokaro holds one: claimed there. Ranchi's task closes as filled by
+    another shop -- not "no longer a pre-order"."""
+    db = _pre_order_world(world)
+    _stock(db, "BV-BOK-01", "P-OA", 1)
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": ""}})
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9001, 1)])
+    world["shop"].fo(FO_2, LOC_RAN, lines=[(9000, 1)])
+    res, order = _book(world, _order(64094, lines=(("RB-1234", 1), ("OA-5", 1))))
+    oid = res["order_id"]
+    assert _preorder_tasks(world, oid) == ["BV-RAN-01"]
+    db.stores.update_one({"store_id": "BV-BOK-01"}, {"$set": {"gstin": "20AAAAA0000A1Z5"}})
+    world["shop"].fos[1]["assignedLocation"]["location"]["id"] = LOC_BOK
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+
+    out = asyncio.run(route_mod.reroute_held_order(db, oid))
+
+    assert out["status"] == "rerouted", out
+    assert "preorder_awaiting_stock" not in db.orders.find_one({"order_id": oid})
+    assert _preorder_notes(world, oid) == {"BV-RAN-01": "This pre-order now waits at, or was filled by, another shop."}
+
+
+def test_a_split_wait_switched_off_is_not_filled_by_the_other_shop(world, monkeypatch):
+    """Delta review of #1244 (c): RB x2 split -- Bokaro's unit claimed at
+    booking, Ranchi's waits. Page types switched off, clear-hold while Ranchi
+    still has none: Ranchi is still routed for RB, so Bokaro filling ITS
+    share is not "filled by another shop" -- Ranchi's task says it is no
+    longer a pre-order, and its unit is the oversell."""
+    db = _pre_order_world(world)
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1)])
+    world["shop"].fo(FO_2, LOC_RAN, lines=[(9000, 1)])
+    res, order = _book(world, _order(64093, lines=(("RB-1234", 2),)))
+    oid = res["order_id"]
+    assert _sold_at(db, oid) == ["BV-BOK-01"]
+    assert [w["store_id"] for w in order["preorder_awaiting_stock"]] == ["BV-RAN-01"], order
+    db.system_settings.update_one({"_id": "default"}, {"$set": {"web_page_types_enabled": False}})
+
+    out = _clear_hold(world, monkeypatch, oid)
+
+    assert getattr(out, "status_code", None) == 409, out
+    assert _open_miss_tasks(world, oid) == ["BV-RAN-01"]
+    assert _preorder_notes(world, oid)["BV-RAN-01"].startswith("No longer a pre-order")
