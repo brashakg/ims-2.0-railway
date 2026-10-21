@@ -42,8 +42,6 @@ STORE = "ZZ-STORE-01"
 _NOW_IST = now_ist()
 # Commission windows the IST MONTH -> the 15th, midday, is comfortably inside.
 WHEN = ist_day_start_utc(date(_NOW_IST.year, _NOW_IST.month, 15)) + timedelta(hours=6)
-# The analytics leaderboard windows from the IST DAY start with no upper bound.
-TODAY_WHEN = ist_day_start_utc(_NOW_IST.date()) + timedelta(hours=6)
 
 USERS = [
     {"user_id": "u-sales", "full_name": "Rekha Sharma"},
@@ -183,7 +181,15 @@ db_holder: dict = {}
 # ---------------------------------------------------------------------------
 
 def test_the_analytics_staff_leaderboard_credits_the_seller(monkeypatch):
-    db = _db([_order("o1", amount=3000.0, when=TODAY_WHEN)])
+    # The leaderboard reads the IST clock when it runs ("today" = the IST day
+    # start, no upper bound). Read the REAL clock once, here, and hand the
+    # route that same instant: a module-level read went stale when a run
+    # crossed IST midnight (the order was seeded on the old day, the route
+    # windowed from the new one -> empty board, nothing wrong in the code).
+    now = now_ist()
+    monkeypatch.setattr(analytics_v2, "now_ist", lambda: now)
+    today_when = ist_day_start_utc(now.date()) + timedelta(hours=6)
+    db = _db([_order("o1", amount=3000.0, when=today_when)])
     monkeypatch.setattr(analytics_v2, "_get_db", lambda: db)
     monkeypatch.setattr(analytics_v2, "validate_store_access", lambda sid, u: STORE)
     out = asyncio.run(
