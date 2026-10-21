@@ -2,13 +2,15 @@
 // IMS 2.0 - Settings: Category, Brand & Discount Management
 // ============================================================================
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Tag, Plus, Edit2, Trash2, X, Check,
-  Boxes, Lock, Info,
+  Boxes, Lock, Info, Search,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useToast } from '../../context/ToastContext';
+import { useAuth } from '../../context/AuthContext';
 import {
   adminBrandApi,
   adminDiscountApi,
@@ -16,6 +18,17 @@ import {
 import type { Category, Brand } from './settingsTypes';
 import { CATEGORY_DEFINITIONS } from './settingsTypes';
 import { loadHsnRates, resolveHsn, serverGstRate } from '../../constants/gstRuntime';
+import { categoryBrowseLabel } from '../../utils/categoryNormalize';
+import {
+  brandCategoryOptions,
+  brandSavePayload,
+  clearBrandFilters,
+  filterBrands,
+  isBrandFiltered,
+  readBrandFilters,
+  writeBrandFilters,
+  type BrandFilters,
+} from './brandFilters';
 
 // ============================================================================
 // Transform helpers
@@ -27,8 +40,12 @@ const transformBrand = (b: any): Brand => ({
   brandCode: b.brand_code || b.brandCode || b.code || '',
   categories: b.categories || [],
   tier: b.tier || 'MASS',
+  // is_active is what every server check reads; the save keeps it in step
+  // with `status` (admin_catalog._with_is_active), so the screen shows it.
   isActive: b.is_active !== false,
+  updatedAt: b.updated_at ? String(b.updated_at) : undefined,
   syncToShopifyDefault: b.sync_to_shopify_default === true || b.syncToShopifyDefault === true,
+  neverSellOnline: b.never_sell_online === true,
   productCount: typeof b.product_count === 'number' ? b.product_count : undefined,
   subbrands: (b.subbrands || []).map((sb: any) => ({
     id: sb.id || sb.subbrand_id,
@@ -124,6 +141,29 @@ export function CategorySection() {
   );
 }
 
+// Same label + select look as the Catalog filter bar (CatalogFiltersBar).
+const FILTER_LABEL = 'flex flex-col gap-1 text-[11px] font-medium uppercase tracking-[.06em] text-gray-500';
+
+function FilterSelect({ title, value, options, onChange }: {
+  title: string;
+  value: string;
+  options: [string, string][];
+  onChange: (v: string) => void;
+}) {
+  return (
+    <label className={FILTER_LABEL}>
+      <span>{title}</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="input-field w-40 normal-case tracking-normal"
+      >
+        {options.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+      </select>
+    </label>
+  );
+}
+
 // ============================================================================
 // Brand Section
 // ============================================================================
@@ -136,13 +176,17 @@ export function BrandSection() {
   const [editingBrand, setEditingBrand] = useState<Brand | null>(null);
   // Per-brand "new sub-brand" input value, keyed by brand id.
   const [newSubbrand, setNewSubbrand] = useState<Record<string, string>>({});
-  // Client-side brand-name filter (the list can get long).
-  const [brandSearch, setBrandSearch] = useState('');
+  // Client-side filters (the whole list is loaded), kept in the page address
+  // so a refresh or a shared link keeps them.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const filters = readBrandFilters(searchParams);
+  const setFilters = (patch: Partial<BrandFilters>) =>
+    setSearchParams((prev) => writeBrandFilters({ ...readBrandFilters(prev), ...patch }, prev), { replace: true });
   const categories = CATEGORY_DEFINITIONS;
 
-  const visibleBrands = brandSearch.trim()
-    ? brands.filter(b => b.brandName.toLowerCase().includes(brandSearch.trim().toLowerCase()))
-    : brands;
+  const visibleBrands = filterBrands(brands, filters);
+  const categoryOptions = useMemo(() => brandCategoryOptions(brands), [brands]);
+  const filtered = isBrandFiltered(filters);
 
   useEffect(() => {
     loadBrands();
@@ -167,19 +211,16 @@ export function BrandSection() {
   const handleSaveBrand = async (brandData: Partial<Brand>) => {
     try {
       setIsLoading(true);
-      const apiData = {
-        name: brandData.brandName || '',
-        code: brandData.brandCode || '',
-        categories: brandData.categories || [],
-        tier: brandData.tier || 'MASS',
-        status: brandData.isActive ? 'ACTIVE' : 'INACTIVE',
-        sync_to_shopify_default: brandData.syncToShopifyDefault === true,
-      };
+      const apiData = brandSavePayload(brandData, editingBrand);
 
-      if (editingBrand?.id) {
-        await adminBrandApi.updateBrand(editingBrand.id, apiData);
-      } else {
-        await adminBrandApi.createBrand(apiData);
+      const saved = editingBrand?.id
+        ? await adminBrandApi.updateBrand(editingBrand.id, apiData)
+        : await adminBrandApi.createBrand(apiData);
+      const stillLive: string[] = saved?.live_listings_not_taken_down || [];
+      if (stillLive.length > 0) {
+        toast.warning(
+          `${stillLive.length} listing${stillLive.length === 1 ? '' : 's'} of this brand stay${stillLive.length === 1 ? 's' : ''} live on the website: ${stillLive.slice(0, 10).join(', ')}${stillLive.length > 10 ? '…' : ''}. Their prices and photos stop updating; stock updates and Take down (Online Store) still work.`,
+        );
       }
       toast.success(editingBrand ? 'Brand updated successfully' : 'Brand created successfully');
       setShowAddBrandModal(false);
@@ -198,8 +239,10 @@ export function BrandSection() {
       await adminBrandApi.deleteBrand(brandId);
       toast.success('Brand deleted successfully');
       loadBrands();
-    } catch {
-      toast.error('Failed to delete brand');
+    } catch (err) {
+      // The server's reason (e.g. the 403 for a Never-sell-online brand):
+      // the API client puts a 4xx detail in the ApiError message.
+      toast.error(err instanceof Error && err.message ? err.message : 'Failed to delete brand');
     }
   };
 
@@ -258,15 +301,82 @@ export function BrandSection() {
         </div>
 
         {brands.length > 0 && (
-          <div className="mb-4">
-            <input
-              type="search"
-              className="input-field !w-72"
-              placeholder="Search brands…"
-              value={brandSearch}
-              onChange={(e) => setBrandSearch(e.target.value)}
-              aria-label="Search brands by name"
-            />
+          <div
+            className="sticky top-0 z-10 -mx-4 mb-4 space-y-2 border-b border-gray-200 bg-white px-4 py-3"
+            data-testid="brand-filters"
+          >
+            <div className="flex flex-wrap items-end gap-2">
+              <label className={clsx(FILTER_LABEL, 'flex-1 min-w-[200px] max-w-sm')}>
+                <span>Search</span>
+                <span className="relative block">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+                  <input
+                    type="search"
+                    className="input-field w-full pl-9 normal-case tracking-normal"
+                    placeholder="Brand, code or sub-brand"
+                    value={filters.q}
+                    onChange={(e) => setFilters({ q: e.target.value })}
+                    aria-label="Search brands by brand, code or sub-brand name"
+                  />
+                </span>
+              </label>
+              <FilterSelect
+                title="Category"
+                value={filters.cat}
+                onChange={(v) => setFilters({ cat: v })}
+                options={[['', 'All categories'], ...categoryOptions.map((c): [string, string] => [c, categoryBrowseLabel(c)])]}
+              />
+              <FilterSelect
+                title="Tier"
+                value={filters.tier}
+                onChange={(v) => setFilters({ tier: v as BrandFilters['tier'] })}
+                options={[['', 'All tiers'], ['MASS', 'Mass'], ['PREMIUM', 'Premium'], ['LUXURY', 'Luxury']]}
+              />
+              <FilterSelect
+                title="Website"
+                value={filters.web}
+                onChange={(v) => setFilters({ web: v as BrandFilters['web'] })}
+                options={[['', 'Any'], ['on', 'On website'], ['off', 'Not on website']]}
+              />
+              <FilterSelect
+                title="Sub-brands"
+                value={filters.sub}
+                onChange={(v) => setFilters({ sub: v as BrandFilters['sub'] })}
+                options={[['', 'Any'], ['yes', 'Has sub-brands'], ['no', 'No sub-brands']]}
+              />
+              <FilterSelect
+                title="Status"
+                value={filters.status}
+                onChange={(v) => setFilters({ status: v as BrandFilters['status'] })}
+                options={[['', 'Any'], ['active', 'Active'], ['inactive', 'Inactive']]}
+              />
+              <FilterSelect
+                title="Online"
+                value={filters.online}
+                onChange={(v) => setFilters({ online: v as BrandFilters['online'] })}
+                options={[['', 'Any'], ['allowed', 'Allowed'], ['blocked', 'Never sell online']]}
+              />
+              <FilterSelect
+                title="Sort by"
+                value={filters.sort}
+                onChange={(v) => setFilters({ sort: v as BrandFilters['sort'] })}
+                options={[['az', 'Name A-Z'], ['products', 'Most products'], ['recent', 'Recently edited']]}
+              />
+            </div>
+            <div className="flex items-center gap-3 text-sm text-gray-600">
+              <span data-testid="brand-result-count">
+                {filtered ? `${visibleBrands.length} of ${brands.length} brands` : `${brands.length} brands`}
+              </span>
+              {filtered && (
+                <button
+                  type="button"
+                  onClick={() => setFilters(clearBrandFilters(filters))}
+                  className="text-xs font-medium text-blue-700 underline"
+                >
+                  Clear filters
+                </button>
+              )}
+            </div>
           </div>
         )}
 
@@ -278,7 +388,14 @@ export function BrandSection() {
           </div>
         ) : visibleBrands.length === 0 ? (
           <div className="text-center py-8 text-gray-500 text-sm">
-            No brands match "{brandSearch.trim()}"
+            No brands match these filters.{' '}
+            <button
+              type="button"
+              onClick={() => setFilters(clearBrandFilters(filters))}
+              className="font-medium text-blue-700 underline"
+            >
+              Clear filters
+            </button>
           </div>
         ) : (
           <div className="space-y-3">
@@ -304,6 +421,14 @@ export function BrandSection() {
                         <span className="text-xs px-2 py-0.5 rounded bg-gray-50 text-gray-400">
                           {brand.productCount} product{brand.productCount === 1 ? '' : 's'}
                         </span>
+                      )}
+                      {brand.neverSellOnline && (
+                        <span className="text-xs px-2 py-0.5 rounded bg-red-50 text-red-700" title="SUPERADMIN block: no product of this brand can go on the website">
+                          Never sell online
+                        </span>
+                      )}
+                      {!brand.isActive && (
+                        <span className="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-600">Inactive</span>
                       )}
                       {brand.syncToShopifyDefault && (
                         <span className="text-xs px-2 py-0.5 rounded bg-green-50 text-green-600" title="New products of this brand default to Shopify-sync intent">
@@ -595,8 +720,11 @@ function BrandModal({
       isActive: true,
       subbrands: [],
       syncToShopifyDefault: false,
+      neverSellOnline: false,
     }
   );
+  const { user } = useAuth();
+  const isSuperadmin = (user?.roles || []).includes('SUPERADMIN');
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
@@ -682,8 +810,27 @@ function BrandModal({
               <span className="text-sm font-medium text-gray-700">Sync to Shopify by default</span>
             </label>
             <p className="text-xs text-gray-500 mt-1 ml-6">
-              New products of this brand are marked for the online store by default.
-              (Sets the default for new products; pushing to the website happens from Online Store.)
+              Products of this brand may go on the website (a person still publishes them from Online Store).
+              Ignored while "Never sell online" is on.
+            </p>
+          </div>
+
+          <div className="rounded-lg border border-red-200 bg-red-50 p-3">
+            <label className={clsx('flex items-center gap-2', isSuperadmin ? 'cursor-pointer' : 'cursor-not-allowed')}>
+              <input
+                type="checkbox"
+                checked={formData.neverSellOnline === true}
+                disabled={!isSuperadmin}
+                onChange={e => setFormData(prev => ({ ...prev, neverSellOnline: e.target.checked }))}
+                className="rounded border-gray-300 text-bv-red-600 focus:ring-bv-red-500"
+              />
+              <span className="text-sm font-medium text-gray-900">Never sell online</span>
+              {!isSuperadmin && <span className="text-xs text-gray-600">(only SUPERADMIN can change this)</span>}
+            </label>
+            <p className="text-xs text-gray-700 mt-1 ml-6">
+              Hard block for a brand that has not allowed online selling: no product of this brand can be
+              published or pushed to the website by anyone, even manually. Listings already live stay up
+              (listed when you save): their prices and photos stop updating; stock and Take down still work.
             </p>
           </div>
         </div>

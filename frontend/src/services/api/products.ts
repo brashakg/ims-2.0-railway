@@ -823,6 +823,8 @@ export const adminBrandApi = {
     status?: string;
     /** Whether this brand's products go to the website (D6; the push gate reads it live). */
     sync_to_shopify_default?: boolean;
+    /** SUPERADMIN-only hard block (the server 403s anyone else changing it). */
+    never_sell_online?: boolean;
   }) => {
     const response = await api.post('/admin/brands', data);
     return response.data;
@@ -837,6 +839,7 @@ export const adminBrandApi = {
     description: string;
     status: string;
     sync_to_shopify_default: boolean;
+    never_sell_online: boolean;
   }>) => {
     const response = await api.put(`/admin/brands/${brandId}`, data);
     return response.data;

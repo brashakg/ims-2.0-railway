@@ -29,6 +29,7 @@ dictionary configured" (enforcement skips). NO emojis (cp1252).
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -159,6 +160,27 @@ SUBBRAND_COLLECTION = "subbrand_masters"
 BRAND_TIERS = frozenset({"MASS", "PREMIUM", "LUXURY"})
 
 
+def brand_name_key(name: Any) -> str:
+    """THE match key for a brand name: case, spaces and punctuation ignored
+    (anything not a letter or digit, incl. "_", dashes, dots, apostrophes and
+    zero-width spaces): "Ray-Ban" == "ray ban" == "RAY.BAN". Used where a
+    near-spelling must not slip past the Never-sell-online block. A completely
+    different name ("Hugo Boss" for "Boss") is NOT caught."""
+    return re.sub(r"[\W_]+", "", str(name or "")).casefold()
+
+
+def blocked_brand_row(rows, brand_name: str) -> Optional[Dict[str, Any]]:
+    """The Never-sell-online row among `rows` (brand_masters docs) whose name
+    has the same brand_name_key as `brand_name`, or None."""
+    key = brand_name_key(brand_name)
+    if not key:
+        return None
+    for doc in rows:
+        if doc.get("never_sell_online") is True and brand_name_key(doc.get("name")) == key:
+            return doc
+    return None
+
+
 def _brand_rows(db, brand_name: str) -> List[Dict[str, Any]]:
     """Every brand_masters row whose name matches `brand_name` without case
     (casefold), active or not. Raises on a read failure: callers decide."""
@@ -211,11 +233,24 @@ def brand_website_refusal(db, brand_name: str) -> Optional[str]:
         return "the product has no brand"
     try:
         rows = _brand_rows(db, name) if db is not None else None
+        blocked = (
+            blocked_brand_row(db.get_collection(BRAND_COLLECTION).find({}), name)
+            if db is not None else None
+        )
     except Exception as e:  # noqa: BLE001
         logger.warning("[CATALOG-DICT] brand lookup failed: %s", e)
         rows = None
     if rows is None:
         return "Settings > Brand Master could not be read just now"
+    # SUPERADMIN hard block (owner 2026-10-19): the brand has not allowed
+    # online selling. Checked before anything else, on ANY row (active or not)
+    # with the same spelling-proof key, so neither another switch nor a near-
+    # spelling ("Ray Ban" for "Ray-Ban") lets the brand's products out.
+    if blocked is not None:
+        return (
+            "brand '%s' has not allowed online selling (Never sell online, "
+            "set by SUPERADMIN in Settings > Brand Master)" % name
+        )
     active = [d for d in rows if d.get("is_active") is not False]
     if not active:
         if rows:
