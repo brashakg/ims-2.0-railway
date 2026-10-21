@@ -24,26 +24,12 @@ import type {
 import { financeApi } from '../../services/api/finance';
 import { NoShopNotice, hasNoShop } from '../../components/common/NoShopNotice';
 import { PurchaseShopLabel, PurchaseShopPicker, usePurchaseShop } from '../purchase/purchaseShop';
-import { mapGst } from './financeUtils';
+import { mapGst, mapRevenue } from './financeUtils';
 
 // ---- Mappers: real finance.py responses -> dashboard panel types ----------
 // The backend returns aggregate/summary shapes; the panels expect these
 // normalised types. Each mapper is defensive (handles missing fields) so a
 // thin/empty response renders an honest empty panel rather than crashing.
-function mapRevenue(d: any): RevenueData[] {
-  if (!d) return [];
-  const net = Number(d.total_revenue || 0);
-  const deductions = Number(d.total_discount || 0);
-  if (!net && !deductions && !d.total_tax) return [];
-  return [{
-    period: `Current ${d.period || 'month'}`,
-    gross_sales: net + deductions,
-    deductions,
-    net_revenue: net,
-    gst_collected: Number(d.total_tax || 0),
-  }];
-}
-
 function mapPnl(d: any, from: string, to: string): ProfitLossStatement | null {
   if (!d) return null;
   const revenue = Number(d.revenue || 0);

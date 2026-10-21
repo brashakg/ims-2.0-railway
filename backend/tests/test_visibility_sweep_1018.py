@@ -98,11 +98,14 @@ def _revenue(client, headers, query=""):
 def test_category_pnl_reads_only_the_managers_shop(client, two_shops, role):
     admin_all = _revenue(client, _headers("ADMIN"))
     own = _revenue(client, _headers(role))
-    # The shop fixture's own seeded sales (O1/O2) count too now that the
-    # category P&L reads the line's real taxable_value (it read `total`,
-    # which only this file's rows carried). The scope rule is the difference:
-    # everything the admin sees beyond the manager is exactly the other shop.
-    assert own >= OWN_REVENUE, own
+    # The manager's shop, net of GST (the category P&L reads each line's
+    # taxable value; it used to read `total`, which only O8/O9 carried):
+    #   O8  stamped taxable_value                       111.00
+    #   O1  item_total 9999, no rate, FRAME-less -> 5%  9999 / 1.05 = 9522.857
+    #   O3  the same line (READY still counts)          9999 / 1.05 = 9522.857
+    #   O2  lines under legacy `order_items`, not `items` -> 0
+    #   111 + 2 * 9522.857 = 19156.71
+    assert own == pytest.approx(19156.71, abs=0.01), own
     assert admin_all - own == pytest.approx(OTHER_REVENUE), (admin_all, own)
     # entity_id does not widen a manager's reach either.
     assert _revenue(client, _headers(role), "?entity_id=entity-other") == own

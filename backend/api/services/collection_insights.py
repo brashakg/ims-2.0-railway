@@ -50,7 +50,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from . import ecom_smart_rules
-from .margin_basis import LINE_REVENUE_EX_GST_EXPR
+from .margin_basis import LINE_REVENUE_EX_GST_GROUP, group_revenue_ex_gst
 
 logger = logging.getLogger(__name__)
 
@@ -462,7 +462,8 @@ def _movement_pipeline(
                 "units": {"$sum": _QTY_EXPR},
                 "revenue": {"$sum": {"$ifNull": ["$items.item_total", 0]}},
                 # Net of GST: what margin is measured on (cost is ex-GST).
-                "revenue_ex_gst": {"$sum": LINE_REVENUE_EX_GST_EXPR},
+                # Read back with group_revenue_ex_gst.
+                **LINE_REVENUE_EX_GST_GROUP,
                 "cogs": {
                     "$sum": {
                         "$cond": [
@@ -551,7 +552,7 @@ def movement_summary(
             age = (ist_today - _ist_date(day)).days if isinstance(day, datetime) else 0
             units = r.get("units") or 0
             revenue = float(r.get("revenue") or 0)
-            revenue_ex_gst = float(r.get("revenue_ex_gst") or 0)
+            revenue_ex_gst = group_revenue_ex_gst(r)
             cogs = float(r.get("cogs") or 0)
             cogs_units = r.get("cogs_units") or 0
             last_sold = r.get("last_sold")

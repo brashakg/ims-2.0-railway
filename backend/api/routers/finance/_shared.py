@@ -55,7 +55,13 @@ from ...services import ap_engine, cashflow, itc_reconcile, cash_register, csv_s
 from ...services.stores_util import is_online_store
 from ...services import survival_cashflow
 from ...services.cost_mask import can_see_cost
-from ...services.margin_basis import line_revenue_ex_gst
+# One cost rule for the P&L and every margin report (services/margin_basis):
+# cost_at_sale snapshot, then the live catalogue cost_price, else None.
+from ...services.margin_basis import (
+    cost_by_product as _cost_by_product,
+    line_revenue_ex_gst,
+    line_unit_cost as _item_cost,
+)
 from ...services.salary_visibility import (
     SALARY_RESTRICTED_MESSAGE,
     is_payroll_shaped_expense,
@@ -117,6 +123,7 @@ _ORDER_REVENUE_PROJECTION = {
     "items": 1,
     "grand_total": 1,
     "total_amount": 1,
+    "total": 1,  # legacy bills: grand_total ?? total, as _REVENUE_EXPR
     "round_off": 1,
     "tax": 1,
     "tax_amount": 1,
@@ -216,28 +223,6 @@ def _order_total(o: dict) -> float:
     return float(v or 0)
 
 
-def _item_cost(it: dict, cost_by_product: dict):
-    """Resolve the unit cost for an order line. Prefers the snapshot
-    item.cost_at_sale (frozen at order create time) so historical P&L
-    doesn't drift when products.cost_price is edited after the sale.
-    Falls back to the live products.cost_price (for orders booked
-    before the snapshot was introduced). Returns None if unknown."""
-    snap = it.get("cost_at_sale")
-    if snap is not None:
-        try:
-            return float(snap)
-        except (TypeError, ValueError):
-            pass
-    pid = it.get("product_id")
-    cost = cost_by_product.get(pid) if pid else None
-    if cost is None:
-        return None
-    try:
-        return float(cost)
-    except (TypeError, ValueError):
-        return None
-
-
 def compute_cogs(orders, cost_by_product: dict, fallback_rate: float = 0.0) -> float:
     """Real COGS: sum unit cost * qty over order line items. Prefers each
     line's cost_at_sale snapshot; falls back to the live product
@@ -276,30 +261,6 @@ def compute_cogs_with_flag(
                 cogs += line_revenue_ex_gst(it) * fallback_rate
                 estimated_lines += 1
     return round(cogs, 2), estimated_lines, total_lines
-
-
-def _cost_by_product(db) -> dict:
-    """product_id (and _id) -> cost_price, for COGS. Keyed both ways because
-    imported orders may reference a product by its Mongo _id."""
-    out: dict = {}
-    try:
-        for p in db.get_collection("products").find(
-            {}, {"product_id": 1, "cost_price": 1}
-        ):
-            cp = p.get("cost_price")
-            if cp is None:
-                continue
-            try:
-                val = float(cp)
-            except Exception:
-                continue
-            if p.get("product_id"):
-                out[p["product_id"]] = val
-            if p.get("_id") is not None:
-                out[str(p["_id"])] = val
-    except Exception:
-        pass
-    return out
 
 
 def _months_in_range(from_date, to_date):

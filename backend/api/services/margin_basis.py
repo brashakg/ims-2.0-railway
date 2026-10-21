@@ -64,7 +64,16 @@ def order_revenue_ex_gst(order: dict) -> float:
     reader's own derivation, so the P&L and GSTR-1 can never disagree."""
     from ..routers.reports.gst_base import _order_taxable_and_tax
 
-    return _order_taxable_and_tax(order or {})[0]
+    order = order or {}
+    # A legacy bill carries only `total` (the P&L's old _REVENUE_EXPR read
+    # grand_total ?? total); read it as the grand total, never as 0.
+    if (
+        order.get("grand_total") is None
+        and order.get("total_amount") is None
+        and order.get("total") is not None
+    ):
+        order = {**order, "grand_total": order.get("total")}
+    return _order_taxable_and_tax(order)[0]
 
 
 def line_revenue_ex_gst(item: dict) -> float:
@@ -87,27 +96,116 @@ def line_revenue_ex_gst(item: dict) -> float:
 
 # The same rule for an $unwind-ed ``items`` line inside a Mongo $group, for the
 # readers that aggregate in the database. Every real line carries
-# taxable_value (prod 2026-10-19: 972 of 972); the fallback backs GST out of
-# item_total at the line's own gst_rate.
-LINE_REVENUE_EX_GST_EXPR = {
-    "$ifNull": [
-        "$items.taxable_value",
-        {
-            "$divide": [
-                {"$ifNull": ["$items.item_total", 0]},
-                {"$add": [1, {"$divide": [{"$ifNull": ["$items.gst_rate", 0]}, 100]}]},
+# taxable_value (prod 2026-10-19: 972 of 972) or its gst_rate, and Mongo sums
+# those exactly as line_revenue_ex_gst does. A line with NEITHER needs
+# resolve_gst_rate (HSN master + category table), which Mongo cannot run: its
+# gross and rate hints come back in the group row and group_revenue_ex_gst
+# backs the GST out in Python with line_revenue_ex_gst itself. Splice
+# LINE_REVENUE_EX_GST_GROUP into the $group; read the row with
+# group_revenue_ex_gst.
+_LINE_GROSS = {"$ifNull": ["$items.item_total", {"$ifNull": ["$items.total", 0]}]}
+_NO_RATE = {"$eq": [{"$ifNull": ["$items.gst_rate", None]}, None]}
+_UNRATED = {
+    "$and": [{"$eq": [{"$ifNull": ["$items.taxable_value", None]}, None]}, _NO_RATE]
+}
+LINE_REVENUE_EX_GST_GROUP = {
+    "revenue_ex_gst": {
+        "$sum": {
+            "$ifNull": [
+                "$items.taxable_value",
+                {
+                    "$cond": [
+                        _NO_RATE,
+                        0,  # unrated: summed into unrated_gross instead
+                        {
+                            "$divide": [
+                                _LINE_GROSS,
+                                {"$add": [1, {"$divide": ["$items.gst_rate", 100]}]},
+                            ]
+                        },
+                    ]
+                },
             ]
-        },
-    ]
+        }
+    },
+    "unrated_gross": {"$sum": {"$cond": [_UNRATED, _LINE_GROSS, 0]}},
+    # $max skips nulls, so this is an unrated line's own hint.
+    "unrated_hsn": {
+        "$max": {"$cond": [_UNRATED, {"$ifNull": ["$items.hsn_code", "$items.hsn"]}, None]}
+    },
+    "unrated_category": {
+        "$max": {
+            "$cond": [_UNRATED, {"$ifNull": ["$items.item_type", "$items.category"]}, None]
+        }
+    },
 }
 
 
-def line_unit_cost(item: dict) -> float:
-    """An order line's ex-GST unit cost: the ``cost_at_sale`` snapshot
-    orders/create.py stamps (legacy ``cost_price`` / ``costPrice`` accepted).
-    Unknown -> 0."""
+def group_revenue_ex_gst(row: dict) -> float:
+    """A $group row built with LINE_REVENUE_EX_GST_GROUP -> its revenue net of
+    GST: the rated lines Mongo summed, plus the unrated gross backed out by
+    line_revenue_ex_gst at the rate resolve_gst_rate gives its hints.
+    ponytail: the unrated lines of one group are read at ONE rate (one hint
+    pair) -- right for a per-product group; a mixed group would need its
+    unrated lines grouped by (hsn, category) first."""
+    row = row or {}
+    rated = _f(row.get("revenue_ex_gst"))
+    gross = _f(row.get("unrated_gross"))
+    if not gross:
+        return rated
+    return rated + line_revenue_ex_gst(
+        {
+            "item_total": gross,
+            "hsn_code": row.get("unrated_hsn"),
+            "item_type": row.get("unrated_category"),
+        }
+    )
+
+
+def line_unit_cost(item: dict, cost_by_product: Optional[dict] = None) -> Optional[float]:
+    """THE ex-GST unit cost of an order line -- the P&L's COGS and every margin
+    report read it here. In order: the ``cost_at_sale`` snapshot orders/create.py
+    stamps (so a later cost edit never rewrites history), a legacy line
+    ``cost_price`` / ``costPrice``, then the product's live catalogue
+    cost_price from ``cost_by_product`` (older and online lines carry no
+    snapshot). None when unknown -- the caller decides (P&L: 60% estimate)."""
     item = item or {}
     for k in ("cost_at_sale", "cost_price", "costPrice"):
         if item.get(k) is not None:
-            return _f(item.get(k))
-    return 0.0
+            try:
+                return float(item.get(k))
+            except (TypeError, ValueError):
+                pass
+    pid = item.get("product_id") or item.get("productId")
+    cost = (cost_by_product or {}).get(pid) if pid else None
+    if cost is None:
+        return None
+    try:
+        return float(cost)
+    except (TypeError, ValueError):
+        return None
+
+
+def cost_by_product(db) -> dict:
+    """product_id (and _id) -> catalogue cost_price (ex-GST), the fallback
+    ``line_unit_cost`` reads. Keyed both ways because imported orders may
+    reference a product by its Mongo _id. No db / any error -> {}."""
+    out: dict = {}
+    try:
+        for p in db.get_collection("products").find(
+            {}, {"product_id": 1, "cost_price": 1}
+        ):
+            cp = p.get("cost_price")
+            if cp is None:
+                continue
+            try:
+                val = float(cp)
+            except Exception:
+                continue
+            if p.get("product_id"):
+                out[p["product_id"]] = val
+            if p.get("_id") is not None:
+                out[str(p["_id"])] = val
+    except Exception:
+        pass
+    return out

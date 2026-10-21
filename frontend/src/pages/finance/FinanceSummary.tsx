@@ -47,9 +47,9 @@ export default function FinanceSummary({ revenueData, plStatement }: FinanceSumm
         <div className="bg-green-50 border border-green-200 rounded-lg p-6 text-gray-900">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-green-700 text-sm font-medium">Total Revenue</p>
+              <p className="text-green-700 text-sm font-medium">Total Revenue (excl. GST)</p>
               <p className="text-2xl font-bold mt-2">{money(revenue)}</p>
-              <p className="text-xs text-green-700 mt-2">Before GST, selected period</p>
+              <p className="text-xs text-green-700 mt-2">Selected period</p>
             </div>
             <TrendingUp className="w-10 h-10 text-green-600 opacity-50" />
           </div>
@@ -101,7 +101,7 @@ export default function FinanceSummary({ revenueData, plStatement }: FinanceSumm
           <div className="p-6 space-y-4">
             <div className="grid grid-cols-2 gap-4">
               <div className="bg-slate-50 p-4 rounded border border-gray-200">
-                <p className="text-slate-600 text-sm">Revenue</p>
+                <p className="text-slate-600 text-sm">Revenue (excl. GST)</p>
                 <p className="text-gray-900 text-lg font-semibold mt-1">
                   {formatCurrency(plStatement.revenue)}
                 </p>
@@ -165,10 +165,10 @@ export default function FinanceSummary({ revenueData, plStatement }: FinanceSumm
             <thead className="bg-slate-50 border-b border-gray-200">
               <tr>
                 <th className="px-6 py-3 text-left text-slate-600">Period</th>
-                <th className="px-6 py-3 text-right text-slate-600">Gross Sales</th>
-                <th className="px-6 py-3 text-right text-slate-600">Deductions</th>
-                <th className="px-6 py-3 text-right text-slate-600">Net Revenue</th>
+                <th className="px-6 py-3 text-right text-slate-600">Gross Sales (incl. GST)</th>
+                <th className="px-6 py-3 text-right text-slate-600">Discounts</th>
                 <th className="px-6 py-3 text-right text-slate-600">GST Collected</th>
+                <th className="px-6 py-3 text-right text-slate-600">Net Revenue (excl. GST)</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-700">
@@ -181,11 +181,11 @@ export default function FinanceSummary({ revenueData, plStatement }: FinanceSumm
                   <td className="px-6 py-4 text-right text-red-600">
                     -{formatCurrency(row.deductions)}
                   </td>
-                  <td className="px-6 py-4 text-right font-medium text-green-600">
-                    {formatCurrency(row.net_revenue)}
-                  </td>
                   <td className="px-6 py-4 text-right font-medium text-blue-600">
                     {formatCurrency(row.gst_collected)}
+                  </td>
+                  <td className="px-6 py-4 text-right font-medium text-green-600">
+                    {formatCurrency(row.net_revenue)}
                   </td>
                 </tr>
               ))}

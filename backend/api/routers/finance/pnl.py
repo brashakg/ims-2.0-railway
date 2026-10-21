@@ -80,6 +80,7 @@ async def get_revenue(
                 "total_orders": {"$sum": 1},
                 "total_tax": {"$sum": _TAX_EXPR},
                 "total_discount": {"$sum": _DISCOUNT_EXPR},
+                "total_round_off": {"$sum": {"$ifNull": ["$round_off", 0]}},
             }
         },
     ]
@@ -130,6 +131,14 @@ async def get_revenue(
 
     return {
         "total_revenue": current["total_revenue"],
+        # The same sales net of GST and round off -- the bills' taxable value,
+        # the P&L's revenue (gst_base: grand_total - round_off - tax).
+        "revenue_ex_gst": round(
+            (current["total_revenue"] or 0)
+            - (current.get("total_round_off") or 0)
+            - (current["total_tax"] or 0),
+            2,
+        ),
         "total_orders": current["total_orders"],
         "total_tax": current["total_tax"],
         "total_discount": current["total_discount"],

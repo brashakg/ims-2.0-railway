@@ -73,8 +73,15 @@ class _Coll:
     def __init__(self, rows, agg):
         self.rows, self.agg = rows, agg
 
-    def find(self, *_a, **_k):
-        return _Cursor(self.rows)
+    def find(self, _flt=None, projection=None, *_a, **_k):
+        """Honours an inclusion projection, as Mongo does: a field the
+        projection leaves out is not there to read."""
+        if not projection:
+            return _Cursor(self.rows)
+        keep = {k for k, v in projection.items() if v}
+        if projection.get("_id", 1):
+            keep.add("_id")
+        return _Cursor([{k: v for k, v in r.items() if k in keep} for r in self.rows])
 
     def aggregate(self, _p):
         return iter(self.agg)
@@ -255,3 +262,170 @@ def test_reports_purchase_recommendation_margin(monkeypatch):
     rec = body["recommendations"][0]
     assert rec["unit_margin"] == 400.0  # 1180 / 1.18 - 600, not 1180 - 600
     assert rec["estimated_margin"] == round(rec["suggested_order_qty"] * 400.0, 2)
+
+
+# --------------------------------------------------------------------------
+# review round 2 (2026-10-21)
+# --------------------------------------------------------------------------
+
+_CATALOGUE = [{"product_id": "P-FR", "cost_price": 600.0},
+              {"product_id": "P-SG", "cost_price": 600.0}]
+
+
+def _no_snapshot_orders():
+    """The fixture with no cost_at_sale on any line (older / online orders):
+    the cost has to come from the product's catalogue cost_price."""
+    orders = _orders()
+    for o in orders:
+        del o["items"][0]["cost_at_sale"]
+    return orders
+
+
+def test_one_cost_rule_for_the_pnl_and_the_reports():
+    from api.routers.finance import _shared
+
+    assert _shared._item_cost is mb.line_unit_cost
+    assert _shared._cost_by_product is mb.cost_by_product
+    line = {"product_id": "P-FR"}
+    assert mb.line_unit_cost(line, {"P-FR": 600.0}) == 600.0
+    assert mb.line_unit_cost({**line, "cost_at_sale": 550.0}, {"P-FR": 600.0}) == 550.0
+    assert mb.line_unit_cost(line, {}) is None
+    assert mb.cost_by_product(_Db(products=_CATALOGUE)) == {"P-FR": 600.0, "P-SG": 600.0}
+    assert mb.cost_by_product(None) == {}
+
+
+def test_reports_fall_back_to_catalogue_cost(monkeypatch):
+    from api.routers.reports import customers as rc, growth
+
+    db = _Db(products=_CATALOGUE)
+    for mod in (rc, growth):
+        monkeypatch.setattr(mod, "get_order_repository",
+                            lambda: _Repo(_no_snapshot_orders()))
+        monkeypatch.setattr(mod, "get_db", lambda: db)
+    f, t = _period()
+    body = asyncio.run(rc.expense_vs_revenue(store_id=None, from_date=f, to_date=t,
+                                             current_user=SU))
+    assert body["cost"] == 1200.0 and body["margin_percent"] == 40.0
+    body = asyncio.run(growth.profit_by_category(store_id=None, from_date=f, to_date=t,
+                                                 current_user=SU))
+    assert {r["category"]: r["cost"] for r in body["data"]} == {"FR": 600.0, "SG": 600.0}
+    assert body["total_profit"] == 800.0
+    body = asyncio.run(growth.profit_by_store(from_date=f, to_date=t, current_user=SU))
+    assert body["data"][0]["cost"] == 1200.0 and body["total_profit"] == 800.0
+
+
+def test_enterprise_kpis_fall_back_to_catalogue_cost(monkeypatch):
+    from api.routers import analytics as an
+
+    monkeypatch.setattr(an, "get_order_repository", lambda: _Repo(_no_snapshot_orders()))
+    monkeypatch.setattr(an, "get_stock_repository", lambda: _Repo([]))
+    monkeypatch.setattr(an, "get_customer_repository", lambda: _Repo([]))
+    monkeypatch.setattr(an, "get_db", lambda: _Db(products=_CATALOGUE))
+    res = asyncio.run(an.get_enterprise_kpis(current_user=SU, period="month", store_id="S1"))
+    assert res["margins"]["gross_profit"] == 800.0
+    assert res["margins"]["gross_margin_percent"] == 40.0
+
+
+def _pnl(monkeypatch, orders, agg=None):
+    from api.routers.finance import pnl as pnl_mod
+
+    monkeypatch.setattr(pnl_mod, "_get_db", lambda: _Db(agg=agg, orders=orders))
+    monkeypatch.setattr(pnl_mod, "_cost_by_product", lambda _db: {})
+    monkeypatch.setattr(pnl_mod, "_payroll_cost", lambda *_a, **_k: 0.0)
+    monkeypatch.setattr(pnl_mod.je_service, "pnl_adjustments", lambda *_a, **_k: {})
+    return asyncio.run(pnl_mod.get_pnl(store_id=None, from_date=None, to_date=None,
+                                       current_user=SU))
+
+
+def test_pnl_reports_gross_sales_incl_gst_beside_revenue(monkeypatch):
+    pnl = _pnl(monkeypatch, _orders(),
+               agg={"orders": [{"_id": None, "revenue": 2230.0, "tax": 230.0}]})
+    assert pnl["gross_sales_incl_gst"] == 2230.0  # what the customers paid
+    assert pnl["tax_collected"] == 230.0
+    assert pnl["revenue"] == 2000.0  # the P&L's revenue: net of GST
+
+
+def test_legacy_order_with_only_total_is_not_zero(monkeypatch):
+    legacy = {"order_id": "L1", "store_id": "S1", "status": "CONFIRMED",
+              "created_at": datetime.now(), "total": 1180.0, "tax_amount": 180.0,
+              # a legacy line: no taxable_value / tax_amount split to fall back on
+              "items": [{"product_id": "P-SG", "category": "SG", "quantity": 1,
+                         "total": 1180.0, "cost_at_sale": 600.0}]}
+    assert mb.order_revenue_ex_gst(legacy) == 1000.0
+    # The P&L order fetch projects `total` too (the fake honours projections).
+    assert _pnl(monkeypatch, [legacy])["revenue"] == 1000.0
+
+
+def _mixed_rate_rounded_order():
+    """ONE bill: a 5% frame (taxable 1000.38, GST 50.02) and an 18% sunglass
+    (taxable 1000, GST 180), each costing 600. The lines total 2230.40; the
+    till rounds the bill to 2230 and books round_off -0.40. Taxable value =
+    2230 - (-0.40) - 230.02 = 2000.38 (ignoring the round off: 1999.98)."""
+    fr = {**_line("FR", 5.0, 1050.40), "taxable_value": 1000.38, "tax_amount": 50.02}
+    sg = _line("SG", 18.0, 1180.0)
+    return {"order_id": "M1", "store_id": "S1", "customer_id": "C1",
+            "status": "CONFIRMED", "created_at": datetime.now(),
+            "pricing_model": "inclusive", "grand_total": 2230.0,
+            "tax_amount": 230.02, "round_off": -0.40, "items": [fr, sg]}
+
+
+def test_mixed_rate_order_with_round_off(monkeypatch):
+    from api.routers.finance import pnl_breakdown as pb
+    from api.routers.finance._shared import pnl_by_category
+    from api.routers.reports import growth
+
+    order = _mixed_rate_rounded_order()
+    assert mb.order_revenue_ex_gst(order) == 2000.38
+    pnl = _pnl(monkeypatch, [order])
+    assert pnl["revenue"] == 2000.38 and pnl["cogs"] == 1200.0
+    assert pnl["gross_profit"] == 800.38
+
+    monkeypatch.setattr(pb, "_get_db", lambda: _Db(orders=[order]))
+    monkeypatch.setattr(pb, "_store_maps", lambda _db: ({"S1": "E1"}, {}))
+    monkeypatch.setattr(pb, "_cost_by_product", lambda _db: {})
+    monkeypatch.setattr(pb, "_payroll_by_store", lambda *_a, **_k: {})
+    monkeypatch.setattr(pb, "_store_name_map", lambda _db: {"S1": "Shop"})
+    row = asyncio.run(pb.get_pnl_by_store(from_date=None, to_date=None, entity_id=None,
+                                          current_user=SU))["stores"][0]
+    assert row["revenue"] == 2000.38 and row["net_profit"] == 800.38
+
+    cats = {c["category"]: c for c in pnl_by_category([order], {})}
+    assert cats["FR"]["revenue"] == 1000.38 and cats["SG"]["revenue"] == 1000.0
+
+    monkeypatch.setattr(growth, "get_order_repository", lambda: _Repo([order]))
+    f, t = _period()
+    body = asyncio.run(growth.profit_by_store(from_date=f, to_date=t, current_user=SU))
+    assert body["data"][0]["revenue"] == 2000.38 and body["total_profit"] == 800.38
+
+
+def test_revenue_breakdown_carries_revenue_ex_gst(monkeypatch):
+    from api.routers.finance import pnl as pnl_mod
+
+    row = {"_id": None, "total_revenue": 2230.0, "total_orders": 1, "total_tax": 230.02,
+           "total_discount": 0.0, "total_round_off": -0.40}
+    monkeypatch.setattr(pnl_mod, "_get_db", lambda: _Db(agg={"orders": [row]}))
+    res = asyncio.run(pnl_mod.get_revenue(period="day", store_id=None, current_user=SU))
+    assert res["total_revenue"] == 2230.0  # paid, unchanged
+    assert res["revenue_ex_gst"] == 2000.38  # the P&L's basis
+
+
+def test_mongo_line_rule_agrees_with_python():
+    """The database sum and line_revenue_ex_gst give the same ex-GST revenue,
+    including a line with neither taxable_value nor gst_rate (which the Python
+    rule prices at its category rate; Mongo cannot, so it hands the gross back
+    to group_revenue_ex_gst). Run on mongomock's real aggregation engine."""
+    mongomock = pytest.importorskip("mongomock")
+    lines = [
+        {"product_id": "P", "item_total": 1180.0, "gst_rate": 18.0, "taxable_value": 1000.0},
+        {"product_id": "P", "item_total": 1180.0, "gst_rate": 18.0},   # rated, no split
+        {"product_id": "P", "item_total": 1180.0, "category": "SG"},   # unrated -> 18%
+    ]
+    coll = mongomock.MongoClient().db.orders
+    coll.insert_many([{"items": [dict(it)]} for it in lines])
+    rows = list(coll.aggregate([
+        {"$unwind": "$items"},
+        {"$group": {"_id": "$items.product_id", **mb.LINE_REVENUE_EX_GST_GROUP}},
+    ]))
+    want = sum(mb.line_revenue_ex_gst(it) for it in lines)
+    assert want == pytest.approx(3000.0)
+    assert mb.group_revenue_ex_gst(rows[0]) == pytest.approx(want)

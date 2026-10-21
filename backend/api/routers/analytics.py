@@ -22,10 +22,15 @@ from ..dependencies import (
     validate_store_access,
     user_store_scope,
     get_store_repository,
+    get_db,
 )
 
 from ..services.cost_mask import mask_cost
-from ..services.margin_basis import line_unit_cost, order_revenue_ex_gst
+from ..services.margin_basis import (
+    cost_by_product,
+    line_unit_cost,
+    order_revenue_ex_gst,
+)
 from ..services.reorder_policy import low_stock_rows
 
 router = APIRouter(prefix="", tags=["Analytics"])
@@ -82,8 +87,9 @@ def _norm_order(o: dict) -> dict:
                     or it.get("finalPrice")
                     or it.get("unitPrice")
                 ),
-                # Unit cost: the cost_at_sale snapshot orders stamp (a line
-                # never carries cost_price, so this read 0 and margin 100%).
+                # The line's own unit cost (cost_at_sale snapshot) or None;
+                # the KPI falls back to the catalogue cost as the P&L does.
+                # (A line never carries cost_price: this read 0, margin 100%.)
                 "cost_price": line_unit_cost(it),
                 "sku": it.get("sku", ""),
             }
@@ -1280,9 +1286,12 @@ async def get_enterprise_kpis(
         )
 
         # ===== MARGIN METRICS =====
-        # Calculate from order line items
+        # Calculate from order line items: each line's unit cost, else the
+        # product's catalogue cost (services/margin_basis, the P&L's rule).
+        cost_map = cost_by_product(get_db())
         total_cost = sum(
-            _safe_float(item.get("quantity")) * _safe_float(item.get("cost_price"))
+            _safe_float(item.get("quantity"))
+            * (line_unit_cost(item, cost_map) or 0.0)
             for order in current_orders
             for item in order.get("items", [])
         )

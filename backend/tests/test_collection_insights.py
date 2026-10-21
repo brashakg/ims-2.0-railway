@@ -151,16 +151,28 @@ class _EmulatedOrders:
                 g = groups.setdefault(
                     key,
                     {"units": 0, "revenue": 0.0, "revenue_ex_gst": 0.0,
+                     "unrated_gross": 0.0, "unrated_hsn": None,
+                     "unrated_category": None,
                      "cogs": 0.0, "cogs_units": 0, "last_sold": None},
                 )
                 g["units"] += qty
                 g["revenue"] += it.get("item_total") or 0
-                # margin_basis.LINE_REVENUE_EX_GST_EXPR: taxable_value, else
-                # item_total / (1 + gst_rate/100) with a missing rate as 0.
-                tv = it.get("taxable_value")
-                if tv is None:
-                    tv = (it.get("item_total") or 0) / (1 + (it.get("gst_rate") or 0) / 100)
-                g["revenue_ex_gst"] += tv
+                # margin_basis.LINE_REVENUE_EX_GST_GROUP: taxable_value, else
+                # item_total / (1 + gst_rate/100); a line with neither comes
+                # back as unrated gross + its hints (test_gst_basis_margins
+                # runs the real accumulators on mongomock).
+                tv, rate = it.get("taxable_value"), it.get("gst_rate")
+                gross = it.get("item_total") or 0
+                if tv is not None:
+                    g["revenue_ex_gst"] += tv
+                elif rate is not None:
+                    g["revenue_ex_gst"] += gross / (1 + rate / 100)
+                else:
+                    g["unrated_gross"] += gross
+                    g["unrated_hsn"] = it.get("hsn_code") or g["unrated_hsn"]
+                    g["unrated_category"] = (
+                        it.get("item_type") or it.get("category") or g["unrated_category"]
+                    )
                 cost = it.get("cost_at_sale")
                 if cost is not None:
                     g["cogs"] += cost * qty
@@ -481,7 +493,10 @@ def test_kpis_composition_full_cogs():
     assert k["stock_value_mrp"] == 6 * 500.0
     assert k["sold"] == {"d7": 2, "d30": 2, "d90": 2}
     assert k["revenue_30d"] == 1000.0
-    assert k["margin_30d"] == 1000.0 - 2 * 300.0
+    # The line carries no taxable_value, gst_rate or category, so it is read
+    # at the default category rate (5%), as line_revenue_ex_gst reads it:
+    # 1000 / 1.05 - 2 * 300 = 952.38 - 600 = 352.38.
+    assert k["margin_30d"] == 352.38
     assert k["sell_through_30d"] == round(2 / 8, 4)
     assert k["days_of_cover"] == round(6 / (2 / 30.0), 1)
     assert k["membership_capped"] is False
@@ -515,8 +530,9 @@ def test_kpis_margin_is_on_revenue_net_of_gst():
     assert k["margin_30d"] == 800.0
     # and the database sums the shared ex-GST line rule, not its own copy
     group = db._c["orders"].pipelines[0][3]["$group"]
-    from api.services.margin_basis import LINE_REVENUE_EX_GST_EXPR
-    assert group["revenue_ex_gst"] == {"$sum": LINE_REVENUE_EX_GST_EXPR}
+    from api.services.margin_basis import LINE_REVENUE_EX_GST_GROUP
+    for key, acc in LINE_REVENUE_EX_GST_GROUP.items():
+        assert group[key] == acc
 
 
 # ===========================================================================
