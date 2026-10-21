@@ -21,8 +21,9 @@ A queued product with no Shopify gid is now first-published by the same run,
 through the SAME door as Online Store > Push all pending: ``queue_order``,
 ``push_product_docs`` (``shopify_push.product_push_refusal`` first -- brand
 gate incl. never_sell_online, first_publish_not_ready, push locks -- then the
-engine's photo / price refusals) and at most ``PRODUCT_BATCH_CAP`` real sends
-per run. A refused product stays queued and is named in the run's failures;
+engine's photo / price refusals) and at most ``FIRST_PUBLISH_CAP_PER_SYNC``
+(100) real sends per scheduled run -- ``PRODUCT_BATCH_CAP`` (25) when the
+manual "Sync live products now" button runs it inside its HTTP request. A refused product stays queued and is named in the run's failures;
 what the cap leaves is ``awaiting_first_publish`` and goes out next slot.
 
 ONE ENGINE, ONE SELECTION
@@ -328,11 +329,15 @@ async def push_product_docs(
 # A capped sweep reports limit_reached=True, so the existing "run again to
 # continue" cue fires: a press that stopped early must never read as complete.
 #
-# The scheduled sync's FIRST-PUBLISH pass (owner ruling 2026-10-20) is held to
-# this SAME cap per run: an unattended 01:00 run must not be a bigger mistake
-# than one press. The rest stay queued for the next slot (or a press).
-# Lives here, not in the router, so both doors read the one number.
+# Lives here, not in the router, so the press and the manual "Sync live
+# products now" button (both run INSIDE an HTTP request) read the one number.
 PRODUCT_BATCH_CAP = 25
+# The SCHEDULED 01:00 / 09:00 IST run's first-publish cap (owner 2026-10-21:
+# up to 100 per sync, so the ~433-product backlog clears in ~4 syncs, ~2
+# days). Only the scheduler passes it: it runs in the background, not inside
+# a request that could time out. Still bounded by max_products_per_run, which
+# the live re-push pass draws on first.
+FIRST_PUBLISH_CAP_PER_SYNC = 100
 
 
 def queue_order(doc: Dict) -> tuple:
@@ -556,11 +561,14 @@ async def sync_live_products(
     actor: str,
     slot: str = MANUAL_SLOT,
     limit: Optional[int] = None,
+    first_publish_cap: int = PRODUCT_BATCH_CAP,
 ) -> Optional[Dict[str, Any]]:
     """Re-push every product that is already on Shopify AND dirty, then
     FIRST-publish queued gid-less products (owner ruling 2026-10-20) through
-    the Push-all door -- at most PRODUCT_BATCH_CAP real sends, inside what the
-    ``limit`` ceiling has left -- then run the stock pass (sync_stock_levels)
+    the Push-all door -- at most ``first_publish_cap`` real sends (default
+    PRODUCT_BATCH_CAP, the in-request cap; the scheduler passes
+    FIRST_PUBLISH_CAP_PER_SYNC), inside what the ``limit`` ceiling has left
+    after the live pass -- then run the stock pass (sync_stock_levels)
     over every listing whose per-shop quantity changed. Runs the
     engine behind the same three gates (DARK => SIMULATED, no network), writes
     the per-product audit rows with ``actor`` as user_id, and persists ONE
@@ -588,8 +596,8 @@ async def sync_live_products(
     pushed_ok = sum(1 for r in batch["results"] if r.get("ok"))
 
     # FIRST PUBLISH (owner ruling 2026-10-20). The never-pushed rows, in the
-    # Push-all queue order, through the Push-all core with the Push-all cap:
-    # one gate, one engine, one number -- never a second publish path. The
+    # Push-all queue order, through the Push-all core with the caller's cap:
+    # one gate, one engine -- never a second publish path. The
     # run ceiling bounds attempts across both passes (live re-pushes first).
     # A gate refusal never takes a slot, so off-brand / unfinished rows can
     # not starve the ones behind them; they stay queued and are named below.
@@ -602,7 +610,7 @@ async def sync_live_products(
         never,
         current_user={"user_id": actor},
         max_results=max(0, limit - len(batch["results"])),
-        max_sent=PRODUCT_BATCH_CAP,
+        max_sent=first_publish_cap,
     )
     first_published = sum(1 for r in first["results"] if r.get("ok"))
     # Only a LIVE success leaves the queue (a SIMULATED plan published
@@ -713,7 +721,7 @@ async def sync_live_products(
         "first_publish_queued": len(never),
         "first_published": first_published,
         "first_publish_refused": len(first["refused"]),
-        "first_publish_cap": PRODUCT_BATCH_CAP,
+        "first_publish_cap": first_publish_cap,
         "first_publish_cap_reached": first["cap_reached"],
         "awaiting_first_publish": awaiting_first_publish,
         "taken_down_skipped": taken_down_skipped,
@@ -771,6 +779,7 @@ async def scheduled_tick(now: Optional[datetime] = None) -> Optional[Dict[str, A
             actor=SCHEDULER_ACTOR,
             slot=slot,
             limit=cfg["max_products_per_run"],
+            first_publish_cap=FIRST_PUBLISH_CAP_PER_SYNC,
         )
     except Exception as e:  # noqa: BLE001 -- a scheduler job must never kill the loop
         logger.error("[LIVE-SYNC] scheduled run failed: %s", e, exc_info=True)

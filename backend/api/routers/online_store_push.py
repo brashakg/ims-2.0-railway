@@ -400,8 +400,10 @@ async def sync_live_now(
     the same three gates (DARK => SIMULATED, no network). A dirty product that
     was never pushed is FIRST-published too (owner ruling 2026-10-20 -- it
     overturns 09-06's "first publish is a human press"), through the same
-    product gate and the same PRODUCT_BATCH_CAP as Push all pending; the rest
-    is counted as awaiting_first_publish. Honours the max_products_per_run
+    product gate and -- because this runs INSIDE the request -- the same
+    PRODUCT_BATCH_CAP (25) as Push all pending (the background 01:00/09:00
+    run uses FIRST_PUBLISH_CAP_PER_SYNC, 100); the rest is counted as
+    awaiting_first_publish. Honours the max_products_per_run
     setting; one audit row per product with the caller as actor; one
     run-summary doc in online_sync_runs. No DB -> 503."""
     db = _require_db()

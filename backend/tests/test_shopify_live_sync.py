@@ -460,9 +460,12 @@ def test_a_refused_product_is_not_first_published_and_is_named(world, live_engin
         assert row["ecom"]["locally_modified"] is True and not row["ecom"].get("shopify_product_id")
 
 
-def test_the_first_publish_batch_cap_holds_and_the_rest_stay_queued(world, live_engine):
+def test_the_scheduled_first_publish_cap_is_100_and_the_rest_stay_queued(world, live_engine):
+    """Owner 2026-10-21: the background 01:00 / 09:00 run first-publishes up
+    to 100 (the ~433 backlog clears in ~4 syncs); the rest wait for the next."""
     db, _ = world
-    cap = ls.PRODUCT_BATCH_CAP
+    cap = ls.FIRST_PUBLISH_CAP_PER_SYNC
+    assert cap == 100
     db.seed("catalog_products", [_new_row(i) for i in range(cap + 3)])
 
     run = _run(ls.scheduled_tick(ist(2026, 10, 21, 1, 0)))
@@ -475,6 +478,21 @@ def test_the_first_publish_batch_cap_holds_and_the_rest_stay_queued(world, live_
     # The next slot continues where this one stopped.
     nxt = _run(ls.scheduled_tick(ist(2026, 10, 21, 9, 0)))
     assert nxt["first_published"] == 3 and nxt["awaiting_first_publish"] == 0
+
+
+def test_the_manual_sync_button_runs_in_the_request_so_keeps_the_press_cap(
+    client, world, live_engine
+):
+    """POST /sync-live awaits the sync INSIDE the HTTP request, so it keeps
+    the Push-all cap (25), never the scheduler's 100."""
+    db, _ = world
+    db.seed("catalog_products", [_new_row(i) for i in range(ls.PRODUCT_BATCH_CAP + 3)])
+    r = client.post("/api/v1/online-store/push/sync-live", headers=_headers(["ADMIN"]))
+    assert r.status_code == 200, r.text
+    run = r.json()["run"]
+    assert len(live_engine) == ls.PRODUCT_BATCH_CAP == 25
+    assert run["first_published"] == 25 and run["first_publish_cap"] == 25
+    assert run["first_publish_cap_reached"] is True and run["awaiting_first_publish"] == 3
 
 
 def test_the_push_all_door_and_the_sync_read_one_cap_and_one_order():
