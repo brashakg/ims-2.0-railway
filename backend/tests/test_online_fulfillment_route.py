@@ -6051,3 +6051,26 @@ def test_a_remap_that_fills_the_moved_line_at_the_new_shop_says_so(world):
     assert out["status"] == "rerouted", out
     assert "preorder_awaiting_stock" not in db.orders.find_one({"order_id": oid})
     assert _preorder_notes(world, oid) == {"BV-RAN-01": "This pre-order now waits at, or was filled by, another shop."}
+
+
+def test_a_split_wait_switched_off_is_not_filled_by_the_other_shop(world, monkeypatch):
+    """Delta review of #1244 (c): RB x2 split -- Bokaro's unit claimed at
+    booking, Ranchi's waits. Page types switched off, clear-hold while Ranchi
+    still has none: Ranchi is still routed for RB, so Bokaro filling ITS
+    share is not "filled by another shop" -- Ranchi's task says it is no
+    longer a pre-order, and its unit is the oversell."""
+    db = _pre_order_world(world)
+    _stock(db, "BV-BOK-01", "P-RB", 1)
+    world["shop"].fo(FO_1, LOC_BOK, lines=[(9000, 1)])
+    world["shop"].fo(FO_2, LOC_RAN, lines=[(9000, 1)])
+    res, order = _book(world, _order(64093, lines=(("RB-1234", 2),)))
+    oid = res["order_id"]
+    assert _sold_at(db, oid) == ["BV-BOK-01"]
+    assert [w["store_id"] for w in order["preorder_awaiting_stock"]] == ["BV-RAN-01"], order
+    db.system_settings.update_one({"_id": "default"}, {"$set": {"web_page_types_enabled": False}})
+
+    out = _clear_hold(world, monkeypatch, oid)
+
+    assert getattr(out, "status_code", None) == 409, out
+    assert _open_miss_tasks(world, oid) == ["BV-RAN-01"]
+    assert _preorder_notes(world, oid)["BV-RAN-01"].startswith("No longer a pre-order")

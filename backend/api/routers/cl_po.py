@@ -158,7 +158,11 @@ def _read_gap_planner_needs(
                 "add": d.get("add"),
                 "qty": rp - avail,
                 "description": desc,
-                "unit_price": line.get("cost_price") or 0.0,
+                # A stock cell is ONE lens; a lens line's cost is per PAIR (owner
+                # 2026-10-19: ZEISS prices per pair). ponytail: assumes every
+                # lens_catalog cost is per pair; add a price-basis field on the
+                # line if per-lens costs ever get keyed in.
+                "unit_price": float(line.get("cost_price") or 0.0) / 2,
             }
         )
     return needs

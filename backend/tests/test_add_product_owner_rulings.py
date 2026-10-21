@@ -309,11 +309,27 @@ def test_f12_a_live_listing_whose_brand_is_switched_off_is_named_in_the_run(monk
     assert "still live" in run["failures"][0]["error"]
 
 
+class _Conn:
+    """Shaped like database.connection.SeededDatabaseConnection: what get_db()
+    really returns. NOT subscriptable -- the route must unwrap .db."""
+
+    def __init__(self, db):
+        self._db = db
+        self.is_connected = getattr(db, "is_connected", True)
+
+    @property
+    def db(self):
+        return self._db
+
+    def get_collection(self, name):
+        return self._db.get_collection(name)
+
+
 def _verdict(monkeypatch, db, brand, locks=None):
     """GET /products/website-verdict -- what the Add/Edit form's line reads."""
     from api.services import policy_engine as pe
 
-    monkeypatch.setattr(deps, "get_db", lambda: db)
+    monkeypatch.setattr(deps, "get_db", lambda: _Conn(db) if db is not None else None)
     monkeypatch.setattr(pe, "get_policy", lambda key, default=None: (
         locks if key == "ecom.shopify_push_locks" and locks is not None else default))
     return _run(prod_router.get_website_verdict(brand=brand, current_user=_ADMIN))

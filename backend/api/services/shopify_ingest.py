@@ -787,9 +787,11 @@ def _settle_preorder_wait(
         still = {str(w["product_id"]) for w in waiting}
 
         def _elsewhere(shop: str, pid: str) -> bool:
-            return pid in still or any(
+            # Only once this shop is no longer routed for it: a split's other
+            # shop filling ITS share says nothing about this shop's.
+            return (shop, pid) not in shortfall and (pid in still or any(
                 s != shop and p == pid and q <= 0 for (s, p), q in shortfall.items()
-            )
+            ))
 
         for shop in sorted({str(w.get("store_id")) for w in before} - {str(w["store_id"]) for w in waiting}):
             pids = {str(w.get("product_id")) for w in before if str(w.get("store_id")) == shop}
