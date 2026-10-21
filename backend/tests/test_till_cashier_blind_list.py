@@ -29,7 +29,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, Dict, List
 
 import pytest
@@ -40,6 +40,7 @@ os.environ.setdefault("ENVIRONMENT", "test")
 
 from strict_fakes import StrictDB  # noqa: E402
 from api.services import eod_tally as till  # noqa: E402
+from api.utils import ist as ist_clock  # noqa: E402
 from api.utils.ist import ist_day_start_utc, ist_today  # noqa: E402
 
 
@@ -139,7 +140,18 @@ def _manager(uid="M1", store="BV-1"):
     }
 
 
-TODAY = ist_today().isoformat()
+# One frozen IST instant for the whole file. TODAY used to be read once at
+# import while the route and the seeded orders read the clock again later, so
+# a run that crossed IST midnight opened the drawer for yesterday and seeded
+# today's sales -- 3 tests failed with nothing wrong in the code. Every
+# "today" here and in the till code goes through api.utils.ist.now_ist.
+_FROZEN_NOW = datetime(2026, 10, 15, 12, 0, tzinfo=ist_clock.IST)
+TODAY = _FROZEN_NOW.date().isoformat()
+
+
+@pytest.fixture(autouse=True)
+def _frozen_ist_clock(monkeypatch):
+    monkeypatch.setattr(ist_clock, "now_ist", lambda: _FROZEN_NOW)
 
 
 def _seed_cash_order(db, rupees: float, order_id="O1", store_id="BV-1"):
