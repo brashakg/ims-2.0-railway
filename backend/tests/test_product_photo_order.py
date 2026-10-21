@@ -295,10 +295,11 @@ def test_a_stale_singular_image_url_never_outranks_photo_1(db, gates, monkeypatc
     assert res.photos["reordered"] is True
 
 
-def test_the_scheduled_sync_carries_a_reorder_and_never_first_publishes(world, monkeypatch):  # noqa: F811
+def test_the_scheduled_sync_carries_a_reorder_and_first_publishes(world, monkeypatch):  # noqa: F811
     """The 01:00 / 09:00 IST live sync: the live product's reorder goes out as
-    one reorder call; a reordered product that was never published stays for
-    a human's first press (owner rule)."""
+    one reorder call; a reordered product that was never published is now
+    first-published by the same run (owner ruling 2026-10-20, overturning the
+    09-06 "first publish is a human press")."""
     db, _audit = world
     monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: True)
     monkeypatch.setenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", "gid://shopify/Publication/1")
@@ -320,9 +321,11 @@ def test_the_scheduled_sync_carries_a_reorder_and_never_first_publishes(world, m
 
     run = _run(ls.sync_live_products(db, trigger="scheduled", actor="u-super"))
 
-    assert run["awaiting_first_publish"] == 1
-    assert fake.calls_of("imsProductCreate") == [], "a first publish stays a human press"
-    assert _media_ops(fake) == ["imsProductReorderMedia"], _media_ops(fake)
+    assert run["awaiting_first_publish"] == 0 and run["first_published"] == 1
+    assert len(fake.calls_of("imsProductCreate")) == 1, "the sync first-publishes P-new"
+    # Live product: ONE reorder, nothing re-uploaded. P-new: its photos go up
+    # with its create, after the live pass.
+    assert _media_ops(fake) == ["imsProductReorderMedia", "imsProductCreateMedia"], _media_ops(fake)
     (re,) = fake.calls_of("imsProductReorderMedia")
     assert re["variables"]["id"] == GID
     assert _apply_moves([_m(1), _m(2), _m(3)], re["variables"]["moves"]) == [
