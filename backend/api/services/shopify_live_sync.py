@@ -14,11 +14,16 @@ policy registry) and manually-pressable sweep that re-pushes every catalogue
 product that is ALREADY ON SHOPIFY (carries an ``ecom.shopify_product_id``)
 and has been edited since (``ecom.locally_modified``).
 
-WHAT THIS IS NOT
-----------------
-It never publishes a product for the FIRST time. A dirty product with no
-Shopify gid is counted as ``awaiting_first_publish`` and left alone: the older
-"flag only" ruling still governs new products -- a human presses Publish.
+FIRST PUBLISH TOO (owner ruling 2026-10-20: "SHOULD BE PUSHED BY AUTOMATIC
+SYNC TOO" -- overturns the 09-06 "first publish is a human press")
+------------------------------------------------------------------------
+A queued product with no Shopify gid is now first-published by the same run,
+through the SAME door as Online Store > Push all pending: ``queue_order``,
+``push_product_docs`` (``shopify_push.product_push_refusal`` first -- brand
+gate incl. never_sell_online, first_publish_not_ready, push locks -- then the
+engine's photo / price refusals) and at most ``PRODUCT_BATCH_CAP`` real sends
+per run. A refused product stays queued and is named in the run's failures;
+what the cap leaves is ``awaiting_first_publish`` and goes out next slot.
 
 ONE ENGINE, ONE SELECTION
 -------------------------
@@ -84,6 +89,9 @@ RUNS_COLLECTION = "online_sync_runs"
 # A live listing the product gate refuses (brand off the website, or push-
 # locked): named in the run's failures, still live at its last pushed price.
 LIVE_NOT_PUSHED = "LIVE_NOT_PUSHED"
+# A never-published product the product gate refuses (brand off the website,
+# not finished in IMS, push-locked): named in the run's failures, stays queued.
+FIRST_PUBLISH_REFUSED = "FIRST_PUBLISH_REFUSED"
 
 
 # ---------------------------------------------------------------------------
@@ -302,6 +310,57 @@ async def push_product_docs(
 
 
 # ---------------------------------------------------------------------------
+# THE BATCH CAP (owner ruling 2026-08-25 -- "one press, goes live")
+# ---------------------------------------------------------------------------
+# Pressing publish now puts products in front of customers immediately, so ONE
+# wrong press must affect a BOUNDED number of products, not the whole catalogue.
+# 25 is the sane default: small enough that a mistake is 25 listings to take
+# down one by one (POST /online-store/push/product/{id}/take-down), large enough that
+# the current ~59-item catalogue clears in three presses.
+#
+# This is a HARD SERVER-SIDE cap on the PRODUCT sweep, not a default the caller
+# can raise -- the frontend passes limit=100 explicitly, so a default nobody
+# reads would cap nothing. It deliberately does NOT clamp the other entities:
+# collections / menus / images / the variant-prices resync do not put a new
+# listing in front of a customer, and the resync PAGES through the whole mapped
+# set (OS-017) -- clamping it would just make that loop run out of pages.
+#
+# A capped sweep reports limit_reached=True, so the existing "run again to
+# continue" cue fires: a press that stopped early must never read as complete.
+#
+# The scheduled sync's FIRST-PUBLISH pass (owner ruling 2026-10-20) is held to
+# this SAME cap per run: an unattended 01:00 run must not be a bigger mistake
+# than one press. The rest stay queued for the next slot (or a press).
+# Lives here, not in the router, so both doors read the one number.
+PRODUCT_BATCH_CAP = 25
+
+
+def queue_order(doc: Dict) -> tuple:
+    """Where one dirty product sits in the press queue: NEVER-PUSHED rows first,
+    then the longest-waiting.
+
+    The cap above is a hard 25 and a withheld publish BURNS a slot (it really
+    did reach Shopify) *and* is re-queued -- so in natural collection order 25
+    permanently-stuck rows (a broken image host, an unpriced tranche) sit at the
+    front of EVERY press forever and the photographed, priced products behind
+    them never go live, however often the owner presses. That is the "run again
+    to continue" lie one layer down: the sentence promises progress a repeat
+    press cannot make.
+
+    `ecom.last_pushed_at` is stamped by _writeback_product on every row that
+    reached Shopify, and the re-queue preserves it (read-merge-write of the
+    whole sub-doc), so ordering by it drifts a stuck row to the BACK after its
+    first attempt -- the cap keeps meaning 25 real write attempts and the queue
+    drains. Stringified so a legacy ISO-string stamp and a datetime can never
+    raise on comparison.
+    """
+    stamp = (doc.get("ecom") or {}).get("last_pushed_at")
+    return (0, "") if not stamp else (1, str(stamp))
+
+
+
+
+# ---------------------------------------------------------------------------
 # Settings (read every tick)
 # ---------------------------------------------------------------------------
 
@@ -498,10 +557,11 @@ async def sync_live_products(
     slot: str = MANUAL_SLOT,
     limit: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Re-push every product that is already on Shopify AND dirty, then run
-    the stock pass (sync_stock_levels) over every listing whose per-shop
-    quantity changed. Never publishes a gid-less product (counted, not
-    pushed). Runs the
+    """Re-push every product that is already on Shopify AND dirty, then
+    FIRST-publish queued gid-less products (owner ruling 2026-10-20) through
+    the Push-all door -- at most PRODUCT_BATCH_CAP real sends, inside what the
+    ``limit`` ceiling has left -- then run the stock pass (sync_stock_levels)
+    over every listing whose per-shop quantity changed. Runs the
     engine behind the same three gates (DARK => SIMULATED, no network), writes
     the per-product audit rows with ``actor`` as user_id, and persists ONE
     run-summary doc in ``online_sync_runs``.
@@ -520,14 +580,40 @@ async def sync_live_products(
 
     dirty, taken_down_skipped = select_dirty_products(db)
     live = [d for d in dirty if (d.get("ecom") or {}).get("shopify_product_id")]
-    awaiting_first_publish = len(dirty) - len(live)
     mode = shopify_push.push_mode_status(db)["mode"]
 
     batch = await push_product_docs(
         db, live, current_user={"user_id": actor}, max_results=limit
     )
-    results = batch["results"]
-    pushed_ok = sum(1 for r in results if r.get("ok"))
+    pushed_ok = sum(1 for r in batch["results"] if r.get("ok"))
+
+    # FIRST PUBLISH (owner ruling 2026-10-20). The never-pushed rows, in the
+    # Push-all queue order, through the Push-all core with the Push-all cap:
+    # one gate, one engine, one number -- never a second publish path. The
+    # run ceiling bounds attempts across both passes (live re-pushes first).
+    # A gate refusal never takes a slot, so off-brand / unfinished rows can
+    # not starve the ones behind them; they stay queued and are named below.
+    never = sorted(
+        (d for d in dirty if not (d.get("ecom") or {}).get("shopify_product_id")),
+        key=queue_order,
+    )
+    first = await push_product_docs(
+        db,
+        never,
+        current_user={"user_id": actor},
+        max_results=max(0, limit - len(batch["results"])),
+        max_sent=PRODUCT_BATCH_CAP,
+    )
+    first_published = sum(1 for r in first["results"] if r.get("ok"))
+    # Only a LIVE success leaves the queue (a SIMULATED plan published
+    # nothing); every other row is still waiting for its first publish.
+    awaiting_first_publish = len(never) - sum(
+        1
+        for r in first["results"]
+        if r.get("ok") and r.get("mode") == shopify_push.MODE_LIVE
+    )
+
+    results = batch["results"] + first["results"]
     refused_no_photo = sum(1 for r in results if r.get("reason") == "no_photo")
     publish_withheld = sum(1 for r in results if r.get("reason") == "publish_withheld")
     # Live, but at the OLD price (ok=True + code): its own count, and it rides
@@ -544,7 +630,7 @@ async def sync_live_products(
         for r in results
         if not r.get("ok") and r.get("reason") not in ("no_photo", "publish_withheld")
     )
-    by_id = {(d.get("id") or d.get("product_id")): d for d in live}
+    by_id = {(d.get("id") or d.get("product_id")): d for d in dirty}
     failures = []
     for r in results:
         if r.get("ok") and not r.get("code"):
@@ -575,6 +661,18 @@ async def sync_live_products(
                 "reason": refusal,
                 "error": "%s -- still live on the website at its last pushed price; "
                 "take it down (Online Store > Take down) or switch the brand on" % refusal,
+            }
+        )
+    # NOT FIRST-PUBLISHED: the gate's reason, per product; it stays queued.
+    for doc, refusal in first["refused"]:
+        failures.append(
+            {
+                "product_id": doc.get("id") or doc.get("product_id"),
+                "sku": doc.get("sku"),
+                "name": doc.get("name") or doc.get("title"),
+                "code": FIRST_PUBLISH_REFUSED,
+                "reason": refusal,
+                "error": "%s -- not on the website yet; stays queued" % refusal,
             }
         )
 
@@ -612,12 +710,17 @@ async def sync_live_products(
         "publish_withheld": publish_withheld,
         "price_not_synced": price_not_synced,
         "photos_not_synced": photos_not_synced,
+        "first_publish_queued": len(never),
+        "first_published": first_published,
+        "first_publish_refused": len(first["refused"]),
+        "first_publish_cap": PRODUCT_BATCH_CAP,
+        "first_publish_cap_reached": first["cap_reached"],
         "awaiting_first_publish": awaiting_first_publish,
         "taken_down_skipped": taken_down_skipped,
-        "blocked_skipped": batch["blocked_skipped"],
+        "blocked_skipped": batch["blocked_skipped"] + first["blocked_skipped"],
         "live_not_pushed": len(batch["refused"]),
         "limit": limit,
-        "limit_reached": batch["limit_reached"],
+        "limit_reached": batch["limit_reached"] or first["limit_reached"],
         "failures": failures,
         "collections": collections,
         "stock": {
@@ -639,10 +742,10 @@ async def sync_live_products(
     logger.info(
         "[LIVE-SYNC] %s run (%s) mode=%s selected=%s ok=%s failed=%s "
         "refused=%s withheld=%s price_not_synced=%s photos_not_synced=%s "
-        "awaiting_first_publish=%s",
+        "first_published=%s first_publish_refused=%s awaiting_first_publish=%s",
         trigger, slot, mode, len(live), pushed_ok, failed,
         refused_no_photo, publish_withheld, price_not_synced, photos_not_synced,
-        awaiting_first_publish,
+        first_published, len(first["refused"]), awaiting_first_publish,
     )
     return _serialise_run(run)
 

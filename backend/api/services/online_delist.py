@@ -31,7 +31,9 @@ taken_down_at) clobbered by that stale copy.
 REACTIVATION: is_active back to true queues the twin (ecom.locally_modified)
 and lifts the take-down marker, so the next press / scheduled live sync puts
 it back. No automatic republish here -- and only for a product that already
-has a gid: a never-pushed product's FIRST publish stays a human press.
+has a gid: a never-pushed product is not queued here (its FIRST publish goes
+out from the queue, by a press or -- owner ruling 2026-10-20 -- the scheduled
+sync, behind the product gate).
 """
 from __future__ import annotations
 

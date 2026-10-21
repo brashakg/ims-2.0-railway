@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -165,8 +166,10 @@ def brand_name_key(name: Any) -> str:
     (anything not a letter or digit, incl. "_", dashes, dots, apostrophes and
     zero-width spaces): "Ray-Ban" == "ray ban" == "RAY.BAN". Used where a
     near-spelling must not slip past the Never-sell-online block. A completely
-    different name ("Hugo Boss" for "Boss") is NOT caught."""
-    return re.sub(r"[\W_]+", "", str(name or "")).casefold()
+    different name ("Hugo Boss" for "Boss") is NOT caught. NFKC first, so a
+    full-width or maths-letter look-alike (U+FF32 full-width R, U+1D411
+    maths bold R) collapses to the same key (review of #1245)."""
+    return re.sub(r"[\W_]+", "", unicodedata.normalize("NFKC", str(name or ""))).casefold()
 
 
 def blocked_brand_row(rows, brand_name: str) -> Optional[Dict[str, Any]]:

@@ -551,7 +551,7 @@ export default function OnlineShopifySyncPage() {
       const withheld = Number(run?.publish_withheld ?? 0);
       const stockBad = run?.stock?.ok === false;
       const line =
-        `Live sync (${where}): ${run?.pushed_ok ?? 0} updated, ${run?.failed ?? 0} failed, ` +
+        `Live sync (${where}): ${run?.pushed_ok ?? 0} updated, ${run?.first_published ?? 0} first published, ${run?.failed ?? 0} failed, ` +
         `${run?.awaiting_first_publish ?? 0} awaiting first publish` +
         (withheld ? `, ${withheld} NOT made visible` : '') +
         (stockBad
@@ -983,6 +983,7 @@ export default function OnlineShopifySyncPage() {
             </p>
             <p className="mt-1">
               <span className="font-medium">{fmt(lastRun.pushed_ok)}</span> updated ·{' '}
+              {(lastRun.first_published ?? 0) > 0 && <>{fmt(lastRun.first_published)} first published · </>}
               <span className={(lastRun.failed ?? 0) > 0 ? 'font-medium text-red-700' : 'font-medium'}>
                 {fmt(lastRun.failed)}
               </span>{' '}

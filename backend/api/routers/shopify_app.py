@@ -187,7 +187,8 @@ async def _last_sync(db) -> Tuple[str, str]:
         return "warn", f"{off}The sync that started {_ist(run.get('started_at'))} has not finished."
     failed = int(run.get("failed") or 0)
     stock_ok = bool((run.get("stock") or {}).get("ok", True))
-    line = f"{off}{when}: {int(run.get('pushed_ok') or 0)} updated, {failed} failed"
+    line = f"{off}{when}: {int(run.get('pushed_ok') or 0)} updated, "
+    line += f"{int(run.get('first_published') or 0)} published for the first time, {failed} failed"
     line += "" if stock_ok else ", stock update failed"
     line += f"; {int(run.get('awaiting_first_publish') or 0)} awaiting their first publish."
     preview = run.get("mode") != shopify_push.MODE_LIVE

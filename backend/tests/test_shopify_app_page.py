@@ -260,7 +260,7 @@ def test_all_healthy_reads_green_in_plain_english(happy):
     assert {lvl for lvl, _ in items.values()} == {"ok"}, items
     assert "2 of 2 shops linked: Bokaro, Dhanbad." in items["Shops linked to Shopify locations"][1]
     sync = items["Last scheduled sync"][1]
-    assert "18 Oct 2026, 09:00 AM IST: 4 updated, 0 failed; 2 awaiting their first publish." in sync
+    assert "18 Oct 2026, 09:00 AM IST: 4 updated, 0 published for the first time, 0 failed; 2 awaiting their first publish." in sync
     notes = items["Notifications from Shopify"][1]
     assert f"{len(ALL_TOPICS)} of {len(ALL_TOPICS)} notification types" in notes
     assert "08:30 AM IST" in notes  # the signature-verified row, not the later unverified one

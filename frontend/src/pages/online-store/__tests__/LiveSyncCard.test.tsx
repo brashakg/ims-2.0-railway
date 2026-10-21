@@ -218,7 +218,7 @@ describe('Live sync card', () => {
     await waitFor(() => expect(pushApi.syncLiveNow).toHaveBeenCalledTimes(1));
     expect(toastCalls).toContainEqual({
       kind: 'success',
-      msg: 'Live sync (dry-run (SIMULATED)): 3 updated, 0 failed, 4 awaiting first publish',
+      msg: 'Live sync (dry-run (SIMULATED)): 3 updated, 0 first published, 0 failed, 4 awaiting first publish',
     });
     // DARK: no confirm dialog was needed; the status is re-read afterwards.
     await waitFor(() => expect(pushApi.getStatus).toHaveBeenCalledTimes(2));
@@ -247,7 +247,7 @@ describe('Live sync card', () => {
     await waitFor(() => expect(pushApi.syncLiveNow).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(toastCalls.some((t) => t.kind === 'warning')).toBe(true));
     const warn = toastCalls.find((t) => t.kind === 'warning')!;
-    expect(warn.msg).toContain('0 updated, 0 failed, 0 awaiting first publish, 1 NOT made visible');
+    expect(warn.msg).toContain('0 updated, 0 first published, 0 failed, 0 awaiting first publish, 1 NOT made visible');
     expect(warn.msg).toContain('stock pass NOT ok [STOCK_TRACKING_FAILED]');
     expect(warn.msg).toContain('WITHOUT LIMIT');
     expect(toastCalls.filter((t) => t.kind === 'success')).toEqual([]);

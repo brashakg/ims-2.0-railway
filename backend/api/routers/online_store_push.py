@@ -59,8 +59,10 @@ logger = logging.getLogger(__name__)
 # live-sync service so the manual sweep and the scheduled sync run ONE code
 # path; re-imported by their old names so nothing else here moved.
 from ..services.shopify_live_sync import (  # noqa: F401
+    PRODUCT_BATCH_CAP,
     all_docs as _all_docs,
     connected_db as _get_db,
+    queue_order as _queue_order,
     variants_for_product as _get_variants_for_product,
     write_push_audit as _write_audit,
 )
@@ -71,50 +73,6 @@ router = APIRouter()
 # of the Online Store module). SUPERADMIN is auto-granted by require_roles, so it
 # is not repeated in the tuple but IS listed in every POLICY row.
 _PUSH_ROLES = ("ADMIN",)
-
-
-# ---------------------------------------------------------------------------
-# THE BATCH CAP (owner ruling 2026-08-25 -- "one press, goes live")
-# ---------------------------------------------------------------------------
-# Pressing publish now puts products in front of customers immediately, so ONE
-# wrong press must affect a BOUNDED number of products, not the whole catalogue.
-# 25 is the sane default: small enough that a mistake is 25 listings to take
-# down one by one (the /product/{id}/take-down route below), large enough that
-# the current ~59-item catalogue clears in three presses.
-#
-# This is a HARD SERVER-SIDE cap on the PRODUCT sweep, not a default the caller
-# can raise -- the frontend passes limit=100 explicitly, so a default nobody
-# reads would cap nothing. It deliberately does NOT clamp the other entities:
-# collections / menus / images / the variant-prices resync do not put a new
-# listing in front of a customer, and the resync PAGES through the whole mapped
-# set (OS-017) -- clamping it would just make that loop run out of pages.
-#
-# A capped sweep reports limit_reached=True, so the existing "run again to
-# continue" cue fires: a press that stopped early must never read as complete.
-PRODUCT_BATCH_CAP = 25
-
-
-def _queue_order(doc: Dict) -> tuple:
-    """Where one dirty product sits in the press queue: NEVER-PUSHED rows first,
-    then the longest-waiting.
-
-    The cap above is a hard 25 and a withheld publish BURNS a slot (it really
-    did reach Shopify) *and* is re-queued -- so in natural collection order 25
-    permanently-stuck rows (a broken image host, an unpriced tranche) sit at the
-    front of EVERY press forever and the photographed, priced products behind
-    them never go live, however often the owner presses. That is the "run again
-    to continue" lie one layer down: the sentence promises progress a repeat
-    press cannot make.
-
-    `ecom.last_pushed_at` is stamped by _writeback_product on every row that
-    reached Shopify, and the re-queue preserves it (read-merge-write of the
-    whole sub-doc), so ordering by it drifts a stuck row to the BACK after its
-    first attempt -- the cap keeps meaning 25 real write attempts and the queue
-    drains. Stringified so a legacy ISO-string stamp and a datetime can never
-    raise on comparison.
-    """
-    stamp = (doc.get("ecom") or {}).get("last_pushed_at")
-    return (0, "") if not stamp else (1, str(stamp))
 
 
 # ---------------------------------------------------------------------------
@@ -440,10 +398,12 @@ async def sync_live_now(
     (services/shopify_live_sync.sync_live_products): every product ALREADY on
     Shopify that was edited in IMS is re-pushed through the same engine and
     the same three gates (DARK => SIMULATED, no network). A dirty product that
-    was never pushed is counted as awaiting_first_publish and NOT published --
-    first publish stays a human press on the product itself. Honours the
-    max_products_per_run setting; one audit row per product with the caller
-    as actor; one run-summary doc in online_sync_runs. No DB -> 503."""
+    was never pushed is FIRST-published too (owner ruling 2026-10-20 -- it
+    overturns 09-06's "first publish is a human press"), through the same
+    product gate and the same PRODUCT_BATCH_CAP as Push all pending; the rest
+    is counted as awaiting_first_publish. Honours the max_products_per_run
+    setting; one audit row per product with the caller as actor; one
+    run-summary doc in online_sync_runs. No DB -> 503."""
     db = _require_db()
     run = await live_sync.sync_live_products(
         db, trigger="manual", actor=current_user.get("user_id") or "unknown"

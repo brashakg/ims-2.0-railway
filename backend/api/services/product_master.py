@@ -2650,9 +2650,10 @@ def _build_pim_doc(
             # loop) and the `pending` count on the Online Store screen
             # (online_store_push._product_counts) -- so the screen reported
             # "pending: 0" while nothing had been queued: a SILENT miss, not an
-            # error. Queuing is NOT publishing: a human still presses the push
-            # button, and the flag is cleared only by a SUCCESSFUL Shopify write
-            # (shopify_push._writeback_product).
+            # error. Queuing is not yet publishing: the next press or the
+            # scheduled sync sends it (a FIRST publish too, owner ruling
+            # 2026-10-20) through the product gate, and the flag is cleared only
+            # by a SUCCESSFUL Shopify write (shopify_push._writeback_product).
             "locally_modified": True,
             "handle": handle or None,
             "seo": {
@@ -4170,9 +4171,10 @@ def queue_model_listing(db, lead: Optional[Dict[str, Any]]) -> None:
     """The model's website listing -- its LEAD's twin -- goes in the push
     queue with a fresh edit revision (G2, owner 2026-10-18: a colour or size
     added to, edited in or taken out of a model changes the model's listing:
-    its colours, prices, photos, 'Available colours'). Queuing is not
-    publishing: the scheduled sync only updates listings already on Shopify,
-    a first publish stays the explicit press. A lead twin that is itself a
+    its colours, prices, photos, 'Available colours'). Queuing is not yet
+    publishing: the next press or the scheduled sync sends it -- a first
+    publish too since the owner ruling of 2026-10-20 -- through the product
+    gate (shopify_push.product_push_refusal). A lead twin that is itself a
     variant is never queued. Fail-soft (the IMS write stands)."""
     if db is None or not lead:
         return
@@ -4732,7 +4734,8 @@ def mirror_update_to_catalog_twin(
     Fail-soft: never raises; a mirror error is logged and the spine save
     stands -- False then (True = written, or nothing to write), so a door
     whose field must land on both copies (Manage Barcode's gtin) can say it
-    did not. Queuing is not publishing: a human still presses the push button.
+    did not. Queuing is not yet publishing: the next press or the scheduled
+    sync sends it (a first publish too, owner ruling 2026-10-20).
     """
     if "attributes" in (patch or {}):
         _refresh_family_of(db, current)
