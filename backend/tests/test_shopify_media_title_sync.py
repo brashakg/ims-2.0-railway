@@ -577,7 +577,9 @@ def test_live_sync_runs_the_stock_pass_once_after_the_products(world, monkeypatc
 
     run = _run(ls.sync_live_products(db, trigger="manual", actor="u-super"))
 
-    assert seen == [1], "the stock pass must run exactly once, after the product pass"
+    # Two product rows first: the live re-push AND the never-pushed product's
+    # first publish (owner ruling 2026-10-20), so the stock pass covers both.
+    assert seen == [2], "the stock pass must run exactly once, after the product passes"
     assert run["stock"] == {
         "ok": True, "changed": 3, "synced": 2, "failed": 1, "code": None, "error": None,
     }

@@ -1353,9 +1353,10 @@ def _mark_online_dirty(product: Dict) -> None:
 
     The `ecom` sub-doc is created when absent: a doc with no `ecom` is not even
     counted as `staged`, so the flag would have nowhere to live and the count
-    would stay blind. Queuing is NOT publishing -- a human still presses the
-    button, and only a SUCCESSFUL Shopify write clears the flag again
-    (shopify_push._writeback_product)."""
+    would stay blind. Queuing is not yet publishing: the next press or the
+    scheduled sync sends it (a FIRST publish too, owner ruling 2026-10-20),
+    through the product gate, and only a SUCCESSFUL Shopify write clears the
+    flag again (shopify_push._writeback_product)."""
     ecom = product.get("ecom")
     if not isinstance(ecom, dict):
         ecom = {}
@@ -3697,8 +3698,9 @@ def _restore_product(
     back EXACTLY as it was before the archive -- switched on only if it was
     on then (a product switched off before it was archived comes back
     switched off) -- and an audit row written. NOT re-published online
-    (owner 2026-10-12: a first publish stays a human press) -- the twin is
-    saved clean and no republish is queued, and the take-down marker
+    (owner 2026-10-12) -- the twin is saved clean and no republish is queued,
+    so not even the scheduled sync (which first-publishes QUEUED rows since
+    the 2026-10-20 ruling) picks it up, and the take-down marker
     (ecom.taken_down_at) stays. One case cannot be both: a product whose SKU
     is on a listing live on the website (a size whose parent listing is up,
     or a take-down that failed). Its is_active is the only thing keeping it

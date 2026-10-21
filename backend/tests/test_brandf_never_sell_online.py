@@ -292,6 +292,25 @@ def test_a_near_spelling_product_brand_is_still_refused(spelling):
     assert _BLOCK in brand_website_refusal(_db(), spelling)
 
 
+@pytest.mark.parametrize("spelling", [
+    "Ｒａｙ-Ｂａｎ",  # full-width Ray-Ban
+    "𝐑ay-Ban",  # maths bold R
+    "Ray-Ban™",  # trade mark sign: NFKC alone makes it "...TM"
+    "Ray-Ban℠",  # service mark sign -> "SM"
+    "Ray-Ban№",  # numero sign -> "No"
+])
+def test_a_unicode_look_alike_of_a_blocked_brand_is_refused(spelling):
+    """Review of #1245: NFKC before the punctuation strip, so a full-width or
+    maths-letter spelling collapses to the blocked brand's key."""
+    from api.services.catalog_dictionary import brand_name_key
+
+    assert brand_name_key(spelling) == brand_name_key("Ray-Ban") == "rayban"
+    db = _db()
+    db["brand_masters"].insert_one({"brand_id": "brandf_rb", "name": "Ray-Ban", "is_active": True,
+                                    "sync_to_shopify_default": True, "never_sell_online": True})
+    assert _BLOCK in brand_website_refusal(db, spelling)
+
+
 def test_a_different_name_is_not_caught_by_the_block():
     """Matching ignores case, spaces and punctuation only."""
     assert brand_website_refusal(_db(), "BrandfOk") is None

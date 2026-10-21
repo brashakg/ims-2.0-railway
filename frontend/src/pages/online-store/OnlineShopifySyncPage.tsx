@@ -551,8 +551,10 @@ export default function OnlineShopifySyncPage() {
       const withheld = Number(run?.publish_withheld ?? 0);
       const stockBad = run?.stock?.ok === false;
       const line =
-        `Live sync (${where}): ${run?.pushed_ok ?? 0} updated, ${run?.failed ?? 0} failed, ` +
+        `Live sync (${where}): ${run?.pushed_ok ?? 0} updated, ${run?.first_published ?? 0} ` +
+        `${run?.mode === 'LIVE' ? 'first published' : 'would be first published'}, ${run?.failed ?? 0} failed, ` +
         `${run?.awaiting_first_publish ?? 0} awaiting first publish` +
+        (run?.first_publish_not_checked ? ` (${run.first_publish_not_checked} not yet checked this run)` : '') +
         (withheld ? `, ${withheld} NOT made visible` : '') +
         (stockBad
           ? ` · stock pass NOT ok${run?.stock?.code ? ` [${run.stock.code}]` : ''}${run?.stock?.error ? ` — ${run.stock.error}` : ''}`
@@ -983,10 +985,16 @@ export default function OnlineShopifySyncPage() {
             </p>
             <p className="mt-1">
               <span className="font-medium">{fmt(lastRun.pushed_ok)}</span> updated ·{' '}
+              {(lastRun.first_published ?? 0) > 0 && (
+                <>
+                  {fmt(lastRun.first_published)} {lastRun.mode === 'LIVE' ? 'first published' : 'would be first published'} ·{' '}
+                </>
+              )}
               <span className={(lastRun.failed ?? 0) > 0 ? 'font-medium text-red-700' : 'font-medium'}>
                 {fmt(lastRun.failed)}
               </span>{' '}
               failed · <span className="font-medium">{fmt(lastRun.awaiting_first_publish)}</span> awaiting first publish
+              {(lastRun.first_publish_not_checked ?? 0) > 0 && <> ({fmt(lastRun.first_publish_not_checked)} not yet checked this run)</>}
               {(lastRun.refused_no_photo ?? 0) > 0 && <> · {fmt(lastRun.refused_no_photo)} refused (no photo)</>}
               {(lastRun.publish_withheld ?? 0) > 0 && <> · {fmt(lastRun.publish_withheld)} withheld</>}
               {(lastRun.price_not_synced ?? 0) > 0 && <> · {fmt(lastRun.price_not_synced)} at the OLD price</>}

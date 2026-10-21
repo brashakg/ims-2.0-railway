@@ -1557,7 +1557,13 @@ export interface LiveSyncRun {
   price_not_synced?: number | null;
   /** Live, but a photo step failed (PHOTOS_NOT_SYNCED): the website's photos are not IMS's, in IMS's order. Still queued. */
   photos_not_synced?: number | null;
-  /** Dirty products with NO Shopify id: never synced -- first publish is a human press. */
+  /** First-published by this run (owner ruling 2026-10-20; SIMULATED in a dry-run). */
+  first_published?: number | null;
+  /** Never-published products the product gate refused this run (named in failures). */
+  first_publish_refused?: number | null;
+  /** Never-published products the cap / run ceiling stopped before they were checked (not refused). */
+  first_publish_not_checked?: number | null;
+  /** Dirty products with NO Shopify id still waiting after this run (refused, failed, or past the batch cap). */
   awaiting_first_publish?: number | null;
   taken_down_skipped?: number | null;
   blocked_skipped?: number | null;

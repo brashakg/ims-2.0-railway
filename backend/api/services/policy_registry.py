@@ -1215,8 +1215,9 @@ _REGISTRY_LIST: List[PolicySpec] = [
         group="Shopify live sync",
         label="Scheduled live-product sync enabled",
         help="Re-push every product ALREADY on Shopify that was edited in IMS, at "
-        "the configured IST times. Never publishes a new product (that stays a "
-        "human press). OFF = only the manual button syncs.",
+        "the configured IST times, and first-publish up to 100 queued new products "
+        "per run that pass the website checks (owner ruling 2026-10-20). OFF = "
+        "only the manual buttons push.",
     ),
     _spec(
         key=LIVE_SYNC_SLOTS_KEY,

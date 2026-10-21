@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("JWT_SECRET_KEY", "test")
 os.environ.setdefault("ENVIRONMENT", "test")
 
+from api.services import catalog_dictionary  # noqa: E402
 from api.services import policy_engine as pe  # noqa: E402
 from api.services import policy_registry as reg  # noqa: E402
 from api.services import rbac_policy as rbac  # noqa: E402
@@ -39,6 +40,10 @@ from api.services import shopify_live_sync as ls  # noqa: E402
 from api.services import shopify_push  # noqa: E402
 from api.utils.ist import IST  # noqa: E402
 from tests.strict_fakes import StrictDB  # noqa: E402
+
+# The REAL brand gate, captured before the module-wide fixture stubs it, for
+# the first-publish test that seeds real Brand Master rows.
+_REAL_BRAND_REFUSAL = catalog_dictionary.brand_website_refusal
 
 # The push's other mechanics, for a brand that IS for the website (owner D6;
 # the brand rule has its own test in test_add_product_owner_rulings.py).
@@ -103,7 +108,7 @@ def _seed_products(db):
         [
             {"id": "P-live", "sku": "S1", "title": "Live edited", "brand": "RB", "mrp": 1000, "images": PHOTO,
              "ecom": {"shopify_product_id": "gid://shopify/Product/1", "locally_modified": True}},
-            {"id": "P-new", "sku": "S2", "title": "Never pushed", "brand": "RB", "images": PHOTO,
+            {"id": "P-new", "sku": "S2", "title": "Never pushed", "brand": "RB", "mrp": 1000, "images": PHOTO,
              "ecom": {"locally_modified": True, "status": "PUBLISHED"}},
             {"id": "P-clean", "sku": "S3", "title": "Live clean", "images": PHOTO,
              "ecom": {"shopify_product_id": "gid://shopify/Product/3"}},
@@ -142,22 +147,25 @@ def world(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Selection: already-live + dirty ONLY; never a first publish
+# Selection: dirty minus taken-down; live re-pushes, then first publishes
 # ---------------------------------------------------------------------------
 
 
-def test_only_live_dirty_products_are_synced_and_gidless_twins_are_counted(world):
+def test_dirty_products_are_synced_and_dark_first_publish_stays_queued(world):
     db, audit = world
     _seed_products(db)
 
     run = _run(ls.sync_live_products(db, trigger="manual", actor="u-super"))
 
-    assert run["selected"] == 1 and run["attempted"] == 1
-    assert run["awaiting_first_publish"] == 1  # P-new counted, NOT pushed
+    assert run["selected"] == 1 and run["attempted"] == 2
+    # P-new goes through the first-publish pass (owner 2026-10-20) -- DARK, so
+    # a SIMULATED plan: nothing went live, it is still awaiting its publish.
+    assert run["first_publish_queued"] == 1 and run["first_published"] == 1
+    assert run["awaiting_first_publish"] == 1
     assert run["taken_down_skipped"] == 1  # P-down never resurrected
     assert run["mode"] == "SIMULATED" and run["pushed_ok"] == 1 and run["failed"] == 0
     pushed_ids = [r["entity_id"] for r in audit.find_many({"action": "ONLINE_STORE_PUSH"})]
-    assert pushed_ids == ["P-live"]
+    assert pushed_ids == ["P-live", "P-new"]
     # The actor is on every audit row (a scheduled run stamps the scheduler id).
     assert {r["user_id"] for r in audit.rows} == {"u-super"}
     # Dark => a SIMULATED plan; the boom spy proves zero network.
@@ -206,7 +214,7 @@ def test_a_slot_is_never_run_twice_but_the_next_slot_runs(world):
     assert _run(ls.scheduled_tick(ist(2026, 9, 7, 1, 10))) is None
     assert _run(ls.scheduled_tick(ist(2026, 9, 7, 1, 40))) is None
     assert len(db["online_sync_runs"].docs) == 1
-    assert len(audit.rows) == 1  # one push, not three
+    assert len(audit.rows) == 2  # one run (P-live + P-new), not three
     # The next slot is a different key -> runs.
     second = _run(ls.scheduled_tick(ist(2026, 9, 7, 9, 0)))
     assert second is not None and second["slot"] == "2026-09-07 09:00"
@@ -337,11 +345,15 @@ def test_run_summary_is_persisted_and_failures_carry_code_and_message(world, mon
                 "awaiting_first_publish", "failures"):
         assert key in doc, key
     assert doc["status"] == "done" and doc["finished_at"] is not None
-    assert doc["failed"] == 1 and doc["pushed_ok"] == 0
+    assert doc["failed"] == 2 and doc["pushed_ok"] == 0 and doc["first_published"] == 0
     assert doc["failures"] == [{
         "product_id": "P-live", "sku": "S1", "name": "Live edited",
         "code": "PUBLISH_SCOPE_MISSING", "reason": None, "error": "Shopify said no",
+    }, {
+        "product_id": "P-new", "sku": "S2", "name": "Never pushed",
+        "code": "PUBLISH_SCOPE_MISSING", "reason": None, "error": "Shopify said no",
     }]
+    assert doc["awaiting_first_publish"] == 1  # a failed first publish stays queued
     # What the status endpoint reports: the same run, JSON-ready, plus the next slot.
     block = ls.status_block(db)
     assert block["last_run"]["run_id"] == run["run_id"] == doc["run_id"]
@@ -367,6 +379,171 @@ def test_idempotent_after_a_clean_run(world, monkeypatch):
     monkeypatch.setattr(shopify_push, "push_product", _ok)
     assert _run(ls.sync_live_products(db, trigger="manual", actor="u"))["selected"] == 1
     assert _run(ls.sync_live_products(db, trigger="manual", actor="u"))["selected"] == 0
+
+
+# ---------------------------------------------------------------------------
+# FIRST PUBLISH by the scheduled sync (owner ruling 2026-10-20: "SHOULD BE
+# PUSHED BY AUTOMATIC SYNC TOO")
+# ---------------------------------------------------------------------------
+
+
+def _new_row(i, **extra):
+    return {"id": f"N{i}", "sku": f"NS{i}", "title": f"New {i}", "brand": "RB", "mrp": 1000,
+            "images": PHOTO, "ecom": {"locally_modified": True}, **extra}
+
+
+@pytest.fixture
+def live_engine(monkeypatch):
+    """A LIVE engine stand-in: records each product it is handed and writes
+    back what a real LIVE push does (gid on a create, dirty flag cleared)."""
+    calls = []
+
+    async def _push(db, product, variants, blocked=None):
+        ecom = product.get("ecom") or {}
+        calls.append((product["id"], "update" if ecom.get("shopify_product_id") else "create"))
+        db["catalog_products"].update_one({"id": product["id"]}, {"$set": {
+            "ecom.shopify_product_id": ecom.get("shopify_product_id") or f"gid://shopify/Product/{product['id']}",
+            "ecom.locally_modified": False,
+        }})
+        return shopify_push.PushResult(mode="LIVE", entity="product", action=calls[-1][1],
+                                       target_id=product["id"], ok=True)
+
+    monkeypatch.setattr(shopify_push, "push_product", _push)
+    return calls
+
+
+def test_scheduled_sync_first_publishes_a_queued_product_and_still_syncs_live(world, live_engine):
+    db, audit = world
+    _seed_products(db)
+
+    run = _run(ls.scheduled_tick(ist(2026, 10, 21, 1, 0)))
+
+    # The already-live product still syncs as before (an update) ...
+    assert ("P-live", "update") in live_engine and run["pushed_ok"] == 1 and run["selected"] == 1
+    # ... and the never-published one is CREATED by the unattended run.
+    assert ("P-new", "create") in live_engine
+    assert run["first_published"] == 1 and run["awaiting_first_publish"] == 0
+    new = db["catalog_products"].find_one({"id": "P-new"})
+    assert new["ecom"]["shopify_product_id"] and new["ecom"]["locally_modified"] is False
+    # Taken down by hand: never re-listed, not even by the first-publish pass.
+    assert "P-down" not in {c[0] for c in live_engine}
+    assert {r["user_id"] for r in audit.rows} == {ls.SCHEDULER_ACTOR}
+
+
+def test_a_refused_product_is_not_first_published_and_is_named(world, live_engine, monkeypatch):
+    """The REAL product gate: a Never-sell-online brand and an unfinished
+    (archived) row are refused, stay queued, and ride the run's failures."""
+    db, _ = world
+    monkeypatch.setattr(catalog_dictionary, "brand_website_refusal", _REAL_BRAND_REFUSAL)
+    db.seed("brand_masters", [
+        {"brand_id": "b-ok", "name": "RB", "is_active": True, "sync_to_shopify_default": True},
+        {"brand_id": "b-no", "name": "NoWeb", "is_active": True, "sync_to_shopify_default": True,
+         "never_sell_online": True},
+    ])
+    db.seed("catalog_products", [
+        _new_row(1),
+        _new_row(2, brand="NoWeb"),
+        _new_row(3, deleted_at="2026-10-01T00:00:00+00:00"),
+    ])
+
+    run = _run(ls.scheduled_tick(ist(2026, 10, 21, 9, 0)))
+
+    assert [c[0] for c in live_engine] == ["N1"]
+    assert run["first_published"] == 1 and run["first_publish_refused"] == 2
+    assert run["awaiting_first_publish"] == 2 and run["first_publish_not_checked"] == 0
+    refused = {f["product_id"]: f for f in run["failures"] if f["code"] == ls.FIRST_PUBLISH_REFUSED}
+    assert set(refused) == {"N2", "N3"}
+    assert "has not allowed online selling" in refused["N2"]["reason"]
+    assert "archived" in refused["N3"]["reason"]
+    for pid in ("N2", "N3"):
+        row = db["catalog_products"].find_one({"id": pid})
+        assert row["ecom"]["locally_modified"] is True and not row["ecom"].get("shopify_product_id")
+
+
+def test_the_scheduled_first_publish_cap_is_100_and_the_rest_stay_queued(world, live_engine):
+    """Owner 2026-10-21: the background 01:00 / 09:00 run first-publishes up
+    to 100 (the ~433 backlog clears in ~4 syncs); the rest wait for the next."""
+    db, _ = world
+    cap = ls.FIRST_PUBLISH_CAP_PER_SYNC
+    assert cap == 100
+    db.seed("catalog_products", [_new_row(i) for i in range(cap + 3)])
+
+    run = _run(ls.scheduled_tick(ist(2026, 10, 21, 1, 0)))
+
+    assert len(live_engine) == cap and run["first_published"] == cap
+    assert run["first_publish_cap"] == cap and run["first_publish_cap_reached"] is True
+    assert run["awaiting_first_publish"] == 3
+    assert run["first_publish_not_checked"] == 3 and run["first_publish_refused"] == 0
+    left = [d for d in db["catalog_products"].docs if not d["ecom"].get("shopify_product_id")]
+    assert len(left) == 3 and all(d["ecom"]["locally_modified"] for d in left)
+    # The next slot continues where this one stopped.
+    nxt = _run(ls.scheduled_tick(ist(2026, 10, 21, 9, 0)))
+    assert nxt["first_published"] == 3 and nxt["awaiting_first_publish"] == 0
+
+
+def test_the_manual_sync_button_runs_in_the_request_so_keeps_the_press_cap(
+    client, world, live_engine
+):
+    """POST /sync-live awaits the sync INSIDE the HTTP request, so it keeps
+    the Push-all cap (25), never the scheduler's 100."""
+    db, _ = world
+    db.seed("catalog_products", [_new_row(i) for i in range(ls.PRODUCT_BATCH_CAP + 3)])
+    r = client.post("/api/v1/online-store/push/sync-live", headers=_headers(["ADMIN"]))
+    assert r.status_code == 200, r.text
+    run = r.json()["run"]
+    assert len(live_engine) == ls.PRODUCT_BATCH_CAP == 25
+    assert run["first_published"] == 25 and run["first_publish_cap"] == 25
+    assert run["first_publish_cap_reached"] is True and run["awaiting_first_publish"] == 3
+
+
+@pytest.fixture
+def photo_checking_engine(monkeypatch):
+    """The engine's own photo refusal (returns before any Shopify call, writes
+    nothing back) in front of a LIVE create -- the reviewer's #1251 probe."""
+    calls = []
+
+    async def _push(db, product, variants, blocked=None):
+        if not product.get("images"):
+            return shopify_push.PushResult(mode="BLOCKED", entity="product", action="skip",
+                                           target_id=product["id"], ok=False, reason="no_photo")
+        calls.append(product["id"])
+        db["catalog_products"].update_one({"id": product["id"]}, {"$set": {
+            "ecom.shopify_product_id": f"gid://shopify/Product/{product['id']}",
+            "ecom.locally_modified": False}})
+        return shopify_push.PushResult(mode="LIVE", entity="product", action="create",
+                                       target_id=product["id"], ok=True)
+
+    monkeypatch.setattr(shopify_push, "push_product", _push)
+    return calls
+
+
+def test_photo_less_rows_never_starve_the_first_publish(world, photo_checking_engine):
+    """210 photo-less never-pushed rows sit at the front of the queue (they
+    share queue_order's key and are never written back). They must not use
+    up the 200 run ceiling: the 5 photographed products behind them go out."""
+    db, _ = world
+    photoless = [_new_row(i) for i in range(210)]
+    for d in photoless:
+        d.pop("images")
+    good = [_new_row(1000 + i) for i in range(5)]
+    db.seed("catalog_products", photoless + good)
+
+    first = _run(ls.scheduled_tick(ist(2026, 10, 21, 1, 0)))
+    second = _run(ls.scheduled_tick(ist(2026, 10, 21, 9, 0)))
+
+    assert sorted(photo_checking_engine) == sorted(d["id"] for d in good)
+    assert first["first_published"] == 5 and first["refused_no_photo"] == 210
+    assert first["limit_reached"] is False and first["first_publish_not_checked"] == 0
+    assert first["awaiting_first_publish"] == 210
+    # The next slot: nothing new to publish, the photo-less still waiting.
+    assert second["first_published"] == 0 and second["awaiting_first_publish"] == 210
+
+
+def test_the_push_all_door_and_the_sync_read_one_cap_and_one_order():
+    from api.routers import online_store_push as router
+
+    assert router.PRODUCT_BATCH_CAP is ls.PRODUCT_BATCH_CAP
+    assert router._queue_order is ls.queue_order
 
 
 # ---------------------------------------------------------------------------

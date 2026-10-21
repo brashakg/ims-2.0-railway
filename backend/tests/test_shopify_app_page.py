@@ -260,11 +260,25 @@ def test_all_healthy_reads_green_in_plain_english(happy):
     assert {lvl for lvl, _ in items.values()} == {"ok"}, items
     assert "2 of 2 shops linked: Bokaro, Dhanbad." in items["Shops linked to Shopify locations"][1]
     sync = items["Last scheduled sync"][1]
-    assert "18 Oct 2026, 09:00 AM IST: 4 updated, 0 failed; 2 awaiting their first publish." in sync
+    assert "18 Oct 2026, 09:00 AM IST: 4 updated, 0 published for the first time, 0 failed; 2 awaiting their first publish." in sync
     notes = items["Notifications from Shopify"][1]
     assert f"{len(ALL_TOPICS)} of {len(ALL_TOPICS)} notification types" in notes
     assert "08:30 AM IST" in notes  # the signature-verified row, not the later unverified one
     assert items["Products on the website"][1].startswith("Shopify has 3 products. IMS has 5 set up")
+
+
+def test_a_preview_run_says_would_be_published_and_names_the_unchecked(happy, monkeypatch):
+    """A DARK run sent nothing: its first publishes are plans; rows the cap
+    stopped are told apart from refused ones (review of #1251)."""
+    monkeypatch.setattr(live_sync, "last_run", lambda db, trigger=None: {
+        "status": "done", "mode": "SIMULATED", "finished_at": "2026-10-18T03:30:00+00:00",
+        "pushed_ok": 0, "first_published": 100, "failed": 0, "awaiting_first_publish": 433,
+        "first_publish_not_checked": 333, "stock": {"ok": True},
+    })
+    line = _items(happy)["Last scheduled sync"][1]
+    assert "100 would be published for the first time" in line
+    assert "433 awaiting their first publish (333 not yet checked this run)." in line
+    assert "It was a preview run" in line
 
 
 def test_the_sync_line_reads_the_scheduled_runs(happy, monkeypatch):
