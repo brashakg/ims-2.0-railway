@@ -10,6 +10,11 @@ from ...utils.ist import (
 from ..auth import get_current_user, require_roles
 from ...dependencies import store_in_view
 from ...services.cost_mask import mask_cost
+from ...services.margin_basis import (
+    cost_by_product,
+    line_unit_cost,
+    order_revenue_ex_gst,
+)
 from ...dependencies import (
     get_order_repository,
     get_stock_repository,
@@ -20,7 +25,6 @@ from ...dependencies import (
 from ._shared import (
     _REPORT_FINANCE_ROLES,
     _item_revenue,
-    _order_revenue,
     _orders_in_window,
     router,
 )
@@ -64,17 +68,21 @@ async def expense_vs_revenue(
         end_dt=to_dt,
     )
 
-    revenue = sum(_order_revenue(o) for o in orders)
+    # Both sides ex-GST (services/margin_basis): revenue is the bills' taxable
+    # value and cost each line's unit cost -- its cost_at_sale, else the
+    # product's catalogue cost, as the P&L reads it. (A line never carries
+    # cost_price, so this read 0 and called the whole bill profit.)
+    revenue = sum(order_revenue_ex_gst(o) for o in orders)
+    cost_map = cost_by_product(get_db())
     cost = 0.0
 
     for order in orders:
         for item in order.get("items", []):
             try:
-                unit_cost = float(item.get("cost_price") or 0)
                 qty = float(item.get("quantity") or 1)
-                cost += unit_cost * qty
             except (TypeError, ValueError):
                 continue
+            cost += (line_unit_cost(item, cost_map) or 0.0) * qty
 
     profit = revenue - cost
     margin_percent = (profit / revenue * 100) if revenue > 0 else 0

@@ -37,7 +37,8 @@ def test_cogs_with_flag_all_estimated():
     """No cost data -> all lines estimated."""
     from api.routers.finance import compute_cogs_with_flag
 
-    orders = [{"items": [{"product_id": "PX", "quantity": 1, "total": 1000}]}]
+    orders = [{"items": [{"product_id": "PX", "quantity": 1, "item_total": 1180,
+                          "taxable_value": 1000}]}]
     cogs, est, total = compute_cogs_with_flag(orders, {}, fallback_rate=0.6)
     assert cogs == 600.0
     assert est == 1
@@ -55,8 +56,9 @@ def test_cogs_with_flag_mixed():
                 {
                     "product_id": "PX",
                     "quantity": 1,
-                    "total": 500,
-                },  # unknown -> fallback
+                    "item_total": 590,
+                    "taxable_value": 500,
+                },  # unknown -> fallback (60% of the ex-GST 500)
             ]
         }
     ]

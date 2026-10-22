@@ -138,7 +138,8 @@ def test_pnl_by_category_prefers_snapshot():
                 {
                     "product_id": "p1",
                     "quantity": 1,
-                    "total": 500,
+                    "item_total": 525.0,
+                    "taxable_value": 500.0,  # revenue is net of GST
                     "item_type": "FRAME",
                     "cost_at_sale": 100.0,
                 }
