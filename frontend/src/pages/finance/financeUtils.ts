@@ -6,7 +6,7 @@
 // services/api/finance.ts. The shared currency formatter and the GST summary
 // mapper live here.
 
-import type { GSTSummaryData } from './financeTypes';
+import type { GSTSummaryData, RevenueData } from './financeTypes';
 
 export const formatCurrency = (amount: number): string => {
   return new Intl.NumberFormat('en-IN', {
@@ -43,4 +43,23 @@ export function mapGst(d: any): GSTSummaryData | null {
     reverse_charge_tax: Number(d.reverse_charge_tax || 0),
     gst_type: igst > 0 ? 'IGST' : 'CGST_SGST',
   };
+}
+
+// GET /finance/revenue -> the "Revenue Breakdown" row. total_revenue is what
+// the customers paid (GST included); Net Revenue is the same sales net of GST
+// (revenue_ex_gst), so it reads on the same basis as the P&L's Revenue card.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function mapRevenue(d: any): RevenueData[] {
+  if (!d) return [];
+  const paid = Number(d.total_revenue || 0);
+  const deductions = Number(d.total_discount || 0);
+  const gst = Number(d.total_tax || 0);
+  if (!paid && !deductions && !gst) return [];
+  return [{
+    period: `Current ${d.period || 'month'}`,
+    gross_sales: paid + deductions,
+    deductions,
+    net_revenue: d.revenue_ex_gst != null ? Number(d.revenue_ex_gst) : paid - gst,
+    gst_collected: gst,
+  }];
 }

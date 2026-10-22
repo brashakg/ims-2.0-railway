@@ -607,9 +607,10 @@ def test_expense_vs_revenue_computes_margin(
     fake_db = patched_reports["db"]
     now = datetime.now()
     _seed_order(
-        fake_db, order_id="E1", grand_total=1000.0,
-        items=[{"item_total": 800.0, "unit_price": 800.0, "quantity": 1,
-                "category": "FRAME", "cost_price": 300.0}],
+        fake_db, order_id="E1", grand_total=1050.0, tax_amount=50.0,
+        items=[{"item_total": 1050.0, "unit_price": 1050.0, "quantity": 1,
+                "category": "FRAME", "gst_rate": 5.0, "taxable_value": 1000.0,
+                "tax_amount": 50.0, "cost_at_sale": 300.0}],
         created_at=now,
     )
     today_d = _business_day(now)
@@ -620,7 +621,9 @@ def test_expense_vs_revenue_computes_margin(
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    # revenue = 1000 (grand_total), cost = 300 × 1 = 300, profit = 700
+    # Both sides ex-GST: revenue = 1050 paid - 50 GST = 1000; cost = the
+    # line's cost_at_sale 300 x 1; profit = 700. (Before: revenue 1050 and
+    # cost 0 -- the line has no cost_price -- so "profit" was the whole bill.)
     assert body["revenue"] == 1000.0
     assert body["cost"] == 300.0
     assert body["profit"] == 700.0

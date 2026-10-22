@@ -1004,19 +1004,37 @@ export default function OnlineShopifySyncPage() {
               {lastRun.limit_reached && <> · stopped at the {lastRun.limit ?? '?'}-product cap</>}
             </p>
             {lastRun.stock && <StockPassLine stock={lastRun.stock} testId="live-sync-stock-line" />}
-            {(lastRun.failures?.length ?? 0) > 0 && (
-              <ul className="mt-2 space-y-1" aria-label="Live sync failures">
-                {lastRun.failures!.map((f, i) => (
-                  <li key={f.product_id ?? i} className="flex flex-wrap items-baseline gap-x-2 text-red-700">
-                    <XCircle className="w-3.5 h-3.5 shrink-0 self-center" />
-                    <span className="font-medium">{f.sku || f.product_id || '?'}</span>
-                    {f.name && <span className="text-gray-600">{f.name}</span>}
-                    {f.code && <code className="rounded bg-red-50 px-1 text-[11px]">{f.code}</code>}
-                    <span>{f.error || f.reason || 'failed'}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
+            {(lastRun.failures?.length ?? 0) > 0 && (() => {
+              // Hundreds of identical "no photo" refusals collapse into ONE
+              // count line with the SKUs behind a native expander.
+              const noPhoto = lastRun.failures!.filter(f => f.reason === 'no_photo');
+              const rest = lastRun.failures!.filter(f => f.reason !== 'no_photo');
+              return (
+                <ul className="mt-2 space-y-1" aria-label="Live sync failures">
+                  {noPhoto.length > 0 && (
+                    <li className="text-red-700" data-testid="live-sync-no-photo">
+                      <details>
+                        <summary className="cursor-pointer">
+                          <span className="font-medium">{fmt(noPhoto.length)}</span> refused: no photograph (add a photo; they stay queued)
+                        </summary>
+                        <p className="mt-1 ml-4 text-gray-600 break-words">
+                          {noPhoto.map(f => f.sku || f.product_id || '?').join(', ')}
+                        </p>
+                      </details>
+                    </li>
+                  )}
+                  {rest.map((f, i) => (
+                    <li key={f.product_id ?? i} className="flex flex-wrap items-baseline gap-x-2 text-red-700">
+                      <XCircle className="w-3.5 h-3.5 shrink-0 self-center" />
+                      <span className="font-medium">{f.sku || f.product_id || '?'}</span>
+                      {f.name && <span className="text-gray-600">{f.name}</span>}
+                      {f.code && <code className="rounded bg-red-50 px-1 text-[11px]">{f.code}</code>}
+                      <span>{f.error || f.reason || 'failed'}</span>
+                    </li>
+                  ))}
+                </ul>
+              );
+            })()}
           </div>
         ) : (
           <p className="mt-2 text-xs text-gray-400">No live sync has run yet.</p>

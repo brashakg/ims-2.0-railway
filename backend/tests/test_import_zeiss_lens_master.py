@@ -216,6 +216,23 @@ def test_revert_after_a_run_that_died_part_way():
     assert db["lens_enum_config"].find_one({"enum_id": "coatings"})["items"] == ["OWNER_EDIT"]
 
 
+def test_revert_keeps_an_enum_value_a_newer_line_still_uses():
+    """Every line of the run is deleted, but a lens line made since (by hand,
+    not by the run) uses ZEISS: putting `brands` back to ["Essilor"] would
+    leave that line un-editable, so that list stays; the rest are restored."""
+    db = _db()
+    docs, enums, added, _ = script.build(ROWS, script.live_enums(db))
+    script.apply(db, docs, enums, added, "run1")
+    db.seed("lens_catalog", [{"lens_line_id": "manual-zeiss", "brand": "ZEISS",
+                              "index": 1.5, "coating": "HC"}])
+    out = script.revert(db, "run1")
+    assert out["deleted"] == 735
+    assert out["enums_still_in_use"] == ["brands"]
+    assert "brands" not in out["enums_restored"] and "coatings" in out["enums_restored"]
+    assert db["lens_enum_config"].find_one({"enum_id": "brands"})["items"] == ["Essilor", "ZEISS"]
+    assert db["lens_enum_config"].find_one({"enum_id": "coatings"})["items"] == ["ANTI_BLUE", "HC"]
+
+
 def test_main_prints_the_run_id_before_the_first_write(monkeypatch, capsys):
     db = _db()
     seen = []

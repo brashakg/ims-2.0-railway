@@ -71,6 +71,7 @@ def _facts(db, doc: Dict[str, Any]) -> Dict[str, Any]:
     # per-colour prices -- close enough to decide whether a price band is empty.
     prices = [p for p in (_resolve_variant_pricing(doc, r)[0] for r in rows) if p]
     return {
+        "id": doc.get("id"),
         "sku": doc.get("sku"),
         "type": ims_to_shopify_type(doc["category"]) if doc.get("category") else "",
         "tags": set(ims_product_tags(doc)),

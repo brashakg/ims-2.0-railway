@@ -13,7 +13,7 @@ from ...services.cost_mask import mask_cost
 from ...services.salary_visibility import SALARY_RESTRICTED_MESSAGE, is_salary_admin
 from ._shared import (
     REAL_SALE_MATCH,
-    _REVENUE_EXPR,
+    _ORDER_REVENUE_PROJECTION,
     _apply_created_at_range,
     _cost_by_product,
     _get_db,
@@ -26,6 +26,7 @@ from ._shared import (
     router,
 )
 from .pnl import COST_ONLY_PNL_FIELDS
+from ...services.margin_basis import order_revenue_ex_gst
 
 # === P&L breakdowns + period status ===
 
@@ -66,30 +67,22 @@ async def get_pnl_by_store(
     )
 
     # Exclude DRAFT/CANCELLED and compare the date range as datetimes
-    # (created_at is a BSON datetime). This `match` is reused for both the
-    # revenue aggregation and the COGS find() below.
+    # (created_at is a BSON datetime). THE real-sale rule (api/utils/real_sale)
+    # -- the GST returns' too, so the P&L and GSTR-1 count the same orders.
     match: dict = {**REAL_SALE_MATCH}
     if store_ids is not None:
         match["store_id"] = {"$in": store_ids}
     _apply_created_at_range(match, from_date, to_date)
 
-    rev = list(
-        db.get_collection("orders").aggregate(
-            [
-                {"$match": match},
-                {"$group": {"_id": "$store_id", "revenue": {"$sum": _REVENUE_EXPR}}},
-            ]
-        )
-    )
-    rev_by_store = {r["_id"]: r["revenue"] for r in rev}
-
+    # Revenue is each bill's taxable value (GST is owed to the government, and
+    # COGS is ex-GST), read off the same order fetch as COGS.
     cost_map = _cost_by_product(db)
+    rev_by_store: dict = {}
     cogs_by_store: dict = {}
     cogs_estimated_by_store: dict = {}  # store_id -> bool (any line estimated)
-    for o in db.get_collection("orders").find(
-        match, {"_id": 0, "store_id": 1, "items": 1}
-    ):
+    for o in db.get_collection("orders").find(match, _ORDER_REVENUE_PROJECTION):
         sid = o.get("store_id")
+        rev_by_store[sid] = rev_by_store.get(sid, 0) + order_revenue_ex_gst(o)
         _c, _est, _tot = compute_cogs_with_flag([o], cost_map, fallback_rate=0.6)
         cogs_by_store[sid] = cogs_by_store.get(sid, 0) + _c
         if _est > 0:

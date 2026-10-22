@@ -50,6 +50,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from . import ecom_smart_rules
+from .margin_basis import LINE_REVENUE_EX_GST_GROUP, group_revenue_ex_gst
 
 logger = logging.getLogger(__name__)
 
@@ -460,6 +461,9 @@ def _movement_pipeline(
                 "_id": gid,
                 "units": {"$sum": _QTY_EXPR},
                 "revenue": {"$sum": {"$ifNull": ["$items.item_total", 0]}},
+                # Net of GST: what margin is measured on (cost is ex-GST).
+                # Read back with group_revenue_ex_gst.
+                **LINE_REVENUE_EX_GST_GROUP,
                 "cogs": {
                     "$sum": {
                         "$cond": [
@@ -483,6 +487,7 @@ def _blank_windows() -> Dict[str, Any]:
         "units_d90": 0,
         "revenue_d30": 0.0,
         "revenue_d90": 0.0,
+        "revenue_ex_gst_d30": 0.0,
         "cogs_d30": 0.0,
         "cogs_units_d30": 0,
         "last_sold": None,
@@ -502,6 +507,7 @@ def movement_summary(
 
     Returns {
         "per_product": {pid: {units_d7, units_d30, units_d90, revenue_d30,
+                              revenue_ex_gst_d30,
                               revenue_d90, cogs_d30, cogs_units_d30, last_sold}},
         "totals": {same keys aggregated},
         "per_store": {store_id: {"units_d30": int, "units_d90": int}},  # by_store only
@@ -546,6 +552,7 @@ def movement_summary(
             age = (ist_today - _ist_date(day)).days if isinstance(day, datetime) else 0
             units = r.get("units") or 0
             revenue = float(r.get("revenue") or 0)
+            revenue_ex_gst = group_revenue_ex_gst(r)
             cogs = float(r.get("cogs") or 0)
             cogs_units = r.get("cogs_units") or 0
             last_sold = r.get("last_sold")
@@ -557,6 +564,7 @@ def movement_summary(
                 if age < 30:
                     tgt["units_d30"] += units
                     tgt["revenue_d30"] += revenue
+                    tgt["revenue_ex_gst_d30"] += revenue_ex_gst
                     tgt["cogs_d30"] += cogs
                     tgt["cogs_units_d30"] += cogs_units
                 if age < 7:
@@ -575,6 +583,7 @@ def movement_summary(
     for tgt in [totals] + list(per_product.values()):
         tgt["revenue_d30"] = round(tgt["revenue_d30"], 2)
         tgt["revenue_d90"] = round(tgt["revenue_d90"], 2)
+        tgt["revenue_ex_gst_d30"] = round(tgt["revenue_ex_gst_d30"], 2)
         tgt["cogs_d30"] = round(tgt["cogs_d30"], 2)
     return {"per_product": per_product, "totals": totals, "per_store": per_store}
 
@@ -607,7 +616,8 @@ def days_of_cover(on_hand: int, sold_30d: int) -> Optional[float]:
 
 
 def margin_30d(revenue_30d: float, cogs_30d: float, units_30d: int, cogs_units_30d: int) -> Optional[float]:
-    """revenue - cogs over the 30d window -- but ONLY when every sold unit
+    """revenue - cogs over the 30d window -- revenue NET OF GST, as cogs is
+    (callers pass revenue_ex_gst_d30) -- but ONLY when every sold unit
     carried a cost_at_sale (100% cogs coverage). Anything less would silently
     overstate margin, so it is labelled honestly as None."""
     units_30d = int(units_30d or 0)
@@ -642,7 +652,7 @@ def kpis(db, collection: Dict, store_id: Optional[str] = None) -> Dict:
         "sold": {"d7": t["units_d7"], "d30": sold30, "d90": t["units_d90"]},
         "revenue_30d": t["revenue_d30"],
         "margin_30d": margin_30d(
-            t["revenue_d30"], t["cogs_d30"], sold30, t["cogs_units_d30"]
+            t["revenue_ex_gst_d30"], t["cogs_d30"], sold30, t["cogs_units_d30"]
         ),
         "sell_through_30d": sell_through(sold30, on_hand),
         "days_of_cover": days_of_cover(on_hand, sold30),

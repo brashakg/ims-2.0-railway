@@ -92,7 +92,7 @@ describe('FinanceDashboard - vendor payables follow the accounts rule', () => {
     roles = ['STORE_MANAGER'];
     api.getPnl.mockResolvedValue({ revenue: 9999, expenses: {} });
     render(<FinanceDashboard />);
-    await waitFor(() => expect(screen.getByText('Total Revenue').parentElement).toHaveTextContent('9,999'));
+    await waitFor(() => expect(screen.getByText('Total Revenue (excl. GST)').parentElement).toHaveTextContent('9,999'));
     for (const label of screen.getAllByText('Gross Profit')) {
       expect(label.parentElement).toHaveTextContent('—');
       expect(label.parentElement).not.toHaveTextContent('9,999');

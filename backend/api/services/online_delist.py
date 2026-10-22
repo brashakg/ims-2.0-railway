@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import inspect
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from . import shopify_push
 from .shopify_live_sync import write_push_audit
@@ -143,13 +143,21 @@ def _stamp(db, twin_id: Optional[str], **fields: Any) -> None:
 
 
 async def delist_if_live(
-    db, product: Dict[str, Any], *, reason: str, actor: Dict[str, Any]
+    db,
+    product: Dict[str, Any],
+    *,
+    reason: str,
+    actor: Dict[str, Any],
+    record_dark: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """Take `product` OFF Shopify if it is there. `reason` is what IMS did
     (deleted / deactivated) and rides on the audit row as `trigger`; `actor` is
     the current_user dict. Returns the push result dict, or None when the
     product was never pushed (no gid -> nothing to do, nothing recorded).
-    NEVER raises."""
+    `record_dark=False` stamps the twin only for a LIVE result, like the
+    Online Store > Take down door: a SIMULATED take-down is audited and
+    nothing else, so the listing still reads as live and is taken down for
+    real once the gates go live (the Never-sell-online sweep). NEVER raises."""
     try:
         db = _raw_db(db)
         twin = _resolve_twin(db, product or {})
@@ -169,7 +177,9 @@ async def delist_if_live(
         data = result.to_dict()
         data["trigger"] = reason
         twin_id = twin.get("id") or twin.get("product_id")
-        if data.get("ok"):
+        if not record_dark and data.get("mode") != shopify_push.MODE_LIVE:
+            pass  # audited below; the twin keeps reading as live
+        elif data.get("ok"):
             _stamp(
                 db,
                 twin_id,
@@ -195,6 +205,61 @@ async def delist_if_live(
     except Exception:  # noqa: BLE001 -- the IMS write that called us stands
         logger.warning("[DELIST] take-down hook failed (IMS write stands)", exc_info=True)
         return None
+
+
+# ---------------------------------------------------------------------------
+# Never sell online (owner ruling 2026-10-22): a brand the SUPERADMIN marked
+# Never sell online has its live listings TAKEN DOWN -- by the brand save and,
+# for anything that save left (a failed or timed-out take-down, gates that were
+# dark), by every scheduled sync. Both callers use the two functions below.
+# ---------------------------------------------------------------------------
+REASON_NEVER_SELL = "brand_never_sell_online"
+
+
+def never_sell_live_listings(db, brand: Optional[str] = None) -> List[Dict[str, Any]]:
+    """{id, sku, brand} of every listing ON the website (the collection
+    registry's live predicate -- a LIVE take-down drops a row out of it) whose
+    brand is marked Never sell online, matched with the gate's own key rule
+    (catalog_dictionary.blocked_brand_row). `brand` narrows it to that one
+    brand. Dirty or not. RAISES on a read failure: callers decide."""
+    from .catalog_dictionary import BRAND_COLLECTION, blocked_brand_row, brand_name_key
+    from .shopify_push.collection_registry import listing_facts
+
+    db = _raw_db(db)
+    if db is None:
+        return []
+    blocked = [d for d in db[BRAND_COLLECTION].find({}) if d.get("never_sell_online") is True]
+    if not blocked:
+        return []
+    probe = brand_name_key(brand) if brand is not None else None
+    return [
+        {"id": f.get("id"), "sku": str(f.get("sku") or ""), "brand": f.get("brand")}
+        for f in listing_facts(db)
+        if blocked_brand_row(blocked, f.get("brand")) is not None
+        and (probe is None or brand_name_key(f.get("brand")) == probe)
+    ]
+
+
+async def take_down_listings(
+    db, listings: List[Dict[str, Any]], *, actor: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Each listing through delist_if_live (the one take-down door; dark ->
+    SIMULATED, nothing stamped). One {sku, ok, mode, error} row per listing.
+    Never raises (delist_if_live does not)."""
+    out: List[Dict[str, Any]] = []
+    for f in listings:
+        res = await delist_if_live(
+            db, {"id": f.get("id"), "sku": f.get("sku")},
+            reason=REASON_NEVER_SELL, actor=actor, record_dark=False,
+        ) or {}
+        ok = res.get("ok") is True
+        out.append({
+            "sku": f.get("sku"),
+            "ok": ok,
+            "mode": res.get("mode"),
+            "error": None if ok else (res.get("error") or "take-down failed"),
+        })
+    return out
 
 
 def mark_for_republish(db, product: Dict[str, Any]) -> bool:
