@@ -689,19 +689,18 @@ def _transfer_b2b_rows(bills):
     return rows, hsn_lines
 
 
-def _return_interstate_flag(db, ret, store, cache):
-    """Is this refund an INTER-state reversal? One answer, used by both returns.
+def _return_supply(db, ret, store, cache) -> tuple:
+    """``(interstate, place_code)`` of a refund: the head AND place of supply
+    its SALE was filed under. One answer for both returns.
 
-    A refund reverses the SAME head its sale was filed under, and the sale
-    files the head its invoice printed (gst_base._order_supply: the order's
-    own stamp, else the invoice's state-code rule). So the parent order is
-    asked exactly that; only a note with no parent order falls back to the
-    same rule over its customer (org_validation.supply_interstate).
-
-    ONE implementation because there are two consumers -- GSTR-3B Table 3.1(a)
-    and the GSTR-1 CDNR rows. `store` is the filing shop's doc; `cache` is a
-    per-report dict keyed by order_id. A read failure RAISES (the doors answer
-    503): guessing a head here flips the reversal onto the wrong tax.
+    The sale files what its invoice printed (gst_base._order_supply: the
+    order's own stamp, else the invoice's state-code rule), so the parent
+    order is asked exactly that; only a note with no parent order falls back
+    to the same rule over its customer (org_validation.supply_interstate).
+    Two consumers -- GSTR-3B Table 3.1(a) and the GSTR-1 CDNR rows. `store`
+    is the filing shop's doc; `cache` is a per-report dict keyed by order_id.
+    A read failure RAISES (the doors answer 503): a guessed head or place of
+    supply files the reversal wrong.
     """
     from .gst_base import CUSTOMER_SUPPLY_FIELDS, _order_supply
     from ...services.org_validation import supply_interstate
@@ -717,12 +716,17 @@ def _return_interstate_flag(db, ret, store, cache):
         else None
     )
     if parent:
-        flag = _order_supply(parent, store, customer)[0]
+        inter, code, _assumed = _order_supply(parent, store, customer)
     else:
-        flag = supply_interstate(store, customer)[0]
+        inter, code, _assumed = supply_interstate(store, customer)
     if oid:
-        cache[oid] = flag
-    return flag
+        cache[oid] = (inter, code)
+    return inter, code
+
+
+def _return_interstate_flag(db, ret, store, cache):
+    """Is this refund an INTER-state reversal? (_return_supply's head.)"""
+    return _return_supply(db, ret, store, cache)[0]
 
 
 def _ledger_row_return_doc(db, row):

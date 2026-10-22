@@ -248,7 +248,7 @@ def _build_b2b(rows: List[Dict[str, Any]], store_state: str) -> List[Dict[str, A
             # B2B rows must carry a counterparty GSTIN. Skip silently —
             # the IMS validation report already flags these.
             continue
-        pos = _state_code(
+        pos = r.get("placeOfSupplyCode") or _state_code(
             str(r.get("placeOfSupply") or r.get("customerState") or ""), ctin
         )
         inv = {
@@ -273,7 +273,9 @@ def _build_b2cl(rows: List[Dict[str, Any]], store_state: str) -> List[Dict[str, 
     for r in rows:
         if not isinstance(r, dict):
             continue
-        pos = _state_code(str(r.get("placeOfSupply") or r.get("customerState") or ""))
+        pos = r.get("placeOfSupplyCode") or _state_code(
+            str(r.get("placeOfSupply") or r.get("customerState") or "")
+        )
         inv = {
             "inum": str(r.get("invoiceNumber") or r.get("inum") or ""),
             "idt": _fmt_date(r.get("invoiceDate") or r.get("idt") or ""),
@@ -292,7 +294,7 @@ def _build_b2cs(rows: List[Dict[str, Any]], store_state: str) -> List[Dict[str, 
         if not isinstance(r, dict):
             continue
         igst = _num(r.get("igst"))
-        pos = _state_code(str(r.get("placeOfSupply") or ""))
+        pos = r.get("placeOfSupplyCode") or _state_code(str(r.get("placeOfSupply") or ""))
         # INTER when IGST present, else INTRA.
         sply_ty = "INTER" if igst > 0 else "INTRA"
         out.append(
@@ -345,7 +347,7 @@ def _build_cdnr(rows: List[Dict[str, Any]], store_state: str) -> List[Dict[str, 
         ntty = str(r.get("noteType") or r.get("ntty") or "C").strip().upper()
         if ntty not in ("C", "D"):
             ntty = "C"
-        pos = _state_code(
+        pos = r.get("placeOfSupplyCode") or _state_code(
             str(r.get("placeOfSupply") or r.get("customerState") or ""), ctin
         )
         nt = {
