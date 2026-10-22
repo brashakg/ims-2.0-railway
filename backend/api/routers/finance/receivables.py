@@ -15,7 +15,7 @@ from ...services import ap_engine
 from ...services.cost_mask import can_see_cost
 from ._shared import (
     UNPAID_STATUSES,
-    REAL_SALE_MATCH,
+    real_sale_match,
     _get_db,
     _order_total,
     router,
@@ -113,7 +113,7 @@ async def get_outstanding(
     # before being voided -- exclude DRAFT/CANCELLED from AR.
     match = {
         "payment_status": {"$in": UNPAID_STATUSES},
-        **REAL_SALE_MATCH,
+        **real_sale_match(db),
     }
     if store_id:
         match["store_id"] = store_id

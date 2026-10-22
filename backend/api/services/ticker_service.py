@@ -27,7 +27,7 @@ from api.utils.ist import ist_today, ist_day_start_utc
 _REVENUE_EXPR = {"$ifNull": ["$grand_total", {"$ifNull": ["$total", 0]}]}
 from api.utils.real_sale import (  # noqa: E402
     EXCLUDED_ORDER_STATUSES as _EXCLUDED_ORDER_STATUSES,
-    REAL_SALE_MATCH,
+    real_sale_match,
 )
 
 # Roles that may see raw rupee figures + per-store breakdown + pace.
@@ -81,7 +81,7 @@ def mtd_revenue(orders_coll, store_id: Optional[str]) -> float:
     month_start, _, _ = _month_bounds()
     match: Dict[str, Any] = {
         "created_at": {"$gte": month_start},
-        **REAL_SALE_MATCH,
+        **real_sale_match(orders=orders_coll),
     }
     if store_id:
         match["store_id"] = store_id

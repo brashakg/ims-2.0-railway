@@ -274,9 +274,9 @@ async def get_tally_tender_receipt_jv(
     # SAME order selection as finance.get_tally_sales_jv -- never DRAFT/CANCELLED,
     # same datetime-typed created_at range -- so Sales + Receipt vouchers cover
     # the exact same order set.
-    from .finance import REAL_SALE_MATCH, _apply_created_at_range, _store_maps
+    from .finance import real_sale_match, _apply_created_at_range, _store_maps
 
-    match: Dict[str, Any] = {**REAL_SALE_MATCH}
+    match: Dict[str, Any] = {**real_sale_match(db)}
     store_ids = None
     if store_id:
         store_ids = [store_id]

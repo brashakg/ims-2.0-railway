@@ -22,7 +22,7 @@ from ._shared import (
 )
 from .gst_base import (
     CUSTOMER_SUPPLY_FIELDS,
-    REAL_SALE_MATCH,
+    real_sale_match,
     UnfileableOrder,
     _get_raw_db,
     _normalise_period,
@@ -420,7 +420,7 @@ def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
                 # Every shop this return files for (H2).
                 "store_id": {"$in": filing},
                 # THE GST-return order rule (gst_base), GSTR-1's too.
-                **REAL_SALE_MATCH,
+                **real_sale_match(db),
                 "created_at": {"$gte": from_dt, "$lt": to_dt},
             }
         ):

@@ -26,7 +26,7 @@ def _get_raw_db():
 # THE rule for which orders a GST return files is THE real-sale rule
 # (api/utils/real_sale) -- the books use the same one, so they agree. A VOID
 # order is filed once invoiced or shipped (owner ruling 2026-10-22).
-from ...utils.real_sale import REAL_SALE_MATCH  # noqa: E402,F401
+from ...utils.real_sale import real_sale_match  # noqa: E402,F401
 
 # B2CL (GSTR-1 Table 5): an INTER-state invoice to an unregistered buyer whose
 # invoice value is above this, in rupees. Intra-state B2C of any value is B2CS.
@@ -212,7 +212,7 @@ def _order_rate_lines(items, order_taxable, order_tax, order=None, issues=None):
     A line's HSN is its ``hsn_code`` (9004 when blank). With no usable line,
     one line carries the order totals at the order's own stamped ``tax_rate``,
     else at the GST slab its own tax / taxable gives (flagged in ``issues``),
-    else the order RAISES UnfileableOrder -- never a guessed 5%. A 0% line
+    else at its effective rate flagged as an ERROR -- never a guessed 5%. A 0% line
     (an exempt eye test) is flagged: it belongs in GSTR-1 Table 8 (nil /
     exempt), which is not built yet (batch 7).
 
@@ -279,7 +279,13 @@ def _order_rate_lines(items, order_taxable, order_tax, order=None, issues=None):
         elif order_taxable <= 0 and order_tax <= 0:
             return []
         else:
-            raise UnfileableOrder(order, "no line carries a GST rate and its tax gives no GST slab")
+            # No slab fits: filed at its own effective rate and flagged as an
+            # ERROR -- the portal takes no such rate, the CA must correct it.
+            rate = round(order_tax / order_taxable * 100, 2) if order_taxable > 0 else 0
+            if issues is not None:
+                issues.append({"level": "error", "invoice": oid, "issue": (
+                    f"No line carries a GST rate and its tax is {rate}% of its taxable value -- "
+                    "no GST slab; correct the order before filing.")})
         raw = [(rate, "9004", order_taxable, order_tax)]
         if rate == 0 and order_taxable > 0:
             _flag(f"Rs {order_taxable:,.2f} at 0% (nil / exempt) belongs in GSTR-1 Table 8, not built yet (batch 7) -- filed at 0% here; the CA moves it.")
@@ -298,23 +304,41 @@ def _order_rate_lines(items, order_taxable, order_tax, order=None, issues=None):
     return [tuple(ln) for ln in lines]
 
 
+def _alloc(total: float, weights: list) -> list:
+    """`total` shared pro rata by `weights` (equally when they sum to 0), to
+    the paisa, the rounding on the last share -- the shares sum to `total`."""
+    w = sum(weights)
+    parts = [round(total * x / w, 2) if w else round(total / len(weights), 2) for x in weights]
+    if parts:
+        parts[-1] = round(parts[-1] + round(total, 2) - round(sum(parts), 2), 2)
+    return parts
+
+
 def _rate_heads(sale_lines, is_inter: bool) -> list:
     """An order's rate lines (_order_rate_lines) summed PER RATE with each
-    rate's tax split by THE split rule (gst_rates.split_gst -- the invoice's):
-    ``[{rate, taxable, tax, cgst, sgst, igst}]`` sorted by rate. GSTR-1's
-    invoice item rows and GSTR-3B's Table 3.1(a) heads both come from here,
-    so the two returns agree to the paisa on every head."""
+    rate's tax split by THE split rule (gst_rates.split_gst -- what the tax
+    invoice prints per rate): ``[{rate, taxable, tax, cgst, sgst, igst,
+    lines}]`` sorted by rate. ``lines`` = ``[(hsn, taxable, cgst, sgst,
+    igst)]``, the rate's heads shared over its lines pro rata to taxable, so
+    the HSN rows add up to the rate rows to the paisa. GSTR-1's item rows,
+    B2CS buckets and HSN rows and GSTR-3B's Table 3.1(a) all come from here,
+    so the returns agree to the paisa on every head."""
     from api.services.gst_rates import split_gst
 
     by_rate: dict = {}
-    for rate, _hsn, taxable, tax in sale_lines:
-        b = by_rate.setdefault(rate, {"rate": rate, "taxable": 0.0, "tax": 0.0})
+    for rate, hsn, taxable, tax in sale_lines:
+        b = by_rate.setdefault(rate, {"rate": rate, "taxable": 0.0, "tax": 0.0, "_l": []})
         b["taxable"] = round(b["taxable"] + taxable, 2)
         b["tax"] = round(b["tax"] + tax, 2)
+        b["_l"].append((hsn, taxable))
     out = []
     for rate in sorted(by_rate):
-        b = by_rate[rate]
+        b = by_rate.pop(rate)
         cgst, sgst, igst = split_gst(b["tax"], is_inter)
+        lines = b.pop("_l")
+        w = [t for _, t in lines]
+        shares = [_alloc(h, w) for h in (cgst, sgst, igst)]
+        b["lines"] = [(h, t, c, g, i) for (h, t), c, g, i in zip(lines, *shares)]
         out.append({**b, "cgst": cgst, "sgst": sgst, "igst": igst})
     return out
 

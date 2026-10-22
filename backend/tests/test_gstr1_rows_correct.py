@@ -231,9 +231,12 @@ def test_b2cl_threshold_is_one_named_constant(monkeypatch):
 
 def _void_fixture():
     live = _order("O-LIVE", [_line(5, 1000.0, 50.0, "900311")], customer="")
-    void = _order("O-VOID", [_line(18, 10000.0, 1800.0, "900410")], customer="", status="VOID")
+    # Never invoiced, never shipped: not a sale (owner ruling 2026-10-22; an
+    # invoiced or shipped VOID IS one -- test_gstr1_review_round1).
+    void = _order("O-VOID", [_line(18, 10000.0, 1800.0, "900410")], customer="", status="VOID",
+                  invoice_number=None, status_before_void="CONFIRMED")
     voided = _order("O-VOIDED", [_line(18, 2000.0, 360.0, "900410")], customer="",
-                    status="VOIDED")
+                    status="VOIDED", invoice_number=None)
     return _db(orders=[live, void, voided])
 
 
@@ -257,9 +260,8 @@ def test_void_order_is_not_filed_in_gstr3b(monkeypatch):
 
 
 def test_gstr1_and_gstr3b_ask_one_order_rule():
-    """One rule, not two synced copies: both returns query the same object."""
-    assert gstr1_mod.GST_RETURN_ORDER_STATUS_FILTER is gstr3b_mod.GST_RETURN_ORDER_STATUS_FILTER
-    assert {"VOID", "VOIDED"} <= set(gstr1_mod.GST_RETURN_ORDER_STATUS_FILTER["$nin"])
+    """One rule, not two synced copies: both returns ask the same function."""
+    assert gstr1_mod.real_sale_match is gstr3b_mod.real_sale_match
 
 
 # ===========================================================================
@@ -270,7 +272,7 @@ def test_gstr1_and_gstr3b_ask_one_order_rule():
 def _corrupt_fixture():
     good = _order("O-GOOD", [_line(5, 1000.0, 50.0, "900311")], customer="")
     bad = _order("O-BAD", [_line(5, 1000.0, 50.0, "900311")], customer="")
-    bad["grand_total"] = "Rs 1050"  # unreadable money on a stored order
+    bad["grand_total"] = "N/A"  # unreadable money on a stored order
     return _db(orders=[good, bad])
 
 
@@ -283,12 +285,20 @@ def test_corrupt_order_raises_instead_of_a_partial_gstr1(monkeypatch):
 
 
 def test_gstr1_doors_answer_503_please_retry(monkeypatch):
-    """Both doors -- the report and the portal JSON -- turn the read failure
-    into GSTR-3B's 503 "please retry".
+    """Both doors -- the report and the portal JSON -- turn a read failure
+    into GSTR-3B's 503 "please retry" (an unreadable ORDER is a 422 naming it:
+    test_gstr1_review_round1).
 
-    REVERT CHECK: on main /gstr1 returns the partial report (200) and
-    /gstr1/gstn-json a portal file without the unread invoice."""
-    _use(monkeypatch, _corrupt_fixture())
+    REVERT CHECK: on main /gstr1 returns a report without the unread credit
+    notes (200) and /gstr1/gstn-json a portal file without them."""
+    db = _corrupt_fixture()
+    db.get_collection("orders").docs = [d for d in db.get_collection("orders").docs if d["order_id"] == "O-GOOD"]
+
+    def _down(*_a, **_k):
+        raise RuntimeError("primary stepped down")
+
+    db.get_collection("credit_note_ledger").find = _down
+    _use(monkeypatch, db)
     for door in (r.gstr1_report, r.gstr1_gstn_json):
         kwargs = {"month": MONTH, "store_id": "S1", "current_user": ADMIN}
         if door is r.gstr1_gstn_json:

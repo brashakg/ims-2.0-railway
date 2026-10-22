@@ -144,11 +144,11 @@ _ORDER_REVENUE_PROJECTION = {
 # books, never invoiced by IMS -- so it is NOT revenue/tax/GST either.
 # VOID (deleted in Shopify): a sale only once invoiced or shipped (owner
 # ruling 2026-10-22). THE rule lives in api/utils/real_sale -- shared with the
-# GST returns so the books and the returns agree; spread REAL_SALE_MATCH into
-# a query (`{**REAL_SALE_MATCH, ...}`), it is a top-level clause.
+# GST returns so the books and the returns agree; spread it into a query
+# (`{**real_sale_match(db), ...}`).
 from ...utils.real_sale import (  # noqa: E402
     EXCLUDED_ORDER_STATUSES as _EXCLUDED_ORDER_STATUSES,
-    REAL_SALE_MATCH,
+    real_sale_match,
 )
 
 

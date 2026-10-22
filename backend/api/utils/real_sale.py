@@ -30,26 +30,39 @@ _SHIPPED = ("SHIPPED", "DELIVERED")
 # Kept as a list: tests and older callers read the excluded statuses.
 EXCLUDED_ORDER_STATUSES = [s for st in _NOT_SALE for s in (st, st.lower())]
 _VOID_STATUSES = [s for st in _VOID for s in (st, st.lower())]
-_SHIPPED_STATUSES = [s for st in _SHIPPED for s in (st, st.lower())]
 
-# Top-level Mongo clause (spread it into a find / $match: `{**REAL_SALE_MATCH,
-# "store_id": ...}`). It owns `$and`, so a query must not set its own `$and`.
-REAL_SALE_MATCH: Dict[str, Any] = {
-    "$and": [
-        {"status": {"$nin": EXCLUDED_ORDER_STATUSES}},
-        {
-            "$or": [
-                {"status": {"$nin": _VOID_STATUSES}},
-                {"invoice_number": {"$nin": [None, ""]}},
-                {"status_before_void": {"$in": _SHIPPED_STATUSES}},
-            ]
-        },
+def real_sale_match(db=None, *, orders=None) -> Dict[str, Any]:
+    """THE rule as a Mongo filter to spread into a query
+    (`{**real_sale_match(db), "store_id": ...}`). Pass the database, or the
+    orders collection as `orders=`; neither gives the status part alone.
+
+    Two steps, deliberately: the status part is a plain field filter, and the
+    VOID orders that are NOT sales (is_real_sale, below) are read first and
+    excluded by order_id -- no top-level $or, which every caller's query
+    would have to merge with its own.
+    ponytail: one extra read of the VOID orders per query; fine while deleted
+    Shopify orders number in the hundreds -- stamp a `real_sale` bool on the
+    order at void time if they ever number in the tens of thousands."""
+    match: Dict[str, Any] = {"status": {"$nin": EXCLUDED_ORDER_STATUSES}}
+    if orders is None:
+        if db is None:
+            return match
+        orders = db.get_collection("orders") if hasattr(db, "get_collection") else db["orders"]
+    not_sales = [
+        o.get("order_id")
+        for o in orders.find({"status": {"$in": _VOID_STATUSES}})
+        if isinstance(o, dict)
+        and o.get("order_id")
+        and str(o.get("status") or "").upper() in _VOID
+        and not is_real_sale(o)
     ]
-}
+    if not_sales:
+        match["order_id"] = {"$nin": not_sales}
+    return match
 
 
 def is_real_sale(order: Dict[str, Any]) -> bool:
-    """The Python twin of REAL_SALE_MATCH, for an order already in hand."""
+    """THE definition, for an order in hand (real_sale_match is its query)."""
     status = str((order or {}).get("status") or "").upper()
     if status in _NOT_SALE:
         return False

@@ -81,7 +81,7 @@ from .gst_base import (  # noqa: F401  # re-exported: see _ReportsModule
     UnfileableOrder,
     _order_taxable_and_tax,
     _order_rate_lines,
-    REAL_SALE_MATCH,
+    real_sale_match,
     B2CL_INVOICE_THRESHOLD,
     _normalise_period,
 )

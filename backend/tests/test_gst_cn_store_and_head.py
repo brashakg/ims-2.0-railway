@@ -221,7 +221,9 @@ def test_rateless_credit_note_derives_its_rate_and_bucket(monkeypatch):
     REVERT CHECK: restoring the `else 18` default files the note at 18% and
     leaves the 18% bucket at 500 (understated) and the 5% bucket at 1000.
     """
-    row = _ledger_row("CN-MANUAL-1", tax=25.0, taxable=500.0)
+    # Linked to its sale (a post-invoice note stamps order_id): a note now
+    # reverses its SALE's HSN rows (GST batch 1 review), so it needs one.
+    row = _ledger_row("CN-MANUAL-1", tax=25.0, taxable=500.0, order_id="O05")
     row.pop("gross_refund"); row.pop("net_refund")
     assert "gst_rate" not in row
     db = _db(

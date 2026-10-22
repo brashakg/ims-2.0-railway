@@ -278,9 +278,26 @@ def test_invoiced_or_shipped_void_is_a_sale_never_invoiced_void_is_not(monkeypat
 def test_books_and_returns_ask_one_order_rule():
     from api.routers.finance import _shared as fin
     from api.routers.reports import gstr1, gstr3b
-    from api.utils.real_sale import REAL_SALE_MATCH
+    from api.utils.real_sale import real_sale_match
 
-    assert fin.REAL_SALE_MATCH is REAL_SALE_MATCH is gstr1.REAL_SALE_MATCH is gstr3b.REAL_SALE_MATCH
+    assert fin.real_sale_match is real_sale_match is gstr1.real_sale_match is gstr3b.real_sale_match
+
+
+def test_pnl_and_gstr1_count_the_same_void_orders(monkeypatch):
+    """margin_basis promises the P&L and GSTR-1 "can never disagree": with an
+    invoiced VOID (a sale) and a never-invoiced VOID (not one), the P&L's
+    revenue is GSTR-1's taxable value -- 13000 on both sides.
+
+    REVERT CHECK: at 14b7ff62 (merged with #1247) GSTR-1 drops every VOID
+    (1000) while the P&L keeps every VOID (18000)."""
+    from api.routers import finance
+
+    db = _use(monkeypatch, _void_db())
+    monkeypatch.setattr(finance, "_get_db", lambda: db)
+    pnl = asyncio.run(finance.get_pnl(store_id="S1", from_date="2026-06-01", to_date="2026-06-30",
+                                      current_user=ADMIN))
+    g1 = r._compute_gstr1(MONTH, "S1")
+    assert pnl["revenue"] == g1["totalTaxableValue"] == 13000.0, (pnl["revenue"], g1["totalTaxableValue"])
 
 
 # ===========================================================================
@@ -288,25 +305,61 @@ def test_books_and_returns_ask_one_order_rule():
 # ===========================================================================
 
 
-def test_a_failed_parent_read_is_503_not_a_guessed_head(monkeypatch):
-    """REVERT CHECK: at 14b7ff62 _return_interstate_flag swallows the parent
-    order read and guesses a head from the customer's state."""
-    db = _db(customers=[B2B], orders=[_order("O1", [_line(5, 5000.0, 250.0, "900311")])],
-             returns=[_return("RET-260615-0004", "O1", 1000.0, 50.0)])
-    real_find_one = db.get_collection("orders").find_one
+def _break_find_one(db, coll, *, first_only=False):
+    """Make `coll`.find_one raise (the first call only, when asked)."""
+    real = db.get_collection(coll).find_one
     calls = {"n": 0}
 
-    def flaky(flt=None, *a, **k):
-        if flt and "order_id" in flt:
-            calls["n"] += 1
+    def flaky(*a, **k):
+        calls["n"] += 1
+        if not first_only or calls["n"] == 1:
             raise RuntimeError("primary stepped down")
-        return real_find_one(flt, *a, **k)
+        return real(*a, **k)
 
-    db.get_collection("orders").find_one = flaky
+    db.get_collection(coll).find_one = flaky
+    return calls
+
+
+def _gstr1_door_status(db, monkeypatch):
     _use(monkeypatch, db)
-    with pytest.raises(HTTPException) as exc:
+    try:
         asyncio.run(r.gstr1_report(month=MONTH, store_id="S1", current_user=ADMIN))
-    assert exc.value.status_code == 503 and calls["n"] >= 1
+    except HTTPException as exc:
+        return exc.status_code
+    return 200
+
+
+def _cn_world(**ledger_extra):
+    return _db(customers=[B2B], orders=[_order("O1", [_line(5, 5000.0, 250.0, "900311")])],
+               returns=[_return("RET-260615-0004", "O1", 1000.0, 50.0)],
+               credit_note_ledger=[_ledger("RET-260615-0004", 1000.0, 50.0, **ledger_extra)])
+
+
+def test_held_parent_read_failure_is_503(monkeypatch):
+    """REVERT CHECK: at 14b7ff62 _cn_parent_held swallows the read as 'not
+    held' and the note files -- a held sale's credit note reversing tax that
+    was never declared."""
+    db = _cn_world(interstate=False)  # stamped head: no other parent read first
+    calls = _break_find_one(db, "orders", first_only=True)
+    assert _gstr1_door_status(db, monkeypatch) == 503 and calls["n"] >= 1
+
+
+def test_interstate_customer_read_failure_is_503(monkeypatch):
+    """REVERT CHECK: at 14b7ff62 _return_interstate_flag swallows the
+    customer read and guesses intra-state -- a head flip on an IGST sale."""
+    db = _db(customers=[B2B], orders=[_order("O1", [_line(5, 5000.0, 250.0, "900311")])],
+             returns=[_return("RET-260615-0005", "O1", 1000.0, 50.0)])
+    _break_find_one(db, "customers")
+    assert _gstr1_door_status(db, monkeypatch) == 503
+
+
+def test_return_doc_read_failure_is_503(monkeypatch):
+    """REVERT CHECK: at 14b7ff62 _ledger_row_return_doc swallows the read, so
+    the note loses its store and sale -- filed under the booking shop's GSTIN
+    (two GSTINs for one refund) and past the held-sale check."""
+    db = _cn_world()
+    _break_find_one(db, "returns")
+    assert _gstr1_door_status(db, monkeypatch) == 503
 
 
 # ===========================================================================
@@ -362,3 +415,21 @@ def test_zero_rated_line_is_flagged_for_table_8(monkeypatch):
     _use(monkeypatch, _db(orders=[o]))
     rep = r._compute_gstr1(MONTH, "S1")
     assert any("Table 8" in i["issue"] for i in rep["validation"]["issues"]), rep["validation"]
+
+
+def test_gstr1_heads_equal_gstr3b_and_the_invoice_to_the_paisa(monkeypatch):
+    """Two 5% lines carrying 0.05 tax each: the invoice splits the RATE's 0.10
+    (0.05 + 0.05); GSTR-1's B2CS row and GSTR-3B must file the same heads.
+
+    REVERT CHECK: splitting each LINE gives 0.03 + 0.03 CGST against 0.02 +
+    0.02 SGST -- a paisa apart from GSTR-3B and the printed invoice (measured
+    on production: 6 months a paisa or two apart before this)."""
+    from api.routers.orders.invoices import _build_invoice_gst_split
+
+    items = [_line(5, 1.0, 0.05, "900311"), _line(5, 1.0, 0.05, "900311")]
+    db = _use(monkeypatch, _db(orders=[_order("O1", items, customer="")]))
+    printed = _build_invoice_gst_split(items, SHOP, {})["totals"]
+    (row,) = r._compute_gstr1(MONTH, "S1")["b2cs"]
+    monkeypatch.setattr(r, "_get_raw_db", lambda: db)
+    t = r._compute_gstr3b(MONTH, "S1")["outwardTaxableSupplies"]
+    assert (row["cgst"], row["sgst"]) == (printed["cgst"], printed["sgst"]) == (t["centralTax"], t["stateTax"])

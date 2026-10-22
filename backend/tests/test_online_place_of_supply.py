@@ -122,19 +122,19 @@ def test_gstr1_files_one_b2cs_row_per_state_whatever_its_spelling(db):
     db.orders.insert_one(_order("POS-2", customer_id=""))  # walk-in: the store's state NAME
     db.orders.insert_one(_order("ONL-2", channel="ONLINE", place_of_supply="20",
                                 place_of_supply_assumed=False, interstate=False))
-    # A row filed INTER at the same place of supply stays its own row (the
-    # portal key carries the supply type): a customer whose state is the code
-    # '20' against the store's 'Jharkhand' is filed IGST by the reports'
-    # string-compare fallback.
+    # A customer whose state is the code '20' at the store in 'Jharkhand' is
+    # INTRA-state: the returns ask the invoice's state-CODE rule
+    # (org_validation.supply_interstate, GST batch 1 review) -- the old raw
+    # string compare filed it IGST against a CGST+SGST invoice.
     db.customers.insert_one({"customer_id": "C-2", "name": "Asha", "state": "20"})
     db.orders.insert_one(_order("POS-3", customer_id="C-2"))
 
     rows = gstr1_mod._compute_gstr1("2026-09", "BV-BOK-01")["b2cs"]
 
     intra = [r for r in rows if r["igst"] == 0]
-    assert len(intra) == 1, rows  # POS-1, POS-2 ('Jharkhand') + ONL-2 ('20')
+    assert len(intra) == 1, rows  # POS-1, POS-2 ('Jharkhand'), ONL-2 + POS-3 ('20')
     assert not [r for r in rows if r["igst"] and r["cgst"]], rows  # never one mixed row
-    assert round(intra[0]["taxableValue"], 2) == round(3 * 892.86, 2)
+    assert round(intra[0]["taxableValue"], 2) == round(4 * 892.86, 2)
     exported = _build_b2cs(rows, "20")
     keys = [(e["sply_ty"], e["pos"], e["rt"]) for e in exported]
     assert len(keys) == len(set(keys)), exported

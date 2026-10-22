@@ -1380,14 +1380,16 @@ def test_finance_and_reports_interstate_gate_agree():
     order_false = {"store_id": "s1", "customer_id": "c1", "interstate": False}
 
     assert fin_mod._order_is_interstate(order_true, {}, {}) is True
-    assert rep_mod._order_is_interstate(order_true, "", "") is True
+    assert rep_mod._order_supply(order_true, {}, {})[0] is True
     assert (
         fin_mod._order_is_interstate(
             order_false, {"s1": "Jharkhand"}, {"c1": "Maharashtra"}
         )
         is False
     )
-    assert rep_mod._order_is_interstate(order_false, "Jharkhand", "Maharashtra") is False
+    assert rep_mod._order_supply(
+        order_false, {"state": "Jharkhand"}, {"state": "Maharashtra"}
+    )[0] is False
 
 
 # --- Follow-up 5: degraded-import fallback vocab mirrors the full live map --

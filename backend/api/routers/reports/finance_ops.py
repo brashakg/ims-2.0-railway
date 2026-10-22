@@ -23,7 +23,7 @@ from ._shared import (
     router,
 )
 from .gst_base import (
-    REAL_SALE_MATCH,
+    real_sale_match,
     _get_raw_db,
     CUSTOMER_SUPPLY_FIELDS,
     _order_rate_lines,
@@ -242,7 +242,7 @@ async def gst_report(
             # BSON datetime and a string comparison never matches.
             "created_at": {"$gte": from_dt, "$lte": to_dt},
             # THE GST-return order rule (gst_base), as GSTR-1 / GSTR-3B.
-            **REAL_SALE_MATCH,
+            **real_sale_match(_get_raw_db()),
         },
         limit=0,  # 0 -> no cap: a GST report must include every invoice.
     )

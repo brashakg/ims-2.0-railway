@@ -26,7 +26,7 @@ from ._shared import (
 )
 from .gst_base import (
     B2CL_INVOICE_THRESHOLD,
-    REAL_SALE_MATCH,
+    real_sale_match,
     _get_raw_db,
     _normalise_period,
     CUSTOMER_SUPPLY_FIELDS,
@@ -35,6 +35,7 @@ from .gst_base import (
     _order_rate_lines,
     _order_supply,
     _order_taxable_and_tax,
+    _alloc,
     _rate_heads,
 )
 from ...services.gst_rates import split_gst
@@ -152,7 +153,7 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
         # silently never matches (this was the original GSTR bug).
         query = {
             "store_id": active_store,
-            **REAL_SALE_MATCH,
+            **real_sale_match(db),
             "created_at": {"$gte": from_dt, "$lt": to_dt},
         }
 
@@ -210,9 +211,10 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
             )
             if not sale_lines:  # a zero-value order files nothing (as GSTR-3B)
                 continue
+            rate_heads = _rate_heads(sale_lines, is_inter_state)
             rate_lines = [
                 {k: rl[k] for k in ("rate", "taxable", "cgst", "sgst", "igst")}
-                for rl in _rate_heads(sale_lines, is_inter_state)
+                for rl in rate_heads
             ]
             igst = round(sum(rl["igst"] for rl in rate_lines), 2)
             cgst = round(sum(rl["cgst"] for rl in rate_lines), 2)
@@ -275,18 +277,18 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
 
             # Every sale's HSN summary rows come from its own lines, per HSN
             # and rate -- the same key a credit note reverses (_cn_hsn_lines).
-            for rate, hsn, line_taxable, line_tax in sale_lines:
-                l_cgst, l_sgst, l_igst = split_gst(line_tax, is_inter_state)
-                sale_hsn_lines.append(
-                    {
-                        "hsn": hsn,
-                        "gst_rate": rate,
-                        "taxable": line_taxable,
-                        "cgst": l_cgst,
-                        "sgst": l_sgst,
-                        "igst": l_igst,
-                    }
-                )
+            for rl in rate_heads:
+                for hsn, line_taxable, l_cgst, l_sgst, l_igst in rl["lines"]:
+                    sale_hsn_lines.append(
+                        {
+                            "hsn": hsn,
+                            "gst_rate": rl["rate"],
+                            "taxable": line_taxable,
+                            "cgst": l_cgst,
+                            "sgst": l_sgst,
+                            "igst": l_igst,
+                        }
+                    )
 
             if customer_gstin:
                 # B2B: registered business with GSTIN
@@ -322,7 +324,8 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                 # sunglass); split each line into the correct rate bucket
                 # instead of lumping the whole invoice under the first line's
                 # rate. Tax is split CGST/SGST (intra) or IGST (inter) per line.
-                for rate, _hsn, line_taxable, line_tax in sale_lines:
+                for rl in rate_heads:
+                    rate = rl["rate"]
                     # The portal's key: (supply type, place of supply,
                     # rate), the place by its state CODE -- a POS row names
                     # the state ('Jharkhand'), an online row its persisted
@@ -341,12 +344,11 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                             "igst": 0.0,
                             "totalTax": 0.0,
                         }
-                    l_cgst, l_sgst, l_igst = split_gst(line_tax, is_inter_state)
-                    b2cs_map[key]["taxableValue"] += line_taxable
-                    b2cs_map[key]["totalTax"] += line_tax
-                    b2cs_map[key]["igst"] += l_igst
-                    b2cs_map[key]["cgst"] += l_cgst
-                    b2cs_map[key]["sgst"] += l_sgst
+                    b2cs_map[key]["taxableValue"] += rl["taxable"]
+                    b2cs_map[key]["totalTax"] += rl["tax"]
+                    b2cs_map[key]["igst"] += rl["igst"]
+                    b2cs_map[key]["cgst"] += rl["cgst"]
+                    b2cs_map[key]["sgst"] += rl["sgst"]
 
             # Validation: B2B without GSTIN — caught by the absence
             # of customer_gstin above. Add an explicit warning for
@@ -473,14 +475,6 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                 else []
             )
         return _parent_lines_cache[oid]
-
-    def _alloc(total: float, weights: list) -> list:
-        """`total` shared pro rata by `weights`, the paisa on the last."""
-        w = sum(weights)
-        parts = [round(total * x / w, 2) if w else 0.0 for x in weights]
-        if parts:
-            parts[-1] = round(parts[-1] + round(total, 2) - round(sum(parts), 2), 2)
-        return parts
 
     def _cn_hsn_lines(ref, oid, buckets, heads) -> list:
         """A credit note's HSN summary lines: each (rate, taxable) bucket
