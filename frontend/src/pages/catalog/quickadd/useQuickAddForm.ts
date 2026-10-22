@@ -523,6 +523,10 @@ export function useQuickAddForm() {
           : keep?.reorderLevel ||
               levelText((product as { reorder_levels?: Record<string, unknown> }).reorder_levels?.[reorderShop]),
       );
+      // Variant mode CREATES a new colour/size: it is never an edit of the
+      // product that was open (?edit=A, then a sibling chip: Save used to PUT
+      // B's fields onto A).
+      setEditMode(null);
       setVariantCtx({
         sourceProductId: seed.sourceProductId,
         leadId: seed.leadId,

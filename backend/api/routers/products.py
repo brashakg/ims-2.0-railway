@@ -3488,6 +3488,8 @@ async def update_product(
                     update_data.get("category") or existing.get("category"),
                     update_data["attributes"],
                     db=_dict_db,
+                    # A value this product already stores stays valid.
+                    stored=existing.get("attributes"),
                 )
             except _pm.ProductMasterError as err:
                 raise HTTPException(

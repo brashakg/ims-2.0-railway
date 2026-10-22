@@ -92,7 +92,7 @@ def test_null_or_zero_clears_the_spine_weight(env, cleared):
     _twin_with_spine(env, weight=40.0)
     res = _put("T-1", {"weight": cleared})
     assert "weight" not in env.find_by_id("P-1")
-    assert res["product"]["weight"] is None
+    assert res["product"].get("weight") is None
 
 
 def test_an_absent_weight_leaves_it_alone(env):
@@ -340,3 +340,108 @@ def test_backfill_apply_and_revert():
     assert ecom["locally_modified"] is True and ecom["edit_rev"] != "old"
     assert backfill.revert(db, "run1") == 1
     assert db["catalog_products"].find_one({"id": "T-LIVE"})["ecom"] == {"locally_modified": False, "edit_rev": "old"}
+
+
+# --------------------------------------------------------------------------
+# A value the product ALREADY STORES stays valid; a NEW off-list value is
+# refused -- THE rule (product_master.enforce_dictionary_values, mirrored by
+# the browser's formModel.offListMessage), at both edit doors.
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def shape_list(monkeypatch):
+    from api.services import catalog_dictionary as cd
+
+    monkeypatch.setattr(cd, "load_field_options", lambda *_a, **_k: {"shape": ["Round", "Aviator"]})
+    monkeypatch.setattr(cd, "load_brand_options", lambda *_a, **_k: None)
+
+
+def test_dictionary_rule_exempts_only_the_stored_value(shape_list):
+    stored = {"shape": "Butterfly"}
+    out = pm.enforce_dictionary_values("SUNGLASS", {"shape": "Butterfly"}, db=object(), stored=stored)
+    assert out["shape"] == "Butterfly"  # unchanged
+    for attrs, kw in (({"shape": "Heart"}, {"stored": stored}), ({"shape": "Butterfly"}, {})):
+        with pytest.raises(pm.ProductMasterError):
+            pm.enforce_dictionary_values("SUNGLASS", attrs, db=object(), **kw)
+
+
+def _spine_put_rig(monkeypatch, shape):
+    from test_product_update_description_weight import _ConnStub, _seeded_repo
+    from api.routers import products as products_mod
+
+    repo = _seeded_repo()
+    repo.update("P1", {"attributes": {"brand_name": "Ray-Ban", "model_no": "RB1001", "shape": shape}})
+    monkeypatch.setattr(products_mod, "get_product_repository", lambda: repo)
+    monkeypatch.setattr(deps_mod, "get_db", lambda: _ConnStub())
+    return repo, products_mod
+
+
+def test_spine_put_saves_a_stored_off_list_value_unchanged(monkeypatch, shape_list):
+    repo, products_mod = _spine_put_rig(monkeypatch, "Butterfly")
+    body = products_mod.ProductUpdate(attributes={"colour_code": "BLK", "shape": "Butterfly"})
+    asyncio.run(products_mod.update_product("P1", body, _user()))
+    assert repo.find_by_id("P1")["attributes"]["shape"] == "Butterfly"
+
+
+def test_spine_put_refuses_a_new_off_list_value(monkeypatch, shape_list):
+    from fastapi import HTTPException
+
+    _repo, products_mod = _spine_put_rig(monkeypatch, "Butterfly")
+    body = products_mod.ProductUpdate(attributes={"shape": "Heart"})
+    with pytest.raises(HTTPException) as err:
+        asyncio.run(products_mod.update_product("P1", body, _user()))
+    assert err.value.status_code == 422
+
+
+def _with_dictionary_db(monkeypatch):
+    """The catalog door runs in-memory here (no db): hand THE rule a db so
+    the patched lists apply, keeping whatever `stored` the door passes."""
+    real = pm.enforce_dictionary_values
+    monkeypatch.setattr(
+        pm, "enforce_dictionary_values",
+        lambda cat, attrs, *, db=None, stored=None: real(cat, attrs, db=object(), stored=stored),
+    )
+
+
+def test_catalog_put_saves_a_stored_off_list_value_unchanged(env, monkeypatch, shape_list):
+    _with_dictionary_db(monkeypatch)
+    doc = _bvi_doc(doc_id="T-SH", sku="SH-1")
+    doc["category"] = "SUNGLASS"
+    doc["attributes"]["shape"] = "Butterfly"
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+    _put("T-SH", {"attributes": {"colour_code": "BLU"}})
+    assert catalog_mod.CATALOG_PRODUCTS["T-SH"]["attributes"]["shape"] == "Butterfly"
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as err:
+        _put("T-SH", {"attributes": {"shape": "Heart"}})
+    assert err.value.status_code == 422
+
+
+# --------------------------------------------------------------------------
+# The weight never lands on the twin when its spine could not be resolved
+# --------------------------------------------------------------------------
+
+
+def test_weight_save_refused_when_the_spine_cannot_be_resolved(env, monkeypatch):
+    from fastapi import HTTPException
+
+    _twin_with_spine(env)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("read failed")
+
+    monkeypatch.setattr(catalog_mod, "_spine_product_id", _boom)
+    with pytest.raises(HTTPException) as err:
+        _put("T-1", {"weight": 40.0})
+    assert err.value.status_code == 503
+    assert "weight" not in catalog_mod.CATALOG_PRODUCTS["T-1"]
+    assert "weight" not in env.find_by_id("P-1")
+
+
+def test_clearing_the_weight_of_an_import_with_no_spine(env):
+    doc = _bvi_doc(doc_id="T-IMP2", sku="IMP-2", weight=28.0)
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+    _put("T-IMP2", {"weight": None})
+    assert "weight" not in catalog_mod.CATALOG_PRODUCTS["T-IMP2"]

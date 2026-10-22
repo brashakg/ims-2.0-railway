@@ -928,8 +928,18 @@ def _enforce_page_type(attributes: Any) -> Dict[str, Any]:
     return attrs
 
 
+def _same_stored(val: Any, stored: Optional[Dict[str, Any]], name: str) -> bool:
+    """THE stored-value exemption (owner review of #1256): a value the product
+    being edited ALREADY STORES stays valid even when it is not in today's
+    list -- a product catalogued before a list existed must stay editable.
+    Case-insensitive, trimmed; the browser mirrors it (formModel.offListMessage)."""
+    if not stored:
+        return False
+    return str(val or "").strip().lower() == str(stored.get(name) or "").strip().lower()
+
+
 def enforce_dictionary_values(
-    category: Any, attributes: Dict[str, Any], *, db=None
+    category: Any, attributes: Dict[str, Any], *, db=None, stored: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """Catalog Dictionary enforcement (owner rule: only values saved in
     Settings may be chosen in Catalog).
@@ -947,6 +957,11 @@ def enforce_dictionary_values(
     Returns a (possibly canonicalised) copy of `attributes`. Fail-soft: no db
     or a config read error -> attributes returned unchanged. Raises
     ProductMasterError(422, field=<name>) on a value outside its list.
+
+    `stored`: the attributes the product being EDITED already holds. A value
+    equal to its stored one is exempt (_same_stored) and left as it is; a NEW
+    value is judged as above. The create door passes none, so it (and a
+    clone) stays strict.
     """
     # The website page type is a fixed list (no Settings, no db): every door
     # that runs the dictionary (create, PUT /products, PUT /catalog/products)
@@ -966,6 +981,8 @@ def enforce_dictionary_values(
         brands = _cd.load_brand_options(db, prefix)
         if brands:  # None (read failed) or [] (empty master) both fail open
             canonical_brand = _cd.match_canonical(brand_val, brands)
+            if canonical_brand is None and _same_stored(brand_val, stored, "brand_name"):
+                canonical_brand = brand_val
             if canonical_brand is None:
                 raise ProductMasterError(
                     f"Brand '{brand_val.strip()}' is not in the Brand Master for "
@@ -984,6 +1001,8 @@ def enforce_dictionary_values(
             subs = _cd.load_subbrand_options(db, attrs.get("brand_name") or brand_val)
             if subs:  # None (read failed) and [] (no subbrands) fail open
                 canonical_sub = _cd.match_canonical(sub_val, subs)
+                if canonical_sub is None and _same_stored(sub_val, stored, "subbrand"):
+                    canonical_sub = sub_val
                 if canonical_sub is None:
                     preview = ", ".join(subs[:6]) + ("..." if len(subs) > 6 else "")
                     raise ProductMasterError(
@@ -1008,6 +1027,8 @@ def enforce_dictionary_values(
             if not isinstance(val, str) or not val.strip():
                 continue  # absent/blank values are the required-gate's concern
             canonical_val = _cd.match_canonical(val, allowed)
+            if canonical_val is None and _same_stored(val, stored, name):
+                continue  # already stored on this product: left as it is
             if canonical_val is None:
                 preview = ", ".join(allowed[:6]) + ("..." if len(allowed) > 6 else "")
                 raise ProductMasterError(

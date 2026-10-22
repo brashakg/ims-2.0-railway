@@ -44,12 +44,22 @@ const SPINE = {
   images: ['/api/v1/products/image/a'],
 };
 
+// A sibling of the same model, offered by the similar-products chip.
+const SIBLING_B = {
+  ...SPINE,
+  product_id: 'P-B',
+  sku: 'SGCARRERA1234-901',
+  brand: 'Ray-Ban',
+  attributes: { brand_name: 'Ray-Ban', model_no: '1234', colour_code: '901', warranty: '1 year' },
+  weight: 38,
+};
+
 const current = vi.hoisted(() => ({ product: {} as Record<string, unknown> }));
 const productSpies = vi.hoisted(() => ({}) as Record<string, ReturnType<typeof vi.fn>>);
 const known: Record<string, (...a: unknown[]) => unknown> = {
   getCategoryRegistry: async () => { throw new Error('offline'); },
   getBrandOptions: async () => ({ brands: [] }),
-  getProduct: async () => current.product,
+  getProduct: async (id: unknown) => (id === 'P-B' ? SIBLING_B : current.product),
   updateProduct: async () => ({}),
 };
 vi.mock('../../../services/api/products', () => {
@@ -88,7 +98,11 @@ vi.mock('../../../services/api/catalog', () => ({
   CatalogRequestError: class CatalogRequestError extends Error { status = 0; },
   catalogProductsApi: catalogSpies,
 }));
-vi.mock('../SimilarProductsHint', () => ({ SimilarProductsHint: () => null }));
+vi.mock('../SimilarProductsHint', () => ({
+  SimilarProductsHint: ({ onPickSibling }: { onPickSibling: (id: string) => void }) => (
+    <button type="button" onClick={() => onPickSibling('P-B')}>pick sibling B</button>
+  ),
+}));
 
 import { QuickAddPage } from '../QuickAddPage';
 import { DuplicateProductError } from '../../../services/api/products';
@@ -193,6 +207,24 @@ describe('the description generator', () => {
     await waitFor(() => expect(productSpies.generateDescription).toHaveBeenCalledTimes(1));
     const [body] = productSpies.generateDescription.mock.calls[0] as [{ attributes: Record<string, string> }];
     expect(body.attributes.weight).toBe('40 g');
+  });
+});
+
+describe('picking a sibling while editing', () => {
+  it('on ?edit=A, sibling B starts a NEW colour: Save creates it and A is never written', async () => {
+    // A with values from today's lists (its own values ride into the new
+    // colour as typed, and a NEW product has nothing stored to exempt).
+    current.product = { ...SPINE, brand: 'Ray-Ban', attributes: SIBLING_B.attributes };
+    open('/catalog/add?edit=P-SG');
+    await waitFor(() => expect(weightBox().value).toBe('40'));
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'pick sibling B' }));
+    const save = await screen.findByRole('button', { name: /Save variant/ });
+    fireEvent.change(screen.getByLabelText(/^Colour Code/), { target: { value: '777' } });
+    await user.click(save);
+    await waitFor(() => expect(productSpies.createProduct).toHaveBeenCalledTimes(1));
+    expect(productSpies.createProduct.mock.calls[0][0]).toMatchObject({ variant_of: 'P-B' });
+    expect(productSpies.updateProduct?.mock.calls.length ?? 0).toBe(0);
   });
 });
 

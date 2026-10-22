@@ -51,7 +51,9 @@ export interface ProductFormValues {
 //  * a value ALREADY STORED on the product being edited stays valid (it shows
 //    as "<value> (current)" in the dropdown and saves unchanged) -- a product
 //    catalogued before a list existed must still be editable; NEW entries are
-//    still limited to the list;
+//    still limited to the list. The SAME rule as the server's
+//    (product_master._same_stored, used by enforce_dictionary_values at both
+//    edit doors): case-insensitive, trimmed;
 //  * brand is not judged while the Brand Master list has not arrived (the
 //    local fallback list is not the owner's).
 // Returns the message, or null when the value is fine.

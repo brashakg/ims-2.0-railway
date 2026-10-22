@@ -2558,7 +2558,8 @@ async def update_catalog_product(
                 existing.get("category"),
             )
             merged_attrs = _pm.enforce_dictionary_values(
-                existing.get("category"), merged_attrs, db=_get_db()
+                existing.get("category"), merged_attrs, db=_get_db(),
+                stored=pre_edit.get("attributes"),
             )
         except _pm.ProductMasterError as err:
             raise HTTPException(status_code=err.status, detail=err.message) from err
@@ -2757,8 +2758,10 @@ async def update_catalog_product(
 
         _pr = get_product_repository()
         _spine_id = _spine_product_id(_pr, existing)
-    except Exception as exc:  # noqa: BLE001 -- fail-soft unless a barcode moves
-        if spine_gtin is not None:
+    except Exception as exc:  # noqa: BLE001 -- fail-soft unless a barcode or weight moves
+        if spine_gtin is not None or "weight" in product.model_fields_set:
+            # Weight too: unresolved, it would land on the twin alone while
+            # the answer said "saved" -- the very strand this door fixed.
             # "Could not look" is not "no linked spine": saving the twin alone
             # would split the two copies for good. Refused, nothing saved.
             raise HTTPException(status_code=503, detail=_SPINE_UNCHECKED) from exc
@@ -3004,8 +3007,6 @@ async def update_catalog_product(
             _pr.update(_spine_id, _patch)
             if weight_sent and not new_weight:
                 _pr.collection.update_one({"product_id": _spine_id}, {"$unset": {"weight": ""}})
-            if weight_sent:
-                existing["weight"] = new_weight  # the answer shows the spine's
     except Exception:  # noqa: BLE001
         logger.warning(
             "[CATALOG] spine sync on update skipped for %s", product_id, exc_info=True
@@ -3069,8 +3070,12 @@ async def update_catalog_product(
             "[CATALOG] online price recompute skipped for %s", product_id, exc_info=True
         )
 
+    # The answer carries the weight the screens read (the spine's), so the
+    # review editor re-seeds from it.
+    reply = dict(mask_cost(existing, current_user, "product"))
+    _stamp_spine_weight([reply])
     return {
-        "product": mask_cost(existing, current_user, "product"),
+        "product": reply,
         "message": message,
     }
 
