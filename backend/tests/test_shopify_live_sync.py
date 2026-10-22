@@ -430,6 +430,46 @@ def test_scheduled_sync_first_publishes_a_queued_product_and_still_syncs_live(wo
     assert {r["user_id"] for r in audit.rows} == {ls.SCHEDULER_ACTOR}
 
 
+def test_always_refused_never_sell_take_downs_never_starve_the_other_passes(world, live_engine, monkeypatch):
+    """Review of #1252 (the reviewer's probe): limit 3, three Never-sell
+    listings Shopify always refuses (deleted there by hand: "Product does not
+    exist") plus a dirty live listing and a queued first publish. The sweep
+    has its own cap, outside the run limit, so the re-push and the first
+    publish go out on the FIRST run; the three are retried and named, once
+    each, on every run."""
+    db, _ = world
+    db.seed("brand_masters", [
+        {"brand_id": "b-no", "name": "NoWeb", "is_active": True, "never_sell_online": True},
+    ])
+    db.seed("catalog_products", [
+        {"id": f"G{i}", "sku": f"GS{i}", "title": "Gone", "brand": "NoWeb", "mrp": 1000, "images": PHOTO,
+         "ecom": {"shopify_product_id": f"gid://shopify/Product/G{i}"}}
+        for i in range(3)
+    ] + [
+        {"id": "P-live", "sku": "S1", "title": "Live edited", "brand": "RB", "mrp": 1000, "images": PHOTO,
+         "ecom": {"shopify_product_id": "gid://shopify/Product/1", "locally_modified": True}},
+        _new_row(1),
+    ])
+    attempts = []
+
+    async def _refused(_db, product):
+        attempts.append(product["id"])
+        return shopify_push.PushResult(mode="LIVE", entity="product", action="update",
+                                       target_id=product["id"], ok=False,
+                                       error="Product does not exist")
+
+    monkeypatch.setattr(shopify_push, "push_product_delist", _refused)
+    for n in (1, 2, 3):
+        run = _run(ls.sync_live_products(db, trigger="manual", actor="u", limit=3))
+        assert len(attempts) == 3 * n, "every listing retried each run, nothing more"
+        named = [f for f in run["failures"] if f["code"] == ls.NEVER_SELL_STILL_LIVE]
+        assert sorted(f["sku"] for f in named) == ["GS0", "GS1", "GS2"]
+        assert all("take-down failed" in f["error"] for f in named)
+        assert run["never_sell_taken_down"] == 0
+    # Both other passes made progress on the first run, despite the refusals.
+    assert sorted(live_engine) == [("N1", "create"), ("P-live", "update")]
+
+
 def test_a_refused_product_is_not_first_published_and_is_named(world, live_engine, monkeypatch):
     """The REAL product gate: a Never-sell-online brand and an unfinished
     (archived) row are refused, stay queued, and ride the run's failures."""

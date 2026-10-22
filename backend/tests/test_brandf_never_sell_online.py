@@ -334,7 +334,31 @@ def test_the_sync_take_down_is_bounded_by_the_run_limit(brands, monkeypatch):
     run = _sync(db, limit=1)
     assert len(shop.calls) == 1 and run["never_sell_taken_down"] == 1 and run["limit_reached"] is True
     [left] = [f for f in run["failures"] if f["code"] == "NEVER_SELL_STILL_LIVE"]
-    assert "run limit" in left["error"]
+    assert "take-down cap" in left["error"]
+
+
+def test_a_failed_live_listing_read_is_reported_not_read_as_nothing(brands, monkeypatch):
+    """Review of #1252: the save stands, but neither the response nor the
+    decision row may say "nothing to take down" when the read failed."""
+    from api.services import online_delist
+
+    db, audit = brands
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("mongo down")
+
+    monkeypatch.setattr(online_delist, "never_sell_live_listings", _boom)
+    out = _run(ac.update_brand("brandf_b1", ac.BrandUpdate(never_sell_online=True), current_user=_SUPER))
+    assert out["never_sell_online"] is True
+    assert db["brand_masters"].find_one({"brand_id": "brandf_b1"})["never_sell_online"] is True
+    assert "read failed" in out["live_listings_read_error"] and out["live_listings_take_down"] == []
+    [on] = _block_rows(audit)
+    assert on["action"] == "BRAND_NEVER_SELL_ONLINE_ON"
+    assert on["details"]["live_listings_read_error"] == out["live_listings_read_error"]
+    # A SUPERADMIN re-save while the read still fails says so too (no silent no-op).
+    again = _run(ac.update_brand("brandf_b1", ac.BrandUpdate(never_sell_online=True), current_user=_SUPER))
+    assert "read failed" in again["live_listings_read_error"]
+    assert _block_rows(audit)[-1]["action"] == "BRAND_NEVER_SELL_ONLINE_RETRY"
 
 
 def test_listing_facts_carry_the_catalog_id():

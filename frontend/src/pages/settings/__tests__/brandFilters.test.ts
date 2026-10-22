@@ -121,7 +121,8 @@ describe('brandSavePayload', () => {
     const open = brand({ brandName: 'Vogue' });
     expect(brandSavePayload({ ...open, neverSellOnline: true }, open).never_sell_online).toBe(true);
     expect(brandSavePayload({ brandName: 'New', neverSellOnline: true }, null).never_sell_online).toBe(true);
-  });  it('a SUPERADMIN save of a blocked brand re-sends true (re-runs the take-down)', () => {
+  });
+  it('a SUPERADMIN save of a blocked brand re-sends true (re-runs the take-down)', () => {
     expect(brandSavePayload({ ...blocked }, blocked, true).never_sell_online).toBe(true);
     expect(brandSavePayload({ ...blocked }, blocked, false)).not.toHaveProperty('never_sell_online');
     const open = brand({ brandName: 'Vogue' });
