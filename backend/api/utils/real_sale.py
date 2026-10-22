@@ -43,14 +43,21 @@ def real_sale_match(db=None, *, orders=None) -> Dict[str, Any]:
     ponytail: one extra read of the VOID orders per query; fine while deleted
     Shopify orders number in the hundreds -- stamp a `real_sale` bool on the
     order at void time if they ever number in the tens of thousands."""
-    match: Dict[str, Any] = {"status": {"$nin": EXCLUDED_ORDER_STATUSES}}
+    # Case-insensitive, as is_real_sale (`Cancelled`, `Void` count too); the
+    # $nin list stays for readers that only understand $nin.
+    match: Dict[str, Any] = {
+        "status": {
+            "$nin": EXCLUDED_ORDER_STATUSES,
+            "$not": {"$regex": "^(cancelled|draft|historical)$", "$options": "i"},
+        }
+    }
     if orders is None:
         if db is None:
             return match
         orders = db.get_collection("orders") if hasattr(db, "get_collection") else db["orders"]
     not_sales = [
         o.get("order_id")
-        for o in orders.find({"status": {"$in": _VOID_STATUSES}})
+        for o in orders.find({"status": {"$regex": "^void(ed)?$", "$options": "i"}})
         if isinstance(o, dict)
         and o.get("order_id")
         and str(o.get("status") or "").upper() in _VOID

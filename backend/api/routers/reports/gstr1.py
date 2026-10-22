@@ -45,7 +45,7 @@ from .gst_itc import (
     _cn_parent_held,
     _ledger_row_return_doc,
     _order_held_off_returns,
-    _return_interstate_flag,
+    _return_supply,
     _transfer_b2b_rows,
     _transfer_outward_bills,
 )
@@ -273,6 +273,9 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                 "hsnCode": hsn_code,
                 "gstRate": gst_rate_dominant,
                 "rateLines": rate_lines,
+                # THE place of supply filed (portal `pos`): the state code
+                # the place-of-supply rule gave this sale (_order_supply).
+                "placeOfSupplyCode": pos_code,
             }
 
             # Every sale's HSN summary rows come from its own lines, per HSN
@@ -331,12 +334,13 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                     # the state ('Jharkhand'), an online row its persisted
                     # code ('20'); one consolidated row, never two.
                     key = (
-                        f"{resolve_state_code(place_of_supply) or place_of_supply}"
+                        f"{pos_code or resolve_state_code(place_of_supply) or place_of_supply}"
                         f"|{rate}|{is_inter_state}"
                     )
                     if key not in b2cs_map:
                         b2cs_map[key] = {
                             "placeOfSupply": place_of_supply,
+                            "placeOfSupplyCode": pos_code,
                             "gstRate": rate,
                             "taxableValue": 0.0,
                             "cgst": 0.0,
@@ -585,16 +589,17 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                 # customer state as the last fallback) so the two
                 # returns can never reverse different heads for one
                 # refund.
+                # The place of supply is ALWAYS the sale's (_return_supply):
+                # a note filed IGST must name the buyer's state, not ours.
+                is_inter, cn_code = _return_supply(
+                    db,
+                    _ret_doc or {"customer_id": cust_id},
+                    store_doc,
+                    _cdnr_inter_cache,
+                )
                 entry_interstate = entry.get("interstate")
                 if isinstance(entry_interstate, bool):
                     is_inter = entry_interstate
-                else:
-                    is_inter = _return_interstate_flag(
-                        db,
-                        _ret_doc or {"customer_id": cust_id},
-                        store_doc,
-                        _cdnr_inter_cache,
-                    )
                 # THE split rule (gst_rates.split_gst), the invoice's: the
                 # heads always add up to the note's tax.
                 cn_cgst, cn_sgst, cn_igst = split_gst(cn_tax, is_inter)
@@ -622,7 +627,7 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                     (cn_cgst, cn_sgst, cn_igst),
                 )
                 cn_hsn = cn_hsn_lines[0]["hsn"] if cn_hsn_lines else ""
-                cn_place = cust_state or store_state or "Unknown"
+                cn_place = state_name(cn_code) or cn_code or cust_state or store_state or "Unknown"
 
                 cn_entry = {
                     "refReference": ref,
@@ -632,6 +637,7 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                     "customerGSTIN": cust_gstin,
                     "customerState": cn_place,
                     "placeOfSupply": cn_place,
+                    "placeOfSupplyCode": cn_code,
                     "grossValue": round(gross_refund, 2),
                     "taxableValue": cn_taxable,
                     "cgst": cn_cgst,
@@ -719,9 +725,7 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                 # order's stamp first, the customer's state only as the
                 # fallback. Re-deriving it here is how the two returns
                 # ended up reversing different heads for one refund.
-                is_inter = _return_interstate_flag(
-                    db, ret, store_doc, _cdnr_inter_cache
-                )
+                is_inter, r_code = _return_supply(db, ret, store_doc, _cdnr_inter_cache)
                 r_cgst, r_sgst, r_igst = split_gst(r_tax, is_inter)
 
                 r_rate = _cn_bucket_rate(gb.get("gst_rate"), r_tax, r_taxable)
@@ -743,7 +747,7 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                     r_ref, str(ret.get("order_id") or ""), r_buckets,
                     (r_cgst, r_sgst, r_igst),
                 )
-                r_place = cust_state or store_state or "Unknown"
+                r_place = state_name(r_code) or r_code or cust_state or store_state or "Unknown"
 
                 cdnr.append(
                     {
@@ -765,6 +769,7 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                         "customerGSTIN": cust_info.get("gstin", ""),
                         "customerState": r_place,
                         "placeOfSupply": r_place,
+                        "placeOfSupplyCode": r_code,
                         "grossValue": round(float(gb.get("gross") or 0.0), 2),
                         "taxableValue": r_taxable,
                         "cgst": r_cgst,
@@ -877,7 +882,12 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
         "validation": {
             "ok": len(validation_issues) == 0,
             "issueCount": len(validation_issues),
-            "issues": validation_issues[:50],
+            # Errors first, then warnings, then info: the first 50 shown are
+            # the ones that stop a filing.
+            "issues": sorted(
+                validation_issues,
+                key=lambda i: {"error": 0, "warn": 1}.get(i.get("level"), 2),
+            )[:50],
         },
     }
 

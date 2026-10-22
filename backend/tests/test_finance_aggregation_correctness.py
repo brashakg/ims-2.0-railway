@@ -130,7 +130,7 @@ def _all_order_matches(recorder):
     real_sale_match), which is how never-invoiced VOIDs get excluded."""
     return [
         m for m in recorder.get("orders", [])
-        if not (isinstance(m.get("status"), dict) and set(m["status"].get("$in", [])) >= {"VOID", "VOIDED"})
+        if not (isinstance(m.get("status"), dict) and "void" in str(m["status"].get("$regex", "")))
     ]
 
 
