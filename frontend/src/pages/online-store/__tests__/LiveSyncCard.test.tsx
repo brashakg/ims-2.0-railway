@@ -139,6 +139,29 @@ describe('Live sync card', () => {
     expect(card).toHaveTextContent(/Configured in Settings > Shopify live sync/);
   });
 
+  // Hundreds of "no photo" refusals used to print one line each (~433 lines).
+  // They collapse into ONE count line; the SKUs sit behind a native expander;
+  // every other failure keeps its own row.
+  it('collapses the no-photo refusals into one count line with an expandable list', async () => {
+    const noPhoto = Array.from({ length: 433 }, (_, i) => ({
+      product_id: `N${i}`, sku: `NS${i}`, name: null, code: null, reason: 'no_photo', error: null,
+    }));
+    const run = { ...LAST_RUN, refused_no_photo: 433, failures: [...LAST_RUN.failures, ...noPhoto] };
+    vi.mocked(pushApi.getStatus).mockResolvedValue(status({ ...SCHEDULE_ON, last_run: run }) as any);
+    render(<OnlineShopifySyncPage />);
+
+    const card = await screen.findByTestId('live-sync-card');
+    const failures = within(card).getByRole('list', { name: /live sync failures/i });
+    const rows = within(failures).getAllByRole('listitem');
+    expect(rows).toHaveLength(3); // one no-photo line + the two real failures
+    const line = within(card).getByTestId('live-sync-no-photo');
+    expect(line).toHaveTextContent(/433\s*refused: no photograph/);
+    expect(line.querySelector('details')).not.toBeNull();
+    expect(line).toHaveTextContent('NS0, NS1');
+    expect(line).toHaveTextContent('NS432');
+    expect(rows[1]).toHaveTextContent('RB-3025');
+  });
+
   // Sync audit #7: a product whose price step failed is LIVE at the OLD price.
   // ok=true, so it is neither "failed" nor a clean "updated" -- it gets its own
   // count on the line and its own row in the failures list (code + message).

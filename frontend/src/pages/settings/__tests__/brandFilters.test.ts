@@ -8,6 +8,7 @@ import {
   filterBrands,
   isBrandFiltered,
   readBrandFilters,
+  takeDownMessages,
   writeBrandFilters,
   type BrandFilters,
 } from '../brandFilters';
@@ -120,5 +121,35 @@ describe('brandSavePayload', () => {
     const open = brand({ brandName: 'Vogue' });
     expect(brandSavePayload({ ...open, neverSellOnline: true }, open).never_sell_online).toBe(true);
     expect(brandSavePayload({ brandName: 'New', neverSellOnline: true }, null).never_sell_online).toBe(true);
+  });
+});
+
+describe('takeDownMessages (Never sell online ON takes live listings down)', () => {
+  it('says the listings ARE being taken down when Shopify took them (LIVE)', () => {
+    const m = takeDownMessages([
+      { sku: 'A', ok: true, mode: 'LIVE' },
+      { sku: 'B', ok: true, mode: 'LIVE' },
+    ]);
+    expect(m.warning).toMatch(/2 live listings are being taken down/);
+    expect(m.error).toBeUndefined();
+  });
+
+  it('never claims a take-down while the push gates are dark (SIMULATED)', () => {
+    const m = takeDownMessages([{ sku: 'A', ok: true, mode: 'SIMULATED' }]);
+    expect(m.warning).toMatch(/would be taken down/);
+    expect(m.warning).toMatch(/nothing changed on the website yet/);
+  });
+
+  it('names the listings whose take-down failed as still live', () => {
+    const m = takeDownMessages([
+      { sku: 'A', ok: true, mode: 'LIVE' },
+      { sku: 'B', ok: false, mode: 'LIVE' },
+    ]);
+    expect(m.warning).toMatch(/^1 live listing is being taken down/);
+    expect(m.error).toMatch(/1 listing could not be taken down and is still live: B/);
+  });
+
+  it('says nothing when the brand had no live listings', () => {
+    expect(takeDownMessages([])).toEqual({});
   });
 });

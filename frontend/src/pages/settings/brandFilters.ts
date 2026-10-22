@@ -117,3 +117,28 @@ export function brandSavePayload(form: Partial<Brand>, original: Brand | null) {
     ...(block !== (original?.neverSellOnline === true) ? { never_sell_online: block } : {}),
   };
 }
+
+/** One row of the server's live_listings_take_down report. */
+export interface TakeDownRow {
+  sku: string;
+  ok: boolean;
+  mode?: string | null;
+}
+
+/** What to tell the SUPERADMIN after Never sell online went ON: the server
+ *  took the brand's live listings down through the one take-down door
+ *  (Shopify Draft, stock kept). Dark gates -> SIMULATED, nothing changed yet. */
+export function takeDownMessages(rows: TakeDownRow[]): { warning?: string; error?: string } {
+  const failed = rows.filter(r => !r.ok).map(r => r.sku);
+  const n = rows.length - failed.length;
+  const out: { warning?: string; error?: string } = {};
+  if (n > 0) {
+    out.warning = rows.some(r => r.ok && r.mode !== 'LIVE')
+      ? `${n} live listing${n === 1 ? '' : 's'} of this brand would be taken down — Shopify writes are off (simulated), nothing changed on the website yet.`
+      : `${n} live listing${n === 1 ? ' is' : 's are'} being taken down from the website (moved to Draft on Shopify; stock kept).`;
+  }
+  if (failed.length > 0) {
+    out.error = `${failed.length} listing${failed.length === 1 ? '' : 's'} could not be taken down and ${failed.length === 1 ? 'is' : 'are'} still live: ${failed.slice(0, 10).join(', ')}${failed.length > 10 ? '…' : ''}. Use Online Store > Take down.`;
+  }
+  return out;
+}

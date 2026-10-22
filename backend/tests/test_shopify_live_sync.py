@@ -539,6 +539,20 @@ def test_photo_less_rows_never_starve_the_first_publish(world, photo_checking_en
     assert second["first_published"] == 0 and second["awaiting_first_publish"] == 210
 
 
+def test_room_smaller_than_cap(world):
+    """Reviewer's #1251 probe: a manual run whose limit leaves room for 2
+    first publishes (3 live re-pushes take the rest of 5) publishes exactly
+    2, says the LIMIT stopped it, and does not claim the per-run cap did."""
+    db, _ = world
+    live = [_new_row(i) for i in range(3)]
+    for d in live:
+        d["ecom"]["shopify_product_id"] = f"gid://shopify/Product/{d['id']}"
+    db.seed("catalog_products", live + [_new_row(100 + i) for i in range(10)])
+    run = _run(ls.sync_live_products(db, trigger="manual", actor="u", limit=5))
+    assert run["first_published"] == 2 and run["limit_reached"] is True
+    assert run["first_publish_cap_reached"] is False
+
+
 def test_the_push_all_door_and_the_sync_read_one_cap_and_one_order():
     from api.routers import online_store_push as router
 

@@ -28,6 +28,7 @@ import {
   readBrandFilters,
   writeBrandFilters,
   type BrandFilters,
+  takeDownMessages,
 } from './brandFilters';
 
 // ============================================================================
@@ -216,12 +217,11 @@ export function BrandSection() {
       const saved = editingBrand?.id
         ? await adminBrandApi.updateBrand(editingBrand.id, apiData)
         : await adminBrandApi.createBrand(apiData);
-      const stillLive: string[] = saved?.live_listings_not_taken_down || [];
-      if (stillLive.length > 0) {
-        toast.warning(
-          `${stillLive.length} listing${stillLive.length === 1 ? '' : 's'} of this brand stay${stillLive.length === 1 ? 's' : ''} live on the website: ${stillLive.slice(0, 10).join(', ')}${stillLive.length > 10 ? '…' : ''}. Their prices and photos stop updating; stock updates and Take down (Online Store) still work.`,
-        );
-      }
+      // Never sell online switched ON: the server took the brand's live
+      // listings down through the one take-down door.
+      const told = takeDownMessages(saved?.live_listings_take_down || []);
+      if (told.warning) toast.warning(told.warning);
+      if (told.error) toast.error(told.error);
       toast.success(editingBrand ? 'Brand updated successfully' : 'Brand created successfully');
       setShowAddBrandModal(false);
       setEditingBrand(null);
@@ -829,8 +829,9 @@ function BrandModal({
             </label>
             <p className="text-xs text-gray-700 mt-1 ml-6">
               Hard block for a brand that has not allowed online selling: no product of this brand can be
-              published or pushed to the website by anyone, even manually. Listings already live stay up
-              (listed when you save): their prices and photos stop updating; stock and Take down still work.
+              published or pushed to the website by anyone, even manually. Listings already live ARE taken
+              down when you save (moved to Draft on Shopify, stock kept). Switching it off again republishes
+              nothing: products go back through the normal publish.
             </p>
           </div>
         </div>

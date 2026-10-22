@@ -455,33 +455,70 @@ def _guard_never_sell_online(user: Any, wanted: Optional[bool], current: bool) -
     return True
 
 
-def _live_listings_of_brand(name: str) -> List[str]:
-    """SKUs of this brand's listings live on the website now (the collection
-    registry's own live predicate). Blocking does NOT take them down -- they
-    are reported so a person can decide (owner 2026-10-19). Fail-soft: []."""
+def _raw_db():
+    """The raw database behind get_db(), or None. listing_facts reads
+    db[name]: never hand it the connection wrapper (not subscriptable -- the
+    #1248 bug class)."""
+    from ..dependencies import get_db
+
+    conn = get_db()
+    if conn is None or not getattr(conn, "is_connected", False):
+        return None
+    return conn.db
+
+
+def _live_listings_of_brand(db, name: str) -> List[Dict[str, Any]]:
+    """{id, sku} of this brand's listings live on the website now (the
+    collection registry's own live predicate, matched by the gate's
+    brand_name_key). Fail-soft: []."""
     try:
-        from ..dependencies import get_db
+        from ..services.catalog_dictionary import brand_name_key
         from ..services.shopify_push.collection_registry import listing_facts
 
-        conn = get_db()
-        # listing_facts reads db[name]: hand it the raw database, never the
-        # connection wrapper (not subscriptable -- the #1248 bug class).
-        if conn is None or not getattr(conn, "is_connected", False):
-            return []
-        db = conn.db
-        from ..services.catalog_dictionary import brand_name_key
-
         probe = brand_name_key(name)
+        if db is None or not probe:
+            return []
         return [
-            str(f.get("sku") or "")
+            {"id": f.get("id"), "sku": str(f.get("sku") or "")}
             for f in listing_facts(db)
-            if probe and brand_name_key(f.get("brand")) == probe
+            if brand_name_key(f.get("brand")) == probe
         ]
-    except Exception:  # noqa: BLE001 - a report, never a blocker
+    except Exception:  # noqa: BLE001 - never blocks the brand save
         return []
 
 
-def _audit_never_sell_online(user: Dict, brand: Dict, blocked: bool, live: List[str]) -> None:
+async def _take_down_brand_listings(user: Dict, name: str) -> List[Dict[str, Any]]:
+    """Owner ruling 2026-10-22: blocking a brand TAKES DOWN its live listings,
+    through the ONE take-down door (online_delist.delist_if_live ->
+    shopify_push.push_product_delist: Shopify status Draft, gid and stock
+    kept, never a delete; SIMULATED with zero network while the push gates
+    are dark; each one audited and stamped on its twin). Unblocking never
+    republishes: a product comes back through the normal publish path.
+
+    Inline, like the collection block cutover: no take-down queue exists.
+    ponytail: sequential inside the request -- a brand with hundreds of live
+    listings could outlast the HTTP timeout; whatever is left stays named by
+    every sync run ("live, not pushed -- take it down"). Queue it if that bites."""
+    from ..services import online_delist
+
+    db = _raw_db()
+    out: List[Dict[str, Any]] = []
+    for f in _live_listings_of_brand(db, name):
+        res = await online_delist.delist_if_live(
+            db, {"id": f["id"], "sku": f["sku"]},
+            reason="brand_never_sell_online", actor=user,
+        ) or {}
+        ok = res.get("ok") is True
+        out.append({
+            "sku": f["sku"],
+            "ok": ok,
+            "mode": res.get("mode"),
+            "error": None if ok else (res.get("error") or "take-down failed"),
+        })
+    return out
+
+
+def _audit_never_sell_online(user: Dict, brand: Dict, blocked: bool, taken: List[Dict]) -> None:
     """Audit row for a Never-sell-online change. Fail-soft."""
     try:
         from ..dependencies import get_audit_repository
@@ -499,7 +536,7 @@ def _audit_never_sell_online(user: Dict, brand: Dict, blocked: bool, live: List[
                 "details": {
                     "brand": brand.get("name"),
                     "never_sell_online": blocked,
-                    "live_listings_not_taken_down": live,
+                    "live_listings_take_down": taken,
                 },
             }
         )
@@ -507,11 +544,11 @@ def _audit_never_sell_online(user: Dict, brand: Dict, blocked: bool, live: List[
         pass
 
 
-def _after_never_sell_online_change(user: Dict, doc: Dict) -> Dict:
+async def _after_never_sell_online_change(user: Dict, doc: Dict) -> Dict:
     blocked = doc.get("never_sell_online") is True
-    live = _live_listings_of_brand(doc.get("name") or "") if blocked else []
-    _audit_never_sell_online(user, doc, blocked, live)
-    doc["live_listings_not_taken_down"] = live
+    taken = await _take_down_brand_listings(user, doc.get("name") or "") if blocked else []
+    _audit_never_sell_online(user, doc, blocked, taken)
+    doc["live_listings_take_down"] = taken
     return doc
 
 
@@ -529,7 +566,7 @@ async def create_brand(payload: BrandCreate, current_user: dict = Depends(get_cu
             status_code=400, detail="tier must be MASS, PREMIUM, or LUXURY"
         )
     doc = _create_doc("brand_masters", _with_is_active(payload.model_dump()), "brand_id")
-    return _after_never_sell_online_change(current_user, doc) if changed else doc
+    return await _after_never_sell_online_change(current_user, doc) if changed else doc
 
 
 @router.put("/brands/{brand_id}")
@@ -552,7 +589,7 @@ async def update_brand(
         "brand_masters", "brand_id", brand_id,
         _with_is_active(payload.model_dump(exclude_unset=True)),
     )
-    return _after_never_sell_online_change(current_user, doc) if changed else doc
+    return await _after_never_sell_online_change(current_user, doc) if changed else doc
 
 
 def _cascade_delete_subbrands(brand_id: str) -> int:

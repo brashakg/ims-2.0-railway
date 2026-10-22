@@ -170,9 +170,13 @@ def brand_name_key(name: Any) -> str:
     full-width or maths-letter look-alike (U+FF32 full-width R, U+1D411
     maths bold R) collapses to the same key (review of #1245) -- with the
     strip run BEFORE it too, because NFKC turns a trade mark sign into
-    letters ("Ray-Ban" + U+2122 -> "...TM") (review of #1251)."""
+    letters ("Ray-Ban" + U+2122 -> "...TM") (review of #1251). NFC before
+    that first strip: a decomposed accent ("e" + U+0301) is a combining mark
+    the strip would drop, so "Cafe" + U+0301 must compose to "Caf" + U+00E9
+    first."""
     strip = re.compile(r"[\W_]+")
-    return strip.sub("", unicodedata.normalize("NFKC", strip.sub("", str(name or "")))).casefold()
+    first = strip.sub("", unicodedata.normalize("NFC", str(name or "")))
+    return strip.sub("", unicodedata.normalize("NFKC", first)).casefold()
 
 
 def blocked_brand_row(rows, brand_name: str) -> Optional[Dict[str, Any]]:
@@ -188,18 +192,24 @@ def blocked_brand_row(rows, brand_name: str) -> Optional[Dict[str, Any]]:
 
 
 def _brand_rows(db, brand_name: str) -> List[Dict[str, Any]]:
-    """Every brand_masters row whose name matches `brand_name` without case
-    (casefold), active or not. Raises on a read failure: callers decide."""
-    probe = str(brand_name or "").strip().casefold()
-    return [
+    """Every brand_masters row whose name has the same brand_name_key as
+    `brand_name` (case, spaces, punctuation ignored -- the Never-sell-online
+    key, ONE rule: "Montblanc" finds master "Mont Blanc"), active or not; an
+    exact (casefold) spelling sorts first. Raises on a read failure."""
+    key = brand_name_key(brand_name)
+    if not key:
+        return []
+    exact = str(brand_name or "").strip().casefold()
+    rows = [
         doc
         for doc in db.get_collection(BRAND_COLLECTION).find({})
-        if str(doc.get("name") or "").strip().casefold() == probe
+        if brand_name_key(doc.get("name")) == key
     ]
+    return sorted(rows, key=lambda d: str(d.get("name") or "").strip().casefold() != exact)
 
 
 def _find_active_brand(db, brand_name: str) -> Optional[Dict[str, Any]]:
-    """The ACTIVE brand_masters doc whose name matches case-insensitively,
+    """The ACTIVE brand_masters doc whose name matches by brand_name_key,
     or None (not found / no db / read failure)."""
     if db is None or not str(brand_name or "").strip():
         return None
@@ -239,15 +249,12 @@ def brand_website_refusal(db, brand_name: str) -> Optional[str]:
         return "the product has no brand"
     try:
         rows = _brand_rows(db, name) if db is not None else None
-        blocked = (
-            blocked_brand_row(db.get_collection(BRAND_COLLECTION).find({}), name)
-            if db is not None else None
-        )
     except Exception as e:  # noqa: BLE001
         logger.warning("[CATALOG-DICT] brand lookup failed: %s", e)
         rows = None
     if rows is None:
         return "Settings > Brand Master could not be read just now"
+    blocked = blocked_brand_row(rows, name)
     # SUPERADMIN hard block (owner 2026-10-19): the brand has not allowed
     # online selling. Checked before anything else, on ANY row (active or not)
     # with the same spelling-proof key, so neither another switch nor a near-

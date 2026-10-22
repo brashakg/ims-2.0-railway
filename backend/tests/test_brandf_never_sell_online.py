@@ -10,7 +10,8 @@ sync, the collection registry's "ready" count and the Add/Edit form's line.
 
   * only SUPERADMIN can set or clear it (server 403 + audit row);
   * it wins over "Sync to Shopify by default";
-  * blocking takes NOTHING down: the live listings are reported instead;
+  * blocking TAKES DOWN the brand's live listings through the one take-down
+    door (owner 2026-10-22); unblocking republishes nothing;
   * clearing it lets the brand publish again.
 
 Run: JWT_SECRET_KEY=test ENVIRONMENT=test python -m pytest backend/tests/test_brandf_never_sell_online.py -q
@@ -137,24 +138,86 @@ def test_an_admin_can_still_edit_the_rest_of_a_blocked_brand(brands):
     assert out["tier"] == "PREMIUM" and out["never_sell_online"] is True
 
 
-def test_superadmin_sets_it_with_an_audit_row_and_nothing_is_taken_down(brands, monkeypatch):
+def _block_rows(audit):
+    return [r for r in audit.rows if r["action"].startswith("BRAND_NEVER_SELL_ONLINE")]
+
+
+def test_superadmin_block_takes_down_live_listings_simulated_while_dark(brands, monkeypatch):
+    """Owner 2026-10-22: blocking takes the live listings down through the
+    existing take-down door. DARK gates -> SIMULATED, zero network."""
     db, audit = brands
 
     async def _boom(*_a, **_k):  # pragma: no cover - must never run
-        raise AssertionError("blocking must not call Shopify")
+        raise AssertionError("a dark take-down must not call Shopify")
 
     monkeypatch.setattr(sp, "_graphql", _boom)
+    monkeypatch.setattr(sp.product, "_graphql", _boom)
     out = _run(ac.update_brand("brandf_b1", ac.BrandUpdate(never_sell_online=True), current_user=_SUPER))
     assert out["never_sell_online"] is True
-    # The live listing is REPORTED, not taken down.
-    assert out["live_listings_not_taken_down"] == ["BRANDF-BrandfLux"]
-    live = db["catalog_products"].find_one({"sku": "BRANDF-BrandfLux"})
-    assert live["ecom"]["shopify_product_id"] and not live["ecom"].get("taken_down_at")
-    [row] = audit.rows
+    assert out["live_listings_take_down"] == [
+        {"sku": "BRANDF-BrandfLux", "ok": True, "mode": "SIMULATED", "error": None}
+    ]
+    twin = db["catalog_products"].find_one({"sku": "BRANDF-BrandfLux"})
+    assert twin["ecom"]["delist_reason"] == "brand_never_sell_online"
+    assert twin["ecom"]["delist_mode"] == "SIMULATED"
+    [row] = _block_rows(audit)
     assert row["action"] == "BRAND_NEVER_SELL_ONLINE_ON" and row["user_id"] == "brandf_super"
-    assert row["details"]["live_listings_not_taken_down"] == ["BRANDF-BrandfLux"]
+    assert row["details"]["live_listings_take_down"] == out["live_listings_take_down"]
+    # The take-down door's own chained push audit row rides too.
+    assert any(r["action"] == "ONLINE_STORE_PUSH" and r["entity_id"] == "brandf_BrandfLux" for r in audit.rows)
+    off = _run(ac.update_brand("brandf_b1", ac.BrandUpdate(never_sell_online=False), current_user=_SUPER))
+    assert _block_rows(audit)[-1]["action"] == "BRAND_NEVER_SELL_ONLINE_OFF"
+    assert off["live_listings_take_down"] == []
+
+
+class _Shopify:
+    """LIVE gates + a recording productUpdate double. No network."""
+
+    def __init__(self, monkeypatch, user_errors=None):
+        self.calls = []
+        monkeypatch.setattr(sp.product, "_live_or_reason", lambda _db: (True, None))
+
+        async def _graphql(_db, _query, variables):
+            self.calls.append(variables)
+            return {"data": {"productUpdate": {"userErrors": user_errors or []}}}
+
+        monkeypatch.setattr(sp.product, "_graphql", _graphql)
+
+
+def test_a_live_block_drafts_the_listing_on_shopify_and_keeps_its_id(brands, monkeypatch):
+    db, _ = brands
+    db["catalog_products"].insert_one({**_live("BrandfOk"), "ecom": {
+        "shopify_product_id": "gid://shopify/Product/8"}})
+    shop = _Shopify(monkeypatch)
+    out = _run(ac.update_brand("brandf_b1", ac.BrandUpdate(never_sell_online=True), current_user=_SUPER))
+    assert out["live_listings_take_down"] == [
+        {"sku": "BRANDF-BrandfLux", "ok": True, "mode": "LIVE", "error": None}
+    ]
+    # Only the blocked brand's listing, and only to Draft (never a delete).
+    assert shop.calls == [{"input": {"id": "gid://shopify/Product/9", "status": "DRAFT"}}]
+    ecom = db["catalog_products"].find_one({"sku": "BRANDF-BrandfLux"})["ecom"]
+    assert ecom["status"] == "DRAFT" and ecom["taken_down_at"]
+    assert ecom["shopify_product_id"] == "gid://shopify/Product/9"
+    assert ecom["online_state"] == "DELISTED" and ecom["delist_mode"] == "LIVE"
+
+    # Unblocking republishes NOTHING: no Shopify call, the listing stays taken
+    # down and is not queued -- it returns through the normal publish path.
     _run(ac.update_brand("brandf_b1", ac.BrandUpdate(never_sell_online=False), current_user=_SUPER))
-    assert audit.rows[-1]["action"] == "BRAND_NEVER_SELL_ONLINE_OFF"
+    assert len(shop.calls) == 1
+    ecom = db["catalog_products"].find_one({"sku": "BRANDF-BrandfLux"})["ecom"]
+    assert ecom["taken_down_at"] and not ecom.get("locally_modified")
+
+
+def test_a_refused_take_down_is_reported_and_the_save_stands(brands, monkeypatch):
+    db, audit = brands
+    _Shopify(monkeypatch, user_errors=[{"field": ["id"], "message": "nope"}])
+    out = _run(ac.update_brand("brandf_b1", ac.BrandUpdate(never_sell_online=True), current_user=_SUPER))
+    assert out["never_sell_online"] is True
+    [res] = out["live_listings_take_down"]
+    assert res["ok"] is False and res["mode"] == "LIVE" and "nope" in res["error"]
+    ecom = db["catalog_products"].find_one({"sku": "BRANDF-BrandfLux"})["ecom"]
+    assert ecom["online_state"] == "DELIST_FAILED" and not ecom.get("taken_down_at")
+    assert _block_rows(audit)[0]["details"]["live_listings_take_down"] == [res]
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +374,45 @@ def test_a_unicode_look_alike_of_a_blocked_brand_is_refused(spelling):
     assert _BLOCK in brand_website_refusal(db, spelling)
 
 
+def test_brand_master_existence_uses_the_same_key():
+    """Review of #1251: the Brand Master EXISTENCE lookup was exact-spelling
+    while the block used brand_name_key -- "Montblanc" against master
+    "Mont Blanc" was refused as "not in Brand Master". One rule now."""
+    db = _db()
+    db["brand_masters"].insert_one({"brand_id": "brandf_mb", "name": "Mont Blanc", "is_active": True,
+                                    "tier": "LUXURY", "sync_to_shopify_default": True})
+    assert brand_website_refusal(db, "Montblanc") is None
+    assert brand_website_refusal(db, "MONT-BLANC") is None
+    from api.services.catalog_dictionary import load_brand_tier
+
+    assert load_brand_tier(db, "Montblanc") == "LUXURY"
+
+
+def test_an_exact_spelling_wins_over_a_key_twin():
+    from api.services.catalog_dictionary import load_brand_tier
+
+    db = _db()
+    db["brand_masters"].insert_many([
+        {"brand_id": "brandf_t1", "name": "Mont-Blanc", "is_active": True, "tier": "MASS"},
+        {"brand_id": "brandf_t2", "name": "Mont Blanc", "is_active": True, "tier": "LUXURY"},
+    ])
+    assert load_brand_tier(db, "mont blanc") == "LUXURY"
+    assert load_brand_tier(db, "Mont-Blanc") == "MASS"
+
+
+def test_a_decomposed_accent_matches_the_composed_brand():
+    """Review of #1251: NFC before the first strip -- a decomposed accent's
+    combining mark is not a word character, so the strip used to drop it."""
+    from api.services.catalog_dictionary import brand_name_key
+
+    decomposed, composed = "Café Lux", "Café Lux"
+    assert brand_name_key(decomposed) == brand_name_key(composed) == "cafélux"
+    db = _db()
+    db["brand_masters"].insert_one({"brand_id": "brandf_cafe", "name": composed, "is_active": True,
+                                    "sync_to_shopify_default": True, "never_sell_online": True})
+    assert _BLOCK in brand_website_refusal(db, decomposed)
+
+
 def test_a_different_name_is_not_caught_by_the_block():
     """Matching ignores case, spaces and punctuation only."""
     assert brand_website_refusal(_db(), "BrandfOk") is None
@@ -321,7 +423,7 @@ def test_the_live_report_matches_with_the_gate_key(brands):
     db["catalog_products"].insert_one({**_live("Brandf.LUX"), "sku": "BRANDF-dot", "id": "brandf_dot",
                                        "product_id": "brandf_dot"})
     out = _run(ac.update_brand("brandf_b1", ac.BrandUpdate(never_sell_online=True), current_user=_SUPER))
-    assert sorted(out["live_listings_not_taken_down"]) == ["BRANDF-BrandfLux", "BRANDF-dot"]
+    assert sorted(r["sku"] for r in out["live_listings_take_down"]) == ["BRANDF-BrandfLux", "BRANDF-dot"]
 
 
 def test_an_unknown_status_is_refused(brands):
