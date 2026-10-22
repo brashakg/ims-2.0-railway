@@ -31,6 +31,8 @@ import re
 from html import escape
 from typing import Any, Dict, List, Optional, Tuple
 
+from .product_naming import drop_doubled_brand, model_number_line
+
 WARRANTY_URL = "https://bettervision.in/pages/warranty"
 
 # Attribute key -> row label, in render order, per section. Only rows whose
@@ -43,6 +45,7 @@ TECH_SPEC_ROWS: List[Tuple[str, str]] = [
     ("_category", "Product Category"),  # injected from the category display
     ("lens_size", "Size"),
     ("bridge_size", "Bridge"),
+    ("bridge_width", "Bridge"),
     ("temple_length", "Temple Length"),
     ("weight", "Weight"),
     ("lens_material", "Lens Material"),
@@ -88,19 +91,34 @@ def _clean(attrs: Dict[str, Any]) -> Dict[str, str]:
 
 
 def build_model_line(category_name: str, attrs: Dict[str, Any]) -> str:
-    """The <h5> display line, e.g.
-    'Rayban RB 5279 2000 53 Black Eyeglass Frame'."""
-    a = _clean(attrs)
-    parts = [
-        a.get("brand_name"),
-        a.get("model_no"),
-        a.get("model_name"),
-        a.get("colour_code"),
-        a.get("lens_size"),
-        a.get("frame_colour") or a.get("colour_name"),
-        category_name,
-    ]
-    return " ".join(p for p in parts if p)
+    """The <h5> 'Model Number' line, e.g. 'Ray-Ban RB5279' -- the shared
+    product_naming.model_number_line: brand + model, the brand never doubled,
+    never a colour code, size or category (``category_name`` is kept for the
+    callers' signature)."""
+    return model_number_line({"attributes": _clean(attrs)})
+
+
+# Measurements shown in millimetres (a bare number gets ' mm').
+_MM_KEYS = frozenset({"lens_size", "bridge_size", "bridge_width", "temple_length"})
+_BARE_NUMBER = re.compile(r"\d+(?:\.\d+)?")
+_NOT_POLARIZED = frozenset({"no", "false", "non-polarized", "non-polarised", "non polarized", "non polarised", "none"})
+# A lens that is NOT polarized is described without any 'polar...' word, so a
+# shopper's 'polarized' search never finds it (Shopify search stems words).
+NOT_POLARIZED_ROW = ("Lens Type", "Standard")
+
+
+def _mm(key: str, value: str) -> str:
+    """A bare-number measurement in millimetres ('145' -> '145 mm')."""
+    value = str(value or "").strip()
+    return value + " mm" if key in _MM_KEYS and _BARE_NUMBER.fullmatch(value) else value
+
+
+def _row(key: str, label: str, value: str) -> Tuple[str, str]:
+    """One spec row as the shopper reads it: millimetres on a measurement, a
+    non-polarized lens as NOT_POLARIZED_ROW."""
+    if key == "polarization" and value.strip().lower() in _NOT_POLARIZED:
+        return NOT_POLARIZED_ROW
+    return label, _mm(key, value)
 
 
 def _table(rows: List[Tuple[str, str]]) -> str:
@@ -118,9 +136,11 @@ def _rows_for(
     seen_labels = set()
     for key, label in spec_map:
         value = category_name if key == "_category" else attrs.get(key)
+        if key == "model_no" and value:
+            value = model_number_line({"attributes": attrs}) or value
         if not value or label in seen_labels:
             continue
-        rows.append((label, value))
+        rows.append(_row(key, label, value))
         seen_labels.add(label)
     return rows
 
@@ -182,22 +202,14 @@ def build_shopify_description_html(
 # metafield).
 _VARIANT_ONLY_KEYS = frozenset({"gtin", "upc", "colour_code", "lens_size", "frame_colour", "colour_name"})
 
-STORE_PROMISE = (
-    "Enjoy best discounts and guaranteed authentic and genuine products, "
-    "ensuring you have the ultimate eyewear shopping experience. Discover your "
-    "perfect pair at Better Vision today!"
-)
+# We launch at full MRP (2026-10-22): no discount promise.
+STORE_PROMISE = "100% genuine, brand-authorised. Discover your perfect pair at Better Vision today!"
 
 
 def build_model_name_line(category_name: str, attrs: Dict[str, Any]) -> str:
-    """The model's <h5> line: brand + model number + model name + category,
-    never a colour code or a size."""
-    a = _clean(attrs)
-    out: List[str] = []
-    for p in (a.get("brand_name"), a.get("model_no"), a.get("model_name"), category_name):
-        if p and p.lower() not in (o.lower() for o in out):
-            out.append(p)
-    return " ".join(out)
+    """The model's <h5> line -- the same model_number_line as every other
+    model line (brand + model, never a colour code, size or category)."""
+    return build_model_line(category_name, attrs)
 
 
 def default_model_paragraph(
@@ -210,7 +222,7 @@ def default_model_paragraph(
     who = {"MEN": "men", "WOMEN": "women", "KIDS": "kids", "UNISEX": "men and women"}.get(
         str(a.get("gender") or "").upper().replace("'", "").replace(" ", ""), ""
     )
-    name = build_model_name_line(category_name, attrs) or category_name
+    name = " ".join(p for p in (build_model_name_line(category_name, attrs), category_name) if p)
     first = f"Reflect your style with the {name}" + (f", made for {who}." if who else ".")
     choice = []
     if colours > 1:
@@ -261,7 +273,7 @@ def build_model_description_html(
     if len(colours) > 1:
         tech.append(("Available Colours", ", ".join(colours)))
     if sizes:
-        tech.append(("Sizes" if len(sizes) > 1 else "Size", ", ".join(sizes)))
+        tech.append(("Sizes" if len(sizes) > 1 else "Size", ", ".join(_mm("lens_size", z) for z in sizes)))
     if tech:
         parts.append("<h4>Technical Specifications</h4>")
         parts.append(_table(tech))
@@ -308,7 +320,7 @@ def variant_table_html(members: List[Dict[str, Any]]) -> str:
     for m in members:
         a = _clean(m.get("attributes") or {})
         cells = [m.get("colour") or ""] + ([m.get("size") or ""] if sizes else [])
-        body_rows.append(cells + [a.get(k, "") for k in differing])
+        body_rows.append(cells + [_mm(k, a.get(k, "")) for k in differing])
     return "<h4>Colours and Sizes</h4>\n<table>\n<thead>\n<tr>{}</tr>\n</thead>\n<tbody>\n{}\n</tbody>\n</table>".format(
         "".join("<th>{}</th>".format(escape(h)) for h in head),
         "\n".join(
@@ -388,3 +400,58 @@ def clip_to_sentence(text: str, max_length: int) -> Optional[str]:
         return text or None
     ends = [m.end() for m in re.finditer(r"[.!?](?=\s|$)", text) if m.end() <= max_length]
     return text[: ends[-1]].strip() if ends else None
+
+
+# ---------------------------------------------------------------------------
+# THE OUTBOUND BODY (listing-quality audit 2026-10-22). Stored bodies were
+# written by older builders (a doubled brand, a colour code and size on the
+# model line, a discount promise, bare-number measurements, 'Polarization:
+# No'). The push sends every body through this ONE pass, so stored copy reads
+# exactly as the builders above write it today. Idempotent; touches only the
+# deterministic parts (the model line, the spec rows, the store promise).
+# ---------------------------------------------------------------------------
+
+_MODEL_H5 = re.compile(r"(<h5>\s*Model Number:\s*)(.*?)(\s*</h5>)", re.S | re.I)
+_OLD_PROMISE = re.compile(
+    r"Enjoy best discounts[^.!?]*[.!?](\s*Discover your perfect pair at Better Vision today!)?", re.I
+)
+_SPEC_ROW = re.compile(r"(<td>)\s*([^<]*?)\s*(</td>\s*<td>)([^<]*)(</td>)", re.I)
+_LABEL_KEY = {
+    "model no": "model_no",
+    "size": "lens_size",
+    "lens width": "lens_size",
+    "bridge": "bridge_width",
+    "temple length": "temple_length",
+    "polarization": "polarization",
+    "polarisation": "polarization",
+}
+
+
+def normalise_body_html(html: str, product: Dict[str, Any]) -> str:
+    """``html`` as the push sends it for ``product`` (a catalog doc / listing
+    view): the brand never doubled, the 'Model Number' line and 'Model No' row
+    = product_naming.model_number_line, measurements in mm, a non-polarized
+    lens without a 'polar...' word, the full-MRP store promise. Pure."""
+    if not html:
+        return html or ""
+    product = product or {}
+    attrs = product.get("attributes") or {}
+    brand = str(product.get("brand") or attrs.get("brand_name") or "").strip()
+    out = drop_doubled_brand(html, brand)
+    line = model_number_line(product)
+    if line:
+        out = _MODEL_H5.sub(lambda m: m.group(1) + escape(line) + m.group(3), out)
+    out = _OLD_PROMISE.sub(STORE_PROMISE, out)
+
+    def _fix_row(m: "re.Match[str]") -> str:
+        key = _LABEL_KEY.get(m.group(2).strip().lower())
+        if key is None:
+            return m.group(0)
+        value = m.group(4).strip()
+        if key == "model_no":
+            label, value = m.group(2), (escape(line) if line else value)
+        else:
+            label, value = _row(key, m.group(2), value)
+        return m.group(1) + label + m.group(3) + value + m.group(5)
+
+    return _SPEC_ROW.sub(_fix_row, out)

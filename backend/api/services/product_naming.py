@@ -357,6 +357,11 @@ def _colour(product: Dict[str, Any]) -> str:
     return ""
 
 
+def readable_colour(product: Dict[str, Any]) -> str:
+    """The product's first readable colour name ('' for a bare code)."""
+    return _colour(product) if isinstance(product, dict) else ""
+
+
 def _brand(product: Dict[str, Any]) -> str:
     a = _attrs(product)
     return _first(product.get("brand"), a.get("brand_name"), a.get("brand"))
@@ -580,13 +585,53 @@ def _model_pieces(product: Dict[str, Any]) -> list:
     return pieces
 
 
+def model_number_line(product: Dict[str, Any]) -> str:
+    """THE model line: brand + model number (+ a model name not already in
+    it), the brand never doubled, title-cased -- "Carrera 3016/S", never
+    "Carrera carrera 3016/s carrera 807/r 55 Sunglass". No colour code, size
+    or category. The body's 'Model Number' line, the spec table's 'Model No'
+    row and the listing title all read it ('' when nothing is filled)."""
+    if not isinstance(product, dict):
+        return ""
+    line = _smart_title(" ".join(_model_pieces(product)))
+    # An all-lowercase model CODE is capitalised ("3016/s" -> "3016/S",
+    # "rb5279" -> "RB5279"); every other token keeps the source's casing
+    # ("2nd", "Gen2", "gen2" stay as typed).
+    return " ".join(w.upper() if _LOWER_MODEL_CODE.fullmatch(w) else w for w in line.split(" "))
+
+
+# A model code typed in lowercase: an optional 1-2 letter prefix, digits, an
+# optional '/x' lens suffix ('rb5279', '3016/s', '807/r').
+_LOWER_MODEL_CODE = re.compile(r"(?:[a-z]{1,2})?\d+(?:/[a-z])?")
+
+
+def drop_doubled_brand(text: str, brand: str) -> str:
+    """``text`` with every brand written twice in a row said once ("Carrera
+    Carrera 804/S" / "Carrera CARRERA 804/S" -> "Carrera 804/S"). Only whole
+    words separated by WHITESPACE, never glued to a hyphen or slash ("Police
+    police-line" and a handle "carrera-carrera-804" stay), case-insensitive.
+    Text between HTML tags only -- never a tag or an href/src value. For
+    stored copy minted before the brand was stripped from the model
+    (legacy_product_name); the push sends nothing doubled."""
+    words = _WORDS_RE.findall(brand or "")
+    if not text or not words:
+        return text or ""
+    b = r"[\s\-]?".join(re.escape(w) for w in words)  # the brand's own 'Ray-Ban'
+    edge_l, edge_r = rf"(?<![^\W_]|[-/])", rf"(?![^\W_]|[-/])"
+    pattern = re.compile(rf"{edge_l}({b})(?:\s+{b})+{edge_r}", re.I)
+    return "".join(
+        part if part.startswith("<") else pattern.sub(lambda m: m.group(1), part)
+        for part in re.split(r"(<[^>]*>)", text)
+    )
+
+
 def build_model_title(product: Dict[str, Any]) -> str:
     """The listing title of a MODEL (owner 2026-10-18): Brand + Model number +
     Model name, title-cased, no colour, no size. Falls back to the category
     word when the model carries nothing else."""
     if not isinstance(product, dict):
         return ""
-    core = " ".join(_model_pieces(product))
+    core = model_number_line(product)
     if not core:
         core = resolve_category_word(product.get("category"))
     return _clamp(_smart_title(core), MAX_NAME_LEN)

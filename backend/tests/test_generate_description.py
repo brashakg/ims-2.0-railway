@@ -139,7 +139,9 @@ def test_shopify_template_builder_pure():
     }
     html = build_shopify_description_html("Sunglass", attrs, "A paragraph.")
     assert html.startswith("<h4>Product Details</h4>")
-    assert "<h5>Model Number: Ray-Ban RB3025 L0205 58 Sunglass</h5>" in html
+    # The model line is brand + model only (listing audit 2026-10-22: no colour
+    # code, size or category appended).
+    assert "<h5>Model Number: Ray-Ban RB3025</h5>" in html
     assert "<p>A paragraph.</p>" in html
     # Category row injected; escaping applied to the material value.
     assert "<td>Product Category</td>" in html and "<td>Sunglass</td>" in html
@@ -150,7 +152,7 @@ def test_shopify_template_builder_pure():
     # No warranty field -> no warranty section; empty attrs -> headers only.
     html2 = build_shopify_description_html("Sunglass", {"brand_name": "X"}, "")
     assert "<h4>Warranty</h4>" not in html2
-    assert build_model_line("Frame", {"brand_name": "B", "model_no": "M1"}) == "B M1 Frame"
+    assert build_model_line("Frame", {"brand_name": "B", "model_no": "M1"}) == "B M1"  # no category appended (audit 2026-10-22)
 
 
 def test_rbac_row_catalogued():

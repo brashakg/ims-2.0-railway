@@ -363,3 +363,49 @@ def merge_tag_lists(
     _add(existing)
     _add(generated)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Listing-level tags (listing-quality audit 2026-10-22)
+# ---------------------------------------------------------------------------
+
+POLARIZED_TAG = "polarization_yes"
+ARRIVAL_PREFIX = "arrived_"
+
+
+def listing_tags(tag_lists: Sequence[Sequence[Any]]) -> List[str]:
+    """The tags of ONE listing made of several products (a model's colours /
+    sizes): their union, except ``polarization_yes``, which stays only when
+    EVERY one of them carries it -- a listing is in 'Polarized ...' only when
+    all its colours are polarized. The per-colour truth rides each variant's
+    own polarization metafield. Pure."""
+    lists = [merge_tag_lists(t, []) for t in tag_lists]
+    out = merge_tag_lists([t for ts in lists for t in ts], [])
+    if lists and not all(POLARIZED_TAG in ts for ts in lists):
+        out = [t for t in out if t != POLARIZED_TAG]
+    return out
+
+
+def arrival_tag(product: Dict[str, Any]) -> Optional[str]:
+    """``arrived_<iso year>w<iso week>`` of the day the product was catalogued
+    (its ``created_at``, else its Mongo ObjectId's time) -- the New Arrivals
+    collection rules on the last few weeks of these. None when unknown."""
+    from datetime import datetime
+
+    product = product or {}
+    when = product.get("created_at")
+    if isinstance(when, str):
+        try:
+            when = datetime.fromisoformat(when.replace("Z", "+00:00"))
+        except ValueError:
+            when = None
+    if not isinstance(when, datetime):
+        oid = product.get("_id")
+        when = getattr(oid, "generation_time", None)
+    return week_tag(when) if isinstance(when, datetime) else None
+
+
+def week_tag(when: Any) -> str:
+    """The arrival tag of the ISO week ``when`` falls in."""
+    year, week, _ = when.isocalendar()
+    return f"{ARRIVAL_PREFIX}{year}w{week:02d}"

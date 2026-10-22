@@ -17,7 +17,9 @@ from ..gtin import (
     manufacturer_barcode_key,
     sanitise_gtin,
 )
-from ..shopify_tag_gen import generate_attribute_tags, merge_tag_lists
+from ..product_description import normalise_body_html
+from ..product_naming import drop_doubled_brand
+from ..shopify_tag_gen import arrival_tag, generate_attribute_tags, merge_tag_lists
 from ..web_page_type import STANDARD, TEMPLATE_SUFFIX
 
 from ._shared import logger
@@ -26,6 +28,11 @@ from .transport import _graphql
 # ===========================================================================
 # Payload builders -- map IMS ecom docs -> Shopify GraphQL input. Pure; testable.
 # ===========================================================================
+
+
+# A listing view's own tag list (listing.listing_view): ims_product_tags
+# returns it as it is.
+LISTING_TAGS = "_listing_tags"
 
 
 def ims_product_tags(product: Dict[str, Any]) -> List[str]:
@@ -37,6 +44,10 @@ def ims_product_tags(product: Dict[str, Any]) -> List[str]:
     BVI parity). Lower-cased + deduped by merge_tag_lists. Both the create
     payload and the update-time tag diff read this one list, so what IMS
     records as "sent" is always what it computed."""
+    if product.get(LISTING_TAGS) is not None:
+        # A model listing's view: its tags were decided over ALL its colours
+        # (shopify_tag_gen.listing_tags); the lead's own must not re-add one.
+        return list(product[LISTING_TAGS])
     ecom = product.get("ecom") or {}
     seo = ecom.get("seo") or {}
     attrs = product.get("attributes") or {}
@@ -46,6 +57,9 @@ def ims_product_tags(product: Dict[str, Any]) -> List[str]:
         # emitted even when `attributes` has no brand_name.
         extras["brand_name"] = product["brand"]
     generated_tags = generate_attribute_tags(product.get("category"), attrs, extras)
+    arrived = arrival_tag(product)
+    if arrived:
+        generated_tags.append(arrived)
     return merge_tag_lists(seo.get("tags") or [], generated_tags)
 
 
@@ -74,6 +88,10 @@ def build_product_input(
     # ever made sent a DRAFT. The press reported "sent, failed 0" and the brand
     # page stayed empty. ARCHIVED is the one status still honoured: it is a
     # deliberate retirement, not an un-advanced create-time default.
+    # Stored copy minted before the brand was stripped from the model reads
+    # "Carrera Carrera 804/S": the push never sends a doubled brand.
+    brand = str(product.get("brand") or "").strip()
+    title = drop_doubled_brand(str(title), brand)
     inp: Dict[str, Any] = {
         "title": title,
         "status": (
@@ -100,7 +118,7 @@ def build_product_input(
         inp["productType"] = ims_to_shopify_type(product["category"])
     body_html = seo.get("html") or product.get("description")
     if body_html:
-        inp["descriptionHtml"] = body_html
+        inp["descriptionHtml"] = normalise_body_html(body_html, product)
     # The website page type picks the theme template (owner 2026-10-19). A
     # standard page sends a hand-set ecom.theme_suffix as before; otherwise
     # it sends NOTHING (a template set in Shopify admin stays) -- except ''
@@ -110,8 +128,8 @@ def build_product_input(
         inp["templateSuffix"] = suffix
     if seo.get("title") or seo.get("description"):
         inp["seo"] = {
-            "title": seo.get("title") or title,
-            "description": seo.get("description") or "",
+            "title": drop_doubled_brand(seo.get("title") or title, brand),
+            "description": drop_doubled_brand(seo.get("description") or "", brand),
         }
     # TAGS RIDE THE CREATE ONLY (sync audit gap #4, owner 2026-09-06). On a
     # productUpdate the `tags` field REPLACES Shopify's whole list, which wiped

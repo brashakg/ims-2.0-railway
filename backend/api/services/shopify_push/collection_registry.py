@@ -9,7 +9,13 @@ website and regenerated on every push-all, scheduled sync and rebuild:
   polarized         Polarized <category>                  (type AND polarization_yes)
   per brand         title from Brand Master               (brand_ tag)
   price bands       Under Rs 3,000 ... Over Rs 10,000     (variant price)
-  New Arrivals      every listing, newest first
+  New Arrivals      the newest NEW_ARRIVALS_WEEKS arrival weeks that have a
+                    listing (any arrived_<year>w<week> tag), newest first
+
+Every collection carries an SEO title ("Polarized Sunglasses | Better
+Vision") and a meta description of at most SEO_DESC_MAX characters -- filled
+only while the field is empty or still holds what IMS generated last
+(SEO_GENERATED); an SEO a human wrote is never overwritten.
 
 Every rule uses IMS's OWN tags / productType / prices exactly as the product
 push sends them, so the collections fill themselves. A definition whose rules
@@ -20,10 +26,12 @@ IMS_MANAGED with a stable IMS_KEY; IMS creates and updates only those.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
 from agents.nexus_providers import _as_shopify_gid
 
+from ._shared import logger
 from .collections import IMS_KEY, IMS_MANAGED, RETIRED, push_collection
 from .transport import _graphql, _user_errors
 
@@ -38,6 +46,48 @@ PRICE_BANDS = (
     ("5000-10000", "Rs 5,000-10,000", 5000, 10000),
     ("over-10000", "Over Rs 10,000", 10000, None),
 )
+
+
+# New Arrivals. Shopify smart rules cannot read a created date, so each
+# product carries its arrival week as a tag (shopify_tag_gen.arrival_tag) and
+# the collection matches ANY of the newest NEW_ARRIVALS_WEEKS weeks that have
+# a listing, looking back NEW_ARRIVALS_MAX_WEEKS first. A quiet spell never
+# empties it (an empty definition would be dropped and the collection would
+# keep a stale rule on Shopify): with no arrival inside the look-back, it
+# still shows the newest weeks there are. The rules change only when a new
+# week gets its first listing.
+NEW_ARRIVALS_WEEKS = 4
+NEW_ARRIVALS_MAX_WEEKS = 12
+# ecom_collections field: {seo_title, seo_description} as IMS generated them
+# last -- a stored SEO equal to it is IMS's own and may be regenerated.
+SEO_GENERATED = "seo_generated"
+_SEO_KEYS = ("seo_title", "seo_description")
+STORE_NAME = "Better Vision"
+SEO_DESC_MAX = 155
+_GENDER_FOR = {"men": "for Men", "women": "for Women", "kids": "for Kids"}
+
+
+def _seo(phrase: str, what: str) -> Dict[str, str]:
+    """{seo_title, seo_description} of a collection: '<phrase> | Better
+    Vision' and one sentence of at most SEO_DESC_MAX characters."""
+    desc = f"Shop {what} online at {STORE_NAME}. 100% genuine, brand-authorised eyewear."
+    if len(desc) > SEO_DESC_MAX:
+        desc = desc[:SEO_DESC_MAX].rsplit(" ", 1)[0].rstrip(" ,.") + "."
+    return {"seo_title": f"{phrase} | {STORE_NAME}", "seo_description": desc}
+
+
+def new_arrival_tags(facts: List[Dict[str, Any]], now: Optional[datetime] = None) -> List[str]:
+    """The arrival-week tags New Arrivals matches, newest first: the newest
+    NEW_ARRIVALS_WEEKS weeks that have a listing within the look-back, else
+    the newest weeks that have one at all ([] when no listing has a tag)."""
+    from ..shopify_tag_gen import ARRIVAL_PREFIX, week_tag
+
+    now = now or datetime.now(timezone.utc)
+    # 'arrived_2026w43' sorts by time: year first, the week zero-padded.
+    weeks = sorted({t for f in facts for t in f["tags"] if t.startswith(ARRIVAL_PREFIX)}, reverse=True)
+    oldest = week_tag(now - timedelta(weeks=NEW_ARRIVALS_MAX_WEEKS - 1))
+    recent = [w for w in weeks if w >= oldest]
+    return (recent or weeks)[:NEW_ARRIVALS_WEEKS]
 
 
 def _rule(field: str, relation: str, value: Any) -> Dict[str, str]:
@@ -64,9 +114,22 @@ def _facts(db, doc: Dict[str, Any]) -> Dict[str, Any]:
     from ..ecom_category_map import ims_to_shopify_type
     from ..online_catalog import variant_rows_for_product
     from ._shared import _product_brand
+    from .listing import listing_view, model_listing
     from .product_input import _resolve_variant_pricing, ims_product_tags
 
-    rows = variant_rows_for_product(db, doc) or [{}]
+    raw = variant_rows_for_product(db, doc) or []
+    rows = raw or [{}]
+    # The tags the push SENDS: a model's listing tags (every colour,
+    # shopify_tag_gen.listing_tags), so a count never differs from who is in.
+    tags = None
+    try:
+        lst = model_listing(db, doc, raw)
+        if lst is not None and not lst.get("variant_of") and not lst.get("refusal"):
+            tags = ims_product_tags(listing_view(doc, lst))
+    except Exception as exc:  # noqa: BLE001 -- a count, never a write
+        logger.warning("[COLLECTIONS] model of %s unreadable, counted by its own tags: %s", doc.get("sku"), exc)
+    if tags is None:
+        tags = ims_product_tags(doc)
     # ponytail: the lead's price rule per variant row, not listing.model_listing's
     # per-colour prices -- close enough to decide whether a price band is empty.
     prices = [p for p in (_resolve_variant_pricing(doc, r)[0] for r in rows) if p]
@@ -74,7 +137,7 @@ def _facts(db, doc: Dict[str, Any]) -> Dict[str, Any]:
         "id": doc.get("id"),
         "sku": doc.get("sku"),
         "type": ims_to_shopify_type(doc["category"]) if doc.get("category") else "",
-        "tags": set(ims_product_tags(doc)),
+        "tags": set(tags),
         "prices": prices,
         "brand": str(_product_brand(doc) or "").strip(),
     }
@@ -117,8 +180,11 @@ def brand_names(db) -> Dict[str, str]:
     return names
 
 
-def _matches(fact: Dict[str, Any], rules: List[Dict[str, str]]) -> bool:
-    """Shopify's reading of an all-AND rule set, over what the push sends."""
+def _matches(fact: Dict[str, Any], rules: List[Dict[str, str]], disjunctive: bool = False) -> bool:
+    """Shopify's reading of a rule set (all-AND, or ANY when
+    ``disjunctive``), over what the push sends."""
+    if disjunctive:
+        return any(_matches(fact, [r]) for r in rules)
     for r in rules:
         field, rel, value = r["field"], r["relation"], r["value"]
         if field == "tag":
@@ -137,42 +203,54 @@ def _values(facts: Iterable[Dict[str, Any]], prefix: str) -> List[str]:
     return sorted({t[len(prefix):] for f in facts for t in f["tags"] if t.startswith(prefix)})
 
 
-def derive_definitions(facts: List[Dict[str, Any]], names: Dict[str, str]) -> List[Dict[str, Any]]:
-    """Every collection the listings call for, each with its product count.
-    A definition matching nothing is left out. Pure."""
+def derive_definitions(
+    facts: List[Dict[str, Any]], names: Dict[str, str], now: Optional[datetime] = None
+) -> List[Dict[str, Any]]:
+    """Every collection the listings call for, each with its product count
+    and its SEO title / description. A definition matching nothing is left
+    out. Pure (``now`` places the New Arrivals window)."""
+    from ..shopify_tag_gen import POLARIZED_TAG
+
     defs: List[Dict[str, Any]] = []
 
-    def add(key, title, rules, handle=None, sort="BEST_SELLING"):
+    def add(key, title, rules, seo, handle=None, sort="BEST_SELLING", disjunctive=False):
         defs.append({"key": key, "title": title, "handle": handle or _handle(title),
-                     "rules": rules, "sort_order": sort})
+                     "rules": rules, "sort_order": sort, "disjunctive": disjunctive, **seo})
 
     for ptype in sorted({f["type"] for f in facts if f["type"]}):
         cat = _CATEGORY_TITLES.get(ptype, ptype)
         mine = [f for f in facts if f["type"] == ptype]
         is_type = _rule("product_type", "EQUALS", ptype)
-        add(f"type:{_handle(cat)}", cat, [is_type])
+        add(f"type:{_handle(cat)}", cat, [is_type], _seo(cat, f"{cat.lower()} from top brands"))
         for g in _values(mine, "gender_"):
+            phrase = f"{cat} {_GENDER_FOR[g]}" if g in _GENDER_FOR else f"{_words(g)} {cat}"
             add(f"gender:{_handle(cat)}:{g}", f"{_GENDER_TITLES.get(g, _words(g))} {cat}",
-                [is_type, _rule("tag", "EQUALS", f"gender_{g}")])
+                [is_type, _rule("tag", "EQUALS", f"gender_{g}")], _seo(phrase, phrase.lower()))
         for s in _values(mine, "shape_"):
-            add(f"shape:{_handle(cat)}:{s}", f"{_words(s)} {cat}", [is_type, _rule("tag", "EQUALS", f"shape_{s}")])
-        add(f"polarized:{_handle(cat)}", f"Polarized {cat}", [is_type, _rule("tag", "EQUALS", "polarization_yes")])
+            phrase = f"{_words(s)} {cat}"
+            add(f"shape:{_handle(cat)}:{s}", phrase, [is_type, _rule("tag", "EQUALS", f"shape_{s}")],
+                _seo(phrase, phrase.lower()))
+        add(f"polarized:{_handle(cat)}", f"Polarized {cat}", [is_type, _rule("tag", "EQUALS", POLARIZED_TAG)],
+            _seo(f"Polarized {cat}", f"polarized {cat.lower()} that cut glare"))
     for tag in _values(facts, "brand_"):
         tag = f"brand_{tag}"
         title = names.get(tag) or next((f["brand"] for f in facts if tag in f["tags"] and f["brand"]), _words(tag[6:]))
-        add(f"brand:{tag[6:]}", title, [_rule("tag", "EQUALS", tag)])
+        add(f"brand:{tag[6:]}", title, [_rule("tag", "EQUALS", tag)],
+            _seo(f"{title} Eyewear", f"{title} sunglasses and eyeglasses"))
     for handle, title, low, high in PRICE_BANDS:
         rules = []
         if low is not None:
             rules.append(_rule("variant_price", "GREATER_THAN", f"{low - 0.01:.2f}"))
         if high is not None:
             rules.append(_rule("variant_price", "LESS_THAN", high))
-        add(f"price:{handle}", title, rules, handle=handle)
-    add("new-arrivals", "New Arrivals", [_rule("variant_price", "GREATER_THAN", 0)], sort="CREATED_DESC")
+        add(f"price:{handle}", title, rules, _seo(f"Eyewear {title}", f"eyewear {title[:1].lower()}{title[1:]}"), handle=handle)
+    add("new-arrivals", "New Arrivals", [_rule("tag", "EQUALS", t) for t in new_arrival_tags(facts, now)],
+        _seo("New Arrivals in Eyewear", "the newest sunglasses and eyeglasses"),
+        sort="CREATED_DESC", disjunctive=True)
 
     out, handles = [], set()
     for d in defs:
-        d["count"] = sum(1 for f in facts if _matches(f, d["rules"]))
+        d["count"] = sum(1 for f in facts if _matches(f, d["rules"], d["disjunctive"]))
         if d["count"] and d["handle"] not in handles:
             handles.add(d["handle"])
             out.append(d)
@@ -231,10 +309,17 @@ def apply_collection_registry(db, definitions: Optional[List[Dict[str, Any]]] = 
     for d in definitions:
         want = {
             "title": d["title"], "handle": d["handle"], "collection_type": "SMART",
-            "rules": d["rules"], "disjunctive": False, "sort_order": d["sort_order"],
+            "rules": d["rules"], "disjunctive": bool(d.get("disjunctive")), "sort_order": d["sort_order"],
             "published": True, IMS_MANAGED: True, IMS_KEY: d["key"],
         }
         doc = coll.find_one({IMS_KEY: d["key"]})
+        generated = {k: d.get(k) for k in _SEO_KEYS}
+        last = (doc or {}).get(SEO_GENERATED) or {}
+        for k in _SEO_KEYS:
+            current = (doc or {}).get(k)
+            if not current or current == last.get(k):  # empty, or still IMS's own
+                want[k] = generated[k]
+        want[SEO_GENERATED] = generated
         holder = coll.find_one({"handle": d["handle"]})
         if holder is not None and (doc is None or holder.get("_id") != doc.get("_id")):
             out["skipped"].append(f"{d['handle']}: handle held by an old collection (run scripts/rebuild_collections.py)")

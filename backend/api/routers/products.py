@@ -2054,6 +2054,7 @@ async def generate_product_description(
     """
     from agents.claude_client import call_claude, is_claude_available
     from ..services.product_description import (
+        STORE_PROMISE,
         build_model_line,
         build_shopify_description_html,
     )
@@ -2082,10 +2083,9 @@ async def generate_product_description(
         "(match the store's existing descriptions): open with a line like "
         "'Reflect your style with {brand + model + colour + product type}', "
         "mention the colour/material/look, who it suits (gender) and the size "
-        "when given, then close with the store promise sentence: 'Enjoy best "
-        "discounts and guaranteed authentic and genuine products, ensuring "
-        "you have the ultimate eyewear shopping experience. Discover your "
-        "perfect pair at Better Vision today!'. Rules: 3-4 sentences, under "
+        "when given, then close with the store promise sentence: '"
+        + STORE_PROMISE
+        + "'. Rules: 3-4 sentences, under "
         f"{body.max_length} characters, PLAIN TEXT only (no markdown, no HTML, "
         "no headings, no bullets, no emojis). Use ONLY the attributes provided "
         "-- never invent specifications, certifications or claims. SEO: "
