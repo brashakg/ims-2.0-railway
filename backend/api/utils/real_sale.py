@@ -20,6 +20,7 @@ VOID with no invoice number that never shipped leaves both.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict
 
 _NOT_SALE = ("CANCELLED", "DRAFT", "HISTORICAL")
@@ -29,7 +30,9 @@ _SHIPPED = ("SHIPPED", "DELIVERED")
 
 # Kept as a list: tests and older callers read the excluded statuses.
 EXCLUDED_ORDER_STATUSES = [s for st in _NOT_SALE for s in (st, st.lower())]
-_VOID_STATUSES = [s for st in _VOID for s in (st, st.lower())]
+_VOID_STATUSES = [s for st in _VOID for s in (st, st.lower(), st.title())]
+_NOT_SALE_RE = re.compile(r"^(cancelled|draft|historical)$", re.IGNORECASE)
+_VOID_RE = re.compile(r"^void(ed)?$", re.IGNORECASE)
 
 def real_sale_match(db=None, *, orders=None) -> Dict[str, Any]:
     """THE rule as a Mongo filter to spread into a query
@@ -43,14 +46,16 @@ def real_sale_match(db=None, *, orders=None) -> Dict[str, Any]:
     ponytail: one extra read of the VOID orders per query; fine while deleted
     Shopify orders number in the hundreds -- stamp a `real_sale` bool on the
     order at void time if they ever number in the tens of thousands."""
-    match: Dict[str, Any] = {"status": {"$nin": EXCLUDED_ORDER_STATUSES}}
+    # Case-insensitive, as is_real_sale: Mongo's $nin / $in take a regex
+    # beside the plain strings (`Cancelled`, `Void` count too).
+    match: Dict[str, Any] = {"status": {"$nin": [*EXCLUDED_ORDER_STATUSES, _NOT_SALE_RE]}}
     if orders is None:
         if db is None:
             return match
         orders = db.get_collection("orders") if hasattr(db, "get_collection") else db["orders"]
     not_sales = [
         o.get("order_id")
-        for o in orders.find({"status": {"$in": _VOID_STATUSES}})
+        for o in orders.find({"status": {"$in": [*_VOID_STATUSES, _VOID_RE]}})
         if isinstance(o, dict)
         and o.get("order_id")
         and str(o.get("status") or "").upper() in _VOID

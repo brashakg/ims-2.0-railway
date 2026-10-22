@@ -236,33 +236,35 @@ def _order_rate_lines(items, order_taxable, order_tax, order=None, issues=None):
     for it in (items or []):
         if not isinstance(it, dict):
             continue
+        stamped = it.get("taxable_value") is not None and it.get("tax_amount") is not None
+        if stamped:
+            taxable, tax = _f(it.get("taxable_value")), _f(it.get("tax_amount"))
+            if taxable <= 0 and tax <= 0:
+                continue  # a Rs 0 line files nothing, whatever its rate says
+        else:
+            gross = _f(it.get("item_total"))
+            if gross <= 0:
+                continue
         rate = it.get("gst_rate")
+        if isinstance(rate, str):
+            rate = rate.strip().rstrip("%").strip() or None  # '5%' / '5 %' -> '5'
         if rate is None:
             entry = GST_CATEGORY_TABLE.get(_normalize_category(it.get("category")))
             if entry:
                 rate = entry[1]
-            else:
+            elif stamped and taxable > 0 and round(tax / taxable * 100) in _GST_SLABS:
                 # No rate, no known category: the line's own stamped tax gives
                 # the slab (flagged); with nothing to read, the order raises.
-                l_tx, l_tax = _f(it.get("taxable_value")), _f(it.get("tax_amount"))
-                derived = round(l_tax / l_tx * 100) if l_tx > 0 else None
-                if derived not in _GST_SLABS:
-                    raise UnfileableOrder(order, f"a line has no GST rate and no known category ({it.get('category')!r})")
-                rate = derived
+                rate = round(tax / taxable * 100)
                 _flag(f"A line has no GST rate; filed at {rate}% (its own tax / taxable).")
+            else:
+                raise UnfileableOrder(order, f"a line has no GST rate and no known category ({it.get('category')!r})")
         try:
             rate = int(round(float(rate)))
         except (TypeError, ValueError):
             raise UnfileableOrder(order, f"a line's GST rate is unreadable ({rate!r})") from None
         hsn = str(it.get("hsn_code") or "9004")
-        if it.get("taxable_value") is not None and it.get("tax_amount") is not None:
-            taxable, tax = _f(it.get("taxable_value")), _f(it.get("tax_amount"))
-            if taxable <= 0 and tax <= 0:
-                continue
-        else:
-            gross = _f(it.get("item_total"))
-            if gross <= 0:
-                continue
+        if not stamped:
             taxable = gross * 100.0 / (100.0 + rate)
             tax = gross - taxable
         raw.append((rate, hsn, taxable, tax))

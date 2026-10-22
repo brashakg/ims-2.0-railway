@@ -1,6 +1,6 @@
 """HR attendance, finance outstanding / GST summary and task reports."""
 
-from fastapi import Depends, Query
+from fastapi import Depends, HTTPException, Query
 from typing import Optional
 from datetime import date, datetime, timedelta
 from ...utils.ist import (
@@ -26,6 +26,7 @@ from .gst_base import (
     real_sale_match,
     _get_raw_db,
     CUSTOMER_SUPPLY_FIELDS,
+    UnfileableOrder,
     _order_rate_lines,
     _order_supply,
     _rate_heads,
@@ -193,6 +194,15 @@ async def gst_report(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(require_roles(*AP_ROLES)),
 ):
+    """GST report for a date range (_gst_report). An order no retry can read
+    (UnfileableOrder) is a 422 naming it, as on GSTR-1 / GSTR-3B -- not a 500."""
+    try:
+        return await _gst_report(from_date, to_date, store_id, current_user)
+    except UnfileableOrder as exc:
+        raise HTTPException(status_code=422, detail=f"GST report: {exc}") from exc
+
+
+async def _gst_report(from_date: date, to_date: date, store_id: Optional[str], current_user: dict):
     """GST report for a date range.
 
     Orders persist `grand_total` + `tax_amount` (and per-line taxable/tax),
