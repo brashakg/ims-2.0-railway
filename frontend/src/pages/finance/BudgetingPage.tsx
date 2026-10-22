@@ -280,9 +280,9 @@ export default function BudgetingPage() {
           <div className="card">
             <div className="flex flex-col tablet:flex-row tablet:items-center tablet:justify-between gap-3 mb-4">
               <h2 className="text-lg font-semibold text-gray-900">Planned amounts</h2>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <input
-                  className="input-field w-40"
+                  className="input-field min-w-0 flex-1 tablet:flex-none tablet:w-40"
                   placeholder="New head…"
                   value={newHead}
                   onChange={(e) => setNewHead(e.target.value)}
