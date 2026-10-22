@@ -93,6 +93,9 @@ LIVE_NOT_PUSHED = "LIVE_NOT_PUSHED"
 # A never-published product the product gate refuses (brand off the website,
 # not finished in IMS, push-locked): named in the run's failures, stays queued.
 FIRST_PUBLISH_REFUSED = "FIRST_PUBLISH_REFUSED"
+# A live listing of a Never-sell-online brand this run did not take down
+# (failed, simulated while dark, or past the run limit): named every run.
+NEVER_SELL_STILL_LIVE = "NEVER_SELL_STILL_LIVE"
 
 
 # ---------------------------------------------------------------------------
@@ -563,7 +566,9 @@ async def sync_live_products(
     limit: Optional[int] = None,
     first_publish_cap: int = PRODUCT_BATCH_CAP,
 ) -> Optional[Dict[str, Any]]:
-    """Re-push every product that is already on Shopify AND dirty, then
+    """First take down every listing still live of a Never-sell-online brand
+    (owner 2026-10-22; online_delist, inside the ``limit``), then
+    re-push every product that is already on Shopify AND dirty, then
     FIRST-publish queued gid-less products (owner ruling 2026-10-20) through
     the Push-all door -- at most ``first_publish_cap`` real sends (default
     PRODUCT_BATCH_CAP, the in-request cap; the scheduler passes
@@ -586,12 +591,32 @@ async def sync_live_products(
         logger.info("[LIVE-SYNC] slot %s already claimed -- skipping", slot)
         return None
 
+    # NEVER SELL ONLINE FIRST (owner ruling 2026-10-22). Every listing still
+    # live of a brand marked Never sell online -- dirty or not -- goes through
+    # the one take-down door (online_delist; dark -> SIMULATED, nothing
+    # stamped, so it is retried for real once the gates go live). Catches
+    # whatever the brand save left (a failed / timed-out take-down). Runs
+    # before the dirty selection so a LIVE take-down (taken_down_at) is not
+    # also re-pushed. Bounded by the run ceiling; what is left counts against
+    # nothing else and is named below.
+    from . import online_delist
+
+    try:
+        never_sell = online_delist.never_sell_live_listings(db)
+    except Exception as e:  # noqa: BLE001 -- the run goes on; next run retries
+        logger.warning("[LIVE-SYNC] never-sell read failed: %s", e)
+        never_sell = []
+    never_sell_rows = await online_delist.take_down_listings(
+        db, never_sell[:limit], actor={"user_id": actor}
+    )
+    limit_left = max(0, limit - len(never_sell_rows))
+
     dirty, taken_down_skipped = select_dirty_products(db)
     live = [d for d in dirty if (d.get("ecom") or {}).get("shopify_product_id")]
     mode = shopify_push.push_mode_status(db)["mode"]
 
     batch = await push_product_docs(
-        db, live, current_user={"user_id": actor}, max_results=limit
+        db, live, current_user={"user_id": actor}, max_results=limit_left
     )
     pushed_ok = sum(1 for r in batch["results"] if r.get("ok"))
 
@@ -612,7 +637,7 @@ async def sync_live_products(
         (d for d in dirty if not (d.get("ecom") or {}).get("shopify_product_id")),
         key=queue_order,
     )
-    room = max(0, limit - len(batch["results"]))
+    room = max(0, limit_left - len(batch["results"]))
     first = await push_product_docs(
         db,
         never,
@@ -669,7 +694,29 @@ async def sync_live_products(
     # switched off in Brand Master (or push-locked) is not pushed, so it keeps
     # selling at its last pushed price and title. Name it, never just count it;
     # taking it down stays a human press (Online Store > Take down).
+    swept = {f.get("sku") for f in never_sell}
+    for f, row in zip(never_sell, never_sell_rows + [None] * len(never_sell)):
+        if row is not None and row["ok"] and row["mode"] == shopify_push.MODE_LIVE:
+            continue  # taken down this run
+        if row is None:
+            why = "not reached this run (run limit) -- still live; next run takes it down"
+        elif not row["ok"]:
+            why = "take-down failed (%s) -- still live; retried next run" % row["error"]
+        else:
+            why = "Shopify writes are off -- would be taken down; still live"
+        failures.append(
+            {
+                "product_id": f.get("id"),
+                "sku": f.get("sku"),
+                "name": None,
+                "code": NEVER_SELL_STILL_LIVE,
+                "reason": online_delist.REASON_NEVER_SELL,
+                "error": "brand '%s' is Never sell online: %s" % (f.get("brand"), why),
+            }
+        )
     for doc, refusal in batch["refused"]:
+        if doc.get("sku") in swept:
+            continue  # named once, above
         failures.append(
             {
                 "product_id": doc.get("id") or doc.get("product_id"),
@@ -738,9 +785,14 @@ async def sync_live_products(
         "taken_down_skipped": taken_down_skipped,
         "blocked_skipped": batch["blocked_skipped"] + first["blocked_skipped"],
         "live_not_pushed": len(batch["refused"]),
+        "never_sell_live": len(never_sell),
+        "never_sell_taken_down": sum(
+            1 for r in never_sell_rows if r["ok"] and r["mode"] == shopify_push.MODE_LIVE
+        ),
         "limit": limit,
         # The ceiling (not the cap) stopped the first-publish pass early.
         "limit_reached": batch["limit_reached"]
+        or len(never_sell) > len(never_sell_rows)
         or (first["cap_reached"] and room < first_publish_cap),
         "failures": failures,
         "collections": collections,

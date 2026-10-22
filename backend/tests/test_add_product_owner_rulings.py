@@ -367,7 +367,9 @@ def test_f12_every_refusal_says_its_own_reason(monkeypatch):
     a brand that is switched off."""
     db = _up_db()
     off = _verdict(monkeypatch, db, "Carrera")["reason"]
-    misspelt = _verdict(monkeypatch, db, "RayBan")["reason"]
+    # A real misspelling ("RayBan" is the same brand_name_key as "Ray-Ban"
+    # and finds it since the existence lookup uses that key -- review of #1251).
+    misspelt = _verdict(monkeypatch, db, "Raybon")["reason"]
     inactive = _verdict(monkeypatch, db, "Titan")["reason"]
     down = _verdict(monkeypatch, None, "Ray-Ban")["reason"]
     assert "not for the website" in off
@@ -378,7 +380,7 @@ def test_f12_every_refusal_says_its_own_reason(monkeypatch):
     # The Catalog / Buy Desk chip carries the same reason, not a fixed guess.
     from api.services.online_catalog import doc_online_state
 
-    st = doc_online_state(db, {"brand": "RayBan", "images": ["https://cdn.example.com/p.jpg"]})
+    st = doc_online_state(db, {"brand": "Raybon", "images": ["https://cdn.example.com/p.jpg"]})
     assert st["online"] == "NOT_FOR_WEBSITE" and misspelt in st["note"]
 
 

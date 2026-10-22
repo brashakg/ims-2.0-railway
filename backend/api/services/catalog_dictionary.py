@@ -170,9 +170,13 @@ def brand_name_key(name: Any) -> str:
     full-width or maths-letter look-alike (U+FF32 full-width R, U+1D411
     maths bold R) collapses to the same key (review of #1245) -- with the
     strip run BEFORE it too, because NFKC turns a trade mark sign into
-    letters ("Ray-Ban" + U+2122 -> "...TM") (review of #1251)."""
+    letters ("Ray-Ban" + U+2122 -> "...TM") (review of #1251). NFC before
+    that first strip: a decomposed accent ("e" + U+0301) is a combining mark
+    the strip would drop, so "Cafe" + U+0301 must compose to "Caf" + U+00E9
+    first."""
     strip = re.compile(r"[\W_]+")
-    return strip.sub("", unicodedata.normalize("NFKC", strip.sub("", str(name or "")))).casefold()
+    first = strip.sub("", unicodedata.normalize("NFC", str(name or "")))
+    return strip.sub("", unicodedata.normalize("NFKC", first)).casefold()
 
 
 def blocked_brand_row(rows, brand_name: str) -> Optional[Dict[str, Any]]:
@@ -188,19 +192,39 @@ def blocked_brand_row(rows, brand_name: str) -> Optional[Dict[str, Any]]:
 
 
 def _brand_rows(db, brand_name: str) -> List[Dict[str, Any]]:
-    """Every brand_masters row whose name matches `brand_name` without case
-    (casefold), active or not. Raises on a read failure: callers decide."""
-    probe = str(brand_name or "").strip().casefold()
+    """Every brand_masters row whose name has the same brand_name_key as
+    `brand_name` (case, spaces, punctuation ignored -- the Never-sell-online
+    key, ONE rule: "Montblanc" finds master "Mont Blanc"), active or not.
+    Raises on a read failure: callers decide."""
+    key = brand_name_key(brand_name)
+    if not key:
+        return []
     return [
         doc
         for doc in db.get_collection(BRAND_COLLECTION).find({})
-        if str(doc.get("name") or "").strip().casefold() == probe
+        if brand_name_key(doc.get("name")) == key
     ]
 
 
-def _find_active_brand(db, brand_name: str) -> Optional[Dict[str, Any]]:
-    """The ACTIVE brand_masters doc whose name matches case-insensitively,
-    or None (not found / no db / read failure)."""
+def _active_candidates(rows: List[Dict[str, Any]], brand_name: str) -> List[Dict[str, Any]]:
+    """THE Brand Master rows that speak for `brand_name`, among its key-matched
+    `rows`. An exact (casefold) spelling decides ALONE: its active rows, or
+    none -- an inactive exact row never falls through to an active key twin.
+    Without one, every active key twin; a caller whose field the twins
+    DISAGREE on treats that as a gap (None / a refusal), never as whichever
+    row the database handed back first."""
+    exact = str(brand_name or "").strip().casefold()
+    own = [d for d in rows if str(d.get("name") or "").strip().casefold() == exact] or rows
+    return [d for d in own if d.get("is_active") is not False]
+
+
+def load_brand_tier(db, brand_name: str) -> Optional[str]:
+    """The Brand Master tier (MASS/PREMIUM/LUXURY) for a brand, or None when
+    the brand is unknown / inactive / has no valid tier / its key twins
+    disagree on the tier / the read failed. Used to DERIVE a product's
+    discount tier at create time (owner rule: the tier is set brand-wise in
+    Settings, not re-picked per product) -- a money field, so an ambiguous
+    match is a visible gap, never a guess."""
     if db is None or not str(brand_name or "").strip():
         return None
     try:
@@ -208,18 +232,10 @@ def _find_active_brand(db, brand_name: str) -> Optional[Dict[str, Any]]:
     except Exception as e:  # noqa: BLE001
         logger.warning("[CATALOG-DICT] brand lookup failed: %s", e)
         return None
-    return next((d for d in rows if d.get("is_active") is not False), None)
-
-
-def load_brand_tier(db, brand_name: str) -> Optional[str]:
-    """The Brand Master tier (MASS/PREMIUM/LUXURY) for a brand, or None when
-    the brand is unknown / has no valid tier / read failed. Used to DERIVE a
-    product's discount tier at create time (owner rule: the tier is set
-    brand-wise in Settings, not re-picked per product)."""
-    doc = _find_active_brand(db, brand_name)
-    if doc is None:
+    tiers = {str(d.get("tier") or "").strip().upper() for d in _active_candidates(rows, brand_name)}
+    if len(tiers) != 1:
         return None
-    tier = str(doc.get("tier") or "").strip().upper()
+    tier = tiers.pop()
     return tier if tier in BRAND_TIERS else None
 
 
@@ -239,15 +255,12 @@ def brand_website_refusal(db, brand_name: str) -> Optional[str]:
         return "the product has no brand"
     try:
         rows = _brand_rows(db, name) if db is not None else None
-        blocked = (
-            blocked_brand_row(db.get_collection(BRAND_COLLECTION).find({}), name)
-            if db is not None else None
-        )
     except Exception as e:  # noqa: BLE001
         logger.warning("[CATALOG-DICT] brand lookup failed: %s", e)
         rows = None
     if rows is None:
         return "Settings > Brand Master could not be read just now"
+    blocked = blocked_brand_row(rows, name)
     # SUPERADMIN hard block (owner 2026-10-19): the brand has not allowed
     # online selling. Checked before anything else, on ANY row (active or not)
     # with the same spelling-proof key, so neither another switch nor a near-
@@ -257,7 +270,7 @@ def brand_website_refusal(db, brand_name: str) -> Optional[str]:
             "brand '%s' has not allowed online selling (Never sell online, "
             "set by SUPERADMIN in Settings > Brand Master)" % name
         )
-    active = [d for d in rows if d.get("is_active") is not False]
+    active = _active_candidates(rows, name)
     if not active:
         if rows:
             return "brand '%s' is inactive in Settings > Brand Master" % name
@@ -265,14 +278,21 @@ def brand_website_refusal(db, brand_name: str) -> Optional[str]:
             "brand '%s' is not in Settings > Brand Master (check its spelling, "
             "or whether the brand was renamed)" % name
         )
-    if active[0].get("sync_to_shopify_default") is not True:
+    syncs = {d.get("sync_to_shopify_default") is True for d in active}
+    if len(syncs) > 1:
+        return (
+            "brand '%s' matches Brand Master rows that disagree on the website "
+            "(%s) -- make them one brand in Settings > Brand Master"
+            % (name, ", ".join(sorted(str(d.get("name")) for d in active)))
+        )
+    if syncs != {True}:
         return "brand '%s' is not for the website (Settings > Brand Master)" % name
     return None
 
 
 def load_subbrand_options(db, brand_name: str) -> Optional[List[str]]:
     """Subbrand names configured for the ACTIVE Brand-Master brand matching
-    `brand_name` (case-insensitive). Returns:
+    `brand_name` (brand_name_key, like the website gate). Returns:
       - None  when the read failed / no db (fail-open, skip enforcement),
       - []    when the brand is unknown or has NO subbrands (subbrand stays
               free-form — mirrors the lens 'series falls open per brand' rule),
@@ -281,25 +301,22 @@ def load_subbrand_options(db, brand_name: str) -> Optional[List[str]]:
     if db is None or not str(brand_name or "").strip():
         return None
     try:
-        probe = str(brand_name).strip().casefold()
-        brands = db.get_collection(BRAND_COLLECTION)
-        brand_doc = None
-        for doc in brands.find({"is_active": {"$ne": False}}):
-            if doc.get("is_active") is False:
-                continue
-            if str(doc.get("name") or "").strip().casefold() == probe:
-                brand_doc = doc
-                break
-        if brand_doc is None or not brand_doc.get("brand_id"):
-            return []
+        # The same rows the website gate and the tier read (brand_name_key,
+        # an exact spelling deciding alone); key twins pool their subbrands.
+        ids = [
+            d["brand_id"]
+            for d in _active_candidates(_brand_rows(db, brand_name), brand_name)
+            if d.get("brand_id")
+        ]
         subs = db.get_collection(SUBBRAND_COLLECTION)
         names: List[str] = []
         seen: set = set()
-        for sb in subs.find({"brand_id": brand_doc["brand_id"]}):
-            name = str(sb.get("name") or "").strip()
-            if name and name.casefold() not in seen:
-                seen.add(name.casefold())
-                names.append(name)
+        for brand_id in ids:
+            for sb in subs.find({"brand_id": brand_id}):
+                name = str(sb.get("name") or "").strip()
+                if name and name.casefold() not in seen:
+                    seen.add(name.casefold())
+                    names.append(name)
         names.sort(key=str.casefold)
         return names
     except Exception as e:  # noqa: BLE001
