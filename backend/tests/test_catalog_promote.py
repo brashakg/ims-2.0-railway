@@ -398,7 +398,7 @@ def test_put_dictionary_enforcement_fires_on_attributes(env, monkeypatch):
     doc = _bvi_doc(doc_id="clx0putdict1")
     catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
 
-    def _reject(category, attrs, db=None):
+    def _reject(category, attrs, db=None, stored=None):
         raise catalog_mod._pm.ProductMasterError(
             "'Neon' is not an allowed value for Frame Color.",
             status=422,

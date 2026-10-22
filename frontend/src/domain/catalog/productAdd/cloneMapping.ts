@@ -62,7 +62,11 @@ export interface ProductDoc {
 }
 
 export function productToFormValues(product: ProductDoc): ProductFormValues {
-  const category = str(product.category);
+  // The form speaks PICKER codes ('SG', 'FR', ...); a spine stores the
+  // canonical name ('SUNGLASS'). Left canonical, the edit page lost every
+  // category rule keyed on the code: the field list fell back to bare text
+  // boxes and a sunglass/frame's Weight box left its place after Warranty.
+  const category = CANONICAL_TO_PICKER[str(product.category)] || str(product.category);
 
   // Start from the stored attributes (canonical), then ensure the top-level
   // identity + power fields are represented so the form prefills fully.
@@ -79,7 +83,7 @@ export function productToFormValues(product: ProductDoc): ProductFormValues {
   // sub-brand (product_master._derive_brand_model_color_size), and a hidden
   // model_no would outrank a Sub Brand edit in the server's duplicate key.
   if (!attributes.brand_name && product.brand) attributes.brand_name = str(product.brand);
-  const isLens = (CANONICAL_TO_PICKER[category] || category) === 'LS';
+  const isLens = category === 'LS';
   if (!isLens && !attributes.model_no && !attributes.model_name && product.model) {
     attributes.model_no = str(product.model);
   }

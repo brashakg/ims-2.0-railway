@@ -264,6 +264,9 @@ from .product_input import (  # noqa: F401
     _publishable_gtin,
     build_variant_price_inputs,
     ims_product_tags,
+    SPINE_WEIGHTS,
+    variant_weight_input,
+    with_spine_weights,
 )
 from .listing import (  # noqa: F401
     FAMILY_UNREADABLE,

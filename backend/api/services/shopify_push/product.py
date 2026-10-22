@@ -51,6 +51,7 @@ from .product_input import (
     build_removed_metafields,
     build_variant_price_inputs,
     ims_product_tags,
+    with_spine_weights,
 )
 from .tags import plan_product_tags, sync_product_tags
 from .variants import (
@@ -235,6 +236,10 @@ async def push_product(
         variants = listing["rows"]
         ecom = product.get("ecom") or {}
     listing_plan = plan_summary(listing) if listing is not None else None
+    # THE WEIGHT (grams) of every variant, read off its SPINE -- the one copy
+    # (the twin holds none): the seeding rows and the price push both carry
+    # it as inventoryItem.measurement.weight, only when one is known.
+    product = with_spine_weights(db, product, variants)
 
     # THE PHOTO RULE (owner ruling 2026-08-25): "Refuse -- no photo, no
     # publish." A listing with a name, a price and an empty grey box is worse

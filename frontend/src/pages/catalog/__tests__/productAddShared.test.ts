@@ -71,13 +71,17 @@ describe('validateReviewForm and formValuesToCatalogUpdate stay in lockstep', ()
   });
 
   it('real attribute change: payload carries the patch AND the dictionary gate arms', () => {
-    const values = fv({ brand_name: 'LEGACY BAD BRAND', colour_code: 'Blue' });
+    // The gate arms for a NEW off-list value; the legacy value the doc
+    // already holds stays valid (owner review of #1256: a stored value must
+    // never block an edit -- formModel.offListMessage).
+    const values = fv({ brand_name: 'LEGACY BAD BRAND', colour_code: 'Blue', shape: 'Heart' });
 
     const payload = formValuesToCatalogUpdate(values, baseline);
-    expect(payload.attributes).toEqual({ colour_code: 'Blue' });
+    expect(payload.attributes).toEqual({ colour_code: 'Blue', shape: 'Heart' });
 
     const errors = validateReviewForm(values, baseline);
-    expect(errors.brand_name).toMatch(/not in the allowed list/);
+    expect(errors.shape).toMatch(/not in the allowed list/);
+    expect(errors.brand_name).toBeUndefined();
   });
 });
 

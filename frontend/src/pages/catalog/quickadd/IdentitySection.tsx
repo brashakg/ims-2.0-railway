@@ -37,7 +37,7 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
   const {
     registryReady, selectedCategory, setSelectedCategory, attributes, setAttr,
     description, setDescription, hsnCode, setHsnCode, gstRate, setGstRate,
-    hsnMatchesCategory, weight, setWeight, displayName, setDisplayName,
+    hsnMatchesCategory, weight, setWeight, storedAttributes, displayName, setDisplayName,
     reviewTags, setReviewTags, subbrandsByBrand, errors, showAdvanced,
     setShowAdvanced, openSections, toggleSection, liveErrors, sectionIssues,
     firstFieldRef, editMode, isReviewMode, variantCtx, flaggedFields, clearFlag,
@@ -108,6 +108,11 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
       isLocked && 'bg-gray-50 text-gray-500 cursor-not-allowed'
     );
     const fieldId = `qa-field-${field.name}`;
+    // The stored value of this select when today's list does not hold it.
+    const storedOffList = (f: CategoryField): string => {
+      const v = String(storedAttributes?.[f.name] ?? '').trim();
+      return v && !f.options?.some((o) => o.toLowerCase() === v.toLowerCase()) ? v : '';
+    };
     return (
     <div key={field.name}>
       <label className="block text-xs font-medium text-gray-700 mb-1" htmlFor={fieldId}>
@@ -130,6 +135,13 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
           {field.options?.map((opt) => (
             <option key={opt} value={opt}>{opt}</option>
           ))}
+          {/* A value ALREADY STORED on the product stays choosable even when it
+              is not in today's list (formModel.offListMessage keeps it valid):
+              shown as "<value> (current)", it saves unchanged. */}
+          {!isLocked &&
+            storedOffList(field) && (
+              <option value={storedOffList(field)}>{storedOffList(field)} (current)</option>
+            )}
           {/* A locked value must stay visible even if it's not in the current
               options list (e.g. legacy brand) — inject it as its own option. */}
           {isLocked &&
@@ -198,6 +210,9 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
         const val = String(v ?? '').trim();
         if (val) filled[k] = val;
       });
+      // Weight is a top-level field, not an attribute: without this the
+      // description's Weight row (product_description.TECH_SPEC_ROWS) never filled.
+      if (String(weight ?? '').trim()) filled.weight = `${String(weight).trim()} g`;
       const res = await productApi.generateDescription({
         category: selectedCategory,
         attributes: filled,

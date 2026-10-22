@@ -1211,7 +1211,9 @@ class ProductCreateInput(BaseModel):
     # products.py ProductCreate). A hard-coded 18.0 default was a pricing
     # back-door: an optical frame (5% GST) would silently persist at 18%.
     gst_rate: Optional[float] = None
-    weight: Optional[float] = None  # in grams
+    # Grams, on the spine; 0 = no weight (never stored). Same bound as the
+    # spine PUT (products.ProductUpdate).
+    weight: Optional[float] = Field(None, ge=0)
 
     # Pricing
     pricing: PricingInput
@@ -1252,7 +1254,9 @@ class ProductUpdateInput(BaseModel):
     description: Optional[str] = None
     hsn_code: Optional[str] = None
     gst_rate: Optional[float] = None
-    weight: Optional[float] = None
+    # Grams, written on the SPINE. A positive number sets it; an explicit
+    # null or 0 CLEARS it (0 is "no weight", never stored); absent = untouched.
+    weight: Optional[float] = Field(None, ge=0)
     pricing: Optional[PricingPatchInput] = None
     images: Optional[List[str]] = None
     is_active: Optional[bool] = None
@@ -1931,6 +1935,35 @@ def _spine_facts(docs: List[Dict]) -> Optional[List[Dict]]:
     return [facts.get(p) or {} if p else {} for p in spine_ids]
 
 
+def _stamp_spine_weight(docs: List[Dict]) -> None:
+    """WEIGHT lives on the SPINE (grams): the one copy the edit page, the
+    till and the Shopify push read. Put each row's spine weight on it, in
+    place, so the drawer and the review editor show the stored value. A twin
+    with no spine (an import awaiting promote) keeps its own until promote
+    carries it across (_promote_extra_fields). Fail-soft: unread, a row
+    shows what it holds."""
+    from ..dependencies import get_product_repository
+
+    try:
+        repo = get_product_repository()
+        if repo is None or not docs:
+            return
+        sids = _spine_ids(repo, docs)
+        found = [s for s in sids if s]
+        weights = {
+            s["product_id"]: s.get("weight")
+            for s in repo.collection.find(
+                {"product_id": {"$in": found}}, {"_id": 0, "product_id": 1, "weight": 1}
+            )
+        } if found else {}
+    except Exception:  # noqa: BLE001
+        logger.warning("[CATALOG] spine weight read failed", exc_info=True)
+        return
+    for d, sid in zip(docs, sids):
+        if sid and weights.get(sid):
+            d["weight"] = weights[sid]
+
+
 def _stamp_spine_attribution(docs: List[Dict], facts: List[Dict]) -> None:
     """Put each row's facts (_row_facts, same order) on it, in place, and the
     names from users (catalog_list.stamp_people)."""
@@ -2092,15 +2125,15 @@ async def list_catalog_products(
 
     # F35: per-unit cost answers to the one product-cost rule (services/
     # cost_mask "product": the managers see it, counter roles never).
-    page_products = mask_cost_list(products[start:end], current_user, "product")
+    # Copies: in no-Mongo mode the rows ARE the in-memory store.
+    page_products = [dict(p) for p in mask_cost_list(products[start:end], current_user, "product")]
+    _stamp_spine_weight(page_products)
     if sort:
         from .products import _CATALOGUER_VIEW_ROLES
 
         if set(current_user.get("roles") or []) & (
             {"SUPERADMIN"} | set(_CATALOGUER_VIEW_ROLES)
         ):
-            # Copies: in no-Mongo mode the rows ARE the in-memory store.
-            page_products = [dict(p) for p in page_products]
             _stamp_spine_attribution(page_products, facts[start:end])
     return {
         "products": page_products,
@@ -2123,6 +2156,7 @@ async def get_catalog_product(
     product = dict(mask_cost(product, current_user, "product"))
     # The drawer's 'Ordered - finish it' reads the one rule, as the list does.
     _pm.stamp_ordered_drafts([product], _products_coll())
+    _stamp_spine_weight([product])
     return {"product": product}
 
 
@@ -2230,6 +2264,9 @@ async def create_catalog_product(
                 "discount_category": product.pricing.discount_category,
                 "hsn_code": hsn_code,
                 "gst_rate": gst_rate,
+                # Grams, on the SPINE (the one copy every reader uses). It
+                # used to be stored on the twin alone.
+                "weight": product.weight or None,
                 # The form's "Shopify tags" box. Declared on ShopifySyncInput and
                 # read by nothing until sync audit gap #4: normalised into the
                 # spine's governed `tags` here, mirrored onto the twin below.
@@ -2288,7 +2325,8 @@ async def create_catalog_product(
         "description": product.description,
         "hsn_code": hsn_code,
         "gst_rate": gst_rate,
-        "weight": product.weight,
+        # Weight is the spine's (above); only a twin with no spine store holds it.
+        **({"weight": product.weight} if _pr is None and product.weight else {}),
         "pricing": {
             "mrp": product.pricing.mrp,
             "offer_price": product.pricing.offer_price or product.pricing.mrp,
@@ -2374,7 +2412,7 @@ async def create_catalog_product(
         product_data["shopify"] = shopify_result
 
     return {
-        "product": mask_cost(product_data, current_user, "product"),
+        "product": mask_cost({**product_data, "weight": product.weight or None}, current_user, "product"),
         "message": "Product created successfully",
         "shopify_sync": shopify_result,
     }
@@ -2520,7 +2558,8 @@ async def update_catalog_product(
                 existing.get("category"),
             )
             merged_attrs = _pm.enforce_dictionary_values(
-                existing.get("category"), merged_attrs, db=_get_db()
+                existing.get("category"), merged_attrs, db=_get_db(),
+                stored=pre_edit.get("attributes"),
             )
         except _pm.ProductMasterError as err:
             raise HTTPException(status_code=err.status, detail=err.message) from err
@@ -2619,8 +2658,6 @@ async def update_catalog_product(
         existing["hsn_code"] = product.hsn_code
     if product.gst_rate is not None:
         existing["gst_rate"] = product.gst_rate
-    if product.weight is not None:
-        existing["weight"] = product.weight
     if product.pricing:
         # Merge the incoming pricing onto the existing block, then enforce the
         # non-negotiable MRP >= offer_price rule on the EFFECTIVE post-merge
@@ -2721,14 +2758,28 @@ async def update_catalog_product(
 
         _pr = get_product_repository()
         _spine_id = _spine_product_id(_pr, existing)
-    except Exception as exc:  # noqa: BLE001 -- fail-soft unless a barcode moves
-        if spine_gtin is not None:
+    except Exception as exc:  # noqa: BLE001 -- fail-soft unless a barcode or weight moves
+        if spine_gtin is not None or "weight" in product.model_fields_set:
+            # Weight too: unresolved, it would land on the twin alone while
+            # the answer said "saved" -- the very strand this door fixed.
             # "Could not look" is not "no linked spine": saving the twin alone
             # would split the two copies for good. Refused, nothing saved.
             raise HTTPException(status_code=503, detail=_SPINE_UNCHECKED) from exc
         logger.warning(
             "[CATALOG] spine lookup skipped for %s", product_id, exc_info=True
         )
+    # WEIGHT (grams) lives on the SPINE -- the copy the edit page, the push and
+    # this door's own reads (_stamp_spine_weight) all use; it travels in the
+    # spine sync below. Only a twin with no spine (an import awaiting promote)
+    # keeps it itself, and promote carries it across. It used to land on the
+    # twin alone, where neither the edit page nor the spine ever saw it.
+    weight_sent = "weight" in product.model_fields_set
+    new_weight = product.weight or None  # 0 / null = no weight (a clear)
+    if weight_sent and not _spine_id:
+        if new_weight:
+            existing["weight"] = new_weight
+        else:
+            existing.pop("weight", None)
     message = "Product updated successfully"
     barcode_token = uuid.uuid4().hex
     spine_before = size_before = None
@@ -2834,6 +2885,14 @@ async def update_catalog_product(
             )
     else:
         _save_catalog_product(to_write)
+    if weight_sent and not new_weight and not _spine_id:
+        # A cleared weight on a spine-less import: the full-doc $set above
+        # cannot remove a key.
+        _twins = _catalog_coll()
+        if _twins is not None:
+            _twins.update_one({"id": product_id}, {"$unset": {"weight": ""}})
+        else:
+            CATALOG_PRODUCTS.get(product_id, {}).pop("weight", None)
 
     # Compact field-classified audit row (cataloguing scorecard corrections):
     # local mirror of the spine PUT's twin in products.update_product -- keep
@@ -2861,7 +2920,7 @@ async def update_catalog_product(
             _changed_keys.append("hsn_code")
         if product.gst_rate is not None:
             _changed_keys.append("gst_rate")
-        if product.weight is not None:
+        if weight_sent:
             _changed_keys.append("weight")
         if product.pricing is not None:
             _changed_keys.append("pricing")
@@ -2938,16 +2997,23 @@ async def update_catalog_product(
                 _patch["gst_rate"] = existing.get("gst_rate")
             if product.is_active is not None:
                 _patch["is_active"] = existing.get("is_active")
+            if new_weight:
+                _patch["weight"] = new_weight
             _patch = {k: v for k, v in _patch.items() if v is not None}
             # A person's change to the product, whatever it touched: the
             # spine records who and when (the same stamp as the twin above),
             # so the Catalog page and the review list read ONE last edit.
             _patch.update(_edit)
             _pr.update(_spine_id, _patch)
+            if weight_sent and not new_weight:
+                _pr.collection.update_one({"product_id": _spine_id}, {"$unset": {"weight": ""}})
     except Exception:  # noqa: BLE001
         logger.warning(
             "[CATALOG] spine sync on update skipped for %s", product_id, exc_info=True
         )
+        if weight_sent:
+            # The weight has no other copy: say so rather than drop it quietly.
+            message = "Saved, but the weight could not be saved. Please save again."
     # Sync audit gap #2 (owner, 2026-09-06): is_active off -> take it OFF
     # Shopify; back on -> queue it for the next press / live sync. The ONE
     # rule lives in services/online_delist; runs AFTER the save (the full-doc
@@ -3004,8 +3070,12 @@ async def update_catalog_product(
             "[CATALOG] online price recompute skipped for %s", product_id, exc_info=True
         )
 
+    # The answer carries the weight the screens read (the spine's), so the
+    # review editor re-seeds from it.
+    reply = dict(mask_cost(existing, current_user, "product"))
+    _stamp_spine_weight([reply])
     return {
-        "product": mask_cost(existing, current_user, "product"),
+        "product": reply,
         "message": message,
     }
 

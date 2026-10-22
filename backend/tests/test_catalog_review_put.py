@@ -416,7 +416,7 @@ def test_dictionary_enforcement_still_422s(env, monkeypatch):
     doc = _bvi_doc(doc_id="clx0rvdict01")
     catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
 
-    def _reject(category, attrs, db=None):
+    def _reject(category, attrs, db=None, stored=None):
         raise catalog_mod._pm.ProductMasterError(
             "'Neon' is not an allowed value for Frame Color.",
             status=422,
@@ -494,7 +494,7 @@ def test_cas_409s_on_concurrent_write_inside_the_window(env, monkeypatch):
     doc = _bvi_doc(doc_id="clx0rvcas001")
     catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
 
-    def _concurrent_writer(category, attrs, db=None):
+    def _concurrent_writer(category, attrs, db=None, stored=None):
         # Another worker's save lands between the check and the write.
         catalog_mod.CATALOG_PRODUCTS[doc["id"]].update(
             {
@@ -534,7 +534,7 @@ def test_concurrent_promote_stamp_survives_put(env, monkeypatch):
     doc = _bvi_doc(doc_id="clx0rvghost1", sku="RVGHOST1")
     catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
 
-    def _promote_stamp_in_window(category, attrs, db=None):
+    def _promote_stamp_in_window(category, attrs, db=None, stored=None):
         # Exactly what promote_catalog_product stamps (partial $set).
         catalog_mod.CATALOG_PRODUCTS[doc["id"]].update(
             {
@@ -956,7 +956,7 @@ def test_a_lost_catalogue_cas_does_not_change_the_billing_barcode(gtin_env, monk
     before = gtin_env.find_by_id("spine-g1")
     loaded = catalog_mod.CATALOG_PRODUCTS["twin-g1"]["updated_at"]
 
-    def concurrent_writer(category, attrs, db=None):
+    def concurrent_writer(category, attrs, db=None, stored=None):
         catalog_mod.CATALOG_PRODUCTS["twin-g1"].update(
             {"updated_at": "2026-07-10T10:05:00", "description": "colleague's saved edit"}
         )

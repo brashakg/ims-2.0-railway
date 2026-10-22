@@ -35,6 +35,8 @@ from .product_input import (
     _variants_for_price_push,
     build_variant_price_inputs,
     variant_barcode,
+    variant_weight_input,
+    with_spine_weights,
 )
 from .writeback import _writeback_variant
 from .inventory import inventory_policy_for, tracking_verdicts
@@ -162,6 +164,9 @@ def build_variant_seed_rows(
         if not row.get("price") and not row.get("inventoryItem"):
             # No price and no SKU -> nothing worth a mutation for this variant.
             continue
+        measurement = variant_weight_input(product, v)
+        if measurement:
+            row.setdefault("inventoryItem", {})["measurement"] = measurement
         rows.append(
             {
                 "key": _variant_option_key(v),
@@ -853,6 +858,9 @@ async def push_variant_prices(
     _lock = product_push_refusal(db, product)
     if _lock:
         return _blocked_result("variant-prices", pid, _lock)
+    # Each variant's shipping weight rides with its price (read off the spine;
+    # push_product has already resolved it for its own press).
+    product = with_spine_weights(db, product, variants)
 
     ecom = product.get("ecom") or {}
     raw_gid = ecom.get("shopify_product_id")
