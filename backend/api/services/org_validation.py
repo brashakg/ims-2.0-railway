@@ -444,3 +444,42 @@ def shop_state_code(store: Optional[dict]) -> str:
     from the very GSTIN the check called wrong (money panel, 2026-09-30)."""
     s = store if isinstance(store, dict) else {}
     return resolve_state_code(s.get("state_code"), s.get("state"), s.get("gstin"))
+
+
+def customer_state_code(customer: Optional[dict]) -> str:
+    """The customer's place-of-supply state code, from (in order) its GSTIN,
+    billing_address.state_code, billing_address.state, state_code, state
+    ("" when nothing resolves). THE read the tax invoice uses
+    (orders.invoices._customer_state_code delegates here) and the GST returns
+    use, so a 'JH' or a billing-address-only state answers one way."""
+    if not isinstance(customer, dict):
+        return ""
+    addr = customer.get("billing_address") or {}
+    if not isinstance(addr, dict):
+        addr = {}
+    return resolve_state_code(
+        customer.get("gstin"),
+        addr.get("state_code"),
+        addr.get("state"),
+        customer.get("state_code"),
+        customer.get("state"),
+    )
+
+
+def supply_interstate(store: Optional[dict], customer: Optional[dict], place_of_supply=None):
+    """THE place-of-supply rule of a sale: ``(interstate, place_code, assumed)``.
+
+    Supplier state = shop_state_code(store); customer state = the order's own
+    persisted place of supply (an online delivery state) else
+    customer_state_code(customer). Inter-state only when BOTH are known and
+    differ; an unknown customer state is intra-state, ``assumed`` True (the
+    safe default the invoice prints). ``place_code`` = the customer's state,
+    else the supplier's. The tax invoice (orders.invoices._build_invoice_gst_
+    split) and the GST returns (reports.gst_base._order_supply) both ask this,
+    so a return files the head the invoice printed. Never raises."""
+    supplier = shop_state_code(store)
+    buyer = resolve_state_code(place_of_supply) or customer_state_code(customer)
+    if buyer and supplier:
+        return buyer != supplier, buyer, False
+    return False, buyer or supplier, True
+

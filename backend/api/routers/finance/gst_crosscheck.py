@@ -14,7 +14,7 @@ from ..auth import get_current_user
 from ...dependencies import user_store_scope
 from ...services.org_validation import shop_gstins
 from ._shared import (
-    _REAL_ORDER_STATUS_FILTER,
+    REAL_SALE_MATCH,
     _customer_state_map,
     _get_db,
     _iso_now,
@@ -143,7 +143,7 @@ def gst_by_registration(db, m: int, y: int, scope: Optional[str],
                                  shops=store_ids if scope else None)
         stray = 0 if scope else db.get_collection("orders").count_documents({
             "created_at": {"$gte": ist_month_window_utc(y, m)[0], "$lt": ist_month_window_utc(y, m)[1]},
-            "status": _REAL_ORDER_STATUS_FILTER,
+            **REAL_SALE_MATCH,
             "store_id": {"$nin": list(s2e)},
         })
     except HTTPException:
@@ -270,7 +270,7 @@ def _books_and_tally_for_stores(db, store_ids, start, end) -> tuple:
     finance /gst/summary and /tally/sales-jv endpoints -- no new tax math."""
     o_match = {
         "created_at": {"$gte": start, "$lt": end},
-        "status": _REAL_ORDER_STATUS_FILTER,
+        **REAL_SALE_MATCH,
     }
     if store_ids is not None:
         o_match["store_id"] = {"$in": store_ids}

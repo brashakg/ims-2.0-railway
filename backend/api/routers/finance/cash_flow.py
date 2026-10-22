@@ -17,7 +17,7 @@ from ...services.salary_visibility import is_payroll_shaped_expense, is_salary_a
 from ._shared import (
     PAID_STATUSES,
     UNPAID_STATUSES,
-    _REAL_ORDER_STATUS_FILTER,
+    REAL_SALE_MATCH,
     _REVENUE_EXPR,
     _get_db,
     _order_total,
@@ -53,7 +53,7 @@ async def get_cash_flow(
     inflow_match = {
         "created_at": {"$gte": start},
         "payment_status": {"$in": PAID_STATUSES},
-        "status": _REAL_ORDER_STATUS_FILTER,
+        **REAL_SALE_MATCH,
     }
     if active_store:
         inflow_match["store_id"] = active_store
@@ -287,7 +287,7 @@ def _ar_aging(db, now: datetime, store_id: Optional[str] = None) -> dict:
                 {
                     "payment_status": {"$in": UNPAID_STATUSES},
                     # A cancelled order is not a receivable.
-                    "status": _REAL_ORDER_STATUS_FILTER,
+                    **REAL_SALE_MATCH,
                     **({"store_id": store_id} if store_id else {}),
                 },
                 {
@@ -395,7 +395,7 @@ async def owner_dashboard(current_user: dict = Depends(get_current_user)):
             # DRAFT/CANCELLED so the owner's month revenue is real.
             "created_at": {"$gte": start},
             "payment_status": {"$in": PAID_STATUSES},
-            "status": _REAL_ORDER_STATUS_FILTER,
+            **REAL_SALE_MATCH,
             **shop,
         },
         _REVENUE_EXPR,
@@ -538,7 +538,7 @@ async def cash_flow_forecast(
                 {
                     "payment_status": {"$in": UNPAID_STATUSES},
                     # Don't project a cancelled order as an expected collection.
-                    "status": _REAL_ORDER_STATUS_FILTER,
+                    **REAL_SALE_MATCH,
                     **shop,
                 },
                 {

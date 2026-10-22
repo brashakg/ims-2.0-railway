@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from ..auth import get_current_user
 from ...dependencies import filter_docs_by_store
 from ._shared import (
-    _REAL_ORDER_STATUS_FILTER,
+    REAL_SALE_MATCH,
     _apply_created_at_range,
     _customer_state_map,
     _get_db,
@@ -220,7 +220,7 @@ def _b2b_invoices(
     cust_map = _b2b_customer_map(db)
     store_state = _store_state_map(db)
 
-    match: dict = {"status": _REAL_ORDER_STATUS_FILTER}
+    match: dict = {**REAL_SALE_MATCH}
     store_ids = None
     if store_id:
         store_ids = [store_id]
@@ -327,7 +327,7 @@ def _b2b_fetch_orders(db, order_ids: List[str]) -> List[dict]:
             db.get_collection("orders").find(
                 {
                     "order_id": {"$in": list(order_ids)},
-                    "status": _REAL_ORDER_STATUS_FILTER,
+                    **REAL_SALE_MATCH,
                 },
                 {"_id": 0},
             ),
@@ -633,7 +633,7 @@ async def get_tally_sales_jv(
     # Never export DRAFT/CANCELLED orders to Tally -- they aren't real sales
     # vouchers. created_at is a BSON datetime so the range is built as datetimes
     # (a 'YYYY-MM-DD' string bound never matched -> empty export).
-    match: dict = {"status": _REAL_ORDER_STATUS_FILTER}
+    match: dict = {**REAL_SALE_MATCH}
     store_ids = None
     if store_id:
         store_ids = [store_id]

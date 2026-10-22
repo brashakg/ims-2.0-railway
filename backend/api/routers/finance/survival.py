@@ -17,7 +17,7 @@ from ...services import survival_cashflow
 from ...services import policy_engine
 from ._shared import (
     PAID_STATUSES,
-    _REAL_ORDER_STATUS_FILTER,
+    REAL_SALE_MATCH,
     _REVENUE_EXPR,
     _get_db,
     _require_finance_admin,
@@ -129,7 +129,7 @@ def _survival_projected_income_paise(
     match = {
         "created_at": {"$gte": start},
         "payment_status": {"$in": PAID_STATUSES},
-        "status": _REAL_ORDER_STATUS_FILTER,
+        **REAL_SALE_MATCH,
     }
     if store_id:
         match["store_id"] = store_id

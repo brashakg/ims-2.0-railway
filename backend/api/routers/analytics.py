@@ -408,9 +408,12 @@ _EXCLUDED_ORDER_STATUSES = frozenset({"CANCELLED", "DRAFT", "HISTORICAL"})
 
 
 def _is_billable(order: dict) -> bool:
-    """Return True when the order represents real revenue (not cancelled/draft)."""
-    status = str(order.get("status") or "").upper()
-    return status not in _EXCLUDED_ORDER_STATUSES
+    """Return True when the order represents real revenue -- THE real-sale rule
+    (api/utils/real_sale: not cancelled / draft / historical, and a VOID only
+    once invoiced or shipped)."""
+    from ..utils.real_sale import is_real_sale
+
+    return is_real_sale(order)
 
 
 def calculate_metrics_for_period(

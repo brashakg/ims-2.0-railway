@@ -22,13 +22,13 @@ from typing import Any, Dict, List, Optional
 
 from api.utils.ist import ist_today, ist_day_start_utc
 
-# Mirror finance.py exactly (single source of truth for "real" revenue).
-# HISTORICAL = pre-IMS imported order (settled outside IMS books; never revenue).
+# THE real-sale rule (api/utils/real_sale), the one finance and the GST
+# returns use. HISTORICAL = pre-IMS import; VOID only when never invoiced.
 _REVENUE_EXPR = {"$ifNull": ["$grand_total", {"$ifNull": ["$total", 0]}]}
-_EXCLUDED_ORDER_STATUSES = [
-    "CANCELLED", "DRAFT", "cancelled", "draft", "HISTORICAL", "historical",
-]
-_REAL_ORDER_STATUS_FILTER = {"$nin": _EXCLUDED_ORDER_STATUSES}
+from api.utils.real_sale import (  # noqa: E402
+    EXCLUDED_ORDER_STATUSES as _EXCLUDED_ORDER_STATUSES,
+    REAL_SALE_MATCH,
+)
 
 # Roles that may see raw rupee figures + per-store breakdown + pace.
 RAW_ROLES = {"SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER", "ACCOUNTANT"}
@@ -81,7 +81,7 @@ def mtd_revenue(orders_coll, store_id: Optional[str]) -> float:
     month_start, _, _ = _month_bounds()
     match: Dict[str, Any] = {
         "created_at": {"$gte": month_start},
-        "status": _REAL_ORDER_STATUS_FILTER,
+        **REAL_SALE_MATCH,
     }
     if store_id:
         match["store_id"] = store_id

@@ -21,13 +21,17 @@ from ._shared import (
     router,
 )
 from .gst_base import (
-    GST_RETURN_ORDER_STATUS_FILTER,
+    CUSTOMER_SUPPLY_FIELDS,
+    REAL_SALE_MATCH,
+    UnfileableOrder,
     _get_raw_db,
     _normalise_period,
-    _order_is_interstate,
+    _order_rate_lines,
+    _order_supply,
     _order_taxable_and_tax,
-    _split_heads,
+    _rate_heads,
 )
+from ...services.gst_rates import split_gst
 from .gst_itc import (
     _cn_foreign_store,
     _cn_parent_held,
@@ -127,7 +131,6 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
     order_inter: dict = {}
     held: dict = {}  # order_id -> parent held on the seller check
     st = db.get_collection("stores").find_one({"store_id": active_store}) or {}
-    store_state = str(st.get("state") or "")
 
     ledger = db.get_collection("credit_note_ledger")
     if ledger is not None:
@@ -170,10 +173,10 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
                 inter = _return_interstate_flag(
                     db,
                     ret_doc or {"customer_id": row.get("customer_id")},
-                    store_state,
+                    st,
                     order_inter,
                 )
-            i, c, sg = _split_heads(t, inter)
+            c, sg, i = split_gst(t, inter)
             igst += i
             cgst += c
             sgst += sg
@@ -186,7 +189,7 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
     # `interstate` stamp, exactly as the CDNR rows and Table 3.1(a) do.
     # Caught by mutation testing: hardcoding returns as intra-state reversed
     # CGST/SGST on a sale that sat in IGST, leaving BOTH heads wrong.
-    # (`order_inter` + `store_state` are shared with the ledger leg above.)
+    # (`order_inter` + the shop doc `st` are shared with the ledger leg above.)
     returns_col = db.get_collection("returns")
     if returns_col is not None:
         for ret in returns_col.find(
@@ -214,9 +217,7 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
                 continue
             if _cn_parent_held(db, ret, held):  # its sale was not filed
                 continue
-            i, c, sg = _split_heads(
-                t, _return_interstate_flag(db, ret, store_state, order_inter)
-            )
+            c, sg, i = split_gst(t, _return_interstate_flag(db, ret, st, order_inter))
             igst += i
             cgst += c
             sgst += sg
@@ -398,21 +399,20 @@ def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
         orders_col = db["orders"]
         customers_col = db["customers"]
 
-        cust_state_map: dict = {}
-        for cust in customers_col.find({}, {"customer_id": 1, "state": 1}):
-            cust_state_map[str(cust.get("customer_id", ""))] = str(
-                cust.get("state", "") or ""
+        cust_docs: dict = {
+            str(cust.get("customer_id", "")): cust
+            for cust in customers_col.find({}, CUSTOMER_SUPPLY_FIELDS)
+        }
+        # Each order's OWN shop (review round 2): the same GSTIN's return must
+        # not change with which of its shops is asked ('Jharkhand' / 'JH' / a
+        # blank online shop). A shop with no state or GSTIN of its own is in
+        # its registration's state.
+        shop_docs = {
+            sd.get("store_id"): {**sd, "gstin": sd.get("gstin") or store_gstin}
+            for sd in db["stores"].find(
+                {"store_id": {"$in": filing}},
+                {"_id": 0, "store_id": 1, "state_code": 1, "state": 1, "gstin": 1},
             )
-        # Each order's OWN shop state as a GST state code (review round 2):
-        # the same GSTIN's return must not change with which of its shops is
-        # asked ('Jharkhand' / 'JH' / a blank online shop). A shop with no
-        # usable state is in its registration's state.
-        from ...services.org_validation import resolve_state_code
-
-        gstin_code = store_gstin[:2] if store_gstin else ""
-        shop_code = {
-            sd.get("store_id"): resolve_state_code(sd.get("state_code"), sd.get("state")) or gstin_code
-            for sd in db["stores"].find({"store_id": {"$in": filing}}, {"_id": 0, "store_id": 1, "state_code": 1, "state": 1})
         }
 
         for order in orders_col.find(
@@ -420,7 +420,7 @@ def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
                 # Every shop this return files for (H2).
                 "store_id": {"$in": filing},
                 # THE GST-return order rule (gst_base), GSTR-1's too.
-                "status": GST_RETURN_ORDER_STATUS_FILTER,
+                **REAL_SALE_MATCH,
                 "created_at": {"$gte": from_dt, "$lt": to_dt},
             }
         ):
@@ -437,20 +437,21 @@ def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
                 continue
             out_taxable += taxable
 
-            cust_id = str(order.get("customer_id", ""))
-            seller = shop_code.get(order.get("store_id")) or gstin_code
-            customer_state = resolve_state_code(cust_state_map.get(cust_id, "")) or seller
-            # OS-008: the order's own interstate flag wins (online orders
-            # carry it), keeping 3.1(a) heads consistent with GSTR-1 and
-            # the cross-check; state comparison stays the fallback.
-            is_inter_state = _order_is_interstate(
-                order, seller, customer_state
-            )
-            if is_inter_state:
-                out_igst += tax
-            else:
-                out_cgst += tax / 2
-                out_sgst += tax / 2
+            # The head the tax invoice PRINTED (_order_supply: the order's own
+            # stamp, else the invoice's state-code rule), split per rate by
+            # the invoice's split rule (_rate_heads) -- exactly GSTR-1's rows.
+            is_inter_state = _order_supply(
+                order,
+                shop_docs.get(order.get("store_id")) or {"gstin": store_gstin},
+                cust_docs.get(str(order.get("customer_id", ""))),
+            )[0]
+            for rl in _rate_heads(
+                _order_rate_lines(order.get("items") or [], taxable, tax, order),
+                is_inter_state,
+            ):
+                out_igst += rl["igst"]
+                out_cgst += rl["cgst"]
+                out_sgst += rl["sgst"]
 
         # NEW-GST-TRANSFER-OUTWARD (GAP A): the sender's deemed outward supply
         # on inter-GSTIN stock transfers -> Table 3.1(a). Reads the SAME mirror
@@ -731,6 +732,8 @@ def _gstin_return(month: str, shop: str) -> dict:
         return _compute_gstr3b(month, shop)
     except HTTPException:
         raise
+    except UnfileableOrder as exc:  # a retry cannot fix it: name the order
+        raise HTTPException(status_code=422, detail=f"GSTR-3B: {exc}") from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("[GSTR-3B] %s %s could not be read", shop, month)
         raise HTTPException(

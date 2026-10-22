@@ -20,7 +20,7 @@ from ...dependencies import resolve_store_scope
 from ...services import je_service
 from ._shared import (
     _DISCOUNT_EXPR,
-    _REAL_ORDER_STATUS_FILTER,
+    REAL_SALE_MATCH,
     _REVENUE_EXPR,
     _TAX_EXPR,
     _apply_created_at_range,
@@ -65,7 +65,7 @@ async def get_revenue(
     # created_at is a BSON datetime -> compare against a datetime, not an ISO
     # string (a string bound never matches). Exclude DRAFT/CANCELLED so revenue
     # reflects real booked sales only.
-    match = {"created_at": {"$gte": start}, "status": _REAL_ORDER_STATUS_FILTER}
+    match = {"created_at": {"$gte": start}, **REAL_SALE_MATCH}
     if store_id:
         match["store_id"] = store_id
 
@@ -105,7 +105,7 @@ async def get_revenue(
         prev_start = ist_day_start_utc(prev_first)
         prev_match = {
             "created_at": {"$gte": prev_start, "$lt": start},
-            "status": _REAL_ORDER_STATUS_FILTER,
+            **REAL_SALE_MATCH,
         }
         if store_id:
             prev_match["store_id"] = store_id
@@ -220,7 +220,7 @@ async def get_pnl(
     # Exclude DRAFT/CANCELLED (never-booked / reversed) and compare the
     # date range as datetimes (created_at is a BSON datetime, so a 'YYYY-MM-DD'
     # string bound matched nothing -> the whole date-ranged P&L read zero).
-    match = {"status": _REAL_ORDER_STATUS_FILTER}
+    match = {**REAL_SALE_MATCH}
     if store_id:
         match["store_id"] = store_id
     _apply_created_at_range(match, from_date, to_date)

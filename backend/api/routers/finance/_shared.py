@@ -119,15 +119,14 @@ _DISCOUNT_EXPR = {"$ifNull": ["$discount_total", {"$ifNull": ["$discount_amount"
 # HISTORICAL = a pre-IMS order imported for customer-360 history only
 # (scripts/migrate_bvi_pim.py orders leg): transacted + settled OUTSIDE IMS
 # books, never invoiced by IMS -- so it is NOT revenue/tax/GST either.
-_EXCLUDED_ORDER_STATUSES = [
-    "CANCELLED",
-    "DRAFT",
-    "cancelled",
-    "draft",
-    "HISTORICAL",
-    "historical",
-]
-_REAL_ORDER_STATUS_FILTER = {"$nin": _EXCLUDED_ORDER_STATUSES}
+# VOID (deleted in Shopify): a sale only once invoiced or shipped (owner
+# ruling 2026-10-22). THE rule lives in api/utils/real_sale -- shared with the
+# GST returns so the books and the returns agree; spread REAL_SALE_MATCH into
+# a query (`{**REAL_SALE_MATCH, ...}`), it is a top-level clause.
+from ...utils.real_sale import (  # noqa: E402
+    EXCLUDED_ORDER_STATUSES as _EXCLUDED_ORDER_STATUSES,
+    REAL_SALE_MATCH,
+)
 
 
 def _parse_range_dt(s, *, end: bool = False) -> Optional[datetime]:

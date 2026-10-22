@@ -23,20 +23,10 @@ def _get_raw_db():
     return None
 
 
-# THE rule for which orders a GST return files (GSTR-1, GSTR-3B and the GST
-# report all query with it): not an unbooked DRAFT, not a CANCELLED order, not
-# a HISTORICAL pre-IMS import (settled outside IMS books), and not an online
-# order deleted in Shopify (VOID / VOIDED, services/shopify_order_delete) --
-# a deleted order is no supply. Finance's revenue rule
-# (finance/_shared._REAL_ORDER_STATUS_FILTER) deliberately still counts VOID;
-# that is a revenue question, not this one.
-GST_RETURN_ORDER_STATUS_FILTER = {
-    "$nin": [
-        s
-        for status in ("CANCELLED", "DRAFT", "HISTORICAL", "VOID", "VOIDED")
-        for s in (status, status.lower())
-    ]
-}
+# THE rule for which orders a GST return files is THE real-sale rule
+# (api/utils/real_sale) -- the books use the same one, so they agree. A VOID
+# order is filed once invoiced or shipped (owner ruling 2026-10-22).
+from ...utils.real_sale import REAL_SALE_MATCH  # noqa: E402,F401
 
 # B2CL (GSTR-1 Table 5): an INTER-state invoice to an unregistered buyer whose
 # invoice value is above this, in rupees. Intra-state B2C of any value is B2CS.
@@ -46,31 +36,76 @@ GST_RETURN_ORDER_STATUS_FILTER = {
 B2CL_INVOICE_THRESHOLD = 250000
 
 
-def _order_is_interstate(order: dict, store_state: str, customer_state: str) -> bool:
-    """Inter-state (IGST) vs intra-state (CGST+SGST) for ONE order in the GST
-    report family (/finance/gst report, GSTR-1, GSTR-3B).
+# The customer fields the place-of-supply rule reads (org_validation.
+# customer_state_code): every return reads customers with this projection.
+CUSTOMER_SUPPLY_FIELDS = {
+    "customer_id": 1, "gstin": 1, "name": 1, "state": 1, "state_code": 1,
+    "billing_address": 1,
+}
 
-    Prefer the order doc's OWN persisted ``interstate`` flag (OS-008): online
-    (Shopify) orders stamp it at ingest from the buyer's DELIVERY address via
-    the shared _build_invoice_gst_split -- while their buyer customer records
-    are minted stateless, so deriving the split from customers.state misfiled
-    every inter-state online sale as CGST/SGST even though the minted invoice
-    said IGST. The store-state vs customer-state string comparison stays as the
-    FALLBACK for docs without the flag (POS orders don't persist it),
-    byte-identical to the prior rule (unknown either side -> intra).
 
-    The OS-008 flag-preference gate is the shared ``order_interstate_flag``
-    helper (utils.online_gst); the raw case-insensitive string-compare fallback
-    below is reports-specific and stays byte-identical to this file's prior rule
-    -- finance.py keeps its own GST-code-normalizing fallback deliberately."""
+def _order_supply(order: dict, store: Optional[dict], customer: Optional[dict]) -> tuple:
+    """``(interstate, place_code, assumed)`` of ONE order for the GST returns
+    (GSTR-1, GSTR-3B, the /reports/finance/gst report) -- the head the tax
+    invoice PRINTED. The order's own persisted ``interstate`` stamp wins (an
+    online order stamps it at ingest from the delivery address, OS-008);
+    otherwise THE invoice rule, org_validation.supply_interstate (state CODES,
+    so 'JH' at a Jharkhand shop is intra; the customer's billing-address state
+    counts; an unknown buyer state is intra, as printed). One function, so a
+    return can never file a head the invoice did not print."""
+    from ...services.org_validation import supply_interstate
+    from ...utils.online_gst import order_place_of_supply
+
+    inter, code, assumed = supply_interstate(store, customer, order_place_of_supply(order))
     flag = order_interstate_flag(order)
     if flag is not None:
-        return flag
-    return bool(
-        store_state
-        and customer_state
-        and store_state.strip().lower() != customer_state.strip().lower()
-    )
+        return flag, code, assumed and not flag
+    return inter, code, assumed
+
+
+class UnfileableOrder(ValueError):
+    """A stored order a GST return cannot file as it stands. The return doors
+    answer it with the ORDER named (a retry cannot fix it)."""
+
+    def __init__(self, order, problem):
+        self.order_id = str((order or {}).get("order_id") or (order or {}).get("order_number") or "?")
+        super().__init__(
+            f"Order {self.order_id}: {problem}; correct the order, then download "
+            "the return again."
+        )
+
+
+class UnreadableOrderMoney(UnfileableOrder):
+    """A stored money field that no tolerant parse can read."""
+
+    def __init__(self, order, value):
+        super().__init__(order, f"unreadable money amount ({value!r})")
+
+
+def _money(value, order=None) -> float:
+    """One stored money amount as a float, read tolerantly: None / '' -> 0;
+    int, float, Decimal, BSON Decimal128; a numeric string with commas or a
+    'Rs' / rupee prefix. Anything else RAISES UnreadableOrderMoney naming the
+    order -- a GST return never files an unreadable amount as 0."""
+    if value is None or value == "":
+        return 0.0
+    if isinstance(value, bool):
+        raise UnreadableOrderMoney(order, value)
+    if hasattr(value, "to_decimal"):  # bson.Decimal128
+        value = value.to_decimal()
+    if isinstance(value, str):
+        text = value.strip().replace(",", "")
+        for prefix in ("Rs.", "Rs", "INR", "₹"):
+            if text.startswith(prefix):
+                text = text[len(prefix):].strip()
+        value = text
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        raise UnreadableOrderMoney(order, value) from None
+    if out != out or out in (float("inf"), float("-inf")):
+        raise UnreadableOrderMoney(order, value)
+    return out
 
 
 def _order_taxable_and_tax(order: dict) -> tuple:
@@ -101,10 +136,7 @@ def _order_taxable_and_tax(order: dict) -> tuple:
     """
 
     def _f(v):
-        try:
-            return float(v or 0)
-        except (TypeError, ValueError):
-            return 0.0
+        return _money(v, order)
 
     # Total GST. An explicit top-level `tax` (the sibling of an explicit
     # `taxable`) is authoritative when present; real orders don't carry it and
@@ -160,7 +192,10 @@ def _order_taxable_and_tax(order: dict) -> tuple:
     return 0.0, round(total_tax, 2)
 
 
-def _order_rate_lines(items, order_taxable, order_tax):
+_GST_SLABS = (0, 5, 12, 18, 28)
+
+
+def _order_rate_lines(items, order_taxable, order_tax, order=None, issues=None):
     """THE rule for splitting one order's taxable value and tax by GST rate,
     for every GSTR-1 table: the B2B / B2CL invoice item rows (one per rate,
     GSTN `itms[]`), the B2CS buckets and the HSN summary. Returns
@@ -175,7 +210,11 @@ def _order_rate_lines(items, order_taxable, order_tax):
     (taxable = item_total * 100 / (100 + rate)), its rate the item's
     ``gst_rate`` or else the category table rate (api.services.gst_rates).
     A line's HSN is its ``hsn_code`` (9004 when blank). With no usable line,
-    one line carries the order totals at 5% / 9004 so nothing is dropped.
+    one line carries the order totals at the order's own stamped ``tax_rate``,
+    else at the GST slab its own tax / taxable gives (flagged in ``issues``),
+    else the order RAISES UnfileableOrder -- never a guessed 5%. A 0% line
+    (an exempt eye test) is flagged: it belongs in GSTR-1 Table 8 (nil /
+    exempt), which is not built yet (batch 7).
 
     The lines DISTRIBUTE the invoice's taxable + tax, never change them: they
     are scaled to the order totals (scale 1.0 when the stamps already
@@ -185,10 +224,13 @@ def _order_rate_lines(items, order_taxable, order_tax):
     from api.services.gst_rates import GST_CATEGORY_TABLE, _normalize_category
 
     def _f(v):
-        try:
-            return float(v or 0)
-        except (TypeError, ValueError):
-            return 0.0
+        return _money(v, order)
+
+    oid = str((order or {}).get("invoice_number") or (order or {}).get("order_id") or "")
+
+    def _flag(issue):
+        if issues is not None:
+            issues.append({"level": "warn", "invoice": oid, "issue": issue})
 
     raw = []
     for it in (items or []):
@@ -197,11 +239,21 @@ def _order_rate_lines(items, order_taxable, order_tax):
         rate = it.get("gst_rate")
         if rate is None:
             entry = GST_CATEGORY_TABLE.get(_normalize_category(it.get("category")))
-            rate = entry[1] if entry else 5.0
+            if entry:
+                rate = entry[1]
+            else:
+                # No rate, no known category: the line's own stamped tax gives
+                # the slab (flagged); with nothing to read, the order raises.
+                l_tx, l_tax = _f(it.get("taxable_value")), _f(it.get("tax_amount"))
+                derived = round(l_tax / l_tx * 100) if l_tx > 0 else None
+                if derived not in _GST_SLABS:
+                    raise UnfileableOrder(order, f"a line has no GST rate and no known category ({it.get('category')!r})")
+                rate = derived
+                _flag(f"A line has no GST rate; filed at {rate}% (its own tax / taxable).")
         try:
             rate = int(round(float(rate)))
         except (TypeError, ValueError):
-            rate = 5
+            raise UnfileableOrder(order, f"a line's GST rate is unreadable ({rate!r})") from None
         hsn = str(it.get("hsn_code") or "9004")
         if it.get("taxable_value") is not None and it.get("tax_amount") is not None:
             taxable, tax = _f(it.get("taxable_value")), _f(it.get("tax_amount"))
@@ -216,8 +268,25 @@ def _order_rate_lines(items, order_taxable, order_tax):
         raw.append((rate, hsn, taxable, tax))
 
     if not raw:
-        # No usable line items -> keep the order-level totals under one bucket.
-        return [(5, "9004", round(order_taxable, 2), round(order_tax, 2))]
+        # No usable line items -> the order totals under ONE bucket, at the
+        # order's own rate -- never a guessed one.
+        stamped = (order or {}).get("tax_rate")
+        if stamped is not None:
+            rate = int(round(_f(stamped)))
+        elif order_taxable > 0 and round(order_tax / order_taxable * 100) in _GST_SLABS:
+            rate = int(round(order_tax / order_taxable * 100))
+            _flag(f"No line carries a GST rate; filed at {rate}% (its own tax / taxable).")
+        elif order_taxable <= 0 and order_tax <= 0:
+            return []
+        else:
+            raise UnfileableOrder(order, "no line carries a GST rate and its tax gives no GST slab")
+        raw = [(rate, "9004", order_taxable, order_tax)]
+        if rate == 0 and order_taxable > 0:
+            _flag(f"Rs {order_taxable:,.2f} at 0% (nil / exempt) belongs in GSTR-1 Table 8, not built yet (batch 7) -- filed at 0% here; the CA moves it.")
+        return [(rate, "9004", round(order_taxable, 2), round(order_tax, 2))]
+    for rate, _h, taxable, _x in raw:
+        if rate == 0 and taxable > 0:
+            _flag(f"Rs {taxable:,.2f} at 0% (nil / exempt) belongs in GSTR-1 Table 8, not built yet (batch 7) -- filed at 0% here; the CA moves it.")
 
     sum_taxable = sum(t for _, _, t, _ in raw)
     sum_tax = sum(x for _, _, _, x in raw)
@@ -229,13 +298,25 @@ def _order_rate_lines(items, order_taxable, order_tax):
     return [tuple(ln) for ln in lines]
 
 
-def _split_heads(tax: float, is_inter: bool) -> tuple:
-    """(igst, cgst, sgst) of one tax amount: all IGST inter-state, else halved
-    with the odd paisa on SGST so the heads always sum to the tax."""
-    if is_inter:
-        return round(tax, 2), 0.0, 0.0
-    cgst = round(tax / 2, 2)
-    return 0.0, cgst, round(tax - cgst, 2)
+def _rate_heads(sale_lines, is_inter: bool) -> list:
+    """An order's rate lines (_order_rate_lines) summed PER RATE with each
+    rate's tax split by THE split rule (gst_rates.split_gst -- the invoice's):
+    ``[{rate, taxable, tax, cgst, sgst, igst}]`` sorted by rate. GSTR-1's
+    invoice item rows and GSTR-3B's Table 3.1(a) heads both come from here,
+    so the two returns agree to the paisa on every head."""
+    from api.services.gst_rates import split_gst
+
+    by_rate: dict = {}
+    for rate, _hsn, taxable, tax in sale_lines:
+        b = by_rate.setdefault(rate, {"rate": rate, "taxable": 0.0, "tax": 0.0})
+        b["taxable"] = round(b["taxable"] + taxable, 2)
+        b["tax"] = round(b["tax"] + tax, 2)
+    out = []
+    for rate in sorted(by_rate):
+        b = by_rate[rate]
+        cgst, sgst, igst = split_gst(b["tax"], is_inter)
+        out.append({**b, "cgst": cgst, "sgst": sgst, "igst": igst})
+    return out
 
 
 def _normalise_period(month: str, year: Optional[int] = None) -> str:
