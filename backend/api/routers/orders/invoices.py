@@ -48,19 +48,13 @@ def _invoice_state_code(*candidates) -> str:
 def _customer_state_code(customer: Optional[dict]) -> str:
     """Resolve the customer's place-of-supply state code from (in order):
     customer GSTIN -> billing_address.state_code -> billing_address.state.
-    Empty string when nothing usable is present."""
-    if not isinstance(customer, dict):
+    Empty string when nothing usable is present. Delegates to
+    org_validation.customer_state_code, the read the GST returns share."""
+    try:
+        from ...services.org_validation import customer_state_code
+    except Exception:  # noqa: BLE001
         return ""
-    addr = customer.get("billing_address") or {}
-    if not isinstance(addr, dict):
-        addr = {}
-    return _invoice_state_code(
-        customer.get("gstin"),
-        addr.get("state_code"),
-        addr.get("state"),
-        customer.get("state_code"),
-        customer.get("state"),
-    )
+    return customer_state_code(customer)
 
 
 def _build_invoice_gst_split(
@@ -102,28 +96,20 @@ def _build_invoice_gst_split(
         else ""
     )
 
-    # THE shop-state read the online seller check uses too (state_code, then
-    # the state name, then the GSTIN), so an order the check passes splits on
-    # the state it checked.
+    # THE place-of-supply rule (org_validation.supply_interstate), the one the
+    # GST returns ask too: supplier = the shop-state read the online seller
+    # check uses (state_code, then the state name, then the GSTIN); customer =
+    # the order's own place of supply, else the customer's state. Inter-state
+    # only when BOTH are known and differ; missing customer state -> intra
+    # (CGST+SGST), flagged as assumed for the print layer.
     try:
-        from ...services.org_validation import shop_state_code
+        from ...services.org_validation import supply_interstate
 
-        supplier_state = shop_state_code(store)
+        interstate, place_of_supply, assumed = supply_interstate(
+            store, customer, place_of_supply
+        )
     except Exception:  # noqa: BLE001 -- never raises, as before
-        supplier_state = ""
-    customer_state = _invoice_state_code(place_of_supply) or _customer_state_code(customer)
-
-    # Inter-state only when BOTH states are known and differ. Missing customer
-    # state -> assume intra (CGST+SGST), the safe default for a single-state
-    # retailer; flag it so the caller/print layer can note the assumption.
-    if customer_state and supplier_state:
-        interstate = customer_state != supplier_state
-        assumed = False
-    else:
-        interstate = False
-        assumed = True
-
-    place_of_supply = customer_state or supplier_state
+        interstate, place_of_supply, assumed = False, "", True
 
     # Aggregate stored per-line taxable + tax by GST rate.
     per_rate: dict = {}

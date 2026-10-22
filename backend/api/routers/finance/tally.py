@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from ..auth import get_current_user
 from ...dependencies import filter_docs_by_store
 from ._shared import (
-    _REAL_ORDER_STATUS_FILTER,
+    real_sale_match,
     _apply_created_at_range,
     _customer_state_map,
     _get_db,
@@ -192,6 +192,15 @@ def _b2b_invoice_row(o: dict, cust: dict, split: dict, now: datetime) -> dict:
     }
 
 
+def _with_order_ids(match: dict, order_ids) -> dict:
+    """`match` narrowed to `order_ids`, keeping its own order_id exclusion
+    (real_sale_match excludes never-invoiced VOIDs by order_id)."""
+    ids = {"$in": list(order_ids)}
+    if "order_id" in match:
+        ids["$nin"] = match["order_id"]["$nin"]
+    return {**match, "order_id": ids}
+
+
 def _filed_orders(db, orders) -> List[dict]:
     """The orders that are sales of their GSTIN: a routed online order held
     on its seller (GSTIN) check is dropped -- the ONE rule GSTR-1 and GSTR-3B
@@ -220,7 +229,7 @@ def _b2b_invoices(
     cust_map = _b2b_customer_map(db)
     store_state = _store_state_map(db)
 
-    match: dict = {"status": _REAL_ORDER_STATUS_FILTER}
+    match: dict = {**real_sale_match(db)}
     store_ids = None
     if store_id:
         store_ids = [store_id]
@@ -254,11 +263,8 @@ def _b2b_invoices(
 
         # Build the store + customer dicts the GST-split helper expects. The
         # store provides supplier state; the customer provides place-of-supply.
-        store_doc = {
-            "state": store_state.get(o.get("store_id"), ""),
-            "state_code": store_state.get(o.get("store_id"), ""),
-            "gstin": "",
-        }
+        # The shop's own state fields (_store_state_map), as the invoice reads them.
+        store_doc = store_state.get(o.get("store_id")) or {}
         cust_doc = {"gstin": cust.get("gstin"), "state": cust.get("state")}
         try:
             split = _build_invoice_gst_split(
@@ -325,10 +331,7 @@ def _b2b_fetch_orders(db, order_ids: List[str]) -> List[dict]:
         docs = _filed_orders(
             db,
             db.get_collection("orders").find(
-                {
-                    "order_id": {"$in": list(order_ids)},
-                    "status": _REAL_ORDER_STATUS_FILTER,
-                },
+                _with_order_ids(real_sale_match(db), order_ids),
                 {"_id": 0},
             ),
         )
@@ -345,11 +348,8 @@ def _b2b_fetch_orders(db, order_ids: List[str]) -> List[dict]:
         }
         if not _is_b2b_customer(cust):
             continue
-        store_doc = {
-            "state": store_state.get(o.get("store_id"), ""),
-            "state_code": store_state.get(o.get("store_id"), ""),
-            "gstin": "",
-        }
+        # The shop's own state fields (_store_state_map), as the invoice reads them.
+        store_doc = store_state.get(o.get("store_id")) or {}
         cust_doc = {"gstin": cust.get("gstin"), "state": cust.get("state")}
         try:
             split = _build_invoice_gst_split(
@@ -633,7 +633,7 @@ async def get_tally_sales_jv(
     # Never export DRAFT/CANCELLED orders to Tally -- they aren't real sales
     # vouchers. created_at is a BSON datetime so the range is built as datetimes
     # (a 'YYYY-MM-DD' string bound never matched -> empty export).
-    match: dict = {"status": _REAL_ORDER_STATUS_FILTER}
+    match: dict = {**real_sale_match(db)}
     store_ids = None
     if store_id:
         store_ids = [store_id]

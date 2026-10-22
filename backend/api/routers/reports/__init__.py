@@ -75,9 +75,14 @@ from ._shared import (  # noqa: F401  # re-exported: see _ReportsModule
 )
 from .gst_base import (  # noqa: F401  # re-exported: see _ReportsModule
     _get_raw_db,
-    _order_is_interstate,
+    _order_supply,
+    _rate_heads,
+    _money,
+    UnfileableOrder,
     _order_taxable_and_tax,
-    _b2cs_rate_lines,
+    _order_rate_lines,
+    real_sale_match,
+    B2CL_INVOICE_THRESHOLD,
     _normalise_period,
 )
 from .gst_itc import (  # noqa: F401  # re-exported: see _ReportsModule

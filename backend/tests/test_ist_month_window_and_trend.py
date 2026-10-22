@@ -100,6 +100,10 @@ class _StrictColl:
     def find(self, flt=None, *_a, **_k):
         return [dict(d) for d in self.docs if self._match(d, flt)]
 
+    def find_one(self, flt=None, *_a, **_k):
+        hits = self.find(flt)
+        return hits[0] if hits else None
+
     def aggregate(self, pipeline):
         rows = list(self.docs)
         for stage in pipeline:

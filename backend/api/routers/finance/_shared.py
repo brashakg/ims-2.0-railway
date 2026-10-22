@@ -142,15 +142,14 @@ _ORDER_REVENUE_PROJECTION = {
 # HISTORICAL = a pre-IMS order imported for customer-360 history only
 # (scripts/migrate_bvi_pim.py orders leg): transacted + settled OUTSIDE IMS
 # books, never invoiced by IMS -- so it is NOT revenue/tax/GST either.
-_EXCLUDED_ORDER_STATUSES = [
-    "CANCELLED",
-    "DRAFT",
-    "cancelled",
-    "draft",
-    "HISTORICAL",
-    "historical",
-]
-_REAL_ORDER_STATUS_FILTER = {"$nin": _EXCLUDED_ORDER_STATUSES}
+# VOID (deleted in Shopify): a sale only once invoiced or shipped (owner
+# ruling 2026-10-22). THE rule lives in api/utils/real_sale -- shared with the
+# GST returns so the books and the returns agree; spread it into a query
+# (`{**real_sale_match(db), ...}`).
+from ...utils.real_sale import (  # noqa: E402
+    EXCLUDED_ORDER_STATUSES as _EXCLUDED_ORDER_STATUSES,
+    real_sale_match,
+)
 
 
 def _parse_range_dt(s, *, end: bool = False) -> Optional[datetime]:
@@ -395,29 +394,29 @@ def _norm_state(value) -> str:
 def _order_is_interstate(
     order, store_state_by_id: dict, customer_state_by_id: dict
 ) -> bool:
-    """Inter-state (IGST) vs intra-state (CGST+SGST) classification for ONE order.
+    """Inter-state (IGST) vs intra-state (CGST+SGST) for ONE order -- THE
+    place-of-supply rule the tax invoice and the GST returns use
+    (reports.gst_base._order_supply -> org_validation.supply_interstate): the
+    order's own ``interstate`` stamp wins (OS-008), else state CODES from the
+    shop (state_code / state / GSTIN) and the customer (GSTIN, billing
+    address, state_code, state); an unknown buyer state is intra-state, as
+    the invoice prints. So the Tally voucher, the finance GST cards and the
+    cross-check books split every order exactly as GSTR-1 / GSTR-3B file it.
 
-    Prefer the order doc's OWN persisted ``interstate`` flag (OS-008): online
-    (Shopify) orders stamp it at ingest from the buyer's DELIVERY address via
-    the same _build_invoice_gst_split the POS invoice uses -- while their buyer
-    customer records are minted stateless, so recomputing the split from
-    customers.state misfiled every inter-state online sale as CGST/SGST even
-    though the minted invoice (place of supply) said IGST. The store-state vs
-    customer-state heuristic stays as the FALLBACK for docs that don't carry
-    the flag (POS orders don't persist it). Requires callers that project
-    fields to include ``interstate`` in the projection.
+    The maps are _store_state_map / _customer_state_map (id -> the fields the
+    rule reads); a bare state string, from an older caller, is read as the
+    doc's `state`. Callers that project order fields must include
+    ``interstate`` and ``place_of_supply``."""
+    from ..reports.gst_base import _order_supply
 
-    The OS-008 flag-preference gate is the shared ``order_interstate_flag``
-    helper (utils.online_gst); the store-vs-customer state fallback below is
-    finance-specific (GST-code normalization via ``_norm_state``) and stays
-    byte-identical to this file's prior rule -- reports.py keeps its own raw
-    string-compare fallback deliberately."""
-    flag = order_interstate_flag(order)
-    if flag is not None:
-        return flag
-    seller = _norm_state(store_state_by_id.get(order.get("store_id")))
-    buyer = _norm_state(customer_state_by_id.get(order.get("customer_id")))
-    return bool(seller and buyer and seller != buyer)
+    def _doc(v):
+        return v if isinstance(v, dict) else {"state": v or ""}
+
+    return _order_supply(
+        order,
+        _doc(store_state_by_id.get(order.get("store_id"))),
+        _doc(customer_state_by_id.get(order.get("customer_id"))),
+    )[0]
 
 
 def _split_output_tax(orders, store_state_by_id: dict, customer_state_by_id: dict):
@@ -468,14 +467,15 @@ def _store_maps(db):
 
 
 def _store_state_map(db, *, strict=False) -> dict:
-    """store_id -> home state (for intra/inter-state GST classification)."""
+    """store_id -> the shop fields the place-of-supply rule reads (state_code,
+    state, GSTIN -- org_validation.shop_state_code), for _order_is_interstate."""
     out: dict = {}
     try:
         for s in db.get_collection("stores").find(
-            {}, {"_id": 0, "store_id": 1, "state": 1}
+            {}, {"_id": 0, "store_id": 1, "state": 1, "state_code": 1, "gstin": 1}
         ):
             if s.get("store_id"):
-                out[s["store_id"]] = str(s.get("state") or "")
+                out[s["store_id"]] = s
     except Exception:
         if strict:
             raise
@@ -483,15 +483,19 @@ def _store_state_map(db, *, strict=False) -> dict:
 
 
 def _customer_state_map(db, *, strict=False) -> dict:
-    """customer_id -> state (for intra/inter-state GST classification)."""
+    """customer_id -> the customer fields the place-of-supply rule reads
+    (GSTIN, billing address, state_code, state --
+    org_validation.customer_state_code), for _order_is_interstate."""
+    from ..reports.gst_base import CUSTOMER_SUPPLY_FIELDS
+
     out: dict = {}
     try:
         for c in db.get_collection("customers").find(
-            {}, {"_id": 0, "customer_id": 1, "state": 1}
+            {}, {"_id": 0, **CUSTOMER_SUPPLY_FIELDS}
         ):
             cid = c.get("customer_id")
             if cid:
-                out[cid] = str(c.get("state") or "")
+                out[cid] = c
     except Exception:
         if strict:
             raise

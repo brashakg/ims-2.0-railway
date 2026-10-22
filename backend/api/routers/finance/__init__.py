@@ -101,7 +101,7 @@ from ._shared import (  # noqa: F401
     _TAX_EXPR,
     _DISCOUNT_EXPR,
     _EXCLUDED_ORDER_STATUSES,
-    _REAL_ORDER_STATUS_FILTER,
+    real_sale_match,
     _parse_range_dt,
     _apply_created_at_range,
     _order_total,

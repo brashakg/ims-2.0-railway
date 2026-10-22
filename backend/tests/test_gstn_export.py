@@ -520,12 +520,26 @@ class TestGstnEndpointGating:
         resp = _reports_client_as(["SUPERADMIN"]).get(path)
         assert resp.status_code != 403
 
-    def test_gstr1_gstn_json_shape_no_db(self, monkeypatch):
+    def test_gstr1_gstn_json_no_db_is_no_file(self, monkeypatch):
+        """No database, no return -- GSTR-3B's rule (below): an empty upload
+        file would file as a nil return (GST batch 1, 2026-10-22). It used to
+        hand back a valid-looking skeleton. (No database whatever the box.)"""
         from api.routers.reports import gstr1 as r1
 
-        # No database on any box (CI has a real Mongo).
         monkeypatch.setattr(r1, "_get_raw_db", lambda: None)
-        """With no DB the endpoint still returns a valid GSTN skeleton."""
+        resp = _reports_client_as(["ADMIN"]).get(
+            "/reports/gstr1/gstn-json?month=2026-04"
+        )
+        assert resp.status_code == 503
+
+    def test_gstr1_gstn_json_shape_empty_month(self, monkeypatch):
+        """A readable month with no sales is a valid empty GSTN file."""
+        from api.routers.reports import gstr1 as r1
+        from strict_fakes import StrictDB
+
+        db = StrictDB()
+        db.seed("stores", [{"store_id": "store-001", "gstin": "20AAACR0000A1ZZ", "state": "Jharkhand"}])
+        monkeypatch.setattr(r1, "_get_raw_db", lambda: db)
         resp = _reports_client_as(["ADMIN"]).get(
             "/reports/gstr1/gstn-json?month=2026-04"
         )
@@ -547,11 +561,13 @@ class TestGstnEndpointGating:
         assert resp.status_code == 503
 
     def test_gstr1_numeric_month_plus_year(self, monkeypatch):
-        from api.routers.reports import gstr1 as r1
-
-        # No database on any box (CI has a real Mongo).
-        monkeypatch.setattr(r1, "_get_raw_db", lambda: None)
         """month=4&year=2026 normalises to fp 042026."""
+        from api.routers.reports import gstr1 as r1
+        from strict_fakes import StrictDB
+
+        db = StrictDB()
+        db.seed("stores", [{"store_id": "store-001", "gstin": "20AAACR0000A1ZZ", "state": "Jharkhand"}])
+        monkeypatch.setattr(r1, "_get_raw_db", lambda: db)
         resp = _reports_client_as(["ADMIN"]).get(
             "/reports/gstr1/gstn-json?month=4&year=2026"
         )

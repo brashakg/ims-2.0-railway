@@ -21,9 +21,11 @@ Schema references (public GSTN offline-tool format):
     * hsn  : {data:[{num, hsn_sc, desc, uqc, qty, txval, rt, iamt, camt, samt, csamt}]}
 - GSTR-3B: top-level {gstin, ret_period, sup_details, inter_sup, itc_elg, intr_ltax}
 
-Everything fails soft: malformed / missing input yields a structurally
-valid skeleton (empty sections) rather than raising, so a partial month
-or an empty store still produces an importable file.
+Missing input yields a structurally valid skeleton (empty sections), so an
+empty month or store still produces an importable file. The GSTR-1 door
+never hands a failed report to these mappers and never swallows their
+errors (reports.gstr1._gstr1_return answers 503 "please retry") -- a
+partial upload file is worse than none.
 
 State -> GST state code mapping is best-effort: the IMS order data carries
 free-text state names ("Maharashtra", "Delhi"), while the portal wants the
@@ -190,17 +192,53 @@ def to_gstr1_json(
     return out
 
 
-def _build_b2b(rows: List[Dict[str, Any]], store_state: str) -> List[Dict[str, Any]]:
-    """Group B2B invoices by counterparty GSTIN (ctin).
+def _invoice_itms(r: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """An invoice's `itms`: ONE itm_det block PER GST RATE, for B2B and B2CL
+    alike. Rows carrying per-rate detail (`rateLines` -- every sale row
+    reports._compute_gstr1 builds, and transfer deemed-supply rows) emit one
+    block per rate, each self-consistent (txval * rt == tax); a single blended
+    block (rt=5 with the tax of a 5% + 18% invoice) misfiles the 18% part and
+    fails the offline tool's item validation. A row without `rateLines` (a
+    legacy header-only transfer bill) keeps one block from its own heads. The
+    heads are always the row's own: an intra-state row is never refiled as
+    IGST."""
+    rate_lines = r.get("rateLines")
+    itms: List[Dict[str, Any]] = []
+    if isinstance(rate_lines, list):
+        itms = [
+            {
+                "num": i,
+                "itm_det": _itm(
+                    rl.get("rate"),
+                    rl.get("taxable"),
+                    rl.get("igst"),
+                    rl.get("cgst"),
+                    rl.get("sgst"),
+                ),
+            }
+            for i, rl in enumerate(
+                (rl for rl in rate_lines if isinstance(rl, dict)), start=1
+            )
+        ]
+    if not itms:
+        itms = [
+            {
+                "num": 1,
+                "itm_det": _itm(
+                    r.get("gstRate"),
+                    r.get("taxableValue"),
+                    r.get("igst"),
+                    r.get("cgst"),
+                    r.get("sgst"),
+                ),
+            }
+        ]
+    return itms
 
-    An invoice's `itms` list carries ONE itm_det block PER GST RATE. Rows that
-    provide per-rate detail (`rateLines`, e.g. transfer deemed-supply rows
-    mixing 5% frames with 18% sunglasses) emit one block per rate, each
-    self-consistent (txval * rt == tax) -- a single blended block (rt=5 with
-    the whole 5%+18% tax) fails the offline tool's item validation. Rows
-    without `rateLines` (normal order rows) keep the original single-item
-    shape unchanged.
-    """
+
+def _build_b2b(rows: List[Dict[str, Any]], store_state: str) -> List[Dict[str, Any]]:
+    """Group B2B invoices by counterparty GSTIN (ctin); each invoice's items
+    one per GST rate (_invoice_itms)."""
     by_ctin: Dict[str, Dict[str, Any]] = {}
     for r in rows:
         if not isinstance(r, dict):
@@ -210,40 +248,9 @@ def _build_b2b(rows: List[Dict[str, Any]], store_state: str) -> List[Dict[str, A
             # B2B rows must carry a counterparty GSTIN. Skip silently —
             # the IMS validation report already flags these.
             continue
-        pos = _state_code(
+        pos = r.get("placeOfSupplyCode") or _state_code(
             str(r.get("placeOfSupply") or r.get("customerState") or ""), ctin
         )
-        rate_lines = r.get("rateLines")
-        itms: List[Dict[str, Any]] = []
-        if isinstance(rate_lines, list):
-            itms = [
-                {
-                    "num": i,
-                    "itm_det": _itm(
-                        rl.get("rate"),
-                        rl.get("taxable"),
-                        rl.get("igst"),
-                        rl.get("cgst"),
-                        rl.get("sgst"),
-                    ),
-                }
-                for i, rl in enumerate(
-                    (rl for rl in rate_lines if isinstance(rl, dict)), start=1
-                )
-            ]
-        if not itms:
-            itms = [
-                {
-                    "num": 1,
-                    "itm_det": _itm(
-                        r.get("gstRate"),
-                        r.get("taxableValue"),
-                        r.get("igst"),
-                        r.get("cgst"),
-                        r.get("sgst"),
-                    ),
-                }
-            ]
         inv = {
             "inum": str(r.get("invoiceNumber") or r.get("inum") or ""),
             "idt": _fmt_date(r.get("invoiceDate") or r.get("idt") or ""),
@@ -251,7 +258,7 @@ def _build_b2b(rows: List[Dict[str, Any]], store_state: str) -> List[Dict[str, A
             "pos": pos,
             "rchrg": "N",
             "inv_typ": "R",
-            "itms": itms,
+            "itms": _invoice_itms(r),
         }
         bucket = by_ctin.setdefault(ctin, {"ctin": ctin, "inv": []})
         bucket["inv"].append(inv)
@@ -259,29 +266,21 @@ def _build_b2b(rows: List[Dict[str, Any]], store_state: str) -> List[Dict[str, A
 
 
 def _build_b2cl(rows: List[Dict[str, Any]], store_state: str) -> List[Dict[str, Any]]:
-    """Group B2CL (>2.5L inter-state consumer) invoices by place-of-supply."""
+    """Group B2CL invoices (inter-state, to a consumer, above the B2CL limit --
+    reports.gst_base.B2CL_INVOICE_THRESHOLD decides which rows these are) by
+    place-of-supply; each invoice's items one per GST rate (_invoice_itms)."""
     by_pos: Dict[str, Dict[str, Any]] = {}
     for r in rows:
         if not isinstance(r, dict):
             continue
-        pos = _state_code(str(r.get("placeOfSupply") or r.get("customerState") or ""))
+        pos = r.get("placeOfSupplyCode") or _state_code(
+            str(r.get("placeOfSupply") or r.get("customerState") or "")
+        )
         inv = {
             "inum": str(r.get("invoiceNumber") or r.get("inum") or ""),
             "idt": _fmt_date(r.get("invoiceDate") or r.get("idt") or ""),
             "val": _num(r.get("invoiceValue") or r.get("val")),
-            "itms": [
-                {
-                    "num": 1,
-                    "itm_det": _itm(
-                        r.get("gstRate"),
-                        r.get("taxableValue"),
-                        # B2CL is inter-state by definition -> tax is IGST.
-                        r.get("igst") or r.get("totalTax"),
-                        0.0,
-                        0.0,
-                    ),
-                }
-            ],
+            "itms": _invoice_itms(r),
         }
         bucket = by_pos.setdefault(pos, {"pos": pos, "inv": []})
         bucket["inv"].append(inv)
@@ -295,7 +294,7 @@ def _build_b2cs(rows: List[Dict[str, Any]], store_state: str) -> List[Dict[str, 
         if not isinstance(r, dict):
             continue
         igst = _num(r.get("igst"))
-        pos = _state_code(str(r.get("placeOfSupply") or ""))
+        pos = r.get("placeOfSupplyCode") or _state_code(str(r.get("placeOfSupply") or ""))
         # INTER when IGST present, else INTRA.
         sply_ty = "INTER" if igst > 0 else "INTRA"
         out.append(
@@ -348,7 +347,7 @@ def _build_cdnr(rows: List[Dict[str, Any]], store_state: str) -> List[Dict[str, 
         ntty = str(r.get("noteType") or r.get("ntty") or "C").strip().upper()
         if ntty not in ("C", "D"):
             ntty = "C"
-        pos = _state_code(
+        pos = r.get("placeOfSupplyCode") or _state_code(
             str(r.get("placeOfSupply") or r.get("customerState") or ""), ctin
         )
         nt = {

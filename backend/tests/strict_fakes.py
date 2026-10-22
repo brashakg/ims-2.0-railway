@@ -160,6 +160,14 @@ def _cmp_ok(actual, op: str, expected) -> bool:
     raise UnsupportedMongoFeature(f"comparison operator {op!r} not implemented")
 
 
+def _in_eq(actual, v) -> bool:
+    """One $in / $nin member: Mongo matches a regex member against strings."""
+    if isinstance(v, re.Pattern):
+        candidates = actual if isinstance(actual, list) else [actual]
+        return any(isinstance(c, str) and v.search(c) for c in candidates)
+    return _eq(actual, v)
+
+
 def _match_ops(actual, spec: Dict[str, Any]) -> bool:
     unknown = set(spec) - _QUERY_OPS
     if unknown:
@@ -181,10 +189,10 @@ def _match_ops(actual, spec: Dict[str, Any]) -> bool:
             if not _cmp_ok(actual, op, val):
                 return False
         elif op == "$in":
-            if not any(_eq(actual_val, v) for v in list(val)):
+            if not any(_in_eq(actual_val, v) for v in list(val)):
                 return False
         elif op == "$nin":
-            if any(_eq(actual_val, v) for v in list(val)):
+            if any(_in_eq(actual_val, v) for v in list(val)):
                 return False
         elif op == "$exists":
             if bool(val) != (actual is not _MISSING):

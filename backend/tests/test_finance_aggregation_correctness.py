@@ -125,8 +125,13 @@ def _finance_client(recorder, roles=("ADMIN",), store_id="store-fin-test"):
 
 
 def _all_order_matches(recorder):
-    """Every match dict recorded against the `orders` collection."""
-    return recorder.get("orders", [])
+    """Every match dict recorded against the `orders` collection -- less the
+    real-sale rule's own read of the VOID orders (api/utils/real_sale.
+    real_sale_match), which is how never-invoiced VOIDs get excluded."""
+    return [
+        m for m in recorder.get("orders", [])
+        if not (isinstance(m.get("status"), dict) and set(m["status"].get("$in", [])) >= {"VOID", "VOIDED"})
+    ]
 
 
 def _all_expense_matches(recorder):
@@ -155,7 +160,7 @@ class TestHistoricalStatusExcluded:
         assert "HISTORICAL" in finance._EXCLUDED_ORDER_STATUSES
         assert "historical" in finance._EXCLUDED_ORDER_STATUSES
         # The derived filter every finance aggregation reuses.
-        assert "HISTORICAL" in finance._REAL_ORDER_STATUS_FILTER["$nin"]
+        assert "HISTORICAL" in finance.real_sale_match(None)["status"]["$nin"]
 
     def test_ticker_mirror_includes_historical(self):
         from api.services import ticker_service

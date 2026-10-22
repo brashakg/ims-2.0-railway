@@ -689,49 +689,44 @@ def _transfer_b2b_rows(bills):
     return rows, hsn_lines
 
 
-def _return_interstate_flag(db, ret, store_state, cache, fallback_state=""):
-    """Is this refund an INTER-state reversal? One answer, used by both returns.
+def _return_supply(db, ret, store, cache) -> tuple:
+    """``(interstate, place_code)`` of a refund: the head AND place of supply
+    its SALE was filed under. One answer for both returns.
 
-    A refund must reverse the SAME head the sale was filed under, so the parent
-    order's own `interstate` stamp is the answer whenever it exists. Only when
-    the order carries no stamp do we derive it from the customer's state.
-
-    ONE implementation because there are two consumers -- GSTR-3B Table 3.1(a)
-    and the GSTR-1 CDNR rows -- and they disagreed: 3.1(a) preferred the order
-    stamp and CDNR always re-derived from the customer. An online buyer record
-    is minted stateless, so the same refund reversed IGST in 3B and CGST/SGST
-    in GSTR-1, and the two returns the accountant types could not reconcile.
-    `cache` is a per-report dict keyed by order_id.
+    The sale files what its invoice printed (gst_base._order_supply: the
+    order's own stamp, else the invoice's state-code rule), so the parent
+    order is asked exactly that; only a note with no parent order falls back
+    to the same rule over its customer (org_validation.supply_interstate).
+    Two consumers -- GSTR-3B Table 3.1(a) and the GSTR-1 CDNR rows. `store`
+    is the filing shop's doc; `cache` is a per-report dict keyed by order_id.
+    A read failure RAISES (the doors answer 503): a guessed head or place of
+    supply files the reversal wrong.
     """
+    from .gst_base import CUSTOMER_SUPPLY_FIELDS, _order_supply
+    from ...services.org_validation import supply_interstate
+
     oid = str(ret.get("order_id") or "")
     if oid and oid in cache:
         return cache[oid]
-    flag = None
+    parent = db.get_collection("orders").find_one({"order_id": oid}) if oid else None
+    cid = str((parent or ret).get("customer_id") or "")
+    customer = (
+        db.get_collection("customers").find_one({"customer_id": cid}, CUSTOMER_SUPPLY_FIELDS)
+        if cid
+        else None
+    )
+    if parent:
+        inter, code, _assumed = _order_supply(parent, store, customer)
+    else:
+        inter, code, _assumed = supply_interstate(store, customer)
     if oid:
-        try:
-            po = db.get_collection("orders").find_one(
-                {"order_id": oid}, {"interstate": 1}
-            ) or {}
-            if isinstance(po.get("interstate"), bool):
-                flag = po["interstate"]
-        except Exception:  # noqa: BLE001
-            flag = None
-    if flag is None:
-        cs = fallback_state or ""
-        if not cs:
-            try:
-                cu = db.get_collection("customers").find_one(
-                    {"customer_id": str(ret.get("customer_id") or "")}, {"state": 1}
-                ) or {}
-                cs = str(cu.get("state") or "")
-            except Exception:  # noqa: BLE001
-                cs = ""
-        flag = bool(
-            store_state and cs and store_state.strip().lower() != cs.strip().lower()
-        )
-    if oid:
-        cache[oid] = flag
-    return flag
+        cache[oid] = (inter, code)
+    return inter, code
+
+
+def _return_interstate_flag(db, ret, store, cache):
+    """Is this refund an INTER-state reversal? (_return_supply's head.)"""
+    return _return_supply(db, ret, store, cache)[0]
 
 
 def _ledger_row_return_doc(db, row):
@@ -744,19 +739,16 @@ def _ledger_row_return_doc(db, row):
     GSTR-1 CDNR pass and the GSTR-3B credit-note leg, so the two returns can
     never attribute the same note differently -- and every check on the
     note's parent (its store, its tax head, its held sale) sees every door's
-    note. Fail-soft -> None (a manual note names no order and stays
-    attributed where booked).
+    note. A manual note naming no order -> None (it stays attributed where
+    booked); a read failure RAISES (the doors answer 503).
     """
     for f in ("ref", "reason"):
         for tok in str(row.get(f) or "").replace(",", " ").split():
             if not tok.startswith("RET-"):
                 continue
-            try:
-                ret = db.get_collection("returns").find_one(
-                    {"return_id": tok.strip(".:;")}
-                )
-            except Exception:  # noqa: BLE001
-                ret = None
+            # A read failure RAISES: a missed return doc files the note
+            # under the wrong GSTIN.
+            ret = db.get_collection("returns").find_one({"return_id": tok.strip(".:;")})
             if isinstance(ret, dict):
                 return ret
     return row if row.get("order_id") else None
@@ -792,16 +784,14 @@ def _cn_parent_held(db, ret_doc, cache) -> bool:
     credit note must not be either -- reversing output tax on a supply never
     declared (and, for a B2B buyer, uploading the CDNR row). ONE answer for
     GSTR-1's ledger + in-store passes and GSTR-3B's two legs. ``cache`` is
-    keyed by order_id. Fail-soft -> False (the note files, as before)."""
+    keyed by order_id. A read failure RAISES (the doors answer 503): filing a
+    held sale's credit note reverses tax that was never declared."""
     oid = str((ret_doc or {}).get("order_id") or "")
     if not oid:
         return False
     if oid not in cache:
-        try:
-            order = db.get_collection("orders").find_one({"order_id": oid})
-            cache[oid] = bool(_order_held_off_returns(db, order))
-        except Exception:  # noqa: BLE001
-            cache[oid] = False
+        order = db.get_collection("orders").find_one({"order_id": oid})
+        cache[oid] = bool(order) and bool(_order_held_off_returns(db, order))
     return cache[oid]
 
 

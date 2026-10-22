@@ -12,8 +12,8 @@ from ...dependencies import resolve_store_scope
 from ...services.cost_mask import mask_cost
 from ...services.salary_visibility import SALARY_RESTRICTED_MESSAGE, is_salary_admin
 from ._shared import (
+    real_sale_match,
     _ORDER_REVENUE_PROJECTION,
-    _REAL_ORDER_STATUS_FILTER,
     _apply_created_at_range,
     _cost_by_product,
     _get_db,
@@ -67,8 +67,9 @@ async def get_pnl_by_store(
     )
 
     # Exclude DRAFT/CANCELLED and compare the date range as datetimes
-    # (created_at is a BSON datetime).
-    match: dict = {"status": _REAL_ORDER_STATUS_FILTER}
+    # (created_at is a BSON datetime). THE real-sale rule (api/utils/real_sale)
+    # -- the GST returns' too, so the P&L and GSTR-1 count the same orders.
+    match: dict = {**real_sale_match(db)}
     if store_ids is not None:
         match["store_id"] = {"$in": store_ids}
     _apply_created_at_range(match, from_date, to_date)
@@ -161,7 +162,7 @@ async def get_pnl_by_category(
     db = _get_db()
     # Exclude DRAFT/CANCELLED; compare the date range as datetimes
     # (created_at is a BSON datetime, so a string bound matched nothing).
-    match: dict = {"status": _REAL_ORDER_STATUS_FILTER}
+    match: dict = {**real_sale_match(db)}
     store_ids = None
     if store_id:
         store_ids = [store_id]

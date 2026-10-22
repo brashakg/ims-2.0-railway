@@ -1,6 +1,6 @@
 """HR attendance, finance outstanding / GST summary and task reports."""
 
-from fastapi import Depends, Query
+from fastapi import Depends, HTTPException, Query
 from typing import Optional
 from datetime import date, datetime, timedelta
 from ...utils.ist import (
@@ -23,8 +23,13 @@ from ._shared import (
     router,
 )
 from .gst_base import (
+    real_sale_match,
     _get_raw_db,
-    _order_is_interstate,
+    CUSTOMER_SUPPLY_FIELDS,
+    UnfileableOrder,
+    _order_rate_lines,
+    _order_supply,
+    _rate_heads,
     _order_taxable_and_tax,
 )
 
@@ -189,6 +194,15 @@ async def gst_report(
     store_id: Optional[str] = Query(None),
     current_user: dict = Depends(require_roles(*AP_ROLES)),
 ):
+    """GST report for a date range (_gst_report). An order no retry can read
+    (UnfileableOrder) is a 422 naming it, as on GSTR-1 / GSTR-3B -- not a 500."""
+    try:
+        return await _gst_report(from_date, to_date, store_id, current_user)
+    except UnfileableOrder as exc:
+        raise HTTPException(status_code=422, detail=f"GST report: {exc}") from exc
+
+
+async def _gst_report(from_date: date, to_date: date, store_id: Optional[str], current_user: dict):
     """GST report for a date range.
 
     Orders persist `grand_total` + `tax_amount` (and per-line taxable/tax),
@@ -237,7 +251,8 @@ async def gst_report(
             # Datetime objects, NOT .isoformat() strings -- created_at is a
             # BSON datetime and a string comparison never matches.
             "created_at": {"$gte": from_dt, "$lte": to_dt},
-            "status": {"$nin": ["CANCELLED", "DRAFT", "cancelled", "draft", "HISTORICAL", "historical"]},
+            # THE GST-return order rule (gst_base), as GSTR-1 / GSTR-3B.
+            **real_sale_match(_get_raw_db()),
         },
         limit=0,  # 0 -> no cap: a GST report must include every invoice.
     )
@@ -246,6 +261,7 @@ async def gst_report(
     # split intra-state (CGST+SGST) from inter-state (IGST) tax, matching
     # the GSTR-1 / GSTR-3B logic.
     store_state = ""
+    store_doc = None
     cust_state_map: dict = {}
     raw_db = _get_raw_db()
     if raw_db is not None:
@@ -262,10 +278,8 @@ async def gst_report(
         except Exception:
             pass
         try:
-            for cust in raw_db["customers"].find({}, {"customer_id": 1, "state": 1}):
-                cust_state_map[str(cust.get("customer_id", ""))] = str(
-                    cust.get("state", "") or ""
-                )
+            for cust in raw_db["customers"].find({}, CUSTOMER_SUPPLY_FIELDS):
+                cust_state_map[str(cust.get("customer_id", ""))] = cust
         except Exception:
             pass
 
@@ -277,18 +291,17 @@ async def gst_report(
 
     for o in orders:
         taxable, tax = _order_taxable_and_tax(o)
-        customer_state = (
-            cust_state_map.get(str(o.get("customer_id", ""))) or store_state
+        customer_doc = cust_state_map.get(str(o.get("customer_id", ""))) or {}
+        customer_state = str(customer_doc.get("state") or "") or store_state
+        # The head the tax invoice printed -- THE rule GSTR-1 / GSTR-3B ask
+        # (gst_base._order_supply), split per rate exactly as GSTR-1 files it.
+        is_inter_state = _order_supply(o, store_doc or {}, customer_doc)[0]
+        heads = _rate_heads(
+            _order_rate_lines(o.get("items") or [], taxable, tax, o), is_inter_state
         )
-        # OS-008: the order's own interstate flag wins (online orders carry it);
-        # store-vs-customer state stays the fallback for docs without it.
-        is_inter_state = _order_is_interstate(o, store_state, customer_state)
-        if is_inter_state:
-            cgst = sgst = 0.0
-            igst = round(tax, 2)
-        else:
-            cgst = sgst = round(tax / 2, 2)
-            igst = 0.0
+        cgst = round(sum(h["cgst"] for h in heads), 2)
+        sgst = round(sum(h["sgst"] for h in heads), 2)
+        igst = round(sum(h["igst"] for h in heads), 2)
 
         total_cgst += cgst
         total_sgst += sgst
