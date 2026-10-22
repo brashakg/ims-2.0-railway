@@ -81,6 +81,9 @@ def test_2_alt_text_names_the_listing_its_colour_and_view_never_empty():
         "u3": "Carrera 3016/S - Gold - view 1",
     }
     assert photo_alts({}, ["u"]) == {"u": "Eyewear - view 1"}
+    # A one-colour title already names its colour: never "Black - Black".
+    one = {"title": "Carrera 1012/S Sunglasses - Black", "attributes": {"frame_color": "Black"}}
+    assert photo_alts(one, ["u"]) == {"u": "Carrera 1012/S Sunglasses - Black - view 1"}
     long = photo_alts({"title": "X" * 300}, ["u"])["u"]
     assert len(long) <= 120 and long.endswith(" - view 1")
 
