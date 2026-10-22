@@ -5,6 +5,7 @@ import type {
 } from '../../../services/api/catalog';
 import { CANONICAL_TO_PICKER, FE_CODE_TO_CANONICAL, getCategoryFields } from './categoryFields';
 import type { ProductFormValues } from './formModel';
+import { offListMessage } from './formModel';
 import type { ProductDoc } from './cloneMapping';
 import { docTags, productToFormValues, str } from './cloneMapping';
 import { inferCategoryCode } from './inferCategory';
@@ -146,8 +147,11 @@ export function formValuesToCatalogUpdate(
   }
 
   if (!_trimEq(values.weight, snapshot.weight)) {
+    // Emptied (or 0) = clear the stored weight: the server takes null / 0 as
+    // "no weight". Garbage is never sent.
     const w = _numOrUndef(values.weight);
-    if (w !== undefined) payload.weight = w;
+    if (w !== undefined) payload.weight = w > 0 ? w : null;
+    else if (!String(values.weight ?? '').trim()) payload.weight = null;
   }
 
   // Pricing: all-optional patch — only the keys that changed, and only when
@@ -231,17 +235,8 @@ export function validateReviewForm(
 
   if (values.category && attrsTouched) {
     getCategoryFields(values.category).forEach((field) => {
-      const val = values.attributes?.[field.name];
-      if (
-        val &&
-        field.type === 'select' &&
-        Array.isArray(field.options) &&
-        field.options.length > 0 &&
-        !field.options.some((o) => o.toLowerCase() === String(val).trim().toLowerCase())
-      ) {
-        errors[field.name] =
-          `"${val}" is not in the allowed list for ${field.label} — pick one from the dropdown (manage values in Settings)`;
-      }
+      const off = offListMessage(field, values.attributes?.[field.name], baseline?.attributes?.[field.name]);
+      if (off) errors[field.name] = off;
     });
   }
 

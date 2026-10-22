@@ -585,25 +585,32 @@ SPINE_WEIGHTS = "_spine_weights"
 def with_spine_weights(
     db, product: Dict[str, Any], variants: Optional[List[Dict[str, Any]]] = None
 ) -> Dict[str, Any]:
-    """A copy of ``product`` carrying every pushed SKU's weight (grams) read
-    off its SPINE -- the ONE place weight lives (the twin holds no copy).
-    Only positive weights are kept: an unknown weight is never sent, so
-    Shopify keeps what it has. Fail-soft: a read error sends no weight (a
-    weight never blocks a press). Already resolved -> returned as is."""
+    """A copy of ``product`` carrying each pushed variant's weight (grams)
+    read off its SPINE -- the ONE place weight lives (the twin holds no copy).
+
+    Matched by the LINK, never by SKU alone (a review-queue twin can share a
+    SKU with an unrelated product's spine -- catalog._spine_ids): the lead's
+    spine is the one whose pim_product_id, else product_id, is this twin's
+    id; a colour/size is a spine whose ``variant_of`` is that lead. A row
+    with no such link gets no weight. Only positive weights are kept: an
+    unknown weight is never sent, so Shopify keeps what it has. Fail-soft: a
+    read error sends no weight (a weight never blocks a press). Already
+    resolved -> returned as is. (``variants`` is accepted for the callers'
+    symmetry; the family is read off the spines.)"""
     if SPINE_WEIGHTS in (product or {}):
         return product
-    skus = {str(product.get("sku") or "")} | {
-        str((v or {}).get("sku") or "") for v in variants or [] if isinstance(v, dict)
-    }
-    skus.discard("")
     weights: Dict[str, float] = {}
+    tid = product.get("id")
     try:
-        if db is not None and skus:
-            for s in db["products"].find(
-                {"sku": {"$in": sorted(skus)}}, {"_id": 0, "sku": 1, "weight": 1}
-            ):
+        if db is not None and tid:
+            spines = db["products"]
+            lead = spines.find_one({"pim_product_id": tid}) or spines.find_one({"product_id": tid})
+            members = [lead] if lead else []
+            if lead and lead.get("product_id"):
+                members += list(spines.find({"variant_of": lead["product_id"]}))
+            for s in members:
                 w = _price_float(s.get("weight"))
-                if w > 0:
+                if s.get("sku") and w > 0:
                     weights[str(s["sku"])] = w
     except Exception:  # noqa: BLE001 -- a weight never blocks a press
         logger.warning("[SHOPIFY] spine weight read failed for %s", product.get("sku"), exc_info=True)

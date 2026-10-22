@@ -1211,7 +1211,9 @@ class ProductCreateInput(BaseModel):
     # products.py ProductCreate). A hard-coded 18.0 default was a pricing
     # back-door: an optical frame (5% GST) would silently persist at 18%.
     gst_rate: Optional[float] = None
-    weight: Optional[float] = None  # in grams
+    # Grams, on the spine; 0 = no weight (never stored). Same bound as the
+    # spine PUT (products.ProductUpdate).
+    weight: Optional[float] = Field(None, ge=0)
 
     # Pricing
     pricing: PricingInput
@@ -1252,7 +1254,9 @@ class ProductUpdateInput(BaseModel):
     description: Optional[str] = None
     hsn_code: Optional[str] = None
     gst_rate: Optional[float] = None
-    weight: Optional[float] = None
+    # Grams, written on the SPINE. A positive number sets it; an explicit
+    # null or 0 CLEARS it (0 is "no weight", never stored); absent = untouched.
+    weight: Optional[float] = Field(None, ge=0)
     pricing: Optional[PricingPatchInput] = None
     images: Optional[List[str]] = None
     is_active: Optional[bool] = None
@@ -2262,7 +2266,7 @@ async def create_catalog_product(
                 "gst_rate": gst_rate,
                 # Grams, on the SPINE (the one copy every reader uses). It
                 # used to be stored on the twin alone.
-                "weight": product.weight,
+                "weight": product.weight or None,
                 # The form's "Shopify tags" box. Declared on ShopifySyncInput and
                 # read by nothing until sync audit gap #4: normalised into the
                 # spine's governed `tags` here, mirrored onto the twin below.
@@ -2322,7 +2326,7 @@ async def create_catalog_product(
         "hsn_code": hsn_code,
         "gst_rate": gst_rate,
         # Weight is the spine's (above); only a twin with no spine store holds it.
-        **({"weight": product.weight} if _pr is None else {}),
+        **({"weight": product.weight} if _pr is None and product.weight else {}),
         "pricing": {
             "mrp": product.pricing.mrp,
             "offer_price": product.pricing.offer_price or product.pricing.mrp,
@@ -2408,7 +2412,7 @@ async def create_catalog_product(
         product_data["shopify"] = shopify_result
 
     return {
-        "product": mask_cost({**product_data, "weight": product.weight}, current_user, "product"),
+        "product": mask_cost({**product_data, "weight": product.weight or None}, current_user, "product"),
         "message": "Product created successfully",
         "shopify_sync": shopify_result,
     }
@@ -2766,8 +2770,13 @@ async def update_catalog_product(
     # spine sync below. Only a twin with no spine (an import awaiting promote)
     # keeps it itself, and promote carries it across. It used to land on the
     # twin alone, where neither the edit page nor the spine ever saw it.
-    if product.weight is not None and not _spine_id:
-        existing["weight"] = product.weight
+    weight_sent = "weight" in product.model_fields_set
+    new_weight = product.weight or None  # 0 / null = no weight (a clear)
+    if weight_sent and not _spine_id:
+        if new_weight:
+            existing["weight"] = new_weight
+        else:
+            existing.pop("weight", None)
     message = "Product updated successfully"
     barcode_token = uuid.uuid4().hex
     spine_before = size_before = None
@@ -2873,6 +2882,14 @@ async def update_catalog_product(
             )
     else:
         _save_catalog_product(to_write)
+    if weight_sent and not new_weight and not _spine_id:
+        # A cleared weight on a spine-less import: the full-doc $set above
+        # cannot remove a key.
+        _twins = _catalog_coll()
+        if _twins is not None:
+            _twins.update_one({"id": product_id}, {"$unset": {"weight": ""}})
+        else:
+            CATALOG_PRODUCTS.get(product_id, {}).pop("weight", None)
 
     # Compact field-classified audit row (cataloguing scorecard corrections):
     # local mirror of the spine PUT's twin in products.update_product -- keep
@@ -2900,7 +2917,7 @@ async def update_catalog_product(
             _changed_keys.append("hsn_code")
         if product.gst_rate is not None:
             _changed_keys.append("gst_rate")
-        if product.weight is not None:
+        if weight_sent:
             _changed_keys.append("weight")
         if product.pricing is not None:
             _changed_keys.append("pricing")
@@ -2977,21 +2994,23 @@ async def update_catalog_product(
                 _patch["gst_rate"] = existing.get("gst_rate")
             if product.is_active is not None:
                 _patch["is_active"] = existing.get("is_active")
-            if product.weight is not None:
-                _patch["weight"] = product.weight
+            if new_weight:
+                _patch["weight"] = new_weight
             _patch = {k: v for k, v in _patch.items() if v is not None}
             # A person's change to the product, whatever it touched: the
             # spine records who and when (the same stamp as the twin above),
             # so the Catalog page and the review list read ONE last edit.
             _patch.update(_edit)
             _pr.update(_spine_id, _patch)
-            if product.weight is not None:
-                existing["weight"] = product.weight  # the answer shows the spine's
+            if weight_sent and not new_weight:
+                _pr.collection.update_one({"product_id": _spine_id}, {"$unset": {"weight": ""}})
+            if weight_sent:
+                existing["weight"] = new_weight  # the answer shows the spine's
     except Exception:  # noqa: BLE001
         logger.warning(
             "[CATALOG] spine sync on update skipped for %s", product_id, exc_info=True
         )
-        if product.weight is not None:
+        if weight_sent:
             # The weight has no other copy: say so rather than drop it quietly.
             message = "Saved, but the weight could not be saved. Please save again."
     # Sync audit gap #2 (owner, 2026-09-06): is_active off -> take it OFF

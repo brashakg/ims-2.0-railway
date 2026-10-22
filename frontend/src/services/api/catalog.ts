@@ -114,7 +114,8 @@ export interface UpdateCatalogProductPayload {
   description?: string;
   hsn_code?: string;
   gst_rate?: number;
-  weight?: number;
+  /** Grams. null (or 0) clears the stored weight. */
+  weight?: number | null;
   /** All-optional PATCH model: send only the pricing keys that changed. */
   pricing?: {
     mrp?: number;

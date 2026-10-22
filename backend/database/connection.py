@@ -1302,6 +1302,8 @@ class MockCollection:
         if doc:
             if "$set" in update:
                 doc.update(update["$set"])
+            for field in update.get("$unset") or {}:
+                doc.pop(field, None)
             if "$inc" in update:
                 for field, amount in update["$inc"].items():
                     doc[field] = doc.get(field, 0) + amount

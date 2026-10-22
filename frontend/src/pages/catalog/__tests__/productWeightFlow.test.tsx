@@ -28,9 +28,14 @@ const SPINE = {
   product_id: 'P-SG',
   sku: 'SGCARRERA1234',
   category: 'SUNGLASS',
-  brand: 'Ray-Ban',
+  brand: 'Carrera',
   model: '1234',
-  attributes: { brand_name: 'Ray-Ban', model_no: '1234', colour_code: '807', warranty: '1 year' },
+  // Stored before today's lists: brand, shape, gender and UV are NOT in the
+  // form's select options -- they must stay valid on the edit page.
+  attributes: {
+    brand_name: 'Carrera', model_no: '1234', colour_code: '807', warranty: '1 year',
+    shape: 'Butterfly', gender: 'Male', uv_protection: 'UV 400',
+  },
   mrp: 9000,
   offer_price: 9000,
   hsn_code: '900410',
@@ -88,6 +93,9 @@ vi.mock('../SimilarProductsHint', () => ({ SimilarProductsHint: () => null }));
 import { QuickAddPage } from '../QuickAddPage';
 import { DuplicateProductError } from '../../../services/api/products';
 import { productToFormValues } from '../../../domain/catalog/productAdd/cloneMapping';
+import { getCategoryFields } from '../../../domain/catalog/productAdd/categoryFields';
+import { validateProductForm } from '../../../domain/catalog/productAdd/formModel';
+import { formValuesToCatalogUpdate, validateReviewForm } from '../../../domain/catalog/productAdd/reviewMapping';
 
 const weightBox = () => screen.getByTitle('Weight (g)') as HTMLInputElement;
 const open = (url: string) =>
@@ -131,9 +139,49 @@ describe('the edit page (?edit=) on a stored sunglass / frame', () => {
     fireEvent.change(weightBox(), { target: { value: '42' } });
     await userEvent.setup().click(screen.getByRole('button', { name: /Save changes/ }));
     await waitFor(() => expect(productSpies.updateProduct).toHaveBeenCalledTimes(1));
-    const [id, body] = productSpies.updateProduct.mock.calls[0] as [string, { weight?: number }];
+    const [id, body] = productSpies.updateProduct.mock.calls[0] as [
+      string, { weight?: number; attributes: Record<string, string> },
+    ];
     expect(id).toBe('P-SG');
     expect(body.weight).toBe(42);
+    // The stored off-list values went back unchanged.
+    expect(body.attributes).toMatchObject({ shape: 'Butterfly', gender: 'Male', uv_protection: 'UV 400' });
+  });
+
+  it('shows a stored off-list value as "(current)"', async () => {
+    open('/catalog/add?edit=P-SG');
+    await waitFor(() => expect(weightBox().value).toBe('40'));
+    expect(screen.getByRole('option', { name: 'Butterfly (current)' })).toBeInTheDocument();
+    expect((screen.getByTitle('Shape') as HTMLSelectElement).value).toBe('Butterfly');
+  });
+});
+
+describe('the off-list rule', () => {
+  const shapeField = () => getCategoryFields('SG').find((f) => f.name === 'shape')!;
+  const values = (shape: string) => ({
+    ...productToFormValues(SPINE),
+    attributes: { ...productToFormValues(SPINE).attributes, shape },
+  });
+
+  it('keeps a stored value valid, and still refuses a NEW off-list value', () => {
+    expect(shapeField().options).not.toContain('Butterfly');
+    const stored = productToFormValues(SPINE).attributes;
+    expect(validateProductForm(values('Butterfly'), stored).shape).toBeUndefined();
+    expect(validateProductForm(values('Heart'), stored).shape).toMatch(/not in the allowed list/);
+    expect(validateProductForm(values('Butterfly')).shape).toMatch(/not in the allowed list/);
+  });
+
+  it('does not judge the brand before the Brand Master list has arrived', () => {
+    // The registry is offline in this file: the local list is not the owner's.
+    expect(validateProductForm(values('Butterfly')).brand_name).toBeUndefined();
+  });
+
+  it('the review editor follows the same rule', () => {
+    const baseline = values('Butterfly');
+    const touched = { ...baseline, attributes: { ...baseline.attributes, colour_code: '808' } };
+    expect(validateReviewForm(touched, baseline).shape).toBeUndefined();
+    const fresh = { ...touched, attributes: { ...touched.attributes, shape: 'Heart' } };
+    expect(validateReviewForm(fresh, baseline).shape).toMatch(/not in the allowed list/);
   });
 });
 
@@ -168,6 +216,15 @@ describe('the review editor (?review=)', () => {
     await userEvent.setup().click(screen.getByRole('button', { name: /Save fixes/ }));
     await waitFor(() => expect(catalogSpies.update).toHaveBeenCalledTimes(1));
     expect(catalogSpies.update.mock.calls[0][1]).toMatchObject({ weight: 41 });
+  });
+});
+
+describe('clearing a weight in the review editor', () => {
+  it('an emptied stored weight is sent as null (a clear), never as a missing key', () => {
+    const snap = { ...productToFormValues(SPINE), weight: '40' };
+    expect(formValuesToCatalogUpdate({ ...snap, weight: '' }, snap).weight).toBeNull();
+    expect(formValuesToCatalogUpdate({ ...snap, weight: '0' }, snap).weight).toBeNull();
+    expect(formValuesToCatalogUpdate({ ...snap, weight: '41' }, snap).weight).toBe(41);
   });
 });
 

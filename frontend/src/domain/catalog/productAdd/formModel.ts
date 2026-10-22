@@ -4,7 +4,13 @@
 
 import type { CreateProductPayload } from '../../../services/api/products';
 import { resolveGstRate, resolveHsn } from '../../../constants/gstRuntime';
-import { getCategoryFields, modelOf, registryRequiredFields } from './categoryFields';
+import {
+  getCategoryFields,
+  isCategoryRegistryLoaded,
+  modelOf,
+  registryRequiredFields,
+} from './categoryFields';
+import type { CategoryField } from './categoryFields';
 
 // Number coercion shared by the CL/LS field mapping. Returns undefined for
 // blank / non-numeric so the backend treats the field as absent.
@@ -39,10 +45,39 @@ export interface ProductFormValues {
   tags?: string[];
 }
 
+// THE off-list rule (Catalog Dictionary mirror of the server gate): a filled
+// select value must be one of the allowed options (case-insensitive -- the
+// server canonicalises the casing on save). Two exceptions:
+//  * a value ALREADY STORED on the product being edited stays valid (it shows
+//    as "<value> (current)" in the dropdown and saves unchanged) -- a product
+//    catalogued before a list existed must still be editable; NEW entries are
+//    still limited to the list;
+//  * brand is not judged while the Brand Master list has not arrived (the
+//    local fallback list is not the owner's).
+// Returns the message, or null when the value is fine.
+export function offListMessage(
+  field: CategoryField,
+  val: unknown,
+  stored?: unknown,
+): string | null {
+  const v = String(val ?? '').trim().toLowerCase();
+  if (!v || field.type !== 'select' || !Array.isArray(field.options) || field.options.length === 0) {
+    return null;
+  }
+  if (field.options.some((o) => o.toLowerCase() === v)) return null;
+  if (String(stored ?? '').trim().toLowerCase() === v) return null;
+  if (field.name === 'brand_name' && !isCategoryRegistryLoaded()) return null;
+  return `"${val}" is not in the allowed list for ${field.label} — pick one from the dropdown (manage values in Settings)`;
+}
+
 // Validate the common, mode-agnostic rules: category present, all required
 // category fields filled, MRP present + > 0, and (client mirror of the server
 // rule) MRP >= offer price. Returns a field->message map; empty means valid.
-export function validateProductForm(values: ProductFormValues): Record<string, string> {
+// `stored`: the attributes of the product being edited (offListMessage).
+export function validateProductForm(
+  values: ProductFormValues,
+  stored?: Record<string, unknown>,
+): Record<string, string> {
   const errors: Record<string, string> = {};
 
   if (!values.category) {
@@ -58,21 +93,10 @@ export function validateProductForm(values: ProductFormValues): Record<string, s
       if (field.required && !values.attributes[field.name]) {
         errors[field.name] = `${field.label} is required`;
       }
-      // Catalog Dictionary mirror of the server gate: a filled select value
-      // must be one of the allowed options (case-insensitive — the server
-      // canonicalises the casing on save).
-      const val = values.attributes[field.name];
-      if (
-        !errors[field.name] &&
-        val &&
-        field.type === 'select' &&
-        Array.isArray(field.options) &&
-        field.options.length > 0 &&
-        !field.options.some((o) => o.toLowerCase() === String(val).trim().toLowerCase())
-      ) {
-        errors[field.name] =
-          `"${val}" is not in the allowed list for ${field.label} — pick one from the dropdown (manage values in Settings)`;
-      }
+      const off = errors[field.name]
+        ? null
+        : offListMessage(field, values.attributes[field.name], stored?.[field.name]);
+      if (off) errors[field.name] = off;
     });
     // Belt-and-braces: enforce every registry-required key even if it had no UI
     // metadata to render (getCategoryFields appends those, but a defensive check

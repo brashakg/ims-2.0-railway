@@ -87,6 +87,31 @@ def test_review_save_writes_weight_on_the_spine_not_the_twin(env):
     assert res["product"]["weight"] == 40.0
 
 
+@pytest.mark.parametrize("cleared", [None, 0])
+def test_null_or_zero_clears_the_spine_weight(env, cleared):
+    _twin_with_spine(env, weight=40.0)
+    res = _put("T-1", {"weight": cleared})
+    assert "weight" not in env.find_by_id("P-1")
+    assert res["product"]["weight"] is None
+
+
+def test_an_absent_weight_leaves_it_alone(env):
+    _twin_with_spine(env, weight=40.0)
+    _put("T-1", {"description": "x"})
+    assert env.find_by_id("P-1")["weight"] == 40.0
+
+
+def test_a_negative_weight_is_refused():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        catalog_mod.ProductUpdateInput(weight=-1)
+    with pytest.raises(ValidationError):
+        catalog_mod.ProductCreateInput(
+            category="FR", attributes={}, weight=-1, pricing={"mrp": 1.0}
+        )
+
+
 def test_an_import_with_no_spine_keeps_its_weight_and_promote_carries_it(env):
     doc = _bvi_doc(doc_id="T-IMP", sku="IMP-1")
     catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
@@ -153,9 +178,17 @@ def test_spine_weight_edit_queues_the_twin_without_copying_weight():
 
 
 def _push_db(weights):
+    """Spines LINKED to the twin T-1: the first SKU is its lead (pim_product_id
+    = the twin's id), every other one a colour/size of it (variant_of)."""
     db = StrictDB()
+    lead = None
     for sku, w in weights.items():
-        doc = {"product_id": sku, "sku": sku}
+        doc = {"product_id": "P-" + sku, "sku": sku}
+        if lead is None:
+            doc["pim_product_id"] = "T-1"
+            lead = doc["product_id"]
+        else:
+            doc["variant_of"] = lead
         if w is not None:
             doc["weight"] = w
         db["products"].insert_one(doc)
@@ -190,6 +223,26 @@ def test_no_known_weight_sends_no_weight(stored):
     rows, _ = build_variant_price_inputs(product, [{"sku": "SKU-1", "shopify_variant_id": "gid://shopify/ProductVariant/9"}])
     assert "inventoryItem" not in rows[0]
     assert "measurement" not in build_variant_seed_rows(product, [])[0]["row"]["inventoryItem"]
+
+
+def test_a_spine_that_only_shares_the_sku_gives_no_weight():
+    """Never by SKU alone (catalog._spine_ids): an unrelated product's spine
+    with the same SKU is not this twin's."""
+    db = StrictDB()
+    db["products"].insert_one({"product_id": "P-OTHER", "sku": "SKU-1", "weight": 99.0})
+    product = with_spine_weights(db, dict(TWIN), [])
+    rows, _ = build_variant_price_inputs(product, [{"sku": "SKU-1", "shopify_variant_id": "gid://shopify/ProductVariant/9"}])
+    assert "inventoryItem" not in rows[0]
+
+
+def test_push_variant_prices_reads_the_weight_itself(monkeypatch):
+    """The standalone price push (not via push_product) looks the weight up."""
+    from api.services.shopify_push import variants as variants_mod
+
+    monkeypatch.setattr(variants_mod, "product_push_refusal", lambda *_a, **_k: None)
+    monkeypatch.setattr(variants_mod, "_live_or_reason", lambda *_a, **_k: (False, "dark"))
+    res = asyncio.run(variants_mod.push_variant_prices(_push_db({"SKU-1": 40.0}), dict(TWIN), []))
+    assert res.payload["variants"][0]["inventoryItem"] == {"measurement": GRAMS}
 
 
 def test_dry_run_push_plan_carries_the_weight(monkeypatch):
@@ -236,6 +289,44 @@ def test_backfill_plan_queues_only_live_listings_with_a_weight():
     assert p["weighted"] == 3
     assert p["queue"] == [{"twin_id": "T-LIVE", "sku": "LIVE", "weighted_skus": ["LIVE", "COL"]}]
     assert p["not_live"] == ["DRAFT"]
+
+
+def test_backfill_skips_listings_that_are_off():
+    spines = [{"product_id": f"P-{i}", "pim_product_id": f"T-{i}", "sku": f"S{i}", "weight": 30.0} for i in range(5)]
+    live = {"shopify_product_id": "gid://shopify/Product/1"}
+    twins = [
+        {"id": "T-0", "sku": "S0", "ecom": live, "is_active": False},
+        {"id": "T-1", "sku": "S1", "ecom": live, "deleted_at": "2026-10-01"},
+        {"id": "T-2", "sku": "S2", "ecom": {**live, "status": "ARCHIVED"}},
+        {"id": "T-3", "sku": "S3", "ecom": {**live, "taken_down_at": "2026-10-01"}},
+        {"id": "T-4", "sku": "S4", "ecom": live},
+    ]
+    p = backfill.plan(spines, twins)
+    assert [r["sku"] for r in p["queue"]] == ["S4"]
+    assert sorted(p["not_live"]) == ["S0", "S1", "S2", "S3"]
+
+
+def test_backfill_copies_a_stranded_twin_weight_onto_its_linked_spine():
+    spines = [
+        {"product_id": "P-A", "pim_product_id": "T-A", "sku": "A"},
+        {"product_id": "P-B", "pim_product_id": "T-B", "sku": "B", "weight": 20.0},
+        # Only the SKU matches T-C: not its spine, nothing copied.
+        {"product_id": "P-X", "sku": "C"},
+    ]
+    twins = [
+        {"id": "T-A", "sku": "A", "weight": 35.0},
+        {"id": "T-B", "sku": "B", "weight": 99.0},  # spine has its own: kept
+        {"id": "T-C", "sku": "C", "weight": 12.0},
+    ]
+    rows = backfill.plan_copies(spines, twins)
+    assert rows == [{"product_id": "P-A", "sku": "A", "twin_id": "T-A", "weight": 35.0}]
+    db = StrictDB()
+    for sp in spines:
+        db["products"].insert_one(dict(sp))
+    assert backfill.apply_copies(db, rows, "run2") == 1
+    assert db["products"].find_one({"product_id": "P-A"})["weight"] == 35.0
+    assert backfill.revert(db, "run2") == 1
+    assert "weight" not in db["products"].find_one({"product_id": "P-A"})
 
 
 def test_backfill_apply_and_revert():

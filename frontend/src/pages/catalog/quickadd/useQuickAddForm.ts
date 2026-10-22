@@ -98,6 +98,10 @@ export function useQuickAddForm() {
   // ACTIVE shop's (an effect, not the loader: the signed-in user -- and so
   // the shop -- can arrive after the product does on a fresh page load).
   const [editLevels, setEditLevels] = useState<Record<string, unknown> | null>(null);
+  // The attributes the product being edited (?edit=) holds as stored: a
+  // value already on it stays valid even when it is not in today's list
+  // (formModel.offListMessage) and shows as "<value> (current)".
+  const [editStoredAttrs, setEditStoredAttrs] = useState<Record<string, string> | null>(null);
   useEffect(() => {
     if (editLevels) setReorderLevel(levelText(editLevels[reorderShop]));
   }, [editLevels, reorderShop]);
@@ -170,6 +174,17 @@ export function useQuickAddForm() {
     doc: CatalogProductDoc;
     values: ProductFormValues;
   } | null>(null);
+  // What the product being edited holds as stored (?edit= its spine, ?review=
+  // its catalogue doc as loaded); undefined for a new product.
+  const storedAttributes = useMemo<Record<string, string> | undefined>(
+    () =>
+      editMode?.kind === 'spine'
+        ? editStoredAttrs ?? undefined
+        : editMode?.kind === 'catalog'
+          ? reviewSnapshot?.values.attributes
+          : undefined,
+    [editMode, editStoredAttrs, reviewSnapshot],
+  );
   const [reviewDry, setReviewDry] = useState<PromoteDryRunResult | null>(null);
   const [reviewDryLoading, setReviewDryLoading] = useState(false);
   const [reviewApproving, setReviewApproving] = useState(false);
@@ -659,7 +674,7 @@ export function useQuickAddForm() {
   const handleSubmit = useCallback(
     async (saveAndNew: boolean) => {
       const values = currentValues();
-      const newErrors = validateProductForm(values);
+      const newErrors = validateProductForm(values, storedAttributes);
       setErrors(newErrors);
       if (Object.keys(newErrors).length > 0) {
         // Make sure every section holding an error is open (a closed section
@@ -821,7 +836,7 @@ export function useQuickAddForm() {
       currentValues, toast, resetForm, navigate, variantCtx, startNextVariant,
       optedOutLeadId, familyHint, enterVariantMode,
       editMode, editLevels, reorderLevel, reorderBadInput, canSetReorderLevel, reorderShop,
-      focusAttrField,
+      focusAttrField, storedAttributes,
     ]
   );
 
@@ -1168,8 +1183,8 @@ export function useQuickAddForm() {
   // required flags arrive.
   const liveErrors = useMemo(() => {
     void registryReady; // re-run once the server's required flags arrive
-    return isReviewMode ? {} : validateProductForm(currentValues());
-  }, [isReviewMode, currentValues, registryReady]);
+    return isReviewMode ? {} : validateProductForm(currentValues(), storedAttributes);
+  }, [isReviewMode, currentValues, registryReady, storedAttributes]);
   const sectionIssues = useMemo(() => {
     const n: Record<SectionId, number> = { identity: 0, pricing: 0, inventory: 0 };
     Object.keys(liveErrors).forEach((k) => { n[sectionOfError(k)] += 1; });
@@ -1313,7 +1328,9 @@ export function useQuickAddForm() {
           // Edit replaces the whole form — leave variant mode if active.
           setVariantCtx(null);
           setFlaggedFields(new Set());
-          applyFormValues(productToFormValues(product));
+          const loaded = productToFormValues(product);
+          applyFormValues(loaded);
+          setEditStoredAttrs(loaded.attributes || {});
           setEditMode({
             kind: 'spine',
             id: editId,
@@ -1533,7 +1550,7 @@ export function useQuickAddForm() {
     attributes, setAttributes, setAttr,
     description, setDescription,
     hsnCode, setHsnCode, gstRate, setGstRate, hsnMatchesCategory,
-    weight, setWeight,
+    weight, setWeight, storedAttributes,
     mrp, setMrp, offerPrice, setOfferPrice, costPrice, setCostPrice,
     discountCategory,
     reorderLevel, setReorderLevel, setReorderBadInput, canSetReorderLevel, reorderShop,
