@@ -2654,7 +2654,7 @@ def _build_pim_doc(
             # scheduled sync sends it (a FIRST publish too, owner ruling
             # 2026-10-20) through the product gate, and the flag is cleared only
             # by a SUCCESSFUL Shopify write (shopify_push._writeback_product).
-            "locally_modified": True,
+            **dirty_marks(),
             "handle": handle or None,
             "seo": {
                 "title": seo_title or name or None,
@@ -4250,7 +4250,12 @@ def _set_twin_link(db, spine: Dict[str, Any], parent: Optional[Dict[str, Any]]) 
     else:
         cat.update_one(
             {"id": _twin_id(spine)},
-            {"$unset": {"ecom.variant_of": ""}, "$set": {"ecom.locally_modified": True}},
+            {
+                "$unset": {"ecom.variant_of": ""},
+                # Queued like any edit: flag + a fresh edit_rev (SF-04), so a
+                # revert keyed on an older revision cannot un-queue it.
+                "$set": {f"ecom.{k}": v for k, v in dirty_marks().items()},
+            },
         )
 
 

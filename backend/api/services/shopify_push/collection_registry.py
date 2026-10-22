@@ -54,8 +54,13 @@ PRICE_BANDS = (
 # a listing, looking back NEW_ARRIVALS_MAX_WEEKS first. A quiet spell never
 # empties it (an empty definition would be dropped and the collection would
 # keep a stale rule on Shopify): with no arrival inside the look-back, it
-# still shows the newest weeks there are. The rules change only when a new
-# week gets its first listing.
+# still shows the newest weeks there are. The rules therefore change whenever
+# the computed week set changes, not only when a new week gets its first
+# listing: a week also drops out when it ages past the look-back (the
+# collection SHRINKS -- older weeks are not pulled in while at least one week
+# is still inside it) or when its last listing leaves; and once the LAST week
+# ages out, the fallback re-grows the collection to the newest
+# NEW_ARRIVALS_WEEKS weeks of older stock (new_arrival_tags).
 NEW_ARRIVALS_WEEKS = 4
 NEW_ARRIVALS_MAX_WEEKS = 12
 # ecom_collections field: {seo_title, seo_description} as IMS generated them

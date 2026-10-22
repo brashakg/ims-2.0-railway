@@ -8,6 +8,8 @@ import os
 import sys
 from datetime import datetime, timezone
 
+import pytest
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
@@ -202,3 +204,33 @@ def test_a_row_queued_concurrently_is_neither_touched_nor_recorded():
     assert list(db[rq.BACKUPS].find({"run_id": "run1"})) == []
     assert rq.revert(db, "run1") == 0
     assert _ecom(db) == {**LIVE, "locally_modified": True, "edit_rev": "h"}
+
+
+def _requeue_publish_failed(db):
+    from api.services.shopify_push.writeback import _requeue_unpublished
+
+    _requeue_unpublished(db, "A")
+
+
+def _requeue_twin_unlinked(db):
+    from api.services.product_master import _set_twin_link
+
+    _set_twin_link(db, {"product_id": "A"}, None)
+
+
+@pytest.mark.parametrize("writer", [_requeue_publish_failed, _requeue_twin_unlinked])
+def test_a_writer_requeue_after_the_push_survives_a_late_revert(writer):
+    """apply -> the push clears the flag -> a writer re-queues -> revert. The
+    writer's re-queue must carry a FRESH edit_rev, or the revert (keyed on the
+    run's revision) silently drops it."""
+    from api.services.shopify_push.writeback import _writeback_product
+
+    db = _world(products=[{"id": "A", "sku": "A", "ecom": dict(LIVE)}])
+    rq.apply(db, rq.live_listings(db), "run1")
+    run_rev = _ecom(db)["edit_rev"]
+    assert _writeback_product(db, "A", LIVE["shopify_product_id"], sent_rev=run_rev)
+    assert _ecom(db)["locally_modified"] is False
+    writer(db)
+    assert _ecom(db)["locally_modified"] is True and _ecom(db)["edit_rev"] != run_rev
+    assert rq.revert(db, "run1") == 0
+    assert _ecom(db)["locally_modified"] is True

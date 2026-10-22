@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from ..catalog_ecom import EDIT_REV, update_ecom
+from ..catalog_ecom import EDIT_REV, dirty_marks, update_ecom
 from ._shared import logger
 from .transport import _now
 
@@ -149,7 +149,7 @@ def _requeue_unpublished(db, product_id: str) -> None:
     Compare-and-set of the ecom sub-doc (catalog_ecom.update_ecom).
     Fail-soft: any error is logged, never raised."""
     try:
-        update_ecom(db, product_id, lambda ecom: {**ecom, "locally_modified": True})
+        update_ecom(db, product_id, lambda ecom: {**ecom, **dirty_marks()})
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[SHOPIFY_PUSH] re-queue failed {product_id}: {e}")
 
