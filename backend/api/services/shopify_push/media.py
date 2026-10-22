@@ -47,8 +47,8 @@ _ALT_MAX = 120
 def photo_alt(title: str, colour: str, n: int) -> str:
     """'{listing title} - {colour} - view {n}': short, never empty."""
     title, colour = str(title or "").strip(), str(colour or "").strip()
-    if colour and colour.lower() in title.lower():
-        colour = ""  # a one-colour title already names it ("... - Black")
+    if colour and re.search(r"(?<![^\W_])" + re.escape(colour) + r"\s*$", title, re.I):
+        colour = ""  # a one-colour title already ends with it ("... - Black")
     head = " - ".join(p for p in (title, colour) if p) or "Eyewear"
     tail = f" - view {n}"
     return head[: _ALT_MAX - len(tail)].rstrip(" -") + tail

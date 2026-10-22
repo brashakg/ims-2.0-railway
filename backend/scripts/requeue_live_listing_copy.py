@@ -17,10 +17,13 @@ Shopify id, not a Shopify Draft, not taken down, archived or deleted -- the
 collection registry's own reading (collection_registry.listing_facts).
 
 SAFETY: DRY RUN by default (prints the SKUs and a count, writes nothing).
---apply saves every row's previous flag in `listing_copy_requeue_backups`
-under a run id, then sets the flag (compare-and-set of the ecom sub-doc).
---revert --run-id X puts the previous flag back, only where the flag is still
-the True this run wrote (a row the push already re-sent is left alone).
+--apply queues each row the way every queueing write does (the flag plus a
+fresh ecom.edit_rev, catalog_ecom.dirty_marks; compare-and-set of the ecom
+sub-doc) and records the row and its revision in
+`listing_copy_requeue_backups` under a run id. A row someone else queued
+meanwhile is left alone and not recorded. --revert --run-id X un-queues only
+rows whose ecom.edit_rev is STILL this run's: a row the push already re-sent,
+or that a human edit queued again since, is left exactly as it is.
 Plain pymongo; init_db is never called. No emoji (Windows cp1252). Prints no
 secrets.
 
@@ -62,30 +65,38 @@ def live_listings(db) -> list:
 
 
 def apply(db, rows: list, run_id: str) -> int:
-    """Backup first, then queue. Returns how many rows were queued."""
-    from api.services.catalog_ecom import update_ecom
+    """Record, then queue (flag + a fresh edit_rev). A row the write declines
+    (queued meanwhile) loses its record again. Returns how many were queued."""
+    from api.services.catalog_ecom import EDIT_REV, dirty_marks, update_ecom
 
     now = datetime.now(tz=timezone.utc)
     done = 0
     for r in rows:
         if r["queued"] or not r["id"]:
             continue
-        db[BACKUPS].insert_one({**r, "run_id": run_id, "at": now})
-        wrote = update_ecom(
-            db, r["id"], lambda e: None if e.get("locally_modified") else {**e, "locally_modified": True}
-        )
-        done += wrote is not None
+        marks = dirty_marks()
+        rec = db[BACKUPS].insert_one({**r, "run_id": run_id, EDIT_REV: marks[EDIT_REV], "at": now})
+        wrote = update_ecom(db, r["id"], lambda e: None if e.get("locally_modified") else {**e, **marks})
+        if wrote is None:
+            db[BACKUPS].delete_one({"_id": rec.inserted_id})
+        else:
+            done += 1
     return done
 
 
 def revert(db, run_id: str) -> int:
-    """Un-queue a run's rows that are still queued. Returns how many."""
-    from api.services.catalog_ecom import update_ecom
+    """Un-queue a run's rows whose edit_rev is still the run's. Returns how many."""
+    from api.services.catalog_ecom import EDIT_REV, update_ecom
 
     done = 0
     for b in list(db[BACKUPS].find({"run_id": run_id})):
+        rev = b.get(EDIT_REV)
         wrote = update_ecom(
-            db, b["id"], lambda e: {**e, "locally_modified": False} if e.get("locally_modified") else None
+            db,
+            b["id"],
+            lambda e: {**e, "locally_modified": False}
+            if rev and e.get("locally_modified") and e.get(EDIT_REV) == rev
+            else None,
         )
         done += wrote is not None
     return done

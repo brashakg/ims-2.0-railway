@@ -9,11 +9,13 @@ website and regenerated on every push-all, scheduled sync and rebuild:
   polarized         Polarized <category>                  (type AND polarization_yes)
   per brand         title from Brand Master               (brand_ tag)
   price bands       Under Rs 3,000 ... Over Rs 10,000     (variant price)
-  New Arrivals      catalogued in the last NEW_ARRIVALS_WEEKS ISO weeks
-                    (any arrived_<year>w<week> tag), newest first
+  New Arrivals      the newest NEW_ARRIVALS_WEEKS arrival weeks that have a
+                    listing (any arrived_<year>w<week> tag), newest first
 
 Every collection carries an SEO title ("Polarized Sunglasses | Better
-Vision") and a meta description of at most SEO_DESC_MAX characters.
+Vision") and a meta description of at most SEO_DESC_MAX characters -- filled
+only while the field is empty or still holds what IMS generated last
+(SEO_GENERATED); an SEO a human wrote is never overwritten.
 
 Every rule uses IMS's OWN tags / productType / prices exactly as the product
 push sends them, so the collections fill themselves. A definition whose rules
@@ -29,6 +31,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from agents.nexus_providers import _as_shopify_gid
 
+from ._shared import logger
 from .collections import IMS_KEY, IMS_MANAGED, RETIRED, push_collection
 from .transport import _graphql, _user_errors
 
@@ -45,12 +48,20 @@ PRICE_BANDS = (
 )
 
 
-# New Arrivals = listings catalogued in the current ISO week and the
-# NEW_ARRIVALS_WEEKS - 1 before it. Shopify smart rules cannot read a created
-# date, so each product carries its arrival week as a tag
-# (shopify_tag_gen.arrival_tag) and the collection matches ANY of the window's
-# week tags; the registry re-derives the window on every sync.
+# New Arrivals. Shopify smart rules cannot read a created date, so each
+# product carries its arrival week as a tag (shopify_tag_gen.arrival_tag) and
+# the collection matches ANY of the newest NEW_ARRIVALS_WEEKS weeks that have
+# a listing, looking back NEW_ARRIVALS_MAX_WEEKS first. A quiet spell never
+# empties it (an empty definition would be dropped and the collection would
+# keep a stale rule on Shopify): with no arrival inside the look-back, it
+# still shows the newest weeks there are. The rules change only when a new
+# week gets its first listing.
 NEW_ARRIVALS_WEEKS = 4
+NEW_ARRIVALS_MAX_WEEKS = 12
+# ecom_collections field: {seo_title, seo_description} as IMS generated them
+# last -- a stored SEO equal to it is IMS's own and may be regenerated.
+SEO_GENERATED = "seo_generated"
+_SEO_KEYS = ("seo_title", "seo_description")
 STORE_NAME = "Better Vision"
 SEO_DESC_MAX = 155
 _GENDER_FOR = {"men": "for Men", "women": "for Women", "kids": "for Kids"}
@@ -65,12 +76,18 @@ def _seo(phrase: str, what: str) -> Dict[str, str]:
     return {"seo_title": f"{phrase} | {STORE_NAME}", "seo_description": desc}
 
 
-def new_arrival_tags(now: Optional[datetime] = None) -> List[str]:
-    """The arrival-week tags New Arrivals matches, newest first."""
-    from ..shopify_tag_gen import week_tag
+def new_arrival_tags(facts: List[Dict[str, Any]], now: Optional[datetime] = None) -> List[str]:
+    """The arrival-week tags New Arrivals matches, newest first: the newest
+    NEW_ARRIVALS_WEEKS weeks that have a listing within the look-back, else
+    the newest weeks that have one at all ([] when no listing has a tag)."""
+    from ..shopify_tag_gen import ARRIVAL_PREFIX, week_tag
 
     now = now or datetime.now(timezone.utc)
-    return [week_tag(now - timedelta(weeks=i)) for i in range(NEW_ARRIVALS_WEEKS)]
+    # 'arrived_2026w43' sorts by time: year first, the week zero-padded.
+    weeks = sorted({t for f in facts for t in f["tags"] if t.startswith(ARRIVAL_PREFIX)}, reverse=True)
+    oldest = week_tag(now - timedelta(weeks=NEW_ARRIVALS_MAX_WEEKS - 1))
+    recent = [w for w in weeks if w >= oldest]
+    return (recent or weeks)[:NEW_ARRIVALS_WEEKS]
 
 
 def _rule(field: str, relation: str, value: Any) -> Dict[str, str]:
@@ -97,9 +114,22 @@ def _facts(db, doc: Dict[str, Any]) -> Dict[str, Any]:
     from ..ecom_category_map import ims_to_shopify_type
     from ..online_catalog import variant_rows_for_product
     from ._shared import _product_brand
+    from .listing import listing_view, model_listing
     from .product_input import _resolve_variant_pricing, ims_product_tags
 
-    rows = variant_rows_for_product(db, doc) or [{}]
+    raw = variant_rows_for_product(db, doc) or []
+    rows = raw or [{}]
+    # The tags the push SENDS: a model's listing tags (every colour,
+    # shopify_tag_gen.listing_tags), so a count never differs from who is in.
+    tags = None
+    try:
+        lst = model_listing(db, doc, raw)
+        if lst is not None and not lst.get("variant_of") and not lst.get("refusal"):
+            tags = ims_product_tags(listing_view(doc, lst))
+    except Exception as exc:  # noqa: BLE001 -- a count, never a write
+        logger.warning("[COLLECTIONS] model of %s unreadable, counted by its own tags: %s", doc.get("sku"), exc)
+    if tags is None:
+        tags = ims_product_tags(doc)
     # ponytail: the lead's price rule per variant row, not listing.model_listing's
     # per-colour prices -- close enough to decide whether a price band is empty.
     prices = [p for p in (_resolve_variant_pricing(doc, r)[0] for r in rows) if p]
@@ -107,7 +137,7 @@ def _facts(db, doc: Dict[str, Any]) -> Dict[str, Any]:
         "id": doc.get("id"),
         "sku": doc.get("sku"),
         "type": ims_to_shopify_type(doc["category"]) if doc.get("category") else "",
-        "tags": set(ims_product_tags(doc)),
+        "tags": set(tags),
         "prices": prices,
         "brand": str(_product_brand(doc) or "").strip(),
     }
@@ -214,7 +244,7 @@ def derive_definitions(
         if high is not None:
             rules.append(_rule("variant_price", "LESS_THAN", high))
         add(f"price:{handle}", title, rules, _seo(f"Eyewear {title}", f"eyewear {title[:1].lower()}{title[1:]}"), handle=handle)
-    add("new-arrivals", "New Arrivals", [_rule("tag", "EQUALS", t) for t in new_arrival_tags(now)],
+    add("new-arrivals", "New Arrivals", [_rule("tag", "EQUALS", t) for t in new_arrival_tags(facts, now)],
         _seo("New Arrivals in Eyewear", "the newest sunglasses and eyeglasses"),
         sort="CREATED_DESC", disjunctive=True)
 
@@ -280,10 +310,16 @@ def apply_collection_registry(db, definitions: Optional[List[Dict[str, Any]]] = 
         want = {
             "title": d["title"], "handle": d["handle"], "collection_type": "SMART",
             "rules": d["rules"], "disjunctive": bool(d.get("disjunctive")), "sort_order": d["sort_order"],
-            "seo_title": d.get("seo_title"), "seo_description": d.get("seo_description"),
             "published": True, IMS_MANAGED: True, IMS_KEY: d["key"],
         }
         doc = coll.find_one({IMS_KEY: d["key"]})
+        generated = {k: d.get(k) for k in _SEO_KEYS}
+        last = (doc or {}).get(SEO_GENERATED) or {}
+        for k in _SEO_KEYS:
+            current = (doc or {}).get(k)
+            if not current or current == last.get(k):  # empty, or still IMS's own
+                want[k] = generated[k]
+        want[SEO_GENERATED] = generated
         holder = coll.find_one({"handle": d["handle"]})
         if holder is not None and (doc is None or holder.get("_id") != doc.get("_id")):
             out["skipped"].append(f"{d['handle']}: handle held by an old collection (run scripts/rebuild_collections.py)")

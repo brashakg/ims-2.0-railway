@@ -46,8 +46,8 @@ def _db(products=None, collections=(), armed=True):
     db.seed("catalog_products", products if products is not None else [
         _sun("A", "RAY-BAN", 2500, gender="Men", shape="Aviator"),
         _sun("B", "Ray-Ban", 7000, gender="Women", shape="Cat Eye"),
-        # catalogued two months ago: not a New Arrival
-        _sun("C", "Dolce & Gabbana", 12000, created_at=NOW - timedelta(days=60), gender="Women", shape="Cat Eye"),
+        # catalogued 200 days ago (beyond the look-back): not a New Arrival
+        _sun("C", "Dolce & Gabbana", 12000, created_at=NOW - timedelta(days=200), gender="Women", shape="Cat Eye"),
         _sun("D", "Idee", 1500, live=False, gender="Unisex", polarization="Yes"),  # not on the website
         {**_sun("E", "Idee", 1500, gender="Kids"), "ecom": {**LIVE, "variant_of": {"sku": "A"}}},  # a colour
     ])

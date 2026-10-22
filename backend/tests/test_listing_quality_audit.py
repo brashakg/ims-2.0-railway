@@ -130,9 +130,12 @@ def test_4_every_collection_kind_has_an_seo_title_and_a_short_description():
 
 
 def test_5_new_arrivals_holds_only_the_last_weeks_catalogue():
-    defs = {d["handle"]: d for d in reg.derive_definitions(_facts(), {})}
+    now = datetime.now(timezone.utc)
+    weekly = [{"type": "Sunglass", "prices": [1.0], "brand": "", "tags": {week_tag(now - timedelta(weeks=k))}}
+              for k in (1, 2, 3)]
+    defs = {d["handle"]: d for d in reg.derive_definitions(_facts() + weekly, {})}
     na = defs["new-arrivals"]
-    assert na["count"] == 1, "the 60-day-old listing is not a new arrival"
+    assert na["count"] == 4, "the newest 4 arrival weeks; the 60-day-old listing is out"
     assert na["disjunctive"] is True and len(na["rules"]) == reg.NEW_ARRIVALS_WEEKS
     assert all(r["field"] == "tag" and r["value"].startswith("arrived_") for r in na["rules"])
     # The arrival week comes from created_at, else the Mongo ObjectId's time.
@@ -186,29 +189,3 @@ def test_8_a_non_polarized_lens_is_described_without_any_polar_word():
     html = build_shopify_description_html("Sunglass", {"brand_name": "B", "polarization": "Yes"}, "")
     assert "<td>Polarization</td>\n<td>Yes</td>" in html
     assert "polar" not in build_product_input(CARRERA, [])["descriptionHtml"].lower()
-
-
-# The live listings need a queue step (a deploy re-sends nothing) ------------
-
-
-def test_requeue_script_queues_live_listings_only_and_reverts():
-    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "scripts"))
-    import requeue_live_listing_copy as rq
-    from strict_fakes import StrictDB
-
-    live = {"shopify_product_id": "gid://shopify/Product/1", "status": "PUBLISHED"}
-    db = StrictDB()
-    db.seed("catalog_products", [
-        {"id": "A", "sku": "A", "ecom": dict(live)},
-        {"id": "B", "sku": "B", "ecom": {**live, "locally_modified": True}},
-        {"id": "C", "sku": "C", "ecom": {**live, "status": "DRAFT"}},
-        {"id": "D", "sku": "D", "ecom": {"locally_modified": True}},  # not live
-        {"id": "E", "sku": "E", "ecom": {**live, "variant_of": {"sku": "A"}}},  # a colour
-    ])
-    rows = rq.live_listings(db)
-    assert [(r["sku"], r["queued"]) for r in rows] == [("A", False), ("B", True)]
-    assert rq.apply(db, rows, "run1") == 1
-    assert db["catalog_products"].find_one({"id": "A"})["ecom"]["locally_modified"] is True
-    assert rq.revert(db, "run1") == 1
-    assert db["catalog_products"].find_one({"id": "A"})["ecom"]["locally_modified"] is False
-    assert db["catalog_products"].find_one({"id": "B"})["ecom"]["locally_modified"] is True

@@ -594,27 +594,35 @@ def model_number_line(product: Dict[str, Any]) -> str:
     if not isinstance(product, dict):
         return ""
     line = _smart_title(" ".join(_model_pieces(product)))
-    # A model code's short letter runs are capitals ("3016/s" -> "3016/S",
-    # "rb5279" -> "RB5279"); _smart_title keeps them as typed.
-    return " ".join(
-        re.sub(r"(?<![A-Za-z])[a-z]{1,3}(?![A-Za-z])", lambda m: m.group().upper(), w)
-        if any(c.isdigit() for c in w) else w
-        for w in line.split(" ")
-    )
+    # An all-lowercase model CODE is capitalised ("3016/s" -> "3016/S",
+    # "rb5279" -> "RB5279"); every other token keeps the source's casing
+    # ("2nd", "Gen2", "gen2" stay as typed).
+    return " ".join(w.upper() if _LOWER_MODEL_CODE.fullmatch(w) else w for w in line.split(" "))
+
+
+# A model code typed in lowercase: an optional 1-2 letter prefix, digits, an
+# optional '/x' lens suffix ('rb5279', '3016/s', '807/r').
+_LOWER_MODEL_CODE = re.compile(r"(?:[a-z]{1,2})?\d+(?:/[a-z])?")
 
 
 def drop_doubled_brand(text: str, brand: str) -> str:
     """``text`` with every brand written twice in a row said once ("Carrera
-    Carrera 804/S" / "Carrera CARRERA 804/S" -> "Carrera 804/S"), whole words,
-    case- and hyphen/space-insensitive ("Ray-Ban Ray Ban"). Never crosses an
-    HTML tag. For stored copy minted before the brand was stripped from the
-    model (legacy_product_name); the push sends nothing doubled."""
+    Carrera 804/S" / "Carrera CARRERA 804/S" -> "Carrera 804/S"). Only whole
+    words separated by WHITESPACE, never glued to a hyphen or slash ("Police
+    police-line" and a handle "carrera-carrera-804" stay), case-insensitive.
+    Text between HTML tags only -- never a tag or an href/src value. For
+    stored copy minted before the brand was stripped from the model
+    (legacy_product_name); the push sends nothing doubled."""
     words = _WORDS_RE.findall(brand or "")
     if not text or not words:
         return text or ""
-    b = r"[\s\-]*".join(re.escape(w) for w in words)
-    pattern = re.compile(rf"(?<!{_WORD})({b})(?:[\s\-]+{b})+(?!{_WORD})", re.I)
-    return pattern.sub(lambda m: m.group(1), text)
+    b = r"[\s\-]?".join(re.escape(w) for w in words)  # the brand's own 'Ray-Ban'
+    edge_l, edge_r = rf"(?<![^\W_]|[-/])", rf"(?![^\W_]|[-/])"
+    pattern = re.compile(rf"{edge_l}({b})(?:\s+{b})+{edge_r}", re.I)
+    return "".join(
+        part if part.startswith("<") else pattern.sub(lambda m: m.group(1), part)
+        for part in re.split(r"(<[^>]*>)", text)
+    )
 
 
 def build_model_title(product: Dict[str, Any]) -> str:
