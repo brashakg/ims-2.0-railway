@@ -26,8 +26,9 @@ from ._shared import (
     logger,
     product_push_refusal,
 )
-from .transport import _graphql, _now
+from .transport import _graphql, _now, _user_errors
 from .queries import (
+    _FILE_UPDATE_ALT,
     _MEDIA_LIMIT,
     _PRODUCT_CREATE_MEDIA,
     _PRODUCT_DELETE_MEDIA,
@@ -36,6 +37,39 @@ from .queries import (
 )
 
 _APP_IMAGE_PATH = "/api/v1/products/image/"
+
+# A listing view's {photo url: the colour it shows} (listing.listing_view);
+# a single product's photos all show its own colour.
+PHOTO_COLOURS = "_photo_colours"
+_ALT_MAX = 120
+
+
+def photo_alt(title: str, colour: str, n: int) -> str:
+    """'{listing title} - {colour} - view {n}': short, never empty."""
+    title, colour = str(title or "").strip(), str(colour or "").strip()
+    if colour and re.search(r"(?<![^\W_])" + re.escape(colour) + r"\s*$", title, re.I):
+        colour = ""  # a one-colour title already ends with it ("... - Black")
+    head = " - ".join(p for p in (title, colour) if p) or "Eyewear"
+    tail = f" - view {n}"
+    return head[: _ALT_MAX - len(tail)].rstrip(" -") + tail
+
+
+def photo_alts(product: Dict[str, Any], photos: List[str]) -> Dict[str, str]:
+    """{photo url: its alt text} for a product's (or a model listing view's)
+    photos -- the view counter runs per colour. Pure."""
+    from ..product_naming import readable_colour
+
+    product = product or {}
+    title = product.get("title") or product.get("name") or ""
+    colours = product.get(PHOTO_COLOURS) or {}
+    own = readable_colour(product)
+    seen: Counter = Counter()
+    out: Dict[str, str] = {}
+    for url in photos:
+        colour = colours.get(url) or own
+        seen[colour] += 1
+        out[url] = photo_alt(title, colour, seen[colour])
+    return out
 
 
 def product_photo_urls(product: Dict[str, Any]) -> List[str]:
@@ -98,7 +132,7 @@ def product_photo_urls(product: Dict[str, Any]) -> List[str]:
 
 
 async def _attach_product_photos(
-    db, product_gid: str, urls: List[str], alt: str = ""
+    db, product_gid: str, urls: List[str], alt: str = "", alts: Optional[Dict[str, str]] = None
 ) -> Dict[str, Any]:
     """LIVE-only: attach the product's photographs to the Shopify product in the
     SAME press that wrote the product (productCreateMedia). Fail-SOFT side
@@ -111,8 +145,8 @@ async def _attach_product_photos(
     per input, in order) -- so the photo pass can record which Shopify media
     IMS owns and never attach the same photograph twice. ``alt`` is the
     design row's alt text (the design press); the product's own photos go up
-    with alt ''."""
-    media = build_media_inputs([{"url": u, "alt_text": alt} for u in urls])
+    with their ``alts`` (photo_alts)."""
+    media = build_media_inputs([{"url": u, "alt_text": (alts or {}).get(u) or alt} for u in urls])
     if not media:
         return {"attached": 0, "error": "no usable photograph"}
     try:
@@ -304,8 +338,8 @@ def match_media_to_photos(
       R3b the CDN name is '<this product's own numeric id>__<nn>__<basename>'
           and <basename> equals the IMS file name stem-for-stem, extension
           ignored (``_connector_file``). A foreign id never matches.
-    There is deliberately NO alt rule: IMS's own attach sends alt '' for
-    every photo (``build_media_inputs``), so an alt equal to an IMS url or
+    There is deliberately NO alt rule: IMS's own alt is descriptive text
+    (photo_alts), never a url or file name, so an alt equal to an IMS url or
     file name can only be a human's edit on a media IMS did not attach, and
     claiming it would let the photo pass delete that media later.
     NEVER position or count: a claimed media can later be DELETED by the photo
@@ -501,9 +535,13 @@ async def sync_product_media(
     IMS dropped, reorder to IMS order -- per the ownership rule above.
     Fail-soft summary, never raises: {attached, deleted, reordered, unmanaged,
     on_shopify (the media count after the pass -- the publish precondition),
-    hands_off, error?, code?}."""
+    hands_off, alt_updated, error?, alt_error?, code?}. Every IMS-owned photo
+    carries its photo_alts text: attached with it, and a live one whose alt
+    differs is rewritten (fileUpdate) -- media IMS does not own is never
+    touched."""
     pid = product.get("id") or product.get("product_id")
     plan = plan_product_media(product, photos, shopify_media)
+    alts = photo_alts(product, photos)
     current = [str(n["id"]) for n in shopify_media if isinstance(n, dict) and n.get("id")]
     summary: Dict[str, Any] = {
         "attached": 0,
@@ -512,6 +550,7 @@ async def sync_product_media(
         "unmanaged": plan["unmanaged"],
         "hands_off": plan["hands_off"],
         "on_shopify": len(current),
+        "alt_updated": 0,
     }
     if len(current) + len(plan["attach"]) > _MEDIA_LIMIT:
         summary["code"] = MEDIA_LIMIT_CODE
@@ -522,9 +561,27 @@ async def sync_product_media(
         )
         return summary
     owned = list(plan["owned"])
+    # 0. ALT TEXT on the photos already live (fail-soft: a failure is noted,
+    # never stops the pass).
+    alt_now = {str(n["id"]): str(n.get("alt") or "") for n in shopify_media if isinstance(n, dict) and n.get("id")}
+    stale = [
+        {"id": r["id"], "alt": alts[r["url"]]}
+        for r in owned
+        if r["url"] in alts and r["id"] in alt_now and alt_now[r["id"]] != alts[r["url"]]
+    ]
+    if stale:
+        try:
+            body = await _graphql(db, _FILE_UPDATE_ALT, {"files": stale})
+            err = _user_errors(body, "fileUpdate")
+        except Exception as exc:  # noqa: BLE001 -- fail-soft side channel
+            err = str(exc)
+        if err:
+            summary["alt_error"] = err
+        else:
+            summary["alt_updated"] = len(stale)
     # 1. ATTACH what IMS has and Shopify lacks (the replacement lands first).
     if plan["attach"]:
-        res = await _attach_product_photos(db, product_gid, plan["attach"])
+        res = await _attach_product_photos(db, product_gid, plan["attach"], alts=alts)
         summary["attached"] = int(res.get("attached") or 0)
         summary["on_shopify"] += summary["attached"]
         owned.extend(res.get("media_map") or [])

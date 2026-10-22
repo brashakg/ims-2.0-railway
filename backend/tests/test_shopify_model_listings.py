@@ -801,7 +801,7 @@ def test_title_seo_and_description_are_the_models_never_one_colour(monkeypatch):
     html = lst["description_html"]
     head = html.split("<h4>Technical Specifications</h4>")[0]
     assert not names_a_colour(head, colours), "the model line and paragraph name no colour"
-    assert "Model Number: Ray-Ban RB3025 Aviator Large Metal Sunglasses</h5>" in html
+    assert "Model Number: Ray-Ban RB3025 Aviator Large Metal</h5>" in html, "no category appended (audit 2026-10-22)"
     assert "Available Colours" in html and "Gold (001), Black (002/58), Havana (003/32)" in html
     assert "<h4>Colours and Sizes</h4>" in html and "Lens Colour" in html.split("<h4>Colours and Sizes</h4>")[1]
     assert "Frame Material</td>\n<td>Metal" in html, "what every colour shares stays in the shared body"

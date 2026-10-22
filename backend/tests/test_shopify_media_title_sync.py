@@ -95,6 +95,7 @@ class _Shopify:
     def _op(query):
         for name in (
             "imsProductCreateMedia",
+            "imsMediaAlt",
             "imsProductDeleteMedia",
             "imsProductReorderMedia",
             "imsProductCreate",
@@ -160,6 +161,8 @@ class _Shopify:
                 out.append({"id": _m(self.next_media), "status": "PROCESSING"})
                 self.next_media += 1
             return {"data": {"productCreateMedia": {"media": out, "mediaUserErrors": []}}}
+        if op == "imsMediaAlt":
+            return {"data": {"fileUpdate": {"files": variables["files"], "userErrors": []}}}
         if op == "imsProductDeleteMedia":
             self.tombstones_at_delete = len(list(db[TOMB].find({})))
             return {
@@ -284,19 +287,52 @@ def test_create_attaches_every_photo_in_order_and_records_the_map(db, gates, mon
     assert res.photos["attached"] == 2 and res.photos["on_shopify"] == 2
 
 
+def test_photos_go_up_with_alt_text_never_empty(db, gates, monkeypatch):
+    """Listing audit 2026-10-22: every photo carries '{title} - {colour} -
+    view {n}' (it used to go up with alt '')."""
+    fake = _live(monkeypatch)
+    doc = _seed(db, {**_product([U1, U2], shopify_id=None), "attributes": {"frame_color": "Black"}})
+
+    _run(shopify_push.push_product(db, doc, []))
+
+    (att,) = fake.calls_of("imsProductCreateMedia")
+    assert [m["alt"] for m in att["variables"]["media"]] == [
+        "Ray-Ban RB2140 - Black - view 1",
+        "Ray-Ban RB2140 - Black - view 2",
+    ]
+
+
+def test_a_live_photo_with_a_stale_alt_is_rewritten_but_unmanaged_media_is_not(db, gates, monkeypatch):
+    """The 23 live listings went up with alt '': a re-press rewrites the alt
+    of the photos IMS owns (fileUpdate), never a hand-uploaded one."""
+    nodes = _nodes(1, 2, 3)  # 3 is a hand upload IMS does not own
+    nodes[1]["alt"] = "Ray-Ban RB2140 - view 2"  # already right
+    fake = _live(monkeypatch, nodes)
+    doc = _seed(db, _product([U1, U2], media_map=[(U1, _m(1)), (U2, _m(2))]))
+
+    res = _run(shopify_push.push_product(db, doc, []))
+
+    (call,) = fake.calls_of("imsMediaAlt")
+    assert call["variables"]["files"] == [{"id": _m(1), "alt": "Ray-Ban RB2140 - view 1"}]
+    assert res.photos["alt_updated"] == 1 and "alt_error" not in res.photos
+
+
 def test_a_repress_with_nothing_changed_touches_no_media(db, gates, monkeypatch):
     """The map is what stops a re-press from piling a duplicate copy of every
     photograph onto a live listing (the July '250 media' wall)."""
-    fake = _live(monkeypatch, _nodes(1, 2))
+    nodes = _nodes(1, 2)
+    for n, k in zip(nodes, (1, 2)):
+        n["alt"] = "Ray-Ban RB2140 - view %d" % k  # the alt IMS sends
+    fake = _live(monkeypatch, nodes)
     doc = _seed(db, _product([U1, U2], media_map=[(U1, _m(1)), (U2, _m(2))]))
 
     res = _run(shopify_push.push_product(db, doc, []))
 
     assert res.ok is True
-    assert not [o for o in fake.ops() if o.endswith("Media")], fake.ops()
+    assert not [o for o in fake.ops() if o.endswith("Media") or o == "imsMediaAlt"], fake.ops()
     assert res.photos == {
         "attached": 0, "deleted": 0, "reordered": False,
-        "unmanaged": 0, "hands_off": False, "on_shopify": 2,
+        "unmanaged": 0, "hands_off": False, "on_shopify": 2, "alt_updated": 0,
     }
 
 
