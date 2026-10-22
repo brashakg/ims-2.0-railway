@@ -60,6 +60,7 @@ _BACKEND = os.path.dirname(_HERE)
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+from api.services.catalog_ecom import dirty_marks  # noqa: E402
 from api.services.shopify_push import product_photo_urls  # noqa: E402
 
 # The buckets, in the order they are decided and printed.
@@ -141,7 +142,7 @@ def backfill(
         if not apply:
             continue
         ecom = dict(doc.get("ecom") or {})
-        ecom["locally_modified"] = True
+        ecom.update(dirty_marks())  # flag + fresh edit_rev (SF-04)
         ecom.setdefault("status", "DRAFT")
         products.update_one({"id": doc.get("id")}, {"$set": {"ecom": ecom}})
 
