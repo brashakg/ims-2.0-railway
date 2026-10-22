@@ -44,7 +44,7 @@ mutation imsProductCreate($input: ProductInput!) {
         pageInfo { hasNextPage endCursor }
         nodes { id title selectedOptions { name value } inventoryItem { id } media(first: 1) { nodes { id } } }
       }
-      media(first: 250) { nodes { id ... on MediaImage { image { url } } } }
+      media(first: 250) { nodes { id alt ... on MediaImage { image { url } } } }
     }
     userErrors { field message }
   }
@@ -67,7 +67,7 @@ mutation imsProductUpdate($input: ProductInput!) {
         pageInfo { hasNextPage endCursor }
         nodes { id title selectedOptions { name value } inventoryItem { id } media(first: 1) { nodes { id } } }
       }
-      media(first: 250) { nodes { id ... on MediaImage { image { url } } } }
+      media(first: 250) { nodes { id alt ... on MediaImage { image { url } } } }
     }
     userErrors { field message }
   }
@@ -169,6 +169,17 @@ mutation imsProductDeleteMedia($productId: ID!, $mediaIds: [ID!]!) {
   productDeleteMedia(productId: $productId, mediaIds: $mediaIds) {
     deletedMediaIds
     mediaUserErrors { field message code }
+  }
+}
+"""
+
+# Alt text of media already on a listing (the photo pass rewrites a stale
+# one). MediaImage ids are File ids; fileUpdate is the non-deprecated door.
+_FILE_UPDATE_ALT = """
+mutation imsMediaAlt($files: [FileUpdateInput!]!) {
+  fileUpdate(files: $files) {
+    files { id alt }
+    userErrors { field message code }
   }
 }
 """

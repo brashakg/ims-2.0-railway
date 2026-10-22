@@ -357,6 +357,11 @@ def _colour(product: Dict[str, Any]) -> str:
     return ""
 
 
+def readable_colour(product: Dict[str, Any]) -> str:
+    """The product's first readable colour name ('' for a bare code)."""
+    return _colour(product) if isinstance(product, dict) else ""
+
+
 def _brand(product: Dict[str, Any]) -> str:
     a = _attrs(product)
     return _first(product.get("brand"), a.get("brand_name"), a.get("brand"))
@@ -580,13 +585,45 @@ def _model_pieces(product: Dict[str, Any]) -> list:
     return pieces
 
 
+def model_number_line(product: Dict[str, Any]) -> str:
+    """THE model line: brand + model number (+ a model name not already in
+    it), the brand never doubled, title-cased -- "Carrera 3016/S", never
+    "Carrera carrera 3016/s carrera 807/r 55 Sunglass". No colour code, size
+    or category. The body's 'Model Number' line, the spec table's 'Model No'
+    row and the listing title all read it ('' when nothing is filled)."""
+    if not isinstance(product, dict):
+        return ""
+    line = _smart_title(" ".join(_model_pieces(product)))
+    # A model code's short letter runs are capitals ("3016/s" -> "3016/S",
+    # "rb5279" -> "RB5279"); _smart_title keeps them as typed.
+    return " ".join(
+        re.sub(r"(?<![A-Za-z])[a-z]{1,3}(?![A-Za-z])", lambda m: m.group().upper(), w)
+        if any(c.isdigit() for c in w) else w
+        for w in line.split(" ")
+    )
+
+
+def drop_doubled_brand(text: str, brand: str) -> str:
+    """``text`` with every brand written twice in a row said once ("Carrera
+    Carrera 804/S" / "Carrera CARRERA 804/S" -> "Carrera 804/S"), whole words,
+    case- and hyphen/space-insensitive ("Ray-Ban Ray Ban"). Never crosses an
+    HTML tag. For stored copy minted before the brand was stripped from the
+    model (legacy_product_name); the push sends nothing doubled."""
+    words = _WORDS_RE.findall(brand or "")
+    if not text or not words:
+        return text or ""
+    b = r"[\s\-]*".join(re.escape(w) for w in words)
+    pattern = re.compile(rf"(?<!{_WORD})({b})(?:[\s\-]+{b})+(?!{_WORD})", re.I)
+    return pattern.sub(lambda m: m.group(1), text)
+
+
 def build_model_title(product: Dict[str, Any]) -> str:
     """The listing title of a MODEL (owner 2026-10-18): Brand + Model number +
     Model name, title-cased, no colour, no size. Falls back to the category
     word when the model carries nothing else."""
     if not isinstance(product, dict):
         return ""
-    core = " ".join(_model_pieces(product))
+    core = model_number_line(product)
     if not core:
         core = resolve_category_word(product.get("category"))
     return _clamp(_smart_title(core), MAX_NAME_LEN)

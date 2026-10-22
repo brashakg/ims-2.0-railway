@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 import os
 import sys
 
@@ -28,8 +29,11 @@ from strict_fakes import StrictDB  # noqa: E402
 LIVE = {"shopify_product_id": "gid://shopify/Product/1"}
 
 
-def _sun(sku, brand, mrp, live=True, **attrs):
-    return {"id": sku, "sku": sku, "brand": brand, "category": "SUNGLASS", "mrp": mrp,
+NOW = datetime.now(timezone.utc)
+
+
+def _sun(sku, brand, mrp, live=True, created_at=NOW, **attrs):
+    return {"id": sku, "sku": sku, "brand": brand, "category": "SUNGLASS", "mrp": mrp, "created_at": created_at,
             "attributes": attrs, "ecom": dict(LIVE) if live else {}}
 
 
@@ -42,7 +46,8 @@ def _db(products=None, collections=(), armed=True):
     db.seed("catalog_products", products if products is not None else [
         _sun("A", "RAY-BAN", 2500, gender="Men", shape="Aviator"),
         _sun("B", "Ray-Ban", 7000, gender="Women", shape="Cat Eye"),
-        _sun("C", "Dolce & Gabbana", 12000, gender="Women", shape="Cat Eye"),
+        # catalogued two months ago: not a New Arrival
+        _sun("C", "Dolce & Gabbana", 12000, created_at=NOW - timedelta(days=60), gender="Women", shape="Cat Eye"),
         _sun("D", "Idee", 1500, live=False, gender="Unisex", polarization="Yes"),  # not on the website
         {**_sun("E", "Idee", 1500, gender="Kids"), "ecom": {**LIVE, "variant_of": {"sku": "A"}}},  # a colour
     ])
@@ -67,7 +72,7 @@ def test_the_set_is_derived_from_the_listings_on_the_website_and_empty_ones_are_
         "under-3000": ("Under Rs 3,000", 1),
         "5000-10000": ("Rs 5,000-10,000", 1),
         "over-10000": ("Over Rs 10,000", 1),
-        "new-arrivals": ("New Arrivals", 3),
+        "new-arrivals": ("New Arrivals", 2),  # catalogued in the last NEW_ARRIVALS_WEEKS weeks only
     }  # no Idee / unisex / kids / polarized (not live or a colour), no empty 3000-5000 band
     assert plan["mens-sunglasses"]["rules"] == [
         {"field": "product_type", "relation": "EQUALS", "value": "Sunglass"},

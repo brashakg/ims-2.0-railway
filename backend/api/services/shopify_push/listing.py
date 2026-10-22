@@ -57,6 +57,8 @@ import copy
 from typing import Any, Dict, List, Optional
 
 from ._shared import logger
+from .media import PHOTO_COLOURS
+from .product_input import LISTING_TAGS
 
 OPTION_CLASH = "OPTION_CLASH"
 OPTION_MISSING = "OPTION_MISSING"
@@ -473,8 +475,10 @@ def _model_content(db, product, lead, members, values, axes, twins=None) -> Dict
         build_model_seo_description,
         build_model_seo_title,
         build_model_title,
+        readable_colour,
         resolve_category_word,
     )
+    from ..shopify_tag_gen import listing_tags
     from .media import product_photo_urls
     from .product_input import build_product_metafields, ims_product_tags
 
@@ -536,20 +540,22 @@ def _model_content(db, product, lead, members, values, axes, twins=None) -> Dict
     if not html:
         html = build_model_description_html(category_name, lead_doc["attributes"], info, paragraph)
 
-    tags: List[str] = []
     photos: List[str] = []
     variant_photos: Dict[str, str] = {}
+    photo_colours: Dict[str, str] = {}
     for m in members:
         twin = twins[str(m["sku"])]
-        for t in ims_product_tags(twin):
-            if t not in tags:
-                tags.append(t)
         own = product_photo_urls(twin)
         if own:
             variant_photos[str(m["sku"])] = own[0]
+        colour = readable_colour(twin) or values[m["sku"]]["option_color"]
         for u in own:
             if u not in photos:
                 photos.append(u)
+                photo_colours[u] = colour
+    # ONE rule for a listing's tags: the union over its colours, 'Polarized'
+    # only when every colour is (shopify_tag_gen.listing_tags).
+    tags = listing_tags([ims_product_tags(twins[str(m["sku"])]) for m in members])
 
     # Model-level metafields carry what EVERY member shares; the rest (and
     # the maker barcode, always) are per colour/size -- variant metafields,
@@ -572,6 +578,7 @@ def _model_content(db, product, lead, members, values, axes, twins=None) -> Dict
         "description_html": html,
         "tags": tags,
         "photos": photos,
+        "photo_colours": photo_colours,
         "variant_photos": variant_photos,
         "metafields": build_product_metafields({"attributes": shared}),
         "removed_metafields": [{"namespace": "ims", "key": k} for k in removed],
@@ -607,6 +614,8 @@ def listing_view(product: Dict[str, Any], listing: Dict[str, Any]) -> Dict[str, 
     view["ecom"] = ecom
     view["title"] = view["name"] = listing["title"]
     view["images"] = list(listing["photos"])
+    view[LISTING_TAGS] = list(listing["tags"])
+    view[PHOTO_COLOURS] = dict(listing.get("photo_colours") or {})
     for legacy in ("image_url", "image"):
         view.pop(legacy, None)
     return view
