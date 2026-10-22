@@ -36,7 +36,7 @@ export function ReportsForecastPage() {
           <div className="space-y-4">
             <div className="grid grid-cols-2 tablet:grid-cols-4 gap-3">
               <div className="bg-white rounded p-3">
-                <p className="text-xs text-gray-500">Revenue</p>
+                <p className="text-xs text-gray-500">Revenue (excl. GST)</p>
                 <p className="text-lg font-bold text-green-600">₹{((expenseVsRevenue.revenue || 0) / 100000).toFixed(2)}L</p>
               </div>
               {/* Cost, profit and margin come only to the roles that may see

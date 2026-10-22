@@ -51,8 +51,9 @@ SAFETY CONTRACT
   part-way can be undone.
 - --revert --run-id X: deletes the lens lines stamped with that run id (only
   those with no lens_stock_lines row). Only when none is kept, it puts each
-  enum list back IF nobody edited it since the run (else it is left alone
-  and reported); a kept line would otherwise lose its enum values.
+  enum list back IF nobody edited it since the run AND no remaining lens
+  line uses a value the run added (else it is left alone and reported); a
+  kept or newer line would otherwise lose its enum values.
 - Plain pymongo, no app start-up (no init_db / ensure_indexes).
 
 USAGE
@@ -316,20 +317,29 @@ def revert(db, run_id: str) -> Dict[str, Any]:
         return {"deleted": deleted, "kept_with_stock": kept, "enums_restored": [],
                 "enums_edited_since": [],
                 "enums_not_restored": "lines from this run are kept (they have stock)"}
-    restored, untouched = [], []
+    restored, untouched, in_use = [], [], []
+    field_of = {enum_id: field for field, enum_id in ENUM_FIELDS}
     for enum_id, after in (b.get("enum_after") or {}).items():
         cur = db[ENUMS].find_one({"enum_id": enum_id}) or {}
         if cur.get("items") != after:
             untouched.append(enum_id)  # edited since the run - leave the owner's list alone
             continue
         prev = (b.get("enum_before") or {}).get(enum_id)
+        # What a restore takes away: deleting a list the run created falls
+        # back to the code defaults, so those are not the run's additions.
+        base = prev if prev is not None else DEFAULT_ENUM_ITEMS.get(enum_id, [])
+        run_added = [v for v in after if v not in base]
+        if run_added and enum_id in field_of and db[CATALOG].count_documents(
+                {field_of[enum_id]: {"$in": run_added}}):
+            in_use.append(enum_id)  # a line made since still uses a value the run added
+            continue
         if prev is None:
             db[ENUMS].delete_one({"enum_id": enum_id})  # the run created it
         else:
             db[ENUMS].update_one({"enum_id": enum_id}, {"$set": {"items": prev, "updated_by": ACTOR + " revert"}})
         restored.append(enum_id)
     return {"deleted": deleted, "kept_with_stock": kept, "enums_restored": restored,
-            "enums_edited_since": untouched}
+            "enums_edited_since": untouched, "enums_still_in_use": in_use}
 
 
 def main(argv: Optional[List[str]] = None) -> int:

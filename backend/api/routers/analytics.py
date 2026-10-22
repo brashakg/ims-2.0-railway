@@ -22,9 +22,15 @@ from ..dependencies import (
     validate_store_access,
     user_store_scope,
     get_store_repository,
+    get_db,
 )
 
 from ..services.cost_mask import mask_cost
+from ..services.margin_basis import (
+    cost_by_product,
+    line_unit_cost,
+    order_revenue_ex_gst,
+)
 from ..services.reorder_policy import low_stock_rows
 
 router = APIRouter(prefix="", tags=["Analytics"])
@@ -65,6 +71,9 @@ def _norm_order(o: dict) -> dict:
             or o.get("totalAmount")
             or o.get("subtotal")
         ),
+        # The same bill net of GST: what gross margin is measured on, since
+        # line cost is ex-GST (services/margin_basis).
+        "revenue_ex_gst": order_revenue_ex_gst(o),
         "status": o.get("status") or o.get("orderStatus", ""),
         "items": [
             {
@@ -78,7 +87,10 @@ def _norm_order(o: dict) -> dict:
                     or it.get("finalPrice")
                     or it.get("unitPrice")
                 ),
-                "cost_price": _safe_float(it.get("cost_price") or it.get("costPrice")),
+                # The line's own unit cost (cost_at_sale snapshot) or None;
+                # the KPI falls back to the catalogue cost as the P&L does.
+                # (A line never carries cost_price: this read 0, margin 100%.)
+                "cost_price": line_unit_cost(it),
                 "sku": it.get("sku", ""),
             }
             for it in (o.get("items") or [])
@@ -1274,16 +1286,22 @@ async def get_enterprise_kpis(
         )
 
         # ===== MARGIN METRICS =====
-        # Calculate from order line items
+        # Calculate from order line items: each line's unit cost, else the
+        # product's catalogue cost (services/margin_basis, the P&L's rule).
+        cost_map = cost_by_product(get_db())
         total_cost = sum(
-            _safe_float(item.get("quantity")) * _safe_float(item.get("cost_price"))
+            _safe_float(item.get("quantity"))
+            * (line_unit_cost(item, cost_map) or 0.0)
             for order in current_orders
             for item in order.get("items", [])
         )
         total_cogs = total_cost
-        gross_profit = total_revenue - total_cogs
+        # Ex-GST cost against ex-GST revenue: the GST inside total_revenue is
+        # owed to the government, not margin.
+        net_revenue = sum(_safe_float(o.get("revenue_ex_gst")) for o in current_orders)
+        gross_profit = net_revenue - total_cogs
         gross_margin_percent = (
-            (gross_profit / total_revenue * 100) if total_revenue > 0 else 0
+            (gross_profit / net_revenue * 100) if net_revenue > 0 else 0
         )
 
         # [RPT-3] Net margin: opex is not yet tracked per-store in the DB.
@@ -1412,6 +1430,7 @@ async def get_enterprise_kpis(
                     "gross_margin_percent": float(gross_margin_percent),
                     "net_margin_percent": net_margin_percent,
                     "gross_profit": float(gross_profit),
+                    "revenue_ex_gst": round(float(net_revenue), 2),
                     "net_profit": net_profit,
                     "net_margin_note": (
                         "Operating expenses not yet tracked per store; "
