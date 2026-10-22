@@ -577,6 +577,52 @@ def variant_barcode(
     )
 
 
+# The {sku: grams} map with_spine_weights puts on the product being pushed
+# (an in-memory key: never written back, never stored).
+SPINE_WEIGHTS = "_spine_weights"
+
+
+def with_spine_weights(
+    db, product: Dict[str, Any], variants: Optional[List[Dict[str, Any]]] = None
+) -> Dict[str, Any]:
+    """A copy of ``product`` carrying every pushed SKU's weight (grams) read
+    off its SPINE -- the ONE place weight lives (the twin holds no copy).
+    Only positive weights are kept: an unknown weight is never sent, so
+    Shopify keeps what it has. Fail-soft: a read error sends no weight (a
+    weight never blocks a press). Already resolved -> returned as is."""
+    if SPINE_WEIGHTS in (product or {}):
+        return product
+    skus = {str(product.get("sku") or "")} | {
+        str((v or {}).get("sku") or "") for v in variants or [] if isinstance(v, dict)
+    }
+    skus.discard("")
+    weights: Dict[str, float] = {}
+    try:
+        if db is not None and skus:
+            for s in db["products"].find(
+                {"sku": {"$in": sorted(skus)}}, {"_id": 0, "sku": 1, "weight": 1}
+            ):
+                w = _price_float(s.get("weight"))
+                if w > 0:
+                    weights[str(s["sku"])] = w
+    except Exception:  # noqa: BLE001 -- a weight never blocks a press
+        logger.warning("[SHOPIFY] spine weight read failed for %s", product.get("sku"), exc_info=True)
+    return {**product, SPINE_WEIGHTS: weights}
+
+
+def variant_weight_input(
+    product: Dict[str, Any], row: Optional[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    """The inventoryItem.measurement one Shopify variant carries -- its own
+    SKU's spine weight in GRAMS -- or None when no weight is known (the key is
+    then OMITTED: IMS never sends 0 over a weight Shopify holds)."""
+    sku = str((row or {}).get("sku") or product.get("sku") or "")
+    w = (product.get(SPINE_WEIGHTS) or {}).get(sku)
+    if not w:
+        return None
+    return {"weight": {"value": w, "unit": "GRAMS"}}
+
+
 def build_variant_price_inputs(
     product: Dict[str, Any], variants: List[Dict[str, Any]]
 ) -> Tuple[List[Dict[str, Any]], int]:
@@ -616,6 +662,9 @@ def build_variant_price_inputs(
         barcode = variant_barcode(product, v)
         if barcode:
             row["barcode"] = barcode
+        measurement = variant_weight_input(product, v)
+        if measurement:
+            row["inventoryItem"] = {"measurement": measurement}
         rows.append(row)
     return rows, skipped
 

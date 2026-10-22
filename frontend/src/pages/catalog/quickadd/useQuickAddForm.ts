@@ -599,14 +599,15 @@ export function useQuickAddForm() {
     try {
       const product = (await productApi.getProduct(pid)) as ProductDoc;
       setDupInfo(null);
-      // Only the typed level survives: the typed identity IS the clash.
-      enterVariantMode(product, { attributes: {}, weight: '', reorderLevel });
+      // The typed identity IS the clash, so it goes; the typed weight and
+      // level are this item's own and survive (a dropped weight was silent).
+      enterVariantMode(product, { attributes: {}, weight, reorderLevel });
     } catch {
       toast.error('Could not load the existing product for a variant.');
     } finally {
       setDupBusy(false);
     }
-  }, [dupInfo, enterVariantMode, toast, reorderLevel]);
+  }, [dupInfo, enterVariantMode, toast, weight, reorderLevel]);
 
   // Rescue popup: open the existing product (existingProductPath -- an
   // ordered draft opens here to be finished, anything else the stock ledger).

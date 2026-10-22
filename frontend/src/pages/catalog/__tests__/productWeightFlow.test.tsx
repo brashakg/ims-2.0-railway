@@ -1,0 +1,194 @@
+// ============================================================================
+// A product's weight, on every mode of the "Edit everything" page (owner
+// 2026-10-22: "she filled weight in, now she can't see it")
+// ============================================================================
+// Weight (grams) lives on the billing spine. The edit page (?edit=) reads the
+// spine as stored: category 'SUNGLASS' / 'FRAME', never the picker's 'SG' /
+// 'FR' -- left canonical, the page lost every rule keyed on the code and a
+// sunglass's Weight box left its place after Warranty. The review editor
+// (?review=) shows the weight the catalogue door serves (the spine's); the
+// duplicate popup's "new colour" keeps a weight the operator typed.
+
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { MemoryRouter } from 'react-router-dom';
+
+vi.mock('../../../context/AuthContext', () => ({
+  useAuth: () => ({
+    user: { id: 'USR-1', name: 'Cat', roles: ['ADMIN'], activeStoreId: 'BV-DHN-02', storeIds: ['BV-DHN-02'] },
+    hasRole: () => true,
+  }),
+}));
+vi.mock('../../../context/ToastContext', () => ({
+  useToast: () => ({ success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() }),
+}));
+
+const SPINE = {
+  product_id: 'P-SG',
+  sku: 'SGCARRERA1234',
+  category: 'SUNGLASS',
+  brand: 'Ray-Ban',
+  model: '1234',
+  attributes: { brand_name: 'Ray-Ban', model_no: '1234', colour_code: '807', warranty: '1 year' },
+  mrp: 9000,
+  offer_price: 9000,
+  hsn_code: '900410',
+  gst_rate: 18,
+  weight: 40,
+  images: ['/api/v1/products/image/a'],
+};
+
+const current = vi.hoisted(() => ({ product: {} as Record<string, unknown> }));
+const productSpies = vi.hoisted(() => ({}) as Record<string, ReturnType<typeof vi.fn>>);
+const known: Record<string, (...a: unknown[]) => unknown> = {
+  getCategoryRegistry: async () => { throw new Error('offline'); },
+  getBrandOptions: async () => ({ brands: [] }),
+  getProduct: async () => current.product,
+  updateProduct: async () => ({}),
+};
+vi.mock('../../../services/api/products', () => {
+  class DuplicateProductError extends Error {
+    existing: Record<string, unknown>;
+    constructor(message: string, existing: Record<string, unknown>) {
+      super(message);
+      this.existing = existing;
+    }
+  }
+  return {
+    DuplicateProductError,
+    productApi: new Proxy({}, {
+      get: (_t, key: string) => (productSpies[key] ??= vi.fn(known[key] ?? (async () => ({})))),
+    }),
+    catalogApi: { getOnlineSummary: vi.fn(async () => ({ catalog: null })) },
+  };
+});
+vi.mock('../../../services/api/client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../services/api/client')>()),
+  default: {
+    get: vi.fn(async () => ({ data: {} })),
+    put: vi.fn(async () => ({ data: {} })),
+    post: vi.fn(async () => ({ data: {} })),
+    patch: vi.fn(async () => ({ data: {} })),
+    delete: vi.fn(async () => ({ data: {} })),
+  },
+}));
+const catalogSpies = vi.hoisted(() => ({
+  get: vi.fn(),
+  update: vi.fn(),
+  promoteDryRun: vi.fn(),
+  list: vi.fn(),
+}));
+vi.mock('../../../services/api/catalog', () => ({
+  CatalogRequestError: class CatalogRequestError extends Error { status = 0; },
+  catalogProductsApi: catalogSpies,
+}));
+vi.mock('../SimilarProductsHint', () => ({ SimilarProductsHint: () => null }));
+
+import { QuickAddPage } from '../QuickAddPage';
+import { DuplicateProductError } from '../../../services/api/products';
+import { productToFormValues } from '../../../domain/catalog/productAdd/cloneMapping';
+
+const weightBox = () => screen.getByTitle('Weight (g)') as HTMLInputElement;
+const open = (url: string) =>
+  render(
+    <MemoryRouter initialEntries={[url]}>
+      <QuickAddPage />
+    </MemoryRouter>,
+  );
+
+beforeEach(() => {
+  Element.prototype.scrollIntoView = vi.fn() as unknown as typeof Element.prototype.scrollIntoView;
+  window.scrollTo = vi.fn() as unknown as typeof window.scrollTo;
+  for (const fn of Object.values(productSpies)) fn.mockClear();
+  current.product = SPINE;
+  catalogSpies.get.mockReset();
+  catalogSpies.update.mockReset().mockResolvedValue({ product: {} });
+  catalogSpies.promoteDryRun.mockReset().mockResolvedValue({ ok: true, gaps: [], duplicate_warnings: [] });
+  catalogSpies.list.mockReset().mockResolvedValue({ products: [], total: 0 });
+  window.sessionStorage.clear();
+});
+
+describe('a stored category opens as the form category', () => {
+  it.each([
+    ['SUNGLASS', 'SG'],
+    ['FRAME', 'FR'],
+    ['OPTICAL_LENS', 'LS'],
+  ])('%s opens as %s', (stored, code) => {
+    expect(productToFormValues({ ...SPINE, category: stored }).category).toBe(code);
+  });
+});
+
+describe('the edit page (?edit=) on a stored sunglass / frame', () => {
+  it.each(['SUNGLASS', 'FRAME'])('%s: the stored weight shows, inline as eyewear, and a save sends it', async (cat) => {
+    current.product = { ...SPINE, category: cat };
+    open('/catalog/add?edit=P-SG');
+    await waitFor(() => expect(weightBox().value).toBe('40'));
+    // Eyewear: Weight sits in the attribute grid; Advanced is HSN & GST only.
+    expect(screen.getByText('Advanced — HSN & GST')).toBeInTheDocument();
+    expect(screen.queryByText('Advanced — HSN, GST & weight')).toBeNull();
+
+    fireEvent.change(weightBox(), { target: { value: '42' } });
+    await userEvent.setup().click(screen.getByRole('button', { name: /Save changes/ }));
+    await waitFor(() => expect(productSpies.updateProduct).toHaveBeenCalledTimes(1));
+    const [id, body] = productSpies.updateProduct.mock.calls[0] as [string, { weight?: number }];
+    expect(id).toBe('P-SG');
+    expect(body.weight).toBe(42);
+  });
+});
+
+describe('the description generator', () => {
+  it('is given the weight, so the spec table can show it', async () => {
+    open('/catalog/add?edit=P-SG');
+    await waitFor(() => expect(weightBox().value).toBe('40'));
+    await userEvent.setup().click(screen.getByRole('button', { name: /Auto-fill with AI/ }));
+    await waitFor(() => expect(productSpies.generateDescription).toHaveBeenCalledTimes(1));
+    const [body] = productSpies.generateDescription.mock.calls[0] as [{ attributes: Record<string, string> }];
+    expect(body.attributes.weight).toBe('40 g');
+  });
+});
+
+describe('the review editor (?review=)', () => {
+  it('shows the weight the catalogue door serves and sends a changed one', async () => {
+    catalogSpies.get.mockResolvedValue({
+      id: 'CAT-1',
+      sku: 'SGCARRERA1234',
+      category: 'SUNGLASS',
+      attributes: SPINE.attributes,
+      pricing: { mrp: 9000, offer_price: 9000 },
+      hsn_code: '900410',
+      gst_rate: 18,
+      weight: 40,
+      needs_review: true,
+      updated_at: '2026-10-22T10:00:00+05:30',
+    });
+    open('/catalog/add?review=CAT-1');
+    await waitFor(() => expect(weightBox().value).toBe('40'));
+    fireEvent.change(weightBox(), { target: { value: '41' } });
+    await userEvent.setup().click(screen.getByRole('button', { name: /Save fixes/ }));
+    await waitFor(() => expect(catalogSpies.update).toHaveBeenCalledTimes(1));
+    expect(catalogSpies.update.mock.calls[0][1]).toMatchObject({ weight: 41 });
+  });
+});
+
+describe('the duplicate popup\'s "new colour"', () => {
+  it('keeps the weight the operator typed', async () => {
+    const existing = { ...SPINE, product_id: 'P-LIVE', weight: undefined, is_active: true, catalog_status: 'ACTIVE' };
+    current.product = existing;
+    productSpies.createProduct = vi.fn(async () => {
+      throw new DuplicateProductError('exists', existing);
+    });
+    open('/catalog/add');
+    const user = userEvent.setup();
+    await user.click(screen.getByText('Sunglass'));
+    fireEvent.change(screen.getByLabelText(/^Brand Name/), { target: { value: 'Ray-Ban' } });
+    fireEvent.change(screen.getByLabelText(/^Model No/), { target: { value: '1234' } });
+    fireEvent.change(screen.getByLabelText(/^Colour Code/), { target: { value: '807' } });
+    fireEvent.change(screen.getByLabelText(/^MRP/), { target: { value: '9000' } });
+    fireEvent.change(weightBox(), { target: { value: '40' } });
+    await user.click(screen.getByRole('button', { name: /Save product/ }));
+    await user.click(await screen.findByRole('button', { name: /Add a new colour\/size of this model/ }));
+    await screen.findByRole('button', { name: /Save variant/ });
+    expect(weightBox().value).toBe('40');
+  });
+});

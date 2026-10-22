@@ -198,6 +198,9 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
         const val = String(v ?? '').trim();
         if (val) filled[k] = val;
       });
+      // Weight is a top-level field, not an attribute: without this the
+      // description's Weight row (product_description.TECH_SPEC_ROWS) never filled.
+      if (String(weight ?? '').trim()) filled.weight = `${String(weight).trim()} g`;
       const res = await productApi.generateDescription({
         category: selectedCategory,
         attributes: filled,

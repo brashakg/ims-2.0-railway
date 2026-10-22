@@ -4713,8 +4713,9 @@ def mirror_update_to_catalog_twin(
         shows moved: mrp / offer_price (the variant price fallbacks),
         description (descriptionHtml), images (the photograph the push
         attaches and the publish gate reads), brand (vendor + brand_ tag),
-        category (productType), attributes (ims.* metafields + filter tags)
-        or tags, or when the re-derived display name (pim_display_name --
+        category (productType), attributes (ims.* metafields + filter tags),
+        tags or weight (the variant's shipping weight -- read off the SPINE,
+        never copied here), or when the re-derived display name (pim_display_name --
         the Shopify title) differs from the twin's. A description-only edit
         DOES queue -- the pending count must be truthful about copy changes.
         cost / tier / hsn / gst / is_active / model are in NO pushed payload:
@@ -4797,11 +4798,15 @@ def mirror_update_to_catalog_twin(
         # reads it off the twin (see _build_pim_doc).
         if "images" in patch:
             cat_patch["images"] = _spine_images({"images": patch["images"]})
+        # WEIGHT is NOT copied: it lives on the spine alone (the push reads it
+        # there, shopify_push.product_input.with_spine_weights; the catalogue
+        # screens through catalog._stamp_spine_weight). It still QUEUES: the
+        # shipping weight is on the Shopify variant.
         if mark_dirty and any(
             k in patch
             for k in (
                 "mrp", "offer_price", "description", "images",
-                "brand", "category", "attributes", "tags",
+                "brand", "category", "attributes", "tags", "weight",
             )
         ):
             cat_patch.update({f"ecom.{k}": v for k, v in dirty_marks().items()})
