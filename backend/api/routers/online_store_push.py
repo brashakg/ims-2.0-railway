@@ -395,8 +395,11 @@ async def sync_live_now(
     """The human's "Sync live products now" button (owner ruling 2026-09-06).
 
     Runs EXACTLY what the 01:00 / 09:00 IST scheduled sync runs
-    (services/shopify_live_sync.sync_live_products): every product ALREADY on
-    Shopify that was edited in IMS is re-pushed through the same engine and
+    (services/shopify_live_sync.sync_live_products): first every listing
+    still live of a Never-sell-online brand is taken down (owner ruling
+    2026-10-22; its own per-run cap, NEVER_SELL_SWEEP_CAP, outside the run
+    limit; what is left is named NEVER_SELL_STILL_LIVE); then every product
+    ALREADY on Shopify that was edited in IMS is re-pushed through the same engine and
     the same three gates (DARK => SIMULATED, no network). A dirty product that
     was never pushed is FIRST-published too (owner ruling 2026-10-20 -- it
     overturns 09-06's "first publish is a human press"), through the same

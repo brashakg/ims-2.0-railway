@@ -25,6 +25,7 @@ Conventions:
   envelopes / 503 on writes; never crash the FastAPI worker.
 """
 
+import logging
 import re
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, model_validator
@@ -39,6 +40,8 @@ from ..services.gst_rates import (
     seed_hsn_gst_master,
     invalidate_cache as invalidate_gst_cache,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(dependencies=[Depends(_require_admin_role)])
 
@@ -514,12 +517,18 @@ async def _after_never_sell_online_change(user: Dict, doc: Dict, *, retry: bool 
     blocked = doc.get("never_sell_online") is True
     db = _raw_db()
     live: List[Dict[str, Any]] = []
+    # A failed read is NOT "nothing to take down" (review of #1252): the
+    # response and the decision row say so; the save stands and the next
+    # scheduled sync takes the listings down.
+    read_error: Optional[str] = None
     if blocked:
         try:
             live = online_delist.never_sell_live_listings(db, doc.get("name") or "")
-        except Exception:  # noqa: BLE001 - the save stands; the next sync retries
-            live = []
-    if retry and not live:
+        except Exception as e:  # noqa: BLE001 - the save stands; the next sync retries
+            logger.warning("[BRAND] never-sell live-listing read failed: %s", e)
+            read_error = "live-listing read failed -- the next sync takes them down"
+    doc["live_listings_read_error"] = read_error
+    if retry and not live and read_error is None:
         doc["live_listings_take_down"] = []
         return doc
     action = (
@@ -530,6 +539,7 @@ async def _after_never_sell_online_change(user: Dict, doc: Dict, *, retry: bool 
     _audit_brand(user, doc, action, {
         "never_sell_online": blocked,
         "live_listings_to_take_down": [f["sku"] for f in live],
+        "live_listings_read_error": read_error,
     }, warn=blocked)
     taken = await online_delist.take_down_listings(db, live, actor=user) if live else []
     if taken:

@@ -94,8 +94,16 @@ LIVE_NOT_PUSHED = "LIVE_NOT_PUSHED"
 # not finished in IMS, push-locked): named in the run's failures, stays queued.
 FIRST_PUBLISH_REFUSED = "FIRST_PUBLISH_REFUSED"
 # A live listing of a Never-sell-online brand this run did not take down
-# (failed, simulated while dark, or past the run limit): named every run.
+# (failed, simulated while dark, or past the sweep cap): named every run.
 NEVER_SELL_STILL_LIVE = "NEVER_SELL_STILL_LIVE"
+# The Never-sell take-down sweep's OWN per-run cap (review of #1252), never
+# charged against max_products_per_run: a listing Shopify always refuses (e.g.
+# deleted there by hand -- "Product does not exist") is retried every run, and
+# charged to the shared limit it would starve the re-push and first-publish
+# passes forever. A run makes at most limit + min(this, limit) attempts.
+# ponytail: >25 always-refused never-sell listings would starve the sweep's own
+# tail; rotate by last attempt if that ever happens.
+NEVER_SELL_SWEEP_CAP = 25
 
 
 # ---------------------------------------------------------------------------
@@ -567,7 +575,8 @@ async def sync_live_products(
     first_publish_cap: int = PRODUCT_BATCH_CAP,
 ) -> Optional[Dict[str, Any]]:
     """First take down every listing still live of a Never-sell-online brand
-    (owner 2026-10-22; online_delist, inside the ``limit``), then
+    (owner 2026-10-22; online_delist, at most min(NEVER_SELL_SWEEP_CAP,
+    ``limit``) attempts, NOT charged against ``limit``), then
     re-push every product that is already on Shopify AND dirty, then
     FIRST-publish queued gid-less products (owner ruling 2026-10-20) through
     the Push-all door -- at most ``first_publish_cap`` real sends (default
@@ -597,8 +606,9 @@ async def sync_live_products(
     # stamped, so it is retried for real once the gates go live). Catches
     # whatever the brand save left (a failed / timed-out take-down). Runs
     # before the dirty selection so a LIVE take-down (taken_down_at) is not
-    # also re-pushed. Bounded by the run ceiling; what is left counts against
-    # nothing else and is named below.
+    # also re-pushed. Bounded by its own cap, OUTSIDE the run ceiling, so a
+    # listing Shopify always refuses can never starve the passes below; what
+    # the cap leaves is named below.
     from . import online_delist
 
     try:
@@ -607,16 +617,15 @@ async def sync_live_products(
         logger.warning("[LIVE-SYNC] never-sell read failed: %s", e)
         never_sell = []
     never_sell_rows = await online_delist.take_down_listings(
-        db, never_sell[:limit], actor={"user_id": actor}
+        db, never_sell[: min(NEVER_SELL_SWEEP_CAP, limit)], actor={"user_id": actor}
     )
-    limit_left = max(0, limit - len(never_sell_rows))
 
     dirty, taken_down_skipped = select_dirty_products(db)
     live = [d for d in dirty if (d.get("ecom") or {}).get("shopify_product_id")]
     mode = shopify_push.push_mode_status(db)["mode"]
 
     batch = await push_product_docs(
-        db, live, current_user={"user_id": actor}, max_results=limit_left
+        db, live, current_user={"user_id": actor}, max_results=limit
     )
     pushed_ok = sum(1 for r in batch["results"] if r.get("ok"))
 
@@ -637,7 +646,7 @@ async def sync_live_products(
         (d for d in dirty if not (d.get("ecom") or {}).get("shopify_product_id")),
         key=queue_order,
     )
-    room = max(0, limit_left - len(batch["results"]))
+    room = max(0, limit - len(batch["results"]))
     first = await push_product_docs(
         db,
         never,
@@ -699,7 +708,7 @@ async def sync_live_products(
         if row is not None and row["ok"] and row["mode"] == shopify_push.MODE_LIVE:
             continue  # taken down this run
         if row is None:
-            why = "not reached this run (run limit) -- still live; next run takes it down"
+            why = "not reached this run (take-down cap) -- still live; next run takes it down"
         elif not row["ok"]:
             why = "take-down failed (%s) -- still live; retried next run" % row["error"]
         else:
