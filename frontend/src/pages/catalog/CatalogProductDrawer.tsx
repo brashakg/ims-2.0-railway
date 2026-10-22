@@ -321,6 +321,8 @@ export function CatalogProductDrawer({
   const [formOffer, setFormOffer] = useState('');
   const [formHsn, setFormHsn] = useState('');
   const [formGst, setFormGst] = useState('');
+  // Weight (grams) is a top-level field, not an attribute -- Shopify ships by it.
+  const [formWeight, setFormWeight] = useState('');
   // Track explicit HSN/GST edits: an untouched pair is OMITTED from the save
   // so a category change re-derives both server-side.
   const [taxTouched, setTaxTouched] = useState(false);
@@ -347,6 +349,7 @@ export function CatalogProductDrawer({
     setFormOffer(offer === null ? '' : String(offer));
     setFormHsn(str(d.hsn_code));
     setFormGst(str(d.gst_rate));
+    setFormWeight(str(d.weight));
     setTaxTouched(false);
   }, []);
 
@@ -449,6 +452,11 @@ export function CatalogProductDrawer({
       }
     }
 
+    const weightNum = parseFloat(formWeight);
+    if (Number.isFinite(weightNum) && weightNum > 0 && String(weightNum) !== str(doc.weight)) {
+      payload.weight = weightNum;
+    }
+
     if (Object.keys(payload).length === 0) {
       toast.info('Nothing changed yet.');
       return;
@@ -469,7 +477,7 @@ export function CatalogProductDrawer({
     }
   }, [
     id, doc, attributes, formCategory, formAttrs, formMrp, formOffer, formHsn,
-    formGst, taxTouched, onUpdated, runDryRun, seedForm, toast,
+    formGst, formWeight, taxTouched, onUpdated, runDryRun, seedForm, toast,
   ]);
 
   // ---- Approve for POS ------------------------------------------------------
@@ -947,6 +955,20 @@ export function CatalogProductDrawer({
                       setTaxTouched(true);
                     }}
                     title="GST rate"
+                    className="input-field w-full"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-medium text-gray-700 mb-0.5">
+                    Weight (g)
+                  </label>
+                  <input
+                    type="number"
+                    min={0}
+                    value={formWeight}
+                    onChange={(e) => setFormWeight(e.target.value)}
+                    title="Weight (g)"
+                    placeholder="e.g. 50"
                     className="input-field w-full"
                   />
                 </div>
