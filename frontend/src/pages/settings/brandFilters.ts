@@ -104,9 +104,12 @@ export function filterBrands(brands: Brand[], f: BrandFilters): Brand[] {
 
 /** The create/edit body for a brand form. never_sell_online is sent only
  *  when the form changed it, so a stale form never reverts a SUPERADMIN's
- *  block (the server refuses a change by anyone else). */
-export function brandSavePayload(form: Partial<Brand>, original: Brand | null) {
+ *  block (the server refuses a change by anyone else) -- except that a
+ *  SUPERADMIN saving a blocked brand re-sends `true`: the server then
+ *  re-runs the take-down for any listing still live (idempotent). */
+export function brandSavePayload(form: Partial<Brand>, original: Brand | null, superadmin = false) {
   const block = form.neverSellOnline === true;
+  const retakeDown = superadmin && block && original?.neverSellOnline === true;
   return {
     name: form.brandName || '',
     code: form.brandCode || '',
@@ -114,7 +117,7 @@ export function brandSavePayload(form: Partial<Brand>, original: Brand | null) {
     tier: form.tier || 'MASS',
     status: form.isActive ? 'ACTIVE' : 'INACTIVE',
     sync_to_shopify_default: form.syncToShopifyDefault === true,
-    ...(block !== (original?.neverSellOnline === true) ? { never_sell_online: block } : {}),
+    ...(retakeDown || block !== (original?.neverSellOnline === true) ? { never_sell_online: block } : {}),
   };
 }
 

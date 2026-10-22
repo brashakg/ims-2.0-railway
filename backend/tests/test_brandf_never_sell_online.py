@@ -157,12 +157,16 @@ def test_superadmin_block_takes_down_live_listings_simulated_while_dark(brands, 
     assert out["live_listings_take_down"] == [
         {"sku": "BRANDF-BrandfLux", "ok": True, "mode": "SIMULATED", "error": None}
     ]
-    twin = db["catalog_products"].find_one({"sku": "BRANDF-BrandfLux"})
-    assert twin["ecom"]["delist_reason"] == "brand_never_sell_online"
-    assert twin["ecom"]["delist_mode"] == "SIMULATED"
-    [row] = _block_rows(audit)
-    assert row["action"] == "BRAND_NEVER_SELL_ONLINE_ON" and row["user_id"] == "brandf_super"
-    assert row["details"]["live_listings_take_down"] == out["live_listings_take_down"]
+    # A SIMULATED take-down stamps NOTHING on the twin (the Take down door's
+    # rule): it still reads as live, so it is taken down once the gates go live.
+    ecom = db["catalog_products"].find_one({"sku": "BRANDF-BrandfLux"})["ecom"]
+    for key in ("online_state", "delist_mode", "delist_reason", "taken_down_at"):
+        assert key not in ecom
+    on, done = _block_rows(audit)
+    assert on["action"] == "BRAND_NEVER_SELL_ONLINE_ON" and on["user_id"] == "brandf_super"
+    assert on["details"]["live_listings_to_take_down"] == ["BRANDF-BrandfLux"]
+    assert done["action"] == "BRAND_NEVER_SELL_ONLINE_TAKE_DOWN"
+    assert done["details"]["live_listings_take_down"] == out["live_listings_take_down"]
     # The take-down door's own chained push audit row rides too.
     assert any(r["action"] == "ONLINE_STORE_PUSH" and r["entity_id"] == "brandf_BrandfLux" for r in audit.rows)
     off = _run(ac.update_brand("brandf_b1", ac.BrandUpdate(never_sell_online=False), current_user=_SUPER))
@@ -217,7 +221,130 @@ def test_a_refused_take_down_is_reported_and_the_save_stands(brands, monkeypatch
     assert res["ok"] is False and res["mode"] == "LIVE" and "nope" in res["error"]
     ecom = db["catalog_products"].find_one({"sku": "BRANDF-BrandfLux"})["ecom"]
     assert ecom["online_state"] == "DELIST_FAILED" and not ecom.get("taken_down_at")
-    assert _block_rows(audit)[0]["details"]["live_listings_take_down"] == [res]
+    assert _block_rows(audit)[-1]["details"]["live_listings_take_down"] == [res]
+
+
+def test_the_decision_row_is_written_before_the_take_down_loop(brands, monkeypatch):
+    """Review of #1252: a request that dies mid-loop must still have left the
+    ON row (with the listings it set out to take down)."""
+    _, audit = brands
+    seen = []
+    monkeypatch.setattr(sp.product, "_live_or_reason", lambda _db: (True, None))
+
+    async def _graphql(_db, _q, _v):
+        seen.append([r["action"] for r in audit.rows])
+        return {"data": {"productUpdate": {"userErrors": []}}}
+
+    monkeypatch.setattr(sp.product, "_graphql", _graphql)
+    _run(ac.update_brand("brandf_b1", ac.BrandUpdate(never_sell_online=True), current_user=_SUPER))
+    assert seen == [["BRAND_NEVER_SELL_ONLINE_ON"]]
+
+
+def _two_live(db):
+    db["catalog_products"].insert_one({**_live("BrandfLux"), "id": "brandf_lux2", "product_id": "brandf_lux2",
+                                       "sku": "BRANDF-lux2",
+                                       "ecom": {"shopify_product_id": "gid://shopify/Product/10"}})
+
+
+def test_a_take_down_cut_off_midway_is_finished_by_a_superadmin_re_save(brands, monkeypatch):
+    """Review of #1252: the request dies after the first take-down (timeout /
+    cancel). A SUPERADMIN re-save (true -> true) takes down the rest, and a
+    further re-save is a no-op: no Shopify call, no audit row."""
+    db, audit = brands
+    _two_live(db)
+    calls = []
+    monkeypatch.setattr(sp.product, "_live_or_reason", lambda _db: (True, None))
+
+    async def _graphql(_db, _q, variables):
+        calls.append(variables["input"]["id"])
+        if len(calls) == 2:
+            raise asyncio.CancelledError()  # the request was cut off here
+        return {"data": {"productUpdate": {"userErrors": []}}}
+
+    monkeypatch.setattr(sp.product, "_graphql", _graphql)
+    with pytest.raises(asyncio.CancelledError):
+        _run(ac.update_brand("brandf_b1", ac.BrandUpdate(never_sell_online=True), current_user=_SUPER))
+    assert db["brand_masters"].find_one({"brand_id": "brandf_b1"})["never_sell_online"] is True
+    _first, second = calls
+
+    # An ADMIN's save of the blocked brand retries nothing.
+    _run(ac.update_brand("brandf_b1", ac.BrandUpdate(never_sell_online=True), current_user=_ADMIN))
+    assert len(calls) == 2
+
+    out = _run(ac.update_brand("brandf_b1", ac.BrandUpdate(never_sell_online=True), current_user=_SUPER))
+    assert calls[2:] == [second], "only the leftover is retried"
+    assert [r["ok"] for r in out["live_listings_take_down"]] == [True]
+    assert _block_rows(audit)[-2]["action"] == "BRAND_NEVER_SELL_ONLINE_RETRY"
+    rows_before = len(audit.rows)
+    again = _run(ac.update_brand("brandf_b1", ac.BrandUpdate(never_sell_online=True), current_user=_SUPER))
+    assert again["live_listings_take_down"] == [] and len(calls) == 3 and len(audit.rows) == rows_before
+
+
+def _sync(db, limit=50):
+    from api.services import shopify_live_sync as live_sync
+
+    return _run(live_sync.sync_live_products(db, trigger="manual", actor="u", limit=limit))
+
+
+def test_a_failed_take_down_is_finished_by_the_next_sync(brands, monkeypatch):
+    """Review of #1252: a refused take-down leaves the listing live; the next
+    sync names it and takes it down, though it is NOT dirty."""
+    db, _ = brands
+    _Shopify(monkeypatch, user_errors=[{"field": ["id"], "message": "nope"}])
+    out = _run(ac.update_brand("brandf_b1", ac.BrandUpdate(never_sell_online=True), current_user=_SUPER))
+    assert out["live_listings_take_down"][0]["ok"] is False
+    assert not db["catalog_products"].find_one({"sku": "BRANDF-BrandfLux"})["ecom"].get("locally_modified")
+
+    still = _sync(db)  # Shopify still says no: named, retried next run
+    assert still["never_sell_live"] == 1 and still["never_sell_taken_down"] == 0
+    [named] = [f for f in still["failures"] if f["sku"] == "BRANDF-BrandfLux"]
+    assert named["code"] == "NEVER_SELL_STILL_LIVE" and "take-down failed" in named["error"]
+
+    shop = _Shopify(monkeypatch)  # Shopify takes it now
+    run = _sync(db)
+    assert run["never_sell_live"] == 1 and run["never_sell_taken_down"] == 1
+    assert shop.calls == [{"input": {"id": "gid://shopify/Product/9", "status": "DRAFT"}}]
+    ecom = db["catalog_products"].find_one({"sku": "BRANDF-BrandfLux"})["ecom"]
+    assert ecom["status"] == "DRAFT" and ecom["taken_down_at"] and ecom["online_state"] == "DELISTED"
+    assert _sync(db)["never_sell_live"] == 0 and len(shop.calls) == 1
+
+
+def test_a_dark_sync_names_the_listing_once_and_stamps_nothing(brands, monkeypatch):
+    db, _ = brands
+
+    async def _boom(*_a, **_k):  # pragma: no cover - must never run
+        raise AssertionError("a dark sync must not call Shopify")
+
+    monkeypatch.setattr(sp.product, "_graphql", _boom)
+    _set_block(db, True)
+    db["catalog_products"].update_one({"sku": "BRANDF-BrandfLux"}, {"$set": {"ecom.locally_modified": True}})
+    run = _sync(db)
+    named = [f for f in run["failures"] if f["sku"] == "BRANDF-BrandfLux"]
+    assert [f["code"] for f in named] == ["NEVER_SELL_STILL_LIVE"], "named once, not also LIVE_NOT_PUSHED"
+    assert "writes are off" in named[0]["error"]
+    ecom = db["catalog_products"].find_one({"sku": "BRANDF-BrandfLux"})["ecom"]
+    assert "online_state" not in ecom and "taken_down_at" not in ecom
+
+
+def test_the_sync_take_down_is_bounded_by_the_run_limit(brands, monkeypatch):
+    db, _ = brands
+    _two_live(db)
+    _set_block(db, True)
+    shop = _Shopify(monkeypatch)
+    run = _sync(db, limit=1)
+    assert len(shop.calls) == 1 and run["never_sell_taken_down"] == 1 and run["limit_reached"] is True
+    [left] = [f for f in run["failures"] if f["code"] == "NEVER_SELL_STILL_LIVE"]
+    assert "run limit" in left["error"]
+
+
+def test_listing_facts_carry_the_catalog_id():
+    """The take-down resolves each live listing by its catalog id (a SKU can
+    repeat across twins): listing_facts must keep carrying it."""
+    from api.services.shopify_push.collection_registry import listing_facts
+
+    db = _db()
+    db.seed("catalog_products", [_live("BrandfOk")])
+    assert [f["id"] for f in listing_facts(db)] == ["brandf_BrandfOk"]
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +525,56 @@ def test_an_exact_spelling_wins_over_a_key_twin():
     ])
     assert load_brand_tier(db, "mont blanc") == "LUXURY"
     assert load_brand_tier(db, "Mont-Blanc") == "MASS"
+
+
+def test_key_twins_that_disagree_on_tier_are_a_gap_not_a_guess():
+    """Review of #1252 (money): no exact spelling, twins disagree -> None."""
+    from api.services.catalog_dictionary import load_brand_tier
+
+    db = _db()
+    db["brand_masters"].insert_many([
+        {"brand_id": "brandf_t1", "name": "Mont-Blanc", "is_active": True, "tier": "MASS"},
+        {"brand_id": "brandf_t2", "name": "Mont Blanc", "is_active": True, "tier": "LUXURY"},
+    ])
+    assert load_brand_tier(db, "Montblanc") is None
+    db["brand_masters"].update_one({"brand_id": "brandf_t1"}, {"$set": {"tier": "LUXURY"}})
+    assert load_brand_tier(db, "Montblanc") == "LUXURY"  # twins that agree are fine
+
+
+def test_an_inactive_exact_row_never_falls_through_to_an_active_twin():
+    from api.services.catalog_dictionary import load_brand_tier
+
+    db = _db()
+    db["brand_masters"].insert_many([
+        {"brand_id": "brandf_i1", "name": "Mont Blanc", "is_active": False, "tier": "LUXURY",
+         "sync_to_shopify_default": True},
+        {"brand_id": "brandf_i2", "name": "Montblanc", "is_active": True, "tier": "MASS",
+         "sync_to_shopify_default": True},
+    ])
+    assert load_brand_tier(db, "Mont Blanc") is None
+    assert "inactive" in brand_website_refusal(db, "Mont Blanc")
+    assert load_brand_tier(db, "Montblanc") == "MASS"
+    assert brand_website_refusal(db, "Montblanc") is None
+
+
+def test_key_twins_that_disagree_on_the_website_are_refused():
+    db = _db()
+    db["brand_masters"].insert_many([
+        {"brand_id": "brandf_w1", "name": "Mont-Blanc", "is_active": True, "sync_to_shopify_default": True},
+        {"brand_id": "brandf_w2", "name": "Mont Blanc", "is_active": True, "sync_to_shopify_default": False},
+    ])
+    assert "disagree" in brand_website_refusal(db, "Montblanc")
+    assert brand_website_refusal(db, "Mont-Blanc") is None  # the exact row decides
+
+
+def test_subbrand_options_follow_the_same_key():
+    from api.services.catalog_dictionary import load_subbrand_options
+
+    db = _db()
+    db["brand_masters"].insert_one({"brand_id": "brandf_mb", "name": "Mont Blanc", "is_active": True})
+    db.seed("subbrand_masters", [{"brand_id": "brandf_mb", "name": "Meisterstuck"}])
+    assert load_subbrand_options(db, "Montblanc") == ["Meisterstuck"]
+    assert load_subbrand_options(db, "Mont Blanc") == ["Meisterstuck"]
 
 
 def test_a_decomposed_accent_matches_the_composed_brand():

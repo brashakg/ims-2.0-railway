@@ -467,59 +467,8 @@ def _raw_db():
     return conn.db
 
 
-def _live_listings_of_brand(db, name: str) -> List[Dict[str, Any]]:
-    """{id, sku} of this brand's listings live on the website now (the
-    collection registry's own live predicate, matched by the gate's
-    brand_name_key). Fail-soft: []."""
-    try:
-        from ..services.catalog_dictionary import brand_name_key
-        from ..services.shopify_push.collection_registry import listing_facts
-
-        probe = brand_name_key(name)
-        if db is None or not probe:
-            return []
-        return [
-            {"id": f.get("id"), "sku": str(f.get("sku") or "")}
-            for f in listing_facts(db)
-            if brand_name_key(f.get("brand")) == probe
-        ]
-    except Exception:  # noqa: BLE001 - never blocks the brand save
-        return []
-
-
-async def _take_down_brand_listings(user: Dict, name: str) -> List[Dict[str, Any]]:
-    """Owner ruling 2026-10-22: blocking a brand TAKES DOWN its live listings,
-    through the ONE take-down door (online_delist.delist_if_live ->
-    shopify_push.push_product_delist: Shopify status Draft, gid and stock
-    kept, never a delete; SIMULATED with zero network while the push gates
-    are dark; each one audited and stamped on its twin). Unblocking never
-    republishes: a product comes back through the normal publish path.
-
-    Inline, like the collection block cutover: no take-down queue exists.
-    ponytail: sequential inside the request -- a brand with hundreds of live
-    listings could outlast the HTTP timeout; whatever is left stays named by
-    every sync run ("live, not pushed -- take it down"). Queue it if that bites."""
-    from ..services import online_delist
-
-    db = _raw_db()
-    out: List[Dict[str, Any]] = []
-    for f in _live_listings_of_brand(db, name):
-        res = await online_delist.delist_if_live(
-            db, {"id": f["id"], "sku": f["sku"]},
-            reason="brand_never_sell_online", actor=user,
-        ) or {}
-        ok = res.get("ok") is True
-        out.append({
-            "sku": f["sku"],
-            "ok": ok,
-            "mode": res.get("mode"),
-            "error": None if ok else (res.get("error") or "take-down failed"),
-        })
-    return out
-
-
-def _audit_never_sell_online(user: Dict, brand: Dict, blocked: bool, taken: List[Dict]) -> None:
-    """Audit row for a Never-sell-online change. Fail-soft."""
+def _audit_brand(user: Dict, brand: Dict, action: str, details: Dict, warn: bool) -> None:
+    """One chained audit row for a brand_master change. Fail-soft."""
     try:
         from ..dependencies import get_audit_repository
 
@@ -528,26 +477,64 @@ def _audit_never_sell_online(user: Dict, brand: Dict, blocked: bool, taken: List
             return
         audit.create(
             {
-                "action": "BRAND_NEVER_SELL_ONLINE_ON" if blocked else "BRAND_NEVER_SELL_ONLINE_OFF",
+                "action": action,
                 "entity_type": "brand_master",
                 "entity_id": brand.get("brand_id"),
                 "user_id": user.get("user_id"),
-                "severity": "WARNING" if blocked else "INFO",
-                "details": {
-                    "brand": brand.get("name"),
-                    "never_sell_online": blocked,
-                    "live_listings_take_down": taken,
-                },
+                "severity": "WARNING" if warn else "INFO",
+                "details": {"brand": brand.get("name"), **details},
             }
         )
     except Exception:  # noqa: BLE001
         pass
 
 
-async def _after_never_sell_online_change(user: Dict, doc: Dict) -> Dict:
+async def _after_never_sell_online_change(user: Dict, doc: Dict, *, retry: bool = False) -> Dict:
+    """Owner ruling 2026-10-22: blocking a brand TAKES DOWN its live listings,
+    through the ONE take-down door (online_delist -> shopify_push.
+    push_product_delist: Shopify Draft, gid and stock kept, never a delete;
+    SIMULATED with zero network and no twin stamp while the push gates are
+    dark). Unblocking never republishes: a product comes back through the
+    normal publish path.
+
+    The decision row (ON / OFF / RETRY, with the listings it will take down)
+    is written BEFORE the loop, so a request that dies mid-way still left it;
+    the results ride a second row after (the audit chain is append-only).
+    `retry`: a SUPERADMIN re-saving an already-blocked brand re-runs the
+    take-down for whatever is still live -- idempotent, nothing left means
+    no Shopify call and no audit row. Every scheduled sync takes the
+    leftovers down too (shopify_live_sync).
+
+    Inline, like the collection block cutover: no take-down queue exists.
+    ponytail: sequential inside the request -- a brand with hundreds of live
+    listings could outlast the HTTP timeout; a re-save or the next sync
+    finishes the rest."""
+    from ..services import online_delist
+
     blocked = doc.get("never_sell_online") is True
-    taken = await _take_down_brand_listings(user, doc.get("name") or "") if blocked else []
-    _audit_never_sell_online(user, doc, blocked, taken)
+    db = _raw_db()
+    live: List[Dict[str, Any]] = []
+    if blocked:
+        try:
+            live = online_delist.never_sell_live_listings(db, doc.get("name") or "")
+        except Exception:  # noqa: BLE001 - the save stands; the next sync retries
+            live = []
+    if retry and not live:
+        doc["live_listings_take_down"] = []
+        return doc
+    action = (
+        "BRAND_NEVER_SELL_ONLINE_RETRY" if retry
+        else "BRAND_NEVER_SELL_ONLINE_ON" if blocked
+        else "BRAND_NEVER_SELL_ONLINE_OFF"
+    )
+    _audit_brand(user, doc, action, {
+        "never_sell_online": blocked,
+        "live_listings_to_take_down": [f["sku"] for f in live],
+    }, warn=blocked)
+    taken = await online_delist.take_down_listings(db, live, actor=user) if live else []
+    if taken:
+        _audit_brand(user, doc, "BRAND_NEVER_SELL_ONLINE_TAKE_DOWN",
+                     {"live_listings_take_down": taken}, warn=not all(r["ok"] for r in taken))
     doc["live_listings_take_down"] = taken
     return doc
 
@@ -589,7 +576,15 @@ async def update_brand(
         "brand_masters", "brand_id", brand_id,
         _with_is_active(payload.model_dump(exclude_unset=True)),
     )
-    return await _after_never_sell_online_change(current_user, doc) if changed else doc
+    # A SUPERADMIN re-saving a blocked brand re-runs the take-down for
+    # anything still live (a failed / timed-out take-down; idempotent).
+    retry = (
+        not changed and was_blocked and payload.never_sell_online is True
+        and _is_superadmin(current_user)
+    )
+    if changed or retry:
+        return await _after_never_sell_online_change(current_user, doc, retry=retry)
+    return doc
 
 
 def _cascade_delete_subbrands(brand_id: str) -> int:

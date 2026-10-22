@@ -171,6 +171,7 @@ function FilterSelect({ title, value, options, onChange }: {
 
 export function BrandSection() {
   const toast = useToast();
+  const { user: authUser } = useAuth();
   const [isLoading, setIsLoading] = useState(false);
   const [brands, setBrands] = useState<Brand[]>([]);
   const [showAddBrandModal, setShowAddBrandModal] = useState(false);
@@ -212,7 +213,7 @@ export function BrandSection() {
   const handleSaveBrand = async (brandData: Partial<Brand>) => {
     try {
       setIsLoading(true);
-      const apiData = brandSavePayload(brandData, editingBrand);
+      const apiData = brandSavePayload(brandData, editingBrand, (authUser?.roles || []).includes('SUPERADMIN'));
 
       const saved = editingBrand?.id
         ? await adminBrandApi.updateBrand(editingBrand.id, apiData)
