@@ -410,7 +410,6 @@ export const KNOWN_BROKEN: ReadonlyArray<{
 }> = [
   { path: '/customers/whatsapp-inbox', rule: 'too-wide', width: 360 },
   { path: '/customers/whatsapp-inbox', rule: 'too-wide', width: 390 },
-  { path: '/finance/budgeting', rule: 'too-wide', width: 360 },
   { path: '/finance/cash-flow', rule: 'too-wide', width: 360 },
   { path: '/incentive', rule: 'too-wide', width: 360 },
   { path: '/incentive', rule: 'too-wide', width: 390 },
