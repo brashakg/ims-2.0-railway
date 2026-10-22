@@ -23,6 +23,7 @@ from ._shared import (
     router,
 )
 from .gst_base import (
+    GST_RETURN_ORDER_STATUS_FILTER,
     _get_raw_db,
     _order_is_interstate,
     _order_taxable_and_tax,
@@ -237,7 +238,8 @@ async def gst_report(
             # Datetime objects, NOT .isoformat() strings -- created_at is a
             # BSON datetime and a string comparison never matches.
             "created_at": {"$gte": from_dt, "$lte": to_dt},
-            "status": {"$nin": ["CANCELLED", "DRAFT", "cancelled", "draft", "HISTORICAL", "historical"]},
+            # THE GST-return order rule (gst_base), as GSTR-1 / GSTR-3B.
+            "status": GST_RETURN_ORDER_STATUS_FILTER,
         },
         limit=0,  # 0 -> no cap: a GST report must include every invoice.
     )

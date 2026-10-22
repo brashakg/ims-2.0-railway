@@ -77,7 +77,9 @@ from .gst_base import (  # noqa: F401  # re-exported: see _ReportsModule
     _get_raw_db,
     _order_is_interstate,
     _order_taxable_and_tax,
-    _b2cs_rate_lines,
+    _order_rate_lines,
+    GST_RETURN_ORDER_STATUS_FILTER,
+    B2CL_INVOICE_THRESHOLD,
     _normalise_period,
 )
 from .gst_itc import (  # noqa: F401  # re-exported: see _ReportsModule

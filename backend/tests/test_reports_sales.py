@@ -838,7 +838,29 @@ class TestGSTR1:
         assert body["b2cs"][0]["totalTax"] == 180.0
 
     def test_b2cl_threshold_above_2_5_lakh(self, client, auth_headers, patched_reports):
-        """Consumer invoice > ₹2.5L without GSTIN goes to B2CL."""
+        """An INTER-state consumer invoice > Rs 2.5L without GSTIN goes to B2CL."""
+        fake_db = patched_reports["db"]
+        _seed_store(fake_db)
+        _seed_customer(fake_db, customer_id="hni", name="HNI customer", state="Maharashtra")
+        _seed_order(
+            fake_db, order_id="O-BIG", store_id="BV-TEST-01",
+            grand_total=295000.0,
+            created_at=datetime(2026, 4, 18, 14, 0),
+            customer_id="hni",
+            customer_name="HNI customer",
+        )
+        fake_db.get_collection("orders").docs[-1]["taxable"] = 250000.0
+        fake_db.get_collection("orders").docs[-1]["tax"] = 45000.0
+
+        r = client.get("/api/v1/reports/gstr1?month=2026-04", headers=auth_headers)
+        body = r.json()
+        assert len(body["b2cl"]) == 1
+        assert body["b2cl"][0]["invoiceValue"] == 295000.0
+        assert body["b2cl"][0]["igst"] == 45000.0
+
+    def test_intra_state_invoice_above_2_5_lakh_is_b2cs(self, client, auth_headers, patched_reports):
+        """B2CL is inter-state only: the same invoice to a walk-in in the shop's
+        own state is B2CS (GST batch 1, 2026-10-22)."""
         fake_db = patched_reports["db"]
         _seed_store(fake_db)
         _seed_order(
@@ -851,10 +873,9 @@ class TestGSTR1:
         fake_db.get_collection("orders").docs[-1]["taxable"] = 250000.0
         fake_db.get_collection("orders").docs[-1]["tax"] = 45000.0
 
-        r = client.get("/api/v1/reports/gstr1?month=2026-04", headers=auth_headers)
-        body = r.json()
-        assert len(body["b2cl"]) == 1
-        assert body["b2cl"][0]["invoiceValue"] == 295000.0
+        body = client.get("/api/v1/reports/gstr1?month=2026-04", headers=auth_headers).json()
+        assert body["b2cl"] == []
+        assert round(sum(row["taxableValue"] for row in body["b2cs"]), 2) == 250000.0
 
     def test_cancelled_orders_excluded(self, client, auth_headers, patched_reports):
         """CANCELLED + DRAFT orders should not appear in GSTR-1."""

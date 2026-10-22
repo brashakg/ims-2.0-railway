@@ -25,11 +25,14 @@ from ._shared import (
     router,
 )
 from .gst_base import (
-    _b2cs_rate_lines,
+    B2CL_INVOICE_THRESHOLD,
+    GST_RETURN_ORDER_STATUS_FILTER,
     _get_raw_db,
     _normalise_period,
     _order_is_interstate,
+    _order_rate_lines,
     _order_taxable_and_tax,
+    _split_heads,
 )
 from .gst_itc import (
     _cn_bucket_rate,
@@ -48,12 +51,18 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
     Extracted from the `/gstr1` endpoint so both the JSON-report endpoint
     and the GSTN portal-export endpoint can share the SAME aggregation
     (no duplicated query logic). Pure-ish: reads MongoDB, returns a dict.
-    Raises HTTPException(400) only on a malformed `month`.
+    Raises HTTPException(400) on a malformed `month`; a database read failure
+    RAISES (the doors turn it into a 503 -- _gstr1_return), never a partial
+    report.
 
     Classifies invoices into:
       - B2B  : orders where the customer has a GSTIN on file
-      - B2CL : orders to consumers with invoice value > 250000
-      - B2CS : consolidated summary of remaining consumer invoices
+      - B2CL : INTER-state orders to consumers with invoice value above
+               B2CL_INVOICE_THRESHOLD (gst_base; the CA confirms the value)
+      - B2CS : consolidated summary of remaining consumer invoices, every
+               intra-state one whatever its value
+    Each B2B / B2CL row carries `rateLines`, one per GST rate on the invoice
+    (the portal's `itms[]`), from the lines' stamped tax (_order_rate_lines).
 
     Field-name fixes:
       - Reads `grand_total` (not legacy `total_amount`) and `tax_amount`
@@ -94,6 +103,9 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
     # deemed-supply bills (filled below; merged into the HSN summary instead of
     # the row-level dominant HSN so mixed 5%/18% transfers stay exact).
     transfer_hsn_lines: list = []
+    # The same per-line HSN detail of the B2B / B2CL sales (one per line and
+    # rate, _order_rate_lines), so a mixed-rate invoice is rate-exact there too.
+    sale_hsn_lines: list = []
 
     # Store header (gstin + legalName + home state for intra/inter split)
     store_gstin = ""
@@ -103,236 +115,259 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
 
     db = _get_raw_db()
     if db is not None:
-        try:
-            stores_col = db["stores"]
-            store_doc = stores_col.find_one({"store_id": active_store})
-            if store_doc:
-                store_gstin = str(store_doc.get("gstin", "") or "")
-                store_legal_name = str(
-                    store_doc.get("store_name") or store_doc.get("name", "") or ""
-                )
-                store_state = str(store_doc.get("state", "") or "")
-        except Exception:
-            pass
+        # A read failure RAISES (the doors answer 503, _gstr1_return) -- never a
+        # report short of the orders, credit notes or returns it could not read.
+        store_doc = db["stores"].find_one({"store_id": active_store})
+        if store_doc:
+            store_gstin = str(store_doc.get("gstin", "") or "")
+            store_legal_name = str(
+                store_doc.get("store_name") or store_doc.get("name", "") or ""
+            )
+            store_state = str(store_doc.get("state", "") or "")
 
-        try:
-            orders_col = db["orders"]
-            customers_col = db["customers"]
+        orders_col = db["orders"]
+        customers_col = db["customers"]
 
-            # Build a lookup: customer_id -> {gstin, name, state}
-            cust_map: dict = {}
-            try:
-                for cust in customers_col.find(
-                    {},
-                    {"customer_id": 1, "gstin": 1, "name": 1, "state": 1},
-                ):
-                    cust_map[str(cust.get("customer_id", ""))] = {
-                        "gstin": str(cust.get("gstin", "") or ""),
-                        "name": str(cust.get("name", "") or ""),
-                        "state": str(cust.get("state", "") or ""),
-                    }
-            except Exception:
-                pass
-
-            # Fetch completed orders in the date range. Filter uses real
-            # datetime objects to match BaseRepository which writes
-            # `created_at` as a Date — comparing a Date to an ISO string
-            # silently never matches (this was the original GSTR bug).
-            query = {
-                "store_id": active_store,
-                "status": {"$nin": ["CANCELLED", "DRAFT", "cancelled", "draft", "HISTORICAL", "historical"]},
-                "created_at": {"$gte": from_dt, "$lt": to_dt},
+        # Build a lookup: customer_id -> {gstin, name, state}. A dropped
+        # customer read would file a B2B sale as B2C, so it raises too.
+        cust_map: dict = {}
+        for cust in customers_col.find(
+            {},
+            {"customer_id": 1, "gstin": 1, "name": 1, "state": 1},
+        ):
+            cust_map[str(cust.get("customer_id", ""))] = {
+                "gstin": str(cust.get("gstin", "") or ""),
+                "name": str(cust.get("name", "") or ""),
+                "state": str(cust.get("state", "") or ""),
             }
 
-            for order in orders_col.find(query):
-                # A routed online order its booking HELD on the seller check
-                # (no shop named, a shop or split leg without its own state's
-                # GSTIN, a split across GSTINs) is never filed under this
-                # GSTIN until Re-map re-routes it -- nor are its credit notes
-                # (below), nor is it in GSTR-3B or Tally (the same question).
-                held = _order_held_off_returns(db, order)
-                if held:
+        # Fetch completed orders in the date range. Filter uses real
+        # datetime objects to match BaseRepository which writes
+        # `created_at` as a Date — comparing a Date to an ISO string
+        # silently never matches (this was the original GSTR bug).
+        query = {
+            "store_id": active_store,
+            "status": GST_RETURN_ORDER_STATUS_FILTER,
+            "created_at": {"$gte": from_dt, "$lt": to_dt},
+        }
+
+        for order in orders_col.find(query):
+            # A routed online order its booking HELD on the seller check
+            # (no shop named, a shop or split leg without its own state's
+            # GSTIN, a split across GSTINs) is never filed under this
+            # GSTIN until Re-map re-routes it -- nor are its credit notes
+            # (below), nor is it in GSTR-3B or Tally (the same question).
+            held = _order_held_off_returns(db, order)
+            if held:
+                validation_issues.append(
+                    {
+                        "level": "error",
+                        "invoice": order.get("invoice_number")
+                        or order.get("order_number"),
+                        "issue": "Not filed: " + held["message"],
+                    }
+                )
+                continue
+            cust_id = str(order.get("customer_id", ""))
+            cust_info = cust_map.get(cust_id, {})
+            customer_gstin = cust_info.get("gstin", "")
+            customer_state = cust_info.get("state", "") or store_state
+            customer_name = (
+                cust_info.get("name", "")
+                or order.get("customer_name", "")
+                or "Walk-in Customer"
+            )
+
+            # PRIMARY field map. Orders persist `grand_total` (what the
+            # customer pays) + `tax_amount` (total GST); there is NO
+            # top-level `taxable` / `taxable_amount` field, so the taxable
+            # value is derived as grand_total - tax_amount (with a per-line
+            # taxable_value fallback). See _order_taxable_and_tax.
+            invoice_value = float(
+                order.get("grand_total", order.get("total_amount", 0)) or 0
+            )
+            taxable_value, total_tax = _order_taxable_and_tax(order)
+
+            # Intra vs inter-state split. Online (Shopify) orders DO carry
+            # their own `interstate` flag (stamped at ingest from the
+            # delivery address) -- prefer it (OS-008); otherwise derive
+            # from store_state vs customer_state. When customer_state is
+            # empty (walk-in without state on file), assume same as store
+            # (intra).
+            is_inter_state = _order_is_interstate(
+                order, store_state, customer_state
+            )
+            items = order.get("items") or []
+            # One item row per GST rate (GSTN `itms[]`), from the tax stamped
+            # on the order lines (_order_rate_lines): a 5% frame + an 18%
+            # sunglass invoice files at both rates, never at the first line's.
+            sale_lines = _order_rate_lines(items, taxable_value, total_tax)
+            rate_map: dict = {}
+            for rate, _hsn, line_taxable, line_tax in sale_lines:
+                bucket = rate_map.setdefault(
+                    rate, {"rate": rate, "taxable": 0.0, "tax": 0.0}
+                )
+                bucket["taxable"] = round(bucket["taxable"] + line_taxable, 2)
+                bucket["tax"] = round(bucket["tax"] + line_tax, 2)
+            rate_lines = []
+            for rate in sorted(rate_map):
+                l_igst, l_cgst, l_sgst = _split_heads(
+                    rate_map[rate]["tax"], is_inter_state
+                )
+                rate_lines.append(
+                    {
+                        "rate": rate,
+                        "taxable": rate_map[rate]["taxable"],
+                        "cgst": l_cgst,
+                        "sgst": l_sgst,
+                        "igst": l_igst,
+                    }
+                )
+            igst = round(sum(rl["igst"] for rl in rate_lines), 2)
+            cgst = round(sum(rl["cgst"] for rl in rate_lines), 2)
+            sgst = round(sum(rl["sgst"] for rl in rate_lines), 2)
+
+            is_b2cl = (
+                not customer_gstin
+                and is_inter_state
+                and invoice_value > B2CL_INVOICE_THRESHOLD
+            )
+            bill_number = _gstr1_bill_number(order, validation_issues)
+            created_raw = order.get("created_at", "")
+            # BUG-104, VALUE rule (move the derived day FORWARD). This is
+            # the invoiceDate on a FILED GSTR-1 row. The month window above
+            # is already IST (ist_day_start_utc, correctly a BOUND moving
+            # BACKWARD), so an order minted 01-Jun 02:00 IST is selected
+            # into JUNE -- but str(created_at)[:10] printed 31-May on it, a
+            # date OUTSIDE the tax period it is filed in. On 1 April it
+            # printed a PRIOR-FINANCIAL-YEAR date against an IST-minted
+            # Rule 46(b) serial. Same class as the creditNoteDate fixed in
+            # _credit_note_date_ist; ist_date_str leaves a legacy ISO
+            # STRING created_at untouched by design (unknown frame), which
+            # is exactly the old behaviour for the migrated orders.
+            invoice_date = ist_date_str(created_raw) if created_raw else month + "-01"
+            # The order's OWN persisted place of supply first (an online
+            # order's delivery state -- the same record its IGST flag
+            # above comes from); the customer doc's state is a returning
+            # buyer's FIRST delivery state and filed IGST rows with the
+            # supplier's own state as the place of supply.
+            place_of_supply = (
+                order_place_of_supply(order)
+                or customer_state
+                or store_state
+                or "Unknown"
+            )
+
+            # Row-level HSN / rate: the largest line's, for the screen only.
+            # The filed figures are the per-rate `rateLines` (portal itms) and
+            # the per-line HSN summary (sale_hsn_lines below).
+            _big = max(sale_lines, key=lambda ln: ln[2])
+            hsn_code, gst_rate_dominant = _big[1], _big[0]
+
+            base_invoice = {
+                "invoiceNumber": bill_number,
+                "invoiceDate": invoice_date,
+                "customerName": customer_name,
+                "placeOfSupply": place_of_supply,
+                "invoiceValue": round(invoice_value, 2),
+                "taxableValue": round(taxable_value, 2),
+                "cgst": cgst,
+                "sgst": sgst,
+                "igst": igst,
+                "totalTax": round(total_tax, 2),
+                "hsnCode": hsn_code,
+                "gstRate": gst_rate_dominant,
+                "rateLines": rate_lines,
+            }
+
+            if customer_gstin or is_b2cl:
+                # B2B / B2CL invoices are filed one by one, so their HSN
+                # summary rows come from their own lines, per rate.
+                for rate, hsn, line_taxable, line_tax in sale_lines:
+                    l_igst, l_cgst, l_sgst = _split_heads(line_tax, is_inter_state)
+                    sale_hsn_lines.append(
+                        {
+                            "hsn": hsn,
+                            "gst_rate": rate,
+                            "taxable": line_taxable,
+                            "cgst": l_cgst,
+                            "sgst": l_sgst,
+                            "igst": l_igst,
+                        }
+                    )
+
+            if customer_gstin:
+                # B2B: registered business with GSTIN
+                b2b.append(
+                    {
+                        **base_invoice,
+                        "customerGSTIN": customer_gstin,
+                        "customerState": customer_state or store_state,
+                    }
+                )
+            elif is_b2cl:
+                # B2CL: an INTER-state consumer invoice above the threshold.
+                # An intra-state one of any value is B2CS (below).
+                b2cl.append(
+                    {
+                        **base_invoice,
+                        "customerState": customer_state or store_state,
+                    }
+                )
+                # An "out-of-state" B2CL with no customer_state is
+                # technically required to have one — flag it.
+                if not customer_state:
                     validation_issues.append(
                         {
-                            "level": "error",
-                            "invoice": order.get("invoice_number")
-                            or order.get("order_number"),
-                            "issue": "Not filed: " + held["message"],
-                        }
-                    )
-                    continue
-                cust_id = str(order.get("customer_id", ""))
-                cust_info = cust_map.get(cust_id, {})
-                customer_gstin = cust_info.get("gstin", "")
-                customer_state = cust_info.get("state", "") or store_state
-                customer_name = (
-                    cust_info.get("name", "")
-                    or order.get("customer_name", "")
-                    or "Walk-in Customer"
-                )
-
-                # PRIMARY field map. Orders persist `grand_total` (what the
-                # customer pays) + `tax_amount` (total GST); there is NO
-                # top-level `taxable` / `taxable_amount` field, so the taxable
-                # value is derived as grand_total - tax_amount (with a per-line
-                # taxable_value fallback). See _order_taxable_and_tax.
-                invoice_value = float(
-                    order.get("grand_total", order.get("total_amount", 0)) or 0
-                )
-                taxable_value, total_tax = _order_taxable_and_tax(order)
-
-                # Intra vs inter-state split. Online (Shopify) orders DO carry
-                # their own `interstate` flag (stamped at ingest from the
-                # delivery address) -- prefer it (OS-008); otherwise derive
-                # from store_state vs customer_state. When customer_state is
-                # empty (walk-in without state on file), assume same as store
-                # (intra).
-                is_inter_state = _order_is_interstate(
-                    order, store_state, customer_state
-                )
-                if is_inter_state:
-                    igst = round(total_tax, 2)
-                    cgst = 0.0
-                    sgst = 0.0
-                else:
-                    cgst = round(total_tax / 2, 2)
-                    sgst = round(total_tax / 2, 2)
-                    igst = 0.0
-
-                bill_number = _gstr1_bill_number(order, validation_issues)
-                created_raw = order.get("created_at", "")
-                # BUG-104, VALUE rule (move the derived day FORWARD). This is
-                # the invoiceDate on a FILED GSTR-1 row. The month window above
-                # is already IST (ist_day_start_utc, correctly a BOUND moving
-                # BACKWARD), so an order minted 01-Jun 02:00 IST is selected
-                # into JUNE -- but str(created_at)[:10] printed 31-May on it, a
-                # date OUTSIDE the tax period it is filed in. On 1 April it
-                # printed a PRIOR-FINANCIAL-YEAR date against an IST-minted
-                # Rule 46(b) serial. Same class as the creditNoteDate fixed in
-                # _credit_note_date_ist; ist_date_str leaves a legacy ISO
-                # STRING created_at untouched by design (unknown frame), which
-                # is exactly the old behaviour for the migrated orders.
-                invoice_date = ist_date_str(created_raw) if created_raw else month + "-01"
-                # The order's OWN persisted place of supply first (an online
-                # order's delivery state -- the same record its IGST flag
-                # above comes from); the customer doc's state is a returning
-                # buyer's FIRST delivery state and filed IGST rows with the
-                # supplier's own state as the place of supply.
-                place_of_supply = (
-                    order_place_of_supply(order)
-                    or customer_state
-                    or store_state
-                    or "Unknown"
-                )
-
-                # HSN: pull from the first line item if available; fallback
-                # to 9004 (frames/lenses default per CBIC). GSTR-1 row-level
-                # HSN is acceptable; section 12 HSN summary is computed
-                # separately below.
-                hsn_code = "9004"
-                gst_rate_dominant = 5
-                items = order.get("items") or []
-                if items:
-                    first = items[0] if isinstance(items[0], dict) else {}
-                    if first.get("hsn_code"):
-                        hsn_code = str(first.get("hsn_code"))
-                    if first.get("gst_rate") is not None:
-                        try:
-                            gst_rate_dominant = int(first.get("gst_rate"))
-                        except Exception:
-                            pass
-
-                base_invoice = {
-                    "invoiceNumber": bill_number,
-                    "invoiceDate": invoice_date,
-                    "customerName": customer_name,
-                    "placeOfSupply": place_of_supply,
-                    "invoiceValue": round(invoice_value, 2),
-                    "taxableValue": round(taxable_value, 2),
-                    "cgst": cgst,
-                    "sgst": sgst,
-                    "igst": igst,
-                    "totalTax": round(total_tax, 2),
-                    "hsnCode": hsn_code,
-                    "gstRate": gst_rate_dominant,
-                }
-
-                if customer_gstin:
-                    # B2B: registered business with GSTIN
-                    b2b.append(
-                        {
-                            **base_invoice,
-                            "customerGSTIN": customer_gstin,
-                            "customerState": customer_state or store_state,
-                        }
-                    )
-                elif invoice_value > 250000:
-                    # B2CL: large consumer invoice (> ₹2.5L)
-                    b2cl.append(
-                        {
-                            **base_invoice,
-                            "customerState": customer_state or store_state,
-                        }
-                    )
-                    # An "out-of-state" B2CL with no customer_state is
-                    # technically required to have one — flag it.
-                    if invoice_value > 250000 and not customer_state:
-                        validation_issues.append(
-                            {
-                                "level": "warn",
-                                "invoice": bill_number,
-                                "issue": "B2CL invoice missing customer state",
-                            }
-                        )
-                else:
-                    # B2CS: consolidate by (place_of_supply, gst_rate). NEW-GST-B2CS-HSN:
-                    # an invoice can mix GST rates (e.g. a 5% frame + an 18%
-                    # sunglass); split each line into the correct rate bucket
-                    # instead of lumping the whole invoice under the first line's
-                    # rate. Tax is split CGST/SGST (intra) or IGST (inter) per line.
-                    for rate, line_taxable, line_tax in _b2cs_rate_lines(
-                        items, taxable_value, total_tax
-                    ):
-                        # The portal's key: (supply type, place of supply,
-                        # rate), the place by its state CODE -- a POS row names
-                        # the state ('Jharkhand'), an online row its persisted
-                        # code ('20'); one consolidated row, never two.
-                        key = (
-                            f"{resolve_state_code(place_of_supply) or place_of_supply}"
-                            f"|{rate}|{is_inter_state}"
-                        )
-                        if key not in b2cs_map:
-                            b2cs_map[key] = {
-                                "placeOfSupply": place_of_supply,
-                                "gstRate": rate,
-                                "taxableValue": 0.0,
-                                "cgst": 0.0,
-                                "sgst": 0.0,
-                                "igst": 0.0,
-                                "totalTax": 0.0,
-                            }
-                        b2cs_map[key]["taxableValue"] += line_taxable
-                        b2cs_map[key]["totalTax"] += line_tax
-                        if is_inter_state:
-                            b2cs_map[key]["igst"] += line_tax
-                        else:
-                            b2cs_map[key]["cgst"] += round(line_tax / 2, 2)
-                            b2cs_map[key]["sgst"] += round(line_tax / 2, 2)
-
-                # Validation: B2B without GSTIN — caught by the absence
-                # of customer_gstin above. Add an explicit warning for
-                # high-value invoices missing it.
-                if invoice_value > 250000 and not customer_gstin:
-                    validation_issues.append(
-                        {
-                            "level": "info",
+                            "level": "warn",
                             "invoice": bill_number,
-                            "issue": "Invoice > ₹2.5L without customer GSTIN — confirm B2C status",
+                            "issue": "B2CL invoice missing customer state",
                         }
                     )
+            else:
+                # B2CS: consolidate by (place_of_supply, gst_rate). NEW-GST-B2CS-HSN:
+                # an invoice can mix GST rates (e.g. a 5% frame + an 18%
+                # sunglass); split each line into the correct rate bucket
+                # instead of lumping the whole invoice under the first line's
+                # rate. Tax is split CGST/SGST (intra) or IGST (inter) per line.
+                for rate, _hsn, line_taxable, line_tax in sale_lines:
+                    # The portal's key: (supply type, place of supply,
+                    # rate), the place by its state CODE -- a POS row names
+                    # the state ('Jharkhand'), an online row its persisted
+                    # code ('20'); one consolidated row, never two.
+                    key = (
+                        f"{resolve_state_code(place_of_supply) or place_of_supply}"
+                        f"|{rate}|{is_inter_state}"
+                    )
+                    if key not in b2cs_map:
+                        b2cs_map[key] = {
+                            "placeOfSupply": place_of_supply,
+                            "gstRate": rate,
+                            "taxableValue": 0.0,
+                            "cgst": 0.0,
+                            "sgst": 0.0,
+                            "igst": 0.0,
+                            "totalTax": 0.0,
+                        }
+                    l_igst, l_cgst, l_sgst = _split_heads(line_tax, is_inter_state)
+                    b2cs_map[key]["taxableValue"] += line_taxable
+                    b2cs_map[key]["totalTax"] += line_tax
+                    b2cs_map[key]["igst"] += l_igst
+                    b2cs_map[key]["cgst"] += l_cgst
+                    b2cs_map[key]["sgst"] += l_sgst
 
-        except Exception:
-            pass
+            # Validation: B2B without GSTIN — caught by the absence
+            # of customer_gstin above. Add an explicit warning for
+            # high-value invoices missing it.
+            if invoice_value > B2CL_INVOICE_THRESHOLD and not customer_gstin:
+                validation_issues.append(
+                    {
+                        "level": "info",
+                        "invoice": bill_number,
+                        "issue": f"Invoice > Rs {B2CL_INVOICE_THRESHOLD:,} without "
+                        "customer GSTIN — confirm B2C status",
+                    }
+                )
 
         # NEW-GST-TRANSFER-OUTWARD (GAP A): the sender side of inter-GSTIN
         # stock transfers. A Schedule I deemed supply to a distinct person (a
@@ -432,134 +467,132 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
 
     if db is not None:
         # Process credit notes from returns/refunds in credit_note_ledger
-        try:
-            ledger_col = db.get_collection("credit_note_ledger") or db["credit_note_ledger"]
-            if ledger_col is not None:
-                # Query credit notes issued in the period. The ledger writes
-                # created_at as an ISO STRING (legacy naive-UTC, or explicit
-                # '+00:00' since A13); the match also covers a BSON-date row.
-                # Half-open [from_dt, to_dt), the same match GSTR-3B uses.
-                ledger_query = {
-                    "store_id": active_store,
-                    "type": "ISSUED",
-                    **instant_in_window_query("created_at", from_dt, to_dt),
+        # `get_collection(...) or db[...]` here raised NotImplementedError on
+        # every real pymongo Collection (no truth value) and the swallow below
+        # it filed GSTR-1 with NO credit notes at all. A read failure now
+        # RAISES (the doors answer 503) like GSTR-3B's _credit_note_totals.
+        ledger_col = db.get_collection("credit_note_ledger")
+        if ledger_col is not None:
+            # Query credit notes issued in the period. The ledger writes
+            # created_at as an ISO STRING (legacy naive-UTC, or explicit
+            # '+00:00' since A13); the match also covers a BSON-date row.
+            # Half-open [from_dt, to_dt), the same match GSTR-3B uses.
+            ledger_query = {
+                "store_id": active_store,
+                "type": "ISSUED",
+                **instant_in_window_query("created_at", from_dt, to_dt),
+            }
+            # Allow for date stored as datetime or ISO string
+            for entry in ledger_col.find(ledger_query):
+                if not isinstance(entry, dict):
+                    continue
+                # Credit notes reduce GST liability
+                cust_id = str(entry.get("customer_id", ""))
+                cust_info = cust_map.get(cust_id, {})
+                cust_gstin = cust_info.get("gstin", "")
+                cust_state = cust_info.get("state", "") or store_state
+
+                # Tax + taxable base for the credit note. PREFER the
+                # explicit GST split stamped on the ledger row (Shopify
+                # refund + in-store CREDIT_NOTE now stamp taxable/tax --
+                # the REAL output-tax reversal). Only FALL BACK to the
+                # gross-minus-net derivation for legacy rows that predate
+                # the stamp (where net = gross - tax). Without this a
+                # fee-less credit note (gross == net) reported tax 0.
+                gross_refund = float(entry.get("gross_refund") or 0.0)
+                net_refund = float(entry.get("net_refund", entry.get("amount", 0)) or 0.0)
+                explicit_tax = entry.get("tax")
+                explicit_taxable = entry.get("taxable")
+                if explicit_tax is not None:
+                    cn_tax = round(float(explicit_tax or 0.0), 2)
+                else:
+                    cn_tax = round(gross_refund - net_refund, 2) if gross_refund > 0 else 0.0
+                if explicit_taxable is not None:
+                    cn_taxable = round(float(explicit_taxable or 0.0), 2)
+                else:
+                    cn_taxable = round(net_refund, 2)
+
+                # Legacy rows booked under the CASHIER's store (not
+                # the order's) belong to the sale store's GSTR-1 --
+                # its in-store-returns pass reports them there.
+                # Reporting them here too filed one credit note under
+                # two GSTINs.
+                _ret_doc = _ledger_row_return_doc(db, entry)
+                if _cn_foreign_store(_ret_doc, active_store):
+                    continue
+                # The refund of a sale this report refused to file
+                # (held on the seller check) is not filed either.
+                if _cn_parent_held(db, _ret_doc, _held_cache):
+                    validation_issues.append(_held_cn_issue(entry.get("ref"), _ret_doc))
+                    continue
+
+                # Split CGST/SGST vs IGST: prefer the head stamped from
+                # the PARENT order at booking time (`interstate`, bool
+                # -- online refunds carry it so the credit note reverses
+                # under the same head the sale filed under, OS-008 CDNR
+                # leg); for legacy rows without the stamp resolve via
+                # the SAME _return_interstate_flag the GSTR-3B leg and
+                # the in-store pass use (parent-order stamp first,
+                # customer state as the last fallback) so the two
+                # returns can never reverse different heads for one
+                # refund.
+                entry_interstate = entry.get("interstate")
+                if isinstance(entry_interstate, bool):
+                    is_inter = entry_interstate
+                else:
+                    is_inter = _return_interstate_flag(
+                        db,
+                        _ret_doc or {"customer_id": cust_id},
+                        store_state,
+                        _cdnr_inter_cache,
+                        fallback_state=cust_info.get("state", "") or "",
+                    )
+                if is_inter:
+                    cn_igst = round(cn_tax, 2)
+                    cn_cgst = 0.0
+                    cn_sgst = 0.0
+                else:
+                    cn_cgst = round(cn_tax / 2, 2)
+                    cn_sgst = round(cn_tax / 2, 2)
+                    cn_igst = 0.0
+
+                # The note's own number, verbatim (flagged when it
+                # breaks GSTN's rule) -- see _cdnr_note_number.
+                ref = _cdnr_note_number(entry, validation_issues)
+                cn_date = _credit_note_date_ist(
+                    entry.get("created_at")
+                ) or (month + "-01")
+
+                # Credit notes carry the items' HSN/rate. Prefer the
+                # rate stamped on the ledger row (Shopify refund +
+                # in-store credit note stamp gst_rate); a legacy row
+                # without one derives it from its own tax/taxable --
+                # NEVER a fabricated 18% that raided the wrong HSN
+                # bucket.
+                cn_hsn = "9004"
+                cn_rate = _cn_bucket_rate(
+                    entry.get("gst_rate"), cn_tax, cn_taxable
+                )
+                cn_place = cust_state or store_state or "Unknown"
+
+                cn_entry = {
+                    "refReference": ref,
+                    "creditNoteDate": cn_date,
+                    "customerId": cust_id,
+                    "customerName": cust_info.get("name", ""),
+                    "customerGSTIN": cust_gstin,
+                    "customerState": cn_place,
+                    "placeOfSupply": cn_place,
+                    "grossValue": round(gross_refund, 2),
+                    "taxableValue": cn_taxable,
+                    "cgst": cn_cgst,
+                    "sgst": cn_sgst,
+                    "igst": cn_igst,
+                    "taxValue": round(cn_tax, 2),
+                    "hsnCode": cn_hsn,
+                    "gstRate": cn_rate,
                 }
-                # Allow for date stored as datetime or ISO string
-                try:
-                    for entry in ledger_col.find(ledger_query):
-                        if not isinstance(entry, dict):
-                            continue
-                        # Credit notes reduce GST liability
-                        cust_id = str(entry.get("customer_id", ""))
-                        cust_info = cust_map.get(cust_id, {})
-                        cust_gstin = cust_info.get("gstin", "")
-                        cust_state = cust_info.get("state", "") or store_state
-
-                        # Tax + taxable base for the credit note. PREFER the
-                        # explicit GST split stamped on the ledger row (Shopify
-                        # refund + in-store CREDIT_NOTE now stamp taxable/tax --
-                        # the REAL output-tax reversal). Only FALL BACK to the
-                        # gross-minus-net derivation for legacy rows that predate
-                        # the stamp (where net = gross - tax). Without this a
-                        # fee-less credit note (gross == net) reported tax 0.
-                        gross_refund = float(entry.get("gross_refund") or 0.0)
-                        net_refund = float(entry.get("net_refund", entry.get("amount", 0)) or 0.0)
-                        explicit_tax = entry.get("tax")
-                        explicit_taxable = entry.get("taxable")
-                        if explicit_tax is not None:
-                            cn_tax = round(float(explicit_tax or 0.0), 2)
-                        else:
-                            cn_tax = round(gross_refund - net_refund, 2) if gross_refund > 0 else 0.0
-                        if explicit_taxable is not None:
-                            cn_taxable = round(float(explicit_taxable or 0.0), 2)
-                        else:
-                            cn_taxable = round(net_refund, 2)
-
-                        # Legacy rows booked under the CASHIER's store (not
-                        # the order's) belong to the sale store's GSTR-1 --
-                        # its in-store-returns pass reports them there.
-                        # Reporting them here too filed one credit note under
-                        # two GSTINs.
-                        _ret_doc = _ledger_row_return_doc(db, entry)
-                        if _cn_foreign_store(_ret_doc, active_store):
-                            continue
-                        # The refund of a sale this report refused to file
-                        # (held on the seller check) is not filed either.
-                        if _cn_parent_held(db, _ret_doc, _held_cache):
-                            validation_issues.append(_held_cn_issue(entry.get("ref"), _ret_doc))
-                            continue
-
-                        # Split CGST/SGST vs IGST: prefer the head stamped from
-                        # the PARENT order at booking time (`interstate`, bool
-                        # -- online refunds carry it so the credit note reverses
-                        # under the same head the sale filed under, OS-008 CDNR
-                        # leg); for legacy rows without the stamp resolve via
-                        # the SAME _return_interstate_flag the GSTR-3B leg and
-                        # the in-store pass use (parent-order stamp first,
-                        # customer state as the last fallback) so the two
-                        # returns can never reverse different heads for one
-                        # refund.
-                        entry_interstate = entry.get("interstate")
-                        if isinstance(entry_interstate, bool):
-                            is_inter = entry_interstate
-                        else:
-                            is_inter = _return_interstate_flag(
-                                db,
-                                _ret_doc or {"customer_id": cust_id},
-                                store_state,
-                                _cdnr_inter_cache,
-                                fallback_state=cust_info.get("state", "") or "",
-                            )
-                        if is_inter:
-                            cn_igst = round(cn_tax, 2)
-                            cn_cgst = 0.0
-                            cn_sgst = 0.0
-                        else:
-                            cn_cgst = round(cn_tax / 2, 2)
-                            cn_sgst = round(cn_tax / 2, 2)
-                            cn_igst = 0.0
-
-                        # The note's own number, verbatim (flagged when it
-                        # breaks GSTN's rule) -- see _cdnr_note_number.
-                        ref = _cdnr_note_number(entry, validation_issues)
-                        cn_date = _credit_note_date_ist(
-                            entry.get("created_at")
-                        ) or (month + "-01")
-
-                        # Credit notes carry the items' HSN/rate. Prefer the
-                        # rate stamped on the ledger row (Shopify refund +
-                        # in-store credit note stamp gst_rate); a legacy row
-                        # without one derives it from its own tax/taxable --
-                        # NEVER a fabricated 18% that raided the wrong HSN
-                        # bucket.
-                        cn_hsn = "9004"
-                        cn_rate = _cn_bucket_rate(
-                            entry.get("gst_rate"), cn_tax, cn_taxable
-                        )
-                        cn_place = cust_state or store_state or "Unknown"
-
-                        cn_entry = {
-                            "refReference": ref,
-                            "creditNoteDate": cn_date,
-                            "customerId": cust_id,
-                            "customerName": cust_info.get("name", ""),
-                            "customerGSTIN": cust_gstin,
-                            "customerState": cn_place,
-                            "placeOfSupply": cn_place,
-                            "grossValue": round(gross_refund, 2),
-                            "taxableValue": cn_taxable,
-                            "cgst": cn_cgst,
-                            "sgst": cn_sgst,
-                            "igst": cn_igst,
-                            "taxValue": round(cn_tax, 2),
-                            "hsnCode": cn_hsn,
-                            "gstRate": cn_rate,
-                        }
-                        cdnr.append(cn_entry)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                cdnr.append(cn_entry)
 
         # ------------------------------------------------------------------
         # IN-STORE RETURNS as credit notes. THE REFUND ITSELF is the taxable
@@ -578,144 +611,116 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
         # cash). It is to read the tax event from where it is already recorded:
         # `returns.gst_breakup`, stamped by the return door itself. No new tax
         # arithmetic is introduced here.
-        try:
-            returns_col = db.get_collection("returns")
-            if returns_col is not None:
-                # A return that DID mint store credit is already in `cdnr` from
-                # the ledger pass; counting it twice would over-reverse the tax,
-                # which under-declares - worse than the bug being fixed.
-                # (_cdnr_inter_cache is shared with the ledger pass above.)
-                seen_returns = set()
-                for _e in cdnr:
-                    for _f in ("refReference",):
-                        _v = str(_e.get(_f) or "")
-                        if _v:
-                            seen_returns.add(_v)
-                for _row in ledger_col.find(
-                    {"store_id": active_store, "type": "ISSUED"},
-                    {"ref": 1, "reason": 1},
-                ) if ledger_col is not None else []:
-                    for _f in ("ref", "reason"):
-                        _v = str(_row.get(_f) or "")
-                        for _tok in _v.replace(",", " ").split():
-                            if _tok.startswith("RET-"):
-                                seen_returns.add(_tok.strip(".:;"))
+        returns_col = db.get_collection("returns")
+        if returns_col is not None:
+            # A return that DID mint store credit is already in `cdnr` from
+            # the ledger pass; counting it twice would over-reverse the tax,
+            # which under-declares - worse than the bug being fixed.
+            # (_cdnr_inter_cache is shared with the ledger pass above.)
+            seen_returns = set()
+            for _e in cdnr:
+                for _f in ("refReference",):
+                    _v = str(_e.get(_f) or "")
+                    if _v:
+                        seen_returns.add(_v)
+            for _row in ledger_col.find(
+                {"store_id": active_store, "type": "ISSUED"},
+                {"ref": 1, "reason": 1},
+            ) if ledger_col is not None else []:
+                for _f in ("ref", "reason"):
+                    _v = str(_row.get(_f) or "")
+                    for _tok in _v.replace(",", " ").split():
+                        if _tok.startswith("RET-"):
+                            seen_returns.add(_tok.strip(".:;"))
 
-                for ret in returns_col.find(
+            for ret in returns_col.find(
+                {
+                    "store_id": active_store,
+                    "status": {"$in": ["COMPLETED", "completed"]},
+                }
+            ):
+                if not isinstance(ret, dict):
+                    continue
+                rid = str(ret.get("return_id") or "")
+                if rid and rid in seen_returns:
+                    continue
+                gb = ret.get("gst_breakup") or {}
+                if not isinstance(gb, dict):
+                    continue
+                r_tax = round(float(gb.get("tax") or 0.0), 2)
+                r_taxable = round(float(gb.get("taxable") or 0.0), 2)
+                if r_tax <= 0 and r_taxable <= 0:
+                    continue
+
+                # Period filter: the naive-UTC instant whatever the stored
+                # shape (BSON naive/aware, ISO string with or without an
+                # offset), half-open -- the same test GSTR-3B applies.
+                r_when = parse_event_utc_naive(ret.get("created_at"))
+                if r_when is None or not (from_dt <= r_when < to_dt):
+                    continue
+                if _cn_parent_held(db, ret, _held_cache):
+                    validation_issues.append(_held_cn_issue(rid, ret))
+                    continue
+
+                cust_id = str(ret.get("customer_id", ""))
+                cust_info = cust_map.get(cust_id, {})
+                cust_state = cust_info.get("state", "") or store_state
+                # Same resolver GSTR-3B Table 3.1(a) uses: the parent
+                # order's stamp first, the customer's state only as the
+                # fallback. Re-deriving it here is how the two returns
+                # ended up reversing different heads for one refund.
+                is_inter = _return_interstate_flag(
+                    db, ret, store_state, _cdnr_inter_cache,
+                    fallback_state=cust_info.get("state", "") or "",
+                )
+                if is_inter:
+                    r_cgst = r_sgst = 0.0
+                    r_igst = r_tax
+                else:
+                    r_cgst = round(r_tax / 2, 2)
+                    r_sgst = round(r_tax - r_cgst, 2)
+                    r_igst = 0.0
+
+                r_rate = _cn_bucket_rate(gb.get("gst_rate"), r_tax, r_taxable)
+                r_place = cust_state or store_state or "Unknown"
+
+                cdnr.append(
                     {
-                        "store_id": active_store,
-                        "status": {"$in": ["COMPLETED", "completed"]},
+                        # The return's credit-note number (its shop's C
+                        # series); a return before numbering: its id.
+                        "refReference": _cdnr_note_number(
+                            {"note_number": ret.get("credit_note_number"), "ref": rid},
+                            validation_issues,
+                        ),
+                        "creditNoteDate": (
+                            r_when[:10]
+                            if isinstance(r_when, str)
+                            else (
+                                ist_date_str(r_when)
+                                if r_when is not None
+                                else month + "-01"
+                            )
+                        ),
+                        "customerId": cust_id,
+                        "customerName": cust_info.get("name", "")
+                        or str(ret.get("customer_name", "") or ""),
+                        "customerGSTIN": cust_info.get("gstin", ""),
+                        "customerState": r_place,
+                        "placeOfSupply": r_place,
+                        "grossValue": round(float(gb.get("gross") or 0.0), 2),
+                        "taxableValue": r_taxable,
+                        "cgst": r_cgst,
+                        "sgst": r_sgst,
+                        "igst": r_igst,
+                        "taxValue": r_tax,
+                        "hsnCode": "9004",
+                        "gstRate": r_rate,
+                        "sourceReturn": rid,
                     }
-                ):
-                    if not isinstance(ret, dict):
-                        continue
-                    rid = str(ret.get("return_id") or "")
-                    if rid and rid in seen_returns:
-                        continue
-                    gb = ret.get("gst_breakup") or {}
-                    if not isinstance(gb, dict):
-                        continue
-                    r_tax = round(float(gb.get("tax") or 0.0), 2)
-                    r_taxable = round(float(gb.get("taxable") or 0.0), 2)
-                    if r_tax <= 0 and r_taxable <= 0:
-                        continue
+                )
 
-                    # Period filter: the naive-UTC instant whatever the stored
-                    # shape (BSON naive/aware, ISO string with or without an
-                    # offset), half-open -- the same test GSTR-3B applies.
-                    r_when = parse_event_utc_naive(ret.get("created_at"))
-                    if r_when is None or not (from_dt <= r_when < to_dt):
-                        continue
-                    if _cn_parent_held(db, ret, _held_cache):
-                        validation_issues.append(_held_cn_issue(rid, ret))
-                        continue
-
-                    cust_id = str(ret.get("customer_id", ""))
-                    cust_info = cust_map.get(cust_id, {})
-                    cust_state = cust_info.get("state", "") or store_state
-                    # Same resolver GSTR-3B Table 3.1(a) uses: the parent
-                    # order's stamp first, the customer's state only as the
-                    # fallback. Re-deriving it here is how the two returns
-                    # ended up reversing different heads for one refund.
-                    is_inter = _return_interstate_flag(
-                        db, ret, store_state, _cdnr_inter_cache,
-                        fallback_state=cust_info.get("state", "") or "",
-                    )
-                    if is_inter:
-                        r_cgst = r_sgst = 0.0
-                        r_igst = r_tax
-                    else:
-                        r_cgst = round(r_tax / 2, 2)
-                        r_sgst = round(r_tax - r_cgst, 2)
-                        r_igst = 0.0
-
-                    r_rate = _cn_bucket_rate(gb.get("gst_rate"), r_tax, r_taxable)
-                    r_place = cust_state or store_state or "Unknown"
-
-                    cdnr.append(
-                        {
-                            # The return's credit-note number (its shop's C
-                            # series); a return before numbering: its id.
-                            "refReference": _cdnr_note_number(
-                                {"note_number": ret.get("credit_note_number"), "ref": rid},
-                                validation_issues,
-                            ),
-                            "creditNoteDate": (
-                                r_when[:10]
-                                if isinstance(r_when, str)
-                                else (
-                                    ist_date_str(r_when)
-                                    if r_when is not None
-                                    else month + "-01"
-                                )
-                            ),
-                            "customerId": cust_id,
-                            "customerName": cust_info.get("name", "")
-                            or str(ret.get("customer_name", "") or ""),
-                            "customerGSTIN": cust_info.get("gstin", ""),
-                            "customerState": r_place,
-                            "placeOfSupply": r_place,
-                            "grossValue": round(float(gb.get("gross") or 0.0), 2),
-                            "taxableValue": r_taxable,
-                            "cgst": r_cgst,
-                            "sgst": r_sgst,
-                            "igst": r_igst,
-                            "taxValue": r_tax,
-                            "hsnCode": "9004",
-                            "gstRate": r_rate,
-                            "sourceReturn": rid,
-                        }
-                    )
-        except Exception:
-            pass
-
-    # Build HSN summary by aggregating sales and deducting credit notes
-    for inv in b2b + b2cl:
-        if not isinstance(inv, dict):
-            continue
-        if inv.get("deemedSupply"):
-            # Transfer deemed-supply rows carry PER-LINE HSN detail (a transfer
-            # can mix 5% frames with 18% sunglasses) -- merged from
-            # transfer_hsn_lines below; skipping the single row-level HSN here
-            # avoids double-counting and rate-lumping.
-            continue
-        hsn = str(inv.get("hsnCode", "9004"))
-        rate = float(inv.get("gstRate", 0))
-        key = f"{hsn}|{rate}"
-        if key not in hsn_by_rate:
-            hsn_by_rate[key] = {
-                "hsnCode": hsn,
-                "gstRate": int(rate),
-                "taxableValue": 0.0,
-                "cgst": 0.0,
-                "sgst": 0.0,
-                "igst": 0.0,
-            }
-        hsn_by_rate[key]["taxableValue"] += float(inv.get("taxableValue", 0))
-        hsn_by_rate[key]["cgst"] += float(inv.get("cgst", 0))
-        hsn_by_rate[key]["sgst"] += float(inv.get("sgst", 0))
-        hsn_by_rate[key]["igst"] += float(inv.get("igst", 0))
-
+    # Build HSN summary by aggregating sales and deducting credit notes.
+    # B2CS sales by their consolidated rate rows:
     for b2cs_row in b2cs:
         if not isinstance(b2cs_row, dict):
             continue
@@ -736,9 +741,10 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
         hsn_by_rate[key]["sgst"] += float(b2cs_row.get("sgst", 0))
         hsn_by_rate[key]["igst"] += float(b2cs_row.get("igst", 0))
 
-    # NEW-GST-TRANSFER-OUTWARD: merge the transfer deemed-supply PER-LINE HSN
-    # detail (the b2b/b2cl loop above skipped these rows).
-    for t_line in transfer_hsn_lines:
+    # B2B / B2CL sales and the transfer deemed supplies by their PER-LINE HSN
+    # detail, per rate (a 5% frame + an 18% sunglass on one invoice, or one
+    # transfer, file two HSN rows -- never one at the first line's rate).
+    for t_line in sale_hsn_lines + transfer_hsn_lines:
         if not isinstance(t_line, dict):
             continue
         hsn = str(t_line.get("hsn") or "9004")
@@ -827,8 +833,8 @@ def _gstr1_shop(store_id, current_user) -> str:
 
     shop = store_in_view(store_id, current_user, one_shop=True) or "store-001"
     db = _get_raw_db()
-    if db is None:
-        return shop
+    if db is None:  # no database is not a nil return (gstr3b._gstin_return_shop)
+        raise HTTPException(status_code=503, detail="GSTR-1 is unavailable; please retry.")
     try:
         filing = _itc_store_scope(db, shop)[2]
     except Exception as exc:  # noqa: BLE001
@@ -842,6 +848,24 @@ def _gstr1_shop(store_id, current_user) -> str:
     return shop
 
 
+def _gstr1_return(month: str, shop: str, shape=None) -> dict:
+    """GSTR-1 for the doors, by GSTR-3B's rule (gstr3b._gstin_return): a read
+    or shaping failure is a 503 telling the user to retry -- never a report
+    short of the orders, credit notes or returns it could not read, and never
+    an empty or partial portal upload file. `shape` maps the report (the
+    portal JSON door)."""
+    try:
+        data = _compute_gstr1(month, shop)
+        return shape(data) if shape else data
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("[GSTR-1] %s %s could not be read", shop, month)
+        raise HTTPException(
+            status_code=503, detail="GSTR-1 figures could not be read; please retry."
+        ) from exc
+
+
 @router.get("/gstr1")
 async def gstr1_report(
     month: str = Query(..., description="Tax period in YYYY-MM format"),
@@ -850,7 +874,7 @@ async def gstr1_report(
 ):
     """GSTR-1 report (IMS internal shape). See _compute_gstr1 for details."""
     active_store = _gstr1_shop(store_id, current_user)
-    return _compute_gstr1(month, active_store)
+    return _gstr1_return(month, active_store)
 
 
 @router.get("/gstr1/gstn-json")
@@ -879,11 +903,10 @@ async def gstr1_gstn_json(
 
     active_store = _gstr1_shop(store_id, current_user)
     period = _normalise_period(month, year)
-    data = _compute_gstr1(period, active_store)
-    try:
-        return to_gstr1_json(data, gstin=data.get("gstin", ""), period=period)
-    except Exception:
-        # Fail soft: never 500 on a shaping bug — return an empty skeleton.
-        return to_gstr1_json({}, gstin="", period=period)
+    return _gstr1_return(
+        period,
+        active_store,
+        shape=lambda data: to_gstr1_json(data, gstin=data.get("gstin", ""), period=period),
+    )
 
 

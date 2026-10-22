@@ -21,10 +21,12 @@ from ._shared import (
     router,
 )
 from .gst_base import (
+    GST_RETURN_ORDER_STATUS_FILTER,
     _get_raw_db,
     _normalise_period,
     _order_is_interstate,
     _order_taxable_and_tax,
+    _split_heads,
 )
 from .gst_itc import (
     _cn_foreign_store,
@@ -116,12 +118,6 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
                 if _tok.startswith("RET-"):
                     seen_returns.add(_tok.strip(".:;"))
 
-    def _split(tax, is_inter):
-        if is_inter:
-            return round(tax, 2), 0.0, 0.0
-        c = round(tax / 2, 2)
-        return 0.0, c, round(tax - c, 2)
-
     # ONE head-resolver state for BOTH legs (parent-order stamp first, customer
     # state as the fallback -- _return_interstate_flag). The ledger leg used to
     # hardcode intra-state for any row without a bool `interstate` stamp,
@@ -177,7 +173,7 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
                     store_state,
                     order_inter,
                 )
-            i, c, sg = _split(t, inter)
+            i, c, sg = _split_heads(t, inter)
             igst += i
             cgst += c
             sgst += sg
@@ -218,7 +214,7 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
                 continue
             if _cn_parent_held(db, ret, held):  # its sale was not filed
                 continue
-            i, c, sg = _split(
+            i, c, sg = _split_heads(
                 t, _return_interstate_flag(db, ret, store_state, order_inter)
             )
             igst += i
@@ -423,7 +419,8 @@ def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
             {
                 # Every shop this return files for (H2).
                 "store_id": {"$in": filing},
-                "status": {"$nin": ["CANCELLED", "DRAFT", "cancelled", "draft", "HISTORICAL", "historical"]},
+                # THE GST-return order rule (gst_base), GSTR-1's too.
+                "status": GST_RETURN_ORDER_STATUS_FILTER,
                 "created_at": {"$gte": from_dt, "$lt": to_dt},
             }
         ):

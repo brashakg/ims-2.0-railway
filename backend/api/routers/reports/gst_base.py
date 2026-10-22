@@ -23,6 +23,29 @@ def _get_raw_db():
     return None
 
 
+# THE rule for which orders a GST return files (GSTR-1, GSTR-3B and the GST
+# report all query with it): not an unbooked DRAFT, not a CANCELLED order, not
+# a HISTORICAL pre-IMS import (settled outside IMS books), and not an online
+# order deleted in Shopify (VOID / VOIDED, services/shopify_order_delete) --
+# a deleted order is no supply. Finance's revenue rule
+# (finance/_shared._REAL_ORDER_STATUS_FILTER) deliberately still counts VOID;
+# that is a revenue question, not this one.
+GST_RETURN_ORDER_STATUS_FILTER = {
+    "$nin": [
+        s
+        for status in ("CANCELLED", "DRAFT", "HISTORICAL", "VOID", "VOIDED")
+        for s in (status, status.lower())
+    ]
+}
+
+# B2CL (GSTR-1 Table 5): an INTER-state invoice to an unregistered buyer whose
+# invoice value is above this, in rupees. Intra-state B2C of any value is B2CS.
+# CA MUST CONFIRM THE VALUE: the limit may have been lowered to Rs 1,00,000 from
+# Aug 2024 (Notification 12/2024-Central Tax). Kept at Rs 2,50,000 until the
+# CA rules -- change it here and nowhere else.
+B2CL_INVOICE_THRESHOLD = 250000
+
+
 def _order_is_interstate(order: dict, store_state: str, customer_state: str) -> bool:
     """Inter-state (IGST) vs intra-state (CGST+SGST) for ONE order in the GST
     report family (/finance/gst report, GSTR-1, GSTR-3B).
@@ -137,30 +160,39 @@ def _order_taxable_and_tax(order: dict) -> tuple:
     return 0.0, round(total_tax, 2)
 
 
-def _b2cs_rate_lines(items, order_taxable, order_tax):
-    """NEW-GST-B2CS-HSN: split a consumer (B2CS) order's lines into
-    ``(gst_rate, taxable, tax)`` tuples, one per line, so an invoice that mixes
-    GST rates (e.g. a 5% frame + an 18% sunglass) lands in the correct per-rate
-    B2CS bucket instead of being lumped under the first line's rate.
+def _order_rate_lines(items, order_taxable, order_tax):
+    """THE rule for splitting one order's taxable value and tax by GST rate,
+    for every GSTR-1 table: the B2B / B2CL invoice item rows (one per rate,
+    GSTN `itms[]`), the B2CS buckets and the HSN summary. Returns
+    ``(gst_rate, hsn, taxable, tax)`` tuples, one per usable line, so an
+    invoice mixing a 5% frame and an 18% sunglass is filed at both rates
+    instead of being lumped under the first line's rate.
 
-    Each line's rate is ``item.gst_rate`` when present, else the canonical
-    category rate (api.services.gst_rates). Taxable is derived GST-exclusively
-    from the line gross ``item_total`` (Indian retail prices are GST-inclusive):
-    ``taxable = item_total * 100 / (100 + rate)``. When no usable line items
-    exist, fall back to a single line carrying the order-level totals so nothing
-    is dropped.
+    A line's own stamped ``gst_rate`` / ``taxable_value`` / ``tax_amount``
+    (orders._compute_per_category_gst at the till, shopify_ingest online) are
+    used as stamped -- no price is recomputed. Only a legacy line without that
+    stamp is derived from its GST-inclusive ``item_total``
+    (taxable = item_total * 100 / (100 + rate)), its rate the item's
+    ``gst_rate`` or else the category table rate (api.services.gst_rates).
+    A line's HSN is its ``hsn_code`` (9004 when blank). With no usable line,
+    one line carries the order totals at 5% / 9004 so nothing is dropped.
+
+    The lines DISTRIBUTE the invoice's taxable + tax, never change them: they
+    are scaled to the order totals (scale 1.0 when the stamps already
+    reconcile, the normal case) and any rounding paisa goes on the last line,
+    so they sum to the order's taxable and tax exactly.
     """
     from api.services.gst_rates import GST_CATEGORY_TABLE, _normalize_category
+
+    def _f(v):
+        try:
+            return float(v or 0)
+        except (TypeError, ValueError):
+            return 0.0
 
     raw = []
     for it in (items or []):
         if not isinstance(it, dict):
-            continue
-        try:
-            gross = float(it.get("item_total") or 0) or 0.0
-        except (TypeError, ValueError):
-            gross = 0.0
-        if gross <= 0:
             continue
         rate = it.get("gst_rate")
         if rate is None:
@@ -170,23 +202,40 @@ def _b2cs_rate_lines(items, order_taxable, order_tax):
             rate = int(round(float(rate)))
         except (TypeError, ValueError):
             rate = 5
-        taxable = gross * 100.0 / (100.0 + rate)
-        raw.append((rate, taxable, gross - taxable))
+        hsn = str(it.get("hsn_code") or "9004")
+        if it.get("taxable_value") is not None and it.get("tax_amount") is not None:
+            taxable, tax = _f(it.get("taxable_value")), _f(it.get("tax_amount"))
+            if taxable <= 0 and tax <= 0:
+                continue
+        else:
+            gross = _f(it.get("item_total"))
+            if gross <= 0:
+                continue
+            taxable = gross * 100.0 / (100.0 + rate)
+            tax = gross - taxable
+        raw.append((rate, hsn, taxable, tax))
 
     if not raw:
         # No usable line items -> keep the order-level totals under one bucket.
-        return [(5, round(order_taxable, 2), round(order_tax, 2))]
+        return [(5, "9004", round(order_taxable, 2), round(order_tax, 2))]
 
-    # Reconcile the per-line split back to the order-level taxable/tax: the split
-    # only DISTRIBUTES the invoice's taxable + tax across rate buckets by line, it
-    # must not change the SUM -- so the GSTR-1 totals (which add these buckets)
-    # still equal the booked invoice. Scale is 1.0 when the lines already
-    # reconcile (the normal case); it absorbs order-level rounding / cart discount.
-    sum_taxable = sum(t for _, t, _ in raw)
-    sum_tax = sum(x for _, _, x in raw)
+    sum_taxable = sum(t for _, _, t, _ in raw)
+    sum_tax = sum(x for _, _, _, x in raw)
     st = (order_taxable / sum_taxable) if sum_taxable > 0 else 1.0
     sx = (order_tax / sum_tax) if sum_tax > 0 else 1.0
-    return [(r, round(t * st, 2), round(x * sx, 2)) for r, t, x in raw]
+    lines = [[r, h, round(t * st, 2), round(x * sx, 2)] for r, h, t, x in raw]
+    lines[-1][2] = round(lines[-1][2] + round(order_taxable, 2) - round(sum(ln[2] for ln in lines), 2), 2)
+    lines[-1][3] = round(lines[-1][3] + round(order_tax, 2) - round(sum(ln[3] for ln in lines), 2), 2)
+    return [tuple(ln) for ln in lines]
+
+
+def _split_heads(tax: float, is_inter: bool) -> tuple:
+    """(igst, cgst, sgst) of one tax amount: all IGST inter-state, else halved
+    with the odd paisa on SGST so the heads always sum to the tax."""
+    if is_inter:
+        return round(tax, 2), 0.0, 0.0
+    cgst = round(tax / 2, 2)
+    return 0.0, cgst, round(tax - cgst, 2)
 
 
 def _normalise_period(month: str, year: Optional[int] = None) -> str:
