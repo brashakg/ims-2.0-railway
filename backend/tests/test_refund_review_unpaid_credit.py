@@ -27,9 +27,32 @@ os.environ.setdefault("ENVIRONMENT", "test")
 os.environ["GST_PRICING_MODE"] = "inclusive"
 os.environ["ONLINE_STORE_ID"] = "BV-ONLINE-01"
 
-from tests.strict_fakes import StrictDB  # noqa: E402
+from tests.strict_fakes import StrictCollection, StrictDB  # noqa: E402
 
 pytestmark = pytest.mark.usefixtures("gst_numbers")
+
+
+class DuplicateKeyError(Exception):
+    """Named like pymongo's, so shopify_refund._is_dup_key recognises it."""
+
+
+class _UniqueRefundColl(StrictCollection):
+    """The unique partial index on shopify_refund_id (uniq_shopify_refund_id)
+    the real collections carry: a second doc with the same string refund id
+    is refused, so a double post shows up as a test failure."""
+
+    def insert_one(self, doc):
+        rid = doc.get("shopify_refund_id")
+        if isinstance(rid, str) and any(d.get("shopify_refund_id") == rid for d in self.docs):
+            raise DuplicateKeyError("E11000 duplicate key uniq_shopify_refund_id")
+        return super().insert_one(doc)
+
+
+class _DB(StrictDB):
+    def get_collection(self, name):
+        if name in ("returns", "shopify_refund_review") and name not in self._collections:
+            self._collections[name] = _UniqueRefundColl(name)
+        return super().get_collection(name)
 
 
 class _Conn:
@@ -54,7 +77,7 @@ class _Customers:
 @pytest.fixture
 def env(monkeypatch):
     monkeypatch.delenv("SHOPIFY_REFUND_AUTO", raising=False)
-    db = StrictDB()
+    db = _DB()
     conn = _Conn(db)
     customers = _Customers(db.get_collection("customers"))
 
@@ -72,6 +95,7 @@ def env(monkeypatch):
     monkeypatch.setattr(returns_router, "get_order_repository", lambda: _OrderRepo())
     monkeypatch.setattr(deps, "get_db", lambda: conn, raising=False)
     monkeypatch.setattr(deps, "get_task_repository", lambda: None, raising=False)
+    monkeypatch.setattr(deps, "get_audit_repository", lambda: None, raising=False)
     db.get_collection("customers").insert_one(
         {"customer_id": "CUST-1", "name": "Ravi", "store_credit": 0.0})
     return db
@@ -124,8 +148,8 @@ def _payload(refund_id="700001", txns: List[Dict[str, Any]] = None, restock_type
     return p
 
 
-def _txn(amount, gateway):
-    return {"kind": "refund", "status": "success", "amount": str(amount), "gateway": gateway}
+def _txn(amount, gateway, status="success"):
+    return {"kind": "refund", "status": status, "amount": str(amount), "gateway": gateway}
 
 
 def _queue_and_confirm(db, payload):
@@ -191,7 +215,7 @@ def test_gateway_refund_gives_no_credit(env):
     _order(env)
     row, res = _queue_and_confirm(env, _payload(txns=[_txn(1000, "razorpay")]))
     assert row["credit_note"]["store_credit"] == 0.0
-    assert "Shopify already" in row["note"]
+    assert "Shopify records Rs 1000.00 already refunded" in row["note"]
     assert res["status"] == "credited"
     assert [r["delta"] for r in _ledger(env)] == [0.0]
     assert _balance(env) == (0.0, 0.0)
@@ -363,3 +387,236 @@ def test_audit_script_flags_credit_on_unpaid_and_manual_refunds():
     assert found["R1"]["credit"] == 1000.0
     assert "never paid" in found["R1"]["why"]
     assert "Shopify" in found["R3"]["why"]
+
+
+# ---------------------------------------------------------------------------
+# Review round 1 (#1261)
+# ---------------------------------------------------------------------------
+
+
+def _money_only(refund_id, amount, gateway="razorpay"):
+    """A Shopify refund that moves money with no item lines (a goodwill
+    custom amount, a shipping-only refund)."""
+    return {"id": refund_id, "order_id": "5001", "refund_line_items": [],
+            "transactions": [_txn(amount, gateway)]}
+
+
+def test_money_only_refund_is_recorded_and_counted(env):
+    """M1: Rs 400 went back to the card with no items, then an item refund
+    with no money: the credit is the Rs 600 still held, not Rs 1000."""
+    _order(env)
+    from api.services.shopify_refund import handle_shopify_refund
+
+    res = handle_shopify_refund(env, _money_only("700050", 400), topic="refunds/create")
+    assert res["status"] == "queued" and res["queue_status"] == "MONEY_ONLY"
+    row = env.get_collection("shopify_refund_review").find_one({"shopify_refund_id": "700050"})
+    assert row["order_id"] == "ord-1" and row["credit_note"]["money_back"] == 400.0
+    assert _ledger(env) == []
+    row, _ = _queue_and_confirm(env, _payload(txns=[]))
+    assert row["credit_note"]["store_credit"] == 600.0
+    assert [r["delta"] for r in _ledger(env)] == [600.0]
+    assert _balance(env) == (600.0, 600.0)
+
+
+def test_money_only_refund_replay_is_a_duplicate(env):
+    _order(env)
+    from api.services.shopify_refund import handle_shopify_refund
+
+    handle_shopify_refund(env, _money_only("700050", 400), topic="refunds/create")
+    again = handle_shopify_refund(env, _money_only("700050", 400), topic="refunds/create")
+    assert again["status"] == "duplicate"
+    assert env.get_collection("shopify_refund_review").count_documents({}) == 1
+
+
+def test_imported_history_refund_counts_as_given_back(env):
+    """Minor 1: an order-history import's RET-HIST doc (settled_externally,
+    no shopify_refunded_amount) counts its net refund as given back."""
+    _order(env)
+    env.get_collection("returns").insert_one({
+        "return_id": "RET-HIST-1", "shopify_refund_id": "1", "order_id": "ord-1",
+        "net_refund": 400.0, "settled_externally": True, "status": "COMPLETED"})
+    row, _ = _queue_and_confirm(env, _payload(txns=[]))
+    assert row["credit_note"]["store_credit"] == 600.0
+    assert [r["delta"] for r in _ledger(env)] == [600.0]
+
+
+def test_partial_money_back_credits_the_rest(env):
+    """Minor 2 (decision): Rs 400 back on the card for a Rs 1000 refund ->
+    credit is the Rs 600 rest, capped by what is still held."""
+    _order(env)
+    row, res = _queue_and_confirm(env, _payload(txns=[_txn(400, "razorpay")]))
+    assert row["status"] == "DISCREPANCY"
+    assert row["credit_note"]["store_credit"] == 600.0
+    assert "Shopify records Rs 400.00 already refunded" in row["note"]
+    assert res["status"] == "credited"
+    assert [r["delta"] for r in _ledger(env)] == [600.0]
+    assert _balance(env) == (600.0, 600.0)
+
+
+def test_partial_money_back_still_capped_by_held(env):
+    _order(env, amount_paid=500.0, payment_status="PARTIAL")
+    row, _ = _queue_and_confirm(env, _payload(txns=[_txn(400, "razorpay")]))
+    assert row["credit_note"]["store_credit"] == 100.0
+    assert [r["delta"] for r in _ledger(env)] == [100.0]
+
+
+def test_pending_refund_blocks_credit_and_is_worded_pending(env):
+    """Minor 6: a pending refund transaction is not called refunded, but it
+    still blocks credit (the money is on its way back)."""
+    _order(env)
+    row, _ = _queue_and_confirm(env, _payload(txns=[_txn(1000, "razorpay", status="pending")]))
+    assert row["credit_note"]["store_credit"] == 0.0
+    assert "Rs 1000.00 pending" in row["note"]
+    assert "already refunded" not in row["note"]
+    assert [r["delta"] for r in _ledger(env)] == [0.0]
+
+
+def test_auto_does_not_post_when_allowance_moved(env, monkeypatch):
+    """Minor 3: the credit shown at queue time changed by the post (a counter
+    return landed between): AUTO books nothing and queues it for a person."""
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    _order(env)
+    from api.services import shopify_refund as sr
+
+    real = sr._store_credit_allowance
+    calls = []
+
+    def _moving(*a, **k):
+        out = real(*a, **k)
+        if not calls:
+            env.get_collection("returns").insert_one({
+                "return_id": "RET-C", "order_id": "ord-1", "status": "COMPLETED",
+                "net_refund": 300.0})
+        calls.append(out)
+        return out
+
+    monkeypatch.setattr(sr, "_store_credit_allowance", _moving)
+    res = sr.handle_shopify_refund(env, _payload(txns=[]), topic="refunds/create")
+    assert res["status"] == "queued"
+    assert _ledger(env) == []
+    row = env.get_collection("shopify_refund_review").find_one({"shopify_refund_id": "700001"})
+    assert row["status"] == "PENDING"
+
+
+def test_auto_full_credit_still_auto_posts(env, monkeypatch):
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    _order(env)
+    from api.services.shopify_refund import handle_shopify_refund
+
+    res = handle_shopify_refund(env, _payload(txns=[]), topic="refunds/create")
+    assert res["status"] == "credited"
+    assert [r["delta"] for r in _ledger(env)] == [1000.0]
+    assert _balance(env) == (1000.0, 1000.0)
+
+
+def test_confirm_stamps_booked_credit_on_the_row(env):
+    """Minor 4: after Confirm the row shows what was booked, not the queue
+    time proposal."""
+    import asyncio
+
+    _order(env)
+    from api.routers.online_store_refund_reviews import confirm_refund_review
+    from api.services.shopify_refund import handle_shopify_refund
+
+    handle_shopify_refund(env, _payload(txns=[]), topic="refunds/create")
+    reviews = env.get_collection("shopify_refund_review")
+    review_id = reviews.find_one({"shopify_refund_id": "700001"})["review_id"]
+    # Rs 300 went back at the counter after the row was queued.
+    env.get_collection("returns").insert_one({
+        "return_id": "RET-C", "order_id": "ord-1", "status": "COMPLETED", "net_refund": 300.0})
+    asyncio.run(confirm_refund_review(review_id, current_user={
+        "user_id": "acc-1", "roles": ["ACCOUNTANT"]}))
+    row = reviews.find_one({"review_id": review_id})
+    assert row["status"] == "POSTED"
+    assert row["credit_note"]["store_credit"] == 700.0
+    assert "700.00" in row["note"]
+    assert [r["delta"] for r in _ledger(env)] == [700.0]
+
+
+def test_never_paid_credit_is_not_labelled_external(env):
+    """Minor 7: zero credit because nothing was collected is not a gateway
+    settlement."""
+    _order(env, amount_paid=0.0, payment_status="UNPAID")
+    _queue_and_confirm(env, _payload(txns=[]))
+    assert [r.get("settlement") for r in _ledger(env)] == ["NOT_COLLECTED"]
+
+
+def test_gateway_credit_is_labelled_external(env):
+    _order(env)
+    _queue_and_confirm(env, _payload(txns=[_txn(1000, "razorpay")]))
+    assert [r.get("settlement") for r in _ledger(env)] == ["EXTERNAL"]
+
+
+def test_hand_adjusted_credit_counts_as_given_back(env):
+    """Minor 8: a store-credit adjustment made by hand for this order counts."""
+    _order(env)
+    env.get_collection("credit_note_ledger").insert_one({
+        "customer_id": "CUST-1", "type": "ADJUSTED", "amount": 200.0, "delta": 200.0,
+        "ref": "ONL-5001", "entry_id": "adj-1"})
+    row, _ = _queue_and_confirm(env, _payload(txns=[]))
+    assert row["credit_note"]["store_credit"] == 800.0
+    assert [r["delta"] for r in _ledger(env)] == [200.0, 800.0]
+
+
+def test_same_refund_posted_twice_books_once(env):
+    """The unique claim index (enforced by the fake) stops a second post."""
+    _order(env)
+    from api.services.shopify_refund import post_from_review
+
+    row, first = _queue_and_confirm(env, _payload(txns=[]))
+    again = post_from_review(env, row)
+    assert first["status"] == "credited" and again["status"] == "duplicate"
+    assert [r["delta"] for r in _ledger(env)] == [1000.0]
+
+
+def test_two_refunds_confirmed_at_once_never_exceed_paid(env, monkeypatch):
+    """Two refunds of one order confirmed at the same moment: the second
+    cannot see the credit the first is booking, so it must not book on a
+    stale answer. Rs 1000 paid on a Rs 2000 order, two Rs 1000 refunds."""
+    _order(env, grand_total=2000.0, amount_paid=1000.0, payment_status="PARTIAL",
+           items=[{"item_id": "it-1", "product_id": "7001", "ims_product_id": "IMS-P-1",
+                   "shopify_line_item_id": 9001, "sku": "RB-1", "product_name": "RB",
+                   "quantity": 2, "gst_rate": 5.0, "taxable_value": 1904.76,
+                   "tax_amount": 95.24}])
+    from api.services.shopify_refund import handle_shopify_refund, post_from_review
+    import api.routers.returns as returns_router
+
+    handle_shopify_refund(env, _payload(refund_id="700001", txns=[]), topic="refunds/create")
+    handle_shopify_refund(env, _payload(refund_id="700002", txns=[]), topic="refunds/create")
+    reviews = env.get_collection("shopify_refund_review")
+    row_a = reviews.find_one({"shopify_refund_id": "700001"})
+    row_b = reviews.find_one({"shopify_refund_id": "700002"})
+    assert row_a["credit_note"]["store_credit"] == row_b["credit_note"]["store_credit"] == 1000.0
+
+    real_issue = returns_router._issue_store_credit
+    inner = []
+    raced = []
+
+    def _racing_issue(*a, **k):
+        if not raced:  # B's confirm lands while A is booking its credit
+            raced.append(True)
+            inner.append(post_from_review(env, row_b))
+        return real_issue(*a, **k)
+
+    monkeypatch.setattr(returns_router, "_issue_store_credit", _racing_issue)
+    res_a = post_from_review(env, row_a)
+    assert res_a["status"] == "credited"
+    assert inner[0]["status"] == "credit_failed"  # busy: try again
+    monkeypatch.setattr(returns_router, "_issue_store_credit", real_issue)
+    res_b = post_from_review(env, row_b)
+    assert res_b["status"] == "credited"
+    assert sorted(r["delta"] for r in _ledger(env)) == [0.0, 1000.0]
+    assert _balance(env) == (1000.0, 1000.0)
+
+
+def test_audit_script_counts_review_rows_from_before_the_fix():
+    from scripts.audit_unpaid_refund_credit import legacy_review_rows
+
+    db = StrictDB()
+    db.seed("shopify_refund_review", [
+        {"review_id": "a", "status": "PENDING", "credit_note": {"gross_refund": 1.0}},
+        {"review_id": "b", "status": "PENDING", "credit_note": {"money_back": 0.0}},
+        {"review_id": "c", "status": "POSTED", "credit_note": {"gross_refund": 1.0}},
+        {"review_id": "d", "status": "DISCREPANCY", "credit_note": {"gross_refund": 1.0}},
+    ])
+    assert legacy_review_rows(db) == 2

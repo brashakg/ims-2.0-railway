@@ -14,13 +14,17 @@ balance. This lists every such credit-note ledger row that MOVED a balance
     PARTIAL_REFUND -- a possible double refund), or
   * the order's Shopify-refund credits add up to more than was paid.
 
+It also counts the refund reviews still open that were queued before the
+fix (no record of what Shopify paid back): confirming one now gives zero
+store credit and says so, so an accountant may need to add owed credit by hand.
+
 Nothing is written. Each row needs a person: check the order, and if the
 credit was not owed, reverse it with a store-credit adjustment.
 
-  railway run --service <backend> -- .venv\\Scripts\\python.exe backend\\scripts\\audit_unpaid_refund_credit.py
+  railway run --service ims-2.0-railway '.venv\\Scripts\\python.exe' backend\\scripts\\audit_unpaid_refund_credit.py
 
-Reads MONGO_PUBLIC_URL / MONGODB_URL / MONGO_URL (never printed) and
-MONGODB_DATABASE (default ims_2_0).
+Reads MONGO_PUBLIC_URL / MONGODB_URL / MONGO_URL (never printed) and the app's
+MONGO_DATABASE (fallback MONGODB_DATABASE, default ims_2_0).
 """
 
 from __future__ import annotations
@@ -96,6 +100,16 @@ def find_suspect_credits(db) -> List[Dict[str, Any]]:
     return sorted(out, key=lambda r: str(r.get("created_at") or ""))
 
 
+# The review statuses a person can still confirm (online_store_refund_reviews).
+_OPEN = ["PENDING", "DISCREPANCY", "CREDIT_FAILED", "NO_CUSTOMER"]
+
+
+def legacy_review_rows(db) -> int:
+    """Open refund reviews queued before the fix (no credit_note.money_back) -- reads only."""
+    return db.get_collection("shopify_refund_review").count_documents(
+        {"status": {"$in": _OPEN}, "credit_note.money_back": {"$exists": False}})
+
+
 def main() -> int:
     from pymongo import MongoClient
 
@@ -105,8 +119,9 @@ def main() -> int:
         return 2
     client = MongoClient(url, serverSelectionTimeoutMS=10000)
     try:
-        db = client[os.getenv("MONGODB_DATABASE") or "ims_2_0"]
+        db = client[os.getenv("MONGO_DATABASE") or os.getenv("MONGODB_DATABASE") or "ims_2_0"]
         rows = find_suspect_credits(db)
+        legacy = legacy_review_rows(db)
     finally:
         client.close()
     print(f"store-credit rows from online refunds to check: {len(rows)}")
@@ -117,6 +132,7 @@ def main() -> int:
               f"order {r['order_number'] or r['order_id']}  customer {r['customer_id']}  "
               f"credit Rs {r['credit']:.2f}  -- {r['why']}")
     print(f"total credit to check: Rs {total:.2f}")
+    print(f"open refund reviews queued before the fix (confirm gives 0 credit): {legacy}")
     print("Nothing was changed (read-only).")
     return 0
 

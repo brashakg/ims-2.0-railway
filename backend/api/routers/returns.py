@@ -1533,6 +1533,7 @@ def _issue_store_credit(
     order_id: Optional[str] = None,
     note_number: Optional[str] = None,
     balance_delta: Optional[float] = None,
+    settlement: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Append an ISSUED credit-note ledger entry (the GSTR-1 CDNR source) and,
     by default, bump the customer's running store-credit balance.
@@ -1575,6 +1576,8 @@ def _issue_store_credit(
     ``balance_delta``: the redeemable part when it is LESS than the note (a
     Shopify refund on an order only partly paid, or never paid: 0) -- the row
     still reverses the whole `amount` for GST, the balance moves by this only.
+    ``settlement`` labels why (EXTERNAL / NOT_COLLECTED / ALREADY_RETURNED /
+    PARTIAL); default EXTERNAL at zero, PARTIAL above.
 
     Fail-LOUD on persistence: returns None (never raises) when the DB is absent
     OR the ledger insert fails, so `credit_note_issued` can never read True
@@ -1647,7 +1650,7 @@ def _issue_store_credit(
     if balance_delta is not None and round(max(0.0, float(balance_delta)), 2) < entry["delta"]:
         entry["delta"] = round(max(0.0, float(balance_delta)), 2)
         entry["balance_after"] = round(float(balance) + entry["delta"], 2)
-        entry["settlement"] = "EXTERNAL" if entry["delta"] == 0 else "PARTIAL"
+        entry["settlement"] = settlement or ("EXTERNAL" if entry["delta"] == 0 else "PARTIAL")
 
     coll = _ledger_coll()
     if coll is None:

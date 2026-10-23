@@ -331,6 +331,15 @@ async def confirm_refund_review(
         "return_id": result.get("return_id"),
         "post_result": post_status,
     }
+    if post_status == "credited":
+        # The row shows what was BOOKED (the post asks the store-credit rule
+        # again), never the queue-time proposal it replaced.
+        update["credit_note"] = {
+            **(row.get("credit_note") or {}),
+            "store_credit": result.get("store_credit"),
+            "store_credit_reason": result.get("store_credit_reason"),
+        }
+        update["note"] = f"Posted. {result.get('store_credit_reason') or ''}".strip()
     try:
         coll = db.get_collection(_REVIEW_COLLECTION)
         if coll is not None:

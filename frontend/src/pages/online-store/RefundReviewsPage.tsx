@@ -39,13 +39,15 @@ import {
 import { formatDateIST } from '../../utils/datetime';
 
 // Status presentation. PENDING/DISCREPANCY/CREDIT_FAILED/NO_CUSTOMER are open;
-// POSTED/REJECTED are resolved; UNMATCHED is awaiting its order.
+// POSTED/REJECTED are resolved; UNMATCHED is awaiting its order; MONEY_ONLY is
+// a record (Shopify paid money back with no items): nothing to confirm.
 const STATUS_META: Record<string, { label: string; chip: string }> = {
   PENDING: { label: 'Awaiting review', chip: 'bg-amber-100 text-amber-800 border-amber-200' },
   DISCREPANCY: { label: 'Amount mismatch', chip: 'bg-red-100 text-red-700 border-red-200' },
   CREDIT_FAILED: { label: 'Credit failed', chip: 'bg-red-100 text-red-700 border-red-200' },
   NO_CUSTOMER: { label: 'No customer', chip: 'bg-red-100 text-red-700 border-red-200' },
   UNMATCHED: { label: 'Order not found', chip: 'bg-gray-100 text-gray-600 border-gray-200' },
+  MONEY_ONLY: { label: 'Money only', chip: 'bg-gray-100 text-gray-600 border-gray-200' },
   POSTED: { label: 'Posted', chip: 'bg-green-100 text-green-800 border-green-200' },
   REJECTED: { label: 'Rejected', chip: 'bg-gray-100 text-gray-500 border-gray-200' },
 };
