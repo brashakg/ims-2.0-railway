@@ -117,6 +117,23 @@ HANDOVER_ROLES = POS_WRITE_ROLES + ("CASHIER", "WORKSHOP_STAFF")
 # ANY logged-in role (workshop, catalogue) could mark a bill paid. Keep the
 # policy row for /orders/{order_id}/payments in sync.
 PAYMENT_ROLES = POS_WRITE_ROLES + ("CASHIER", "OPTOMETRIST", "ACCOUNTANT")
+
+
+def refuse_if_advance_refunded(order: dict, action: str) -> None:
+    """An order whose advance was refunded (/returns/advance-refund claimed it)
+    is on its way to CANCELLED: it takes no more money and is never handed
+    over. A payment landing after the claim is refused here, so it can never
+    strand the order between the refund and the cancel."""
+    if (order or {}).get("advance_refund_id"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This order's advance was refunded through 'Refund advance and "
+                f"cancel', so it cannot {action}. Finish the cancel instead."
+            ),
+        )
+
+
 # A LOYALTY tender is a till act (the points are redeemed at the counter):
 # ACCOUNTANT records money, never points (owner 2026-10-23).
 LOYALTY_TENDER_ROLES = tuple(r for r in PAYMENT_ROLES if r != "ACCOUNTANT")

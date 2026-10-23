@@ -69,7 +69,7 @@ def _refuse_cancel_holding_money(order: Dict[str, Any], order_id: str, current_u
     if paid <= 0.01:
         return  # nothing was taken: cancel exactly as before
 
-    held = round(paid - _sum_prior_refunds(order_id), 2)
+    held = round(paid - _sum_prior_refunds(order_id, strict=True), 2)
     if held > 0.01:
         raise HTTPException(
             status_code=400,
