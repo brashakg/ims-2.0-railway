@@ -1532,6 +1532,8 @@ def _issue_store_credit(
     store_id: Optional[str] = None,
     order_id: Optional[str] = None,
     note_number: Optional[str] = None,
+    balance_delta: Optional[float] = None,
+    settlement: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Append an ISSUED credit-note ledger entry (the GSTR-1 CDNR source) and,
     by default, bump the customer's running store-credit balance.
@@ -1543,9 +1545,12 @@ def _issue_store_credit(
     BOK02/C2627/0001). A refused number is a refused note (None): never one
     filed without a legal number.
 
-    ``order_id``: the order the note reverses, stamped on the row by a door
-    whose note has no returns doc (no RET- ref) -- the GST returns find its
-    parent there (reports.gst_itc._ledger_row_return_doc).
+    ``order_id``: the order the note reverses, stamped on the row by every
+    door that knows it. A door whose note has no returns doc (no RET- ref)
+    relies on it: the GST returns find its parent there
+    (reports.gst_itc._ledger_row_return_doc; a RET- ref's doc still wins). The
+    Shopify refund rule ties a credit whose return doc is not written yet to
+    its order by it (shopify_refund._given_back_elsewhere).
 
     Store attribution (`store_id`): the credit note must be booked under the
     SAME store -- hence the same GSTIN -- the parent invoice was filed under,
@@ -1571,6 +1576,11 @@ def _issue_store_credit(
     redeemable store credit (a double benefit). `bump_balance=False` writes the
     CDNR ledger row (type ISSUED, so the GST reversal still flows into GSTR-1)
     but with a ZERO delta and leaves customer.store_credit untouched.
+    ``balance_delta``: the redeemable part when it is LESS than the note (a
+    Shopify refund on an order only partly paid, or never paid: 0) -- the row
+    still reverses the whole `amount` for GST, the balance moves by this only.
+    ``settlement`` labels why (EXTERNAL / NOT_COLLECTED / ALREADY_RETURNED /
+    PARTIAL); default EXTERNAL at zero, PARTIAL above.
 
     Fail-LOUD on persistence: returns None (never raises) when the DB is absent
     OR the ledger insert fails, so `credit_note_issued` can never read True
@@ -1639,9 +1649,11 @@ def _issue_store_credit(
     # Externally-settled (card/gateway refund): record the CDNR row but do NOT
     # add redeemable balance -> zero the delta, hold the balance, mark it.
     if not bump_balance:
-        entry["delta"] = 0.0
-        entry["balance_after"] = round(float(balance), 2)
-        entry["settlement"] = "EXTERNAL"
+        balance_delta = 0.0
+    if balance_delta is not None and round(max(0.0, float(balance_delta)), 2) < entry["delta"]:
+        entry["delta"] = round(max(0.0, float(balance_delta)), 2)
+        entry["balance_after"] = round(float(balance) + entry["delta"], 2)
+        entry["settlement"] = settlement or ("EXTERNAL" if entry["delta"] == 0 else "PARTIAL")
 
     coll = _ledger_coll()
     if coll is None:
@@ -1657,7 +1669,7 @@ def _issue_store_credit(
     # Keep the legacy customer.store_credit number in sync so the rest of the
     # app (POS redeem, customer card) sees the new balance -- unless this credit
     # was settled externally (card refund), where the balance must stay put.
-    if bump_balance and repo is not None:
+    if entry["delta"] > 0 and repo is not None:
         try:
             repo.update(customer_id, {"store_credit": entry["balance_after"]})
         except Exception:  # noqa: BLE001
@@ -3764,6 +3776,9 @@ async def create_return(
             # sale was filed under, not the counter it was processed at.
             store_id=store_id,
             note_number=credit_note_number,
+            # Ties the credit to its order before this return's doc lands
+            # (shopify_refund._given_back_elsewhere reads it).
+            order_id=resolved_order_id,
         )
         if entry is None:
             # Release the qty claim so the return stays retryable, then say so.

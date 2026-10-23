@@ -279,6 +279,23 @@ class TestReturnsOverRefund:
         assert out["return_id"].startswith("RET-")
         assert len(returns_ctx["returns_coll"].docs) == 1
 
+    async def test_store_credit_return_ties_its_credit_to_the_order(
+        self, returns_ctx, monkeypatch
+    ):
+        # The counter door stamps the order on its credit's ledger row, so the
+        # Shopify refund rule counts the credit before this return's doc lands
+        # (shopify_refund._given_back_elsewhere, #1261).
+        calls = []
+
+        def _spy(customer_id, amount, *a, **k):
+            calls.append(k)
+            return {"entry_id": "e-1", "type": "ISSUED", "amount": amount, "delta": amount}
+
+        monkeypatch.setattr(returns_module, "_issue_store_credit", _spy)
+        await returns_module.create_return(
+            _ret_body(return_type="CREDIT_NOTE"), current_user=_cashier())
+        assert [k.get("order_id") for k in calls] == ["ORD-1"]
+
     async def test_cumulative_across_two_calls_second_rejected(self, returns_ctx):
         # qty 2 line; first return 1 (ok), second return 2 -> only 1 left -> 400.
         returns_ctx["order_repo"]._order["items"][0]["quantity"] = 2

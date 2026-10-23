@@ -1049,9 +1049,10 @@ def test_refund_ims_missed_is_queued_for_the_accountant_once(swept):
 def test_a_refund_with_no_ims_line_is_settled_not_churned(swept):
     """A shipping-only / goodwill refund (refund_line_items empty, the money in
     transactions[] + order_adjustments[]) is a routine Shopify refund. The
-    refund handler answers skipped:no_mappable_refund_lines -- nothing for IMS
-    to credit -- so the sweep settles it: not a failure (which would mask the
-    order's real syncs), not re-raised hourly; the order's own facts land."""
+    refund handler books nothing for it and records the money as a MONEY_ONLY
+    review row (queued) -- so the sweep settles it: not a failure (which would
+    mask the order's real syncs), not re-raised hourly; the order's own facts
+    land."""
     _book(swept, 30024)
     goodwill = {
         "id": 700424,
@@ -1073,11 +1074,12 @@ def test_a_refund_with_no_ims_line_is_settled_not_churned(swept):
     assert _doc(swept, 30024)["payment_status"] == "PARTIAL_REFUND"
     row = swept["inbox"].find_one({"_id": f"pull:30024:{UPDATED}:refunds/create:700424"})
     assert row["handler_error"] is None
-    # The handler writes no row for this verdict, so the pre-filter asks it
-    # again each hour (a read-only call); a handler-side review row for
-    # lines-less refunds is the upgrade path.
-    assert swept["refund_calls"] == ["700424", "700424"]
-    assert swept["review"].count_documents({}) == 0
+    # The money moved, so the handler records it as a MONEY_ONLY review row
+    # (nothing booked; the store-credit rule counts it as given back) and the
+    # next hour's pre-filter finds it processed -- asked once, not hourly.
+    assert swept["refund_calls"] == ["700424"]
+    rows = list(swept["review"].find({}))
+    assert [(r["status"], r["credit_note"]["money_back"]) for r in rows] == [("MONEY_ONLY", 99.0)]
 
 
 # ---------------------------------------------------------------------------
