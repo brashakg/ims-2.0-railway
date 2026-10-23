@@ -252,7 +252,7 @@ export async function submitPosOrder(
         loyaltyWarning =
           `Loyalty redeem failed${why ? ` (${why})` : ''} — points were NOT debited, and ` +
           `₹${Math.round(pendingLoyalty.rupeeValue).toLocaleString('en-IN')} is still due on the order. ` +
-          `Collect it another way, or re-apply the points from the Orders screen.`;
+          `Collect it another way.`;
       }
       store.clearPendingLoyaltyRedeem();
     }
@@ -293,8 +293,8 @@ export async function submitPosOrder(
         // recorded against it later. But it is no longer SILENT: money taken
         // at the counter that never reached the order is exactly what a
         // day-end blind count cannot explain. (For a LOYALTY leg the points
-        // ARE burned and the REDEEM ledger row is linked to this order_id,
-        // so staff can record the tender from the Orders screen.)
+        // ARE burned and the REDEEM ledger row is linked to this order_id;
+        // the server keeps that burn unclaimed for a later LOYALTY tender.)
         const why = serverReason(e);
         unrecordedPayments.push(
           `${leg.method} ₹${Math.round(leg.amount).toLocaleString('en-IN')}${why ? ` (${why})` : ''}`,
@@ -309,7 +309,12 @@ export async function submitPosOrder(
     if (unrecordedPayments.length) {
       warningParts.push(
         `Order saved, but ${unrecordedPayments.join(' and ')} did NOT record against it. `
-          + `Add the payment from the Orders screen before closing the till.`,
+          + `Add the payment from the Orders screen before closing the till.`
+          // The Orders screen takes cash / card / UPI / bank only: a loyalty
+          // leg cannot be added there, so say what IS true.
+          + (unrecordedPayments.some((u) => u.startsWith('LOYALTY'))
+            ? ` Loyalty points cannot be added there - ask an admin; the redeemed points stay reserved for this bill.`
+            : ''),
       );
     }
     if (loyaltyWarning) warningParts.push(loyaltyWarning);
