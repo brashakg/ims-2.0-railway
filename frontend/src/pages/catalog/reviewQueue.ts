@@ -95,8 +95,8 @@ export function clearReviewQueue(key = REVIEW_QUEUE_KEY): void {
 
 /** Drop an id from the stash (approved / vanished) keeping offset+total
  *  honest. Returns the updated stash, or null when none existed. */
-export function removeFromReviewQueue(id: string): ReviewQueueStash | null {
-  const stash = readReviewQueue();
+export function removeFromReviewQueue(id: string, key = REVIEW_QUEUE_KEY): ReviewQueueStash | null {
+  const stash = readReviewQueue(key);
   if (!stash) return null;
   const at = stash.ids.indexOf(id);
   if (at === -1) return stash;
@@ -107,7 +107,7 @@ export function removeFromReviewQueue(id: string): ReviewQueueStash | null {
     index: Math.min(stash.index, Math.max(0, ids.length - 1)),
     total: stash.total !== undefined ? Math.max(0, stash.total - 1) : undefined,
   };
-  writeReviewQueue(next);
+  writeReviewQueue(next, key);
   return next;
 }
 

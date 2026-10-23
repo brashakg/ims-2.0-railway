@@ -83,7 +83,7 @@ vi.mock('../../../constants/gstRuntime', () => ({
 }));
 
 import { QuickAddPage } from '../QuickAddPage';
-import { EDIT_QUEUE_KEY, writeReviewQueue } from '../reviewQueue';
+import { EDIT_QUEUE_KEY, readReviewQueue, writeReviewQueue } from '../reviewQueue';
 
 function Where() {
   const l = useLocation();
@@ -127,7 +127,7 @@ beforeEach(() => {
 describe('Save & next from the Catalog list', () => {
   it('saves, then opens the next product of the same list; shows Item N of M', async () => {
     stashQueue(['P-A', 'P-B', 'P-C'], 120);
-    renderAt('/catalog/add?edit=P-B');
+    renderAt('/catalog/add?edit=P-B&from=list');
     expect(await screen.findByTestId('edit-queue-pos')).toHaveTextContent('Item 52 of 120');
     fireEvent.click(screen.getByRole('button', { name: /Save & next/ }));
     await waitFor(() => expect(productSpies.updateProduct).toHaveBeenCalledTimes(1));
@@ -139,7 +139,7 @@ describe('Save & next from the Catalog list', () => {
 
   it('Ctrl+Shift+Enter is Save & next; Ctrl+Enter stays plain Save', async () => {
     stashQueue(['P-A', 'P-B']);
-    renderAt('/catalog/add?edit=P-A');
+    renderAt('/catalog/add?edit=P-A&from=list');
     await screen.findByTestId('edit-queue-pos');
     await sleep(50); // the page's key handler is (re)attached after paint
     fireEvent.keyDown(window, { key: 'Enter', ctrlKey: true, shiftKey: true });
@@ -154,7 +154,7 @@ describe('Save & next from the Catalog list', () => {
 
   it('Skip opens the next product without saving', async () => {
     stashQueue(['P-A', 'P-B']);
-    renderAt('/catalog/add?edit=P-A');
+    renderAt('/catalog/add?edit=P-A&from=list');
     await screen.findByTestId('edit-queue-pos');
     fireEvent.click(screen.getByRole('button', { name: 'Skip' }));
     await waitFor(() => expect(loadedIds()).toEqual(['P-A', 'P-B']));
@@ -163,7 +163,7 @@ describe('Save & next from the Catalog list', () => {
 
   it('Skip with unsaved changes asks first; "Cancel" stays on the product', async () => {
     stashQueue(['P-A', 'P-B']);
-    renderAt('/catalog/add?edit=P-A');
+    renderAt('/catalog/add?edit=P-A&from=list');
     await screen.findByTestId('edit-queue-pos');
     fireEvent.change(screen.getByLabelText(/^MRP/), { target: { value: '9990' } });
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
@@ -180,7 +180,7 @@ describe('Save & next from the Catalog list', () => {
 
   it('Skip with nothing changed does not ask', async () => {
     stashQueue(['P-A', 'P-B']);
-    renderAt('/catalog/add?edit=P-A');
+    renderAt('/catalog/add?edit=P-A&from=list');
     await screen.findByTestId('edit-queue-pos');
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
     fireEvent.click(screen.getByRole('button', { name: 'Skip' }));
@@ -192,20 +192,20 @@ describe('Save & next from the Catalog list', () => {
   it('end of the stashed page: the next rows come from the list query (same filter + sort)', async () => {
     stashQueue(['P-A', 'P-B'], 120);
     productSpies.getProducts.mockResolvedValue({
-      // From this page's start: the rows already walked, then new ones.
-      products: [{ product_id: 'P-A' }, { product_id: 'P-B' }, { product_id: 'P-D' }],
+      // The rows after those queued (one already queued is left out).
+      products: [{ product_id: 'P-A' }, { product_id: 'P-D' }],
       total_count: 120,
     });
-    renderAt('/catalog/add?edit=P-B');
+    renderAt('/catalog/add?edit=P-B&from=list');
     await screen.findByTestId('edit-queue-pos');
     fireEvent.click(screen.getByRole('button', { name: /Save & next/ }));
     await waitFor(() => expect(loadedIds()).toEqual(['P-B', 'P-D']));
-    expect(productSpies.getProducts).toHaveBeenCalledWith({ ...LIST_PARAMS, skip: 50, limit: 100 });
+    expect(productSpies.getProducts).toHaveBeenCalledWith({ ...LIST_PARAMS, skip: 52, limit: 50 });
   });
 
   it('last product: Save & next saves, says so, and returns to the list as it was', async () => {
     stashQueue(['P-A', 'P-B']);
-    renderAt('/catalog/add?edit=P-B');
+    renderAt('/catalog/add?edit=P-B&from=list');
     await screen.findByTestId('edit-queue-pos');
     fireEvent.click(screen.getByRole('button', { name: /Save & next/ }));
     await waitFor(() => expect(where()).toMatch(/^\/catalog\?/));
@@ -219,11 +219,96 @@ describe('Save & next from the Catalog list', () => {
 
   it('opened from elsewhere (not in the list): plain Save only, no queue', async () => {
     stashQueue(['P-A', 'P-B']);
-    renderAt('/catalog/add?edit=P-Z');
+    renderAt('/catalog/add?edit=P-Z&from=list');
     await waitFor(() => expect(loadedIds()).toEqual(['P-Z']));
     await screen.findByRole('button', { name: /Save changes/ });
     expect(screen.queryByRole('button', { name: /Save & next/ })).toBeNull();
     expect(screen.queryByTestId('edit-queue-pos')).toBeNull();
+  });
+});
+
+describe('Save & next: review fixes (PR #1267)', () => {
+  const pageOf = (skip: number, size: number, total: number) =>
+    Array.from({ length: Math.max(0, Math.min(size, total - skip)) }, (_, i) => ({ product_id: `P${skip + i + 1}` }));
+
+  it('walks past several pages: each refill asks for the rows after those queued', async () => {
+    writeReviewQueue(
+      { ids: ['P1', 'P2'], index: 0, offset: 0, total: 7, filters: { address: 'sort=name_asc' },
+        list: { path: '/catalog', params: LIST_PARAMS, pageSize: 2 } },
+      EDIT_QUEUE_KEY,
+    );
+    productSpies.getProducts.mockImplementation(async (q: { skip: number; limit: number }) => ({
+      products: pageOf(q.skip, q.limit, 7),
+      total_count: 7,
+    }));
+    renderAt('/catalog/add?edit=P1&from=list');
+    for (let i = 2; i <= 7; i++) {
+      await screen.findByText(`Item ${i - 1} of 7`);
+      await sleep(30);
+      fireEvent.click(screen.getByRole('button', { name: 'Skip' }));
+      await waitFor(() => expect(loadedIds().at(-1)).toBe(`P${i}`));
+    }
+    await screen.findByText('Item 7 of 7');
+    await sleep(30);
+    fireEvent.click(screen.getByRole('button', { name: 'Skip' }));
+    await waitFor(() => expect(toast.info).toHaveBeenCalledWith('That was the last product in this list.'));
+    expect(loadedIds()).toEqual(['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7']);
+    expect(productSpies.getProducts.mock.calls.map((c) => [c[0].skip, c[0].limit])).toEqual([
+      [2, 2], [4, 2], [6, 2], [7, 2],
+    ]);
+  });
+
+  it('a next product that will not load is dropped and the walk moves on', async () => {
+    stashQueue(['P-A', 'P-B', 'P-C']);
+    productSpies.getProduct.mockImplementation(async (id: unknown) => {
+      if (id === 'P-B') throw new Error('404');
+      return product(String(id));
+    });
+    renderAt('/catalog/add?edit=P-A&from=list');
+    await screen.findByTestId('edit-queue-pos');
+    await sleep(30);
+    fireEvent.click(screen.getByRole('button', { name: 'Skip' }));
+    await waitFor(() => expect(loadedIds()).toEqual(['P-A', 'P-B', 'P-C']));
+    await screen.findByText(/Updated|Item 52 of 52/);
+    expect(readReviewQueue(EDIT_QUEUE_KEY)?.ids).toEqual(['P-A', 'P-C']);
+    // The form is P-C's, and Save writes P-C.
+    await sleep(30);
+    fireEvent.click(screen.getByRole('button', { name: /Save changes/ }));
+    await waitFor(() => expect(productSpies.updateProduct).toHaveBeenCalledTimes(1));
+    expect(productSpies.updateProduct.mock.calls[0][0]).toBe('P-C');
+  });
+
+  it('from Save & next until the next product is in the form, nothing can be saved', async () => {
+    stashQueue(['P-A', 'P-B']);
+    let release: (v: unknown) => void = () => {};
+    productSpies.getProduct.mockImplementation((id: unknown) =>
+      id === 'P-B' ? new Promise((r) => { release = r; }) : Promise.resolve(product(String(id))),
+    );
+    renderAt('/catalog/add?edit=P-A&from=list');
+    await screen.findByTestId('edit-queue-pos');
+    await sleep(30);
+    fireEvent.click(screen.getByRole('button', { name: /Save & next/ }));
+    await waitFor(() => expect(loadedIds()).toEqual(['P-A', 'P-B']));
+    await sleep(30);
+    expect(screen.getByRole('button', { name: /Save changes/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Save & next/ })).toBeDisabled();
+    fireEvent.keyDown(window, { key: 'Enter', ctrlKey: true });
+    await sleep(30);
+    expect(productSpies.updateProduct).toHaveBeenCalledTimes(1); // only P-A's own save
+    await act(async () => { release(product('P-B')); });
+    await screen.findByText('Item 52 of 52');
+    await waitFor(() => expect(screen.getByRole('button', { name: /Save changes/ })).toBeEnabled());
+  });
+
+  it('opened from anywhere but the list: the old list is dropped, plain Save only', async () => {
+    stashQueue(['P-A', 'P-B']);
+    renderAt('/catalog/add?edit=P-A');
+    await screen.findByRole('button', { name: /Save changes/ });
+    await sleep(30);
+    expect(screen.queryByRole('button', { name: /Save & next/ })).toBeNull();
+    expect(readReviewQueue(EDIT_QUEUE_KEY)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /Save changes/ }));
+    await waitFor(() => expect(where()).toBe('/catalog?focus=P-A'));
   });
 });
 

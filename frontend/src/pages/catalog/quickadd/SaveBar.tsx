@@ -17,7 +17,7 @@ export function SaveBar({ form }: { form: QuickAddForm }) {
     reviewDryLoading, reviewDry, reviewGapView,
     handleReviewPrev, handleReviewSkip, handleReviewSave, handleReviewApprove,
     handleSubmit, editMode, variantCtx, navigate, liveErrors, jumpToField,
-    selectedCategory, editQueuePos, handleEditSkip, editListPath, uploadingImages,
+    selectedCategory, editQueuePos, handleEditSkip, editListPath, uploadingImages, editBusy,
   } = form;
 
   return (
@@ -44,7 +44,7 @@ export function SaveBar({ form }: { form: QuickAddForm }) {
         <button
           type="button"
           onClick={() => handleSubmit(false)}
-          disabled={isSubmitting}
+          disabled={isSubmitting || editBusy}
           className="btn-primary flex items-center gap-2"
         >
           {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
@@ -57,7 +57,7 @@ export function SaveBar({ form }: { form: QuickAddForm }) {
             <button
               type="button"
               onClick={() => handleSubmit(false, true)}
-              disabled={isSubmitting || uploadingImages}
+              disabled={isSubmitting || uploadingImages || editBusy}
               className="btn-secondary flex items-center gap-2"
               title="Save, then open the next product of the list (Ctrl+Shift+Enter)"
             >
@@ -67,7 +67,7 @@ export function SaveBar({ form }: { form: QuickAddForm }) {
             <button
               type="button"
               onClick={handleEditSkip}
-              disabled={isSubmitting || uploadingImages}
+              disabled={isSubmitting || uploadingImages || editBusy}
               className="rounded-lg px-3 py-2 text-sm text-gray-600 hover:bg-gray-100 disabled:opacity-50"
               title="Open the next product without saving"
             >

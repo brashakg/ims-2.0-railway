@@ -613,7 +613,7 @@ export function CatalogManagerPage({
     (it: CatalogDrawerItem, hash = '') => {
       const id = docId(it.doc);
       if (it.kind === 'imported') handleEditEverything(id, hash);
-      else navigate(`/catalog/add?edit=${encodeURIComponent(id)}${hash}`);
+      else navigate(`/catalog/add?edit=${encodeURIComponent(id)}&from=list${hash}`);
     },
     [handleEditEverything, navigate]
   );
