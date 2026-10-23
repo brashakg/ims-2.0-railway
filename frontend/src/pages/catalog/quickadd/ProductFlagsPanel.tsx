@@ -5,32 +5,23 @@
 // cataloguer fixes it here and presses Mark fixed; the last fixed flag of a
 // task completes that task on the server (services/catalog_flags, one rule).
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { CheckCircle2, Flag, Loader2 } from 'lucide-react';
-import { productApi } from '../../../services/api/products';
 import { catalogBulkApi, type ProductFlag } from '../../../services/api/catalog';
 import { useToast } from '../../../context/ToastContext';
 import { flagLabel, whenIST } from '../catalogListState';
 
-export function ProductFlagsPanel({ productId }: { productId: string }) {
+// The flags come from the product the edit page already loaded (one fetch).
+export function ProductFlagsPanel({
+  productId,
+  initialFlags,
+}: {
+  productId: string;
+  initialFlags: ProductFlag[];
+}) {
   const toast = useToast();
-  const [flags, setFlags] = useState<ProductFlag[]>([]);
+  const [flags, setFlags] = useState<ProductFlag[]>(initialFlags);
   const [busy, setBusy] = useState<string | null>(null);
-
-  useEffect(() => {
-    let alive = true;
-    productApi
-      .getProduct(productId)
-      .then((doc: Record<string, unknown>) => {
-        if (alive) setFlags(Array.isArray(doc?.flags) ? (doc.flags as ProductFlag[]) : []);
-      })
-      .catch(() => {
-        /* no panel: the edit page works without it */
-      });
-    return () => {
-      alive = false;
-    };
-  }, [productId]);
 
   const open = flags.filter((f) => f.status === 'open');
   if (open.length === 0) return null;

@@ -66,7 +66,7 @@ vi.mock('../../../services/api/catalog', () => ({
 import { productApi } from '../../../services/api/products';
 import { catalogBulkApi, catalogProductsApi } from '../../../services/api/catalog';
 import { CatalogManagerPage } from '../CatalogManagerPage';
-import { backToQueueAddress, readReviewQueue } from '../reviewQueue';
+import { EDIT_QUEUE_KEY, backToQueueAddress, editListAddress, readReviewQueue } from '../reviewQueue';
 
 const getProducts = productApi.getProducts as unknown as ReturnType<typeof vi.fn>;
 const getFacets = productApi.getFacets as unknown as ReturnType<typeof vi.fn>;
@@ -707,5 +707,35 @@ describe('G1 - one row per model (owner 2026-10-18)', () => {
     // the page box counts items too
     fireEvent.click(screen.getByLabelText('Select all on this page'));
     expect(screen.getByTestId('selection-bar')).toHaveTextContent('3 items selected');
+  });
+});
+
+describe('Save & next: the Catalog list hands the edit page its products', () => {
+  it('stashes the rows in the order shown, with the list query that made them', async () => {
+    getProducts.mockResolvedValue({
+      products: [
+        { ...ROW, product_id: 'P-B', name: 'B' },
+        { ...ROW, product_id: 'P-A', name: 'A' },
+        { ...ROW, product_id: 'P-C', name: 'C' },
+      ],
+      total: 3,
+      total_count: 90,
+    });
+    renderAt('?sort=name_asc&brand=Carrera&rows=25&page=2');
+    await screen.findByTestId('catalog-table');
+    await waitFor(() => expect(readReviewQueue(EDIT_QUEUE_KEY)?.ids).toEqual(['P-B', 'P-A', 'P-C']));
+    const stash = readReviewQueue(EDIT_QUEUE_KEY)!;
+    expect(stash).toMatchObject({ offset: 25, total: 90 });
+    // The very params the list asked with (no skip/limit), for the next page.
+    const asked = { ...getProducts.mock.calls.at(-1)?.[0] };
+    delete asked.skip;
+    delete asked.limit;
+    expect(stash.list).toEqual({ path: '/catalog', params: asked, pageSize: 25 });
+    expect(stash.list?.params).toMatchObject({ sort: 'name_asc', brand: 'Carrera' });
+    // Plain Save comes back to this list as it was, the product in view.
+    const back = new URLSearchParams(editListAddress(stash, 'P-A').split('?')[1]);
+    expect(back.get('sort')).toBe('name_asc');
+    expect(back.get('page')).toBe('2');
+    expect(back.get('focus')).toBe('P-A');
   });
 });

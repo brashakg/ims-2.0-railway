@@ -1577,3 +1577,38 @@ def test_title_legacy_doubled_brand_name_is_reminted_on_an_edit(door):
     _put("P-CL", brand="Acuvue", model="Acuvue Oasys", attributes=dict(cl, power="-1.50"))
     name = door.repo.find_by_id("P-CL")["name"]
     assert "Acuvue Acuvue" not in name and "-1.50" in name
+
+
+# ---------------------------------------------------------------------------
+# The SKU preview names what decides it (Save & next PR, 2026-10-23): the form
+# asks again only when one of those fields changes, so a field left out would
+# leave a stale SKU on screen.
+# ---------------------------------------------------------------------------
+
+_TYPED = dict(
+    _FORM_VALUES, base_curve="8.6", diameter="14.2", cl_cyl="-0.75", cl_axis="180",
+    cl_add="1.00", pack="6", usp_1="Light", lens_colour="G15", shape="Round",
+)
+
+
+@pytest.mark.parametrize("category", pm.canonical_categories())
+def test_sku_preview_names_every_field_that_moves_the_sku(category):
+    """From a form holding only the brand, every field of the category's form
+    typed next either keeps the previewed SKU or is named in identity_fields
+    -- blank fields included (a contact lens's power and fit are form fields
+    its registry does not list, but the SKU reads them)."""
+    spec = pm.category_spec(category)
+    form = set(spec.required + spec.optional)
+    if category in ("CONTACT_LENS", "COLORED_CONTACT_LENS"):
+        form |= {"power", "base_curve", "diameter", "cl_cyl", "cl_axis", "cl_add", "pack"}
+    start = {"brand_name": "Carrera"}
+    sku = _preview(category, start)
+    named = set(_preview(category, start, field="identity_fields"))
+    for k, v in _TYPED.items():
+        if k == "brand_name" or k not in form:
+            continue
+        try:
+            moved = _preview(category, dict(start, **{k: v})) != sku
+        except Exception:  # noqa: BLE001 - a value this category refuses
+            moved = True
+        assert not moved or k in named, (category, k)

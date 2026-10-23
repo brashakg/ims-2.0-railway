@@ -28,6 +28,7 @@ import {
   CatalogRequestError,
   type CatalogProductDoc,
   type PromoteDryRunResult,
+  type ProductFlag,
 } from '../../../services/api/catalog';
 import {
   buildProductPayload,
@@ -57,7 +58,12 @@ import {
   readReviewQueue,
   writeReviewQueue,
   removeFromReviewQueue,
+  EDIT_QUEUE_KEY,
+  editListAddress,
+  clearReviewQueue,
+  type ReviewQueueStash,
 } from '../reviewQueue';
+import { IDENTITY_DEBOUNCE_MS, answerStillHolds, typedAttributes } from '../identityAnswer';
 import { existingProductPath, sectionOfError, type EditMode, type SectionId } from './shared';
 import { useProductImages } from './useProductImages';
 import { reorderApi } from '../../../services/api/inventory';
@@ -328,23 +334,38 @@ export function useQuickAddForm() {
   // product's identity but never its SKU) is shown as the save mints it: with
   // a number added to the end.
   const [skuPreview, setSkuPreview] = useState('');
+  // Asked again only when a field that decides the SKU moves: the server
+  // names them with its answer (identity_fields, read off build_sku's own
+  // identity_parts -- no list of them is kept here), the same rule the
+  // similar-products strip keeps its answer by. Was: every keystroke in any
+  // field (4,185 calls in 20 days). An older server without identity_fields
+  // is asked on every change, as before.
+  const skuAskedRef = useRef<{ category: string; typed: Record<string, string>; decides?: string[] } | null>(null);
+  const skuTypedKey = JSON.stringify(typedAttributes(attributes));
   useEffect(() => {
-    if (editMode || !selectedCategory ||
-        !Object.values(attributes).some((v) => String(v ?? '').trim())) {
+    const typed = JSON.parse(skuTypedKey) as Record<string, string>;
+    if (editMode || !selectedCategory || Object.keys(typed).length === 0) {
+      skuAskedRef.current = null;
       setSkuPreview('');
       return;
     }
+    const asked = skuAskedRef.current;
+    if (asked && answerStillHolds(asked, asked.decides, selectedCategory, typed)) return;
     let alive = true;
     const t = window.setTimeout(() => {
       productApi
         .previewSku(selectedCategory, attributes)
         .then((r) => {
-          if (alive) setSkuPreview(!r?.sku ? '' : r.taken ? `${r.sku}-<number> (${r.sku} is in use)` : r.sku);
+          if (!alive) return;
+          skuAskedRef.current = { category: selectedCategory, typed, decides: r?.identity_fields };
+          setSkuPreview(!r?.sku ? '' : r.taken ? `${r.sku}-<number> (${r.sku} is in use)` : r.sku);
         })
         .catch(() => { if (alive) setSkuPreview(''); });
-    }, 300);
+    }, IDENTITY_DEBOUNCE_MS);
     return () => { alive = false; window.clearTimeout(t); };
-  }, [editMode, selectedCategory, attributes]);
+    // `attributes` is read through skuTypedKey (its typed values).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editMode, selectedCategory, skuTypedKey]);
 
   const canAddProduct = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']);
   // Cost price + margin are what we pay: CostCell's COST_ROLES only (owner
@@ -675,8 +696,116 @@ export function useQuickAddForm() {
   const imageCtl = useProductImages(setImages);
 
 
+  // ---- EDIT QUEUE (?edit= from the Catalog list) -----------------------------
+  // The review queue's own stash (reviewQueue.ts), in its EDIT_QUEUE_KEY slot:
+  // the Catalog list writes its products; Save & next / Skip walk them in the
+  // list's filter and sort. Off the end of the stashed page, the list's own
+  // query fetches what follows. Null = not opened from the list (plain Save).
+  const [editQueuePos, setEditQueuePos] = useState<{ n: number; m: number } | null>(null);
+  // True from the moment the walk moves on until the next product is in the
+  // form: nothing can be saved meanwhile (the form still shows the last one).
+  const [editBusy, setEditBusy] = useState(false);
+  // The form as loaded -- the unsaved-changes check for Skip.
+  const [editBaseline, setEditBaseline] = useState<string | null>(null);
+  const editFingerprint = useMemo(
+    () =>
+      JSON.stringify([
+        selectedCategory, typedAttributes(attributes), description, hsnCode, gstRate, weight,
+        mrp, offerPrice, costPrice, images,
+      ]),
+    [selectedCategory, attributes, description, hsnCode, gstRate, weight, mrp, offerPrice,
+      costPrice, images],
+  );
+  // Captured once the loaded product has settled into the form.
+  useEffect(() => {
+    if (editMode?.kind === 'spine' && editBaseline === null) setEditBaseline(editFingerprint);
+  }, [editMode, editBaseline, editFingerprint]);
+  // The shop's level is compared with the loaded one, as the save does.
+  const editDirty =
+    editMode?.kind === 'spine' &&
+    ((editBaseline !== null && editBaseline !== editFingerprint) ||
+      typedLevel(reorderLevel) !== typedLevel(levelText(editLevels?.[reorderShop])));
+
+  // Open the product after position `at` of the queue. Past the stashed rows,
+  // the list's own query is asked for the rows after those queued, a page at
+  // a time, until one is new or a page comes back empty (the end).
+  // `backId` = the product the list re-opens when the walk ends; `toList` =
+  // go back to the list then (after a save, or when the form holds nothing).
+  const goNext = useCallback(
+    async (stash: ReviewQueueStash, at: number, backId: string, toList: boolean) => {
+      setEditBusy(true);
+      let ids = stash.ids;
+      let total = stash.total;
+      if (at + 1 >= ids.length && stash.list) {
+        let skip = (stash.offset ?? 0) + ids.length;
+        try {
+          for (let pages = 0; pages < 50 && at + 1 >= ids.length; pages++) {
+            const res = await productApi.getProducts({
+              ...stash.list.params,
+              skip,
+              limit: stash.list.pageSize,
+            });
+            const rows = (res?.products || []) as Array<Record<string, unknown>>;
+            if (rows.length === 0) break;
+            skip += rows.length;
+            const seen = ids;
+            const fresh = rows
+              .map((d) => String(d.product_id || d.id || d._id || ''))
+              .filter((id) => id && !seen.includes(id));
+            ids = [...seen, ...fresh];
+            total = Number(res?.total_count ?? res?.total ?? total);
+          }
+        } catch {
+          /* nothing more known: treated as the end of the list */
+        }
+      }
+      const nextId = ids[at + 1];
+      if (!nextId) {
+        toast.info('That was the last product in this list.');
+        if (toList) navigate(editListAddress(stash, backId));
+        else setEditBusy(false);
+        return;
+      }
+      writeReviewQueue({ ...stash, ids, total, index: at + 1 }, EDIT_QUEUE_KEY);
+      setSearchParams(
+        (prev) => {
+          const sp = new URLSearchParams(prev);
+          sp.set('edit', nextId);
+          sp.set('from', 'list');
+          return sp;
+        },
+        { replace: true },
+      );
+    },
+    [navigate, setSearchParams, toast],
+  );
+
+  const advanceEdit = useCallback(
+    async (saved: boolean) => {
+      if (editMode?.kind !== 'spine') return;
+      const currentId = editMode.id;
+      const stash = readReviewQueue(EDIT_QUEUE_KEY);
+      const at = stash ? stash.ids.indexOf(currentId) : -1;
+      if (!stash || at < 0) {
+        if (saved) navigate(editListAddress(stash, currentId));
+        return;
+      }
+      await goNext(stash, at, currentId, saved);
+    },
+    [editMode, navigate, goNext],
+  );
+
+  // Skip: the next product without saving (unsaved changes ask first).
+  const handleEditSkip = useCallback(() => {
+    if (editBusy) return;
+    if (editDirty && !window.confirm('You have unsaved changes on this product — move on without saving?')) return;
+    void advanceEdit(false);
+  }, [editDirty, advanceEdit, editBusy]);
+
   const handleSubmit = useCallback(
-    async (saveAndNew: boolean) => {
+    async (saveAndNew: boolean, thenNext = false) => {
+      // The walk is between products: the form is not the next one's yet.
+      if (editBusy) return;
       const values = currentValues();
       const newErrors = validateProductForm(values, storedAttributes);
       setErrors(newErrors);
@@ -758,7 +887,10 @@ export function useQuickAddForm() {
             (editMode.sku ? `Updated ${editMode.sku} — same SKU, no new product.` : 'Product updated.') +
               (released ? ` ${released} held unit(s) are now on the shelf.` : '')
           );
-          navigate(`/catalog?focus=${encodeURIComponent(editMode.id)}`);
+          // Save & next: the next product of the list it came from; plain
+          // Save: back to that list (its filters), this product in view.
+          if (thenNext) await advanceEdit(true);
+          else navigate(editListAddress(readReviewQueue(EDIT_QUEUE_KEY), editMode.id));
           return;
         }
         // G1: a new colour/size names its model; 'This is a different model'
@@ -818,7 +950,8 @@ export function useQuickAddForm() {
           window.scrollTo({ top: 0, behavior: 'smooth' });
           focusAttrField(modelFields(values.category)[0] ?? null);
         } else {
-          navigate('/inventory');
+          // The Catalog, the new product's card open (was Inventory).
+          navigate(newId ? `/catalog?focus=${encodeURIComponent(newId)}` : '/catalog');
         }
       } catch (err) {
         if (err instanceof DuplicateProductError) {
@@ -840,7 +973,7 @@ export function useQuickAddForm() {
       currentValues, toast, resetForm, navigate, variantCtx, startNextVariant,
       optedOutLeadId, familyHint, enterVariantMode,
       editMode, editLevels, reorderLevel, reorderBadInput, canSetReorderLevel, reorderShop,
-      focusAttrField, storedAttributes,
+      focusAttrField, storedAttributes, advanceEdit, editBusy,
     ]
   );
 
@@ -1226,7 +1359,10 @@ export function useQuickAddForm() {
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
         e.preventDefault();
         if (isSubmitting) return;
-        void handleSubmit(e.shiftKey);
+        // Editing from the Catalog list: Ctrl+Shift+Enter = Save & next
+        // (Ctrl+Enter stays Save; an edit has no Save + New).
+        if (e.shiftKey && editMode?.kind === 'spine' && editQueuePos) void handleSubmit(false, true);
+        else void handleSubmit(e.shiftKey);
       } else if (e.key === 'Escape' && variantCtx) {
         e.preventDefault();
         exitVariantMode();
@@ -1237,7 +1373,7 @@ export function useQuickAddForm() {
   }, [
     handleSubmit, isSubmitting, dupInfo, variantCtx, exitVariantMode, editMode,
     reviewApproving, handleReviewSave, handleReviewApprove, handleReviewPrev,
-    handleReviewSkip,
+    handleReviewSkip, editQueuePos,
   ]);
 
   // ---- Clone: prefill from an existing product -----------------------------
@@ -1325,6 +1461,13 @@ export function useQuickAddForm() {
     // ?review wins over a crafted combined URL.
     if (!editId || searchParams.get('review')) return;
     let cancelled = false;
+    // Opened by the Catalog list (its Edit, or Save & next): its queue
+    // applies. From anywhere else, the old list is dropped, so it can never
+    // drive Save & next or where Save lands.
+    const fromList = searchParams.get('from') === 'list';
+    if (!fromList) clearReviewQueue(EDIT_QUEUE_KEY);
+    let forwarded = false;
+    setEditBusy(true);
     (async () => {
       try {
         const product = (await productApi.getProduct(editId)) as ProductDoc;
@@ -1341,18 +1484,45 @@ export function useQuickAddForm() {
             sku: String(product.sku || ''),
             orderedDraft: Boolean((product as { ordered_draft?: boolean }).ordered_draft),
             variantOf: String((product as { variant_of?: string }).variant_of || '') || undefined,
+            flags: Array.isArray((product as { flags?: unknown }).flags)
+              ? (product as { flags: ProductFlag[] }).flags
+              : [],
           });
+          setEditBaseline(null);
+          // Opened from the Catalog list: its place in that list.
+          const stash = fromList ? readReviewQueue(EDIT_QUEUE_KEY) : null;
+          const at = stash ? stash.ids.indexOf(editId) : -1;
+          if (stash && at >= 0) {
+            if (stash.index !== at) writeReviewQueue({ ...stash, index: at }, EDIT_QUEUE_KEY);
+            const n = (stash.offset ?? 0) + at + 1;
+            setEditQueuePos({ n, m: Math.max(n, stash.total ?? stash.ids.length) });
+          } else {
+            setEditQueuePos(null);
+          }
           // THIS shop's level; not set here = blank (never another shop's,
           // never the old chain-wide reorder_point). See editLevels above.
           const levels = (product as { reorder_levels?: Record<string, unknown> }).reorder_levels;
           setEditLevels(levels && typeof levels === 'object' ? levels : {});
         }
       } catch {
-        if (!cancelled) toast.error('Could not load the product to edit.');
-      } finally {
         if (!cancelled) {
+          toast.error('Could not load the product to edit.');
+          // Walking the list: drop the product that will not open and move
+          // on -- never leave the last product in the form as the Save target.
+          const stash = fromList ? readReviewQueue(EDIT_QUEUE_KEY) : null;
+          const at = stash ? stash.ids.indexOf(editId) : -1;
+          const after = stash && at >= 0 ? removeFromReviewQueue(editId, EDIT_QUEUE_KEY) : null;
+          if (stash && after) {
+            forwarded = true;
+            await goNext(after, at - 1, stash.ids[at - 1] ?? editId, true);
+          }
+        }
+      } finally {
+        if (!cancelled && !forwarded) {
+          setEditBusy(false);
           const next = new URLSearchParams(searchParams);
           next.delete('edit');
+          next.delete('from');
           setSearchParams(next, { replace: true });
         }
       }
@@ -1578,6 +1748,11 @@ export function useQuickAddForm() {
     handleSimilarPick, handleSimilarOpen, handleFamilyFound,
     // submit
     isSubmitting, handleSubmit,
+    // edit queue (?edit= from the Catalog list)
+    editQueuePos, editDirty, handleEditSkip, editBusy,
+    editListPath: editMode?.kind === 'spine'
+      ? editListAddress(readReviewQueue(EDIT_QUEUE_KEY), editMode.id)
+      : '/catalog',
     // review mode
     queueClear, setQueueClear, queuePos, reviewSnapshot, reviewDirty,
     reviewApproving, reviewDry, reviewDryLoading, reviewGapView,

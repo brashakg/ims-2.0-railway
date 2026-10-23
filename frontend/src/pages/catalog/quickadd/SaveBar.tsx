@@ -6,7 +6,7 @@
 // Save & Approve / Skip).
 // MOVED verbatim out of QuickAddPage.tsx (Wave 3 file diet).
 
-import { Keyboard, Loader2, RotateCcw, Save, X } from 'lucide-react';
+import { ChevronRight, Keyboard, Loader2, RotateCcw, Save, X } from 'lucide-react';
 import { fieldLabelFor } from '../productAddShared';
 import { ReviewQueueBar } from './ReviewQueueBar';
 import type { QuickAddForm } from './useQuickAddForm';
@@ -17,7 +17,7 @@ export function SaveBar({ form }: { form: QuickAddForm }) {
     reviewDryLoading, reviewDry, reviewGapView,
     handleReviewPrev, handleReviewSkip, handleReviewSave, handleReviewApprove,
     handleSubmit, editMode, variantCtx, navigate, liveErrors, jumpToField,
-    selectedCategory,
+    selectedCategory, editQueuePos, handleEditSkip, editListPath, uploadingImages, editBusy,
   } = form;
 
   return (
@@ -44,16 +44,44 @@ export function SaveBar({ form }: { form: QuickAddForm }) {
         <button
           type="button"
           onClick={() => handleSubmit(false)}
-          disabled={isSubmitting}
+          disabled={isSubmitting || editBusy}
           className="btn-primary flex items-center gap-2"
         >
           {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
           {editMode?.kind === 'spine' ? 'Save changes' : variantCtx ? 'Save variant' : 'Save product'}
         </button>
+        {/* Opened from the Catalog list: save and open the list's next
+            product, or move on without saving. */}
+        {editMode?.kind === 'spine' && editQueuePos && (
+          <>
+            <button
+              type="button"
+              onClick={() => handleSubmit(false, true)}
+              disabled={isSubmitting || uploadingImages || editBusy}
+              className="btn-secondary flex items-center gap-2"
+              title="Save, then open the next product of the list (Ctrl+Shift+Enter)"
+            >
+              <ChevronRight className="w-4 h-4" />
+              Save &amp; next
+            </button>
+            <button
+              type="button"
+              onClick={handleEditSkip}
+              disabled={isSubmitting || uploadingImages || editBusy}
+              className="rounded-lg px-3 py-2 text-sm text-gray-600 hover:bg-gray-100 disabled:opacity-50"
+              title="Open the next product without saving"
+            >
+              Skip
+            </button>
+            <span className="text-xs font-medium text-gray-600 whitespace-nowrap" data-testid="edit-queue-pos">
+              Item {editQueuePos.n} of {editQueuePos.m}
+            </span>
+          </>
+        )}
         {editMode?.kind === 'spine' ? (
           <button
             type="button"
-            onClick={() => navigate(`/catalog?focus=${encodeURIComponent(editMode.id)}`)}
+            onClick={() => navigate(editListPath)}
             disabled={isSubmitting}
             className="btn-secondary flex items-center gap-2"
           >
@@ -97,6 +125,9 @@ export function SaveBar({ form }: { form: QuickAddForm }) {
           <span><kbd className="qa-kbd">Ctrl</kbd>+<kbd className="qa-kbd">Enter</kbd> Save</span>
           {!editMode && (
             <span><kbd className="qa-kbd">Ctrl</kbd>+<kbd className="qa-kbd">Shift</kbd>+<kbd className="qa-kbd">Enter</kbd> Save + New</span>
+          )}
+          {editMode?.kind === 'spine' && editQueuePos && (
+            <span><kbd className="qa-kbd">Ctrl</kbd>+<kbd className="qa-kbd">Shift</kbd>+<kbd className="qa-kbd">Enter</kbd> Save &amp; next</span>
           )}
         </span>
       </div>

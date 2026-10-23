@@ -543,9 +543,10 @@ export const productApi = {
   previewSku: async (
     category: string,
     attributes: Record<string, string>
-  ): Promise<{ category: string | null; sku: string; taken?: boolean }> => {
+  ): Promise<{ category: string | null; sku: string; taken?: boolean; identity_fields?: string[] }> => {
     const response = await api.post('/products/sku-preview', { category, attributes });
-    return response.data as { category: string | null; sku: string; taken?: boolean };
+    // identity_fields: what decides this SKU -- the form asks again only when one moves.
+    return response.data as { category: string | null; sku: string; taken?: boolean; identity_fields?: string[] };
   },
 
   getBrands: async (category?: string) => {

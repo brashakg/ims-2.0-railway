@@ -21,9 +21,10 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { productApi, type SimilarProductsResponse } from '../../services/api/products';
+import { IDENTITY_DEBOUNCE_MS, answerStillHolds, typedAttributes } from './identityAnswer';
 
 /** Council ruling: fire 400ms after the operator stops typing. */
-export const SIMILAR_DEBOUNCE_MS = 400;
+export const SIMILAR_DEBOUNCE_MS = IDENTITY_DEBOUNCE_MS;
 
 export interface SimilarQueryInput {
   /** CATEGORIES picker code (SG/FR/...) — the backend resolves aliases. */
@@ -53,13 +54,8 @@ interface Answer {
   data: SimilarProductsResponse;
 }
 
-/** The answer still holds when no field it says decides it has moved. */
 function stillTrue(a: Answer, category: string, typed: Record<string, string>): boolean {
-  if (a.category !== category) return false;
-  const decides = a.data.identity_fields;
-  return Object.keys({ ...a.typed, ...typed }).every(
-    (k) => a.typed[k] === typed[k] || (decides !== undefined && !decides.includes(k)),
-  );
+  return answerStillHolds(a, a.data.identity_fields, category, typed);
 }
 
 export function useSimilarProducts(
@@ -70,13 +66,8 @@ export function useSimilarProducts(
   const abortRef = useRef<AbortController | null>(null);
   const armed = enabled && isSimilarQueryArmed(q);
   // A string, so a fresh attributes object with the same values never refires.
-  const attrsKey = JSON.stringify(
-    Object.entries(q.attributes || {})
-      .map(([k, v]) => [k, String(v ?? '').trim()])
-      .filter(([, v]) => v)
-      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
-  );
-  const typed = Object.fromEntries(JSON.parse(attrsKey) as [string, string][]);
+  const attrsKey = JSON.stringify(typedAttributes(q.attributes));
+  const typed = JSON.parse(attrsKey) as Record<string, string>;
   const data = armed && answer && stillTrue(answer, q.category, typed) ? answer.data : null;
 
   useEffect(() => {
@@ -87,7 +78,7 @@ export function useSimilarProducts(
     const timer = window.setTimeout(() => {
       const controller = new AbortController();
       abortRef.current = controller;
-      const asked = { category: q.category, typed: Object.fromEntries(JSON.parse(attrsKey) as [string, string][]) };
+      const asked = { category: q.category, typed: JSON.parse(attrsKey) as Record<string, string> };
       productApi
         .getSimilarProducts({ category: asked.category, ...asked.typed }, controller.signal)
         .then((res) => {

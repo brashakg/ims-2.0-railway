@@ -1039,7 +1039,7 @@ export function CatalogProductDrawer({
             {canEdit && (
               <button
                 type="button"
-                onClick={() => navigate(`/catalog/add?edit=${encodeURIComponent(id)}`)}
+                onClick={() => navigate(`/catalog/add?edit=${encodeURIComponent(id)}&from=list`)}
                 className="btn-primary flex items-center gap-1.5 text-sm"
               >
                 <Pencil className="w-3.5 h-3.5" /> Edit

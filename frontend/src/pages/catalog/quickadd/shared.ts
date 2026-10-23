@@ -33,6 +33,8 @@ export const existingProductPath = (
     ? `/catalog/add?edit=${encodeURIComponent(info.product_id)}`
     : productListPath(info?.sku);
 
+import type { ProductFlag } from '../../../services/api/catalog';
+
 // The page's edit target, discriminated by which collection it edits:
 //   kind='spine'   — /catalog/add?edit=<id>: EDIT-IN-PLACE of a billing
 //                    `products` row (one validated PUT /products/{id}).
@@ -51,4 +53,7 @@ export type EditMode = {
   /** G1: the model's lead when the product is a colour/size of a model --
    *  its model-level fields are edited on the model. */
   variantOf?: string;
+  /** ?edit only: the catalogue flags the product carried as loaded (the
+   *  flags panel shows them -- the product is fetched once). */
+  flags?: ProductFlag[];
 } | null;
