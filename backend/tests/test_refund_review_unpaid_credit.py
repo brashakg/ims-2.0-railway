@@ -812,3 +812,59 @@ def test_in_flight_claim_counts_its_shopify_money_exactly(env, monkeypatch):
     monkeypatch.setattr(returns_router, "_issue_store_credit", _spy)
     _queue_and_confirm(env, _payload(txns=[_txn(400, "razorpay")]))
     assert seen[0]["status"] == "PENDING" and seen[0]["money_back"] == 400.0
+
+
+def _dead_run_claim(env, return_id="RET-261020-AB12CD"):
+    """The returns doc a run left behind when it died mid-post (claimed,
+    never finalized) -- stale, so a re-drive may finish it."""
+    from datetime import datetime, timedelta, timezone
+    from api.services import shopify_refund as sr
+
+    stale = (datetime.now(timezone.utc)
+             - timedelta(seconds=sr._CLAIM_STALE_SECONDS + 60)).isoformat()
+    env.get_collection("returns").insert_one({
+        "return_id": return_id, "shopify_refund_id": "700001", "order_id": "ord-1",
+        "status": "PENDING", "credit_note_issued": False, "money_back": 0.0,
+        "shopify_refunded_amount": 1000.0, "created_at": stale})
+
+
+def test_redrive_does_not_count_its_own_dead_run_credit(env):
+    """Round 4 (b): the dead run already booked its own Rs 1000 credit (ref =
+    its return id, stamped with the order). The re-drive finds that note and
+    books nothing new -- and the rule still answers the full credit, never
+    "already given back"."""
+    _order(env)
+    from api.services import shopify_refund as sr
+
+    sr.handle_shopify_refund(env, _payload(txns=[]), topic="refunds/create")
+    row = env.get_collection("shopify_refund_review").find_one({"shopify_refund_id": "700001"})
+    _dead_run_claim(env)
+    env.get_collection("credit_note_ledger").insert_one({
+        "customer_id": "CUST-1", "type": "ISSUED", "amount": 1000.0, "delta": 1000.0,
+        "ref": "RET-261020-AB12CD", "order_id": "ord-1", "entry_id": "own-1"})
+    credit, why, label, _ = sr._store_credit_allowance(env, "ord-1", "700001", 1000.0, 0.0)
+    assert (credit, label) == (1000.0, None)
+    res = sr.post_from_review(env, row)
+    assert res["status"] == "credited"
+    assert "Rs 1000.00 goes to the customer" in res["store_credit_reason"]
+    assert [r["entry_id"] for r in _ledger(env)] == ["own-1"]
+
+
+def test_hand_credit_typed_like_the_refunds_return_id_is_counted(env):
+    """Round 4 (a): a hand credit typed with the re-drive's own return id in
+    other case ('ret-261020-ab12cd', no order stamp) is not the refund's own
+    note: it counts, so the re-drive credits Rs 800, not Rs 1000 (Rs 1200 on
+    a Rs 1000 order)."""
+    _order(env)
+    from api.services import shopify_refund as sr
+
+    sr.handle_shopify_refund(env, _payload(txns=[]), topic="refunds/create")
+    row = env.get_collection("shopify_refund_review").find_one({"shopify_refund_id": "700001"})
+    _dead_run_claim(env)
+    env.get_collection("credit_note_ledger").insert_one({
+        "customer_id": "CUST-1", "type": "ISSUED", "amount": 200.0, "delta": 200.0,
+        "ref": "ret-261020-ab12cd", "entry_id": "hand-7"})
+    res = sr.post_from_review(env, row)
+    assert res["status"] == "credited"
+    assert sorted(r["delta"] for r in _ledger(env)) == [200.0, 800.0]
+    assert _balance(env) == (1000.0, 1000.0)
