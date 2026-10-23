@@ -227,7 +227,8 @@ REPORT_READS = [
     # The Finance dashboard's P&L by category (open to the shop managers).
     (f"/api/v1/finance/pnl/by-category?{_WINDOW}", ("gross_profit", "total_gross_profit")),
 ]
-SHOP = [(path, extra) for _m, path, extra in [*SHOP_READS, BLIND]]
+# /api/v1/blind-count was retired in S1 (review M5) -- unmounted, no reads left.
+SHOP = [(path, extra) for _m, path, extra in SHOP_READS]
 ALL_READS = PURCHASE_READS + REPORT_READS + SHOP
 
 
@@ -690,23 +691,11 @@ def test_the_quarantine_queue_and_its_writes_show_cost_to_accounts_only(client, 
         assert bool(_leaks(r.json())) is sees, r.json()
 
 
-@pytest.mark.parametrize("role,sees", (("STORE_MANAGER", False), ("AREA_MANAGER", False), ("ADMIN", True)))
-def test_locking_the_day_end_count_shows_its_value_to_accounts_only(client, buying, role, sees):
-    # P1 counted at 0 with units on hand: the lock reveals a shortage at cost.
-    h = _headers(role)
-    opened = client.post("/api/v1/blind-count/open", json={"store_id": STORE}, headers=h)
-    assert opened.status_code == 200, opened.text
-    sid = opened.json()["session_id"]
-    sub = client.post(
-        f"/api/v1/blind-count/{sid}/submit",
-        json={"counts": [{"product_id": "P1", "counted_qty": 0}]}, headers=h,
-    )
-    assert sub.status_code == 200, sub.text
-    locked = client.post(f"/api/v1/blind-count/{sid}/lock", headers=h)
-    assert locked.status_code == 200, locked.text
-    assert locked.json()["status"].upper() == "LOCKED"
-    assert any(it.get("variance_units") for it in locked.json()["items"]), locked.json()
-    assert bool(_leaks(locked.json())) is sees, locked.json()
+# test_locking_the_day_end_count_shows_its_value_to_accounts_only: REMOVED in
+# S1 (review M5) with the /api/v1/blind-count mount it exercised. The live
+# count's value-at-cost masking is covered in test_stock_count_lifecycle.py /
+# stockCountResult.test.tsx; the retired route answering 404 is pinned in
+# test_counter_roles_no_cost_anywhere.py.
 
 
 @pytest.mark.parametrize("role,sees", (("CATALOG_MANAGER", False), ("ADMIN", True)))
