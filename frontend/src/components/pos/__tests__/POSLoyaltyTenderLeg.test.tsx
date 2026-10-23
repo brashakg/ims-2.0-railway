@@ -208,6 +208,16 @@ describe('POS loyalty tender leg', () => {
     const res = await submitPosOrder(usePOSStore.getState() as any, 'idem-7');
     expect(res.warning).toMatch(/did NOT record/);
     expect(res.warning).toMatch(/Not enough loyalty points/);
+    // The Orders screen takes no loyalty tender: never send staff there for one.
+    expect(res.warning).toMatch(/Loyalty points cannot be added there/);
+  });
+
+  it('a failed burn never points staff at an Orders-screen loyalty action that does not exist', async () => {
+    seedStore(300);
+    mockedRedeem.mockRejectedValueOnce(new Error('network'));
+    const res = await submitPosOrder(usePOSStore.getState() as any, 'idem-8');
+    expect(res.warning).toMatch(/NOT debited/);
+    expect(res.warning).not.toMatch(/re-apply the points/);
   });
 
   it('a LOYALTY line with no pending intent behind it burns nothing, posts nothing, and is flagged', async () => {
