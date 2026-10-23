@@ -69,8 +69,8 @@ manager gets 404).
 |---|---|
 | PUBLIC (no IMS role gate) | 46 |
 | AUTHENTICATED | 394 |
-| Role-gated (one or more roles) | 867 |
-| **Total `/api/v1` (method x path)** | **1307** |
+| Role-gated (one or more roles) | 868 |
+| **Total `/api/v1` (method x path)** | **1308** |
 | ...of which `store_scoped` | 241 |
 | ...of which `self_enforced` | 47 |
 
@@ -809,6 +809,7 @@ entry exactly; see the manual interpretation notes above.
 | `POST` | `/api/v1/inventory/stock-count/{count_id}/items` | ADMIN, AREA_MANAGER, CATALOG_MANAGER, STORE_MANAGER, WORKSHOP_STAFF |  |  |
 | `POST` | `/api/v1/inventory/stock-count/{count_id}/reconcile` | ADMIN |  |  |
 | `POST` | `/api/v1/inventory/stock-count/{count_id}/reconcile/finish` | ADMIN |  |  |
+| `POST` | `/api/v1/inventory/stock-count/{count_id}/write-off-request` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
 | `POST` | `/api/v1/inventory/stock/add` | ADMIN, AREA_MANAGER, CATALOG_MANAGER, STORE_MANAGER, WORKSHOP_STAFF |  |  |
 | `GET` | `/api/v1/inventory/stock/barcode/{barcode}` | AUTH |  |  |
 | `GET` | `/api/v1/inventory/stock/quarantined` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |  |
