@@ -122,6 +122,27 @@ DEFAULT_MATRIX: Dict[str, Any] = {
 }
 
 
+# The pre-2026-10-23 code default (multi-band; managers gated above Rs 5,000,
+# goodwill escalating to ADMIN). A copy of it saved as the
+# refund.approval_matrix policy would contradict the owner ruling, so
+# resolve_matrix ignores it (money review of #1264).
+LEGACY_DEFAULT_MATRIX: Dict[str, Any] = {
+    "currency": "INR",
+    "role_floor_paise": {
+        "CASHIER": 0, "SALES_STAFF": 0, "STORE_MANAGER": 500000,
+        "AREA_MANAGER": 2000000, "ADMIN": None, "SUPERADMIN": None,
+    },
+    "bands": [
+        {"max_paise": 100000, "tier": 0},
+        {"max_paise": 500000, "tier": 1},
+        {"max_paise": 2000000, "tier": 2},
+        {"max_paise": None, "tier": 3},
+    ],
+    "reason_bump": {"DEFECTIVE": 0, "CHANGE_OF_MIND": 0, "PRICE_MATCH": 1, "GOODWILL": 1},
+    "max_tier": 3,
+}
+
+
 def _max_tier(matrix: Dict[str, Any]) -> int:
     try:
         return int(matrix.get("max_tier", 3))
@@ -239,7 +260,9 @@ def resolve_matrix(scope: Optional[dict] = None) -> Dict[str, Any]:
         from api.services.policy_engine import get_policy
 
         val = get_policy(MATRIX_KEY, scope or None, default=DEFAULT_MATRIX)
-        return val if isinstance(val, dict) and val else DEFAULT_MATRIX
+        if not isinstance(val, dict) or not val or val == LEGACY_DEFAULT_MATRIX:
+            return DEFAULT_MATRIX
+        return val
     except Exception:  # noqa: BLE001
         logger.debug("[F27] resolve_matrix read failed; using default", exc_info=True)
         return DEFAULT_MATRIX
@@ -266,4 +289,8 @@ def required_tier_for_refund(
     if not matrix_enabled(scope or None):
         return None  # DARK -- behaves exactly as today
     matrix = resolve_matrix(scope or None)
-    return int_to_e4_tier(required_tier(amount_paise, reason, role, matrix))
+    # A saved matrix may be STRICTER than the owner rule, never looser.
+    return int_to_e4_tier(max(
+        required_tier(amount_paise, reason, role, DEFAULT_MATRIX),
+        required_tier(amount_paise, reason, role, matrix),
+    ))
