@@ -140,8 +140,15 @@ def _all_expense_matches(recorder):
 
 
 def _excludes_draft_cancelled(match):
+    """The query carries THE real-sale rule (utils.real_sale.real_sale_match):
+    DRAFT / HISTORICAL out by status; a CANCELLED order out unless it carries a
+    tax invoice (PR #1264 -- its credit note does the reversal), which the rule
+    judges per order and excludes by order_id (behaviour pinned in
+    test_pos_money_doors::test_a_cancelled_order_with_an_invoice_is_still_a_sale)."""
+    from api.utils.real_sale import real_sale_match
+
     st = match.get("status")
-    return isinstance(st, dict) and set(st.get("$nin", [])) >= {"CANCELLED", "DRAFT"}
+    return isinstance(st, dict) and st.get("$nin") == real_sale_match(None)["status"]["$nin"]
 
 
 # ============================================================================
