@@ -965,8 +965,11 @@ export const vendorsApi = {
       // Ruling 14: the receiver's per-line tally tick. A PO-backed receipt is
       // refused (422 LINES_NOT_TALLIED) until every line carries it.
       tallied?: boolean;
-      // NO_PO only: the cost paid per unit (required there) and the expiry.
+      // NO_PO only: the cost paid per unit (cost roles; accounts otherwise).
       unit_price?: number;
+      // The shelf the pieces go on (C1 / D3), and a contact lens's batch + expiry.
+      location_code?: string;
+      batch_code?: string;
       expiry_date?: string;
     }>;
     notes?: string;
