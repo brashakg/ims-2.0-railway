@@ -27,8 +27,10 @@ class PaymentMethod(str, Enum):
     GIFT_VOUCHER = "GIFT_VOUCHER"
     # Loyalty-points redemption recorded as an internal tender. The points are
     # already atomically debited by POST /loyalty/redeem BEFORE this payment is
-    # recorded, so add_payment does NOT re-redeem -- it just records the rupee
-    # value so it counts toward amount_paid (non-CREDIT) and reduces balance_due.
+    # recorded, so add_payment does NOT re-redeem -- it CLAIMS that redeem's
+    # ledger row (payments._claim_loyalty_redemption: same order, same
+    # customer, same rupee value, unused) and refuses a leg with no burn behind
+    # it, then records the rupee value so it counts toward amount_paid.
     # Previously absent from the enum: the POS LOYALTY tender 422'd and was
     # swallowed, so the customer's points were burned yet the order still showed
     # that amount as owing (a double charge).

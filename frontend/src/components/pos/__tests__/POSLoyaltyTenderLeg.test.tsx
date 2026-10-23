@@ -185,6 +185,31 @@ describe('POS loyalty tender leg', () => {
     expect(usePOSStore.getState().pendingLoyaltyRedeem).toBeNull();
   });
 
+  it('a redeem the server refuses for want of points says so in plain words', async () => {
+    seedStore(300);
+    mockedRedeem.mockRejectedValueOnce({
+      response: { status: 400, data: { detail: { ok: false, reason: 'insufficient_balance' } } },
+    });
+
+    const res = await submitPosOrder(usePOSStore.getState() as any, 'idem-6');
+    expect(res.warning).toMatch(/Not enough loyalty points/);
+    expect(loyaltyBodies()).toHaveLength(0);
+  });
+
+  it("a tender the server refuses carries the server's reason into the warning", async () => {
+    seedStore(300);
+    mockedAddPayment.mockImplementation(async (_id: string, body: any) => {
+      if (body.method === 'LOYALTY') {
+        throw { response: { status: 400, data: { detail: 'Not enough loyalty points: no points worth Rs 300.00 were redeemed' } } };
+      }
+      return { payment_id: 'pmt-1' } as any;
+    });
+
+    const res = await submitPosOrder(usePOSStore.getState() as any, 'idem-7');
+    expect(res.warning).toMatch(/did NOT record/);
+    expect(res.warning).toMatch(/Not enough loyalty points/);
+  });
+
   it('a LOYALTY line with no pending intent behind it burns nothing, posts nothing, and is flagged', async () => {
     const total = seedStore(300);
     usePOSStore.setState({ pendingLoyaltyRedeem: null } as any);

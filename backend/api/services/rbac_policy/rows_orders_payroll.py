@@ -164,10 +164,21 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/orders/{order_id}/items/{item_id}",
         "allowed": "AUTHENTICATED",
     },
+    # Taking money on a bill: mirrors orders/_shared.PAYMENT_ROLES, the
+    # in-function gate in payments.add_payment -- keep the two in sync.
     {
         "method": "POST",
         "path": "/api/v1/orders/{order_id}/payments",
-        "allowed": "AUTHENTICATED",
+        "allowed": [
+            "SUPERADMIN",
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "SALES_CASHIER",
+            "SALES_STAFF",
+            "CASHIER",
+            "OPTOMETRIST",
+        ],
     },
     {
         "method": "POST",

@@ -108,6 +108,15 @@ POS_WRITE_ROLES = (
 # FE/BE mismatch predates this change and is flagged, not decided.
 HANDOVER_ROLES = POS_WRITE_ROLES + ("CASHIER", "WORKSHOP_STAFF")
 
+# Roles permitted to TAKE MONEY on a bill (POST /orders/{id}/payments, and the
+# deliver-with-payment door that calls it). The till's role set (frontend
+# navConfig 'Billing' / 'Delivery Counter': SUPERADMIN, ADMIN, STORE_MANAGER,
+# OPTOMETRIST, CASHIER, SALES_STAFF) plus everyone who may ring a sale
+# (POS_WRITE_ROLES), so nobody can create a bill they cannot tender. Before
+# this, ANY logged-in role (workshop, catalogue, accounts) could mark a bill
+# paid. Keep the policy row for /orders/{order_id}/payments in sync.
+PAYMENT_ROLES = POS_WRITE_ROLES + ("CASHIER", "OPTOMETRIST")
+
 # Per-category GST is sourced from the canonical table in
 # api/services/gst_rates.py (single source of truth, shared with the product
 # master in products.py so a product's master rate == what POS bills it).
