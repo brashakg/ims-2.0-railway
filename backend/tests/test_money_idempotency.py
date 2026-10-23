@@ -256,10 +256,13 @@ def test_return_duplicate_idempotency_key_replays_not_duplicates(returns_ctx):
 
 
 def test_return_distinct_keys_create_distinct_records(returns_ctx):
-    """A different Idempotency-Key is a genuinely different refund -> two docs."""
+    """A different Idempotency-Key is a genuinely different refund -> two docs.
+
+    A store manager records them: together they refund more than Rs 2,000 on
+    one bill, which needs a manager (owner ruling 2026-10-23, PR #1264)."""
     client = returns_ctx["client"]
     coll = returns_ctx["returns_coll"]
-    auth = {"Authorization": f"Bearer {_staff_token(['CASHIER'])}"}
+    auth = {"Authorization": f"Bearer {_staff_token(['STORE_MANAGER'])}"}
 
     r1 = client.post(
         "/api/v1/returns",
