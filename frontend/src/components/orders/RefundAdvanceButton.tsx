@@ -4,7 +4,7 @@
 import { useEffect, useState } from 'react';
 import { Undo2 } from 'lucide-react';
 import { returnsApi } from '../../services/api/returns';
-import type { AdvanceRefundPlan } from '../../services/api/returns';
+import type { AdvanceRefundPlan, CashPaidFrom } from '../../services/api/returns';
 import { useToast } from '../../context/ToastContext';
 
 export const ADVANCE_REFUND_ROLES = ['ACCOUNTANT', 'ADMIN', 'SUPERADMIN'];
@@ -36,6 +36,7 @@ export function RefundAdvanceButton({ orderId, onDone }: { orderId: string; onDo
   const [open, setOpen] = useState(false);
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
+  const [cashFrom, setCashFrom] = useState<CashPaidFrom | undefined>(undefined);
 
   useEffect(() => {
     let live = true;
@@ -51,7 +52,7 @@ export function RefundAdvanceButton({ orderId, onDone }: { orderId: string; onDo
   const submit = async () => {
     setBusy(true);
     try {
-      const res = await returnsApi.refundAdvanceAndCancel(orderId, reason.trim());
+      const res = await returnsApi.refundAdvanceAndCancel(orderId, reason.trim(), finishOnly ? undefined : cashFrom);
       if (res?.cancel_error) toast.error(res.message);
       else toast.success(res?.message || 'Advance refunded and order cancelled');
       setOpen(false);
@@ -64,6 +65,10 @@ export function RefundAdvanceButton({ orderId, onDone }: { orderId: string; onDo
   };
 
   const allowed = plan?.ok === true;
+  // The advance is refunded but the cancel did not finish: one press finishes it.
+  const finishOnly = plan?.action === 'finish_cancel';
+  const needsCashFrom = !finishOnly && plan?.has_cash === true;
+  const label = finishOnly ? 'Finish cancel' : 'Refund advance and cancel';
   return (
     <>
       <button
@@ -73,7 +78,7 @@ export function RefundAdvanceButton({ orderId, onDone }: { orderId: string; onDo
         className="btn-outline flex-1 flex items-center justify-center gap-2 min-w-[150px] disabled:opacity-50 disabled:cursor-not-allowed"
       >
         <Undo2 className="w-4 h-4" />
-        Refund advance and cancel
+        {label}
       </button>
       {!allowed && plan?.reason && (
         <p className="w-full text-xs text-gray-500">Refund advance: {plan.reason}</p>
@@ -83,10 +88,16 @@ export function RefundAdvanceButton({ orderId, onDone }: { orderId: string; onDo
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
           role="dialog"
           aria-modal="true"
-          aria-label="Refund advance and cancel"
+          aria-label={label}
         >
           <div className="w-full max-w-md rounded-lg bg-white shadow-lg p-5 space-y-4">
-            <h3 className="text-sm font-semibold text-gray-900">Refund advance and cancel</h3>
+            <h3 className="text-sm font-semibold text-gray-900">{label}</h3>
+            {finishOnly && (
+              <p className="text-sm text-gray-700">
+                The advance is already refunded. This cancels the order.
+              </p>
+            )}
+            {!finishOnly && (
             <div className="rounded-md bg-gray-50 border border-gray-200 px-3 py-2 text-sm space-y-1">
               {(plan?.refund_tenders || []).map((t) => (
                 <div key={t.method} className="flex justify-between">
@@ -99,7 +110,23 @@ export function RefundAdvanceButton({ orderId, onDone }: { orderId: string; onDo
                 <span className="font-mono">{rs(plan?.total || 0)}</span>
               </div>
             </div>
-            {plan?.invoice_number && (
+            )}
+            {needsCashFrom && (
+              <fieldset className="text-sm space-y-1">
+                <legend className="text-gray-700">The cash is paid back from</legend>
+                <label className="flex items-center gap-2">
+                  <input type="radio" name="cash-from" checked={cashFrom === 'STORE_DRAWER'}
+                    onChange={() => setCashFrom('STORE_DRAWER')} />
+                  This shop's cash drawer
+                </label>
+                <label className="flex items-center gap-2">
+                  <input type="radio" name="cash-from" checked={cashFrom === 'HQ'}
+                    onChange={() => setCashFrom('HQ')} />
+                  HQ (not from the shop drawer)
+                </label>
+              </fieldset>
+            )}
+            {!finishOnly && plan?.invoice_number && (
               <p className="text-xs text-gray-600">
                 A credit note for the whole invoice {plan.invoice_number} will be issued (all its GST
                 reversed); only the money paid above is refunded.
@@ -122,9 +149,9 @@ export function RefundAdvanceButton({ orderId, onDone }: { orderId: string; onDo
               <button
                 className="btn-primary"
                 onClick={submit}
-                disabled={busy || reason.trim().length < 10}
+                disabled={busy || reason.trim().length < 10 || (needsCashFrom && !cashFrom)}
               >
-                {busy ? 'Refunding...' : `Refund ${rs(plan?.total || 0)} and cancel`}
+                {busy ? 'Working...' : finishOnly ? 'Finish the cancel' : `Refund ${rs(plan?.total || 0)} and cancel`}
               </button>
             </div>
           </div>

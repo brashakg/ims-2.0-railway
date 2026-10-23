@@ -30,7 +30,7 @@ import { marketingApi } from '../../services/api/marketing';
 import { printDocumentsApi } from '../../services/api/printDocuments';
 import { formatDateIST, formatTimeIST } from '../../utils/datetime';
 import { useAuth } from '../../context/AuthContext';
-import { canCloseHandover, canMarkDelivered } from './handoverRoles';
+import { canCloseHandover, canMarkDelivered, canTakePayment } from './handoverRoles';
 import { useToast } from '../../context/ToastContext';
 import { Pagination } from '../../components/common/Pagination';
 import clsx from 'clsx';
@@ -629,7 +629,7 @@ export function OrdersPage() {
                       <Printer className="w-3 h-3" />
                       Print
                     </button>
-                    {order.paymentStatus !== 'PAID' && (
+                    {order.paymentStatus !== 'PAID' && canTakePayment(user) && (
                       <button
                         onMouseDown={(e) => { e.preventDefault(); (document.activeElement as HTMLElement)?.blur?.(); }}
                         onClick={(e) => { e.stopPropagation(); openPaymentModal(order); }}
@@ -874,7 +874,7 @@ export function OrdersPage() {
                       Mark Delivered
                     </button>
                   )}
-                  {selectedOrder.balanceDue > 0 && (
+                  {selectedOrder.balanceDue > 0 && canTakePayment(user) && (
                     <button
                       onClick={() => openPaymentModal(selectedOrder)}
                       className="btn-outline flex-1 flex items-center justify-center gap-2 min-w-[150px]"
