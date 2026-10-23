@@ -84,6 +84,8 @@ export function RefundApprovalModal({
         store_id: storeId,
         amount,
         reason: reason || 'Refund',
+        // The tier the refund door named, so the request reaches the right approvers.
+        required_tier: requiredTier,
         context: {
           order_id: orderId,
           order_number: orderNumber,

@@ -482,7 +482,15 @@ class ApprovalEngine:
             logger.debug("[APPROVALS] tier policy read failed; using defaults", exc_info=True)
 
         amt = float(amount or 0.0)
-        if amt >= super_above_rs:
+        if action_type == "REFUND_APPROVAL_MATRIX":
+            # The refund matrix owns this action's amount ladder (owner ruling
+            # 2026-10-23: above Rs 2,000 -> a STORE_MANAGER may approve), so the
+            # generic refund.tier.* bands must not push it to ADMIN. The maker
+            # passes the matrix tier the refund door named (it may only RAISE
+            # this), and consume re-checks it via min_tier, so a lower-tier
+            # token can never clear a refund the matrix gates higher.
+            amount_tier = "auto"
+        elif amt >= super_above_rs:
             amount_tier = "super"
         elif amt >= admin_above_rs:
             amount_tier = "admin"

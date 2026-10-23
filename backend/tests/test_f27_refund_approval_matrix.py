@@ -4,13 +4,14 @@ IMS 2.0 - Feature #27 Refund approval matrix -- intent tests.
 The matrix decides, for a refund, WHICH E4 approval tier (if any) is required
 before it can be recorded -- keyed on amount band x reason x requesting role,
 configurable per store/entity via E2, and DARK by default (flag off) so it can
-ship without touching live refunds.
+ship without touching live refunds. Since the owner ruling of 2026-10-23 it is
+ON by default (above Rs 2,000 needs a manager) and FAILS CLOSED.
 
 Covered:
   - pure required_tier across role-floor auto-clear, amount bands, reason bump, clamp,
   - int_to_e4_tier mapping,
-  - required_tier_for_refund: DARK (flag off) -> None; ENABLED -> resolves tier;
-    fail-OPEN on resolver error,
+  - required_tier_for_refund: flag off -> None; ENABLED -> resolves tier;
+    fail-CLOSED on resolver error (raises),
   - the returns gate: dark -> no-op (None); enabled + tier>0 + no token -> 403;
     enabled + valid token -> consumes an E4 approval BOUND to this refund
     (store_id + context.order_id) so a token for refund A can't authorize refund B.
@@ -31,7 +32,37 @@ os.environ.setdefault("ENVIRONMENT", "test")
 
 from api.services import refund_approval_matrix as ram  # noqa: E402
 
-M = ram.DEFAULT_MATRIX
+# A multi-band matrix (the pre-2026-10-23 default) to exercise the pure
+# engine's mechanics -- floors, bands, reason bump, clamp. The CODE default is
+# now the owner's single rule; see the DEFAULT_MATRIX tests below.
+M = {
+    "currency": "INR",
+    "role_floor_paise": {
+        "CASHIER": 0, "SALES_STAFF": 0, "STORE_MANAGER": 500000,
+        "AREA_MANAGER": 2000000, "ADMIN": None, "SUPERADMIN": None,
+    },
+    "bands": [
+        {"max_paise": 100000, "tier": 0},
+        {"max_paise": 500000, "tier": 1},
+        {"max_paise": 2000000, "tier": 2},
+        {"max_paise": None, "tier": 3},
+    ],
+    "reason_bump": {"DEFECTIVE": 0, "CHANGE_OF_MIND": 0, "PRICE_MATCH": 1, "GOODWILL": 1},
+    "max_tier": 3,
+}
+
+
+def test_default_matrix_is_the_owner_rule():
+    # Owner ruling 2026-10-23: above Rs 2,000 a refund needs a MANAGER
+    # (tier 1 == E4 "auto" == STORE_MANAGER+); at/below Rs 2,000 nothing changes.
+    D = ram.DEFAULT_MATRIX
+    for role in ("CASHIER", "SALES_STAFF", "SALES_CASHIER"):
+        assert ram.required_tier(200000, "GOODWILL", role, D) == 0      # Rs 2,000.00
+        assert ram.required_tier(200001, "DEFECTIVE", role, D) == 1     # Rs 2,000.01
+        assert ram.required_tier(99999999, "GOODWILL", role, D) == 1    # never past a manager
+    for role in ("STORE_MANAGER", "AREA_MANAGER", "ADMIN", "SUPERADMIN"):
+        assert ram.required_tier(99999999, "GOODWILL", role, D) == 0
+    assert ram.int_to_e4_tier(1) == "auto"
 
 
 # --------------------------------------------------------------------------- #
@@ -93,7 +124,7 @@ def test_resolver_enabled_resolves_tier(monkeypatch):
                                         store_id="BV-01") is None
 
 
-def test_resolver_fails_open_on_error(monkeypatch):
+def test_resolver_fails_closed_on_error(monkeypatch):
     monkeypatch.setattr(ram, "matrix_enabled", lambda scope=None: True)
     monkeypatch.setattr(ram, "resolve_matrix", lambda scope=None: M)
 
@@ -101,16 +132,31 @@ def test_resolver_fails_open_on_error(monkeypatch):
         raise RuntimeError("matrix corrupt")
 
     monkeypatch.setattr(ram, "required_tier", _boom)
-    # a resolver error must FAIL OPEN (None) so a transient fault can't wedge the till
-    assert ram.required_tier_for_refund(300000, "DEFECTIVE", "SALES_CASHIER",
-                                        store_id="BV-01") is None
+    # a resolver error must FAIL CLOSED: it raises, and the refund door refuses
+    with pytest.raises(RuntimeError):
+        ram.required_tier_for_refund(300000, "DEFECTIVE", "SALES_CASHIER", store_id="BV-01")
 
 
-def test_matrix_enabled_dark_default(monkeypatch):
-    # get_policy returns the passed default for an unset key -> flag default False.
+def test_matrix_enabled_on_by_default(monkeypatch):
+    # get_policy returns the passed default for an unset key -> flag default True.
     from api.services import policy_engine as pe
     monkeypatch.setattr(pe, "get_policy", lambda key, scope=None, *, default=None: default)
-    assert ram.matrix_enabled({"store_id": "BV-01"}) is False
+    assert ram.matrix_enabled({"store_id": "BV-01"}) is True
+
+
+def test_matrix_enabled_fails_closed(monkeypatch):
+    from api.services import policy_engine as pe
+
+    def _boom(*a, **k):
+        raise RuntimeError("policy store down")
+
+    monkeypatch.setattr(pe, "get_policy", _boom)
+    assert ram.matrix_enabled({"store_id": "BV-01"}) is True
+
+
+def test_registry_default_is_on():
+    from api.services.policy_registry import REGISTRY
+    assert REGISTRY["refund.matrix_enabled"].default is True
 
 
 # --------------------------------------------------------------------------- #

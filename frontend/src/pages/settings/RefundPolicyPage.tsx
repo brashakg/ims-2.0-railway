@@ -4,7 +4,7 @@
 // A focused editor for the configurable refund-approval matrix (DECISIONS sec 6):
 //   - three approval-threshold tiers: auto-approve below / needs ADMIN above /
 //     needs SUPERADMIN above (rupee inputs; stored as money_paisa policy keys)
-//   - the refund approval-matrix master switch (gate is DARK by default)
+//   - the refund approval-matrix master switch (ON by default: refunds above Rs 2,000 need a manager)
 //   - the original-tender hard-lock toggle (refunds always go back to the
 //     original payment method)
 // plus the approver's own PIN (reused from ApprovalPinSection).
@@ -43,7 +43,7 @@ const DEFAULTS: FormState = {
   autoBelow: 500,
   adminAbove: 2000,
   superAbove: 10000,
-  matrixEnabled: false,
+  matrixEnabled: true,
   tenderEnforce: true,
 };
 
