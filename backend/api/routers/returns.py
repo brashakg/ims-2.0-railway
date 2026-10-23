@@ -4536,18 +4536,22 @@ async def retry_restock(
 # A not-yet-delivered order that took an advance could only be plain-cancelled
 # (the advance kept, no refund) -- and create_return cannot refund it: a return
 # refunds the LINES' value, capped at what was paid, so a Rs 1,000 advance on a
-# Rs 5,000 order is refused. This door refunds exactly the money taken, back to
-# the tenders it was taken in, then cancels the order through the ONE cancel
-# door (stock back on the shelf, loyalty earn clawed back, redeemed points
-# restored). STORE_MANAGER / ADMIN / SUPERADMIN only: that IS the manager's approval the
-# refund rule demands, and cancelling an order that took an advance is
-# manager-only too.
-# ponytail: un-invoiced orders paid in CASH / UPI / CARD / BANK / LOYALTY only.
-# An invoiced order needs a credit note for its invoice (GST), and a
-# store-credit / gift-voucher / EMI advance needs its instrument re-issued --
-# both are refused with a clear message until the owner rules on them.
-_ADVANCE_REFUND_ROLES = ("ADMIN", "STORE_MANAGER")  # SUPERADMIN auto-passes
-_ADVANCE_REFUND_TENDERS = _REFUND_CASH_IN + ("LOYALTY",)
+# Rs 5,000 order is refused. This door refunds exactly the money taken, then
+# cancels the order through the ONE cancel door (stock back on the shelf,
+# loyalty earn clawed back, redeemed points restored).
+#
+# Owner rulings 2026-10-23:
+#   * ACCOUNTANT / ADMIN / SUPERADMIN only (not store managers): that IS the
+#     approval the refund rule demands.
+#   * Cash / UPI / card / bank go back the way they came; loyalty points come
+#     back through the cancel; an advance paid by store credit, gift voucher
+#     or EMI goes back ALWAYS AS STORE CREDIT to the bill's own customer.
+#   * An INVOICED order gets a credit note for the WHOLE invoice (GST fully
+#     reversed, the shop's normal credit-note series) while only the advance
+#     actually paid is refunded.
+_ADVANCE_REFUND_ROLES = ("ACCOUNTANT", "ADMIN")  # SUPERADMIN auto-passes
+_ADVANCE_BACK_SAME_WAY = _REFUND_CASH_IN + ("LOYALTY",)
+_ADVANCE_BACK_AS_CREDIT = ("STORE_CREDIT", "GIFT_VOUCHER", "EMI")
 
 
 class AdvanceRefundRequest(BaseModel):
@@ -4555,12 +4559,126 @@ class AdvanceRefundRequest(BaseModel):
     reason: str = Field(..., min_length=10, max_length=500)
 
 
+def _advance_legs(order: Dict[str, Any]) -> Dict[str, float]:
+    """The money taken on an order, per tender. A CREDIT leg is a pay-later
+    promise, not money, so it is never refunded."""
+    legs: Dict[str, float] = {}
+    for p in order.get("payments") or []:
+        method = canonicalize_tender(p.get("method"))
+        if method == "CREDIT":
+            continue
+        legs[method] = round(legs.get(method, 0.0) + float(p.get("amount") or 0), 2)
+    return {m: a for m, a in legs.items() if a > 0}
+
+
+def _advance_refund_plan(order: Dict[str, Any]) -> Dict[str, Any]:
+    """What the door would do for this order, or why it cannot: the ONE
+    reading the Orders screen's button shows and the POST enforces."""
+    from .orders.release import CANCELLABLE_STATUSES
+
+    status = order.get("status")
+    if status not in CANCELLABLE_STATUSES:
+        return {"ok": False, "reason": (
+            f"This order is {status}. Only an order not yet delivered can have its "
+            "advance refunded; use a normal return for a delivered order.")}
+    if str(order.get("channel") or "").strip().upper() == "ONLINE" or order.get("shopify_order_id"):
+        return {"ok": False, "reason": (
+            "This is an online order: Shopify took the money, so it is refunded "
+            "on Shopify (Online Store > Refund reviews).")}
+    legs = _advance_legs(order)
+    other = sorted(m for m in legs if m not in _ADVANCE_BACK_SAME_WAY + _ADVANCE_BACK_AS_CREDIT)
+    if other:
+        return {"ok": False, "reason": (
+            f"This advance was paid partly by {', '.join(other)}, which cannot be "
+            "given back here. Nothing was recorded.")}
+    total = round(sum(legs.values()), 2)
+    if total <= 0.01:
+        return {"ok": False, "reason": "No money was taken on this order - cancel it normally."}
+    if abs(total - float(order.get("amount_paid") or 0)) > 0.01:
+        return {"ok": False, "reason": (
+            "The payments on this order do not add up to its amount paid, so "
+            "nothing was recorded. Ask an admin to check the order.")}
+    credit = round(sum(a for m, a in legs.items() if m in _ADVANCE_BACK_AS_CREDIT), 2)
+    customer_id = str(order.get("customer_id") or "")
+    if credit > 0 and (not customer_id or customer_id.startswith("walkin-")):
+        return {"ok": False, "reason": (
+            "Part of this advance must go back as store credit, but the bill has "
+            "no customer account to hold it.")}
+    tenders = [{"method": m, "amount": a} for m, a in legs.items() if m in _ADVANCE_BACK_SAME_WAY]
+    if credit > 0:
+        tenders.append({"method": "STORE_CREDIT", "amount": credit})
+    return {"ok": True, "total": total, "credit": credit, "refund_tenders": tenders,
+            "invoice_number": order.get("invoice_number") or None}
+
+
+def _credit_back_advance(order: Dict[str, Any], amount: float, return_id: str,
+                         current_user: dict) -> Optional[Dict[str, Any]]:
+    """Give the store-credit / voucher / EMI part of an advance back as store
+    credit to the bill's own customer. ADJUSTED, not ISSUED: the GST returns
+    read every ISSUED row as a credit note, and this is money going back, not
+    a second tax reversal (an invoiced order's one credit note is the return
+    doc). None when it could not be written -- the caller records nothing."""
+    customer_id = str(order.get("customer_id") or "")
+    repo = get_customer_repository()
+    doc = repo.find_by_id(customer_id) if repo is not None else None
+    coll = _ledger_coll()
+    if coll is None:
+        return None
+    try:
+        entry = scl.make_entry(
+            customer_id=customer_id,
+            entry_type=scl.ADJUSTED,
+            amount=amount,
+            current_balance=_current_credit_balance(customer_id, doc),
+            reason=f"Advance on order {order.get('order_number') or order.get('order_id')} refunded as store credit",
+            ref=return_id,
+            store_id=order.get("store_id"),
+            user_id=current_user.get("user_id"),
+        )
+        entry["order_id"] = order.get("order_id")
+        entry["source"] = "ADVANCE_REFUND"
+        coll.insert_one(dict(entry))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[RETURNS] advance store credit not written for %s: %s", return_id, exc)
+        return None
+    if repo is not None:
+        try:
+            repo.update(customer_id, {"store_credit": entry["balance_after"]})
+        except Exception:  # noqa: BLE001
+            pass
+    entry.pop("_id", None)
+    return entry
+
+
+def _whole_invoice_credit_note(order: Dict[str, Any], order_id: str):
+    """(priced_lines, gst_view, gross) for a credit note over the WHOLE
+    invoice -- every line at its full quantity, priced by THE return pricing
+    so the note reverses exactly the tax the invoice charged. Lines carry
+    restock=False: the cancel puts the stock back, not this note."""
+    lines = []
+    for it in order.get("items") or []:
+        if not isinstance(it, dict):
+            continue
+        lines.append(ReturnLine(
+            order_item_id=str(it.get("item_id") or it.get("id") or "") or None,
+            product_id=it.get("product_id"),
+            product_name=str(it.get("product_name") or ""),
+            sku=str(it.get("sku") or ""),
+            return_qty=_line_purchased_qty(it),
+            unit_price=float(it.get("unit_price") or 0),
+            gst_rate=it.get("gst_rate"),
+            restock=False,
+        ))
+    priced_lines, gross, _round_off = _price_return(lines, order, order_id)
+    return priced_lines, engine.gst_breakup_lines(priced_lines), gross
+
+
 @router.post("/advance-refund", status_code=201)
 async def refund_advance_and_cancel(
     body: AdvanceRefundRequest = Body(...),
     current_user: dict = Depends(require_roles(*_ADVANCE_REFUND_ROLES)),
 ):
-    """Refund the advance on a not-yet-delivered, un-invoiced order, then cancel it."""
+    """Refund the advance on a not-yet-delivered order, then cancel it."""
     db = _get_db()
     if db is not None:
         from .finance import check_period_locked
@@ -4576,63 +4694,50 @@ async def refund_advance_and_cancel(
     store_id = order.get("store_id")
     if not can_access_store_scoped(store_id, current_user):
         raise HTTPException(status_code=403, detail="No access to the store this order belongs to.")
-
-    from .orders.release import CANCELLABLE_STATUSES
-
-    status = order.get("status")
-    if status not in CANCELLABLE_STATUSES:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"This order is {status}. Only an order not yet delivered can have "
-                "its advance refunded; use a normal return for a delivered order."
-            ),
-        )
-    if order.get("invoice_number"):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"This order has tax invoice {order.get('invoice_number')}, so its "
-                "refund needs a credit note. Return the items from Returns instead."
-            ),
-        )
     coll = _returns_coll()
     if coll is None:
         raise HTTPException(status_code=503, detail="Returns store unavailable - nothing was recorded.")
+
+    from .orders.cancel import cancel_order_core
+
+    async def _cancel() -> Optional[Any]:
+        try:
+            await cancel_order_core(order_id, body.reason, current_user)
+            return None
+        except HTTPException as exc:
+            logger.error("[RETURNS] advance refunded on %s but cancel failed: %s", order_id, exc.detail)
+            return exc.detail
+
+    # Pressed again after the refund landed but the cancel did not: finish it.
+    done_id = order.get("advance_refund_id")
+    if done_id and order.get("status") == "CANCELLED":
+        raise HTTPException(status_code=400, detail="This advance is already refunded and the order cancelled.")
+    if done_id and coll.count_documents({"return_id": done_id}):
+        cancel_error = await _cancel()
+        return {"return_id": done_id, "order_id": order_id, "refund_amount": 0.0,
+                "order_status": order.get("status") if cancel_error else "CANCELLED",
+                "cancel_error": cancel_error,
+                "message": ("The advance was already refunded; the order is now cancelled."
+                            if not cancel_error else f"The advance was already refunded, but "
+                            f"the order could not be cancelled: {cancel_error}")}
+
+    plan = _advance_refund_plan(order)
+    if not plan["ok"]:
+        raise HTTPException(status_code=400, detail=plan["reason"])
     if coll.count_documents({"order_id": order_id}):
         raise HTTPException(
             status_code=400,
             detail="This order already has a return against it. Ask an admin to settle it.",
         )
+    total, credit, refund_tenders = plan["total"], plan["credit"], plan["refund_tenders"]
+    status = order.get("status")
 
-    # The money taken, per tender (a CREDIT leg is a pay-later promise, not money).
-    legs: Dict[str, float] = {}
-    for p in order.get("payments") or []:
-        method = canonicalize_tender(p.get("method"))
-        if method == "CREDIT":
-            continue
-        legs[method] = round(legs.get(method, 0.0) + float(p.get("amount") or 0), 2)
-    legs = {m: a for m, a in legs.items() if a > 0}
-    other = sorted(m for m in legs if m not in _ADVANCE_REFUND_TENDERS)
-    if other:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"This advance was paid partly by {', '.join(other)}, which this door "
-                "cannot give back. Nothing was recorded - ask an admin."
-            ),
-        )
-    total = round(sum(legs.values()), 2)
-    if total <= 0.01:
-        raise HTTPException(status_code=400, detail="No money was taken on this order - cancel it normally.")
-    if abs(total - float(order.get("amount_paid") or 0)) > 0.01:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "The payments on this order do not add up to its amount paid, so "
-                "nothing was recorded. Ask an admin to check the order."
-            ),
-        )
+    # A credit note for the WHOLE invoice (invoiced orders only).
+    priced_lines: List[Dict[str, Any]] = []
+    gst_view: Dict[str, Any] = {"taxable": 0.0, "tax": 0.0}
+    note_value = 0.0
+    if plan["invoice_number"]:
+        priced_lines, gst_view, note_value = _whole_invoice_credit_note(order, order_id)
 
     # One refund per order, even under a double tap: claim the order first.
     return_id = generate_return_id()
@@ -4644,7 +4749,30 @@ async def refund_advance_and_cancel(
             detail="This order changed or is already being refunded - reload it and check.",
         )
 
-    refund_tenders = [{"method": m, "amount": a} for m, a in legs.items()]
+    def _unclaim():
+        repo.update_if(order_id, {"advance_refund_id": return_id}, {"advance_refund_id": None})
+
+    credit_note_number: Optional[str] = None
+    if plan["invoice_number"]:
+        try:
+            credit_note_number = next_document_number(_get_db(), store_id, "C")
+        except InvoiceNumberError as exc:
+            _unclaim()
+            raise HTTPException(
+                status_code=400,
+                detail=f"The credit note cannot be numbered, so NOTHING was recorded: {exc}",
+            ) from exc
+
+    credit_entry = None
+    if credit > 0:
+        credit_entry = _credit_back_advance(order, credit, return_id, current_user)
+        if credit_entry is None:
+            _unclaim()
+            raise HTTPException(
+                status_code=503,
+                detail="The store credit could not be written, so NOTHING was recorded. Try again.",
+            )
+
     actor_name = current_user.get("full_name", current_user.get("username", ""))
     now = utc_now_iso()
     doc: Dict[str, Any] = {
@@ -4657,19 +4785,25 @@ async def refund_advance_and_cancel(
         "store_id": store_id,
         "return_type": "RETURN",
         "advance_refund": True,
-        # Nothing was handed over and no invoice was issued: no goods, no tax.
-        "items": [],
-        "returned_value": total,
-        "gross_refund": total,
+        # Invoiced: the whole invoice's lines and tax (THE credit note GSTR-1
+        # / 3B read from returns.gst_breakup). Not invoiced: no tax was charged.
+        "items": priced_lines,
+        "returned_value": note_value or total,
+        "gross_refund": note_value or total,
+        "credit_note_value": note_value or None,
         "restocking_fee": 0.0,
+        # The money actually given back: the advance, never the invoice value.
         "net_refund": total,
-        "gst_breakup": {"taxable": 0.0, "tax": 0.0},
-        "credit_note_number": None,
+        "gst_breakup": gst_view,
+        "credit_note_number": credit_note_number,
+        "invoice_number": plan["invoice_number"],
         "refund_amount": total,
         "refund_method": refund_tenders[0]["method"],
         # Drawer truth: the Day-End readers net these legs off.
         "refund_tenders": refund_tenders,
         "drawer_auto_netted": True,
+        "credit_amount": credit or None,
+        "credit_entry": credit_entry,
         "status": "COMPLETED",
         "reason_summary": body.reason,
         "refund_approval_by": current_user.get("user_id"),
@@ -4682,8 +4816,10 @@ async def refund_advance_and_cancel(
     try:
         coll.insert_one(dict(doc))
     except Exception as exc:  # noqa: BLE001
-        repo.update_if(order_id, {"advance_refund_id": return_id}, {"advance_refund_id": None})
         logger.error("[RETURNS] advance refund %s not saved: %s", return_id, exc)
+        if credit_entry is not None:  # take the credit back: nothing may stand without its record
+            _credit_back_advance(order, -credit, return_id, current_user)
+        _unclaim()
         raise HTTPException(
             status_code=503, detail="The refund could not be saved - nothing was recorded. Try again."
         )
@@ -4699,7 +4835,8 @@ async def refund_advance_and_cancel(
                 "entity_id": return_id,
                 "store_id": store_id,
                 "user_id": current_user.get("user_id"),
-                "details": {"order_id": order_id, "refund_tenders": refund_tenders, "reason": body.reason},
+                "details": {"order_id": order_id, "refund_tenders": refund_tenders,
+                            "credit_note_number": credit_note_number, "reason": body.reason},
                 "created_at": now,
             })
     except Exception as exc:  # noqa: BLE001
@@ -4707,26 +4844,39 @@ async def refund_advance_and_cancel(
 
     # Cancel through the ONE cancel door; the refund above lets it pass the
     # money gate. A cancel failure leaves the refund standing and says so --
-    # the manager presses Cancel again (it no longer finds money held).
-    from .orders.cancel import cancel_order
-
-    cancel_error = None
-    try:
-        await cancel_order(order_id, reason=body.reason, current_user=current_user)
-    except HTTPException as exc:
-        cancel_error = exc.detail
-        logger.error("[RETURNS] advance refunded on %s but cancel failed: %s", order_id, exc.detail)
+    # pressing the button again finishes the cancel (branch above).
+    cancel_error = await _cancel()
     return {
         "return_id": return_id,
         "order_id": order_id,
         "refund_amount": total,
         "refund_tenders": refund_tenders,
+        "credit_note_number": credit_note_number,
         "order_status": status if cancel_error else "CANCELLED",
         "cancel_error": cancel_error,
         "message": (
             f"Refund of Rs {total:,.2f} recorded and the order cancelled."
             if not cancel_error
             else f"Refund of Rs {total:,.2f} recorded, but the order could not be "
-            f"cancelled: {cancel_error}. Cancel it again."
+            f"cancelled: {cancel_error}. Press the button again to finish."
         ),
     }
+
+
+@router.get("/advance-refund/{order_id}")
+async def advance_refund_preview(
+    order_id: str,
+    current_user: dict = Depends(require_roles(*_ADVANCE_REFUND_ROLES)),
+):
+    """What 'Refund advance and cancel' would give back on this order, or why
+    it cannot -- the Orders screen's confirm dialog. No side effects."""
+    repo = get_order_repository()
+    order = repo.find_by_id(order_id) if repo is not None else None
+    if not order or not can_access_store_scoped(order.get("store_id"), current_user):
+        raise HTTPException(status_code=404, detail="Order not found")
+    plan = _advance_refund_plan(order)
+    if plan["ok"]:
+        coll = _returns_coll()
+        if coll is not None and coll.count_documents({"order_id": order.get("order_id") or order_id}):
+            plan = {"ok": False, "reason": "This order already has a return against it. Ask an admin to settle it."}
+    return plan

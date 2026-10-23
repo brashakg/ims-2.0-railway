@@ -269,13 +269,21 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/returns/{return_id}/restock",
         "allowed": ["ADMIN", "CASHIER", "SALES_STAFF", "STORE_MANAGER"],
     },
-    # Refund an advance + cancel the order: manager-only (returns.py
-    # _ADVANCE_REFUND_ROLES). A subset of the returns:write union above, so
-    # it broadens no capability grant.
+    # Refund an advance + cancel the order: ACCOUNTANT / ADMIN / SUPERADMIN
+    # (owner 2026-10-23; returns.py _ADVANCE_REFUND_ROLES). Its own capability
+    # key (returns:advance-refund, services/capabilities) so ACCOUNTANT never
+    # joins the returns:write union.
     {
         "method": "POST",
         "path": "/api/v1/returns/advance-refund",
-        "allowed": ["ADMIN", "STORE_MANAGER"],
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
+    # Its read-only preview for the Orders screen's confirm dialog (same roles;
+    # returns:read is already AUTHENTICATED-broad, so it broadens nothing).
+    {
+        "method": "GET",
+        "path": "/api/v1/returns/advance-refund/{order_id}",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
     },
     # --- /api/v1/settings ---
     {"method": "GET", "path": "/api/v1/settings", "allowed": "PUBLIC"},

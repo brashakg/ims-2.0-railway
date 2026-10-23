@@ -25,8 +25,10 @@ from .release import (
 )
 
 
-# Who may cancel an order that took money (once that money is refunded).
-CANCEL_ADVANCE_ROLES = ("SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER")
+# Who may cancel an order that took money (once that money is refunded): the
+# same people who refund an advance (owner 2026-10-23 -- accounts and HQ, not
+# store managers; returns.py _ADVANCE_REFUND_ROLES).
+CANCEL_ADVANCE_ROLES = ("SUPERADMIN", "ADMIN", "ACCOUNTANT")
 
 
 def _refuse_cancel_holding_money(order: Dict[str, Any], order_id: str, current_user: dict) -> None:
@@ -43,8 +45,15 @@ def _refuse_cancel_holding_money(order: Dict[str, Any], order_id: str, current_u
         or order.get("shopify_order_id")
     ):
         return
+    from ..returns import _returns_coll, _sum_prior_refunds
+
     invoice = order.get("invoice_number")
-    if invoice:
+    reversed_by = None  # the refund-advance door's whole-invoice credit note
+    if invoice and order.get("advance_refund_id"):
+        coll = _returns_coll()
+        doc = coll.find_one({"return_id": order["advance_refund_id"], "status": "COMPLETED"}) if coll is not None else None
+        reversed_by = (doc or {}).get("credit_note_number")
+    if invoice and not reversed_by:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -59,7 +68,6 @@ def _refuse_cancel_holding_money(order: Dict[str, Any], order_id: str, current_u
         paid = float("inf")  # unreadable -> treat as money held, never as none
     if paid <= 0.01:
         return  # nothing was taken: cancel exactly as before
-    from ..returns import _sum_prior_refunds
 
     held = round(paid - _sum_prior_refunds(order_id), 2)
     if held > 0.01:
@@ -75,7 +83,7 @@ def _refuse_cancel_holding_money(order: Dict[str, Any], order_id: str, current_u
     if not any(r in current_user.get("roles", []) for r in CANCEL_ADVANCE_ROLES):
         raise HTTPException(
             status_code=403,
-            detail="Only a store manager or above can cancel an order that took an advance.",
+            detail="Only accounts or an admin can cancel an order that took an advance.",
         )
 
 
@@ -93,6 +101,13 @@ async def cancel_order(
         raise HTTPException(
             status_code=403, detail="Your role is not permitted to cancel orders."
         )
+    return await cancel_order_core(order_id, reason, current_user)
+
+
+async def cancel_order_core(order_id: str, reason: str, current_user: dict):
+    """The cancel itself, behind the route's role gate. The refund-advance door
+    (returns.refund_advance_and_cancel, accounts / admin) calls it directly
+    once the advance is refunded; every other guard below still runs."""
     repo = get_order_repository()
 
     if repo is not None:
