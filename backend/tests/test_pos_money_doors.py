@@ -41,6 +41,7 @@ from database.repositories.loyalty_repository import (  # noqa: E402
     LoyaltyAccountRepository,
     LoyaltyTransactionRepository,
 )
+from database.repositories.customer_repository import CustomerRepository  # noqa: E402
 from database.repositories.order_repository import OrderRepository  # noqa: E402
 from tests.strict_fakes import StrictDB  # noqa: E402
 
@@ -93,6 +94,10 @@ def till(monkeypatch):
     monkeypatch.setattr(L.loyalty_otp, "redeem_otp_required", lambda *_a, **_k: False)
     monkeypatch.setattr(L, "get_audit_repository", lambda: None)
     monkeypatch.setattr(returns_router, "get_order_repository", lambda: orders)
+    monkeypatch.setattr(
+        returns_router, "get_customer_repository",
+        lambda: CustomerRepository(db.get_collection("customers")),
+    )
     monkeypatch.setattr("api.dependencies.get_db", lambda: conn, raising=False)
     monkeypatch.setattr("api.dependencies.get_audit_repository", lambda: None, raising=False)
     from api.services import audit_alerts, lens_stock_hook
@@ -185,9 +190,10 @@ async def test_a_burn_on_another_order_cannot_pay_this_one(till):
         ("SALES_STAFF", True),
         ("STORE_MANAGER", True),
         ("OPTOMETRIST", True),
+        ("ACCOUNTANT", True),  # owner 2026-10-23: accounts collect credit bills
         ("WORKSHOP_STAFF", False),
-        ("ACCOUNTANT", False),
         ("CATALOG_MANAGER", False),
+        ("DESIGN_MANAGER", False),
     ],
 )
 @pytest.mark.asyncio
@@ -202,6 +208,26 @@ async def test_payment_role_matrix(till, role, allowed):
             await add_payment("ORD-1", pay, _user(role))
         assert exc.value.status_code == 403
         assert _stored(till)["payments"] == []
+
+
+@pytest.mark.asyncio
+async def test_accountant_cannot_record_a_loyalty_tender(till):
+    # Owner 2026-10-23: ACCOUNTANT records money, never points -- even when a
+    # real burn sits on the bill, and the burn stays unclaimed for the till.
+    till["db"].get_collection("orders").insert_one(_order())
+    till["db"].get_collection("loyalty_accounts").insert_one(
+        {"customer_id": "CUST-1", "balance_points": 500, "lifetime_earned": 500, "tier": "BRONZE"}
+    )
+    burned = await L.redeem(L.RedeemRequest(customer_id="CUST-1", order_id="ORD-1", points=300), _user("CASHIER"))
+    with pytest.raises(HTTPException) as exc:
+        await add_payment("ORD-1", PaymentCreate(method="LOYALTY", amount=300.0), _user("ACCOUNTANT"))
+    assert exc.value.status_code == 403
+    assert _stored(till)["payments"] == []
+    row = till["db"].get_collection("loyalty_transactions").find_one({"txn_id": burned["txn_id"]})
+    assert row.get("tender_payment_id") is None
+    # The till can still use that burn.
+    await add_payment("ORD-1", PaymentCreate(method="LOYALTY", amount=300.0), _user("CASHIER"))
+    assert _stored(till)["amount_paid"] == 300.0
 
 
 def test_payment_policy_row_matches_the_in_function_gate():
@@ -396,61 +422,159 @@ def _advance_order(till, **over):
     )
 
 
-@pytest.mark.parametrize("role", ["CASHIER", "SALES_STAFF", "OPTOMETRIST", "WORKSHOP_STAFF"])
-def test_advance_refund_is_manager_only(till, role):
+_ADV_BODY = {"order_id": "ORD-1", "reason": "customer cancelled the order"}
+_LINE = {"item_id": "li1", "product_id": "P1", "product_name": "Frame", "sku": "F1", "quantity": 1,
+         "unit_price": 4761.90, "gst_rate": 5.0, "taxable_value": 4761.90, "tax_amount": 238.10}
+
+
+def _ledger(till):
+    return till["db"].get_collection("credit_note_ledger")
+
+
+@pytest.mark.parametrize(
+    "role", ["CASHIER", "SALES_STAFF", "STORE_MANAGER", "OPTOMETRIST", "WORKSHOP_STAFF"]
+)
+def test_advance_refund_is_accounts_and_admin_only(till, role):
+    # Owner 2026-10-23: ACCOUNTANT / ADMIN / SUPERADMIN only -- not store managers.
     _advance_order(till)
-    r = _advance_client().post(
-        "/api/v1/returns/advance-refund",
-        json={"order_id": "ORD-1", "reason": "customer cancelled the order"},
-        headers=_hdr(role),
-    )
+    r = _advance_client().post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr(role))
     assert r.status_code == 403, r.text
     assert till["db"].get_collection("returns").count_documents({}) == 0
     assert _stored(till)["status"] == "CONFIRMED"
 
 
-def test_manager_refunds_the_advance_to_its_tenders_and_cancels(till):
+def test_advance_refund_has_its_own_capability_key():
+    from api.services import capabilities as C
+
+    assert C.capability_for("POST", "/api/v1/returns/advance-refund") == "returns:advance-refund"
+    assert C.PARENT_CAPABILITY["returns:advance-refund"] == "returns:write"
+    # ACCOUNTANT never joins the counter-returns grant union.
+    assert "ACCOUNTANT" not in C._CAP_ROLE_HINT["returns:write"]
+    row = rbac_policy.policy_for("POST", "/api/v1/returns/advance-refund")
+    assert set(row["allowed"]) == set(returns_router._ADVANCE_REFUND_ROLES)
+
+
+@pytest.mark.parametrize("role", ["ACCOUNTANT", "ADMIN"])
+def test_accounts_refunds_the_advance_to_its_tenders_and_cancels(till, role):
     _advance_order(till)
     client = _advance_client()
-    body = {"order_id": "ORD-1", "reason": "customer cancelled the order"}
-    r = client.post("/api/v1/returns/advance-refund", json=body, headers=_hdr("STORE_MANAGER"))
+    r = client.post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr(role))
     assert r.status_code == 201, r.text
     ret = till["db"].get_collection("returns").find_one({"order_id": "ORD-1"})
     assert ret["status"] == "COMPLETED" and ret["return_type"] == "RETURN"
     assert ret["net_refund"] == 1000.0
     assert sorted((t["method"], t["amount"]) for t in ret["refund_tenders"]) == [("CASH", 600.0), ("UPI", 400.0)]
     assert ret["gst_breakup"] == {"taxable": 0.0, "tax": 0.0}  # no invoice, no tax reversed
+    assert ret["credit_note_number"] is None
+    assert _ledger(till).count_documents({}) == 0
     assert _stored(till)["status"] == "CANCELLED"
     assert r.json()["order_status"] == "CANCELLED"
 
     # A second press refunds nothing more.
-    r2 = client.post("/api/v1/returns/advance-refund", json=body, headers=_hdr("STORE_MANAGER"))
+    r2 = client.post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr(role))
     assert r2.status_code == 400, r2.text
     assert till["db"].get_collection("returns").count_documents({"order_id": "ORD-1"}) == 1
 
 
-def test_advance_refund_refuses_an_invoiced_order(till):
-    _advance_order(till, invoice_number="BOK01/2627/00009")
-    r = _advance_client().post(
-        "/api/v1/returns/advance-refund",
-        json={"order_id": "ORD-1", "reason": "customer cancelled the order"},
-        headers=_hdr("STORE_MANAGER"),
+@pytest.mark.usefixtures("gst_numbers")
+def test_invoiced_part_advance_gets_a_whole_invoice_credit_note_and_only_the_advance_back(till):
+    # Owner 2026-10-23: Rs 5,000 invoice, Rs 1,000 paid -> a credit note for the
+    # WHOLE invoice (all its tax reversed), Rs 1,000 refunded, order cancelled.
+    _advance_order(till, invoice_number="BOK01/2627/00009", items=[dict(_LINE)])
+    r = _advance_client().post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r.status_code == 201, r.text
+    ret = till["db"].get_collection("returns").find_one({"order_id": "ORD-1"})
+    assert ret["credit_note_number"] == "TST01/C2627/0001"
+    assert ret["gst_breakup"]["tax"] == pytest.approx(238.10)
+    assert ret["gst_breakup"]["taxable"] == pytest.approx(4761.90)
+    assert ret["credit_note_value"] == pytest.approx(5000.0)
+    assert ret["net_refund"] == 1000.0 and ret["refund_amount"] == 1000.0
+    assert sum(t["amount"] for t in ret["refund_tenders"]) == 1000.0
+    assert [it["return_qty"] for it in ret["items"]] == [1]
+    assert all(it["restock"] is False for it in ret["items"])  # the cancel restocks, not the note
+    assert _stored(till)["status"] == "CANCELLED"
+
+
+@pytest.mark.parametrize("method", ["STORE_CREDIT", "GIFT_VOUCHER", "EMI"])
+def test_store_credit_voucher_or_emi_advance_comes_back_as_store_credit(till, method):
+    # Owner 2026-10-23: ALWAYS as store credit to the bill's own customer.
+    till["db"].get_collection("customers").insert_one({"customer_id": "CUST-1", "name": "Asha", "store_credit": 50.0})
+    till["db"].get_collection("orders").insert_one(
+        _order(amount_paid=1000.0, balance_due=4000.0, grand_total=5000.0, payment_status="PARTIAL",
+               payments=[{"payment_id": "p1", "method": method, "amount": 700.0},
+                         {"payment_id": "p2", "method": "CASH", "amount": 300.0}])
     )
+    r = _advance_client().post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r.status_code == 201, r.text
+    rows = list(_ledger(till).find({}))
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["customer_id"] == "CUST-1" and row["type"] == "ADJUSTED"  # money back, not a 2nd credit note
+    assert row["delta"] == 700.0 and row["balance_after"] == 750.0
+    assert row["order_id"] == "ORD-1" and row["created_by"] == "u1"
+    cust = till["db"].get_collection("customers").find_one({"customer_id": "CUST-1"})
+    assert cust["store_credit"] == 750.0
+    ret = till["db"].get_collection("returns").find_one({"order_id": "ORD-1"})
+    assert sorted((t["method"], t["amount"]) for t in ret["refund_tenders"]) == [("CASH", 300.0), ("STORE_CREDIT", 700.0)]
+    assert _stored(till)["status"] == "CANCELLED"
+
+
+def test_store_credit_advance_on_a_walk_in_is_refused(till):
+    till["db"].get_collection("orders").insert_one(
+        _order(customer_id="walkin-1", amount_paid=500.0, payment_status="PARTIAL",
+               payments=[{"payment_id": "p1", "method": "GIFT_VOUCHER", "amount": 500.0}])
+    )
+    r = _advance_client().post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ADMIN"))
     assert r.status_code == 400, r.text
-    assert "credit note" in r.text
+    assert _ledger(till).count_documents({}) == 0
     assert till["db"].get_collection("returns").count_documents({}) == 0
     assert _stored(till)["status"] == "CONFIRMED"
 
 
+def test_a_failed_cancel_is_finished_by_pressing_again(till, monkeypatch):
+    from api.routers.orders import cancel as cancel_mod
+
+    _advance_order(till)
+    real = cancel_mod.cancel_order_core
+
+    async def _fails_once(*_a, **_k):
+        raise HTTPException(status_code=500, detail="Could not cancel the order -- please retry.")
+
+    monkeypatch.setattr(cancel_mod, "cancel_order_core", _fails_once)
+    client = _advance_client()
+    r = client.post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r.status_code == 201 and r.json()["cancel_error"], r.text
+    assert _stored(till)["status"] == "CONFIRMED"
+
+    monkeypatch.setattr(cancel_mod, "cancel_order_core", real)
+    r2 = client.post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r2.status_code == 201, r2.text
+    assert _stored(till)["status"] == "CANCELLED"
+    assert till["db"].get_collection("returns").count_documents({"order_id": "ORD-1"}) == 1  # refunded once
+
+
+def test_preview_names_the_amount_and_method_or_the_reason(till):
+    _advance_order(till)
+    client = _advance_client()
+    ok = client.get("/api/v1/returns/advance-refund/ORD-1", headers=_hdr("ACCOUNTANT")).json()
+    assert ok["ok"] is True and ok["total"] == 1000.0
+    assert sorted((t["method"], t["amount"]) for t in ok["refund_tenders"]) == [("CASH", 600.0), ("UPI", 400.0)]
+    till["db"].get_collection("orders").insert_one(_order("ORD-2"))
+    no = client.get("/api/v1/returns/advance-refund/ORD-2", headers=_hdr("ACCOUNTANT")).json()
+    assert no["ok"] is False and "No money was taken" in no["reason"]
+    assert client.get("/api/v1/returns/advance-refund/ORD-1", headers=_hdr("STORE_MANAGER")).status_code == 403
+
+
 @pytest.mark.asyncio
-async def test_after_a_full_refund_only_a_manager_may_cancel(till):
+async def test_after_a_full_refund_only_accounts_or_admin_may_cancel(till):
     _advance_order(till)
     till["db"].get_collection("returns").insert_one(
         {"return_id": "RET-X", "order_id": "ORD-1", "status": "COMPLETED", "net_refund": 1000.0}
     )
-    with pytest.raises(HTTPException) as exc:
-        await cancel_order("ORD-1", reason="customer cancelled the order", current_user=_user("SALES_STAFF"))
-    assert exc.value.status_code == 403
+    for role in ("SALES_STAFF", "STORE_MANAGER"):
+        with pytest.raises(HTTPException) as exc:
+            await cancel_order("ORD-1", reason="customer cancelled the order", current_user=_user(role))
+        assert exc.value.status_code == 403
     assert _stored(till)["status"] == "CONFIRMED"
-    out = await cancel_order("ORD-1", reason="customer cancelled the order", current_user=_user("STORE_MANAGER"))
+    out = await cancel_order("ORD-1", reason="customer cancelled the order", current_user=_user("ADMIN"))
     assert out["status"] == "CANCELLED"
