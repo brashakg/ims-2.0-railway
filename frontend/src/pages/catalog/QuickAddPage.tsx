@@ -298,6 +298,18 @@ export function QuickAddPage() {
 
           <InventorySection form={form} />
 
+          {/* Soft warnings (owner 2026-10-23): amber hints, never a block. */}
+          {form.softWarnings.length > 0 && (
+            <ul className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900 space-y-0.5" data-testid="qa-soft-warnings">
+              {form.softWarnings.map((w) => (
+                <li key={w} className="flex items-start gap-1.5">
+                  <AlertTriangle className="w-3.5 h-3.5 mt-px shrink-0" />
+                  {w}
+                </li>
+              ))}
+            </ul>
+          )}
+
           <OnlineStrip form={form} />
 
         </div>

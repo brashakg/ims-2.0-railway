@@ -11,12 +11,15 @@
 // so a colour/size of a model shows the model's and is edited on the model.
 
 import { Globe } from 'lucide-react';
-import { WEB_PAGE_TYPES } from '../productAddShared';
+import { WEB_PAGE_TYPES, fieldLabelFor } from '../productAddShared';
 import { LockChip } from './parts';
 import type { QuickAddForm } from './useQuickAddForm';
 
 export function OnlineStrip({ form }: { form: QuickAddForm }) {
-  const { isReviewMode, attributes, websiteVerdict, setAttr, errors, editMode, variantCtx } = form;
+  const {
+    isReviewMode, attributes, websiteVerdict, setAttr, errors, editMode, variantCtx,
+    websiteNeeds, selectedCategory, jumpToField,
+  } = form;
   const brand = (attributes.brand_name || '').trim();
   const pageType = attributes.web_page_type || 'STANDARD';
   // Pre-order / Preview only stay hidden until SUPERADMIN switches them on
@@ -45,6 +48,47 @@ export function OnlineStrip({ form }: { form: QuickAddForm }) {
                     : `Website: no - ${websiteVerdict.reason || 'the push refuses it'}.`}
           </p>
         </div>
+        {/* "Website still needs" (owner 2026-10-23): the push gate's own list
+            for the SAVED product (the one being edited, or in Add the one
+            just saved) -- never the cost price. Save is never blocked by it. */}
+        {websiteNeeds && (
+          <p className="mt-1.5 flex flex-wrap items-center gap-1.5 text-xs text-gray-700" data-testid="qa-website-needs">
+            <span className="font-medium">
+              {websiteNeeds.sku ? `Last saved (${websiteNeeds.sku}): ` : 'As saved: '}
+            </span>
+            {websiteNeeds.needs === null ? (
+              'website readiness could not be checked just now.'
+            ) : websiteNeeds.needs.length === 0 && websiteNeeds.gaps.length === 0 ? (
+              'nothing more is needed for the website.'
+            ) : (
+              <>
+                website still needs
+                {websiteNeeds.needs.map((n) => (
+                  <span key={n} className="inline-flex items-center rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-800">
+                    {n}
+                  </span>
+                ))}
+                {websiteNeeds.gaps.map((g) => {
+                  const label = g === 'MRP_BELOW_OFFER' ? 'MRP below the offer price' : fieldLabelFor(selectedCategory, g);
+                  return editMode?.kind === 'spine' ? (
+                    <button
+                      key={g}
+                      type="button"
+                      onClick={() => jumpToField(g)}
+                      className="inline-flex min-h-8 items-center rounded-full bg-amber-50 px-2.5 text-[11px] font-medium text-amber-800 hover:bg-amber-100"
+                    >
+                      {label}
+                    </button>
+                  ) : (
+                    <span key={g} className="inline-flex items-center rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-800">
+                      {label}
+                    </span>
+                  );
+                })}
+              </>
+            )}
+          </p>
+        )}
         {pagesOn && (
         <div className="mt-3 flex flex-wrap items-start gap-4">
           <div>

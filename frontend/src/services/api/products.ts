@@ -536,6 +536,18 @@ export const productApi = {
     return response.data as { brand: string; online: boolean; reason: string | null; web_page_types_enabled?: boolean };
   },
 
+  // What keeps a SAVED product off the website -- the same route, asked about
+  // one product: the push gate's reasons, a photo, a selling price (`needs`)
+  // and the catalogue fields it waits on (`gaps`, never the cost price).
+  // needs null = could not be read.
+  getWebsiteNeeds: async (
+    productId: string
+  ): Promise<{ needs: string[] | null; gaps: string[] }> => {
+    const response = await api.get('/products/website-verdict', { params: { product_id: productId } });
+    const d = response.data as { needs?: string[] | null; gaps?: string[] };
+    return { needs: d.needs ?? null, gaps: d.gaps ?? [] };
+  },
+
   // The SKU a NEW product will get, from the server's one minter
   // (product_master.build_sku) -- the form shows it before saving and never
   // builds a SKU itself. `taken`: another product already has it, so the save

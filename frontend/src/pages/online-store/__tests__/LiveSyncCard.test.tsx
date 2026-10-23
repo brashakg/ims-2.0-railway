@@ -285,4 +285,12 @@ describe('Live sync card', () => {
     expect(card).toHaveTextContent(/Schedule OFF — only the button below syncs/);
     expect(card).not.toHaveTextContent(/Next run/);
   });
+  it('the products card says how many wait and what each door publishes (text only)', async () => {
+    vi.mocked(pushApi.getStatus).mockResolvedValue(status(SCHEDULE_ON) as any);
+    render(<OnlineShopifySyncPage />);
+    const line = await screen.findByTestId('publish-counter');
+    expect(line).toHaveTextContent(
+      '9 waiting - the next scheduled sync (01:00/09:00 IST) publishes up to 100; each press of Push all publishes up to 25.',
+    );
+  });
 });

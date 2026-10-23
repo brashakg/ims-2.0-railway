@@ -1950,6 +1950,7 @@ async def get_brand_options(
 @router.get("/website-verdict")
 async def get_website_verdict(
     brand: str = "",
+    product_id: str = "",
     current_user: dict = Depends(get_current_user),
 ):
     """Whether a product of this brand goes to the website, and why not: THE
@@ -1962,7 +1963,11 @@ async def get_website_verdict(
     "web_page_types_enabled": bool} -- the last is the SUPERADMIN switch the
     form's Website page select follows (web_page_type.pages_enabled). Fail-closed
     like the gate: no db -> online false, reason says Brand Master could not
-    be read, page types off."""
+    be read, page types off.
+
+    With `product_id` (a SAVED product) it also says what keeps THAT product
+    off the website: "needs" (the gate's reasons, a photo, a selling price)
+    and "gaps" (catalogue field keys, never cost) -- _website_needs."""
     from ..dependencies import get_db as _get_db_dep
     from ..services.shopify_push import product_push_refusal
     from ..services.web_page_type import pages_enabled
@@ -1973,8 +1978,53 @@ async def get_website_verdict(
     # wrapper, which is not subscriptable.
     db = conn.db if conn is not None and getattr(conn, "is_connected", False) else None
     reason = product_push_refusal(db, {"brand": brand})
-    return {"brand": brand, "online": reason is None, "reason": reason,
-            "web_page_types_enabled": db is not None and pages_enabled(db)}
+    out = {"brand": brand, "online": reason is None, "reason": reason,
+           "web_page_types_enabled": db is not None and pages_enabled(db)}
+    if product_id:
+        out.update(_website_needs(db, product_id))
+    return out
+
+
+def _website_needs(db, product_id: str) -> Dict[str, Any]:
+    """What keeps a SAVED product off the website, asked of the push's own
+    rules (never worked out again here): product_push_refusal (lock, first-
+    publish readiness, brand), the photo rule (product_photo_urls -- "no
+    photo, no publish") and the one price rule (unpriced_size_names). `gaps`
+    are the catalogue fields the first-publish rule waits on
+    (gaps_before_cost -- NEVER the cost price: the purchase brings it and a
+    catalogue manager cannot fill it). {"needs": None} when it could not be
+    read; [] / [] = nothing missing."""
+    from ..services.shopify_live_sync import variants_for_product
+    from ..services.shopify_push import product_push_refusal
+    from ..services.shopify_push.media import product_photo_urls
+    from ..services.shopify_push.product_input import unpriced_size_names
+
+    if db is None:
+        return {"needs": None, "gaps": []}
+    try:
+        spine = db["products"].find_one({"product_id": product_id})
+        if spine is None:
+            return {"needs": None, "gaps": []}
+        twins = db["catalog_products"]
+        twin = (twins.find_one({"id": spine["pim_product_id"]}) if spine.get("pim_product_id") else None) or (
+            twins.find_one({"sku": spine.get("sku")}) if spine.get("sku") else None)
+        doc = twin or spine
+        needs: List[str] = []
+        why = product_push_refusal(db, doc)
+        if why:
+            needs.append(why)
+        if not product_photo_urls(doc):
+            needs.append("a photo")
+        unpriced = unpriced_size_names(doc, variants_for_product(db, twin) if twin else [])
+        if unpriced:
+            needs.append("a selling price (" + ", ".join(unpriced) + ")")
+        first_publish = not ((doc.get("ecom") or {}).get("shopify_product_id"))
+        gaps = (_pm.gaps_before_cost(spine)
+                if first_publish and _pm.effective_catalog_status(spine) != "ACTIVE" else [])
+        return {"needs": needs, "gaps": [g for g in gaps if g != "cost_price"]}
+    except Exception as e:  # noqa: BLE001 - a read-only hint, never a blocker
+        logger.warning("[WEBSITE-NEEDS] read failed for %s: %s", product_id, e)
+        return {"needs": None, "gaps": []}
 
 
 # NOTE: registered here (with the other literal /products/* paths like

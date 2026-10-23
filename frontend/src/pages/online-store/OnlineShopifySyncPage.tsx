@@ -1115,6 +1115,15 @@ export default function OnlineShopifySyncPage() {
                     </span>
                   </div>
                 )}
+                {/* Publish counter (owner 2026-10-23): text only -- the caps
+                    are the backend's (FIRST_PUBLISH_CAP_PER_SYNC 100,
+                    PRODUCT_BATCH_CAP 25), unchanged. */}
+                {ent.key === 'products' && pending > 0 && (
+                  <p className="mt-1.5 text-[11px] text-gray-600" data-testid="publish-counter">
+                    {fmt(pending)} waiting - the next scheduled sync (01:00/09:00 IST) publishes up to 100;
+                    each press of Push all publishes up to 25.
+                  </p>
+                )}
 
                 {/* Last sweep result (the returned plan / outcome). */}
                 {sweep && (
