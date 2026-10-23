@@ -810,6 +810,7 @@ def _given_back_elsewhere(db, order: Dict[str, Any], refund_id: str) -> Optional
     seen = {refund_id}
     return_ids = set()
     doc_entries = set()
+    own_return = None
     try:
         for doc in db.get_collection(_RETURNS_COLLECTION).find({"order_id": order_id}):
             return_ids.add(_norm(doc.get("return_id")))
@@ -818,6 +819,11 @@ def _given_back_elsewhere(db, order: Dict[str, Any], refund_id: str) -> Optional
             if own_entry:
                 doc_entries.add(own_entry)
             rid = _norm(doc.get("shopify_refund_id"))
+            if rid == refund_id:
+                # THIS refund's own doc: a re-drive of a run that died after
+                # booking its credit -- that credit is this refund's, never
+                # money given back by another.
+                own_return = _norm(doc.get("return_id")).upper()
             if rid:
                 if rid in seen:
                     continue
@@ -866,7 +872,8 @@ def _given_back_elsewhere(db, order: Dict[str, Any], refund_id: str) -> Optional
                     untied += delta
             elif kind == "ADJUSTED":
                 total += delta
-            elif kind == "ISSUED" and _norm(row.get("entry_id")) not in doc_entries:
+            elif (kind == "ISSUED" and _norm(row.get("entry_id")) not in doc_entries
+                  and not (own_return and ref == own_return)):
                 total += delta
     except Exception:  # noqa: BLE001 -- unreadable is no answer, never "nothing"
         logger.warning("[SHOPIFY_REFUND] earlier refunds unreadable for order=%s", order_id,
