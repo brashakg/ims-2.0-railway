@@ -97,6 +97,15 @@ export function PendingReceipts({ storeId, refreshKey, highlight, onAccepted, on
   const accept = (g: WaitingRow) =>
     run(g.grn_id, async () => {
       const res = await vendorsApi.acceptGRN(g.grn_id);
+      if (res?.status_flip_failed) {
+        // Pieces are on the shelf but the receipt did not advance: never a
+        // success. Pressing "Add to stock" again finishes it (counted once).
+        toast.warning(
+          `GRN ${g.grn_number}: ${String(res.message || 'the receipt did not finish.')} Press "Add to stock" on it again.`,
+          20000,
+        );
+        return;
+      }
       reportGrnAccept(toast, g.grn_number, res);
       onAccepted(g.grn_id, g.grn_number);
     }, `Failed to accept GRN ${g.grn_number}`);

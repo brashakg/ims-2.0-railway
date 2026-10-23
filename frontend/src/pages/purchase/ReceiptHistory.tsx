@@ -85,7 +85,7 @@ export function ReceiptHistory({ storeId, refreshKey }: { storeId: string; refre
   const [problemsOnly, setProblemsOnly] = useState(false);
   const [printGrn, setPrintGrn] = useState<HistoryGRN | null>(null);
   const [identity, setIdentity] = useState<StoreIdentity | null>(null);
-  const [vendor, setVendor] = useState<{ address: string; gstin: string } | null>(null);
+  const [vendor, setVendor] = useState<{ name: string; address: string; gstin: string } | null>(null);
   const [failed, setFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
 
@@ -120,7 +120,8 @@ export function ReceiptHistory({ storeId, refreshKey }: { storeId: string; refre
       .then((v: Record<string, unknown>) => {
         if (cancelled || !v) return;
         const address = [v.address, v.city, v.state].filter((x) => typeof x === 'string' && x.trim()).join(', ');
-        setVendor({ address, gstin: typeof v.gstin === 'string' ? v.gstin : '' });
+        const name = String(v.trade_name || v.legal_name || '');
+        setVendor({ name, address, gstin: typeof v.gstin === 'string' ? v.gstin : '' });
       })
       .catch(() => undefined);
     return () => {
@@ -160,22 +161,19 @@ export function ReceiptHistory({ storeId, refreshKey }: { storeId: string; refre
             grn_date: printGrn.received_at,
             po_number: printGrn.po_number,
             vendor_id: printGrn.vendor_id || '',
-            vendor_name: printGrn.vendor_name || '',
+            // A bought-without-PO receipt saves no supplier name: the record has it.
+            vendor_name: printGrn.vendor_name || vendor?.name || '',
             vendor_address: vendor?.address || '',
             vendor_gstin: vendor?.gstin || '',
-            items: printGrn.items.map((i) => {
-              // No order behind the line (bought without PO): nothing was ordered to differ from.
-              const ordered = typeof i.ordered_qty === 'number' ? i.ordered_qty : i.received_qty;
-              return {
-                product_id: i.product_id,
-                product_name: i.product_name ?? i.product_id,
-                hsn_code: undefined,
-                ordered_qty: ordered,
-                received_qty: i.received_qty,
-                variance: i.received_qty - ordered,
-                remarks: i.rejection_reason,
-              };
-            }),
+            items: printGrn.items.map((i) => ({
+              product_id: i.product_id,
+              product_name: i.product_name ?? i.product_id,
+              hsn_code: undefined,
+              // The whole order's quantity (null with no order behind the line).
+              ordered_qty: typeof i.ordered_qty === 'number' ? i.ordered_qty : null,
+              received_qty: i.received_qty,
+              remarks: i.rejection_reason,
+            })),
             quality_inspection:
               printGrn.quality === 'passed' ? 'accepted' : printGrn.quality === 'failed' ? 'rejected' : 'partially_accepted',
             inspection_remarks: undefined,

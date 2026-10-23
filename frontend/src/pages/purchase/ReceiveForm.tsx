@@ -10,7 +10,7 @@
 // also drafts the bill and runs the 3-way match for accounts); anything else
 // is created and accepted in two calls -- the rules live in receiveLines.ts.
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { AlertCircle, CheckCircle2, Loader2, Package, Printer, ScanLine, Trash2, X } from 'lucide-react';
 import clsx from 'clsx';
@@ -43,6 +43,7 @@ import {
   receiptSums,
   receiveProblem,
   rejectedOf,
+  scanOne,
   tallyAll,
   type CandidatePO,
   type ReceiveKind,
@@ -117,8 +118,8 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
   const [results, setResults] = useState<Array<Record<string, unknown>>>([]);
   const [searching, setSearching] = useState(false);
   const [scan, setScan] = useState('');
-  const scanned = useRef(new Set<string>());
   const [batchOpen, setBatchOpen] = useState<Set<string>>(new Set());
+  const [showCompleted, setShowCompleted] = useState(false);
 
   const rejectOnlyOrder = !!po && isRejectOnlyOrder(po);
   const extra = !!po && isExtraReceipt(po);
@@ -161,7 +162,14 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
     void Promise.allSettled(ids.map((id) => productApi.getProduct(id))).then((res) => {
       if (cancelled) return;
       const facts = new Map(
-        res.map((r, i) => [ids[i], productFacts(r.status === 'fulfilled' ? r.value : null)] as const),
+        res.map((r, i) => [
+          ids[i],
+          r.status === 'fulfilled'
+            ? productFacts(r.value)
+            : r.reason instanceof ApiError && r.reason.status === 404
+              ? { heldForCatalogue: true } // not in the catalogue: the server holds it
+              : {},
+        ] as const),
       );
       setLines((ls) => ls.map((l) => ({ ...l, ...facts.get(l.product_id) })));
     });
@@ -199,7 +207,7 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
     setLines((ls) => ls.map((l) => (l.key === key ? { ...l, ...patch } : l)));
 
   /** Adds a catalogue product as a typed line; returns its row key. */
-  const addProduct = (p: Record<string, unknown>, extra: Partial<ReceiveLine> = {}): string | null => {
+  const addProduct = (p: Record<string, unknown>): string | null => {
     setQuery('');
     setResults([]);
     const pid = String(p.product_id ?? '');
@@ -207,7 +215,6 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
     const line: ReceiveLine = {
       ...newLine({ product_id: pid, product_name: String(p.name || p.product_name || pid), sku: p.sku ? String(p.sku) : undefined }, null),
       ...productFacts(p),
-      ...extra,
     };
     setLines((ls) => (ls.some((l) => l.product_id === pid) ? ls : [...ls, line]));
     return line.key;
@@ -219,25 +226,28 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
     const code = scan.trim();
     setScan('');
     if (!code) return;
-    let idx = matchScan(lines, code);
-    if (idx < 0) {
-      const found = ((await productApi.getProducts({ search: code, limit: 5 }).catch(() => null))?.products ?? []) as Array<Record<string, unknown>>;
-      idx = lines.findIndex((l) => found.some((p) => p.product_id === l.product_id));
-      if (idx < 0 && !po && found.length === 1) {
-        // This scan is the line's first piece: the next scan adds to it.
-        const key = addProduct(found[0], { arrived: 1, touched: true });
-        if (key) scanned.current.add(key);
-        return;
-      }
+    const known = matchScan(lines, code);
+    if (known >= 0) {
+      const key = lines[known].key;
+      setLines((ls) => ls.map((l) => (l.key === key ? scanOne(l) : l)));
+      return;
     }
-    if (idx < 0) {
+    const found = ((await productApi.getProducts({ search: code, limit: 5 }).catch(() => null))?.products ?? []) as Array<Record<string, unknown>>;
+    const hit = !po && found.length === 1 ? found[0] : found.find((p) => lines.some((l) => l.product_id === p.product_id));
+    const pid = hit ? String(hit.product_id ?? '') : '';
+    if (!pid) {
       toast.warning(`${code} is not on this delivery`);
       return;
     }
-    const l = lines[idx];
-    const first = !scanned.current.has(l.key);
-    scanned.current.add(l.key);
-    setLine(l.key, { arrived: first ? 1 : l.arrived + 1, touched: true });
+    // Read the list as it is NOW: a scan fired before this lookup came back
+    // may have added the product already -- count onto it, never reset it.
+    setLines((ls) => {
+      const i = ls.findIndex((l) => l.product_id === pid);
+      if (i >= 0) return ls.map((l, j) => (j === i ? scanOne(l) : l));
+      if (po) return ls;
+      const line = newLine({ product_id: pid, product_name: String(hit?.name || hit?.product_name || pid), sku: hit?.sku ? String(hit.sku) : undefined }, null);
+      return [...ls, scanOne({ ...line, ...productFacts(hit) })];
+    });
   };
 
   const handleFile = async (file: File) => {
@@ -524,6 +534,10 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
   const priceCol = kind === 'NO_PO' && canEnterPrice;
   const cols = 8 + (priceCol ? 1 : 0);
   const ticked = lines.filter((l) => l.counted).length;
+  // On an open order, a line already received in full (nothing due, nothing
+  // counted) folds away; a scan or a count on it brings it back.
+  const folds = (l: ReceiveLine) => !!po && !extra && !rejectOnlyOrder && l.due === 0 && l.arrived === 0;
+  const completed = lines.filter(folds).length;
   const label = (t: string) => (
     <span className="block text-xs font-medium mb-1" style={{ color: 'var(--ink-4)' }}>{t}</span>
   );
@@ -572,7 +586,7 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
           )}
           {extra && (
             <p className="text-xs" style={{ color: 'var(--ink-3)' }}>
-              This order is fully received. Count only the extra goods in this delivery: they are held for the manager.
+              This order is fully received. Count only the extra goods in this delivery: they go into stock and the store manager is flagged.
               Cancelled items stay rejected.
             </p>
           )}
@@ -714,6 +728,7 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
               </thead>
               <tbody>
                 {lines.map((l, idx) => {
+                  if (!showCompleted && folds(l)) return null;
                   const rej = rejectedOf(l);
                   const exp = expiryWarning(l.expiry, today);
                   const batchShown = l.contactLens || batchOpen.has(l.key);
@@ -823,6 +838,11 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
                 })}
               </tbody>
             </table>
+            {completed > 0 && (
+              <button type="button" className="text-xs underline px-4 py-2" style={{ color: 'var(--ink-4)' }} onClick={() => setShowCompleted((v) => !v)}>
+                {showCompleted ? 'Hide completed lines' : `Show ${completed} completed line${completed === 1 ? '' : 's'}`}
+              </button>
+            )}
             <datalist id="receive-damage-reasons">
               {DAMAGE_REASONS.map((r) => <option key={r} value={r} />)}
             </datalist>
@@ -839,8 +859,13 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
               <li>{sums.onShelf} good piece{sums.onShelf === 1 ? '' : 's'} go into stock{lines.some((l) => l.shelf.trim()) ? ' at their shelf codes' : ''}.</li>
               {sums.rejected > 0 && <li>{sums.rejected} piece{sums.rejected === 1 ? '' : 's'} go to Quarantine; a draft debit note is made for accounts.</li>}
               {sums.short > 0 && <li>{sums.short} piece{sums.short === 1 ? '' : 's'} short stay open on the order.</li>}
-              {sums.over > 0 && <li>{sums.over} piece{sums.over === 1 ? '' : 's'} on lines beyond the order are held for the manager.</li>}
-              {sums.catalogue > 0 && <li>{sums.catalogue} piece{sums.catalogue === 1 ? '' : 's'} wait until the catalogue team finishes the product.</li>}
+              {sums.over > 0 && <li>{sums.over} of them {sums.over === 1 ? 'is' : 'are'} beyond the order: into stock, and the store manager is flagged.</li>}
+              {sums.catalogue > 0 && (
+                <li>
+                  Another {sums.catalogue} piece{sums.catalogue === 1 ? '' : 's'} may wait until the catalogue team finishes
+                  the product (an estimate: the server checks each product as it is received).
+                </li>
+              )}
               <li>
                 {kind === 'DELIVERY_CHALLAN'
                   ? "The vendor's invoice is matched to this challan when it arrives."

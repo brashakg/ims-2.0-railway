@@ -48,6 +48,8 @@ export interface ReceiveLine {
   rejectOnly: boolean;
   /** Edited by hand or by a scan: "Everything arrived as ordered" leaves it alone. */
   touched?: boolean;
+  /** Pieces scanned onto this line so far. */
+  scans?: number;
   // From the product master (fail-soft: absent until it loads).
   contactLens?: boolean;
   heldForCatalogue?: boolean;
@@ -158,15 +160,20 @@ export function tallyAll(lines: ReceiveLine[]): ReceiveLine[] {
   return lines.map((l) => (l.touched ? l : { ...l, arrived: l.due ?? l.arrived, counted: true }));
 }
 
-/** The server's hold arithmetic, per line (grn_accept): a line whose product
- *  is not finished in the catalogue is held whole; else a line whose ACCEPTED
- *  pieces go beyond what is due is held whole for the store manager. */
-export function heldWhy(l: ReceiveLine): 'catalogue' | 'over' | null {
-  const good = goodOf(l);
-  if (good === 0 || l.rejectOnly) return null;
-  if (l.heldForCatalogue) return 'catalogue';
-  if (l.due !== null && good > l.due) return 'over';
-  return null;
+/** May the server hold this line back for the catalogue? (grn_accept holds a
+ *  line WHOLE when its product is missing or not finished.) An ESTIMATE: the
+ *  server judges each product as it is received; the screen only knows what
+ *  the product read told it (productFacts). */
+export function heldForCatalogue(l: ReceiveLine): boolean {
+  return !!l.heldForCatalogue && !l.rejectOnly && goodOf(l) > 0;
+}
+
+/** Accepted pieces beyond what the order still wants. They go INTO STOCK and
+ *  the store manager is flagged (owner ruling 2026-10-08 (b),
+ *  grn_accept._flag_over_delivery) -- never held, never refused. */
+export function beyondOrder(l: ReceiveLine): number {
+  if (l.due === null || l.rejectOnly || heldForCatalogue(l)) return 0;
+  return Math.max(0, goodOf(l) - l.due);
 }
 
 export interface LineNote {
@@ -187,11 +194,11 @@ export function lineNotes(l: ReceiveLine): LineNote[] {
   if (l.due !== null && l.arrived < l.due) {
     out.push({ text: `${l.due - l.arrived} short, stays on the order`, tone: 'warn' });
   }
-  const held = heldWhy(l);
-  if (held === 'over' && l.due !== null) {
-    out.push({ text: `${goodOf(l) - l.due} more than ordered: held for the manager`, tone: 'warn' });
+  const beyond = beyondOrder(l);
+  if (beyond > 0) {
+    out.push({ text: `${beyond} beyond the order: into stock, flagged for the store manager`, tone: 'warn' });
   }
-  if (held === 'catalogue') out.push({ text: 'Held until catalogued', tone: 'warn' });
+  if (heldForCatalogue(l)) out.push({ text: 'May be held until catalogued', tone: 'warn' });
   if (out.length === 0) {
     out.push(
       l.arrived > 0
@@ -203,23 +210,22 @@ export function lineNotes(l: ReceiveLine): LineNote[] {
 }
 
 /** The "What happens when you press Receive" figures, by the server's own
- *  arithmetic: a held line is held WHOLE (heldWhy), each piece counted once
- *  -- on the shelf, held for the catalogue, held for the manager, or to
- *  quarantine. */
+ *  arithmetic, each piece counted once: on the shelf (pieces beyond the order
+ *  included -- `over` says how many of those), possibly held for the
+ *  catalogue (an estimate, held WHOLE per line), or to quarantine. */
 export function receiptSums(lines: ReceiveLine[]) {
   const sent = linesToSend(lines);
   const sum = (f: (l: ReceiveLine) => number) => sent.reduce((s, l) => s + f(l), 0);
   const good = sum(goodOf);
-  const over = sum((l) => (heldWhy(l) === 'over' ? goodOf(l) : 0));
-  const catalogue = sum((l) => (heldWhy(l) === 'catalogue' ? goodOf(l) : 0));
+  const catalogue = sum((l) => (heldForCatalogue(l) ? goodOf(l) : 0));
   return {
     arrived: sum((l) => l.arrived),
     rejected: sum(rejectedOf),
     good,
-    over,
+    over: sum(beyondOrder),
     catalogue,
     short: lines.reduce((s, l) => s + (l.due !== null ? Math.max(0, l.due - l.arrived) : 0), 0),
-    onShelf: good - over - catalogue,
+    onShelf: good - catalogue,
   };
 }
 
@@ -231,6 +237,16 @@ export function expiryWarning(expiry: string, today: string): 'expired' | 'short
   d.setUTCMonth(d.getUTCMonth() + 6);
   return expiry < d.toISOString().slice(0, 10) ? 'short' : null;
 }
+
+/** One more scanned piece on a line: its first scan starts the count at 1
+ *  (the prefilled "due" is not a count). Pure, so it runs inside a state
+ *  update and two scans fired together both count. */
+export const scanOne = (l: ReceiveLine): ReceiveLine => ({
+  ...l,
+  arrived: l.scans ? l.arrived + 1 : 1,
+  scans: (l.scans ?? 0) + 1,
+  touched: true,
+});
 
 /** The line a scanned barcode / GTIN / SKU belongs to, or -1. */
 export function matchScan(lines: ReceiveLine[], code: string): number {
@@ -244,9 +260,14 @@ export function matchScan(lines: ReceiveLine[], code: string): number {
 /** What the product master tells the screen about a line. */
 export function productFacts(p: Record<string, unknown> | null | undefined): Pick<ReceiveLine, 'contactLens' | 'heldForCatalogue' | 'codes'> {
   if (!p) return {};
+  // The server holds a product not finished in the catalogue: an ordered draft,
+  // or any explicit status other than ACTIVE (product_master.
+  // effective_catalog_status reads a blank one as ACTIVE). A DRAFT short only
+  // of its cost is not held -- the screen cannot see that, hence "may be".
+  const status = String(p.catalog_status ?? '').trim().toUpperCase();
   return {
     contactLens: /CONTACT/i.test(String(p.category ?? '')),
-    heldForCatalogue: p.ordered_draft === true,
+    heldForCatalogue: p.ordered_draft === true || (status !== '' && status !== 'ACTIVE'),
     codes: ['sku', 'barcode', 'gtin', 'storeBarcode', 'store_barcode']
       .map((k) => p[k])
       .filter((v): v is string => typeof v === 'string' && v.trim() !== ''),
@@ -330,12 +351,13 @@ export function grnItems(kind: ReceiveKind, lines: ReceiveLine[], canEnterPrice:
 
 /** A clean box against an open order goes through POST /grn/express, which
  *  also drafts the bill and runs the 3-way match for accounts. Anything else
- *  -- a damaged piece, a piece beyond the order, a line held for the
+ *  -- a damaged piece, a line that may be held for the
  *  catalogue, an extra or rejected delivery, a challan, no order -- is
  *  created and accepted in two calls (express would refuse or half-finish it). */
 export function goesExpress(kind: ReceiveKind, po: CandidatePO | null, lines: ReceiveLine[]): boolean {
   if (kind !== 'STANDARD' || !po || po.status === 'RECEIVED' || isRejectOnlyOrder(po)) return false;
   return linesToSend(lines).every(
-    (l) => !l.rejectOnly && rejectedOf(l) === 0 && l.due !== null && heldWhy(l) === null,
+    // Pieces beyond the order are fine here: they go into stock, flagged.
+    (l) => !l.rejectOnly && rejectedOf(l) === 0 && l.due !== null && !heldForCatalogue(l),
   );
 }

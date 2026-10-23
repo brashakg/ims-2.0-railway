@@ -9,7 +9,8 @@ import {
   expiryWarning,
   goesExpress,
   grnItems,
-  heldWhy,
+  beyondOrder,
+  scanOne,
   lineNotes,
   linesFromPO,
   matchScan,
@@ -64,8 +65,8 @@ describe('lines from an order', () => {
       ['P3', 2, 2, false],
     ]);
     expect(lineNotes(ls[1]).map((n) => n.text)).toEqual(['Received in full']);
-    // An extra piece of the completed line is beyond the order: held whole.
-    expect(heldWhy({ ...ls[1], arrived: 1 })).toBe('over');
+    // An extra piece of the completed line is beyond the order: into stock, flagged.
+    expect(beyondOrder({ ...ls[1], arrived: 1 })).toBe(1);
   });
 
   it('a cancelled line on an open order rejects what arrives, as a credit', () => {
@@ -134,13 +135,15 @@ describe('what each row says', () => {
   it.each([
     [{ arrived: 4 }, ['All good']],
     [{ arrived: 3 }, ['1 short, stays on the order']],
-    [{ arrived: 5 }, ['1 more than ordered: held for the manager']],
-    // The server holds on ACCEPTED pieces: 5 arrived, 1 damaged = 4 good, within the order.
+    // Beyond the order goes INTO STOCK and the store manager is flagged
+    // (owner ruling 2026-10-08 (b)); it is never held.
+    [{ arrived: 5 }, ['1 beyond the order: into stock, flagged for the store manager']],
+    // Counted on ACCEPTED pieces: 5 arrived, 1 damaged = 4 good, within the order.
     [{ arrived: 5, damaged: 1 }, ['1 damaged: to quarantine']],
-    // A draft is held for the catalogue first -- never counted twice as "over" too.
-    [{ arrived: 5, heldForCatalogue: true }, ['Held until catalogued']],
+    // A line that may wait for the catalogue is that -- never also "beyond".
+    [{ arrived: 5, heldForCatalogue: true }, ['May be held until catalogued']],
     [{ arrived: 4, damaged: 1 }, ['1 damaged: to quarantine']],
-    [{ arrived: 4, heldForCatalogue: true }, ['Held until catalogued']],
+    [{ arrived: 4, heldForCatalogue: true }, ['May be held until catalogued']],
   ])('%o -> %o', (patch, texts) => {
     expect(lineNotes({ ...base, ...patch }).map((n) => n.text)).toEqual(texts);
   });
@@ -148,12 +151,12 @@ describe('what each row says', () => {
 
 describe('"What happens when you press Receive" uses the server arithmetic', () => {
   const [a, , c] = linesFromPO(order()).map((l) => ({ ...l, counted: true }));
-  it('5 arrived, 1 damaged, 4 due: 4 on the shelf, nothing held (holds read ACCEPTED pieces)', () => {
+  it('5 arrived, 1 damaged, 4 due: 4 on the shelf, none beyond (counted on ACCEPTED pieces)', () => {
     expect(receiptSums([{ ...a, arrived: 5, damaged: 1 }])).toMatchObject({ good: 4, rejected: 1, over: 0, onShelf: 4 });
   });
-  it('a line beyond the order is held WHOLE; a draft is held for the catalogue only, never twice', () => {
+  it('pieces beyond the order go on the shelf (flagged); a catalogue hold is the whole line, counted once', () => {
     const sums = receiptSums([{ ...a, arrived: 5 }, { ...c, arrived: 3, heldForCatalogue: true }]);
-    expect(sums).toMatchObject({ good: 8, over: 5, catalogue: 3, onShelf: 0 });
+    expect(sums).toMatchObject({ good: 8, over: 1, catalogue: 3, onShelf: 5 });
   });
 });
 
@@ -175,9 +178,18 @@ describe('the scan box', () => {
     expect(matchScan(ls, 'nope')).toBe(-1);
   });
 
-  it('the catalogue says which lines are contact lenses and which are drafts', () => {
+  it('the catalogue says which lines are contact lenses and which may be held', () => {
     expect(productFacts({ category: 'CONTACT_LENS', ordered_draft: true })).toMatchObject({ contactLens: true, heldForCatalogue: true });
     expect(productFacts({ category: 'FRAME' })).toMatchObject({ contactLens: false, heldForCatalogue: false });
+    // Any explicit status but ACTIVE is not finished; a blank one reads ACTIVE (the server's rule).
+    expect(productFacts({ catalog_status: 'DRAFT' }).heldForCatalogue).toBe(true);
+    expect(productFacts({ catalog_status: 'active' }).heldForCatalogue).toBe(false);
+  });
+
+  it('a scan is one piece, counted on the line as it is NOW (the first starts at 1)', () => {
+    const [a] = linesFromPO(order());
+    const once = scanOne(a);
+    expect([once.arrived, scanOne(once).arrived, scanOne(scanOne(once)).arrived]).toEqual([1, 2, 3]);
   });
 });
 
@@ -223,11 +235,12 @@ describe('which door a receipt takes', () => {
   const clean = counted(linesFromPO(po));
   it('a clean box against an open order goes express', () => {
     expect(goesExpress('STANDARD', po, clean)).toBe(true);
+    // Beyond the order is still clean: the server stocks it and flags it.
+    expect(goesExpress('STANDARD', po, [{ ...clean[0], arrived: 5 }])).toBe(true);
     expect(goesExpress('STANDARD', po, [{ ...clean[0], arrived: 2 }])).toBe(true); // short is still clean
   });
   it.each([
     ['a damaged piece', [{ ...clean[0], damaged: 1 }]],
-    ['a piece beyond the order', [{ ...clean[0], arrived: 5 }]],
     ['a line held for the catalogue', [{ ...clean[0], heldForCatalogue: true }]],
   ])('%s takes the two-call door', (_why, ls) => {
     expect(goesExpress('STANDARD', po, ls as ReceiveLine[])).toBe(false);

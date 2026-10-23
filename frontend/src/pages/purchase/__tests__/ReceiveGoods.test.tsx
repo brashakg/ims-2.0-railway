@@ -11,7 +11,7 @@
 // receipts still waiting, and the history.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
+import { act, render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() }));
@@ -285,10 +285,11 @@ describe('a damaged piece, inline on its row', () => {
     api.acceptGRN.mockRejectedValue(
       serverSaid(503, 'Some units were received before the stock store stopped responding. Open the receiving screen and accept it again.'),
     );
+    cockpit.expressReceive.mockRejectedValue(serverSaid(400, { code: 'EXPRESS_NOT_CLEAN' }));
     await openPO();
     fireEvent.click(screen.getByRole('button', { name: /Everything arrived as ordered/ }));
     fireEvent.change(screen.getByLabelText('Arrived on line 1'), { target: { value: '5' } });
-    expect(screen.getByText('1 more than ordered: held for the manager')).toBeInTheDocument();
+    expect(screen.getByText('1 beyond the order: into stock, flagged for the store manager')).toBeInTheDocument();
     await attachBill();
     fireEvent.click(receiveBtn());
     expect(await screen.findByText(/GRN-0400 was saved but is NOT on the shelf yet/)).toBeInTheDocument();
@@ -332,6 +333,21 @@ describe('a damaged piece, inline on its row', () => {
   });
 });
 
+describe('the catalogue hold is shown as an estimate', () => {
+  it('a product the catalogue does not have (404) may be held; the summary says it is an estimate', async () => {
+    products.getProduct.mockImplementation(async (id: string) => {
+      if (id === 'P1') throw serverSaid(404, 'Product not found');
+      return { product_id: id };
+    });
+    await openPO();
+    await screen.findByText('May be held until catalogued');
+    fireEvent.click(screen.getByRole('button', { name: /Everything arrived as ordered/ }));
+    expect(screen.getByText(/Another 4 pieces may wait until the catalogue team finishes/)).toBeInTheDocument();
+    expect(screen.getByText(/an estimate: the server checks each product/)).toBeInTheDocument();
+    expect(screen.getByText(/2 good pieces go into stock/)).toBeInTheDocument();
+  });
+});
+
 describe('contact lenses and the scan box', () => {
   it('a contact-lens line asks for batch + expiry; short-dated is a warning only', async () => {
     await openPO();
@@ -358,7 +374,26 @@ describe('contact lenses and the scan box', () => {
       fireEvent.keyDown(scan, { key: 'Enter' });
     }
     await waitFor(() => expect(arrived.value).toBe('3'));
-    expect(screen.getByText('1 more than ordered: held for the manager')).toBeInTheDocument();
+    expect(screen.getByText('1 beyond the order: into stock, flagged for the store manager')).toBeInTheDocument();
+  });
+
+  it('two scans of a product not on the list, fired before its lookup returns, count 2', async () => {
+    let answer: (v: unknown) => void = () => undefined;
+    products.getProducts.mockImplementation(() => new Promise((r) => { answer = r; }));
+    renderAt();
+    fireEvent.click(await screen.findByRole('button', { name: 'Bought without PO' }));
+    const scan = await screen.findByLabelText('Scan a barcode');
+    const fire = () => {
+      fireEvent.change(scan, { target: { value: '8900000000017' } });
+      fireEvent.keyDown(scan, { key: 'Enter' });
+    };
+    fire();
+    const first = answer;
+    fire();
+    const second = answer;
+    const hit = { products: [{ product_id: 'P-FR1', name: 'Acme Aviator', gtin: '8900000000017' }] };
+    await act(async () => { first(hit); second(hit); });
+    await waitFor(() => expect((screen.getByLabelText('Arrived on line 1') as HTMLInputElement).value).toBe('2'));
   });
 });
 
@@ -443,25 +478,29 @@ describe('no purchase order', () => {
 });
 
 describe('an open order with a line already received in full', () => {
-  it('lists that line at 0, and an extra piece of it is logged (held for the manager, never express)', async () => {
+  it('folds that line away, and an extra piece of it goes into stock, flagged (the express door takes it)', async () => {
     api.getPurchaseOrders.mockResolvedValue({
       purchase_orders: [{ ...PO, status: 'PARTIALLY_RECEIVED', items: [
         PO.items[0], { ...PO.items[1], received_qty: 2 },
       ] }],
     });
     await openPO();
+    // Folded behind "Show 1 completed line" until asked for.
+    expect(screen.queryByText('Received in full')).toBeNull();
+    expect(screen.queryByLabelText('Arrived on line 2')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Show 1 completed line' }));
     expect(screen.getByText('Received in full')).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('Arrived on line 2'), { target: { value: '1' } });
-    expect(screen.getByText('1 more than ordered: held for the manager')).toBeInTheDocument();
+    expect(screen.getByText('1 beyond the order: into stock, flagged for the store manager')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Everything else arrived as ordered/ }));
     fireEvent.click(screen.getByLabelText(/I counted line 2/));
     await attachBill();
-    expect(screen.getByText(/1 piece on lines beyond the order are held for the manager/)).toBeInTheDocument();
-    expect(screen.getByText(/4 good pieces go into stock/)).toBeInTheDocument();
+    expect(screen.getByText(/1 of them is beyond the order: into stock, and the store manager is flagged/)).toBeInTheDocument();
+    expect(screen.getByText(/5 good pieces go into stock/)).toBeInTheDocument();
     fireEvent.click(receiveBtn());
-    await waitFor(() => expect(api.createGRN).toHaveBeenCalled());
-    expect(cockpit.expressReceive).not.toHaveBeenCalled();
-    expect(api.createGRN.mock.calls[0][0].items).toEqual([
+    await waitFor(() => expect(cockpit.expressReceive).toHaveBeenCalled());
+    expect(api.createGRN).not.toHaveBeenCalled();
+    expect(cockpit.expressReceive.mock.calls[0][0].items).toEqual([
       expect.objectContaining({ product_id: 'P1', received_qty: 4 }),
       expect.objectContaining({ product_id: 'P2', received_qty: 1, accepted_qty: 1 }),
     ]);
@@ -469,13 +508,15 @@ describe('an open order with a line already received in full', () => {
 });
 
 describe('other orders', () => {
-  it('extra goods on a fully received order: only what arrived is sent, and it is held for the manager', async () => {
+  it('extra goods on a fully received order: only what arrived is sent; it goes into stock, flagged', async () => {
     renderAt();
     fireEvent.change(await screen.findByLabelText(/Another order/), { target: { value: 'PO4' } });
-    expect(await screen.findByText(/fully received\. Count only the extra goods/)).toBeInTheDocument();
+    expect(await screen.findByText(/fully received\. Count only the extra goods in this delivery: they go into stock and the store manager is flagged/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Everything arrived as ordered/ })).toBeNull();
+    // Every line of a fully received order shows: nothing folds away.
+    expect(screen.queryByRole('button', { name: /completed line/ })).toBeNull();
     fireEvent.change(screen.getByLabelText('Arrived on line 1'), { target: { value: '1' } });
-    expect(screen.getByText('1 more than ordered: held for the manager')).toBeInTheDocument();
+    expect(screen.getByText('1 beyond the order: into stock, flagged for the store manager')).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText(/I counted line 1/));
     await attachBill();
     fireEvent.click(receiveBtn());
@@ -551,6 +592,18 @@ describe('receipts still waiting', () => {
     expect(await screen.findByText('labels for G-H')).toBeInTheDocument();
   });
 
+  it('Add to stock that did not finish (status_flip_failed) warns to press it again: no success, no labels', async () => {
+    waiting.PENDING = [{ grn_id: 'G-P', grn_number: 'GRN-0390', status: 'PENDING', items: [{}] }];
+    api.acceptGRN.mockResolvedValue({ status_flip_failed: true, units_added: 2, grn_status: 'PENDING',
+      message: '2 unit(s) were received, but the receipt status could not be updated.' });
+    renderAt();
+    const panel = await screen.findByTestId('receipts-waiting');
+    fireEvent.click(within(panel).getByRole('button', { name: /Add to stock/ }));
+    await waitFor(() => expect(toast.warning).toHaveBeenCalledWith(expect.stringMatching(/GRN-0390: 2 unit\(s\) were received.*Add to stock" on it again/), 20000));
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(screen.queryByText('labels for G-P')).toBeNull();
+  });
+
   it('a receipt held beyond its order offers Not received; any can be voided', async () => {
     vi.spyOn(window, 'confirm').mockReturnValue(true);
     waiting.PARTIALLY_ACCEPTED = [
@@ -592,6 +645,22 @@ describe('receipt history', () => {
     fireEvent.click(await screen.findByTitle('Print GRN'));
     await waitFor(() => expect(printed.grn?.vendor_gstin).toBe('27AAACS1234A1Z5'));
     expect(printed.grn).toMatchObject({ vendor_name: 'Safilo India', vendor_address: 'Andheri, Mumbai' });
-    expect((printed.grn?.items as Array<Record<string, number>>)[0]).toMatchObject({ ordered_qty: 4, received_qty: 3, variance: -1 });
+    const item = (printed.grn?.items as Array<Record<string, number>>)[0];
+    expect(item).toMatchObject({ ordered_qty: 4, received_qty: 3 });
+    // The ordered figure is the WHOLE order's: no variance against it, ever.
+    expect(item).not.toHaveProperty('variance');
+  });
+
+  it('a bought-without-PO print takes the supplier name from the supplier record, and orders nothing', async () => {
+    history = [
+      { grn_id: 'G3', grn_number: 'GRN-0011', grn_subtype: 'NO_PO', vendor_id: 'V-77', status: 'ACCEPTED',
+        created_at: '2026-10-14T11:00:00', items: [{ product_id: 'P1', received_qty: 2, accepted_qty: 2, rejected_qty: 0 }] },
+    ];
+    api.getVendor.mockResolvedValue({ vendor_id: 'V-77', trade_name: 'Frames Wala', gstin: '' });
+    renderAt();
+    fireEvent.click(await screen.findByRole('button', { name: /Receipt history/ }));
+    fireEvent.click(await screen.findByTitle('Print GRN'));
+    await waitFor(() => expect(printed.grn?.vendor_name).toBe('Frames Wala'));
+    expect((printed.grn?.items as Array<Record<string, unknown>>)[0].ordered_qty).toBeNull();
   });
 });
