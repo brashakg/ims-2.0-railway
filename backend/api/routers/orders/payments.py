@@ -34,13 +34,15 @@ from .workshop import _ensure_workshop_job_for_order
 from .release import _claim_order_status
 
 
-def _claim_loyalty_redemption(order: dict, amount: float, payment_id: str) -> str:
+def _claim_loyalty_redemption(order: dict, amount: float, payment_id: str, idem_key: str = ""):
     """A LOYALTY tender must be backed by REAL points. POST /loyalty/redeem does
     the atomic points debit (refusing a customer who lacks the points) and writes
     a REDEEM ledger row carrying this order_id. This claims one unused such row
     for THIS order and THIS order's customer, worth exactly this amount, by
     compare-and-set -- so a tender with no burn behind it is refused, and one
-    burn backs at most one tender. Returns the claimed txn_id."""
+    burn backs at most one tender. Returns (claimed txn_id, None), or
+    (None, twin payment_id) when an identical request (same Idempotency-Key)
+    already claimed the burn -- the caller replays it instead of refusing."""
     from ...dependencies import get_loyalty_transaction_repository
 
     order_id = order.get("order_id")
@@ -62,8 +64,17 @@ def _claim_loyalty_redemption(order: dict, amount: float, payment_id: str) -> st
     for row in unused:
         if abs(float(row.get("rupee_value") or 0) - float(amount)) > 0.01:
             continue
-        if txns.update_if(row["txn_id"], {"tender_payment_id": None}, {"tender_payment_id": payment_id}):
-            return row["txn_id"]
+        claim = {"tender_payment_id": payment_id}
+        if idem_key:
+            claim["tender_idempotency_key"] = idem_key
+        if txns.update_if(row["txn_id"], {"tender_payment_id": None}, claim):
+            return row["txn_id"], None
+    if idem_key:
+        twin = txns.collection.find_one(
+            {"order_id": order_id, "type": "REDEEM", "tender_idempotency_key": idem_key}
+        )
+        if twin and twin.get("tender_payment_id"):
+            return None, twin["tender_payment_id"]
     raise HTTPException(
         status_code=400,
         detail=(
@@ -80,7 +91,9 @@ def _release_loyalty_redemption(txn_id: str, payment_id: str) -> None:
 
     try:
         get_loyalty_transaction_repository().update_if(
-            txn_id, {"tender_payment_id": payment_id}, {"tender_payment_id": None}
+            txn_id,
+            {"tender_payment_id": payment_id},
+            {"tender_payment_id": None, "tender_idempotency_key": None},
         )
     except Exception as exc:  # noqa: BLE001
         logger.error("[ORDERS] loyalty claim %s NOT released: %s", txn_id, exc)
@@ -240,7 +253,19 @@ async def add_payment(
                     status_code=403,
                     detail="Loyalty points are taken at the till only - your role cannot record a loyalty payment.",
                 )
-            loyalty_txn_id = _claim_loyalty_redemption(order, payment.amount, payment_id)
+            loyalty_txn_id, twin_payment_id = _claim_loyalty_redemption(
+                order, payment.amount, payment_id, idem_key
+            )
+            if twin_payment_id:
+                # The same request is already recording this tender: replay it.
+                return {
+                    "payment_id": twin_payment_id,
+                    "message": "Payment recorded",
+                    "amount": payment.amount,
+                    "order_status": order.get("status", "DRAFT"),
+                    "payment_status": order.get("payment_status", "UNPAID"),
+                    "_idempotent_replay": True,
+                }
 
         # EMI validation and interest calculation
         emi_details = None

@@ -75,9 +75,9 @@ def _refuse_cancel_holding_money(order: Dict[str, Any], order_id: str, current_u
             status_code=400,
             detail=(
                 f"Rs {held:,.2f} was paid on this order. Cancelling does not give "
-                "money back, so the order was not cancelled. A store manager must "
-                "use 'Refund advance and cancel' (Returns), which refunds the "
-                "customer and cancels the order in one step."
+                "money back, so the order was not cancelled. Accounts or an admin "
+                "must use 'Refund advance and cancel' on the Orders screen, which "
+                "refunds the customer and cancels the order in one step."
             ),
         )
     if not any(r in current_user.get("roles", []) for r in CANCEL_ADVANCE_ROLES):
