@@ -21,7 +21,7 @@ from .helpers import (
 )
 from .stock_count import (
     _load_open_count,
-    _upsert_count_item,
+    _record_scan,
 )
 
 # ============================================================================
@@ -31,7 +31,10 @@ from .stock_count import (
 
 class BarcodeScanRequest(BaseModel):
     barcode: str
-    physical_count: int = Field(..., ge=0)
+    # Only for a session-less stock lookup. Inside a count session a scan is
+    # ONE piece (owner ruling S1) and a number here is refused -- a typed
+    # quantity goes on the style's line (POST /stock-count/{id}/items).
+    physical_count: Optional[int] = Field(None, ge=0)
     notes: Optional[str] = None
     # The count session this scan belongs to. Without it the scan resolved a
     # barcode, calculated a difference and THREW IT AWAY -- which is how every
@@ -60,6 +63,18 @@ async def scan_barcode_for_count(
         stock_coll = db.get_collection("stock_units")
         products_coll = db.get_collection("products")
 
+        # A scan inside a session is ONE piece. A number sent with it used to
+        # REPLACE the style's whole counted line (the "scan replaces the
+        # quantity" bug); refuse it rather than silently ignore it.
+        if request.count_id and request.physical_count is not None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "A scan counts one piece. To enter a number for a style "
+                    "with no label, type it on that style's line instead."
+                ),
+            )
+
         # Resolve the session FIRST when one was given, so a scan against a
         # closed or someone else's count is refused before anything is read.
         count_doc = (
@@ -72,7 +87,7 @@ async def scan_barcode_for_count(
         # unknown code: its product and on-hand are that shop's (audit
         # 2026-10-18); admins reach every shop.
         stock = in_reach_or_404(
-            stock_coll.find_one(barcode_svc.unit_barcode_match(request.barcode)),
+            barcode_svc.find_unit_by_code(stock_coll, request.barcode),
             current_user,
             "Barcode not found",
         )
@@ -126,35 +141,51 @@ async def scan_barcode_for_count(
 
         # Recording onto an OPEN session: the count is BLIND (owner ruling
         # 2026-08-25). The scan door must not echo what the books expect --
-        # no system count, no variance, no "you matched" tell. The comparison
-        # against the opening snapshot happens at /complete, after the
-        # answers are in.
+        # no system count, no variance, no "you matched" tell. It answers
+        # only "saved" and how many pieces this session has scanned so far.
         if count_doc is not None:
-            items_counted = _upsert_count_item(
+            added, fresh = _record_scan(
                 db,
                 count_doc,
-                product_id=product_id,
+                unit=stock,
                 product_name=product_name,
                 sku=sku,
-                counted_quantity=request.physical_count,
-                notes=request.notes,
                 user_id=current_user.get("user_id", ""),
             )
+            return {
+                "barcode": stock.get("barcode") or request.barcode,
+                "product_id": product_id,
+                "product_name": product_name,
+                "sku": sku,
+                "count_id": request.count_id,
+                "recorded": True,
+                # False: this exact piece was already scanned -- counted once.
+                "added": added,
+                "pieces_scanned": len(fresh.get("scans") or []),
+                "items_counted": fresh.get("items_counted"),
+            }
+
+        # No session: a plain stock lookup against LIVE on-hand (nothing is
+        # recorded), same information as the inventory dashboard.
+        physical = int(request.physical_count or 0)
+        variance = physical - system_count
+
+        # BLIND COUNT, server side (S1 review M5): this door is one request
+        # away from a counter mid-count, so the on-hand figure and the
+        # variance go to the admins only. Everyone else gets "found".
+        from ._shared import is_write_off_admin
+
+        if not is_write_off_admin(current_user):
             return {
                 "barcode": request.barcode,
                 "product_id": product_id,
                 "product_name": product_name,
                 "sku": sku,
-                "physical_count": request.physical_count,
                 "notes": request.notes,
-                "count_id": request.count_id,
-                "recorded": True,
-                "items_counted": items_counted,
+                "count_id": None,
+                "recorded": False,
+                "items_counted": None,
             }
-
-        # No session: a plain stock lookup against LIVE on-hand (nothing is
-        # recorded), same information as the inventory dashboard.
-        variance = request.physical_count - system_count
 
         return {
             "barcode": request.barcode,
@@ -162,7 +193,7 @@ async def scan_barcode_for_count(
             "product_name": product_name,
             "sku": sku,
             "system_count": system_count,
-            "physical_count": request.physical_count,
+            "physical_count": physical,
             "variance": variance,
             "variance_percent": round((variance / max(system_count, 1)) * 100, 2),
             "notes": request.notes,

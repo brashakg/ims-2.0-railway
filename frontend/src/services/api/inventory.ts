@@ -294,8 +294,29 @@ export const inventoryApi = {
     return response.data;
   },
 
+  // TYPED quantity for a style whose pieces have no label (0 = none here). It
+  // is added to the pieces scanned for that style, never in place of them.
   recordCountItem: async (countId: string, item: { product_id: string; product_name?: string; sku?: string; counted_quantity: number; notes?: string }) => {
     const response = await api.post(`/inventory/stock-count/${countId}/items`, item);
+    return response.data;
+  },
+
+  // One scanned piece. The same label twice counts once (`added: false`).
+  scanCountPiece: async (countId: string, barcode: string) => {
+    const response = await api.post('/inventory/stock-count-scan', { barcode, count_id: countId });
+    return response.data as {
+      recorded: boolean;
+      added: boolean;
+      product_name: string;
+      sku: string;
+      pieces_scanned: number;
+      items_counted: number;
+    };
+  },
+
+  // A store manager sends a finished count's missing pieces to the admin.
+  requestStockCountWriteOff: async (countId: string, notes?: string) => {
+    const response = await api.post(`/inventory/stock-count/${countId}/write-off-request`, notes ? { notes } : {});
     return response.data;
   },
 
@@ -306,8 +327,12 @@ export const inventoryApi = {
 
   // Write off what the count found missing. ADMIN / SUPERADMIN only (owner
   // ruling 2026-08-25 #8) -- the server is the gate, the UI just hides it.
-  reconcileStockCount: async (countId: string, notes?: string) => {
-    const response = await api.post(`/inventory/stock-count/${countId}/reconcile`, notes ? { notes } : {});
+  // `includeNoneFound`: ALSO write off the styles the count found nothing of
+  // (owner ruling M6) -- the admin's second, explicit confirmation.
+  reconcileStockCount: async (countId: string, notes?: string, includeNoneFound = false) => {
+    const body: Record<string, unknown> = notes ? { notes } : {};
+    if (includeNoneFound) body.include_none_found = true;
+    const response = await api.post(`/inventory/stock-count/${countId}/reconcile`, body);
     return response.data;
   },
 

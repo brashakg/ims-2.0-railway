@@ -155,7 +155,9 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/lens-stock/{lens_line_id}/commit",
-        "allowed": ["ADMIN", "CATALOG_MANAGER", "STORE_MANAGER"],
+        # S1 review round 2: admin only over HTTP (the till / workshop use
+        # the server-side lens_stock_hook, not this route).
+        "allowed": ["ADMIN"],
         "store_scoped": True,
     },
     {
@@ -167,7 +169,9 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/lens-stock/{lens_line_id}/reserve",
-        "allowed": ["ADMIN", "CATALOG_MANAGER", "STORE_MANAGER"],
+        # S1 review round 2: admin only over HTTP (the till / workshop use
+        # the server-side lens_stock_hook, not this route).
+        "allowed": ["ADMIN"],
         "store_scoped": True,
     },
     {

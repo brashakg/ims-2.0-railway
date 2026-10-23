@@ -311,9 +311,12 @@ async def get_stock_by_barcode(
 @router.post("/stock/add")
 async def add_stock(
     request: StockAddRequest,
-    current_user: dict = Depends(require_roles(*_INVENTORY_ROLES)),
+    # S1 review M4: minting units outside receiving can paper over a missing
+    # piece (and dodge a write-off). ADMIN / SUPERADMIN only; receiving and
+    # opening stock mint their own units.
+    current_user: dict = Depends(require_roles("ADMIN")),
 ):
-    """Add stock to inventory"""
+    """Add stock to inventory (ADMIN / SUPERADMIN)."""
     stock_repo = get_stock_repository()
     product_repo = get_product_repository()
     active_store = current_user.get("active_store_id")

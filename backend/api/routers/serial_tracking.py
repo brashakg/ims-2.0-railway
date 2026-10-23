@@ -148,7 +148,9 @@ class RecallBody(BaseModel):
 async def capture(body: CaptureBody, current_user: Dict[str, Any] = Depends(get_current_user)):
     """STOCK-IN: mint a unique IN_STOCK serial for one physical unit. Inventory/
     manager only + store-scoped. A non-serialized category is a no-op (skipped)."""
-    _require(current_user, _STOCK_ROLES, "capture a serial")
+    # Minting a unit outside receiving can paper over a missing piece: ADMIN /
+    # SUPERADMIN only (S1 review M4). Receiving mints units itself.
+    _require(current_user, {"ADMIN", "SUPERADMIN"}, "capture a serial")
     validate_store_access(body.store_id, current_user)
     # A non-serialized category does not force a serial (no-op) -- fail soft so a
     # normal receive of a non-tracked item is never blocked.
@@ -181,6 +183,9 @@ async def mark_sold(serial: str, body: MarkSoldBody, current_user: Dict[str, Any
     if unit is None:
         raise HTTPException(status_code=404, detail="serial not found")
     validate_store_access(unit.get("store_id"), current_user)
+    from .inventory._shared import refuse_unless_real_order
+
+    refuse_unless_real_order(_get_db(), body.order_id, unit, current_user)
     updated = svc.mark_serial_sold(
         _units(), serial=serial, order_id=body.order_id,
         store_id=unit.get("store_id"), customer_id=body.customer_id,
@@ -196,8 +201,10 @@ async def mark_sold(serial: str, body: MarkSoldBody, current_user: Dict[str, Any
 
 @router.post("/{serial}/recall")
 async def recall(serial: str, body: RecallBody, current_user: Dict[str, Any] = Depends(get_current_user)):
-    """Mark a serial RECALLED (from any pre-recall state). Manager/admin only."""
-    _require(current_user, _RECALL_ROLES, "recall a serial")
+    """Mark a serial RECALLED (from any pre-recall state). A recalled unit is
+    off the books: a write-off, ADMIN / SUPERADMIN only (owner ruling
+    2026-08-25)."""
+    _require(current_user, {"ADMIN", "SUPERADMIN"}, "recall a serial")
     unit = svc.find_serial(_units(), serial, None)
     if unit is None:
         raise HTTPException(status_code=404, detail="serial not found")

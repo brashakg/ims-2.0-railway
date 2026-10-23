@@ -1066,6 +1066,21 @@ _REGISTRY_LIST: List[PolicySpec] = [
         "EXPERIMENTAL: nothing in the app calls it yet; POS billing is "
         "unaffected either way. Leave OFF unless instructed.",
     ),
+    # --- Stock count: writing off styles with NOTHING found (S1, owner M6) ---
+    _spec(
+        key="inventory.count_none_found_min_coverage_pct",
+        type="percent",
+        default=90.0,
+        scopes=("global",),
+        write_roles=("SUPERADMIN",),
+        group="Operations",
+        label="Stock count: coverage needed to write off 'None found' styles",
+        help="A whole-shop or whole-category count may write off the pieces of "
+        "styles nobody found only if at least this share of the styles in "
+        "scope was counted. Below it, an unwalked shelf would read as missing.",
+        minimum=0,
+        maximum=100,
+    ),
     # --- Blind stock take (services/blind_stock_take.py) ---
     _spec(
         key="inventory.blind_count_tolerance_units",

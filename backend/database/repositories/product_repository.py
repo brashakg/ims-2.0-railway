@@ -12,7 +12,7 @@ import uuid
 from typing import List, NamedTuple, Optional, Dict
 from datetime import datetime, date, timedelta, timezone
 
-from api.services.barcode import unit_barcode_match
+from api.services.barcode import find_unit_by_code
 from api.services.gtin import gtin_spellings
 from api.utils.ist import ist_today
 
@@ -561,7 +561,11 @@ class StockRepository(BaseRepository):
         return "stock_id"
 
     def find_by_barcode(self, barcode: str) -> Optional[Dict]:
-        return self.find_one(unit_barcode_match(barcode))
+        try:
+            return self._clean_id(find_unit_by_code(self.collection, barcode))
+        except Exception as e:  # noqa: BLE001 -- same fail-soft as find_one
+            print(f"Error finding {self.entity_name}: {e}")
+            return None
 
     def find_by_product_store(self, product_id: str, store_id: str) -> List[Dict]:
         return self.find_many(

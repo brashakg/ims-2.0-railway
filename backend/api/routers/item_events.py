@@ -219,8 +219,9 @@ async def quarantine_release(
 ):
     """QUARANTINED -> AVAILABLE (RESTOCK) | DAMAGED (DAMAGE) | RTV (RTV).
 
-    DAMAGE / RTV are write-offs (manager ladder). RESTOCK returns the unit to
-    sellable on-hand; the other two do NOT."""
+    DAMAGE is a write-off: ADMIN / SUPERADMIN only. RTV (supplier return) and
+    RESTOCK stay with the manager ladder. RESTOCK returns the unit to sellable
+    on-hand; the other two do NOT."""
     db = _get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
@@ -236,6 +237,14 @@ async def quarantine_release(
     if disp not in _RELEASE_DISPOSITIONS:
         raise HTTPException(status_code=422,
                             detail=f"disposition must be one of {sorted(_RELEASE_DISPOSITIONS)}")
+    if disp == "DAMAGE":
+        # DAMAGE takes the piece off the books as a loss: a write-off, which
+        # is ADMIN / SUPERADMIN only at every value (owner ruling 2026-08-25).
+        # RESTOCK and RTV (back to the supplier, who credits it) stay with the
+        # manager ladder.
+        from .inventory._shared import refuse_write_off_unless_admin
+
+        refuse_write_off_unless_admin(current_user, "write off a damaged piece")
     target = {
         "RESTOCK": ie.StockState.AVAILABLE,
         "DAMAGE": ie.StockState.DAMAGED,
@@ -387,6 +396,9 @@ async def sell_unit(
         raise HTTPException(status_code=403,
                             detail={"code": "feature_disabled",
                                     "message": "E3 POS sell flag is off."})
+    from .inventory._shared import refuse_unless_real_order
+
+    refuse_unless_real_order(db, req.order_id, unit, current_user)
     ok, ev = ie.record_event_atomic(
         db,
         event_type=ie.ItemEventType.SELL,

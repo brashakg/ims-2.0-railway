@@ -7,6 +7,7 @@
 // send a manager, so a widened role check shows here.
 
 import { render, screen } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { describe, it, expect, vi } from 'vitest';
 
 vi.mock('../../../services/api', () => ({
@@ -47,7 +48,7 @@ vi.mock('../../../context/ToastContext', () => ({
 import StockAuditPage from '../StockAudit';
 
 async function missingTile() {
-  render(<StockAuditPage />);
+  render(<MemoryRouter><StockAuditPage /></MemoryRouter>);
   const label = await screen.findByText('Stock missing');
   return label.parentElement!.querySelector('.v')!.textContent;
 }

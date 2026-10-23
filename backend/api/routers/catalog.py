@@ -4080,6 +4080,12 @@ async def adjust_product_inventory(
         for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER", "WORKSHOP_STAFF"]
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
+    if adjustment < 0:
+        # Taking stock DOWN is a write-off: ADMIN / SUPERADMIN only, at every
+        # value (owner ruling 2026-08-25).
+        from .inventory._shared import refuse_write_off_unless_admin
+
+        refuse_write_off_unless_admin(current_user, "adjust stock down")
 
     product = _get_catalog_product(product_id)
     if product is None:

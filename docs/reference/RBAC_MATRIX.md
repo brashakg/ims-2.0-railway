@@ -69,9 +69,9 @@ manager gets 404).
 |---|---|
 | PUBLIC (no IMS role gate) | 46 |
 | AUTHENTICATED | 394 |
-| Role-gated (one or more roles) | 867 |
-| **Total `/api/v1` (method x path)** | **1307** |
-| ...of which `store_scoped` | 241 |
+| Role-gated (one or more roles) | 862 |
+| **Total `/api/v1` (method x path)** | **1302** |
+| ...of which `store_scoped` | 235 |
 | ...of which `self_enforced` | 47 |
 
 ## Full matrix (method x path -> policy entry)
@@ -261,17 +261,6 @@ entry exactly; see the manual interpretation notes above.
 | `GET` | `/api/v1/bank-recon/reconciliations/{run_id}` | ACCOUNTANT, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
 | `POST` | `/api/v1/bank-recon/reconciliations/{run_id}/lock` | ACCOUNTANT, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
 | `POST` | `/api/v1/bank-recon/reconciliations/{run_id}/sign-off` | ACCOUNTANT, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
-
-### `/api/v1/blind-count`
-
-| Method | Path | Allowed | S | E |
-|---|---|---|---|---|
-| `POST` | `/api/v1/blind-count/open` | SALES_STAFF, SALES_CASHIER, CATALOG_MANAGER, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
-| `GET` | `/api/v1/blind-count/{session_id}` | SALES_STAFF, SALES_CASHIER, CATALOG_MANAGER, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
-| `POST` | `/api/v1/blind-count/{session_id}/lock` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
-| `POST` | `/api/v1/blind-count/{session_id}/propose-adjustment` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
-| `POST` | `/api/v1/blind-count/{session_id}/reopen` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
-| `POST` | `/api/v1/blind-count/{session_id}/submit` | SALES_STAFF, SALES_CASHIER, CATALOG_MANAGER, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
 
 ### `/api/v1/budgets`
 
@@ -809,7 +798,8 @@ entry exactly; see the manual interpretation notes above.
 | `POST` | `/api/v1/inventory/stock-count/{count_id}/items` | ADMIN, AREA_MANAGER, CATALOG_MANAGER, STORE_MANAGER, WORKSHOP_STAFF |  |  |
 | `POST` | `/api/v1/inventory/stock-count/{count_id}/reconcile` | ADMIN |  |  |
 | `POST` | `/api/v1/inventory/stock-count/{count_id}/reconcile/finish` | ADMIN |  |  |
-| `POST` | `/api/v1/inventory/stock/add` | ADMIN, AREA_MANAGER, CATALOG_MANAGER, STORE_MANAGER, WORKSHOP_STAFF |  |  |
+| `POST` | `/api/v1/inventory/stock-count/{count_id}/write-off-request` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/inventory/stock/add` | ADMIN |  |  |
 | `GET` | `/api/v1/inventory/stock/barcode/{barcode}` | AUTH |  |  |
 | `GET` | `/api/v1/inventory/stock/quarantined` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |  |
 | `PATCH` | `/api/v1/inventory/stock/{stock_id}/lift-quarantine` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
@@ -912,9 +902,9 @@ entry exactly; see the manual interpretation notes above.
 | `GET` | `/api/v1/lens-stock/gap-planner` | AUTH | S |  |
 | `GET` | `/api/v1/lens-stock/{lens_line_id}` | AUTH | S |  |
 | `POST` | `/api/v1/lens-stock/{lens_line_id}/bulk-import` | ADMIN, CATALOG_MANAGER, STORE_MANAGER | S |  |
-| `POST` | `/api/v1/lens-stock/{lens_line_id}/commit` | ADMIN, CATALOG_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/lens-stock/{lens_line_id}/commit` | ADMIN | S |  |
 | `POST` | `/api/v1/lens-stock/{lens_line_id}/release` | ADMIN, CATALOG_MANAGER, STORE_MANAGER | S |  |
-| `POST` | `/api/v1/lens-stock/{lens_line_id}/reserve` | ADMIN, CATALOG_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/lens-stock/{lens_line_id}/reserve` | ADMIN | S |  |
 | `PATCH` | `/api/v1/lens-stock/{line_stock_id}` | ADMIN, CATALOG_MANAGER, STORE_MANAGER | S |  |
 
 ### `/api/v1/loyalty`
@@ -1368,11 +1358,11 @@ entry exactly; see the manual interpretation notes above.
 
 | Method | Path | Allowed | S | E |
 |---|---|---|---|---|
-| `POST` | `/api/v1/serials/capture` | CATALOG_MANAGER, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `POST` | `/api/v1/serials/capture` | ADMIN, SUPERADMIN | S |  |
 | `GET` | `/api/v1/serials/warranty/{serial}` | SALES_CASHIER, CASHIER, SALES_STAFF, OPTOMETRIST, CATALOG_MANAGER, STORE_MANAGER, AREA_MANAGER, ACCOUNTANT, ADMIN, SUPERADMIN | S |  |
 | `GET` | `/api/v1/serials/{serial}` | SALES_CASHIER, CASHIER, SALES_STAFF, OPTOMETRIST, CATALOG_MANAGER, STORE_MANAGER, AREA_MANAGER, ACCOUNTANT, ADMIN, SUPERADMIN | S |  |
 | `POST` | `/api/v1/serials/{serial}/mark-sold` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
-| `POST` | `/api/v1/serials/{serial}/recall` | STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
+| `POST` | `/api/v1/serials/{serial}/recall` | ADMIN, SUPERADMIN | S |  |
 | `POST` | `/api/v1/serials/{serial}/return` | CATALOG_MANAGER, STORE_MANAGER, AREA_MANAGER, ADMIN, SUPERADMIN | S |  |
 
 ### `/api/v1/settings`

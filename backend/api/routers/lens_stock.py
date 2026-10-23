@@ -79,6 +79,7 @@ class StockCellCreate(BaseModel):
     reserved: int = Field(0, ge=0)
     reorder_point: int = Field(0, ge=0)
     safety_stock: int = Field(0, ge=0)
+    notes: Optional[str] = None
 
 
 class StockCellUpdate(BaseModel):
@@ -114,6 +115,9 @@ class BulkImportPayload(BaseModel):
     matrix: Optional[List[BulkImportRow]] = None
     csv: Optional[str] = None
     source_id: Optional[str] = None  # e.g. uploaded file name
+    # Why the stock is changing. Required when a non-admin RAISES any cell
+    # (S1 review round 3) -- the same rule as a hand-typed PATCH.
+    notes: Optional[str] = None
 
 
 class ReserveCommitReleasePayload(BaseModel):
@@ -466,6 +470,21 @@ async def create_cell(
     # Store-scope: a STORE_MANAGER can only write into their own store.
     active_store = validate_store_access(payload.store_id, current_user)
 
+    # S1 review round 2: a new cell with stock in it is stock from nothing.
+    # A non-admin creates an EMPTY cell (stock arrives by receiving) and says
+    # why; only ADMIN / SUPERADMIN may open a cell with pieces in it.
+    from .inventory._shared import is_write_off_admin
+
+    if not is_write_off_admin(current_user):
+        if payload.on_hand or payload.reserved:
+            raise HTTPException(
+                status_code=403,
+                detail="Only an admin can create a lens cell with stock in it. "
+                "Create it empty; stock arrives by receiving.",
+            )
+        if not (payload.notes or "").strip():
+            raise HTTPException(status_code=400, detail="Say why this lens cell is being created.")
+
     lens_line = _load_lens_line(payload.lens_line_id)
     if not lens_line:
         raise HTTPException(
@@ -555,6 +574,18 @@ async def update_cell(
             changed[k] = v
     if not changed:
         return {"status": "no_changes", "cell": _enrich(existing)}
+    if "on_hand" in changed and changed["on_hand"] != prior_on_hand:
+        # A hand-typed stock figure is an adjustment: it says why, and taking
+        # stock DOWN is a write-off -- ADMIN / SUPERADMIN only (owner ruling
+        # 2026-08-25).
+        if not (notes or "").strip():
+            raise HTTPException(
+                status_code=400, detail="Say why the stock figure is being changed."
+            )
+        if changed["on_hand"] < prior_on_hand:
+            from .inventory._shared import refuse_write_off_unless_admin
+
+            refuse_write_off_unless_admin(current_user, "lower a lens stock figure")
     changed["last_movement_at"] = _now()
 
     try:
@@ -639,6 +670,38 @@ async def bulk_import(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+    # Taking any cell's stock DOWN is a write-off: ADMIN / SUPERADMIN only.
+    # Checked for the WHOLE import before a single write, so a refused import
+    # changes nothing.
+    from .inventory._shared import is_write_off_admin, refuse_write_off_unless_admin
+
+    # The create_cell rule holds here too (S1 review round 3): a NEW cell
+    # with stock in it is stock from nothing -- admin only -- and a
+    # non-admin raising a cell says why.
+    if not is_write_off_admin(current_user):
+        raises = False
+        for cell in normalized_cells:
+            cur = coll.find_one(
+                {"lens_line_id": lens_line_id, "store_id": active_store,
+                 "sph": cell["sph"], "cyl": cell["cyl"], "add": cell["add"]},
+                {"on_hand": 1},
+            )
+            new_qty = int(cell.get("on_hand") or 0)
+            if cur is None and new_qty > 0:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Only an admin can create a lens cell with stock in it. "
+                    "Import it empty; stock arrives by receiving.",
+                )
+            if cur and new_qty < int(cur.get("on_hand") or 0):
+                refuse_write_off_unless_admin(current_user, "lower a lens stock figure")
+            if cur and new_qty > int(cur.get("on_hand") or 0):
+                raises = True
+        if raises and not (payload.notes or "").strip():
+            raise HTTPException(
+                status_code=400, detail="Say why the stock figures are being raised."
+            )
+
     written: List[Dict[str, Any]] = []
     failed: List[Dict[str, Any]] = []
     for cell in normalized_cells:
@@ -688,6 +751,7 @@ async def bulk_import(
                 user=current_user,
                 source_type="IMPORT",
                 source_id=payload.source_id,
+                notes=payload.notes,
             )
             written.append({"line_stock_id": existing["line_stock_id"], "after": after})
         else:
@@ -714,6 +778,7 @@ async def bulk_import(
                 user=current_user,
                 source_type="IMPORT",
                 source_id=payload.source_id,
+                notes=payload.notes,
             )
             written.append(
                 {
@@ -776,10 +841,23 @@ def _atomic_update(
 
 
 @router.post("/{lens_line_id}/reserve")
+async def reserve_cell_route(
+    lens_line_id: str,
+    payload: ReserveCommitReleasePayload,
+    # S1 review round 2: reserve + commit lowers on_hand -- a write-off when
+    # driven by hand. Over HTTP it is ADMIN / SUPERADMIN only; the till and
+    # the workshop reach reserve_cell / commit_cell through the server-side
+    # hook (services/lens_stock_hook.py), never this route.
+    current_user: dict = Depends(require_roles("ADMIN")),
+):
+    """HTTP door onto reserve_cell (admin only)."""
+    return await reserve_cell(lens_line_id, payload, current_user)
+
+
 async def reserve_cell(
     lens_line_id: str,
     payload: ReserveCommitReleasePayload,
-    current_user: dict = Depends(require_roles(*_WRITE_ROLES)),
+    current_user: dict,
 ):
     """Atomically reserve `qty` units of a cell.
 
@@ -858,10 +936,19 @@ async def reserve_cell(
 
 
 @router.post("/{lens_line_id}/commit")
+async def commit_cell_route(
+    lens_line_id: str,
+    payload: ReserveCommitReleasePayload,
+    current_user: dict = Depends(require_roles("ADMIN")),
+):
+    """HTTP door onto commit_cell (admin only -- see reserve_cell_route)."""
+    return await commit_cell(lens_line_id, payload, current_user)
+
+
 async def commit_cell(
     lens_line_id: str,
     payload: ReserveCommitReleasePayload,
-    current_user: dict = Depends(require_roles(*_WRITE_ROLES)),
+    current_user: dict,
 ):
     """Atomically commit `qty` units of a cell.
 

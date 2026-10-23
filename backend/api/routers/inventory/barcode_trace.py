@@ -91,7 +91,7 @@ async def barcode_lifecycle_trace(
 
     try:
         # 1. Stock unit
-        su = db.get_collection("stock_units").find_one(barcode_svc.unit_barcode_match(barcode))
+        su = barcode_svc.find_unit_by_code(db.get_collection("stock_units"), barcode)
         if su and not can_access_store_scoped(su.get("store_id"), current_user):
             su = None  # another shop's unit: the unknown-barcode answer
         if su:

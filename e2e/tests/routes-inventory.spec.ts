@@ -81,8 +81,10 @@ test('coverage has not silently shrunk', () => {
       'the parameterised eye-examination page /clinical/test/:entryId and its ' +
       'amend form, which need a seeded queue entry and a seeded eye_test that ' +
       'seed_e2e.py does not create; +1 for the redirect-only forecast catch-all ' +
-      '/reports/forecast/*). ' +
+      '/reports/forecast/*; +1 for the stock-count result /inventory/audit/:countId, ' +
+      'which needs a finished count -- ROUTES compares paths literally, so a ' +
+      'parameterised screen cannot be probed without a seeded id AND a url field). ' +
       'If an exclusion is genuinely new and justified, raise the ceiling here in the ' +
       'same commit that adds it -- deliberately, not by accident.',
-  ).toEqual({ probedAtLeast: true, exclusions: 31 });
+  ).toEqual({ probedAtLeast: true, exclusions: 32 });
 });
