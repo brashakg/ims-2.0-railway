@@ -6,7 +6,7 @@
 // travelled as ONE unit, injections intact, and nothing about the order,
 // the copy or the classes changed.
 
-import { Fragment, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   ChevronDown,
@@ -30,6 +30,7 @@ import {
 } from '../productAddShared';
 import { SimilarProductsHint } from '../SimilarProductsHint';
 import { ConfirmChip, LockChip, Section } from './parts';
+import { specKey } from './formHelpers';
 import type { QuickAddForm } from './useQuickAddForm';
 
 export function IdentitySection({ form }: { form: QuickAddForm }) {
@@ -42,6 +43,7 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
     setShowAdvanced, openSections, toggleSection, liveErrors, sectionIssues,
     firstFieldRef, editMode, isReviewMode, variantCtx, flaggedFields, clearFlag,
     reviewSnapshot, handleSimilarPick, handleSimilarOpen, handleFamilyFound,
+    copyFromLastFields, copyFromLast, lastSaved,
   } = form;
   // "Auto-fill with AI" (description) round-trip in flight.
   const [generatingDesc, setGeneratingDesc] = useState(false);
@@ -200,9 +202,22 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
     !String(attributes.brand_name || '').trim() ||
     !String(attributes.model_no || attributes.model_name || '').trim();
 
-  const handleGenerateDescription = async () => {
+  // The last AI draft and the specs it was written from (specKey). Stale =
+  // the box still holds that draft and the specs have changed since.
+  const [drafted, setDrafted] = useState<{ text: string; from: string } | null>(null);
+  const descRef = useRef(description);
+  useEffect(() => {
+    descRef.current = description;
+  });
+  const draftStale =
+    drafted !== null && description === drafted.text && specKey(attributes, weight) !== drafted.from;
+
+  // `auto`: the one background draft (below) -- it never overwrites text and
+  // stays quiet on failure (the button is still there).
+  const handleGenerateDescription = async (auto = false) => {
     if (generatingDesc || aiDescIdentityMissing || !selectedCategory) return;
     setGeneratingDesc(true);
+    const fromKey = specKey(attributes, weight);
     try {
       // Send every FILLED attribute value — the backend drafts from these.
       const filled: Record<string, string> = {};
@@ -218,8 +233,13 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
         attributes: filled,
       });
       if (res?.status === 'GENERATED' && res.description) {
-        // Overwrite (operator can edit afterwards).
+        // The button overwrites (operator can edit afterwards); the
+        // background draft never replaces anything typed meanwhile.
+        if (auto && descRef.current.trim()) return;
         setDescription(res.description);
+        setDrafted({ text: res.description, from: fromKey });
+      } else if (auto) {
+        // quiet: the button stays for a manual try
       } else if (res?.status === 'FAILED_NO_KEY') {
         toast.error('AI unavailable — add the Anthropic key in Settings');
       } else {
@@ -229,11 +249,35 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
       }
     } catch {
       // Never blocks saving — the description stays manual on failure.
-      toast.error('Could not generate a description — please try again.');
+      if (!auto) toast.error('Could not generate a description — please try again.');
     } finally {
       setGeneratingDesc(false);
     }
   };
+
+  // AUTO-DRAFT ONCE (owner 2026-10-23): a NEW product whose description box
+  // is empty gets one background draft once brand, model and its colour are
+  // typed (a short pause after the colour). Once per product: re-armed only
+  // when the colour is cleared (Save + New / the next variant clears it).
+  // Each colour drafts its own paragraph -- one is never copied to another.
+  const colourTyped = Object.entries(attributes)
+    .filter(([k, v]) => /colou?r/i.test(k) && String(v ?? '').trim())
+    .map(([, v]) => String(v).trim())
+    .join('|');
+  const autoTriedRef = useRef(false);
+  useEffect(() => {
+    if (!colourTyped) {
+      autoTriedRef.current = false;
+      return;
+    }
+    if (editMode || autoTriedRef.current || description.trim() || aiDescIdentityMissing || !selectedCategory) return;
+    const t = window.setTimeout(() => {
+      autoTriedRef.current = true;
+      void handleGenerateDescription(true);
+    }, 1500);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [colourTyped, editMode, description, aiDescIdentityMissing, selectedCategory]);
 
   // Weight is a TOP-LEVEL payload field (`weight`, grams), not an attribute. For
   // SG/FR it renders inline in the attribute grid (between Warranty and UPC —
@@ -399,6 +443,21 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
           {/* Category-specific fields. For SG/FR the Weight input is
               injected right after Warranty (before UPC) per the
               owner-locked field order. */}
+          {/* Copy specs from last product (owner 2026-10-23): fills only
+              blank repeating specs, each amber until confirmed. */}
+          {Object.keys(copyFromLastFields).length > 0 && (
+            <button
+              type="button"
+              onClick={copyFromLast}
+              className="mb-3 inline-flex min-h-8 items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-3 text-xs font-medium text-amber-800 hover:bg-amber-100"
+              data-testid="qa-copy-last"
+              title={Object.keys(copyFromLastFields).map((k) => k.replace(/_/g, ' ')).join(', ')}
+            >
+              Copy specs from last product{lastSaved?.sku ? ` (${lastSaved.sku})` : ''}:{' '}
+              {Object.keys(copyFromLastFields).length} field
+              {Object.keys(copyFromLastFields).length === 1 ? '' : 's'}
+            </button>
+          )}
           <div className="grid grid-cols-1 tablet:grid-cols-2 laptop:grid-cols-3 desktop:grid-cols-4 gap-3">
             {visibleFields.map((f, i) => {
               if (isEyewear && f.name === 'warranty') {
@@ -457,7 +516,7 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
               <label className="block text-xs font-medium text-gray-700">Description</label>
               <button
                 type="button"
-                onClick={() => void handleGenerateDescription()}
+                onClick={() => void handleGenerateDescription(false)}
                 disabled={generatingDesc || aiDescIdentityMissing}
                 title={
                   aiDescIdentityMissing
@@ -481,6 +540,19 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
               className="input-field w-full"
               placeholder="Optional product description…"
             />
+            {draftStale && (
+              <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-amber-800" data-testid="qa-desc-stale">
+                Specs changed since this was drafted - regenerate?
+                <button
+                  type="button"
+                  onClick={() => void handleGenerateDescription(false)}
+                  disabled={generatingDesc || aiDescIdentityMissing}
+                  className="rounded-md border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] font-medium hover:bg-amber-100 disabled:opacity-50"
+                >
+                  Regenerate
+                </button>
+              </p>
+            )}
           </div>
 
           {/* Advanced (HSN / GST / weight) — collapsed by default */}

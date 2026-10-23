@@ -66,6 +66,7 @@ import {
 import { IDENTITY_DEBOUNCE_MS, answerStillHolds, typedAttributes } from '../identityAnswer';
 import { existingProductPath, sectionOfError, type EditMode, type SectionId } from './shared';
 import { useProductImages } from './useProductImages';
+import { copyableSpecs, softWarnings as buildSoftWarnings } from './formHelpers';
 import { reorderApi } from '../../../services/api/inventory';
 import { REORDER_LEVEL_ROLES } from '../../inventory/inventoryRoles';
 import { typedLevel, levelText, isLevelInputValid, LEVEL_INPUT_ERROR } from '../../../utils/reorderLevel';
@@ -152,6 +153,8 @@ export function useQuickAddForm() {
     sourceImages: string[];
     firstClearedField: string | null;
     dictionaryNote: string;
+    /** The MRP of the colour it was started from (the soft price hint). */
+    modelMrp: string;
   } | null>(null);
   // G1 model families: the latest model the typed brand + model joins on
   // Save (GET /products/similar `family`), and the model the cataloguer said
@@ -227,6 +230,39 @@ export function useQuickAddForm() {
   // shopify_push.product_push_refusal: a push-locked brand, or the brand's
   // Brand Master default), never worked out here, so the line cannot disagree
   // with the push. undefined = being asked; null = could not be asked.
+  // The last product saved in this session (Save + New): 'Copy specs from
+  // last product' fills from it, and its website line reads its id.
+  const [lastSaved, setLastSaved] = useState<{
+    id: string; sku: string; category: string; attributes: Record<string, string>;
+  } | null>(null);
+  // What keeps the SAVED product off the website (the push gate's own list,
+  // GET /products/website-verdict?product_id=): the product being edited, or
+  // in Add the one just saved. undefined = not asked / being asked.
+  const needsId = editMode?.kind === 'spine' ? editMode.id : editMode ? '' : lastSaved?.id || '';
+  const [websiteNeeds, setWebsiteNeeds] = useState<
+    { needs: string[] | null; gaps: string[]; sku: string } | undefined
+  >(undefined);
+  useEffect(() => {
+    setWebsiteNeeds(undefined);
+    if (!needsId) return;
+    let alive = true;
+    const sku = editMode?.kind === 'spine' ? '' : lastSaved?.sku || '';
+    // Promise.resolve first: a read that throws at once is a failed read too.
+    Promise.resolve()
+      .then(() => productApi.getWebsiteNeeds(needsId))
+      .then((r) => {
+        if (!alive) return;
+        // Anything but a list reads as 'could not be checked', never 'ready'.
+        setWebsiteNeeds({
+          needs: Array.isArray(r?.needs) ? r.needs : null,
+          gaps: Array.isArray(r?.gaps) ? r.gaps : [],
+          sku,
+        });
+      })
+      .catch(() => { if (alive) setWebsiteNeeds({ needs: null, gaps: [], sku }); });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [needsId]);
   const [websiteVerdict, setWebsiteVerdict] = useState<
     { online: boolean; reason: string | null; web_page_types_enabled?: boolean } | null | undefined
   >(undefined);
@@ -557,6 +593,7 @@ export function useQuickAddForm() {
         locked: new Set(seed.locked),
         sourceImages: seed.sourceImages,
         firstClearedField: seed.cleared[0] || null,
+        modelMrp: seed.values.mrp || '',
         dictionaryNote:
           seed.dictionaryDropped.length > 0
             ? `${seed.dictionaryDropped.length} copied value${
@@ -907,6 +944,11 @@ export function useQuickAddForm() {
         // SKU is auto-minted by the backend and our internal barcode is assigned
         // at Goods Receipt — neither is entered here.
         const newId = created?.product_id || created?.id;
+        // 'Copy specs from last product' + its website line read this.
+        setLastSaved({
+          id: newId || '', sku: created?.sku || '',
+          category: values.category, attributes: { ...values.attributes },
+        });
         if (newId && canSetReorderLevel && typedLevel(reorderLevel) !== null) {
           await saveShopLevel(newId);
         }
@@ -1702,6 +1744,31 @@ export function useQuickAddForm() {
   }, [variantId]);
 
 
+  // 'Copy specs from last product': a NEW model only (variant mode already
+  // copies the model's), same category, blanks only; amber until touched.
+  const copyFromLastFields = useMemo(
+    () => (editMode || variantCtx ? {} : copyableSpecs(selectedCategory, lastSaved, attributes)),
+    [editMode, variantCtx, selectedCategory, lastSaved, attributes],
+  );
+  const copyFromLast = useCallback(() => {
+    const fills = copyFromLastFields;
+    if (Object.keys(fills).length === 0) return;
+    setAttributes((prev) => ({ ...prev, ...fills }));
+    setFlaggedFields((prev) => new Set([...prev, ...Object.keys(fills)]));
+  }, [copyFromLastFields]);
+
+  // Soft warnings: shown amber, NEVER a block (the validator alone blocks).
+  const softWarnings = useMemo(
+    () =>
+      isReviewMode
+        ? []
+        : buildSoftWarnings({
+            attributes, mrp, modelMrp: variantCtx?.modelMrp, imageCount: images.length,
+            showPhotoHint: Boolean(selectedCategory),
+          }),
+    [isReviewMode, attributes, mrp, variantCtx, images.length, selectedCategory],
+  );
+
   const setAttr = (name: string, value: string) => {
     setAttributes((prev) => ({ ...prev, [name]: value }));
     // Variant mode: touching a copied field confirms it — drop the amber flag.
@@ -1731,7 +1798,9 @@ export function useQuickAddForm() {
     images, setImages,
     displayName, setDisplayName, reviewTags, setReviewTags,
     // options fed from the server
-    subbrandsByBrand, brandTiers, websiteVerdict, skuPreview,
+    subbrandsByBrand, brandTiers, websiteVerdict, websiteNeeds, skuPreview,
+    // fill helpers (never block a save)
+    copyFromLastFields, copyFromLast, lastSaved, softWarnings,
     // accordion + validation surface
     errors, showAdvanced, setShowAdvanced,
     openSections, toggleSection, liveErrors, sectionIssues, jumpToField,
