@@ -178,6 +178,7 @@ ROWS: List[Dict[str, object]] = [
             "SALES_STAFF",
             "CASHIER",
             "OPTOMETRIST",
+            "ACCOUNTANT",
         ],
     },
     {
