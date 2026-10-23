@@ -578,3 +578,178 @@ async def test_after_a_full_refund_only_accounts_or_admin_may_cancel(till):
     assert _stored(till)["status"] == "CONFIRMED"
     out = await cancel_order("ORD-1", reason="customer cancelled the order", current_user=_user("ADMIN"))
     assert out["status"] == "CANCELLED"
+
+
+# =========================================================================== #
+# Money review of #1264 (2026-10-23)
+# =========================================================================== #
+@pytest.mark.usefixtures("gst_numbers")
+def test_split_refunds_cannot_dodge_the_2000_rule(monkeypatch):
+    # Rs 2,808 bill returned one unit at a time: Rs 1,404 alone is under the
+    # line, but the second return takes the order's refunds past Rs 2,000.
+    client, returns = _ctx(monkeypatch, qty=2)
+    r1 = client.post("/api/v1/returns", json=_qa_payload(), headers=_hdr("CASHIER"))
+    assert r1.status_code == 201, r1.text
+    r2 = client.post("/api/v1/returns", json=_qa_payload(), headers=_hdr("CASHIER"))
+    assert r2.status_code == 403, r2.text
+    assert r2.json()["detail"]["reason"] == "REFUND_APPROVAL_REQUIRED"
+    assert returns.count_documents({}) == 1
+
+
+def _stored_matrix(monkeypatch, matrix):
+    from api.services import policy_engine
+
+    def _get(key, scope=None, *, default=None):
+        return matrix if key == ram.MATRIX_KEY else True
+
+    monkeypatch.setattr(policy_engine, "get_policy", _get)
+
+
+def test_an_old_shape_saved_matrix_is_ignored(monkeypatch):
+    legacy = {
+        "currency": "INR",
+        "role_floor_paise": {"CASHIER": 0, "SALES_STAFF": 0, "STORE_MANAGER": 500000,
+                             "AREA_MANAGER": 2000000, "ADMIN": None, "SUPERADMIN": None},
+        "bands": [{"max_paise": 100000, "tier": 0}, {"max_paise": 500000, "tier": 1},
+                  {"max_paise": 2000000, "tier": 2}, {"max_paise": None, "tier": 3}],
+        "reason_bump": {"DEFECTIVE": 0, "CHANGE_OF_MIND": 0, "PRICE_MATCH": 1, "GOODWILL": 1},
+        "max_tier": 3,
+    }
+    _stored_matrix(monkeypatch, legacy)
+    # The owner rule, not the old bands: Rs 1,500 by a cashier needs nobody,
+    # Rs 2,500 needs a store manager (not an admin), a manager is never gated.
+    assert ram.required_tier_for_refund(150000, "GOODWILL", "CASHIER") is None
+    assert ram.required_tier_for_refund(250000, "GOODWILL", "CASHIER") == "auto"
+    assert ram.required_tier_for_refund(900000, "DEFECTIVE", "STORE_MANAGER") is None
+
+
+def test_a_saved_matrix_can_never_loosen_the_owner_rule(monkeypatch):
+    _stored_matrix(monkeypatch, {"bands": [{"max_paise": None, "tier": 0}], "max_tier": 3})
+    assert ram.required_tier_for_refund(250000, "DEFECTIVE", "CASHIER") == "auto"
+
+
+def test_advance_claim_refuses_when_a_payment_lands_mid_refund(till, monkeypatch):
+    _advance_order(till)
+    orders = till["orders"]
+    real_find = orders.find_by_id
+
+    def _read_then_payment_lands(oid):
+        doc = real_find(oid)
+        till["db"].get_collection("orders").update_one(
+            {"order_id": oid}, {"$set": {"amount_paid": 1500.0}})
+        return doc
+
+    monkeypatch.setattr(orders, "find_by_id", _read_then_payment_lands)
+    r = _advance_client().post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r.status_code == 409, r.text
+    assert till["db"].get_collection("returns").count_documents({}) == 0
+    assert _stored(till).get("advance_refund_id") is None
+
+
+def test_two_presses_at_once_refund_once(till, monkeypatch):
+    # The other press won the claim: this one records nothing.
+    _advance_order(till)
+    monkeypatch.setattr(till["orders"], "update_if", lambda *a, **k: False)
+    r = _advance_client().post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ADMIN"))
+    assert r.status_code == 409, r.text
+    assert till["db"].get_collection("returns").count_documents({}) == 0
+    assert _ledger(till).count_documents({}) == 0
+    assert _stored(till)["status"] == "CONFIRMED"
+
+
+def test_advance_door_refuses_when_a_counter_return_claimed_units_first(till):
+    # A counter return reserved units (its doc not written yet): the door
+    # sees the reservation after its own claim and backs out.
+    _advance_order(till, items=[dict(_LINE, returned_qty=1)])
+    r = _advance_client().post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ADMIN"))
+    assert r.status_code == 409, r.text
+    assert till["db"].get_collection("returns").count_documents({}) == 0
+    assert _stored(till).get("advance_refund_id") is None
+
+
+@pytest.mark.usefixtures("gst_numbers")
+def test_counter_return_refused_while_an_advance_refund_holds_the_order(monkeypatch):
+    client, returns = _ctx(monkeypatch, advance_refund_id="RET-ADV-1")
+    r = client.post("/api/v1/returns", json=_qa_payload(), headers=_hdr("STORE_MANAGER"))
+    assert r.status_code == 409, r.text
+    assert returns.count_documents({}) == 0
+
+
+def test_cancel_crash_after_refund_says_press_again(till, monkeypatch):
+    from api.routers.orders import cancel as cancel_mod
+
+    _advance_order(till)
+
+    async def _boom(*_a, **_k):
+        raise RuntimeError("mongo blip")
+
+    monkeypatch.setattr(cancel_mod, "cancel_order_core", _boom)
+    r = _advance_client().post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["refund_amount"] == 1000.0 and body["cancel_error"]
+    assert "press" in body["message"].lower()
+    assert till["db"].get_collection("returns").count_documents({"order_id": "ORD-1"}) == 1
+
+
+@pytest.mark.asyncio
+async def test_loyalty_claim_is_released_when_the_payment_write_fails(till, monkeypatch):
+    till["db"].get_collection("orders").insert_one(_order())
+    till["db"].get_collection("loyalty_accounts").insert_one(
+        {"customer_id": "CUST-1", "balance_points": 500, "lifetime_earned": 500, "tier": "BRONZE"}
+    )
+    burned = await L.redeem(L.RedeemRequest(customer_id="CUST-1", order_id="ORD-1", points=300), _user("CASHIER"))
+    monkeypatch.setattr(till["orders"], "add_payment", lambda *a, **k: False)
+    with pytest.raises(HTTPException):
+        await add_payment("ORD-1", PaymentCreate(method="LOYALTY", amount=300.0), _user("CASHIER"))
+    row = till["db"].get_collection("loyalty_transactions").find_one({"txn_id": burned["txn_id"]})
+    assert row.get("tender_payment_id") is None
+
+
+@pytest.mark.asyncio
+async def test_same_key_loyalty_twin_replays_instead_of_refusing(till):
+    # Two identical requests (same Idempotency-Key) racing: the first claimed
+    # the burn but its payment row is not on the order yet.
+    till["db"].get_collection("orders").insert_one(_order())
+    till["db"].get_collection("loyalty_accounts").insert_one(
+        {"customer_id": "CUST-1", "balance_points": 500, "lifetime_earned": 500, "tier": "BRONZE"}
+    )
+    burned = await L.redeem(L.RedeemRequest(customer_id="CUST-1", order_id="ORD-1", points=300), _user("CASHIER"))
+    till["db"].get_collection("loyalty_transactions").update_one(
+        {"txn_id": burned["txn_id"]},
+        {"$set": {"tender_payment_id": "pay-twin", "tender_idempotency_key": "idem-L"}},
+    )
+    out = await add_payment(
+        "ORD-1", PaymentCreate(method="LOYALTY", amount=300.0), _user("CASHIER"), idempotency_key="idem-L"
+    )
+    assert out["payment_id"] == "pay-twin" and out["_idempotent_replay"] is True
+    assert _stored(till)["payments"] == []  # the twin records it, not this request
+
+
+def test_backfill_links_old_redemptions_to_their_payment_only_by_reference(tmp_path):
+    from scripts import backfill_loyalty_tender_claims as bf
+
+    db = StrictDB()
+    db.seed("orders", [
+        _order("ORD-1", payments=[{"payment_id": "p1", "method": "LOYALTY", "amount": 300.0,
+                                   "reference": "300pts txn T-1"}]),
+        _order("ORD-2", payments=[{"payment_id": "p2", "method": "LOYALTY", "amount": 200.0,
+                                   "reference": "no txn named"}]),
+    ])
+    db.seed("loyalty_transactions", [
+        {"txn_id": "T-1", "order_id": "ORD-1", "customer_id": "CUST-1", "type": "REDEEM", "rupee_value": 300.0},
+        {"txn_id": "T-2", "order_id": "ORD-2", "customer_id": "CUST-1", "type": "REDEEM", "rupee_value": 200.0},
+        {"txn_id": "T-3", "order_id": "ORD-1", "customer_id": "CUST-1", "type": "REDEEM", "rupee_value": 300.0},
+    ])
+    out = bf.plan(db)
+    assert out["links"] == [("T-1", "p1")] and out["unmatched"] == 2
+    # Dry run wrote nothing.
+    assert db.get_collection("loyalty_transactions").find_one({"txn_id": "T-1"}).get("tender_payment_id") is None
+    backup = tmp_path / "b.json"
+    assert bf.apply(db, out["links"], str(backup)) == 1
+    rows = db.get_collection("loyalty_transactions")
+    assert rows.find_one({"txn_id": "T-1"})["tender_payment_id"] == "p1"
+    assert rows.find_one({"txn_id": "T-2"}).get("tender_payment_id") is None
+    assert rows.find_one({"txn_id": "T-3"}).get("tender_payment_id") is None
+    assert "T-1" in backup.read_text()
+    assert bf.plan(db)["links"] == []  # idempotent
