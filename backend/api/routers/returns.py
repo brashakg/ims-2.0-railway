@@ -1545,9 +1545,12 @@ def _issue_store_credit(
     BOK02/C2627/0001). A refused number is a refused note (None): never one
     filed without a legal number.
 
-    ``order_id``: the order the note reverses, stamped on the row by a door
-    whose note has no returns doc (no RET- ref) -- the GST returns find its
-    parent there (reports.gst_itc._ledger_row_return_doc).
+    ``order_id``: the order the note reverses, stamped on the row by every
+    door that knows it. A door whose note has no returns doc (no RET- ref)
+    relies on it: the GST returns find its parent there
+    (reports.gst_itc._ledger_row_return_doc; a RET- ref's doc still wins). The
+    Shopify refund rule ties a credit whose return doc is not written yet to
+    its order by it (shopify_refund._given_back_elsewhere).
 
     Store attribution (`store_id`): the credit note must be booked under the
     SAME store -- hence the same GSTIN -- the parent invoice was filed under,
@@ -3773,6 +3776,9 @@ async def create_return(
             # sale was filed under, not the counter it was processed at.
             store_id=store_id,
             note_number=credit_note_number,
+            # Ties the credit to its order before this return's doc lands
+            # (shopify_refund._given_back_elsewhere reads it).
+            order_id=resolved_order_id,
         )
         if entry is None:
             # Release the qty claim so the return stays retryable, then say so.

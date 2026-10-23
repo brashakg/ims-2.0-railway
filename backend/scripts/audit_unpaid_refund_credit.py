@@ -14,7 +14,9 @@ balance. This lists every such credit-note ledger row that MOVED a balance
     PARTIAL_REFUND -- a possible double refund), or
   * the order's Shopify-refund credits add up to more than was paid.
 
-It also counts the refund reviews still open that were queued before the
+It also lists orders Shopify shows (partly) refunded that IMS holds no refund
+record for (a money-only refund from before those were recorded), and counts
+the refund reviews still open that were queued before the
 fix (no record of what Shopify paid back): confirming one now gives zero
 store credit and says so, so an accountant may need to add owed credit by hand.
 
@@ -110,6 +112,25 @@ def legacy_review_rows(db) -> int:
         {"status": {"$in": _OPEN}, "credit_note.money_back": {"$exists": False}})
 
 
+def unexplained_refund_orders(db) -> List[Dict[str, Any]]:
+    """Orders Shopify shows (partly) refunded that IMS holds no Shopify refund
+    record for -- a money-only refund (goodwill, shipping) from before those
+    were recorded. A later item refund on one of them is held for a person,
+    not auto-posted. Reads only."""
+    explained = {r.get("order_id") for r in db.get_collection("returns").find(
+        {"shopify_refund_id": {"$exists": True}}, {"order_id": 1})}
+    explained |= {r.get("order_id") for r in db.get_collection("shopify_refund_review").find(
+        {}, {"order_id": 1})}
+    return [
+        {"order_id": o.get("order_id"), "order_number": o.get("order_number"),
+         "payment_status": o.get("payment_status")}
+        for o in db.get_collection("orders").find(
+            {"payment_status": {"$in": ["PARTIAL_REFUND", "REFUNDED"]}},
+            {"order_id": 1, "order_number": 1, "payment_status": 1})
+        if o.get("order_id") not in explained
+    ]
+
+
 def main() -> int:
     from pymongo import MongoClient
 
@@ -122,6 +143,7 @@ def main() -> int:
         db = client[os.getenv("MONGO_DATABASE") or os.getenv("MONGODB_DATABASE") or "ims_2_0"]
         rows = find_suspect_credits(db)
         legacy = legacy_review_rows(db)
+        unexplained = unexplained_refund_orders(db)
     finally:
         client.close()
     print(f"store-credit rows from online refunds to check: {len(rows)}")
@@ -133,6 +155,9 @@ def main() -> int:
               f"credit Rs {r['credit']:.2f}  -- {r['why']}")
     print(f"total credit to check: Rs {total:.2f}")
     print(f"open refund reviews queued before the fix (confirm gives 0 credit): {legacy}")
+    print(f"orders Shopify shows refunded with no refund record in IMS: {len(unexplained)}")
+    for o in unexplained:
+        print(f"  order {o['order_number'] or o['order_id']}  {o['payment_status']}")
     print("Nothing was changed (read-only).")
     return 0
 
