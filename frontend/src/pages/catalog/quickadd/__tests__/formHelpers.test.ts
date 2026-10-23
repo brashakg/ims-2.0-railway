@@ -20,6 +20,13 @@ describe('copyableSpecs', () => {
     expect(copyableSpecs('FR', LAST, {})).toEqual({});
     expect(copyableSpecs('SG', null, {})).toEqual({});
   });
+  it('a sub-brand / label is offered only for the same brand', () => {
+    const last = { category: 'SG', attributes: { brand_name: 'Ray-Ban', subbrand: 'Chromance', label: 'Gold', warranty: '1 Year' } };
+    expect(copyableSpecs('SG', last, { brand_name: 'Oakley' })).toEqual({ warranty: '1 Year' });
+    expect(copyableSpecs('SG', last, { brand_name: 'RAY BAN' })).toEqual({
+      subbrand: 'Chromance', label: 'Gold', warranty: '1 Year',
+    });
+  });
 });
 
 const base = { mrp: '', imageCount: 3, showPhotoHint: true };
@@ -38,6 +45,9 @@ describe('softWarnings', () => {
       /repeats the brand/,
     );
     expect(softWarnings({ ...base, attributes: { brand_name: 'Ray-Ban', model_no: 'RB4165' } })).toEqual([]);
+    expect(softWarnings({ ...base, attributes: { brand_name: 'Ray-Ban', model_no: 'RAY BAN RB4165' } })).toHaveLength(1);
+    // a whole word only, never a substring of a code
+    expect(softWarnings({ ...base, attributes: { brand_name: 'Prada', model_no: 'PRADAX01' } })).toEqual([]);
   });
   it('price far from the model, and fewer than 2 photos', () => {
     expect(softWarnings({ ...base, attributes: {}, mrp: '20000', modelMrp: '7890' })[0]).toMatch(/far from/);

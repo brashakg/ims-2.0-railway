@@ -4,6 +4,8 @@
 
 import { variantFieldRule } from '../../../domain/catalog/productAdd/variantRules';
 
+const alnum = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, '');
+
 // The model itself is typed fresh for a new model; never copied.
 const NOT_COPIED = new Set(['brand_name', 'model_no', 'model_name']);
 
@@ -19,16 +21,19 @@ export function copyableSpecs(
 ): Record<string, string> {
   if (!last || !category || last.category !== category) return {};
   const out: Record<string, string> = {};
+  // A sub-brand / label belongs to its brand: never offered across brands.
+  const sameBrand =
+    alnum(last.attributes.brand_name || '') === alnum(current.brand_name || '');
   Object.entries(last.attributes).forEach(([k, v]) => {
     const val = String(v ?? '').trim();
     if (!val || NOT_COPIED.has(k) || String(current[k] ?? '').trim()) return;
+    if (!sameBrand && (k === 'subbrand' || k === 'label')) return;
     if (variantFieldRule(category, k) === 'never') return;
     out[k] = val;
   });
   return out;
 }
 
-const alnum = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, '');
 const num = (s: string | undefined) => {
   const t = String(s ?? '').trim();
   return t && /^\d+(\.\d+)?$/.test(t) ? Number(t) : null;
@@ -48,9 +53,16 @@ export function softWarnings(input: {
 }): string[] {
   const a = input.attributes;
   const out: string[] = [];
+  // The brand as whole word(s) of the model ('RAYBAN RB4165', 'Ray-Ban
+  // RB4165'), never a substring of a code ('OAKLEYX' or 'PRADAMIX' stay quiet).
   const brand = alnum(a.brand_name || '');
-  const model = alnum(a.model_no || a.model_name || '');
-  if (brand.length >= 3 && model.includes(brand)) {
+  const words = (t: string) => t.toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean);
+  const bw = words(a.brand_name || '');
+  const mw = words(a.model_no || a.model_name || '');
+  const repeats =
+    mw.includes(brand) ||
+    mw.some((_, i) => bw.length > 1 && mw.slice(i, i + bw.length).join(' ') === bw.join(' '));
+  if (brand.length >= 3 && repeats) {
     out.push('The model number repeats the brand name - type just the model (e.g. RB4165).');
   }
   const lens = num(a.lens_size);
