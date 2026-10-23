@@ -2870,9 +2870,9 @@ def _gate_refund_approval_matrix(
     the refund. PURE GATE -- it changes NO money math; it only decides whether a
     consumed E4 approval token is required and verifies it.
 
-    DARK by default: when the matrix is disabled for this scope (the flag default
-    is False) required_tier_for_refund returns None and this is a no-op -- the
-    refund path is byte-identical to today.
+    ON by default (owner ruling 2026-10-23: a refund above Rs 2,000 by sales /
+    cashier staff needs a STORE_MANAGER+ approval). FAILS CLOSED: if the rule
+    cannot be resolved the refund is refused (503), never let through.
 
     When the matrix is ENABLED and the resolved tier is > 0 the caller MUST supply
     a refund_approval_token / _request_id that resolves to a valid, single-use,
@@ -2904,9 +2904,18 @@ def _gate_refund_approval_matrix(
             store_id=store_id,
             entity_id=entity_id,
         )
-    except Exception as exc:  # noqa: BLE001 - fail OPEN (no gate) on a resolver error
-        logger.warning("[RETURNS] F27 tier resolve failed; no gate: %s", exc)
-        return None
+    except Exception as exc:  # noqa: BLE001 - fail CLOSED: an error never lets a refund through
+        logger.error("[RETURNS] F27 tier resolve failed; refund refused: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "reason": "REFUND_APPROVAL_UNAVAILABLE",
+                "message": (
+                    "The refund approval rule could not be checked just now, so "
+                    "nothing was recorded. Try again in a minute."
+                ),
+            },
+        )
 
     if tier is None:
         return None  # gate dark / below the role floor -> no approval required
@@ -2920,9 +2929,8 @@ def _gate_refund_approval_matrix(
                 "reason": "REFUND_APPROVAL_REQUIRED",
                 "required_tier": tier,
                 "message": (
-                    "This refund requires a tiered approval. A manager must "
-                    "PIN-approve an approval request, then re-submit the return "
-                    "with the approval token."
+                    "Refund above Rs 2,000 needs a manager's approval. A store "
+                    "manager must approve the request, then the refund goes through."
                 ),
             },
         )

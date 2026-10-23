@@ -144,24 +144,23 @@ _REGISTRY_LIST: List[PolicySpec] = [
         help="Refunds at/above this amount require SUPERADMIN approval.",
         minimum=0,
     ),
-    # F27 refund approval matrix. DARK by default (matrix_enabled=False) so a
-    # fresh deploy behaves exactly as today -- the refund path adds NO gate until
-    # the owner enables it per scope (like Fcostfloor). The matrix itself is a
-    # JSON doc keyed on amount bands x reason x role; see
-    # api/services/refund_approval_matrix.py (DEFAULT_MATRIX) for the shape. When
-    # ON, a refund whose resolved tier is >0 must carry a CONSUMED E4 approval
-    # token bound to that refund before it is recorded; money math is unchanged.
+    # F27 refund approval matrix. ON by default -- OWNER RULING 2026-10-23: a
+    # refund ABOVE Rs 2,000 needs a manager's (STORE_MANAGER+) approval; the code
+    # DEFAULT_MATRIX in api/services/refund_approval_matrix.py carries exactly
+    # that rule. A refund whose resolved tier is >0 must carry a CONSUMED E4
+    # approval token bound to that refund before it is recorded; money math is
+    # unchanged. The gate fails CLOSED (an error refuses the refund).
     _spec(
         key="refund.matrix_enabled",
         type="bool",
-        default=False,
+        default=True,
         scopes=("global", "entity", "store"),
         write_roles=("SUPERADMIN", "ADMIN"),
         group="Refunds & Returns",
         label="Refund approval matrix enabled",
         help="Require a tiered approval (per the refund approval matrix) before "
-        "a refund is recorded. OFF (default) keeps the refund path "
-        "byte-identical to today; enable per scope to roll out.",
+        "a refund is recorded. ON (default): a refund above Rs 2,000 by sales "
+        "or cashier staff needs a store manager's approval.",
     ),
     _spec(
         key="refund.approval_matrix",
