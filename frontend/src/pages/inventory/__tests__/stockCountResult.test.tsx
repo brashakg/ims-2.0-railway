@@ -99,20 +99,32 @@ describe('review round 1', () => {
     expect(screen.queryByText(/to admin for write-off/)).toBeNull();
   });
 
+  it('a store manager never sees the none-found value at cost', async () => {
+    auth.role = 'STORE_MANAGER';
+    box.doc = { ...DOC, write_off_allowed: true, none_found: [{ product_id: 'P9', product_name: 'Carrera 5003',
+      sku: 'C5003', missing_units: [{ unit_id: 'u9', barcode: 'BV00000NF001', unit_cost: 1200 }] }] };
+    renderAt();
+    expect(await screen.findByText(/None found/)).toBeInTheDocument();
+    expect(screen.queryByText(/1,200/)).toBeNull();
+    expect(screen.queryByText(/pieces of styles with nothing found/)).toBeNull();
+  });
+
   it('styles with nothing found are written off only after a second confirmation', async () => {
     auth.role = 'ADMIN';
     box.doc = {
       ...DOC,
       write_off_allowed: true,
       none_found: [{ product_id: 'P9', product_name: 'Carrera 5003', sku: 'C5003',
-        missing_units: [{ unit_id: 'u9', barcode: 'BV00000NF001' }] }],
+        missing_units: [{ unit_id: 'u9', barcode: 'BV00000NF001', unit_cost: 1200 }] }],
     };
     const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(true).mockReturnValueOnce(false);
     renderAt();
     expect(await screen.findByText(/None found \(1 style, 1 pieces\)/)).toBeInTheDocument();
     fireEvent.click(screen.getByText(/pieces of styles with nothing found/));
     expect(confirm).toHaveBeenCalledTimes(2);
-    expect(String(confirm.mock.calls[1][0])).toMatch(/1 style had nothing found - write off all their pieces/);
+    expect(String(confirm.mock.calls[1][0])).toBe(
+      'Counted 46 of 48 styles. Write off 1 piece of 1 style worth ₹1,200 at cost?'
+    );
     expect(box.reconcile).not.toHaveBeenCalled();
     confirm.mockReturnValueOnce(true).mockReturnValueOnce(true);
     fireEvent.click(screen.getByText(/pieces of styles with nothing found/));

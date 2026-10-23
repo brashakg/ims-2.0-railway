@@ -273,3 +273,68 @@ def test_two_labels_differing_only_in_case_never_answer_each_others_scan():
     assert find_unit_by_code(coll, "ab12CD34ef")["stock_id"] == "LEGACY"  # only one fits
     coll.insert_one({"stock_id": "LEGACY2", "barcode": "aB12CD34ef"})
     assert find_unit_by_code(coll, "ab12cd34ef") is None, "ambiguous: refused, not guessed"
+
+
+# ---------------------------------------------------------------------------
+# Review round 2 (PR #1260)
+# ---------------------------------------------------------------------------
+
+
+def test_lens_reserve_and_commit_over_http_are_admin_only(lens, monkeypatch):
+    """Reserve then commit lowers on_hand -- a write-off driven by hand. Over
+    HTTP: ADMIN only. The till / workshop reach the same functions through
+    the server-side hook, which keeps working for them."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from api.routers.auth import get_current_user
+
+    ls, coll = lens
+    app = FastAPI()
+    app.include_router(ls.router, prefix="/lens-stock")
+    who = {"user": MANAGER}
+    app.dependency_overrides[get_current_user] = lambda: who["user"]
+    http = TestClient(app)
+    body = {"store_id": STORE, "sph": 0.0, "cyl": 0.0, "add": None, "qty": 1}
+    for door in ("reserve", "commit"):
+        assert http.post(f"/lens-stock/L1/{door}", json=body).status_code == 403, door
+    assert coll.find_one({"line_stock_id": "C1"})["on_hand"] == 5
+
+    # the server-side hook path (a direct call) still works for the till
+    monkeypatch.setattr(ls, "_ledger_lens_event", lambda *a, **k: None, raising=False)
+    payload = ls.ReserveCommitReleasePayload(**body)
+    _run(ls.reserve_cell("L1", payload, MANAGER))
+    assert coll.find_one({"line_stock_id": "C1"})["reserved"] == 1
+
+
+def test_one_order_line_cannot_cover_more_pieces_than_it_sold(serial_db):
+    """Round 2: the same order used to be reusable for any number of hand
+    mark-solds. Its line sold ONE piece of P1, and one is already sold."""
+    st, mdb = serial_db
+    mdb["orders"].insert_one({"order_id": "O1", "store_id": STORE, "status": "CONFIRMED",
+                              "items": [{"product_id": "P1", "quantity": 1}]})
+    mdb["stock_units"].insert_one({"stock_id": "U0", "serial": "SN-0", "product_id": "P1",
+                                   "store_id": STORE, "status": "SOLD", "order_id": "O1"})
+    with pytest.raises(HTTPException) as exc:
+        _run(st.mark_sold("SN-1", st.MarkSoldBody(order_id="O1"), MANAGER))
+    assert exc.value.status_code == 403
+    assert mdb["stock_units"].find_one({"serial": "SN-1"})["status"] == "IN_STOCK"
+
+    mdb["orders"].update_one({"order_id": "O1"}, {"$set": {"items": [{"product_id": "P1", "quantity": 2}]}})
+    assert _run(st.mark_sold("SN-1", st.MarkSoldBody(order_id="O1"), MANAGER))["status"] == "SOLD"
+
+
+def test_a_manager_creates_only_an_empty_lens_cell_with_a_reason(lens, monkeypatch):
+    ls, coll = lens
+    monkeypatch.setattr(ls, "validate_lens_stock_line_payload", lambda raw, lens_line: dict(raw))
+    base = {"lens_line_id": "L1", "store_id": STORE, "sph": 2.0, "cyl": 0.0}
+    with pytest.raises(HTTPException) as exc:
+        _run(ls.create_cell(ls.StockCellCreate(**base, on_hand=3, notes="opening"), MANAGER))
+    assert exc.value.status_code == 403
+    with pytest.raises(HTTPException) as exc:
+        _run(ls.create_cell(ls.StockCellCreate(**base), MANAGER))
+    assert exc.value.status_code == 400
+    assert coll.count_documents({"sph": 2.0}) == 0
+    _run(ls.create_cell(ls.StockCellCreate(**base, notes="new power range"), MANAGER))
+    assert coll.find_one({"sph": 2.0})["on_hand"] == 0
+    _run(ls.create_cell(ls.StockCellCreate(**{**base, "sph": 3.0}, on_hand=4), ADMIN))
+    assert coll.find_one({"sph": 3.0})["on_hand"] == 4

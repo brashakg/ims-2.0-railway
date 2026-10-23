@@ -86,5 +86,5 @@ test('coverage has not silently shrunk', () => {
       'parameterised screen cannot be probed without a seeded id AND a url field). ' +
       'If an exclusion is genuinely new and justified, raise the ceiling here in the ' +
       'same commit that adds it -- deliberately, not by accident.',
-  ).toEqual({ probedAtLeast: true, exclusions: 31 });
+  ).toEqual({ probedAtLeast: true, exclusions: 32 });
 });

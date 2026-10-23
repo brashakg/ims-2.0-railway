@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import os
 import sys
+import secrets
 import uuid
 from datetime import datetime
 from typing import Any, Dict
@@ -174,7 +175,7 @@ def _seed_units(mongo_db, product_id: str, n: int, store_id: str = STORE):
     """n serialized AVAILABLE units, returning their barcodes."""
     barcodes = []
     for i in range(n):
-        bc = f"BV{uuid.uuid4().hex[:10].upper()}"  # minted shape: upper case, no hyphen
+        bc = f"BV{secrets.token_hex(5).upper()}"  # minted shape: upper case, no hyphen
         mongo_db["stock_units"].insert_one(
             {
                 "stock_id": f"STK-{uuid.uuid4().hex[:8]}",
@@ -341,42 +342,32 @@ def test_a_scan_into_a_completed_session_is_refused(admin_client, mongo_db):
     assert "not in progress" in r.json()["detail"].lower()
 
 
-class _ScanLandsMidFinish:
-    """The REAL stock_counts collection, except one more piece is scanned in
-    the window between Finish reading the session and closing it."""
+class _SaveLandsMidFinish:
+    """The REAL stock_counts collection, except -- between Finish reading the
+    session and closing it -- one REAL save runs: the very function the scan
+    door / the typed door calls (`_record_scan` / `_record_typed`), against
+    the unpatched collection. Nothing about the save is imitated, so if a
+    save stops bumping the revision, Finish closes over it and the test goes
+    red (the round-1 harness bumped the revision itself: hollow)."""
 
-    def __init__(self, coll, scan):
+    def __init__(self, coll, save):
         self._c = coll
-        self._scan = scan
+        self._save = save
         self.fired = False
 
     def find_one(self, flt, *args, **kwargs):
         doc = self._c.find_one(flt, *args, **kwargs)
         if not self.fired and doc and doc.get("status") == "in_progress":
             self.fired = True
-            self._c.update_one(
-                {"count_id": doc["count_id"]},
-                # exactly what the scan door writes: the piece, and a new revision
-                {"$push": {"scans": self._scan}, "$inc": {"rev": 1}},
-            )
+            self._save(dict(doc))
         return doc
 
     def __getattr__(self, name):
         return getattr(self._c, name)
 
 
-def test_a_piece_scanned_while_finishing_is_never_dropped(
-    admin_client, mongo_db, monkeypatch
-):
-    pid = _seed_product(mongo_db)
-    barcodes = _seed_units(mongo_db, pid, 2)
-    count_id = _start(admin_client)
-    _scan(admin_client, count_id, barcodes[0])
-    late = mongo_db["stock_units"].find_one({"barcode": barcodes[1]})
-    racing = _ScanLandsMidFinish(
-        mongo_db["stock_counts"],
-        {"unit_id": str(late["_id"]), "barcode": barcodes[1], "product_id": pid},
-    )
+def _finish_with_a_save_in_the_window(admin_client, mongo_db, monkeypatch, count_id, save):
+    racing = _SaveLandsMidFinish(mongo_db["stock_counts"], save)
     real_get = _DBProxy(mongo_db).get_collection
 
     class _Proxy:
@@ -390,11 +381,51 @@ def test_a_piece_scanned_while_finishing_is_never_dropped(
 
     monkeypatch.setattr(inv_mod, "_get_db", lambda: _Proxy())
     r = admin_client.post(f"/inventory/stock-count/{count_id}/complete", json={})
-    assert racing.fired
-    assert r.status_code == 409, r.text
     monkeypatch.setattr(inv_mod, "_get_db", lambda: _DBProxy(mongo_db))
+    assert racing.fired, "the harness must actually have landed the save"
+    return r
+
+
+def test_a_piece_scanned_while_finishing_is_never_dropped(
+    admin_client, mongo_db, monkeypatch
+):
+    from api.routers.inventory.stock_count import _record_scan
+
+    pid = _seed_product(mongo_db)
+    barcodes = _seed_units(mongo_db, pid, 2)
+    count_id = _start(admin_client)
+    _scan(admin_client, count_id, barcodes[0])
+    late = mongo_db["stock_units"].find_one({"barcode": barcodes[1]})
+
+    r = _finish_with_a_save_in_the_window(
+        admin_client, mongo_db, monkeypatch, count_id,
+        lambda doc: _record_scan(_DBProxy(mongo_db), doc, unit=late,
+                                 product_name="", sku="", user_id="u-late"),
+    )
+    assert r.status_code == 409, r.text
     body = _complete(admin_client, count_id)
     assert body["shrinkage_units"] == 0, "the late piece was counted, not lost"
+
+
+def test_every_real_save_moves_the_count_revision(admin_client, mongo_db):
+    """Finish trusts the revision; so every door that saves an answer must
+    move it -- asserted through the real HTTP doors."""
+    pid = _seed_product(mongo_db)
+    barcodes = _seed_units(mongo_db, pid, 2)
+    count_id = _start(admin_client)
+
+    def rev():
+        return mongo_db["stock_counts"].find_one({"count_id": count_id})["rev"]
+
+    assert rev() == 0
+    _scan(admin_client, count_id, barcodes[0])
+    assert rev() == 1, "a scan must move the revision"
+    _type_for(admin_client, mongo_db, count_id, barcodes[0], 1)
+    assert rev() == 2, "a typed answer for a new style must move the revision"
+    _type_for(admin_client, mongo_db, count_id, barcodes[0], 0)
+    assert rev() == 3, "re-typing a style must move the revision"
+    _scan(admin_client, count_id, barcodes[0])
+    assert rev() == 3, "a repeat scan saves nothing and moves nothing"
 
 
 def test_a_recorded_count_can_then_be_completed(admin_client, mongo_db):
@@ -2250,47 +2281,29 @@ def test_finishing_a_stuck_write_off_that_took_nothing_does_not_close_it(
     assert mongo_db["stock_units"].count_documents({"product_id": pid, "status": "AVAILABLE"}) == 4
 
 
-class _SaveLandsMidFinish:
-    """stock_counts, except a typed answer is saved between Finish's read and
-    its close -- exactly as the typed door writes it (a line + a revision)."""
-
-    def __init__(self, coll, line):
-        self._c = coll
-        self._line = line
-        self.fired = False
-
-    def find_one(self, flt, *args, **kwargs):
-        doc = self._c.find_one(flt, *args, **kwargs)
-        if not self.fired and doc and doc.get("status") == "in_progress":
-            self.fired = True
-            self._c.update_one(
-                {"count_id": doc["count_id"]},
-                {"$push": {"items": self._line}, "$inc": {"rev": 1}},
-            )
-        return doc
-
-    def __getattr__(self, name):
-        return getattr(self._c, name)
-
-
 def test_a_typed_answer_saved_while_finishing_is_never_dropped(
     admin_client, mongo_db, monkeypatch
 ):
     """M2: Finish guarded only the number of scans, so a typed answer saved
-    mid-Finish was silently left out of the result."""
+    mid-Finish was silently left out of the result. The save here is the
+    REAL typed door's write (`_record_typed`)."""
+    from api.routers.inventory.stock_count import _record_typed
+
     pid = _seed_product(mongo_db)
     other = _seed_product(mongo_db)
     barcodes = _seed_units(mongo_db, pid, 2)
     _seed_units(mongo_db, other, 1)
     count_id = _start(admin_client)
     _scan(admin_client, count_id, barcodes[0])
-    racing = _SaveLandsMidFinish(
-        mongo_db["stock_counts"], {"product_id": other, "typed_quantity": 1}
+    r = _finish_with_a_save_in_the_window(
+        admin_client, mongo_db, monkeypatch, count_id,
+        lambda doc: _record_typed(_DBProxy(mongo_db), doc, product_id=other,
+                                  product_name="", sku="", typed_quantity=1,
+                                  notes=None, user_id="u-late"),
     )
-    monkeypatch.setattr(inv_mod, "_get_db", lambda: _proxy_with(mongo_db, "stock_counts", racing))
-    r = admin_client.post(f"/inventory/stock-count/{count_id}/complete", json={})
-    assert racing.fired
     assert r.status_code == 409, r.text
+    line = next(v for v in _complete(admin_client, count_id)["variances"] if v["product_id"] == other)
+    assert line["typed_quantity"] == 1, "the late typed answer is in the result"
 
 
 class _ClosesUnderTheWrite:
@@ -2422,37 +2435,98 @@ def test_a_piece_transferred_mid_write_off_is_not_voided_at_the_other_shop(
     assert body["units_voided"] == 0 and body["units_not_voided"] == 1
 
 
+def _none_found_count(admin_client, mongo_db, *, products: int, walked: int):
+    """A category count over `products` styles (2 pieces each) where only the
+    first `walked` styles were scanned; the rest had nothing found."""
+    count_id, pids, barcodes, _cat = _start_in_own_category(
+        admin_client, mongo_db, products=products, units=2
+    )
+    for pid in pids[:walked]:
+        for bc in barcodes[pid]:
+            _scan(admin_client, count_id, bc)
+    body = _complete(admin_client, count_id)
+    return count_id, pids, barcodes, body
+
+
 def test_styles_with_nothing_found_are_listed_and_written_off_only_when_confirmed(
     admin_client, mongo_db
 ):
     """M6 (owner ruling): in a whole-shop / whole-category count a style
     nobody scanned or typed is 'None found'; the admin writes off its exact
-    pieces only with a second, explicit confirmation."""
-    count_id, pids, barcodes, _cat = _start_in_own_category(
-        admin_client, mongo_db, products=2, units=2
-    )
-    for bc in barcodes[pids[0]]:
-        _scan(admin_client, count_id, bc)
-
-    body = _complete(admin_client, count_id)
+    pieces only with a second, explicit confirmation. 9 of 10 styles walked
+    is exactly the 90% floor (round 2)."""
+    count_id, pids, barcodes, body = _none_found_count(admin_client, mongo_db, products=10, walked=9)
     nf = {n["product_id"]: n for n in body["none_found"]}
-    assert set(nf) == {pids[1]}
-    assert sorted(m["barcode"] for m in nf[pids[1]]["missing_units"]) == sorted(barcodes[pids[1]])
+    assert set(nf) == {pids[9]}
+    assert sorted(m["barcode"] for m in nf[pids[9]]["missing_units"]) == sorted(barcodes[pids[9]])
 
     out = admin_client.post(f"/inventory/stock-count/{count_id}/reconcile", json={}).json()
     assert out["units_voided"] == 0, "not without the explicit confirmation"
-    assert mongo_db["stock_units"].count_documents({"product_id": pids[1], "status": "AVAILABLE"}) == 2
+    assert mongo_db["stock_units"].count_documents({"product_id": pids[9], "status": "AVAILABLE"}) == 2
 
-    count_id, pids, barcodes, _cat = _start_in_own_category(
-        admin_client, mongo_db, products=2, units=2
-    )
-    for bc in barcodes[pids[0]]:
-        _scan(admin_client, count_id, bc)
-    _complete(admin_client, count_id)
-    out = admin_client.post(
+    count_id, pids, barcodes, body = _none_found_count(admin_client, mongo_db, products=10, walked=9)
+    assert body["coverage_percentage"] == 90.0
+    r = admin_client.post(
         f"/inventory/stock-count/{count_id}/reconcile", json={"include_none_found": True}
-    ).json()
-    assert out["units_voided"] == 2
-    assert mongo_db["stock_units"].count_documents({"product_id": pids[1], "status": "VOID"}) == 2
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["units_voided"] == 2
+    assert mongo_db["stock_units"].count_documents({"product_id": pids[9], "status": "VOID"}) == 2
     row = mongo_db["stock_shrinkage"].find_one({"count_id": count_id})
     assert row["none_found"] is True
+
+
+def test_none_found_is_refused_below_the_coverage_floor(admin_client, mongo_db, monkeypatch):
+    """Round 2: on a half-walked count every unwalked style reads as 'None
+    found'. Below the SUPERADMIN-tunable floor (default 90%) the server
+    refuses -- and the count stays ready for the ordinary write-off."""
+    count_id, pids, _bc, body = _none_found_count(admin_client, mongo_db, products=10, walked=8)
+    assert body["coverage_percentage"] == 80.0
+    r = admin_client.post(
+        f"/inventory/stock-count/{count_id}/reconcile", json={"include_none_found": True}
+    )
+    assert r.status_code == 400, r.text
+    assert "8 of 10 styles" in r.json()["detail"]
+    assert mongo_db["stock_counts"].find_one({"count_id": count_id})["status"] == "completed"
+    assert mongo_db["stock_units"].count_documents(
+        {"product_id": {"$in": pids[8:]}, "status": "AVAILABLE"}) == 4
+
+    # The floor is a SUPERADMIN setting: lowered to 75%, 80% passes.
+    from api.services import policy_engine
+
+    real = policy_engine.get_policy
+    monkeypatch.setattr(
+        policy_engine, "get_policy",
+        lambda key, scope=None, **kw: 75.0
+        if key == "inventory.count_none_found_min_coverage_pct" else real(key, scope, **kw),
+    )
+    r = admin_client.post(
+        f"/inventory/stock-count/{count_id}/reconcile", json={"include_none_found": True}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["units_voided"] == 4
+
+
+def test_the_none_found_floor_is_a_superadmin_policy_defaulting_to_90():
+    from api.services.policy_registry import REGISTRY
+
+    spec = REGISTRY["inventory.count_none_found_min_coverage_pct"]
+    assert spec.default == 90.0
+    assert tuple(spec.write_roles) == ("SUPERADMIN",)
+
+
+def test_a_new_style_received_and_scanned_during_the_count_is_added_not_count_again(
+    admin_client, mongo_db
+):
+    """Round 2 minor: a style with NO stock when a whole-shop count opened,
+    received and scanned during it, used to read 'count again'."""
+    count_id = _start(admin_client)
+    pid = _seed_product(mongo_db)
+    fresh = _seed_units(mongo_db, pid, 1)[0]  # received mid-count
+    _scan(admin_client, count_id, fresh)
+
+    body = _complete(admin_client, count_id)
+    line = next(v for v in body["variances"] if v["product_id"] == pid)
+    assert line["moved_during_count"] is False
+    assert [a["barcode"] for a in line["added_during_count"]] == [fresh]
+    assert line["overage_units"] == 0 and line["shortage_units"] == 0

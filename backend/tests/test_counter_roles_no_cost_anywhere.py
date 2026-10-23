@@ -546,7 +546,7 @@ def test_accounts_read_a_serial_with_its_cost(client, serials, role, path):
 # recall is a write-off since S1 (ADMIN / SUPERADMIN only):
 # test_write_off_admin_only.py.
 _SERIAL_WRITES = (
-    ("/api/v1/serials/SN-W/mark-sold", "IN_STOCK", {"order_id": "O1"}),
+    ("/api/v1/serials/SN-W/mark-sold", "IN_STOCK", {"order_id": "O-W"}),
     ("/api/v1/serials/SN-W/return", "SOLD", None),
 )
 
@@ -559,6 +559,11 @@ def test_a_serial_write_answers_cost_by_the_product_rule(
     if widened:
         _widen_product_rule(monkeypatch, "STORE_MANAGER")
     _serial_unit(serials, "SN-W", before)
+    if path.endswith("/mark-sold"):
+        # A hand mark-sold needs a live order line with a piece left to hand
+        # over (S1 review round 2); O1's one piece is already sold (SN12345).
+        serials.orders.insert_one({"order_id": "O-W", "store_id": STORE, "status": "CONFIRMED",
+                                   "items": [{"product_id": "P1", "quantity": 1}]})
     r = client.post(path, json=body, headers=_headers("STORE_MANAGER"))
     assert r.status_code == 200, r.text
     assert r.json()["serial"] == "SN-W" and r.json()["status"] != before, r.json()

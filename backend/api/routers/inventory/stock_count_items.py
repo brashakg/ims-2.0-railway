@@ -196,6 +196,23 @@ async def complete_stock_count(
         # WHICH pieces were on hand when the count opened (sessions opened
         # before this was recorded fall back to the fingerprint alone).
         opening_ids_by_pid = count_doc.get("system_unit_ids")
+        # Styles in this count's scope that had NO stock when it opened (so
+        # are absent from the snapshot). A whole-shop count's scope is every
+        # style; a category count's is that category.
+        in_scope_empty_at_open: set = set()
+        if opening_ids_by_pid is not None and snapshot is not None:
+            absent = [p for p in pids if p not in opening_ids_by_pid]
+            if absent and not count_doc.get("category"):
+                in_scope_empty_at_open = set(absent)
+            elif absent:
+                in_scope_empty_at_open = {
+                    str(p.get("product_id") or p.get("_id"))
+                    for p in db.get_collection("products").find(
+                        {"$or": [{"_id": {"$in": absent}}, {"product_id": {"$in": absent}}],
+                         "category": count_doc.get("category")},
+                        {"_id": 1, "product_id": 1},
+                    )
+                }
 
         variances = []
         total_system = 0
@@ -231,7 +248,11 @@ async def complete_stock_count(
             # A piece that ARRIVED during the count (a receipt) does not move
             # the line: it is reported as "added during the count" and kept
             # out of both the expected set and the counted pieces.
-            if opening_ids_by_pid is not None and pid in opening_ids_by_pid:
+            if opening_ids_by_pid is not None and (
+                pid in opening_ids_by_pid or pid in in_scope_empty_at_open
+            ):
+                # In scope with NO stock when the count opened: everything on
+                # hand now arrived during the count (S1 review round 2).
                 opening = set(opening_ids_by_pid.get(pid) or [])
                 left = opening - set(live_by_str)
                 added = [s for s in sorted(live_by_str) if s not in opening]

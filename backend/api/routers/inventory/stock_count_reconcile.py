@@ -104,6 +104,33 @@ def _refuse_partial_scope(count_doc: dict) -> None:
         )
 
 
+NONE_FOUND_COVERAGE_KEY = "inventory.count_none_found_min_coverage_pct"
+
+
+def _refuse_none_found_below_coverage(count_doc: dict) -> None:
+    """Writing off styles nobody found needs a count that walked most of its
+    scope (SUPERADMIN-tunable, default 90%): on a half-walked shop every
+    unwalked style would otherwise read as missing (S1 review round 2)."""
+    try:
+        from ...services.policy_engine import get_policy
+
+        need = float(get_policy(NONE_FOUND_COVERAGE_KEY, None, default=90.0))
+    except Exception:  # noqa: BLE001 -- unreadable policy: the safe default
+        need = 90.0
+    got = count_doc.get("coverage_percentage")
+    if got is None or float(got) < need:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Only {count_doc.get('products_counted') or 0} of "
+                f"{count_doc.get('products_expected') or 0} styles were counted "
+                f"({got if got is not None else 'unknown'}%). Styles with nothing "
+                f"found can be written off only when at least {need:g}% were "
+                "counted. Count the rest first."
+            ),
+        )
+
+
 class ReconcileStockCountRequest(BaseModel):
     notes: Optional[str] = None
     # /reconcile/finish only: close a stuck write-off that took NOTHING while
@@ -188,6 +215,8 @@ async def reconcile_stock_count(
                 ),
             )
         _refuse_partial_scope(count_doc)
+        if request and request.include_none_found:
+            _refuse_none_found_below_coverage(count_doc)
         if request and request.include_none_found:
             # Styles with nothing found, as lines the loop below treats like
             # any other: same unmoved / AVAILABLE / this-shop rules.

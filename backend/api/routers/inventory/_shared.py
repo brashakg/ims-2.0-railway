@@ -87,20 +87,45 @@ def refuse_unless_real_order(db, order_id, unit: dict, current_user: dict) -> No
         order = db.get_collection("orders").find_one(
             {"$or": [{"order_id": oid}, {"order_number": oid}, {"_id": oid}]}
         )
-    ok = bool(order) and (
+    pid = str(unit.get("product_id") or "")
+    line_qty = sum(
+        int(i.get("quantity") or 1)
+        for i in ((order or {}).get("items") or [])
+        if str(i.get("product_id") or "") == pid
+    )
+    ok = bool(order) and line_qty > 0 and (
         str(order.get("status") or "").strip().upper() not in _DEAD_ORDER_STATUSES
         and order.get("store_id") == unit.get("store_id")
-        and any(
-            str(i.get("product_id") or "") == str(unit.get("product_id") or "")
-            for i in (order.get("items") or [])
-        )
     )
+    if ok:
+        # ONE ORDER LINE, ONE USE PER PIECE (S1 review round 2): the same
+        # order cannot be named for more pieces of this product than its
+        # line sold. Pieces already sold against it: units stamped with the
+        # order, plus ledger SELL events naming it.
+        oid = str(order_id).strip()
+        sold = {
+            str(u.get("stock_id") or u.get("_id"))
+            for u in db.get_collection("stock_units").find(
+                {"product_id": pid, "order_id": {"$in": [oid, order.get("order_id")]}},
+                {"stock_id": 1},
+            )
+        } | {
+            str(e.get("stock_id"))
+            for e in db.get_collection("item_events").find(
+                {"event_type": "sell", "product_id": pid,
+                 "source_id": {"$in": [oid, order.get("order_id")]}},
+                {"stock_id": 1},
+            )
+        }
+        sold.discard(str(unit.get("stock_id") or unit.get("_id")))
+        ok = len(sold) < line_qty
     if not ok:
         raise HTTPException(
             status_code=403,
             detail=(
-                "Name the live order this piece was sold on. Without one, only "
-                "an admin can take it off the books."
+                "Name the live order this piece was sold on (one that still has "
+                "this product left to hand over). Without one, only an admin can "
+                "take it off the books."
             ),
         )
 

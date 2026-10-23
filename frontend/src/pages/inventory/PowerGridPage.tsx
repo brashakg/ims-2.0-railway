@@ -1050,6 +1050,9 @@ function ManualAdjustForm({ cell, onSaved, onError, onSuccess }: ManualAdjustFor
   const [onHand, setOnHand] = useState<string>(String(cell.on_hand ?? 0));
   const [reorderPoint, setReorderPoint] = useState<string>(String(cell.reorder_point ?? 0));
   const [safetyStock, setSafetyStock] = useState<string>(String(cell.safety_stock ?? 0));
+  // S1: a hand-typed stock figure says why (the server refuses it without),
+  // and lowering it is admin-only -- the server answers a manager with 403.
+  const [reason, setReason] = useState('');
   const [saving, setSaving] = useState(false);
 
   // Re-sync the form when the drawer points at a different cell or the cell
@@ -1058,6 +1061,7 @@ function ManualAdjustForm({ cell, onSaved, onError, onSuccess }: ManualAdjustFor
     setOnHand(String(cell.on_hand ?? 0));
     setReorderPoint(String(cell.reorder_point ?? 0));
     setSafetyStock(String(cell.safety_stock ?? 0));
+    setReason('');
   }, [cell.line_stock_id, cell.on_hand, cell.reorder_point, cell.safety_stock]);
 
   const parseField = (v: string): number | null => {
@@ -1089,6 +1093,7 @@ function ManualAdjustForm({ cell, onSaved, onError, onSuccess }: ManualAdjustFor
 
   const { body, invalid } = buildBody();
   const dirty = Object.keys(body).length > 0;
+  const needsReason = body.on_hand !== undefined && !reason.trim();
 
   const onSave = async () => {
     if (invalid) {
@@ -1111,7 +1116,10 @@ function ManualAdjustForm({ cell, onSaved, onError, onSuccess }: ManualAdjustFor
     };
     onSaved(optimistic);
     try {
-      const res = await lensStockApi.update(cell.line_stock_id, body);
+      const res = await lensStockApi.update(
+        cell.line_stock_id,
+        body.on_hand !== undefined ? { ...body, notes: reason.trim() } : body,
+      );
       // Re-fetch authoritative cell from the response (backend recomputes
       // available + last_movement_at).
       onSaved(res.cell);
@@ -1136,6 +1144,20 @@ function ManualAdjustForm({ cell, onSaved, onError, onSuccess }: ManualAdjustFor
         <AdjustField label="Reorder point" value={reorderPoint} onChange={setReorderPoint} disabled={saving} />
         <AdjustField label="Safety stock" value={safetyStock} onChange={setSafetyStock} disabled={saving} />
       </div>
+      {body.on_hand !== undefined && (
+        <label className="flex flex-col mt-2">
+          <span className="text-[10px] uppercase tracking-wide text-ink-4 font-medium mb-1">Why is the stock figure changing?</span>
+          <input
+            type="text"
+            value={reason}
+            disabled={saving}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="e.g. tray recounted"
+            aria-label="Reason for the stock change"
+            className="border border-line rounded px-2 py-1.5 text-sm bg-white focus:outline-none focus:border-bv"
+          />
+        </label>
+      )}
       <div className="flex items-center justify-end gap-2 mt-3">
         {dirty && !saving ? (
           <span className="text-[11px] text-ink-4 mr-auto">Unsaved changes</span>
@@ -1143,7 +1165,7 @@ function ManualAdjustForm({ cell, onSaved, onError, onSuccess }: ManualAdjustFor
         <button
           type="button"
           onClick={onSave}
-          disabled={saving || !dirty || invalid}
+          disabled={saving || !dirty || invalid || needsReason}
           className="inline-flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg bg-bv text-white hover:bg-bv-600 disabled:opacity-50 disabled:cursor-not-allowed transition"
         >
           {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}

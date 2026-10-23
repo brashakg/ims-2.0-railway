@@ -139,8 +139,16 @@ export function StockCountResult() {
         'Only pieces that have not moved since this count are written off; any that were sold or moved drop out.'
     )) return;
     // The second, explicit confirmation for styles nobody found any of.
+    // Round 2: the coverage is in the question (the server also refuses
+    // below the SUPERADMIN-set floor, default 90%); the value only for the
+    // cost roles.
+    const noneFoundValue = noneFound.reduce(
+      (s, n) => s + (n.missing_units || []).reduce((t, m) => t + (m.unit_cost || 0), 0), 0);
     if (includeNoneFound && !window.confirm(
-      `${noneFound.length} style${noneFound.length === 1 ? '' : 's'} had nothing found - write off all their pieces (${noneFoundPieces})?`
+      `Counted ${doc.products_counted ?? 0} of ${doc.products_expected ?? 0} styles. ` +
+        `Write off ${noneFoundPieces} piece${noneFoundPieces === 1 ? '' : 's'} of ` +
+        `${noneFound.length} style${noneFound.length === 1 ? '' : 's'}` +
+        `${showCost ? ` worth ${money(noneFoundValue)} at cost` : ''}?`
     )) return;
     setBusy(true);
     try {

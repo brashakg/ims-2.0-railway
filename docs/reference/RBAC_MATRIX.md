@@ -902,9 +902,9 @@ entry exactly; see the manual interpretation notes above.
 | `GET` | `/api/v1/lens-stock/gap-planner` | AUTH | S |  |
 | `GET` | `/api/v1/lens-stock/{lens_line_id}` | AUTH | S |  |
 | `POST` | `/api/v1/lens-stock/{lens_line_id}/bulk-import` | ADMIN, CATALOG_MANAGER, STORE_MANAGER | S |  |
-| `POST` | `/api/v1/lens-stock/{lens_line_id}/commit` | ADMIN, CATALOG_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/lens-stock/{lens_line_id}/commit` | ADMIN | S |  |
 | `POST` | `/api/v1/lens-stock/{lens_line_id}/release` | ADMIN, CATALOG_MANAGER, STORE_MANAGER | S |  |
-| `POST` | `/api/v1/lens-stock/{lens_line_id}/reserve` | ADMIN, CATALOG_MANAGER, STORE_MANAGER | S |  |
+| `POST` | `/api/v1/lens-stock/{lens_line_id}/reserve` | ADMIN | S |  |
 | `PATCH` | `/api/v1/lens-stock/{line_stock_id}` | ADMIN, CATALOG_MANAGER, STORE_MANAGER | S |  |
 
 ### `/api/v1/loyalty`
