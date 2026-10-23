@@ -123,7 +123,13 @@ export interface AdvanceRefundPlan {
   credit?: number;
   refund_tenders?: { method: string; amount: number }[];
   invoice_number?: string | null;
+  /** 'finish_cancel' once the advance is refunded but the order not cancelled. */
+  action?: 'refund_and_cancel' | 'finish_cancel';
+  /** A cash part is refunded: say whether from the shop drawer or HQ. */
+  has_cash?: boolean;
 }
+
+export type CashPaidFrom = 'STORE_DRAWER' | 'HQ';
 
 export const returnsApi = {
   advanceRefundPreview: async (orderId: string): Promise<AdvanceRefundPlan> => {
@@ -133,8 +139,12 @@ export const returnsApi = {
 
   /** Refund the advance (back the way it was paid; store credit for a
    *  store-credit / voucher / EMI part) and cancel the order. */
-  refundAdvanceAndCancel: async (orderId: string, reason: string) => {
-    const response = await api.post('/returns/advance-refund', { order_id: orderId, reason });
+  refundAdvanceAndCancel: async (orderId: string, reason: string, cashPaidFrom?: CashPaidFrom) => {
+    const response = await api.post('/returns/advance-refund', {
+      order_id: orderId,
+      reason,
+      ...(cashPaidFrom ? { cash_paid_from: cashPaidFrom } : {}),
+    });
     return response.data;
   },
 
