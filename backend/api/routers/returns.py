@@ -199,9 +199,9 @@ class ReturnCreate(BaseModel):
     # of these resolves to a valid, single-use, not-expired E4 approval of
     # action_type REFUND_APPROVAL_MATRIX bound to THIS order + store (the maker
     # mints it via POST /approvals/requests + a manager PIN-approves it; the
-    # requester cannot approve their own -- it is a maker-checker action). DARK by
-    # default (matrix_enabled=False): when the matrix is off these are ignored and
-    # the refund path is byte-identical to today. The token is consumed atomically
+    # requester cannot approve their own -- it is a maker-checker action). ON by
+    # default (owner 2026-10-23: above Rs 2,000 needs a manager); only when the
+    # matrix is switched off are these ignored. The token is consumed atomically
     # by create_return; a missing / mismatched / expired token -> 403.
     refund_approval_token: Optional[str] = None
     refund_approval_request_id: Optional[str] = None
@@ -2857,6 +2857,20 @@ def _consume_serial_override(body: "ReturnCreate", current_user: dict) -> bool:
         return False
 
 
+def _refuse_if_advance_refunded(order: Dict[str, Any]) -> None:
+    """An order whose advance was refunded (or is being refunded) through
+    /returns/advance-refund takes no counter return: the money already went
+    back, and a return now would refund it twice."""
+    if order.get("advance_refund_id"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This order's advance was refunded through 'Refund advance and "
+                "cancel', so a return cannot refund it again. Nothing was recorded."
+            ),
+        )
+
+
 def _gate_refund_approval_matrix(
     body: "ReturnCreate",
     *,
@@ -2865,6 +2879,7 @@ def _gate_refund_approval_matrix(
     entity_id: Optional[str],
     resolved_order_id: Optional[str],
     current_user: dict,
+    prior_refunds: float = 0.0,
 ) -> Optional[str]:
     """F27: enforce the configurable refund approval matrix in FRONT of recording
     the refund. PURE GATE -- it changes NO money math; it only decides whether a
@@ -2897,8 +2912,12 @@ def _gate_refund_approval_matrix(
     try:
         from ..services.refund_approval_matrix import required_tier_for_refund
 
+        # The tier is decided on everything this order has refunded so far
+        # (counter returns AND advance refunds) plus this refund: two Rs 1,500
+        # returns on one bill are a Rs 3,000 refund. The approval consumed below
+        # still covers THIS refund's amount.
         tier = required_tier_for_refund(
-            int(round(float(net_amount) * 100)),  # rupees -> integer paise
+            int(round((float(prior_refunds or 0) + float(net_amount)) * 100)),  # paise
             reason,
             role,
             store_id=store_id,
@@ -3435,6 +3454,7 @@ async def create_return(
     # ANY account. A different customer is refused (no family-wallet rule
     # covers store credit; family_wallet.py pools loyalty points only).
     order_customer_id = order.get("customer_id") or order.get("customerId")
+    _refuse_if_advance_refunded(order)
     if body.customer_id and str(body.customer_id) != str(order_customer_id or ""):
         raise HTTPException(
             status_code=400,
@@ -3633,10 +3653,12 @@ async def create_return(
     # so a refund that needs approval rejects with nothing reserved. PURE GATE: it
     # changes NO money math -- it only requires + verifies a consumed E4 approval
     # token bound to this refund when the matrix is enabled and the tier is > 0.
-    # DARK by default (flag off) -> no-op, refund path byte-identical to today.
+    # ON by default (owner 2026-10-23); fails CLOSED. The tier reads the ORDER's
+    # refunds so far plus this one, so splitting a refund cannot dodge the rule.
     _refund_approval = _gate_refund_approval_matrix(
         body,
         net_amount=net_amount,
+        prior_refunds=_prior_refunds,
         store_id=store_id,
         entity_id=(order or {}).get("entity_id"),
         resolved_order_id=resolved_order_id,
@@ -3707,6 +3729,22 @@ async def create_return(
                 ),
             )
         claimed.append(rl)
+
+    # The refund-advance door claims the ORDER (advance_refund_id) and then
+    # looks for reserved units; this door reserved its units above and now
+    # looks for that claim. Whichever writes second sees the other, so the
+    # two can never both refund one order.
+    try:
+        _orders_now = get_order_repository()
+        _refuse_if_advance_refunded(
+            (_orders_now.find_by_id(resolved_order_id) if _orders_now is not None else None) or {}
+        )
+    except HTTPException:
+        for done in claimed:
+            _release_returnable_qty(
+                resolved_order_id, done["orig_line"], float(done["ret_line"].return_qty)
+            )
+        raise
 
     # Rule 53 (owner 2026-10-18): a return that reverses output tax is a
     # credit note -- numbered ONCE from the sale shop's series, whatever the
@@ -4701,12 +4739,17 @@ async def refund_advance_and_cancel(
     from .orders.cancel import cancel_order_core
 
     async def _cancel() -> Optional[Any]:
+        # Never a 500 after the refund is recorded: any failure is reported as
+        # "cancel pending - press again" beside the refund that stands.
         try:
             await cancel_order_core(order_id, body.reason, current_user)
             return None
         except HTTPException as exc:
             logger.error("[RETURNS] advance refunded on %s but cancel failed: %s", order_id, exc.detail)
             return exc.detail
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[RETURNS] advance refunded on %s but cancel crashed: %s", order_id, exc)
+            return "the cancel could not run just now"
 
     # Pressed again after the refund landed but the cancel did not: finish it.
     done_id = order.get("advance_refund_id")
@@ -4739,10 +4782,14 @@ async def refund_advance_and_cancel(
     if plan["invoice_number"]:
         priced_lines, gst_view, note_value = _whole_invoice_credit_note(order, order_id)
 
-    # One refund per order, even under a double tap: claim the order first.
+    # One refund per order, even under a double tap: claim the order first --
+    # only while its status AND the money on it are what was read, so a payment
+    # landing mid-refund makes this refuse instead of refunding a stale amount.
     return_id = generate_return_id()
     if not repo.update_if(
-        order_id, {"status": status, "advance_refund_id": None}, {"advance_refund_id": return_id}
+        order_id,
+        {"status": status, "advance_refund_id": None, "amount_paid": order.get("amount_paid")},
+        {"advance_refund_id": return_id},
     ):
         raise HTTPException(
             status_code=409,
@@ -4751,6 +4798,20 @@ async def refund_advance_and_cancel(
 
     def _unclaim():
         repo.update_if(order_id, {"advance_refund_id": return_id}, {"advance_refund_id": None})
+
+    # A counter return reserves its units on the order BEFORE it writes its
+    # doc, and refuses once it sees advance_refund_id (create_return). Check
+    # for one that got in first -- after our claim -- so the two can never
+    # both refund the same order.
+    fresh = repo.find_by_id(order_id) or {}
+    if coll.count_documents({"order_id": order_id}) or any(
+        float((it or {}).get("returned_qty") or 0) > 0 for it in fresh.get("items") or []
+    ):
+        _unclaim()
+        raise HTTPException(
+            status_code=409,
+            detail="A return is being recorded on this order right now - nothing was refunded. Reload and check.",
+        )
 
     credit_note_number: Optional[str] = None
     if plan["invoice_number"]:
@@ -4857,8 +4918,8 @@ async def refund_advance_and_cancel(
         "message": (
             f"Refund of Rs {total:,.2f} recorded and the order cancelled."
             if not cancel_error
-            else f"Refund of Rs {total:,.2f} recorded, but the order could not be "
-            f"cancelled: {cancel_error}. Press the button again to finish."
+            else f"Refund of Rs {total:,.2f} recorded. Cancel pending: {cancel_error}. "
+            "Press the button again to finish the cancel."
         ),
     }
 
