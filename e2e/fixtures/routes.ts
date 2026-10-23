@@ -343,6 +343,7 @@ export const EXCLUSIONS: ReadonlyArray<{ path: string; reason: string }> = [
   { path: '/customers/:customerId/loyalty', reason: 'needs a seeded customer id; seed_e2e.py creates no customers' },
   { path: '/collections/:id', reason: 'needs a seeded collection id; seed_e2e.py creates no collections' },
   { path: '/walkouts/:walkoutId', reason: 'needs a seeded walkout id; seed_e2e.py creates no walkouts' },
+  { path: '/inventory/audit/:countId', reason: 'needs a finished stock count; seed_e2e.py creates none' },
   { path: '/incentive/staff/:staffId', reason: 'needs a seeded staff id; seed_e2e.py seeds only the admin user' },
   { path: '/workshop/station/:stationCode', reason: 'needs a seeded workshop station; seed_e2e.py creates none' },
   {

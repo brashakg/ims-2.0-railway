@@ -58,6 +58,7 @@ const OnlineStockPage = lazy(() => import('../pages/inventory/OnlineStockPage'))
 const StockLookupPage = lazy(() => import('../pages/inventory/StockLookupPage'));
 const StockReplenishment = lazy(() => import('../pages/inventory/StockReplenishment').then(m => ({ default: m.StockReplenishment })));
 const StockAudit = lazy(() => import('../pages/inventory/StockAudit').then(m => ({ default: m.StockAudit })));
+const StockCountResult = lazy(() => import('../pages/inventory/StockCountResult').then(m => ({ default: m.StockCountResult })));
 const OpeningStockImport = lazy(() => import('../pages/inventory/OpeningStockImport').then(m => ({ default: m.OpeningStockImport })));
 
 // Legacy ?tab= mapper - logic in pages/inventory/legacyTabRedirect.ts so it
@@ -134,6 +135,18 @@ export const inventoryRoutes = (
       element={
         <ProtectedRoute allowedRoles={INVENTORY_MANAGE_ROLES}>
           <StockAudit />
+        </ProtectedRoute>
+      }
+    />
+
+    {/* S1: a finished count's result - coverage, moved styles, the exact
+        missing pieces, the extras, and the write-off (admin) / send for
+        write-off (manager) door. Its own address, not a hidden panel. */}
+    <Route
+      path="inventory/audit/:countId"
+      element={
+        <ProtectedRoute allowedRoles={INVENTORY_MANAGE_ROLES}>
+          <StockCountResult />
         </ProtectedRoute>
       }
     />

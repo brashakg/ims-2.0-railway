@@ -1,111 +1,97 @@
 // ============================================================================
-// THE COUNT IS BLIND (owner ruling 2026-08-25)
+// THE COUNT IS BLIND (owner ruling 2026-08-25) -- and a scan is ONE piece (S1)
 // ============================================================================
 // While a session is open the counter must not see what the books expect.
 // The server withholds the figures at the source (see
-// backend/tests/test_stock_count_blind.py -- THE key tests assert on the
-// response body); this suite guards the second line of defence: even if a
-// stale cache or a hostile/old server ships the numbers anyway, the counting
-// screen must not render them. Every fixture here deliberately INCLUDES the
-// withheld fields with unmistakable sentinel values, and the assertions are
-// that those values never reach the DOM.
+// backend/tests/test_stock_count_blind.py); this suite guards the second line
+// of defence: even if a stale cache or an old server ships the numbers (or the
+// old expected-styles sheet) anyway, the counting screen must not render
+// them. Every fixture deliberately INCLUDES the withheld fields with
+// unmistakable sentinel values, and the assertions are that those values
+// never reach the DOM.
 
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const getStockCount = vi.fn();
 const recordCountItem = vi.fn();
-const apiPost = vi.fn();
+const scanCountPiece = vi.fn();
 
 vi.mock('../../../services/api', () => ({
-  default: { post: (...a: unknown[]) => apiPost(...a) },
   inventoryApi: {
     getStockCount: (...a: unknown[]) => getStockCount(...a),
     recordCountItem: (...a: unknown[]) => recordCountItem(...a),
+    scanCountPiece: (...a: unknown[]) => scanCountPiece(...a),
   },
+  productApi: { searchProducts: vi.fn(async () => ({ products: [] })) },
 }));
 
 import { StockCountScanningInterface } from '../StockCountScanningInterface';
 
-// A sheet as an OLD server would send it: system_quantity present. 777 is the
-// sentinel -- it appears nowhere else, so finding it in the DOM = a leak.
-const HOSTILE_SHEET = {
+// An OPEN session as an OLD server would send it: the expected-styles sheet
+// with system quantities. 777 and "Hidden Style" appear nowhere else, so
+// finding either in the DOM = a leak.
+const HOSTILE_DOC = {
   status: 'in_progress',
+  system_quantities: { 'PRD-9': 777 },
   expected_lines: [
-    {
-      product_id: 'PRD-1',
-      product_name: 'Ray-Ban RB3025',
-      sku: 'SKU-1',
-      system_quantity: 777,
-      counted_quantity: null,
-    },
+    { product_id: 'PRD-9', product_name: 'Hidden Style', sku: 'SKU-9', system_quantity: 777, counted_quantity: null },
   ],
-};
-
-// A scan response as the OLD endpoint sent it: live variance readout.
-const HOSTILE_SCAN = {
-  data: {
-    barcode: 'BC-1',
-    product_id: 'PRD-1',
-    product_name: 'Ray-Ban RB3025',
-    sku: 'SKU-1',
-    system_count: 888,
-    physical_count: 3,
-    variance: -885,
-    variance_percent: -99.66,
-    count_id: 'C-1',
-    recorded: true,
-    items_counted: 1,
-  },
+  scans: [],
+  items: [],
+  pieces_scanned: 0,
 };
 
 beforeEach(() => {
   vi.clearAllMocks();
-  getStockCount.mockResolvedValue(HOSTILE_SHEET);
-  recordCountItem.mockResolvedValue({ items_counted: 1 });
-  apiPost.mockResolvedValue(HOSTILE_SCAN);
+  getStockCount.mockResolvedValue(HOSTILE_DOC);
 });
 
-describe('the blind count sheet', () => {
-  it('never shows a Books-say column, even when the payload carries the figure', async () => {
+describe('the blind count screen', () => {
+  it('never lists the styles the books expect, nor how many', async () => {
     render(<StockCountScanningInterface countId="C-1" />);
-    expect(await screen.findByText('Ray-Ban RB3025')).toBeInTheDocument();
-
-    expect(screen.queryByText('Books say')).toBeNull();
-    // the sentinel expected quantity must not surface anywhere
+    await waitFor(() => expect(getStockCount).toHaveBeenCalled());
+    expect(await screen.findByTestId('pieces-scanned')).toHaveTextContent('0');
+    expect(screen.queryByText('Hidden Style')).toBeNull();
     expect(screen.queryByText(/777/)).toBeNull();
-    // the sheet stays usable blind: a box to answer into
-    expect(
-      screen.getByLabelText('Counted quantity for Ray-Ban RB3025')
-    ).toBeInTheDocument();
   });
 
-  it('acknowledges a scan without echoing system count or variance', async () => {
+  it('a scan sends ONE piece (no quantity) and shows only "scanned"', async () => {
+    scanCountPiece.mockResolvedValue({
+      recorded: true, added: true, product_name: 'Ray-Ban RB3025', sku: 'SKU-1',
+      pieces_scanned: 1, items_counted: 1,
+      // what the OLD endpoint used to echo -- must never reach the DOM
+      system_count: 888, variance: -885,
+    });
+    // after the scan the session re-reads with the piece on it
+    getStockCount.mockResolvedValueOnce(HOSTILE_DOC).mockResolvedValue({ ...HOSTILE_DOC, pieces_scanned: 1 });
     render(<StockCountScanningInterface countId="C-1" />);
-    await screen.findByText('Ray-Ban RB3025');
+    const box = await screen.findByLabelText("Scan a piece's barcode");
+    fireEvent.change(box, { target: { value: 'BV91FA3858A2' } });
+    fireEvent.keyDown(box, { key: 'Enter' });
 
-    fireEvent.change(screen.getByPlaceholderText('Scan or enter barcode...'), {
-      target: { value: 'BC-1' },
-    });
-    fireEvent.change(screen.getByPlaceholderText('0'), {
-      target: { value: '3' },
-    });
-    fireEvent.click(screen.getByText('Record counted quantity'));
-
-    expect(await screen.findByText('Recorded')).toBeInTheDocument();
-    // the hostile response's figures must never reach the DOM
+    expect(await screen.findByText('Last: Ray-Ban RB3025 · scanned')).toBeInTheDocument();
+    expect(scanCountPiece).toHaveBeenCalledWith('C-1', 'BV91FA3858A2');
+    expect(screen.getByTestId('pieces-scanned')).toHaveTextContent('1');
     expect(screen.queryByText(/888/)).toBeNull();
     expect(screen.queryByText(/-885/)).toBeNull();
     expect(screen.queryByText(/variance/i)).toBeNull();
-    expect(screen.queryByText(/system count/i)).toBeNull();
-    // ...while the counter's own answer is confirmed saved
-    await waitFor(() =>
-      expect(apiPost).toHaveBeenCalledWith('/inventory/stock-count-scan', {
-        barcode: 'BC-1',
-        physical_count: 3,
-        notes: undefined,
-        count_id: 'C-1',
-      })
-    );
+  });
+
+  it('the same label scanned twice is said to count once', async () => {
+    scanCountPiece.mockResolvedValue({
+      recorded: true, added: false, product_name: 'Ray-Ban RB3025', sku: 'SKU-1',
+      pieces_scanned: 1, items_counted: 1,
+    });
+    // after the scan the session re-reads with the piece on it
+    getStockCount.mockResolvedValueOnce(HOSTILE_DOC).mockResolvedValue({ ...HOSTILE_DOC, pieces_scanned: 1 });
+    render(<StockCountScanningInterface countId="C-1" />);
+    const box = await screen.findByLabelText("Scan a piece's barcode");
+    fireEvent.change(box, { target: { value: 'BV91FA3858A2' } });
+    fireEvent.keyDown(box, { key: 'Enter' });
+    expect(
+      await screen.findByText('Last: Ray-Ban RB3025 · already scanned, counted once')
+    ).toBeInTheDocument();
+    expect(screen.getByTestId('pieces-scanned')).toHaveTextContent('1');
   });
 });

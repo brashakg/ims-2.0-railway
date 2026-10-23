@@ -8,6 +8,7 @@
 // helper), so 05:14 UTC must read 10:44 am whatever the viewer's timezone.
 
 import { render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { describe, it, expect, vi } from 'vitest';
 
 const NAIVE_UTC = '2026-09-17T05:14:43'; // = 10:44 am IST
@@ -74,7 +75,7 @@ describe('stock screens show IST (F53)', () => {
   });
 
   it('the stock-count session start is IST, not UTC', async () => {
-    render(<StockAuditPage />);
+    render(<MemoryRouter><StockAuditPage /></MemoryRouter>);
     const line = await screen.findByText(/AUD-1 · started/);
     expect(line.textContent).toMatch(/10:44\s*am/i);
     expect(line.textContent).not.toMatch(/5:14/);
