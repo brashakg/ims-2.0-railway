@@ -722,7 +722,9 @@ def test_retry_applies_after_stock_recovers(ctx, monkeypatch):
 
 def test_multi_unit_return_reactivates_one_mints_rest(ctx):
     # Return 2 of PRD-1 but only ONE prior SOLD unit exists -> 1 reactivate + 1 mint.
-    tok = _staff_token(["CASHIER"])
+    # Two units are above Rs 2,000: a store manager records it (owner ruling
+    # 2026-10-23 -- a cashier would need a manager's approval first).
+    tok = _staff_token(["STORE_MANAGER"])
     payload = _payload()
     payload["items"][0]["return_qty"] = 2
     r = ctx["client"].post(
