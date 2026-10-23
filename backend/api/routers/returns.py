@@ -344,10 +344,18 @@ def _resolve_original_line(
     return None
 
 
-def _sum_prior_refunds(order_id: Optional[str], field: str = "net_refund") -> float:
+def _sum_prior_refunds(
+    order_id: Optional[str], field: str = "net_refund", *, strict: bool = False
+) -> float:
     """Total ``field`` (net_refund by default) already issued for an order across
     COMPLETED returns (BUG-096 cumulative monetary cap). Fail-soft -> 0.0 when
-    unavailable."""
+    unavailable.
+
+    ``strict`` (the refund door: the Rs 2,000 approval rule and the over-refund
+    cap, owner ruling 2026-10-23 -- FAIL CLOSED): a READ ERROR raises 503
+    instead of reading as "nothing refunded yet", which would let a split
+    refund skip the manager and the cap. No returns collection at all (DB-less
+    mode, where no earlier return can exist) still reads 0."""
     if not order_id:
         return 0.0
     coll = _returns_coll()
@@ -365,6 +373,12 @@ def _sum_prior_refunds(order_id: Optional[str], field: str = "net_refund") -> fl
                 except (TypeError, ValueError):
                     pass
     except Exception as exc:  # noqa: BLE001
+        if strict:
+            logger.error("[RETURNS] earlier refunds unreadable for %s: %s", order_id, exc)
+            raise HTTPException(
+                status_code=503,
+                detail="Could not check earlier refunds on this bill - try again. Nothing was recorded.",
+            )
         logger.debug("[RETURNS] _sum_prior_refunds lookup failed: %s", exc)
     return round(total, 2)
 
@@ -3585,7 +3599,7 @@ async def create_return(
         _refund_ceiling = _order_billed_total(order)
     else:
         _refund_ceiling = float(_ap or 0.0)
-    _prior_refunds = _sum_prior_refunds(resolved_order_id)
+    _prior_refunds = _sum_prior_refunds(resolved_order_id, strict=True)
     if round(_prior_refunds + net_amount, 2) > _refund_ceiling + 0.01:
         raise HTTPException(
             status_code=400,
