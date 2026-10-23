@@ -48,7 +48,7 @@ import { usePurchaseShop } from '../purchaseShop';
 import { PurchaseInvoicesTab } from '../invoices/PurchaseInvoicesTab';
 import ReconConsole from '../ReconConsole';
 import { PurchaseVarianceTab } from '../PurchaseVarianceTab';
-import { GoodsReceiptNote } from '../GoodsReceiptNote';
+import { ReceiveGoods } from '../ReceiveGoods';
 import { VendorReturns } from '../VendorReturns';
 
 beforeEach(() => {
@@ -83,7 +83,7 @@ const TABS: Record<string, { list: string; node: () => ReactNode }> = {
   invoices: { list: '/vendors/purchase-invoices', node: () => <PurchaseInvoicesTab suppliers={[]} /> },
   reconciliation: { list: '/vendors/recon/worklists', node: () => <ReconConsole /> },
   variance: { list: '/vendors/variance-report', node: () => <PurchaseVarianceTab /> },
-  'goods receipt': { list: '/vendors/grn', node: () => <GoodsReceiptNote /> },
+  'receive goods': { list: '/vendors/purchase-orders', node: () => <ReceiveGoods /> },
   'vendor returns': { list: '/vendor-returns/', node: () => <VendorReturns /> },
 };
 

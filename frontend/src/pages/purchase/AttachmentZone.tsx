@@ -1,9 +1,8 @@
 // ============================================================================
 // IMS 2.0 - GRN attachment upload zone (Purchase P1 / S3)
 // ============================================================================
-// Extracted verbatim from GoodsReceiptCockpit.tsx (procurement Phase 2) so the
-// express-receive panel and the classic two-step receive form share ONE
-// upload UI for the mandatory no-paper-no-stock document gate.
+// The one upload UI for the receiving screen's no-paper-no-stock bill gate
+// (ReceiveForm.tsx).
 
 import { useRef } from 'react';
 import { Upload, X, CheckCircle2, Loader2 } from 'lucide-react';

@@ -54,7 +54,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { NewOrdersDeliverTo, usePurchaseShop } from '../purchaseShop';
 import { PurchaseOrdersSection } from '../PurchaseOrdersSection';
 import { VendorReturns } from '../VendorReturns';
-import { GoodsReceiptNote } from '../GoodsReceiptNote';
+import { ReceiveGoods } from '../ReceiveGoods';
 
 beforeEach(() => {
   cleanup();
@@ -148,50 +148,12 @@ describe('F63: New PO says where it delivers', () => {
 });
 
 describe('F63: goods receipt works the shop on show', () => {
-  it('an admin viewing Pune receives against Pune\'s orders', async () => {
+  it("an admin viewing Pune receives against Pune's orders", async () => {
     roles = ['ADMIN'];
-    open(<GoodsReceiptNote />, 'BV-PUN-01');
+    open(<ReceiveGoods />, 'BV-PUN-01');
     await waitFor(() => expect(reads('/vendors/purchase-orders')).toContain('BV-PUN-01'));
     expect(reads('/vendors/purchase-orders')).not.toContain('BV-DHN-01');
   });
-
-  it('the counts say which shops they cover -- never "all stores" for one shop', async () => {
-    roles = ['ADMIN'];
-    open(<GoodsReceiptNote />, 'BV-PUN-01');
-    expect(await screen.findByText('the shop picked above')).toBeInTheDocument();
-    expect(screen.queryByText(/all stores in scope/i)).toBeNull();
-    cleanup();
-    open(<GoodsReceiptNote />, '');
-    expect(await screen.findByText('all stores')).toBeInTheDocument();
-    cleanup();
-    roles = ['STORE_MANAGER'];
-    open(<GoodsReceiptNote />, '');
-    expect(await screen.findByText('your shop')).toBeInTheDocument();
-  });
-
-  it('a receipt with no order is refused while another shop is on show (it would land at Dhanbad)', async () => {
-    roles = ['ADMIN'];
-    http.get.mockImplementation((url: string) =>
-      Promise.resolve({
-        data: url === '/vendors' || url === '/vendors/'
-          ? { vendors: [{ vendor_id: 'V-77', trade_name: 'Frames Wala' }] }
-          : url === '/vendors/grn' ? { grns: [] }
-            : url === '/products'
-              ? { products: [{ product_id: 'P-FR1', name: 'Acme Aviator', sku: 'FR-0001' }] }
-              : { purchase_orders: [] },
-      }),
-    );
-    open(<GoodsReceiptNote />, 'BV-PUN-01');
-    fireEvent.click(await screen.findByLabelText(/This is a Delivery Challan/i, { selector: 'input' }));
-    fireEvent.change(screen.getByPlaceholderText(/DC\/26\/05\/118/), { target: { value: 'DC/26/08/9' } });
-    await screen.findByText('Frames Wala');
-    fireEvent.change(screen.getByDisplayValue('Select the vendor…'), { target: { value: 'V-77' } });
-    fireEvent.change(screen.getByPlaceholderText(/Search a product to add/i), { target: { value: 'frame' } });
-    fireEvent.click(await screen.findByText('Acme Aviator', {}, { timeout: 3000 }));
-    fireEvent.click(screen.getByRole('button', { name: /Post GRN/i }));
-    await waitFor(() =>
-      expect(toast.error).toHaveBeenCalledWith(expect.stringContaining('recorded at your own shop')),
-    );
-    expect(http.post).not.toHaveBeenCalled();
-  });
+  // The scope words and the no-order refusal on another shop are pinned in
+  // purchaseAllStoresGrnRecon.test.tsx against the same screen.
 });
