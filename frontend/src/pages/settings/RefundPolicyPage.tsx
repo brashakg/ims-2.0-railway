@@ -57,6 +57,10 @@ export function RefundPolicySection() {
   const [form, setForm] = useState<FormState>(DEFAULTS);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  // True only once the server's current values were read. A Save from a form
+  // that never loaded them would write guesses -- e.g. switch the Rs 2,000
+  // manager-approval rule OFF -- so it is refused.
+  const [loaded, setLoaded] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -74,9 +78,11 @@ export function RefundPolicySection() {
       if (typeof pol[K_MATRIX]?.value === 'boolean') next.matrixEnabled = pol[K_MATRIX].value;
       if (typeof pol[K_TENDER]?.value === 'boolean') next.tenderEnforce = pol[K_TENDER].value;
       setForm(next);
+      setLoaded(true);
     } catch {
       // Keep code defaults on a read error (page never blanks out).
       setForm(DEFAULTS);
+      setLoaded(false);
     } finally {
       setLoading(false);
     }
@@ -94,6 +100,10 @@ export function RefundPolicySection() {
     form.superAbove > form.adminAbove;
 
   const save = async () => {
+    if (!loaded) {
+      toast.error('The current refund policy could not be loaded, so nothing was saved. Reload the page and try again.');
+      return;
+    }
     if (!ordered) {
       toast.error('Thresholds must increase: auto-approve < admin < superadmin.');
       return;
