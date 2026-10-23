@@ -4528,3 +4528,205 @@ async def retry_restock(
             else "Restock partial - retry again"
         ),
     }
+
+
+# ============================================================================
+# REFUND AN ADVANCE + CANCEL (owner 2026-10-23)
+# ============================================================================
+# A not-yet-delivered order that took an advance could only be plain-cancelled
+# (the advance kept, no refund) -- and create_return cannot refund it: a return
+# refunds the LINES' value, capped at what was paid, so a Rs 1,000 advance on a
+# Rs 5,000 order is refused. This door refunds exactly the money taken, back to
+# the tenders it was taken in, then cancels the order through the ONE cancel
+# door (stock back on the shelf, loyalty earn clawed back, redeemed points
+# restored). STORE_MANAGER / ADMIN / SUPERADMIN only: that IS the manager's approval the
+# refund rule demands, and cancelling an order that took an advance is
+# manager-only too.
+# ponytail: un-invoiced orders paid in CASH / UPI / CARD / BANK / LOYALTY only.
+# An invoiced order needs a credit note for its invoice (GST), and a
+# store-credit / gift-voucher / EMI advance needs its instrument re-issued --
+# both are refused with a clear message until the owner rules on them.
+_ADVANCE_REFUND_ROLES = ("ADMIN", "STORE_MANAGER")  # SUPERADMIN auto-passes
+_ADVANCE_REFUND_TENDERS = _REFUND_CASH_IN + ("LOYALTY",)
+
+
+class AdvanceRefundRequest(BaseModel):
+    order_id: str
+    reason: str = Field(..., min_length=10, max_length=500)
+
+
+@router.post("/advance-refund", status_code=201)
+async def refund_advance_and_cancel(
+    body: AdvanceRefundRequest = Body(...),
+    current_user: dict = Depends(require_roles(*_ADVANCE_REFUND_ROLES)),
+):
+    """Refund the advance on a not-yet-delivered, un-invoiced order, then cancel it."""
+    db = _get_db()
+    if db is not None:
+        from .finance import check_period_locked
+        from ..utils.ist import ist_today
+
+        check_period_locked(db, ist_today())
+
+    repo = get_order_repository()
+    order = repo.find_by_id(body.order_id) if repo is not None else None
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    order_id = order.get("order_id") or body.order_id
+    store_id = order.get("store_id")
+    if not can_access_store_scoped(store_id, current_user):
+        raise HTTPException(status_code=403, detail="No access to the store this order belongs to.")
+
+    from .orders.release import CANCELLABLE_STATUSES
+
+    status = order.get("status")
+    if status not in CANCELLABLE_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"This order is {status}. Only an order not yet delivered can have "
+                "its advance refunded; use a normal return for a delivered order."
+            ),
+        )
+    if order.get("invoice_number"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"This order has tax invoice {order.get('invoice_number')}, so its "
+                "refund needs a credit note. Return the items from Returns instead."
+            ),
+        )
+    coll = _returns_coll()
+    if coll is None:
+        raise HTTPException(status_code=503, detail="Returns store unavailable - nothing was recorded.")
+    if coll.count_documents({"order_id": order_id}):
+        raise HTTPException(
+            status_code=400,
+            detail="This order already has a return against it. Ask an admin to settle it.",
+        )
+
+    # The money taken, per tender (a CREDIT leg is a pay-later promise, not money).
+    legs: Dict[str, float] = {}
+    for p in order.get("payments") or []:
+        method = canonicalize_tender(p.get("method"))
+        if method == "CREDIT":
+            continue
+        legs[method] = round(legs.get(method, 0.0) + float(p.get("amount") or 0), 2)
+    legs = {m: a for m, a in legs.items() if a > 0}
+    other = sorted(m for m in legs if m not in _ADVANCE_REFUND_TENDERS)
+    if other:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"This advance was paid partly by {', '.join(other)}, which this door "
+                "cannot give back. Nothing was recorded - ask an admin."
+            ),
+        )
+    total = round(sum(legs.values()), 2)
+    if total <= 0.01:
+        raise HTTPException(status_code=400, detail="No money was taken on this order - cancel it normally.")
+    if abs(total - float(order.get("amount_paid") or 0)) > 0.01:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The payments on this order do not add up to its amount paid, so "
+                "nothing was recorded. Ask an admin to check the order."
+            ),
+        )
+
+    # One refund per order, even under a double tap: claim the order first.
+    return_id = generate_return_id()
+    if not repo.update_if(
+        order_id, {"status": status, "advance_refund_id": None}, {"advance_refund_id": return_id}
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="This order changed or is already being refunded - reload it and check.",
+        )
+
+    refund_tenders = [{"method": m, "amount": a} for m, a in legs.items()]
+    actor_name = current_user.get("full_name", current_user.get("username", ""))
+    now = utc_now_iso()
+    doc: Dict[str, Any] = {
+        "return_id": return_id,
+        "order_id": order_id,
+        "order_number": order.get("order_number"),
+        "historical": bool(order.get("historical")),
+        "customer_id": order.get("customer_id"),
+        "customer_name": order.get("customer_name") or "",
+        "store_id": store_id,
+        "return_type": "RETURN",
+        "advance_refund": True,
+        # Nothing was handed over and no invoice was issued: no goods, no tax.
+        "items": [],
+        "returned_value": total,
+        "gross_refund": total,
+        "restocking_fee": 0.0,
+        "net_refund": total,
+        "gst_breakup": {"taxable": 0.0, "tax": 0.0},
+        "credit_note_number": None,
+        "refund_amount": total,
+        "refund_method": refund_tenders[0]["method"],
+        # Drawer truth: the Day-End readers net these legs off.
+        "refund_tenders": refund_tenders,
+        "drawer_auto_netted": True,
+        "status": "COMPLETED",
+        "reason_summary": body.reason,
+        "refund_approval_by": current_user.get("user_id"),
+        "refund_approval_by_name": actor_name,
+        "refund_approval_status": "APPROVED",
+        "created_by": current_user.get("user_id"),
+        "created_by_name": actor_name,
+        "created_at": now,
+    }
+    try:
+        coll.insert_one(dict(doc))
+    except Exception as exc:  # noqa: BLE001
+        repo.update_if(order_id, {"advance_refund_id": return_id}, {"advance_refund_id": None})
+        logger.error("[RETURNS] advance refund %s not saved: %s", return_id, exc)
+        raise HTTPException(
+            status_code=503, detail="The refund could not be saved - nothing was recorded. Try again."
+        )
+
+    try:
+        from ..dependencies import get_audit_repository
+
+        audit = get_audit_repository()
+        if audit is not None:
+            audit.create({
+                "action": "ADVANCE_REFUNDED",
+                "entity_type": "return",
+                "entity_id": return_id,
+                "store_id": store_id,
+                "user_id": current_user.get("user_id"),
+                "details": {"order_id": order_id, "refund_tenders": refund_tenders, "reason": body.reason},
+                "created_at": now,
+            })
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[RETURNS] advance refund audit skipped: %s", exc)
+
+    # Cancel through the ONE cancel door; the refund above lets it pass the
+    # money gate. A cancel failure leaves the refund standing and says so --
+    # the manager presses Cancel again (it no longer finds money held).
+    from .orders.cancel import cancel_order
+
+    cancel_error = None
+    try:
+        await cancel_order(order_id, reason=body.reason, current_user=current_user)
+    except HTTPException as exc:
+        cancel_error = exc.detail
+        logger.error("[RETURNS] advance refunded on %s but cancel failed: %s", order_id, exc.detail)
+    return {
+        "return_id": return_id,
+        "order_id": order_id,
+        "refund_amount": total,
+        "refund_tenders": refund_tenders,
+        "order_status": status if cancel_error else "CANCELLED",
+        "cancel_error": cancel_error,
+        "message": (
+            f"Refund of Rs {total:,.2f} recorded and the order cancelled."
+            if not cancel_error
+            else f"Refund of Rs {total:,.2f} recorded, but the order could not be "
+            f"cancelled: {cancel_error}. Cancel it again."
+        ),
+    }
