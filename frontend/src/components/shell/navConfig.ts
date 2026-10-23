@@ -82,7 +82,7 @@ export const NAV_GROUPS: NavGroup[] = [
       // F39: NBA daily call list — ranked customers to phone today (in-app only).
       { id: 'daily-calls', label: 'Daily Calls', to: '/customers/nba', icon: 'phone', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF'] },
       { id: 'walkouts', label: 'Walkouts', to: '/walkouts', icon: 'user', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT', 'SALES_STAFF', 'CASHIER'] },
-      { id: 'orders', label: 'Orders', to: '/orders', icon: 'receipt', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CASHIER', 'SALES_STAFF', 'OPTOMETRIST', 'WORKSHOP_STAFF'] },
+      { id: 'orders', label: 'Orders', to: '/orders', icon: 'receipt', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CASHIER', 'SALES_STAFF', 'OPTOMETRIST', 'WORKSHOP_STAFF', 'ACCOUNTANT'] },
       { id: 'estimates', label: 'Estimates', to: '/estimates', icon: 'file', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'SALES_STAFF'] },
       { id: 'returns', label: 'Returns', to: '/returns', icon: 'refresh', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_STAFF'] },
       // F27: refund-approval queue (the refund-only slice of the E4 inbox).

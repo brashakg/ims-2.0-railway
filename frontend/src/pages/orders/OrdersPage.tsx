@@ -39,6 +39,7 @@ import { OrderStatusTimeline } from '../../components/orders/OrderStatusTimeline
 import { OrderShippingCard } from '../../components/orders/OrderShippingCard';
 import { OrderTrackingQR } from '../../components/orders/OrderTrackingQR';
 import { SuperadminOrderEditModal } from '../../components/orders/SuperadminOrderEditModal';
+import { RefundAdvanceButton, canRefundAdvance } from '../../components/orders/RefundAdvanceButton';
 
 // Status configurations
 const ORDER_STATUS_CONFIG: Record<OrderStatus, { label: string; color: string; bgColor: string; icon: typeof Clock }> = {
@@ -880,6 +881,16 @@ export function OrdersPage() {
                       <CreditCard className="w-4 h-4" />
                       Collect Payment
                     </button>
+                  )}
+                  {canRefundAdvance(user) && selectedOrder.orderStatus !== 'CANCELLED' && (
+                    <RefundAdvanceButton
+                      key={selectedOrder.id}
+                      orderId={selectedOrder.id}
+                      onDone={() => {
+                        setSelectedOrder(null);
+                        loadOrders();
+                      }}
+                    />
                   )}
                 </div>
               </div>
