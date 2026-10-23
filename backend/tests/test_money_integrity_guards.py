@@ -271,7 +271,10 @@ class TestReturnsOverRefund:
                 {"quantity": 3, "taxable_value": 4500, "tax_amount": 810}
             )
         body = _ret_body(items=[_ret_line(return_qty=2)])
-        out = await returns_module.create_return(body, current_user=_cashier())
+        # Rs 3,540 is above Rs 2,000, which needs a manager (owner ruling
+        # 2026-10-23), so a store manager records it.
+        manager = {**_cashier(), "roles": ["STORE_MANAGER"]}
+        out = await returns_module.create_return(body, current_user=manager)
         assert out["return_type"] == "RETURN"
         # 2 units * 1770 per-unit billed gross = 3540.
         assert out["returned_value"] == 3540.0
