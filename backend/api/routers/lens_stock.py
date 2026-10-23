@@ -555,6 +555,18 @@ async def update_cell(
             changed[k] = v
     if not changed:
         return {"status": "no_changes", "cell": _enrich(existing)}
+    if "on_hand" in changed and changed["on_hand"] != prior_on_hand:
+        # A hand-typed stock figure is an adjustment: it says why, and taking
+        # stock DOWN is a write-off -- ADMIN / SUPERADMIN only (owner ruling
+        # 2026-08-25).
+        if not (notes or "").strip():
+            raise HTTPException(
+                status_code=400, detail="Say why the stock figure is being changed."
+            )
+        if changed["on_hand"] < prior_on_hand:
+            from .inventory._shared import refuse_write_off_unless_admin
+
+            refuse_write_off_unless_admin(current_user, "lower a lens stock figure")
     changed["last_movement_at"] = _now()
 
     try:
@@ -638,6 +650,21 @@ async def bulk_import(
         normalized_cells = validate_bulk_import_payload(matrix_in, lens_line=lens_line)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+    # Taking any cell's stock DOWN is a write-off: ADMIN / SUPERADMIN only.
+    # Checked for the WHOLE import before a single write, so a refused import
+    # changes nothing.
+    from .inventory._shared import is_write_off_admin, refuse_write_off_unless_admin
+
+    if not is_write_off_admin(current_user):
+        for cell in normalized_cells:
+            cur = coll.find_one(
+                {"lens_line_id": lens_line_id, "store_id": active_store,
+                 "sph": cell["sph"], "cyl": cell["cyl"], "add": cell["add"]},
+                {"on_hand": 1},
+            )
+            if cur and int(cell.get("on_hand") or 0) < int(cur.get("on_hand") or 0):
+                refuse_write_off_unless_admin(current_user, "lower a lens stock figure")
 
     written: List[Dict[str, Any]] = []
     failed: List[Dict[str, Any]] = []

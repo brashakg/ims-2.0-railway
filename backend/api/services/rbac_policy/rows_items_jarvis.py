@@ -251,13 +251,8 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/inventory/stock/add",
-        "allowed": [
-            "ADMIN",
-            "AREA_MANAGER",
-            "CATALOG_MANAGER",
-            "STORE_MANAGER",
-            "WORKSHOP_STAFF",
-        ],
+        # S1 review M4: minting units outside receiving is admin-only.
+        "allowed": ["ADMIN"],
     },
     {
         "method": "GET",

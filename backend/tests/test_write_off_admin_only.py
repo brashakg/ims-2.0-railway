@@ -113,3 +113,163 @@ def test_a_store_manager_cannot_adjust_stock_down(monkeypatch):
     assert out["new_quantity"] == 6
     out = _run(catalog_mod.adjust_product_inventory("P1", "L1", -2, None, ADMIN))
     assert out["new_quantity"] == 4
+
+
+# ---------------------------------------------------------------------------
+# Review round 1 (PR #1260): the remaining loss doors
+# ---------------------------------------------------------------------------
+
+
+class _MDB:
+    is_connected = True
+
+    def __init__(self, mdb):
+        self._m = mdb
+
+    def get_collection(self, name):
+        return self._m[name]
+
+    def __getattr__(self, name):
+        return self._m[name]
+
+
+@pytest.fixture
+def lens(monkeypatch):
+    from api.routers import lens_stock as ls
+
+    mdb = mongomock.MongoClient()["lens"]
+    mdb["lens_stock"].insert_one(
+        {"line_stock_id": "C1", "lens_line_id": "L1", "store_id": STORE,
+         "sph": 0.0, "cyl": 0.0, "add": None, "on_hand": 5, "reserved": 0}
+    )
+    monkeypatch.setattr(ls, "_stock_coll", lambda: mdb["lens_stock"])
+    monkeypatch.setattr(ls, "_write_audit", lambda **k: None)
+    monkeypatch.setattr(ls, "_load_lens_line", lambda lid: {"lens_line_id": lid})
+    monkeypatch.setattr(
+        ls, "validate_bulk_import_payload",
+        lambda m, lens_line: [{"sph": r["sph"], "cyl": r["cyl"], "add": r["add"],
+                               "on_hand": r["qty"]} for r in m],
+    )
+    return ls, mdb["lens_stock"]
+
+
+def test_a_store_manager_cannot_lower_a_lens_stock_figure(lens):
+    ls, coll = lens
+    with pytest.raises(HTTPException) as exc:
+        _run(ls.update_cell("C1", ls.StockCellUpdate(on_hand=3, notes="miscount"), MANAGER))
+    assert exc.value.status_code == 403
+    assert coll.find_one({"line_stock_id": "C1"})["on_hand"] == 5
+
+    with pytest.raises(HTTPException) as exc:  # raising it is allowed -- with a reason
+        _run(ls.update_cell("C1", ls.StockCellUpdate(on_hand=7), MANAGER))
+    assert exc.value.status_code == 400
+    _run(ls.update_cell("C1", ls.StockCellUpdate(on_hand=7, notes="tray found"), MANAGER))
+    assert coll.find_one({"line_stock_id": "C1"})["on_hand"] == 7
+    _run(ls.update_cell("C1", ls.StockCellUpdate(on_hand=2, notes="breakage"), ADMIN))
+    assert coll.find_one({"line_stock_id": "C1"})["on_hand"] == 2
+
+
+def test_a_lens_bulk_import_that_lowers_stock_is_refused_whole(lens):
+    ls, coll = lens
+    body = ls.BulkImportPayload(
+        store_id=STORE,
+        matrix=[{"sph": 0.0, "cyl": 0.0, "add": None, "qty": 1},
+                {"sph": 1.0, "cyl": 0.0, "add": None, "qty": 4}],
+    )
+    with pytest.raises(HTTPException) as exc:
+        _run(ls.bulk_import("L1", body, MANAGER))
+    assert exc.value.status_code == 403
+    assert coll.find_one({"line_stock_id": "C1"})["on_hand"] == 5
+    assert coll.count_documents({}) == 1, "nothing of a refused import is written"
+
+
+@pytest.fixture
+def serial_db(monkeypatch):
+    from api.routers import serial_tracking as st
+
+    mdb = mongomock.MongoClient()["ser"]
+    mdb["stock_units"].insert_one(
+        {"stock_id": "U1", "serial": "SN-1", "product_id": "P1", "store_id": STORE,
+         "status": "IN_STOCK"}
+    )
+    monkeypatch.setattr(st, "_get_db", lambda: _MDB(mdb))
+    monkeypatch.setattr(st, "_sync_online_stock", lambda *a, **k: None)
+    monkeypatch.setattr(st, "_audit", lambda *a, **k: None)
+    return st, mdb
+
+
+def test_a_manager_marks_a_serial_sold_only_on_a_real_order(serial_db):
+    st, mdb = serial_db
+    with pytest.raises(HTTPException) as exc:
+        _run(st.mark_sold("SN-1", st.MarkSoldBody(order_id="NO-SUCH"), MANAGER))
+    assert exc.value.status_code == 403
+    mdb["orders"].insert_one({"order_id": "O9", "store_id": "ST-ELSE", "status": "CONFIRMED",
+                              "items": [{"product_id": "P1"}]})
+    with pytest.raises(HTTPException):  # another shop's order is not this sale
+        _run(st.mark_sold("SN-1", st.MarkSoldBody(order_id="O9"), MANAGER))
+    mdb["orders"].insert_one({"order_id": "O1", "store_id": STORE, "status": "CONFIRMED",
+                              "items": [{"product_id": "P1"}]})
+    out = _run(st.mark_sold("SN-1", st.MarkSoldBody(order_id="O1"), MANAGER))
+    assert out["status"] == "SOLD"
+
+
+def test_a_manager_cannot_recall_or_capture_a_serial(serial_db):
+    st, mdb = serial_db
+    with pytest.raises(HTTPException) as exc:
+        _run(st.recall("SN-1", st.RecallBody(reason="batch"), MANAGER))
+    assert exc.value.status_code == 403
+    assert mdb["stock_units"].find_one({"serial": "SN-1"})["status"] == "IN_STOCK"
+    with pytest.raises(HTTPException) as exc:
+        _run(st.capture(st.CaptureBody(serial="SN-2", product_id="P1", store_id=STORE), MANAGER))
+    assert exc.value.status_code == 403
+    assert mdb["stock_units"].count_documents({"serial": "SN-2"}) == 0
+
+
+def test_the_item_ledger_sell_needs_a_real_order(monkeypatch):
+    from api.routers import item_events as ie_mod
+    from database.repositories.product_repository import StockRepository
+
+    mdb = mongomock.MongoClient()["sell"]
+    mdb["stock_units"].insert_one(
+        {"stock_id": "U1", "product_id": "P1", "store_id": STORE, "status": "AVAILABLE"}
+    )
+    monkeypatch.setattr(ie_mod, "_get_db", lambda: _MDB(mdb))
+    monkeypatch.setattr(ie_mod, "get_stock_repository", lambda: StockRepository(mdb["stock_units"]))
+    monkeypatch.setattr(ie_mod, "_pos_sell_enabled", lambda s: True)
+    with pytest.raises(HTTPException) as exc:
+        _run(ie_mod.sell_unit("U1", ie_mod.SellRequest(order_id=None), MANAGER))
+    assert exc.value.status_code == 403
+    assert mdb["stock_units"].find_one({"stock_id": "U1"})["status"] == "AVAILABLE"
+
+
+def test_a_sessionless_scan_shows_no_on_hand_to_a_manager(monkeypatch):
+    """M5: the count is blind on the server too -- the session-less lookup
+    is one request away from a counter mid-count."""
+    mdb = mongomock.MongoClient()["scan"]
+    mdb["stock_units"].insert_one(
+        {"barcode": "BV0000000001", "product_id": "P1", "store_id": STORE, "status": "AVAILABLE"}
+    )
+    mdb["products"].insert_one({"_id": "P1", "sku": "S1", "brand": "B", "model": "M"})
+    monkeypatch.setattr(inv_mod, "_get_db", lambda: _MDB(mdb))
+    req = inv_mod.BarcodeScanRequest(barcode="BV0000000001", physical_count=0)
+    out = _run(inv_mod.scan_barcode_for_count(req, None, MANAGER))
+    assert out["product_id"] == "P1"
+    assert "system_count" not in out and "variance" not in out
+    assert _run(inv_mod.scan_barcode_for_count(req, None, ADMIN))["system_count"] == 1
+
+
+def test_two_labels_differing_only_in_case_never_answer_each_others_scan():
+    """m5: the case-blind lookup let 'Ab12cd34ef' answer a scan of
+    'AB12CD34EF' (and vice versa)."""
+    from api.services.barcode import find_unit_by_code
+
+    coll = mongomock.MongoClient()["bc"]["stock_units"]
+    coll.insert_one({"stock_id": "LEGACY", "barcode": "Ab12cd34ef"})
+    coll.insert_one({"stock_id": "MINTED", "barcode": "AB12CD34EF"})
+    assert find_unit_by_code(coll, "AB12CD34EF")["stock_id"] == "MINTED"
+    assert find_unit_by_code(coll, "ab12cd34ef")["stock_id"] == "MINTED"  # typed lower = minted
+    assert find_unit_by_code(coll, "Ab12cd34ef")["stock_id"] == "LEGACY"
+    coll.delete_one({"stock_id": "MINTED"})
+    assert find_unit_by_code(coll, "ab12CD34ef")["stock_id"] == "LEGACY"  # only one fits
+    coll.insert_one({"stock_id": "LEGACY2", "barcode": "aB12CD34ef"})
+    assert find_unit_by_code(coll, "ab12cd34ef") is None, "ambiguous: refused, not guessed"

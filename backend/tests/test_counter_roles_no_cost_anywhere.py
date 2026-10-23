@@ -354,7 +354,7 @@ READS = [
     ("GET", f"/api/v1/transfers/analytics/location/{STORE}", ("total_value", "value")),
 ]
 
-# The blind count answers its own count roles only (SALES_* among the counter).
+# The /api/v1/blind-count routes were RETIRED in S1 (review M5): unmounted.
 BLIND = ("GET", "/api/v1/blind-count/BST-1", ())
 
 
@@ -471,10 +471,10 @@ def _widen_product_rule(monkeypatch, role):
 def test_widening_the_product_rule_moves_every_shop_cost_read(
     client, shop, monkeypatch, widened
 ):
-    for method, path, extra in [*READS, BLIND]:
+    for method, path, extra in READS:
         assert not _cost_keys(_get(client, widened, method, path), extra), path
     _widen_product_rule(monkeypatch, widened)
-    for method, path, extra in [*READS, BLIND]:
+    for method, path, extra in READS:
         body = _get(client, widened, method, path)
         if path.split("?")[0] in _STOCK_AT_COST:
             assert not _cost_keys(body, extra), (widened, path, body)
@@ -542,10 +542,11 @@ def test_accounts_read_a_serial_with_its_cost(client, serials, role, path):
         assert "$.order.items[0].cost_at_sale" in keys, keys
 
 
-# (path, the unit's state before, body) -- STORE_MANAGER reaches all three.
+# (path, the unit's state before, body) -- STORE_MANAGER reaches both. A
+# recall is a write-off since S1 (ADMIN / SUPERADMIN only):
+# test_write_off_admin_only.py.
 _SERIAL_WRITES = (
     ("/api/v1/serials/SN-W/mark-sold", "IN_STOCK", {"order_id": "O1"}),
-    ("/api/v1/serials/SN-W/recall", "IN_STOCK", {"reason": "batch fault"}),
     ("/api/v1/serials/SN-W/return", "SOLD", None),
 )
 
@@ -565,17 +566,12 @@ def test_a_serial_write_answers_cost_by_the_product_rule(
     assert serials.stock_units.find_one({"serial": "SN-W"})["cost_price"] == COST
 
 
-@pytest.mark.parametrize("role", ("SALES_STAFF", "SALES_CASHIER"))
-def test_counter_role_reads_a_locked_blind_count_without_cost(client, shop, role):
-    body = _get(client, role, *BLIND[:2])
-    assert body["status"] == "LOCKED" and body["items_revealed"], body
-    assert not _cost_keys(body), _cost_keys(body)
-    assert not _figures_in(body), body
-
-
-@pytest.mark.parametrize("role", ("SUPERADMIN", "ADMIN"))
-def test_accounts_read_the_blind_count_value(client, shop, role):
-    assert _cost_keys(_get(client, role, *BLIND[:2]))
+@pytest.mark.parametrize("role", ("SALES_STAFF", "ADMIN"))
+def test_the_retired_blind_count_answers_nobody(client, shop, role):
+    """S1 review M5: the unused second count system is unmounted -- it showed
+    expected figures to managers on an open count."""
+    r = client.get(BLIND[1], headers=_headers(role))
+    assert r.status_code == 404, r.text
 
 
 # ---------------------------------------------------------------------------

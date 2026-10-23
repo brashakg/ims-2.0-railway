@@ -40,6 +40,9 @@ _MGR = {
     "store_ids": [STORE],
     "active_store_id": STORE,
 }
+# Minting outside receiving (/stock/add, serial capture) and the on-hand
+# figure on a session-less count scan are admin-only since S1 (review M4/M5).
+_ADMIN = {**_MGR, "user_id": "adm-1", "roles": ["ADMIN"]}
 
 
 class _GRNRepo:
@@ -91,7 +94,7 @@ def _grn_door(monkeypatch, db, qty=3):
     return [u["barcode"] for u in stock_repo.find_many({"product_id": "FR-1"})]
 
 
-def _stock_add_door(monkeypatch, db, qty=2, user=_MGR):
+def _stock_add_door(monkeypatch, db, qty=2, user=_ADMIN):
     from api.routers import inventory as inv
 
     class _Stock:
@@ -133,7 +136,7 @@ def _serial_capture_door(monkeypatch, db, **extra):
     monkeypatch.setattr(r, "_sync_online_stock", lambda *a, **k: None)
     unit = asyncio.run(
         r.capture(
-            r.CaptureBody(serial="SN-1", product_id="P1", store_id=STORE, **extra), _MGR
+            r.CaptureBody(serial="SN-1", product_id="P1", store_id=STORE, **extra), _ADMIN
         )
     )
     return [unit["barcode"]]
@@ -257,7 +260,7 @@ def test_stock_count_scan_finds_a_unit_typed_in_lower_case(monkeypatch):
 
     out = _run(
         inv.scan_barcode_for_count(
-            inv.BarcodeScanRequest(barcode="bv0000000001", physical_count=1), None, _MGR
+            inv.BarcodeScanRequest(barcode="bv0000000001", physical_count=1), None, _ADMIN
         )
     )
     assert out["product_id"] == "P1"

@@ -396,6 +396,9 @@ async def sell_unit(
         raise HTTPException(status_code=403,
                             detail={"code": "feature_disabled",
                                     "message": "E3 POS sell flag is off."})
+    from .inventory._shared import refuse_unless_real_order
+
+    refuse_unless_real_order(db, req.order_id, unit, current_user)
     ok, ev = ie.record_event_atomic(
         db,
         event_type=ie.ItemEventType.SELL,

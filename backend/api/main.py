@@ -67,7 +67,6 @@ from .routers import (
     non_adapt_router,
     serial_tracking_router,
     family_wallet_router,
-    blind_stock_take_router,
     inventory_balancing_router,
     repair_portal_router,
     roster_router,
@@ -1396,12 +1395,10 @@ app.include_router(serial_tracking_router, prefix="/api/v1/serials", tags=["Seri
 app.include_router(
     family_wallet_router, prefix="/api/v1/family-wallet", tags=["FamilyWallet"]
 )
-# Feature #15 blind stock take: own /api/v1/blind-count prefix; each route gates
-# inline (counter open/submit; manager reveal/lock/reopen/propose) + store-scopes.
-# Proposes adjustments only -- never auto-mutates on-hand.
-app.include_router(
-    blind_stock_take_router, prefix="/api/v1/blind-count", tags=["BlindStockTake"]
-)
+# RETIRED (S1 review M5): /api/v1/blind-count was a second, unused count
+# system -- no screen called it and it showed expected figures to managers on
+# an open count. The live count is /inventory/stock-count. The module
+# (routers/blind_stock_take.py) is kept, unmounted, until it is salvaged.
 # Feature #1 cross-store inventory balancing: read-only rebalancing proposals.
 # Management-only + output store-scoped; never mutates stock / executes transfers.
 app.include_router(

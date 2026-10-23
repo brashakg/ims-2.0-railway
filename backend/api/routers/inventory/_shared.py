@@ -67,10 +67,47 @@ _STOCK_MANAGER_ROLES = (
 WRITE_OFF_ROLES = ("ADMIN", "SUPERADMIN")
 
 
+def is_write_off_admin(current_user: dict) -> bool:
+    roles = {str(r).upper() for r in (current_user or {}).get("roles", []) or []}
+    return bool(roles & set(WRITE_OFF_ROLES))
+
+
+_DEAD_ORDER_STATUSES = {"CANCELLED", "CANCELED", "VOID", "VOIDED", "DRAFT"}
+
+
+def refuse_unless_real_order(db, order_id, unit: dict, current_user: dict) -> None:
+    """Marking a unit SOLD by hand takes it off the shelf. Without a real
+    order for it that is a write-off wearing a sale's clothes, so a non-admin
+    must name a live order of THIS shop that carries THIS unit's product."""
+    if is_write_off_admin(current_user):
+        return
+    order = None
+    if order_id and db is not None:
+        oid = str(order_id).strip()
+        order = db.get_collection("orders").find_one(
+            {"$or": [{"order_id": oid}, {"order_number": oid}, {"_id": oid}]}
+        )
+    ok = bool(order) and (
+        str(order.get("status") or "").strip().upper() not in _DEAD_ORDER_STATUSES
+        and order.get("store_id") == unit.get("store_id")
+        and any(
+            str(i.get("product_id") or "") == str(unit.get("product_id") or "")
+            for i in (order.get("items") or [])
+        )
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Name the live order this piece was sold on. Without one, only "
+                "an admin can take it off the books."
+            ),
+        )
+
+
 def refuse_write_off_unless_admin(current_user: dict, what: str) -> None:
     """403 unless the caller may write stock off (WRITE_OFF_ROLES)."""
-    roles = {str(r).upper() for r in (current_user or {}).get("roles", []) or []}
-    if not roles & set(WRITE_OFF_ROLES):
+    if not is_write_off_admin(current_user):
         raise HTTPException(
             status_code=403,
             detail=(

@@ -227,10 +227,14 @@ def test_every_serial_status_change_feeds_the_online_stock_writeback(monkeypatch
         lambda d, pids, sid, *, source: fired.append((tuple(pids), sid, source)),
     )
 
-    asyncio.run(r.capture(r.CaptureBody(serial="SN-9", product_id="P1", store_id="S1"), _MGR))
-    asyncio.run(r.mark_sold("SN-9", r.MarkSoldBody(order_id="ORD-9"), _MGR))
-    asyncio.run(r.capture(r.CaptureBody(serial="SN-8", product_id="P2", store_id="S1"), _MGR))
-    asyncio.run(r.recall("SN-8", r.RecallBody(reason="battery"), _MGR))
+    # capture + recall are admin-only and a hand mark-sold needs a real
+    # order or an admin since S1 (review B2/M4); the write-back rule is the
+    # same whoever drives the door.
+    adm = {**_MGR, "roles": ["ADMIN"]}
+    asyncio.run(r.capture(r.CaptureBody(serial="SN-9", product_id="P1", store_id="S1"), adm))
+    asyncio.run(r.mark_sold("SN-9", r.MarkSoldBody(order_id="ORD-9"), adm))
+    asyncio.run(r.capture(r.CaptureBody(serial="SN-8", product_id="P2", store_id="S1"), adm))
+    asyncio.run(r.recall("SN-8", r.RecallBody(reason="battery"), adm))
     asyncio.run(r.return_unit("SN-9", _MGR))
 
     assert fired == [

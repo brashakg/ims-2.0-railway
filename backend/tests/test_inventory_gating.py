@@ -47,7 +47,6 @@ def _headers(roles):
 
 # (method, path)
 WRITES = [
-    ("post", "/api/v1/inventory/stock/add"),
     ("post", "/api/v1/inventory/opening-stock/preview"),
     ("post", "/api/v1/inventory/opening-stock/commit"),
     ("post", "/api/v1/inventory/stock-count/start"),
@@ -82,6 +81,20 @@ class TestInventoryWriteGating:
     @pytest.mark.parametrize("method,path", WRITES)
     def test_superadmin_allowed(self, client, auth_headers, method, path):
         resp = getattr(client, method)(path, headers=auth_headers)
+        assert resp.status_code != 403
+
+
+class TestMintingOutsideReceivingIsAdminOnly:
+    """S1 review M4: /inventory/stock/add mints units outside receiving --
+    a way to paper over a missing piece. ADMIN / SUPERADMIN only."""
+
+    @pytest.mark.parametrize("roles", [*BLOCKED_ROLES, *ALLOWED_ROLES])
+    def test_non_admins_blocked(self, client, roles):
+        resp = client.post("/api/v1/inventory/stock/add", headers=_headers(roles))
+        assert resp.status_code == 403
+
+    def test_superadmin_allowed(self, client, auth_headers):
+        resp = client.post("/api/v1/inventory/stock/add", headers=auth_headers)
         assert resp.status_code != 403
 
 

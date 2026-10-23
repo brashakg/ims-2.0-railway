@@ -87,7 +87,7 @@ async def scan_barcode_for_count(
         # unknown code: its product and on-hand are that shop's (audit
         # 2026-10-18); admins reach every shop.
         stock = in_reach_or_404(
-            stock_coll.find_one(barcode_svc.unit_barcode_match(request.barcode)),
+            barcode_svc.find_unit_by_code(stock_coll, request.barcode),
             current_user,
             "Barcode not found",
         )
@@ -169,6 +169,23 @@ async def scan_barcode_for_count(
         # recorded), same information as the inventory dashboard.
         physical = int(request.physical_count or 0)
         variance = physical - system_count
+
+        # BLIND COUNT, server side (S1 review M5): this door is one request
+        # away from a counter mid-count, so the on-hand figure and the
+        # variance go to the admins only. Everyone else gets "found".
+        from ._shared import is_write_off_admin
+
+        if not is_write_off_admin(current_user):
+            return {
+                "barcode": request.barcode,
+                "product_id": product_id,
+                "product_name": product_name,
+                "sku": sku,
+                "notes": request.notes,
+                "count_id": None,
+                "recorded": False,
+                "items_counted": None,
+            }
 
         return {
             "barcode": request.barcode,

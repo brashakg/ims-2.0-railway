@@ -82,16 +82,36 @@ def mint_unit_barcode(db, store_id: Optional[str]) -> str:
 def unit_barcode_match(code: Optional[str]) -> dict:
     """THE stock_units filter for a scanned or typed unit code.
 
-    Every minted unit code is upper case, but a hand-typed one may not be
-    ('bv0000000001', or 'Bv0000000001' from a tablet that capitalises the first
-    letter), and a legacy code may be mixed case (serial capture used to store
-    any caller-supplied label verbatim, e.g. 'Ab12cd34ef'). So the whole code
-    matches exactly, ignoring letter case. A blank code (' ' scanned or typed)
-    matches nothing: '^$' would hit any unit stored with barcode ''.
+    EXACT match on the stored code, never a pattern (S1 review m5): a
+    case-insensitive regex let 'AB12CD34' and 'ab12cd34' -- two different
+    stored labels -- answer the same scan, so a count could tick off the wrong
+    piece. Every minted code is upper case, so a code typed in lower case (a
+    tablet keyboard) is upper-cased to find its unit; the code exactly as typed
+    is also tried, for a legacy mixed-case label stored verbatim. A blank code
+    matches nothing. (There is NO unique index on stock_units.barcode; the one
+    minter is what keeps codes unique.)
     """
     raw = str(code or "").strip()
     if not raw:
         return {"barcode": {"$in": []}}
-    # ponytail: a case-insensitive regex cannot seek an index; fine while
-    # stock_units is small, add a collation index if lookups slow down.
     return {"barcode": {"$regex": "^" + re.escape(raw) + "$", "$options": "i"}}
+
+
+def find_unit_by_code(stock_units, code: Optional[str]) -> Optional[dict]:
+    """The ONE unit a scanned or typed code names (S1 review m5).
+
+    The code exactly as stored first, then its upper-case form (every minted
+    code is upper case). Only if neither exists is letter case ignored -- for
+    a legacy mixed-case label typed differently -- and then only when exactly
+    ONE stored code matches: two labels differing only in case are refused
+    (None), never silently swapped for each other.
+    """
+    raw = str(code or "").strip()
+    if not raw:
+        return None
+    for candidate in dict.fromkeys((raw, raw.upper())):
+        unit = stock_units.find_one({"barcode": candidate})
+        if unit:
+            return unit
+    hits = list(stock_units.find(unit_barcode_match(raw)).limit(2))
+    return hits[0] if len(hits) == 1 else None
