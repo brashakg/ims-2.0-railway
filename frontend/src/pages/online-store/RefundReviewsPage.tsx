@@ -175,6 +175,8 @@ export default function RefundReviewsPage() {
             stock_in_task?: string | null;
             stock_in_store_id?: string | null;
             historical?: boolean;
+            /** Why the customer got this much store credit (never more than was paid). */
+            store_credit_reason?: string | null;
           };
           // An idempotent re-confirm returns {status:'duplicate'} with NO
           // restock_applied key. Reading that as `false` would pin the red
@@ -185,28 +187,33 @@ export default function RefundReviewsPage() {
             await load();
             return;
           }
+          // The store-credit outcome rides on every "posted" message: a never-paid
+          // order gets none, and the accountant must see that, not assume it.
+          const posted = `Credit note posted.${
+            result.store_credit_reason ? ` ${result.store_credit_reason}` : ''
+          }`;
           const landed =
             result.restock_store_ids && result.restock_store_ids.length > 0
               ? result.restock_store_ids.join(', ')
               : result.restock_store_id || '';
           if (result.stock_in_task) {
-            toast.success(`Credit note posted. ${stockInNote(result.stock_in_store_id)}`);
+            toast.success(`${posted} ${stockInNote(result.stock_in_store_id)}`);
           } else if (result.restock_applied && result.restock_stock_ids?.length === 0) {
             // Nothing to put back now: the goods are still with the customer.
             toast.success(
-              'Credit note posted. No stock was put back - if the goods physically come back, press Goods back.',
+              `${posted} No stock was put back - if the goods physically come back, press Goods back.`,
             );
           } else if (result.restock_applied) {
             toast.success(
               landed
-                ? `Credit note posted. Stock put back at ${landed}.`
-                : 'Credit note posted and stock restocked.',
+                ? `${posted} Stock put back at ${landed}.`
+                : `${posted} Stock restocked.`,
             );
           } else if (result.historical) {
             // Owner 2026-10-01: Goods back books a historical frame and a
             // stock-in task adds it -- never "put back", never "not by hand".
             toast.warning(
-              `Credit note posted, but the returned frames are not booked yet (${
+              `${posted} The returned frames are not booked yet (${
                 result.return_id || review.review_id
               }). When they are at the shop, press Goods back on this refund: this order ` +
                 'predates IMS stock, so that adds no stock row - it raises a task for the store ' +
@@ -215,7 +222,7 @@ export default function RefundReviewsPage() {
           } else {
             const ref = result.return_id || review.review_id;
             toast.warning(
-              `Credit note posted, but the returned items were NOT put back into stock (${ref}). ` +
+              `${posted} The returned items were NOT put back into stock (${ref}). ` +
                 'A task has been raised. When the goods are at the shop, press Goods back on this ' +
                 'refund - never add them by hand as well, or they are counted twice.',
             );
@@ -310,7 +317,7 @@ export default function RefundReviewsPage() {
             {restockGaps.length} refund{restockGaps.length !== 1 ? 's' : ''}
           </p>
           <p className="text-sm text-red-900 mt-1">
-            The credit note posted and the customer is refunded, but the returned items could
+            The credit note posted (the money side is done), but the returned items could
             not be booked into any shop&apos;s stock — so they are physically with whoever
             received them and IMS has no record of them. When they are at the shop, press Goods
             back on the refund - never add them by hand as well, or they are counted twice.
@@ -472,7 +479,7 @@ export default function RefundReviewsPage() {
                   {r.note && <p className="text-xs text-gray-500 mt-1 max-w-lg">{r.note}</p>}
                   {mismatch && (
                     <p className="text-xs text-red-600 mt-1">
-                      Shopify refunded {fmtMoney(r.shopify_refunded_amount)} but the computed credit
+                      Shopify&apos;s refund is for {fmtMoney(r.shopify_refunded_amount)} but the computed credit
                       note is {fmtMoney(r.gross_refund)} — reconcile before posting.
                     </p>
                   )}

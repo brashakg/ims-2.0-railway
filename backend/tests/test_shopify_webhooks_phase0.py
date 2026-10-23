@@ -382,6 +382,10 @@ def _seed_online_order(wired, *, shopify_order_id="5001", customer_id="CUST-1"):
         "fulfillment_stores": ["BV-GANGA-01"],
         "items": [item],
         "grand_total": 1000.0,
+        # Paid at checkout: ingest always stamps the collected amount, and the
+        # refund's store credit is capped by it (never-paid -> no credit).
+        "amount_paid": 1000.0,
+        "payment_status": "PAID",
         "status": "CONFIRMED",
     }
     wired["orders"].insert_one(order)

@@ -32,10 +32,14 @@ refund). We read the amount Shopify actually refunded from the payload and, when
 it differs from the computed gross beyond a small epsilon, force the review-queue
 row to DISCREPANCY and NEVER auto-post -- an accountant reconciles.
 
-NO DOUBLE BENEFIT ON CARD REFUNDS: when the payload shows the money already went
-back via a payment gateway, the credit note is booked WITHOUT bumping the
-customer's redeemable store credit (the CDNR ledger row is still written for the
-GST reversal). Only a genuine store-credit settlement bumps the balance.
+STORE CREDIT NEVER EXCEEDS MONEY HELD (_store_credit_allowance): the GST credit
+note always reverses the whole refund, but the customer's REDEEMABLE store credit
+is only the money IMS actually collected for the order (amount_paid) and has not
+already given back -- by this refund's own Shopify transactions (card, UPI, a
+manual refund by hand, a gift card), by Shopify's whole-order refund, by an
+earlier Shopify refund or a counter return. A never-paid order (COD cancelled
+before shipping) gives zero; anything that cannot be read gives zero (fail
+closed) and the review row says why in plain words.
 
 IDEMPOTENT on the Shopify refund id (CLAIM-FIRST): the AUTO path INSERTS the
 `returns` doc stamped with the refund id (backed by a unique partial index)
@@ -66,6 +70,7 @@ PUBLIC API:
 from __future__ import annotations
 
 import logging
+import math
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -129,9 +134,9 @@ _AMOUNT_EPS = 1.0
 # legacy_restock) restocks. Absent -> defer to the refund-level `restock` flag.
 _RESTOCK_TYPES_ON = {"return", "cancel", "legacy_restock"}
 
-# Gateways that mean the money did NOT go back to an external card/UPI/wallet
-# (so a store-credit bump is legitimate). Anything else = money already returned.
-_NON_EXTERNAL_GATEWAYS = {"manual", "store_credit", "store-credit", "gift_card", "gift-card"}
+# A refund transaction in these states moved no money. Any other state (success,
+# pending) means Shopify sent -- or is sending -- that money back.
+_TXN_NO_MONEY = {"failure", "error"}
 
 
 def _norm(value: Any) -> str:
@@ -743,28 +748,102 @@ def _shopify_refunded_amount(payload: Dict[str, Any]) -> Optional[float]:
     return None
 
 
-def _is_gateway_refund(payload: Dict[str, Any]) -> bool:
-    """True when the payload shows the money already went back via a payment
-    GATEWAY (card / UPI / wallet), so IMS must NOT also mint redeemable store
-    credit (double benefit). A `manual` / `store_credit` / `gift_card` gateway is
-    an internal settlement, not external money -> False."""
-    if not isinstance(payload, dict):
-        return False
-    txns = payload.get("transactions")
-    if not isinstance(txns, list):
-        return False
-    for t in txns:
-        if not isinstance(t, dict):
-            continue
-        if _norm(t.get("kind")).lower() != "refund":
-            continue
-        status = _norm(t.get("status")).lower()
-        if status and status != "success":
-            continue
-        gateway = _norm(t.get("gateway")).lower()
-        if gateway and gateway not in _NON_EXTERNAL_GATEWAYS:
-            return True
-    return False
+def _money_back_on_shopify(payload: Dict[str, Any]) -> float:
+    """The money THIS refund already sent back outside IMS store credit: every
+    refund transaction Shopify reports that did not fail, on ANY gateway -- a
+    card / UPI gateway, a "manual" refund paid by hand, a gift card. No
+    transactions = no money moved (Shopify recorded the refund only)."""
+    total = 0.0
+    txns = payload.get("transactions") if isinstance(payload, dict) else None
+    for t in txns if isinstance(txns, list) else []:
+        if (isinstance(t, dict) and _norm(t.get("kind")).lower() == "refund"
+                and _norm(t.get("status")).lower() not in _TXN_NO_MONEY):
+            total += _f(t.get("amount"))
+    return round(total, 2)
+
+
+def _given_back_elsewhere(db, order_id: str, refund_id: str) -> Optional[float]:
+    """Money already given back on this order by every OTHER refund or return
+    IMS knows of: a COMPLETED counter return's net refund, and for each other
+    Shopify refund (its returns doc, else its review row -- rejected or not,
+    Shopify's money moved either way) what Shopify sent back plus the store
+    credit IMS gave for it. None when it cannot be read."""
+    total = 0.0
+    seen = {refund_id}
+    try:
+        for doc in db.get_collection(_RETURNS_COLLECTION).find({"order_id": order_id}):
+            rid = _norm(doc.get("shopify_refund_id"))
+            if rid:
+                if rid not in seen:
+                    seen.add(rid)
+                    credit = _f((doc.get("credit_entry") or {}).get("delta"))
+                    if "money_back" in doc:
+                        total += _f(doc.get("money_back")) + credit
+                    else:
+                        # A doc posted before this rule: its refunded amount may
+                        # be the line total, not money moved -- the larger of
+                        # the two, never their sum (no double count).
+                        total += max(_f(doc.get("shopify_refunded_amount")), credit)
+            elif doc.get("status") == "COMPLETED":
+                total += _f(doc.get("net_refund"))
+        for row in db.get_collection(_REVIEW_COLLECTION).find({"order_id": order_id}):
+            rid = _norm(row.get("shopify_refund_id"))
+            if rid and rid not in seen:
+                seen.add(rid)
+                cn = row.get("credit_note") or {}
+                total += _f(cn.get("money_back", cn.get("shopify_refunded_amount")))
+    except Exception:  # noqa: BLE001 -- unreadable is no answer, never "nothing"
+        logger.warning("[SHOPIFY_REFUND] earlier refunds unreadable for order=%s", order_id,
+                       exc_info=True)
+        return None
+    return round(total, 2)
+
+
+def _store_credit_allowance(
+    db, order_id: Any, refund_id: str, gross: float, money_back: Optional[float]
+) -> Tuple[Optional[float], str]:
+    """THE rule for the redeemable store credit a Shopify refund may give:
+    never more than the money the customer actually paid for the order
+    (amount_paid: the gateway and the till) less what was already given back.
+    Asked when the review row is written (to show the reviewer) and again at
+    the post (AUTO or Confirm), which books it. Fail CLOSED: (0, why) for
+    anything missing; (None, why) when a read failed just now -- the post then
+    issues nothing and the row stays open for a retry."""
+    gross = round(_f(gross), 2)
+    if money_back is None:
+        return 0.0, ("This refund was queued before IMS checked what Shopify paid back, "
+                     "so no store credit is given. Give credit by hand only if it is owed.")
+    if money_back > 0:
+        return 0.0, (f"Shopify already sent Rs {money_back:.2f} of this refund back to the "
+                     "customer (card, UPI or a manual refund), so no store credit is given.")
+    try:
+        order = db.get_collection("orders").find_one({"order_id": order_id}) if order_id else None
+    except Exception:  # noqa: BLE001
+        logger.warning("[SHOPIFY_REFUND] order unreadable for store credit order=%s", order_id,
+                       exc_info=True)
+        return None, "IMS could not read this order just now, so no store credit is given yet."
+    paid = (order or {}).get("amount_paid")
+    paid = _f(paid, float("nan")) if paid is not None else float("nan")
+    if not math.isfinite(paid):
+        return 0.0, ("IMS cannot tell how much was paid for this order, so no store credit "
+                     "is given. Check the payment and give credit by hand only if it is owed.")
+    if paid <= 0:
+        return 0.0, ("This order was never paid, so there is nothing to give back. "
+                     "No store credit is given.")
+    if _norm(order.get("payment_status")).upper() == "REFUNDED":
+        return 0.0, "Shopify shows this whole order already refunded, so no store credit is given."
+    given = _given_back_elsewhere(db, order_id, refund_id)
+    if given is None:
+        return None, ("IMS could not read this order's earlier refunds just now, so no store "
+                      "credit is given yet.")
+    held = round(paid - given, 2)
+    if held <= 0:
+        return 0.0, ("Everything paid for this order has already been given back, so no "
+                     "store credit is given.")
+    if held < gross:
+        return held, (f"Only Rs {held:.2f} of this order's payment has not been given back, "
+                      f"so the store credit is Rs {held:.2f}, not Rs {gross:.2f}.")
+    return gross, f"Rs {gross:.2f} goes to the customer as store credit."
 
 
 def _system_user(store_id: Optional[str]) -> Dict[str, Any]:
@@ -923,21 +1002,24 @@ def handle_shopify_refund(
             and abs(shopify_refunded - gross_refund) > _AMOUNT_EPS
         )
 
-        # Whether the money already went back via a payment GATEWAY (card/UPI/
-        # wallet). Computed HERE -- BEFORE the queue/discrepancy branches -- and
-        # PERSISTED in the credit_note dict so the accountant-confirm path
-        # (post_from_review reads credit_note.settled_externally) never mints
-        # redeemable store credit ON TOP of a gateway refund. Previously only the
-        # AUTO branch computed it, so a queued gateway refund confirmed by the
-        # accountant granted the customer a double benefit.
-        settled_externally = _is_gateway_refund(payload)
+        # The money this refund already sent back on Shopify (any gateway,
+        # "manual" included), PERSISTED on the credit note so the confirm asks
+        # the same store-credit rule (_store_credit_allowance) against it. The
+        # allowance here is what the reviewer is shown; the post asks again.
+        money_back = _money_back_on_shopify(payload)
+        settled_externally = money_back > 0
+        store_credit, credit_why = _store_credit_allowance(
+            db, order.get("order_id"), refund_id, gross_refund, money_back)
 
         credit_note = {
             "gross_refund": gross_refund,
             "net_refund": gross_refund,  # no online restocking fee
             "gst_breakup": gst_view,
             "shopify_refunded_amount": shopify_refunded,
+            "money_back": money_back,
             "settled_externally": settled_externally,
+            "store_credit": store_credit,
+            "store_credit_reason": credit_why,
             "lines": priced,
         }
 
@@ -958,8 +1040,9 @@ def handle_shopify_refund(
                 restock_store=restock_store,
                 status="DISCREPANCY",
                 note=(
-                    f"Shopify refunded Rs {shopify_refunded} but the computed "
-                    f"credit note is Rs {gross_refund} -- accountant must reconcile."
+                    f"Shopify's refund is for Rs {shopify_refunded} but the computed "
+                    f"credit note is Rs {gross_refund} -- accountant must reconcile. "
+                    f"{credit_why}"
                 ),
             )
 
@@ -989,23 +1072,30 @@ def handle_shopify_refund(
             or order.get("awb")
             or order.get("shopify_fulfillment_id")
         )
+        # Only a refund transaction proves Shopify sent the money back.
+        not_counter = ("never a counter return -- Shopify already refunded this money"
+                       if money_back > 0 else
+                       "never a counter return -- the money is settled on this review")
         if goods_out and not (door_cancelled or counter_returned):
             note = (
                 # A historical order is never restocked (owner 2026-10-01).
                 "Shopify cancelled units it never shipped. This order predates IMS "
                 "stock: Confirm books them and raises a task for the shop's store "
-                "manager to add the frame(s) through stock-in (never a counter "
-                "return -- Shopify already refunded this money)."
+                f"manager to add the frame(s) through stock-in ({not_counter})."
                 if _never_shipped(payload, order) and order.get("historical") else
                 "Shopify cancelled units it never shipped: they never left the "
-                "shelf, and Confirm puts them back in stock (never a counter "
-                "return -- Shopify already refunded this money)."
+                f"shelf, and Confirm puts them back in stock ({not_counter})."
                 if _never_shipped(payload, order) else
                 "Goods are with the courier or the customer: when they physically "
-                "come back, press Goods back here (never a counter return -- "
-                "Shopify already refunded this money)."
+                f"come back, press Goods back here ({not_counter})."
             )
-        if door_cancelled or counter_returned or goods_out or not _refund_auto_enabled(db):
+        note = f"{note} {credit_why}"
+        # Store credit cut below the refund with no Shopify money moved (never
+        # paid, part paid, already given back, unknown): a person sees why,
+        # even under AUTO.
+        credit_cut = not settled_externally and store_credit != gross_refund
+        if (door_cancelled or counter_returned or goods_out or credit_cut
+                or not _refund_auto_enabled(db)):
             # DEFAULT: accountant review queue. NO ledger, NO stock movement.
             # An order staff cancelled, or took a return of, in IMS is queued
             # even under AUTO: the counter may already have settled this money.
@@ -1048,10 +1138,11 @@ def handle_shopify_refund(
                 restock_store=restock_store,
                 status=queue_status,
                 note=(
-                    "AUTO restock done but the store credit could not be issued "
-                    "(no customer on the order or a ledger error) -- an accountant "
-                    "must issue the credit note manually."
-                ),
+                    "AUTO restock done but the credit note could not be issued "
+                    "(no customer on the order, a ledger error, or the order could "
+                    "not be read) -- an accountant must confirm it again. "
+                    f"{result.get('store_credit_reason') or ''}"
+                ).strip(),
             )
             result["queue_status"] = queue_status
         result.setdefault("shopify_order_id", _norm(order.get("shopify_order_id")))
@@ -1173,8 +1264,11 @@ def _post_credit_and_restock(
 
     GST: the credit note is booked UNDER THE ORIGINAL ORDER'S STORE (the online
     billing store / GSTIN, not the physical restock store) and stamped with the
-    real taxable/tax split. CARD refunds (settled_externally=True) write the CDNR
-    ledger row WITHOUT bumping the customer's redeemable store credit.
+    real taxable/tax split. The customer's redeemable store credit is the
+    allowance asked HERE, at post time (_store_credit_allowance): never more
+    than the money collected and not already given back -- a card refund, a
+    never-paid order write the CDNR row with a zero balance move. A read that
+    failed just now issues nothing (credit_failed: the row stays open).
 
     Shared by the AUTO webhook path and the accountant CONFIRM route. Fully
     fail-soft. Returns {"status": "credited"|"credit_failed"|"duplicate", ...}."""
@@ -1280,10 +1374,13 @@ def _post_credit_and_restock(
     #     A re-drive first looks for the note an earlier attempt of this return
     #     already posted (SF03: a run that died after posting it): never twice.
     credit_entry = _posted_credit(db, return_id) if prior_doc is not None else None
+    money_back = credit_note.get("money_back")
+    store_credit, credit_why = _store_credit_allowance(
+        db, order_id, refund_id, gross_refund, money_back)
     try:
         from ..routers.returns import _issue_store_credit
 
-        if credit_entry is None and customer_id and gross_refund > 0:
+        if credit_entry is None and customer_id and gross_refund > 0 and store_credit is not None:
             credit_entry = _issue_store_credit(
                 customer_id,
                 gross_refund,
@@ -1295,7 +1392,7 @@ def _post_credit_and_restock(
                 taxable=gst_view.get("taxable"),
                 tax=gst_view.get("tax"),
                 gst_rate=gst_view.get("gst_rate"),
-                bump_balance=not settled_externally,
+                balance_delta=store_credit,
                 # GSTR-1 CDNR head consistency: reverse under the SAME head the
                 # parent online order filed under (its persisted interstate
                 # flag); absent -> the CDNR state-compare fallback unchanged.
@@ -1481,6 +1578,8 @@ def _post_credit_and_restock(
         "credit_entry": credit_entry,
         "credit_note_issued": credit_ok,
         "settled_externally": bool(settled_externally),
+        "money_back": money_back,
+        "store_credit_reason": credit_why,
         "restocked": restocked,
         "restock_applied": restock_applied,
         "restock_stock_ids": stock_ids,
@@ -1536,6 +1635,9 @@ def _post_credit_and_restock(
         "gst_breakup": gst_view,
         "credit_note_issued": credit_ok,
         "settled_externally": bool(settled_externally),
+        # The redeemable part the customer got (the ledger row's balance move).
+        "store_credit": _f((credit_entry or {}).get("delta")),
+        "store_credit_reason": credit_why,
         "restock_applied": restock_applied,
         # Where the units ACTUALLY landed (None when the restock was blocked or
         # a split sent them to several shops -- see restock_store_ids).
