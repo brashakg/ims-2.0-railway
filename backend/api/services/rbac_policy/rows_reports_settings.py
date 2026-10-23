@@ -269,6 +269,14 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/returns/{return_id}/restock",
         "allowed": ["ADMIN", "CASHIER", "SALES_STAFF", "STORE_MANAGER"],
     },
+    # Refund an advance + cancel the order: manager-only (returns.py
+    # _ADVANCE_REFUND_ROLES). A subset of the returns:write union above, so
+    # it broadens no capability grant.
+    {
+        "method": "POST",
+        "path": "/api/v1/returns/advance-refund",
+        "allowed": ["ADMIN", "STORE_MANAGER"],
+    },
     # --- /api/v1/settings ---
     {"method": "GET", "path": "/api/v1/settings", "allowed": "PUBLIC"},
     {"method": "GET", "path": "/api/v1/settings/", "allowed": "PUBLIC"},

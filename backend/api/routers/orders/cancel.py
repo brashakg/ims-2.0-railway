@@ -25,6 +25,60 @@ from .release import (
 )
 
 
+# Who may cancel an order that took money (once that money is refunded).
+CANCEL_ADVANCE_ROLES = ("SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER")
+
+
+def _refuse_cancel_holding_money(order: Dict[str, Any], order_id: str, current_user: dict) -> None:
+    """A plain cancel moves NO money. An order carrying a tax invoice, or money
+    the customer paid that has not been refunded, used to cancel anyway -- the
+    advance was kept with no refund, and the returns door then refused every
+    CANCELLED order, so the money had no way back. Refuse, naming the door.
+
+    An ONLINE order is out of scope: its money was taken by Shopify and goes
+    back through the Shopify refund (Online Store > Refund reviews), not the
+    counter, so its cancel behaves exactly as before."""
+    if (
+        str(order.get("channel") or "").strip().upper() == "ONLINE"
+        or order.get("shopify_order_id")
+    ):
+        return
+    invoice = order.get("invoice_number")
+    if invoice:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"This order already has tax invoice {invoice}, so it cannot be "
+                "cancelled. Return the items from Returns instead - that issues "
+                "the credit note and the refund."
+            ),
+        )
+    try:
+        paid = float(order.get("amount_paid") or 0)
+    except (TypeError, ValueError):
+        paid = float("inf")  # unreadable -> treat as money held, never as none
+    if paid <= 0.01:
+        return  # nothing was taken: cancel exactly as before
+    from ..returns import _sum_prior_refunds
+
+    held = round(paid - _sum_prior_refunds(order_id), 2)
+    if held > 0.01:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Rs {held:,.2f} was paid on this order. Cancelling does not give "
+                "money back, so the order was not cancelled. A store manager must "
+                "use 'Refund advance and cancel' (Returns), which refunds the "
+                "customer and cancels the order in one step."
+            ),
+        )
+    if not any(r in current_user.get("roles", []) for r in CANCEL_ADVANCE_ROLES):
+        raise HTTPException(
+            status_code=403,
+            detail="Only a store manager or above can cancel an order that took an advance.",
+        )
+
+
 @router.post("/{order_id}/cancel")
 async def cancel_order(
     order_id: str,
@@ -64,6 +118,9 @@ async def cancel_order(
                     else f"Cannot cancel a {status} order"
                 ),
             )
+
+        if status != "CANCELLED":
+            _refuse_cancel_holding_money(order, order_id, current_user)
 
         # ------------------------------------------------------------------
         # ATOMIC SINGLE-SHOT CANCEL (panel must-fix 3). find_by_id + status

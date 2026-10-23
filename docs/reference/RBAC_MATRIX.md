@@ -68,10 +68,10 @@ manager gets 404).
 | Gate type | Count |
 |---|---|
 | PUBLIC (no IMS role gate) | 46 |
-| AUTHENTICATED | 394 |
-| Role-gated (one or more roles) | 867 |
-| **Total `/api/v1` (method x path)** | **1307** |
-| ...of which `store_scoped` | 236 |
+| AUTHENTICATED | 393 |
+| Role-gated (one or more roles) | 864 |
+| **Total `/api/v1` (method x path)** | **1303** |
+| ...of which `store_scoped` | 235 |
 | ...of which `self_enforced` | 47 |
 
 ## Full matrix (method x path -> policy entry)
@@ -273,6 +273,12 @@ entry exactly; see the manual interpretation notes above.
 | `GET` | `/api/v1/budgets/variance` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
 | `DELETE` | `/api/v1/budgets/{budget_id}` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
 
+### `/api/v1/buy-desk`
+
+| Method | Path | Allowed | S | E |
+|---|---|---|---|---|
+| `GET` | `/api/v1/buy-desk/rows` | ADMIN, CATALOG_MANAGER, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, SUPERADMIN |  |  |
+
 ### `/api/v1/catalog`
 
 | Method | Path | Allowed | S | E |
@@ -305,14 +311,12 @@ entry exactly; see the manual interpretation notes above.
 | `GET` | `/api/v1/catalog/products` | AUTH |  |  |
 | `POST` | `/api/v1/catalog/products` | ADMIN, CATALOG_MANAGER, SUPERADMIN |  |  |
 | `POST` | `/api/v1/catalog/products/bulk-archive` | ADMIN, SUPERADMIN |  |  |
-| `POST` | `/api/v1/catalog/products/bulk-purge` | SUPERADMIN |  |  |
 | `POST` | `/api/v1/catalog/products/bulk-restore` | ADMIN, SUPERADMIN |  |  |
 | `POST` | `/api/v1/catalog/products/bulk-sync-shopify` | ADMIN, SUPERADMIN |  |  |
 | `DELETE` | `/api/v1/catalog/products/{product_id}` | ADMIN, SUPERADMIN |  |  |
 | `GET` | `/api/v1/catalog/products/{product_id}` | AUTH |  |  |
 | `PUT` | `/api/v1/catalog/products/{product_id}` | ADMIN, CATALOG_MANAGER, SUPERADMIN |  |  |
 | `POST` | `/api/v1/catalog/products/{product_id}/inventory/adjust` | ADMIN, STORE_MANAGER, SUPERADMIN, WORKSHOP_STAFF |  |  |
-| `DELETE` | `/api/v1/catalog/products/{product_id}/permanent` | SUPERADMIN |  |  |
 | `POST` | `/api/v1/catalog/products/{product_id}/promote` | ADMIN, CATALOG_MANAGER, SUPERADMIN |  |  |
 | `POST` | `/api/v1/catalog/products/{product_id}/sync-shopify` | ADMIN, CATALOG_MANAGER, SUPERADMIN |  |  |
 | `GET` | `/api/v1/catalog/recent-activity` | AUTH |  |  |
@@ -779,7 +783,6 @@ entry exactly; see the manual interpretation notes above.
 | `POST` | `/api/v1/inventory/opening-stock/preview` | ADMIN, AREA_MANAGER, CATALOG_MANAGER, STORE_MANAGER, WORKSHOP_STAFF |  |  |
 | `GET` | `/api/v1/inventory/overstock-analysis` | AUTH |  |  |
 | `PUT` | `/api/v1/inventory/reorder-levels/{product_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN | S |  |
-| `GET` | `/api/v1/inventory/reorder-list` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, ACCOUNTANT, SUPERADMIN | S |  |
 | `GET` | `/api/v1/inventory/sell-through-analysis` | AUTH |  |  |
 | `GET` | `/api/v1/inventory/sellable` | AUTH | S |  |
 | `GET` | `/api/v1/inventory/serials` | AUTH | S |  |
@@ -1041,8 +1044,6 @@ entry exactly; see the manual interpretation notes above.
 | `POST` | `/api/v1/online-store/images/{image_id}/status` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
 | `GET` | `/api/v1/online-store/menus` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
 | `POST` | `/api/v1/online-store/menus` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
-| `GET` | `/api/v1/online-store/menus/generated` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
-| `PUT` | `/api/v1/online-store/menus/generated/{menu_id}/template` | ADMIN, SUPERADMIN |  |  |
 | `DELETE` | `/api/v1/online-store/menus/{menu_id}` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
 | `GET` | `/api/v1/online-store/menus/{menu_id}` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
 | `PUT` | `/api/v1/online-store/menus/{menu_id}` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
@@ -1099,7 +1100,7 @@ entry exactly; see the manual interpretation notes above.
 | `GET` | `/api/v1/orders/{order_id}/invoice.pdf` | AUTH |  |  |
 | `POST` | `/api/v1/orders/{order_id}/items` | AUTH |  |  |
 | `DELETE` | `/api/v1/orders/{order_id}/items/{item_id}` | AUTH |  |  |
-| `POST` | `/api/v1/orders/{order_id}/payments` | AUTH |  |  |
+| `POST` | `/api/v1/orders/{order_id}/payments` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, SALES_CASHIER, SALES_STAFF, CASHIER, OPTOMETRIST |  |  |
 | `POST` | `/api/v1/orders/{order_id}/ready` | AUTH |  |  |
 | `PUT` | `/api/v1/orders/{order_id}/superadmin-edit` | AUTH |  |  |
 | `PUT` | `/api/v1/orders/{order_id}/superadmin-invoice-change` | AUTH |  |  |
@@ -1235,7 +1236,6 @@ entry exactly; see the manual interpretation notes above.
 | `GET` | `/api/v1/products/similar` | AUTH |  |  |
 | `POST` | `/api/v1/products/sku-preview` | ADMIN, CATALOG_MANAGER |  |  |
 | `GET` | `/api/v1/products/sku/{sku}` | AUTH |  |  |
-| `POST` | `/api/v1/products/suggest-colour-name` | ADMIN, CATALOG_MANAGER |  |  |
 | `GET` | `/api/v1/products/tags/list` | AUTH |  |  |
 | `GET` | `/api/v1/products/website-verdict` | AUTH |  |  |
 | `GET` | `/api/v1/products/{product_id}` | AUTH |  |  |
@@ -1339,6 +1339,7 @@ entry exactly; see the manual interpretation notes above.
 | `POST` | `/api/v1/returns` | ADMIN, CASHIER, SALES_STAFF, STORE_MANAGER |  |  |
 | `GET` | `/api/v1/returns/` | AUTH |  |  |
 | `POST` | `/api/v1/returns/` | ADMIN, CASHIER, SALES_STAFF, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/returns/advance-refund` | ADMIN, STORE_MANAGER |  |  |
 | `POST` | `/api/v1/returns/quote` | ADMIN, CASHIER, SALES_STAFF, STORE_MANAGER |  |  |
 | `GET` | `/api/v1/returns/{return_id}` | AUTH |  |  |
 | `POST` | `/api/v1/returns/{return_id}/restock` | ADMIN, CASHIER, SALES_STAFF, STORE_MANAGER |  |  |
@@ -1620,7 +1621,6 @@ entry exactly; see the manual interpretation notes above.
 | `GET` | `/api/v1/vendors/` | AUTH |  |  |
 | `POST` | `/api/v1/vendors/` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
 | `GET` | `/api/v1/vendors/ap-aging` | ACCOUNTANT, ADMIN |  |  |
-| `GET` | `/api/v1/vendors/expense-types` | ACCOUNTANT, ADMIN |  |  |
 | `GET` | `/api/v1/vendors/goods-receipt/cockpit` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
 | `GET` | `/api/v1/vendors/grn` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
 | `POST` | `/api/v1/vendors/grn` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
@@ -1655,6 +1655,7 @@ entry exactly; see the manual interpretation notes above.
 | `POST` | `/api/v1/vendors/purchase-invoices/{invoice_id}/recon` | ACCOUNTANT, ADMIN |  |  |
 | `GET` | `/api/v1/vendors/purchase-orders` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
 | `POST` | `/api/v1/vendors/purchase-orders` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/vendors/purchase-orders/from-forecast` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
 | `GET` | `/api/v1/vendors/purchase-orders/{po_id}` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
 | `PUT` | `/api/v1/vendors/purchase-orders/{po_id}` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
 | `POST` | `/api/v1/vendors/purchase-orders/{po_id}/cancel` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
