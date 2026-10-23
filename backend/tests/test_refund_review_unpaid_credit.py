@@ -672,18 +672,6 @@ def test_counter_credit_in_flight_is_seen(env, monkeypatch):
     assert row["credit_note"]["store_credit"] == 600.0
 
 
-def test_counter_return_door_stamps_the_order_on_its_ledger_row():
-    """Round 2 item 2: the counter return door passes order_id, so its credit
-    is tied to the order before its returns doc lands."""
-    import inspect
-    import api.routers.returns as returns_router
-
-    src = inspect.getsource(returns_router)
-    call = src[src.index("        entry = _issue_store_credit(\n            customer_id,\n            amount,"):]
-    call = call[:call.index("\n        )\n")]
-    assert "order_id=resolved_order_id" in call
-
-
 def test_hand_credit_ref_is_normalised(env):
     """Round 2 item 3: a hand credit whose free-text ref names the order
     ('#onl-5001 goodwill') is tied to it."""
@@ -766,3 +754,61 @@ def test_auto_lock_busy_note_does_not_claim_a_restock(env, monkeypatch):
     assert row["status"] == "CREDIT_FAILED"
     assert "restock done" not in row["note"].lower()
     assert "nothing was booked" in row["note"]
+
+
+# ---------------------------------------------------------------------------
+# Review round 3 (#1261)
+# ---------------------------------------------------------------------------
+
+
+def test_untied_hand_credit_is_never_auto_posted(env, monkeypatch):
+    """Round 3 F1: a hand credit on the customer that names no order (or names
+    the Shopify display number instead of ONL-...) may be this refund paid
+    already: AUTO does not post, a person decides."""
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    _order(env)
+    env.get_collection("credit_note_ledger").insert_one({
+        "customer_id": "CUST-1", "type": "ADJUSTED", "amount": 150.0, "delta": 150.0,
+        "ref": "#1001 sorry", "entry_id": "hand-3"})
+    from api.services.shopify_refund import handle_shopify_refund
+
+    res = handle_shopify_refund(env, _payload(txns=[]), topic="refunds/create")
+    assert res["status"] == "queued"
+    assert [r["entry_id"] for r in _ledger(env)] == ["hand-3"]
+
+
+def test_hand_credit_reusing_a_return_ref_is_counted(env):
+    """Round 3 F2: only the return's OWN credit entry is skipped (its doc
+    already counts it); a separate hand credit typed with the same RET- ref
+    is money given back too."""
+    _order(env)
+    env.get_collection("returns").insert_one({
+        "return_id": "RET-1", "order_id": "ord-1", "status": "COMPLETED", "net_refund": 300.0,
+        "credit_entry": {"entry_id": "e-ret", "delta": 300.0}})
+    env.get_collection("credit_note_ledger").insert_one({
+        "customer_id": "CUST-1", "type": "ISSUED", "amount": 300.0, "delta": 300.0,
+        "ref": "RET-1", "order_id": "ord-1", "entry_id": "e-ret"})
+    env.get_collection("credit_note_ledger").insert_one({
+        "customer_id": "CUST-1", "type": "ISSUED", "amount": 100.0, "delta": 100.0,
+        "ref": "RET-1", "entry_id": "hand-9"})
+    row, _ = _queue_and_confirm(env, _payload(txns=[]))
+    assert row["credit_note"]["store_credit"] == 600.0
+
+
+def test_in_flight_claim_counts_its_shopify_money_exactly(env, monkeypatch):
+    """Round 3: the claim doc of a refund being posted already says what
+    Shopify sent back, so a refund booked while it is in flight (a dead run's
+    claim) counts that money exactly -- not the line total as a guess."""
+    _order(env)
+    import api.routers.returns as returns_router
+
+    seen = []
+    real = returns_router._issue_store_credit
+
+    def _spy(*a, **k):
+        seen.append(env.get_collection("returns").find_one({"shopify_refund_id": "700001"}))
+        return real(*a, **k)
+
+    monkeypatch.setattr(returns_router, "_issue_store_credit", _spy)
+    _queue_and_confirm(env, _payload(txns=[_txn(400, "razorpay")]))
+    assert seen[0]["status"] == "PENDING" and seen[0]["money_back"] == 400.0

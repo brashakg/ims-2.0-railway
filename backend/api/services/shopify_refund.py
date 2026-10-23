@@ -809,9 +809,14 @@ def _given_back_elsewhere(db, order: Dict[str, Any], refund_id: str) -> Optional
     total = shopify_back = untied = 0.0
     seen = {refund_id}
     return_ids = set()
+    doc_entries = set()
     try:
         for doc in db.get_collection(_RETURNS_COLLECTION).find({"order_id": order_id}):
             return_ids.add(_norm(doc.get("return_id")))
+            # The doc's OWN credit row is counted through the doc below.
+            own_entry = _norm((doc.get("credit_entry") or {}).get("entry_id"))
+            if own_entry:
+                doc_entries.add(own_entry)
             rid = _norm(doc.get("shopify_refund_id"))
             if rid:
                 if rid in seen:
@@ -861,7 +866,7 @@ def _given_back_elsewhere(db, order: Dict[str, Any], refund_id: str) -> Optional
                     untied += delta
             elif kind == "ADJUSTED":
                 total += delta
-            elif kind == "ISSUED" and ref not in {r.upper() for r in return_ids}:
+            elif kind == "ISSUED" and _norm(row.get("entry_id")) not in doc_entries:
                 total += delta
     except Exception:  # noqa: BLE001 -- unreadable is no answer, never "nothing"
         logger.warning("[SHOPIFY_REFUND] earlier refunds unreadable for order=%s", order_id,
@@ -949,9 +954,12 @@ def _store_credit_allowance(
     # Shopify says part of this order went back but IMS holds no record of
     # any Shopify money back on it: the refund was money-only and predates
     # money-only rows. A person checks before any credit.
-    ask = (_norm(order.get("payment_status")).upper() == "PARTIAL_REFUND"
-           and back["shopify_back"] + money_back <= 0)
-    if ask:
+    unexplained = (_norm(order.get("payment_status")).upper() == "PARTIAL_REFUND"
+                   and back["shopify_back"] + money_back <= 0)
+    # Or a hand credit on the customer that names no order: it may be this
+    # refund paid already. Either way AUTO never posts it.
+    ask = unexplained or back["untied_hand"] > 0
+    if unexplained:
         why += (" Check first: Shopify shows money of this order already refunded, but IMS "
                 "has no record of that refund, so this credit may pay the customer twice.")
     if back["untied_hand"] > 0:
@@ -1577,6 +1585,9 @@ def _post_locked(
         "net_refund": gross_refund,
         "gst_breakup": gst_view,
         "shopify_refunded_amount": credit_note.get("shopify_refunded_amount"),
+        # Known now: a claim still in flight counts its Shopify money exactly
+        # (its credit row, once booked, is counted by its order_id).
+        "money_back": credit_note.get("money_back"),
         "settled_externally": bool(settled_externally),
         "status": "PENDING",
         "reason_summary": "Shopify refund",
