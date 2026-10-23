@@ -198,7 +198,7 @@ describe('#10 Receive goods: on All stores each receipt names the shop it was bo
     fireEvent.click(await screen.findByRole('button', { name: /Receipt history/ }));
     expect(await shopOf(await screen.findByText('GRN-1'), '.card')).toBe('For Better Vision Dhanbad');
     expect(await shopOf(screen.getByText('GRN-2'), '.card')).toBe('For WizOpt Pune');
-    fireEvent.click(screen.getByLabelText(/Only with problems/));
+    fireEvent.click(screen.getByLabelText(/Only with damaged or rejected pieces/));
     expect(screen.queryByText('GRN-1')).toBeNull();
     expect(await shopOf(await screen.findByText('GRN-2'), '.card')).toBe('For WizOpt Pune');
   });
@@ -236,8 +236,8 @@ describe('#12 Receive goods: a problems-only view over the newest page says it c
     open(<ReceiveGoods />);
     fireEvent.click(await screen.findByRole('button', { name: /Receipt history/ }));
     await screen.findByText('GRN-1');
-    fireEvent.click(screen.getByLabelText(/Only with problems/));
-    expect(screen.getByText('No receipts with problems in the latest 50 receipts.')).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText(/Only with damaged or rejected pieces/));
+    expect(screen.getByText('No receipts with damaged or rejected pieces in the latest 50 receipts.')).toBeInTheDocument();
   });
 });
 

@@ -48,6 +48,8 @@ export function ReceiveGoods() {
   const { data: stores } = useStores();
 
   const [orders, setOrders] = useState<CandidatePO[] | null>(null);
+  // A failed read is never "no deliveries waiting".
+  const [ordersFailed, setOrdersFailed] = useState(false);
   const [form, setForm] = useState<{ po: CandidatePO | null; kind: ReceiveKind; n: number } | null>(null);
   const [view, setView] = useState<'deliveries' | 'history'>('deliveries');
   const [refreshKey, setRefreshKey] = useState(0);
@@ -57,6 +59,7 @@ export function ReceiveGoods() {
   // Every order a receipt can be logged against, filtered by the server
   // before it pages (an old cancel-closed order never hides behind 50 drafts).
   const loadOrders = useCallback(async () => {
+    setOrdersFailed(false);
     try {
       const res = await vendorsApi.getPurchaseOrders({ ...(storeId ? { store_id: storeId } : {}), receipt_candidates: true });
       const raw = Array.isArray(res?.purchase_orders) ? (res.purchase_orders as Array<Record<string, unknown>>) : [];
@@ -65,7 +68,7 @@ export function ReceiveGoods() {
         raw.map(toCandidate).filter((p) => p.po_id && !seen.has(p.po_id) && !!seen.add(p.po_id)),
       );
     } catch {
-      setOrders([]);
+      setOrdersFailed(true);
     }
   }, [storeId]);
 
@@ -219,7 +222,12 @@ export function ReceiveGoods() {
               </div>
             </div>
 
-            {orders === null ? (
+            {ordersFailed ? (
+              <div className="card text-center py-8 mb-4" role="alert" style={{ color: 'var(--err)' }}>
+        <p className="text-sm">Could not load the deliveries. Nothing is known about them yet.</p>
+        <button type="button" className="btn sm mt-2" onClick={() => void loadOrders()}>Retry</button>
+      </div>
+            ) : orders === null ? (
               <div className="card text-center py-12" style={{ color: 'var(--ink-4)' }}>
                 <Loader2 className="w-6 h-6 mx-auto mb-3 animate-spin" />
                 <p className="text-sm">Checking for deliveries…</p>

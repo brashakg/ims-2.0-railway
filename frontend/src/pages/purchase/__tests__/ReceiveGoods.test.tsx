@@ -23,7 +23,9 @@ const api = vi.hoisted(() => ({
   acceptGRN: vi.fn(),
   voidGRN: vi.fn(),
   dropOverOrder: vi.fn(),
+  getVendor: vi.fn(),
 }));
+const printed = vi.hoisted(() => ({ grn: null as null | Record<string, unknown> }));
 const cockpit = vi.hoisted(() => ({ uploadDoc: vi.fn(), expressReceive: vi.fn() }));
 const products = vi.hoisted(() => ({ getProduct: vi.fn(), getProducts: vi.fn() }));
 const auth = vi.hoisted(() => ({ roles: ['STORE_MANAGER'] as string[] }));
@@ -46,7 +48,12 @@ vi.mock('../../../hooks/usePOSQueries', () => ({
 vi.mock('../../../components/labels/UnitLabelsModal', () => ({
   UnitLabelsModal: ({ grnId }: { grnId: string }) => <div>labels for {grnId}</div>,
 }));
-vi.mock('../../../components/print/GRNPrint', () => ({ GRNPrint: () => null }));
+vi.mock('../../../components/print/GRNPrint', () => ({
+  GRNPrint: ({ grn }: { grn: Record<string, unknown> }) => {
+    printed.grn = grn;
+    return null;
+  },
+}));
 vi.mock('../../../components/print/storeIdentity', () => ({ resolveStoreIdentity: vi.fn().mockResolvedValue(null) }));
 // The quick-add form has its own suite: here it only hands back the dealer.
 vi.mock('../SupplierFormModal', () => ({
@@ -55,7 +62,12 @@ vi.mock('../SupplierFormModal', () => ({
   ),
 }));
 
-import { ApiError } from '../../../services/api/client';
+import { ApiError, buildApiError } from '../../../services/api/client';
+import type { AxiosError } from 'axios';
+
+/** What the api client really rejects with, for a server answer. */
+const serverSaid = (status: number, detail: unknown) =>
+  buildApiError({ message: `Request failed with status code ${status}`, response: { status, data: { detail } } } as unknown as AxiosError<never>);
 import { ReceiveGoods } from '../ReceiveGoods';
 
 const PO = {
@@ -86,6 +98,7 @@ beforeEach(() => {
   online.value = false;
   waiting = {};
   history = [];
+  printed.grn = null;
   api.getPurchaseOrders.mockResolvedValue({ purchase_orders: [UNDATED, LATER, PO, DONE, CLOSED] });
   api.getGRNs.mockImplementation(async (p: { status?: string }) => ({ grns: p?.status ? waiting[p.status] ?? [] : history }));
   api.getVendors.mockResolvedValue({ vendors: [{ vendor_id: 'V-77', trade_name: 'Frames Wala' }] });
@@ -225,6 +238,24 @@ describe('a clean box (express)', () => {
 });
 
 describe('a damaged piece, inline on its row', () => {
+  it('"Everything arrived as ordered" after a damaged piece keeps the damage: never sellable via express', async () => {
+    await openPO();
+    fireEvent.change(screen.getByLabelText('Damaged on line 1'), { target: { value: '1' } });
+    fireEvent.change(screen.getByLabelText('What is wrong on line 1'), { target: { value: 'Broken hinge' } });
+    fireEvent.click(screen.getByLabelText('Replacement coming'));
+    fireEvent.click(screen.getByRole('button', { name: /Everything else arrived as ordered/ }));
+    expect((screen.getByLabelText('Damaged on line 1') as HTMLInputElement).value).toBe('1');
+    // The edited line is the receiver's own count: it is not ticked for him.
+    expect((screen.getByLabelText(/I counted line 1/) as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByLabelText(/I counted line 2/) as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(screen.getByLabelText(/I counted line 1/));
+    await attachBill();
+    fireEvent.click(receiveBtn());
+    await waitFor(() => expect(api.createGRN).toHaveBeenCalled());
+    expect(cockpit.expressReceive).not.toHaveBeenCalled();
+    expect(api.createGRN.mock.calls[0][0].items[0]).toMatchObject({ accepted_qty: 3, rejected_qty: 1, rejection_disposition: 'replacement' });
+  });
+
   it('asks what is wrong and replacement / credit, then posts it to quarantine with a draft debit note', async () => {
     await openPO();
     fireEvent.click(screen.getByRole('button', { name: /Everything arrived as ordered/ }));
@@ -251,7 +282,9 @@ describe('a damaged piece, inline on its row', () => {
   });
 
   it('a receipt saved but not added to stock says so and never invites a second receipt', async () => {
-    api.acceptGRN.mockRejectedValue(new Error('The stock store stopped responding.'));
+    api.acceptGRN.mockRejectedValue(
+      serverSaid(503, 'Some units were received before the stock store stopped responding. Open the receiving screen and accept it again.'),
+    );
     await openPO();
     fireEvent.click(screen.getByRole('button', { name: /Everything arrived as ordered/ }));
     fireEvent.change(screen.getByLabelText('Arrived on line 1'), { target: { value: '5' } });
@@ -260,6 +293,42 @@ describe('a damaged piece, inline on its row', () => {
     fireEvent.click(receiveBtn());
     expect(await screen.findByText(/GRN-0400 was saved but is NOT on the shelf yet/)).toBeInTheDocument();
     expect(screen.getByText(/do not receive the box again/)).toBeInTheDocument();
+    expect(screen.getByText(/stock store stopped responding/)).toBeInTheDocument();
+  });
+
+  it('a receipt whose status did not advance is shown as unfinished, with the way out', async () => {
+    api.acceptGRN.mockResolvedValue({
+      status_flip_failed: true, units_added: 4, grn_status: 'PENDING',
+      message: '4 unit(s) were received, but the receipt status could not be updated.',
+    });
+    await openPO();
+    fireEvent.change(screen.getByLabelText('Damaged on line 1'), { target: { value: '1' } });
+    fireEvent.change(screen.getByLabelText('What is wrong on line 1'), { target: { value: 'Scratched lens' } });
+    fireEvent.click(screen.getByLabelText('Credit'));
+    fireEvent.click(screen.getByRole('button', { name: /Everything else arrived as ordered/ }));
+    fireEvent.click(screen.getByLabelText(/I counted line 1/));
+    await attachBill();
+    fireEvent.click(receiveBtn());
+    expect(await screen.findByText(/GRN-0400: 4 piece\(s\) are on the shelf, but the receipt did not finish/)).toBeInTheDocument();
+    expect(screen.queryByText('Received and put on the shelf.')).toBeNull();
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: /Open receipts still waiting/ })).toBeInTheDocument();
+  });
+
+  it('a server field error (a 422 list) is read out, never "try again"', async () => {
+    api.createGRN.mockRejectedValue(
+      serverSaid(422, [{ loc: ['body', 'vendor_invoice_date'], msg: 'Value error, the bill date is after today', type: 'value_error' }]),
+    );
+    await openPO();
+    fireEvent.change(screen.getByLabelText('Damaged on line 1'), { target: { value: '1' } });
+    fireEvent.change(screen.getByLabelText('What is wrong on line 1'), { target: { value: 'Scratched lens' } });
+    fireEvent.click(screen.getByLabelText('Credit'));
+    fireEvent.click(screen.getByRole('button', { name: /Everything else arrived as ordered/ }));
+    fireEvent.click(screen.getByLabelText(/I counted line 1/));
+    await attachBill();
+    fireEvent.click(receiveBtn());
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    expect(toast.error.mock.calls[0][0]).toMatch(/the bill date is after today/);
   });
 });
 
@@ -294,6 +363,20 @@ describe('contact lenses and the scan box', () => {
 });
 
 describe('no purchase order', () => {
+  it('scanning a product not yet on the list adds it at 1, and the next scan makes 2', async () => {
+    products.getProducts.mockResolvedValue({ products: [{ product_id: 'P-FR1', name: 'Acme Aviator', gtin: '8900000000017' }] });
+    renderAt();
+    fireEvent.click(await screen.findByRole('button', { name: 'Bought without PO' }));
+    const scan = await screen.findByLabelText('Scan a barcode');
+    fireEvent.change(scan, { target: { value: '8900000000017' } });
+    fireEvent.keyDown(scan, { key: 'Enter' });
+    const arrived = (await screen.findByLabelText('Arrived on line 1')) as HTMLInputElement;
+    expect(arrived.value).toBe('1');
+    fireEvent.change(scan, { target: { value: '8900000000017' } });
+    fireEvent.keyDown(scan, { key: 'Enter' });
+    await waitFor(() => expect(arrived.value).toBe('2'));
+  });
+
   async function typeOneLine() {
     fireEvent.change(screen.getByPlaceholderText(/Search a product to add/), { target: { value: 'frame' } });
     fireEvent.click(await screen.findByText('Acme Aviator'));
@@ -308,6 +391,7 @@ describe('no purchase order', () => {
     fireEvent.change(await screen.findByLabelText(/Supplier/), { target: { value: 'V-77' } });
     await typeOneLine();
     expect(screen.queryByLabelText(/Cost on line/)).toBeNull();
+    expect(screen.getByText(/You only count\. Prices are never typed here/)).toBeInTheDocument();
     expect(screen.getByTestId('receive-problem')).toHaveTextContent(/no paper, no stock/);
     await attachBill('');
     fireEvent.click(receiveBtn());
@@ -320,10 +404,13 @@ describe('no purchase order', () => {
     expect(await screen.findByText(/Sent to accounts: a task to book this bill/)).toBeInTheDocument();
   });
 
-  it('bought without PO, by accounts: the cost per unit; a dealer not on file is added and picked', async () => {
-    auth.roles = ['ACCOUNTANT'];
+  it('bought without PO, by an admin: the cost per unit; a dealer not on file is added and picked', async () => {
+    auth.roles = ['ADMIN'];
     renderAt();
     fireEvent.click(await screen.findByRole('button', { name: 'Bought without PO' }));
+    // The sentence says what THIS person types: a cost, from the dealer's bill.
+    expect(screen.getByText(/type each item's cost per unit/)).toBeInTheDocument();
+    expect(screen.queryByText(/Prices are never typed here/)).toBeNull();
     fireEvent.click(await screen.findByRole('button', { name: /Add the dealer/ }));
     fireEvent.click(screen.getByRole('button', { name: 'save dealer' }));
     expect((screen.getByLabelText(/Supplier/) as HTMLSelectElement).value).toBe('V-NEW');
@@ -344,11 +431,40 @@ describe('no purchase order', () => {
     expect(document.querySelector('input[type="file"]')).toBeNull();
     expect(screen.getByTestId('receive-problem')).toHaveTextContent(/challan number/);
     fireEvent.change(screen.getByLabelText('Challan no. *'), { target: { value: 'DC/26/10/4' } });
+    fireEvent.change(screen.getByLabelText('Challan date'), { target: { value: '' } });
+    expect(screen.getByTestId('receive-problem')).toHaveTextContent(/challan date/);
+    fireEvent.change(screen.getByLabelText('Challan date'), { target: { value: '2026-10-20' } });
     fireEvent.click(receiveBtn());
     await waitFor(() => expect(api.createGRN).toHaveBeenCalled());
     const body = api.createGRN.mock.calls[0][0];
     expect(body).toMatchObject({ grn_subtype: 'DELIVERY_CHALLAN', vendor_id: 'V-77', dc_number: 'DC/26/10/4' });
     expect(body.attachment_file_id).toBeUndefined();
+  });
+});
+
+describe('an open order with a line already received in full', () => {
+  it('lists that line at 0, and an extra piece of it is logged (held for the manager, never express)', async () => {
+    api.getPurchaseOrders.mockResolvedValue({
+      purchase_orders: [{ ...PO, status: 'PARTIALLY_RECEIVED', items: [
+        PO.items[0], { ...PO.items[1], received_qty: 2 },
+      ] }],
+    });
+    await openPO();
+    expect(screen.getByText('Received in full')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Arrived on line 2'), { target: { value: '1' } });
+    expect(screen.getByText('1 more than ordered: held for the manager')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Everything else arrived as ordered/ }));
+    fireEvent.click(screen.getByLabelText(/I counted line 2/));
+    await attachBill();
+    expect(screen.getByText(/1 piece on lines beyond the order are held for the manager/)).toBeInTheDocument();
+    expect(screen.getByText(/4 good pieces go into stock/)).toBeInTheDocument();
+    fireEvent.click(receiveBtn());
+    await waitFor(() => expect(api.createGRN).toHaveBeenCalled());
+    expect(cockpit.expressReceive).not.toHaveBeenCalled();
+    expect(api.createGRN.mock.calls[0][0].items).toEqual([
+      expect.objectContaining({ product_id: 'P1', received_qty: 4 }),
+      expect.objectContaining({ product_id: 'P2', received_qty: 1, accepted_qty: 1 }),
+    ]);
   });
 });
 
@@ -374,14 +490,49 @@ describe('other orders', () => {
     await screen.findByText(/closed by a cancel\. Count what the vendor sent/);
     expect(screen.queryByLabelText(/Delivery challan/)).toBeNull();
     fireEvent.change(screen.getByLabelText('Arrived on line 1'), { target: { value: '2' } });
-    screen.getAllByLabelText(/I counted line/).forEach((c) => fireEvent.click(c));
-    fireEvent.click(screen.getAllByLabelText('Credit')[0]);
+    // No replacement is coming on a cancelled order: credit, chosen for him.
+    expect(screen.queryByLabelText('Replacement coming')).toBeNull();
+    expect(screen.getByText(/the order line is cancelled, so no replacement is coming/)).toBeInTheDocument();
+    // Only the line that arrived needs the tick; line 2 (nothing came) does not.
+    fireEvent.click(screen.getByLabelText(/I counted line 1/));
     await attachBill();
+    expect(receiveBtn()).toBeEnabled();
     fireEvent.click(receiveBtn());
     await waitFor(() => expect(api.createGRN).toHaveBeenCalled());
     expect(api.createGRN.mock.calls[0][0].items).toEqual([
       expect.objectContaining({ received_qty: 2, accepted_qty: 0, rejected_qty: 2, rejection_disposition: 'credit_note' }),
     ]);
+  });
+});
+
+describe('a list that failed to load says so, with Retry', () => {
+  it('the deliveries inbox', async () => {
+    api.getPurchaseOrders.mockRejectedValueOnce(new Error('down'));
+    renderAt();
+    expect(await screen.findByText(/Could not load the deliveries/)).toBeInTheDocument();
+    expect(screen.queryByText('No deliveries waiting')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByText('PO-0412')).toBeInTheDocument();
+  });
+
+  it('the receipts still waiting', async () => {
+    api.getGRNs.mockImplementation(async (p: { status?: string }) => {
+      if (p?.status) throw new Error('down');
+      return { grns: [] };
+    });
+    renderAt();
+    expect(await screen.findByText(/Could not check for receipts still waiting/)).toBeInTheDocument();
+  });
+
+  it('the receipt history', async () => {
+    api.getGRNs.mockImplementation(async (p: { status?: string }) => {
+      if (!p?.status) throw new Error('down');
+      return { grns: [] };
+    });
+    renderAt();
+    fireEvent.click(await screen.findByRole('button', { name: /Receipt history/ }));
+    expect(await screen.findByText('Could not load the receipt history.')).toBeInTheDocument();
+    expect(screen.queryByText('No goods receipts yet.')).toBeNull();
   });
 });
 
@@ -427,5 +578,20 @@ describe('receipt history', () => {
     expect(await screen.findByText('Bought without PO · Sharma Optical')).toBeInTheDocument();
     expect(screen.getByText(/1 rejected — Broken hinge/)).toBeInTheDocument();
     expect(screen.getByTitle('Print GRN')).toBeInTheDocument();
+    expect(screen.getByLabelText('Only with damaged or rejected pieces')).toBeInTheDocument();
+  });
+
+  it('the GRN print shows what the order asked for and the supplier with its GSTIN', async () => {
+    history = [
+      { grn_id: 'G2', grn_number: 'GRN-0010', po_number: 'PO-0412', vendor_id: 'V1', vendor_name: 'Safilo India', status: 'ACCEPTED',
+        created_at: '2026-10-14T11:00:00', items: [{ product_id: 'P1', ordered_qty: 4, received_qty: 3, accepted_qty: 3, rejected_qty: 0 }] },
+    ];
+    api.getVendor.mockResolvedValue({ vendor_id: 'V1', gstin: '27AAACS1234A1Z5', address: 'Andheri', city: 'Mumbai' });
+    renderAt();
+    fireEvent.click(await screen.findByRole('button', { name: /Receipt history/ }));
+    fireEvent.click(await screen.findByTitle('Print GRN'));
+    await waitFor(() => expect(printed.grn?.vendor_gstin).toBe('27AAACS1234A1Z5'));
+    expect(printed.grn).toMatchObject({ vendor_name: 'Safilo India', vendor_address: 'Andheri, Mumbai' });
+    expect((printed.grn?.items as Array<Record<string, number>>)[0]).toMatchObject({ ordered_qty: 4, received_qty: 3, variance: -1 });
   });
 });

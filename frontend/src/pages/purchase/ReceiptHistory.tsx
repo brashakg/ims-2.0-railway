@@ -17,6 +17,8 @@ import { RowShop } from './invoices/pickers';
 interface HistoryItem {
   product_id: string;
   product_name?: string;
+  /** What the order asked for, stamped on the line by the server. */
+  ordered_qty?: number;
   received_qty: number;
   accepted_qty: number;
   rejected_qty: number;
@@ -37,6 +39,8 @@ interface HistoryGRN {
   quality: 'passed' | 'failed' | 'conditional';
   received_by: string;
   store_id?: string;
+  vendor_id?: string;
+  vendor_name?: string;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -67,6 +71,8 @@ function toHistoryGRN(g: any): HistoryGRN {
     quality: rej === 0 ? 'passed' : acc === 0 ? 'failed' : 'conditional',
     received_by: g.created_by_name || g.created_by || 'Unknown',
     store_id: g.store_id,
+    vendor_id: g.vendor_id || undefined,
+    vendor_name: g.vendor_name || undefined,
   };
 }
 
@@ -79,9 +85,13 @@ export function ReceiptHistory({ storeId, refreshKey }: { storeId: string; refre
   const [problemsOnly, setProblemsOnly] = useState(false);
   const [printGrn, setPrintGrn] = useState<HistoryGRN | null>(null);
   const [identity, setIdentity] = useState<StoreIdentity | null>(null);
+  const [vendor, setVendor] = useState<{ address: string; gstin: string } | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
+    setFailed(false);
     vendorsApi
       .getGRNs({ store_id: storeId || undefined })
       .then((resp: unknown) => {
@@ -92,12 +102,31 @@ export function ReceiptHistory({ storeId, refreshKey }: { storeId: string; refre
         setTotal(matchingTotal(resp, list.length));
       })
       .catch(() => {
-        if (!cancelled) setGrns([]);
+        if (!cancelled) setFailed(true);
       });
     return () => {
       cancelled = true;
     };
-  }, [storeId, refreshKey]);
+  }, [storeId, refreshKey, attempt]);
+
+  // The supplier block of the print: the receipt names its supplier; the
+  // address and GSTIN are the supplier's own record (fail-soft: name only).
+  useEffect(() => {
+    setVendor(null);
+    if (!printGrn?.vendor_id) return;
+    let cancelled = false;
+    vendorsApi
+      .getVendor(printGrn.vendor_id)
+      .then((v: Record<string, unknown>) => {
+        if (cancelled || !v) return;
+        const address = [v.address, v.city, v.state].filter((x) => typeof x === 'string' && x.trim()).join(', ');
+        setVendor({ address, gstin: typeof v.gstin === 'string' ? v.gstin : '' });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [printGrn]);
 
   // The GRN prints the shop that RECEIVED it (on all stores the list mixes shops).
   useEffect(() => {
@@ -115,6 +144,8 @@ export function ReceiptHistory({ storeId, refreshKey }: { storeId: string; refre
     };
   }, [printGrn, storeId]);
 
+  // Rejected or damaged pieces only. A line's ordered_qty is the WHOLE
+  // order's quantity, so "short" against it would flag every split delivery.
   const problem = (g: HistoryGRN) => g.total_rejected > 0 || g.total_received !== g.total_accepted;
   const shown = problemsOnly ? grns.filter(problem) : grns;
   const sv = identity?.store;
@@ -128,19 +159,23 @@ export function ReceiptHistory({ storeId, refreshKey }: { storeId: string; refre
             grn_number: printGrn.grn_number,
             grn_date: printGrn.received_at,
             po_number: printGrn.po_number,
-            vendor_id: '',
-            vendor_name: '',
-            vendor_address: '',
-            vendor_gstin: '',
-            items: printGrn.items.map((i) => ({
-              product_id: i.product_id,
-              product_name: i.product_name ?? i.product_id,
-              hsn_code: undefined,
-              ordered_qty: i.accepted_qty + i.rejected_qty,
-              received_qty: i.received_qty,
-              variance: i.received_qty - (i.accepted_qty + i.rejected_qty),
-              remarks: i.rejection_reason,
-            })),
+            vendor_id: printGrn.vendor_id || '',
+            vendor_name: printGrn.vendor_name || '',
+            vendor_address: vendor?.address || '',
+            vendor_gstin: vendor?.gstin || '',
+            items: printGrn.items.map((i) => {
+              // No order behind the line (bought without PO): nothing was ordered to differ from.
+              const ordered = typeof i.ordered_qty === 'number' ? i.ordered_qty : i.received_qty;
+              return {
+                product_id: i.product_id,
+                product_name: i.product_name ?? i.product_id,
+                hsn_code: undefined,
+                ordered_qty: ordered,
+                received_qty: i.received_qty,
+                variance: i.received_qty - ordered,
+                remarks: i.rejection_reason,
+              };
+            }),
             quality_inspection:
               printGrn.quality === 'passed' ? 'accepted' : printGrn.quality === 'failed' ? 'rejected' : 'partially_accepted',
             inspection_remarks: undefined,
@@ -172,17 +207,22 @@ export function ReceiptHistory({ storeId, refreshKey }: { storeId: string; refre
         )}
         <label className="flex items-center gap-2 text-sm cursor-pointer" style={{ color: 'var(--ink-3)' }}>
           <input type="checkbox" checked={problemsOnly} onChange={(e) => setProblemsOnly(e.target.checked)} />
-          Only with problems (damaged or short)
+          Only with damaged or rejected pieces
         </label>
       </div>
-      {shown.length === 0 ? (
+      {failed ? (
+        <div className="card text-center py-8 mb-4" role="alert" style={{ color: 'var(--err)' }}>
+        <p className="text-sm">Could not load the receipt history.</p>
+        <button type="button" className="btn sm mt-2" onClick={() => setAttempt((n) => n + 1)}>Retry</button>
+      </div>
+      ) : shown.length === 0 ? (
         <div className="card text-center py-10" style={{ color: 'var(--ink-4)' }}>
           <FileText className="w-8 h-8 mx-auto mb-2" style={{ color: 'var(--ink-5)' }} />
           {!problemsOnly
             ? 'No goods receipts yet.'
             : grns.length < total
-              ? `No receipts with problems in the latest ${grns.length} receipts.`
-              : 'No receipts with problems.'}
+              ? `No receipts with damaged or rejected pieces in the latest ${grns.length} receipts.`
+              : 'No receipts with damaged or rejected pieces.'}
         </div>
       ) : (
         shown.map((g) => {

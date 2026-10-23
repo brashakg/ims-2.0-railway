@@ -46,6 +46,8 @@ export interface ReceiveLine {
   unitPrice?: number;
   /** A cancelled product on the order: every piece that arrives is rejected. */
   rejectOnly: boolean;
+  /** Edited by hand or by a scan: "Everything arrived as ordered" leaves it alone. */
+  touched?: boolean;
   // From the product master (fail-soft: absent until it loads).
   contactLens?: boolean;
   heldForCatalogue?: boolean;
@@ -107,9 +109,11 @@ export function newLine(p: { product_id: string; product_name: string; sku?: str
   };
 }
 
-/** The lines to count for an order. An open order lists what is still due
- *  (arrived prefilled, NOT ticked: a person counts). A fully received or
- *  cancel-closed order lists every line at 0 -- only what is extra counts. */
+/** The lines to count for an order: EVERY line. What is still due is
+ *  prefilled (NOT ticked: a person counts); a line received in full -- or
+ *  every line of a fully received / cancel-closed order -- starts at 0, so
+ *  extra pieces of it can still be logged. A cancelled line rejects
+ *  whatever arrives, and its rejection is a credit (nothing is coming). */
 export function linesFromPO(po: CandidatePO): ReceiveLine[] {
   const closed = isRejectOnlyOrder(po) || po.status === 'RECEIVED';
   const cancelled = new Set(
@@ -118,7 +122,7 @@ export function linesFromPO(po: CandidatePO): ReceiveLine[] {
       .map((it) => String(it.product_id ?? '')),
   );
   return po.items
-    .filter((it) => it.product_id && (closed || dueOf(po, it) > 0))
+    .filter((it) => it.product_id)
     .map((it, i) => {
       const pid = String(it.product_id);
       const line = newLine(
@@ -129,13 +133,14 @@ export function linesFromPO(po: CandidatePO): ReceiveLine[] {
         },
         closed ? 0 : dueOf(po, it),
       );
-      const rejectOnly = isRejectOnlyOrder(po) || (po.status === 'RECEIVED' && cancelled.has(pid));
+      const rejectOnly = isRejectOnlyOrder(po) || (cancelled.has(pid) && line.due === 0);
       return {
         ...line,
         key: `${pid}-${i}`,
         po_item_id: String(it.po_item_id ?? it.id ?? pid),
         rejectOnly,
         damageReason: rejectOnly ? 'Cancelled on the order' : '',
+        damageChoice: rejectOnly ? 'credit_note' : '',
       };
     });
 }
@@ -145,14 +150,23 @@ export const rejectedOf = (l: ReceiveLine) => (l.rejectOnly ? l.arrived : Math.m
 /** Pieces of a line that go into stock (or wait, if the line is held). */
 export const goodOf = (l: ReceiveLine) => Math.max(0, l.arrived - rejectedOf(l));
 
-/** "Everything arrived as ordered": every line as due, nothing damaged, ticked. */
+/** "Everything arrived as ordered": every line nobody has touched is filled
+ *  with what is due and ticked. A line edited by hand or by a scan -- its
+ *  count, a damaged piece -- is the receiver's own answer and is left as it
+ *  is (wiping a damaged piece would put it on the shelf). */
 export function tallyAll(lines: ReceiveLine[]): ReceiveLine[] {
-  return lines.map((l) => ({
-    ...l,
-    arrived: l.due ?? l.arrived,
-    damaged: l.rejectOnly ? l.damaged : 0,
-    counted: true,
-  }));
+  return lines.map((l) => (l.touched ? l : { ...l, arrived: l.due ?? l.arrived, counted: true }));
+}
+
+/** The server's hold arithmetic, per line (grn_accept): a line whose product
+ *  is not finished in the catalogue is held whole; else a line whose ACCEPTED
+ *  pieces go beyond what is due is held whole for the store manager. */
+export function heldWhy(l: ReceiveLine): 'catalogue' | 'over' | null {
+  const good = goodOf(l);
+  if (good === 0 || l.rejectOnly) return null;
+  if (l.heldForCatalogue) return 'catalogue';
+  if (l.due !== null && good > l.due) return 'over';
+  return null;
 }
 
 export interface LineNote {
@@ -173,14 +187,40 @@ export function lineNotes(l: ReceiveLine): LineNote[] {
   if (l.due !== null && l.arrived < l.due) {
     out.push({ text: `${l.due - l.arrived} short, stays on the order`, tone: 'warn' });
   }
-  if (l.due !== null && l.arrived > l.due) {
-    out.push({ text: `${l.arrived - l.due} more than ordered: held for the manager`, tone: 'warn' });
+  const held = heldWhy(l);
+  if (held === 'over' && l.due !== null) {
+    out.push({ text: `${goodOf(l) - l.due} more than ordered: held for the manager`, tone: 'warn' });
   }
-  if (l.heldForCatalogue && goodOf(l) > 0) {
-    out.push({ text: 'Held until catalogued', tone: 'warn' });
+  if (held === 'catalogue') out.push({ text: 'Held until catalogued', tone: 'warn' });
+  if (out.length === 0) {
+    out.push(
+      l.arrived > 0
+        ? { text: 'All good', tone: 'ok' }
+        : { text: l.due === 0 ? 'Received in full' : 'Nothing arrived', tone: 'info' },
+    );
   }
-  if (out.length === 0) out.push({ text: l.arrived > 0 ? 'All good' : 'Nothing arrived', tone: l.arrived > 0 ? 'ok' : 'info' });
   return out;
+}
+
+/** The "What happens when you press Receive" figures, by the server's own
+ *  arithmetic: a held line is held WHOLE (heldWhy), each piece counted once
+ *  -- on the shelf, held for the catalogue, held for the manager, or to
+ *  quarantine. */
+export function receiptSums(lines: ReceiveLine[]) {
+  const sent = linesToSend(lines);
+  const sum = (f: (l: ReceiveLine) => number) => sent.reduce((s, l) => s + f(l), 0);
+  const good = sum(goodOf);
+  const over = sum((l) => (heldWhy(l) === 'over' ? goodOf(l) : 0));
+  const catalogue = sum((l) => (heldWhy(l) === 'catalogue' ? goodOf(l) : 0));
+  return {
+    arrived: sum((l) => l.arrived),
+    rejected: sum(rejectedOf),
+    good,
+    over,
+    catalogue,
+    short: lines.reduce((s, l) => s + (l.due !== null ? Math.max(0, l.due - l.arrived) : 0), 0),
+    onShelf: good - over - catalogue,
+  };
 }
 
 /** Contact-lens expiry: expired or within six months is a WARNING only. */
@@ -219,6 +259,7 @@ export interface ReceiveHeader {
   vendorId: string;
   billNo: string;
   dcNumber: string;
+  dcDate: string;
   billFileId: string | null;
 }
 
@@ -235,9 +276,9 @@ export function receiveProblem(h: ReceiveHeader, lines: ReceiveLine[], rejectOnl
   if (linesToSend(lines).length === 0) {
     return rejectOnlyOrder ? 'Enter the pieces that arrived - each one is logged as rejected' : 'Enter what arrived';
   }
-  const unticked = lines.filter((l) => !l.counted).length;
-  if (unticked > 0) return `Tick "I counted this" on every line (${unticked} still unticked)`;
   const sent = linesToSend(lines);
+  const unticked = sent.filter((l) => !l.counted).length;
+  if (unticked > 0) return `Tick "I counted this" on every line that arrived (${unticked} still unticked)`;
   if (sent.some((l) => l.damaged > l.arrived)) return 'A line cannot have more damaged pieces than arrived';
   if (sent.some((l) => rejectedOf(l) > 0 && !l.damageReason.trim())) {
     return "Say what is wrong with each damaged piece - the supplier's debit note needs it";
@@ -246,6 +287,7 @@ export function receiveProblem(h: ReceiveHeader, lines: ReceiveLine[], rejectOnl
     return 'Choose "replacement coming" or "credit" for each damaged piece';
   }
   if (h.kind === 'DELIVERY_CHALLAN' && !h.dcNumber.trim()) return 'Enter the challan number';
+  if (h.kind === 'DELIVERY_CHALLAN' && !h.dcDate) return 'Enter the challan date';
   if (h.kind === 'STANDARD' && !h.billNo.trim()) return 'Enter the vendor bill number';
   if (h.kind !== 'DELIVERY_CHALLAN' && !h.billFileId) return 'Attach the bill photo or PDF - no paper, no stock';
   return null;
@@ -294,6 +336,6 @@ export function grnItems(kind: ReceiveKind, lines: ReceiveLine[], canEnterPrice:
 export function goesExpress(kind: ReceiveKind, po: CandidatePO | null, lines: ReceiveLine[]): boolean {
   if (kind !== 'STANDARD' || !po || po.status === 'RECEIVED' || isRejectOnlyOrder(po)) return false;
   return linesToSend(lines).every(
-    (l) => !l.rejectOnly && rejectedOf(l) === 0 && l.due !== null && l.arrived <= l.due && !l.heldForCatalogue,
+    (l) => !l.rejectOnly && rejectedOf(l) === 0 && l.due !== null && heldWhy(l) === null,
   );
 }

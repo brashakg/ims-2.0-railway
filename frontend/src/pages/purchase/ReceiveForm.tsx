@@ -40,6 +40,7 @@ import {
   matchScan,
   newLine,
   productFacts,
+  receiptSums,
   receiveProblem,
   rejectedOf,
   tallyAll,
@@ -197,22 +198,19 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
   const setLine = (key: string, patch: Partial<ReceiveLine>) =>
     setLines((ls) => ls.map((l) => (l.key === key ? { ...l, ...patch } : l)));
 
-  const addProduct = (p: Record<string, unknown>) => {
+  /** Adds a catalogue product as a typed line; returns its row key. */
+  const addProduct = (p: Record<string, unknown>, extra: Partial<ReceiveLine> = {}): string | null => {
     setQuery('');
     setResults([]);
     const pid = String(p.product_id ?? '');
-    if (!pid) return;
-    setLines((ls) =>
-      ls.some((l) => l.product_id === pid)
-        ? ls
-        : [
-            ...ls,
-            {
-              ...newLine({ product_id: pid, product_name: String(p.name || p.product_name || pid), sku: p.sku ? String(p.sku) : undefined }, null),
-              ...productFacts(p),
-            },
-          ],
-    );
+    if (!pid) return null;
+    const line: ReceiveLine = {
+      ...newLine({ product_id: pid, product_name: String(p.name || p.product_name || pid), sku: p.sku ? String(p.sku) : undefined }, null),
+      ...productFacts(p),
+      ...extra,
+    };
+    setLines((ls) => (ls.some((l) => l.product_id === pid) ? ls : [...ls, line]));
+    return line.key;
   };
 
   // Each scan of a barcode / GTIN adds one to its line; the first scan on a
@@ -226,7 +224,9 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
       const found = ((await productApi.getProducts({ search: code, limit: 5 }).catch(() => null))?.products ?? []) as Array<Record<string, unknown>>;
       idx = lines.findIndex((l) => found.some((p) => p.product_id === l.product_id));
       if (idx < 0 && !po && found.length === 1) {
-        addProduct(found[0]);
+        // This scan is the line's first piece: the next scan adds to it.
+        const key = addProduct(found[0], { arrived: 1, touched: true });
+        if (key) scanned.current.add(key);
         return;
       }
     }
@@ -237,7 +237,7 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
     const l = lines[idx];
     const first = !scanned.current.has(l.key);
     scanned.current.add(l.key);
-    setLine(l.key, { arrived: first ? 1 : l.arrived + 1 });
+    setLine(l.key, { arrived: first ? 1 : l.arrived + 1, touched: true });
   };
 
   const handleFile = async (file: File) => {
@@ -256,21 +256,12 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
   };
 
   const problem = receiveProblem(
-    { kind, hasOrder: !!po, vendorId, billNo, dcNumber, billFileId: upload?.file_id ?? null },
+    { kind, hasOrder: !!po, vendorId, billNo, dcNumber, dcDate, billFileId: upload?.file_id ?? null },
     lines,
     rejectOnlyOrder,
   );
 
-  const sums = useMemo(() => {
-    const sent = linesToSend(lines);
-    const arrived = sent.reduce((s, l) => s + l.arrived, 0);
-    const rejected = sent.reduce((s, l) => s + rejectedOf(l), 0);
-    const good = sent.reduce((s, l) => s + goodOf(l), 0);
-    const over = lines.reduce((s, l) => s + (l.due !== null && !l.rejectOnly ? Math.max(0, l.arrived - l.due) : 0), 0);
-    const catalogue = lines.reduce((s, l) => s + (l.heldForCatalogue ? goodOf(l) : 0), 0);
-    const short = lines.reduce((s, l) => s + (l.due !== null ? Math.max(0, l.due - l.arrived) : 0), 0);
-    return { arrived, rejected, good, over, catalogue, short, onShelf: Math.max(0, good - over - catalogue) };
-  }, [lines]);
+  const sums = useMemo(() => receiptSums(lines), [lines]);
 
   // ---- Submit ---------------------------------------------------------------
 
@@ -306,7 +297,9 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
             ? detail
             : is409
               ? 'Refused - this receipt may already exist. Check "Receipts still waiting"; do not submit it again.'
-              : 'Could not save the receipt - try again.'),
+              : err instanceof Error && err.message
+                ? err.message
+                : 'Could not save the receipt - try again.'),
         12000,
       );
     }
@@ -398,6 +391,17 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
           kind: 'blocked',
           headline: `Receipt ${grnNumber} was saved but is NOT on the shelf yet`,
           message: `${err instanceof Error ? err.message : 'Adding it to stock did not finish.'} Finish it from "Receipts still waiting" - do not receive the box again.`,
+          grnNumber,
+        });
+        return;
+      }
+      if (acc?.status_flip_failed) {
+        // Its pieces are on the shelf but the receipt did not finish: the
+        // way out is accepting it again (counted once), never a new receipt.
+        setStage({
+          kind: 'blocked',
+          headline: `Receipt ${grnNumber}: ${Number(acc.units_added ?? 0)} piece(s) are on the shelf, but the receipt did not finish`,
+          message: `${String(acc.message || '')} Press "Add to stock" on it in "Receipts still waiting" - do not receive the box again.`.trim(),
           grnNumber,
         });
         return;
@@ -543,7 +547,9 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
         </div>
         <div className="card-body space-y-4">
           <p className="text-sm" style={{ color: 'var(--ink-3)' }}>
-            You only count. Prices are never typed here: the accountant types them from the bill on the Bills page.
+            {kind === 'NO_PO' && canEnterPrice
+              ? "Count what arrived, and type each item's cost per unit (before GST) from the dealer's bill. A manager's receipt has no cost: accounts type it on the Bills page."
+              : 'You only count. Prices are never typed here: the accountant types them from the bill on the Bills page.'}
           </p>
           <div className="flex flex-wrap gap-x-5 gap-y-2" role="radiogroup" aria-label="What kind of receipt">
             {kinds.map(([k, text]) => (
@@ -651,7 +657,8 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
             </label>
             {lines.some((l) => (l.due ?? 0) > 0) && (
               <button type="button" className="btn accent" onClick={() => setLines(tallyAll)}>
-                <CheckCircle2 className="w-4 h-4" /> Everything arrived as ordered
+                <CheckCircle2 className="w-4 h-4" />
+                {lines.some((l) => l.touched) ? 'Everything else arrived as ordered' : 'Everything arrived as ordered'}
               </button>
             )}
           </div>
@@ -733,13 +740,13 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
                       </td>
                       {showDue && <td className="right mono">{l.due}</td>}
                       <td className="right">
-                        <input type="number" min={0} className="input" style={{ width: 64, textAlign: 'right' }} value={l.arrived} aria-label={`Arrived on line ${idx + 1}`} onChange={(e) => setLine(l.key, { arrived: Math.max(0, parseInt(e.target.value) || 0) })} />
+                        <input type="number" min={0} className="input" style={{ width: 64, textAlign: 'right' }} value={l.arrived} aria-label={`Arrived on line ${idx + 1}`} onChange={(e) => setLine(l.key, { arrived: Math.max(0, parseInt(e.target.value) || 0), touched: true })} />
                       </td>
                       <td className="right">
                         {l.rejectOnly ? (
                           <span className="mono" style={{ color: rej ? 'var(--err)' : 'var(--ink-4)' }}>{rej}</span>
                         ) : (
-                          <input type="number" min={0} max={l.arrived} className="input" style={{ width: 64, textAlign: 'right' }} value={l.damaged} aria-label={`Damaged on line ${idx + 1}`} onChange={(e) => setLine(l.key, { damaged: Math.max(0, parseInt(e.target.value) || 0) })} />
+                          <input type="number" min={0} max={l.arrived} className="input" style={{ width: 64, textAlign: 'right' }} value={l.damaged} aria-label={`Damaged on line ${idx + 1}`} onChange={(e) => setLine(l.key, { damaged: Math.max(0, parseInt(e.target.value) || 0), touched: true })} />
                         )}
                       </td>
                       <td className="right mono">{goodOf(l)}</td>
@@ -788,15 +795,23 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
                               aria-label={`What is wrong on line ${idx + 1}`}
                               onChange={(e) => setLine(l.key, { damageReason: e.target.value })}
                             />
-                            <span className="text-sm" style={{ color: 'var(--ink-3)' }}>From {po?.vendor_name || 'the supplier'} we want:</span>
-                            <label className="flex items-center gap-1.5 text-sm cursor-pointer">
-                              <input type="radio" name={`choice-${l.key}`} checked={l.damageChoice === 'replacement'} onChange={() => setLine(l.key, { damageChoice: 'replacement' })} />
-                              Replacement coming
-                            </label>
-                            <label className="flex items-center gap-1.5 text-sm cursor-pointer">
-                              <input type="radio" name={`choice-${l.key}`} checked={l.damageChoice === 'credit_note'} onChange={() => setLine(l.key, { damageChoice: 'credit_note' })} />
-                              Credit
-                            </label>
+                            {l.rejectOnly ? (
+                              <span className="text-sm" style={{ color: 'var(--ink-3)' }}>
+                                Credit from {po?.vendor_name || 'the supplier'}: the order line is cancelled, so no replacement is coming.
+                              </span>
+                            ) : (
+                              <>
+                              <span className="text-sm" style={{ color: 'var(--ink-3)' }}>From {po?.vendor_name || 'the supplier'} we want:</span>
+                              <label className="flex items-center gap-1.5 text-sm cursor-pointer">
+                                <input type="radio" name={`choice-${l.key}`} checked={l.damageChoice === 'replacement'} onChange={() => setLine(l.key, { damageChoice: 'replacement' })} />
+                                Replacement coming
+                              </label>
+                              <label className="flex items-center gap-1.5 text-sm cursor-pointer">
+                                <input type="radio" name={`choice-${l.key}`} checked={l.damageChoice === 'credit_note'} onChange={() => setLine(l.key, { damageChoice: 'credit_note' })} />
+                                Credit
+                              </label>
+                              </>
+                            )}
                           </div>
                           <p className="text-xs mt-1" style={{ color: 'var(--ink-3)' }}>
                             The piece goes to Quarantine (never on the shelf), and a draft debit note is made for accounts.
@@ -824,7 +839,7 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
               <li>{sums.onShelf} good piece{sums.onShelf === 1 ? '' : 's'} go into stock{lines.some((l) => l.shelf.trim()) ? ' at their shelf codes' : ''}.</li>
               {sums.rejected > 0 && <li>{sums.rejected} piece{sums.rejected === 1 ? '' : 's'} go to Quarantine; a draft debit note is made for accounts.</li>}
               {sums.short > 0 && <li>{sums.short} piece{sums.short === 1 ? '' : 's'} short stay open on the order.</li>}
-              {sums.over > 0 && <li>{sums.over} piece{sums.over === 1 ? '' : 's'} beyond the order are held for the manager.</li>}
+              {sums.over > 0 && <li>{sums.over} piece{sums.over === 1 ? '' : 's'} on lines beyond the order are held for the manager.</li>}
               {sums.catalogue > 0 && <li>{sums.catalogue} piece{sums.catalogue === 1 ? '' : 's'} wait until the catalogue team finishes the product.</li>}
               <li>
                 {kind === 'DELIVERY_CHALLAN'

@@ -39,9 +39,12 @@ export function PendingReceipts({ storeId, refreshKey, highlight, onAccepted, on
   const toast = useToast();
   const [rows, setRows] = useState<WaitingRow[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
+  // A failed read must not hide receipts that hold no stock yet.
+  const [failed, setFailed] = useState(false);
 
   const load = useCallback(async () => {
     try {
+      setFailed(false);
       const scope = { store_id: storeId || undefined };
       const [pend, part] = await Promise.all([
         vendorsApi.getGRNs({ ...scope, status: 'PENDING' }),
@@ -68,7 +71,7 @@ export function PendingReceipts({ storeId, refreshKey, highlight, onAccepted, on
         }),
       );
     } catch {
-      /* fail-soft: the panel just doesn't render */
+      setFailed(true);
     }
   }, [storeId]);
 
@@ -132,6 +135,14 @@ export function PendingReceipts({ storeId, refreshKey, highlight, onAccepted, on
     }, `Failed to void GRN ${g.grn_number}`);
   };
 
+  if (failed) {
+    return (
+      <div className="card text-center py-8 mb-4" role="alert" style={{ color: 'var(--err)' }}>
+        <p className="text-sm">Could not check for receipts still waiting to go into stock.</p>
+        <button type="button" className="btn sm mt-2" onClick={() => void load()}>Retry</button>
+      </div>
+    );
+  }
   if (rows.length === 0) return null;
 
   return (

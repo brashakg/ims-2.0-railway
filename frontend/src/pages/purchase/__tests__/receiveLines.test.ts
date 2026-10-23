@@ -9,11 +9,13 @@ import {
   expiryWarning,
   goesExpress,
   grnItems,
+  heldWhy,
   lineNotes,
   linesFromPO,
   matchScan,
   newLine,
   productFacts,
+  receiptSums,
   receiveProblem,
   tallyAll,
   toCandidate,
@@ -44,6 +46,7 @@ const header = (over: Partial<ReceiveHeader> = {}): ReceiveHeader => ({
   vendorId: '',
   billNo: 'SAF-8841',
   dcNumber: '',
+  dcDate: '2026-10-23',
   billFileId: 'F1',
   ...over,
 });
@@ -51,12 +54,28 @@ const header = (over: Partial<ReceiveHeader> = {}): ReceiveHeader => ({
 const counted = (ls: ReceiveLine[]) => ls.map((l) => ({ ...l, counted: true }));
 
 describe('lines from an order', () => {
-  it('an open order lists only what is still due, prefilled but NOT ticked', () => {
+  it('an open order lists EVERY line: what is due prefilled, NOT ticked; a line received in full at 0', () => {
     const ls = linesFromPO(order());
     expect(ls.map((l) => [l.product_id, l.due, l.arrived, l.counted])).toEqual([
       ['P1', 4, 4, false],
-      // P2 is fully received; P3 falls back to the header's received count.
+      // P2 is fully received: listed at 0, so extra pieces of it can be logged.
+      ['P2', 0, 0, false],
+      // P3 falls back to the header's received count.
       ['P3', 2, 2, false],
+    ]);
+    expect(lineNotes(ls[1]).map((n) => n.text)).toEqual(['Received in full']);
+    // An extra piece of the completed line is beyond the order: held whole.
+    expect(heldWhy({ ...ls[1], arrived: 1 })).toBe('over');
+  });
+
+  it('a cancelled line on an open order rejects what arrives, as a credit', () => {
+    const ls = linesFromPO(order({ items: [
+      { product_id: 'P1', quantity: 4, received_qty: 0 },
+      { product_id: 'P9', quantity: 1, received_qty: 1, cancelled_qty: 2, line_status: 'RECEIVED' },
+    ] }));
+    expect(ls.map((l) => [l.product_id, l.rejectOnly, l.damageChoice])).toEqual([
+      ['P1', false, ''],
+      ['P9', true, 'credit_note'],
     ]);
   });
 
@@ -80,17 +99,32 @@ describe('lines from an order', () => {
   it('an order a cancel closed: every line rejects whatever arrives', () => {
     const ls = linesFromPO(order({ status: 'CANCELLED', closed_by_cancel: true }));
     expect(ls.every((l) => l.rejectOnly && l.due === 0)).toBe(true);
-    const items = grnItems('STANDARD', counted(ls).map((l) => ({ ...l, arrived: 1, damageChoice: 'credit_note' as const })), false);
-    expect(items[0]).toMatchObject({ received_qty: 1, accepted_qty: 0, rejected_qty: 1, rejection_reason: 'Cancelled on the order' });
+    // No replacement is coming on a cancelled line: the credit is chosen for the receiver.
+    expect(ls.every((l) => l.damageChoice === 'credit_note')).toBe(true);
+    const items = grnItems('STANDARD', counted(ls).map((l) => ({ ...l, arrived: 1 })), false);
+    expect(items[0]).toMatchObject({
+      received_qty: 1, accepted_qty: 0, rejected_qty: 1, rejection_reason: 'Cancelled on the order', rejection_disposition: 'credit_note',
+    });
   });
 });
 
 describe('"Everything arrived as ordered"', () => {
-  it('fills every line with what is due, clears damage and ticks it', () => {
-    const ls = linesFromPO(order()).map((l) => ({ ...l, arrived: 1, damaged: 1 }));
+  it('fills and ticks every UNTOUCHED line with what is due', () => {
+    const ls = linesFromPO(order()).map((l) => ({ ...l, arrived: 1 }));
     expect(tallyAll(ls).map((l) => [l.arrived, l.damaged, l.counted])).toEqual([
       [4, 0, true],
+      [0, 0, true],
       [2, 0, true],
+    ]);
+  });
+
+  it('never overwrites a line the receiver edited: a damaged piece stays damaged (and off the shelf)', () => {
+    const [a, b, c] = linesFromPO(order());
+    const out = tallyAll([{ ...a, arrived: 4, damaged: 1, touched: true }, b, { ...c, arrived: 1, touched: true }]);
+    expect(out.map((l) => [l.arrived, l.damaged, l.counted])).toEqual([
+      [4, 1, false],
+      [0, 0, true],
+      [1, 0, false],
     ]);
   });
 });
@@ -101,10 +135,25 @@ describe('what each row says', () => {
     [{ arrived: 4 }, ['All good']],
     [{ arrived: 3 }, ['1 short, stays on the order']],
     [{ arrived: 5 }, ['1 more than ordered: held for the manager']],
+    // The server holds on ACCEPTED pieces: 5 arrived, 1 damaged = 4 good, within the order.
+    [{ arrived: 5, damaged: 1 }, ['1 damaged: to quarantine']],
+    // A draft is held for the catalogue first -- never counted twice as "over" too.
+    [{ arrived: 5, heldForCatalogue: true }, ['Held until catalogued']],
     [{ arrived: 4, damaged: 1 }, ['1 damaged: to quarantine']],
     [{ arrived: 4, heldForCatalogue: true }, ['Held until catalogued']],
   ])('%o -> %o', (patch, texts) => {
     expect(lineNotes({ ...base, ...patch }).map((n) => n.text)).toEqual(texts);
+  });
+});
+
+describe('"What happens when you press Receive" uses the server arithmetic', () => {
+  const [a, , c] = linesFromPO(order()).map((l) => ({ ...l, counted: true }));
+  it('5 arrived, 1 damaged, 4 due: 4 on the shelf, nothing held (holds read ACCEPTED pieces)', () => {
+    expect(receiptSums([{ ...a, arrived: 5, damaged: 1 }])).toMatchObject({ good: 4, rejected: 1, over: 0, onShelf: 4 });
+  });
+  it('a line beyond the order is held WHOLE; a draft is held for the catalogue only, never twice', () => {
+    const sums = receiptSums([{ ...a, arrived: 5 }, { ...c, arrived: 3, heldForCatalogue: true }]);
+    expect(sums).toMatchObject({ good: 8, over: 5, catalogue: 3, onShelf: 0 });
   });
 });
 
@@ -197,8 +246,9 @@ describe('what stops the Receive button', () => {
   it('a line not ticked "I counted this"', () => {
     expect(receiveProblem(header(), [{ ...ls[0], counted: false }, ls[1]], false)).toMatch(/1 still unticked/);
   });
-  it('a 0 line still has to be ticked (a person said none came)', () => {
-    expect(receiveProblem(header(), [{ ...ls[0], arrived: 0, counted: false }, ls[1]], false)).toMatch(/unticked/);
+  it('only the lines a receipt sends need the tick (a 0 line carries nothing)', () => {
+    expect(receiveProblem(header(), [{ ...ls[0], arrived: 0, counted: false }, ls[2]], false)).toBeNull();
+    expect(receiveProblem(header(), [{ ...ls[0], arrived: 1, counted: false }, ls[2]], false)).toMatch(/1 still unticked/);
   });
   it('a damaged piece needs what is wrong, then replacement or credit', () => {
     const d = { ...ls[0], damaged: 1 };
@@ -208,11 +258,13 @@ describe('what stops the Receive button', () => {
   it('no paper, no stock: the bill number and the bill photo', () => {
     expect(receiveProblem(header({ billNo: ' ' }), ls, false)).toMatch(/vendor bill number/);
     expect(receiveProblem(header({ billFileId: null }), ls, false)).toMatch(/no paper, no stock/);
-    expect(receiveProblem(header({ kind: 'NO_PO', hasOrder: false, vendorId: 'V', billNo: '', billFileId: null }), ls, false)).toMatch(/no paper/);
+    expect(receiveProblem(header({ kind: 'NO_PO', hasOrder: false, vendorId: 'V', billNo: '', billFileId: null }), ls.filter((l) => l.arrived > 0), false)).toMatch(/no paper/);
   });
   it('a challan needs its number, not a photo; with no order, a supplier', () => {
     expect(receiveProblem(header({ kind: 'DELIVERY_CHALLAN', billFileId: null }), ls, false)).toMatch(/challan number/);
     expect(receiveProblem(header({ kind: 'DELIVERY_CHALLAN', billFileId: null, dcNumber: 'DC/1' }), ls, false)).toBeNull();
+    // The server refuses a challan with no date (dc_date is required).
+    expect(receiveProblem(header({ kind: 'DELIVERY_CHALLAN', billFileId: null, dcNumber: 'DC/1', dcDate: '' }), ls, false)).toMatch(/challan date/);
     expect(receiveProblem(header({ kind: 'DELIVERY_CHALLAN', hasOrder: false, dcNumber: 'DC/1' }), ls, false)).toMatch(/Pick the supplier/);
   });
   it('nothing arrived on a cancel-closed order says so', () => {
