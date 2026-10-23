@@ -341,6 +341,35 @@ def _scoped_product_ids(
         return None
 
 
+def _on_hand_units(
+    db, store_id: str, product_ids: List[str]
+) -> Optional[Dict[str, list]]:
+    """WHICH units are on hand at this store right now, per product, read
+    exactly the way the session's opening snapshot was (`_countable_match`).
+
+    The ids come back in their stored type (the write-off conditions on them);
+    compare them as ``str``. A product with every unit gone maps to [] -- a
+    real empty shelf, which is exactly the movement worth catching. A failed
+    read is logged and returns None: no answer, never "the shelf is empty".
+    """
+    ids = [pid for pid in product_ids if pid]
+    units: Dict[str, list] = {}
+    if not ids or db is None:
+        return units
+    try:
+        rows = db.get_collection("stock_units").aggregate(
+            [{"$match": _countable_match(store_id, ids)}, _COUNTABLE_GROUP]
+        )
+        for r in rows:
+            units[str(r["_id"])] = list(r.get("units") or [])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[INVENTORY] live on-hand check failed: %s", exc)
+        return None
+    for pid in ids:
+        units.setdefault(pid, [])
+    return units
+
+
 def _on_hand_now(db, store_id: str, product_ids: List[str]):
     """Live on-hand at this store: (quantities, unit fingerprints) per product,
     taken exactly the way the session's opening snapshot was.
@@ -349,86 +378,95 @@ def _on_hand_now(db, store_id: str, product_ids: List[str]):
     the line moved at all -- see the block comment above for why a quantity
     cannot answer the second question.
     """
-    live: Dict[str, int] = {}
-    prints: Dict[str, str] = {}
-    ids = [pid for pid in product_ids if pid]
-    if not ids or db is None:
-        return live, prints
-    try:
-        rows = db.get_collection("stock_units").aggregate(
-            [{"$match": _countable_match(store_id, ids)}, _COUNTABLE_GROUP]
-        )
-        for r in rows:
-            pid = str(r["_id"])
-            live[pid] = int(r.get("qty", 0) or 0)
-            prints[pid] = _unit_fingerprint(r.get("units"))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[INVENTORY] live on-hand check failed: %s", exc)
-        return live, prints
-    # A product with every unit gone reports no group row at all -- that is a
-    # real zero (and an empty set), not "unknown", and it is exactly the
-    # movement worth catching.
-    for pid in ids:
-        live.setdefault(pid, 0)
-        prints.setdefault(pid, _unit_fingerprint([]))
+    units = _on_hand_units(db, store_id, product_ids) or {}
+    live = {pid: len(u) for pid, u in units.items()}
+    prints = {pid: _unit_fingerprint(u) for pid, u in units.items()}
     return live, prints
 
 
-def _expected_lines(db, count_doc: dict) -> List[dict]:
-    """The COUNT SHEET: every product this session expects to find, with what
-    has been counted against it so far.
-
-    The only wired door used to be the barcode scanner, so a shortage was
-    findable only while at least one unit of that style survived on the shelf.
-    If the last one has walked, so has its label -- which is exactly the case
-    a count exists to find. The sheet gives every expected line a quantity box
-    whether or not a unit is left to scan.
-    """
-    system_quantities = count_doc.get("system_quantities") or {}
-    counted = {
-        i.get("product_id"): i for i in (count_doc.get("items") or []) if i.get("product_id")
-    }
-    ids = [pid for pid in list(system_quantities.keys()) + list(counted.keys()) if pid]
+def _product_labels(db, product_ids: List[str]) -> Dict[str, tuple]:
+    """(name, sku) per product id. Products store no `name`; it is rebuilt
+    from brand + model, the convention used across the app."""
+    ids = [pid for pid in product_ids if pid]
     labels: Dict[str, tuple] = {}
-    if ids:
-        try:
-            for p in db.get_collection("products").find(
-                {"$or": [{"_id": {"$in": ids}}, {"product_id": {"$in": ids}}]},
-                {"_id": 1, "product_id": 1, "sku": 1, "brand": 1, "model": 1, "name": 1},
-            ):
-                sku = p.get("sku", "") or ""
-                name = (
-                    p.get("name")
-                    or f"{p.get('brand', '')} {p.get('model', '')}".strip()
-                    or sku
-                    or "Unknown"
-                )
-                for key in (p.get("_id"), p.get("product_id")):
-                    if key:
-                        labels[str(key)] = (name, sku)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[INVENTORY] count sheet product lookup failed: %s", exc)
+    if not ids or db is None:
+        return labels
+    try:
+        for p in db.get_collection("products").find(
+            {"$or": [{"_id": {"$in": ids}}, {"product_id": {"$in": ids}}]},
+            {"_id": 1, "product_id": 1, "sku": 1, "brand": 1, "model": 1, "name": 1},
+        ):
+            sku = p.get("sku", "") or ""
+            name = (
+                p.get("name")
+                or f"{p.get('brand', '')} {p.get('model', '')}".strip()
+                or sku
+                or "Unknown"
+            )
+            for key in (p.get("_id"), p.get("product_id")):
+                if key:
+                    labels[str(key)] = (name, sku)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[INVENTORY] count product lookup failed: %s", exc)
+    return labels
 
-    lines = []
-    for pid in dict.fromkeys(list(system_quantities.keys()) + list(counted.keys())):
-        name, sku = labels.get(pid, ("Unknown", ""))
-        line = counted.get(pid)
-        lines.append(
-            {
-                "product_id": pid,
-                "product_name": name,
-                "sku": sku,
-                "system_quantity": int(system_quantities.get(pid, 0) or 0),
-                # None means NOT COUNTED YET. A counted zero is a real answer
-                # -- the whole point of the sheet -- so the two must not be
-                # collapsed into the same falsy number.
-                "counted_quantity": (
-                    int(line.get("counted_quantity", 0) or 0) if line else None
-                ),
-                "counted_at": line.get("counted_at") if line else None,
-            }
-        )
-    lines.sort(key=lambda ln: (ln["product_name"] or "", ln["sku"] or ""))
+
+# ---------------------------------------------------------------------------
+# WHAT HAS BEEN COUNTED: scanned pieces + typed quantities, kept apart.
+#
+# Owner ruling (S1): each scan of a unit barcode ADDS ONE piece, and scanning
+# the same piece twice counts it once. A typed quantity is a separate answer
+# -- pieces of a style that have NO label to scan (0 = "none of this style
+# here"). Neither overwrites the other: a style's counted quantity is its
+# scanned pieces + its typed pieces.
+#
+# Scans live in a top-level ``scans`` array written with ONE guarded $push
+# (``scans.unit_id $ne``), so two scans landing at once can neither be lost
+# nor count the same piece twice. Typed answers live on ``items``.
+# ---------------------------------------------------------------------------
+
+
+def count_lines(count_doc: dict) -> Dict[str, dict]:
+    """Every style this session has an answer for, merged from typed lines
+    and scanned pieces. Pure.
+
+    A line written before scans existed (only ``counted_quantity``) is read
+    as a typed answer -- that is what it was.
+    """
+    lines: Dict[str, dict] = {}
+
+    def _line(pid, src):
+        return {
+            "product_id": pid,
+            "product_name": src.get("product_name", "") or "",
+            "sku": src.get("sku", "") or "",
+            "typed_quantity": None,
+            "scanned_unit_ids": [],
+            "scanned_barcodes": [],
+            "notes": src.get("notes"),
+            "counted_by": src.get("counted_by") or src.get("scanned_by"),
+            "counted_at": src.get("counted_at") or src.get("scanned_at"),
+        }
+
+    for it in count_doc.get("items") or []:
+        pid = it.get("product_id")
+        if not pid:
+            continue
+        typed = it.get("typed_quantity")
+        if typed is None and "scanned_quantity" not in it:
+            typed = it.get("counted_quantity")
+        line = lines[pid] = _line(pid, it)
+        line["typed_quantity"] = None if typed is None else int(typed)
+    for sc in count_doc.get("scans") or []:
+        pid = sc.get("product_id")
+        if not pid:
+            continue
+        line = lines.setdefault(pid, _line(pid, sc))
+        line["scanned_unit_ids"].append(str(sc.get("unit_id")))
+        line["scanned_barcodes"].append(sc.get("barcode") or "")
+    for line in lines.values():
+        line["scanned_quantity"] = len(line["scanned_unit_ids"])
+        line["counted_quantity"] = line["scanned_quantity"] + (line["typed_quantity"] or 0)
     return lines
 
 
@@ -436,24 +474,22 @@ def _withhold_expected_while_open(count_doc: dict) -> dict:
     """OWNER RULING 2026-08-25: a BLIND count is THE day-end.
 
     While a session is still ``in_progress`` its RESPONSE must not carry what
-    the books expect -- not as a column, and not in the body one devtools tab
-    away (this repo has shipped that leak twice before). Withheld here, at the
-    source, for EVERY reader of an open session: blindness is decided by
-    SESSION STATUS alone, deliberately role-blind, because a manager who is
-    also the counter would otherwise defeat the control through their own
-    screen. The moment the session leaves ``in_progress`` (complete /
-    reconcile) the expected figures and variances flow again -- that
-    comparison is the whole value of counting.
+    the books expect -- not as a column, not as a list of styles still to
+    find, and not in the body one devtools tab away (this repo has shipped
+    that leak twice before). Withheld here, at the source, for EVERY reader
+    of an open session: blindness is decided by SESSION STATUS alone,
+    deliberately role-blind, because a manager who is also the counter would
+    otherwise defeat the control through their own screen. The moment the
+    session leaves ``in_progress`` the expected figures and variances flow
+    again -- that comparison is the whole value of counting.
 
     Mutates and returns the response dict; the stored document keeps its
     snapshot untouched (callers strip AFTER persistence / on read copies).
     """
     if count_doc.get("status") != "in_progress":
         return count_doc
-    count_doc.pop("system_quantities", None)
-    count_doc.pop("system_unit_fingerprints", None)
-    for line in count_doc.get("expected_lines") or []:
-        line.pop("system_quantity", None)
+    for key in ("system_quantities", "system_unit_fingerprints", "expected_lines"):
+        count_doc.pop(key, None)
     return count_doc
 
 
@@ -475,48 +511,83 @@ def _load_open_count(db, count_id: str, current_user: dict) -> dict:
     return count_doc
 
 
-def _upsert_count_item(
-    db,
-    count_doc: dict,
-    *,
-    product_id: str,
-    product_name: str,
-    sku: str,
-    counted_quantity: int,
-    notes: Optional[str],
-    user_id: str,
-) -> int:
-    """Write one counted quantity onto the session; return the line count.
+def _refresh_items_counted(db, count_id: str) -> dict:
+    """Re-read the session and store how many styles it has an answer for.
+    Returns the fresh document."""
+    coll = db.get_collection("stock_counts")
+    doc = coll.find_one({"count_id": count_id}) or {}
+    n = len(count_lines(doc))
+    if doc.get("items_counted") != n:
+        coll.update_one({"count_id": count_id}, {"$set": {"items_counted": n}})
+        doc["items_counted"] = n
+    return doc
 
-    Re-counting the same product REPLACES its line (a recount corrects the
-    first pass, it does not add to it).
 
-    ponytail: read-modify-write of the whole `items` array, which is what the
-    original line-recording endpoint already did -- one counter per session is
-    the real-world shape. If two people ever count one session at once, move
-    to a positional `$[elem]` update.
+def _record_scan(db, count_doc: dict, *, unit: dict, product_name: str,
+                 sku: str, user_id: str) -> tuple:
+    """Add ONE scanned piece to the session. Returns (added, fresh_doc).
+
+    ``added`` is False when this exact piece was already scanned into this
+    session: a second scan of the same label counts nothing.
+    """
+    unit_id = str(unit["_id"])
+    res = db.get_collection("stock_counts").update_one(
+        {
+            "count_id": count_doc["count_id"],
+            "status": "in_progress",
+            "scans.unit_id": {"$ne": unit_id},
+        },
+        {
+            "$push": {
+                "scans": {
+                    "unit_id": unit_id,
+                    "barcode": unit.get("barcode") or "",
+                    "product_id": unit.get("product_id"),
+                    "product_name": product_name or "",
+                    "sku": sku or "",
+                    "scanned_at": utc_now_iso(),
+                    "scanned_by": user_id,
+                }
+            }
+        },
+    )
+    added = int(getattr(res, "modified_count", 0) or 0) == 1
+    return added, _refresh_items_counted(db, count_doc["count_id"])
+
+
+def _record_typed(db, count_doc: dict, *, product_id: str, product_name: str,
+                  sku: str, typed_quantity: int, notes: Optional[str],
+                  user_id: str) -> dict:
+    """Write the TYPED quantity for one style; return the fresh document.
+
+    Re-typing a style replaces its typed number (a correction of the same
+    answer). It never touches the pieces scanned for that style.
+
+    ponytail: read-modify-write of `items` -- one counter typing the odd
+    label-less style is the real-world shape. Scans (the hot path) never come
+    through here; each is one guarded $push.
     """
     items = list(count_doc.get("items", []) or [])
-    now_iso = utc_now_iso()
     line = {
         "product_id": product_id,
         "product_name": product_name or "",
         "sku": sku or "",
-        "counted_quantity": int(counted_quantity),
+        "typed_quantity": int(typed_quantity),
         "notes": notes,
-        "counted_at": now_iso,
+        "counted_at": utc_now_iso(),
         "counted_by": user_id,
     }
-
     for idx, existing in enumerate(items):
         if existing.get("product_id") == product_id:
-            items[idx] = {**existing, **line}
+            items[idx] = line
             break
     else:
         items.append(line)
 
+    fresh = {**count_doc, "items": items}
+    fresh["items_counted"] = len(count_lines(fresh))
     db.get_collection("stock_counts").update_one(
-        {"count_id": count_doc["count_id"]},
-        {"$set": {"items": items, "items_counted": len(items)}},
+        {"count_id": count_doc["count_id"], "status": "in_progress"},
+        {"$set": {"items": items, "items_counted": fresh["items_counted"]}},
     )
-    return len(items)
+    return fresh

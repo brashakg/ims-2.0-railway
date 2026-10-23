@@ -197,6 +197,28 @@ def _start(client) -> str:
     return r.json()["count_id"]
 
 
+def _scan(client, count_id: str, barcode: str):
+    """One piece through the scan door."""
+    return client.post(
+        "/inventory/stock-count-scan", json={"barcode": barcode, "count_id": count_id}
+    )
+
+
+def _type_for(client, mongo_db, count_id: str, barcode: str, n: int):
+    """Type `n` for the style this barcode belongs to (pieces with no label)."""
+    pid = mongo_db["stock_units"].find_one({"barcode": barcode})["product_id"]
+    return client.post(
+        f"/inventory/stock-count/{count_id}/items",
+        json={"product_id": pid, "counted_quantity": n},
+    )
+
+
+def _complete(client, count_id: str) -> dict:
+    r = client.post(f"/inventory/stock-count/{count_id}/complete", json={})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
 # ============================================================================
 # 1. THE LIE: completing a count where nothing was recorded
 # ============================================================================
@@ -230,84 +252,147 @@ def test_an_empty_count_stays_open_after_the_refusal(admin_client, mongo_db):
 
 
 # ============================================================================
-# 2. THE MISSING STEP: a counted quantity is actually written onto the session
+# 2. EACH SCAN IS ONE PIECE (owner ruling S1)
 # ============================================================================
+# The scan door used to take a typed "physical count" with every scan and
+# WRITE IT OVER the style's line: scan one frame and type 3, scan another and
+# type 1, and the shop "had" 1. A scan is now one piece; the same label
+# scanned twice is still one piece; a typed number (for pieces with no label)
+# is a separate answer that a scan never overwrites.
 
 
-def test_a_scan_records_the_counted_quantity_onto_the_session(admin_client, mongo_db):
-    """The count sheet door. Assert the SET and the COUNT on the stored doc."""
+def test_each_scan_adds_one_piece_and_a_repeat_scan_adds_none(admin_client, mongo_db):
     pid = _seed_product(mongo_db)
     barcodes = _seed_units(mongo_db, pid, 5)
+    count_id = _start(admin_client)
+
+    first = _scan(admin_client, count_id, barcodes[0])
+    assert first.status_code == 200, first.text
+    body = first.json()
+    assert body["recorded"] is True and body["added"] is True
+    assert body["pieces_scanned"] == 1
+    # BLIND COUNT (owner ruling 2026-08-25): nothing the books expect.
+    assert "system_count" not in body
+    assert "variance" not in body
+    assert "physical_count" not in body
+
+    _scan(admin_client, count_id, barcodes[1])
+    again = _scan(admin_client, count_id, barcodes[0].lower())  # same label, typed
+    assert again.json()["added"] is False, "the same piece twice is one piece"
+    assert again.json()["pieces_scanned"] == 2
+
+    doc = mongo_db["stock_counts"].find_one({"count_id": count_id})
+    assert [sc["barcode"] for sc in doc["scans"]] == barcodes[:2]
+    assert doc["items_counted"] == 1, "one style answered"
+
+    body = _complete(admin_client, count_id)
+    line = body["variances"][0]
+    assert line["scanned_quantity"] == 2
+    assert line["physical_quantity"] == 2, "two pieces scanned = two counted"
+    assert body["shrinkage_units"] == 3
+
+
+def test_a_scan_never_replaces_a_typed_quantity(admin_client, mongo_db):
+    """One piece of this style has no label: the counter types 1. Scanning the
+    other two adds to it -- and re-typing corrects only the typed part."""
+    pid = _seed_product(mongo_db)
+    barcodes = _seed_units(mongo_db, pid, 4)
+    count_id = _start(admin_client)
+
+    assert _type_for(admin_client, mongo_db, count_id, barcodes[0], 1).status_code == 200
+    _scan(admin_client, count_id, barcodes[0])
+    _scan(admin_client, count_id, barcodes[1])
+    _type_for(admin_client, mongo_db, count_id, barcodes[0], 2)  # re-typed
+
+    doc = mongo_db["stock_counts"].find_one({"count_id": count_id})
+    assert len(doc["scans"]) == 2, "re-typing must not erase a scan"
+    assert doc["items"][0]["typed_quantity"] == 2
+    line = _complete(admin_client, count_id)["variances"][0]
+    assert line["scanned_quantity"] == 2
+    assert line["typed_quantity"] == 2
+    assert line["physical_quantity"] == 4
+
+
+def test_a_scan_carrying_a_number_is_refused_inside_a_session(admin_client, mongo_db):
+    """The old door: barcode + "physical_count". Refused, never silently used
+    or silently ignored, and nothing is recorded."""
+    pid = _seed_product(mongo_db)
+    barcodes = _seed_units(mongo_db, pid, 4)
     count_id = _start(admin_client)
 
     r = admin_client.post(
         "/inventory/stock-count-scan",
         json={"barcode": barcodes[0], "physical_count": 3, "count_id": count_id},
     )
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["recorded"] is True
-    assert body["items_counted"] == 1
-    # BLIND COUNT (owner ruling 2026-08-25): a scan recording onto an open
-    # session must not echo the expected figure or a live variance.
-    assert "system_count" not in body
-    assert "variance" not in body
-    assert "variance_percent" not in body
-
+    assert r.status_code == 400, r.text
     doc = mongo_db["stock_counts"].find_one({"count_id": count_id})
-    assert doc["items_counted"] == 1, "the session's line count must move"
-    assert len(doc["items"]) == 1
-    line = doc["items"][0]
-    assert line["product_id"] == pid
-    assert line["counted_quantity"] == 3, "the SET value must be what was counted"
-    assert line["counted_by"] == "u-count"
-
-
-def test_recounting_a_product_replaces_its_line_and_does_not_add_one(
-    admin_client, mongo_db
-):
-    """A recount corrects the first pass; it must never be added to it."""
-    pid = _seed_product(mongo_db)
-    barcodes = _seed_units(mongo_db, pid, 4)
-    count_id = _start(admin_client)
-
-    admin_client.post(
-        "/inventory/stock-count-scan",
-        json={"barcode": barcodes[0], "physical_count": 2, "count_id": count_id},
-    )
-    r = admin_client.post(
-        "/inventory/stock-count-scan",
-        json={"barcode": barcodes[1], "physical_count": 4, "count_id": count_id},
-    )
-    assert r.json()["items_counted"] == 1
-
-    doc = mongo_db["stock_counts"].find_one({"count_id": count_id})
-    assert len(doc["items"]) == 1
-    assert doc["items"][0]["counted_quantity"] == 4
-    assert doc["items_counted"] == 1
+    assert not doc.get("scans") and not doc.get("items")
 
 
 def test_a_scan_into_a_completed_session_is_refused(admin_client, mongo_db):
     pid = _seed_product(mongo_db)
     barcodes = _seed_units(mongo_db, pid, 2)
     count_id = _start(admin_client)
-    admin_client.post(
-        "/inventory/stock-count-scan",
-        json={"barcode": barcodes[0], "physical_count": 2, "count_id": count_id},
-    )
-    assert (
-        admin_client.post(
-            f"/inventory/stock-count/{count_id}/complete", json={}
-        ).status_code
-        == 200
-    )
+    _scan(admin_client, count_id, barcodes[0])
+    _complete(admin_client, count_id)
 
-    r = admin_client.post(
-        "/inventory/stock-count-scan",
-        json={"barcode": barcodes[0], "physical_count": 9, "count_id": count_id},
-    )
+    r = _scan(admin_client, count_id, barcodes[1])
     assert r.status_code == 400
     assert "not in progress" in r.json()["detail"].lower()
+
+
+class _ScanLandsMidFinish:
+    """The REAL stock_counts collection, except one more piece is scanned in
+    the window between Finish reading the session and closing it."""
+
+    def __init__(self, coll, scan):
+        self._c = coll
+        self._scan = scan
+        self.fired = False
+
+    def find_one(self, flt, *args, **kwargs):
+        doc = self._c.find_one(flt, *args, **kwargs)
+        if not self.fired and doc and doc.get("status") == "in_progress":
+            self.fired = True
+            self._c.update_one(
+                {"count_id": doc["count_id"]}, {"$push": {"scans": self._scan}}
+            )
+        return doc
+
+    def __getattr__(self, name):
+        return getattr(self._c, name)
+
+
+def test_a_piece_scanned_while_finishing_is_never_dropped(
+    admin_client, mongo_db, monkeypatch
+):
+    pid = _seed_product(mongo_db)
+    barcodes = _seed_units(mongo_db, pid, 2)
+    count_id = _start(admin_client)
+    _scan(admin_client, count_id, barcodes[0])
+    late = mongo_db["stock_units"].find_one({"barcode": barcodes[1]})
+    racing = _ScanLandsMidFinish(
+        mongo_db["stock_counts"],
+        {"unit_id": str(late["_id"]), "barcode": barcodes[1], "product_id": pid},
+    )
+    real_get = _DBProxy(mongo_db).get_collection
+
+    class _Proxy:
+        is_connected = True
+
+        def get_collection(self, name):
+            return racing if name == "stock_counts" else real_get(name)
+
+        def __getattr__(self, name):
+            return real_get(name)
+
+    monkeypatch.setattr(inv_mod, "_get_db", lambda: _Proxy())
+    r = admin_client.post(f"/inventory/stock-count/{count_id}/complete", json={})
+    assert racing.fired
+    assert r.status_code == 409, r.text
+    monkeypatch.setattr(inv_mod, "_get_db", lambda: _DBProxy(mongo_db))
+    body = _complete(admin_client, count_id)
+    assert body["shrinkage_units"] == 0, "the late piece was counted, not lost"
 
 
 def test_a_recorded_count_can_then_be_completed(admin_client, mongo_db):
@@ -316,10 +401,7 @@ def test_a_recorded_count_can_then_be_completed(admin_client, mongo_db):
     pid = _seed_product(mongo_db)
     barcodes = _seed_units(mongo_db, pid, 3)
     count_id = _start(admin_client)
-    admin_client.post(
-        "/inventory/stock-count-scan",
-        json={"barcode": barcodes[0], "physical_count": 3, "count_id": count_id},
-    )
+    _type_for(admin_client, mongo_db, count_id, barcodes[0], 3)
 
     r = admin_client.post(f"/inventory/stock-count/{count_id}/complete", json={})
     assert r.status_code == 200, r.text
@@ -338,10 +420,7 @@ def test_a_real_discrepancy_is_reported_in_units_and_in_rupees(admin_client, mon
     barcodes = _seed_units(mongo_db, pid, 5)
     count_id = _start(admin_client)
 
-    admin_client.post(
-        "/inventory/stock-count-scan",
-        json={"barcode": barcodes[0], "physical_count": 3, "count_id": count_id},
-    )
+    _type_for(admin_client, mongo_db, count_id, barcodes[0], 3)
     r = admin_client.post(f"/inventory/stock-count/{count_id}/complete", json={})
     assert r.status_code == 200, r.text
     body = r.json()
@@ -373,10 +452,7 @@ def test_a_line_with_no_cost_price_is_flagged_not_valued_at_zero(
     barcodes = _seed_units(mongo_db, pid, 4)
     count_id = _start(admin_client)
 
-    admin_client.post(
-        "/inventory/stock-count-scan",
-        json={"barcode": barcodes[0], "physical_count": 1, "count_id": count_id},
-    )
+    _type_for(admin_client, mongo_db, count_id, barcodes[0], 1)
     body = admin_client.post(
         f"/inventory/stock-count/{count_id}/complete", json={}
     ).json()
@@ -393,10 +469,7 @@ def test_an_overage_is_reported_separately_and_valued(admin_client, mongo_db):
     barcodes = _seed_units(mongo_db, pid, 2)
     count_id = _start(admin_client)
 
-    admin_client.post(
-        "/inventory/stock-count-scan",
-        json={"barcode": barcodes[0], "physical_count": 5, "count_id": count_id},
-    )
+    _type_for(admin_client, mongo_db, count_id, barcodes[0], 5)
     body = admin_client.post(
         f"/inventory/stock-count/{count_id}/complete", json={}
     ).json()
@@ -416,10 +489,8 @@ def _counted_short(client, mongo_db, *, on_hand: int, counted: int, cost=2000.0)
     pid = _seed_product(mongo_db, cost=cost)
     barcodes = _seed_units(mongo_db, pid, on_hand)
     count_id = _start(client)
-    client.post(
-        "/inventory/stock-count-scan",
-        json={"barcode": barcodes[0], "physical_count": counted, "count_id": count_id},
-    )
+    for bc in barcodes[:counted]:  # the pieces found; barcodes[counted:] are not
+        assert _scan(client, count_id, bc).status_code == 200
     assert (
         client.post(f"/inventory/stock-count/{count_id}/complete", json={}).status_code
         == 200
@@ -448,34 +519,26 @@ def test_a_store_manager_cannot_write_off_missing_stock(
 
 
 def test_a_unit_sold_during_the_count_is_never_written_off(admin_client, mongo_db):
-    """The write-off may only take units that are still AVAILABLE at the
-    instant of the write. A frame sold mid-count used to be overwritten from
-    SOLD to VOID -- the sale destroyed and the shortfall still "corrected"."""
+    """The write-off may only take pieces that have not moved since the count.
+    Missing pieces barcodes[3] and [4]; [3] is sold before the admin gets to
+    it. [3] stays SOLD, only [4] is written off, and the gap is reported."""
     pid, count_id, barcodes = _counted_short(
         admin_client, mongo_db, on_hand=5, counted=3
     )
-
-    # The shop sells two frames between the count and the write-off.
-    for bc in barcodes[:2]:
-        mongo_db["stock_units"].update_one(
-            {"barcode": bc}, {"$set": {"status": "SOLD", "sold_at": "2026-08-25"}}
-        )
+    mongo_db["stock_units"].update_one(
+        {"barcode": barcodes[3]}, {"$set": {"status": "SOLD", "sold_at": "2026-08-25"}}
+    )
 
     r = admin_client.post(f"/inventory/stock-count/{count_id}/reconcile", json={})
     assert r.status_code == 200, r.text
     body = r.json()
 
-    sold = list(mongo_db["stock_units"].find({"barcode": {"$in": barcodes[:2]}}))
-    assert [u["status"] for u in sold] == [
-        "SOLD",
-        "SOLD",
-    ], "a sold unit must never be voided from under the sale"
-    assert (
-        mongo_db["stock_units"].count_documents({"product_id": pid, "status": "VOID"})
-        == 2
-    )
-    assert body["units_voided"] == 2
-    assert body["units_not_voided"] == 0
+    status = {u["barcode"]: u["status"] for u in mongo_db["stock_units"].find({"product_id": pid})}
+    assert status[barcodes[3]] == "SOLD", "a sold unit must never be voided from under the sale"
+    assert status[barcodes[4]] == "VOID"
+    assert [status[b] for b in barcodes[:3]] == ["AVAILABLE"] * 3
+    assert body["units_voided"] == 1
+    assert body["units_not_voided"] == 1
 
 
 def test_when_the_shelf_moved_too_far_the_shortfall_is_reported_not_forced(
@@ -600,8 +663,8 @@ class _SaleLandsMidWriteOff:
         self._bc = barcode
         self.sale_landed = False
 
-    def find(self, *args, **kwargs):
-        docs = list(self._c.find(*args, **kwargs))
+    def aggregate(self, *args, **kwargs):
+        docs = list(self._c.aggregate(*args, **kwargs))
         if not self.sale_landed:
             self._c.update_one(
                 {"barcode": self._bc},
@@ -621,9 +684,9 @@ def test_a_sale_landing_mid_write_off_survives_the_write_off(
     write must re-check AVAILABLE, lose the race, and leave the sale alone."""
     pid, count_id, barcodes = _counted_short(
         admin_client, mongo_db, on_hand=4, counted=2
-    )  # 2 missing; the oldest two are the candidates
+    )  # barcodes[2] and barcodes[3] were not found
 
-    racing = _SaleLandsMidWriteOff(mongo_db["stock_units"], barcodes[0])
+    racing = _SaleLandsMidWriteOff(mongo_db["stock_units"], barcodes[2])
     real_get = _DBProxy(mongo_db).get_collection
 
     class _Proxy:
@@ -642,7 +705,7 @@ def test_a_sale_landing_mid_write_off_survives_the_write_off(
     ).json()
 
     assert racing.sale_landed, "the harness must actually have landed the sale"
-    sold = mongo_db["stock_units"].find_one({"barcode": barcodes[0]})
+    sold = mongo_db["stock_units"].find_one({"barcode": barcodes[2]})
     assert (
         sold["status"] == "SOLD"
     ), "the frame the customer just bought was written off from under the sale"
@@ -752,10 +815,7 @@ def test_a_frame_sold_while_the_count_is_open_is_not_reported_as_missing(
 
     assert _sell_one_at_the_till(mongo_db, pid) is not None
 
-    admin_client.post(
-        "/inventory/stock-count-scan",
-        json={"barcode": barcodes[4], "physical_count": 4, "count_id": count_id},
-    )
+    _type_for(admin_client, mongo_db, count_id, barcodes[4], 4)
     body = admin_client.post(
         f"/inventory/stock-count/{count_id}/complete", json={}
     ).json()
@@ -781,10 +841,7 @@ def test_the_write_off_never_destroys_a_frame_that_moved_during_the_count(
     barcodes = _seed_units(mongo_db, pid, 5)
     count_id = _start(admin_client)
     _sell_one_at_the_till(mongo_db, pid)
-    admin_client.post(
-        "/inventory/stock-count-scan",
-        json={"barcode": barcodes[4], "physical_count": 4, "count_id": count_id},
-    )
+    _type_for(admin_client, mongo_db, count_id, barcodes[4], 4)
     admin_client.post(f"/inventory/stock-count/{count_id}/complete", json={})
 
     r = admin_client.post(f"/inventory/stock-count/{count_id}/reconcile", json={})
@@ -810,10 +867,7 @@ def test_a_frame_sold_after_its_shelf_was_counted_is_still_not_missing(
     pid = _seed_product(mongo_db, cost=1450.0)
     barcodes = _seed_units(mongo_db, pid, 5)
     count_id = _start(admin_client)
-    admin_client.post(
-        "/inventory/stock-count-scan",
-        json={"barcode": barcodes[0], "physical_count": 5, "count_id": count_id},
-    )
+    _type_for(admin_client, mongo_db, count_id, barcodes[0], 5)
     _sell_one_at_the_till(mongo_db, pid)
 
     body = admin_client.post(
@@ -878,14 +932,7 @@ def test_counting_one_product_out_of_four_is_not_everything_matched(
         admin_client, mongo_db, products=4
     )
 
-    admin_client.post(
-        "/inventory/stock-count-scan",
-        json={
-            "barcode": barcodes[pids[0]][0],
-            "physical_count": 2,
-            "count_id": count_id,
-        },
-    )
+    _type_for(admin_client, mongo_db, count_id, barcodes[pids[0]][0], 2)
     body = admin_client.post(
         f"/inventory/stock-count/{count_id}/complete", json={}
     ).json()
@@ -913,14 +960,7 @@ def test_a_count_that_walked_every_expected_product_reports_a_full_count(
         admin_client, mongo_db, products=2
     )
     for pid in pids:
-        admin_client.post(
-            "/inventory/stock-count-scan",
-            json={
-                "barcode": barcodes[pid][0],
-                "physical_count": 2,
-                "count_id": count_id,
-            },
-        )
+        _type_for(admin_client, mongo_db, count_id, barcodes[pid][0], 2)
 
     body = admin_client.post(
         f"/inventory/stock-count/{count_id}/complete", json={}
@@ -960,45 +1000,36 @@ def test_counting_something_the_session_never_expected_does_not_inflate_coverage
 
 
 # ============================================================================
-# 8. THE COUNT SHEET: A STYLE THAT HAS WALKED ENTIRELY CAN STILL BE RECORDED
+# 8. A STYLE THAT HAS WALKED ENTIRELY CAN STILL BE ANSWERED -- BLIND
 # ============================================================================
-# The only wired door was the barcode scanner. If the last unit of a style has
-# gone, so has its label -- which is exactly the case a count exists to find.
-# The session must therefore hand the screen the LIST of what it expects, so
-# every expected line has a quantity box whether or not a unit survives.
+# If the last piece of a style has gone, so has its label. The counter finds
+# the style in the catalogue and types 0. The OPEN session never hands the
+# screen a list of styles it expects: that list is the missing list (owner
+# ruling S1), and the count is blind until Finish.
 
 
-def test_the_session_hands_the_screen_the_lines_it_expects_to_find(
-    admin_client, mongo_db
-):
-    count_id, pids, _bc, _cat = _start_in_own_category(
+def test_an_open_session_lists_no_styles_still_to_find(admin_client, mongo_db):
+    count_id, pids, barcodes, _cat = _start_in_own_category(
         admin_client, mongo_db, products=2, units=2
     )
+    _scan(admin_client, count_id, barcodes[pids[0]][0])
 
     r = admin_client.get(f"/inventory/stock-count/{count_id}")
     assert r.status_code == 200, r.text
-    lines = r.json()["expected_lines"]
-
-    assert {ln["product_id"] for ln in lines} == set(pids), (
-        "the count sheet must list every product the session expects, "
-        "not only the ones whose barcode still exists on a shelf"
-    )
-    assert len(lines) == 2
-    for ln in lines:
-        # BLIND COUNT: an OPEN session's sheet lists WHAT to count, never
-        # how many the books expect (owner ruling 2026-08-25).
-        assert "system_quantity" not in ln
-        assert ln["counted_quantity"] is None, "nothing counted yet"
-        assert ln["product_name"], "a line with no name cannot be counted"
-        assert ln["sku"]
+    body = r.json()
+    assert "expected_lines" not in body, "the expected-styles sheet is a missing list"
+    assert "system_quantities" not in body
+    assert "system_unit_fingerprints" not in body
+    assert body["pieces_scanned"] == 1
+    assert pids[1] not in r.text, "an unanswered expected style leaked by id"
 
 
 def test_a_style_with_nothing_left_on_the_shelf_can_be_counted_as_zero(
     admin_client, mongo_db
 ):
     """Both frames of this style have walked. There is no label to scan, so
-    the counter types 0 against the sheet line -- and the loss is found."""
-    count_id, pids, _bc, _cat = _start_in_own_category(
+    the counter types 0 -- and the two missing pieces are named and taken."""
+    count_id, pids, bcs, _cat = _start_in_own_category(
         admin_client, mongo_db, products=1, units=2
     )
     pid = pids[0]
@@ -1008,18 +1039,14 @@ def test_a_style_with_nothing_left_on_the_shelf_can_be_counted_as_zero(
         json={"product_id": pid, "counted_quantity": 0},
     )
     assert r.status_code == 200, r.text
+    doc = mongo_db["stock_counts"].find_one({"count_id": count_id})
+    assert doc["items"][0]["typed_quantity"] == 0, "a typed zero is an answer"
 
-    sheet = admin_client.get(f"/inventory/stock-count/{count_id}").json()
-    assert sheet["expected_lines"][0]["counted_quantity"] == 0, (
-        "a counted zero must read back as zero, never as 'not counted yet'"
-    )
-
-    body = admin_client.post(
-        f"/inventory/stock-count/{count_id}/complete", json={}
-    ).json()
+    body = _complete(admin_client, count_id)
     assert body["shrinkage_units"] == 2
     assert body["shrinkage_value"] == 2000.0
     assert body["full_count"] is True
+    assert sorted(m["barcode"] for m in body["variances"][0]["missing_units"]) == sorted(bcs[pid])
 
     admin_client.post(f"/inventory/stock-count/{count_id}/reconcile", json={})
     assert (
@@ -1254,14 +1281,7 @@ def test_finishing_a_part_audited_count_does_not_double_the_audit_trail(
         admin_client, mongo_db, products=2, units=3
     )
     for pid in pids:
-        admin_client.post(
-            "/inventory/stock-count-scan",
-            json={
-                "barcode": barcodes[pid][0],
-                "physical_count": 1,
-                "count_id": count_id,
-            },
-        )
+        _scan(admin_client, count_id, barcodes[pid][0])
     assert (
         admin_client.post(
             f"/inventory/stock-count/{count_id}/complete", json={}
@@ -1307,72 +1327,34 @@ def test_finishing_a_part_audited_count_does_not_double_the_audit_trail(
 
 
 # ============================================================================
-# 11. AN OVERRIDE MAY NEVER WRITE OFF MORE THAN THE COUNT FOUND
+# 11. A WRITE-OFF TAKES PIECES, NOT QUANTITIES
 # ============================================================================
-# The write-off accepts per-product overrides. Nothing bounded them by what
-# was counted, so an override of 0 on a count that found NOTHING missing voided
-# the whole shelf -- with no record of who set the number.
+# The write-off used to accept per-style quantity overrides. It now takes the
+# exact pieces the count did not find, so a quantity cannot say which pieces
+# to spare. An override is refused -- never silently ignored, which would
+# write off more than the admin asked.
 
 
-def test_an_override_cannot_write_off_more_than_the_count_found(
+def test_a_quantity_override_is_refused_and_nothing_is_written_off(
     admin_client, mongo_db
 ):
-    pid, count_id, _bc = _counted_short(admin_client, mongo_db, on_hand=5, counted=5)
+    pid, count_id, _bc = _counted_short(admin_client, mongo_db, on_hand=5, counted=2)
 
     r = admin_client.post(
         f"/inventory/stock-count/{count_id}/reconcile",
-        json={"overrides": [{"product_id": pid, "accepted_quantity": 0}]},
+        json={"overrides": [{"product_id": pid, "accepted_quantity": 4}]},
     )
 
-    assert r.status_code == 400, (
-        "an override below the counted quantity destroys stock the count "
-        f"never said was missing; got {r.status_code} {r.text}"
-    )
+    assert r.status_code == 400, r.text
     assert (
-        mongo_db["stock_units"].count_documents(
-            {"product_id": pid, "status": "AVAILABLE"}
-        )
+        mongo_db["stock_units"].count_documents({"product_id": pid, "status": "AVAILABLE"})
         == 5
-    ), "the whole shelf was voided by a number nobody counted"
+    )
     assert mongo_db["stock_shrinkage"].count_documents({"count_id": count_id}) == 0
     assert (
         mongo_db["stock_counts"].find_one({"count_id": count_id})["status"]
         == "completed"
     ), "a refused override must not park the count in reconciling"
-
-
-def test_an_override_that_accepts_more_than_was_counted_is_stamped_on_the_record(
-    admin_client, mongo_db
-):
-    """Overriding UPWARDS is the legitimate case (a recount found more), it
-    writes off LESS, and the record has to say a human changed the number."""
-    pid, count_id, _bc = _counted_short(
-        admin_client, mongo_db, on_hand=5, counted=2, cost=1000.0
-    )
-
-    body = admin_client.post(
-        f"/inventory/stock-count/{count_id}/reconcile",
-        json={"overrides": [{"product_id": pid, "accepted_quantity": 4}]},
-    ).json()
-
-    assert body["units_voided"] == 1, "3 were counted short, 1 is accepted as missing"
-    row = mongo_db["stock_shrinkage"].find_one({"count_id": count_id})
-    assert row["accepted_quantity"] == 4
-    assert row["counted_quantity"] == 2
-    assert row["override_applied"] is True
-    assert row["overridden_by"] == "u-count", "who changed the number"
-
-
-def test_a_write_off_with_no_override_is_not_stamped_as_overridden(
-    admin_client, mongo_db
-):
-    """The discriminator: the stamp must mean something."""
-    _pid, count_id, _bc = _counted_short(admin_client, mongo_db, on_hand=5, counted=3)
-    admin_client.post(f"/inventory/stock-count/{count_id}/reconcile", json={})
-
-    row = mongo_db["stock_shrinkage"].find_one({"count_id": count_id})
-    assert row["override_applied"] is False
-    assert row.get("overridden_by") is None
 
 
 # ============================================================================
@@ -1423,10 +1405,7 @@ def test_a_sale_and_a_delivery_that_cancel_out_are_not_a_missing_frame(
     assert _sell_one_at_the_till(mongo_db, pid) is not None  # 10:15
     _receive_one_into_the_stockroom(mongo_db, pid)  # 11:00
 
-    admin_client.post(  # 12:00 -- the shelf, honestly
-        "/inventory/stock-count-scan",
-        json={"barcode": barcodes[2], "physical_count": 2, "count_id": count_id},
-    )
+    _type_for(admin_client, mongo_db, count_id, barcodes[2], 2)
     body = admin_client.post(
         f"/inventory/stock-count/{count_id}/complete", json={}
     ).json()
@@ -1463,10 +1442,7 @@ def test_the_write_off_spares_the_shelf_when_movement_cancelled_out(
     count_id = _start(admin_client)
     _sell_one_at_the_till(mongo_db, pid)
     _receive_one_into_the_stockroom(mongo_db, pid)
-    admin_client.post(
-        "/inventory/stock-count-scan",
-        json={"barcode": barcodes[2], "physical_count": 2, "count_id": count_id},
-    )
+    _type_for(admin_client, mongo_db, count_id, barcodes[2], 2)
     admin_client.post(f"/inventory/stock-count/{count_id}/complete", json={})
 
     on_the_shelf_before = _available_unit_ids(mongo_db, pid)
@@ -1504,10 +1480,7 @@ def test_a_shelf_whose_every_frame_was_replaced_is_not_an_untouched_shelf(
     after = _available_unit_ids(mongo_db, pid)
     assert len(after) == 3 and not (before & after), "set up: every frame replaced"
 
-    admin_client.post(
-        "/inventory/stock-count-scan",
-        json={"barcode": barcodes[0], "physical_count": 3, "count_id": count_id},
-    )
+    _type_for(admin_client, mongo_db, count_id, barcodes[0], 3)
     body = admin_client.post(
         f"/inventory/stock-count/{count_id}/complete", json={}
     ).json()
@@ -1927,10 +1900,7 @@ def test_an_unreadable_opening_scope_is_never_a_clean_full_count(
         "get_stock_repository",
         lambda: StockRepository(mongo_db["stock_units"]),
     )
-    r = client.post(
-        "/inventory/stock-count-scan",
-        json={"barcode": barcodes[0], "physical_count": 2, "count_id": count_id},
-    )
+    r = _type_for(client, mongo_db, count_id, barcodes[0], 2)
     assert r.status_code == 200, r.text
     r = client.post(f"/inventory/stock-count/{count_id}/complete")
     assert r.status_code == 200, r.text
@@ -2070,3 +2040,125 @@ def test_the_unit_fingerprint_ignores_the_order_mongo_returns_units():
     )
     assert _unit_fingerprint(["u-a", "u-b"]) != _unit_fingerprint(["u-a", "u-z"])
     assert _unit_fingerprint([]) == _unit_fingerprint(None)
+
+
+# ============================================================================
+# 12. THE RESULT NAMES THE EXACT PIECES -- AND THE WRITE-OFF TAKES THOSE
+# ============================================================================
+# Owner ruling S1. The write-off used to take the OLDEST available units of a
+# short style ("ponytail: oldest-first ... the particular serial voided may
+# not be the one that walked"): the frame still on the shelf was destroyed
+# and the one that walked stayed on the books, still sellable online.
+
+
+def test_the_write_off_takes_the_exact_pieces_not_found_not_the_oldest(
+    admin_client, mongo_db
+):
+    pid = _seed_product(mongo_db, cost=1200.0)
+    barcodes = _seed_units(mongo_db, pid, 5)  # barcodes[0] is the oldest
+    count_id = _start(admin_client)
+    for i in (0, 1, 3):  # found the two OLDEST and one more
+        _scan(admin_client, count_id, barcodes[i])
+
+    body = _complete(admin_client, count_id)
+    line = body["variances"][0]
+    assert sorted(m["barcode"] for m in line["missing_units"]) == sorted(
+        [barcodes[2], barcodes[4]]
+    ), "the result must name the pieces that were not found"
+    assert all(m["unit_cost"] == 1200.0 for m in line["missing_units"])
+    assert all(m["arrived_at"] for m in line["missing_units"])
+    assert body["shrinkage_value"] == 2400.0
+
+    r = admin_client.post(f"/inventory/stock-count/{count_id}/reconcile", json={})
+    assert r.status_code == 200, r.text
+    status = {u["barcode"]: u["status"] for u in mongo_db["stock_units"].find({"product_id": pid})}
+    assert status[barcodes[2]] == status[barcodes[4]] == "VOID"
+    assert [status[barcodes[i]] for i in (0, 1, 3)] == ["AVAILABLE"] * 3, (
+        "a frame the counter scanned on the shelf was written off"
+    )
+    row = mongo_db["stock_shrinkage"].find_one({"count_id": count_id})
+    assert sorted(row["missing_barcodes"]) == sorted([barcodes[2], barcodes[4]])
+
+
+def test_a_typed_shortfall_is_counted_but_not_written_off_by_piece(
+    admin_client, mongo_db
+):
+    """3 on the books, the counter types 1 (a piece with no label). Two are
+    short -- but WHICH two cannot be known, so none is destroyed."""
+    pid = _seed_product(mongo_db, cost=1000.0)
+    barcodes = _seed_units(mongo_db, pid, 3)
+    count_id = _start(admin_client)
+    _type_for(admin_client, mongo_db, count_id, barcodes[0], 1)
+
+    body = _complete(admin_client, count_id)
+    line = body["variances"][0]
+    assert body["shrinkage_units"] == 2
+    assert line["missing_units"] == []
+    assert line["missing_unidentified"] == 2
+
+    out = admin_client.post(f"/inventory/stock-count/{count_id}/reconcile", json={}).json()
+    assert out["units_voided"] == 0
+    assert out["units_not_identified"] == 2
+    assert mongo_db["stock_units"].count_documents({"product_id": pid, "status": "AVAILABLE"}) == 3
+
+
+def test_an_extra_piece_is_reported_and_never_added_to_stock(admin_client, mongo_db):
+    """A frame the books put at another shop is on this shelf."""
+    pid = _seed_product(mongo_db, cost=900.0)
+    barcodes = _seed_units(mongo_db, pid, 2)
+    stray = _seed_units(mongo_db, pid, 1, store_id="ST-ELSEWHERE")[0]
+    count_id = _start(admin_client)
+    for bc in barcodes + [stray]:
+        _scan(admin_client, count_id, bc)
+
+    body = _complete(admin_client, count_id)
+    line = body["variances"][0]
+    assert line["missing_units"] == []
+    assert [x["barcode"] for x in line["extra_units"]] == [stray]
+    assert line["extra_units"][0]["recorded_store_id"] == "ST-ELSEWHERE"
+    assert body["overage_units"] == 1
+    assert body["shrinkage_units"] == 0
+
+    admin_client.post(f"/inventory/stock-count/{count_id}/reconcile", json={})
+    unit = mongo_db["stock_units"].find_one({"barcode": stray})
+    assert unit["store_id"] == "ST-ELSEWHERE" and unit["status"] == "AVAILABLE"
+
+
+def test_the_result_names_the_styles_nobody_counted(admin_client, mongo_db):
+    count_id, pids, barcodes, _cat = _start_in_own_category(
+        admin_client, mongo_db, products=3
+    )
+    _scan(admin_client, count_id, barcodes[pids[0]][0])
+
+    body = _complete(admin_client, count_id)
+    assert {n["product_id"] for n in body["not_counted"]} == set(pids[1:])
+    assert all(n["product_name"] == "Ray-Ban RB3025" for n in body["not_counted"])
+    # a style nobody counted is NOT missing: none of its pieces is listed
+    assert {v["product_id"] for v in body["variances"]} == {pids[0]}
+
+
+def test_a_store_manager_sends_for_write_off_and_destroys_nothing(
+    admin_client, manager_client, mongo_db
+):
+    pid, count_id, barcodes = _counted_short(admin_client, mongo_db, on_hand=4, counted=2)
+
+    r = manager_client.post(
+        f"/inventory/stock-count/{count_id}/write-off-request", json={"notes": "checked"}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["pieces"] == 2
+    assert mongo_db["stock_units"].count_documents({"product_id": pid, "status": "AVAILABLE"}) == 4
+    doc = mongo_db["stock_counts"].find_one({"count_id": count_id})
+    assert doc["status"] == "completed"
+    assert doc["write_off_request"]["requested_by"] == "u-count"
+
+    again = manager_client.post(f"/inventory/stock-count/{count_id}/write-off-request", json={})
+    assert again.status_code == 409
+    assert manager_client.post(
+        f"/inventory/stock-count/{count_id}/reconcile", json={}
+    ).status_code == 403, "sending is not writing off"
+
+    out = admin_client.post(f"/inventory/stock-count/{count_id}/reconcile", json={}).json()
+    assert out["units_voided"] == 2
+    row = mongo_db["stock_shrinkage"].find_one({"count_id": count_id})
+    assert row["write_off_requested_by"] == "u-count"

@@ -211,17 +211,11 @@ def test_an_open_session_response_carries_no_expected_quantities(
             "nothing"
         )
 
-    lines = body["expected_lines"]
-    assert lines, "the sheet must still list what to count"
-    for ln in lines:
-        assert "system_quantity" not in ln, (
-            "a sheet line on an OPEN session carried the expected quantity"
-        )
-        # The sheet stays USABLE blind: identity + own-answer state survive.
-        assert ln["product_id"]
-        assert ln["product_name"]
-        assert ln["sku"]
-        assert ln["counted_quantity"] is None
+    # Owner ruling S1: not even the LIST of styles the books expect -- that
+    # list is the missing list. The counter sees what they have counted.
+    assert "expected_lines" not in body
+    assert pid not in r.text, "an expected style leaked by id"
+    assert body["pieces_scanned"] == 0
 
 
 def test_withheld_not_destroyed_the_stored_snapshot_survives(client, mongo_db):
@@ -275,19 +269,20 @@ def test_a_recording_scan_echoes_no_variance(client, mongo_db):
 
     r = client.post(
         "/inventory/stock-count-scan",
-        json={"barcode": barcodes[0], "physical_count": 3, "count_id": count_id},
+        json={"barcode": barcodes[0], "count_id": count_id},
     )
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["recorded"] is True
     assert body["items_counted"] == 1
+    assert body["pieces_scanned"] == 1
     for field in WITHHELD_SCAN_FIELDS:
         assert field not in body, (
             f"a recording scan on an open session echoed `{field}`"
         )
     # The answer still landed on the session.
     doc = mongo_db["stock_counts"].find_one({"count_id": count_id})
-    assert doc["items"][0]["counted_quantity"] == 3
+    assert [sc["barcode"] for sc in doc["scans"]] == [barcodes[0]]
 
 
 # ============================================================================
@@ -313,9 +308,9 @@ def test_a_completed_session_reveals_expected_vs_counted(client, mongo_db):
     body = r.json()
     assert body["status"] == "completed"
     assert body["system_quantities"] == {pid: 7}
-    line = next(ln for ln in body["expected_lines"] if ln["product_id"] == pid)
-    assert line["system_quantity"] == 7
-    assert line["counted_quantity"] == 5
+    vrow = next(v for v in body["variances"] if v["product_id"] == pid)
+    assert vrow["system_quantity"] == 7
+    assert vrow["physical_quantity"] == 5
     vrow = next(v for v in body["variances"] if v["product_id"] == pid)
     assert vrow["variance"] == -2
 

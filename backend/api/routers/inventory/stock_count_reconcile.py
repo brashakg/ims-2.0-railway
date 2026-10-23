@@ -9,6 +9,7 @@ from ._shared import (
     HTTPException,
     List,
     Optional,
+    _STOCK_MANAGER_ROLES,
     can_access_store_scoped,
     datetime,
     get_current_user,
@@ -22,7 +23,7 @@ from .helpers import (
 )
 from ...services.cost_mask import mask_cost
 from .stock_count import (
-    _expected_lines,
+    _on_hand_units,
     _product_costs,
     _withhold_expected_while_open,
 )
@@ -46,11 +47,12 @@ async def get_stock_count(
         if not can_access_store_scoped(count_doc.get("store_id"), current_user):
             raise HTTPException(status_code=404, detail="Stock count session not found")
         count_doc.pop("_id", None)
-        # The sheet the counter works from: what this session expects to find,
-        # so a style whose last unit has walked (no label left to scan) still
-        # has a line to write a zero against. While the session is OPEN the
-        # lines carry NO system_quantity -- the count is blind until submitted.
-        count_doc["expected_lines"] = _expected_lines(db, count_doc)
+        # While the session is OPEN the counter sees only what has been
+        # counted: pieces scanned so far and any typed styles -- no expected
+        # quantity, no variance and no list of styles still to find (owner
+        # ruling S1: that list IS the missing list). A style whose last piece
+        # has no label is found by searching the catalogue, not from a sheet.
+        count_doc["pieces_scanned"] = len(count_doc.get("scans") or [])
         # Values at cost: the roles that see product cost only (D7).
         return mask_cost(_withhold_expected_while_open(count_doc), current_user, "product")
     except HTTPException:
@@ -90,10 +92,11 @@ def _ledger_void(db, unit, count_id, actor_id) -> None:
 
 class ReconcileStockCountRequest(BaseModel):
     notes: Optional[str] = None
-    # Per-item overrides: the reviewer can accept a different final quantity
-    # for specific items before writing.  If not supplied, the counted_quantity
-    # from the completed count is used.
-    overrides: Optional[List[Dict]] = None  # [{product_id, accepted_quantity}]
+    # RETIRED. Overrides accepted a QUANTITY per style; a write-off now takes
+    # the exact pieces the count did not find, so a quantity cannot say which
+    # pieces to spare. Refused when sent (never silently ignored: ignoring one
+    # would write off MORE than the admin asked) -- recount the style instead.
+    overrides: Optional[List[Dict]] = None
 
 
 @router.post("/stock-count/{count_id}/reconcile")
@@ -103,20 +106,24 @@ async def reconcile_stock_count(
     # OWNER RULING 2026-08-25 (#8): a stock write-off is ADMIN / SUPERADMIN
     # ONLY, at EVERY value -- no store-manager write-offs and therefore no
     # rupee threshold. A store manager may COUNT (the doors above stay on
-    # _INVENTORY_ROLES); destroying stock off the books is not theirs.
+    # _INVENTORY_ROLES) and SEND a count for write-off (/write-off-request);
+    # destroying stock off the books is not theirs.
     # SUPERADMIN auto-passes inside require_roles.
     current_user: dict = Depends(require_roles("ADMIN")),
 ):
-    """Write off what a completed cycle-count found missing (INV-8).
+    """Write off the EXACT pieces a completed count did not find (INV-8).
 
     For each variance line:
-    - Negative variance (shrinkage): the oldest still-AVAILABLE units are
-      VOIDed and a valued row is written to ``stock_shrinkage`` for audit. A
-      unit that moved during the count (sold, transferred, returned) is never
-      taken -- the conditional write loses that race on purpose and the
-      shortfall is reported as ``units_not_voided``.
-    - Positive variance (overage): recorded for review but NOT silently inflated
-      (SYSTEM_INTENT: fail loudly / never fabricate stock).
+    - Missing pieces (named by unit at completion): each one is VOIDed by its
+      own conditional write and a valued row is written to ``stock_shrinkage``.
+      Only a piece that has not moved since the count is taken -- still on
+      hand at this shop, still AVAILABLE. One that was sold, transferred or
+      reserved since drops out and is reported as ``units_not_voided``.
+    - A shortfall the count could not name (a typed quantity: some pieces had
+      no label) is NOT written off; it is reported as ``units_not_identified``
+      -- scan the style to name the pieces.
+    - A line whose stock moved during the count is skipped ("count again").
+    - Extra pieces are recorded for review, never added to stock.
 
     Transitions ``completed`` -> ``reconciling`` (atomically claimed, so the
     same count can never be written off twice) -> ``reconciled``. A failure
@@ -152,49 +159,17 @@ async def reconcile_stock_count(
                 status_code=400,
                 detail="No variance data found — complete the count first",
             )
-
-        # Build the override map BEFORE the claim, so a refused override
-        # leaves the count exactly where it was instead of parking it in
-        # "reconciling" with no way back.
-        #
-        # BOUND: an override may never accept LESS than was counted. Nothing
-        # bounded these, so accepted_quantity 0 on a count that found nothing
-        # missing voided the entire shelf. Accepting MORE than was counted is
-        # the legitimate direction (a recount found more) and writes off less.
-        counted_by_product = {
-            v.get("product_id"): int(v.get("physical_quantity", 0) or 0)
-            for v in variances
-        }
-        override_map: Dict[str, int] = {}
         if request and request.overrides:
-            for ov in request.overrides:
-                pid = ov.get("product_id") or ""
-                qty = ov.get("accepted_quantity")
-                if not pid or qty is None:
-                    continue
-                accepted = max(0, int(qty))
-                if pid not in counted_by_product:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            "Cannot accept a quantity for a product this count "
-                            f"never recorded ({pid})"
-                        ),
-                    )
-                if accepted < counted_by_product[pid]:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            "An accepted quantity may not be lower than what was "
-                            f"counted ({accepted} accepted vs {counted_by_product[pid]} "
-                            "counted). That would write off stock the count never "
-                            "said was missing -- recount the shelf instead."
-                        ),
-                    )
-                override_map[pid] = accepted
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "A write-off takes the exact pieces the count did not find; "
+                    "it no longer accepts quantities. Count the style again instead."
+                ),
+            )
 
         # CLAIM the count before touching any stock. The status read above is a
-        # check-then-act: two clicks of the button (or two managers) both saw
+        # check-then-act: two clicks of the button (or two admins) both saw
         # "completed" and both wrote off the same shortfall, destroying twice
         # the stock. This flip is atomic, so exactly one caller proceeds.
         claimed = counts_coll.update_one(
@@ -210,11 +185,22 @@ async def reconcile_stock_count(
         now = datetime.utcnow()
         store_id = count_doc.get("store_id", "")
         costs = _product_costs(db, [v.get("product_id", "") for v in variances])
+        # The pieces on hand at this shop NOW, in their stored id type -- the
+        # write below conditions on them. A missing piece no longer in this
+        # set has moved since the count and is left alone.
+        on_hand = _on_hand_units(
+            db, store_id, [v.get("product_id", "") for v in variances if v.get("missing_units")]
+        )
+        if on_hand is None:
+            raise HTTPException(
+                status_code=503, detail="Could not read the stock right now"
+            )
         shrinkage_records = []
         overage_records = []
         reconciled_items = []
         units_voided_total = 0
         units_not_voided_total = 0
+        units_not_identified_total = 0
         shrinkage_value_total = 0.0
         lines_skipped_moved = 0
         voided_pids: list = []
@@ -223,8 +209,16 @@ async def reconcile_stock_count(
             pid = v.get("product_id", "")
             system_qty = int(v.get("system_quantity", 0) or 0)
             counted_qty = int(v.get("physical_quantity", 0) or 0)
-            accepted_qty = override_map.get(pid, counted_qty)
-            net_variance = accepted_qty - system_qty
+            missing = list(v.get("missing_units") or [])
+            unidentified = int(v.get("missing_unidentified", 0) or 0)
+            extras = list(v.get("extra_units") or [])
+            base = {
+                "product_id": pid,
+                "product_name": v.get("product_name", ""),
+                "sku": v.get("sku", ""),
+                "system_quantity": system_qty,
+                "physical_quantity": counted_qty,
+            }
 
             # A line whose on-hand moved while the count was open is NOT a
             # loss (completion flagged it). Writing it off would void a frame
@@ -232,81 +226,38 @@ async def reconcile_stock_count(
             if v.get("moved_during_count"):
                 lines_skipped_moved += 1
                 reconciled_items.append(
-                    {
-                        "product_id": pid,
-                        "product_name": v.get("product_name", ""),
-                        "sku": v.get("sku", ""),
-                        "system_quantity": system_qty,
-                        "physical_quantity": counted_qty,
-                        "accepted_quantity": counted_qty,
-                        "net_variance": 0,
-                        "skipped_reason": "stock moved during the count - count again",
-                    }
+                    {**base, "net_variance": 0,
+                     "skipped_reason": "stock moved during the count - count again"}
                 )
                 continue
 
-            reconciled_items.append(
-                {
-                    "product_id": pid,
-                    "product_name": v.get("product_name", ""),
-                    "sku": v.get("sku", ""),
-                    "system_quantity": system_qty,
-                    "physical_quantity": counted_qty,
-                    "accepted_quantity": accepted_qty,
-                    "net_variance": net_variance,
-                }
-            )
+            item = {**base, "net_variance": counted_qty - system_qty}
+            reconciled_items.append(item)
+            units_not_identified_total += unidentified
+            if unidentified:
+                item["units_not_identified"] = unidentified
 
-            if net_variance < 0:
-                # Shrinkage: write an audit record.
-                # Stock units are serialized (one row per unit) so we
-                # VOID the excess rows rather than decrementing a counter.
-                shrinkage_qty = abs(net_variance)
+            if missing:
                 unit_cost = float(costs.get(pid, 0.0) or 0.0)
-
-                # Void the oldest AVAILABLE units to reconcile stock.
+                live = {str(u): u for u in on_hand.get(pid, [])}
+                # SAFETY: one CONDITIONAL write per named piece -- still this
+                # shop's, still AVAILABLE at the instant of the write. POS
+                # claims a unit with an atomic find_one_and_update on
+                # status=="AVAILABLE", so a frame sold between the read and the
+                # write loses here and is left exactly where it is. NOT
+                # swallowed: a failed write fails the write-off loudly.
                 #
-                # SAFETY: the write is CONDITIONAL on the unit still being
-                # AVAILABLE. Reading candidates and then writing them blind is
-                # a check-then-act -- POS claims a unit with an atomic
-                # find_one_and_update on status=="AVAILABLE", so a frame sold
-                # between the read and the write was being overwritten from
-                # SOLD to VOID: the sale destroyed, the customer's frame
-                # deleted from the books, and the shortfall still "corrected".
-                # Losing that race is now the CORRECT outcome -- a unit that
-                # moved during the count (sold, transferred, returned) is left
-                # exactly where it is and the shortfall is reported honestly
-                # instead of being taken out of a live sale.
-                #
-                # NOT swallowed: this used to sit inside a bare except that
-                # logged and carried on, so the endpoint reported a successful
-                # write-off over a failed one.
-                #
-                # ponytail: oldest-first among the units still AVAILABLE. A
-                # count records a QUANTITY per product, not which serials were
-                # on the shelf, so it cannot know WHICH unit is the missing
-                # one -- the quantity is right (that is what gates the sale),
-                # but the particular serial voided may not be the one that
-                # walked. If a serial-accurate write-off is ever wanted, the
-                # count sheet has to record scanned barcodes, not a number.
-                candidates = list(
-                    stock_coll.find(
-                        {
-                            "product_id": pid,
-                            "store_id": store_id,
-                            "status": "AVAILABLE",
-                        },
-                        sort=[("created_at", 1)],
-                        limit=shrinkage_qty,
-                    )
-                )
-                # E3-5: one conditional write per unit, so every write-off
-                # names the frame it took -- on the shrinkage row and as one
-                # VOID row per unit in the item-event ledger.
+                # ponytail: "has not moved since the count" is read as "still
+                # on hand here and AVAILABLE". A piece sold and returned in
+                # between reads as unmoved; add a per-unit event-sequence check
+                # if that ever matters.
                 voided_ids = []
-                for c in (c for c in candidates if "_id" in c):
+                for m in missing:
+                    raw = live.get(str(m.get("unit_id")))
+                    if raw is None:
+                        continue
                     res = stock_coll.update_one(
-                        {"_id": c["_id"], "status": "AVAILABLE"},
+                        {"_id": raw, "store_id": store_id, "status": "AVAILABLE"},
                         {
                             "$set": {
                                 "status": "VOID",
@@ -316,11 +267,11 @@ async def reconcile_stock_count(
                         },
                     )
                     if int(getattr(res, "modified_count", 0) or 0):
-                        voided_ids.append(str(c.get("stock_id") or c["_id"]))
-                        _ledger_void(db, c, count_id, current_user.get("user_id", ""))
+                        unit = stock_coll.find_one({"_id": raw}) or {"_id": raw}
+                        voided_ids.append(str(unit.get("stock_id") or raw))
+                        _ledger_void(db, unit, count_id, current_user.get("user_id", ""))
                 voided = len(voided_ids)
-
-                not_voided = shrinkage_qty - voided
+                not_voided = len(missing) - voided
                 units_voided_total += voided
                 units_not_voided_total += not_voided
                 if voided and pid not in voided_pids:
@@ -337,47 +288,43 @@ async def reconcile_stock_count(
                         "product_id": pid,
                         "product_name": v.get("product_name", ""),
                         "sku": v.get("sku", ""),
-                        "shrinkage_quantity": shrinkage_qty,
+                        "shrinkage_quantity": len(missing),
                         # What the write-off actually did, not what it wanted
                         # to do. A shrinkage row that claims 3 units when 1
                         # could not be voided is the old silent failure.
                         "units_voided": voided,
                         "units_not_voided": not_voided,
-                        # E3-5: exactly which units this row wrote off.
+                        # E3-5: exactly which units this row wrote off, and the
+                        # labels of the pieces the count named missing.
                         "voided_stock_ids": voided_ids,
+                        "missing_barcodes": [m.get("barcode") for m in missing],
                         # A loss with no rupee figure is not a loss anyone can
                         # act on: this is what the row is worth at cost.
                         "unit_cost": round(unit_cost, 2),
                         "shrinkage_value": shrinkage_value,
                         "system_quantity": system_qty,
                         "counted_quantity": counted_qty,
-                        "accepted_quantity": accepted_qty,
-                        # Whether a human moved the number away from what was
-                        # counted, and who. An unstamped override is a loss
-                        # nobody owns.
-                        "override_applied": pid in override_map
-                        and accepted_qty != counted_qty,
-                        "overridden_by": (
-                            current_user.get("user_id", "")
-                            if (pid in override_map and accepted_qty != counted_qty)
-                            else None
-                        ),
+                        "write_off_requested_by": (
+                            count_doc.get("write_off_request") or {}
+                        ).get("requested_by"),
                         "recorded_at": utc_event_iso(now),
                         "recorded_by": current_user.get("user_id", ""),
                         "notes": request.notes if request else None,
                     }
                 )
+                item["units_voided"] = voided
+                item["units_not_voided"] = not_voided
 
-                reconciled_items[-1]["units_voided"] = voided
-                reconciled_items[-1]["units_not_voided"] = not_voided
-
-            elif net_variance > 0:
-                # Overage: record for investigation only — do not inflate stock.
+            over = int(v.get("overage_units", 0) or 0)
+            if over > 0:
+                # Extra pieces: recorded for investigation only -- never added
+                # to stock (SYSTEM_INTENT: fail loudly / never fabricate stock).
                 overage_records.append(
                     {
                         "product_id": pid,
                         "product_name": v.get("product_name", ""),
-                        "overage_quantity": net_variance,
+                        "overage_quantity": over,
+                        "extra_barcodes": [x.get("barcode") for x in extras],
                     }
                 )
 
@@ -422,6 +369,7 @@ async def reconcile_stock_count(
                     "overage_count": len(overage_records),
                     "units_voided": units_voided_total,
                     "units_not_voided": units_not_voided_total,
+                    "units_not_identified": units_not_identified_total,
                     "lines_skipped_moved": lines_skipped_moved,
                     "shrinkage_value_written_off": shrinkage_value_total,
                 }
@@ -437,6 +385,7 @@ async def reconcile_stock_count(
             "overage_lines": len(overage_records),
             "units_voided": units_voided_total,
             "units_not_voided": units_not_voided_total,
+            "units_not_identified": units_not_identified_total,
             "lines_skipped_moved": lines_skipped_moved,
             "shrinkage_value_written_off": shrinkage_value_total,
             "overages_pending_review": overage_records,
@@ -611,3 +560,54 @@ async def finish_stuck_stock_count_reconcile(
         raise HTTPException(
             status_code=500, detail="Could not finish the stuck write-off"
         )
+
+
+class WriteOffRequest(BaseModel):
+    notes: Optional[str] = None
+
+
+@router.post("/stock-count/{count_id}/write-off-request")
+async def request_stock_count_write_off(
+    count_id: str,
+    request: Optional[WriteOffRequest] = None,
+    current_user: dict = Depends(require_roles(*_STOCK_MANAGER_ROLES)),
+):
+    """SEND a finished count's missing pieces to the admin for write-off.
+
+    Owner ruling 2026-08-25 (#8): only ADMIN / SUPERADMIN write stock off. A
+    store manager's door is this request: it marks the count as waiting for
+    the admin, and destroys nothing. The admin then writes off (``/reconcile``)
+    the exact pieces still unmoved, or sends it back for a recount.
+    """
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    counts_coll = db.get_collection("stock_counts")
+    count_doc = counts_coll.find_one({"count_id": count_id})
+    if not count_doc or not can_access_store_scoped(count_doc.get("store_id"), current_user):
+        raise HTTPException(status_code=404, detail="Stock count session not found")
+    if count_doc.get("status") != "completed":
+        raise HTTPException(
+            status_code=400, detail="Only a finished count can be sent for write-off"
+        )
+    pieces = sum(len(v.get("missing_units") or []) for v in count_doc.get("variances") or [])
+    if not pieces:
+        raise HTTPException(
+            status_code=400, detail="This count found no named missing pieces to write off"
+        )
+    ask = {
+        "requested_by": current_user.get("user_id", ""),
+        "requested_by_name": current_user.get(
+            "full_name", current_user.get("username", "")
+        ),
+        "requested_at": utc_event_iso(datetime.utcnow()),
+        "pieces": pieces,
+        "notes": request.notes if request else None,
+    }
+    res = counts_coll.update_one(
+        {"count_id": count_id, "status": "completed", "write_off_request": None},
+        {"$set": {"write_off_request": ask}},
+    )
+    if int(getattr(res, "modified_count", 0) or 0) != 1:
+        raise HTTPException(status_code=409, detail="Already sent for write-off")
+    return {"message": "Sent to admin for write-off", "count_id": count_id, **ask}

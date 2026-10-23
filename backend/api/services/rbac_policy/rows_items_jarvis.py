@@ -242,6 +242,14 @@ ROWS: List[Dict[str, object]] = [
     },
     {
         "method": "POST",
+        "path": "/api/v1/inventory/stock-count/{count_id}/write-off-request",
+        # A store manager SENDS a finished count's missing pieces to the admin
+        # (it destroys nothing). Manager ladder only -- every role here is
+        # already in the inventory:write union, so nothing is broadened.
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+    },
+    {
+        "method": "POST",
         "path": "/api/v1/inventory/stock/add",
         "allowed": [
             "ADMIN",

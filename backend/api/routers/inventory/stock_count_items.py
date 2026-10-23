@@ -23,9 +23,12 @@ from .helpers import (
 from ...services.cost_mask import mask_cost
 from .stock_count import (
     _load_open_count,
-    _on_hand_now,
+    _on_hand_units,
     _product_costs,
-    _upsert_count_item,
+    _product_labels,
+    _record_typed,
+    _unit_fingerprint,
+    count_lines,
 )
 
 @router.post("/stock-count/{count_id}/items")
@@ -34,7 +37,10 @@ async def record_count_item(
     item: StockCountItem,
     current_user: dict = Depends(require_roles(*_INVENTORY_ROLES)),
 ):
-    """Record a counted item in an active stock count session"""
+    """Type a quantity for one style in an open count: the pieces of it that
+    have NO label to scan (0 = "none of this style here", so it reads as
+    counted, not skipped). It is added to the pieces scanned for the style,
+    never in place of them."""
     db = _get_db()
 
     # Recording a counted quantity is a WRITE. "Item recorded (no DB)" told the
@@ -44,13 +50,16 @@ async def record_count_item(
 
     try:
         count_doc = _load_open_count(db, count_id, current_user)
-        items_counted = _upsert_count_item(
+        name, sku = _product_labels(db, [item.product_id]).get(
+            item.product_id, (item.product_name or "", item.sku or "")
+        )
+        fresh = _record_typed(
             db,
             count_doc,
             product_id=item.product_id,
-            product_name=item.product_name or "",
-            sku=item.sku or "",
-            counted_quantity=item.counted_quantity,
+            product_name=name,
+            sku=sku,
+            typed_quantity=item.counted_quantity,
             notes=item.notes,
             user_id=current_user.get("user_id", ""),
         )
@@ -58,7 +67,8 @@ async def record_count_item(
         return {
             "message": "Item recorded",
             "count_id": count_id,
-            "items_counted": items_counted,
+            "items_counted": fresh.get("items_counted"),
+            "pieces_scanned": len(fresh.get("scans") or []),
         }
 
     except HTTPException:
@@ -101,7 +111,8 @@ async def complete_stock_count(
         # must report UNKNOWN for the first and a clean 100% for the second.
         snapshot = count_doc.get("system_quantities", {})
         system_quantities = snapshot or {}
-        items = count_doc.get("items", [])
+        lines = count_lines(count_doc)
+        items = list(lines.values())
 
         # A count with no lines is NOT a count. Completing an empty session used
         # to run this whole calculation over an empty list and hand the counter
@@ -119,14 +130,22 @@ async def complete_stock_count(
         # Calculate variances. A count is only useful if the answer is in
         # rupees as well as units -- "12 units short" means nothing until it
         # reads "12 units short, Rs 24,000".
-        costs = _product_costs(db, [i.get("product_id", "") for i in items])
-        # What the books say RIGHT NOW, against the snapshot this session
-        # opened with. Any line where the two differ has been sold,
-        # transferred, received or returned since the counter started, so the
-        # difference between snapshot and shelf is not a loss.
-        live_on_hand, live_fingerprints = _on_hand_now(
-            db, count_doc.get("store_id", ""), [i.get("product_id", "") for i in items]
-        )
+        pids = [i["product_id"] for i in items]
+        costs = _product_costs(db, pids)
+        # WHICH units the books say are on hand RIGHT NOW, against the snapshot
+        # this session opened with. Any line where the two differ has been
+        # sold, transferred, received or returned since the counter started,
+        # so the difference between snapshot and shelf is not a loss.
+        store_id = count_doc.get("store_id", "")
+        live_units = _on_hand_units(db, store_id, pids)
+        if live_units is None:
+            # Without the shelf as the books see it now, no piece can be named
+            # missing and no line can be cleared of movement. Fail loud; the
+            # session stays open and can be finished again.
+            raise HTTPException(
+                status_code=503,
+                detail="Could not read the stock right now. Try Finish again.",
+            )
         opening_fingerprints = count_doc.get("system_unit_fingerprints") or {}
 
         variances = []
@@ -138,12 +157,19 @@ async def complete_stock_count(
         overage_value = 0.0
         lines_without_cost = 0
         lines_moved = 0
+        # unit id (as stored) -> the variance line it is missing from; the
+        # barcode / arrival date is filled in with one read below.
+        missing_raw: dict = {}
+        extra_barcodes: dict = {}
 
         for item in items:
             pid = item["product_id"]
             counted = item["counted_quantity"]
+            typed = item["typed_quantity"] or 0
             system = system_quantities.get(pid, 0)
-            system_now = live_on_hand.get(pid, system)
+            raw_live = live_units.get(pid, [])
+            live_by_str = {str(u): u for u in raw_live}
+            system_now = len(live_by_str)
             # MOVED DURING THE COUNT: stock left or arrived while the session
             # was open. Counting it against the opening snapshot manufactures
             # a shortage out of a sale, and the write-off then destroys a
@@ -158,7 +184,7 @@ async def complete_stock_count(
             opening_print = opening_fingerprints.get(pid)
             units_changed = (
                 opening_print is not None
-                and live_fingerprints.get(pid) != opening_print
+                and _unit_fingerprint(raw_live) != opening_print
             )
             moved = system_now != system or units_changed
             variance = counted - system
@@ -166,20 +192,46 @@ async def complete_stock_count(
             unit_cost = float(costs.get(pid, 0.0) or 0.0)
             variance_value = round(variance * unit_cost, 2)
 
+            # THE EXACT PIECES. On a line that did not move, the units on hand
+            # now ARE the units on hand when the count opened, so "on hand but
+            # not scanned" names the missing pieces by unit, and "scanned but
+            # not on hand here" names the extra ones. A typed quantity says
+            # some pieces had no label: which unscanned ones they were cannot
+            # be known, so that line's shortfall is counted but NOT named --
+            # it cannot be written off piece by piece until it is scanned.
+            scanned = set(item["scanned_unit_ids"])
+            unscanned = [s for s in sorted(live_by_str) if s not in scanned]
+            extra_ids = [s for s in item["scanned_unit_ids"] if s not in live_by_str]
+            if typed:
+                missing_ids = []
+                unidentified = max(0, len(unscanned) - typed)
+                typed_extra = max(0, typed - len(unscanned))
+            else:
+                missing_ids = unscanned
+                unidentified = 0
+                typed_extra = 0
+            line_short = len(missing_ids) + unidentified
+            line_over = len(extra_ids) + typed_extra
+
             if moved:
                 lines_moved += 1
+                missing_ids, unidentified, extra_ids = [], 0, []
+                line_short = line_over = 0
             else:
                 total_system += system
                 total_counted += counted
-                if variance < 0:
-                    total_shrinkage += abs(variance)
-                    shrinkage_value += abs(variance_value)
-                elif variance > 0:
-                    total_overage += variance
-                    overage_value += variance_value
-                if variance != 0 and unit_cost <= 0:
+                total_shrinkage += line_short
+                shrinkage_value += line_short * unit_cost
+                total_overage += line_over
+                overage_value += line_over * unit_cost
+                if (line_short or line_over) and unit_cost <= 0:
                     # The rupee figure for this line is unknown, not zero.
                     lines_without_cost += 1
+                for uid in missing_ids:
+                    missing_raw[uid] = (live_by_str[uid], len(variances))
+                for uid in extra_ids:
+                    idx = item["scanned_unit_ids"].index(uid)
+                    extra_barcodes[item["scanned_barcodes"][idx]] = len(variances)
 
             variances.append(
                 {
@@ -190,13 +242,60 @@ async def complete_stock_count(
                     "system_quantity_now": system_now,
                     "units_changed_during_count": units_changed,
                     "physical_quantity": counted,
+                    "scanned_quantity": item["scanned_quantity"],
+                    "typed_quantity": item["typed_quantity"],
                     "variance": variance,
                     "variance_percentage": var_pct,
                     "unit_cost": round(unit_cost, 2),
                     "variance_value": variance_value,
                     "moved_during_count": moved,
+                    "shortage_units": line_short,
+                    "overage_units": line_over,
+                    "missing_units": [],
+                    "missing_unidentified": unidentified,
+                    "extra_units": [],
                 }
             )
+
+        # Name every missing piece (barcode, arrived) and every extra piece
+        # (where the books think it is) -- one read each.
+        if missing_raw:
+            for u in db.get_collection("stock_units").find(
+                {"_id": {"$in": [raw for raw, _ in missing_raw.values()]}},
+                {"_id": 1, "stock_id": 1, "barcode": 1, "created_at": 1, "received_at": 1},
+            ):
+                _raw, idx = missing_raw[str(u["_id"])]
+                v = variances[idx]
+                v["missing_units"].append(
+                    {
+                        "unit_id": str(u["_id"]),
+                        "stock_id": u.get("stock_id"),
+                        "barcode": u.get("barcode") or "",
+                        "arrived_at": u.get("received_at") or u.get("created_at"),
+                        "unit_cost": v["unit_cost"],
+                    }
+                )
+            for v in variances:
+                v["missing_units"].sort(key=lambda m: m["barcode"])
+        if extra_barcodes:
+            seen = set()
+            for u in db.get_collection("stock_units").find(
+                {"barcode": {"$in": list(extra_barcodes)}},
+                {"_id": 1, "barcode": 1, "store_id": 1, "status": 1},
+            ):
+                bc = u.get("barcode")
+                if bc in seen or bc not in extra_barcodes:
+                    continue
+                seen.add(bc)
+                variances[extra_barcodes[bc]]["extra_units"].append(
+                    {
+                        "unit_id": str(u["_id"]),
+                        "barcode": bc,
+                        # Where the books put it: another shop, or sold here.
+                        "recorded_store_id": u.get("store_id"),
+                        "recorded_status": u.get("status"),
+                    }
+                )
 
         # HOW MUCH OF THE SHELF WAS WALKED. The session has known the full
         # expected set since it opened; nothing ever compared the two, so
@@ -221,6 +320,16 @@ async def complete_stock_count(
         unknown_tokens = unknown_status_tokens(db, count_doc.get("store_id", ""))
         if unknown_tokens:
             cov["full_count"] = False
+        # The styles nobody counted, by name -- "count these now".
+        labels = _product_labels(db, cov.get("products_not_counted") or [])
+        not_counted = [
+            {
+                "product_id": pid,
+                "product_name": labels.get(pid, ("Unknown", ""))[0],
+                "sku": labels.get(pid, ("Unknown", ""))[1],
+            }
+            for pid in (cov.get("products_not_counted") or [])
+        ]
         products_expected = cov["products_expected"]
         products_counted = cov["products_counted"]
         coverage_pct = cov["coverage_percentage"]
@@ -250,10 +359,28 @@ async def complete_stock_count(
             "lines_without_cost": lines_without_cost,
             "lines_moved_during_count": lines_moved,
             **cov,
+            "not_counted": not_counted,
+            "pieces_scanned": len(count_doc.get("scans") or []),
             "unknown_status_tokens": unknown_tokens or [],
             "notes": request.notes if request else None,
         }
-        collection.update_one({"count_id": count_id}, {"$set": update_data})
+        # Close the session ONLY if no piece was scanned after it was read: a
+        # scan landing mid-Finish would otherwise sit in `scans` but be missing
+        # from every figure above -- and its piece listed as missing.
+        n_scans = len(count_doc.get("scans") or [])
+        closed = collection.update_one(
+            {
+                "count_id": count_id,
+                "status": "in_progress",
+                f"scans.{n_scans}": {"$exists": False},
+            },
+            {"$set": update_data},
+        )
+        if int(getattr(closed, "modified_count", 0) or 0) != 1:
+            raise HTTPException(
+                status_code=409,
+                detail="A piece was scanned while finishing. Press Finish again.",
+            )
 
         # Variance -> accountable SYSTEM task (fail-soft; deduped per count).
         try:
@@ -314,6 +441,8 @@ async def complete_stock_count(
             "products_missed": cov["products_missed"],
             "coverage_percentage": coverage_pct,
             "full_count": full_count,
+            "not_counted": not_counted,
+            "pieces_scanned": len(count_doc.get("scans") or []),
             "unknown_status_tokens": unknown_tokens or [],
             "variances": variances,
         }, current_user, "product")
