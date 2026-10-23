@@ -3422,6 +3422,21 @@ async def create_return(
     # doc) -- that still authorises the caller and never trusts a foreign store.
     store_id = order_store_id or validate_store_access(body.store_id, current_user)
 
+    # Store credit / refund belongs to the customer on the ORIGINAL bill. A
+    # body customer_id used to override it unchecked, so a return could credit
+    # ANY account. A different customer is refused (no family-wallet rule
+    # covers store credit; family_wallet.py pools loyalty points only).
+    order_customer_id = order.get("customer_id") or order.get("customerId")
+    if body.customer_id and str(body.customer_id) != str(order_customer_id or ""):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "A return's refund or store credit goes to the customer on the "
+                "original bill only. This return names a different customer, so "
+                "nothing was recorded."
+            ),
+        )
+
     # BUG-096: only a completed sale is returnable. Reject a CANCELLED / DRAFT /
     # REFUNDED / VOID order -- you cannot refund a sale that never completed or was
     # already fully refunded. Legacy orders with no status field fall through to
@@ -3636,7 +3651,7 @@ async def create_return(
     # (preserves the existing field name; now correctly gross, not net).
     ret_value = gross_refund
 
-    customer_id = body.customer_id or (order or {}).get("customer_id")
+    customer_id = order_customer_id
     customer_name = (
         (order or {}).get("customer_name") or (order or {}).get("customerName") or ""
     )
