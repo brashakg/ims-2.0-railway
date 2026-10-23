@@ -59,6 +59,26 @@ _STOCK_MANAGER_ROLES = (
     "STORE_MANAGER",
 )
 
+
+# OWNER RULING 2026-08-25 (#8): taking stock off the books as a LOSS (a count
+# write-off, a unit marked damaged or lost, a quantity adjusted down) is ADMIN
+# / SUPERADMIN only, at every value. A store manager sends it for write-off
+# instead. The ONE check every such door asks, so no door can drift.
+WRITE_OFF_ROLES = ("ADMIN", "SUPERADMIN")
+
+
+def refuse_write_off_unless_admin(current_user: dict, what: str) -> None:
+    """403 unless the caller may write stock off (WRITE_OFF_ROLES)."""
+    roles = {str(r).upper() for r in (current_user or {}).get("roles", []) or []}
+    if not roles & set(WRITE_OFF_ROLES):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Only an admin can {what}. Send it to the admin for write-off "
+                "instead."
+            ),
+        )
+
 # The free-string status value a quarantined unit carries. NOT an enum / schema
 # change (CORRECTIONS P0-6): stock_units.status is a free string, and every
 # on-hand / sellable rollup uses an explicit AVAILABLE/RESERVED allowlist, so a

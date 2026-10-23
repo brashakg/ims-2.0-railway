@@ -398,7 +398,9 @@ def test_quarantine_release_dispositions(env, disposition, final_status, restore
     env["add_unit"](sid)
     _run(quarantine_in(sid, QuarantineInRequest(reason="DEFECTIVE"), _MANAGER))
     assert env["stock_repo"].find_available("P-FRAME", "S-A") == 0
-    _run(quarantine_release(sid, QuarantineReleaseRequest(disposition=disposition), _MANAGER))
+    # DAMAGE is a write-off: ADMIN only (owner ruling 2026-08-25).
+    releaser = _ADMIN if disposition == "DAMAGE" else _MANAGER
+    _run(quarantine_release(sid, QuarantineReleaseRequest(disposition=disposition), releaser))
     assert env["stock_repo"].find_by_id(sid)["status"] == final_status
     expected = 1 if restored else 0
     assert env["stock_repo"].find_available("P-FRAME", "S-A") == expected
@@ -406,6 +408,26 @@ def test_quarantine_release_dispositions(env, disposition, final_status, restore
     rows = _events(env, sid)
     assert len(rows) == 2
     assert {r["event_type"] for r in rows} == {"quarantine.in", "quarantine.out"}
+
+
+def test_a_store_manager_cannot_write_off_a_quarantined_piece_as_damaged(env):
+    """Owner ruling 2026-08-25: a write-off is ADMIN / SUPERADMIN only, at
+    every value. Releasing a quarantined piece as DAMAGE takes it off the
+    books -- a manager gets 403 and the piece stays quarantined."""
+    from fastapi import HTTPException
+    from api.routers.item_events import (
+        quarantine_in, quarantine_release,
+        QuarantineInRequest, QuarantineReleaseRequest,
+    )
+
+    env["add_unit"]("U7-MGR")
+    _run(quarantine_in("U7-MGR", QuarantineInRequest(reason="DEFECTIVE"), _MANAGER))
+    with pytest.raises(HTTPException) as exc:
+        _run(quarantine_release(
+            "U7-MGR", QuarantineReleaseRequest(disposition="DAMAGE"), _MANAGER))
+    assert exc.value.status_code == 403
+    assert env["stock_repo"].find_by_id("U7-MGR")["status"] == "QUARANTINED"
+    assert [r["event_type"] for r in _events(env, "U7-MGR")] == ["quarantine.in"]
 
 
 # ===========================================================================

@@ -4,6 +4,7 @@ from api.utils.event_time import utc_event_iso
 
 from ...dependencies import store_in_view
 from ._shared import (
+    refuse_write_off_unless_admin,
     BaseModel,
     Depends,
     Dict,
@@ -64,6 +65,9 @@ class SerialUpdate(BaseModel):
 
 
 _SERIAL_STATUSES = {"IN_STOCK", "SOLD", "WARRANTY_CLAIM", "DAMAGED", "LOST_STOLEN"}
+# Marking a unit damaged or lost records it as a LOSS -- a write-off, which is
+# ADMIN / SUPERADMIN only (owner ruling 2026-08-25).
+_LOSS_STATUSES = {"DAMAGED", "LOST_STOLEN"}
 
 
 def _compute_warranty_status(expiry: Optional[str], now: datetime) -> str:
@@ -219,6 +223,8 @@ async def create_serial(
     active_store = validate_store_access(req.store_id, current_user)
     if req.status not in _SERIAL_STATUSES:
         raise HTTPException(status_code=400, detail="Invalid status")
+    if req.status in _LOSS_STATUSES:
+        refuse_write_off_unless_admin(current_user, "mark a unit damaged or lost")
 
     try:
         serials_coll = db.get_collection("serial_numbers")
@@ -285,6 +291,11 @@ async def update_serial(
         updates = req.model_dump(exclude_unset=True, exclude_none=True)
         if "status" in updates and updates["status"] not in _SERIAL_STATUSES:
             raise HTTPException(status_code=400, detail="Invalid status")
+        if (
+            updates.get("status") in _LOSS_STATUSES
+            and updates["status"] != existing.get("status")
+        ):
+            refuse_write_off_unless_admin(current_user, "mark a unit damaged or lost")
 
         now = datetime.utcnow()
         updates["updated_at"] = utc_event_iso(now)
