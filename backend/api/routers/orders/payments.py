@@ -20,6 +20,7 @@ from ...dependencies import (
 from ...services import cash_denominations as cash_denom
 from ...services.policy_registry import resolve_emi_annual_rate as _emi_annual_rate
 from ._shared import (
+    LOYALTY_TENDER_ROLES,
     PAYMENT_ROLES,
     logger,
     router,
@@ -234,6 +235,11 @@ async def add_payment(
         payment_id = str(uuid.uuid4())
         loyalty_txn_id = None
         if payment.method == PaymentMethod.LOYALTY:
+            if not any(r in current_user.get("roles", []) for r in LOYALTY_TENDER_ROLES):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Loyalty points are taken at the till only - your role cannot record a loyalty payment.",
+                )
             loyalty_txn_id = _claim_loyalty_redemption(order, payment.amount, payment_id)
 
         # EMI validation and interest calculation

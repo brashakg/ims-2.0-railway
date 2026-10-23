@@ -112,10 +112,14 @@ HANDOVER_ROLES = POS_WRITE_ROLES + ("CASHIER", "WORKSHOP_STAFF")
 # deliver-with-payment door that calls it). The till's role set (frontend
 # navConfig 'Billing' / 'Delivery Counter': SUPERADMIN, ADMIN, STORE_MANAGER,
 # OPTOMETRIST, CASHIER, SALES_STAFF) plus everyone who may ring a sale
-# (POS_WRITE_ROLES), so nobody can create a bill they cannot tender. Before
-# this, ANY logged-in role (workshop, catalogue, accounts) could mark a bill
-# paid. Keep the policy row for /orders/{order_id}/payments in sync.
-PAYMENT_ROLES = POS_WRITE_ROLES + ("CASHIER", "OPTOMETRIST")
+# (POS_WRITE_ROLES), so nobody can create a bill they cannot tender, plus
+# ACCOUNTANT (owner 2026-10-23: accounts collect credit bills). Before this,
+# ANY logged-in role (workshop, catalogue) could mark a bill paid. Keep the
+# policy row for /orders/{order_id}/payments in sync.
+PAYMENT_ROLES = POS_WRITE_ROLES + ("CASHIER", "OPTOMETRIST", "ACCOUNTANT")
+# A LOYALTY tender is a till act (the points are redeemed at the counter):
+# ACCOUNTANT records money, never points (owner 2026-10-23).
+LOYALTY_TENDER_ROLES = tuple(r for r in PAYMENT_ROLES if r != "ACCOUNTANT")
 
 # Per-category GST is sourced from the canonical table in
 # api/services/gst_rates.py (single source of truth, shared with the product
