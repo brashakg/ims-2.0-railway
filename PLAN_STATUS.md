@@ -1,5 +1,7 @@
 # IMS 2.0 — live plan status
 
+Updated **2026-10-23** (evening). **21 PRs merged since the 2026-10-19 morning note** (section 4aa): step A finished (#1236 till discount approver, #1238 GST input credit, #1239 GST document numbers, #1241 publish prep, #1242 top-menu scroll, #1243 model name), the website work (#1244 page types, #1245 brand filters + Never sell online, #1251 auto first-publish 100 per sync, #1252 + #1254 never-sell take-down, #1257 listing quality, #1258 re-queue stamp, #1255 + #1256 weight on the product and sent to Shopify in grams, #1248 + #1262 the "could not be read" website labels), GST (#1247 margins without GST, #1253 GSTR-1 batch 1), the ZEISS lens master (#1246), two flaky tests (#1249, #1250) and **S2 of the stock redesign: one Receive screen (#1259)**. **Deployed 2026-10-23 16:06 and 18:01** after Railway's build pause (platform security incident 10-21); live build 8a21fd3c, healthy. On prod (owner approved): page types switched on; the 23 live listings re-sent with the new copy and weights; 47 new products first-published by two manual syncs (425 waiting, 100 per scheduled run); per-colour photos attached on 11 listings; an archived product taken out of the queue. Secrets rotated after the incident: MongoDB and Redis passwords (now variable references), the login and seed secrets, the Anthropic key (old key deleted by the owner); still to rotate: Shopify app token, credential-encryption key, PageSpeed, old e-commerce keys, marketing site password. **The owner approved the stock & inventory redesign** (14-screen canvas, section 4ab) and **a Fable 5.1 review of 8 workflows** found 34 confirmed problems (section 4ac); fixes are in build, the POS ones owner-approved. Still nothing sells online: website stock is 0 until opening stock / purchases are entered in IMS.
+
 Updated **2026-10-19** (morning). Step A of the agreed order (section 4x) is mostly merged: **9 more PRs merged since the 2026-10-18 evening note** (section 4z) - one product per model in IMS (#1226), no duplicate products on Shopify (#1227), the visibility sweep (#1232), 16-character tax invoice numbers BOK01/2627/00001 (#1231), one website listing per model with colour/size choices (#1233), supplier payments pick their bill (#1230), who sees which shop (#1235), no doubled brand in titles (#1237) and supplier returns that name every piece (#1234). On prod (owner approved): the model-family move was applied (96 models, 149 linked, reversible) and the Shopify unique product id was set up. Read-only checks: the 01:02 IST sync ran clean with the Pune error gone; the website-listing dry run shows 0 price changes on the 10 live Carrera models and none of the 25 live listings queued; every staff login has a shop; there are no supplier returns on prod; no product has a selling price below MRP. In review: the till discount approver (#1236), GST input credit (#1238), GST document numbers (#1239). **The owner answered all five questions the same morning (section 5):** offers within caps, the June Pune test bills cancelled, 83 doubled brand names cleaned up, a return with no credit-note number refused, and Better Vision Opticals Pvt Ltd is over Rs 5 crore (e-invoicing needed). Still nothing sells online: products have 0 stock in IMS until it is received through purchasing.
 
 Updated **2026-10-18** (evening). The largest day so far: Codex finished the paused wave and the 13-finding audit, and Claude took over as lead. **35 PRs merged since 2026-10-13** (section 4w): the paused procurement/online wave (#1163, #1166, #1171, #1181, #1196-#1204), all 13 original audit findings (#1205-#1220), and today's batch (#1221 collections push, #1222 failed Shopify notifications retried, #1223 GSTR-3B month-end, #1224 stock-write ordering, #1225 every size priced before publish, #1228 status page inside Shopify admin). On prod (owner approved): Pune linked to its Shopify location (all 4 shops linked); the IMS Shopify app's permissions fixed (menus and pages now readable); the live-data checks needed no change (barcodes 0, reorder levels 0, customers over Rs 1,50,000 credit 0). A full sweep of all 295 audit documents (2,801 items) was reconciled against the code; its confirmed open items are in section 4y. **The agreed order of work is section 4x.** Still nothing sells online: all 601 ready products have 0 stock in IMS until it is received through purchasing.
@@ -451,13 +453,80 @@ In review (not merged): **#1236** till discount approver from the manager's own 
 
 **Next GST follow-up (before the first GSTR-1 with a move between GSTINs):** file transfers in the month they ship, not the month they are completed; flag a transfer invoice missing from every return; a return paid partly in store credit must file its whole tax reversal; GSTR-3B always covers every shop on a GSTIN.
 
+## 4aa. Merged 2026-10-19 (late) .. 2026-10-23 (all squash-merged to main)
+
+| PR | What it does |
+|---|---|
+| **#1236** | The till's discount approver is decided by the server; over-limit discounts go through a manager's approval |
+| **#1238** | One input-credit rule: GST table per GSTIN, unclaimed GST into stock cost, section 17(5) tick, supplier note month |
+| **#1239** | Transfer tax invoices, debit and credit notes fit GST's 16 characters |
+| **#1241** | Website publish prep: cost-exempt colours, collections fill, brand collections |
+| **#1242** | Top-menu dropdowns scroll again |
+| **#1243** | A frame's Model Name is what staff typed, never a copy of the Model Number |
+| **#1244** | Website page type per product (Standard / Pre-order / Preview only); switched ON on prod 10-23 |
+| **#1245** | Brand Master filter bar + SUPERADMIN "Never sell online" block |
+| **#1246** | ZEISS April 2026 lens master + dry-run import (applied on prod, 735 lines) |
+| **#1247** | Every margin compares cost and price both without GST |
+| **#1248**, **#1262** | The website line on Add/Edit product (#1248) and on the Catalogue list (#1262) no longer say "could not be read" |
+| **#1249**, **#1250** | Two tests no longer fail around IST midnight |
+| **#1251** | The scheduled sync (01:00 / 09:00 IST) first-publishes up to 100 queued products per run (owner 10-20; about 15 Dec switch to all-at-once) |
+| **#1252**, **#1254** | "Never sell online" takes the brand's live listings down, with its own per-run cap; a failed read is reported |
+| **#1253** | GST batch 1: GSTR-1 rows correct (fail loudly, B2CL inter-state only, per-rate items), credit-note place of supply from the sale, an invoiced or shipped VOID is still a sale |
+| **#1255**, **#1256** | Weight: one value on the product, shown on every screen, sent to Shopify in grams |
+| **#1257** | Listing quality before auto-publish: no doubled brand, alt text on every photo, no "100% genuine" promise, collection SEO, New Arrivals tags, mm on sizes, "polarized" only when true |
+| **#1258** | Re-queue writers stamp a fresh revision, so a queued edit is never lost |
+| **#1259** | **Stock redesign S2 - one Receive screen** at /purchase/receive: order receipt, bought without PO, delivery challan, extra goods, cancelled orders; per-line "I counted this"; damaged piece inline -> Quarantine + draft debit note; shelf code; contact-lens batch + expiry; labels after receiving; stuck-receipt recovery; no prices for the manager (the accountant types bill prices); /purchase/grn forwards. 3 review rounds |
+
+## 4ab. Stock & inventory redesign (owner approved 2026-10-23)
+
+Design: the 14-board canvas "IMS Stock & Inventory Redesign" (claude.ai artifact BEBdK16Xgjyv41LbCogZi2). It follows the page-split rules: one top menu, every screen its own address, no hidden tabs, one door per job, old addresses forward. The Stock & supply menu goes from 19 links to 10 (Catalogue stays inside it as one link with its own section links; stock reports move to Analysis; Workshop to Operations; Online Stock to Growth; Opening Stock stays).
+
+| Phase | Work | State |
+|---|---|---|
+| S1 | Blind scan count (each scan +1, typed qty per style, nothing expected shown until Finish), count result, write-off of the EXACT unscanned pieces, write-offs admin-only on the server at every door, zone counts never write off, "None found" styles write-off-able by an admin only above 90% coverage | **PR #1260** (draft, review round 3 pending) |
+| S2 | One Receive screen | **DONE #1259** |
+| S2b | Server side of receiving: "credit" closes the order line short (D9); damaged-piece photo; challan photo REQUIRED (owner 10-23); red DO NOT SHELVE label from receive; two small preview fixes | TODO |
+| S3 | Transfers tracked piece by piece: scan out / scan in, missing on the way, ship marks the packed barcodes, GST supply dated at ship, inter-GSTIN valued challan | TODO |
+| S4 | One average cost per product (re-averaged only when the accountant accepts a bill) and one stock-value formula; on-hold bills never rewrite cost/MRP; lens-lab challan bills no longer double-counted | TODO (money review) |
+| S5 | One Reorder list (shop level if set, else 30-day sales); Buy Desk, Replenishment and Low stock forward to it | TODO |
+| S6 | Menu 19 -> 10, Find a product (ledger + lookup merged), Catalogue section links, Approvals carries write-off and missing-on-the-way requests | TODO |
+| S7 | Stock today landing page | TODO |
+
+Owner answers 2026-10-23: one average cost; the ACCOUNTANT types bill prices; count blind until Finish; reorder = shop level, else 30-day sales; challan photo required; cash-memo bill number optional; "None found" styles: an admin may write them off (whole-shop or whole-category counts only).
+
+## 4ac. Fable 5.1 workflow review (2026-10-23) and the fixes
+
+8 workflows reviewed by Claude Fable 5.1 in one batch ($19.64 of the $200 API credit that expires 31 Oct); the 43 critical/high leads were verified against the code: **34 confirmed, 8 partly, 1 false** (1 critical and 20 high after checking).
+
+| Fix | Problems | State |
+|---|---|---|
+| M1 | Confirming an online refund review on a never-paid (COD) order minted store credit; credit is now capped at money collected minus money already given back. Prod check: no such credit was ever given | **PR #1261** (draft, money review round 2) |
+| POS 1 | "Paid by loyalty" without points + no role gate on payments; return store credit to another customer; refunds of any size by a cashier (**owner 10-23: above Rs 2,000 needs a manager**, fail closed); a paid/invoiced order cancelled with no refund or credit note | WIP (owner approved POS) |
+| POS 2 | Tax invoice number minted at the moment of sale (not when the PDF is opened); HSN and GST class from the product (also fixes website orders' GST guess) | TODO |
+| POS 3 | Made-to-order lens price doubled at the till | TODO |
+| POS 4 | Oversell not blocked for never-stocked products and the last-unit race | TODO (after S1) |
+| Website 1 | Invoice total checked against what Shopify charged (discount codes, shipping); shipping address stored on the order; no fake "shipped" from a simulated courier booking | TODO |
+| Website 2 | Bulk price changes reach bettervision.in; archived products cannot be re-listed | TODO |
+| Inside S1/S3/S4 | Count scan "1" instead of "+1", lens stock lowered without a reason, transfer GST month, a random frame marked shipped, a partial transfer strands pieces, an on-hold bill rewrites cost, challan double count | in those phases |
+| Returns (lower) | A failed return save swallowed after its side effects; a credit-note number burned on failure; a bank deposit missing from the shared till session (false SHORT) | TODO |
+
+## 4ad. Small screen fixes queued (owner asks 2026-10-23)
+
+- The shared error display: 18 screens read the server's refusal from the wrong place, so a "not allowed" shows as a red error (Durga's "Couldn't check Shopify sync status", "Failed to create GRN").
+- Out-of-date "dry-run unless armed" texts on the Shopify pages; photos still processing shown as amber "waiting", not red crosses; a size variant's "push the parent" message in plain words.
+- Brand form: ticking "Never sell online" greys out and unticks "Sync to Shopify by default".
+- Catalogue list: "Edited by" / "Added" on each colour and size row, not only the model.
+- Website "Type: Sunglass" -> "Sunglasses".
+- **Colour names**: the 630 drafted names (sheet sent to the owner, $8.58) are confirmed by the cataloguer, then loaded into IMS and synced; then a permanent "Suggested colour name" on each new product (from its own photo, Accept / Change on the edit screen).
+- Catalogue data for the cataloguer: two products entered twice (Carrera 3001/S Havana 54, Flag Lab 16 KY21V), a Polaroid PLD 2141/S colour without a price, 163 colours whose catalogue lens/frame colour contradicts the photo (flagged in the sheet).
+
 ## 4x. The agreed order of work (owner 2026-10-18)
 
 | Step | Work | State |
 |---|---|---|
-| **A** | In-flight fixes: one product per model in IMS (**#1226**, draft); no duplicate products on Shopify + catalogue saves never wipe the Shopify link (**#1227**, draft); tax invoice numbers fit GST's 16 characters, format **BOK01/2627/00001**; supplier payments pick their bill + advances applied later + a payment can never apply twice; shop scope on the category P&L, cost writes for accounts only, bill scans and journal entries for accounts only, other shops' frames hidden from scans; stock (supplier returns name their frames and leave stock when shipped, damaged returns set aside, stock-count write-offs per frame); till discount approver from the manager's own login + an over-limit approval step; "who sees which shop" (accountant own shop on four finance views, no-shop login sees no sales at the till, admin with no shop picked sees all shops everywhere) | **mostly merged** (#1226 #1227 #1230 #1231 #1232 #1234 #1235, section 4z); in review: #1236, #1238, #1239 |
+| **A** | In-flight fixes: one product per model in IMS (**#1226**, draft); no duplicate products on Shopify + catalogue saves never wipe the Shopify link (**#1227**, draft); tax invoice numbers fit GST's 16 characters, format **BOK01/2627/00001**; supplier payments pick their bill + advances applied later + a payment can never apply twice; shop scope on the category P&L, cost writes for accounts only, bill scans and journal entries for accounts only, other shops' frames hidden from scans; stock (supplier returns name their frames and leave stock when shipped, damaged returns set aside, stock-count write-offs per frame); till discount approver from the manager's own login + an over-limit approval step; "who sees which shop" (accountant own shop on four finance views, no-shop login sees no sales at the till, admin with no shop picked sees all shops everywhere) | **DONE** (#1226 #1227 #1230 #1231 #1232 #1234 #1235, section 4z; #1236 #1238 #1239, section 4aa) |
 | **A2** | E-invoicing for Better Vision Opticals Pvt Ltd (over Rs 5 crore): an IRN and signed QR on its B2B tax invoices, B2B credit/debit notes and its transfer tax invoices between the Maharashtra and Jharkhand GSTINs, before the first such document is issued. Route to choose: IMS prepares the e-invoice file for upload on the government portal and stores the IRN/QR it returns, or a direct link through a GST provider | **new 2026-10-19 - design first** |
-| **B1-5** | Products live on bettervision.in: grouped website listings (one per model with colour/size choices, model-level title, description and SEO, all photos, new colours added to the 25 live listings); set up the unique product id on Shopify; move the 601 products into model families (dry run shown to the owner first); publish ~451 listings, then collections, then rebuild the menu; one real test order end to end | listings code **merged #1233**, unique id set up, model families applied; next: publish, collections, menu, test order |
+| **B1-5** | Products live on bettervision.in: grouped website listings (one per model with colour/size choices, model-level title, description and SEO, all photos, new colours added to the 25 live listings); set up the unique product id on Shopify; move the 601 products into model families (dry run shown to the owner first); publish ~451 listings, then collections, then rebuild the menu; one real test order end to end | listings code **merged #1233**; auto first-publish **#1251** (100 per scheduled run; 72 published, 425 waiting on 10-23); collections pushed; next: menu rebuild once products are live, one real test order, website stock |
 | **C (Batch 2)** | Loyalty redemption and its record saved together (also adjustments, expiry, referrals); promotional messages re-check opt-out and quiet hours just before sending | approved |
 | **B6-8** | Look and buying: theme check, mock-ups, home / collection / product pages, checkout; traffic: Google Shopping, Facebook and Instagram shop, SEO, WhatsApp order updates; a daily visitors / carts / orders dashboard | after C |
 | **Rest of C** | Shopify housekeeping (5 unused notifications after a safety check, remove the dead old key, prepare the next API version); recovery tools for rare stuck states; audit leftovers (section 4y) | later |
