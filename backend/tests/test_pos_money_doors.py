@@ -422,7 +422,7 @@ def _advance_order(till, **over):
     )
 
 
-_ADV_BODY = {"order_id": "ORD-1", "reason": "customer cancelled the order"}
+_ADV_BODY = {"order_id": "ORD-1", "reason": "customer cancelled the order", "cash_paid_from": "STORE_DRAWER"}
 _LINE = {"item_id": "li1", "product_id": "P1", "product_name": "Frame", "sku": "F1", "quantity": 1,
          "unit_price": 4761.90, "gst_rate": 5.0, "taxable_value": 4761.90, "tax_amount": 238.10}
 
@@ -792,3 +792,265 @@ def test_return_refused_when_earlier_refunds_cannot_be_read(monkeypatch):
     assert r.status_code == 503, r.text
     assert "Could not check earlier refunds on this bill - try again" in r.text
     assert returns.count_documents({}) == 0
+
+
+# =========================================================================== #
+# Round-2 money review (head dd003bd3)
+# =========================================================================== #
+def test_a_cancelled_order_with_an_invoice_is_still_a_sale():
+    # B1: its credit note does the reversal; dropping the invoice as well
+    # reversed the tax twice.
+    from api.utils.real_sale import is_real_sale, real_sale_match
+    from tests.strict_fakes import matches
+
+    db = StrictDB()
+    db.seed("orders", [
+        {"order_id": "A", "status": "CANCELLED", "invoice_number": "BOK01/2627/00009"},
+        {"order_id": "B", "status": "CANCELED", "invoice_number": "BOK01/2627/00010"},
+        {"order_id": "C", "status": "CANCELLED", "invoice_number": None},
+        {"order_id": "D", "status": "cancelled"},
+        {"order_id": "E", "status": "CONFIRMED"},
+    ])
+    flt = real_sale_match(db)
+    rows = list(db.get_collection("orders").find({}))
+    assert sorted(o["order_id"] for o in rows if matches(o, flt)) == ["A", "B", "E"]
+    assert [o["order_id"] for o in rows if is_real_sale(o)] == ["A", "B", "E"]
+
+
+def _gst_flow(till):
+    """Invoice Rs 5,000 (tax 238.10), Rs 1,000 advance, then the advance door:
+    whole-invoice credit note, order cancelled. Same month for both."""
+    from datetime import datetime, timezone
+
+    till["db"].seed("stores", [{"store_id": STORE, "gstin": "27AAACR0000A1ZZ", "store_name": "Pune",
+                                "state": "Maharashtra"}])
+    till["db"].seed("customers", [{"customer_id": "CUST-1", "name": "Asha", "state": "Maharashtra"}])
+    line = dict(_LINE, hsn_code="900311", item_total=5000.0)
+    _advance_order(till, invoice_number="BOK01/2627/00009", items=[line], tax_amount=238.10,
+                   created_at=datetime.now(timezone.utc).replace(tzinfo=None))
+    r = _advance_client().post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r.status_code == 201, r.text
+    assert _stored(till)["status"] == "CANCELLED"
+    from api.utils.ist import ist_today
+    return ist_today().strftime("%Y-%m")
+
+
+@pytest.mark.usefixtures("gst_numbers")
+def test_gstr1_files_the_invoice_and_its_whole_credit_note_once(till, monkeypatch):
+    import api.routers.reports as rep_mod
+
+    month = _gst_flow(till)
+    monkeypatch.setattr(rep_mod, "_get_raw_db", lambda: till["db"])
+    rep = rep_mod._compute_gstr1(month, STORE)
+    sales_tax = round(sum(b.get("cgst", 0) + b.get("sgst", 0) + b.get("igst", 0) for b in rep["b2cs"]), 2)
+    cn_tax = round(sum(c["taxValue"] for c in rep["cdnr"]), 2)
+    assert sales_tax == pytest.approx(238.10)   # the invoice is still filed
+    assert cn_tax == pytest.approx(238.10)      # its credit note reverses it, once
+    assert len(rep["cdnr"]) == 1
+
+
+@pytest.mark.usefixtures("gst_numbers")
+def test_gstr3b_nets_the_invoice_and_its_credit_note_to_zero(till, monkeypatch):
+    import api.routers.reports as rep_mod
+
+    month = _gst_flow(till)
+    monkeypatch.setattr(rep_mod, "_get_raw_db", lambda: till["db"])
+    rep = rep_mod._compute_gstr3b(month, STORE)
+    t = rep["outwardTaxableSupplies"]
+    assert round(t["centralTax"] + t["stateTax"] + t["integratedTax"], 2) == pytest.approx(0.0, abs=0.01)
+    assert rep["outwardTaxableValue"] == pytest.approx(0.0, abs=0.01)
+    # ...because the invoice's 238.10 met its credit note's 238.10 -- not
+    # because the invoice vanished and the note rolls forward to next month.
+    cn = rep["creditNotes"]
+    assert round(cn["centralTax"] + cn["stateTax"] + cn["integratedTax"], 2) == pytest.approx(238.10)
+    carry = rep.get("creditNoteCarryForward") or {}
+    assert round(sum(float(v or 0) for k, v in carry.items() if k != "taxableValue"), 2) == 0.0
+
+
+# --- B2: a refunded order takes no more money and is never handed over ------
+@pytest.mark.asyncio
+async def test_no_payment_on_an_order_whose_advance_was_refunded(till):
+    _advance_order(till, advance_refund_id="RET-ADV-1")
+    with pytest.raises(HTTPException) as exc:
+        await add_payment("ORD-1", PaymentCreate(method="CASH", amount=100.0), _user("CASHIER"))
+    assert exc.value.status_code == 409
+    assert len(_stored(till)["payments"]) == 2 and _stored(till)["amount_paid"] == 1000.0
+
+
+@pytest.mark.asyncio
+async def test_no_handover_of_an_order_whose_advance_was_refunded(till):
+    from api.routers.orders import deliver_order, deliver_with_payment
+    from api.routers.orders.delivery import DeliverWithPaymentRequest
+
+    _advance_order(till, advance_refund_id="RET-ADV-1", status="READY")
+    with pytest.raises(HTTPException) as exc:
+        await deliver_order("ORD-1", None, _user("STORE_MANAGER"))
+    assert exc.value.status_code == 409
+    with pytest.raises(HTTPException) as exc2:
+        await deliver_with_payment(
+            "ORD-1", DeliverWithPaymentRequest(payment=PaymentCreate(method="CASH", amount=100.0)),
+            _user("STORE_MANAGER"))
+    assert exc2.value.status_code == 409
+    doc = _stored(till)
+    assert doc["status"] == "READY" and doc["amount_paid"] == 1000.0
+
+
+@pytest.mark.asyncio
+async def test_cancel_guard_reads_earlier_refunds_strictly(till, monkeypatch):
+    _advance_order(till)
+    monkeypatch.setattr(returns_router, "_returns_coll", lambda: _ReadFails())
+    with pytest.raises(HTTPException) as exc:
+        await cancel_order("ORD-1", reason="customer cancelled the order", current_user=_user("ADMIN"))
+    assert exc.value.status_code == 503
+    assert "Could not check earlier refunds" in str(exc.value.detail)
+    assert _stored(till)["status"] == "CONFIRMED"
+
+
+def test_preview_offers_finish_cancel_after_a_failed_cancel(till, monkeypatch):
+    from api.routers.orders import cancel as cancel_mod
+
+    _advance_order(till)
+
+    async def _fails(*_a, **_k):
+        raise HTTPException(status_code=500, detail="Could not cancel the order -- please retry.")
+
+    monkeypatch.setattr(cancel_mod, "cancel_order_core", _fails)
+    client = _advance_client()
+    assert client.post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT")).status_code == 201
+    plan = client.get("/api/v1/returns/advance-refund/ORD-1", headers=_hdr("ACCOUNTANT")).json()
+    assert plan["ok"] is True and plan["action"] == "finish_cancel"
+
+
+# --- M1: no burned credit-note numbers --------------------------------------
+@pytest.mark.usefixtures("gst_numbers")
+def test_no_credit_note_number_is_taken_when_the_store_credit_fails(till, monkeypatch):
+    minted = []
+    real_mint = returns_router.next_document_number
+
+    def _spy(*a, **k):
+        n = real_mint(*a, **k)
+        minted.append(n)
+        return n
+
+    monkeypatch.setattr(returns_router, "next_document_number", _spy)
+    monkeypatch.setattr(returns_router, "_credit_back_advance", lambda *a, **k: None)
+    till["db"].get_collection("orders").insert_one(
+        _order(invoice_number="BOK01/2627/00009", items=[dict(_LINE)], amount_paid=1000.0,
+               payment_status="PARTIAL", grand_total=5000.0,
+               payments=[{"payment_id": "p1", "method": "GIFT_VOUCHER", "amount": 1000.0}])
+    )
+    r = _advance_client().post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r.status_code == 503, r.text
+    assert minted == []
+    assert till["db"].get_collection("returns").count_documents({}) == 0
+
+
+@pytest.mark.usefixtures("gst_numbers")
+def test_a_number_burned_by_a_failed_save_is_recorded_as_unused(till, monkeypatch):
+    audits = []
+
+    class _Audit:
+        def create(self, row):
+            audits.append(row)
+
+    monkeypatch.setattr("api.dependencies.get_audit_repository", lambda: _Audit())
+    _advance_order(till, invoice_number="BOK01/2627/00009", items=[dict(_LINE)])
+    rcoll = till["db"].get_collection("returns")
+
+    def _boom(_doc):
+        raise RuntimeError("insert failed")
+
+    monkeypatch.setattr(rcoll, "insert_one", _boom)
+    r = _advance_client().post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r.status_code == 503, r.text
+    unused = [a for a in audits if a.get("action") == "CREDIT_NOTE_NUMBER_UNUSED"]
+    assert len(unused) == 1 and unused[0]["details"]["unused_credit_note_number"] == "TST01/C2627/0001"
+    assert _stored(till).get("advance_refund_id") is None
+
+
+# --- M2: a crash between the claim and the record is undone on the next press
+def _stale(till, *, minutes_ago):
+    from datetime import datetime, timedelta, timezone
+
+    at = (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).isoformat()
+    till["db"].get_collection("customers").insert_one({"customer_id": "CUST-1", "name": "Asha", "store_credit": 750.0})
+    till["db"].get_collection("orders").insert_one(
+        _order(amount_paid=1000.0, payment_status="PARTIAL", advance_refund_id="RET-STALE",
+               advance_refund_at=at,
+               payments=[{"payment_id": "p1", "method": "STORE_CREDIT", "amount": 700.0},
+                         {"payment_id": "p2", "method": "CASH", "amount": 300.0}])
+    )
+    _ledger(till).insert_one({"entry_id": "e1", "customer_id": "CUST-1", "type": "ADJUSTED", "amount": 700.0,
+                              "delta": 700.0, "balance_after": 750.0, "ref": "RET-STALE",
+                              "order_id": "ORD-1", "source": "ADVANCE_REFUND"})
+
+
+def test_a_crashed_press_is_undone_then_refunded_once(till):
+    _stale(till, minutes_ago=10)
+    r = _advance_client().post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r.status_code == 201, r.text
+    rows = list(_ledger(till).find({"customer_id": "CUST-1"}))
+    assert sorted(x["delta"] for x in rows) == [-700.0, 700.0, 700.0]  # stale, its reversal, the real one
+    assert till["db"].get_collection("customers").find_one({"customer_id": "CUST-1"})["store_credit"] == 750.0
+    assert till["db"].get_collection("returns").count_documents({"order_id": "ORD-1"}) == 1
+    assert _stored(till)["status"] == "CANCELLED"
+
+
+def test_a_press_still_in_flight_is_not_undone(till):
+    _stale(till, minutes_ago=0)
+    r = _advance_client().post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r.status_code == 409, r.text
+    assert _ledger(till).count_documents({}) == 1
+    assert _stored(till)["advance_refund_id"] == "RET-STALE"
+
+
+# --- M3: cash paid from the shop drawer vs from HQ ---------------------------
+def test_drawer_cash_refund_carries_a_cash_count_block(till):
+    _advance_order(till)
+    r = _advance_client().post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r.status_code == 201, r.text
+    ret = till["db"].get_collection("returns").find_one({"order_id": "ORD-1"})
+    cash = [t for t in ret["refund_tenders"] if t["method"] == "CASH"][0]
+    assert cash["cash_count"]["state"] == "NOT_CAPTURED"
+    assert ret["cash_paid_from"] == "STORE_DRAWER" and ret["drawer_auto_netted"] is True
+
+
+def test_hq_cash_refund_never_touches_the_shop_drawer(till):
+    _advance_order(till)
+    body = {**_ADV_BODY, "cash_paid_from": "HQ"}
+    r = _advance_client().post("/api/v1/returns/advance-refund", json=body, headers=_hdr("ACCOUNTANT"))
+    assert r.status_code == 201, r.text
+    ret = till["db"].get_collection("returns").find_one({"order_id": "ORD-1"})
+    assert [t["method"] for t in ret["refund_tenders"]] == ["UPI"]
+    assert ret["paid_outside_drawer"] == [{"method": "CASH", "amount": 600.0, "paid_from": "HQ"}]
+    assert ret["cash_paid_from"] == "HQ"
+    assert ret["net_refund"] == 1000.0
+
+
+def test_cash_refund_must_say_where_the_cash_comes_from(till):
+    _advance_order(till)
+    body = {k: v for k, v in _ADV_BODY.items() if k != "cash_paid_from"}
+    r = _advance_client().post("/api/v1/returns/advance-refund", json=body, headers=_hdr("ACCOUNTANT"))
+    assert r.status_code == 400, r.text
+    assert till["db"].get_collection("returns").count_documents({}) == 0
+
+
+# --- create_return's re-check after reserving units --------------------------
+@pytest.mark.usefixtures("gst_numbers")
+def test_counter_return_backs_out_when_an_advance_refund_claims_mid_way(monkeypatch):
+    client, returns = _ctx(monkeypatch)
+    order = returns_router.get_order_repository()._order
+    real_claim = returns_router._claim_returnable_qty
+    released = []
+
+    def _claim_then_door_claims(*a, **k):
+        ok = real_claim(*a, **k)
+        order["advance_refund_id"] = "RET-ADV-RACE"  # the door won the order meanwhile
+        return ok
+
+    monkeypatch.setattr(returns_router, "_claim_returnable_qty", _claim_then_door_claims)
+    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a))
+    r = client.post("/api/v1/returns", json=_qa_payload(), headers=_hdr("STORE_MANAGER"))
+    assert r.status_code == 409, r.text
+    assert returns.count_documents({}) == 0
+    assert len(released) == 1
