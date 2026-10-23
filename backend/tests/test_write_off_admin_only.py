@@ -338,3 +338,59 @@ def test_a_manager_creates_only_an_empty_lens_cell_with_a_reason(lens, monkeypat
     assert coll.find_one({"sph": 2.0})["on_hand"] == 0
     _run(ls.create_cell(ls.StockCellCreate(**{**base, "sph": 3.0}, on_hand=4), ADMIN))
     assert coll.find_one({"sph": 3.0})["on_hand"] == 4
+
+
+# ---------------------------------------------------------------------------
+# Review round 3 (PR #1260)
+# ---------------------------------------------------------------------------
+
+
+def test_an_order_named_by_number_then_by_id_still_covers_one_piece(serial_db):
+    """F1: the cap matched only the name used THIS time, so naming a qty-1
+    order by its number on one mark-sold and by its id on the next sold two
+    pieces. Every name of the order counts against the same line."""
+    st, mdb = serial_db
+    mdb["orders"].insert_one({"_id": "OBJ-1", "order_id": "O1", "order_number": "BV-0001",
+                              "store_id": STORE, "status": "CONFIRMED",
+                              "items": [{"product_id": "P1", "quantity": 1}]})
+    mdb["stock_units"].insert_one({"stock_id": "U2", "serial": "SN-2", "product_id": "P1",
+                                   "store_id": STORE, "status": "IN_STOCK"})
+    assert _run(st.mark_sold("SN-1", st.MarkSoldBody(order_id="BV-0001"), MANAGER))["status"] == "SOLD"
+    with pytest.raises(HTTPException) as exc:
+        _run(st.mark_sold("SN-2", st.MarkSoldBody(order_id="O1"), MANAGER))
+    assert exc.value.status_code == 403
+    assert mdb["stock_units"].find_one({"serial": "SN-2"})["status"] == "IN_STOCK"
+
+
+def test_an_order_line_quantity_written_as_a_decimal_is_read(serial_db):
+    """F1: int('2.0') crashed the check."""
+    st, mdb = serial_db
+    mdb["orders"].insert_one({"order_id": "O2", "store_id": STORE, "status": "CONFIRMED",
+                              "items": [{"product_id": "P1", "quantity": "2.0"}]})
+    assert _run(st.mark_sold("SN-1", st.MarkSoldBody(order_id="O2"), MANAGER))["status"] == "SOLD"
+
+
+def test_a_lens_bulk_import_by_a_manager_follows_the_create_cell_rule(lens):
+    """F2: the bulk import let a manager open a new cell WITH stock and raise
+    a cell's stock with no reason -- the two things create_cell / PATCH refuse."""
+    ls, coll = lens
+
+    def body(rows, notes=None):
+        return ls.BulkImportPayload(store_id=STORE, notes=notes, matrix=[
+            {"sph": sph, "cyl": 0.0, "add": None, "qty": q} for sph, q in rows])
+
+    with pytest.raises(HTTPException) as exc:  # a new cell with stock in it
+        _run(ls.bulk_import("L1", body([(1.0, 4)], notes="tray found"), MANAGER))
+    assert exc.value.status_code == 403
+    assert coll.count_documents({"sph": 1.0}) == 0
+
+    with pytest.raises(HTTPException) as exc:  # raising stock with no reason
+        _run(ls.bulk_import("L1", body([(0.0, 7)]), MANAGER))
+    assert exc.value.status_code == 400
+    assert coll.find_one({"line_stock_id": "C1"})["on_hand"] == 5
+
+    _run(ls.bulk_import("L1", body([(0.0, 7), (2.0, 0)], notes="recounted tray"), MANAGER))
+    assert coll.find_one({"line_stock_id": "C1"})["on_hand"] == 7
+    assert coll.find_one({"sph": 2.0})["on_hand"] == 0, "an EMPTY new cell is fine"
+    _run(ls.bulk_import("L1", body([(3.0, 4)]), ADMIN))
+    assert coll.find_one({"sph": 3.0})["on_hand"] == 4

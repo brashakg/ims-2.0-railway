@@ -75,6 +75,15 @@ def is_write_off_admin(current_user: dict) -> bool:
 _DEAD_ORDER_STATUSES = {"CANCELLED", "CANCELED", "VOID", "VOIDED", "DRAFT"}
 
 
+def _qty(value) -> int:
+    """An order line's quantity as a whole number ('2.0', 2.0 and 2 alike);
+    a missing one is a single piece."""
+    try:
+        return int(float(value)) if value not in (None, "") else 1
+    except (TypeError, ValueError):
+        return 1
+
+
 def refuse_unless_real_order(db, order_id, unit: dict, current_user: dict) -> None:
     """Marking a unit SOLD by hand takes it off the shelf. Without a real
     order for it that is a write-off wearing a sale's clothes, so a non-admin
@@ -89,7 +98,7 @@ def refuse_unless_real_order(db, order_id, unit: dict, current_user: dict) -> No
         )
     pid = str(unit.get("product_id") or "")
     line_qty = sum(
-        int(i.get("quantity") or 1)
+        _qty(i.get("quantity"))
         for i in ((order or {}).get("items") or [])
         if str(i.get("product_id") or "") == pid
     )
@@ -101,19 +110,28 @@ def refuse_unless_real_order(db, order_id, unit: dict, current_user: dict) -> No
         # ONE ORDER LINE, ONE USE PER PIECE (S1 review round 2): the same
         # order cannot be named for more pieces of this product than its
         # line sold. Pieces already sold against it: units stamped with the
-        # order, plus ledger SELL events naming it.
-        oid = str(order_id).strip()
+        # order, plus ledger SELL events naming it -- under ANY of the
+        # order's names (round 3: by number once and by id the next time
+        # used to count as two different orders).
+        #
+        # ponytail: check-then-act -- two mark-solds landing in the same
+        # instant can both read "one piece left" and both pass. Rare for a
+        # hand action; a per-order claim counter closes it if it ever happens.
+        names = list(
+            {str(order_id).strip(), order.get("order_id"), order.get("order_number"),
+             str(order.get("_id")) if order.get("_id") is not None else None}
+            - {None, ""}
+        )
         sold = {
             str(u.get("stock_id") or u.get("_id"))
             for u in db.get_collection("stock_units").find(
-                {"product_id": pid, "order_id": {"$in": [oid, order.get("order_id")]}},
+                {"product_id": pid, "order_id": {"$in": names}},
                 {"stock_id": 1},
             )
         } | {
             str(e.get("stock_id"))
             for e in db.get_collection("item_events").find(
-                {"event_type": "sell", "product_id": pid,
-                 "source_id": {"$in": [oid, order.get("order_id")]}},
+                {"event_type": "sell", "product_id": pid, "source_id": {"$in": names}},
                 {"stock_id": 1},
             )
         }

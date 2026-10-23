@@ -2530,3 +2530,21 @@ def test_a_new_style_received_and_scanned_during_the_count_is_added_not_count_ag
     assert line["moved_during_count"] is False
     assert [a["barcode"] for a in line["added_during_count"]] == [fresh]
     assert line["overage_units"] == 0 and line["shortage_units"] == 0
+
+
+def test_a_category_counts_scope_comes_from_the_one_category_resolver(admin_client, mongo_db):
+    """Round 3 (F3): the 'in scope, empty at open' check re-typed the
+    category query and dropped is_active, so an INACTIVE style -- outside
+    every count's scope by _category_product_ids -- was taken as in scope.
+    One resolver: the inactive style is not 'added during the count'."""
+    count_id, _pids, _bc, category = _start_in_own_category(admin_client, mongo_db, products=1)
+    retired = _seed_product(mongo_db, category=category, is_active=False)
+    piece = _seed_units(mongo_db, retired, 1)[0]
+    live = _seed_product(mongo_db, category=category)
+    fresh = _seed_units(mongo_db, live, 1)[0]
+    _scan(admin_client, count_id, piece)
+    _scan(admin_client, count_id, fresh)
+
+    lines = {v["product_id"]: v for v in _complete(admin_client, count_id)["variances"]}
+    assert [a["barcode"] for a in lines[live]["added_during_count"]] == [fresh]
+    assert lines[retired]["added_during_count"] == [], "an inactive style is not in scope"

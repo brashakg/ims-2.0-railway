@@ -22,6 +22,7 @@ from .helpers import (
 )
 from ...services.cost_mask import mask_cost
 from .stock_count import (
+    _category_product_ids,
     _load_open_count,
     _on_hand_units,
     _product_costs,
@@ -205,14 +206,11 @@ async def complete_stock_count(
             if absent and not count_doc.get("category"):
                 in_scope_empty_at_open = set(absent)
             elif absent:
-                in_scope_empty_at_open = {
-                    str(p.get("product_id") or p.get("_id"))
-                    for p in db.get_collection("products").find(
-                        {"$or": [{"_id": {"$in": absent}}, {"product_id": {"$in": absent}}],
-                         "category": count_doc.get("category")},
-                        {"_id": 1, "product_id": 1},
-                    )
-                }
+                # THE one category resolver (never a re-typed query): it is
+                # what the opening snapshot used, active styles only.
+                in_scope_empty_at_open = set(absent) & set(
+                    _category_product_ids(db, count_doc.get("category")) or []
+                )
 
         variances = []
         total_system = 0

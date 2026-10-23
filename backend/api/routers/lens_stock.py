@@ -115,6 +115,9 @@ class BulkImportPayload(BaseModel):
     matrix: Optional[List[BulkImportRow]] = None
     csv: Optional[str] = None
     source_id: Optional[str] = None  # e.g. uploaded file name
+    # Why the stock is changing. Required when a non-admin RAISES any cell
+    # (S1 review round 3) -- the same rule as a hand-typed PATCH.
+    notes: Optional[str] = None
 
 
 class ReserveCommitReleasePayload(BaseModel):
@@ -672,15 +675,32 @@ async def bulk_import(
     # changes nothing.
     from .inventory._shared import is_write_off_admin, refuse_write_off_unless_admin
 
+    # The create_cell rule holds here too (S1 review round 3): a NEW cell
+    # with stock in it is stock from nothing -- admin only -- and a
+    # non-admin raising a cell says why.
     if not is_write_off_admin(current_user):
+        raises = False
         for cell in normalized_cells:
             cur = coll.find_one(
                 {"lens_line_id": lens_line_id, "store_id": active_store,
                  "sph": cell["sph"], "cyl": cell["cyl"], "add": cell["add"]},
                 {"on_hand": 1},
             )
-            if cur and int(cell.get("on_hand") or 0) < int(cur.get("on_hand") or 0):
+            new_qty = int(cell.get("on_hand") or 0)
+            if cur is None and new_qty > 0:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Only an admin can create a lens cell with stock in it. "
+                    "Import it empty; stock arrives by receiving.",
+                )
+            if cur and new_qty < int(cur.get("on_hand") or 0):
                 refuse_write_off_unless_admin(current_user, "lower a lens stock figure")
+            if cur and new_qty > int(cur.get("on_hand") or 0):
+                raises = True
+        if raises and not (payload.notes or "").strip():
+            raise HTTPException(
+                status_code=400, detail="Say why the stock figures are being raised."
+            )
 
     written: List[Dict[str, Any]] = []
     failed: List[Dict[str, Any]] = []
@@ -731,6 +751,7 @@ async def bulk_import(
                 user=current_user,
                 source_type="IMPORT",
                 source_id=payload.source_id,
+                notes=payload.notes,
             )
             written.append({"line_stock_id": existing["line_stock_id"], "after": after})
         else:
@@ -757,6 +778,7 @@ async def bulk_import(
                 user=current_user,
                 source_type="IMPORT",
                 source_id=payload.source_id,
+                notes=payload.notes,
             )
             written.append(
                 {
