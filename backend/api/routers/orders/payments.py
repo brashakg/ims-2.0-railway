@@ -20,6 +20,7 @@ from ...dependencies import (
 from ...services import cash_denominations as cash_denom
 from ...services.policy_registry import resolve_emi_annual_rate as _emi_annual_rate
 from ._shared import (
+    refuse_if_advance_refunded,
     LOYALTY_TENDER_ROLES,
     PAYMENT_ROLES,
     logger,
@@ -167,6 +168,7 @@ async def add_payment(
             raise HTTPException(
                 status_code=400, detail="Cannot add payment to cancelled order"
             )
+        refuse_if_advance_refunded(order, "take a payment")
 
         # ONE reading of what an order owes, shared with the courier door
         # (services.delivery_gate.order_balance_due). The fallback below used

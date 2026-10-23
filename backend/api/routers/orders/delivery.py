@@ -18,6 +18,7 @@ from ...dependencies import (
     validate_store_access,
 )
 from ._shared import (
+    refuse_if_advance_refunded,
     HANDOVER_ROLES,
     VALID_TRANSITIONS,
     _get_db,
@@ -161,6 +162,7 @@ async def deliver_order(
         # Clinical Rx FLAG-AND-HOLD: a held spectacle order (missing Rx) may not
         # be delivered until an admin clears the hold (400 otherwise).
         assert_no_active_rx_hold(order)
+        refuse_if_advance_refunded(order, "be handed over")
 
         if not validate_status_transition(order.get("status", ""), "DELIVERED"):
             raise HTTPException(

@@ -4609,6 +4609,17 @@ _ADVANCE_BACK_AS_CREDIT = ("STORE_CREDIT", "GIFT_VOUCHER", "EMI")
 class AdvanceRefundRequest(BaseModel):
     order_id: str
     reason: str = Field(..., min_length=10, max_length=500)
+    # Where a CASH part is handed back from (required when there is one): the
+    # shop's own drawer (Day-End nets it off that drawer, with a cash_count
+    # block) or HQ (recorded beside the refund, never netted off a drawer).
+    cash_paid_from: Optional[Literal["STORE_DRAWER", "HQ"]] = None
+
+
+# A claim older than this with no refund record behind it is a press that
+# crashed mid-way; a younger one is a press still running.
+# ponytail: a fixed window; a press never takes this long -- make it a policy
+# key if one ever does.
+_STALE_CLAIM_SECONDS = 120
 
 
 def _advance_legs(order: Dict[str, Any]) -> Dict[str, float]:
@@ -4664,12 +4675,17 @@ def _advance_refund_plan(order: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _credit_back_advance(order: Dict[str, Any], amount: float, return_id: str,
-                         current_user: dict) -> Optional[Dict[str, Any]]:
+                         current_user: dict, source: str = "ADVANCE_REFUND") -> Optional[Dict[str, Any]]:
     """Give the store-credit / voucher / EMI part of an advance back as store
     credit to the bill's own customer. ADJUSTED, not ISSUED: the GST returns
     read every ISSUED row as a credit note, and this is money going back, not
     a second tax reversal (an invoiced order's one credit note is the return
-    doc). None when it could not be written -- the caller records nothing."""
+    doc). A negative amount takes such a credit back (source names why). None
+    when it could not be written -- the caller records nothing."""
+    # THE balance rule (customer.store_credit is authoritative, the ledger its
+    # audit trail -- customers._current_credit_balance), not a second copy.
+    from .customers import _current_credit_balance as _authoritative_balance
+
     customer_id = str(order.get("customer_id") or "")
     repo = get_customer_repository()
     doc = repo.find_by_id(customer_id) if repo is not None else None
@@ -4681,14 +4697,18 @@ def _credit_back_advance(order: Dict[str, Any], amount: float, return_id: str,
             customer_id=customer_id,
             entry_type=scl.ADJUSTED,
             amount=amount,
-            current_balance=_current_credit_balance(customer_id, doc),
-            reason=f"Advance on order {order.get('order_number') or order.get('order_id')} refunded as store credit",
+            current_balance=_authoritative_balance(customer_id, doc),
+            reason=(
+                f"Advance on order {order.get('order_number') or order.get('order_id')} refunded as store credit"
+                if amount > 0 else
+                f"Advance refund on order {order.get('order_number') or order.get('order_id')} not completed - credit taken back"
+            ),
             ref=return_id,
             store_id=order.get("store_id"),
             user_id=current_user.get("user_id"),
         )
         entry["order_id"] = order.get("order_id")
-        entry["source"] = "ADVANCE_REFUND"
+        entry["source"] = source
         coll.insert_one(dict(entry))
     except Exception as exc:  # noqa: BLE001
         logger.error("[RETURNS] advance store credit not written for %s: %s", return_id, exc)
@@ -4700,6 +4720,63 @@ def _credit_back_advance(order: Dict[str, Any], amount: float, return_id: str,
             pass
     entry.pop("_id", None)
     return entry
+
+
+def _advance_claim_is_stale(order: Dict[str, Any]) -> bool:
+    """True when the order's advance-refund claim is older than a press can
+    run (or carries no time at all)."""
+    from api.utils.event_time import parse_event_utc_naive
+
+    at = parse_event_utc_naive(order.get("advance_refund_at"))
+    if at is None:
+        return True
+    age = (datetime.now(timezone.utc).replace(tzinfo=None) - at).total_seconds()
+    return age > _STALE_CLAIM_SECONDS
+
+
+def _undo_stale_advance_claim(repo, order: Dict[str, Any], claim_id: str, current_user: dict) -> None:
+    """A press crashed after its claim (and perhaps its store credit) but before
+    its refund record: take back whatever credit it wrote, then free the order.
+    Idempotent -- the net of the claim's ledger rows is what is taken back, so
+    a second run takes back nothing more."""
+    ledger = _ledger_coll()
+    if ledger is not None:
+        rows = list(ledger.find({"ref": claim_id, "source": {"$in": ["ADVANCE_REFUND", "ADVANCE_REFUND_REVERSAL"]}}))
+        net = round(sum(float(r.get("delta") or 0) for r in rows), 2)
+        if net > 0.005 and _credit_back_advance(
+            order, -net, claim_id, current_user, "ADVANCE_REFUND_REVERSAL"
+        ) is None:
+            raise HTTPException(
+                status_code=503,
+                detail="An earlier refund attempt could not be undone just now - try again.",
+            )
+    repo.update_if(order.get("order_id"), {"advance_refund_id": claim_id},
+                   {"advance_refund_id": None, "advance_refund_at": None})
+    logger.warning("[RETURNS] stale advance-refund claim %s on %s undone", claim_id, order.get("order_id"))
+
+
+def _record_unused_credit_note(number: str, order: Dict[str, Any], return_id: str,
+                               current_user: dict, why: str) -> None:
+    """A credit-note serial taken but never issued (its record failed): write
+    it off in the audit trail so the C series has no silent gap (Rule 53 --
+    every serial accounted for, as admin_edit does for an unused invoice)."""
+    logger.error("[RETURNS] credit note %s UNUSED (refund %s not saved)", number, return_id)
+    try:
+        from ..dependencies import get_audit_repository
+
+        audit = get_audit_repository()
+        if audit is not None:
+            audit.create({
+                "action": "CREDIT_NOTE_NUMBER_UNUSED",
+                "entity_type": "order",
+                "entity_id": order.get("order_id"),
+                "store_id": order.get("store_id"),
+                "user_id": current_user.get("user_id"),
+                "details": {"unused_credit_note_number": number, "refund_id": return_id, "reason": why},
+                "created_at": utc_now_iso(),
+            })
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[RETURNS] unused credit note %s not audited: %s", number, exc)
 
 
 def _whole_invoice_credit_note(order: Dict[str, Any], order_id: str):
@@ -4767,6 +4844,17 @@ async def refund_advance_and_cancel(
 
     # Pressed again after the refund landed but the cancel did not: finish it.
     done_id = order.get("advance_refund_id")
+    if done_id and order.get("status") != "CANCELLED" and not coll.count_documents({"return_id": done_id}):
+        # A claim with no refund record: a press still running, or one that
+        # crashed between its claim (and maybe its store credit) and the record.
+        if not _advance_claim_is_stale(order):
+            raise HTTPException(
+                status_code=409,
+                detail="This refund is being recorded right now - wait a minute and reload.",
+            )
+        _undo_stale_advance_claim(repo, order, done_id, current_user)
+        order = repo.find_by_id(order_id) or {}
+        done_id = order.get("advance_refund_id")
     if done_id and order.get("status") == "CANCELLED":
         raise HTTPException(status_code=400, detail="This advance is already refunded and the order cancelled.")
     if done_id and coll.count_documents({"return_id": done_id}):
@@ -4789,6 +4877,26 @@ async def refund_advance_and_cancel(
     total, credit, refund_tenders = plan["total"], plan["credit"], plan["refund_tenders"]
     status = order.get("status")
 
+    # Cash: from the shop's drawer (netted at Day-End, with a cash_count
+    # block like every counter refund) or from HQ (recorded, never netted).
+    cash = round(sum(t["amount"] for t in refund_tenders if t["method"] == "CASH"), 2)
+    paid_outside_drawer: List[Dict[str, Any]] = []
+    if cash > 0:
+        if body.cash_paid_from is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Say whether the cash is paid from the shop's drawer or by HQ. Nothing was recorded.",
+            )
+        if body.cash_paid_from == "HQ":
+            refund_tenders = [t for t in refund_tenders if t["method"] != "CASH"]
+            paid_outside_drawer = [{"method": "CASH", "amount": cash, "paid_from": "HQ"}]
+        else:
+            refund_tenders = [
+                {**t, "cash_count": cash_denom.not_captured_block(cash_denom.rupees_to_paisa(t["amount"]))}
+                if t["method"] == "CASH" else t
+                for t in refund_tenders
+            ]
+
     # A credit note for the WHOLE invoice (invoiced orders only).
     priced_lines: List[Dict[str, Any]] = []
     gst_view: Dict[str, Any] = {"taxable": 0.0, "tax": 0.0}
@@ -4803,7 +4911,7 @@ async def refund_advance_and_cancel(
     if not repo.update_if(
         order_id,
         {"status": status, "advance_refund_id": None, "amount_paid": order.get("amount_paid")},
-        {"advance_refund_id": return_id},
+        {"advance_refund_id": return_id, "advance_refund_at": utc_now_iso()},
     ):
         raise HTTPException(
             status_code=409,
@@ -4811,7 +4919,8 @@ async def refund_advance_and_cancel(
         )
 
     def _unclaim():
-        repo.update_if(order_id, {"advance_refund_id": return_id}, {"advance_refund_id": None})
+        repo.update_if(order_id, {"advance_refund_id": return_id},
+                       {"advance_refund_id": None, "advance_refund_at": None})
 
     # A counter return reserves its units on the order BEFORE it writes its
     # doc, and refuses once it sees advance_refund_id (create_return). Check
@@ -4827,17 +4936,6 @@ async def refund_advance_and_cancel(
             detail="A return is being recorded on this order right now - nothing was refunded. Reload and check.",
         )
 
-    credit_note_number: Optional[str] = None
-    if plan["invoice_number"]:
-        try:
-            credit_note_number = next_document_number(_get_db(), store_id, "C")
-        except InvoiceNumberError as exc:
-            _unclaim()
-            raise HTTPException(
-                status_code=400,
-                detail=f"The credit note cannot be numbered, so NOTHING was recorded: {exc}",
-            ) from exc
-
     credit_entry = None
     if credit > 0:
         credit_entry = _credit_back_advance(order, credit, return_id, current_user)
@@ -4847,6 +4945,25 @@ async def refund_advance_and_cancel(
                 status_code=503,
                 detail="The store credit could not be written, so NOTHING was recorded. Try again.",
             )
+
+    def _back_out():
+        """Undo everything written so far (the store credit, then the claim)."""
+        if credit_entry is not None:
+            _credit_back_advance(order, -credit, return_id, current_user, "ADVANCE_REFUND_REVERSAL")
+        _unclaim()
+
+    # The credit-note number LAST: only the record itself can fail after it,
+    # and that one failure writes the number off as unused (no silent gap).
+    credit_note_number: Optional[str] = None
+    if plan["invoice_number"]:
+        try:
+            credit_note_number = next_document_number(_get_db(), store_id, "C")
+        except InvoiceNumberError as exc:
+            _back_out()
+            raise HTTPException(
+                status_code=400,
+                detail=f"The credit note cannot be numbered, so NOTHING was recorded: {exc}",
+            ) from exc
 
     actor_name = current_user.get("full_name", current_user.get("username", ""))
     now = utc_now_iso()
@@ -4873,10 +4990,13 @@ async def refund_advance_and_cancel(
         "credit_note_number": credit_note_number,
         "invoice_number": plan["invoice_number"],
         "refund_amount": total,
-        "refund_method": refund_tenders[0]["method"],
-        # Drawer truth: the Day-End readers net these legs off.
+        "refund_method": (refund_tenders or paid_outside_drawer)[0]["method"],
+        # Drawer truth: the Day-End readers net these legs off -- only the
+        # cash handed back from this shop's own drawer is among them.
         "refund_tenders": refund_tenders,
-        "drawer_auto_netted": True,
+        "drawer_auto_netted": not paid_outside_drawer,
+        "cash_paid_from": body.cash_paid_from if cash > 0 else None,
+        "paid_outside_drawer": paid_outside_drawer or None,
         "credit_amount": credit or None,
         "credit_entry": credit_entry,
         "status": "COMPLETED",
@@ -4892,9 +5012,9 @@ async def refund_advance_and_cancel(
         coll.insert_one(dict(doc))
     except Exception as exc:  # noqa: BLE001
         logger.error("[RETURNS] advance refund %s not saved: %s", return_id, exc)
-        if credit_entry is not None:  # take the credit back: nothing may stand without its record
-            _credit_back_advance(order, -credit, return_id, current_user)
-        _unclaim()
+        if credit_note_number:
+            _record_unused_credit_note(credit_note_number, order, return_id, current_user, str(exc))
+        _back_out()  # nothing may stand without its record
         raise HTTPException(
             status_code=503, detail="The refund could not be saved - nothing was recorded. Try again."
         )
@@ -4949,9 +5069,16 @@ async def advance_refund_preview(
     order = repo.find_by_id(order_id) if repo is not None else None
     if not order or not can_access_store_scoped(order.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="Order not found")
+    coll = _returns_coll()
+    done_id = order.get("advance_refund_id")
+    if (done_id and order.get("status") != "CANCELLED" and coll is not None
+            and coll.count_documents({"return_id": done_id})):
+        return {"ok": True, "action": "finish_cancel", "total": 0.0, "refund_tenders": [],
+                "reason": "The advance is already refunded; the order still needs cancelling."}
     plan = _advance_refund_plan(order)
     if plan["ok"]:
-        coll = _returns_coll()
+        plan["action"] = "refund_and_cancel"
+        plan["has_cash"] = any(t["method"] == "CASH" for t in plan["refund_tenders"])
         if coll is not None and coll.count_documents({"order_id": order.get("order_id") or order_id}):
             plan = {"ok": False, "reason": "This order already has a return against it. Ask an admin to settle it."}
     return plan
