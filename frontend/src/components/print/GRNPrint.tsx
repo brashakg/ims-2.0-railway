@@ -26,9 +26,9 @@ interface GRNItem {
   product_id: string;
   product_name: string;
   hsn_code?: string;
-  ordered_qty: number;
+  /** What the WHOLE order asked for (not this delivery); null with no order. */
+  ordered_qty: number | null;
   received_qty: number;
-  variance: number;
   remarks?: string;
 }
 
@@ -81,12 +81,6 @@ function getInspectionStatusColor(status: string): { bg: string; fg: string } {
   }
 }
 
-function getVarianceColor(variance: number): string {
-  if (variance > 0) return '#a01c1c';
-  if (variance < 0) return '#a06d00';
-  return '#1f7a1f';
-}
-
 export function GRNPrint({
   grn,
   store,
@@ -101,9 +95,9 @@ export function GRNPrint({
     window.print();
   };
 
-  const totalOrdered = grn.items.reduce((sum, item) => sum + item.ordered_qty, 0);
+  // No variance column: a line's ordered quantity is the whole order's, so
+  // a second delivery of a split order would print a false shortfall.
   const totalReceived = grn.items.reduce((sum, item) => sum + item.received_qty, 0);
-  const totalVariance = totalReceived - totalOrdered;
   const status = getInspectionStatusColor(grn.quality_inspection);
 
   const effectiveEntity: EntityLike = entity || {
@@ -211,9 +205,8 @@ export function GRNPrint({
                   <th style={{ ...tblHead, width: '5%' }}>#</th>
                   <th style={{ ...tblHead, textAlign: 'left' }}>Product</th>
                   <th style={{ ...tblHead, width: '10%' }}>HSN/SAC</th>
-                  <th style={{ ...tblHead, width: '10%' }}>Ordered</th>
-                  <th style={{ ...tblHead, width: '10%' }}>Received</th>
-                  <th style={{ ...tblHead, width: '10%' }}>Variance</th>
+                  <th style={{ ...tblHead, width: '14%' }}>Ordered (whole order)</th>
+                  <th style={{ ...tblHead, width: '12%' }}>Received now</th>
                   <th style={{ ...tblHead, width: '20%', textAlign: 'left' }}>Remarks</th>
                 </tr>
               </thead>
@@ -223,21 +216,15 @@ export function GRNPrint({
                     <td style={tblCell}>{index + 1}</td>
                     <td style={{ ...tblCell, textAlign: 'left' }}>{item.product_name}</td>
                     <td style={{ ...tblCell, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{item.hsn_code || '—'}</td>
-                    <td style={tblNum}>{item.ordered_qty}</td>
+                    <td style={tblNum}>{item.ordered_qty ?? '—'}</td>
                     <td style={tblNum}>{item.received_qty}</td>
-                    <td style={{ ...tblNum, color: getVarianceColor(item.variance), fontWeight: 600 }}>
-                      {item.variance > 0 ? '+' : ''}{item.variance}
-                    </td>
                     <td style={{ ...tblCell, textAlign: 'left' }}>{item.remarks || '—'}</td>
                   </tr>
                 ))}
                 <tr>
                   <td colSpan={3} style={{ ...tblCell, textAlign: 'right', fontWeight: 700 }}>TOTAL</td>
-                  <td style={{ ...tblNum, fontWeight: 700 }}>{totalOrdered}</td>
+                  <td style={tblNum}></td>
                   <td style={{ ...tblNum, fontWeight: 700 }}>{totalReceived}</td>
-                  <td style={{ ...tblNum, color: getVarianceColor(totalVariance), fontWeight: 700 }}>
-                    {totalVariance > 0 ? '+' : ''}{totalVariance}
-                  </td>
                   <td style={tblCell}></td>
                 </tr>
               </tbody>

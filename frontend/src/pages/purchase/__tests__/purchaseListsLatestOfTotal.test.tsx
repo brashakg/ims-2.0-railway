@@ -53,7 +53,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 import { PurchaseOrdersSection } from '../PurchaseOrdersSection';
 import { PurchaseAnalyticsSection } from '../PurchaseAnalyticsSection';
-import { GoodsReceiptNote } from '../GoodsReceiptNote';
+import { ReceiveGoods } from '../ReceiveGoods';
 
 const po = (i: number) => ({
   po_id: `po-${i}`,
@@ -163,24 +163,20 @@ describe('#18 Analytics: Total POs is the real count; page sums are labelled as 
   });
 });
 
-describe('#18 Goods received: the GRN count is the real count, the list is the latest cut', () => {
-  it('50 of 120 receipts on all stores: Total GRNs 120, "latest 50 shown", and the history says latest 50 of 120', async () => {
+describe('#18 Receive goods: the receipt history says when it is the latest cut', () => {
+  it('50 of 120 receipts on all stores: the history says latest 50 of 120', async () => {
     serve({ rows: 0, total: 0 }, { rows: 50, total: 120 });
-    open(<GoodsReceiptNote />);
-    await waitFor(() => expect(figureUnder('Total GRNs')).toBe('120'));
-    expect(screen.getByText('all stores · latest 50 shown')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /History/ }));
+    open(<ReceiveGoods />);
+    fireEvent.click(await screen.findByRole('button', { name: /Receipt history/ }));
     expect((await screen.findByTestId('grn-list-cut')).textContent).toBe(
       'Latest 50 of 120 receipts, newest first.',
     );
   });
 
-  it('every receipt in hand: the tile is the count and the caption is just the scope', async () => {
+  it('every receipt in hand: nothing extra', async () => {
     serve({ rows: 0, total: 0 }, { rows: 2, total: 2 });
-    open(<GoodsReceiptNote />);
-    await waitFor(() => expect(figureUnder('Total GRNs')).toBe('2'));
-    expect(screen.getByText('all stores')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /History/ }));
+    open(<ReceiveGoods />);
+    fireEvent.click(await screen.findByRole('button', { name: /Receipt history/ }));
     await screen.findByText('GRN-1');
     expect(screen.queryByTestId('grn-list-cut')).toBeNull();
   });

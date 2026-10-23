@@ -1,12 +1,12 @@
 // ============================================================================
 // Audit F63: on "All stores" every part of a Purchase tab says all stores
 // ============================================================================
-// Goods received: with the admin's Shop picker on All stores the receipts list
-// covered every shop while the "Select purchase order" picker still asked for
-// his own active shop (GET /vendors/purchase-orders?store_id=BV-DHN-01), so a
-// Pune order never appeared and the empty state read as if nothing was open.
-// One scope per tab: the picker now reads what the list reads, names the shop
-// each order delivers to, and its empty state says which shops it covers. A
+// Receive goods: with the admin's Shop picker on All stores the receipts list
+// covered every shop while the order picker still asked for his own active
+// shop (GET /vendors/purchase-orders?store_id=BV-DHN-01), so a Pune order
+// never appeared and the empty state read as if nothing was open. One scope
+// per screen: the inbox reads what the history reads, names the shop each
+// order delivers to, and its empty state says which shops it covers. A
 // receipt is booked at its order's shop (the server re-points a standard
 // receipt); a Delivery Challan is booked at the receiver's own shop, so one
 // against another shop's order is refused. A GRN printed from the all-stores
@@ -33,6 +33,7 @@ vi.mock('../../../components/print/GRNPrint', () => ({ GRNPrint: () => null }));
 vi.mock('../../../services/api/grnCockpit', () => ({
   grnCockpitApi: {
     uploadDoc: vi.fn().mockResolvedValue({ file_id: 'F-1', filename: 'bill.pdf', mime: 'application/pdf', size: 1, sha256: 'x', persisted: true }),
+    expressReceive: vi.fn((body: unknown) => http.post('/vendors/grn/express', body).then((r: { data: unknown }) => r.data)),
   },
 }));
 const identity = vi.hoisted(() => ({ resolveStoreIdentity: vi.fn() }));
@@ -47,7 +48,7 @@ vi.mock('../../../services/api/client', async (importOriginal) => {
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 import { usePurchaseShop } from '../purchaseShop';
-import { GoodsReceiptNote } from '../GoodsReceiptNote';
+import { ReceiveGoods } from '../ReceiveGoods';
 import ReconConsole from '../ReconConsole';
 
 type Po = { po_id: string; po_number: string; vendor_name: string; status: string; delivery_store_id: string; items: unknown[] };
@@ -144,71 +145,78 @@ const scopes = (url: string) =>
     .filter(([u]) => u === url)
     .map(([, cfg]) => (cfg as { params?: { store_id?: string } } | undefined)?.params?.store_id);
 
-const poPicker = () => screen.getByDisplayValue('Select a PO…') as HTMLSelectElement;
+const card = async (po: string) => (await screen.findByText(po)).closest('.card') as HTMLElement;
+const openCard = async (po: string) => {
+  fireEvent.click(within(await card(po)).getByRole('button', { name: /Receive this box/ }));
+  await screen.findByText(/What arrived/);
+};
+const receive = () => fireEvent.click(screen.getByRole('button', { name: /^Receive \d+ piece/ }));
 
-describe('F63: Goods received on All stores -- the PO picker reads what the list reads', () => {
+describe('F63: Receive goods on All stores -- the inbox reads what the history reads', () => {
   it("an admin on All stores sees every shop's open orders, each naming the shop it delivers to", async () => {
     roles = ['ADMIN'];
-    open(<GoodsReceiptNote />, '');
-    expect(await screen.findByText('PO-PUN-7 · Frames Wala · delivers to WizOpt Pune')).toBeInTheDocument();
-    expect(screen.getByText('PO-DHN-3 · Jharkhand Optical · delivers to Better Vision Dhanbad')).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: /PO-OLD-0.*count extra goods.*Better Vision Dhanbad/ })).toBeInTheDocument();
-    expect(http.get).toHaveBeenCalledWith('/vendors/purchase-orders', {
-      params: { store_id: undefined, receipt_candidates: true },
-    });
-    // One scope for the tab: no read asks for his own shop, the list included.
+    open(<ReceiveGoods />, '');
+    expect(within(await card('PO-PUN-7')).getByText(/^For/).textContent).toBe('For WizOpt Pune');
+    expect(within(await card('PO-DHN-3')).getByText(/^For/).textContent).toBe('For Better Vision Dhanbad');
+    expect(screen.getByRole('option', { name: /PO-OLD-0 .*count extra goods.*Better Vision Dhanbad/ })).toBeInTheDocument();
+    expect(http.get).toHaveBeenCalledWith('/vendors/purchase-orders', { params: { receipt_candidates: true } });
+    // One scope for the screen: no read asks for his own shop, the waiting list included.
     expect(new Set(scopes('/vendors/purchase-orders'))).toEqual(new Set([undefined]));
     expect(new Set(scopes('/vendors/grn'))).toEqual(new Set([undefined]));
   });
 
   it('an admin who picks Pune, and a manager on his own shop, see their shop only -- no shop names', async () => {
     roles = ['ADMIN'];
-    open(<GoodsReceiptNote />, 'BV-PUN-01');
-    expect(await screen.findByText('PO-PUN-7 · Frames Wala')).toBeInTheDocument();
+    open(<ReceiveGoods />, 'BV-PUN-01');
+    await card('PO-PUN-7');
     expect(screen.queryByText(/PO-DHN-3/)).toBeNull();
+    expect(screen.queryByText(/^For/)).toBeNull();
     expect(new Set(scopes('/vendors/purchase-orders'))).toEqual(new Set(['BV-PUN-01']));
     cleanup();
     http.get.mockClear();
     roles = ['STORE_MANAGER'];
-    open(<GoodsReceiptNote />, '');
-    expect(await screen.findByText('PO-DHN-3 · Jharkhand Optical')).toBeInTheDocument();
+    open(<ReceiveGoods />, '');
+    await card('PO-DHN-3');
     expect(screen.queryByText(/PO-PUN-7/)).toBeNull();
     expect(new Set(scopes('/vendors/purchase-orders'))).toEqual(new Set(['BV-DHN-01']));
   });
 
-  it('the empty picker says which shops it covers', async () => {
+  it('the empty inbox says which shops it covers', async () => {
     orders = CLOSED.map((po) => ({ ...po, status: 'DRAFT' }));
     roles = ['ADMIN'];
-    open(<GoodsReceiptNote />, '');
+    open(<ReceiveGoods />, '');
     expect(await screen.findByText(/No open purchase orders to receive against in any store\./)).toBeInTheDocument();
     cleanup();
-    open(<GoodsReceiptNote />, 'BV-PUN-01');
+    open(<ReceiveGoods />, 'BV-PUN-01');
     expect(
       await screen.findByText(/No open purchase orders to receive against at the shop picked above\./),
     ).toBeInTheDocument();
     cleanup();
     roles = ['STORE_MANAGER'];
-    open(<GoodsReceiptNote />, '');
+    open(<ReceiveGoods />, '');
     expect(await screen.findByText(/No open purchase orders to receive against at your shop\./)).toBeInTheDocument();
   });
 
   it("a Delivery Challan against Pune's order is refused for an admin on Dhanbad (it would be booked at Dhanbad)", async () => {
     roles = ['ADMIN'];
-    open(<GoodsReceiptNote />, '');
-    await screen.findByText(/PO-PUN-7/);
-    fireEvent.click(screen.getByLabelText(/This is a Delivery Challan/i, { selector: 'input' }));
-    fireEvent.change(screen.getByPlaceholderText(/DC\/26\/05\/118/), { target: { value: 'DC/26/09/4' } });
-    const picker = screen.getByDisplayValue('No PO — receiving over the counter') as HTMLSelectElement;
-    fireEvent.change(picker, { target: { value: 'po-pun-7' } });
-    fireEvent.click(screen.getByRole('button', { name: /Post GRN/i }));
+    open(<ReceiveGoods />, '');
+    await openCard('PO-PUN-7');
+    fireEvent.click(screen.getByLabelText(/Delivery challan, invoice comes later/));
+    fireEvent.change(screen.getByLabelText('Challan no. *'), { target: { value: 'DC/26/09/4' } });
+    fireEvent.click(screen.getByLabelText(/I counted line 1/));
+    receive();
     await waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith(expect.stringContaining('This order delivers to another shop')),
     );
     expect(http.post).not.toHaveBeenCalled();
 
     // His own shop's order on a Delivery Challan still posts.
-    fireEvent.change(picker, { target: { value: 'po-dhn-3' } });
-    fireEvent.click(screen.getByRole('button', { name: /Post GRN/i }));
+    fireEvent.click(screen.getByRole('button', { name: /All deliveries/ }));
+    await openCard('PO-DHN-3');
+    fireEvent.click(screen.getByLabelText(/Delivery challan, invoice comes later/));
+    fireEvent.change(screen.getByLabelText('Challan no. *'), { target: { value: 'DC/26/09/4' } });
+    fireEvent.click(screen.getByLabelText(/I counted line 1/));
+    receive();
     await waitFor(() => expect(http.post).toHaveBeenCalledWith('/vendors/grn', expect.anything()));
     expect((http.post.mock.calls[0][1] as { po_id: string }).po_id).toBe('po-dhn-3');
   });
@@ -225,62 +233,67 @@ describe('F63: Goods received on All stores -- the PO picker reads what the list
               : { purchase_orders: [] },
       }),
     );
-    open(<GoodsReceiptNote />, '');
-    fireEvent.click(await screen.findByLabelText(/This is a Delivery Challan/i, { selector: 'input' }));
-    fireEvent.change(screen.getByPlaceholderText(/DC\/26\/05\/118/), { target: { value: 'DC/26/09/5' } });
+    open(<ReceiveGoods />, '');
+    fireEvent.click(await screen.findByRole('button', { name: /Delivery challan, invoice comes later/ }));
+    fireEvent.change(screen.getByLabelText('Challan no. *'), { target: { value: 'DC/26/09/5' } });
     await screen.findByText('Frames Wala');
-    fireEvent.change(screen.getByDisplayValue('Select the vendor…'), { target: { value: 'V-77' } });
+    fireEvent.change(screen.getByLabelText(/Supplier/), { target: { value: 'V-77' } });
     fireEvent.change(screen.getByPlaceholderText(/Search a product to add/i), { target: { value: 'frame' } });
     fireEvent.click(await screen.findByText('Acme Aviator', {}, { timeout: 3000 }));
-    fireEvent.click(screen.getByLabelText(/Tally line 1/));
-    fireEvent.click(screen.getByRole('button', { name: /Post GRN/i }));
+    fireEvent.click(screen.getByLabelText(/I counted line 1/));
+    receive();
     await waitFor(() => expect(http.post).toHaveBeenCalledWith('/vendors/grn', expect.anything()));
     expect(toast.error).not.toHaveBeenCalled();
   });
 
-  it("a standard receipt against Pune's order is sent against that order (the server books it at Pune)", async () => {
+  it('a receipt with no order is refused while another shop is on show (it would land at Dhanbad)', async () => {
     roles = ['ADMIN'];
-    open(<GoodsReceiptNote />, '');
-    await screen.findByText(/PO-PUN-7/);
-    fireEvent.change(poPicker(), { target: { value: 'po-pun-7' } });
-    fireEvent.change(screen.getByPlaceholderText('e.g. JJ/24/04/2240'), { target: { value: 'INV-9' } });
-    // A standard receipt carries the vendor's bill (#1165 F-S3).
-    fireEvent.change(screen.getByLabelText('Attach the vendor invoice or challan'), {
-      target: { files: [new File(['%PDF'], 'bill.pdf', { type: 'application/pdf' })] },
-    });
-    await screen.findByText('Attached: bill.pdf');
-    fireEvent.click(screen.getByLabelText(/Tally line 1/));
-    fireEvent.click(screen.getByRole('button', { name: /Post GRN/i }));
-    await waitFor(() => expect(http.post).toHaveBeenCalledWith('/vendors/grn', expect.anything()));
-    const body = http.post.mock.calls[0][1] as Record<string, unknown>;
-    expect(body.po_id).toBe('po-pun-7');
-    expect(body.grn_subtype).toBe('STANDARD');
-    expect(body).not.toHaveProperty('store_id');
+    http.get.mockImplementation((url: string) =>
+      Promise.resolve({
+        data: url === '/products'
+          ? { products: [{ product_id: 'P-FR1', name: 'Acme Aviator' }] }
+          : url === '/vendors/grn' ? { grns: [] }
+            : url === '/vendors/purchase-orders' ? { purchase_orders: [] }
+              : { vendors: [{ vendor_id: 'V-77', trade_name: 'Frames Wala' }] },
+      }),
+    );
+    open(<ReceiveGoods />, 'BV-PUN-01');
+    fireEvent.click(await screen.findByRole('button', { name: /Delivery challan, invoice comes later/ }));
+    fireEvent.change(screen.getByLabelText('Challan no. *'), { target: { value: 'DC/26/09/7' } });
+    await screen.findByText('Frames Wala');
+    fireEvent.change(screen.getByLabelText(/Supplier/), { target: { value: 'V-77' } });
+    fireEvent.change(screen.getByPlaceholderText(/Search a product to add/i), { target: { value: 'frame' } });
+    fireEvent.click(await screen.findByText('Acme Aviator', {}, { timeout: 3000 }));
+    fireEvent.click(screen.getByLabelText(/I counted line 1/));
+    receive();
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(expect.stringContaining('recorded at your own shop')));
+    expect(http.post).not.toHaveBeenCalled();
   });
 
-  it("narrowing the shop after picking Pune's order drops the pick: nothing posts against an order no longer shown", async () => {
+  it("a standard receipt against Pune's order is sent against that order (the server books it at Pune)", async () => {
     roles = ['ADMIN'];
-    open(<GoodsReceiptNote />, '');
-    await screen.findByText(/PO-PUN-7/);
-    fireEvent.click(screen.getByLabelText(/This is a Delivery Challan/i, { selector: 'input' }));
-    fireEvent.change(screen.getByPlaceholderText(/DC\/26\/05\/118/), { target: { value: 'DC/26/09/6' } });
-    fireEvent.change(screen.getByDisplayValue('No PO — receiving over the counter'), { target: { value: 'po-pun-7' } });
-    expect(screen.getByRole('button', { name: /Post GRN/i })).toBeEnabled();
-    // The admin narrows Shop to his own Dhanbad: Pune's order leaves the picker.
-    const shop = screen.getByLabelText('Purchase shop');
-    await within(shop).findByText('Better Vision Dhanbad');
-    fireEvent.change(shop, { target: { value: 'BV-DHN-01' } });
-    await waitFor(() => expect(screen.queryByText(/PO-PUN-7/)).toBeNull());
-    await waitFor(() => expect(screen.getByRole('button', { name: /Post GRN/i })).toBeDisabled());
-    fireEvent.click(screen.getByRole('button', { name: /Post GRN/i }));
-    expect(http.post).not.toHaveBeenCalled();
+    http.post.mockResolvedValue({ data: { grn_id: 'G-E', grn_number: 'GRN-E', accepted_units: 2, match_preview: null } });
+    open(<ReceiveGoods />, '');
+    await openCard('PO-PUN-7');
+    fireEvent.change(screen.getByLabelText(/^Vendor bill no/), { target: { value: 'INV-9' } });
+    // A standard receipt carries the vendor's bill (#1165 F-S3).
+    fireEvent.change(document.querySelector('input[type="file"]') as HTMLInputElement, {
+      target: { files: [new File(['%PDF'], 'bill.pdf', { type: 'application/pdf' })] },
+    });
+    await screen.findByText('bill.pdf');
+    fireEvent.click(screen.getByRole('button', { name: /Everything arrived as ordered/ }));
+    receive();
+    await waitFor(() => expect(http.post).toHaveBeenCalledWith('/vendors/grn/express', expect.anything()));
+    const body = http.post.mock.calls[0][1] as Record<string, unknown>;
+    expect(body.po_id).toBe('po-pun-7');
+    expect(body).not.toHaveProperty('store_id');
   });
 
   it("a Pune GRN printed from the All-stores history carries Pune's identity, not the admin's Dhanbad", async () => {
     grns = [{ grn_id: 'g-pun', grn_number: 'GRN-PUN-1', po_number: 'PO-PUN-7', store_id: 'BV-PUN-01', items: [] }];
     roles = ['ADMIN'];
-    open(<GoodsReceiptNote />, '');
-    fireEvent.click(await screen.findByRole('button', { name: /History/ }));
+    open(<ReceiveGoods />, '');
+    fireEvent.click(await screen.findByRole('button', { name: /Receipt history/ }));
     fireEvent.click(await screen.findByTitle('Print GRN'));
     await waitFor(() => expect(identity.resolveStoreIdentity).toHaveBeenCalled());
     expect(identity.resolveStoreIdentity).toHaveBeenCalledWith('BV-PUN-01');

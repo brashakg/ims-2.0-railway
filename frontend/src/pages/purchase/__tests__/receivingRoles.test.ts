@@ -3,8 +3,8 @@
 // _RECEIVE_ROLES is, pinned by
 // test_c7_receiving_is_the_managers); this pins the frontend half to it, so
 // re-adding ACCOUNTANT to RECEIVING_MANAGER_ROLES -- which would hand the
-// accountant the Receive Goods menu item, the /purchase/grn and
-// /purchase/receive routes and every Receive button, each answering 403 --
+// accountant the Receive Goods menu item, the /purchase/receive
+// route (and /purchase/grn, which forwards to it) and every Receive button, each answering 403 --
 // fails here by name. (The drawer's Receive step is pinned for ACCOUNTANT in
 // POLifecycleDrawer.test.tsx.)
 import { describe, it, expect } from 'vitest';
@@ -33,12 +33,12 @@ describe('receiving is the managers only, on both sides', () => {
     expect(item?.requireRoles).toEqual([...RECEIVING_MANAGER_ROLES]);
   });
 
-  it('both receiving routes and the PO table Receive button gate on that one list', () => {
+  it('the receiving route and the PO table Receive button gate on that one list', () => {
     const routes = src('../../../routes/purchaseRoutes.tsx');
-    for (const route of ['purchase/grn', 'purchase/receive']) {
-      const block = routes.match(new RegExp(`path="${route}"[\\s\\S]*?allowedRoles=\\{([^}]*)\\}`));
-      expect(block?.[1], route).toBe('[...RECEIVING_MANAGER_ROLES]');
-    }
+    const block = routes.match(/path="purchase\/receive"[\s\S]*?allowedRoles=\{([^}]*)\}/);
+    expect(block?.[1]).toBe('[...RECEIVING_MANAGER_ROLES]');
+    // The retired classic form only forwards there: no second door to gate.
+    expect(routes).toMatch(/path="purchase\/grn" element=\{<GrnRedirect \/>\}/);
     // The whole statement: `hasRole([...RECEIVING_MANAGER_ROLES]) || hasRole(['ACCOUNTANT'])`
     // handed the accountant a Receive button that lands on /unauthorized.
     expect(src('../PurchaseTable.tsx')).toMatch(/^\s*const canReceive = hasRole\(\[\.\.\.RECEIVING_MANAGER_ROLES\]\);$/m);
