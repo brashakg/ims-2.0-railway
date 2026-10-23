@@ -156,13 +156,23 @@ async def sku_preview(
     CATEGORY-BRAND-MODEL-COLOUR-SIZE). The Add-product form shows this before
     saving. `taken`: another product has it (pm.sku_taken, the question the
     save asks), so the save adds a number to the end. Does NOT allocate that
-    number (preview is read-only)."""
+    number (preview is read-only). `identity_fields`: the attributes that
+    decide the SKU, so the form re-asks only when one of them changes."""
     try:
         sku = pm.build_sku(body.category, body.attributes)
     except pm.ProductMasterError as err:
         _raise(err)
     taken = pm.sku_taken(sku, get_product_repository(), get_db())
-    return {"category": pm.resolve_category(body.category), "sku": sku, "taken": taken}
+    canonical = pm.resolve_category(body.category)
+    return {
+        "category": canonical,
+        "sku": sku,
+        "taken": taken,
+        # The attributes that decide this SKU (pm.identity_inputs, read off
+        # identity_parts -- build_sku's own parts): the form asks again only
+        # when one of them changes.
+        "identity_fields": pm.identity_inputs(body.attributes or {}, canonical),
+    }
 
 
 # ---------------------------------------------------------------------------

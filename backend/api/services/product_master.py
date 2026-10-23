@@ -1319,6 +1319,10 @@ def identity_inputs(attributes: Dict[str, Any], category: Any) -> List[str]:
     a = dict(attributes or {})
     spec = category_spec(category)
     fields = set(a) | set(spec.required + spec.optional if spec else ())
+    # A contact lens's power and fit (_cl_parts) are form fields its registry
+    # does not list: asked while still blank, so typing one is a change.
+    if resolve_category(category) in _CONTACT_LENSES:
+        fields |= {"power", "cl_cyl", "cl_axis", "cl_add", *(k for _, _, k in _CL_FIT_FIELDS)}
 
     def parts(attrs: Dict[str, Any]) -> Any:
         try:
