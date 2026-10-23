@@ -114,8 +114,8 @@ export function CreateJobModal({ page }: { page: WorkshopPageState }) {
                     <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
                       <p className="font-medium">Delivery Challan required</p>
                       <p className="mt-1">{dcHardlock}</p>
-                      <a href="/purchase/grn" className="mt-2 inline-block underline">
-                        Go to GRN / DC entry
+                      <a href="/purchase/receive" className="mt-2 inline-block underline">
+                        Go to Receive goods (delivery challan)
                       </a>
                       {canOverrideHardlock && (
                         <div className="mt-3">

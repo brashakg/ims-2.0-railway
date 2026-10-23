@@ -384,6 +384,10 @@ def product_push_refusal(db, product: Dict[str, Any]) -> Optional[str]:
     Stock is deliberately NOT gated: a listing already live when its brand is
     switched off keeps a true stock count until someone takes it down (Online
     Store > Take down), so the website never sells a frame that is not there."""
+    # get_db() hands out a connection wrapper that is not subscriptable; the
+    # reads below need the database itself (Catalogue list 2026-10-23, #1248).
+    if db is not None and not hasattr(db, "__getitem__") and hasattr(db, "db"):
+        db = db.db
     lock = push_lock_reason(db, "product", product)
     if lock:
         return lock

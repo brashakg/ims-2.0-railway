@@ -8,7 +8,7 @@
 // Legacy /purchase?tab=<x> deep-links (bookmarks, WhatsApp'd links, old
 // builds) forward via PurchaseTabRedirect below — no dead links.
 import { lazy } from 'react';
-import { Route, Navigate, useSearchParams } from 'react-router-dom';
+import { Route, Navigate, useLocation, useSearchParams } from 'react-router-dom';
 import { ProtectedRoute } from '../components/layout/ProtectedRoute';
 import { APPROVE_ROLES } from '../pages/purchase/invoices/shared';
 import { RECEIVING_MANAGER_ROLES } from '../pages/purchase/purchaseTypes';
@@ -28,8 +28,7 @@ const PurchaseVarianceTab = lazy(() => import('../pages/purchase/PurchaseVarianc
 const SuppliersSection = lazy(() => import('../pages/purchase/SuppliersSection').then(m => ({ default: m.SuppliersSection })));
 const PurchaseAnalyticsSection = lazy(() => import('../pages/purchase/PurchaseAnalyticsSection').then(m => ({ default: m.PurchaseAnalyticsSection })));
 const PurchasesThisMonthSection = lazy(() => import('../pages/purchase/PurchasesThisMonthSection').then(m => ({ default: m.PurchasesThisMonthSection })));
-const GoodsReceiptNote = lazy(() => import('../pages/purchase/GoodsReceiptNote').then(m => ({ default: m.GoodsReceiptNote })));
-const GoodsReceiptCockpit = lazy(() => import('../pages/purchase/GoodsReceiptCockpit').then(m => ({ default: m.GoodsReceiptCockpit })));
+const ReceiveGoods = lazy(() => import('../pages/purchase/ReceiveGoods').then(m => ({ default: m.ReceiveGoods })));
 const VendorReturns = lazy(() => import('../pages/purchase/VendorReturns').then(m => ({ default: m.VendorReturns })));
 // Purchase S6: Accountant Reconciliation Console
 const ReconConsole = lazy(() => import('../pages/purchase/ReconConsole'));
@@ -69,6 +68,12 @@ function InvoiceBookRedirect() {
   const grnId = new URLSearchParams(window.location.search).get('grn_id') || '';
   const suffix = grnId ? `?grn_id=${encodeURIComponent(grnId)}` : '';
   return <Navigate to={`/purchase/invoices${suffix}`} replace />;
+}
+
+// /purchase/grn (retired) -> /purchase/receive, query string kept.
+function GrnRedirect() {
+  const { search } = useLocation();
+  return <Navigate to={`/purchase/receive${search}`} replace />;
 }
 
 export const purchaseRoutes = (
@@ -160,25 +165,20 @@ export const purchaseRoutes = (
       element={<Navigate to="/purchase/suppliers" replace />}
     />
 
-    {/* Phase 4: Goods Receipt Notes */}
-    <Route
-      path="purchase/grn"
-      element={
-        <ProtectedRoute allowedRoles={[...RECEIVING_MANAGER_ROLES]} deniedHint={RECEIVE_DENIED_HINT}>
-          <NoShopGate title="Goods received"><GoodsReceiptNote /></NoShopGate>
-        </ProtectedRoute>
-      }
-    />
+    {/* Retired (owner ruling): the classic goods-receipt form. Every
+        capability it had is on the one receiving screen; the address
+        forwards there with its query string. */}
+    <Route path="purchase/grn" element={<GrnRedirect />} />
 
-    {/* Procurement Phase 2: Deliveries inbox + guided express
-        receive (mandatory attachment gate). Managers only (owner
-        ruling 2026-09-28: receiving stays with them) — mirrors the
-        backend /vendors/grn* gate. */}
+    {/* THE receiving screen: deliveries inbox, against an order, bought
+        without PO, delivery challan. Managers only (owner ruling
+        2026-09-28: receiving stays with them) -- mirrors the backend
+        /vendors/grn* gate. */}
     <Route
       path="purchase/receive"
       element={
         <ProtectedRoute allowedRoles={[...RECEIVING_MANAGER_ROLES]} deniedHint={RECEIVE_DENIED_HINT}>
-          <NoShopGate title="Receive goods"><GoodsReceiptCockpit /></NoShopGate>
+          <NoShopGate title="Receive goods"><ReceiveGoods /></NoShopGate>
         </ProtectedRoute>
       }
     />

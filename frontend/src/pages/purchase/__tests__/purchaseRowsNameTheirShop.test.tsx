@@ -54,7 +54,7 @@ import { usePurchaseShop } from '../purchaseShop';
 import { PurchaseInvoicesTab } from '../invoices/PurchaseInvoicesTab';
 import { PurchaseTable } from '../PurchaseTable';
 import { mapPOtoPurchaseOrder } from '../purchaseMappers';
-import { GoodsReceiptNote } from '../GoodsReceiptNote';
+import { ReceiveGoods } from '../ReceiveGoods';
 import { VendorReturns } from '../VendorReturns';
 import { PurchaseAnalytics } from '../PurchaseAnalytics';
 import type { PurchaseOrder } from '../purchaseTypes';
@@ -190,23 +190,24 @@ describe('#10 Purchase Orders: on All stores each card names the shop the order 
   });
 });
 
-describe('#10 Goods received: on All stores each receipt names the shop it was booked at', () => {
-  it('the History and Discrepancies cards name each receipt\'s shop', async () => {
+describe('#10 Receive goods: on All stores each receipt names the shop it was booked at', () => {
+  it("the history cards (and the problems-only view) name each receipt's shop", async () => {
     lists.grns = [grn(1, 'BV-DHN-01'), grn(2, 'WO-PUN-01', 1)];
     lists.grnTotal = 2;
-    open(<GoodsReceiptNote />);
-    fireEvent.click(await screen.findByRole('button', { name: /History/ }));
+    open(<ReceiveGoods />);
+    fireEvent.click(await screen.findByRole('button', { name: /Receipt history/ }));
     expect(await shopOf(await screen.findByText('GRN-1'), '.card')).toBe('For Better Vision Dhanbad');
     expect(await shopOf(screen.getByText('GRN-2'), '.card')).toBe('For WizOpt Pune');
-    fireEvent.click(screen.getByRole('button', { name: /Discrepancies/ }));
+    fireEvent.click(screen.getByLabelText(/Only with damaged or rejected pieces/));
+    expect(screen.queryByText('GRN-1')).toBeNull();
     expect(await shopOf(await screen.findByText('GRN-2'), '.card')).toBe('For WizOpt Pune');
   });
 
   it('with one shop picked the cards do not repeat it', async () => {
     lists.grns = [grn(2, 'WO-PUN-01')];
     lists.grnTotal = 1;
-    open(<GoodsReceiptNote />, 'WO-PUN-01');
-    fireEvent.click(await screen.findByRole('button', { name: /History/ }));
+    open(<ReceiveGoods />, 'WO-PUN-01');
+    fireEvent.click(await screen.findByRole('button', { name: /Receipt history/ }));
     await screen.findByText('GRN-2');
     expect(screen.queryAllByTestId('row-shop')).toHaveLength(0);
   });
@@ -228,47 +229,15 @@ describe('#10 Vendor Returns: on All stores each return names the shop it was ra
   });
 });
 
-/** The caption printed under a stat-strip tile's figure. */
-const captionUnder = (label: string) =>
-  screen.getByText(label).parentElement?.querySelector('.d')?.textContent;
-/** A tab button's text. */
-const tabText = (name: RegExp) => screen.getByRole('button', { name }).textContent;
-
-describe('#12 Goods received: counts over the newest page say they cover the latest N', () => {
-  it('50 of 120: the Quality tiles and both tab badges name the latest 50', async () => {
-    lists.grns = Array.from({ length: 50 }, (_, i) => grn(i, 'BV-DHN-01', i < 3 ? 1 : 0));
-    lists.grnTotal = 120;
-    open(<GoodsReceiptNote />);
-    await waitFor(() => expect(captionUnder('Total GRNs')).toBe('all stores · latest 50 shown'));
-    expect(captionUnder('Quality passed')).toBe('clean receipts · of latest 50');
-    expect(captionUnder('Conditional')).toBe('partial accept · of latest 50');
-    // Rejection creates custody/draft work, not an already issued debit note.
-    expect(captionUnder('Failed quality')).toBe('rejection recorded · of latest 50');
-    expect(tabText(/History/)).toBe('History· latest 50 of 120');
-    expect(tabText(/Discrepancies/)).toBe('Discrepancies· 3 in latest 50');
-    fireEvent.click(screen.getByRole('button', { name: /Discrepancies/ }));
-    expect(screen.getByText(/Checked over the latest 50 of 120 receipts only\./)).toBeInTheDocument();
-  });
-
-  it('a cut page with no discrepancy says none in the latest N -- not none at all', async () => {
+describe('#12 Receive goods: a problems-only view over the newest page says it covers the latest N', () => {
+  it('a cut page with no problem says none in the latest N -- not none at all', async () => {
     lists.grns = Array.from({ length: 50 }, (_, i) => grn(i));
     lists.grnTotal = 120;
-    open(<GoodsReceiptNote />);
-    await waitFor(() => expect(captionUnder('Total GRNs')).toBe('all stores · latest 50 shown'));
-    fireEvent.click(screen.getByRole('button', { name: /Discrepancies/ }));
-    expect(screen.getByText('No discrepancies in the latest 50 receipts.')).toBeInTheDocument();
-  });
-
-  it('every receipt in hand: the tiles and badges are plain counts', async () => {
-    lists.grns = [grn(1), grn(2, 'BV-DHN-01', 1)];
-    lists.grnTotal = 2;
-    open(<GoodsReceiptNote />);
-    await waitFor(() => expect(captionUnder('Total GRNs')).toBe('all stores'));
-    expect(captionUnder('Quality passed')).toBe('clean receipts');
-    expect(captionUnder('Conditional')).toBe('partial accept');
-    expect(captionUnder('Failed quality')).toBe('rejection recorded');
-    expect(tabText(/History/)).toBe('History· 2');
-    expect(tabText(/Discrepancies/)).toBe('Discrepancies· 1');
+    open(<ReceiveGoods />);
+    fireEvent.click(await screen.findByRole('button', { name: /Receipt history/ }));
+    await screen.findByText('GRN-1');
+    fireEvent.click(screen.getByLabelText(/Only with damaged or rejected pieces/));
+    expect(screen.getByText('No receipts with damaged or rejected pieces in the latest 50 receipts.')).toBeInTheDocument();
   });
 });
 

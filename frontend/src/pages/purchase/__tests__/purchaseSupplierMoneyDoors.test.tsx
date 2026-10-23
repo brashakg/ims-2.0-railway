@@ -55,8 +55,17 @@ vi.mock('../VendorReturns', () => ({
 vi.mock('../PurchaseVarianceTab', () => ({
   PurchaseVarianceTab: () => <div>VARIANCE SECTION</div>,
 }));
-vi.mock('../GoodsReceiptNote', () => ({ GoodsReceiptNote: () => <div>GRN SCREEN</div> }));
-vi.mock('../GoodsReceiptCockpit', () => ({ GoodsReceiptCockpit: () => <div>RECEIVE SCREEN</div> }));
+vi.mock('../ReceiveGoods', async () => {
+  const { useLocation } = await vi.importActual<typeof import('react-router-dom')>('react-router-dom');
+  return {
+    ReceiveGoods: () => (
+      <>
+        <div>RECEIVE SCREEN</div>
+        <div data-testid="receive-search">{useLocation().search}</div>
+      </>
+    ),
+  };
+});
 vi.mock('../ReconConsole', () => ({ default: () => <div>RECON SCREEN</div> }));
 
 import { purchaseRoutes } from '../../../routes/purchaseRoutes';
@@ -166,7 +175,8 @@ describe('Purchase - a login with no shop reads the message, never a screen', ()
     ['/purchase/variance', 'STORE_MANAGER', 'VARIANCE SECTION'],
     ['/purchase/vendor-returns', 'ACCOUNTANT', 'VENDOR RETURNS SECTION'],
     ['/purchase/invoices', 'ACCOUNTANT', 'INVOICES SECTION'],
-    ['/purchase/grn', 'STORE_MANAGER', 'GRN SCREEN'],
+    // The retired classic form forwards to the receiving screen, gate and all.
+    ['/purchase/grn', 'STORE_MANAGER', 'RECEIVE SCREEN'],
     ['/purchase/receive', 'STORE_MANAGER', 'RECEIVE SCREEN'],
     ['/purchase/recon-console', 'ACCOUNTANT', 'RECON SCREEN'],
   ])('%s as %s', async (path, role, screenText) => {
@@ -176,7 +186,7 @@ describe('Purchase - a login with no shop reads the message, never a screen', ()
     expect(screen.queryByText(screenText)).not.toBeInTheDocument();
   });
 
-  it.each([['/purchase/grn', 'GRN SCREEN'], ['/purchase/recon-console', 'RECON SCREEN']])(
+  it.each([['/purchase/grn', 'RECEIVE SCREEN'], ['/purchase/recon-console', 'RECON SCREEN']])(
     'an admin with no shop still opens %s',
     async (path, screenText) => {
       shop = undefined;
@@ -184,4 +194,15 @@ describe('Purchase - a login with no shop reads the message, never a screen', ()
       expect(await screen.findByText(screenText)).toBeInTheDocument();
     },
   );
+});
+
+// Owner ruling: the classic goods-receipt form is retired. Its address (old
+// bookmarks, the workshop's challan link) forwards to the one receiving
+// screen and keeps its query string, so a ?po_id= deep link still opens it.
+describe('/purchase/grn forwards to the receiving screen', () => {
+  it('lands on /purchase/receive with the query string kept', async () => {
+    openAt('/purchase/grn?vendor_id=V1&po_id=PO-9', 'STORE_MANAGER');
+    expect(await screen.findByText('RECEIVE SCREEN')).toBeInTheDocument();
+    expect(screen.getByTestId('receive-search').textContent).toBe('?vendor_id=V1&po_id=PO-9');
+  });
 });

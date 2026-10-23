@@ -1,5 +1,5 @@
 // ============================================================================
-// IMS 2.0 - Purchase Orders 'Receive' lands on a cockpit that holds the order
+// IMS 2.0 - Purchase Orders 'Receive' lands on a receive screen that holds the order
 // (review r1 #27, audit F63)
 // ============================================================================
 // An admin works Purchase on ALL STORES (or a shop he picked) while his own
@@ -9,9 +9,9 @@
 // open POs by delivery shop -- had none: 'No open POs for this vendor at this
 // store.' for an order that is open.
 //
-// The cockpit now reads the one Purchase shop scope: the admin's pick, every
-// shop when he picks none. Everyone else keeps their own shop, as before.
-// Drives the REAL PurchaseTable button into the REAL cockpit.
+// The receiving screen reads the one Purchase shop scope: the admin's pick,
+// every shop when he picks none. Everyone else keeps their own shop, as
+// before. Drives the REAL PurchaseTable button into the REAL receive screen.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { useEffect, useState, type ReactNode } from 'react';
@@ -26,19 +26,18 @@ const toastMock = vi.hoisted(() => ({
 }));
 
 vi.mock('../../../services/api/grnCockpit', () => ({
-  grnCockpitApi: {
-    listVendors: vi.fn(),
-    getCockpit: vi.fn(),
-    uploadDoc: vi.fn(),
-    createGRN: vi.fn(),
-    expressReceive: vi.fn(),
-  },
+  grnCockpitApi: { uploadDoc: vi.fn(), expressReceive: vi.fn() },
+}));
+
+vi.mock('../../../services/api/products', () => ({
+  productApi: { getProduct: vi.fn(async (id: string) => ({ product_id: id })), getProducts: vi.fn() },
 }));
 
 vi.mock('../../../services/api/inventory', () => ({
   vendorsApi: {
     getGRNs: vi.fn(),
     getPurchaseOrders: vi.fn(),
+    getVendors: vi.fn(),
     acceptGRN: vi.fn(),
     voidGRN: vi.fn(),
   },
@@ -74,22 +73,12 @@ vi.mock('../../../hooks/usePOSQueries', () => ({
   }),
 }));
 
-// The express panel has its own tests; here it only proves the PO was found.
-vi.mock('../ExpressReceivePanel', () => ({
-  ExpressReceivePanel: ({ po }: { po: { po_number: string } }) => (
-    <div>express receive {po.po_number}</div>
-  ),
-}));
-
-import { GoodsReceiptCockpit } from '../GoodsReceiptCockpit';
+import { ReceiveGoods } from '../ReceiveGoods';
 import { PurchaseTable } from '../PurchaseTable';
 import { usePurchaseShop } from '../purchaseShop';
-import { grnCockpitApi } from '../../../services/api/grnCockpit';
 import { vendorsApi } from '../../../services/api/inventory';
 import type { PurchaseOrder } from '../purchaseTypes';
 
-const getCockpit = grnCockpitApi.getCockpit as unknown as ReturnType<typeof vi.fn>;
-const listVendors = grnCockpitApi.listVendors as unknown as ReturnType<typeof vi.fn>;
 const getGRNs = vendorsApi.getGRNs as unknown as ReturnType<typeof vi.fn>;
 const getPOs = vendorsApi.getPurchaseOrders as unknown as ReturnType<typeof vi.fn>;
 
@@ -119,24 +108,21 @@ const PUNE_PO: PurchaseOrder = {
   total: 210,
 };
 
-const OPEN_PUNE = {
+const PUNE_ROW = {
   po_id: 'PO2',
   po_number: 'PO-PUN-0001',
+  vendor_id: 'V2',
+  vendor_name: 'Pune Frames',
   status: 'SENT',
-  expected_date: '2026-10-05',
-  lines: [],
+  delivery_store_id: 'WO-PUN-01',
+  items: [{ product_id: 'P1', product_name: 'Frame A', ordered_qty: 2, received_qty: 0 }],
 };
 
-/** The server's cockpit rule: open POs filtered by delivery shop; no
- *  store_id (an admin) = every shop. Only the Pune order exists. */
-function cockpitFor({ store_id }: { store_id?: string }) {
-  const holdsPune = !store_id || store_id === 'WO-PUN-01';
-  return Promise.resolve({
-    vendor: { vendor_id: 'V2' },
-    open_pos: holdsPune ? [OPEN_PUNE] : [],
-    pending_not_received: [],
-    pending_cataloged: [],
-  });
+/** The server's list rule: orders filtered by delivery shop; no store_id (an
+ *  admin) = every shop. Only the Pune order exists. */
+function ordersFor(params?: { store_id?: string }) {
+  const holdsPune = !params?.store_id || params.store_id === 'WO-PUN-01';
+  return Promise.resolve({ purchase_orders: holdsPune ? [PUNE_ROW] : [] });
 }
 
 /** Sets the shared Purchase shop pick before the page mounts. */
@@ -159,7 +145,7 @@ function openOrdersWithPick(shop: string) {
             path="/purchase/orders"
             element={<PurchaseTable purchaseOrders={[PUNE_PO]} onViewPO={() => {}} />}
           />
-          <Route path="/purchase/receive" element={<GoodsReceiptCockpit />} />
+          <Route path="/purchase/receive" element={<ReceiveGoods />} />
         </Routes>
       </Pick>
     </MemoryRouter>,
@@ -168,48 +154,34 @@ function openOrdersWithPick(shop: string) {
 
 async function pressReceive() {
   fireEvent.click(screen.getByRole('button', { name: /^receive$/i }));
-  await waitFor(() => expect(getCockpit).toHaveBeenCalled());
+  await waitFor(() => expect(getPOs).toHaveBeenCalled());
 }
+
+const orderIsOpen = () => screen.findByRole('heading', { name: /Receive PO-PUN-0001/ });
 
 beforeEach(() => {
   vi.clearAllMocks();
   roles = ['ADMIN'];
   activeStoreId = 'BV-DHN-01';
-  getCockpit.mockImplementation(cockpitFor);
-  listVendors.mockResolvedValue([{ vendor_id: 'V2', display_name: 'Pune Frames' }]);
   getGRNs.mockResolvedValue({ grns: [] });
-  getPOs.mockResolvedValue({
-    purchase_orders: [
-      {
-        po_id: 'PO2',
-        po_number: 'PO-PUN-0001',
-        vendor_id: 'V2',
-        vendor_name: 'Pune Frames',
-        status: 'SENT',
-        delivery_store_id: 'WO-PUN-01',
-        items: [{ product_id: 'P1', ordered_qty: 2, received_qty: 0 }],
-      },
-    ],
-  });
+  getPOs.mockImplementation(ordersFor);
 });
 
-describe('Receive from Purchase Orders lands on a cockpit holding the order', () => {
-  it('admin on All stores: the cockpit reads every shop and opens the order', async () => {
+describe('Receive from Purchase Orders lands on a receive screen holding the order', () => {
+  it('admin on All stores: the screen reads every shop and opens the order', async () => {
     openOrdersWithPick('');
     await pressReceive();
-    expect(getCockpit).toHaveBeenCalledWith({ vendor_id: 'V2', store_id: undefined });
-    expect(getCockpit).not.toHaveBeenCalledWith(
-      expect.objectContaining({ store_id: 'BV-DHN-01' }),
-    );
-    expect(await screen.findByText('express receive PO-PUN-0001')).toBeInTheDocument();
+    expect(getPOs).toHaveBeenCalledWith({ receipt_candidates: true });
+    expect(getPOs).not.toHaveBeenCalledWith(expect.objectContaining({ store_id: 'BV-DHN-01' }));
+    expect(await orderIsOpen()).toBeInTheDocument();
   });
 
-  it('admin who picked Pune: the cockpit reads Pune and opens the order', async () => {
+  it('admin who picked Pune: the screen reads Pune and opens the order', async () => {
     openOrdersWithPick('WO-PUN-01');
     await pressReceive();
-    expect(getCockpit).toHaveBeenCalledWith({ vendor_id: 'V2', store_id: 'WO-PUN-01' });
-    expect(await screen.findByText('express receive PO-PUN-0001')).toBeInTheDocument();
-    // The picker on the cockpit says which shop it is reading.
+    expect(getPOs).toHaveBeenCalledWith({ store_id: 'WO-PUN-01', receipt_candidates: true });
+    expect(await orderIsOpen()).toBeInTheDocument();
+    // The picker on the screen says which shop it is reading.
     expect((screen.getByLabelText('Purchase shop') as HTMLSelectElement).value).toBe('WO-PUN-01');
   });
 
@@ -218,23 +190,19 @@ describe('Receive from Purchase Orders lands on a cockpit holding the order', ()
     activeStoreId = 'WO-PUN-01';
     openOrdersWithPick('BV-DHN-01');
     await pressReceive();
-    expect(getCockpit).toHaveBeenCalledWith({ vendor_id: 'V2', store_id: 'WO-PUN-01' });
-    expect(getCockpit).toHaveBeenCalledTimes(1);
-    expect(await screen.findByText('express receive PO-PUN-0001')).toBeInTheDocument();
+    expect(getPOs).toHaveBeenCalledWith({ store_id: 'WO-PUN-01', receipt_candidates: true });
+    expect(await orderIsOpen()).toBeInTheDocument();
     expect(screen.queryByLabelText('Purchase shop')).toBeNull();
   });
 
-  it('admin moving the shop filter on the cockpit reloads the open vendor for it', async () => {
+  it('admin narrowing the shop to one the order does not deliver to drops the open order', async () => {
     openOrdersWithPick('');
     await pressReceive();
-    await screen.findByText('express receive PO-PUN-0001');
-    fireEvent.change(screen.getByLabelText('Purchase shop'), {
-      target: { value: 'BV-DHN-01' },
-    });
-    await waitFor(() =>
-      expect(getCockpit).toHaveBeenLastCalledWith({ vendor_id: 'V2', store_id: 'BV-DHN-01' }),
-    );
-    expect(await screen.findByText(/no open pos for this vendor at this store/i)).toBeInTheDocument();
+    await orderIsOpen();
+    fireEvent.change(screen.getByLabelText('Purchase shop'), { target: { value: 'BV-DHN-01' } });
+    await waitFor(() => expect(getPOs).toHaveBeenLastCalledWith({ store_id: 'BV-DHN-01', receipt_candidates: true }));
+    expect(screen.queryByRole('heading', { name: /Receive PO-PUN-0001/ })).toBeNull();
+    expect(await screen.findByText(/No open purchase orders to receive against at the shop picked above/)).toBeInTheDocument();
   });
 });
 
@@ -243,7 +211,7 @@ describe('Deliveries inbox follows the same scope', () => {
     render(
       <MemoryRouter initialEntries={['/purchase/receive']}>
         <Pick shop={shop}>
-          <GoodsReceiptCockpit />
+          <ReceiveGoods />
         </Pick>
       </MemoryRouter>,
     );
@@ -252,14 +220,14 @@ describe('Deliveries inbox follows the same scope', () => {
   it('admin on All stores: every shop, and each box says which shop it is for', async () => {
     openInbox('');
     expect(await screen.findByText('PO-PUN-0001')).toBeInTheDocument();
-    expect(getPOs).toHaveBeenCalledWith({});
+    expect(getPOs).toHaveBeenCalledWith({ receipt_candidates: true });
     expect(screen.getByText(/^For/).textContent).toBe('For WizOpt Pune');
   });
 
   it('admin on one shop: that shop, no per-box shop line', async () => {
     openInbox('WO-PUN-01');
     expect(await screen.findByText('PO-PUN-0001')).toBeInTheDocument();
-    expect(getPOs).toHaveBeenCalledWith({ store_id: 'WO-PUN-01' });
+    expect(getPOs).toHaveBeenCalledWith({ store_id: 'WO-PUN-01', receipt_candidates: true });
     expect(screen.queryByText(/^For/)).toBeNull();
   });
 
@@ -268,26 +236,13 @@ describe('Deliveries inbox follows the same scope', () => {
     activeStoreId = 'WO-PUN-01';
     openInbox('');
     expect(await screen.findByText('PO-PUN-0001')).toBeInTheDocument();
-    expect(getPOs).toHaveBeenCalledWith({ store_id: 'WO-PUN-01' });
-    expect(getPOs).not.toHaveBeenCalledWith({});
+    expect(getPOs).toHaveBeenCalledWith({ store_id: 'WO-PUN-01', receipt_candidates: true });
+    expect(getPOs).not.toHaveBeenCalledWith({ receipt_candidates: true });
   });
 
-  it('admin on All stores, a vendor with nothing open: not "at this store"', async () => {
-    getCockpit.mockResolvedValue({
-      vendor: { vendor_id: 'V9' },
-      open_pos: [],
-      pending_not_received: [],
-      pending_cataloged: [],
-    });
-    render(
-      <MemoryRouter initialEntries={['/purchase/receive?vendor_id=V9']}>
-        <Pick shop="">
-          <GoodsReceiptCockpit />
-        </Pick>
-      </MemoryRouter>,
-    );
-    expect(
-      await screen.findByText('No open POs for this vendor in any store.'),
-    ).toBeInTheDocument();
+  it('admin on All stores with nothing open: not "at this store"', async () => {
+    getPOs.mockResolvedValue({ purchase_orders: [] });
+    openInbox('');
+    expect(await screen.findByText(/No open purchase orders to receive against in any store\./)).toBeInTheDocument();
   });
 });
