@@ -92,7 +92,7 @@ import {
   isOrderedDraft,
   type CatalogDrawerItem,
 } from './CatalogProductDrawer';
-import { writeReviewQueue } from './reviewQueue';
+import { EDIT_QUEUE_KEY, clearReviewQueue, writeReviewQueue } from './reviewQueue';
 import { CatalogFiltersBar } from './CatalogFiltersBar';
 import { ArchiveDialog, FlagDialog, SelectionBar } from './CatalogBulkActions';
 import {
@@ -389,6 +389,17 @@ export function CatalogManagerPage({
   }, [filters.q]);
 
   // ---- Data loads -----------------------------------------------------------
+  // The Catalog list's query (no skip/limit). The edit page's Save & next asks
+  // for the list's next page with these very params (reviewQueue `list`).
+  const catalogParams = useMemo(
+    () => ({
+      ...toProductParams(filters),
+      // G1 (owner 2026-10-18): one row per model, its colours/sizes folded in.
+      group: grouped ? ('model' as const) : undefined,
+      photo,
+    }),
+    [filters, grouped, photo]
+  );
   const load = useCallback(async () => {
     const seq = ++loadSeq.current;
     const stale = () => seq !== loadSeq.current;
@@ -411,10 +422,7 @@ export function CatalogManagerPage({
     try {
       if (segment === 'catalog') {
         const res = await productApi.getProducts({
-          ...toProductParams(filters),
-          // G1 (owner 2026-10-18): one row per model, its colours/sizes folded in.
-          group: grouped ? 'model' : undefined,
-          photo,
+          ...catalogParams,
           skip: (page - 1) * pageSize,
           limit: pageSize,
         });
@@ -457,7 +465,7 @@ export function CatalogManagerPage({
       // newer request owns the spinner.
       if (!pastEnd && !stale()) setLoading(false);
     }
-  }, [segment, filters, photo, grouped, page, pageSize, setPage]);
+  }, [segment, filters, catalogParams, page, pageSize, setPage]);
 
   useEffect(() => {
     void load();
@@ -547,6 +555,32 @@ export function CatalogManagerPage({
       },
     });
   }, [segment, loading, items, page, pageSize, total, filters, searchParams]);
+
+  // Same for the Catalog list: the edit page (?edit=<id>, from a row's Edit or
+  // the drawer's) walks these products with Save & next / Skip. Another list
+  // (Needs review) clears it, so its drafts open with a plain Save.
+  useEffect(() => {
+    if (loading) return;
+    if (segment !== 'catalog') {
+      clearReviewQueue(EDIT_QUEUE_KEY);
+      return;
+    }
+    writeReviewQueue(
+      {
+        ids: items.filter((it) => it.kind === 'spine').map((it) => docId(it.doc)),
+        index: 0,
+        offset: (page - 1) * pageSize,
+        total,
+        filters: { page, address: searchParams.toString() },
+        list: {
+          path: photoPreset ? '/catalog/missing-photos' : '/catalog',
+          params: catalogParams,
+          pageSize,
+        },
+      },
+      EDIT_QUEUE_KEY
+    );
+  }, [segment, loading, items, page, pageSize, total, searchParams, photoPreset, catalogParams]);
 
   // "Edit everything" (drawer / row action) → full cataloguing page with the
   // queue stashed at this item's position. `hash` = '#images' lands on the

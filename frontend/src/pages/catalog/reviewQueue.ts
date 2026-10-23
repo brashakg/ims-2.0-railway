@@ -15,6 +15,9 @@
 import { readFilters, type SortKey } from './catalogListState';
 
 export const REVIEW_QUEUE_KEY = 'ims.review.queue';
+/** The same stash, its own slot: the Catalog list's products for the edit
+ *  page's Save & next / Skip / "Item N of M" (?edit=<id>). */
+export const EDIT_QUEUE_KEY = 'ims.edit.queue';
 
 export interface ReviewQueueFilters {
   search?: string;
@@ -39,19 +42,24 @@ export interface ReviewQueueStash {
   /** Total items in the review queue at stash time (the M in "N of M"). */
   total?: number;
   filters?: ReviewQueueFilters;
+  /** Edit queue only: the list the ids came from -- its path (/catalog or
+   *  /catalog/missing-photos) and the exact getProducts params it asked with
+   *  (no skip/limit), so the editor fetches the list's NEXT page in the same
+   *  filter and sort when this page runs out. */
+  list?: { path: string; params: Record<string, unknown>; pageSize: number };
 }
 
-export function writeReviewQueue(stash: ReviewQueueStash): void {
+export function writeReviewQueue(stash: ReviewQueueStash, key = REVIEW_QUEUE_KEY): void {
   try {
-    window.sessionStorage.setItem(REVIEW_QUEUE_KEY, JSON.stringify(stash));
+    window.sessionStorage.setItem(key, JSON.stringify(stash));
   } catch {
     /* storage full/blocked — the editor falls back to single-item fetches */
   }
 }
 
-export function readReviewQueue(): ReviewQueueStash | null {
+export function readReviewQueue(key = REVIEW_QUEUE_KEY): ReviewQueueStash | null {
   try {
-    const raw = window.sessionStorage.getItem(REVIEW_QUEUE_KEY);
+    const raw = window.sessionStorage.getItem(key);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as ReviewQueueStash;
     if (!parsed || !Array.isArray(parsed.ids)) return null;
@@ -67,15 +75,19 @@ export function readReviewQueue(): ReviewQueueStash | null {
           ? Math.trunc(parsed.total as number)
           : undefined,
       filters: parsed.filters && typeof parsed.filters === 'object' ? parsed.filters : undefined,
+      list:
+        parsed.list && typeof parsed.list === 'object' && typeof parsed.list.path === 'string'
+          ? parsed.list
+          : undefined,
     };
   } catch {
     return null;
   }
 }
 
-export function clearReviewQueue(): void {
+export function clearReviewQueue(key = REVIEW_QUEUE_KEY): void {
   try {
-    window.sessionStorage.removeItem(REVIEW_QUEUE_KEY);
+    window.sessionStorage.removeItem(key);
   } catch {
     /* nothing to clear */
   }
@@ -135,4 +147,13 @@ export function queueSort(stash: ReviewQueueStash | null): SortKey {
   const address = stash?.filters?.address;
   return readFilters(new URLSearchParams(typeof address === 'string' ? address : ''), null, 'review')
     .sort;
+}
+
+/** Back to the Catalog list the edit queue came from, as the user left it
+ *  (filters, sort, page), with ?focus opening this product's card. No queue
+ *  = the plain Catalog. Pure. */
+export function editListAddress(stash: ReviewQueueStash | null, focusId: string): string {
+  const sp = new URLSearchParams(stash?.list ? stash.filters?.address ?? '' : '');
+  sp.set('focus', focusId);
+  return `${stash?.list?.path ?? '/catalog'}?${sp.toString()}`;
 }

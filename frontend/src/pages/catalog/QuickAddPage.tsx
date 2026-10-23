@@ -42,7 +42,7 @@ export function QuickAddPage() {
   const form = useQuickAddForm();
   const {
     canAddProduct, queueClear, setQueueClear, setSearchParams, navigate,
-    editMode, isReviewMode, reviewSnapshot, handleBackToQueue,
+    editMode, isReviewMode, reviewSnapshot, handleBackToQueue, editListPath,
     variantCtx, exitVariantMode, leaveFamily, familyHint, optedOutLeadId,
     dupInfo, setDupInfo, dupBusy, handleDupAddVariant, handleDupOpenExisting,
   } = form;
@@ -120,7 +120,7 @@ export function QuickAddPage() {
           )}
           <button
             type="button"
-            onClick={() => navigate(`/catalog?focus=${encodeURIComponent(editMode.id)}`)}
+            onClick={() => navigate(editListPath)}
             className="btn-secondary !py-1.5 !px-3 text-xs"
           >
             Cancel
@@ -129,7 +129,9 @@ export function QuickAddPage() {
       )}
 
       {/* Open catalogue flags on this product: fix, then Mark fixed. */}
-      {editMode?.kind === 'spine' && <ProductFlagsPanel productId={editMode.id} />}
+      {editMode?.kind === 'spine' && (
+        <ProductFlagsPanel key={editMode.id} productId={editMode.id} initialFlags={editMode.flags ?? []} />
+      )}
 
       {/* REVIEW MODE banner: what's being reviewed, the auto-SKU note, the
           read-only online (Shopify) status, and the way back to the queue. */}
