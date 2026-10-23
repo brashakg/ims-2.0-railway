@@ -753,3 +753,42 @@ def test_backfill_links_old_redemptions_to_their_payment_only_by_reference(tmp_p
     assert rows.find_one({"txn_id": "T-3"}).get("tender_payment_id") is None
     assert "T-1" in backup.read_text()
     assert bf.plan(db)["links"] == []  # idempotent
+
+
+# =========================================================================== #
+# Fail closed: an unreadable refund history refuses the refund (owner rule)
+# =========================================================================== #
+class _ReadFails:
+    def find(self, *_a, **_k):
+        raise RuntimeError("returns read failed")
+
+
+def test_strict_prior_refunds_refuses_on_a_read_error(monkeypatch):
+    monkeypatch.setattr(returns_router, "_returns_coll", lambda: _ReadFails())
+    with pytest.raises(HTTPException) as exc:
+        returns_router._sum_prior_refunds("ORD-1", strict=True)
+    assert exc.value.status_code == 503
+    assert "Could not check earlier refunds on this bill - try again" in str(exc.value.detail)
+    # Other callers keep the old fail-soft reading.
+    assert returns_router._sum_prior_refunds("ORD-1") == 0.0
+
+
+@pytest.mark.usefixtures("gst_numbers")
+def test_return_refused_when_earlier_refunds_cannot_be_read(monkeypatch):
+    # The line-quantity read succeeds; the read of the bill's earlier refunds
+    # (the Rs 2,000 rule and the over-refund cap) fails -> refused, nothing kept.
+    client, returns = _ctx(monkeypatch)
+    real_find = returns.find
+    calls = {"n": 0}
+
+    def _find(*a, **k):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise RuntimeError("returns read failed")
+        return real_find(*a, **k)
+
+    monkeypatch.setattr(returns, "find", _find)
+    r = client.post("/api/v1/returns", json=_qa_payload(), headers=_hdr("CASHIER"))
+    assert r.status_code == 503, r.text
+    assert "Could not check earlier refunds on this bill - try again" in r.text
+    assert returns.count_documents({}) == 0
