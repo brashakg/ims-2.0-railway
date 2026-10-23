@@ -95,6 +95,7 @@ async def start_stock_count(
     # "ONE SNAPSHOT MECHANISM" note above. Without it, a sale and a receipt
     # that cancel out leave the line looking untouched.
     system_unit_fingerprints: Dict[str, str] = {}
+    system_unit_ids: Dict[str, List[str]] = {}
     # Resolve category -> product_ids when filtering is requested, with the
     # SAME resolver the scope snapshot uses. None = the category could not be
     # resolved; the old fallback silently snapshotted the WHOLE STORE instead,
@@ -129,6 +130,9 @@ async def start_stock_count(
                 system_unit_fingerprints[str(r["_id"])] = _unit_fingerprint(
                     r.get("units")
                 )
+                # WHICH pieces were on hand: the result tells a piece added
+                # during the count (a receipt) from one that left (a sale).
+                system_unit_ids[str(r["_id"])] = sorted(str(u) for u in r["units"])
 
     count_doc = {
         "count_id": count_id,
@@ -146,6 +150,10 @@ async def start_stock_count(
         "items": [],
         "system_quantities": system_quantities,
         "system_unit_fingerprints": system_unit_fingerprints,
+        "system_unit_ids": system_unit_ids,
+        # Bumped by EVERY scan and typed answer; Finish closes only the
+        # revision it read, so an answer saved mid-Finish is never dropped.
+        "rev": 0,
         "completed_at": None,
         "variances": [],
         "items_counted": 0,
@@ -488,7 +496,8 @@ def _withhold_expected_while_open(count_doc: dict) -> dict:
     """
     if count_doc.get("status") != "in_progress":
         return count_doc
-    for key in ("system_quantities", "system_unit_fingerprints", "expected_lines"):
+    for key in ("system_quantities", "system_unit_fingerprints", "system_unit_ids",
+                "expected_lines"):
         count_doc.pop(key, None)
     return count_doc
 
@@ -523,12 +532,24 @@ def _refresh_items_counted(db, count_id: str) -> dict:
     return doc
 
 
+def _closed_while_saving(db, count_id: str) -> None:
+    """A write that matched nothing because the session is no longer open is
+    a REFUSAL, never a quiet "saved" or "already scanned"."""
+    doc = db.get_collection("stock_counts").find_one({"count_id": count_id}) or {}
+    if doc.get("status") != "in_progress":
+        raise HTTPException(
+            status_code=409,
+            detail="This count was finished while saving -- that answer was NOT saved.",
+        )
+
+
 def _record_scan(db, count_doc: dict, *, unit: dict, product_name: str,
                  sku: str, user_id: str) -> tuple:
     """Add ONE scanned piece to the session. Returns (added, fresh_doc).
 
-    ``added`` is False when this exact piece was already scanned into this
-    session: a second scan of the same label counts nothing.
+    ``added`` is False only when this exact piece was already scanned into
+    this session: a second scan of the same label counts nothing. If the
+    session closed under the scan, 409 -- the piece was not saved.
     """
     unit_id = str(unit["_id"])
     res = db.get_collection("stock_counts").update_one(
@@ -548,10 +569,13 @@ def _record_scan(db, count_doc: dict, *, unit: dict, product_name: str,
                     "scanned_at": utc_now_iso(),
                     "scanned_by": user_id,
                 }
-            }
+            },
+            "$inc": {"rev": 1},
         },
     )
     added = int(getattr(res, "modified_count", 0) or 0) == 1
+    if not added:
+        _closed_while_saving(db, count_doc["count_id"])
     return added, _refresh_items_counted(db, count_doc["count_id"])
 
 
@@ -561,13 +585,12 @@ def _record_typed(db, count_doc: dict, *, product_id: str, product_name: str,
     """Write the TYPED quantity for one style; return the fresh document.
 
     Re-typing a style replaces its typed number (a correction of the same
-    answer). It never touches the pieces scanned for that style.
-
-    ponytail: read-modify-write of `items` -- one counter typing the odd
-    label-less style is the real-world shape. Scans (the hot path) never come
-    through here; each is one guarded $push.
+    answer). It never touches the pieces scanned for that style, and it
+    writes ONE style's line -- two counters typing different styles cannot
+    lose each other's answer. A session closed under the write is a 409.
     """
-    items = list(count_doc.get("items", []) or [])
+    coll = db.get_collection("stock_counts")
+    cid = count_doc["count_id"]
     line = {
         "product_id": product_id,
         "product_name": product_name or "",
@@ -577,17 +600,21 @@ def _record_typed(db, count_doc: dict, *, product_id: str, product_name: str,
         "counted_at": utc_now_iso(),
         "counted_by": user_id,
     }
-    for idx, existing in enumerate(items):
-        if existing.get("product_id") == product_id:
-            items[idx] = line
+    for _attempt in range(2):
+        res = coll.update_one(
+            {"count_id": cid, "status": "in_progress", "items.product_id": product_id},
+            {"$set": {"items.$": line}, "$inc": {"rev": 1}},
+        )
+        if int(getattr(res, "matched_count", 0) or 0):
             break
-    else:
-        items.append(line)
-
-    fresh = {**count_doc, "items": items}
-    fresh["items_counted"] = len(count_lines(fresh))
-    db.get_collection("stock_counts").update_one(
-        {"count_id": count_doc["count_id"], "status": "in_progress"},
-        {"$set": {"items": items, "items_counted": fresh["items_counted"]}},
-    )
-    return fresh
+        res = coll.update_one(
+            {"count_id": cid, "status": "in_progress",
+             "items.product_id": {"$ne": product_id}},
+            {"$push": {"items": line}, "$inc": {"rev": 1}},
+        )
+        if int(getattr(res, "matched_count", 0) or 0):
+            break
+        # Neither matched: the session closed, or another counter added
+        # this style's line between the two writes (then the first wins).
+        _closed_while_saving(db, cid)
+    return _refresh_items_counted(db, cid)

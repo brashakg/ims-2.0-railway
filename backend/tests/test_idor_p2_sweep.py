@@ -421,10 +421,20 @@ class _CountColl:
         return None
 
     def update_one(self, flt, update, upsert=False):
+        from types import SimpleNamespace
+
         self.updates.append({"filter": flt, "update": update})
-        if self.doc and self.doc.get("count_id") == flt.get("count_id"):
+        hit = bool(self.doc) and self.doc.get("count_id") == flt.get("count_id")
+        if hit and "$push" in update:  # a typed answer for a new style
+            for k, v in update["$push"].items():
+                self.doc.setdefault(k, []).append(v)
+        elif hit and "items.$" not in update.get("$set", {}):
             self.doc.update(update.get("$set", {}))
-        return None
+        if "items.product_id" in flt and not isinstance(flt["items.product_id"], dict):
+            hit = hit and any(
+                i.get("product_id") == flt["items.product_id"] for i in self.doc.get("items", [])
+            )
+        return SimpleNamespace(matched_count=int(hit), modified_count=int(hit))
 
 
 class _CountDB:
@@ -488,7 +498,7 @@ class TestInventoryStockCountStoreGuard:
         )
         assert res["message"] == "Item recorded"
         assert res["items_counted"] == 1
-        assert len(coll.updates) == 1
+        assert coll.updates, "the answer was written"
 
     def test_get_count_same_store_succeeds(self, monkeypatch):
         self._install(monkeypatch, _seed_count())
@@ -505,7 +515,7 @@ class TestInventoryStockCountStoreGuard:
             )
         )
         assert res["items_counted"] == 1
-        assert len(coll.updates) == 1
+        assert coll.updates
 
 
 # ===========================================================================

@@ -8,7 +8,8 @@
 
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import { describe, it, expect, vi } from 'vitest';
+import { fireEvent } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const DOC = {
   count_id: 'C1',
@@ -32,9 +33,17 @@ const DOC = {
   ],
 };
 
+const box = vi.hoisted(() => ({ doc: null as any, reconcile: vi.fn(async () => ({ units_voided: 1 })) }));
 vi.mock('../../../services/api', () => ({
-  inventoryApi: { getStockCount: vi.fn(async () => DOC) },
+  inventoryApi: {
+    getStockCount: vi.fn(async () => box.doc),
+    reconcileStockCount: (...a: unknown[]) => (box.reconcile as any)(...a),
+  },
 }));
+beforeEach(() => {
+  box.doc = DOC;
+  box.reconcile.mockClear();
+});
 vi.mock('../../../context/ToastContext', () => ({
   useToast: () => ({ success: vi.fn(), error: vi.fn() }),
 }));
@@ -77,5 +86,37 @@ describe('stock count result', () => {
     expect(await screen.findByText('Write off these 1 piece')).toBeInTheDocument();
     expect(screen.queryByText(/Send 1 piece/)).toBeNull();
     expect(screen.getAllByText('₹5,210').length).toBeGreaterThan(0);
+  });
+});
+
+describe('review round 1', () => {
+  it('a zone count offers no write-off to anyone', async () => {
+    auth.role = 'ADMIN';
+    box.doc = { ...DOC, zone: 'Wall A', write_off_allowed: false };
+    renderAt();
+    expect(await screen.findByText('Zone count: recount the whole shop or category to write off.')).toBeInTheDocument();
+    expect(screen.queryByText(/Write off these/)).toBeNull();
+    expect(screen.queryByText(/to admin for write-off/)).toBeNull();
+  });
+
+  it('styles with nothing found are written off only after a second confirmation', async () => {
+    auth.role = 'ADMIN';
+    box.doc = {
+      ...DOC,
+      write_off_allowed: true,
+      none_found: [{ product_id: 'P9', product_name: 'Carrera 5003', sku: 'C5003',
+        missing_units: [{ unit_id: 'u9', barcode: 'BV00000NF001' }] }],
+    };
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(true).mockReturnValueOnce(false);
+    renderAt();
+    expect(await screen.findByText(/None found \(1 style, 1 pieces\)/)).toBeInTheDocument();
+    fireEvent.click(screen.getByText(/pieces of styles with nothing found/));
+    expect(confirm).toHaveBeenCalledTimes(2);
+    expect(String(confirm.mock.calls[1][0])).toMatch(/1 style had nothing found - write off all their pieces/);
+    expect(box.reconcile).not.toHaveBeenCalled();
+    confirm.mockReturnValueOnce(true).mockReturnValueOnce(true);
+    fireEvent.click(screen.getByText(/pieces of styles with nothing found/));
+    expect(box.reconcile).toHaveBeenCalledWith('C1', undefined, true);
+    confirm.mockRestore();
   });
 });

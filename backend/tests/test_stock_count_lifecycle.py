@@ -174,7 +174,7 @@ def _seed_units(mongo_db, product_id: str, n: int, store_id: str = STORE):
     """n serialized AVAILABLE units, returning their barcodes."""
     barcodes = []
     for i in range(n):
-        bc = f"BC-{uuid.uuid4().hex[:10]}"
+        bc = f"BV{uuid.uuid4().hex[:10].upper()}"  # minted shape: upper case, no hyphen
         mongo_db["stock_units"].insert_one(
             {
                 "stock_id": f"STK-{uuid.uuid4().hex[:8]}",
@@ -355,7 +355,9 @@ class _ScanLandsMidFinish:
         if not self.fired and doc and doc.get("status") == "in_progress":
             self.fired = True
             self._c.update_one(
-                {"count_id": doc["count_id"]}, {"$push": {"scans": self._scan}}
+                {"count_id": doc["count_id"]},
+                # exactly what the scan door writes: the piece, and a new revision
+                {"$push": {"scans": self._scan}, "$inc": {"rev": 1}},
             )
         return doc
 
@@ -2146,7 +2148,9 @@ def test_a_store_manager_sends_for_write_off_and_destroys_nothing(
         f"/inventory/stock-count/{count_id}/write-off-request", json={"notes": "checked"}
     )
     assert r.status_code == 200, r.text
-    assert r.json()["pieces"] == 2
+    done = mongo_db["stock_counts"].find_one({"count_id": count_id})
+    none_found = sum(len(n["missing_units"]) for n in done.get("none_found") or [])
+    assert r.json()["pieces"] == 2 + none_found, "the named pieces + the none-found ones"
     assert mongo_db["stock_units"].count_documents({"product_id": pid, "status": "AVAILABLE"}) == 4
     doc = mongo_db["stock_counts"].find_one({"count_id": count_id})
     assert doc["status"] == "completed"
@@ -2162,3 +2166,293 @@ def test_a_store_manager_sends_for_write_off_and_destroys_nothing(
     assert out["units_voided"] == 2
     row = mongo_db["stock_shrinkage"].find_one({"count_id": count_id})
     assert row["write_off_requested_by"] == "u-count"
+
+
+# ============================================================================
+# 13. REVIEW ROUND 1 (PR #1260)
+# ============================================================================
+
+
+def _proxy_with(mongo_db, name, coll):
+    real_get = _DBProxy(mongo_db).get_collection
+
+    class _Proxy:
+        is_connected = True
+
+        def get_collection(self, n):
+            return coll if n == name else real_get(n)
+
+        def __getattr__(self, n):
+            return real_get(n)
+
+    return _Proxy()
+
+
+def test_a_zone_count_can_never_write_off(admin_client, manager_client, mongo_db):
+    """B1: a zone is a label, not a scope -- the expected set is the whole
+    shop, so a 'Wall A' count names every stockroom piece missing."""
+    pid = _seed_product(mongo_db)
+    barcodes = _seed_units(mongo_db, pid, 4)
+    r = admin_client.post("/inventory/stock-count/start", json={"zone": "Wall A"})
+    count_id = r.json()["count_id"]
+    _scan(admin_client, count_id, barcodes[0])
+
+    body = _complete(admin_client, count_id)
+    assert body["write_off_allowed"] is False
+    assert body["none_found"] == [], "never offered for a zone count"
+
+    r = admin_client.post(f"/inventory/stock-count/{count_id}/reconcile", json={})
+    assert r.status_code == 400 and "zone" in r.json()["detail"].lower()
+    r = manager_client.post(f"/inventory/stock-count/{count_id}/write-off-request", json={})
+    assert r.status_code == 400
+    assert mongo_db["stock_units"].count_documents({"product_id": pid, "status": "AVAILABLE"}) == 4
+    assert mongo_db["stock_counts"].find_one({"count_id": count_id})["status"] == "completed"
+
+
+def test_a_failed_stock_read_leaves_the_count_ready_to_write_off(
+    admin_client, mongo_db, monkeypatch
+):
+    """M1: the on-hand read used to run AFTER the claim, so a 503 parked the
+    count in 'reconciling' with nothing taken."""
+    pid, count_id, _bc = _counted_short(admin_client, mongo_db, on_hand=4, counted=2)
+    monkeypatch.setattr(inv_mod, "_on_hand_units", lambda *a, **k: None)
+    r = admin_client.post(f"/inventory/stock-count/{count_id}/reconcile", json={})
+    assert r.status_code == 503
+    assert mongo_db["stock_counts"].find_one({"count_id": count_id})["status"] == "completed"
+
+
+def test_finishing_a_stuck_write_off_that_took_nothing_does_not_close_it(
+    admin_client, mongo_db
+):
+    """M1: 'reconciling' with 0 voided and pieces still named missing must
+    not close as reconciled. It goes back to 'completed' -- or the admin
+    closes it explicitly, with a reason."""
+    pid, count_id, _bc = _counted_short(admin_client, mongo_db, on_hand=4, counted=2)
+    mongo_db["stock_counts"].update_one({"count_id": count_id}, {"$set": {"status": "reconciling"}})
+
+    body = admin_client.post(f"/inventory/stock-count/{count_id}/reconcile/finish", json={}).json()
+    assert body["status"] == "completed"
+    assert mongo_db["stock_counts"].find_one({"count_id": count_id})["status"] == "completed"
+
+    mongo_db["stock_counts"].update_one({"count_id": count_id}, {"$set": {"status": "reconciling"}})
+    r = admin_client.post(
+        f"/inventory/stock-count/{count_id}/reconcile/finish",
+        json={"close_without_write_off": True},
+    )
+    assert r.status_code == 400, "a close without write-off needs a reason"
+    r = admin_client.post(
+        f"/inventory/stock-count/{count_id}/reconcile/finish",
+        json={"close_without_write_off": True, "notes": "found in the back room"},
+    )
+    assert r.status_code == 200, r.text
+    doc = mongo_db["stock_counts"].find_one({"count_id": count_id})
+    assert doc["status"] == "reconciled" and doc["closed_without_write_off"] is True
+    assert mongo_db["stock_units"].count_documents({"product_id": pid, "status": "AVAILABLE"}) == 4
+
+
+class _SaveLandsMidFinish:
+    """stock_counts, except a typed answer is saved between Finish's read and
+    its close -- exactly as the typed door writes it (a line + a revision)."""
+
+    def __init__(self, coll, line):
+        self._c = coll
+        self._line = line
+        self.fired = False
+
+    def find_one(self, flt, *args, **kwargs):
+        doc = self._c.find_one(flt, *args, **kwargs)
+        if not self.fired and doc and doc.get("status") == "in_progress":
+            self.fired = True
+            self._c.update_one(
+                {"count_id": doc["count_id"]},
+                {"$push": {"items": self._line}, "$inc": {"rev": 1}},
+            )
+        return doc
+
+    def __getattr__(self, name):
+        return getattr(self._c, name)
+
+
+def test_a_typed_answer_saved_while_finishing_is_never_dropped(
+    admin_client, mongo_db, monkeypatch
+):
+    """M2: Finish guarded only the number of scans, so a typed answer saved
+    mid-Finish was silently left out of the result."""
+    pid = _seed_product(mongo_db)
+    other = _seed_product(mongo_db)
+    barcodes = _seed_units(mongo_db, pid, 2)
+    _seed_units(mongo_db, other, 1)
+    count_id = _start(admin_client)
+    _scan(admin_client, count_id, barcodes[0])
+    racing = _SaveLandsMidFinish(
+        mongo_db["stock_counts"], {"product_id": other, "typed_quantity": 1}
+    )
+    monkeypatch.setattr(inv_mod, "_get_db", lambda: _proxy_with(mongo_db, "stock_counts", racing))
+    r = admin_client.post(f"/inventory/stock-count/{count_id}/complete", json={})
+    assert racing.fired
+    assert r.status_code == 409, r.text
+
+
+class _ClosesUnderTheWrite:
+    """stock_counts, except the count is finished right after the door has
+    checked it is open -- so the door's own write matches nothing."""
+
+    def __init__(self, coll):
+        self._c = coll
+        self.fired = False
+
+    def find_one(self, flt, *args, **kwargs):
+        doc = self._c.find_one(flt, *args, **kwargs)
+        if not self.fired and doc and doc.get("status") == "in_progress":
+            self.fired = True
+            self._c.update_one({"count_id": doc["count_id"]}, {"$set": {"status": "completed"}})
+        return doc
+
+    def __getattr__(self, name):
+        return getattr(self._c, name)
+
+
+@pytest.mark.parametrize("door", ["scan", "typed"])
+def test_an_answer_saved_into_a_count_that_just_closed_is_refused_loudly(
+    admin_client, mongo_db, monkeypatch, door
+):
+    """M3: the typed door reported "recorded" over a write that landed
+    nowhere; the scan door reported "already scanned" for the same."""
+    pid = _seed_product(mongo_db)
+    barcodes = _seed_units(mongo_db, pid, 2)
+    count_id = _start(admin_client)
+    racing = _ClosesUnderTheWrite(mongo_db["stock_counts"])
+    monkeypatch.setattr(inv_mod, "_get_db", lambda: _proxy_with(mongo_db, "stock_counts", racing))
+    if door == "scan":
+        r = _scan(admin_client, count_id, barcodes[0])
+    else:
+        r = _type_for(admin_client, mongo_db, count_id, barcodes[0], 1)
+    assert racing.fired
+    assert r.status_code == 409, r.text
+    assert "not saved" in r.json()["detail"].lower()
+
+
+def test_two_counters_typing_different_styles_keep_both_answers(admin_client, mongo_db):
+    """M3: the typed door rewrote the whole list from what it had read, so a
+    second counter's save wiped the first counter's answer."""
+    from api.routers.inventory.stock_count import _record_typed
+
+    count_id = _start(admin_client)
+    stale = mongo_db["stock_counts"].find_one({"count_id": count_id})  # counter B's read
+    proxy = _DBProxy(mongo_db)
+    _record_typed(proxy, stale, product_id="P-A", product_name="A", sku="A",
+                  typed_quantity=2, notes=None, user_id="a")
+    _record_typed(proxy, stale, product_id="P-B", product_name="B", sku="B",
+                  typed_quantity=0, notes=None, user_id="b")
+    doc = mongo_db["stock_counts"].find_one({"count_id": count_id})
+    assert {(i["product_id"], i["typed_quantity"]) for i in doc["items"]} == {("P-A", 2), ("P-B", 0)}
+
+
+def test_a_piece_received_during_the_count_is_added_not_a_moved_style(
+    admin_client, mongo_db
+):
+    """M4: a receipt mid-count made the whole style 'moved'. It is now
+    reported as added during the count; the rest of the style is judged."""
+    pid = _seed_product(mongo_db, cost=1000.0)
+    barcodes = _seed_units(mongo_db, pid, 3)
+    count_id = _start(admin_client)
+    new_piece = _seed_units(mongo_db, pid, 1)[0]  # received mid-count
+    _scan(admin_client, count_id, barcodes[0])
+    _scan(admin_client, count_id, barcodes[1])
+
+    line = _complete(admin_client, count_id)["variances"][0]
+    assert line["moved_during_count"] is False
+    assert [a["barcode"] for a in line["added_during_count"]] == [new_piece]
+    assert [m["barcode"] for m in line["missing_units"]] == [barcodes[2]], (
+        "the new piece is not missing, the unscanned opening piece is"
+    )
+
+
+def test_a_reserved_piece_is_shown_not_checked_and_never_written_off(
+    admin_client, mongo_db
+):
+    """m1: a piece RESERVED for an order may be in the order drawer."""
+    pid = _seed_product(mongo_db)
+    barcodes = _seed_units(mongo_db, pid, 3)
+    mongo_db["stock_units"].update_one({"barcode": barcodes[2]}, {"$set": {"status": "RESERVED"}})
+    count_id = _start(admin_client)
+    _scan(admin_client, count_id, barcodes[0])
+
+    body = _complete(admin_client, count_id)
+    line = body["variances"][0]
+    assert [m["barcode"] for m in line["missing_units"]] == [barcodes[1]]
+    assert [m["barcode"] for m in line["reserved_not_checked"]] == [barcodes[2]]
+    assert body["shrinkage_units"] == 1
+
+    admin_client.post(f"/inventory/stock-count/{count_id}/reconcile", json={})
+    assert mongo_db["stock_units"].find_one({"barcode": barcodes[2]})["status"] == "RESERVED"
+
+
+class _PieceTransferredMidWriteOff:
+    """stock_units, except a missing piece moves to another shop (still
+    AVAILABLE there) right after the write-off read which pieces are here."""
+
+    def __init__(self, coll, barcode):
+        self._c = coll
+        self._bc = barcode
+        self.fired = False
+
+    def aggregate(self, *args, **kwargs):
+        docs = list(self._c.aggregate(*args, **kwargs))
+        if not self.fired:
+            self.fired = True
+            self._c.update_one({"barcode": self._bc}, {"$set": {"store_id": "ST-OTHER"}})
+        return docs
+
+    def __getattr__(self, name):
+        return getattr(self._c, name)
+
+
+def test_a_piece_transferred_mid_write_off_is_not_voided_at_the_other_shop(
+    admin_client, mongo_db, monkeypatch
+):
+    """m4: the write must also condition on the shop."""
+    pid, count_id, barcodes = _counted_short(admin_client, mongo_db, on_hand=3, counted=2)
+    racing = _PieceTransferredMidWriteOff(mongo_db["stock_units"], barcodes[2])
+    monkeypatch.setattr(inv_mod, "_get_db", lambda: _proxy_with(mongo_db, "stock_units", racing))
+    body = admin_client.post(f"/inventory/stock-count/{count_id}/reconcile", json={}).json()
+    assert racing.fired
+    unit = mongo_db["stock_units"].find_one({"barcode": barcodes[2]})
+    assert unit["status"] == "AVAILABLE" and unit["store_id"] == "ST-OTHER"
+    assert body["units_voided"] == 0 and body["units_not_voided"] == 1
+
+
+def test_styles_with_nothing_found_are_listed_and_written_off_only_when_confirmed(
+    admin_client, mongo_db
+):
+    """M6 (owner ruling): in a whole-shop / whole-category count a style
+    nobody scanned or typed is 'None found'; the admin writes off its exact
+    pieces only with a second, explicit confirmation."""
+    count_id, pids, barcodes, _cat = _start_in_own_category(
+        admin_client, mongo_db, products=2, units=2
+    )
+    for bc in barcodes[pids[0]]:
+        _scan(admin_client, count_id, bc)
+
+    body = _complete(admin_client, count_id)
+    nf = {n["product_id"]: n for n in body["none_found"]}
+    assert set(nf) == {pids[1]}
+    assert sorted(m["barcode"] for m in nf[pids[1]]["missing_units"]) == sorted(barcodes[pids[1]])
+
+    out = admin_client.post(f"/inventory/stock-count/{count_id}/reconcile", json={}).json()
+    assert out["units_voided"] == 0, "not without the explicit confirmation"
+    assert mongo_db["stock_units"].count_documents({"product_id": pids[1], "status": "AVAILABLE"}) == 2
+
+    count_id, pids, barcodes, _cat = _start_in_own_category(
+        admin_client, mongo_db, products=2, units=2
+    )
+    for bc in barcodes[pids[0]]:
+        _scan(admin_client, count_id, bc)
+    _complete(admin_client, count_id)
+    out = admin_client.post(
+        f"/inventory/stock-count/{count_id}/reconcile", json={"include_none_found": True}
+    ).json()
+    assert out["units_voided"] == 2
+    assert mongo_db["stock_units"].count_documents({"product_id": pids[1], "status": "VOID"}) == 2
+    row = mongo_db["stock_shrinkage"].find_one({"count_id": count_id})
+    assert row["none_found"] is True

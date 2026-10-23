@@ -327,8 +327,12 @@ export const inventoryApi = {
 
   // Write off what the count found missing. ADMIN / SUPERADMIN only (owner
   // ruling 2026-08-25 #8) -- the server is the gate, the UI just hides it.
-  reconcileStockCount: async (countId: string, notes?: string) => {
-    const response = await api.post(`/inventory/stock-count/${countId}/reconcile`, notes ? { notes } : {});
+  // `includeNoneFound`: ALSO write off the styles the count found nothing of
+  // (owner ruling M6) -- the admin's second, explicit confirmation.
+  reconcileStockCount: async (countId: string, notes?: string, includeNoneFound = false) => {
+    const body: Record<string, unknown> = notes ? { notes } : {};
+    if (includeNoneFound) body.include_none_found = true;
+    const response = await api.post(`/inventory/stock-count/${countId}/reconcile`, body);
     return response.data;
   },
 

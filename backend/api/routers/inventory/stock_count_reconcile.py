@@ -90,8 +90,28 @@ def _ledger_void(db, unit, count_id, actor_id) -> None:
         logger.warning("[INVENTORY] write-off ledger row failed: %s", e)
 
 
+def _refuse_partial_scope(count_doc: dict) -> None:
+    """Only a whole-shop or whole-category count may write off. A zone is a
+    label, not a scope -- the expected set is still the whole shop or
+    category -- so a zone count would name stockroom pieces missing."""
+    if count_doc.get("write_off_allowed") is False or (count_doc.get("zone") or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This was a zone count. Recount the whole shop or category "
+                "to write anything off."
+            ),
+        )
+
+
 class ReconcileStockCountRequest(BaseModel):
     notes: Optional[str] = None
+    # /reconcile/finish only: close a stuck write-off that took NOTHING while
+    # pieces are still named missing. Needs `notes` as the reason.
+    close_without_write_off: bool = False
+    # /reconcile only: ALSO write off the styles the count found NOTHING of
+    # (owner ruling M6). The admin's second, explicit confirmation.
+    include_none_found: bool = False
     # RETIRED. Overrides accepted a QUANTITY per style; a write-off now takes
     # the exact pieces the count did not find, so a quantity cannot say which
     # pieces to spare. Refused when sent (never silently ignored: ignoring one
@@ -167,6 +187,37 @@ async def reconcile_stock_count(
                     "it no longer accepts quantities. Count the style again instead."
                 ),
             )
+        _refuse_partial_scope(count_doc)
+        if request and request.include_none_found:
+            # Styles with nothing found, as lines the loop below treats like
+            # any other: same unmoved / AVAILABLE / this-shop rules.
+            variances = list(variances) + [
+                {
+                    "product_id": n.get("product_id"),
+                    "product_name": n.get("product_name", ""),
+                    "sku": n.get("sku", ""),
+                    "system_quantity": len(n.get("missing_units") or []),
+                    "physical_quantity": 0,
+                    "moved_during_count": n.get("moved_during_count"),
+                    "missing_units": n.get("missing_units") or [],
+                    "none_found": True,
+                }
+                for n in (count_doc.get("none_found") or [])
+            ]
+
+        store_id = count_doc.get("store_id", "")
+        # The pieces on hand at this shop NOW, in their stored id type -- the
+        # write below conditions on them. A missing piece no longer in this
+        # set has moved since the count and is left alone. Read BEFORE the
+        # claim: a failed read must leave the count "completed" (retryable),
+        # not parked in "reconciling" with nothing taken.
+        on_hand = _on_hand_units(
+            db, store_id, [v.get("product_id", "") for v in variances if v.get("missing_units")]
+        )
+        if on_hand is None:
+            raise HTTPException(
+                status_code=503, detail="Could not read the stock right now. Try again."
+            )
 
         # CLAIM the count before touching any stock. The status read above is a
         # check-then-act: two clicks of the button (or two admins) both saw
@@ -183,18 +234,7 @@ async def reconcile_stock_count(
             )
 
         now = datetime.utcnow()
-        store_id = count_doc.get("store_id", "")
         costs = _product_costs(db, [v.get("product_id", "") for v in variances])
-        # The pieces on hand at this shop NOW, in their stored id type -- the
-        # write below conditions on them. A missing piece no longer in this
-        # set has moved since the count and is left alone.
-        on_hand = _on_hand_units(
-            db, store_id, [v.get("product_id", "") for v in variances if v.get("missing_units")]
-        )
-        if on_hand is None:
-            raise HTTPException(
-                status_code=503, detail="Could not read the stock right now"
-            )
         shrinkage_records = []
         overage_records = []
         reconciled_items = []
@@ -304,6 +344,7 @@ async def reconcile_stock_count(
                         "shrinkage_value": shrinkage_value,
                         "system_quantity": system_qty,
                         "counted_quantity": counted_qty,
+                        "none_found": bool(v.get("none_found")),
                         "write_off_requested_by": (
                             count_doc.get("write_off_request") or {}
                         ).get("requested_by"),
@@ -451,6 +492,34 @@ async def finish_stuck_stock_count_reconcile(
             if pid:
                 voided_by_product[pid] = voided_by_product.get(pid, 0) + 1
 
+        # NOTHING WAS TAKEN, yet pieces are still named missing: closing this
+        # as "reconciled" would read as a finished write-off of a loss nobody
+        # wrote off. Put it back to "completed" (nothing to rebuild; the
+        # write-off can simply be run again) -- unless the admin explicitly
+        # closes it without a write-off, with a reason.
+        named = sum(len(v.get("missing_units") or []) for v in count_doc.get("variances") or [])
+        if not voided_by_product and named:
+            reason = ((request.notes if request else None) or "").strip()
+            if not (request and request.close_without_write_off):
+                counts_coll.update_one(
+                    {"count_id": count_id, "status": "reconciling"},
+                    {"$set": {"status": "completed"}},
+                )
+                return {
+                    "message": (
+                        "Nothing had been written off yet. The count is back to "
+                        "waiting for write-off; run it again."
+                    ),
+                    "count_id": count_id,
+                    "status": "completed",
+                    "units_voided": 0,
+                }
+            if not reason:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Give a reason to close this count without a write-off.",
+                )
+
         # ponytail: two admins clicking Finish in the same instant could both
         # pass this read and write one audit row each. No stock is destroyed
         # either way and the loser's status flip 409s; add a claim flip if
@@ -536,6 +605,9 @@ async def finish_stuck_stock_count_reconcile(
                     "units_not_voided": 0,
                     "shrinkage_value_written_off": value_total,
                     "recovered_from_stuck_write_off": True,
+                    "closed_without_write_off": bool(
+                        not voided_by_product and request and request.close_without_write_off
+                    ),
                 }
             },
         )
@@ -577,7 +649,7 @@ async def request_stock_count_write_off(
     Owner ruling 2026-08-25 (#8): only ADMIN / SUPERADMIN write stock off. A
     store manager's door is this request: it marks the count as waiting for
     the admin, and destroys nothing. The admin then writes off (``/reconcile``)
-    the exact pieces still unmoved, or sends it back for a recount.
+    the exact pieces still unmoved.
     """
     db = _get_db()
     if db is None:
@@ -590,7 +662,11 @@ async def request_stock_count_write_off(
         raise HTTPException(
             status_code=400, detail="Only a finished count can be sent for write-off"
         )
+    _refuse_partial_scope(count_doc)
     pieces = sum(len(v.get("missing_units") or []) for v in count_doc.get("variances") or [])
+    # styles with nothing found go to the admin too (owner ruling M6); the
+    # admin still confirms them separately.
+    pieces += sum(len(n.get("missing_units") or []) for n in count_doc.get("none_found") or [])
     if not pieces:
         raise HTTPException(
             status_code=400, detail="This count found no named missing pieces to write off"

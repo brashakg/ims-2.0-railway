@@ -42,7 +42,19 @@ interface ResultLine {
   missing_units?: MissingPiece[];
   missing_unidentified?: number;
   extra_units?: ExtraPiece[];
+  reserved_not_checked?: MissingPiece[];
+  added_during_count?: Array<MissingPiece & { scanned?: boolean }>;
   typed_quantity?: number | null;
+}
+
+/** A style a whole-scope count found NOTHING of (owner ruling M6). */
+interface NoneFoundStyle {
+  product_id: string;
+  product_name: string;
+  sku: string;
+  moved_during_count?: boolean;
+  missing_units?: MissingPiece[];
+  reserved_not_checked?: MissingPiece[];
 }
 
 // Rupees, Indian grouping. A figure the server did not send (cost is masked
@@ -111,18 +123,28 @@ export function StockCountResult() {
   const extras = lines.flatMap((l) => (l.extra_units || []).map((x) => ({ ...x, line: l })));
   const moved = lines.filter((l) => l.moved_during_count);
   const notCounted: Array<{ product_id: string; product_name: string; sku: string }> = doc.not_counted || [];
+  const reserved = lines.flatMap((l) => (l.reserved_not_checked || []).map((m) => ({ ...m, line: l })));
+  const added = lines.flatMap((l) => (l.added_during_count || []).map((m) => ({ ...m, line: l })));
+  const noneFound: NoneFoundStyle[] = (doc.none_found || []).filter((n: NoneFoundStyle) => (n.missing_units || []).length > 0);
+  const noneFoundPieces = noneFound.reduce((s, n) => s + (n.missing_units || []).length, 0);
+  // A zone is a label, not a scope: a zone count never writes off (B1).
+  const zoneCount = doc.write_off_allowed === false;
   const missingValue = showCost ? missing.reduce((s, m) => s + (m.unit_cost || 0), 0) : undefined;
   const noCost = missing.some((m) => !m.unit_cost);
   const request = doc.write_off_request;
 
-  const writeOff = async () => {
-    if (!window.confirm(
+  const writeOff = async (includeNoneFound = false) => {
+    if (missing.length > 0 && !window.confirm(
       `Write off ${missing.length} piece${missing.length === 1 ? '' : 's'}? ` +
         'Only pieces that have not moved since this count are written off; any that were sold or moved drop out.'
     )) return;
+    // The second, explicit confirmation for styles nobody found any of.
+    if (includeNoneFound && !window.confirm(
+      `${noneFound.length} style${noneFound.length === 1 ? '' : 's'} had nothing found - write off all their pieces (${noneFoundPieces})?`
+    )) return;
     setBusy(true);
     try {
-      const r = await inventoryApi.reconcileStockCount(countId);
+      const r = await inventoryApi.reconcileStockCount(countId, undefined, includeNoneFound);
       const left = r.units_not_voided || 0;
       toast.success(
         `Wrote off ${r.units_voided || 0} piece(s), ${money(r.shrinkage_value_written_off)}.` +
@@ -265,6 +287,53 @@ export function StockCountResult() {
         ))}
       </div>
 
+      {zoneCount && (
+        <div className="card p-4">
+          <p className="font-semibold" style={{ color: 'var(--warn)' }}>
+            Zone count: recount the whole shop or category to write off.
+          </p>
+          <p className="text-sm" style={{ color: 'var(--ink-4)' }}>
+            A zone is a label on the count; the system expects the whole shop's pieces, so pieces kept
+            elsewhere would show as missing here. Nothing from this count can be written off.
+          </p>
+        </div>
+      )}
+
+      {reserved.length > 0 && (
+        <div className="card p-4 space-y-1">
+          <p className="font-semibold">Reserved, not checked ({reserved.length})</p>
+          <p className="text-xs" style={{ color: 'var(--ink-4)' }}>Held for a customer order - may be in the order drawer. Never written off from a count.</p>
+          {reserved.map((m) => (
+            <p key={m.unit_id} className="text-sm"><span className="mono">{m.barcode}</span> {m.line.product_name}</p>
+          ))}
+        </div>
+      )}
+
+      {added.length > 0 && (
+        <div className="card p-4 space-y-1">
+          <p className="font-semibold">Added during the count ({added.length})</p>
+          <p className="text-xs" style={{ color: 'var(--ink-4)' }}>Received while the count was open - not counted for or against this count.</p>
+          {added.map((m) => (
+            <p key={m.unit_id} className="text-sm"><span className="mono">{m.barcode}</span> {m.line.product_name}{m.scanned ? ' · scanned' : ''}</p>
+          ))}
+        </div>
+      )}
+
+      {noneFound.length > 0 && (
+        <div className="card p-4 space-y-2">
+          <p className="font-semibold">None found ({noneFound.length} style{noneFound.length === 1 ? '' : 's'}, {noneFoundPieces} pieces)</p>
+          <p className="text-xs" style={{ color: 'var(--ink-4)' }}>Nobody scanned or typed any piece of these styles.</p>
+          <ul className="text-sm space-y-1">
+            {noneFound.map((n) => (
+              <li key={n.product_id}>
+                {n.product_name} <span style={{ color: 'var(--ink-4)' }}>{n.sku}</span> ·{' '}
+                {(n.missing_units || []).map((m) => m.barcode).join(', ')}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {extras.length > 0 && (
         <div className="card p-4 space-y-2">
           <p className="font-semibold">Extra: scanned here, not on our list ({extras.length})</p>
@@ -286,17 +355,24 @@ export function StockCountResult() {
 
       {/* Each person's own door. */}
       <div className="card p-4 space-y-2">
-        {doc.status === 'completed' && missing.length > 0 && (
+        {doc.status === 'completed' && !zoneCount && missing.length + noneFoundPieces > 0 && (
           canWriteOff ? (
             <>
               {request && (
                 <p className="text-sm">Sent for write-off by {request.requested_by_name || request.requested_by}
                   {request.requested_at ? `, ${formatDateTimeIST(request.requested_at)}` : ''}.</p>
               )}
-              <button className="btn accent" disabled={busy} onClick={writeOff}>
-                {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
-                Write off these {missing.length} piece{missing.length === 1 ? '' : 's'}
-              </button>
+              {missing.length > 0 && (
+                <button className="btn accent" disabled={busy} onClick={() => writeOff(false)}>
+                  {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
+                  Write off these {missing.length} piece{missing.length === 1 ? '' : 's'}
+                </button>
+              )}
+              {noneFoundPieces > 0 && (
+                <button className="btn" disabled={busy} onClick={() => writeOff(true)}>
+                  Write off these {missing.length} and the {noneFoundPieces} pieces of styles with nothing found
+                </button>
+              )}
               <p className="text-xs" style={{ color: 'var(--ink-4)' }}>
                 Only pieces that have not moved since this count are written off. If one was sold or moved since, it drops out and you are told.
               </p>
@@ -309,7 +385,7 @@ export function StockCountResult() {
             <>
               <button className="btn accent" disabled={busy} onClick={sendForWriteOff}>
                 {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-                Send {missing.length} piece{missing.length === 1 ? '' : 's'} to admin for write-off
+                Send {missing.length + noneFoundPieces} piece{missing.length + noneFoundPieces === 1 ? '' : 's'} to admin for write-off
               </button>
               <p className="text-xs" style={{ color: 'var(--ink-4)' }}>
                 Managers can't write off. The admin sees these barcodes; only pieces that have not moved since this count can be written off.
