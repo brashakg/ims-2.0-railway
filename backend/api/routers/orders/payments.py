@@ -20,6 +20,7 @@ from ...dependencies import (
 from ...services import cash_denominations as cash_denom
 from ...services.policy_registry import resolve_emi_annual_rate as _emi_annual_rate
 from ._shared import (
+    PAYMENT_ROLES,
     logger,
     router,
 )
@@ -30,6 +31,58 @@ from .pricing import (
 from .numbering import build_emi_schedule
 from .workshop import _ensure_workshop_job_for_order
 from .release import _claim_order_status
+
+
+def _claim_loyalty_redemption(order: dict, amount: float, payment_id: str) -> str:
+    """A LOYALTY tender must be backed by REAL points. POST /loyalty/redeem does
+    the atomic points debit (refusing a customer who lacks the points) and writes
+    a REDEEM ledger row carrying this order_id. This claims one unused such row
+    for THIS order and THIS order's customer, worth exactly this amount, by
+    compare-and-set -- so a tender with no burn behind it is refused, and one
+    burn backs at most one tender. Returns the claimed txn_id."""
+    from ...dependencies import get_loyalty_transaction_repository
+
+    order_id = order.get("order_id")
+    customer_id = str(order.get("customer_id") or "")
+    if not customer_id or customer_id.startswith("walkin-"):
+        raise HTTPException(
+            status_code=400,
+            detail="Loyalty: this order has no customer account, so it cannot be paid with points.",
+        )
+    txns = get_loyalty_transaction_repository()
+    if txns is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Loyalty points cannot be checked just now - nothing was recorded. Try again.",
+        )
+    unused = txns.collection.find(
+        {"order_id": order_id, "customer_id": customer_id, "type": "REDEEM", "tender_payment_id": None}
+    )
+    for row in unused:
+        if abs(float(row.get("rupee_value") or 0) - float(amount)) > 0.01:
+            continue
+        if txns.update_if(row["txn_id"], {"tender_payment_id": None}, {"tender_payment_id": payment_id}):
+            return row["txn_id"]
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"Not enough loyalty points: no points worth Rs {float(amount):.2f} were "
+            "redeemed for this bill, so it cannot be paid by loyalty. Redeem the "
+            "customer's points first. Nothing was recorded."
+        ),
+    )
+
+
+def _release_loyalty_redemption(txn_id: str, payment_id: str) -> None:
+    """Undo a claim whose payment row never landed, so the burn stays spendable."""
+    from ...dependencies import get_loyalty_transaction_repository
+
+    try:
+        get_loyalty_transaction_repository().update_if(
+            txn_id, {"tender_payment_id": payment_id}, {"tender_payment_id": None}
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[ORDERS] loyalty claim %s NOT released: %s", txn_id, exc)
 
 
 @router.post("/{order_id}/payments")
@@ -48,6 +101,13 @@ async def add_payment(
     row and looked up before any write. Fail-soft: if the lookup fails, the
     normal (non-idempotent) path runs.
     """
+    # RBAC: taking money on a bill is a till action. This door was open to ANY
+    # logged-in role, so a workshop or catalogue login could mark a bill paid.
+    if not any(r in current_user.get("roles", []) for r in PAYMENT_ROLES):
+        raise HTTPException(
+            status_code=403,
+            detail="Your role is not permitted to take payments on a bill.",
+        )
     repo = get_order_repository()
 
     if repo is not None:
@@ -170,6 +230,12 @@ async def add_payment(
                 user_id=current_user.get("user_id"),
             )
 
+        # Loyalty: the points must have been really redeemed for THIS bill.
+        payment_id = str(uuid.uuid4())
+        loyalty_txn_id = None
+        if payment.method == PaymentMethod.LOYALTY:
+            loyalty_txn_id = _claim_loyalty_redemption(order, payment.amount, payment_id)
+
         # EMI validation and interest calculation
         emi_details = None
         if payment.method == PaymentMethod.EMI:
@@ -204,7 +270,7 @@ async def add_payment(
                 emi_details["financed_amount"] = round(float(payment.emi_principal), 2)
 
         payment_data = {
-            "payment_id": str(uuid.uuid4()),
+            "payment_id": payment_id,
             "method": payment.method.value,
             "amount": payment.amount,
             "reference": payment.reference,
@@ -216,6 +282,8 @@ async def add_payment(
         }
         if emi_details:
             payment_data["emi_details"] = emi_details
+        if loyalty_txn_id:
+            payment_data["loyalty_txn_id"] = loyalty_txn_id
 
         # Denominated cash accountability. ADDITIVE and CASH-only: these keys
         # ride alongside `amount`, which stays the single source of truth for
@@ -243,12 +311,19 @@ async def add_payment(
                 )
             )
 
-        if payment.method == PaymentMethod.CREDIT:
-            from ...services.credit_limit import record_credit
+        try:
+            if payment.method == PaymentMethod.CREDIT:
+                from ...services.credit_limit import record_credit
 
-            recorded = record_credit(repo, order, payment_data, get_customer_repository())
-        else:
-            recorded = repo.add_payment(order_id, payment_data)
+                recorded = record_credit(repo, order, payment_data, get_customer_repository())
+            else:
+                recorded = repo.add_payment(order_id, payment_data)
+        except BaseException:
+            if loyalty_txn_id:
+                _release_loyalty_redemption(loyalty_txn_id, payment_id)
+            raise
+        if not recorded and loyalty_txn_id:
+            _release_loyalty_redemption(loyalty_txn_id, payment_id)
         if recorded:
             # Auto-confirm DRAFT orders when first payment is received
             # This fixes the "stuck in DRAFT+PARTIAL" lifecycle issue
@@ -257,6 +332,8 @@ async def add_payment(
                 saved = next((p for p in refreshed.get("payments") or []
                               if p.get("idempotency_key") == idem_key), None)
                 if saved and saved.get("payment_id") != payment_data["payment_id"]:
+                    if loyalty_txn_id:  # the other request's row stands, not ours
+                        _release_loyalty_redemption(loyalty_txn_id, payment_id)
                     return {
                         "payment_id": saved.get("payment_id"), "message": "Payment recorded",
                         "amount": saved.get("amount"), "order_status": refreshed.get("status", "DRAFT"),
