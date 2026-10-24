@@ -109,6 +109,9 @@ describe('address round-trip and clear', () => {
 });
 
 describe('brandSavePayload', () => {
+  it('never submits a blocked brand with website sync enabled', () => {
+    expect(brandSavePayload({ neverSellOnline: true, syncToShopifyDefault: true }, null).sync_to_shopify_default).toBe(false);
+  });
   const blocked = brand({ brandName: 'Cartier', neverSellOnline: true });
   it('omits never_sell_online when the form did not change it', () => {
     expect(brandSavePayload({ ...blocked }, blocked)).not.toHaveProperty('never_sell_online');

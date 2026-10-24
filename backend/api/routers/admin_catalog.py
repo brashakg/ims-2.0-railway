@@ -424,6 +424,16 @@ def _with_is_active(data: Dict) -> Dict:
     return data
 
 
+def _normalize_brand_online_default(data: Dict, existing: Optional[Dict] = None) -> Dict:
+    """A blocked brand cannot opt products into website sync, including PATCH-like saves."""
+    blocked = data.get("never_sell_online")
+    if blocked is None:
+        blocked = (existing or {}).get("never_sell_online")
+    if blocked is True:
+        data["sync_to_shopify_default"] = False
+    return data
+
+
 def _refuse_blocked_name(user: Any, name: Optional[str], own_id: Optional[str] = None) -> None:
     """A brand may not be created or renamed to a Never-sell-online brand's
     name (case, spaces and hyphens ignored) by anyone but SUPERADMIN: a
@@ -562,7 +572,9 @@ async def create_brand(payload: BrandCreate, current_user: dict = Depends(get_cu
         raise HTTPException(
             status_code=400, detail="tier must be MASS, PREMIUM, or LUXURY"
         )
-    doc = _create_doc("brand_masters", _with_is_active(payload.model_dump()), "brand_id")
+    doc = _create_doc("brand_masters", _with_is_active(
+        _normalize_brand_online_default(payload.model_dump())
+    ), "brand_id")
     return await _after_never_sell_online_change(current_user, doc) if changed else doc
 
 
@@ -584,7 +596,9 @@ async def update_brand(
         _refuse_blocked_name(current_user, payload.name, own_id=brand_id)
     doc = _update_doc(
         "brand_masters", "brand_id", brand_id,
-        _with_is_active(payload.model_dump(exclude_unset=True)),
+        _with_is_active(_normalize_brand_online_default(
+            payload.model_dump(exclude_unset=True), existing
+        )),
     )
     # A SUPERADMIN re-saving a blocked brand re-runs the take-down for
     # anything still live (a failed / timed-out take-down; idempotent).

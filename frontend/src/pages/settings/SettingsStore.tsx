@@ -713,7 +713,7 @@ function BrandModal({
   onSave: (data: Partial<Brand>) => void;
 }) {
   const [formData, setFormData] = useState<Partial<Brand>>(
-    brand || {
+    brand ? { ...brand, syncToShopifyDefault: !brand.neverSellOnline && brand.syncToShopifyDefault } : {
       brandName: '',
       brandCode: '',
       categories: [],
@@ -801,18 +801,20 @@ function BrandModal({
           </div>
 
           <div>
-            <label className="flex items-center gap-2 cursor-pointer">
+            <label className={clsx('flex items-center gap-2', formData.neverSellOnline ? 'cursor-not-allowed opacity-50' : 'cursor-pointer')}>
               <input
                 type="checkbox"
                 checked={formData.syncToShopifyDefault === true}
+                disabled={formData.neverSellOnline === true}
                 onChange={e => setFormData(prev => ({ ...prev, syncToShopifyDefault: e.target.checked }))}
                 className="rounded border-gray-300 text-bv-red-600 focus:ring-bv-red-500"
               />
               <span className="text-sm font-medium text-gray-700">Sync to Shopify by default</span>
             </label>
             <p className="text-xs text-gray-500 mt-1 ml-6">
-              Products of this brand may go on the website (a person still publishes them from Online Store).
-              Ignored while "Never sell online" is on.
+              {formData.neverSellOnline
+                ? 'Website sync is off because Never sell online is on.'
+                : 'Products of this brand may go on the website (a person still publishes them from Online Store).'}
             </p>
           </div>
 
@@ -822,7 +824,10 @@ function BrandModal({
                 type="checkbox"
                 checked={formData.neverSellOnline === true}
                 disabled={!isSuperadmin}
-                onChange={e => setFormData(prev => ({ ...prev, neverSellOnline: e.target.checked }))}
+                onChange={e => setFormData(prev => ({
+                  ...prev, neverSellOnline: e.target.checked,
+                  ...(e.target.checked ? { syncToShopifyDefault: false } : {}),
+                }))}
                 className="rounded border-gray-300 text-bv-red-600 focus:ring-bv-red-500"
               />
               <span className="text-sm font-medium text-gray-900">Never sell online</span>

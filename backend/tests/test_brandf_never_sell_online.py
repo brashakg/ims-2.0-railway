@@ -138,6 +138,35 @@ def test_an_admin_can_still_edit_the_rest_of_a_blocked_brand(brands):
     assert out["tier"] == "PREMIUM" and out["never_sell_online"] is True
 
 
+@pytest.mark.parametrize("changes", [
+    {"sync_to_shopify_default": True},
+    {"tier": "PREMIUM"},
+    {"never_sell_online": True, "sync_to_shopify_default": True},
+])
+def test_blocked_brand_saves_normalize_default_even_when_block_is_omitted(brands, changes):
+    db, _ = brands
+    _set_block(db, True)
+    out = _run(ac.update_brand("brandf_b1", ac.BrandUpdate(**changes), current_user=_ADMIN))
+    assert out["never_sell_online"] is True
+    assert out["sync_to_shopify_default"] is False
+    assert db["brand_masters"].find_one({"brand_id": "brandf_b1"})["sync_to_shopify_default"] is False
+
+
+def test_create_and_block_existing_brand_clear_sync_default(brands):
+    db, _ = brands
+    created = _run(ac.create_brand(ac.BrandCreate(
+        name="BrandfNew", code="BFNEW", tier="MASS", never_sell_online=True,
+        sync_to_shopify_default=True,
+    ), current_user=_SUPER))
+    assert created["sync_to_shopify_default"] is False
+    blocked = _run(ac.update_brand("brandf_b1", ac.BrandUpdate(never_sell_online=True), current_user=_SUPER))
+    assert blocked["sync_to_shopify_default"] is False
+    unblocked = _run(ac.update_brand("brandf_b1", ac.BrandUpdate(never_sell_online=False), current_user=_SUPER))
+    assert unblocked["sync_to_shopify_default"] is False
+    enabled = _run(ac.update_brand("brandf_b1", ac.BrandUpdate(sync_to_shopify_default=True), current_user=_ADMIN))
+    assert enabled["sync_to_shopify_default"] is True
+
+
 def _block_rows(audit):
     return [r for r in audit.rows if r["action"].startswith("BRAND_NEVER_SELL_ONLINE")]
 
