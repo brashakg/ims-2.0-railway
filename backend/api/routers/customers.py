@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from typing import Any, Dict, List, Optional
 from datetime import date, datetime
 import uuid
+import logging
 import re
 from .auth import get_current_user, require_roles
 from ..utils.ist import ist_day_start_utc, now_ist
@@ -205,6 +206,7 @@ def _scoped_customer_or_404(customer_id, current_user, *, write: bool = False):
     return doc
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _audit_customer(
@@ -1835,28 +1837,43 @@ def redeem_store_credit_atomic(
     return {"entry": entry, "balance": entry["balance_after"]}
 
 
-def apply_store_credit_delta(repo, customer_id: str, entry: dict) -> None:
-    """Move customer.store_credit by a ledger entry's delta with ONE atomic
-    $inc -- never a read-then-$set, which overwrote a concurrent door's $inc
-    (500 + a manual 200 racing an advance refund's 1000 read 700, not 1700).
-    A customer with no store_credit field yet (legacy: its balance lives in
-    the ledger) gets the entry's balance_after, guarded on the field still
-    being absent. A repository with no raw collection (test doubles) keeps
-    the legacy $set."""
+def apply_store_credit_delta(
+    repo, customer_id: str, delta: float, *, guard_ref: Optional[str] = None,
+    balance_after: Optional[float] = None,
+) -> bool:
+    """THE way customer.store_credit moves: ONE atomic $inc of the delta --
+    never a read-then-$set, which overwrote a concurrent door's $inc (500 + a
+    manual 200 racing an advance refund's 1000 read 700, not 1700).
+
+    A missing or null store_credit starts from 0 (Mongo refuses $inc on null)
+    and is logged; legacy customers whose balance lives only in the ledger get
+    the field from scripts/backfill_store_credit_field.py -- never seeded here,
+    which double counted. ``guard_ref`` (the advance refund's credit row id)
+    makes the move apply once: the $inc lands only while the ref is not yet in
+    the customer's advance_credit_refs, and pushes it in the same write.
+
+    True when the balance moved (or, with guard_ref, had already moved). A
+    repository with no raw collection (test doubles only) gets balance_after."""
     coll = getattr(repo, "collection", None)
     if coll is None:
-        repo.update(customer_id, {"store_credit": entry["balance_after"]})
-        return
-    delta = float(entry.get("delta") or 0)
-    for _ in range(2):
-        res = coll.update_one({"customer_id": customer_id, "store_credit": {"$exists": True}},
-                              {"$inc": {"store_credit": delta}})
-        if getattr(res, "matched_count", getattr(res, "modified_count", 0)):
-            return
-        res = coll.update_one({"customer_id": customer_id, "store_credit": {"$exists": False}},
-                              {"$set": {"store_credit": entry["balance_after"]}})
-        if getattr(res, "matched_count", getattr(res, "modified_count", 0)):
-            return
+        repo.update(customer_id, {"store_credit": balance_after})
+        return True
+    seeded = coll.update_one({"customer_id": customer_id, "store_credit": None},
+                             {"$set": {"store_credit": 0.0}})
+    if getattr(seeded, "matched_count", getattr(seeded, "modified_count", 0)):
+        logger.warning("[CUSTOMERS] %s had no store_credit field; starting it at 0 "
+                       "(run scripts/backfill_store_credit_field.py for legacy balances)", customer_id)
+    flt: Dict[str, Any] = {"customer_id": customer_id}
+    upd: Dict[str, Any] = {"$inc": {"store_credit": float(delta)}}
+    if guard_ref:
+        flt["advance_credit_refs"] = {"$ne": guard_ref}
+        upd["$push"] = {"advance_credit_refs": guard_ref}
+    res = coll.update_one(flt, upd)
+    if getattr(res, "matched_count", getattr(res, "modified_count", 0)):
+        return True
+    if guard_ref:
+        return coll.find_one({"customer_id": customer_id, "advance_credit_refs": guard_ref}) is not None
+    return False
 
 
 def _post_credit_entry(
@@ -1911,7 +1928,7 @@ def _post_credit_entry(
         coll.insert_one(dict(entry))
     # Keep the legacy number in sync so the rest of the app stays correct.
     try:
-        apply_store_credit_delta(repo, customer_id, entry)
+        apply_store_credit_delta(repo, customer_id, entry["delta"], balance_after=entry["balance_after"])
     except Exception:  # noqa: BLE001
         pass
     entry.pop("_id", None)
