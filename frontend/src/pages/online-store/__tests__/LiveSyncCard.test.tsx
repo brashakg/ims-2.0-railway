@@ -115,7 +115,6 @@ describe('Live sync card', () => {
     vi.mocked(syncHealthApi.getDrift).mockResolvedValue({ unavailable: true } as any);
   });
 
-
   it('shows the last run, every failure with its code, and the next IST slot', async () => {
     vi.mocked(pushApi.getStatus).mockResolvedValue(status(SCHEDULE_ON) as any);
     render(<OnlineShopifySyncPage />);
