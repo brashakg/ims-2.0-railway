@@ -675,12 +675,14 @@ async def sync_live_products(
     )
     # Live, but its photos are not IMS's photos in IMS's order: same treatment.
     photos_not_synced = sum(
-        1 for r in results if r.get("code") == shopify_push.PHOTOS_NOT_SYNCED
+        1 for r in results if shopify_push.photo_sync_state(r) == "pending"
     )
+    photos_failed = sum(1 for r in results if shopify_push.photo_sync_state(r) == "failed")
     failed = sum(
         1
         for r in results
-        if not r.get("ok") and r.get("reason") not in ("no_photo", "publish_withheld")
+        if (not r.get("ok") and r.get("reason") not in ("no_photo", "publish_withheld"))
+        or shopify_push.photo_sync_state(r) == "failed"
     )
     by_id = {(d.get("id") or d.get("product_id")): d for d in dirty}
     failures = []
@@ -698,6 +700,27 @@ async def sync_live_products(
                 "error": r.get("error"),
             }
         )
+
+    # Collect independently: a partial variant warning or another failure
+    # must not hide this first-pass photo state (or vice versa).
+    pending_photo_ids = {
+        result.get("target_id") for result in results
+        if result.get("ok") and result.get("code") == shopify_push.PHOTOS_NOT_SYNCED
+    }
+    failures = [entry for entry in failures
+                if entry.get("code") != shopify_push.PHOTOS_NOT_SYNCED
+                or entry.get("product_id") not in pending_photo_ids]
+    photo_warnings = []
+    for result in results:
+        if shopify_push.photo_sync_state(result) != "pending":
+            continue
+        doc = by_id.get(result.get("target_id"), {})
+        photo_warnings.append({
+            "product_id": result.get("target_id"), "sku": doc.get("sku"),
+            "name": doc.get("name") or doc.get("title"),
+            "code": shopify_push.PHOTOS_NOT_SYNCED,
+            "error": (result.get("photos") or {}).get("message") or shopify_push._PHOTOS_NOT_SYNCED_MSG,
+        })
 
     # LIVE BUT REFUSED: a listing already on the website whose brand was
     # switched off in Brand Master (or push-locked) is not pushed, so it keeps
@@ -780,6 +803,8 @@ async def sync_live_products(
         "attempted": len(results),
         "pushed_ok": pushed_ok,
         "failed": failed,
+        "photos_failed": photos_failed,
+        "photo_warnings": photo_warnings,
         "refused_no_photo": refused_no_photo,
         "publish_withheld": publish_withheld,
         "price_not_synced": price_not_synced,

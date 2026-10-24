@@ -159,12 +159,29 @@ _PRICE_NOT_SYNCED_MSG = (
 # not IMS's photos in IMS's order. The row stays queued so the next press or
 # scheduled sync sends the step again (a reorder-only edit has no other retry).
 PHOTOS_NOT_SYNCED = "PHOTOS_NOT_SYNCED"
+PHOTOS_SYNC_FAILED = "PHOTOS_SYNC_FAILED"
 _PHOTOS_NOT_SYNCED_MSG = (
-    "Live on the website, but its photos there do not match IMS: a photo "
-    "change (a new photo, a removed photo or a new order) did not reach "
-    "Shopify. The product stays queued -- press again, or the next scheduled "
-    "sync retries it."
+    "Photos still attaching -- will finish on the next sync. "
+    "The product is live and stays queued for its photo retry."
 )
+
+
+def photo_sync_state(result: Dict[str, Any]) -> Optional[str]:
+    """Shared run/sweep classification; other failures keep their own code.
+
+    No polling or sleeps: one pass per product and retry on the next run.
+    Older results lack metadata, so their original code remains readable.
+    """
+    if not result.get("ok"):
+        return None
+    state = (result.get("photos") or {}).get("sync_state")
+    if state in ("pending", "failed"):
+        return state
+    if result.get("code") == PHOTOS_SYNC_FAILED:
+        return "failed"
+    if result.get("code") == PHOTOS_NOT_SYNCED:
+        return "pending"
+    return None
 
 
 # ===========================================================================

@@ -257,10 +257,10 @@ describe('the bulk press reports what it refused', () => {
 
     await pressProducts();
 
-    expect(await screen.findByText(/2 with photos NOT as IMS\s+has them/)).toBeTruthy();
+    expect(await screen.findByText(/2 photos still attaching/)).toHaveClass('text-amber-700');
     expect(toastCalls.some((t) => t.kind === 'success')).toBe(false);
     const msg = toastCalls.map((t) => t.msg).join(' | ');
-    expect(msg).toMatch(/2 live with their photos NOT as IMS has them \(still queued\)/);
+    expect(msg).toMatch(/2 photos still attaching — will finish on the next sync/);
     expect(msg).not.toMatch(/stock/i);
   });
 

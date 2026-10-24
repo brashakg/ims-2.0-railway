@@ -673,6 +673,12 @@ async def push_all_pending(
             bucket["noop"] += 1
         elif data.get("ok"):
             bucket["pushed"] += 1
+            photo_state = shopify_push.photo_sync_state(data)
+            if photo_state == "pending":
+                bucket["photos_not_synced"] = bucket.get("photos_not_synced", 0) + 1
+            elif photo_state == "failed":
+                bucket["photos_failed"] = bucket.get("photos_failed", 0) + 1
+                bucket["failed"] += 1
             # LIVE AND SOLD OUT: the writer's own stamp (push_skus_stock
             # `sold_out`, every accepted number 0), never re-derived here or
             # in TypeScript (recheck round 2). Correct -- IMS is master and
@@ -686,10 +692,8 @@ async def push_all_pending(
                 # storefront (so it is pushed), at the OLD price (so it gets
                 # its own line and stays queued -- see push_product).
                 bucket["price_not_synced"] = bucket.get("price_not_synced", 0) + 1
-            elif data.get("code") == shopify_push.PHOTOS_NOT_SYNCED:
-                # Live, but a photo step failed: its own line, still queued
-                # (same rule as the price) -- never a stock warning.
-                bucket["photos_not_synced"] = bucket.get("photos_not_synced", 0) + 1
+            elif data.get("code") in (shopify_push.PHOTOS_NOT_SYNCED, shopify_push.PHOTOS_SYNC_FAILED):
+                pass  # Counted above, including when another code takes priority.
             elif data.get("code"):
                 # ANY OTHER code on an ok push is the STOCK pass not being
                 # clean (STORE_UNMAPPED, SHOPIFY_LOCATION_*, STOCK_*). Without

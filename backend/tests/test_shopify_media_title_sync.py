@@ -333,6 +333,8 @@ def test_a_repress_with_nothing_changed_touches_no_media(db, gates, monkeypatch)
     assert res.photos == {
         "attached": 0, "deleted": 0, "reordered": False,
         "unmanaged": 0, "hands_off": False, "on_shopify": 2, "alt_updated": 0,
+        "sync_state": "synced", "consecutive_incomplete": 0,
+        "message": None, "variant_error": None,
     }
 
 

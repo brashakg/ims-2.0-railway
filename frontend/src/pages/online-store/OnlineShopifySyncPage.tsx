@@ -246,7 +246,7 @@ function sweepToast(
     (heldDown ? ` · ${heldDown} skipped (taken down)` : '') +
     (archived ? ` · ${archived} archived (not listed)` : '') +
     (oldPrice ? ` · ${oldPrice} at the OLD price (price not synced)` : '') +
-    (oldPhotos ? ` · ${oldPhotos} live with their photos NOT as IMS has them (still queued)` : '') +
+    (oldPhotos ? ` · ${oldPhotos} photos still attaching — will finish on the next sync` : '') +
     (noStock ? ` · ${noStock} live with NO stock written (sold out)` : '') +
     (stockWarn ? ` · ${stockWarn} live with a stock warning (see the stock line)` : '') +
     (soldOut ? ` · ${soldOut} live and SOLD OUT (0 at every shop)` : '') +
@@ -609,7 +609,14 @@ export default function OnlineShopifySyncPage() {
 
   const mode = status?.mode;
   const liveSync = status?.live_sync ?? null;
-  const lastRun = liveSync?.last_run ?? null;
+  const savedRun = liveSync?.last_run ?? null;
+  // Old run ledgers filed initial photo delays under failures. Read them
+  // as pending too, without changing the saved history.
+  const lastRun = savedRun ? {
+    ...savedRun,
+    photo_warnings: savedRun.photo_warnings ?? savedRun.failures?.filter(f => f.code === 'PHOTOS_NOT_SYNCED'),
+    failures: savedRun.failures?.filter(f => f.code !== 'PHOTOS_NOT_SYNCED'),
+  } : null;
   const stockPayload = (stockResult?.payload ?? null) as Record<string, any> | null;
   // The plan's inner keys are store_ids (Pune's is a UUID); the owner reads
   // shop codes. mode.stores is the same store list the writer maps from.
@@ -999,10 +1006,22 @@ export default function OnlineShopifySyncPage() {
               {(lastRun.publish_withheld ?? 0) > 0 && <> · {fmt(lastRun.publish_withheld)} withheld</>}
               {(lastRun.price_not_synced ?? 0) > 0 && <> · {fmt(lastRun.price_not_synced)} at the OLD price</>}
               {(lastRun.photos_not_synced ?? 0) > 0 && (
-                <> · {fmt(lastRun.photos_not_synced)} with photos NOT as IMS has them</>
+                <> · <span className="text-amber-700">{fmt(lastRun.photos_not_synced)} photos still attaching</span></>
               )}
+              {(lastRun.photos_failed ?? 0) > 0 && <span className="text-red-700"> · {fmt(lastRun.photos_failed)} repeated photo failures</span>}
               {lastRun.limit_reached && <> · stopped at the {lastRun.limit ?? '?'}-product cap</>}
             </p>
+            {(lastRun.photo_warnings?.length ?? 0) > 0 && (
+              <ul className="mt-2 space-y-1 text-amber-700" aria-label="Live sync photo warnings">
+                {lastRun.photo_warnings!.map((warning, i) => (
+                  <li key={warning.product_id ?? i}>
+                    <span className="font-medium">{warning.sku || warning.product_id || '?'}</span>
+                    {' · PHOTOS_NOT_SYNCED · '}
+                    {warning.error || 'photos still attaching — will finish on the next sync'}
+                  </li>
+                ))}
+              </ul>
+            )}
             {lastRun.stock && <StockPassLine stock={lastRun.stock} testId="live-sync-stock-line" />}
             {(lastRun.failures?.length ?? 0) > 0 && (() => {
               // Hundreds of identical "no photo" refusals collapse into ONE
@@ -1200,11 +1219,10 @@ export default function OnlineShopifySyncPage() {
                         );
                         return oldPhotos > 0 ? (
                           <span
-                            className="inline-flex items-center gap-1 text-red-700"
-                            title="Live on the website, but a photo change did not reach Shopify, so the website's photos or their order are not what IMS shows. They are still queued - press again, or the next scheduled sync retries them."
+                            className="inline-flex items-center gap-1 text-amber-700"
+                            title="Photos still attaching — will finish on the next sync."
                           >
-                            <AlertTriangle className="w-3 h-3" /> {fmt(oldPhotos)} with photos NOT as IMS
-                            has them
+                            <AlertTriangle className="w-3 h-3" /> {fmt(oldPhotos)} photos still attaching
                           </span>
                         ) : null;
                       })()}
@@ -1318,7 +1336,7 @@ export default function OnlineShopifySyncPage() {
                             {pushToastLevel(r) === 'success' ? (
                               <CheckCircle2 className="w-3 h-3 text-green-600 shrink-0" />
                             ) : (
-                              <XCircle className="w-3 h-3 text-amber-600 shrink-0" />
+                              <XCircle className={`w-3 h-3 shrink-0 ${pushToastLevel(r) === 'error' ? 'text-red-700' : 'text-amber-600'}`} />
                             )}
                             <span className="truncate">{formatPushResult(r.entity + ' ' + (r.target_id ?? ''), r)}</span>
                           </li>
