@@ -370,7 +370,9 @@ def test_the_world_reproduces_the_hold(world):
     # identity_key a catalogued Boss 1700 C2 52 does (C2/C3 root cause), and
     # the eye size is part of it (owner 09-28: each eye size is its own item).
     assert draft["attributes"]["lens_size"] == "52"
-    assert draft["identity_key"] == "boss|boss1700|c2|52"
+    # 'BOSS 1700' under Boss keys as model 1700: a brand typed in front of the
+    # model is no part of it (product_master.model_without_brand, #1271).
+    assert draft["identity_key"] == "boss|1700|c2|52"
     # grn_accept: the line is held with reason incomplete_catalog, 0 minted.
     stored = world.grn(grn["grn_id"])
     assert stored["status"] == "PARTIALLY_ACCEPTED"
@@ -1901,9 +1903,9 @@ def test_the_identity_migration_keys_rows_as_the_door_does(world):
         "Boss", "BOSS 1700", "C2", "52", mrp=2990, offer=2790, cost=1200
     )
     stored = world.product(frame["product_id"])
-    assert _identity_of(stored) == stored["identity_key"] == "boss|boss1700|c2|52"
+    assert _identity_of(stored) == stored["identity_key"] == "boss|1700|c2|52"
     # A top-level size that differs from the eye size never wins over it.
-    assert _identity_of({**stored, "size": "M"}) == "boss|boss1700|c2|52"
+    assert _identity_of({**stored, "size": "M"}) == "boss|1700|c2|52"
 
 
 def test_c2_a_frame_still_carrying_an_old_size_is_found_by_its_eye_size(world):
@@ -1931,10 +1933,10 @@ def test_c2_a_frame_still_carrying_an_old_size_is_found_by_its_eye_size(world):
     made = _run(_products.create_product(body, CATALOGUER_WITH_COST, as_draft=False))
     stored = world.product(made["product_id"])
     finding(
-        stored["identity_key"] == "boss|boss1700|c2|52",
+        stored["identity_key"] == "boss|1700|c2|52",
         f"C2: the frame is keyed by its old size ({stored['identity_key']})",
     )
-    assert _identity_of(stored) == "boss|boss1700|c2|52"
+    assert _identity_of(stored) == "boss|1700|c2|52"
     # A row stored before this fix carries the old size top-level too.
     world.db.products.update_one(
         {"product_id": made["product_id"]}, {"$set": {"size": "52-18-140"}}
@@ -2637,7 +2639,7 @@ def test_r5_the_identity_migration_rekeys_everything_but_the_collisions(world):
     )
     stats = run(world.db.products, apply=True)
     finding(
-        world.product(a["product_id"])["identity_key"] == "boss|boss1701|c2|50",
+        world.product(a["product_id"])["identity_key"] == "boss|1701|c2|50",
         "R5: one collision stopped the migration re-keying an unrelated frame",
     )
     assert stats["collisions"] == 1
