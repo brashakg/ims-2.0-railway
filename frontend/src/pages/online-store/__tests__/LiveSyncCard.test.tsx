@@ -115,21 +115,6 @@ describe('Live sync card', () => {
     vi.mocked(syncHealthApi.getDrift).mockResolvedValue({ unavailable: true } as any);
   });
 
-  it('keeps photos still attaching amber and separate from repeated photo failures', async () => {
-    vi.mocked(pushApi.getStatus).mockResolvedValue(status({ ...SCHEDULE_ON, last_run: {
-      ...LAST_RUN, failed: 1, photos_not_synced: 1, photos_failed: 1,
-      photo_warnings: [{ sku: 'FIRST', code: 'PHOTOS_NOT_SYNCED', error: 'photos still attaching — will finish on the next sync' }],
-      failures: [{ sku: 'SECOND', code: 'PHOTOS_SYNC_FAILED', error: 'Photos did not finish after 2 consecutive sync runs' }],
-    } }) as any);
-    render(<OnlineShopifySyncPage />);
-    const warnings = await screen.findByRole('list', { name: 'Live sync photo warnings' });
-    expect(warnings).toHaveClass('text-amber-700');
-    expect(warnings).toHaveTextContent('FIRST');
-    const failures = screen.getByRole('list', { name: 'Live sync failures' });
-    expect(failures).toHaveTextContent('SECOND');
-    expect(failures).not.toHaveTextContent('FIRST');
-    expect(within(failures).getByRole('listitem')).toHaveClass('text-red-700');
-  });
 
   it('shows the last run, every failure with its code, and the next IST slot', async () => {
     vi.mocked(pushApi.getStatus).mockResolvedValue(status(SCHEDULE_ON) as any);
@@ -209,6 +194,22 @@ describe('Live sync card', () => {
     expect(rows[0]).toHaveTextContent('RB-2140');
     expect(rows[0]).toHaveTextContent('PRICE_NOT_SYNCED');
     expect(rows[0]).toHaveTextContent(/OLD price/);
+  });
+
+  it('keeps photos still attaching amber and separate from repeated photo failures', async () => {
+    vi.mocked(pushApi.getStatus).mockResolvedValue(status({ ...SCHEDULE_ON, last_run: {
+      ...LAST_RUN, failed: 1, photos_not_synced: 1, photos_failed: 1,
+      photo_warnings: [{ sku: 'FIRST', code: 'PHOTOS_NOT_SYNCED', error: 'photos still attaching — will finish on the next sync' }],
+      failures: [{ sku: 'SECOND', code: 'PHOTOS_SYNC_FAILED', error: 'Photos did not finish after 2 consecutive sync runs' }],
+    } }) as any);
+    render(<OnlineShopifySyncPage />);
+    const warnings = await screen.findByRole('list', { name: 'Live sync photo warnings' });
+    expect(warnings).toHaveClass('text-amber-700');
+    expect(warnings).toHaveTextContent('FIRST');
+    const failures = screen.getByRole('list', { name: 'Live sync failures' });
+    expect(failures).toHaveTextContent('SECOND');
+    expect(failures).not.toHaveTextContent('FIRST');
+    expect(within(failures).getByRole('listitem')).toHaveClass('text-red-700');
   });
 
   // Photo order (owner 2026-10-12): a photo step that failed on a live
