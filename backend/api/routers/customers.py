@@ -1835,6 +1835,30 @@ def redeem_store_credit_atomic(
     return {"entry": entry, "balance": entry["balance_after"]}
 
 
+def apply_store_credit_delta(repo, customer_id: str, entry: dict) -> None:
+    """Move customer.store_credit by a ledger entry's delta with ONE atomic
+    $inc -- never a read-then-$set, which overwrote a concurrent door's $inc
+    (500 + a manual 200 racing an advance refund's 1000 read 700, not 1700).
+    A customer with no store_credit field yet (legacy: its balance lives in
+    the ledger) gets the entry's balance_after, guarded on the field still
+    being absent. A repository with no raw collection (test doubles) keeps
+    the legacy $set."""
+    coll = getattr(repo, "collection", None)
+    if coll is None:
+        repo.update(customer_id, {"store_credit": entry["balance_after"]})
+        return
+    delta = float(entry.get("delta") or 0)
+    for _ in range(2):
+        res = coll.update_one({"customer_id": customer_id, "store_credit": {"$exists": True}},
+                              {"$inc": {"store_credit": delta}})
+        if getattr(res, "matched_count", getattr(res, "modified_count", 0)):
+            return
+        res = coll.update_one({"customer_id": customer_id, "store_credit": {"$exists": False}},
+                              {"$set": {"store_credit": entry["balance_after"]}})
+        if getattr(res, "matched_count", getattr(res, "modified_count", 0)):
+            return
+
+
 def _post_credit_entry(
     customer_id: str, entry_type: str, body: StoreCreditEntryRequest, current_user: dict
 ):
@@ -1887,7 +1911,7 @@ def _post_credit_entry(
         coll.insert_one(dict(entry))
     # Keep the legacy number in sync so the rest of the app stays correct.
     try:
-        repo.update(customer_id, {"store_credit": entry["balance_after"]})
+        apply_store_credit_delta(repo, customer_id, entry)
     except Exception:  # noqa: BLE001
         pass
     entry.pop("_id", None)
