@@ -110,7 +110,7 @@ async function typeNewColour(user: ReturnType<typeof userEvent.setup>) {
     </MemoryRouter>,
   );
   await loadCategoryRegistry();
-  await user.click(await screen.findByText('Sunglass'));
+  await user.click(await screen.findByText('Sunglasses'));
   fill(screen.getByLabelText(/^Brand Name/), 'Ray-Ban');
   fill(screen.getByLabelText(/^Model No/), 'RB4165');
   fill(screen.getByLabelText(/^Colour Code/), '902');

@@ -269,7 +269,7 @@ describe('the duplicate popup\'s "new colour"', () => {
     });
     open('/catalog/add');
     const user = userEvent.setup();
-    await user.click(screen.getByText('Sunglass'));
+    await user.click(screen.getByText('Sunglasses'));
     fireEvent.change(screen.getByLabelText(/^Brand Name/), { target: { value: 'Ray-Ban' } });
     fireEvent.change(screen.getByLabelText(/^Model No/), { target: { value: '1234' } });
     fireEvent.change(screen.getByLabelText(/^Colour Code/), { target: { value: '807' } });

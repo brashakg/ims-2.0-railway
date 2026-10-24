@@ -26,7 +26,7 @@ const GST_CATEGORIES: { value: string; label: string }[] = [
   { value: 'OPTICAL_LENS', label: 'Optical Lens (5%)' },
   { value: 'CONTACT_LENS', label: 'Contact Lens (5%)' },
   { value: 'READING_GLASSES', label: 'Reading Glasses (5%)' },
-  { value: 'SUNGLASS', label: 'Sunglass (18%)' },
+  { value: 'SUNGLASS', label: 'Sunglasses (18%)' },
   { value: 'WATCH', label: 'Watch (18%)' },
   { value: 'ACCESSORIES', label: 'Accessories (18%)' },
   { value: 'SERVICES', label: 'Services (18%)' },

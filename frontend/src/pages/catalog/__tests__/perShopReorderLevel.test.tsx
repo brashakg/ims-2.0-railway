@@ -124,7 +124,7 @@ describe('F73/D12 - add product', () => {
   it('a typed level is saved for this shop only, never as one chain-wide reorder_point', async () => {
     const user = userEvent.setup();
     renderPage();
-    await user.click(screen.getByText('Sunglass'));
+    await user.click(screen.getByText('Sunglasses'));
     fill(screen.getByLabelText(/^Brand Name/), 'Ray-Ban');
     fill(screen.getByLabelText(/^Model No/), 'RB4165');
     fill(screen.getByLabelText(/^Colour Code/), '601');

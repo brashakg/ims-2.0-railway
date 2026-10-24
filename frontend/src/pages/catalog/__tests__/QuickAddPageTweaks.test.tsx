@@ -127,7 +127,7 @@ describe('1 - "Still missing" in the save bar', () => {
   it('is the validator\'s own required set, by registry label, and shrinks as fields fill', async () => {
     const user = userEvent.setup();
     renderPage();
-    await user.click(screen.getByText('Sunglass'));
+    await user.click(screen.getByText('Sunglasses'));
 
     const expected = Object.keys(validateProductForm(blankSunglass())).map(registryLabel);
     // Sanity: the validator really does name something (else the test is vacuous).
@@ -149,7 +149,7 @@ describe('1 - "Still missing" in the save bar', () => {
   it('tapping a chip opens the closed section and lands focus on that field', async () => {
     const user = userEvent.setup();
     renderPage();
-    await user.click(screen.getByText('Sunglass'));
+    await user.click(screen.getByText('Sunglasses'));
 
     // Close Pricing: its MRP input is unmounted, yet its chip is still in the bar.
     await user.click(screen.getByRole('button', { name: /^Pricing/ }));
@@ -163,7 +163,7 @@ describe('1 - "Still missing" in the save bar', () => {
   it('a blanked HSN joins the same list, flags the Advanced row, and its chip focuses the HSN select', async () => {
     const user = userEvent.setup();
     renderPage();
-    await user.click(screen.getByText('Sunglass'));
+    await user.click(screen.getByText('Sunglasses'));
     expect(stillMissing()).not.toContain('HSN Code');
     expect(screen.queryByText('HSN Code required')).toBeNull();
 
@@ -190,7 +190,7 @@ describe('2 - a count on each section header', () => {
   it('splits the validator\'s errors by section, stays visible on a CLOSED header, and clears as fields fill', async () => {
     const user = userEvent.setup();
     renderPage();
-    await user.click(screen.getByText('Sunglass'));
+    await user.click(screen.getByText('Sunglasses'));
 
     const errs = Object.keys(validateProductForm(blankSunglass()));
     const pricing = errs.filter((k) => k === 'mrp' || k === 'offer_price').length;
@@ -213,7 +213,7 @@ describe('4 - touch targets', () => {
   it('no page-level h-8 shrink remains, and the two photo controls are 40px targets', async () => {
     const user = userEvent.setup();
     const { container } = renderPage();
-    await user.click(screen.getByText('Sunglass'));
+    await user.click(screen.getByText('Sunglasses'));
 
     const root = container.querySelector('.inv-body')!;
     expect(root.className).not.toMatch(/input-field\]:h-8/);
@@ -238,7 +238,7 @@ describe('5 - GST rate is text, and the value still posts', () => {
   it('shows the number as text (no read-only box), drops it when the HSN disagrees, and sends gst_rate', async () => {
     const user = userEvent.setup();
     const { container } = renderPage();
-    await user.click(screen.getByText('Sunglass'));
+    await user.click(screen.getByText('Sunglasses'));
 
     const gst = screen.getByTestId('qa-gst-rate');
     expect(gst.tagName).not.toBe('INPUT');
@@ -288,7 +288,7 @@ describe('8 - the review card uses registry labels', () => {
   it('names a filled attribute by the label the form itself shows, never the raw key', async () => {
     const user = userEvent.setup();
     renderPage();
-    await user.click(screen.getByText('Sunglass'));
+    await user.click(screen.getByText('Sunglasses'));
     fill(screen.getByLabelText(/^Frame Front Material/), 'Acetate');
 
     const card = screen.getByRole('heading', { name: 'Review' }).closest('.card')!;
@@ -306,7 +306,7 @@ describe('9 + 12 - the Online strip', () => {
     expect(screen.queryByLabelText('Sync to Shopify')).toBeNull();
     expect(screen.queryByLabelText('Publish to Shopify POS')).toBeNull();
 
-    await user.click(screen.getByText('Sunglass'));
+    await user.click(screen.getByText('Sunglasses'));
     fill(screen.getByLabelText(/^Brand Name/), 'Ray-Ban');
     expect(await screen.findByText(/Website: yes - Ray-Ban/)).toBeInTheDocument();
     // POST /products stores no Shopify tags, so the form offers no box for them.
@@ -348,7 +348,7 @@ describe('12 - the Website page (owner 2026-10-19)', () => {
   it('stays hidden until SUPERADMIN switches page types on', async () => {
     const user = userEvent.setup();
     renderPage();
-    await user.click(screen.getByText('Sunglass'));
+    await user.click(screen.getByText('Sunglasses'));
     fill(screen.getByLabelText(/^Brand Name/), 'Ray-Ban');
     await waitFor(() => expect(productApi.getWebsiteVerdict).toHaveBeenCalled());
     expect(screen.queryByLabelText(/^Website page/)).toBeNull();
@@ -360,7 +360,7 @@ describe('12 - the Website page (owner 2026-10-19)', () => {
     }));
     const user = userEvent.setup();
     renderPage();
-    await user.click(screen.getByText('Sunglass'));
+    await user.click(screen.getByText('Sunglasses'));
     fill(screen.getByLabelText(/^Brand Name/), 'Ray-Ban');
     fill(screen.getByLabelText(/^Model No/), 'RB4165');
     fill(screen.getByLabelText(/^Colour Code/), '601');
