@@ -21,16 +21,25 @@ WHAT IT DOES
       held by another row, or -- an eye-size item -- held by the same frame
       catalogued with no eye size (its key lacks the size, so it never
       collided). For each pair a SURVIVOR is picked by one rule
-      (_survivor_score): on Shopify > has stock / order / PO / receipt lines >
-      more photos > has a price > newer. The other row is archived only when
-      it is not on Shopify (product, twin or a catalog_variants Shopify id),
-      has no stock units, no order / PO / receipt lines and no linked
-      variants; otherwise the pair is reported for a human.
+      (_survivor_score): never an archived row > on Shopify > named by any
+      stock / order / purchase / receipt / return / transfer / workshop /
+      bill / alias row (_REF_COLLECTIONS) > more photos > has a price >
+      newer. The other row is archived only when it is not on Shopify
+      (product, twin or a catalog_variants Shopify id), no such row names it
+      (an unreadable collection counts as naming it) and it leads no linked
+      variants; otherwise the pair is reported for a human. A row matched by
+      more than one brand-in-model row (a size-less frame vs sizes 52 and 54)
+      is reported too, and nothing in that group is written.
   (c) --apply: archives the losers FIRST (the archive door's own fields:
       is_active False, deleted_at, deleted_by, active_before_archive, on the
-      spine and its catalogue twin; never a delete). A loser that holds the
-      key its survivor needs gives it up ($unset identity_key: the unique
-      index counts archived rows too). Then the survivor gets its model_no
+      spine and its catalogue twin; never a delete; the product-list cache
+      dropped). A loser that holds the key its survivor needs gives it up
+      ($unset identity_key): the unique index counts archived rows too, and
+      leaving it there would leave the LIVE survivor on the stale key the
+      guard and the similar-products lookup miss -- the bug itself. Restore
+      (catalog _restore_refusal) refuses while a live row is the same product
+      and re-keys a restored row, so a keyless duplicate never comes back.
+      Then the survivor gets its model_no
       cleaned, the loser's eye size when it has none, and the rule's key; every
       other brand-in-model row is cleaned and re-keyed. Each changed document
       is backed up first in `fix_brand_in_model_backups` under one run id;
@@ -96,6 +105,33 @@ def _positive(v: Any) -> bool:
         return False
 
 
+# Every collection a row of which names a product (by id or SKU, flat or on
+# its lines): a copy any of them names is never archived by a script.
+_REF_COLLECTIONS = (
+    "stock_units", "orders", "purchase_orders", "grns", "returns", "vendor_returns", "vendor_rmas",
+    "stock_transfers", "workshop_jobs", "vendor_bills", "debit_notes", "vendor_debit_notes",
+    "opening_stock_batches", "vendor_sku_aliases", "stock_counts", "stock_audit", "stock_shrinkage",
+    "serial_numbers", "lens_stock_lines", "display_placements",
+)
+_LINE_PATHS = ("", "items.", "lines.", "line_items.")
+
+
+def _refs(db, ids: List[str], sku: Any) -> List[str]:
+    """The collections that name this product; one that cannot be read is
+    named too (unreadable is never "no reference")."""
+    terms: List[Dict[str, Any]] = [{p + "product_id": {"$in": ids}} for p in _LINE_PATHS]
+    if sku:
+        terms += [{p + "sku": sku} for p in _LINE_PATHS]
+    out = []
+    for coll in _REF_COLLECTIONS:
+        try:
+            if db[coll].count_documents({"$or": terms}):
+                out.append(f"{coll} rows")
+        except Exception as exc:  # noqa: BLE001 - refuse, never guess
+            out.append(f"{coll} unreadable ({type(exc).__name__})")
+    return out
+
+
 def _facts(db, doc: Dict[str, Any]) -> Dict[str, Any]:
     """What decides which twin survives, and whether the other may go."""
     twin = _twin(db, doc)
@@ -108,12 +144,7 @@ def _facts(db, doc: Dict[str, Any]) -> Dict[str, Any]:
     variant_or = [{"parent_product_id": {"$in": ids}}] + ([{"parent_sku": sku}, {"sku": sku}] if sku else [])
     for v in db["catalog_variants"].find({"$or": variant_or}):
         on_shopify = on_shopify or bool(v.get("shopify_variant_id") or v.get("shopify_inventory_item_id"))
-    refs = []
-    if db["stock_units"].count_documents({"product_id": {"$in": ids}}):
-        refs.append("stock units")
-    for coll, label in (("orders", "order"), ("purchase_orders", "purchase-order"), ("grns", "receipt")):
-        if db[coll].count_documents({"items.product_id": {"$in": ids}}):
-            refs.append(f"{label} lines")
+    refs = _refs(db, ids, sku)
     photos = max(
         db["product_images"].count_documents({"product_id": {"$in": ids}}),
         len((twin or {}).get("images") or doc.get("images") or []),
@@ -129,14 +160,16 @@ def _facts(db, doc: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _survivor_score(f: Dict[str, Any]) -> tuple:
-    """THE survivor rule: on Shopify > has stock/order/PO/receipt lines > more
-    photos > has a price > newer."""
-    return (f["on_shopify"], bool(f["refs"]), f["photos"], f["price"], f["created"])
+    """THE survivor rule: never an archived row > on Shopify > named by stock,
+    orders, purchases, receipts, returns... > more photos > has a price >
+    newer."""
+    return (not f["archived"], f["on_shopify"], bool(f["refs"]), f["photos"], f["price"], f["created"])
 
 
 def _why(f: Dict[str, Any]) -> str:
-    bits = ["on Shopify" if f["on_shopify"] else "not on Shopify"]
-    bits.append(", ".join(f["refs"]) if f["refs"] else "no stock/order lines")
+    bits = ["ARCHIVED"] if f["archived"] else []
+    bits.append("on Shopify" if f["on_shopify"] else "not on Shopify")
+    bits.append("named by " + ", ".join(f["refs"]) if f["refs"] else "named by no stock, order, purchase or return")
     bits.append(f"{f['photos']} photo(s)")
     bits.append("priced" if f["price"] else "no price")
     bits.append(f"created {f['created_at']}")
@@ -182,7 +215,7 @@ def plan(db) -> Dict[str, Any]:
             continue
         attrs = pm._identity_attributes(doc)
         brand, model, _, _ = pm.identity_parts(attrs, doc.get("category"))
-        folded = pm.model_without_brand(brand, model, attrs.get("subbrand"))
+        folded = pm.model_without_brand(brand, model)
         if folded == pm.normalise_identity_component(model):
             other_stale.append(f"{doc.get('sku')}: stored {old!r}, rule {new!r} (not a brand-in-model row)")
             continue
@@ -204,7 +237,8 @@ def plan(db) -> Dict[str, Any]:
         c["collides"] = True
         if same or len(holders) != 1:
             pairs.append({"key": c["new_key"], "change": c, "other": None,
-                          "verdict": "REPORT ONLY: more than two rows share this product"})
+                          "verdict": f"REPORT ONLY, a human merges it: {1 + len(same) + len(holders)} rows "
+                                     "are this product"})
             continue
         h = holders[0]
         fc, fh = _facts(db, c["doc"]), _facts(db, h)
@@ -219,6 +253,17 @@ def plan(db) -> Dict[str, Any]:
             "verdict": ("REPORT ONLY, a human merges it: the other copy " + "; ".join(blockers))
             if blockers else "ARCHIVE",
         })
+    # One row matched by more than one brand-in-model row (a size-less frame
+    # vs sizes 52 and 54): which size it is, is a human's call. Nothing in
+    # that group is written.
+    seen: Dict[Any, int] = {}
+    for e in pairs:
+        if e.get("other"):
+            seen[e["other"].get("product_id")] = seen.get(e["other"].get("product_id"), 0) + 1
+    for e in pairs:
+        if e.get("other") and seen[e["other"].get("product_id")] > 1:
+            e["blockers"] = [f"{e['other'].get('sku')} matches more than one brand-in-model row"]
+            e["verdict"] = "REPORT ONLY, a human merges it: " + e["blockers"][0]
     return {"changes": changes, "pairs": pairs, "other_stale": other_stale}
 
 
@@ -282,9 +327,10 @@ def _archive(db, run_id: str, spine: Dict[str, Any], twin: Optional[Dict[str, An
         _write(db, run_id, coll, filt, doc, sets, unsets)
 
 
-def _fix_row(db, run_id: str, doc: Dict[str, Any], c: Optional[Dict[str, Any]], size: Any) -> Optional[str]:
+def _fix_row(db, run_id: str, doc: Dict[str, Any], c: Optional[Dict[str, Any]], size: Any) -> str:
     """Clean the model (c, a brand-in-model change) and fill an eye size, then
-    write the rule's key. Returns the key, or None when it is taken."""
+    write the rule's key. 'written', 'unchanged' (nothing to write) or
+    'taken' (another row holds the key: nothing written)."""
     attrs = dict(doc.get("attributes") or {})
     spine_set: Dict[str, Any] = {}
     twin_set: Dict[str, Any] = {}
@@ -307,18 +353,25 @@ def _fix_row(db, run_id: str, doc: Dict[str, Any], c: Optional[Dict[str, Any]], 
     pid = doc.get("product_id")
     if key and key != doc.get("identity_key"):
         if db["products"].count_documents({"identity_key": key, "product_id": {"$ne": pid}}):
-            print(f"  [skip] {doc.get('sku')}: {key!r} is held by another row")
-            return None
+            print(f"  [skip] {doc.get('sku')}: another product already holds {key!r}; nothing written")
+            return "taken"
         spine_set["identity_key"] = key
     if spine_set:
         _write(db, run_id, "products", {"product_id": pid}, doc, spine_set)
     if twin_set:
         _write(db, run_id, "catalog_products", {"id": twin.get("id")}, twin, twin_set)
-    return key
+    return "written" if spine_set or twin_set else "unchanged"
 
 
 def apply(db, p: Dict[str, Any], run_id: str) -> Dict[str, int]:
     stats = {"archived": 0, "rekeyed": 0, "skipped": 0}
+
+    def count(outcome: str) -> None:
+        if outcome == "written":
+            stats["rekeyed"] += 1
+        elif outcome == "taken":
+            stats["skipped"] += 1
+
     now = datetime.now(timezone.utc).isoformat()
     done = set()
     # Pairs first, the loser archived BEFORE its survivor takes the key.
@@ -332,18 +385,26 @@ def apply(db, p: Dict[str, Any], run_id: str) -> Dict[str, int]:
         _archive(db, run_id, loser, e["fl"]["twin"], now,
                  free_key=bool(loser.get("identity_key")) and loser.get("identity_key") == e["key"])
         stats["archived"] += 1
-        if _fix_row(db, run_id, survivor, c if e["keep_change"] else None, e["fill_size"]):
-            stats["rekeyed"] += 1
-        else:
-            stats["skipped"] += 1
+        count(_fix_row(db, run_id, survivor, c if e["keep_change"] else None, e["fill_size"]))
     for c in p["changes"]:
-        if c["doc"].get("product_id") in done:
-            continue
-        if _fix_row(db, run_id, c["doc"], c, None):
-            stats["rekeyed"] += 1
-        else:
-            stats["skipped"] += 1
+        if c["doc"].get("product_id") not in done:
+            count(_fix_row(db, run_id, c["doc"], c, None))
+    if stats["archived"] or stats["rekeyed"]:
+        _invalidate_lists()
     return stats
+
+
+def _invalidate_lists() -> None:
+    """The app's own product-list cache drop (as _archive_product does), so no
+    cached page keeps an archived twin. Best-effort: without the app's Redis
+    in this shell, cached pages expire on their own TTL (5 minutes)."""
+    try:
+        from api.services.cache import invalidate_product_lists
+
+        invalidate_product_lists()
+        print("Product lists cache cleared.")
+    except Exception as exc:  # noqa: BLE001 - the data write already stands
+        print(f"Product lists cache not cleared ({type(exc).__name__}); pages refresh within 5 minutes.")
 
 
 def revert(db, run_id: str) -> int:

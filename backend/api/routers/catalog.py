@@ -3169,6 +3169,10 @@ def _promote_duplicate_warnings(repo, doc: Dict) -> List[Dict[str, Any]]:
         or_terms.append({"barcode": barcode})
     if brand and model:
         or_terms.append({"brand": brand, "model": model})
+        # The identity rule too: 'CARRERA 3001/S' is the 3001/S already here.
+        family = _pm.model_family_query(doc.get("category"), brand, model)
+        if family:
+            or_terms.append(family)
     if not or_terms:
         return []
     warnings: List[Dict[str, Any]] = []
@@ -3756,6 +3760,27 @@ def _live_skus(skus: List[str]) -> Optional[set]:
         return None
 
 
+def _restore_refusal(repo, spine: Optional[Dict]) -> Optional[str]:
+    """Why an archived product may not come back: another LIVE product is
+    already the same item by the create door's key (identity_key_of over its
+    attributes, never its stored key -- an archived twin may have given its
+    key up to the copy that stayed). Restoring it would put a duplicate back
+    on sale. None when it may come back (or its key cannot be read)."""
+    if not spine:
+        return None
+    try:
+        key = _pm.identity_key_of(spine)
+        holder = repo.find_by_identity_key(key) if key else None
+    except _pm.ProductMasterError:
+        return None
+    if holder and holder.get("product_id") != spine.get("product_id") and not holder.get("deleted_at"):
+        return (
+            f"Not restored: the same product is already in the catalogue as {holder.get('sku')}. "
+            "Archive that one first, or edit this one so it is a different product."
+        )
+    return None
+
+
 def _restore_product(
     product: Optional[Dict],
     spine: Optional[Dict],
@@ -3794,15 +3819,21 @@ def _restore_product(
 
     _pr = get_product_repository()
     if _pr is not None and spine_id:
-        _pr.update(
-            spine_id,
-            {
-                "is_active": active,
-                "deleted_at": None,
-                "deleted_by": None,
-                ACTIVE_BEFORE_ARCHIVE: None,
-            },
-        )
+        back: Dict[str, Any] = {
+            "is_active": active,
+            "deleted_at": None,
+            "deleted_by": None,
+            ACTIVE_BEFORE_ARCHIVE: None,
+        }
+        # Keyed again by the create rule when its key is free (an archived
+        # twin may have given its key up): a restored row is never keyless.
+        try:
+            key = _pm.identity_key_of(spine)
+            if key and key != spine.get("identity_key") and _pr.find_by_identity_key(key) is None:
+                back["identity_key"] = key
+        except _pm.ProductMasterError:
+            pass
+        _pr.update(spine_id, back)
     try:
         audit_repo = get_audit_repository()
         if audit_repo is not None:
@@ -3993,6 +4024,8 @@ async def bulk_restore_products(
             results.append({"product_id": pid, "status": "refused", "reason": "Product not found"})
         elif not doc.get("deleted_at"):
             results.append({"product_id": pid, "status": "refused", "reason": "Not archived"})
+        elif why := _restore_refusal(repo, spine):
+            results.append({"product_id": pid, "status": "refused", "reason": why})
         elif not body.apply:
             results.append({"product_id": pid, "status": "ready"})
         else:

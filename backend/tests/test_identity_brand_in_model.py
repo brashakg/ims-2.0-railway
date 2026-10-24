@@ -106,23 +106,75 @@ def test_an_edit_never_moves_an_existing_sku(door):
     assert "sku" not in patch and patch.get("identity_key", first["identity_key"]) == first["identity_key"]
 
 
-def test_sub_brand_prefixes_fold_away():
-    clean = K("Prada", "PS01US", "1AB", "54", subbrand="Linea Rossa")
-    assert clean == "prada|ps01us|1ab|54"
-    for typed in ("LINEA ROSSA PS01US", "PRADA LINEA ROSSA PS01US", "Prada PS01US", "linearossa-PS 01US"):
-        assert K("Prada", typed, "1AB", "54", subbrand="Linea Rossa") == clean, typed
-    # A sub-brand that already starts with the brand.
-    assert K("Prada", "PRADA LINEA ROSSA PS01US", "1AB", "54", subbrand="Prada Linea Rossa") == clean
+def _sg(model, **attrs):
+    return {"category": "SUNGLASS", "attributes": {"brand_name": attrs.pop("brand", "Boss"), "model_no": model,
+                                                   "colour_code": "C2", "lens_size": "52", **attrs}}
 
 
-def test_the_fold_never_eats_a_real_model():
-    # The model IS the brand / sub-brand (a lens named by its sub-brand).
-    assert K("Essilor", "Crizal", "HC", "1.56", subbrand="Crizal") == "essilor|crizal|hc|156"
-    assert K("Titan", "Titan") == "titan|titan|"
-    # Glued on with no model-number shape after it: a word, not the brand.
-    assert K("Titan", "TITANIUM12") == "titan|titanium12|"
-    # The owner's Luxottica spellings still fold to one.
-    assert K("Ray-Ban", "RAY-BAN 0RB 4350", "002/20") == K("Ray-Ban", "RB4350", "002-20")
+def test_the_sub_brand_never_moves_the_key():
+    """B1: only the BRAND folds. The same frame typed with and without its
+    optional sub-brand is one product; a sub-brand word in the model stays."""
+    k = pm.identity_key_of
+    assert k(_sg("META WAYFARER", brand="Ray-Ban", subbrand="Meta")) == k(_sg("META WAYFARER", brand="Ray-Ban"))
+    assert k(_sg("BOSS ORANGE 0123", subbrand="Orange")) == "boss|orange0123|c2|52"
+    assert k(_sg("BOSS ORANGE 0123", subbrand="Orange")) != k(_sg("BOSS 0123", subbrand="Orange"))
+    assert k(_sg("OX8046", brand="Oakley", subbrand="OX")) != k(_sg("OY8046", brand="Oakley", subbrand="OX"))
+
+
+def test_the_fold_takes_the_brand_and_never_a_real_model():
+    """N7: the brand typed in front folds; a model that IS the brand, or a word
+    that merely starts with it, never does."""
+    fold = pm.model_without_brand
+    assert fold("Carrera", "CARRERA 3001/S") == fold("Carrera", "Carrera3001/S") == "3001s"
+    assert fold("Ray-Ban", "RAY-BAN 0RB 4350") == "rb4350"  # Luxottica 0 dropped after the brand
+    assert fold("Titan", "Titan") == "titan"
+    assert fold("Titan", "TITANIUM12") == "titanium12"
+    assert fold("Essilor", "Crizal") == "crizal"
+
+
+def test_a_variant_edit_that_drops_the_brand_is_no_model_change():
+    """N1: CARRERA 3001/S -> 3001/S on a variant is the same model."""
+    before = {"brand_name": "Carrera", "model_no": "CARRERA 3001/S"}
+    assert pm.model_field_changes(before, dict(before, model_no="3001/S")) == {}
+    assert pm.model_field_changes(before, dict(before, model_no="3002/S")) == {"model_no": "3002/S"}
+    variant = {"variant_of": "P-LEAD", "brand": "Carrera", "model": "CARRERA 3001/S", "category": "SUNGLASS",
+               "attributes": before}
+    pm.assert_variant_model_fields(variant, dict(before, model_no="3001/S"), model="3001/S", brand="Carrera")
+    with pytest.raises(pm.ProductMasterError):
+        pm.assert_variant_model_fields(variant, None, model="3002/S")
+
+
+def test_promote_warns_about_the_brand_in_model_twin(door):
+    """N6: the import review's duplicate warning reads the same rule."""
+    from api.routers import catalog as cat
+
+    first = door("CARRERA 3001/S")
+    doc = {"category": "SUNGLASS", "attributes": {"brand_name": "Carrera", "model_no": "3001/S"}}
+    warned = cat._promote_duplicate_warnings(door.repo, doc)
+    assert [w["sku"] for w in warned] == [first["sku"]]
+
+
+def test_restore_refuses_while_a_live_row_is_the_same_product(door, monkeypatch):
+    """S3: an archived twin that gave its key up never comes back as a live
+    duplicate; with no live twin it comes back keyed again."""
+    from api.routers import catalog as cat
+
+    kept = door("3001/S")
+    door.repo.collection.insert_one({
+        "product_id": "P-ARCH", "sku": "SGCARRERACARRERA3001S086HA", "category": "SUNGLASS",
+        "brand": "Carrera", "model": "CARRERA 3001/S", "is_active": False, "deleted_at": "2026-10-24",
+        "attributes": {"brand_name": "Carrera", "model_no": "CARRERA 3001/S", "colour_code": "086HA",
+                       "lens_size": "54"}})
+    archived = door.repo.find_by_id("P-ARCH")
+    assert kept["sku"] in cat._restore_refusal(door.repo, archived)
+    # The kept one archived too: the twin may come back, keyed by the rule.
+    door.repo.collection.update_one({"product_id": kept["product_id"]},
+                                    {"$set": {"deleted_at": "x"}, "$unset": {"identity_key": ""}})
+    assert cat._restore_refusal(door.repo, archived) is None
+    monkeypatch.setattr(deps, "get_product_repository", lambda: door.repo)
+    cat._restore_product(None, archived, _ADMIN, on_website=False)
+    back = door.repo.find_by_id("P-ARCH")
+    assert back["deleted_at"] is None and back["identity_key"] == "carrera|3001s|086ha|54"
 
 
 def test_the_model_scan_and_families_read_the_same_rule():
@@ -244,7 +296,8 @@ def test_script_apply_archives_first_then_rekeys_and_reverts():
     db = _seeded()
     before = _snapshot(db)
     stats = fix.apply(db, fix.plan(db), "run-1")
-    assert stats == {"archived": 3, "rekeyed": 4, "skipped": 1}
+    # Pair 2's survivor needed no write: only real writes are counted.
+    assert stats == {"archived": 3, "rekeyed": 3, "skipped": 1}
     rows = {d["product_id"]: d for d in db["products"].docs}
     # Pair 1: the new-format copy archived and off the key; the live one takes it, cleaned.
     assert rows["p-new1"]["is_active"] is False and rows["p-new1"]["deleted_at"]
@@ -276,3 +329,58 @@ def test_script_apply_archives_first_then_rekeys_and_reverts():
     assert fix.revert(db, "run-1") > 0
     assert _snapshot(db) == before
     assert fix.revert(db, "run-1") == 0  # a second revert is a no-op
+
+
+def test_script_an_archived_row_never_survives():
+    """B2: an archived copy loses whatever else it has, and the report says so."""
+    from scripts import fix_brand_in_model as fix
+
+    db = _seeded()
+    db["products"].update_one({"product_id": "p-new2"}, {"$set": {"deleted_at": "2026-10-01", "is_active": False}})
+    e = _pairs(fix.plan(db))["carrera|flaglab16|ky21v|99"]
+    assert e["survivor"]["sku"] == "SGCARRERACARRERAFLAGLAB16KY21V"  # despite the archived row's photos
+    assert e["blockers"] == ["already archived"]
+    assert fix._why(e["fl"]).startswith("ARCHIVED")
+
+
+def test_script_one_row_matched_twice_is_report_only_and_untouched():
+    """B3: a size-less frame vs brand-in-model rows of sizes 52 and 54."""
+    from scripts import fix_brand_in_model as fix
+
+    db = _seeded()
+    db["products"].insert_one(_row("p-old5", "SGCARRERACARRERAFLAGLAB16FG48652", "CARRERA FLAGLAB16", "FG486",
+                                   "52", "carrera|carreraflaglab16|fg486|52"))
+    before = _snapshot(db)
+    p = fix.plan(db)
+    group = [e for e in p["pairs"] if (e.get("other") or {}).get("product_id") == "p-new3"]
+    assert len(group) == 2 and all(e["blockers"] for e in group)
+    fix.apply(db, p, "run-b3")
+    for pid in ("p-old3", "p-old5", "p-new3"):
+        assert db["products"].find_one({"product_id": pid}) == next(
+            d for d in before["products"] if d["product_id"] == pid)
+
+
+def test_script_any_reference_or_unreadable_collection_blocks_the_archive():
+    """S2: returns, transfers, workshop jobs, bills, aliases... name a product;
+    a collection that cannot be read refuses rather than guesses."""
+    from scripts import fix_brand_in_model as fix
+
+    # Pair 1's loser (the live copy survives as the one on Shopify).
+    db = _seeded()
+    db.seed("returns", [{"return_id": "R1", "items": [{"product_id": "p-new1"}]}])
+    e = _pairs(fix.plan(db))["carrera|3001s|086ha|54"]
+    assert e["loser"]["product_id"] == "p-new1" and e["blockers"] == ["has returns rows"]
+
+    db = _seeded()
+    db.seed("vendor_sku_aliases", [{"vendor_sku": "V-1", "sku": "SG-CARRERA-3001S-086HA-54"}])
+    assert _pairs(fix.plan(db))["carrera|3001s|086ha|54"]["blockers"] == ["has vendor_sku_aliases rows"]
+
+    db = _seeded()
+
+    class _Broken(StrictCollection):
+        def count_documents(self, *a, **k):
+            raise RuntimeError("down")
+
+    db._collections["workshop_jobs"] = _Broken("workshop_jobs")
+    blockers = _pairs(fix.plan(db))["carrera|flaglab16|ky21v|99"]["blockers"]
+    assert blockers == ["has workshop_jobs unreadable (RuntimeError)"]
