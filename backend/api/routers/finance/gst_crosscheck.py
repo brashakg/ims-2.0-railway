@@ -261,6 +261,39 @@ def _gst_month_window(y: int, m: int):
     return start, end
 
 
+def _cancelled_behind_credit_note(db, store_ids, start, end, store_states, customer_states) -> dict:
+    """Invoices the refund-advance door cancelled behind a credit note for the
+    whole invoice (PR #1264). GSTR-1 / GSTR-3B keep filing them (their note
+    reverses them -- utils.real_sale gst_documents view) while the books drop
+    every cancelled order, so build_crosscheck adds them back to Books / Tally
+    like the deemed supply. Same field expressions as the books leg above."""
+    from ...utils.real_sale import is_real_sale
+
+    match = {
+        "created_at": {"$gte": start, "$lt": end},
+        "status": {"$in": ["CANCELLED", "CANCELED", "cancelled", "canceled"]},
+        "advance_refund_status": "COMPLETED",
+    }
+    if store_ids is not None:
+        match["store_id"] = {"$in": store_ids}
+    out = {"count": 0, "taxableValue": 0.0, "tax": 0.0, "cgst": 0.0, "sgst": 0.0, "igst": 0.0}
+    for o in db.get_collection("orders").find(match):
+        if not is_real_sale(o, gst_documents=True):
+            continue
+        grand = float(o.get("grand_total") or o.get("total") or 0)
+        tax = float(o.get("tax_amount") or o.get("tax_total") or 0)
+        out["count"] += 1
+        out["taxableValue"] += grand - float(o.get("round_off") or 0) - tax
+        out["tax"] += tax
+        if _order_is_interstate(o, store_states, customer_states):
+            out["igst"] += tax
+        else:
+            cgst, sgst = _jv_cgst_sgst_split(tax)
+            out["cgst"] += cgst
+            out["sgst"] += sgst
+    return {k: (round(v, 2) if isinstance(v, float) else v) for k, v in out.items()}
+
+
 def _books_and_tally_for_stores(db, store_ids, start, end) -> tuple:
     """Books + Tally-JV totals for a store set over a created_at window.
 
@@ -337,6 +370,8 @@ def _books_and_tally_for_stores(db, store_ids, start, end) -> tuple:
         "sales_tax": round(sales_tax, 2),
         "sales_taxable": round(sales_grand - sales_round_off - sales_tax, 2),
         "payments_collected": round(payments_collected, 2),
+        "cancelled_behind_credit_note": _cancelled_behind_credit_note(
+            db, store_ids, start, end, store_states, customer_states),
     }
     tally = {
         "taxable": round(sales_grand - sales_round_off - sales_tax, 2),
