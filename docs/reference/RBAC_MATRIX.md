@@ -69,8 +69,8 @@ manager gets 404).
 |---|---|
 | PUBLIC (no IMS role gate) | 46 |
 | AUTHENTICATED | 394 |
-| Role-gated (one or more roles) | 862 |
-| **Total `/api/v1` (method x path)** | **1302** |
+| Role-gated (one or more roles) | 864 |
+| **Total `/api/v1` (method x path)** | **1304** |
 | ...of which `store_scoped` | 235 |
 | ...of which `self_enforced` | 47 |
 
@@ -311,12 +311,14 @@ entry exactly; see the manual interpretation notes above.
 | `GET` | `/api/v1/catalog/products` | AUTH |  |  |
 | `POST` | `/api/v1/catalog/products` | ADMIN, CATALOG_MANAGER, SUPERADMIN |  |  |
 | `POST` | `/api/v1/catalog/products/bulk-archive` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/catalog/products/bulk-purge` | SUPERADMIN |  |  |
 | `POST` | `/api/v1/catalog/products/bulk-restore` | ADMIN, SUPERADMIN |  |  |
 | `POST` | `/api/v1/catalog/products/bulk-sync-shopify` | ADMIN, SUPERADMIN |  |  |
 | `DELETE` | `/api/v1/catalog/products/{product_id}` | ADMIN, SUPERADMIN |  |  |
 | `GET` | `/api/v1/catalog/products/{product_id}` | AUTH |  |  |
 | `PUT` | `/api/v1/catalog/products/{product_id}` | ADMIN, CATALOG_MANAGER, SUPERADMIN |  |  |
 | `POST` | `/api/v1/catalog/products/{product_id}/inventory/adjust` | ADMIN, STORE_MANAGER, SUPERADMIN, WORKSHOP_STAFF |  |  |
+| `DELETE` | `/api/v1/catalog/products/{product_id}/permanent` | SUPERADMIN |  |  |
 | `POST` | `/api/v1/catalog/products/{product_id}/promote` | ADMIN, CATALOG_MANAGER, SUPERADMIN |  |  |
 | `POST` | `/api/v1/catalog/products/{product_id}/sync-shopify` | ADMIN, CATALOG_MANAGER, SUPERADMIN |  |  |
 | `GET` | `/api/v1/catalog/recent-activity` | AUTH |  |  |

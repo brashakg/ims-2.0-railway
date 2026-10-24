@@ -288,6 +288,9 @@ export interface BulkRowResult {
   /** Restore: false = back in the catalogue switched off (`note` says why). */
   switched_on?: boolean;
   note?: string;
+  /** Permanent delete: the product's SKU, and the HTTP code of a refusal. */
+  sku?: string;
+  code?: number;
 }
 
 /** Who gets a flag task (the server's own rule names them). */
@@ -329,6 +332,16 @@ export const catalogBulkApi = {
     const response = await api.post('/catalog/products/bulk-restore', {
       product_ids: productIds,
       apply: true,
+    });
+    return response.data as { applied: boolean; results: BulkRowResult[] };
+  },
+
+  /** Delete ARCHIVED products permanently (SUPERADMIN only). Refused while
+   *  any history points at them. `apply: false` is the confirm dialog's dry run. */
+  purge: async (productIds: string[], apply: boolean) => {
+    const response = await api.post('/catalog/products/bulk-purge', {
+      product_ids: productIds,
+      apply,
     });
     return response.data as { applied: boolean; results: BulkRowResult[] };
   },
