@@ -1570,6 +1570,8 @@ export interface LiveSyncRun {
   limit?: number | null;
   limit_reached?: boolean | null;
   failures?: LiveSyncFailure[] | null;
+  /** Incomplete family siblings omitted while the complete variants were sent. */
+  variant_warnings?: LiveSyncFailure[] | null;
   /** The stock pass the run ends with (sync_stock_levels -- per-shop
    *  quantities at each shop's Shopify location). `ok=false` with a code
    *  (STORE_UNMAPPED / STOCK_ONHAND_UNKNOWN / ...) is the only trace a
@@ -1636,6 +1638,8 @@ export interface PushSweepResult {
            *  the press failed (PRICE_NOT_SYNCED). Counted in `pushed` too (a
            *  shopper can find them); they stay queued for the retry. */
           price_not_synced?: number;
+          /** Incomplete sibling options omitted while complete family members went live. */
+          variants_held?: number;
           /** Products that are live but whose photos did not all reach
            *  Shopify in IMS order (PHOTOS_NOT_SYNCED). Counted in `pushed`
            *  too; they stay queued for the retry. */

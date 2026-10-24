@@ -867,17 +867,53 @@ def test_two_variants_that_look_the_same_are_refused_unless_the_lens_tells_them_
     assert values == ["Gold (001) / Green Polarized", "Gold (001) / Grey"]
 
 
-def test_a_new_colour_with_no_size_on_a_model_chosen_by_size_is_refused(monkeypatch):
+@pytest.mark.parametrize("third_complete", [False, True])
+def test_first_publish_skips_missing_sibling_and_retries_on_the_same_page(monkeypatch, third_complete):
     db = _world()
     pids = _family(db, [("Gold", "001", "55"), ("Gold", "001", "58")])
     db["products"].update_one({"product_id": pids[1]}, {"$unset": {"attributes.lens_size": ""}})
-    pids.append(_item(db, 3, "Gold", "001", "62"))
-    pm.link_to_family(db, pids[2], pids[0], actor="u-admin")
+    if third_complete:
+        pids.append(_item(db, 3, "Gold", "001", "62"))
+        pm.link_to_family(db, pids[2], pids[0], actor="u-admin")
+    complete = [pid for pid in pids if pid != pids[1]]
     fake = FakeShopify()
     _live(monkeypatch, fake)
     res = _push(db, pids[0])
-    assert res.ok is False and res.code == "OPTION_MISSING" and fake.writes() == []
-    assert db["products"].find_one({"product_id": pids[1]})["sku"] in res.error
+    assert res.ok is True, res.error
+    missing_sku = db["products"].find_one({"product_id": pids[1]})["sku"]
+    assert res.code == "OPTION_MISSING" and missing_sku in res.error
+    assert res.listing["held"] == [{"sku": missing_sku, "code": "OPTION_MISSING", "reason": "no lens size"}]
+    page = _only_product(fake)
+    _assert_every_variant_is_its_item(db, fake, page, complete)
+    assert not _row(db, pids[1]).get("shopify_variant_id")
+    assert _twin(db, pids[0])["ecom"]["locally_modified"] is True
+    original_ids = {pid: _row(db, pid)["shopify_variant_id"] for pid in complete}
+
+    # An unchanged retry must keep the missing sibling queued and never
+    # duplicate the variants that already reached the website.
+    again = _push(db, pids[0])
+    assert again.ok and again.code == "OPTION_MISSING"
+    assert _twin(db, pids[0])["ecom"]["locally_modified"] is True
+    _assert_every_variant_is_its_item(db, fake, _only_product(fake), complete)
+
+    db["products"].update_one({"product_id": pids[1]}, {"$set": {"attributes.lens_size": "58"}})
+    fixed = _push(db, pids[0])
+    assert fixed.ok and not fixed.listing["held"], fixed.error
+    _assert_every_variant_is_its_item(db, fake, _only_product(fake), pids)
+    assert {pid: _row(db, pid)["shopify_variant_id"] for pid in original_ids} == original_ids
+    assert _twin(db, pids[0])["ecom"]["locally_modified"] is False
+
+
+def test_first_publish_still_refuses_a_lead_missing_the_required_size(monkeypatch):
+    db = _world()
+    pids = _family(db, [("Gold", "001", "55"), ("Gold", "001", "58")])
+    db["products"].update_one({"product_id": pids[0]}, {"$unset": {"attributes.lens_size": ""}})
+    fake = FakeShopify()
+    _live(monkeypatch, fake)
+    res = _push(db, pids[0])
+    assert res.ok is False and res.code == "OPTION_MISSING"
+    assert fake.writes() == []
+    assert not _row(db, pids[0]).get("shopify_variant_id")
 
 
 # ---------------------------------------------------------------------------
