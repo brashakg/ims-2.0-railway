@@ -675,16 +675,29 @@ async def sync_live_products(
     )
     # Live, but its photos are not IMS's photos in IMS's order: same treatment.
     photos_not_synced = sum(
-        1 for r in results if r.get("code") == shopify_push.PHOTOS_NOT_SYNCED
+        1 for r in results if shopify_push.photo_sync_state(r) == "pending"
     )
+    photos_failed = sum(1 for r in results if shopify_push.photo_sync_state(r) == "failed")
     failed = sum(
         1
         for r in results
-        if not r.get("ok") and r.get("reason") not in ("no_photo", "publish_withheld")
+        if (not r.get("ok") and r.get("reason") not in ("no_photo", "publish_withheld"))
+        or shopify_push.photo_sync_state(r) == "failed"
     )
     by_id = {(d.get("id") or d.get("product_id")): d for d in dirty}
     failures = []
+    photo_warnings = []
     for r in results:
+        if shopify_push.photo_sync_state(r) == "pending":
+            doc = by_id.get(r.get("target_id"), {})
+            photo_warnings.append({
+                "product_id": r.get("target_id"), "sku": doc.get("sku"),
+                "name": doc.get("name") or doc.get("title"),
+                "code": shopify_push.PHOTOS_NOT_SYNCED,
+                "error": (r.get("photos") or {}).get("message") or shopify_push._PHOTOS_NOT_SYNCED_MSG,
+            })
+            if r.get("code") == shopify_push.PHOTOS_NOT_SYNCED:
+                continue  # Price/stock failures alongside pending photos remain red.
         if r.get("ok") and not r.get("code"):
             continue
         doc = by_id.get(r.get("target_id"), {})
@@ -784,6 +797,8 @@ async def sync_live_products(
         "publish_withheld": publish_withheld,
         "price_not_synced": price_not_synced,
         "photos_not_synced": photos_not_synced,
+        "photos_failed": photos_failed,
+        "photo_warnings": photo_warnings,
         "first_publish_queued": len(never),
         "first_published": first_published,
         "first_publish_refused": len(first["refused"]),

@@ -1486,6 +1486,12 @@ export interface PushResult {
   reason?: string | null;
   /** Stable machine code for an actionable failure (e.g. PUBLISH_SCOPE_MISSING). */
   code?: string | null;
+  /** Photo retry state, independent of any simultaneous price/stock code. */
+  photos?: {
+    sync_state?: 'pending' | 'failed' | 'synced';
+    consecutive_incomplete?: number;
+    message?: string | null;
+  } | null;
   /** The per-shop stock sub-result (backend PushResult.stock) -- only what the
    *  toast reads: `quantities` is {sku: {store_id: qty}} as ACCEPTED by
    *  Shopify, and `sold_out` is the WRITER's verdict that every accepted
@@ -1557,6 +1563,9 @@ export interface LiveSyncRun {
   price_not_synced?: number | null;
   /** Live, but a photo step failed (PHOTOS_NOT_SYNCED): the website's photos are not IMS's, in IMS's order. Still queued. */
   photos_not_synced?: number | null;
+  /** Repeated incomplete photo passes (at least two consecutive runs). */
+  photos_failed?: number | null;
+  photo_warnings?: LiveSyncFailure[] | null;
   /** First-published by this run (owner ruling 2026-10-20; SIMULATED in a dry-run). */
   first_published?: number | null;
   /** Never-published products the product gate refused this run (named in failures). */
@@ -1640,6 +1649,7 @@ export interface PushSweepResult {
            *  Shopify in IMS order (PHOTOS_NOT_SYNCED). Counted in `pushed`
            *  too; they stay queued for the retry. */
           photos_not_synced?: number;
+          photos_failed?: number;
           /** Products that published but whose QUANTITIES reached no Shopify
            *  location at all (no shop mapped, two SKUs on one inventory
            *  item...). Counted in `pushed` too -- the listing is live -- but
