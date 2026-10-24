@@ -1687,7 +1687,7 @@ def _issue_store_credit(
         try:
             from .customers import apply_store_credit_delta
 
-            apply_store_credit_delta(repo, customer_id, entry)
+            apply_store_credit_delta(repo, customer_id, entry["delta"], balance_after=entry["balance_after"])
         except Exception:  # noqa: BLE001
             pass
     entry.pop("_id", None)
@@ -4737,8 +4737,17 @@ def _credit_back_advance(order: Dict[str, Any], amount: float, return_id: str,
             row.pop("_id", None)
         return row
 
+    def _claim_holds() -> bool:
+        """Only the press that holds the order's claim may credit: a press
+        whose claim was freed (it stalled past the 2-minute free) must not."""
+        orders = get_order_repository()
+        held = (orders.find_by_id(order.get("order_id")) or {}).get("advance_refund_id") if orders else None
+        return held == return_id
+
     entry = _row()
     if entry is None:
+        if not _claim_holds():
+            return None
         try:
             doc = repo.find_by_id(customer_id)
             entry = scl.make_entry(
@@ -4762,15 +4771,13 @@ def _credit_back_advance(order: Dict[str, Any], amount: float, return_id: str,
                 logger.error("[RETURNS] advance store credit not written for %s: %s", return_id, exc)
                 return None
     if not entry.get("applied"):
+        if not _claim_holds():
+            return None
+        from .customers import apply_store_credit_delta
+
         try:
-            res = customers.update_one(
-                {"customer_id": customer_id, "advance_credit_refs": {"$ne": entry_id}},
-                {"$inc": {"store_credit": float(entry.get("delta") or amount)},
-                 "$push": {"advance_credit_refs": entry_id}},
-            )
-            applied = bool(getattr(res, "matched_count", getattr(res, "modified_count", 0))) or bool(
-                customers.find_one({"customer_id": customer_id, "advance_credit_refs": entry_id})
-            )
+            applied = apply_store_credit_delta(
+                repo, customer_id, float(entry.get("delta") or amount), guard_ref=entry_id)
         except Exception as exc:  # noqa: BLE001
             logger.error("[RETURNS] store credit balance not moved for %s: %s", return_id, exc)
             applied = False
@@ -5038,11 +5045,23 @@ async def refund_advance_and_cancel(
 
     _cutoff = (datetime.now(timezone.utc) - _td(seconds=_STALE_CLAIM_SECONDS)).isoformat()
     _held = (repo.find_by_id(order_id) or {}).get("advance_refund_id")
-    coll.update_many(
-        {"order_id": order_id, "advance_refund": True, "status": "PENDING",
-         "return_id": {"$ne": _held}, "created_at": {"$lt": _cutoff}},
-        {"$set": {"status": "VOIDED", "voided_reason": "a later press found it without its claim"}},
-    )
+    # Never one that already moved money or took a note: its credit row
+    # ('<id>:credit') or credit-note number means it stays, and the refund
+    # below is refused ("ask an admin") -- voiding it and refunding again
+    # would pay the advance back twice. Unreadable ledger: void nothing.
+    _ledger = _ledger_coll()
+    if _ledger is not None:
+        for _stale in coll.find(
+            {"order_id": order_id, "advance_refund": True, "status": "PENDING",
+             "return_id": {"$ne": _held}, "created_at": {"$lt": _cutoff}}
+        ):
+            _rid = _stale.get("return_id")
+            if _stale.get("credit_note_number") or _ledger.find_one({"_id": f"{_rid}:credit"}):
+                continue
+            coll.update_one(
+                {"return_id": _rid, "status": "PENDING"},
+                {"$set": {"status": "VOIDED", "voided_reason": "a later press found it without its claim"}},
+            )
     plan = _advance_refund_plan(order)
     if not plan["ok"]:
         raise HTTPException(status_code=plan.get("status_code", 400), detail=plan["reason"])
