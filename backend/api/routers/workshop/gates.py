@@ -460,6 +460,26 @@ def _resolve_job_order(job: dict) -> Optional[dict]:
     return found if isinstance(found, dict) else None
 
 
+def undo_handover_if_order_refunded(repo, job: dict, previous_status: str) -> bool:
+    """Re-check AFTER a job landed on DELIVERED (PR #1264): the money gate read
+    the order a moment before the write, and a refund-advance claim (or the
+    cancel) can land in between. If it did, put the job back -- CANCELLED when
+    the order is cancelled, else where it was -- and return True so the door
+    refuses. Different collections, so this re-check is the compare-and-set."""
+    order = _resolve_job_order(job)
+    if order is None:
+        return False
+    status = str(order.get("status") or "").strip().upper()
+    if not (status in ("CANCELLED", "CANCELED") or order.get("advance_refund_id")):
+        return False
+    back = "CANCELLED" if status in ("CANCELLED", "CANCELED") else previous_status
+    try:
+        repo.update(job.get("job_id"), {"status": back, "handover_undone": "order refunded or cancelled"})
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[WORKSHOP] job %s handover NOT undone: %s", job.get("job_id"), exc)
+    return True
+
+
 def gate_job_handover_payment(
     job: dict,
     current_user: dict,
