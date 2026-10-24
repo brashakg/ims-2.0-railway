@@ -70,6 +70,10 @@ def order_mint_problem(order: Optional[Dict]) -> Optional[str]:
         )
     if str(o.get("status") or "").upper() == "CANCELLED":
         return "this order was cancelled"
+    if o.get("advance_refund_id"):
+        # PR #1264: its advance was (or is being) refunded on the way to a
+        # cancel -- a number now would file a sale no credit note reverses.
+        return "this order's advance was refunded and it is being cancelled"
     return None
 
 
@@ -626,7 +630,9 @@ class OrderRepository(BaseRepository):
         second printed number."""
         if self.update_if(
             order_id,
-            {"invoice_number": {"$in": [None, ""]}},
+            # ...and no refund-advance claim (order_mint_problem's rule, held
+            # at the write so a claim landing after the door's read wins).
+            {"invoice_number": {"$in": [None, ""]}, "advance_refund_id": None},
             {"invoice_number": invoice_number, "invoice_date": datetime.now()},
         ):
             return invoice_number

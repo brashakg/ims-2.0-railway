@@ -1516,20 +1516,6 @@ def _gate_refund_tenders_against_order(
     return refund_tenders, True
 
 
-def _current_credit_balance(customer_id: str, customer_doc: Optional[dict]) -> float:
-    """Ledger is authoritative once it has entries; otherwise bridge from the
-    legacy customer.store_credit number (same rule as the customers router)."""
-    coll = _ledger_coll()
-    if coll is not None:
-        try:
-            entries = list(coll.find({"customer_id": customer_id}, {"_id": 0}))
-            if entries:
-                return scl.compute_balance(entries)
-        except Exception:  # noqa: BLE001
-            pass
-    return float((customer_doc or {}).get("store_credit", 0) or 0)
-
-
 def _issue_store_credit(
     customer_id: str,
     amount: float,
@@ -1612,6 +1598,10 @@ def _issue_store_credit(
         except Exception:  # noqa: BLE001
             customer_doc = None
 
+    # THE balance rule (customers._current_credit_balance: the customer's
+    # store_credit field is authoritative), not a second, ledger-first copy.
+    from .customers import _current_credit_balance, apply_store_credit_delta, store_credit_balance_unready
+
     balance = _current_credit_balance(customer_id, customer_doc)
     try:
         entry = scl.make_entry(
@@ -1675,6 +1665,10 @@ def _issue_store_credit(
         # issued. Fail loud (return None) rather than hand back a phantom entry.
         logger.warning("[RETURNS] credit ledger unavailable; credit note not issued")
         return None
+    if entry["delta"] > 0 and repo is not None and store_credit_balance_unready(repo, customer_id):
+        logger.error("[RETURNS] %s: store-credit balance not set up (backfill not run); credit note not issued",
+                     customer_id)
+        return None
     try:
         coll.insert_one(dict(entry))
     except Exception as exc:  # noqa: BLE001
@@ -1685,11 +1679,17 @@ def _issue_store_credit(
     # was settled externally (card refund), where the balance must stay put.
     if entry["delta"] > 0 and repo is not None:
         try:
-            from .customers import apply_store_credit_delta
-
-            apply_store_credit_delta(repo, customer_id, entry["delta"], balance_after=entry["balance_after"])
-        except Exception:  # noqa: BLE001
-            pass
+            moved = apply_store_credit_delta(repo, customer_id, entry["delta"],
+                                             balance_after=entry["balance_after"], entry_id=entry.get("entry_id"))
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[RETURNS] store credit balance not moved for %s: %s", customer_id, exc)
+            moved = False
+        if not moved:
+            # Fail LOUD: the caller refuses the return ("could not issue the
+            # store-credit portion") instead of reporting credit that the
+            # customer's balance does not carry.
+            logger.error("[RETURNS] credit row %s written but the balance did not move", entry.get("entry_id"))
+            return None
     entry.pop("_id", None)
     return entry
 
@@ -3341,6 +3341,40 @@ async def quote_return(
     }
 
 
+def _reserve_order_refund(order_id: Optional[str], net_amount: float) -> Tuple[float, bool]:
+    """Reserve this refund on the ORDER's refunded total, atomically, BEFORE
+    the over-refund cap and the Rs 2,000 approval rule decide (PR #1264):
+    two returns fired at once each read the other's refund, so neither can
+    dodge the rule or the cap. ``refunds_reserved`` moves by a compare-and-set
+    on the value read; the prior total is the larger of it and the completed
+    returns' sum (a Shopify refund books a doc but no reservation). Returns
+    (prior total, reserved?). Released by _release_order_refund when the
+    return fails before it is recorded. A repository without compare-and-set
+    (test doubles) reads the documented sum only."""
+    documented = _sum_prior_refunds(order_id, strict=True)
+    repo = get_order_repository()
+    update_if = getattr(repo, "update_if", None) if repo is not None else None
+    if not order_id or not callable(update_if) or getattr(repo, "collection", None) is None:
+        return documented, False
+    for _ in range(8):
+        held = (repo.find_by_id(order_id) or {}).get("refunds_reserved")
+        prior = round(max(float(held or 0), documented), 2)
+        if update_if(order_id, {"refunds_reserved": held}, {"refunds_reserved": round(prior + float(net_amount), 2)}):
+            return prior, True
+    raise HTTPException(status_code=503, detail="Too many refunds on this bill at once - nothing was recorded. Try again.")
+
+
+def _release_order_refund(order_id: str, amount: float) -> None:
+    """Give back a reservation whose return was not recorded."""
+    repo = get_order_repository()
+    for _ in range(8):
+        held = (repo.find_by_id(order_id) or {}).get("refunds_reserved")
+        if repo.update_if(order_id, {"refunds_reserved": held},
+                          {"refunds_reserved": round(max(0.0, float(held or 0) - float(amount)), 2)}):
+            return
+    logger.error("[RETURNS] refund reservation of Rs %.2f on %s NOT released", amount, order_id)
+
+
 @router.post("", status_code=201)
 @router.post("/", status_code=201)
 async def create_return(
@@ -3348,6 +3382,19 @@ async def create_return(
     current_user: dict = Depends(require_roles(*_RETURN_ROLES)),
     idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
 ):
+    """Create a customer return / exchange / credit-note (see _create_return).
+    A refund reservation taken on the order is released whenever the return
+    fails before it is recorded."""
+    held: Dict[str, Any] = {}
+    try:
+        return await _create_return(body, current_user, idempotency_key, held)
+    except BaseException:
+        if held.get("amount"):
+            _release_order_refund(held["order_id"], held["amount"])
+        raise
+
+
+async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_key, held: Dict[str, Any]):
     """Create a customer return / exchange / credit-note.
 
     Money is RECORDED, never executed. Returns the new return_id plus the
@@ -3601,7 +3648,9 @@ async def create_return(
         _refund_ceiling = _order_billed_total(order)
     else:
         _refund_ceiling = float(_ap or 0.0)
-    _prior_refunds = _sum_prior_refunds(resolved_order_id, strict=True)
+    _prior_refunds, _reserved = _reserve_order_refund(resolved_order_id, net_amount)
+    if _reserved:
+        held.update(order_id=resolved_order_id, amount=net_amount)
     if round(_prior_refunds + net_amount, 2) > _refund_ceiling + 0.01:
         raise HTTPException(
             status_code=400,
@@ -4056,6 +4105,10 @@ async def create_return(
             )
         except Exception as exc:  # noqa: BLE001
             logger.debug("[RETURNS] online write-back skipped: %s", exc)
+
+    # The money is out (credit issued / refund recorded below): the
+    # reservation is now part of the order's refunded total -- keep it.
+    held.clear()
 
     # 4. Persist the return doc.
     now = utc_now_iso()
@@ -4651,7 +4704,16 @@ def _goods_handed_over(order: Dict[str, Any]) -> bool:
         ):
             return True
     from ..dependencies import get_workshop_repository
+    from .shipping import _live_shipment_for_order
 
+    try:
+        # A live courier booking is a handover too (shipping never moves a
+        # counter order's status): THE shipping rule, read strictly.
+        if _live_shipment_for_order(order.get("order_id"), strict=True) is not None:
+            return True
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[RETURNS] shipments unreadable for %s: %s", order.get("order_id"), exc)
+        raise HTTPException(status_code=503, detail="Could not check whether the goods were handed over - try again.")
     jobs = getattr(get_workshop_repository(), "collection", None)
     if jobs is None:
         return False  # no workshop store at all (DB-less mode): no job can exist
@@ -4747,6 +4809,12 @@ def _credit_back_advance(order: Dict[str, Any], amount: float, return_id: str,
     entry = _row()
     if entry is None:
         if not _claim_holds():
+            return None
+        from .customers import store_credit_balance_unready
+
+        if store_credit_balance_unready(repo, customer_id):
+            logger.error("[RETURNS] %s: store-credit balance not set up (backfill not run); advance credit refused",
+                         customer_id)
             return None
         try:
             doc = repo.find_by_id(customer_id)
@@ -4879,6 +4947,15 @@ def _finish_advance_refund(repo, coll, doc: Dict[str, Any], current_user: dict) 
     if doc.get("invoice_number") and not number:
         number = order.get("advance_refund_credit_note")
         if not number:
+            if order.get("advance_refund_cn_minting_at") and not _advance_claim_is_stale(
+                {"advance_refund_at": order.get("advance_refund_cn_minting_at")}
+            ):
+                # Another press is numbering THIS refund right now: never write
+                # its number off from here.
+                raise HTTPException(
+                    status_code=409,
+                    detail="This refund is being numbered right now - wait a minute and press again.",
+                )
             if order.get("advance_refund_cn_minting_at"):
                 # An earlier press began numbering and never stamped a number:
                 # it may have taken a serial. Write that off for the CA rather
@@ -4939,15 +5016,18 @@ def _finish_advance_refund(repo, coll, doc: Dict[str, Any], current_user: dict) 
         stamped = False
     if not stamped:
         raise HTTPException(status_code=503, detail=press_again)
+    completed_at = utc_now_iso()
     try:
         coll.update_one(
             {"return_id": return_id, "status": "PENDING"},
-            {"$set": {"status": "COMPLETED", "credit_entry": credit_entry, "completed_at": utc_now_iso()}},
+            {"$set": {"status": "COMPLETED", "credit_entry": credit_entry,
+                      "completed_at": completed_at, "created_at": completed_at}},
         )
     except Exception as exc:  # noqa: BLE001
         logger.error("[RETURNS] advance refund %s not completed: %s", return_id, exc)
         raise HTTPException(status_code=503, detail=press_again)
-    return {**doc, "status": "COMPLETED", "credit_note_number": number, "credit_entry": credit_entry}
+    return {**doc, "status": "COMPLETED", "credit_note_number": number, "credit_entry": credit_entry,
+            "completed_at": completed_at, "created_at": completed_at}
 
 
 @router.post("/advance-refund", status_code=201)
@@ -5025,10 +5105,23 @@ async def refund_advance_and_cancel(
             # Look once more right before freeing: a slow press may have just
             # written its record, which is then finished, never orphaned.
             doc = coll.find_one({"return_id": done_id})
-            if doc is None:
-                repo.update_if(order_id, {"advance_refund_id": done_id},
-                               {"advance_refund_id": None, "advance_refund_at": None})
+            # ONE conditional write: free the claim only while no press has
+            # stamped its record on the order (advance_refund_record). A press
+            # that stamped first wins; a press freed first fails its stamp and
+            # stops before any money -- the two can never interleave.
+            if doc is None and repo.update_if(
+                order_id, {"advance_refund_id": done_id, "advance_refund_record": None},
+                {"advance_refund_id": None, "advance_refund_at": None},
+            ):
                 order = repo.find_by_id(order_id) or {}
+            elif doc is None:
+                order = repo.find_by_id(order_id) or {}
+                doc = coll.find_one({"return_id": done_id})
+                if doc is None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="This refund is being recorded right now - wait a minute and reload.",
+                    )
         if doc is not None:
             # Finish whatever is not done: a PENDING record, or a COMPLETED one
             # whose order stamp did not land (a crash between the two).
@@ -5106,8 +5199,11 @@ async def refund_advance_and_cancel(
     return_id = generate_return_id()
     if not repo.update_if(
         order_id,
-        {"status": status, "advance_refund_id": None, "amount_paid": order.get("amount_paid")},
-        {"advance_refund_id": return_id, "advance_refund_at": utc_now_iso()},
+        # ...and the invoice state the plan read: an invoice minted in
+        # between would mean a refund with no credit note for it.
+        {"status": status, "advance_refund_id": None, "amount_paid": order.get("amount_paid"),
+         "invoice_number": order.get("invoice_number")},
+        {"advance_refund_id": return_id, "advance_refund_at": utc_now_iso(), "advance_refund_record": None},
     ):
         raise HTTPException(
             status_code=409,
@@ -5116,7 +5212,7 @@ async def refund_advance_and_cancel(
 
     def _unclaim():
         repo.update_if(order_id, {"advance_refund_id": return_id},
-                       {"advance_refund_id": None, "advance_refund_at": None})
+                       {"advance_refund_id": None, "advance_refund_at": None, "advance_refund_record": None})
 
     # A counter return reserves its units on the order BEFORE it writes its
     # doc, and refuses once it sees advance_refund_id (create_return); a
@@ -5136,6 +5232,7 @@ async def refund_advance_and_cancel(
         coll.count_documents({"order_id": order_id, "status": {"$ne": "VOIDED"}})
         or any(float((it or {}).get("returned_qty") or 0) > 0 for it in fresh.get("items") or [])
         or abs(float(fresh.get("amount_paid") or 0) - float(order.get("amount_paid") or 0)) > 0.005
+        or (fresh.get("invoice_number") or None) != (order.get("invoice_number") or None)
     ):
         _unclaim()
         raise HTTPException(
@@ -5187,7 +5284,11 @@ async def refund_advance_and_cancel(
         "refund_approval_status": "APPROVED",
         "created_by": current_user.get("user_id"),
         "created_by_name": actor_name,
+        # created_at is re-dated to the COMPLETION time when the refund
+        # completes (_finish_advance_refund): Day-End and the GST period read
+        # created_at, and a refund belongs to the day it went through.
         "created_at": now,
+        "claimed_at": now,
     }
     try:
         coll.insert_one(dict(doc))
@@ -5196,6 +5297,15 @@ async def refund_advance_and_cancel(
         _unclaim()  # nothing else was written yet
         raise HTTPException(
             status_code=503, detail="The refund could not be saved - nothing was recorded. Try again."
+        )
+    # Stamp the record on the order while the claim is still ours -- the
+    # same single write the stale-claim free conditions on. Lost (the claim
+    # was freed meanwhile): stop here, before any credit or note; the record
+    # wrote nothing else and is voided later.
+    if not repo.update_if(order_id, {"advance_refund_id": return_id}, {"advance_refund_record": return_id}):
+        raise HTTPException(
+            status_code=409,
+            detail="This refund's claim was released meanwhile - nothing was refunded. Reload and check.",
         )
 
     doc = _finish_advance_refund(repo, coll, doc, current_user)
