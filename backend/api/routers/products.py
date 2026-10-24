@@ -2249,6 +2249,7 @@ def _strip_attribution(products: List[Dict[str, Any]], current_user: dict):
     (GET /products, /products/{id}, /products/sku/{sku}). Returns the list."""
     if not _sees_attribution(current_user):
         for p in products:
+            _strip_attribution((p.get("family") or {}).get("members", []), current_user)
             for f in _ATTRIBUTION_ONLY:
                 p.pop(f, None)
     return products

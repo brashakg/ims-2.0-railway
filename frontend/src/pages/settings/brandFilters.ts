@@ -116,7 +116,7 @@ export function brandSavePayload(form: Partial<Brand>, original: Brand | null, s
     categories: form.categories || [],
     tier: form.tier || 'MASS',
     status: form.isActive ? 'ACTIVE' : 'INACTIVE',
-    sync_to_shopify_default: form.syncToShopifyDefault === true,
+    sync_to_shopify_default: !block && form.syncToShopifyDefault === true,
     ...(retakeDown || block !== (original?.neverSellOnline === true) ? { never_sell_online: block } : {}),
   };
 }

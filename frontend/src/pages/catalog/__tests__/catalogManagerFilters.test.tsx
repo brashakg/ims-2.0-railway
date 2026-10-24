@@ -708,6 +708,23 @@ describe('G1 - one row per model (owner 2026-10-18)', () => {
     fireEvent.click(screen.getByLabelText('Select all on this page'));
     expect(screen.getByTestId('selection-bar')).toHaveTextContent('3 items selected');
   });
+
+  it('shows each variant own editor and never borrows the model edit', async () => {
+    getProducts.mockResolvedValue({ products: [{
+      ...MODEL, updated_by: 'lead-editor', updated_by_name: 'Lead Editor', last_edited_at: '2026-10-23T10:00:00Z',
+      family: { ...MODEL.family, members: MODEL.family.members.map((m, i) => ({
+        ...m, created_at: '2026-10-01T10:00:00Z',
+        ...(i === 1 ? { updated_by: 'child-editor', updated_by_name: 'Child Editor', last_edited_at: '2026-10-22T10:00:00Z' } : {}),
+      })) },
+    }], total: 1, total_count: 1 });
+    renderAt();
+    fireEvent.click(await screen.findByTestId('family-toggle'));
+    const rows = screen.getAllByTestId('family-member-row');
+    expect(rows[1]).toHaveTextContent('Edited by Child Editor');
+    expect(rows[1]).not.toHaveTextContent('Lead Editor');
+    expect(rows[2]).toHaveTextContent('Not edited since');
+    expect(rows[2]).not.toHaveTextContent('Edited by');
+  });
 });
 
 describe('Save & next: the Catalog list hands the edit page its products', () => {

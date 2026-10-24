@@ -87,7 +87,9 @@ export function InventorySection({ form }: { form: QuickAddForm }) {
           backend; the create payload sends the resulting URLs). The id
           is the #images anchor the catalog list's "Add photo" lands on. */}
       <div id="product-images" className="mt-4 pt-4 border-t border-gray-100 scroll-mt-4">
-        <label className="block text-xs font-medium text-gray-700 mb-2">Product Images</label>
+        <label className="block text-xs font-medium text-gray-700 mb-2">
+          Photos: {images.length} added (website needs at least 1 usable photo)
+        </label>
         <div className="mb-3">
           <AngleGuide />
         </div>

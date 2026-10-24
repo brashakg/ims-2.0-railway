@@ -191,14 +191,14 @@ export const getHighestRoleLevel = (roles: string[]): number => {
 // server per the interface note above).
 export const CATEGORY_DEFINITIONS: Category[] = [
   { code: 'FR', name: 'Frame', shortName: 'Spectacles', attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'lensSize', 'bridgeWidth', 'templeLength'], isActive: true },
-  { code: 'SG', name: 'Sunglass', shortName: 'Sunglasses', attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'lensSize', 'bridgeWidth', 'templeLength'], isActive: true },
+  { code: 'SG', name: 'Sunglasses', shortName: 'Sunglasses', attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'lensSize', 'bridgeWidth', 'templeLength'], isActive: true },
   { code: 'CL', name: 'Contact Lens', shortName: 'Contact Lens', attributes: ['brandName', 'subbrand', 'modelNo', 'colourName', 'power', 'pack', 'expiryDate'], isActive: true },
   { code: 'LS', name: 'Optical Lens', shortName: 'Lens', attributes: ['brandName', 'subbrand', 'index', 'coating', 'addOn1', 'addOn2', 'addOn3', 'lensCategory'], isActive: true },
   { code: 'RG', name: 'Reading Glasses', shortName: 'Readers', attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'lensSize', 'bridgeWidth', 'templeLength', 'power'], isActive: true },
   { code: 'WT', name: 'Wrist Watch', shortName: 'Watch', attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'dialColour', 'beltColour', 'dialSize', 'beltSize', 'watchCategory'], isActive: true },
   { code: 'CK', name: 'Clock', shortName: 'Clock', attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'dialColour', 'bodyColour', 'dialSize', 'batterySize', 'clockCategory'], isActive: true },
   { code: 'HA', name: 'Hearing Aid', shortName: 'Hearing Aid', attributes: ['brandName', 'subbrand', 'modelNo', 'serialNo', 'machineCapacity', 'machineType'], isActive: true },
-  { code: 'SMTSG', name: 'Smart Sunglass', shortName: 'Smart Sunglasses', attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'lensSize', 'bridgeWidth', 'templeLength', 'yearOfLaunch'], isActive: true },
+  { code: 'SMTSG', name: 'Smart Sunglasses', shortName: 'Smart Sunglasses', attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'lensSize', 'bridgeWidth', 'templeLength', 'yearOfLaunch'], isActive: true },
   { code: 'SMTFR', name: 'Smart Glasses', shortName: 'Smart Glasses', attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'lensSize', 'bridgeWidth', 'templeLength', 'yearOfLaunch'], isActive: true },
   { code: 'SMTWT', name: 'Smart Watch', shortName: 'Smart Watch', attributes: ['brandName', 'subbrand', 'modelNo', 'colourCode', 'bodyColour', 'beltColour', 'dialSize', 'beltSize', 'yearOfLaunch'], isActive: true },
   { code: 'ACC', name: 'Accessories', shortName: 'Accessories', attributes: ['brandName', 'subbrand', 'modelNo', 'size', 'pack', 'expiryDate', 'addOn1'], isActive: true },

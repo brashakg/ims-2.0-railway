@@ -154,7 +154,7 @@ const weightInput = () => screen.getByTitle('Weight (g)') as HTMLInputElement;
 const copiedFlag = (el: HTMLElement) => /(^|\s)ring-amber-400(\s|$)/.test(el.className);
 
 async function sunglass(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(screen.getByText('Sunglass'));
+  await user.click(screen.getByText('Sunglasses'));
   fill(screen.getByLabelText(/^Brand Name/), 'Ray-Ban');
   fill(screen.getByLabelText(/^Model No/), 'RB4165');
   fill(screen.getByLabelText(/^Colour Code/), '601');
@@ -183,7 +183,7 @@ beforeEach(() => {
 describe('F12 / D6 - the brand default decides the website', () => {
   it('Add product has no Sync to Shopify switch', async () => {
     renderPage();
-    await screen.findByText('Sunglass');
+    await screen.findByText('Sunglasses');
     expect(screen.queryByLabelText('Sync to Shopify')).toBeNull();
   });
 
@@ -450,7 +450,7 @@ describe('F69 - the same-model chip', () => {
     // never '0RB4165' beside Model Name 'RB4165' under SG-RAYBAN-0RB4165-710.
     const user = userEvent.setup();
     renderPage();
-    await user.click(screen.getByText('Sunglass'));
+    await user.click(screen.getByText('Sunglasses'));
     fill(screen.getByLabelText(/^Brand Name/), 'Ray-Ban');
     fill(screen.getByLabelText(/^Model No/), '0RB4165');
     fill(screen.getByLabelText(/^Colour Code/), '710');

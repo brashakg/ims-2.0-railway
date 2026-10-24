@@ -74,7 +74,7 @@ const amber = (el: HTMLElement) => /(^|\s)ring-amber-400(\s|$)/.test(el.classNam
 const desc = () => screen.getByPlaceholderText('Optional product description…') as HTMLTextAreaElement;
 
 async function sunglass(user: ReturnType<typeof userEvent.setup>, colour = '601') {
-  await user.click(screen.getByText('Sunglass'));
+  await user.click(screen.getByText('Sunglasses'));
   fill(screen.getByLabelText(/^Brand Name/), 'Ray-Ban');
   fill(screen.getByLabelText(/^Model No/), 'RB4165');
   if (colour) fill(screen.getByLabelText(/^Colour Code/), colour);

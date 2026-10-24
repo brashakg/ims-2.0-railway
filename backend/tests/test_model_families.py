@@ -422,6 +422,33 @@ def test_grouped_list_one_row_per_model_filters_match_variants(db, list_cache):
     assert [p["product_id"] for p in out["products"]] == ["L", "C1", "C2", "S"]
 
 
+def test_grouped_members_keep_their_own_edit_and_live_editor_name(db, list_cache):
+    _seed(db, _frame("L", "001", minutes=0), _frame("C1", "002", minutes=1),
+          _frame("C2", "003", minutes=2))
+    pm.link_to_family(_Conn(db), "C1", "L")
+    pm.link_to_family(_Conn(db), "C2", "L")
+    db.users.insert_one({"user_id": "editor-child", "name": "Child Editor"})
+    db.products.update_one({"product_id": "L"}, {"$set": {
+        "updated_by": "editor-lead", "updated_by_name": "Lead Editor", "edited_at": T0,
+    }})
+    edited = T0 + timedelta(days=2)
+    db.products.update_one({"product_id": "C1"}, {"$set": {
+        "updated_by": "editor-child", "updated_by_name": "Old Child Name", "edited_at": edited,
+        "updated_at": T0 + timedelta(days=10),
+    }})
+    out = _list(sort="oldest", group="model")
+    members = {m["product_id"]: m for m in out["products"][0]["family"]["members"]}
+    assert members["L"]["updated_by_name"] == "Lead Editor"
+    assert members["C1"]["updated_by_name"] == "Child Editor"
+    assert members["C1"]["last_edited_at"].replace(tzinfo=timezone.utc) == edited
+    assert not members["C2"]["updated_by"]
+    counter = _list(sort="oldest", group="model", current_user={"roles": ["SALES_STAFF"]})
+    for member in counter["products"][0]["family"]["members"]:
+        assert "updated_by" not in member
+        assert "updated_by_name" not in member
+        assert "created_by" not in member
+
+
 def test_the_till_lookup_of_a_variant_is_its_own_sku_and_price(db):
     _seed(db, _frame("L", "001", mrp=5000), _frame("C", "002", minutes=1, mrp=6500))
     pm.link_to_family(_Conn(db), "C", "L")

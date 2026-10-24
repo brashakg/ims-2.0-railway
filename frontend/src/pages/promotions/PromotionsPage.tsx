@@ -263,7 +263,7 @@ export default function PromotionsPage() {
                 <input
                   value={form.name}
                   onChange={(e) => update('name', e.target.value)}
-                  placeholder="e.g. Watch + Sunglass 10% bundle"
+                  placeholder="e.g. Watch + Sunglasses 10% bundle"
                   className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm"
                 />
               </div>

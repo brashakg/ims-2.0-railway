@@ -91,7 +91,7 @@ const fill = (el: HTMLElement, value: string) => fireEvent.change(el, { target: 
 
 async function typeTheSunglass() {
   const user = userEvent.setup();
-  await user.click(screen.getByText('Sunglass'));
+  await user.click(screen.getByText('Sunglasses'));
   fill(screen.getByLabelText(/^Brand Name/), 'Ray-Ban');
   fill(screen.getByLabelText(/^Model No/), 'RB4165');
   fill(screen.getByLabelText(/^Colour Code/), '601');
