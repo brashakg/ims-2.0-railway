@@ -474,7 +474,11 @@ def undo_handover_if_order_refunded(repo, job: dict, previous_status: str) -> bo
         return False
     back = "CANCELLED" if status in ("CANCELLED", "CANCELED") else previous_status
     try:
-        repo.update(job.get("job_id"), {"status": back, "handover_undone": "order refunded or cancelled"})
+        repo.collection.update_one(
+            {"job_id": job.get("job_id")},
+            {"$set": {"status": back, "handover_undone": "order refunded or cancelled"},
+             "$unset": {"delivered_at": "", "picked_up_by_name": "", "picked_up_by_phone": ""}},
+        )
     except Exception as exc:  # noqa: BLE001
         logger.error("[WORKSHOP] job %s handover NOT undone: %s", job.get("job_id"), exc)
     return True
