@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Promotions admin (F11 advanced promotions + F12 cross-category bundles)
 // ============================================================================
@@ -111,7 +112,7 @@ export default function PromotionsPage() {
       setForm(emptyForm);
       load();
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || 'Could not create rule');
+      toast.error(getErrorMessage(e, 'Could not create rule'));
     } finally {
       setSaving(false);
     }

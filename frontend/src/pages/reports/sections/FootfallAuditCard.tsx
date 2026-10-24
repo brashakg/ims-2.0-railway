@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — TechCherry R1.1 — Footfall Audit
 // ============================================================================
@@ -24,7 +25,7 @@ export function FootfallAuditCard({ storeId }: { storeId?: string }) {
     setError(null);
     reportsApi.getFootfallAudit(storeId, 6)
       .then(setData)
-      .catch(e => setError(e?.response?.data?.detail || e?.message || 'Failed to load'))
+      .catch(e => setError(getErrorMessage(e, 'Failed to load')))
       .finally(() => setLoading(false));
   }, [storeId]);
 

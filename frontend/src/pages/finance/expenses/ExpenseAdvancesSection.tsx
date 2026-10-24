@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../../utils/errorHandler';
 // /finance/expenses/advances -- Advances (every signed-in user; the server
 // decides whose rows come back). Moved byte-identical from the old
 // ExpenseTracker 'advances' tab, with its loader, handlers and request modal.
@@ -15,7 +16,7 @@ import {
   type AdvanceRecord,
 } from '../../../services/api/expenses';
 import { formatDateIST } from '../../../utils/datetime';
-import { fc, useExpensesContext, type ApiError } from './expenseShared';
+import { fc, useExpensesContext } from './expenseShared';
 import { Labeled } from './expenseWidgets';
 
 const ADVANCE_STATUS_META: Record<string, { label: string; badge: string }> = {
@@ -77,12 +78,7 @@ export function ExpenseAdvancesSection() {
     } catch (err) {
       // The backend blocks a second unsettled advance (400) and refuses a
       // reason that is not on the list (422). Show what it said.
-      const e = err as ApiError;
-      const d = e?.response?.data?.detail;
-      const msg = typeof d === 'string' ? d
-        : Array.isArray(d) ? (d[0] as { msg?: string })?.msg || 'Check the form and try again'
-        : 'Failed to request advance';
-      toast.error(msg);
+      toast.error(getErrorMessage(err, 'Failed to request advance'));
     } finally {
       setSaving(false);
     }
@@ -91,9 +87,7 @@ export function ExpenseAdvancesSection() {
   const advanceAction = async (fn: () => Promise<unknown>, ok: string) => {
     try { await fn(); toast.success(ok); await loadAdvances(); }
     catch (err) {
-      const e = err as ApiError;
-      const d = e?.response?.data?.detail;
-      toast.error(typeof d === 'string' ? d : 'Action failed');
+      toast.error(getErrorMessage(err, 'Action failed'));
     }
   };
 

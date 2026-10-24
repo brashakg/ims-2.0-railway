@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Settings: TDS Rates (SUPERADMIN editable)
 // ============================================================================
@@ -72,8 +73,7 @@ export function TdsRatesSection() {
       toast.success('TDS rates updated');
       await load();
     } catch (e: any) {
-      const detail = e?.response?.data?.detail;
-      toast.error(typeof detail === 'string' ? detail : 'Could not save TDS rates');
+      toast.error(getErrorMessage(e, 'Could not save TDS rates'));
     } finally {
       setSaving(false);
     }

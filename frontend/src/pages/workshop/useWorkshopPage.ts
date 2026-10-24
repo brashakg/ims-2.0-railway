@@ -1,3 +1,4 @@
+import { getErrorDetail, getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Workshop Page - state, loaders and handlers
 // ============================================================================
@@ -269,7 +270,7 @@ const loadJobs = async () => {
       }
     } catch (err: any) {
       // F9 — surface the DC hardlock as an actionable banner inside the modal.
-      const detail = err?.response?.data?.detail;
+      const detail = getErrorDetail(err) as string | { code?: string; message?: string } | undefined;
       const code = typeof detail === 'object' ? detail?.code : undefined;
       if (code === 'DC_HARDLOCK' || code === 'DC_HARDLOCK_OVERRIDE_FORBIDDEN') {
         setDcHardlock(
@@ -281,7 +282,7 @@ const loadJobs = async () => {
         // plain-string detail. The wrong-patient sentence and the "a Store
         // Manager must approve" instruction are the most important strings this
         // screen can show — a generic toast hid both and left staff retrying.
-        toast.error(typeof detail === 'string' ? detail : 'Failed to create workshop job');
+        toast.error(getErrorMessage(err, 'Failed to create workshop job'));
       }
     } finally {
       setCreateLoading(false);
@@ -401,8 +402,7 @@ const loadJobs = async () => {
         }
       }
     } catch (err) {
-      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
-        ?? 'Failed to record QC';
+      const msg = getErrorMessage(err, 'Failed to record QC');
       toast.error(msg);
     } finally {
       setQcBusy(false);
@@ -453,8 +453,7 @@ const loadJobs = async () => {
       setSelectedJob(null);
       await loadJobs();
     } catch (err) {
-      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
-        ?? 'Failed to send job for rework';
+      const msg = getErrorMessage(err, 'Failed to send job for rework');
       toast.error(msg);
     } finally {
       setQcBusy(false);
@@ -471,8 +470,7 @@ const loadJobs = async () => {
       setSelectedJob(null);
       await loadJobs();
     } catch (err) {
-      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
-        ?? 'Failed to update lens status';
+      const msg = getErrorMessage(err, 'Failed to update lens status');
       toast.error(msg);
     } finally {
       setLensBusy(false);

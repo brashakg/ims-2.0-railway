@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Contact Lens Fitting Page
 // ============================================================================
@@ -197,8 +198,7 @@ export function ContactLensFittingPage() {
       resetForm();
       loadFittings(selected.id);
     } catch (err: any) {
-      const detail = err?.response?.data?.detail;
-      toast.error(typeof detail === 'string' ? detail : 'Could not save the fitting');
+      toast.error(getErrorMessage(err, 'Could not save the fitting'));
     } finally {
       setSubmitting(false);
     }

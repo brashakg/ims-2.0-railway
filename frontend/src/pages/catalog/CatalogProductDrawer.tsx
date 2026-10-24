@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Catalog Manager: product slide-over drawer
 // ============================================================================
@@ -297,7 +298,7 @@ export function CatalogProductDrawer({
       }
     } catch (e: any) {
       toast.error(
-        `${name}: push failed — ${e?.response?.data?.detail || e?.message || 'error'}`,
+        `${name}: push failed — ${getErrorMessage(e, 'error')}`,
       );
     } finally {
       setPushingEcom(false);

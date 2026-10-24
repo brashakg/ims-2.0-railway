@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Cataloguing Scorecard + QC review (attribution phase 2)
 // ============================================================================
@@ -191,8 +192,7 @@ export default function CataloguingScorecardPage() {
       await loadQc();
     } catch (err: unknown) {
       const msg =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
-        'Failed to generate the QC sample.';
+        getErrorMessage(err, 'Failed to generate the QC sample.');
       toast.error(typeof msg === 'string' ? msg : 'Failed to generate the QC sample.');
     } finally {
       setGenerating(false);
@@ -219,8 +219,7 @@ export default function CataloguingScorecardPage() {
       await loadQc();
     } catch (err: unknown) {
       const msg =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
-        'Failed to save the verdict.';
+        getErrorMessage(err, 'Failed to save the verdict.');
       toast.error(typeof msg === 'string' ? msg : 'Failed to save the verdict.');
     } finally {
       setSavingVerdict(null);

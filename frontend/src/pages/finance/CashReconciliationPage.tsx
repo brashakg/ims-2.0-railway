@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Cash-register vs blind-EOD reconciliation console (#7)
 // ============================================================================
@@ -144,7 +145,7 @@ export default function CashReconciliationPage() {
       setData(res);
     } catch (e: unknown) {
       const msg =
-        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        getErrorMessage(e, '') ||
         (e instanceof Error ? e.message : 'Failed to load reconciliation');
       toast.error(msg);
       setData(null);
@@ -181,7 +182,7 @@ export default function CashReconciliationPage() {
       await load();
     } catch (e: unknown) {
       const msg =
-        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        getErrorMessage(e, '') ||
         (e instanceof Error ? e.message : 'Could not record sign-off');
       toast.error(msg);
     } finally {

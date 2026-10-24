@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Settings: Profile & Business Settings
 // ============================================================================
@@ -387,7 +388,7 @@ export function BusinessSection() {
       }
       toast.success('Logo uploaded');
     } catch (err) {
-      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      const detail = getErrorMessage(err, '');
       toast.error(detail || 'Failed to upload logo');
     } finally {
       setUploadingLogo(false);

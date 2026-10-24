@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Online Store - Collections editor  (BVI Phase 2, "push-dark")
 // ============================================================================
@@ -286,7 +287,7 @@ export default function CollectionsPage() {
       }
     } catch (e: any) {
       toast.error(
-        e?.response?.data?.detail || e?.message || 'Could not publish collection',
+        getErrorMessage(e, 'Could not publish collection'),
       );
     } finally {
       setPublishingId(null);
@@ -352,7 +353,7 @@ export default function CollectionsPage() {
       await load();
     } catch (e: any) {
       toast.error(
-        e?.response?.data?.detail || e?.message || 'Could not update the online-block',
+        getErrorMessage(e, 'Could not update the online-block'),
       );
     } finally {
       setBlockingId(null);

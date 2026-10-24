@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Online Store - Refund reviews  (Shopify refund -> GST credit note)
 // ============================================================================
@@ -255,9 +256,7 @@ export default function RefundReviewsPage() {
         await load();
       } catch (e) {
         const msg =
-          (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
-          (e as Error)?.message ||
-          'Action failed';
+          getErrorMessage(e, 'Action failed');
         toast.error(typeof msg === 'string' ? msg : 'Action failed');
       } finally {
         setActingId(null);

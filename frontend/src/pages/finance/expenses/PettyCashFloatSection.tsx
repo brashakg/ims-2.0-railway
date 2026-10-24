@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../../utils/errorHandler';
 // /finance/expenses/float -- F17 Petty Cash Float (manager / area-manager /
 // accountant / admin; route-gated). CASH SURFACE: its loader, handler and
 // modal are moved byte-identical from the old ExpenseTracker 'float' tab and
@@ -10,7 +11,7 @@ import { useAuth } from '../../../context/AuthContext';
 import { useToast } from '../../../context/ToastContext';
 import { expensesApi, type PettyCashBalance } from '../../../services/api/expenses';
 import { formatDateIST } from '../../../utils/datetime';
-import { fc, useExpensesContext, type ApiError } from './expenseShared';
+import { fc, useExpensesContext } from './expenseShared';
 import { Labeled } from './expenseWidgets';
 
 export function PettyCashFloatSection() {
@@ -61,9 +62,7 @@ export function PettyCashFloatSection() {
       setShowFloatModal(null); setFloatAmount(''); setFloatReason('');
       await loadFloat();
     } catch (err) {
-      const e = err as ApiError;
-      const d = e?.response?.data?.detail;
-      toast.error(typeof d === 'string' ? d : 'Float update failed');
+      toast.error(getErrorMessage(err, 'Float update failed'));
     } finally {
       setSaving(false);
     }

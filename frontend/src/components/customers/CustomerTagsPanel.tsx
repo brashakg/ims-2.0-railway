@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - F39 Customer tags panel (Customer 360)
 // ============================================================================
@@ -65,7 +66,7 @@ export function CustomerTagsPanel({
       setMsg('Suggested. A manager will review it.');
       await loadSuggestions();
     } catch (e: any) {
-      setMsg(e?.response?.data?.detail || 'Could not suggest tag.');
+      setMsg(getErrorMessage(e, 'Could not suggest tag.'));
     } finally {
       setBusy(false);
     }

@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Clinic Prescription History + Edit (per customer)
 // ============================================================================
@@ -334,7 +335,7 @@ export function ClinicPrescriptionHistory({
       setEditingRx(null);
       await load();
     } catch (err: any) {
-      const detail = err?.response?.data?.detail || err?.message || 'Failed to save prescription';
+      const detail = getErrorMessage(err, 'Failed to save prescription');
       setFormError(typeof detail === 'string' ? detail : 'Failed to save prescription');
     } finally {
       setSaving(false);

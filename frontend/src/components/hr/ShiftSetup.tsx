@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // Shift Setup (HR Page - "Shifts" tab)
 // ============================================================================
@@ -86,7 +87,7 @@ export function ShiftSetup() {
       setName('');
       await loadShifts();
     } catch (err: any) {
-      toast.error(err?.response?.data?.detail || 'Failed to create shift');
+      toast.error(getErrorMessage(err, 'Failed to create shift'));
     } finally {
       setSaving(false);
     }
@@ -103,7 +104,7 @@ export function ShiftSetup() {
       toast.success('Shift assigned to employee');
       setAssignEmployeeId('');
     } catch (err: any) {
-      toast.error(err?.response?.data?.detail || 'Failed to assign shift');
+      toast.error(getErrorMessage(err, 'Failed to assign shift'));
     } finally {
       setAssigningFor(null);
     }

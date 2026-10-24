@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Online Store - Image Design Queue  (BVI Phase 4, "push-dark")
 // ============================================================================
@@ -313,7 +314,7 @@ export default function DesignQueuePage() {
         bannerRef.current?.refresh();
       }
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || e?.message || 'Could not publish image');
+      toast.error(getErrorMessage(e, 'Could not publish image'));
     } finally {
       setPublishingId(null);
     }

@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // E2 - Policy Matrix (schema-driven form)
 // The /settings/policies/registry response IS the form definition: every control
@@ -113,7 +114,7 @@ export function PolicySchemaForm({ storeId }: { storeId?: string }) {
       setEffective((prev) => ({ ...prev, [spec.key]: res }));
       toast.success(`${spec.label} saved (${res.source})`);
     } catch (err: any) {
-      const msg = err?.response?.data?.detail || (err instanceof SyntaxError ? 'Invalid JSON' : 'Save failed');
+      const msg = getErrorMessage(err, err instanceof SyntaxError ? 'Invalid JSON' : 'Save failed');
       toast.error(msg);
     } finally {
       setSavingKey(null);
@@ -128,7 +129,7 @@ export function PolicySchemaForm({ storeId }: { storeId?: string }) {
       setEdits((prev) => ({ ...prev, [spec.key]: spec.secret ? '' : toDisplay(spec, res.value) }));
       toast.success(`${spec.label} override cleared`);
     } catch (err: any) {
-      toast.error(err?.response?.data?.detail || 'Clear failed');
+      toast.error(getErrorMessage(err, 'Clear failed'));
     } finally {
       setSavingKey(null);
     }

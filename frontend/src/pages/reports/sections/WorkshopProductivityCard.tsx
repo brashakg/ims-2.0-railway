@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Workshop Productivity Report
 // ============================================================================
@@ -41,7 +42,7 @@ export function WorkshopProductivityCard({ storeId }: { storeId?: string }) {
     reportsApi
       .getWorkshopProductivity(storeId, fromDate, toDate)
       .then(setData)
-      .catch((e) => setError(e?.response?.data?.detail || e?.message || 'Failed to load'))
+      .catch((e) => setError(getErrorMessage(e, 'Failed to load')))
       .finally(() => setLoading(false));
   };
 

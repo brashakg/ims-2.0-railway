@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Workshop: vendor / lens-lab capture block
 // ============================================================================
@@ -89,8 +90,7 @@ export function VendorCaptureBlock({ job, onSaved }: { job: Job; onSaved: () => 
       onSaved();
     } catch (err) {
       const msg =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
-        'Failed to save vendor details';
+        getErrorMessage(err, 'Failed to save vendor details');
       toast.error(msg);
     } finally {
       setSaving(false);
@@ -115,8 +115,7 @@ export function VendorCaptureBlock({ job, onSaved }: { job: Job; onSaved: () => 
       onSaved();
     } catch (err) {
       const msg =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
-        'Failed to log vendor status';
+        getErrorMessage(err, 'Failed to log vendor status');
       toast.error(msg);
     } finally {
       setSaving(false);

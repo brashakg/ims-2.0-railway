@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Loyalty engine settings (SUPERADMIN only — write)
 // ============================================================================
@@ -95,8 +96,7 @@ export function LoyaltySettingsSection() {
       toast.success('Loyalty settings updated');
     } catch (err) {
       const msg =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
-        'Save failed';
+        getErrorMessage(err, 'Save failed');
       toast.error(msg);
     } finally {
       setSaving(false);

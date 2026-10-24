@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Suppliers List Panel
 // ============================================================================
@@ -249,8 +250,7 @@ function PortalTokenModal({
       toast.success(`Portal link generated for ${vendorName}`);
     } catch (err: unknown) {
       const msg =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
-        'Failed to generate token';
+        getErrorMessage(err, 'Failed to generate token');
       toast.error(msg);
     } finally {
       setGenerating(false);

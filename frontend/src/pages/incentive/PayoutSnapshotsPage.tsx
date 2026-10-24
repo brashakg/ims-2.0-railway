@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Payout Snapshots List (Pune Incentive Module iii)
 // ============================================================================
@@ -29,7 +30,7 @@ export function PayoutSnapshotsPage() {
       const r = await payoutApi.list(year);
       setItems(r.items || []);
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || 'Failed to load';
+      const msg = getErrorMessage(e, 'Failed to load');
       toast.error(typeof msg === 'string' ? msg : 'Failed to load');
     } finally {
       setLoading(false);
