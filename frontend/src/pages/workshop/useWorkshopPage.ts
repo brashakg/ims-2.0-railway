@@ -1,4 +1,4 @@
-import { getErrorDetail, getErrorMessage } from '../../utils/errorHandler';
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Workshop Page - state, loaders and handlers
 // ============================================================================
@@ -270,7 +270,7 @@ const loadJobs = async () => {
       }
     } catch (err: any) {
       // F9 — surface the DC hardlock as an actionable banner inside the modal.
-      const detail = getErrorDetail(err) as string | { code?: string; message?: string } | undefined;
+      const detail = err?.response?.data?.detail;
       const code = typeof detail === 'object' ? detail?.code : undefined;
       if (code === 'DC_HARDLOCK' || code === 'DC_HARDLOCK_OVERRIDE_FORBIDDEN') {
         setDcHardlock(

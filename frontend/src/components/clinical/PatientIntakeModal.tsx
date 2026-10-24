@@ -231,7 +231,7 @@ export function PatientIntakeModal({
           const created = await customerApi.createCustomer(payload as any);
           customerId = created?.customer_id || created?.id;
         } catch (err: any) {
-          const detail: string = getErrorMessage(err, '');
+          const detail: string = err?.response?.data?.detail ?? err?.message ?? '';
           if (/already exists/i.test(detail)) {
             existing = await lookup();
             if (existing) {
