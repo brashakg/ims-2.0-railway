@@ -687,7 +687,7 @@ async def sync_live_products(
     by_id = {(d.get("id") or d.get("product_id")): d for d in dirty}
     failures = []
     for r in results:
-        if r.get("ok") and r.get("code") in (None, "", shopify_push.PHOTOS_NOT_SYNCED):
+        if r.get("ok") and not r.get("code"):
             continue
         doc = by_id.get(r.get("target_id"), {})
         failures.append(
@@ -703,6 +703,13 @@ async def sync_live_products(
 
     # Collect independently: a partial variant warning or another failure
     # must not hide this first-pass photo state (or vice versa).
+    pending_photo_ids = {
+        result.get("target_id") for result in results
+        if result.get("ok") and result.get("code") == shopify_push.PHOTOS_NOT_SYNCED
+    }
+    failures = [entry for entry in failures
+                if entry.get("code") != shopify_push.PHOTOS_NOT_SYNCED
+                or entry.get("product_id") not in pending_photo_ids]
     photo_warnings = []
     for result in results:
         if shopify_push.photo_sync_state(result) != "pending":
