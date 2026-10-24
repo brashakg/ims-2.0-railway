@@ -17,6 +17,7 @@ from ._shared import (
     PRICE_NOT_SYNCED,
     _PRICE_NOT_SYNCED_MSG,
     PHOTOS_NOT_SYNCED,
+    PHOTOS_SYNC_FAILED,
     _PHOTOS_NOT_SYNCED_MSG,
     PushResult,
     _blocked_result,
@@ -912,20 +913,30 @@ async def push_product(
         # failing re-queues the listing for PHOTO_RETRY_CAP runs, then the
         # press says so and stops re-queueing it (a person must look). A
         # clean photo pass resets the count.
-        photo_line = (
-            _PHOTOS_NOT_SYNCED_MSG
-            if (photo_summary or {}).get("error")
-            else (variant_photo_summary or {}).get("error")
-        )
+        photo_line = _PHOTOS_NOT_SYNCED_MSG
         photo_requeue = photos_not_synced
+        tries = 0
         if pid and new_gid:
             tries = _count_photo_tries(db, pid, failed=photos_not_synced)
+            if photos_not_synced and tries >= 2:
+                photo_line = (
+                    f"Photos did not finish after {tries} consecutive sync runs -- "
+                    "check the photographs; the next sync retries them."
+                )
             if photos_not_synced and tries >= PHOTO_RETRY_CAP:
                 photo_requeue = False
                 photo_line = (
-                    f"{photo_line} -- tried {tries} times; it is no longer re-queued for its "
+                    f"Photos did not finish -- tried {tries} times; it is no longer re-queued for its "
                     "photos: check the photographs, then press Send to website"
                 )
+        photo_failed = photos_not_synced and tries >= 2
+        photo_summary = {
+            **(photo_summary or {}),
+            "sync_state": "failed" if photo_failed else "pending" if photos_not_synced else "synced",
+            "consecutive_incomplete": tries,
+            "message": photo_line if photos_not_synced else None,
+            "variant_error": (variant_photo_summary or {}).get("error"),
+        }
         # A colour held back from this LIVE listing (no price, no colour or
         # size, looks the same as another): named by SKU, the rest was sent.
         held = list((listing or {}).get("held") or [])
@@ -982,11 +993,12 @@ async def push_product(
                 (
                     PRICE_NOT_SYNCED
                     if price_not_synced
-                    else PHOTOS_NOT_SYNCED
-                    if photos_not_synced
+                    else PHOTOS_SYNC_FAILED
+                    if photo_failed
                     else ((stock_summary or {}).get("code") if stock_not_written else None)
                 )
                 or (held[0]["code"] if held else None)
+                or (PHOTOS_NOT_SYNCED if photos_not_synced else None)
                 if published_ok
                 else (pub_summary or {}).get("code")
             ),

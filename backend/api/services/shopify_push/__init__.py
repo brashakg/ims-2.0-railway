@@ -162,6 +162,8 @@ from ._shared import (  # noqa: F401
     PRICE_NOT_SYNCED,
     _PRICE_NOT_SYNCED_MSG,
     PHOTOS_NOT_SYNCED,
+    PHOTOS_SYNC_FAILED,
+    photo_sync_state,
     _PHOTOS_NOT_SYNCED_MSG,
 )
 from .transport import (  # noqa: F401
