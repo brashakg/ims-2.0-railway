@@ -697,7 +697,12 @@ async def push_all_pending(
             # beside `pushed` instead of the summary line saying nothing.
             if (data.get("stock") or {}).get("sold_out"):
                 bucket["sold_out"] = bucket.get("sold_out", 0) + 1
-            if data.get("code") == shopify_push.PRICE_NOT_SYNCED:
+            if data.get("code") == "OPTION_MISSING":
+                # The complete family members are live; omitted options are
+                # catalogue warnings, not evidence of a stock write failure.
+                held = (data.get("listing") or {}).get("held") or []
+                bucket["variants_held"] = bucket.get("variants_held", 0) + len(held)
+            elif data.get("code") == shopify_push.PRICE_NOT_SYNCED:
                 # Live, but the price step failed: the product IS on the
                 # storefront (so it is pushed), at the OLD price (so it gets
                 # its own line and stays queued -- see push_product).

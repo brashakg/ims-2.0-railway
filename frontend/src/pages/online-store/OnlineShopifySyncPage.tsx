@@ -199,6 +199,7 @@ function sweepToast(
   const heldDown = n('taken_down_skipped');
   const archived = n('archived_not_listed');
   const oldPrice = n('price_not_synced');
+  const variantsHeld = n('variants_held');
   // LIVE, BUT ITS PHOTOS ARE NOT IMS's (a photo step failed): still queued,
   // and the website's photo 1 may not be the main photo IMS shows.
   const oldPhotos = n('photos_not_synced');
@@ -248,6 +249,7 @@ function sweepToast(
     (withheld ? ` · ${withheld} NOT made visible` : '') +
     (heldDown ? ` · ${heldDown} skipped (taken down)` : '') +
     (archived ? ` · ${archived} archived (not listed)` : '') +
+    (variantsHeld ? ` · ${variantsHeld} colours/sizes left off (incomplete options)` : '') +
     (oldPrice ? ` · ${oldPrice} at the OLD price (price not synced)` : '') +
     (oldPhotos ? ` · ${oldPhotos} photos still attaching — will finish on the next sync` : '') +
     (photosFailed ? ` · ${photosFailed} live with photos FAILED (check the photographs)` : '') +
@@ -256,7 +258,8 @@ function sweepToast(
     (soldOut ? ` · ${soldOut} live and SOLD OUT (0 at every shop)` : '') +
     why +
     stockPassLine;
-  const bad = refused || withheld || oldPhotos || photosFailed || noStock || stockWarn || stockPassBad || failed;
+  const bad =
+    refused || withheld || variantsHeld || oldPhotos || photosFailed || noStock || stockWarn || stockPassBad || failed;
   return { level: bad ? 'warning' : 'success', msg };
 }
 
@@ -1206,6 +1209,15 @@ export default function OnlineShopifySyncPage() {
                             title="These reached Shopify but were NOT made visible (no Online Store channel, the photograph did not attach, or the price could not be proved). They are still queued — fix the cause and press again."
                           >
                             <AlertTriangle className="w-3 h-3" /> {fmt(withheld)} NOT made visible
+                          </span>
+                        ) : null;
+                      })()}
+                      {(() => {
+                        const variantsHeld = Number(sweep.summary?.[ent.token]?.variants_held ?? 0);
+                        return variantsHeld > 0 ? (
+                          <span className="inline-flex items-center gap-1 text-amber-700">
+                            <AlertTriangle className="w-3 h-3" /> {fmt(variantsHeld)} colours/sizes left
+                            off (incomplete options)
                           </span>
                         ) : null;
                       })()}
