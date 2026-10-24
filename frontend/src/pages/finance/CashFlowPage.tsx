@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Owner Cash-Flow + Accounts-Payable (SUPERADMIN / ADMIN / ACCOUNTANT)
 // ============================================================================
@@ -26,17 +27,7 @@ const inr = (n?: number) => `₹${Math.round(n || 0).toLocaleString('en-IN')}`;
 const AP_BUCKETS = ['current', '1_30', '31_60', '61_90', '90_plus'];
 const AP_LABELS: Record<string, string> = { current: 'Current', '1_30': '1-30d', '31_60': '31-60d', '61_90': '61-90d', '90_plus': '90+ d' };
 
-function errMsg(e: unknown, fb: string) {
-  if (e && typeof e === 'object' && 'response' in e) {
-    const r = (e as { response?: { data?: { detail?: string | { message?: string } } } }).response;
-    const d = r?.data?.detail;
-    // Structured refusals ({code, message}) carry their text in .message —
-    // rendering the raw object printed "[object Object]" in the toast.
-    if (typeof d === 'string') return d;
-    if (d && typeof d === 'object' && d.message) return d.message;
-  }
-  return e instanceof Error ? e.message : fb;
-}
+const errMsg = getErrorMessage;
 
 type Tab = 'overview' | 'forecast' | 'aging';
 

@@ -8,17 +8,62 @@ export interface FormattedError {
   action?: string;
 }
 
+type ErrorShape = {
+  status?: number;
+  detail?: unknown;
+  message?: unknown;
+  response?: { status?: number; data?: { detail?: unknown; message?: unknown } };
+};
+
+function errorShape(error: unknown): ErrorShape | undefined {
+  return error && typeof error === 'object' ? error as ErrorShape : undefined;
+}
+
+/** Read the shared client's ApiError, with support for raw axios adapters. */
+export function getErrorStatus(error: unknown): number | undefined {
+  const value = errorShape(error);
+  return value?.status ?? value?.response?.status;
+}
+
+export function getErrorDetail(error: unknown): unknown {
+  const value = errorShape(error);
+  // Canonical errors deliberately omit 5xx payloads. Never reconstruct one.
+  return value?.detail ?? value?.response?.data?.detail;
+}
+
+/** One plain-text message for every screen; structured details never reach JSX. */
+export function getErrorMessage(error: unknown, fallback: string): string {
+  const value = errorShape(error);
+  const detail = getErrorDetail(error);
+  if (typeof detail === 'string' && detail.trim()) return detail;
+  if (Array.isArray(detail) && detail.length > 0) {
+    const first = detail[0] as { loc?: unknown[]; msg?: unknown } | null;
+    if (typeof first?.msg === 'string' && first.msg.trim()) {
+      const field = Array.isArray(first.loc) ? String(first.loc[first.loc.length - 1] ?? '') : '';
+      return field ? `${field}: ${first.msg}` : first.msg;
+    }
+  }
+  if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
+    const payload = detail as { message?: unknown; error?: unknown };
+    const message = payload.message ?? payload.error;
+    if (typeof message === 'string' && message.trim()) return message;
+  }
+  if (typeof value?.message === 'string' && value.message.trim()) return value.message;
+  if (typeof error === 'string' && error.trim()) return error;
+  return fallback;
+}
+
 /**
  * True when the API refused the request on PERMISSIONS (HTTP 403).
  *
- * Reads the axios error shape the pages actually receive, rather than
+ * Reads the ApiError status (or a raw axios adapter), rather than
  * string-matching a message. Callers use this to show an explicit
  * "you do not have access" state instead of an empty table or a generic
  * "failed to load" -- an empty payroll table reads as "no employees were paid",
  * which is a data-integrity lie, not a permissions message.
  */
 export function isForbiddenError(error: unknown): boolean {
-  return (error as { response?: { status?: number } })?.response?.status === 403;
+  return getErrorStatus(error) === 403;
 }
 
 /**
@@ -35,8 +80,7 @@ export function isForbiddenError(error: unknown): boolean {
  * that shape are dropped in favour of the caller's plain-English fallback.
  */
 export function forbiddenDetail(error: unknown, fallback: string): string {
-  const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data
-    ?.detail;
+  const detail = getErrorDetail(error);
   if (typeof detail !== 'string' || !detail.trim()) return fallback;
   const looksLikeMiddlewareText = /^forbidden:/i.test(detail.trim()) || detail.includes('/api/v1/');
   return looksLikeMiddlewareText ? fallback : detail;
@@ -53,18 +97,8 @@ export function forbiddenDetail(error: unknown, fallback: string): string {
  * recording and the clinic's Edit screen -- and a clinician must not be told
  * WHICH FIELD is wrong on one of them and "failed to save" on the other.
  */
-export function apiDetailMessage(error: unknown, fallback: string): string {
-  const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data
-    ?.detail;
-  if (typeof detail === 'string' && detail.trim()) return detail;
-  if (Array.isArray(detail) && detail.length > 0) {
-    const first = detail[0] as { loc?: unknown[]; msg?: string };
-    const field = Array.isArray(first?.loc) ? String(first.loc[first.loc.length - 1]) : '';
-    const msg = first?.msg || 'invalid value';
-    return field ? `${field}: ${msg}` : msg;
-  }
-  return fallback;
-}
+// Kept as an alias for existing clinical callers; no second message parser.
+export const apiDetailMessage = getErrorMessage;
 
 export function formatApiError(error: unknown): FormattedError {
   if (error instanceof Error) {

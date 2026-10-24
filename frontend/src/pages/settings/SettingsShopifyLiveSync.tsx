@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Shopify live sync — Settings section (SUPERADMIN)
 // ============================================================================
@@ -120,7 +121,7 @@ export function ShopifyLiveSyncSection() {
       toast.success('Shopify live sync settings saved. The scheduler reads them on its next tick.');
       await load();
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || e?.message || 'Failed to save live sync settings');
+      toast.error(getErrorMessage(e, 'Failed to save live sync settings'));
     } finally {
       setSaving(false);
     }

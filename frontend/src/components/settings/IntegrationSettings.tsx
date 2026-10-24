@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Integration Settings (supplementary panel)
 // ============================================================================
@@ -90,8 +91,7 @@ function TallyExportsPanel() {
       toast.success(`Downloaded voucher XML for ${storeCode}`);
     } catch (err: unknown) {
       const message =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
-        `Failed to download voucher for ${storeCode}`;
+        getErrorMessage(err, `Failed to download voucher for ${storeCode}`);
       toast.error(message);
     } finally {
       setDownloadingId(null);
@@ -111,8 +111,7 @@ function TallyExportsPanel() {
       }
     } catch (err: unknown) {
       const message =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
-        'Failed to regenerate';
+        getErrorMessage(err, 'Failed to regenerate');
       toast.error(message);
     } finally {
       setRegenAll(false);

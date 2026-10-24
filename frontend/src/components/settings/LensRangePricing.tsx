@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Lens range pricing (May 2026)
 // ============================================================================
@@ -151,8 +152,7 @@ export function LensRangePricingSection() {
       load();
     } catch (err) {
       const msg =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
-        'Could not save range';
+        getErrorMessage(err, 'Could not save range');
       toast.error(msg);
     } finally {
       setCreating(false);
@@ -170,8 +170,7 @@ export function LensRangePricingSection() {
       load();
     } catch (err) {
       const msg =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
-        'Update failed';
+        getErrorMessage(err, 'Update failed');
       toast.error(msg);
     }
   };

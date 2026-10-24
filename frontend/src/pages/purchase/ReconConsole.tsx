@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Accountant Reconciliation Console (Purchase S6 / Phase 3 rework)
 // ============================================================================
@@ -319,11 +320,7 @@ function ApproveExceptionModal({
       });
       toast.success('Exception approved — invoice released for payment');
     } catch (e) {
-      const msg =
-        e && typeof e === 'object' && 'response' in e
-          ? ((e as { response?: { data?: { detail?: string } } }).response?.data?.detail ?? '')
-          : e instanceof Error ? e.message : '';
-      toast.error(msg || 'Failed to approve the exception');
+      toast.error(getErrorMessage(e, 'Failed to approve the exception'));
     } finally {
       setSaving(false);
     }
@@ -1144,7 +1141,7 @@ export default function ReconConsole() {
       } catch (err) {
         failures[id] =
           err && typeof err === 'object' && 'response' in err
-            ? String((err as { response?: { data?: { detail?: string } } }).response?.data?.detail ?? 'Failed')
+            ? String(getErrorMessage(err, 'Failed'))
             : err instanceof Error ? err.message : 'Failed';
         console.error(err);
       } finally {

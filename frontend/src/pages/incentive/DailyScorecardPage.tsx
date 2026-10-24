@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Daily Scorecard (Pune Incentive Module ii)
 // ============================================================================
@@ -154,7 +155,7 @@ export function DailyScorecardPage() {
         setFootfallStatus(null);
       }
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || 'Failed to load';
+      const msg = getErrorMessage(e, 'Failed to load');
       setError(typeof msg === 'string' ? msg : 'Failed to load');
     } finally {
       setLoading(false);
@@ -222,7 +223,7 @@ export function DailyScorecardPage() {
       }
       await loadDay();
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || 'Save failed';
+      const msg = getErrorMessage(e, 'Save failed');
       toast.error(typeof msg === 'string' ? msg : 'Save failed');
     } finally {
       setSaving(false);
@@ -237,7 +238,7 @@ export function DailyScorecardPage() {
       toast.success('Row deleted — you can re-save now.');
       await loadDay();
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || 'Delete failed';
+      const msg = getErrorMessage(e, 'Delete failed');
       toast.error(typeof msg === 'string' ? msg : 'Delete failed');
     }
   };

@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Customer Prescription (Rx) Portal (public, OTP-gated)
 // ============================================================================
@@ -25,11 +26,7 @@ import { formatPowerOrDash } from '../../utils/rxPowerValue';
 
 type Step = 'phone' | 'otp' | 'view';
 
-function errMessage(e: unknown, fallback: string): string {
-  const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-  if (typeof detail === 'string') return detail;
-  return (e as Error)?.message || fallback;
-}
+const errMessage = getErrorMessage;
 
 function formatDate(value: string | null | undefined): string {
   if (!value) return '—';

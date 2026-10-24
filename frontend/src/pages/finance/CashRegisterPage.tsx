@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Cash Register / EOD reconciliation (Accounts)
 // ============================================================================
@@ -126,7 +127,7 @@ export default function CashRegisterPage() {
       await load();
     } catch (e: unknown) {
       const msg =
-        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        getErrorMessage(e, '') ||
         (e instanceof Error ? e.message : 'Could not open session');
       toast.error(msg);
     } finally {
@@ -173,7 +174,7 @@ export default function CashRegisterPage() {
       await load();
     } catch (e: unknown) {
       const msg =
-        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        getErrorMessage(e, '') ||
         (e instanceof Error ? e.message : 'Could not close session');
       toast.error(msg);
     } finally {

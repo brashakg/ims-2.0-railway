@@ -9,6 +9,7 @@
  *     blank Rx link and the backend's Rx verification silently no-op'd.
  */
 import { describe, it, expect } from 'vitest';
+import { buildApiError } from '../../../services/api/client';
 
 import {
   hasQcOnFile,
@@ -174,6 +175,13 @@ describe('resolveItemPrescriptionId', () => {
 });
 
 describe('backendMessage', () => {
+  it('renders a canonical API rejection without an axios response wrapper', () => {
+    const err = buildApiError({ response: { status: 409, data: {
+      detail: { code: 'DC_HARDLOCK', message: 'No DC logged.' },
+    } } } as unknown as Parameters<typeof buildApiError>[0]);
+    expect(backendMessage(err, 'generic')).toBe('No DC logged.');
+  });
+
   it('renders the gate sentence the counter needs to read', () => {
     const err = {
       response: {

@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - POS customer panel (owner spec, 2026-09-05)
 // ============================================================================
@@ -103,8 +104,7 @@ const ageOf = (dob: string | null | undefined): number | null => {
   return years >= 0 && years < 130 ? years : null;
 };
 const firstName = (name: string | null | undefined) => (name || 'member').split(/\s+/)[0];
-const serverDetail = (e: any, fallback: string) =>
-  e?.response?.data?.detail || e?.message || fallback;
+const serverDetail = getErrorMessage;
 
 /** <=767px is the phone sheet; the app's `tablet` breakpoint starts at 768.
  *  FOLLOWS THE VIEWPORT (resize-subscribed), never a mount-time read: the e2e

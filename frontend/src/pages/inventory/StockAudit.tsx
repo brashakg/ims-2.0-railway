@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Stock Audit / Count Sheet  ·  v2 reskin (slice 2c)
 // ============================================================================
@@ -211,7 +212,7 @@ export function StockAudit() {
       // The server refuses a count with nothing counted ("nothing has been
       // counted"). Swallowing that into a generic failure hid the one message
       // the counter actually needs.
-      toast.error(err?.response?.data?.detail || 'Failed to finish the stock count');
+      toast.error(getErrorMessage(err, 'Failed to finish the stock count'));
     }
   };
 

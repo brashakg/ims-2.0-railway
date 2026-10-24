@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../../utils/errorHandler';
 // ============================================================================
 // Purchase Invoices - P3 variance-approval panel + quick-approve modal.
 // MOVED verbatim out of ../PurchaseInvoicesTab.tsx by the Wave 6 file diet.
@@ -55,11 +56,7 @@ function ApproveModal({
       });
       toast.success('Exception approved — invoice released for payment');
     } catch (e) {
-      const msg =
-        e && typeof e === 'object' && 'response' in e
-          ? ((e as { response?: { data?: { detail?: string } } }).response?.data?.detail ?? '')
-          : e instanceof Error ? e.message : '';
-      toast.error(msg || 'Failed to approve the exception');
+      toast.error(getErrorMessage(e, 'Failed to approve the exception'));
     } finally {
       setSaving(false);
     }

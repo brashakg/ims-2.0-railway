@@ -1,3 +1,4 @@
+import { getErrorStatus } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Settings: Login Devices (approved-device gate, owner 2026-09-02)
 // ============================================================================
@@ -82,7 +83,7 @@ export default function SettingsDevices() {
       setDevices(data.devices);
     } catch (e: any) {
       setError(
-        e?.response?.status === 403
+        getErrorStatus(e) === 403
           ? 'Only the Superadmin can view and approve login devices.'
           : 'Could not load devices. Pull to refresh or tap Retry.'
       );

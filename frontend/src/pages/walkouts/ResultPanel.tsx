@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Walkout Result Panel (Pune Incentive Module i, Phase 3)
 // ============================================================================
@@ -53,7 +54,7 @@ export function ResultPanel({ walkout, canEdit, onChanged }: ResultPanelProps) {
       toast.success(`Walkout marked ${result}`);
       setShowConvertForm(false);
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || 'Could not save result';
+      const msg = getErrorMessage(e, 'Could not save result');
       toast.error(typeof msg === 'string' ? msg : 'Could not save result');
     } finally {
       setBusy(false);

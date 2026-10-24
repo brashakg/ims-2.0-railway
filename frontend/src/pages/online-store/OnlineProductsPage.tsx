@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Online Store - Products / PIM  (BVI Phase 1, rebuilt on the PIM)
 // ============================================================================
@@ -299,7 +300,7 @@ export default function OnlineProductsPage() {
       bannerRef.current?.refresh();
     } catch (e: any) {
       toast.error(
-        `${row.title}: push failed — ${e?.response?.data?.detail || e?.message || 'error'}`,
+        `${row.title}: push failed — ${getErrorMessage(e, 'error')}`,
       );
     } finally {
       setPushingId(null);
@@ -327,7 +328,7 @@ export default function OnlineProductsPage() {
       bannerRef.current?.refresh();
     } catch (e: any) {
       toast.error(
-        `${row.title}: take-down failed — ${e?.response?.data?.detail || e?.message || 'error'}`,
+        `${row.title}: take-down failed — ${getErrorMessage(e, 'error')}`,
       );
     } finally {
       setPushingId(null);

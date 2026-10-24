@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Go-live readiness: Tax-Code Audit
 // ============================================================================
@@ -46,7 +47,7 @@ export function TaxCodeAuditCard({ storeId, canExport = true }: { storeId?: stri
     setError(null);
     reportsApi.getTaxCodeAudit(storeId)
       .then(setData)
-      .catch(e => setError(e?.response?.data?.detail || e?.message || 'Failed to load'))
+      .catch(e => setError(getErrorMessage(e, 'Failed to load')))
       .finally(() => setLoading(false));
   }, [storeId]);
 

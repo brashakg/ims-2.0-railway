@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — TechCherry R1.2 — Price Band Analysis
 // ============================================================================
@@ -31,7 +32,7 @@ export function PriceBandCard({ storeId }: { storeId?: string }) {
     setError(null);
     reportsApi.getPriceBands(storeId, 3, 4)
       .then(setData)
-      .catch(e => setError(e?.response?.data?.detail || e?.message || 'Failed to load'))
+      .catch(e => setError(getErrorMessage(e, 'Failed to load')))
       .finally(() => setLoading(false));
   }, [storeId]);
 

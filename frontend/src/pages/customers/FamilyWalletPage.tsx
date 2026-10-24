@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Family/Household Loyalty Wallet (Feature #49)
 // ============================================================================
@@ -122,8 +123,7 @@ export function FamilyWalletPage() {
       success('Household wallet created.');
       await refreshHousehold(hh.household_id);
     } catch (e: unknown) {
-      const detail = (e as { response?: { data?: { detail?: string } } })?.response
-        ?.data?.detail;
+      const detail = getErrorMessage(e, '');
       toastError(detail || 'Could not create the household.');
     } finally {
       setBusy(false);
@@ -148,8 +148,7 @@ export function FamilyWalletPage() {
       setAddPhone('');
       await refreshHousehold(household.household_id);
     } catch (e: unknown) {
-      const detail = (e as { response?: { data?: { detail?: string } } })?.response
-        ?.data?.detail;
+      const detail = getErrorMessage(e, '');
       toastError(detail ? `Could not add member: ${detail}` : 'Could not add member.');
     } finally {
       setBusy(false);
@@ -165,8 +164,7 @@ export function FamilyWalletPage() {
         success('Member removed.');
         await refreshHousehold(household.household_id);
       } catch (e: unknown) {
-        const detail = (e as { response?: { data?: { detail?: string } } })?.response
-          ?.data?.detail;
+        const detail = getErrorMessage(e, '');
         toastError(detail ? `Could not remove: ${detail}` : 'Could not remove member.');
       } finally {
         setBusy(false);
@@ -197,8 +195,7 @@ export function FamilyWalletPage() {
       setRedeemPoints('');
       await refreshHousehold(household.household_id);
     } catch (e: unknown) {
-      const detail = (e as { response?: { data?: { detail?: string } } })?.response
-        ?.data?.detail;
+      const detail = getErrorMessage(e, '');
       if (detail === 'otp_required') {
         toastError(
           'Redemption needs an OTP, but OTP delivery (SMS/WhatsApp) is currently ' +

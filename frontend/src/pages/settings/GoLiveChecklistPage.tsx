@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Go-Live Readiness Checklist
 // ============================================================================
@@ -37,7 +38,7 @@ export function GoLiveChecklistPage() {
     setError(null);
     storeApi.getGoLiveChecklist()
       .then(setData)
-      .catch((e) => setError(e?.response?.data?.detail || e?.message || 'Failed to load'))
+      .catch((e) => setError(getErrorMessage(e, 'Failed to load')))
       .finally(() => setLoading(false));
   };
 

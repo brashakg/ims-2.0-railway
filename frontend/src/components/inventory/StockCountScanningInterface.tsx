@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Stock Count: scan every piece
 // ============================================================================
@@ -108,7 +109,7 @@ export function StockCountScanningInterface({ countId, onRecorded }: Props) {
       onRecorded?.(res.items_counted ?? 0);
       load();
     } catch (err: any) {
-      setError(err?.response?.data?.detail || `Barcode ${code} not found`);
+      setError(getErrorMessage(err, `Barcode ${code} not found`));
     }
   };
 
@@ -182,7 +183,7 @@ export function StockCountScanningInterface({ countId, onRecorded }: Props) {
       onRecorded?.(res?.items_counted ?? 0);
       load();
     } catch (err: any) {
-      setError(err?.response?.data?.detail || 'Could not save that quantity');
+      setError(getErrorMessage(err, 'Could not save that quantity'));
     } finally {
       setSaving(null);
     }

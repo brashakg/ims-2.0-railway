@@ -1,3 +1,4 @@
+import { getErrorStatus } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Settings: HSN & GST Rates (SUPERADMIN/ADMIN)
 // ============================================================================
@@ -120,7 +121,7 @@ export function HsnRatesSection() {
       await load();
       await loadHsnRates();
     } catch (err: any) {
-      const msg = err?.response?.status === 409 ? 'That HSN code already exists' : 'Failed to add HSN rate';
+      const msg = getErrorStatus(err) === 409 ? 'That HSN code already exists' : 'Failed to add HSN rate';
       toast.error(msg);
     } finally {
       setSaving(false);

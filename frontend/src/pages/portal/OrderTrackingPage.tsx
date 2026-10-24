@@ -1,3 +1,4 @@
+import { getErrorStatus } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Customer Order Tracking (public, tokenized link)
 // ============================================================================
@@ -64,7 +65,7 @@ export default function OrderTrackingPage() {
       const resp = await portalApi.trackOrder(token);
       setData(resp);
     } catch (e: unknown) {
-      const status = (e as { response?: { status?: number } })?.response?.status;
+      const status = getErrorStatus(e);
       setError(
         status === 404
           ? 'We could not find an order for this link. Please check the link or contact your store.'
