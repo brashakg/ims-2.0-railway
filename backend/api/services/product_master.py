@@ -1326,9 +1326,11 @@ def identity_inputs(attributes: Dict[str, Any], category: Any) -> List[str]:
 
     def parts(attrs: Dict[str, Any]) -> Any:
         try:
-            return identity_parts(attrs, category)
+            p = identity_parts(attrs, category)
         except ProductMasterError:
             return None
+        # A sub-brand typed in front of the model moves the key's model too.
+        return p, model_without_brand(p[0], p[1], attrs.get("subbrand"))
 
     now = parts(a)
     return sorted(k for k in fields if parts({**a, k: "\x00"}) != now)
@@ -1366,8 +1368,44 @@ def normalise_identity_component(value: Any) -> str:
     return re.sub(r"^0+(?=[a-z])", "", s)
 
 
+_SEPARATOR = r"[^a-z0-9]"
+# What a model number looks like right after a brand typed without a gap:
+# a digit, or one or two letters then a digit ('CARRERA1001/S' -> 1001S,
+# 'RAYBANRB2140' -> RB2140). ponytail: 'TITANIUM12' under Titan stays
+# 'TITANIUM12' (three letters); widen only for a real model the rule misses.
+_MODEL_AFTER_BRAND = re.compile(r"^(?:\d|[a-z]{1,2}\d)")
+
+
+def model_without_brand(brand: Any, model: Any, subbrand: Any = None) -> str:
+    """THE model part of every identity comparison: the model normalised
+    (normalise_identity_component) with a leading copy of the brand, the
+    sub-brand, or both, folded away -- 'CARRERA 3001/S', 'CARRERA3001/S' and
+    '3001/S' under Carrera are one model (prod 10-24: the first spelling hid
+    two duplicate pairs from the unique identity_key index). Folded always
+    when a separator follows the prefix, without one only before a
+    model-number shape (_MODEL_AFTER_BRAND); never when the model IS the
+    prefix (a lens whose model is its sub-brand). The duplicate key
+    (compute_identity_key), the model scan (model_family_query) and the model
+    families (family_key) all read it. Stored values are never rewritten and
+    the SKU is never minted from it."""
+    m = normalise_identity_component(model)
+    b, s = normalise_identity_component(brand), normalise_identity_component(subbrand)
+    raw = str(model or "").strip().lower()
+    for p in sorted({b + s, s, b} - {""}, key=len, reverse=True):
+        if not m.startswith(p) or len(m) == len(p):
+            continue
+        rest = m[len(p):]
+        typed_apart = re.match(
+            r"^\W*" + (_SEPARATOR + "*").join(map(re.escape, p)) + _SEPARATOR + "+", raw
+        )
+        if typed_apart or _MODEL_AFTER_BRAND.match(rest):
+            # Normalised again: 'RAY-BAN 0RB4350' drops the Luxottica 0 too.
+            return normalise_identity_component(rest)
+    return m
+
+
 def compute_identity_key(
-    brand: Any, model: Any, colour: Any = None, size: Any = None
+    brand: Any, model: Any, colour: Any = None, size: Any = None, subbrand: Any = None
 ) -> Optional[str]:
     """The brand+model+colour(+size) identity used by the Hub Phase 1 duplicate
     guard.
@@ -1387,7 +1425,9 @@ def compute_identity_key(
     (backward-compatible).
     """
     _norm = normalise_identity_component
-    b, m = _norm(brand), _norm(model)
+    # The model reads without a brand / sub-brand typed in front of it
+    # (model_without_brand): 'CARRERA 3001/S' is the 3001/S under Carrera.
+    b, m = _norm(brand), model_without_brand(brand, model, subbrand)
     if not b or not m:
         return None
     parts = [b, m, _norm(colour)]
@@ -1524,8 +1564,9 @@ def identity_key_of(doc: Dict[str, Any]) -> Optional[str]:
     over its attributes, a legacy row's flat columns filling only an empty
     slot (_identity_attributes). The edit door and the key rebuild
     (scripts/migrate_identity_key_tighten.py) both read a row through here."""
+    attrs = _identity_attributes(doc)
     return compute_identity_key(
-        *identity_parts(_identity_attributes(doc), (doc or {}).get("category"))
+        *identity_parts(attrs, (doc or {}).get("category")), subbrand=attrs.get("subbrand")
     )
 
 
@@ -1647,7 +1688,9 @@ def rekey_on_edit(
 SIMILAR_SIBLINGS_CAP = 12
 
 
-def model_family_query(category: Any, brand: Any, model: Any) -> Optional[Dict[str, Any]]:
+def model_family_query(
+    category: Any, brand: Any, model: Any, subbrand: Any = None
+) -> Optional[Dict[str, Any]]:
     """The filter for every row of one model -- same category, any colour or
     size -- or None when the category or brand/model does not normalise.
     find_similar_products lists by it; the counter stock lookup counts by it.
@@ -1661,7 +1704,7 @@ def model_family_query(category: Any, brand: Any, model: Any) -> Optional[Dict[s
     if canonical is None:
         return None
     b = normalise_identity_component(brand)
-    m = normalise_identity_component(model)
+    m = model_without_brand(brand, model, subbrand)
     if not b or not m:
         return None
     return {
@@ -1729,7 +1772,8 @@ def find_similar_products(
         if canonical is None:
             return empty
         brand, model, colour, size = identity_parts(attributes or {}, canonical)
-        sibling_query = model_family_query(canonical, brand, model)
+        subbrand = (attributes or {}).get("subbrand")
+        sibling_query = model_family_query(canonical, brand, model, subbrand)
         if sibling_query is None:
             return empty
 
@@ -1746,7 +1790,7 @@ def find_similar_products(
                 "model": model,
                 "color": colour,
                 "size": size,
-                "identity_key": compute_identity_key(brand, model, colour, size),
+                "identity_key": compute_identity_key(brand, model, colour, size, subbrand),
             },
             ProductRepository(products_collection),
         )
@@ -2348,7 +2392,9 @@ def normalise_payload(
     # Stamped only when brand+model are both present (the minimum that makes an
     # identity meaningful); categories without a brand/model -- e.g. SERVICES --
     # carry no identity_key and are not identity-deduped.
-    _ident = compute_identity_key(*identity_parts(attributes, canonical))
+    _ident = compute_identity_key(
+        *identity_parts(attributes, canonical), subbrand=(attributes or {}).get("subbrand")
+    )
     if _ident:
         doc["identity_key"] = _ident
     if dc is not None:
@@ -3914,11 +3960,13 @@ def _model_identity(doc: Dict[str, Any]) -> Tuple[Any, str, str]:
     """(category, brand, model) as the identity key reads them -- the rule an
     explicit variant_of (the size-variant runbook's door) is checked by."""
     category = resolve_category((doc or {}).get("category"))
-    ids = _derive_brand_model_color_size((doc or {}).get("attributes") or {}, category)
+    attrs = (doc or {}).get("attributes") or {}
+    ids = _derive_brand_model_color_size(attrs, category)
+    brand = ids["brand"] or doc.get("brand")
     return (
         category,
-        normalise_identity_component(ids["brand"] or doc.get("brand")),
-        normalise_identity_component(ids["model"] or doc.get("model")),
+        normalise_identity_component(brand),
+        model_without_brand(brand, ids["model"] or doc.get("model"), attrs.get("subbrand")),
     )
 
 
@@ -3934,31 +3982,8 @@ def family_key(doc: Dict[str, Any]) -> Optional[Tuple[str, str, str]]:
         return None
     attrs = _shown_attributes((doc or {}).get("attributes") or {}, category)
     brand = normalise_identity_component(attrs.get("brand_name") or attrs.get("brand") or doc.get("brand"))
-    model = _without_brand(brand, attrs.get("model_no"))
+    model = model_without_brand(brand, attrs.get("model_no"), attrs.get("subbrand"))
     return (category, brand, model) if brand and model else None
-
-
-_SEPARATOR = r"[^a-z0-9]"
-# What a model number looks like right after a brand typed without a gap:
-# a digit, or one or two letters then a digit ('CARRERA1001/S' -> 1001S,
-# 'RAYBANRB2140' -> RB2140). ponytail: 'TITANIUM12' under Titan stays
-# 'TITANIUM12' (three letters); widen only for a real model the rule misses.
-_MODEL_AFTER_BRAND = re.compile(r"^(?:\d|[a-z]{1,2}\d)")
-
-
-def _without_brand(brand: str, raw_model: Any) -> str:
-    """The normalised model number with a leading copy of the brand folded
-    away: always when a separator follows the brand ('CARRERA 1001/S'),
-    without one only before a model-number shape (_MODEL_AFTER_BRAND)."""
-    model = normalise_identity_component(raw_model)
-    if not brand or not model.startswith(brand) or len(model) == len(brand):
-        return model
-    rest = model[len(brand):]
-    typed_apart = re.match(
-        r"^\W*" + (_SEPARATOR + "*").join(map(re.escape, brand)) + _SEPARATOR + "+",
-        str(raw_model or "").strip().lower(),
-    )
-    return rest if typed_apart or _MODEL_AFTER_BRAND.match(rest) else model
 
 
 def _brand_rows_query(category: Any, brand: Any) -> Optional[Dict[str, Any]]:
