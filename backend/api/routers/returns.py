@@ -1685,7 +1685,9 @@ def _issue_store_credit(
     # was settled externally (card refund), where the balance must stay put.
     if entry["delta"] > 0 and repo is not None:
         try:
-            repo.update(customer_id, {"store_credit": entry["balance_after"]})
+            from .customers import apply_store_credit_delta
+
+            apply_store_credit_delta(repo, customer_id, entry)
         except Exception:  # noqa: BLE001
             pass
     entry.pop("_id", None)
@@ -4634,6 +4636,32 @@ def _advance_legs(order: Dict[str, Any]) -> Dict[str, float]:
     return {m: a for m, a in legs.items() if a > 0}
 
 
+_HANDED_OVER = "Goods already handed over - use a normal return."
+
+
+def _goods_handed_over(order: Dict[str, Any]) -> bool:
+    """True when any of the order's goods already left the shop: a workshop
+    job DELIVERED (a job going out through the pickup scan never moves the
+    order, which stays READY), or a line marked delivered. An advance refund
+    would pay the money back for goods the customer has. FAILS CLOSED: an
+    unreadable jobs collection raises 503."""
+    for it in order.get("items") or []:
+        if isinstance(it, dict) and (
+            str(it.get("status") or "").upper() == "DELIVERED" or it.get("delivered_at")
+        ):
+            return True
+    from ..dependencies import get_workshop_repository
+
+    jobs = getattr(get_workshop_repository(), "collection", None)
+    if jobs is None:
+        return False  # no workshop store at all (DB-less mode): no job can exist
+    try:
+        return jobs.find_one({"order_id": order.get("order_id"), "status": "DELIVERED"}) is not None
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[RETURNS] workshop jobs unreadable for %s: %s", order.get("order_id"), exc)
+        raise HTTPException(status_code=503, detail="Could not check whether the goods were handed over - try again.")
+
+
 def _advance_refund_plan(order: Dict[str, Any]) -> Dict[str, Any]:
     """What the door would do for this order, or why it cannot: the ONE
     reading the Orders screen's button shows and the POST enforces."""
@@ -4644,6 +4672,8 @@ def _advance_refund_plan(order: Dict[str, Any]) -> Dict[str, Any]:
         return {"ok": False, "reason": (
             f"This order is {status}. Only an order not yet delivered can have its "
             "advance refunded; use a normal return for a delivered order.")}
+    if _goods_handed_over(order):
+        return {"ok": False, "reason": _HANDED_OVER, "status_code": 409}
     if str(order.get("channel") or "").strip().upper() == "ONLINE" or order.get("shopify_order_id"):
         return {"ok": False, "reason": (
             "This is an online order: Shopify took the money, so it is refunded "
@@ -4853,7 +4883,13 @@ def _finish_advance_refund(repo, coll, doc: Dict[str, Any], current_user: dict) 
                            {"advance_refund_cn_minting_at": utc_now_iso()})
             try:
                 fresh = next_document_number(_get_db(), doc.get("store_id"), "C")
-            except InvoiceNumberError as exc:
+            except Exception as exc:
+                # The mint refused (or failed): no serial to account for --
+                # clear the marker so the next press writes nothing off.
+                repo.update_if(order_id, {"advance_refund_id": return_id}, {"advance_refund_cn_minting_at": None})
+                if not isinstance(exc, InvoiceNumberError):
+                    logger.error("[RETURNS] credit note numbering failed for %s: %s", return_id, exc)
+                    raise HTTPException(status_code=503, detail=press_again) from exc
                 raise HTTPException(
                     status_code=400,
                     detail=f"The credit note cannot be numbered: {exc}. Fix the shop's invoice series, then press again.",
@@ -4993,10 +5029,24 @@ async def refund_advance_and_cancel(
                 doc = _finish_advance_refund(repo, coll, doc, current_user)
             return _respond(doc, await _cancel(), again=True)
 
+    # An earlier press freed after 2 minutes may have written its PENDING
+    # record late: its finish refuses without the claim, so it wrote nothing
+    # else -- void it rather than let it block every later refund.
+    # Only one OLDER than a press can run and not the order's current claim: a
+    # press that claimed a moment ago is writing its own record right now.
+    from datetime import timedelta as _td
+
+    _cutoff = (datetime.now(timezone.utc) - _td(seconds=_STALE_CLAIM_SECONDS)).isoformat()
+    _held = (repo.find_by_id(order_id) or {}).get("advance_refund_id")
+    coll.update_many(
+        {"order_id": order_id, "advance_refund": True, "status": "PENDING",
+         "return_id": {"$ne": _held}, "created_at": {"$lt": _cutoff}},
+        {"$set": {"status": "VOIDED", "voided_reason": "a later press found it without its claim"}},
+    )
     plan = _advance_refund_plan(order)
     if not plan["ok"]:
-        raise HTTPException(status_code=400, detail=plan["reason"])
-    if coll.count_documents({"order_id": order_id}):
+        raise HTTPException(status_code=plan.get("status_code", 400), detail=plan["reason"])
+    if coll.count_documents({"order_id": order_id, "status": {"$ne": "VOIDED"}}):
         raise HTTPException(
             status_code=400,
             detail="This order already has a return against it. Ask an admin to settle it.",
@@ -5055,8 +5105,16 @@ async def refund_advance_and_cancel(
     # compare-and-set on advance_refund_id too). Re-read after our claim: if
     # either got in first, back out with nothing written.
     fresh = repo.find_by_id(order_id) or {}
+    try:
+        handed_over = _goods_handed_over(fresh)
+    except HTTPException:
+        _unclaim()
+        raise
+    if handed_over:
+        _unclaim()
+        raise HTTPException(status_code=409, detail=_HANDED_OVER)
     if (
-        coll.count_documents({"order_id": order_id})
+        coll.count_documents({"order_id": order_id, "status": {"$ne": "VOIDED"}})
         or any(float((it or {}).get("returned_qty") or 0) > 0 for it in fresh.get("items") or [])
         or abs(float(fresh.get("amount_paid") or 0) - float(order.get("amount_paid") or 0)) > 0.005
     ):
@@ -5169,6 +5227,8 @@ async def advance_refund_preview(
     if plan["ok"]:
         plan["action"] = "refund_and_cancel"
         plan["has_cash"] = any(t["method"] == "CASH" for t in plan["refund_tenders"])
-        if coll is not None and coll.count_documents({"order_id": order.get("order_id") or order_id}):
+        if coll is not None and coll.count_documents(
+            {"order_id": order.get("order_id") or order_id, "status": {"$nin": ["VOIDED", "PENDING"]}}
+        ):
             plan = {"ok": False, "reason": "This order already has a return against it. Ask an admin to settle it."}
     return plan
