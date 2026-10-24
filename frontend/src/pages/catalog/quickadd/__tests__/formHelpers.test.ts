@@ -46,6 +46,8 @@ describe('softWarnings', () => {
     );
     expect(softWarnings({ ...base, attributes: { brand_name: 'Ray-Ban', model_no: 'RB4165' } })).toEqual([]);
     expect(softWarnings({ ...base, attributes: { brand_name: 'Ray-Ban', model_no: 'RAY BAN RB4165' } })).toHaveLength(1);
+    // The prod 10-24 case: saved as typed, but the cataloguer is told.
+    expect(softWarnings({ ...base, attributes: { brand_name: 'Carrera', model_no: 'CARRERA 3001/S' } })).toHaveLength(1);
     // a whole word only, never a substring of a code
     expect(softWarnings({ ...base, attributes: { brand_name: 'Prada', model_no: 'PRADAX01' } })).toEqual([]);
   });

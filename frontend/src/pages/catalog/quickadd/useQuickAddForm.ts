@@ -1758,14 +1758,14 @@ export function useQuickAddForm() {
   }, [copyFromLastFields]);
 
   // Soft warnings: shown amber, NEVER a block (the validator alone blocks).
+  // Review mode (an imported product) shows the field hints too -- a brand
+  // typed in the model number came in this way -- but not the photo hint.
   const softWarnings = useMemo(
     () =>
-      isReviewMode
-        ? []
-        : buildSoftWarnings({
-            attributes, mrp, modelMrp: variantCtx?.modelMrp, imageCount: images.length,
-            showPhotoHint: Boolean(selectedCategory),
-          }),
+      buildSoftWarnings({
+        attributes, mrp, modelMrp: variantCtx?.modelMrp, imageCount: images.length,
+        showPhotoHint: !isReviewMode && Boolean(selectedCategory),
+      }),
     [isReviewMode, attributes, mrp, variantCtx, images.length, selectedCategory],
   );
 
