@@ -1,4 +1,4 @@
-import { getErrorMessage } from '../../utils/errorHandler';
+import { getErrorDetail, getErrorMessage } from '../../utils/errorHandler';
 /**
  * Workshop QC-handover helpers (pure, no React) — extracted so they can be unit
  * tested. See backend/api/routers/workshop.py for the authoritative rules; these
@@ -102,11 +102,13 @@ export const resolveItemPrescriptionId = (item: unknown): string => {
 };
 
 /**
- * Pull the backend's own sentence out of an Axios-shaped error. Workshop gates
+ * Pull the backend's own sentence out of the shared API error. Workshop gates
  * return either a plain string detail (the QC / Rx gates) or an object with a
  * `message` (the DC hardlock), so both are handled. The QC handover gate
  * deliberately leaves destructive buttons enabled on the reasoning that the
  * server returns a plain-English refusal naming the remedy — that reasoning only
  * holds if the UI actually renders it.
  */
-export const backendMessage = getErrorMessage;
+export const backendMessage = (error: unknown, fallback: string): string =>
+  // Keep the operation-specific fallback for unexpected local errors.
+  getErrorMessage({ detail: getErrorDetail(error) }, fallback);
