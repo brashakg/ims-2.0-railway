@@ -83,6 +83,9 @@ def till(monkeypatch):
     class _Conn:
         is_connected = True
 
+        def get_collection(self, name):  # the real connection wrapper has it too
+            return db.get_collection(name)
+
     conn = _Conn()
     conn.db = db
     monkeypatch.setattr(om, "get_order_repository", lambda: orders)
@@ -1348,9 +1351,12 @@ def test_the_balance_moves_by_inc_not_by_overwriting_a_read(till):
     till["db"].get_collection("customers").insert_one({"customer_id": "CUST-1", "store_credit": 500.0})
     orig_find = till["db"].get_collection("customers").find_one
 
+    redeemed = {"n": 0}
+
     def _redeem_meanwhile(flt=None, *a, **k):
         doc = orig_find(flt, *a, **k)
-        if flt == {"customer_id": "CUST-1"}:
+        if flt == {"customer_id": "CUST-1"} and not redeemed["n"]:
+            redeemed["n"] = 1
             till["db"].get_collection("customers").update_one(
                 {"customer_id": "CUST-1"}, {"$inc": {"store_credit": -200.0}})
         return doc
@@ -1379,6 +1385,9 @@ def test_a_crash_after_numbering_is_written_off_on_the_next_press(till, monkeypa
     assert client.post("/api/v1/returns/advance-refund", json=_ADV_BODY,
                        headers=_hdr("ACCOUNTANT")).status_code == 503
     assert hit["n"] == 1
+    # The crashed press's marker is old by the time anyone presses again.
+    till["db"].get_collection("orders").update_one(
+        {"order_id": "ORD-1"}, {"$set": {"advance_refund_cn_minting_at": "2026-10-01T10:00:00+00:00"}})
     r2 = client.post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
     assert r2.status_code == 201, r2.text
     unused = [a for a in audits if a.get("action") == "CREDIT_NOTE_NUMBER_UNUSED"]
@@ -1741,13 +1750,13 @@ def test_a_freed_claim_cannot_credit(till):
 
 
 def test_a_customer_without_a_store_credit_field_gets_just_the_delta(till):
-    # One rule: no seeding from the ledger (it double counted); the backfill
-    # script sets the field from the ledger for legacy customers.
+    # One rule: no seeding from the ledger (it double counted). A customer
+    # with no field AND no ledger history simply starts at 0 + the delta;
+    # one WITH history is refused until the backfill sets the field (below).
     from api.routers.customers import apply_store_credit_delta
 
     customers = till["db"].get_collection("customers")
     customers.insert_one({"customer_id": "CUST-1"})
-    _ledger(till).insert_one({"customer_id": "CUST-1", "type": "ISSUED", "delta": 300.0})
     repo = CustomerRepository(customers)
     assert apply_store_credit_delta(repo, "CUST-1", 200.0) is True
     assert customers.find_one({"customer_id": "CUST-1"})["store_credit"] == 200.0
@@ -1800,3 +1809,320 @@ def test_a_freed_claim_cannot_apply_its_unapplied_credit_row(till):
                               "type": "ADJUSTED", "delta": 1000.0, "ref": "RET-A", "applied": False})
     assert returns_router._credit_back_advance(_stored(till), 1000.0, "RET-A", _user("ACCOUNTANT")) is None
     assert till["db"].get_collection("customers").find_one({"customer_id": "CUST-1"})["store_credit"] == 0.0
+
+
+# =========================================================================== #
+# Round-7 review (head 22778d95)
+# =========================================================================== #
+def _ship(till, monkeypatch, **doc):
+    from api.routers import shipping
+
+    coll = till["db"].get_collection("shipments")
+    monkeypatch.setattr(shipping, "_shipments_coll", lambda: coll)
+    if doc:
+        coll.insert_one(doc)
+    return coll
+
+
+# --- 1: a courier booking is a handover -----------------------------------------
+def test_no_advance_refund_once_a_courier_shipment_is_booked(till, monkeypatch):
+    _advance_order(till, status="READY")
+    _ship(till, monkeypatch, shipment_id="SH-1", order_id="ORD-1", status="BOOKED")
+    client = _advance_client()
+    r = client.post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r.status_code == 409 and "handed over" in r.text, r.text
+    assert till["db"].get_collection("returns").count_documents({}) == 0
+    plan = client.get("/api/v1/returns/advance-refund/ORD-1", headers=_hdr("ACCOUNTANT")).json()
+    assert plan["ok"] is False and "handed over" in plan["reason"]
+
+
+def test_a_dead_shipment_does_not_block_the_refund(till, monkeypatch):
+    _advance_order(till, status="READY")
+    _ship(till, monkeypatch, shipment_id="SH-0", order_id="ORD-1", status="CANCELLED")
+    r = _advance_client().post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r.status_code == 201, r.text
+
+
+def test_a_booking_landing_after_the_claim_is_caught(till, monkeypatch):
+    _advance_order(till, status="READY")
+    ships = _ship(till, monkeypatch)
+    real_update_if = till["orders"].update_if
+
+    def _booked_meanwhile(oid, expected, data, *a, **k):
+        ok = real_update_if(oid, expected, data, *a, **k)
+        if data.get("advance_refund_id") and "advance_refund_at" in data:
+            ships.insert_one({"shipment_id": "SH-2", "order_id": "ORD-1", "status": "BOOKED"})
+        return ok
+
+    monkeypatch.setattr(till["orders"], "update_if", _booked_meanwhile)
+    r = _advance_client().post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r.status_code == 409, r.text
+    assert till["db"].get_collection("returns").count_documents({}) == 0
+    assert _stored(till).get("advance_refund_id") is None
+
+
+# --- 2: no tax invoice on a refunded order; the claim pins the invoice state -----
+def test_no_invoice_is_minted_on_an_advance_refunded_order(till):
+    from database.repositories.order_repository import InvoiceNumberError, order_mint_problem
+
+    assert "refund" in order_mint_problem({"status": "CONFIRMED", "advance_refund_id": "RET-1"})
+    till["db"].get_collection("orders").insert_one(_order(advance_refund_id="RET-1"))
+    with pytest.raises(InvoiceNumberError):
+        till["orders"].set_invoice("ORD-1", "BOK01/2627/00077")
+    assert not _stored(till).get("invoice_number")
+
+
+def test_an_invoice_minted_between_the_look_and_the_claim_stops_the_refund(till, monkeypatch):
+    _advance_order(till)
+    real_find = till["orders"].find_by_id
+    hit = {"n": 0}
+
+    def _invoiced_meanwhile(oid):
+        doc = real_find(oid)
+        if not hit["n"]:
+            hit["n"] = 1
+            till["db"].get_collection("orders").update_one(
+                {"order_id": oid}, {"$set": {"invoice_number": "BOK01/2627/00078"}})
+        return doc
+
+    monkeypatch.setattr(till["orders"], "find_by_id", _invoiced_meanwhile)
+    r = _advance_client().post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r.status_code == 409, r.text
+    assert till["db"].get_collection("returns").count_documents({}) == 0
+
+
+# --- 3 (reviewer probe): the backfill never sums an unapplied advance credit ------
+def test_probe_backfill_never_doubles_a_stranded_advance_credit(till, tmp_path):
+    from scripts import backfill_store_credit_field as bf
+
+    db = till["db"]
+    db.get_collection("customers").insert_one({"customer_id": "CUST-1"})  # legacy: no field
+    db.get_collection("orders").insert_one(_order(advance_refund_id="RET-A"))
+    _ledger(till).insert_one({"_id": "RET-A:credit", "entry_id": "RET-A:credit", "customer_id": "CUST-1",
+                              "type": "ADJUSTED", "delta": 1000.0, "ref": "RET-A", "applied": False,
+                              "source": "ADVANCE_REFUND"})
+    out = bf.plan(db)
+    assert out["sets"] == [] and out["skipped_unapplied"] == ["CUST-1"]
+    bf.apply(db, out["sets"], str(tmp_path / "b.json"))
+    # The next press applies its own row once: 1,000, never 2,000.
+    assert returns_router._credit_back_advance(_stored(till), 1000.0, "RET-A", _user("ACCOUNTANT")) is not None
+    assert db.get_collection("customers").find_one({"customer_id": "CUST-1"})["store_credit"] == 1000.0
+
+
+# --- 4: a skipped backfill can never silently drop a legacy balance --------------
+def test_a_missing_field_with_ledger_history_is_refused_loudly(till):
+    from api.routers.customers import apply_store_credit_delta
+
+    customers = till["db"].get_collection("customers")
+    customers.insert_one({"customer_id": "CUST-1"})
+    _ledger(till).insert_one({"customer_id": "CUST-1", "type": "ISSUED", "delta": 300.0})
+    assert apply_store_credit_delta(CustomerRepository(customers), "CUST-1", 200.0) is False
+    assert "store_credit" not in customers.find_one({"customer_id": "CUST-1"})
+
+
+def test_the_manual_door_refuses_before_writing_when_the_backfill_was_skipped(till, monkeypatch):
+    from api.routers import customers as cust_router
+
+    till["db"].get_collection("customers").insert_one({"customer_id": "CUST-1", "store_id": STORE})
+    _ledger(till).insert_one({"customer_id": "CUST-1", "type": "ISSUED", "delta": 300.0})
+    monkeypatch.setattr(cust_router, "get_customer_repository",
+                        lambda: CustomerRepository(till["db"].get_collection("customers")))
+    monkeypatch.setattr(cust_router, "_ledger_coll", lambda: _ledger(till))
+    monkeypatch.setattr(cust_router, "_scoped_customer_or_404",
+                        lambda cid, user, write=False: till["db"].get_collection("customers").find_one({"customer_id": cid}))
+    with pytest.raises(HTTPException) as exc:
+        cust_router._post_credit_entry("CUST-1", "ISSUED", cust_router.StoreCreditEntryRequest(amount=200.0, reason="goodwill"),
+                                       _user("ADMIN"))
+    assert exc.value.status_code == 503
+    assert _ledger(till).count_documents({}) == 1  # nothing new written
+
+
+def test_a_return_credit_note_refuses_before_writing_when_the_backfill_was_skipped(till, monkeypatch):
+    till["db"].get_collection("customers").insert_one({"customer_id": "CUST-1"})
+    _ledger(till).insert_one({"customer_id": "CUST-1", "type": "ISSUED", "delta": 300.0})
+    monkeypatch.setattr(returns_router, "next_document_number", lambda *a, **k: "TST01/C2627/0042")
+    out = returns_router._issue_store_credit("CUST-1", 200.0, reason="return", ref="RET-Q",
+                                             current_user=_user("ADMIN"), store_id=STORE)
+    assert out is None
+    assert _ledger(till).count_documents({}) == 1
+
+
+# --- 10: the return credit note's audit balance reads THE balance rule ----------
+def test_a_return_credit_note_audits_the_authoritative_balance(till, monkeypatch):
+    # customer.store_credit is authoritative (500); the ledger alone sums 300.
+    till["db"].get_collection("customers").insert_one({"customer_id": "CUST-1", "store_credit": 500.0})
+    _ledger(till).insert_one({"customer_id": "CUST-1", "type": "ISSUED", "delta": 300.0})
+    monkeypatch.setattr(returns_router, "next_document_number", lambda *a, **k: "TST01/C2627/0043")
+    out = returns_router._issue_store_credit("CUST-1", 200.0, reason="return", ref="RET-R",
+                                             current_user=_user("ADMIN"), store_id=STORE)
+    assert out["balance_after"] == 700.0
+    assert till["db"].get_collection("customers").find_one({"customer_id": "CUST-1"})["store_credit"] == 700.0
+
+
+# --- 5: two returns at once cannot dodge the Rs 2,000 rule ------------------------
+def test_two_returns_at_once_cannot_dodge_the_2000_rule(till, monkeypatch):
+    # Rs 1,800 + Rs 1,800 on one bill, the second fired while the first is
+    # still deciding: the order's refunded total is reserved BEFORE the gate.
+    line = {"item_id": "li1", "product_id": "P1", "product_name": "Frame", "sku": "F1", "quantity": 2,
+            "unit_price": 1525.42, "gst_rate": 18.0, "taxable_value": 3050.85, "tax_amount": 549.15}
+    till["db"].get_collection("orders").insert_one(_order(
+        status="DELIVERED", grand_total=3600.0, amount_paid=3600.0, balance_due=0.0, payment_status="PAID",
+        items=[line], payments=[{"payment_id": "p1", "method": "CASH", "amount": 3600.0}]))
+    monkeypatch.setattr(returns_router, "get_stock_repository", lambda: None)
+    monkeypatch.setattr(returns_router, "get_product_repository", lambda: None)
+    monkeypatch.setattr(returns_router, "next_document_number", lambda *a, **k: f"TST01/C2627/{len(results) + 1:04d}")
+    # The per-line unit claim (positional array update) is not what is under
+    # test here -- the order's refunded TOTAL is; let the unit claim pass.
+    monkeypatch.setattr(returns_router, "_claim_returnable_qty", lambda *a, **k: True)
+    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: None)
+    payload = {"order_id": "ORD-1", "return_type": "RETURN", "items": [{
+        "order_item_id": "li1", "product_id": "P1", "product_name": "Frame", "sku": "F1",
+        "return_qty": 1, "unit_price": 1525.42, "reason": "DEFECTIVE", "condition": "GOOD"}]}
+    client = _advance_client()
+    real_gate = returns_router._gate_refund_approval_matrix
+    results = []
+
+    def _second_fires_mid_gate(*a, **k):
+        if not results:
+            results.append("first-deciding")
+            results.append(client.post("/api/v1/returns", json=payload, headers=_hdr("CASHIER")))
+        return real_gate(*a, **k)
+
+    monkeypatch.setattr(returns_router, "_gate_refund_approval_matrix", _second_fires_mid_gate)
+    first = client.post("/api/v1/returns", json=payload, headers=_hdr("CASHIER"))
+    second = results[1]
+    assert first.status_code == 201, first.text
+    assert second.status_code == 403, second.text
+    assert second.json()["detail"]["reason"] == "REFUND_APPROVAL_REQUIRED"
+    assert till["db"].get_collection("returns").count_documents({"status": "COMPLETED"}) == 1
+    assert _stored(till)["refunds_reserved"] == pytest.approx(1800.0)  # the refused one released its share
+
+
+# --- 6: freeing a stale claim and a press stamping its record cannot interleave ----
+def test_a_press_whose_claim_was_freed_stops_before_any_money(till, monkeypatch):
+    till["db"].get_collection("customers").insert_one({"customer_id": "CUST-1", "store_credit": 0.0})
+    till["db"].get_collection("orders").insert_one(
+        _order(amount_paid=1000.0, payment_status="PARTIAL",
+               payments=[{"payment_id": "p1", "method": "STORE_CREDIT", "amount": 1000.0}]))
+    rcoll = till["db"].get_collection("returns")
+    real_insert = rcoll.insert_one
+
+    def _freed_after_insert(doc, *a, **k):
+        out = real_insert(doc, *a, **k)
+        till["db"].get_collection("orders").update_one(
+            {"order_id": "ORD-1"}, {"$set": {"advance_refund_id": None}})  # another press freed the claim
+        return out
+
+    monkeypatch.setattr(rcoll, "insert_one", _freed_after_insert)
+    r = _advance_client().post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r.status_code == 409, r.text
+    assert _ledger(till).count_documents({}) == 0
+    assert till["db"].get_collection("customers").find_one({"customer_id": "CUST-1"})["store_credit"] == 0.0
+
+
+def test_a_free_loses_to_a_press_that_stamped_its_record(till, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    at = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    till["db"].get_collection("orders").insert_one(
+        _order(amount_paid=1000.0, payment_status="PARTIAL", advance_refund_id="RET-A", advance_refund_at=at,
+               payments=[{"payment_id": "p1", "method": "CASH", "amount": 1000.0}]))
+    rcoll = till["db"].get_collection("returns")
+    real_find = rcoll.find_one
+    looks = {"n": 0}
+
+    def _a_writes_between_the_look_and_the_free(flt=None, *a, **k):
+        if flt == {"return_id": "RET-A"}:
+            looks["n"] += 1
+            if looks["n"] == 2:  # B's second look: A lands its record + stamp right after
+                rcoll.insert_one({"return_id": "RET-A", "order_id": "ORD-1", "store_id": STORE,
+                                  "status": "PENDING", "advance_refund": True, "net_refund": 1000.0,
+                                  "refund_tenders": [{"method": "CASH", "amount": 1000.0}],
+                                  "created_at": at})
+                till["db"].get_collection("orders").update_one(
+                    {"order_id": "ORD-1"}, {"$set": {"advance_refund_record": "RET-A"}})
+                return None
+        return real_find(flt, *a, **k)
+
+    monkeypatch.setattr(rcoll, "find_one", _a_writes_between_the_look_and_the_free)
+    r = _advance_client().post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r.status_code == 201, r.text
+    assert real_find({"return_id": "RET-A"})["status"] == "COMPLETED"
+    assert rcoll.count_documents({"order_id": "ORD-1"}) == 1  # refunded once, A's record
+
+
+# --- 7: the refund belongs to the day it completed --------------------------------
+@pytest.mark.usefixtures("gst_numbers")
+def test_a_refund_finished_later_is_dated_when_it_completed(till, monkeypatch):
+    _invoiced_voucher_order(till)
+    real_credit = returns_router._credit_back_advance
+    monkeypatch.setattr(returns_router, "_credit_back_advance", lambda *a, **k: None)
+    client = _advance_client()
+    assert client.post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT")).status_code == 503
+    rcoll = till["db"].get_collection("returns")
+    rcoll.update_one({"order_id": "ORD-1"}, {"$set": {"created_at": "2026-10-01T10:00:00+00:00",
+                                                       "claimed_at": "2026-10-01T10:00:00+00:00"}})  # claimed last week
+    monkeypatch.setattr(returns_router, "_credit_back_advance", real_credit)
+    assert client.post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT")).status_code == 201
+    doc = rcoll.find_one({"order_id": "ORD-1"})
+    assert doc["claimed_at"] == "2026-10-01T10:00:00+00:00"
+    assert doc["created_at"] == doc["completed_at"] and doc["created_at"] > "2026-10-02"
+
+
+# --- 8: never write a number off while another press is numbering ---------------
+@pytest.mark.usefixtures("gst_numbers")
+def test_no_write_off_while_another_press_is_numbering(till, monkeypatch):
+    from api.utils.event_time import utc_now_iso
+
+    audits = []
+
+    class _Audit:
+        def create(self, row):
+            audits.append(row)
+
+    monkeypatch.setattr("api.dependencies.get_audit_repository", lambda: _Audit())
+    _advance_order(till, invoice_number="BOK01/2627/00009", items=[dict(_LINE)],
+                   advance_refund_id="RET-B", advance_refund_cn_minting_at=utc_now_iso(),
+                   advance_refund_record="RET-B")
+    till["db"].get_collection("returns").insert_one({
+        "return_id": "RET-B", "order_id": "ORD-1", "store_id": STORE, "status": "PENDING",
+        "advance_refund": True, "invoice_number": "BOK01/2627/00009", "net_refund": 1000.0,
+        "refund_tenders": [{"method": "CASH", "amount": 1000.0}], "created_at": utc_now_iso()})
+    r = _advance_client().post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r.status_code == 409, r.text
+    assert [a for a in audits if a.get("action") == "CREDIT_NOTE_NUMBER_UNUSED"] == []
+
+
+def test_a_return_credit_note_fails_loudly_when_the_balance_does_not_move(till, monkeypatch):
+    # No customer doc for the balance to move on: the row must not be passed
+    # off as issued credit.
+    monkeypatch.setattr(returns_router, "next_document_number", lambda *a, **k: "TST01/C2627/0044")
+    out = returns_router._issue_store_credit("CUST-GONE", 200.0, reason="return", ref="RET-S",
+                                             current_user=_user("ADMIN"), store_id=STORE)
+    assert out is None
+
+
+def test_a_press_stamps_its_record_so_a_stale_free_cannot_take_its_claim(till, monkeypatch):
+    # Press A records + stamps, then dies before finishing; its record is not
+    # visible to B's looks (a lagging read). B must NOT free A's claim.
+    _advance_order(till)
+    real_finish = returns_router._finish_advance_refund
+
+    def _dies(*a, **k):
+        raise RuntimeError("press A died")
+
+    monkeypatch.setattr(returns_router, "_finish_advance_refund", _dies)
+    client = _advance_client()
+    with pytest.raises(RuntimeError):
+        client.post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    monkeypatch.setattr(returns_router, "_finish_advance_refund", real_finish)
+    rid = _stored(till)["advance_refund_id"]
+    till["db"].get_collection("orders").update_one(
+        {"order_id": "ORD-1"}, {"$set": {"advance_refund_at": "2026-10-01T10:00:00+00:00"}})
+    rcoll = till["db"].get_collection("returns")
+    real_find = rcoll.find_one
+    monkeypatch.setattr(rcoll, "find_one", lambda flt=None, *a, **k: None if flt == {"return_id": rid} else real_find(flt, *a, **k))
+    r = client.post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r.status_code == 409, r.text
+    assert _stored(till)["advance_refund_id"] == rid
+    assert rcoll.count_documents({"order_id": "ORD-1"}) == 1
