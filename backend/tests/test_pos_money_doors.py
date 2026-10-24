@@ -1243,3 +1243,263 @@ def test_an_online_cancelled_unpaid_invoiced_order_stays_out_of_gstr1(till, monk
 
     rep = rep_mod._compute_gstr1(ist_today().strftime("%Y-%m"), STORE)
     assert rep["b2cs"] == [] and rep["cdnr"] == []
+
+
+# =========================================================================== #
+# Round-4 review (head 9a8e5880): crash injection
+# =========================================================================== #
+def _crash_once(monkeypatch, obj, name, when):
+    """Make obj.name raise the FIRST time `when(*args)` is true."""
+    real = getattr(obj, name)
+    hit = {"n": 0}
+
+    def _wrapped(*a, **k):
+        if not hit["n"] and when(*a, **k):
+            hit["n"] = 1
+            raise RuntimeError("process died here")
+        return real(*a, **k)
+
+    monkeypatch.setattr(obj, name, _wrapped)
+    return hit
+
+
+# --- F1: the order stamp comes before COMPLETED, and a re-press heals it ----
+@pytest.mark.usefixtures("gst_numbers")
+def test_a_crash_at_the_order_stamp_is_healed_by_the_next_press(till, monkeypatch):
+    _advance_order(till, invoice_number="BOK01/2627/00009", items=[dict(_LINE)])
+    hit = _crash_once(monkeypatch, till["orders"], "update_if",
+                      lambda oid, exp, data, *a, **k: "advance_refund_status" in data)
+    client = _advance_client()
+    r1 = client.post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert hit["n"] == 1 and r1.status_code == 503, r1.text
+    doc = till["db"].get_collection("returns").find_one({"order_id": "ORD-1"})
+    # The note is NOT filed (record not COMPLETED) while the invoice is not kept.
+    assert doc["status"] == "PENDING"
+    assert _stored(till).get("advance_refund_status") is None
+    r2 = client.post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r2.status_code == 201, r2.text
+    assert till["db"].get_collection("returns").find_one({"order_id": "ORD-1"})["status"] == "COMPLETED"
+    order = _stored(till)
+    assert order["advance_refund_status"] == "COMPLETED" and order["status"] == "CANCELLED"
+    assert order["advance_refund_credit_note"] == doc["credit_note_number"]
+
+
+@pytest.mark.usefixtures("gst_numbers")
+def test_a_completed_record_without_the_order_stamp_is_finished(till):
+    # A record already COMPLETED whose order stamp never landed (older
+    # sequence): the re-press runs the finish instead of only the cancel.
+    _advance_order(till, invoice_number="BOK01/2627/00009", items=[dict(_LINE)],
+                   advance_refund_id="RET-OLD", advance_refund_credit_note="TST01/C2627/0007")
+    till["db"].get_collection("returns").insert_one({
+        "return_id": "RET-OLD", "order_id": "ORD-1", "store_id": STORE, "status": "COMPLETED",
+        "invoice_number": "BOK01/2627/00009", "credit_note_number": "TST01/C2627/0007",
+        "net_refund": 1000.0, "refund_tenders": [{"method": "CASH", "amount": 1000.0}]})
+    r = _advance_client().post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r.status_code == 201, r.text
+    order = _stored(till)
+    assert order["advance_refund_status"] == "COMPLETED" and order["status"] == "CANCELLED"
+
+
+# --- F2: the balance moves once, atomically, even across a crash -------------
+def test_a_crash_at_the_balance_write_is_finished_once(till, monkeypatch):
+    till["db"].get_collection("customers").insert_one({"customer_id": "CUST-1", "name": "Asha", "store_credit": 50.0})
+    till["db"].get_collection("orders").insert_one(
+        _order(amount_paid=1000.0, payment_status="PARTIAL",
+               payments=[{"payment_id": "p1", "method": "STORE_CREDIT", "amount": 1000.0}]))
+    customers = till["db"].get_collection("customers")
+    hit = _crash_once(monkeypatch, customers, "update_one", lambda flt, upd, *a, **k: "$inc" in upd)
+    client = _advance_client()
+    r1 = client.post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert hit["n"] == 1 and r1.status_code == 503, r1.text
+    row = _ledger(till).find_one({})
+    assert row["applied"] is False
+    assert customers.find_one({"customer_id": "CUST-1"})["store_credit"] == 50.0
+    r2 = client.post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r2.status_code == 201, r2.text
+    assert customers.find_one({"customer_id": "CUST-1"})["store_credit"] == 1050.0
+    assert _ledger(till).find_one({})["applied"] is True
+    # Applying the same row again moves nothing.
+    returns_router._credit_back_advance(_stored(till), 1000.0, row["ref"], _user("ACCOUNTANT"))
+    assert customers.find_one({"customer_id": "CUST-1"})["store_credit"] == 1050.0
+
+
+def test_the_balance_moves_by_inc_not_by_overwriting_a_read(till):
+    # A redeem lands between the row's read and the balance write: an $inc
+    # keeps it; a $set of the earlier read would erase it.
+    till["db"].get_collection("customers").insert_one({"customer_id": "CUST-1", "store_credit": 500.0})
+    orig_find = till["db"].get_collection("customers").find_one
+
+    def _redeem_meanwhile(flt=None, *a, **k):
+        doc = orig_find(flt, *a, **k)
+        if flt == {"customer_id": "CUST-1"}:
+            till["db"].get_collection("customers").update_one(
+                {"customer_id": "CUST-1"}, {"$inc": {"store_credit": -200.0}})
+        return doc
+
+    till["db"].get_collection("customers").find_one = _redeem_meanwhile
+    returns_router._credit_back_advance(_order(), 700.0, "RET-Y", _user("ACCOUNTANT"))
+    till["db"].get_collection("customers").find_one = orig_find
+    assert till["db"].get_collection("customers").find_one({"customer_id": "CUST-1"})["store_credit"] == 1000.0
+
+
+# --- S2: a crash between numbering and the stamp leaves no silent gap ---------
+@pytest.mark.usefixtures("gst_numbers")
+def test_a_crash_after_numbering_is_written_off_on_the_next_press(till, monkeypatch):
+    audits = []
+
+    class _Audit:
+        def create(self, row):
+            audits.append(row)
+
+    monkeypatch.setattr("api.dependencies.get_audit_repository", lambda: _Audit())
+    _advance_order(till, invoice_number="BOK01/2627/00009", items=[dict(_LINE)])
+    hit = _crash_once(monkeypatch, till["orders"], "update_if",
+                      lambda oid, exp, data, *a, **k: bool(data.get("advance_refund_credit_note")))
+    client = _advance_client()
+    assert client.post("/api/v1/returns/advance-refund", json=_ADV_BODY,
+                       headers=_hdr("ACCOUNTANT")).status_code == 503
+    assert hit["n"] == 1
+    r2 = client.post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r2.status_code == 201, r2.text
+    unused = [a for a in audits if a.get("action") == "CREDIT_NOTE_NUMBER_UNUSED"]
+    assert len(unused) == 1 and "unknown" in unused[0]["details"]["unused_credit_note_number"]
+    assert till["db"].get_collection("returns").find_one({"order_id": "ORD-1"})["credit_note_number"] == "TST01/C2627/0002"
+
+
+# --- S3: a stale claim whose record appears late is finished, not freed -------
+def test_a_stale_claim_with_a_late_record_is_finished_not_freed(till, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    at = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    till["db"].get_collection("orders").insert_one(
+        _order(amount_paid=1000.0, payment_status="PARTIAL", advance_refund_id="RET-SLOW", advance_refund_at=at,
+               payments=[{"payment_id": "p1", "method": "CASH", "amount": 1000.0}]))
+    rcoll = till["db"].get_collection("returns")
+    rcoll.insert_one({"return_id": "RET-SLOW", "order_id": "ORD-1", "store_id": STORE, "status": "PENDING",
+                      "net_refund": 1000.0, "refund_tenders": [{"method": "CASH", "amount": 1000.0}]})
+    real = rcoll.find_one
+    seen = {"n": 0}
+
+    def _first_look_misses(flt=None, *a, **k):
+        if flt == {"return_id": "RET-SLOW"} and not seen["n"]:
+            seen["n"] = 1
+            return None
+        return real(flt, *a, **k)
+
+    monkeypatch.setattr(rcoll, "find_one", _first_look_misses)
+    r = _advance_client().post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r.status_code == 201, r.text
+    assert real({"return_id": "RET-SLOW"})["status"] == "COMPLETED"
+    assert rcoll.count_documents({"order_id": "ORD-1"}) == 1
+    assert _stored(till)["status"] == "CANCELLED"
+
+
+# --- S4: a refund claim landing between the job gate and the job write --------
+@pytest.mark.asyncio
+async def test_workshop_handover_is_undone_when_a_refund_lands_mid_write(till, monkeypatch):
+    from api.routers.workshop import gates, status as wstatus
+    from api.routers.workshop.models import StatusBody
+    from database.repositories.workshop_repository import WorkshopJobRepository
+
+    till["db"].get_collection("orders").insert_one(_order(
+        status="READY", payment_status="PAID", amount_paid=1000.0, balance_due=0.0,
+        payments=[{"payment_id": "p1", "method": "CASH", "amount": 1000.0}]))
+    jobs = till["db"].get_collection("workshop_jobs")
+    jobs.insert_one({"job_id": "J1", "order_id": "ORD-1", "store_id": STORE, "status": "READY", "qc_passed": True})
+    wrepo = WorkshopJobRepository(jobs)
+    real_update = wrepo.update_status
+
+    def _refund_lands_first(*a, **k):
+        till["db"].get_collection("orders").update_one(
+            {"order_id": "ORD-1"}, {"$set": {"advance_refund_id": "RET-RACE"}})
+        return real_update(*a, **k)
+
+    monkeypatch.setattr(wrepo, "update_status", _refund_lands_first)
+    monkeypatch.setattr(wstatus, "get_workshop_repository", lambda: wrepo)
+    monkeypatch.setattr(gates, "get_order_repository", lambda: till["orders"])
+    with pytest.raises(HTTPException) as exc:
+        await wstatus.update_job_status("J1", StatusBody(status="DELIVERED"), None, None, _user("STORE_MANAGER"))
+    assert exc.value.status_code == 409
+    assert jobs.find_one({"job_id": "J1"})["status"] == "READY"
+
+
+def test_the_pickup_scan_undo_helper_puts_the_job_back(till, monkeypatch):
+    from api.routers.workshop import gates
+    from database.repositories.workshop_repository import WorkshopJobRepository
+
+    monkeypatch.setattr(gates, "get_order_repository", lambda: till["orders"])
+    till["db"].get_collection("orders").insert_one(_order(status="READY", advance_refund_id="RET-RACE"))
+    jobs = till["db"].get_collection("workshop_jobs")
+    jobs.insert_one({"job_id": "J2", "order_id": "ORD-1", "status": "DELIVERED"})
+    assert gates.undo_handover_if_order_refunded(WorkshopJobRepository(jobs), {"job_id": "J2", "order_id": "ORD-1"}, "READY")
+    assert jobs.find_one({"job_id": "J2"})["status"] == "READY"
+
+
+# --- S1: the GST cross-check adds the cancelled-behind-a-note invoice to Books --
+def test_crosscheck_books_carry_invoices_cancelled_behind_a_whole_credit_note(till):
+    from api.routers.finance import gst_crosscheck as xr
+    from api.services import gst_crosscheck as xc
+    from datetime import datetime
+
+    till["db"].get_collection("orders").insert_one(_order(
+        status="CANCELLED", invoice_number="BOK01/2627/00009", grand_total=5000.0, tax_amount=238.10,
+        advance_refund_status="COMPLETED", advance_refund_credit_note="TST01/C2627/0001",
+        created_at=datetime(2026, 10, 10)))
+    till["db"].get_collection("orders").insert_one(_order(
+        "ORD-2", status="CANCELLED", invoice_number="BOK01/2627/00010", grand_total=900.0, tax_amount=42.86,
+        created_at=datetime(2026, 10, 10)))  # no credit note: stays out
+    cbn = xr._cancelled_behind_credit_note(
+        till["db"], [STORE], datetime(2026, 10, 1), datetime(2026, 11, 1), {}, {})
+    assert cbn["count"] == 1 and cbn["tax"] == pytest.approx(238.10) and cbn["taxableValue"] == pytest.approx(4761.90)
+    out = xc.build_crosscheck(
+        {"totalTaxableValue": 4761.90, "totalTax": 238.10},
+        {"outwardTaxableValue": 0.0, "outwardTax": 0.0},
+        {"sales_taxable": 0.0, "sales_tax": 0.0, "cancelled_behind_credit_note": cbn},
+        {"taxable": 0.0, "tax": 0.0, "cgst": 0.0, "sgst": 0.0, "igst": 0.0},
+    )
+    row = next(c for c in out["comparisons"] if c["metric"] == "Total output GST")
+    vals = row.get("values") or row.get("sources") or {}
+    assert vals["Books (orders)"] == pytest.approx(vals["GSTR-1"]) == pytest.approx(238.10)
+    assert out["cancelled_behind_credit_note"]["count"] == 1
+
+
+def test_a_crash_after_the_balance_moved_never_moves_it_twice(till):
+    # Died after the $inc but before the row was marked applied: the guard on
+    # the customer doc (advance_credit_refs) stops a second $inc.
+    till["db"].get_collection("customers").insert_one(
+        {"customer_id": "CUST-1", "store_credit": 1050.0, "advance_credit_refs": ["RET-Z:credit"]})
+    _ledger(till).insert_one({"_id": "RET-Z:credit", "entry_id": "RET-Z:credit", "customer_id": "CUST-1",
+                              "type": "ADJUSTED", "amount": 1000.0, "delta": 1000.0, "ref": "RET-Z",
+                              "applied": False})
+    out = returns_router._credit_back_advance(_order(), 1000.0, "RET-Z", _user("ACCOUNTANT"))
+    assert out is not None and out["applied"] is True
+    assert till["db"].get_collection("customers").find_one({"customer_id": "CUST-1"})["store_credit"] == 1050.0
+
+
+@pytest.mark.asyncio
+async def test_pickup_scan_is_undone_when_a_refund_lands_mid_write(till, monkeypatch):
+    from api.routers import labels
+    from api.routers.workshop import gates
+    from database.repositories.workshop_repository import WorkshopJobRepository
+
+    till["db"].get_collection("orders").insert_one(_order(
+        status="READY", payment_status="PAID", amount_paid=1000.0, balance_due=0.0,
+        payments=[{"payment_id": "p1", "method": "CASH", "amount": 1000.0}]))
+    jobs = till["db"].get_collection("workshop_jobs")
+    jobs.insert_one({"job_id": "J3", "job_number": "J3", "order_id": "ORD-1", "store_id": STORE,
+                     "status": "READY", "qc_passed": True})
+    wrepo = WorkshopJobRepository(jobs)
+    real_update = wrepo.update_status
+
+    def _refund_lands_first(*a, **k):
+        till["db"].get_collection("orders").update_one(
+            {"order_id": "ORD-1"}, {"$set": {"advance_refund_id": "RET-RACE"}})
+        return real_update(*a, **k)
+
+    monkeypatch.setattr(wrepo, "update_status", _refund_lands_first)
+    monkeypatch.setattr(labels, "get_workshop_repository", lambda: wrepo)
+    monkeypatch.setattr(gates, "get_order_repository", lambda: till["orders"])
+    out = await labels.scan_advance("J3", labels.ScanAdvanceBody(scanned_code="J3", station="PICKUP"),
+                                    _user("STORE_MANAGER"))
+    assert out["ok"] is False and out["reason"] == "ORDER_REFUNDED", out
+    assert jobs.find_one({"job_id": "J3"})["status"] == "READY"
