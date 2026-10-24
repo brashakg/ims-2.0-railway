@@ -999,7 +999,8 @@ def test_a_crash_after_the_credit_rolls_forward_without_a_second_credit(till, mo
 
 
 def test_the_store_credit_row_is_written_once_per_refund(till):
-    order = _order(customer_id="CUST-1")
+    order = _order(customer_id="CUST-1", advance_refund_id="RET-X")  # the press holds the claim
+    till["db"].get_collection("orders").insert_one(order)
     till["db"].get_collection("customers").insert_one({"customer_id": "CUST-1", "store_credit": 0.0})
     a = returns_router._credit_back_advance(order, 700.0, "RET-X", _user("ACCOUNTANT"))
     b = returns_router._credit_back_advance(order, 700.0, "RET-X", _user("ACCOUNTANT"))
@@ -1355,6 +1356,7 @@ def test_the_balance_moves_by_inc_not_by_overwriting_a_read(till):
         return doc
 
     till["db"].get_collection("customers").find_one = _redeem_meanwhile
+    till["db"].get_collection("orders").insert_one(_order(advance_refund_id="RET-Y"))
     returns_router._credit_back_advance(_order(), 700.0, "RET-Y", _user("ACCOUNTANT"))
     till["db"].get_collection("customers").find_one = orig_find
     assert till["db"].get_collection("customers").find_one({"customer_id": "CUST-1"})["store_credit"] == 1000.0
@@ -1489,6 +1491,7 @@ def test_a_crash_after_the_balance_moved_never_moves_it_twice(till):
     _ledger(till).insert_one({"_id": "RET-Z:credit", "entry_id": "RET-Z:credit", "customer_id": "CUST-1",
                               "type": "ADJUSTED", "amount": 1000.0, "delta": 1000.0, "ref": "RET-Z",
                               "applied": False})
+    till["db"].get_collection("orders").insert_one(_order(advance_refund_id="RET-Z"))
     out = returns_router._credit_back_advance(_order(), 1000.0, "RET-Z", _user("ACCOUNTANT"))
     assert out is not None and out["applied"] is True
     assert till["db"].get_collection("customers").find_one({"customer_id": "CUST-1"})["store_credit"] == 1050.0
@@ -1690,3 +1693,110 @@ def test_a_young_pending_record_of_another_press_is_never_voided(till):
     r = _advance_client().post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
     assert r.status_code == 400, r.text
     assert rcoll.find_one({"return_id": "RET-NOW"})["status"] == "PENDING"
+
+
+# =========================================================================== #
+# Round-6 review (head 70e624a2)
+# =========================================================================== #
+def _old_pending(till, **over):
+    rec = {"return_id": "RET-A", "order_id": "ORD-1", "store_id": STORE, "status": "PENDING",
+           "advance_refund": True, "net_refund": 1000.0, "refund_tenders": [],
+           "credit_amount": 1000.0, "created_at": "2026-10-01T10:00:00+00:00"}
+    rec.update(over)
+    till["db"].get_collection("returns").insert_one(rec)
+
+
+def test_a_stale_record_whose_credit_was_applied_is_never_voided(till):
+    # Press A stalled, B freed its claim, A then credited Rs 1,000: voiding A's
+    # record and refunding again would pay Rs 2,000 for a Rs 1,000 advance.
+    till["db"].get_collection("customers").insert_one({"customer_id": "CUST-1", "store_credit": 1000.0})
+    till["db"].get_collection("orders").insert_one(
+        _order(amount_paid=1000.0, payment_status="PARTIAL",
+               payments=[{"payment_id": "p1", "method": "STORE_CREDIT", "amount": 1000.0}]))
+    _old_pending(till)
+    _ledger(till).insert_one({"_id": "RET-A:credit", "entry_id": "RET-A:credit", "customer_id": "CUST-1",
+                              "type": "ADJUSTED", "delta": 1000.0, "ref": "RET-A", "applied": True})
+    r = _advance_client().post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r.status_code == 400 and "Ask an admin" in r.text, r.text
+    assert till["db"].get_collection("returns").find_one({"return_id": "RET-A"})["status"] == "PENDING"
+    assert _ledger(till).count_documents({}) == 1
+    assert till["db"].get_collection("customers").find_one({"customer_id": "CUST-1"})["store_credit"] == 1000.0
+
+
+def test_a_stale_record_with_a_credit_note_number_is_never_voided(till):
+    _advance_order(till)
+    _old_pending(till, credit_amount=None, credit_note_number="TST01/C2627/0003")
+    r = _advance_client().post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r.status_code == 400 and "Ask an admin" in r.text, r.text
+    assert till["db"].get_collection("returns").find_one({"return_id": "RET-A"})["status"] == "PENDING"
+
+
+def test_a_freed_claim_cannot_credit(till):
+    till["db"].get_collection("customers").insert_one({"customer_id": "CUST-1", "store_credit": 0.0})
+    till["db"].get_collection("orders").insert_one(_order(advance_refund_id="RET-OTHER"))
+    out = returns_router._credit_back_advance(_stored(till), 1000.0, "RET-A", _user("ACCOUNTANT"))
+    assert out is None
+    assert _ledger(till).count_documents({}) == 0
+    assert till["db"].get_collection("customers").find_one({"customer_id": "CUST-1"})["store_credit"] == 0.0
+
+
+def test_a_customer_without_a_store_credit_field_gets_just_the_delta(till):
+    # One rule: no seeding from the ledger (it double counted); the backfill
+    # script sets the field from the ledger for legacy customers.
+    from api.routers.customers import apply_store_credit_delta
+
+    customers = till["db"].get_collection("customers")
+    customers.insert_one({"customer_id": "CUST-1"})
+    _ledger(till).insert_one({"customer_id": "CUST-1", "type": "ISSUED", "delta": 300.0})
+    repo = CustomerRepository(customers)
+    assert apply_store_credit_delta(repo, "CUST-1", 200.0) is True
+    assert customers.find_one({"customer_id": "CUST-1"})["store_credit"] == 200.0
+
+
+def test_a_null_store_credit_is_treated_as_missing(till):
+    from api.routers.customers import apply_store_credit_delta
+
+    customers = till["db"].get_collection("customers")
+    customers.insert_one({"customer_id": "CUST-1", "store_credit": None})
+    assert apply_store_credit_delta(CustomerRepository(customers), "CUST-1", 200.0) is True
+    assert customers.find_one({"customer_id": "CUST-1"})["store_credit"] == 200.0
+
+
+def test_the_advance_credit_uses_the_one_balance_rule(till):
+    # Missing field: the advance refund's guarded $inc goes the same way.
+    till["db"].get_collection("customers").insert_one({"customer_id": "CUST-1", "store_credit": None})
+    till["db"].get_collection("orders").insert_one(_order(advance_refund_id="RET-B"))
+    out = returns_router._credit_back_advance(_stored(till), 700.0, "RET-B", _user("ACCOUNTANT"))
+    assert out is not None and out["applied"] is True
+    assert till["db"].get_collection("customers").find_one({"customer_id": "CUST-1"})["store_credit"] == 700.0
+    returns_router._credit_back_advance(_stored(till), 700.0, "RET-B", _user("ACCOUNTANT"))
+    assert till["db"].get_collection("customers").find_one({"customer_id": "CUST-1"})["store_credit"] == 700.0
+
+
+def test_backfill_sets_the_field_from_the_ledger_dry_run_first(tmp_path):
+    from scripts import backfill_store_credit_field as bf
+
+    db = StrictDB()
+    db.seed("customers", [{"customer_id": "C1"}, {"customer_id": "C2", "store_credit": None},
+                          {"customer_id": "C3", "store_credit": 50.0}, {"customer_id": "C4"}])
+    db.seed("credit_note_ledger", [{"customer_id": "C1", "delta": 300.0}, {"customer_id": "C1", "delta": -100.0},
+                                   {"customer_id": "C2", "delta": 80.0}, {"customer_id": "C3", "delta": 999.0}])
+    out = bf.plan(db)
+    assert sorted(out["sets"]) == [("C1", 200.0), ("C2", 80.0), ("C4", 0.0)]
+    assert "store_credit" not in db.get_collection("customers").find_one({"customer_id": "C1"})
+    assert bf.apply(db, out["sets"], str(tmp_path / "b.json")) == 3
+    cust = db.get_collection("customers")
+    assert cust.find_one({"customer_id": "C1"})["store_credit"] == 200.0
+    assert cust.find_one({"customer_id": "C3"})["store_credit"] == 50.0
+    assert bf.plan(db)["sets"] == []
+
+
+def test_a_freed_claim_cannot_apply_its_unapplied_credit_row(till):
+    # Press A wrote its credit row while it held the claim, then stalled; the
+    # claim was freed before the balance moved: the balance must not move now.
+    till["db"].get_collection("customers").insert_one({"customer_id": "CUST-1", "store_credit": 0.0})
+    till["db"].get_collection("orders").insert_one(_order(advance_refund_id="RET-OTHER"))
+    _ledger(till).insert_one({"_id": "RET-A:credit", "entry_id": "RET-A:credit", "customer_id": "CUST-1",
+                              "type": "ADJUSTED", "delta": 1000.0, "ref": "RET-A", "applied": False})
+    assert returns_router._credit_back_advance(_stored(till), 1000.0, "RET-A", _user("ACCOUNTANT")) is None
+    assert till["db"].get_collection("customers").find_one({"customer_id": "CUST-1"})["store_credit"] == 0.0
