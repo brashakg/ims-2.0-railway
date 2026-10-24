@@ -424,7 +424,10 @@ def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
                 # Every shop this return files for (H2).
                 "store_id": {"$in": filing},
                 # THE GST-return order rule (gst_base), GSTR-1's too.
-                **real_sale_match(db),
+                # The GST-document view (PR #1264): this return also nets the
+                # credit notes, so an invoice cancelled behind a whole-invoice
+                # note stays filed and its note reverses it once.
+                **real_sale_match(db, gst_documents=True),
                 "created_at": {"$gte": from_dt, "$lt": to_dt},
             }
         ):
