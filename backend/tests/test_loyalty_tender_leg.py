@@ -44,6 +44,7 @@ from api.routers import orders as orders_module  # noqa: E402
 from api.routers.orders import PaymentCreate, PaymentMethod, add_payment  # noqa: E402
 from database.repositories.order_repository import OrderRepository  # noqa: E402
 from database.repositories.customer_repository import CustomerRepository  # noqa: E402
+from database.repositories.loyalty_repository import LoyaltyTransactionRepository  # noqa: E402
 
 
 def _order_doc(order_id="ORD-L1", grand_total=1000.0) -> Dict[str, Any]:
@@ -83,6 +84,14 @@ def sale(monkeypatch):
         db.customers.insert_one({"customer_id": "cust-1", "credit_limit": grand_total})
         repo = OrderRepository(coll)
         customer_repo = CustomerRepository(db.customers)
+        # The burn a LOYALTY leg must be backed by (POST /loyalty/redeem writes
+        # it): an unused Rs 300 REDEEM row for this order and customer.
+        db.loyalty_transactions.insert_one({
+            "txn_id": f"t-{order_id}", "order_id": order_id, "customer_id": "cust-1",
+            "type": "REDEEM", "points": 300, "rupee_value": 300.0,
+        })
+        txns = LoyaltyTransactionRepository(db.loyalty_transactions)
+        monkeypatch.setattr("api.dependencies.get_loyalty_transaction_repository", lambda: txns)
         monkeypatch.setattr(orders_module, "get_order_repository", lambda: repo)
         monkeypatch.setattr(orders_module, "get_customer_repository", lambda: customer_repo)
         return {"coll": coll, "order_id": order_id}

@@ -157,6 +157,13 @@ def capability_for(method: str, path: str) -> Optional[str]:
     if tmpl in ("/api/v1/vendor-rma/{rma_id}/credit-preview",
                 "/api/v1/vendor-rma/{rma_id}/credit-note"):
         return "vendor-rma:confirm-credit"
+    # Curated finer capability: refunding an advance + cancelling the order
+    # (owner 2026-10-23: ACCOUNTANT / ADMIN / SUPERADMIN only). ACCOUNTANT is
+    # not in the returns:write union and must not join it -- the grant guard
+    # would then let an accountant hand out counter returns. A returns:write
+    # deny or grant still answers it: PARENT_CAPABILITY.
+    if tmpl == "/api/v1/returns/advance-refund":
+        return "returns:advance-refund"
     verb = "read" if method.upper() in _READ_METHODS else "write"
     return f"{mod}:{verb}"
 
@@ -171,6 +178,7 @@ PARENT_CAPABILITY: Dict[str, str] = {
     "vendor-returns:create": "vendor-returns:write",
     "vendor-returns:confirm-credit": "vendor-returns:write",
     "vendor-rma:confirm-credit": "vendor-rma:write",
+    "returns:advance-refund": "returns:write",
 }
 
 

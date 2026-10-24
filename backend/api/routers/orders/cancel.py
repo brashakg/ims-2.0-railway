@@ -5,6 +5,7 @@ split): no path, method, dependency, status code, response_model, default,
 rounding or validation was changed.
 """
 
+from api.utils.event_time import utc_now_iso
 from fastapi import Depends, HTTPException, Query
 from typing import Any, Dict, List
 from ..auth import get_current_user
@@ -25,6 +26,68 @@ from .release import (
 )
 
 
+# Who may cancel an order that took money (once that money is refunded): the
+# same people who refund an advance (owner 2026-10-23 -- accounts and HQ, not
+# store managers; returns.py _ADVANCE_REFUND_ROLES).
+CANCEL_ADVANCE_ROLES = ("SUPERADMIN", "ADMIN", "ACCOUNTANT")
+
+
+def _refuse_cancel_holding_money(order: Dict[str, Any], order_id: str, current_user: dict) -> None:
+    """A plain cancel moves NO money. An order carrying a tax invoice, or money
+    the customer paid that has not been refunded, used to cancel anyway -- the
+    advance was kept with no refund, and the returns door then refused every
+    CANCELLED order, so the money had no way back. Refuse, naming the door.
+
+    An ONLINE order is out of scope: its money was taken by Shopify and goes
+    back through the Shopify refund (Online Store > Refund reviews), not the
+    counter, so its cancel behaves exactly as before."""
+    if (
+        str(order.get("channel") or "").strip().upper() == "ONLINE"
+        or order.get("shopify_order_id")
+    ):
+        return
+    from ..returns import _returns_coll, _sum_prior_refunds
+
+    invoice = order.get("invoice_number")
+    reversed_by = None  # the refund-advance door's whole-invoice credit note
+    if invoice and order.get("advance_refund_id"):
+        coll = _returns_coll()
+        doc = coll.find_one({"return_id": order["advance_refund_id"], "status": "COMPLETED"}) if coll is not None else None
+        reversed_by = (doc or {}).get("credit_note_number")
+    if invoice and not reversed_by:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"This order already has tax invoice {invoice}, so it cannot be "
+                "cancelled. Return the items from Returns instead - that issues "
+                "the credit note and the refund."
+            ),
+        )
+    try:
+        paid = float(order.get("amount_paid") or 0)
+    except (TypeError, ValueError):
+        paid = float("inf")  # unreadable -> treat as money held, never as none
+    if paid <= 0.01:
+        return  # nothing was taken: cancel exactly as before
+
+    held = round(paid - _sum_prior_refunds(order_id, strict=True), 2)
+    if held > 0.01:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Rs {held:,.2f} was paid on this order. Cancelling does not give "
+                "money back, so the order was not cancelled. Accounts or an admin "
+                "must use 'Refund advance and cancel' on the Orders screen, which "
+                "refunds the customer and cancels the order in one step."
+            ),
+        )
+    if not any(r in current_user.get("roles", []) for r in CANCEL_ADVANCE_ROLES):
+        raise HTTPException(
+            status_code=403,
+            detail="Only accounts or an admin can cancel an order that took an advance.",
+        )
+
+
 @router.post("/{order_id}/cancel")
 async def cancel_order(
     order_id: str,
@@ -39,6 +102,13 @@ async def cancel_order(
         raise HTTPException(
             status_code=403, detail="Your role is not permitted to cancel orders."
         )
+    return await cancel_order_core(order_id, reason, current_user)
+
+
+async def cancel_order_core(order_id: str, reason: str, current_user: dict):
+    """The cancel itself, behind the route's role gate. The refund-advance door
+    (returns.refund_advance_and_cancel, accounts / admin) calls it directly
+    once the advance is refunded; every other guard below still runs."""
     repo = get_order_repository()
 
     if repo is not None:
@@ -64,6 +134,9 @@ async def cancel_order(
                     else f"Cannot cancel a {status} order"
                 ),
             )
+
+        if status != "CANCELLED":
+            _refuse_cancel_holding_money(order, order_id, current_user)
 
         # ------------------------------------------------------------------
         # ATOMIC SINGLE-SHOT CANCEL (panel must-fix 3). find_by_id + status
@@ -323,6 +396,30 @@ async def cancel_order(
                     stock_released,
                 )
 
+        # The order's open workshop job ends with it (PR #1264): the lab must
+        # not finish -- nor the pickup scan hand over -- glasses for an order
+        # that is cancelled (and, after an advance refund, paid back). A job
+        # already DELIVERED stays as the record of what left. Fail-soft but
+        # loud: the handover gate refuses a cancelled order anyway.
+        workshop_jobs_cancelled = 0
+        try:
+            from ...dependencies import get_workshop_repository
+
+            _jobs = getattr(get_workshop_repository(), "collection", None)
+            if _jobs is not None:
+                _res = _jobs.update_many(
+                    {"order_id": order_id, "status": {"$nin": ["DELIVERED", "CANCELLED"]}},
+                    {"$set": {
+                        "status": "CANCELLED",
+                        "cancelled_with_order": True,
+                        "cancellation_reason": reason,
+                        "updated_at": utc_now_iso(),
+                    }},
+                )
+                workshop_jobs_cancelled = int(getattr(_res, "modified_count", 0) or 0)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[ORDERS] workshop job not cancelled with order %s: %s", order_id, exc)
+
         # A pre-order's wait ends with the order (owner 2026-10-19): its
         # task closes, its awaiting-stock lines go. Fail-soft, online only.
         if order.get("preorder_awaiting_stock"):
@@ -355,6 +452,7 @@ async def cancel_order(
             "stock_release_failed": stock_release_failed,
             "stock_units_still_sold": stock_still_sold,
             "loyalty_reversal_failed": loyalty_reversal_failed,
+            "workshop_jobs_cancelled": workshop_jobs_cancelled,
         }
 
     return {"order_id": order_id, "status": "CANCELLED"}

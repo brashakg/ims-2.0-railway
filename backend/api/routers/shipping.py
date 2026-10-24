@@ -169,10 +169,12 @@ def _resolve_order(order_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _live_shipment_for_order(order_id: str) -> Optional[Dict[str, Any]]:
+def _live_shipment_for_order(order_id: str, strict: bool = False) -> Optional[Dict[str, Any]]:
     """The shipment already out for this order, if any - the guard against
     booking a SECOND collection of the same balance. Fail-soft (no DB / a
-    lookup error) -> None, like every other read in this router."""
+    lookup error) -> None, like every other read in this router.
+    ``strict`` (the refund-advance door: a booking IS a handover): a lookup
+    error raises instead of reading as "nothing shipped"."""
     coll = _shipments_coll()
     if coll is None:
         return None
@@ -185,6 +187,8 @@ def _live_shipment_for_order(order_id: str) -> Optional[Dict[str, Any]]:
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SHIPROCKET] duplicate-booking lookup failed: %s", exc)
+        if strict:
+            raise
         return None
 
 
@@ -382,8 +386,9 @@ async def book_shipment(
         # bill. The same helper feeds the courier payload, so what is
         # persisted here and what the courier collects cannot differ.
         if is_cod:
-            from ..services.delivery_gate import cod_collectable
+            from ..services.delivery_gate import cod_collectable, refuse_handover_of_refunded
 
+            refuse_handover_of_refunded(order)
             cod_amount = cod_collectable(order)
         else:
             from ..services.delivery_gate import assert_handover_payment

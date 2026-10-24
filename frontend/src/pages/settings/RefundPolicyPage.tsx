@@ -4,7 +4,7 @@
 // A focused editor for the configurable refund-approval matrix (DECISIONS sec 6):
 //   - three approval-threshold tiers: auto-approve below / needs ADMIN above /
 //     needs SUPERADMIN above (rupee inputs; stored as money_paisa policy keys)
-//   - the refund approval-matrix master switch (gate is DARK by default)
+//   - the refund approval-matrix master switch (ON by default: refunds above Rs 2,000 need a manager)
 //   - the original-tender hard-lock toggle (refunds always go back to the
 //     original payment method)
 // plus the approver's own PIN (reused from ApprovalPinSection).
@@ -43,7 +43,7 @@ const DEFAULTS: FormState = {
   autoBelow: 500,
   adminAbove: 2000,
   superAbove: 10000,
-  matrixEnabled: false,
+  matrixEnabled: true,
   tenderEnforce: true,
 };
 
@@ -57,6 +57,10 @@ export function RefundPolicySection() {
   const [form, setForm] = useState<FormState>(DEFAULTS);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  // True only once the server's current values were read. A Save from a form
+  // that never loaded them would write guesses -- e.g. switch the Rs 2,000
+  // manager-approval rule OFF -- so it is refused.
+  const [loaded, setLoaded] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -74,9 +78,11 @@ export function RefundPolicySection() {
       if (typeof pol[K_MATRIX]?.value === 'boolean') next.matrixEnabled = pol[K_MATRIX].value;
       if (typeof pol[K_TENDER]?.value === 'boolean') next.tenderEnforce = pol[K_TENDER].value;
       setForm(next);
+      setLoaded(true);
     } catch {
       // Keep code defaults on a read error (page never blanks out).
       setForm(DEFAULTS);
+      setLoaded(false);
     } finally {
       setLoading(false);
     }
@@ -94,6 +100,10 @@ export function RefundPolicySection() {
     form.superAbove > form.adminAbove;
 
   const save = async () => {
+    if (!loaded) {
+      toast.error('The current refund policy could not be loaded, so nothing was saved. Reload the page and try again.');
+      return;
+    }
     if (!ordered) {
       toast.error('Thresholds must increase: auto-approve < admin < superadmin.');
       return;

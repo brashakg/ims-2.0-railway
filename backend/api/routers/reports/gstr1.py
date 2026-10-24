@@ -153,7 +153,9 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
         # silently never matches (this was the original GSTR bug).
         query = {
             "store_id": active_store,
-            **real_sale_match(db),
+            # The GST-document view (PR #1264): it also files the credit notes,
+            # so an invoice cancelled behind a whole-invoice note stays filed.
+            **real_sale_match(db, gst_documents=True),
             "created_at": {"$gte": from_dt, "$lt": to_dt},
         }
 

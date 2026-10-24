@@ -138,6 +138,20 @@ def gate_credit_delivery(
     )
 
 
+def refuse_handover_of_refunded(order: dict) -> None:
+    """409 when the order is cancelled or its advance was refunded: the goods
+    must not go out with the money already back."""
+    status = str((order or {}).get("status") or "").strip().upper()
+    if status in ("CANCELLED", "CANCELED") or (order or {}).get("advance_refund_id"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This order is cancelled or its advance was refunded, so it "
+                "cannot be handed over or shipped."
+            ),
+        )
+
+
 def assert_handover_payment(
     order: dict,
     *,
@@ -155,7 +169,14 @@ def assert_handover_payment(
       2. balance still due -> manager, or a consumed CREDIT_DELIVERY token
          bound to this store + order (403 otherwise).
 
+    0. a CANCELLED order, or one whose advance was refunded through
+       /returns/advance-refund (advance_refund_id, on its way to CANCELLED),
+       never leaves: the customer has the money back (PR #1264). Every
+       handover door routes here -- the counter deliver, shipping, the
+       workshop PUT status and the PICKUP scan.
+
     Raises HTTPException; returns None when the handover is money-clear."""
+    refuse_handover_of_refunded(order)
     payment_status = order.get("payment_status", "UNPAID")
     if payment_status == "UNPAID":
         raise HTTPException(

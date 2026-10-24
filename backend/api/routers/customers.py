@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from typing import Any, Dict, List, Optional
 from datetime import date, datetime
 import uuid
+import logging
 import re
 from .auth import get_current_user, require_roles
 from ..utils.ist import ist_day_start_utc, now_ist
@@ -205,6 +206,7 @@ def _scoped_customer_or_404(customer_id, current_user, *, write: bool = False):
     return doc
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _audit_customer(
@@ -1835,6 +1837,73 @@ def redeem_store_credit_atomic(
     return {"entry": entry, "balance": entry["balance_after"]}
 
 
+def store_credit_balance_unready(repo, customer_id: str, exclude_entry_id: Optional[str] = None) -> bool:
+    """True when the customer's store_credit field is missing / null but the
+    ledger already holds rows for them (``exclude_entry_id``: the row the
+    caller itself is writing): a legacy balance scripts/
+    backfill_store_credit_field.py has not set yet. Starting such a field at 0
+    would silently drop that balance, so the doors refuse instead (deploy
+    order: the backfill runs BEFORE PR #1264). An unreadable ledger reads as
+    unready too -- never a guess."""
+    coll = getattr(repo, "collection", None)
+    if coll is None:
+        return False
+    doc = coll.find_one({"customer_id": customer_id}) or {}
+    if doc.get("store_credit") is not None:
+        return False
+    ledger = _ledger_coll()
+    if ledger is None:
+        return True
+    flt: Dict[str, Any] = {"customer_id": customer_id}
+    if exclude_entry_id:
+        flt["entry_id"] = {"$ne": exclude_entry_id}
+    return ledger.find_one(flt) is not None
+
+
+def apply_store_credit_delta(
+    repo, customer_id: str, delta: float, *, guard_ref: Optional[str] = None,
+    balance_after: Optional[float] = None, entry_id: Optional[str] = None,
+) -> bool:
+    """THE way customer.store_credit moves: ONE atomic $inc of the delta --
+    never a read-then-$set, which overwrote a concurrent door's $inc (500 + a
+    manual 200 racing an advance refund's 1000 read 700, not 1700).
+
+    A missing or null store_credit starts from 0 (Mongo refuses $inc on null)
+    and is logged -- but ONLY when the ledger holds nothing else for the
+    customer: a legacy balance living only in the ledger is the backfill
+    script's to set (store_credit_balance_unready -> logged, False), never
+    seeded here (which double counted) nor dropped by a silent 0. ``guard_ref`` (the advance refund's credit row id)
+    makes the move apply once: the $inc lands only while the ref is not yet in
+    the customer's advance_credit_refs, and pushes it in the same write.
+
+    True when the balance moved (or, with guard_ref, had already moved). A
+    repository with no raw collection (test doubles only) gets balance_after."""
+    coll = getattr(repo, "collection", None)
+    if coll is None:
+        repo.update(customer_id, {"store_credit": balance_after})
+        return True
+    if store_credit_balance_unready(repo, customer_id, exclude_entry_id=entry_id or guard_ref):
+        logger.error("[CUSTOMERS] %s has ledger history but no store_credit field: run "
+                     "scripts/backfill_store_credit_field.py; balance NOT moved", customer_id)
+        return False
+    seeded = coll.update_one({"customer_id": customer_id, "store_credit": None},
+                             {"$set": {"store_credit": 0.0}})
+    if getattr(seeded, "matched_count", getattr(seeded, "modified_count", 0)):
+        logger.warning("[CUSTOMERS] %s had no store_credit field; starting it at 0 "
+                       "(run scripts/backfill_store_credit_field.py for legacy balances)", customer_id)
+    flt: Dict[str, Any] = {"customer_id": customer_id}
+    upd: Dict[str, Any] = {"$inc": {"store_credit": float(delta)}}
+    if guard_ref:
+        flt["advance_credit_refs"] = {"$ne": guard_ref}
+        upd["$push"] = {"advance_credit_refs": guard_ref}
+    res = coll.update_one(flt, upd)
+    if getattr(res, "matched_count", getattr(res, "modified_count", 0)):
+        return True
+    if guard_ref:
+        return coll.find_one({"customer_id": customer_id, "advance_credit_refs": guard_ref}) is not None
+    return False
+
+
 def _post_credit_entry(
     customer_id: str, entry_type: str, body: StoreCreditEntryRequest, current_user: dict
 ):
@@ -1867,6 +1936,11 @@ def _post_credit_entry(
     # ISSUE / ADJUST (credit). A credit cannot overspend, so the snapshot
     # path is safe for it; a REDEEM never reaches here (returned above).
     # ------------------------------------------------------------------
+    if store_credit_balance_unready(repo, customer_id):
+        raise HTTPException(
+            status_code=503,
+            detail="This customer's store-credit balance has not been set up yet - nothing was recorded. Ask an admin.",
+        )
     balance = _current_credit_balance(customer_id, existing)
     try:
         entry = scl.make_entry(
@@ -1887,9 +1961,16 @@ def _post_credit_entry(
         coll.insert_one(dict(entry))
     # Keep the legacy number in sync so the rest of the app stays correct.
     try:
-        repo.update(customer_id, {"store_credit": entry["balance_after"]})
-    except Exception:  # noqa: BLE001
-        pass
+        moved = apply_store_credit_delta(repo, customer_id, entry["delta"],
+                                         balance_after=entry["balance_after"], entry_id=entry.get("entry_id"))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[CUSTOMERS] store credit balance not moved for %s: %s", customer_id, exc)
+        moved = False
+    if not moved:
+        raise HTTPException(
+            status_code=503,
+            detail="The store-credit entry was recorded but the balance could not be moved - ask an admin.",
+        )
     entry.pop("_id", None)
     return {"entry": entry, "balance": entry["balance_after"]}
 

@@ -18,7 +18,7 @@ export const orderRoutes = (
       path="orders"
       element={
         <ProtectedRoute
-          allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CASHIER', 'SALES_STAFF', 'OPTOMETRIST', 'WORKSHOP_STAFF']}
+          allowedRoles={['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CASHIER', 'SALES_STAFF', 'OPTOMETRIST', 'WORKSHOP_STAFF', 'ACCOUNTANT']}
         >
           <OrdersPage />
         </ProtectedRoute>
