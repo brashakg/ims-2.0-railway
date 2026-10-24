@@ -357,6 +357,9 @@ async def add_payment(
             raise
         if not recorded and loyalty_txn_id:
             _release_loyalty_redemption(loyalty_txn_id, payment_id)
+        if not recorded:
+            # A refund-advance claim that landed mid-write: say so, not "failed".
+            refuse_if_advance_refunded(repo.find_by_id(order_id) or {}, "take a payment")
         if recorded:
             # Auto-confirm DRAFT orders when first payment is received
             # This fixes the "stuck in DRAFT+PARTIAL" lifecycle issue

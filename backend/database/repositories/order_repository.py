@@ -528,7 +528,9 @@ class OrderRepository(BaseRepository):
         try:
             for attempt in range(12):
                 order = expected_order if expected_order is not None else self.find_by_id(order_id)
-                if not order or order.get("status") == "CANCELLED":
+                # PR #1264: an order a refund-advance claim holds takes no money
+                # (its write's compare-and-set carries advance_refund_id too).
+                if not order or order.get("status") == "CANCELLED" or order.get("advance_refund_id"):
                     return False
                 key = payment.get("idempotency_key")
                 if key and any(p.get("idempotency_key") == key for p in order.get("payments") or []):
