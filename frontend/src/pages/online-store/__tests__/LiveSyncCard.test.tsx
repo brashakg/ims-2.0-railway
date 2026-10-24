@@ -115,6 +115,21 @@ describe('Live sync card', () => {
     vi.mocked(syncHealthApi.getDrift).mockResolvedValue({ unavailable: true } as any);
   });
 
+  it('names an omitted sibling in an amber warning without inventing a failed lead', async () => {
+    vi.mocked(pushApi.getStatus).mockResolvedValue(status({ ...SCHEDULE_ON, last_run: {
+      ...LAST_RUN, failed: 0, failures: [], variant_warnings: [{
+        product_id: 'LEAD', sku: 'RB-BLUE', code: 'OPTION_MISSING', reason: 'no lens size',
+        error: 'RB-BLUE left off website page: no lens size',
+      }],
+    } }) as any);
+    render(<OnlineShopifySyncPage />);
+    const warnings = await screen.findByRole('list', { name: 'Live sync variant warnings' });
+    expect(warnings).toHaveTextContent('RB-BLUE left off website page: no lens size');
+    expect(warnings).toHaveTextContent('stays queued; complete variants were sent');
+    expect(warnings).toHaveClass('text-amber-700');
+    expect(screen.queryByRole('list', { name: 'Live sync failures' })).not.toBeInTheDocument();
+  });
+
   it('shows the last run, every failure with its code, and the next IST slot', async () => {
     vi.mocked(pushApi.getStatus).mockResolvedValue(status(SCHEDULE_ON) as any);
     render(<OnlineShopifySyncPage />);

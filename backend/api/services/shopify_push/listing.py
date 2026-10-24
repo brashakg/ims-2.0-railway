@@ -19,9 +19,10 @@ OPTIONS come from what VARIES in the model: colour only -> Color, size only
 -> Size, both -> Color + Size. The values are G1's (product_master.
 family_option_values: 'Gold (001)'; two members of one frame colour get their
 lens label, 'Gold (001) / Green Polarized'). A value is never left blank and
-never shared by two variants. A FIRST publish that would need either -- or
-has an unpriced variant -- is REFUSED before anything is sent
-(OPTION_MISSING / OPTION_CLASH / UNPRICED_SIZE, #1225). A LIVE listing holds
+never shared by two variants. A FIRST publish omits siblings missing an
+option and keeps the lead queued until corrected. An incomplete lead,
+clashing identities or unpriced sent variants still REFUSE publication
+(OPTION_MISSING / OPTION_CLASH / UNPRICED_SIZE). A LIVE listing holds
 back only the colour(s) at fault, names them by SKU and sends everything
 else (review of #1233: one bad colour never freezes a live listing).
 
@@ -233,7 +234,8 @@ def model_listing(
 
     _price_pending(db, product, rows)
 
-    # WHAT EACH NEW COLOUR NEEDS. A first publish refuses as a whole (#1225);
+    # WHAT EACH NEW COLOUR NEEDS. First publication keeps its lead and refuses
+    # ambiguous identities, but can omit a sibling missing an option.
     # a LIVE listing holds back only the colour(s) at fault and sends the
     # rest -- one bad colour never freezes a live listing (owner, review of
     # #1233). Held colours are named by SKU on the result.
@@ -272,7 +274,7 @@ def model_listing(
             sku = str(m["sku"])
             for name, field in AXES:
                 if _creating(sku) and name in axes and not str(values[sku][field] or "").strip():
-                    _hold(sku, OPTION_MISSING, f"no {'colour' if name == 'Color' else 'size'}")
+                    _hold(sku, OPTION_MISSING, f"no {'colour' if name == 'Color' else 'lens size'}")
         members = _not_held(kept)
         axes = _axes_of(members, values)
         # A colour that would ADD an option the listing's own variants have no
@@ -310,21 +312,28 @@ def model_listing(
                 )
             else:
                 missing = [
-                    f"{'colour' if name == 'Color' else 'size'} on {m['sku']}"
+                    (str(m['sku']), 'colour' if name == 'Color' else 'lens size')
                     for m in members
                     if _creating(str(m["sku"]))
                     for name, field in AXES
                     if name in axes and not str(values[str(m["sku"])][field] or "").strip()
                 ]
-                if missing:
+                if any(sku == lead_sku for sku, _ in missing):
                     refusal = (
                         OPTION_MISSING,
                         "refused: the website chooses this model by "
                         + " and ".join(a.lower() for a in axes)
                         + ", and there is no "
-                        + ", no ".join(missing)
+                        + ", no ".join(f"{field} on {sku}" for sku, field in missing)
                         + " -- fill it in, then press again. Nothing was sent",
                     )
+                else:
+                    for sku, field in missing:
+                        _hold(sku, OPTION_MISSING, f"no {field}")
+                    members = _not_held(members)
+                    axes = _axes_of(members, values)
+                    dropped = {h["sku"] for h in held}
+                    rows = [r for r in rows if str(r.get("sku")) not in dropped]
 
     # The option values each row is chosen by on the website: exactly the
     # axes the model (as sent) varies on.

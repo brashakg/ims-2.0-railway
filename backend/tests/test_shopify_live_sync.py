@@ -172,6 +172,33 @@ def test_dirty_products_are_synced_and_dark_first_publish_stays_queued(world):
     assert audit.rows[0]["details"]["mode"] == "SIMULATED"
 
 
+@pytest.mark.parametrize("push_code,expected_failures", [("OPTION_MISSING", 0), ("PRICE_NOT_SYNCED", 1)])
+@pytest.mark.parametrize("seed_hold", [False, True])
+def test_missing_sibling_is_named_separately_without_hiding_other_push_failures(world, monkeypatch, push_code, expected_failures, seed_hold):
+    db, _ = world
+    _seed_products(db)
+    db["catalog_products"].delete_one({"id": "P-new"})
+
+    async def push(*args, **kwargs):
+        return shopify_push.PushResult(
+            mode="LIVE", entity="product", action="update", target_id="P-live", ok=True,
+            code=push_code, error="price failed" if expected_failures else "missing sibling",
+            listing={"held": [{"sku": "BLUE-SIZE", "code": "OPTION_MISSING", "reason": "no lens size"}]},
+            variants_seeded={"held_data": seed_hold},
+        )
+
+    monkeypatch.setattr(shopify_push, "push_product", push)
+    run = _run(ls.sync_live_products(db, trigger="manual", actor="u"))
+    assert run["variant_warnings"] == [{
+        "product_id": "P-live", "sku": "BLUE-SIZE", "code": "OPTION_MISSING", "reason": "no lens size",
+        "error": "BLUE-SIZE left off website page: no lens size",
+    }]
+    assert len(run["failures"]) == (1 if seed_hold else expected_failures)
+    assert run["failed"] == 0
+    if expected_failures:
+        assert run["failures"][0]["code"] == "PRICE_NOT_SYNCED"
+
+
 def test_scheduled_run_stamps_the_scheduler_actor(world):
     db, audit = world
     _seed_products(db)
