@@ -269,6 +269,12 @@ async def _release_lens_lines(
     return list(lines or [])
 
 
+def _handover_guard(new_status: str) -> dict:
+    """A DELIVERED claim also requires no refund-advance claim on the order
+    (PR #1264): the gate read the order a moment earlier; this closes the gap."""
+    return {"advance_refund_id": None} if new_status == "DELIVERED" else {}
+
+
 def _claim_order_status(
     repo, order_id: str, new_status: str, required_status, user_id, extra=None
 ) -> bool:
@@ -321,7 +327,7 @@ def _claim_order_status(
     if callable(updater):
         try:
             doc = updater(
-                {"order_id": order_id, "status": {"$in": wanted}},
+                {"order_id": order_id, "status": {"$in": wanted}, **_handover_guard(new_status)},
                 {"$set": payload, "$push": {"status_history": history_entry}},
             )
         except Exception as exc:  # noqa: BLE001
@@ -352,11 +358,13 @@ def _claim_order_status(
     existing = repo.find_by_id(order_id)
     if not existing or existing.get("status") not in wanted:
         return False
+    if new_status == "DELIVERED" and existing.get("advance_refund_id"):
+        return False
     guarded = getattr(coll, "update_one", None) if coll is not None else None
     if callable(guarded):
         try:
             res = guarded(
-                {"order_id": order_id, "status": {"$in": wanted}},
+                {"order_id": order_id, "status": {"$in": wanted}, **_handover_guard(new_status)},
                 {"$set": payload, "$push": {"status_history": history_entry}},
             )
         except Exception as exc:  # noqa: BLE001
@@ -395,6 +403,9 @@ def _claim_order_for_cancel(
     """
     payload = {
         "status": "CANCELLED",
+        # Nothing is owed on a cancelled order (PR #1264): no phantom balance
+        # in receivables or cash-flow.
+        "balance_due": 0.0,
         "cancellation_reason": reason,
         "cancelled_by": current_user.get("user_id"),
         "cancelled_at": utc_now_iso(),

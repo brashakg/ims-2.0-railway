@@ -382,8 +382,9 @@ async def book_shipment(
         # bill. The same helper feeds the courier payload, so what is
         # persisted here and what the courier collects cannot differ.
         if is_cod:
-            from ..services.delivery_gate import cod_collectable
+            from ..services.delivery_gate import cod_collectable, refuse_handover_of_refunded
 
+            refuse_handover_of_refunded(order)
             cod_amount = cod_collectable(order)
         else:
             from ..services.delivery_gate import assert_handover_payment

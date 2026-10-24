@@ -5,6 +5,7 @@ split): no path, method, dependency, status code, response_model, default,
 rounding or validation was changed.
 """
 
+from api.utils.event_time import utc_now_iso
 from fastapi import Depends, HTTPException, Query
 from typing import Any, Dict, List
 from ..auth import get_current_user
@@ -395,6 +396,30 @@ async def cancel_order_core(order_id: str, reason: str, current_user: dict):
                     stock_released,
                 )
 
+        # The order's open workshop job ends with it (PR #1264): the lab must
+        # not finish -- nor the pickup scan hand over -- glasses for an order
+        # that is cancelled (and, after an advance refund, paid back). A job
+        # already DELIVERED stays as the record of what left. Fail-soft but
+        # loud: the handover gate refuses a cancelled order anyway.
+        workshop_jobs_cancelled = 0
+        try:
+            from ...dependencies import get_workshop_repository
+
+            _jobs = getattr(get_workshop_repository(), "collection", None)
+            if _jobs is not None:
+                _res = _jobs.update_many(
+                    {"order_id": order_id, "status": {"$nin": ["DELIVERED", "CANCELLED"]}},
+                    {"$set": {
+                        "status": "CANCELLED",
+                        "cancelled_with_order": True,
+                        "cancellation_reason": reason,
+                        "updated_at": utc_now_iso(),
+                    }},
+                )
+                workshop_jobs_cancelled = int(getattr(_res, "modified_count", 0) or 0)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[ORDERS] workshop job not cancelled with order %s: %s", order_id, exc)
+
         # A pre-order's wait ends with the order (owner 2026-10-19): its
         # task closes, its awaiting-stock lines go. Fail-soft, online only.
         if order.get("preorder_awaiting_stock"):
@@ -427,6 +452,7 @@ async def cancel_order_core(order_id: str, reason: str, current_user: dict):
             "stock_release_failed": stock_release_failed,
             "stock_units_still_sold": stock_still_sold,
             "loyalty_reversal_failed": loyalty_reversal_failed,
+            "workshop_jobs_cancelled": workshop_jobs_cancelled,
         }
 
     return {"order_id": order_id, "status": "CANCELLED"}
