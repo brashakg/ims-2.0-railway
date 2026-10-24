@@ -189,8 +189,8 @@ def test_detect_drift_no_pushed_gids():
     assert result["drifted"] == []
 
 
-def test_detect_drift_flags_drift_when_shopify_newer():
-    """When Shopify updatedAt is after our last_pushed_at, the gid is drifted."""
+def test_detect_drift_timestamp_only_payload_is_unknown():
+    """A timestamp-only response cannot establish owned-content drift."""
     from datetime import datetime, timezone
 
     db = _FakeDb({
@@ -206,7 +206,7 @@ def test_detect_drift_flags_drift_when_shopify_newer():
         "ecom_collections": _FakeColl([]),
     })
 
-    # Shopify says it was updated AFTER our stamp -> drift.
+    # A newer timestamp alone is not evidence of content drift.
     shopify_nodes = [
         {"id": "gid://shopify/Product/99", "updatedAt": "2026-06-02T10:00:00Z"}
     ]
@@ -217,14 +217,13 @@ def test_detect_drift_flags_drift_when_shopify_newer():
         result = _run(sh.detect_drift(db, limit=10))
 
     assert result["checked"] is True
-    assert result["counts"]["drifted"] == 1
-    assert len(result["drifted"]) == 1
-    assert result["drifted"][0]["gid"] == "gid://shopify/Product/99"
-    assert result["drifted"][0]["sku"] == "DRIFT-SKU"
+    assert result["counts"]["drifted"] == 0
+    assert result["counts"]["unknown"] == 1
+    assert result["unknown"][0]["sku"] == "DRIFT-SKU"
 
 
-def test_detect_drift_no_drift_when_shopify_older():
-    """When Shopify updatedAt is BEFORE last_pushed_at, no drift is flagged."""
+def test_detect_drift_missing_content_with_older_timestamp_is_not_an_alarm():
+    """An older timestamp also cannot establish content drift without fields."""
     from datetime import datetime, timezone
 
     db = _FakeDb({
@@ -240,7 +239,7 @@ def test_detect_drift_no_drift_when_shopify_older():
         "ecom_collections": _FakeColl([]),
     })
 
-    # Shopify updated BEFORE our stamp -> no drift.
+    # The incomplete response is unknown, whatever its timestamp.
     shopify_nodes = [
         {"id": "gid://shopify/Product/55", "updatedAt": "2026-06-04T10:00:00Z"}
     ]
@@ -255,8 +254,8 @@ def test_detect_drift_no_drift_when_shopify_older():
     assert result["drifted"] == []
 
 
-def test_detect_drift_no_timestamp_counted_separately():
-    """Gids without last_pushed_at (pre-Step-3 rows) are counted in no_timestamp, not drifted."""
+def test_detect_drift_missing_timestamp_keeps_the_legacy_counter():
+    """Keep no_timestamp for compatibility; it no longer gates comparison."""
     db = _FakeDb({
         "catalog_products": _FakeColl([
             {

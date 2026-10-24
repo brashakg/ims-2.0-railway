@@ -1993,6 +1993,15 @@ export const pushApi = {
  *  which also carries an uploads_audit block). All fields optional + nullable. */
 export interface SyncParity {
   parity?: {
+    colours_sizes?: {
+      checked?: boolean;
+      reason?: string;
+      total?: number;
+      online?: number;
+      website_pages?: number;
+      missing?: number;
+      missing_items?: Array<{ sku?: string; product_id?: string; reason?: string; code?: string | null }>;
+    } | null;
     entities?: Record<
       string,
       { total?: number; pushed?: number; missing?: number } | null
@@ -2048,8 +2057,9 @@ export interface SyncHealth {
 export interface SyncDrift {
   checked?: boolean | null;
   reason?: string | null;
-  drifted?: Array<{ gid?: string; sku?: string }> | null;
-  counts?: { scanned?: number; drifted?: number; no_timestamp?: number } | null;
+  drifted?: Array<{ gid?: string; sku?: string; fields?: string[] }> | null;
+  unknown?: Array<{ gid?: string; sku?: string; reason?: string }> | null;
+  counts?: { scanned?: number; drifted?: number; no_timestamp?: number; unknown?: number } | null;
   unavailable?: boolean;
 }
 
