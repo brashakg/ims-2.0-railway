@@ -37,6 +37,10 @@ class UnsupportedMongoFeature(AssertionError):
     """The fake was asked for a Mongo feature it does not faithfully emulate."""
 
 
+class MongoWriteError(Exception):
+    """A write real Mongo refuses (e.g. $inc on a null / non-numeric field)."""
+
+
 # ---------------------------------------------------------------------------
 # Query matching
 # ---------------------------------------------------------------------------
@@ -380,7 +384,12 @@ class StrictCollection:
             _del_path(doc, k)
         for k, v in (update.get("$inc") or {}).items():
             cur = _get_path(doc, k)
-            _set_path(doc, k, (0 if cur is _MISSING or cur is None else cur) + v)
+            # Mongo: $inc on a missing field starts from 0, but on a present
+            # NON-NUMERIC value (null included) the write FAILS -- it does not
+            # quietly treat null as 0.
+            if cur is not _MISSING and (isinstance(cur, bool) or not isinstance(cur, (int, float))):
+                raise MongoWriteError(f"Cannot apply $inc to a value of non-numeric type ({k}={cur!r})")
+            _set_path(doc, k, (0 if cur is _MISSING else cur) + v)
         for k, v in (update.get("$push") or {}).items():
             if isinstance(v, dict) and any(kk.startswith("$") for kk in v):
                 raise UnsupportedMongoFeature("$push modifiers ($each/$slice) not implemented")
