@@ -4120,6 +4120,77 @@ async def bulk_restore_products(
     return {"applied": body.apply, "results": results}
 
 
+def _purge_rows(ids: List[str], actor: Dict, apply: bool) -> List[Dict[str, Any]]:
+    """THE permanent-delete door body (services/product_purge), for the
+    single door and the Catalog page's bulk door. Per spine id: ready / done
+    / refused with the reason and its HTTP code."""
+    from ..dependencies import get_audit_repository, get_product_repository
+    from ..services import product_purge
+
+    repo = get_product_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="The catalogue is not reachable")
+    spines = [repo.find_by_id(p) for p in ids]
+    twins = _twins_or_503(repo, spines)
+    db = _get_db()
+    run_id = f"PURGE-{uuid.uuid4().hex[:12].upper()}"
+    rows: List[Dict[str, Any]] = []
+    for pid, spine, twin in zip(ids, spines, twins):
+        row: Dict[str, Any] = {"product_id": pid}
+        if spine is not None:
+            row["sku"] = spine.get("sku")
+            row["name"] = spine.get("name") or spine.get("model") or spine.get("sku")
+        refused = product_purge.purge_refusal(db, spine, twin)
+        if refused is not None:
+            row.update(status="refused", code=refused[0], reason=refused[1])
+        elif not apply:
+            row["status"] = "ready"
+        else:
+            try:
+                row["backup_id"] = product_purge.purge_product(
+                    db, spine, twin, actor, run_id=run_id, audit_repo=get_audit_repository()
+                )
+                row["status"] = "done"
+            except Exception:  # noqa: BLE001
+                logger.error("[CATALOG] permanent delete failed for %s", pid, exc_info=True)
+                row.update(
+                    status="refused",
+                    code=503,
+                    reason="Could not delete it right now (nothing was lost: it is backed up "
+                    "first). Try again in a minute.",
+                )
+        rows.append(row)
+    if apply and any(r["status"] == "done" for r in rows):
+        invalidate_product_lists()
+    return rows
+
+
+@router.delete("/products/{product_id}/permanent")
+async def purge_catalog_product(
+    product_id: str,
+    current_user: dict = Depends(require_roles("SUPERADMIN")),
+):
+    """Delete an ARCHIVED product for good (owner 2026-10-24), SUPERADMIN only.
+    Refused 409 (not archived / on Shopify / leads a model / any history) or
+    503 (a check could not read) -- nothing deleted. Backed up first."""
+    (row,) = _purge_rows([product_id], current_user, apply=True)
+    if row["status"] != "done":
+        raise HTTPException(status_code=row["code"], detail=row["reason"])
+    return {"message": "Product deleted permanently", **row}
+
+
+@router.post("/products/bulk-purge")
+async def bulk_purge_products(
+    body: BulkProductIds,
+    current_user: dict = Depends(require_roles("SUPERADMIN")),
+):
+    """The Catalog page's 'Delete permanently' (Flags: Archived), SUPERADMIN
+    only: the same rule as the single door, up to 200 spine ids. The dry run
+    (apply=false) tells the confirm dialog which would be refused and why."""
+    ids = list(dict.fromkeys(p for p in body.product_ids if p))
+    return {"applied": body.apply, "results": _purge_rows(ids, current_user, body.apply)}
+
+
 # ============================================================================
 # CATALOGUE FLAGS ("needs work") -- services/catalog_flags
 # ============================================================================
