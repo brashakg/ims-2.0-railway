@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Notifications (full screen)
 // ============================================================================
@@ -75,7 +76,7 @@ export function NotificationsPage() {
       setSnoozeFor(null); setCustomTime('');
       await load();
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || 'Failed to snooze');
+      toast.error(getErrorMessage(e, 'Failed to snooze'));
     }
   };
 

@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Contact-lens refill-due worklist (CRM-2 phase 2)
 // ============================================================================
@@ -70,8 +71,7 @@ export function CLRefillWorklistPage() {
         );
       }
     } catch (e: unknown) {
-      const detail = (e as { response?: { data?: { detail?: string } } })?.response
-        ?.data?.detail;
+      const detail = getErrorMessage(e, '');
       toastError(detail ? `Could not create reminders: ${detail}` : 'Could not create reminders.');
     } finally {
       setCreating(false);

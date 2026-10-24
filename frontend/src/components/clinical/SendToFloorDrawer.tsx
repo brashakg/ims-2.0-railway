@@ -1,3 +1,4 @@
+import { getErrorStatus } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — F50 Send-to-Floor Drawer (clinical -> retail handover)
 // ============================================================================
@@ -84,7 +85,7 @@ export function SendToFloorDrawer({ testId, patientName, onClose, onSent }: Send
       }
       onSent?.();
     } catch (err: unknown) {
-      const status = (err as { response?: { status?: number } })?.response?.status;
+      const status = getErrorStatus(err);
       if (status === 403) {
         toast.error('Clinical handover is not enabled for this store.');
       } else if (status === 422) {

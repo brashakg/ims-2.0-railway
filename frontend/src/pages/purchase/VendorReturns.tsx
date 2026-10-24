@@ -1,3 +1,4 @@
+import { getErrorStatus } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Vendor Returns / Debit Notes
 // ============================================================================
@@ -351,7 +352,7 @@ export function VendorReturns() {
         params: { store_id: ownStoreId ?? undefined },
       })).data;
     } catch (e) {
-      if ((e as { response?: { status?: number } })?.response?.status !== 404) {
+      if (getErrorStatus(e) !== 404) {
         toast.error(errMsg(e, 'Could not look that barcode up'));
         return;
       }

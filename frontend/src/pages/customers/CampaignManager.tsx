@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Campaign Manager
 // ============================================================================
@@ -714,13 +715,6 @@ function ActionButton({
   );
 }
 
-function extractErr(e: unknown): string | null {
-  if (typeof e === 'object' && e !== null) {
-    const anyE = e as { response?: { data?: { detail?: unknown } } };
-    const detail = anyE.response?.data?.detail;
-    if (typeof detail === 'string') return detail;
-  }
-  return null;
-}
+const extractErr = (e: unknown): string | null => getErrorMessage(e, '') || null;
 
 export default CampaignManager;

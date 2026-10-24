@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Walkouts Page (Pune Incentive Module i, Phases 1-2)
 // ============================================================================
@@ -57,7 +58,7 @@ export function WalkoutsPage() {
       setItems(resp.items || []);
       setTotal(resp.total || 0);
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || 'Could not load walkouts';
+      const msg = getErrorMessage(e, 'Could not load walkouts');
       toast.error(typeof msg === 'string' ? msg : 'Could not load walkouts');
       setItems([]);
       setTotal(0);

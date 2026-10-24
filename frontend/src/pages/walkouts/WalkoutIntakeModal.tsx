@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Walkout Intake Modal (Pune Incentive Module i, Phase 1)
 // ============================================================================
@@ -192,9 +193,7 @@ export function WalkoutIntakeModal({ isOpen, onClose, onSaved }: WalkoutIntakeMo
       onClose();
     } catch (e: any) {
       const msg =
-        e?.response?.data?.detail ||
-        e?.message ||
-        'Could not log walkout';
+        getErrorMessage(e, 'Could not log walkout');
       toast.error(typeof msg === 'string' ? msg : 'Could not log walkout');
     } finally {
       setIsSaving(false);

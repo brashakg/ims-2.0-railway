@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Stock Replenishment
 // ============================================================================
@@ -574,7 +575,7 @@ function CreatePOModal({
       );
       onCreated();
     } catch (err: unknown) {
-      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      const msg = getErrorMessage(err, '')
         || (err instanceof Error ? err.message : 'Failed to create purchase order');
       toast.error(msg);
     } finally {

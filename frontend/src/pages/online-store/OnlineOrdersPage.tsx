@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Online Store - Online Orders  (BVI Phase 3b)
 // ============================================================================
@@ -461,9 +462,7 @@ export default function OnlineOrdersPage() {
         await load();
       } catch (e) {
         const msg =
-          (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
-          (e as Error)?.message ||
-          'Re-map failed';
+          getErrorMessage(e, 'Re-map failed');
         toast.error(typeof msg === 'string' ? msg : 'Re-map failed');
       } finally {
         setRemappingId(null);
@@ -499,9 +498,7 @@ export default function OnlineOrdersPage() {
         await load();
       } catch (e) {
         const msg =
-          (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
-          (e as Error)?.message ||
-          'Could not clear the hold';
+          getErrorMessage(e, 'Could not clear the hold');
         toast.error(typeof msg === 'string' ? msg : 'Could not clear the hold');
       } finally {
         setClearingId(null);

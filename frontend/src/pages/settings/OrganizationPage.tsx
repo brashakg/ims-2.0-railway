@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Organization Setup (merged Entities + Stores)
 // ============================================================================
@@ -26,13 +27,7 @@ const STORE_CATEGORIES = [
   'SUNGLASS', 'WATCH', 'SMARTWATCH', 'WALL_CLOCK', 'HEARING_AID', 'ACCESSORIES', 'SERVICES',
 ];
 
-function errMsg(e: unknown, fallback: string): string {
-  if (e && typeof e === 'object' && 'response' in e) {
-    const r = (e as { response?: { data?: { detail?: string } } }).response;
-    if (r?.data?.detail) return r.data.detail;
-  }
-  return e instanceof Error ? e.message : fallback;
-}
+const errMsg = getErrorMessage;
 
 const inputCls =
   'w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200';

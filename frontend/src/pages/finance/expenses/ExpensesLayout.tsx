@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Expense Tracking & Approval System (layout)
 // ============================================================================
@@ -34,7 +35,6 @@ import {
   EXPENSE_ACCOUNTANT_ROLES,
   FLOAT_VIEW_ROLES,
   FLOAT_MANAGE_ROLES,
-  type ApiError,
   type ExpensesOutletContext,
 } from './expenseShared';
 import { Card, Labeled } from './expenseWidgets';
@@ -166,15 +166,7 @@ export function ExpensesLayout() {
       // string -- e.g. a category the server no longer accepts. The dropdown
       // only offers accepted categories, so a 422 here means something is out
       // of step; say what the server said instead of a useless generic.
-      const e = err as ApiError;
-      const detail = e?.response?.data?.detail;
-      if (e?.response?.status === 400 && typeof detail === 'string') {
-        toast.error(detail);
-      } else if (Array.isArray(detail) && detail[0]?.msg) {
-        toast.error(detail[0].msg);
-      } else {
-        toast.error('Failed to submit expense');
-      }
+      toast.error(getErrorMessage(err, 'Failed to submit expense'));
     } finally {
       setSaving(false);
     }

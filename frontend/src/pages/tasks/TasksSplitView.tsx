@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Tasks: the priority strip + list + detail panel
 // ============================================================================
@@ -370,10 +371,7 @@ function TaskDetailPanel({
   // refuses it for everyone else, so nobody else is offered the button.
   const canReassign = canSeeTeamTasks(user?.roles);
 
-  const _errMsg = (e: unknown, fallback: string): string => {
-    const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-    return typeof msg === 'string' ? msg : fallback;
-  };
+  const _errMsg = getErrorMessage;
 
   const handleComplete = async () => {
     const notes = window.prompt('Completion notes (required, min 3 characters):', '');

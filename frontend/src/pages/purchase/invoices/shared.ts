@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../../utils/errorHandler';
 // ============================================================================
 // Purchase Invoices - shared helpers (INR formatting, GST rate list, approval
 // role list). The tax head is NOT decided here: the form shows the server's
@@ -23,18 +24,7 @@ export const rcmNote = (tax?: number, owed?: number) =>
 // latter. String()-ing an object rendered "[object Object]" at the user, which
 // is how a precise refusal ("...is still missing Selling Price") became
 // unreadable. Prefer the object's own message.
-export function errMsg(e: unknown, fb: string) {
-  if (e && typeof e === 'object' && 'response' in e) {
-    const r = (e as { response?: { data?: { detail?: unknown } } }).response;
-    const d = r?.data?.detail;
-    if (typeof d === 'string' && d) return d;
-    if (d && typeof d === 'object') {
-      const m = (d as { message?: string }).message;
-      if (m) return m;
-    }
-  }
-  return e instanceof Error ? e.message : fb;
-}
+export const errMsg = getErrorMessage;
 
 // The accounts roles: they approve a 3-way-match exception (release an ON_HOLD
 // invoice for payment despite a variance) and alone see the bill form's

@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Store-credit / credit-note ledger card
 // ============================================================================
@@ -60,7 +61,7 @@ export function StoreCreditLedgerCard({ customerId }: { customerId: string }) {
       setMode(null); setAmount(''); setReason('');
       await load();
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || 'Action failed');
+      toast.error(getErrorMessage(e, 'Action failed'));
     } finally {
       setSaving(false);
     }

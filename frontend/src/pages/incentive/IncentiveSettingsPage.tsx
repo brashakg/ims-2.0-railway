@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Incentive Settings (Pune Incentive Module iii configuration)
 // ============================================================================
@@ -194,7 +195,7 @@ export function IncentiveSettingsPage() {
         })),
       );
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || 'Failed to load settings';
+      const msg = getErrorMessage(e, 'Failed to load settings');
       setError(typeof msg === 'string' ? msg : 'Failed to load settings');
     } finally {
       setLoading(false);
@@ -239,7 +240,7 @@ export function IncentiveSettingsPage() {
       hydrate(next);
       toast.success('Staff weightages saved');
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || 'Save failed');
+      toast.error(getErrorMessage(e, 'Save failed'));
     } finally {
       setSavingFor('weights', false);
     }
@@ -266,7 +267,7 @@ export function IncentiveSettingsPage() {
       hydrate(next);
       toast.success('Eligibility bands saved');
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || 'Save failed');
+      toast.error(getErrorMessage(e, 'Save failed'));
     } finally {
       setSavingFor('bands', false);
     }
@@ -284,7 +285,7 @@ export function IncentiveSettingsPage() {
       hydrate(next);
       toast.success('Targets and base rates saved');
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || 'Save failed');
+      toast.error(getErrorMessage(e, 'Save failed'));
     } finally {
       setSavingFor('targets', false);
     }
@@ -316,7 +317,7 @@ export function IncentiveSettingsPage() {
       hydrate(next);
       toast.success('Discount multipliers saved');
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || 'Save failed');
+      toast.error(getErrorMessage(e, 'Save failed'));
     } finally {
       setSavingFor('mults', false);
     }
@@ -334,7 +335,7 @@ export function IncentiveSettingsPage() {
       hydrate(next);
       toast.success('Visufit gate saved');
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || 'Save failed');
+      toast.error(getErrorMessage(e, 'Save failed'));
     } finally {
       setSavingFor('visufit', false);
     }
@@ -387,7 +388,7 @@ export function IncentiveSettingsPage() {
       hydrate(next);
       toast.success('Supervisor bonuses saved');
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || 'Save failed');
+      toast.error(getErrorMessage(e, 'Save failed'));
     } finally {
       setSavingFor('supervisors', false);
     }
@@ -410,7 +411,7 @@ export function IncentiveSettingsPage() {
       setLysAmount('');
       clearDirty('lys');
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || 'Save failed');
+      toast.error(getErrorMessage(e, 'Save failed'));
     } finally {
       setSavingFor('lys', false);
     }

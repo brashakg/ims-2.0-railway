@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — SOP Editor Modal (Phase 6.14)
 // ============================================================================
@@ -175,7 +176,7 @@ export function SopEditorModal({ isOpen, onClose, initial, onSaved }: SopEditorM
     } catch (e) {
       // eslint-disable-next-line no-console
       console.error('[SOP] save failed:', e);
-      const msg = (e as any)?.response?.data?.detail || (e as Error)?.message || 'Could not save SOP';
+      const msg = getErrorMessage(e, 'Could not save SOP');
       toast.error(typeof msg === 'string' ? msg : 'Could not save SOP');
     } finally {
       setIsSaving(false);

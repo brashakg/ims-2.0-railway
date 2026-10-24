@@ -1,3 +1,4 @@
+import { getErrorMessage, getErrorStatus } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - New Lens Line modal (Power Grid cataloguing, P1)
 // ============================================================================
@@ -129,12 +130,9 @@ export default function NewLensLineModal({ meta, onClose, onCreated }: Props) {
       onCreated(res.lens_line);
     } catch (err: unknown) {
       // 409 = duplicate identity tuple; surface the server message.
-      const anyErr = err as { response?: { data?: { detail?: string }; status?: number }; message?: string };
-      const detail = anyErr?.response?.data?.detail;
-      const msg =
-        anyErr?.response?.status === 409
-          ? 'A lens line with this exact brand/series/index/material/type/coating already exists.'
-          : detail || anyErr?.message || 'Failed to create lens line';
+      const msg = getErrorStatus(err) === 409
+        ? 'A lens line with this exact brand/series/index/material/type/coating already exists.'
+        : getErrorMessage(err, 'Failed to create lens line');
       toast.error(msg);
     } finally {
       setSubmitting(false);

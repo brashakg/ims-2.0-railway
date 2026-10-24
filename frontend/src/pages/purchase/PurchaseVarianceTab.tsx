@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - F8: PO vs GRN variance / backorder tab
 // ============================================================================
@@ -18,13 +19,7 @@ import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { usePurchaseShop } from './purchaseShop';
 
-function errMsg(e: unknown, fb: string): string {
-  if (e && typeof e === 'object' && 'response' in e) {
-    const r = (e as { response?: { data?: { detail?: string } } }).response;
-    if (r?.data?.detail) return String(r.data.detail);
-  }
-  return e instanceof Error ? e.message : fb;
-}
+const errMsg = getErrorMessage;
 
 const inr = (n?: number | null) =>
   n == null ? '-' : `₹${(Math.round(n * 100) / 100).toLocaleString('en-IN')}`;

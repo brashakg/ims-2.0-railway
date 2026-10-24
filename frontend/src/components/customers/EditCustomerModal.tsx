@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Edit Customer modal (shared: Customers page + both POS tills)
 // ============================================================================
@@ -116,7 +117,7 @@ export function EditCustomerModal({
     } catch (e: any) {
       // The server owns every real rule here (duplicate mobile 409,
       // B2B-requires-GSTIN, formats) -- surface its refusal VERBATIM.
-      const detail = e?.response?.data?.detail || e?.message || 'Failed to update customer';
+      const detail = getErrorMessage(e, 'Failed to update customer');
       setError(typeof detail === 'string' ? detail : 'Failed to update customer');
     } finally {
       setSaving(false);

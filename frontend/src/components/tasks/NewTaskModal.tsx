@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — New Task modal (Tasks/SOP v2, ported from docs/design/tasks.html)
 // ============================================================================
@@ -260,8 +261,7 @@ export function NewTaskModal({
       onClose();
       onCreated();
     } catch (e) {
-      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-      toast.error(typeof msg === 'string' ? msg : 'Failed to create task');
+      toast.error(getErrorMessage(e, 'Failed to create task'));
     } finally {
       setSubmitting(false);
     }

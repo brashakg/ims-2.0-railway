@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Online Store - Menus / Mega-Menu editor  (BVI Phase 3, "push-dark")
 // ============================================================================
@@ -393,7 +394,7 @@ export default function MenusPage() {
         bannerRef.current?.refresh();
       }
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || e?.message || 'Could not publish menu');
+      toast.error(getErrorMessage(e, 'Could not publish menu'));
     } finally {
       setPublishing(false);
     }

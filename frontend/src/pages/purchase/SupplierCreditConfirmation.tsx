@@ -1,3 +1,4 @@
+import { getErrorStatus } from '../../utils/errorHandler';
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { X } from 'lucide-react';
 import {
@@ -182,7 +183,7 @@ function SupplierCreditForm({ returnId, canRecord, onClose, onSaved }: SupplierC
       onSaved(result);
     } catch (cause) {
       if (version !== requestVersion.current) return;
-      const status = (cause as { response?: { status?: number } })?.response?.status;
+      const status = getErrorStatus(cause);
       // A lost reply may already have posted. Keep this exact request until
       // the server confirms its outcome; never make a second note on retry.
       setUncertain(wasUncertain => wasUncertain || !status || status >= 500);

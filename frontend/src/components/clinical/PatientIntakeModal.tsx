@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Clinical Patient Intake Modal
 // ============================================================================
@@ -230,7 +231,7 @@ export function PatientIntakeModal({
           const created = await customerApi.createCustomer(payload as any);
           customerId = created?.customer_id || created?.id;
         } catch (err: any) {
-          const detail: string = err?.response?.data?.detail ?? err?.message ?? '';
+          const detail: string = getErrorMessage(err, '');
           if (/already exists/i.test(detail)) {
             existing = await lookup();
             if (existing) {
@@ -265,7 +266,7 @@ export function PatientIntakeModal({
         } catch (err: any) {
           // Surface the backend's range message, but don't lose the patient —
           // they're still created and queued; the Rx can be added in the exam.
-          const detail = err?.response?.data?.detail || err?.message || 'Could not save prescription';
+          const detail = getErrorMessage(err, 'Could not save prescription');
           toast.warning(`Patient saved, but Rx not stored: ${detail}`);
         }
       }
@@ -289,7 +290,7 @@ export function PatientIntakeModal({
       onComplete?.({ customerId, patientName, prescriptionId });
       onClose();
     } catch (err: any) {
-      const detail = err?.response?.data?.detail || err?.message || 'Failed to add patient';
+      const detail = getErrorMessage(err, 'Failed to add patient');
       toast.error(detail);
     } finally {
       setSaving(false);

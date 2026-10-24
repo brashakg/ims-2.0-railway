@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 /**
  * Workshop QC-handover helpers (pure, no React) — extracted so they can be unit
  * tested. See backend/api/routers/workshop.py for the authoritative rules; these
@@ -108,11 +109,4 @@ export const resolveItemPrescriptionId = (item: unknown): string => {
  * server returns a plain-English refusal naming the remedy — that reasoning only
  * holds if the UI actually renders it.
  */
-export const backendMessage = (err: unknown, fallback: string): string => {
-  const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data
-    ?.detail;
-  if (typeof detail === 'string' && detail.trim()) return detail;
-  const message = (detail as { message?: unknown } | undefined)?.message;
-  if (typeof message === 'string' && message.trim()) return message;
-  return fallback;
-};
+export const backendMessage = getErrorMessage;

@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — TechCherry R1.3 — Lens Deep Dive
 // ============================================================================
@@ -59,7 +60,7 @@ export function LensDeepDiveCard({ storeId }: { storeId?: string }) {
     setError(null);
     reportsApi.getLensDeepDive(storeId, 12)
       .then(setData)
-      .catch(e => setError(e?.response?.data?.detail || e?.message || 'Failed to load'))
+      .catch(e => setError(getErrorMessage(e, 'Failed to load')))
       .finally(() => setLoading(false));
   }, [storeId]);
 

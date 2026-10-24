@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Points History (Pune Incentive Module ii, Phase 3)
 // ============================================================================
@@ -37,7 +38,7 @@ export function PointsHistoryPage() {
       setItems(r.items);
       if (r.items.length > 0) setStaffName(r.items[0].staff_name || null);
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || 'Failed to load';
+      const msg = getErrorMessage(e, 'Failed to load');
       toast.error(typeof msg === 'string' ? msg : 'Failed to load');
     } finally {
       setLoading(false);

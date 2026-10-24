@@ -1,3 +1,4 @@
+import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — MTD Leaderboard (Pune Incentive Module ii, Phase 3 + F33)
 // ============================================================================
@@ -93,7 +94,7 @@ export function MTDLeaderboardPage() {
       setVisibility(resp.visibility === 'self' ? 'self' : 'all');
       setTotalParticipants(resp.total_participants ?? (resp.items || []).length);
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || 'Failed to load';
+      const msg = getErrorMessage(e, 'Failed to load');
       setError(typeof msg === 'string' ? msg : 'Failed to load');
     } finally {
       setLoading(false);
