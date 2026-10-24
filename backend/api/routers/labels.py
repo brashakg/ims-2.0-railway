@@ -392,6 +392,19 @@ async def scan_advance(
             "reason": "WRITE_FAILED",
             "message": "Failed to persist the stage change.",
         }
+    if target == "DELIVERED":
+        from .workshop.gates import undo_handover_if_order_refunded
+
+        if undo_handover_if_order_refunded(repo, job, current):
+            return {
+                "ok": False,
+                "reason": "ORDER_REFUNDED",
+                "message": "This order was cancelled or its advance refunded - do not hand it over.",
+                "expected": target,
+                "got": current,
+                "stage": current,
+                "station": station,
+            }
     # Best-effort secondary write for history + per-stage timestamp (the
     # status itself already landed via update_status above).
     try:
