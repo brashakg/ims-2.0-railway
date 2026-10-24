@@ -140,15 +140,8 @@ def _all_expense_matches(recorder):
 
 
 def _excludes_draft_cancelled(match):
-    """The query carries THE real-sale rule (utils.real_sale.real_sale_match):
-    DRAFT / HISTORICAL out by status; a CANCELLED order out unless it carries a
-    tax invoice (PR #1264 -- its credit note does the reversal), which the rule
-    judges per order and excludes by order_id (behaviour pinned in
-    test_pos_money_doors::test_a_cancelled_order_with_an_invoice_is_still_a_sale)."""
-    from api.utils.real_sale import real_sale_match
-
     st = match.get("status")
-    return isinstance(st, dict) and st.get("$nin") == real_sale_match(None)["status"]["$nin"]
+    return isinstance(st, dict) and set(st.get("$nin", [])) >= {"CANCELLED", "DRAFT"}
 
 
 # ============================================================================
@@ -410,7 +403,13 @@ def test_gst_reconciliation_endpoint_excludes_draft_cancelled(monkeypatch):
     # Orders query (keyed on created_at range) must exclude draft/cancelled and
     # use datetime bounds.
     order_q = next(m for m in matches if "created_at" in m and "status" in m)
-    assert _excludes_draft_cancelled(order_q)
+    # GSTR-3B reads THE rule's GST-document view (PR #1264): drafts out by
+    # status, every cancelled order judged one by one (only an invoice
+    # reversed by its whole credit note stays -- test_pos_money_doors).
+    from api.utils.real_sale import real_sale_match
+
+    assert order_q["status"]["$nin"] == real_sale_match(None, gst_documents=True)["status"]["$nin"]
+    assert "DRAFT" in order_q["status"]["$nin"]
     assert isinstance(order_q["created_at"]["$gte"], datetime)
 
 
