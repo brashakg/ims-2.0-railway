@@ -1382,17 +1382,28 @@ export default function OnlineShopifySyncPage() {
 
           {/* Parity */}
           <DiagTile title="Parity (IMS vs Shopify)" loading={diagLoading} unavailable={parity?.unavailable}>
-            {parity?.parity?.entities ? (
-              Object.entries(parity.parity.entities).map(([name, v]) => (
-                <DiagRow
-                  key={name}
-                  label={name.replace(/_/g, ' ')}
-                  value={`${fmt(v?.pushed)} / ${fmt(v?.total)}`}
-                  warn={!!v?.missing}
-                />
-              ))
+            {parity?.parity?.colours_sizes?.checked ? (
+              <>
+                <p className="text-sm font-semibold text-gray-900">
+                  {fmt(parity.parity.colours_sizes.online)} of {fmt(parity.parity.colours_sizes.total)} colours/sizes online
+                  {' '}({fmt(parity.parity.colours_sizes.website_pages)} website pages)
+                </p>
+                <p className="mt-1 text-[11px] text-gray-500">Matched by SKU to a Shopify variant. Stock and storefront visibility are checked separately.</p>
+                {!!parity.parity.colours_sizes.missing && (
+                  <details className="mt-2 text-[11px]">
+                    <summary className="cursor-pointer text-amber-700">{fmt(parity.parity.colours_sizes.missing)} colours/sizes not online</summary>
+                    <ul className="mt-1 max-h-60 overflow-y-auto space-y-1">
+                      {parity.parity.colours_sizes.missing_items?.map((item, i) => (
+                        <li key={`${item.sku || item.product_id}-${i}`} className="text-gray-700 break-words">
+                          <span className="font-medium">{item.sku || item.product_id || 'Missing SKU'}</span>: {item.reason || 'Reason unavailable'}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+              </>
             ) : (
-              <p className="text-[11px] text-gray-500">No parity data.</p>
+              <p className="text-[11px] text-gray-500">{parity?.parity?.colours_sizes?.reason || 'Colour/size parity unavailable.'}</p>
             )}
             {parity?.uploads_audit?.checked && (
               <DiagRow
@@ -1404,16 +1415,18 @@ export default function OnlineShopifySyncPage() {
           </DiagTile>
 
           {/* Drift */}
-          <DiagTile title="Dual-writer drift" loading={diagLoading} unavailable={drift?.unavailable}>
+          <DiagTile title="Content drift" loading={diagLoading} unavailable={drift?.unavailable}>
             {drift?.checked ? (
               <>
-                <DiagRow label="Scanned" value={fmt(drift.counts?.scanned)} />
-                <DiagRow label="Drifted gids" value={fmt(drift.counts?.drifted)} warn={!!drift.counts?.drifted} />
+                <DiagRow label="Compared (sample)" value={fmt(drift.counts?.scanned)} />
+                <DiagRow label="Products with differences" value={fmt(drift.counts?.drifted)} warn={!!drift.counts?.drifted} />
+                <p className="mt-1 text-[11px] text-gray-500">IMS-owned product fields only. Pending IMS edits can also differ; timestamps alone do not trigger an alarm.</p>
+                {!!drift.counts?.unknown && <DiagRow label="Could not compare" value={fmt(drift.counts.unknown)} warn />}
                 {Array.isArray(drift.drifted) && drift.drifted.length > 0 && (
                   <ul className="mt-1 space-y-0.5">
-                    {drift.drifted.slice(0, 5).map((d, i) => (
-                      <li key={(d.gid ?? '') + i} className="text-[11px] text-amber-700 truncate">
-                        {d.sku || d.gid}
+                    {drift.drifted.map((d, i) => (
+                      <li key={(d.gid ?? '') + i} className="text-[11px] text-amber-700 break-words">
+                        {d.sku || d.gid}: {d.fields?.join(', ') || 'Fields unavailable'}
                       </li>
                     ))}
                   </ul>
