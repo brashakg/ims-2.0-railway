@@ -9,6 +9,12 @@ short. This sets store_credit = the ledger balance (sum of the entries'
 deltas, store_credit_ledger.compute_balance) for every customer whose field
 is missing or null. Customers that already carry a number are never touched.
 
+DEPLOY ORDER (PR #1264): run this on prod -- dry run, then --apply -- BEFORE
+the PR deploys. After the deploy, a customer with ledger history and no field
+is REFUSED store-credit moves (customers.store_credit_balance_unready) until
+this has set the field, so a skipped run fails loudly instead of silently
+dropping a legacy balance.
+
 SAFETY: dry run by default; nothing is written without --apply. --apply first
 writes every customer row it will change to a backup JSON file; each write is
 guarded on the field STILL being missing / null. Prints counts only, no
@@ -27,15 +33,23 @@ from datetime import datetime
 
 
 def plan(db) -> dict:
-    """{"sets": [(customer_id, balance)]} -- reads only."""
-    sets = []
+    """{"sets": [(customer_id, balance)], "skipped_unapplied": [customer_id]}
+    -- reads only. A customer holding an advance-refund credit row that was
+    written but NOT applied (applied: False -- its balance move is still
+    owed, PR #1264) is SKIPPED and reported, never summed: summing it here
+    and then applying it on the next press would pay it twice."""
+    sets, skipped = [], []
     for cust in db["customers"].find({"store_credit": None}):
         cid = cust.get("customer_id")
         if not cid:
             continue
-        balance = round(sum(float(e.get("delta") or 0) for e in db["credit_note_ledger"].find({"customer_id": cid})), 2)
+        rows = list(db["credit_note_ledger"].find({"customer_id": cid}))
+        if any(r.get("applied") is False for r in rows):
+            skipped.append(cid)
+            continue
+        balance = round(sum(float(e.get("delta") or 0) for e in rows), 2)
         sets.append((cid, balance))
-    return {"sets": sets}
+    return {"sets": sets, "skipped_unapplied": skipped}
 
 
 def apply(db, sets, backup_path: str) -> int:
@@ -72,6 +86,9 @@ def main() -> int:
     out = plan(db)
     nonzero = sum(1 for _, b in out["sets"] if b)
     print(f"[PLAN] customers without a store_credit field: {len(out['sets'])} ({nonzero} with a ledger balance)")
+    if out["skipped_unapplied"]:
+        print(f"[SKIPPED] {len(out['skipped_unapplied'])} customer(s) with an advance credit not yet applied "
+              "(finish their refund first): " + ", ".join(out["skipped_unapplied"]))
     if not args.apply:
         print("[DRY RUN] nothing written. Re-run with --apply.")
         return 0
