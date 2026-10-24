@@ -43,6 +43,12 @@ export interface CategoryRegistryEntry {
 
 /** G1: one item of a model (GET /products/{id}/family, the grouped list). */
 export interface FamilyMember {
+  created_by?: string | null;
+  created_by_name?: string | null;
+  created_at?: string | null;
+  updated_by?: string | null;
+  updated_by_name?: string | null;
+  last_edited_at?: string | null;
   product_id: string;
   sku?: string;
   name?: string;
