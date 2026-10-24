@@ -1022,6 +1022,16 @@ export default function OnlineShopifySyncPage() {
               </ul>
             )}
             {lastRun.stock && <StockPassLine stock={lastRun.stock} testId="live-sync-stock-line" />}
+            {(lastRun.variant_warnings?.length ?? 0) > 0 && (
+              <ul className="mt-2 space-y-1 text-amber-700" aria-label="Live sync variant warnings">
+                {lastRun.variant_warnings!.map((warning, i) => (
+                  <li key={`${warning.sku}-${i}`}>
+                    {warning.error || `${warning.sku || '?'} left off website page: ${warning.reason || 'incomplete options'}`}
+                    {' — stays queued; complete variants were sent.'}
+                  </li>
+                ))}
+              </ul>
+            )}
             {(lastRun.failures?.length ?? 0) > 0 && (() => {
               // Hundreds of identical "no photo" refusals collapse into ONE
               // count line with the SKUs behind a native expander.

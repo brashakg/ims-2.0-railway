@@ -698,7 +698,23 @@ async def sync_live_products(
     )
     by_id = {(d.get("id") or d.get("product_id")): d for d in dirty}
     failures = []
+    variant_warnings = []
     for r in results:
+        held = [item for item in ((r.get("listing") or {}).get("held") or [])
+                if item.get("code") == "OPTION_MISSING" and str(item.get("reason", "")).startswith("no ")
+                ] if r.get("ok") else []
+        for item in held:
+            variant_warnings.append({
+                "product_id": r.get("target_id"),
+                "sku": item.get("sku"),
+                "code": item.get("code"),
+                "reason": item.get("reason"),
+                "error": f"{item.get('sku')} left off website page: {item.get('reason')}",
+            })
+        only_missing_options = len(held) == len((r.get("listing") or {}).get("held") or [])
+        other_seed_hold = (r.get("variants_seeded") or {}).get("held_data")
+        if held and only_missing_options and not other_seed_hold and r.get("code") == "OPTION_MISSING":
+            continue  # Partial success is named by sibling, not a failed lead.
         # Clean, or live with only its photos still attaching (named in
         # photo_warnings below): not a failure row.
         if r.get("ok") and r.get("code") in (None, "", shopify_push.PHOTOS_NOT_SYNCED):
@@ -816,6 +832,7 @@ async def sync_live_products(
         "publish_withheld": publish_withheld,
         "price_not_synced": price_not_synced,
         "photos_not_synced": photos_not_synced,
+        "variant_warnings": variant_warnings,
         "first_publish_queued": len(never),
         "first_published": first_published,
         "first_publish_refused": len(first["refused"]),

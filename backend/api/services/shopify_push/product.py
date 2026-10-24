@@ -973,7 +973,13 @@ async def push_product(
         # the wrong price or with the wrong photos. Either way the row goes
         # BACK in the queue so the next press / scheduled sync retries it. See
         # _requeue_unpublished for why this is not the ping-pong hazard.
-        if pid and (not published_ok or price_not_synced or photo_requeue):
+        # Missing-option siblings have no independent push door: the lead
+        # must stay queued until their next family plan includes them.
+        option_requeue = any(
+            h.get("code") == "OPTION_MISSING" and str(h.get("reason", "")).startswith("no ")
+            for h in held
+        )
+        if pid and (not published_ok or price_not_synced or photo_requeue or option_requeue):
             _requeue_unpublished(db, pid)
         return PushResult(
             mode=MODE_LIVE,
