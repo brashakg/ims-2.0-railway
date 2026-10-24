@@ -1011,7 +1011,6 @@ export default function OnlineShopifySyncPage() {
               {(lastRun.photos_failed ?? 0) > 0 && <span className="text-red-700"> · {fmt(lastRun.photos_failed)} repeated photo failures</span>}
               {lastRun.limit_reached && <> · stopped at the {lastRun.limit ?? '?'}-product cap</>}
             </p>
-            {lastRun.stock && <StockPassLine stock={lastRun.stock} testId="live-sync-stock-line" />}
             {(lastRun.photo_warnings?.length ?? 0) > 0 && (
               <ul className="mt-2 space-y-1 text-amber-700" aria-label="Live sync photo warnings">
                 {lastRun.photo_warnings!.map((warning, i) => (
@@ -1023,6 +1022,7 @@ export default function OnlineShopifySyncPage() {
                 ))}
               </ul>
             )}
+            {lastRun.stock && <StockPassLine stock={lastRun.stock} testId="live-sync-stock-line" />}
             {(lastRun.failures?.length ?? 0) > 0 && (() => {
               // Hundreds of identical "no photo" refusals collapse into ONE
               // count line with the SKUs behind a native expander.

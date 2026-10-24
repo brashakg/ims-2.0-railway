@@ -686,19 +686,8 @@ async def sync_live_products(
     )
     by_id = {(d.get("id") or d.get("product_id")): d for d in dirty}
     failures = []
-    photo_warnings = []
     for r in results:
-        if shopify_push.photo_sync_state(r) == "pending":
-            doc = by_id.get(r.get("target_id"), {})
-            photo_warnings.append({
-                "product_id": r.get("target_id"), "sku": doc.get("sku"),
-                "name": doc.get("name") or doc.get("title"),
-                "code": shopify_push.PHOTOS_NOT_SYNCED,
-                "error": (r.get("photos") or {}).get("message") or shopify_push._PHOTOS_NOT_SYNCED_MSG,
-            })
-            if r.get("code") == shopify_push.PHOTOS_NOT_SYNCED:
-                continue  # Price/stock failures alongside pending photos remain red.
-        if r.get("ok") and not r.get("code"):
+        if r.get("ok") and r.get("code") in (None, "", shopify_push.PHOTOS_NOT_SYNCED):
             continue
         doc = by_id.get(r.get("target_id"), {})
         failures.append(
@@ -711,6 +700,20 @@ async def sync_live_products(
                 "error": r.get("error"),
             }
         )
+
+    # Collect independently: a partial variant warning or another failure
+    # must not hide this first-pass photo state (or vice versa).
+    photo_warnings = []
+    for result in results:
+        if shopify_push.photo_sync_state(result) != "pending":
+            continue
+        doc = by_id.get(result.get("target_id"), {})
+        photo_warnings.append({
+            "product_id": result.get("target_id"), "sku": doc.get("sku"),
+            "name": doc.get("name") or doc.get("title"),
+            "code": shopify_push.PHOTOS_NOT_SYNCED,
+            "error": (result.get("photos") or {}).get("message") or shopify_push._PHOTOS_NOT_SYNCED_MSG,
+        })
 
     # LIVE BUT REFUSED: a listing already on the website whose brand was
     # switched off in Brand Master (or push-locked) is not pushed, so it keeps
@@ -793,12 +796,12 @@ async def sync_live_products(
         "attempted": len(results),
         "pushed_ok": pushed_ok,
         "failed": failed,
+        "photos_failed": photos_failed,
+        "photo_warnings": photo_warnings,
         "refused_no_photo": refused_no_photo,
         "publish_withheld": publish_withheld,
         "price_not_synced": price_not_synced,
         "photos_not_synced": photos_not_synced,
-        "photos_failed": photos_failed,
-        "photo_warnings": photo_warnings,
         "first_publish_queued": len(never),
         "first_published": first_published,
         "first_publish_refused": len(first["refused"]),
