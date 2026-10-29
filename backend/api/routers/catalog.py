@@ -3760,19 +3760,27 @@ def _live_skus(skus: List[str]) -> Optional[set]:
         return None
 
 
-def _restore_refusal(repo, spine: Optional[Dict]) -> Optional[str]:
-    """Why an archived product may not come back: THE create door's "we
-    already have this" rule (product_master.identity_conflict, over the key
-    the create rule gives the row -- never its stored key, which an archived
-    twin may have given up) names ANOTHER row, live or archived. A live one
-    would be a duplicate on sale; an archived one holds the key, so this row
-    would come back without one, invisible to the duplicate guard -- restore
-    that one instead. An eye-size item with no eye size whose frame is
-    catalogued by eye size is refused the same way (EYE_SIZE_NEEDED). Asked
-    per row, so a bulk restore sees each earlier restore. None when it may
-    come back; a read failure refuses (never a guess)."""
-    if not spine:
-        return None
+def _restore_refusal(repo, spine: Optional[Dict], twin: Optional[Dict] = None) -> Optional[str]:
+    """Why an archived product may not come back (None: it may), asked per
+    row so a bulk restore sees each earlier restore.
+
+      * THE create door's "we already have this" rule
+        (product_master.identity_conflict, over the key the create rule gives
+        the row -- never its stored key, which an archived twin may have given
+        up) names ANOTHER row, live or archived. A live one would be a
+        duplicate on sale; an archived one holds the key, so this row would
+        come back without one -- restore that one instead. An eye-size item
+        with no eye size whose frame is catalogued by eye size: EYE_SIZE_NEEDED.
+      * Its barcode (_restore_barcode_refusal), for every row -- keyless,
+        unreadable or a spineless catalogue twin too."""
+    if spine:
+        why = _restore_identity_refusal(repo, spine)
+        if why:
+            return why
+    return _restore_barcode_refusal(repo, spine, twin)
+
+
+def _restore_identity_refusal(repo, spine: Dict) -> Optional[str]:
     try:
         probe = _pm.identity_spine(spine)
     except _pm.ProductMasterError:
@@ -3800,14 +3808,28 @@ def _restore_refusal(repo, spine: Optional[Dict]) -> Optional[str]:
         )
     if err is not None:
         return f"Not restored: {err.message}"
-    # The barcode by Add product's own rule (assert_gtin_free): the legacy
-    # products.barcode or the gtin attribute, every spelling, spines and
-    # catalogue twins alike.
-    code = spine.get("barcode") or (spine.get("attributes") or {}).get("gtin")
-    try:
-        _pm.assert_gtin_free(code, repo, spine.get("product_id"))
-    except _pm.ProductMasterError as clash:
-        return f"Not restored: {clash.message}"
+    return None
+
+
+def _restore_barcode_refusal(repo, spine: Optional[Dict], twin: Optional[Dict]) -> Optional[str]:
+    """Add product's own barcode rule (assert_gtin_free) over EVERY barcode
+    the row carries (products.barcode and attributes.gtin; a spineless twin's
+    gtin / barcode), each distinct value. Only a LIVE product or twin holds a
+    code (live_only), so two archived copies sharing an EAN never block each
+    other: once one is back, the other is refused here. A read failure is a
+    plain refusal, never a guess."""
+    doc = spine or twin or {}
+    attrs = doc.get("attributes") if isinstance(doc.get("attributes"), dict) else {}
+    codes = [c for c in dict.fromkeys((doc.get("barcode"), attrs.get("gtin"), doc.get("gtin"))) if c]
+    own = (spine or {}).get("product_id") or (twin or {}).get("id")
+    for code in codes:
+        try:
+            _pm.assert_gtin_free(code, repo, own, live_only=True)
+        except _pm.ProductMasterError as clash:
+            return f"Not restored: {clash.message}"
+        except Exception:  # noqa: BLE001 - unread is never "free"
+            logger.warning("[CATALOG] restore barcode check could not read", exc_info=True)
+            return "Not restored: could not check the barcode right now, try again."
     return None
 
 
@@ -4054,7 +4076,7 @@ async def bulk_restore_products(
             results.append({"product_id": pid, "status": "refused", "reason": "Product not found"})
         elif not doc.get("deleted_at"):
             results.append({"product_id": pid, "status": "refused", "reason": "Not archived"})
-        elif why := _restore_refusal(repo, spine):
+        elif why := _restore_refusal(repo, spine, twin):
             results.append({"product_id": pid, "status": "refused", "reason": why})
         elif not body.apply:
             results.append({"product_id": pid, "status": "ready"})

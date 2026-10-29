@@ -203,7 +203,12 @@ class ProductRepository(BaseRepository):
         return self.find_one({"identity_key": identity_key})
 
     def find_by_barcode(
-        self, barcode: str, exclude_product_id: Optional[str] = None
+        self,
+        barcode: str,
+        exclude_product_id: Optional[str] = None,
+        *,
+        live_only: bool = False,
+        strict: bool = False,
     ) -> Optional[Dict]:
         """Find the product holding this manufacturer barcode (Hub Phase 1
         duplicate guard + the create and edit doors' uniqueness check). It can
@@ -211,7 +216,10 @@ class ProductRepository(BaseRepository):
         Add Product form write), so both are read, in every spelling of the one
         GTIN (a UPC-A and its 13-digit form are one code). None for a blank
         value. `exclude_product_id` is excluded IN the query: a find_one that
-        returned the product being edited would hide another holder."""
+        returned the product being edited would hide another holder.
+        `live_only`: archived rows (deleted_at set) are no holder, filtered IN
+        the query (Restore). `strict`: a read error raises instead of reading
+        as "no holder"."""
         spellings = gtin_spellings(barcode)
         if not spellings:
             return None
@@ -223,10 +231,18 @@ class ProductRepository(BaseRepository):
         }
         if exclude_product_id:
             query["product_id"] = {"$ne": exclude_product_id}
+        if live_only:
+            query["deleted_at"] = None
+        if strict:
+            return self._clean_id(self.collection.find_one(query))
         return self.find_one(query)
 
     def find_twin_by_barcode(
-        self, barcode: str, exclude_product_id: Optional[str] = None
+        self,
+        barcode: str,
+        exclude_product_id: Optional[str] = None,
+        *,
+        live_only: bool = False,
     ) -> Optional[Dict]:
         """A catalog_products twin holding this manufacturer barcode that is
         not `exclude_product_id`'s own (a spine id, or a spineless twin's id).
@@ -235,7 +251,9 @@ class ProductRepository(BaseRepository):
         too: every field a twin carries a barcode in (the gtin attribute, its
         top-level projection, the legacy barcode), in every spelling. A
         spine's own twin is the one keyed on its id or pim_product_id -- never
-        one that merely shares its sku (an unrelated review-queue twin can)."""
+        one that merely shares its sku (an unrelated review-queue twin can).
+        `live_only`: an archived twin is no holder (filtered IN the query). A
+        read error raises (the raw collection)."""
         spellings = gtin_spellings(barcode)
         db = getattr(self.collection, "database", None)
         if not spellings or db is None:
@@ -250,6 +268,8 @@ class ProductRepository(BaseRepository):
             own = self.find_by_id(exclude_product_id) or {}
             ids = [exclude_product_id, own.get("pim_product_id")]
             query["id"] = {"$nin": [i for i in ids if i]}
+        if live_only:
+            query["deleted_at"] = None
         return db["catalog_products"].find_one(query)
 
     def _category_filter(

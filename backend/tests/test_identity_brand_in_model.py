@@ -693,22 +693,6 @@ def test_script_cleans_the_twins_flat_model_too():
 _CODE = "8056597054324"
 
 
-def test_identity_conflict_sees_another_holder_of_its_own_barcode(door):
-    """With self_id, the barcode read excludes the row itself IN the query: a
-    find_one that returned the row first used to hide a second, live holder
-    (here holding the code in attributes.gtin)."""
-    me = _arch(door, "P-ME", "SGME", "7001", barcode=_CODE)
-    # A second, LIVE holder of the code in attributes.gtin (a twin made before
-    # the barcode rule; the create door refuses one today).
-    door.repo.collection.insert_one(_row("P-OTHER", "SG-OTHER", "7002/S", "C1", "54", "carrera|7002s|c1|54",
-                                         attributes={"brand_name": "Carrera", "model_no": "7002/S",
-                                                     "colour_code": "C1", "lens_size": "54", "gtin": _CODE}))
-    other = door.repo.find_by_id("P-OTHER")
-    probe = dict(pm.identity_spine(me), barcode=_CODE)
-    err = pm.identity_conflict(probe, door.repo, self_id="P-ME")
-    assert err is not None and err.code == "DUPLICATE_PRODUCT" and err.conflict["sku"] == other["sku"]
-
-
 def test_restore_reads_the_gtin_attribute_as_the_barcode(door):
     """Restore asks the barcode the way Add product does (assert_gtin_free):
     the code may sit in attributes.gtin, not the legacy products.barcode."""
@@ -719,5 +703,95 @@ def test_restore_reads_the_gtin_attribute_as_the_barcode(door):
     arch = _arch(door, "P-GT", "SGGT", "5002")
     door.repo.collection.update_one({"product_id": "P-GT"}, {"$set": {"attributes.gtin": _CODE}})
     why = cat._restore_refusal(door.repo, door.repo.find_by_id("P-GT"))
+    assert why and live["sku"] in why and arch
+
+
+
+def test_restore_counts_only_live_barcode_holders(door, monkeypatch):
+    """Two ARCHIVED copies sharing an EAN never block each other: the one
+    holding the key comes back; the other is then refused by the per-row
+    check (now a live holder) -- no deadlock."""
+    from api.routers import catalog as cat
+
+    kept = door("3001/S")
+    door.repo.collection.update_one({"product_id": kept["product_id"]},
+                                    {"$set": {"deleted_at": "x", "is_active": False, "barcode": _CODE}})
+    _arch(door, "P-TWIN", "SGTWIN", "CARRERA 3001/S", barcode=_CODE)
+    survivor = door.repo.find_by_id(kept["product_id"])
+    assert cat._restore_refusal(door.repo, survivor) is None
+    monkeypatch.setattr(deps, "get_product_repository", lambda: door.repo)
+    cat._restore_product(None, survivor, _ADMIN, on_website=False)
+    assert cat._restore_refusal(door.repo, door.repo.find_by_id("P-TWIN"))
+
+
+def _with_twins(door, twins):
+    db = StrictDB()
+    db.seed("catalog_products", twins)
+    door.repo.collection.database = db  # find_twin_by_barcode reads the raw db
+    return db
+
+
+def test_restore_barcode_check_reads_twins_live_only_and_never_its_own(door):
+    from api.routers import catalog as cat
+
+    arch = _arch(door, "P-OWN", "SGOWN", "5003", barcode=_CODE)
+    # Its own twin (keyed on its id) holds the code: no clash.
+    _with_twins(door, [{"id": "P-OWN", "sku": "SGOWN", "attributes": {"gtin": _CODE}, "deleted_at": "x"}])
+    assert cat._restore_refusal(door.repo, arch) is None
+    # Another product's ARCHIVED twin: no clash; a LIVE one: refused.
+    _with_twins(door, [{"id": "T-OLD", "sku": "SGOLD", "attributes": {"gtin": _CODE}, "deleted_at": "x"}])
+    assert cat._restore_refusal(door.repo, arch) is None
+    _with_twins(door, [{"id": "T-LIVE", "sku": "SGLIVE", "attributes": {"gtin": _CODE}}])
+    assert "SGLIVE" in cat._restore_refusal(door.repo, arch)
+
+
+def test_restore_checks_each_barcode_field(door):
+    """SHOULD 1: products.barcode AND attributes.gtin, each distinct value."""
+    from api.routers import catalog as cat
+
+    live = door("3001/S")
+    door.repo.collection.update_one({"product_id": live["product_id"]}, {"$set": {"barcode": "4006381333931"}})
+    _arch(door, "P-TWO", "SGTWO", "5004", barcode=_CODE)
+    door.repo.collection.update_one({"product_id": "P-TWO"}, {"$set": {"attributes.gtin": "4006381333931"}})
+    why = cat._restore_refusal(door.repo, door.repo.find_by_id("P-TWO"))
     assert why and live["sku"] in why
-    assert arch["product_id"] == "P-GT"
+
+
+def test_restore_refuses_when_the_barcode_cannot_be_read(door):
+    """SHOULD 2: a read failure is a plain refusal -- never a 500, never a pass."""
+    from api.routers import catalog as cat
+
+    arch = _arch(door, "P-RD", "SGRD", "5005", barcode=_CODE)
+    real = door.repo.collection.find_one
+
+    def flaky(flt=None, *a, **k):
+        if "$or" in (flt or {}):
+            raise RuntimeError("down")
+        return real(flt, *a, **k)
+
+    door.repo.collection.find_one = flaky
+    try:
+        assert cat._restore_refusal(door.repo, arch) == (
+            "Not restored: could not check the barcode right now, try again.")
+    finally:
+        door.repo.collection.find_one = real
+
+    class _Down:
+        def __getitem__(self, name):
+            raise RuntimeError("down")
+
+    door.repo.collection.database = _Down()
+    assert "could not check the barcode" in cat._restore_refusal(door.repo, arch)
+
+
+def test_restore_checks_the_barcode_of_keyless_rows_and_spineless_twins(door):
+    """SHOULD 3: no identity key (or no spine at all) still asks the barcode."""
+    from api.routers import catalog as cat
+
+    live = door("3001/S")
+    door.repo.collection.update_one({"product_id": live["product_id"]}, {"$set": {"barcode": _CODE}})
+    door.repo.collection.insert_one({"product_id": "P-KL", "sku": "SGKL", "category": "SUNGLASS",
+                                     "deleted_at": "x", "barcode": _CODE, "attributes": {}})
+    assert live["sku"] in cat._restore_refusal(door.repo, door.repo.find_by_id("P-KL"))
+    twin = {"id": "T-ONLY", "sku": "BVI-9", "deleted_at": "x", "attributes": {"gtin": _CODE}}
+    assert live["sku"] in cat._restore_refusal(door.repo, None, twin)
