@@ -106,6 +106,7 @@ class FakeShopify:
         self.redirects = []
         self.deleted_variants = []
         self.media_ready = True
+        self.variant_refusal = None
         self._n = 1000
 
     # -- bookkeeping --------------------------------------------------------
@@ -321,7 +322,9 @@ class FakeShopify:
         for pair in v["variantMedia"]:
             _pp, var = self.variant(pair["variantId"])
             media = next((m for m in p["media"] if m["id"] == pair["mediaIds"][0]), None)
-            if media is None or media["status"] != "READY":
+            if self.variant_refusal:
+                errors.append({"field": ["variantMedia"], "message": self.variant_refusal, "code": "INVALID"})
+            elif media is None or media["status"] != "READY":
                 errors.append({"field": ["variantMedia"], "message": "Non-ready media are not supported", "code": "NON_READY_MEDIA"})
             elif var["media"]:
                 errors.append({"field": ["variantMedia"], "message": "already has media", "code": "PRODUCT_VARIANT_ALREADY_HAS_MEDIA"})
@@ -978,7 +981,8 @@ def test_a_colour_photo_still_processing_is_attached_on_the_next_run(monkeypatch
     _live(monkeypatch, fake)
     res = _push(db, pids[0])
     assert res.ok and res.code == "PHOTOS_NOT_SYNCED", (res.error, res.code)
-    assert "still being processed" in res.error
+    assert "Photos still attaching" in res.error
+    assert "still being processed" in res.photos["variant_error"]
     assert _twin(db, pids[0])["ecom"]["locally_modified"] is True, "re-queued for the next run"
     product = _only_product(fake)
     assert all(v["media"] is None for v in product["variants"])
@@ -1129,10 +1133,15 @@ def test_a_live_listing_holds_back_only_an_unpriced_colour(monkeypatch):
     assert res.listing["held"] == [{"sku": silver_sku, "code": "UNPRICED_SIZE", "reason": "no MRP"}]
 
 
-def test_a_live_listing_holds_back_only_a_colour_with_no_size(monkeypatch):
+@pytest.mark.parametrize("photos_pending", [False, True])
+def test_a_live_listing_holds_back_only_a_colour_with_no_size(monkeypatch, photos_pending):
     db = _world()
     fake = FakeShopify()
     pids, p, var = _live_lead(db, fake)
+    if photos_pending:
+        fake.media_ready = False
+        for media in p["media"]:
+            media["status"] = "PROCESSING"
     db["products"].update_one({"product_id": pids[1]}, {"$set": {"attributes.lens_size": "62"}})
     db["products"].update_one({"product_id": pids[2]}, {"$unset": {"attributes.lens_size": ""}})
     _price_edit(db, pids[0], 11990.0)
@@ -1140,6 +1149,9 @@ def test_a_live_listing_holds_back_only_a_colour_with_no_size(monkeypatch):
     res = _push(db, pids[0])
     silver_sku = db["products"].find_one({"product_id": pids[2]})["sku"]
     assert res.ok and res.code == "OPTION_MISSING", (res.error, res.code)
+    assert silver_sku in res.error
+    if photos_pending:
+        assert res.photos["sync_state"] == "pending"
     assert [h["sku"] for h in res.listing["held"]] == [silver_sku]
     assert [o["name"] for o in p["options"]] == ["Color", "Size"]
     assert var["opts"] == {"Color": "Gold (001)", "Size": "58"}, "the lead's variant took the lead's size"
@@ -1259,21 +1271,73 @@ def test_one_colours_details_leave_the_product_level_of_a_live_listing(monkeypat
     assert fake.metafields[var["id"]]["frame_color"] == "Gold"
 
 
+def _photo_clock(monkeypatch):
+    from api.services.shopify_push import product as product_mod
+
+    clock = [datetime(2026, 10, 29, 1, 0, tzinfo=timezone.utc)]
+    monkeypatch.setattr(product_mod, "_now", lambda: clock[0])
+    return clock
+
+
+def test_pressing_again_while_shopify_is_still_processing_stays_amber(monkeypatch):
+    # Review of #1277: the streak counts sync runs, not presses. Pressing
+    # Send twice in a minute while Shopify is still processing the photos
+    # must not turn the product red and claim two runs happened.
+    db = _world()
+    pids = _family(db, [("Gold", "001"), ("Black", "002/58")])
+    fake = FakeShopify()
+    fake.media_ready = False
+    _live(monkeypatch, fake)
+    clock = _photo_clock(monkeypatch)
+    for _press in range(3):
+        clock[0] += timedelta(minutes=1)
+        res = _push(db, pids[0])
+        assert res.code == "PHOTOS_NOT_SYNCED", res.error
+        assert res.photos["sync_state"] == "pending" and res.photos["consecutive_incomplete"] == 1
+    clock[0] += timedelta(hours=8)
+    res = _push(db, pids[0])
+    assert res.code == "PHOTOS_SYNC_FAILED" and res.photos["consecutive_incomplete"] == 2
+
+
+def test_a_colour_photo_shopify_refuses_is_red_at_once_with_shopifys_reason(monkeypatch):
+    # Review of #1277: a variant refusal that is not NON_READY_MEDIA never
+    # fixes itself -- red on the first press, with Shopify's reason on it.
+    db = _world()
+    pids = _family(db, [("Gold", "001"), ("Black", "002/58")])
+    fake = FakeShopify()
+    fake.variant_refusal = "Media ZZZ-REASON is invalid"
+    _live(monkeypatch, fake)
+    res = _push(db, pids[0])
+    assert res.ok and res.code == "PHOTOS_SYNC_FAILED", (res.error, res.code)
+    assert res.photos["sync_state"] == "failed"
+    assert "ZZZ-REASON" in res.error and "still attaching" not in res.error
+
+
 def test_photo_retries_stop_after_six_runs(monkeypatch):
     db = _world()
     pids = _family(db, [("Gold", "001"), ("Black", "002/58")])
     fake = FakeShopify()
     fake.media_ready = False
     _live(monkeypatch, fake)
+    async def no_wait(*args, **kwargs):
+        raise AssertionError("photo processing must not add per-product sleeps")
+
+    monkeypatch.setattr(asyncio, "sleep", no_wait)
+    clock = _photo_clock(monkeypatch)
     for run in range(1, 7):
+        clock[0] += timedelta(hours=8)  # one scheduled sync slot apart
         res = _push(db, pids[0])
-        assert res.code == "PHOTOS_NOT_SYNCED", (run, res.error)
+        assert res.code == ("PHOTOS_NOT_SYNCED" if run == 1 else "PHOTOS_SYNC_FAILED"), (run, res.error)
+        assert res.photos["sync_state"] == ("pending" if run == 1 else "failed")
+        assert res.photos["consecutive_incomplete"] == run
         assert _twin(db, pids[0])["ecom"]["locally_modified"] is (run < 6), run
     assert "tried 6 times" in res.error
+    assert "next sync retries" not in res.error
     for m in _only_product(fake)["media"]:
         m["status"] = "READY"
     res = _push(db, pids[0])
     assert res.code is None and _twin(db, pids[0])["ecom"]["photo_sync_tries"] == 0
+    assert res.photos["sync_state"] == "synced"
 
 
 def test_duplicate_listing_runbook_never_folds_a_different_model(monkeypatch):

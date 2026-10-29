@@ -1417,7 +1417,10 @@ class _RealishCollection:
         return cur
 
     def _matches(self, doc, filt):
-        return all(self._get(doc, k) == v for k, v in (filt or {}).items())
+        return all(
+            any(self._matches(doc, alt) for alt in v) if k == "$or" else self._get(doc, k) == v
+            for k, v in (filt or {}).items()
+        )
 
     def find(self, filt=None):
         return [r for r in self._rows if self._matches(r, filt)]
@@ -1467,6 +1470,22 @@ def test_push_history_pushes_mode_and_ok_into_the_query_on_real_mongo(
             "timestamp": "2026-08-01T00:00:00",
             "details": {"mode": "SIMULATED", "ok": False, "push_action": "create"},
         },
+        # Live, but its photos failed (review of #1277): the Failures view
+        # lists it too, whichever code won the row.
+        {
+            "action": "ONLINE_STORE_PUSH", "entity_type": "product",
+            "entity_id": "P-PHOTO-FAIL", "user_id": "u1",
+            "timestamp": "2026-07-31T00:00:00",
+            "details": {"mode": "SIMULATED", "ok": True, "push_action": "update",
+                        "code": "PHOTOS_SYNC_FAILED"},
+        },
+        {
+            "action": "ONLINE_STORE_PUSH", "entity_type": "product",
+            "entity_id": "P-PRICE-PHOTO-FAIL", "user_id": "u1",
+            "timestamp": "2026-07-30T00:00:00",
+            "details": {"mode": "SIMULATED", "ok": True, "push_action": "update",
+                        "code": "PRICE_NOT_SYNCED", "photos": {"sync_state": "failed"}},
+        },
     ]
     repo = _RealishAuditRepoSpy(rows)
     monkeypatch.setattr(deps, "get_audit_repository", lambda: repo)
@@ -1484,9 +1503,10 @@ def test_push_history_pushes_mode_and_ok_into_the_query_on_real_mongo(
 
     # `ok` filter rides the query too.
     r2 = client.get("/api/v1/online-store/push/history?ok=false", headers=auth_headers)
-    assert r2.json()["count"] == 1
-    assert r2.json()["entries"][0]["target_id"] == "P-SIM-FAIL"
-    assert repo.calls[-1]["filter"].get("details.ok") is False
+    assert [e["target_id"] for e in r2.json()["entries"]] == [
+        "P-SIM-FAIL", "P-PHOTO-FAIL", "P-PRICE-PHOTO-FAIL"
+    ]
+    assert {"details.ok": False} in repo.calls[-1]["filter"]["$or"]
 
 
 def test_push_history_mock_collection_keeps_the_python_post_filter(

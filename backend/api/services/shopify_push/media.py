@@ -479,21 +479,31 @@ def _tombstone_media(db, product_id: Optional[str], rows: List[Dict[str, Any]]) 
 
 
 async def _delete_media(
-    db, product_id: Optional[str], product_gid: str, rows: List[Dict[str, Any]]
+    db,
+    product_id: Optional[str],
+    product_gid: str,
+    rows: List[Dict[str, Any]],
+    summary: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """Take media IMS owns off a listing: tombstone every row, then
     productDeleteMedia. The error text, or None when done. No tombstone, no
-    delete. Never raises."""
+    delete. Never raises. A transport failure (no answer from Shopify) marks
+    ``summary["no_answer"]``."""
     try:
         _tombstone_media(db, product_id, rows)
+    except Exception as exc:  # noqa: BLE001 -- fail-soft side channel
+        return str(exc)
+    try:
         body = await _graphql(
             db,
             _PRODUCT_DELETE_MEDIA,
             {"productId": product_gid, "mediaIds": [r["id"] for r in rows]},
         )
-        return _user_errors_media(body, "productDeleteMedia")
     except Exception as exc:  # noqa: BLE001 -- fail-soft side channel
+        if summary is not None:
+            summary["no_answer"] = True
         return str(exc)
+    return _user_errors_media(body, "productDeleteMedia")
 
 
 def _writeback_media_map(db, product_id: str, media_map: List[Dict[str, str]]) -> bool:
@@ -535,7 +545,8 @@ async def sync_product_media(
     IMS dropped, reorder to IMS order -- per the ownership rule above.
     Fail-soft summary, never raises: {attached, deleted, reordered, unmanaged,
     on_shopify (the media count after the pass -- the publish precondition),
-    hands_off, alt_updated, error?, alt_error?, code?}. Every IMS-owned photo
+    hands_off, alt_updated, error?, no_answer? (the error is a transport
+    failure, not a refusal), alt_error?, code?}. Every IMS-owned photo
     carries its photo_alts text: attached with it, and a live one whose alt
     differs is rewritten (fileUpdate) -- media IMS does not own is never
     touched."""
@@ -597,10 +608,12 @@ async def sync_product_media(
             _writeback_media_map(db, pid, _in_ims_order(owned, photos) + pending)
         if res.get("error"):
             summary["error"] = res["error"]
+            if res.get("no_answer"):
+                summary["no_answer"] = True
             return summary
     # 2. DELETE what IMS dropped -- tombstone first, then the call.
     if plan["delete"]:
-        err = await _delete_media(db, pid, product_gid, plan["delete"])
+        err = await _delete_media(db, pid, product_gid, plan["delete"], summary)
         if err:
             summary["error"] = err
             return summary
@@ -635,6 +648,7 @@ async def sync_product_media(
             err = _user_errors_media(body, "productReorderMedia")
         except Exception as exc:  # noqa: BLE001
             err = str(exc)
+            summary["no_answer"] = True  # transport: not a refusal
         if err:
             summary["error"] = err
             return summary
@@ -722,6 +736,7 @@ async def sync_variant_media(
             not_ready = any(str(e.get("code") or "") == "NON_READY_MEDIA" for e in errors)
         except Exception as exc:  # noqa: BLE001 -- fail-soft side channel
             err, not_ready = str(exc), False
+            summary["no_answer"] = True  # transport: not a refusal
         if err:
             summary["code"] = VARIANT_PHOTOS_PENDING if not_ready else None
             summary["error"] = (
