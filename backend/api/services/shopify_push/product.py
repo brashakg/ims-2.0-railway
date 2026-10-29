@@ -6,6 +6,7 @@ variant seeding, photos, publish) and `push_product_delist`.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from agents.nexus_providers import _as_shopify_gid
@@ -74,7 +75,13 @@ from .inventory import (
     sku_by_variant_gid,
     sync_product_stock,
 )
-from .media import plan_product_media, product_photo_urls, sync_product_media, sync_variant_media
+from .media import (
+    VARIANT_PHOTOS_PENDING,
+    plan_product_media,
+    product_photo_urls,
+    sync_product_media,
+    sync_variant_media,
+)
 from .writeback import _requeue_unpublished, _writeback_product, _writeback_variant
 
 # A first publish / reseed / repair refused because a size has no price (SF-05).
@@ -906,30 +913,42 @@ async def push_product(
         # cleared the queue flag -- so a reorder that did not land was never
         # sent again and the website kept the old photo 1. Same rule as the
         # price: live, so ok stays True, but re-queued with its own code.
-        photos_not_synced = bool((photo_summary or {}).get("error")) or bool(
-            (variant_photo_summary or {}).get("error")
-        )
+        photo_errors = [
+            x for x in (photo_summary, variant_photo_summary) if (x or {}).get("error")
+        ]
+        photos_not_synced = bool(photo_errors)
+        # ONLY "Shopify is still processing" (or gave no answer) is worth
+        # waiting for (review of #1277). A refusal -- the 250-media limit, a
+        # photo Shopify could not fetch, an attach / delete / reorder / colour
+        # userError -- never fixes itself, so it is red on the first press
+        # and the line carries Shopify's own reason.
+        photos_transient = photos_not_synced and all(_photo_error_is_transient(x) for x in photo_errors)
+        photo_cause = "; ".join(str(x["error"]) for x in photo_errors)
         # ...BUT NOT FOR EVER (review of #1233): a photo step that keeps
         # failing re-queues the listing for PHOTO_RETRY_CAP runs, then the
         # press says so and stops re-queueing it (a person must look). A
         # clean photo pass resets the count.
-        photo_line = _PHOTOS_NOT_SYNCED_MSG
+        photo_line = (
+            _PHOTOS_NOT_SYNCED_MSG
+            if photos_transient
+            else f"Shopify refused the photos ({photo_cause}) -- check the photographs; the next sync retries them."
+        )
         photo_requeue = photos_not_synced
         tries = 0
         if pid and new_gid:
             tries = _count_photo_tries(db, pid, failed=photos_not_synced)
-            if photos_not_synced and tries >= 2:
+            if photos_transient and tries >= 2:
                 photo_line = (
-                    f"Photos did not finish after {tries} consecutive sync runs -- "
+                    f"Photos did not finish after {tries} sync runs ({photo_cause}) -- "
                     "check the photographs; the next sync retries them."
                 )
             if photos_not_synced and tries >= PHOTO_RETRY_CAP:
                 photo_requeue = False
                 photo_line = (
-                    f"Photos did not finish -- tried {tries} times; it is no longer re-queued for its "
-                    "photos: check the photographs, then press Send to website"
+                    f"Photos did not finish ({photo_cause}) -- tried {tries} times; it is no longer "
+                    "re-queued for its photos: check the photographs, then press Send to website"
                 )
-        photo_failed = photos_not_synced and tries >= 2
+        photo_failed = photos_not_synced and (not photos_transient or tries >= 2)
         photo_summary = {
             **(photo_summary or {}),
             "sync_state": "failed" if photo_failed else "pending" if photos_not_synced else "synced",
@@ -1028,20 +1047,50 @@ async def push_product(
         )
 
 
+def _photo_error_is_transient(summary: Dict[str, Any]) -> bool:
+    """A photo error worth waiting for: Shopify still processing the photo
+    (VARIANT_PHOTOS_PENDING / NON_READY_MEDIA) or no answer at all."""
+    return bool(summary.get("no_answer")) or summary.get("code") == VARIANT_PHOTOS_PENDING
+
+
+# A press inside this window after the last counted one is the SAME run
+# (pressing Send again while Shopify still processes), never a second one.
+# ponytail: a fixed gap, not a run id; the scheduled slots are hours apart.
+PHOTO_TRY_GAP = timedelta(minutes=30)
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _count_photo_tries(db, pid: str, *, failed: bool) -> int:
-    """ecom.photo_sync_tries: +1 for a press whose photo step failed, back to
-    0 for a clean one. Returns the count after this press (0 on a read or
-    write failure -- never a reason to stop re-queueing)."""
+    """ecom.photo_sync_tries: +1 for a sync run whose photo step failed, back
+    to 0 for a clean one. A failed press within PHOTO_TRY_GAP of the last
+    counted one does not count again (review of #1277: presses are not runs).
+    Returns the count after this press (0 on a read or write failure --
+    never a reason to stop re-queueing)."""
     from ..catalog_ecom import update_ecom
 
     box = {"n": 0}
+    now = _now()
 
     def _apply(ecom: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         held = int(ecom.get("photo_sync_tries") or 0)
-        box["n"] = held + 1 if failed else 0
-        if box["n"] == held:
+        if not failed:
+            box["n"] = 0
+            if not held and "photo_sync_tried_at" not in ecom:
+                return None
+            ecom.pop("photo_sync_tried_at", None)
+            return {**ecom, "photo_sync_tries": 0}
+        try:
+            last = datetime.fromisoformat(str(ecom.get("photo_sync_tried_at")))
+        except ValueError:
+            last = None
+        if held and last and now - last < PHOTO_TRY_GAP:
+            box["n"] = held
             return None
-        return {**ecom, "photo_sync_tries": box["n"]}
+        box["n"] = held + 1
+        return {**ecom, "photo_sync_tries": box["n"], "photo_sync_tried_at": now.isoformat()}
 
     try:
         update_ecom(db, pid, _apply)

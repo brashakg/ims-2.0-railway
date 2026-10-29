@@ -476,8 +476,16 @@ async def push_history(
     if real_mongo:
         if want_mode:
             flt["details.mode"] = want_mode
-        if ok is not None:
-            flt["details.ok"] = bool(ok)
+        if ok is True:
+            flt["details.ok"] = True
+        elif ok is False:
+            # The Failures view: not live, OR live with its photos failed
+            # (the query form of shopify_push.photo_sync_state == "failed").
+            flt["$or"] = [
+                {"details.ok": False},
+                {"details.code": shopify_push.PHOTOS_SYNC_FAILED},
+                {"details.photos.sync_state": "failed"},
+            ]
         fetch_n = limit
     else:
         # Over-fetch when a details filter is active (the filter is post-hoc
@@ -494,7 +502,9 @@ async def push_history(
         d = r.get("details") or {}
         if want_mode and str(d.get("mode") or "").upper() != want_mode:
             continue
-        if ok is not None and bool(d.get("ok")) is not ok:
+        if ok is True and not d.get("ok"):
+            continue
+        if ok is False and d.get("ok") and shopify_push.photo_sync_state(d) != "failed":
             continue
         entries.append(
             {
@@ -677,8 +687,8 @@ async def push_all_pending(
             if photo_state == "pending":
                 bucket["photos_not_synced"] = bucket.get("photos_not_synced", 0) + 1
             elif photo_state == "failed":
+                # Live, so it stays in `pushed`: its own red count, not `failed`.
                 bucket["photos_failed"] = bucket.get("photos_failed", 0) + 1
-                bucket["failed"] += 1
             # LIVE AND SOLD OUT: the writer's own stamp (push_skus_stock
             # `sold_out`, every accepted number 0), never re-derived here or
             # in TypeScript (recheck round 2). Correct -- IMS is master and

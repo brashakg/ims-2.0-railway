@@ -528,7 +528,17 @@ def _iso(value: Any) -> Any:
 def _serialise_run(doc: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not doc:
         return None
-    return {k: _iso(v) for k, v in doc.items() if k not in ("_id", "lock_key")}
+    run = {k: _iso(v) for k, v in doc.items() if k not in ("_id", "lock_key")}
+    if "photo_warnings" not in run and run.get("failures"):
+        # A run saved before photo_warnings existed filed a first-pass photo
+        # delay under failures: read it as a warning here, the one reader, so
+        # no screen re-spells the rule. A row past the retry cap stays failed.
+        def _pending(f: Dict[str, Any]) -> bool:
+            return f.get("code") == shopify_push.PHOTOS_NOT_SYNCED and "no longer re-queued" not in str(f.get("error") or "")
+
+        run["photo_warnings"] = [f for f in run["failures"] if _pending(f)]
+        run["failures"] = [f for f in run["failures"] if not _pending(f)]
+    return run
 
 
 def last_run(db, trigger: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -678,16 +688,20 @@ async def sync_live_products(
         1 for r in results if shopify_push.photo_sync_state(r) == "pending"
     )
     photos_failed = sum(1 for r in results if shopify_push.photo_sync_state(r) == "failed")
+    # `failed` = did not reach the website. A live product whose photos
+    # failed is in pushed_ok and in photos_failed (its own red count), never
+    # here -- the same rule as price_not_synced.
     failed = sum(
         1
         for r in results
-        if (not r.get("ok") and r.get("reason") not in ("no_photo", "publish_withheld"))
-        or shopify_push.photo_sync_state(r) == "failed"
+        if not r.get("ok") and r.get("reason") not in ("no_photo", "publish_withheld")
     )
     by_id = {(d.get("id") or d.get("product_id")): d for d in dirty}
     failures = []
     for r in results:
-        if r.get("ok") and not r.get("code"):
+        # Clean, or live with only its photos still attaching (named in
+        # photo_warnings below): not a failure row.
+        if r.get("ok") and r.get("code") in (None, "", shopify_push.PHOTOS_NOT_SYNCED):
             continue
         doc = by_id.get(r.get("target_id"), {})
         failures.append(
@@ -703,13 +717,6 @@ async def sync_live_products(
 
     # Collect independently: a partial variant warning or another failure
     # must not hide this first-pass photo state (or vice versa).
-    pending_photo_ids = {
-        result.get("target_id") for result in results
-        if result.get("ok") and result.get("code") == shopify_push.PHOTOS_NOT_SYNCED
-    }
-    failures = [entry for entry in failures
-                if entry.get("code") != shopify_push.PHOTOS_NOT_SYNCED
-                or entry.get("product_id") not in pending_photo_ids]
     photo_warnings = []
     for result in results:
         if shopify_push.photo_sync_state(result) != "pending":
