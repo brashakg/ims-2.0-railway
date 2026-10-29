@@ -581,6 +581,20 @@ Queued from this: the card should count colours/sizes ("610 of 633 online, 469 p
 | /online-store/images "not required - editor and cataloguer work from the same catalog page" | A separate photo-approval page | Queued: remove the page and its menu link (old address forwards to the catalogue) |
 | Store Health "Fixes needed" (ignore barcode) | "162 not mapped to Shopify" = the same lead-only counting error as 10-24 (really 5); "529 not in any collection" = the broken collection count above; "2 missing an image" = real | Queued after #1275 (one counting rule for both pages); the 2 products to be named for the cataloguers |
 
+**Codex PR reviews (2026-10-29; each serious finding re-checked by a second agent):**
+
+| PR | Verdict | What happens next |
+|---|---|---|
+| #1278 catalogue small fixes | Approved | **DONE #1278** (merged + deployed 2026-10-29, build d2f346a1): Never-sell-online and Sync-to-website can no longer both be on; "Edited by" per colour row; "Sunglasses" label; clearer photo counter |
+| #1277 photos still attaching | Approved with 3 fixes | permanent photo refusals must stay red, the colour-photo error text must stay visible, escalation counts sync runs not presses - being fixed |
+| #1276 one bad colour does not block the page | Blocked | could re-queue a live product on every sync; the "missing option" rule was copied into two files - being fixed |
+| #1274 error messages | Blocked | could show staff raw developer text after a permission refusal; local programming errors replaced the screen's own message - being fixed |
+| #1275 colour counts + content drift | Blocked | copied the "is this colour online" rule instead of sharing it; 17 Shopify reads on every page load - being fixed, and Store Health will use the same rule (162 -> real count, archived products left out) |
+
+Fixed one PR at a time (this PC runs short of memory with parallel test runs), each re-reviewed before merge. Then one small PR: remove the Images page (old address forwards to the catalogue) and take archived products out of the publish queue (Maui Jim's red line on every sync).
+
+**Duplicate fix #1271:** re-review 2026-10-29 BLOCKED again (11 confirmed): the clean-up script could guess a wrong eye size when the same frame exists in another size; restoring two archived copies could bring back a duplicate; editing an old-style product skipped the duplicate check. Prod dry run changed: the two newer Flag Lab 16 copies were archived by hand, so the older copies are live; the script will also clean live copies whose twin was archived by hand. Being fixed.
+
 **In build since resume:** POS fix 1 #1264 (round-7 fixes pushed, money review 8 next); duplicate fix #1271 (reopened - it had been closed by mistake on 10-24; review fixes pushed, re-review next); delete archived products #1273 (review fixes + the owner-approved website delete).
 
 ## 4x. The agreed order of work (owner 2026-10-18)
