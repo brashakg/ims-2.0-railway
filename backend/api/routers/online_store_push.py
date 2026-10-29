@@ -476,8 +476,16 @@ async def push_history(
     if real_mongo:
         if want_mode:
             flt["details.mode"] = want_mode
-        if ok is not None:
-            flt["details.ok"] = bool(ok)
+        if ok is True:
+            flt["details.ok"] = True
+        elif ok is False:
+            # The Failures view: not live, OR live with its photos failed
+            # (the query form of shopify_push.photo_sync_state == "failed").
+            flt["$or"] = [
+                {"details.ok": False},
+                {"details.code": shopify_push.PHOTOS_SYNC_FAILED},
+                {"details.photos.sync_state": "failed"},
+            ]
         fetch_n = limit
     else:
         # Over-fetch when a details filter is active (the filter is post-hoc
@@ -494,7 +502,9 @@ async def push_history(
         d = r.get("details") or {}
         if want_mode and str(d.get("mode") or "").upper() != want_mode:
             continue
-        if ok is not None and bool(d.get("ok")) is not ok:
+        if ok is True and not d.get("ok"):
+            continue
+        if ok is False and d.get("ok") and shopify_push.photo_sync_state(d) != "failed":
             continue
         entries.append(
             {
@@ -673,6 +683,12 @@ async def push_all_pending(
             bucket["noop"] += 1
         elif data.get("ok"):
             bucket["pushed"] += 1
+            photo_state = shopify_push.photo_sync_state(data)
+            if photo_state == "pending":
+                bucket["photos_not_synced"] = bucket.get("photos_not_synced", 0) + 1
+            elif photo_state == "failed":
+                # Live, so it stays in `pushed`: its own red count, not `failed`.
+                bucket["photos_failed"] = bucket.get("photos_failed", 0) + 1
             # LIVE AND SOLD OUT: the writer's own stamp (push_skus_stock
             # `sold_out`, every accepted number 0), never re-derived here or
             # in TypeScript (recheck round 2). Correct -- IMS is master and
@@ -681,15 +697,21 @@ async def push_all_pending(
             # beside `pushed` instead of the summary line saying nothing.
             if (data.get("stock") or {}).get("sold_out"):
                 bucket["sold_out"] = bucket.get("sold_out", 0) + 1
-            if data.get("code") == shopify_push.PRICE_NOT_SYNCED:
+            # Siblings left off for a missing option, counted by the ONE rule
+            # (shopify_push.missing_option_holds). When they are the press's
+            # only trouble they are catalogue warnings, never a stock failure.
+            omitted = shopify_push.missing_option_holds(data.get("listing"))
+            if omitted:
+                bucket["variants_held"] = bucket.get("variants_held", 0) + len(omitted)
+            if shopify_push.only_missing_options(data):
+                pass
+            elif data.get("code") == shopify_push.PRICE_NOT_SYNCED:
                 # Live, but the price step failed: the product IS on the
                 # storefront (so it is pushed), at the OLD price (so it gets
                 # its own line and stays queued -- see push_product).
                 bucket["price_not_synced"] = bucket.get("price_not_synced", 0) + 1
-            elif data.get("code") == shopify_push.PHOTOS_NOT_SYNCED:
-                # Live, but a photo step failed: its own line, still queued
-                # (same rule as the price) -- never a stock warning.
-                bucket["photos_not_synced"] = bucket.get("photos_not_synced", 0) + 1
+            elif data.get("code") in (shopify_push.PHOTOS_NOT_SYNCED, shopify_push.PHOTOS_SYNC_FAILED):
+                pass  # Counted above, including when another code takes priority.
             elif data.get("code"):
                 # ANY OTHER code on an ok push is the STOCK pass not being
                 # clean (STORE_UNMAPPED, SHOPIFY_LOCATION_*, STOCK_*). Without

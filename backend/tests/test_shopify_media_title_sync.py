@@ -333,6 +333,8 @@ def test_a_repress_with_nothing_changed_touches_no_media(db, gates, monkeypatch)
     assert res.photos == {
         "attached": 0, "deleted": 0, "reordered": False,
         "unmanaged": 0, "hands_off": False, "on_shopify": 2, "alt_updated": 0,
+        "sync_state": "synced", "consecutive_incomplete": 0,
+        "message": None, "variant_error": None,
     }
 
 
@@ -497,6 +499,30 @@ def test_the_250_media_limit_is_refused_with_a_code_before_any_call(db, gates, m
     assert not [o for o in fake.ops() if o.endswith("Media")], fake.ops()
     assert res.photos["code"] == shopify_push.MEDIA_LIMIT_CODE
     assert "250" in res.photos["error"] and res.photos["attached"] == 0
+
+
+@pytest.mark.parametrize("refusal", ["attach", "media_limit"])
+def test_a_definite_photo_refusal_is_red_on_the_first_press_with_its_reason(db, gates, monkeypatch, refusal):
+    # Review of #1277: only Shopify still processing (or no answer) is
+    # "still attaching". A refusal never fixes itself, so it is red on the
+    # first press and the line carries Shopify's own reason.
+    from api.services.shopify_push import media as media_mod
+
+    if refusal == "attach":
+        fake = _live(monkeypatch, _nodes(1, 2))
+        fake.fail_attach = True
+        doc = _seed(db, _product([U1, U3], media_map=[(U1, _m(1)), (U2, _m(2))]))
+    else:
+        monkeypatch.setattr(media_mod, "_MEDIA_LIMIT", 2)
+        _live(monkeypatch, _nodes(1, 2))
+        doc = _seed(db, _product([U1, U2, U3], media_map=[(U1, _m(1)), (U2, _m(2))]))
+
+    res = _run(shopify_push.push_product(db, doc, []))
+
+    assert res.ok and res.code == shopify_push.PHOTOS_SYNC_FAILED, (res.code, res.error)
+    assert res.photos["sync_state"] == "failed" and res.photos["consecutive_incomplete"] == 1
+    assert "still attaching" not in res.error
+    assert res.photos["error"] in res.error
 
 
 def test_a_bare_create_that_cannot_attach_withholds_the_publish(db, gates, monkeypatch):

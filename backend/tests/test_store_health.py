@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from api.services import rbac_policy as rbac  # noqa: E402
 from api.services import store_health as sh  # noqa: E402
+from strict_fakes import StrictDB  # noqa: E402
 
 STORE_HEALTH = "/api/v1/online-store/store-health"
 
@@ -37,58 +38,20 @@ STORE_HEALTH = "/api/v1/online-store/store-health"
 # ---------------------------------------------------------------------------
 
 
-class _FakeCursor:
-    def __init__(self, rows):
-        self._rows = list(rows)
-
-    def limit(self, n):
-        self._rows = self._rows[: int(n)]
-        return self
-
-    def __iter__(self):
-        return iter(self._rows)
-
-
 class _FakeColl:
+    """A row holder for _FakeDb."""
+
     def __init__(self, rows=None):
         self._rows = list(rows or [])
 
-    def _projected(self, query):
-        return [dict(r) for r in self._rows if _matches(r, query or {})]
 
-    def find(self, query=None, _projection=None, *_a, **_k):
-        return _FakeCursor(self._projected(query))
-
-    def count_documents(self, query=None):
-        return sum(1 for r in self._rows if _matches(r, query or {}))
-
-
-def _matches(row, query) -> bool:
-    """Minimal matcher for the {$exists,$ne,$nin} predicates the service uses."""
-    for key, cond in query.items():
-        val = row.get(key)
-        if isinstance(cond, dict):
-            if "$exists" in cond:
-                if cond["$exists"] and key not in row:
-                    return False
-                if not cond["$exists"] and key in row:
-                    return False
-            if "$ne" in cond and val == cond["$ne"]:
-                return False
-            if "$nin" in cond and val in cond["$nin"]:
-                return False
-        else:
-            if val != cond:
-                return False
-    return True
-
-
-class _FakeDb:
-    def __init__(self, colls=None):
-        self._colls = dict(colls or {})
-
-    def __getitem__(self, name):
-        return self._colls.get(name, _FakeColl([]))
+def _FakeDb(colls=None):
+    """A StrictDB seeded per collection: the shared online rule
+    (online_catalog.skus_on_shopify) reads with real $or/$in semantics."""
+    db = StrictDB()
+    for name, coll in (colls or {}).items():
+        db.seed(name, coll._rows)
+    return db
 
 
 def _eligible_product(**overrides):
@@ -101,7 +64,8 @@ def _eligible_product(**overrides):
         "hsn_code": "9004",
         "barcode": "BC-1",
         "images": ["https://cdn/x.jpg"],
-        "ecom": {"shopify_product_id": "gid://shopify/Product/1"},
+        "ecom": {"shopify_product_id": "gid://shopify/Product/1",
+                 "shopify_variant_id": "gid://shopify/ProductVariant/1"},
     }
     doc.update(overrides)
     return doc
@@ -277,6 +241,53 @@ def test_fallback_to_products_when_no_catalog_spine():
     cov = sh.attribute_coverage(db)
     assert cov["total"] == 1
     assert cov["overall_pct"] == 100.0
+
+
+def test_a_colour_mapped_on_its_own_variant_row_is_not_unmapped():
+    """Owner 2026-10-29: "No Shopify mapping 162" counted only family leads
+    (ecom.shopify_product_id). A colour rides its lead's page; it is mapped
+    when its own variant is -- online_catalog.skus_on_shopify, the rule the
+    sync screen's colour/size parity reads too."""
+    lead = _eligible_product(product_id="P1", sku="L", barcode="BC-1")
+    kid = _eligible_product(product_id="P2", sku="K", barcode="BC-2", ecom={"variant_of": {"twin_id": "t1"}})
+    new = _eligible_product(product_id="P3", sku="N", barcode="BC-3", ecom={"variant_of": {"twin_id": "t1"}})
+    db = _FakeDb({
+        "catalog_products": _FakeColl([lead, kid, new]),
+        "catalog_variants": _FakeColl([{"sku": "K", "parent_product_id": "t1",
+                                        "shopify_variant_id": "gid://shopify/ProductVariant/2"}]),
+        "collection_products": _FakeColl([{"sku": s} for s in ("L", "K", "N")]),
+    })
+    orph = sh.orphan_skus(db)
+    assert orph["no_mapping"] == 1 and [o["sku"] for o in orph["orphans"]] == ["N"]
+
+
+def test_archived_products_are_left_out_of_every_count():
+    """Owner 2026-10-29: the "2 products missing an image" were the 2
+    archived ones. Archived on the twin or on its spine
+    (online_catalog.is_archived_row) -> in no count at all."""
+    live = _eligible_product()
+    gone_twin = _eligible_product(product_id="P2", sku="SKU-2", barcode="BC-1", images=[], hsn_code="",
+                                  ecom={}, deleted_at="2026-10-01")
+    gone_spine = _eligible_product(product_id="P3", sku="SKU-3", barcode="", images=[], ecom={})
+    db = _FakeDb({
+        "catalog_products": _FakeColl([live, gone_twin, gone_spine]),
+        "products": _FakeColl([{"product_id": "S3", "sku": "SKU-3", "deleted_at": "2026-10-02"}]),
+        "collection_products": _FakeColl([{"handle": "sun", "sku": "SKU-1"}]),
+    })
+    out = sh.readiness_score(db)
+    assert out["total_products"] == 1 and out["coverage"]["missing"]["image"] == 0
+    assert out["barcode_match"]["duplicate_barcode"] == 0
+    assert (out["orphans"]["total"], out["orphans"]["no_mapping"], out["orphans"]["not_in_collection"]) == (1, 0, 0)
+    assert out["readiness_pct"] == 100.0 and out["fixes_needed"] == []
+
+
+def test_an_unreadable_mapping_is_degraded_never_all_unmapped():
+    db = _FakeDb({"catalog_products": _FakeColl([_eligible_product()])})
+
+    def dead(*_a, **_k):
+        raise RuntimeError("blip")
+    db["catalog_variants"].find = dead
+    assert sh.store_health_envelope(db)["degraded"] is True
 
 
 # ---------------------------------------------------------------------------

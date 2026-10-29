@@ -811,11 +811,13 @@ async def online_store_drift(
     limit: int = 50,
     current_user: dict = Depends(get_current_user),
 ):
-    """SUPERADMIN-only live drift detector (Step 3 BVI safety net).
+    """SUPERADMIN-only owned-content drift check.
 
-    Compares each pushed IMS object's Shopify updatedAt against our
-    last_pushed_at timestamp. A gid whose Shopify updatedAt is NEWER than
-    our record means a second writer touched it -- a dual-writer violation.
+    Compares the IMS-owned product content (title, status, the tags IMS owns,
+    variant SKUs / options / prices) of the ``limit`` most recently pushed
+    listings with Shopify's. Products only (collections are not compared); a
+    newer Shopify updatedAt alone is never drift. A listing that could not be
+    fully read or compared is reported under ``unknown`` with its reason.
 
     This makes a REAL Shopify GraphQL read (via shopify_push._graphql).
     No creds -> {checked: False, reason: ...}. Never 500s."""

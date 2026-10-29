@@ -50,19 +50,14 @@ export function softWarnings(input: {
   imageCount: number;
   /** A size-only variant or a shop-first save can be fine with one photo. */
   showPhotoHint: boolean;
+  /** The server's answer (GET /products/similar brand_in_model): the model
+   *  number carries the brand in front of it, by the duplicate key's own
+   *  fold. No rule of its own here (#1271: one rule). */
+  brandInModel?: boolean;
 }): string[] {
   const a = input.attributes;
   const out: string[] = [];
-  // The brand as whole word(s) of the model ('RAYBAN RB4165', 'Ray-Ban
-  // RB4165'), never a substring of a code ('OAKLEYX' or 'PRADAMIX' stay quiet).
-  const brand = alnum(a.brand_name || '');
-  const words = (t: string) => t.toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean);
-  const bw = words(a.brand_name || '');
-  const mw = words(a.model_no || a.model_name || '');
-  const repeats =
-    mw.includes(brand) ||
-    mw.some((_, i) => bw.length > 1 && mw.slice(i, i + bw.length).join(' ') === bw.join(' '));
-  if (brand.length >= 3 && repeats) {
+  if (input.brandInModel) {
     out.push('The model number repeats the brand name - type just the model (e.g. RB4165).');
   }
   const lens = num(a.lens_size);

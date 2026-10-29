@@ -23,6 +23,7 @@ No emoji (Windows cp1252).
 """
 
 import copy
+from datetime import datetime, timedelta, timezone
 import os
 import sys
 
@@ -413,7 +414,8 @@ def test_the_next_sync_sends_the_failed_reorder_again_then_the_queue_drains(
 
     assert run["pushed_ok"] == 1 and run["failed"] == 0
     assert run["photos_not_synced"] == 1
-    (failure,) = run["failures"]
+    assert run["failures"] == []
+    (failure,) = run["photo_warnings"]
     assert failure["product_id"] == "P1"
     assert failure["code"] == shopify_push.PHOTOS_NOT_SYNCED
     assert failure["error"] == shopify_push._PHOTOS_NOT_SYNCED_MSG
@@ -438,8 +440,60 @@ def test_the_next_sync_sends_the_failed_reorder_again_then_the_queue_drains(
     assert _run(ls.sync_live_products(db, trigger="manual", actor="u-super"))["selected"] == 0
 
 
+def test_second_incomplete_photo_run_is_red_then_a_success_resets_the_streak(world, monkeypatch):
+    db, _ = world
+    monkeypatch.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: True)
+    monkeypatch.setenv("SHOPIFY_ONLINE_STORE_PUBLICATION_ID", "gid://shopify/Publication/1")
+    shopify_push._publication_id_cache.clear()
+    fake = _reorder_fails(monkeypatch)
+    db.seed("catalog_products", [_live_reordered()])
+    clock = [datetime(2026, 10, 29, 1, 0, tzinfo=timezone.utc)]
+    monkeypatch.setattr(product_mod, "_now", lambda: clock[0])
+    for attempt in (1, 2):
+        clock[0] += timedelta(hours=8)  # one scheduled slot apart
+        run = _run(ls.sync_live_products(db, trigger="manual", actor="u"))
+        # The product IS live: a photo failure is its own red count, never
+        # folded into `failed` (which means "did not reach the website").
+        assert run["failed"] == 0 and run["pushed_ok"] == 1
+        assert run["photos_not_synced"] == (1 if attempt == 1 else 0)
+        assert run["photos_failed"] == attempt - 1
+        assert len(run["photo_warnings"]) == (1 if attempt == 1 else 0)
+        if attempt == 2:
+            assert run["failures"][0]["code"] == "PHOTOS_SYNC_FAILED"
+    fake.fail_reorder = False
+    clean = _run(ls.sync_live_products(db, trigger="manual", actor="u"))
+    assert clean["failed"] == 0 and clean["photo_warnings"] == []
+    assert _twin(db)["ecom"]["photo_sync_tries"] == 0
+
+
+def test_an_old_run_ledger_reads_first_pass_photo_rows_as_warnings(world):
+    # Review of #1277: a run saved before photo_warnings existed filed a
+    # first-pass photo delay under failures. The ONE reader (last_run) splits
+    # it, so no screen re-spells the rule -- but a row that already hit the
+    # retry cap ("no longer re-queued") stays a failure.
+    db, _ = world
+    capped = "Photos did not finish -- tried 6 times; it is no longer re-queued for its photos"
+    db.seed(ls.RUNS_COLLECTION, [{
+        "job": ls.JOB_ID, "trigger": "scheduled", "started_at": "2026-10-20T01:00:00",
+        "failures": [
+            {"product_id": "A", "code": "PHOTOS_NOT_SYNCED", "error": "photo change did not reach Shopify"},
+            {"product_id": "B", "code": "PHOTOS_NOT_SYNCED", "error": capped},
+            {"product_id": "C", "code": "PRICE_NOT_SYNCED", "error": "old price"},
+        ],
+    }])
+    run = ls.last_run(db)
+    assert [w["product_id"] for w in run["photo_warnings"]] == ["A"]
+    assert [f["product_id"] for f in run["failures"]] == ["B", "C"]
+
+
+@pytest.mark.parametrize("code,photo_state,expected_failed", [
+    ("PHOTOS_NOT_SYNCED", "pending", 0),
+    ("PHOTOS_SYNC_FAILED", "failed", 1),
+    ("PRICE_NOT_SYNCED", "pending", 0),
+    ("PRICE_NOT_SYNCED", "failed", 1),
+])  # expected_failed is the photos_failed count; `failed` stays 0 (it is live)
 def test_the_push_all_press_gives_it_its_own_line_never_a_stock_line(
-    client, auth_headers, patched_db, monkeypatch  # noqa: F811
+    client, auth_headers, patched_db, monkeypatch, code, photo_state, expected_failed  # noqa: F811
 ):
     conn, _ = patched_db
     conn.db["catalog_products"].insert_one(_live_reordered())
@@ -447,8 +501,9 @@ def test_the_push_all_press_gives_it_its_own_line_never_a_stock_line(
     async def _live_with_old_photos(db, product, variants, blocked=None):
         return PushResult(
             mode="LIVE", entity="product", action="update", target_id=product["id"],
-            ok=True, shopify_id=GID, code=shopify_push.PHOTOS_NOT_SYNCED,
+            ok=True, shopify_id=GID, code=code,
             error=shopify_push._PHOTOS_NOT_SYNCED_MSG,
+            photos={"sync_state": photo_state},
         )
 
     async def _no_stock(db):
@@ -464,7 +519,8 @@ def test_the_push_all_press_gives_it_its_own_line_never_a_stock_line(
     assert r.status_code == 200, r.text
     products = r.json()["summary"]["products"]
     assert products["pushed"] == 1 and products["failed"] == 0
-    assert products["photos_not_synced"] == 1
+    assert products.get("photos_not_synced", 0) == (1 if photo_state == "pending" else 0)
+    assert products.get("photos_failed", 0) == expected_failed
     assert "stock_not_written" not in products and "stock_warning" not in products
 
 

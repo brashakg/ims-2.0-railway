@@ -218,6 +218,10 @@ export interface SimilarProductsResponse {
   identity_fields?: string[];
   /** G1: the model this item joins on Save (null: no model yet). */
   family?: FamilyHint | null;
+  /** The model number as typed carries the brand in front of it: the
+   *  duplicate key's own fold (product_master.brand_in_model, #1271). Drives
+   *  the form's amber hint; never a block. */
+  brand_in_model?: boolean;
 }
 
 // ---------------------------------------------------------------------------

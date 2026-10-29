@@ -31,12 +31,21 @@ CONTRACT (mirrors the rest of the online-store bridge):
 carry an `ecom` sub-doc (the same definition the module summary's `products`
 count uses). When that collection is empty we fall back to the physical
 `products` master so the checks still say something useful pre-consolidation.
+ARCHIVED rows (online_catalog.is_archived_row, on the row or its spine) are in
+no count (owner 2026-10-29).
+
+"No Shopify mapping" is THE colour/size online rule,
+online_catalog.skus_on_shopify -- the sync screen's colour/size parity reads
+the same function (a colour rides its lead's page, so a page id on the row is
+not the test). A mapping read failure raises -> the envelope's degraded flag.
 """
 
 from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List, Optional
+
+from .online_catalog import is_archived_row, skus_on_shopify
 
 logger = logging.getLogger(__name__)
 
@@ -79,30 +88,47 @@ def _online_eligible_products(db, limit: int = _SCAN_LIMIT) -> List[Dict[str, An
         "image": 1,
         "image_url": 1,
         "ecom": 1,
+        "deleted_at": 1,
+        "is_archived": 1,
+        "status": 1,
     }
 
     # 1) Catalog spine, online-eligible (has an ecom sub-doc).
+    rows: List[Dict[str, Any]] = []
     try:
         cat = _coll(db, "catalog_products")
         if cat is not None:
             rows = list(
                 cat.find({"ecom": {"$exists": True}}, projection).limit(limit)
             )
-            if rows:
-                return rows
     except Exception as exc:  # noqa: BLE001
         logger.warning("[STORE_HEALTH] catalog_products scan failed: %s", exc)
+    if rows:
+        return _not_archived(db, rows)  # outside the try: a dead spine read raises
 
     # 2) Fallback: active physical product master.
     try:
         prods = _coll(db, "products")
         if prods is not None:
-            return list(
-                prods.find({"is_active": {"$ne": False}}, projection).limit(limit)
-            )
+            rows = list(prods.find({"is_active": {"$ne": False}}, projection).limit(limit))
+            return [r for r in rows if not is_archived_row(r)]
     except Exception as exc:  # noqa: BLE001
         logger.warning("[STORE_HEALTH] products fallback scan failed: %s", exc)
     return []
+
+
+def _not_archived(db, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop the archived twins -- archived on the twin, its ecom or its spine.
+    A spine read failure RAISES (never count an archived product by accident);
+    the envelope turns it into degraded."""
+    skus = [r["sku"] for r in rows if r.get("sku")]
+    spines = {}
+    if skus:
+        for s in db["products"].find(
+            {"sku": {"$in": skus}}, {"_id": 0, "sku": 1, "deleted_at": 1, "is_archived": 1, "status": 1}
+        ):
+            spines[str(s.get("sku"))] = s
+    return [r for r in rows if not is_archived_row(r, r.get("ecom"), spines.get(str(r.get("sku") or "")))]
 
 
 def _has_image(doc: Dict[str, Any]) -> bool:
@@ -139,16 +165,9 @@ def _attr_present(doc: Dict[str, Any], attr: str) -> bool:
     return False
 
 
-def _has_online_mapping(doc: Dict[str, Any]) -> bool:
-    """True when a product already carries a Shopify product gid (ecom mapping)."""
-    ecom = doc.get("ecom") or {}
-    if not isinstance(ecom, dict):
-        return False
-    gid = ecom.get("shopify_product_id")
-    return bool(str(gid or "").strip())
-
-
 def _skus_in_any_collection(db, limit: int = _SCAN_LIMIT) -> set:
+    # TODO(feat/self-maintaining-menus): collection membership is being rebuilt
+    # as ONE rule in that PR; this reader is left as it is until it lands.
     """The set of SKUs that belong to at least one collection. Reads the
     materialised `collection_products` membership view (keyed on sku), falling
     back to the `ecom_collections` member arrays. Fail-soft -> empty set."""
@@ -195,7 +214,8 @@ def _skus_in_any_collection(db, limit: int = _SCAN_LIMIT) -> set:
 def orphan_skus(db, limit: int = 50) -> Dict[str, Any]:
     """Online-eligible products that are NOT list-ready. A product is an orphan
     when ANY of:
-      - no_mapping        : it has no Shopify product gid yet, OR
+      - no_mapping        : no Shopify variant is mapped to its sku yet
+                            (online_catalog.skus_on_shopify), OR
       - not_in_collection : it is in no collection (won't surface in nav), OR
       - missing_spine     : it has no usable catalog spine link (no sku).
 
@@ -222,6 +242,7 @@ def orphan_skus(db, limit: int = 50) -> Dict[str, Any]:
         return base
 
     in_collection = _skus_in_any_collection(db)
+    mapped = skus_on_shopify(db, [p.get("sku") for p in products])  # raises -> degraded
     no_mapping = 0
     not_in_collection = 0
     missing_spine = 0
@@ -234,7 +255,8 @@ def orphan_skus(db, limit: int = 50) -> Dict[str, Any]:
         if not sku:
             reasons.append("missing_spine")
             missing_spine += 1
-        if not _has_online_mapping(p):
+        # Like not_in_collection, a row with no sku is missing_spine only.
+        if sku and sku not in mapped:
             reasons.append("no_mapping")
             no_mapping += 1
         # A product with no sku can't be matched into a collection either, but we

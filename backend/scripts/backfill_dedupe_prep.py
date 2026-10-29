@@ -50,25 +50,15 @@ AUDIT_KIND = "dedupe_prep_phase1"
 
 
 def _identity_of(doc: Dict[str, Any]):
-    """Derive identity_key from a spine doc's identity (top-level or attributes),
-    reusing the canonical service rule so the script and the live guard agree."""
-    from api.services.product_master import compute_identity_key
+    """THE create door's key for a stored row (product_master.identity_key_of),
+    never a derivation of its own, so the script and the live guard agree. None
+    when the row has no derivable identity or a stored value cannot be read."""
+    from api.services import product_master as pm
 
-    attrs = doc.get("attributes") or {}
-    brand = doc.get("brand") or attrs.get("brand_name") or attrs.get("brand")
-    model = (
-        doc.get("model")
-        or attrs.get("model_no")
-        or attrs.get("model_name")
-        or attrs.get("model")
-    )
-    colour = (
-        doc.get("color")
-        or attrs.get("colour_code")
-        or attrs.get("colour_name")
-        or attrs.get("color")
-    )
-    return compute_identity_key(brand, model, colour)
+    try:
+        return pm.identity_key_of(doc)
+    except pm.ProductMasterError:
+        return None
 
 
 def _pid(doc: Dict[str, Any]) -> str:
@@ -131,8 +121,12 @@ def run_dedupe(
         "barcode_unset": 0,
         "resku": 0,
         "pid_assigned": 0,
+        "identity_held": 0,
         "resku_map": {},
     }
+    # A key another row already holds is never written a second time (the
+    # unique index; an archived twin that gave its key up must not take it back).
+    held_keys = {doc.get("identity_key") for doc in rows if doc.get("identity_key")}
     # All SKUs that already exist -- the re-SKU suffix must avoid every one of them
     # (plus any it mints this run) so it never re-creates the exact dup we are clearing.
     all_skus = {doc.get("sku") for doc in rows if doc.get("sku")}
@@ -171,7 +165,11 @@ def run_dedupe(
         # (1) identity_key backfill (only when absent + derivable).
         if not doc.get("identity_key"):
             ident = _identity_of(doc)
-            if ident:
+            if ident and ident in held_keys:
+                stats["identity_held"] += 1
+                print(f"  [skip] {doc.get('sku')}: {ident!r} is held by another row")
+            elif ident:
+                held_keys.add(ident)
                 stats["identity_backfilled"] += 1
                 if apply:
                     set_fields["identity_key"] = ident

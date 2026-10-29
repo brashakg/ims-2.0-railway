@@ -200,9 +200,13 @@ function sweepToast(
   const heldDown = n('taken_down_skipped');
   const archived = n('archived_not_listed');
   const oldPrice = n('price_not_synced');
+  const variantsHeld = n('variants_held');
   // LIVE, BUT ITS PHOTOS ARE NOT IMS's (a photo step failed): still queued,
   // and the website's photo 1 may not be the main photo IMS shows.
   const oldPhotos = n('photos_not_synced');
+  // LIVE, BUT ITS PHOTOS FAILED (a refusal, or still incomplete on a later
+  // run): live, so not in `failed` -- its own red count.
+  const photosFailed = n('photos_failed');
   // LIVE, BUT SOLD OUT. The listing published and its quantities reached
   // no location at all (no shop mapped, two SKUs on one inventory
   // item...). It has its own count for the same reason the OLD price
@@ -246,14 +250,17 @@ function sweepToast(
     (withheld ? ` · ${withheld} NOT made visible` : '') +
     (heldDown ? ` · ${heldDown} skipped (taken down)` : '') +
     (archived ? ` · ${archived} archived (not listed)` : '') +
+    (variantsHeld ? ` · ${variantsHeld} colours/sizes left off (incomplete options)` : '') +
     (oldPrice ? ` · ${oldPrice} at the OLD price (price not synced)` : '') +
-    (oldPhotos ? ` · ${oldPhotos} live with their photos NOT as IMS has them (still queued)` : '') +
+    (oldPhotos ? ` · ${oldPhotos} photos still attaching — will finish on the next sync` : '') +
+    (photosFailed ? ` · ${photosFailed} live with photos FAILED (check the photographs)` : '') +
     (noStock ? ` · ${noStock} live with NO stock written (sold out)` : '') +
     (stockWarn ? ` · ${stockWarn} live with a stock warning (see the stock line)` : '') +
     (soldOut ? ` · ${soldOut} live and SOLD OUT (0 at every shop)` : '') +
     why +
     stockPassLine;
-  const bad = refused || withheld || oldPhotos || noStock || stockWarn || stockPassBad || failed;
+  const bad =
+    refused || withheld || variantsHeld || oldPhotos || photosFailed || noStock || stockWarn || stockPassBad || failed;
   return { level: bad ? 'warning' : 'success', msg };
 }
 
@@ -272,7 +279,8 @@ export default function OnlineShopifySyncPage() {
   const [health, setHealth] = useState<SyncHealth | null>(null);
   const [parity, setParity] = useState<SyncParity | null>(null);
   const [drift, setDrift] = useState<SyncDrift | null>(null);
-  const [diagLoading, setDiagLoading] = useState(true);
+  // One flag per tile: the slow Shopify drift read never holds up the others.
+  const [diagLoading, setDiagLoading] = useState({ health: true, parity: true, drift: true });
 
   // Per-entity dry-run state: which entity is running + its last sweep result.
   const [running, setRunning] = useState<EntityKey | null>(null);
@@ -340,20 +348,13 @@ export default function OnlineShopifySyncPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [historyFilter]);
 
-  const loadDiagnostics = useCallback(async () => {
-    setDiagLoading(true);
-    try {
-      const [h, p, d] = await Promise.all([
-        syncHealthApi.getSyncHealth(),
-        syncHealthApi.getParity(),
-        syncHealthApi.getDrift(),
-      ]);
-      setHealth(h);
-      setParity(p);
-      setDrift(d);
-    } finally {
-      setDiagLoading(false);
-    }
+  const loadDiagnostics = useCallback(() => {
+    setDiagLoading({ health: true, parity: true, drift: true });
+    const done = (tile: 'health' | 'parity' | 'drift') => () => setDiagLoading((s) => ({ ...s, [tile]: false }));
+    // Each tile sets its own state as its read lands (the api calls are fail-soft).
+    void syncHealthApi.getSyncHealth().then(setHealth).finally(done('health'));
+    void syncHealthApi.getParity().then(setParity).finally(done('parity'));
+    void syncHealthApi.getDrift().then(setDrift).finally(done('drift'));
   }, []);
 
   useEffect(() => {
@@ -372,6 +373,7 @@ export default function OnlineShopifySyncPage() {
   };
 
   const isLive = !!status?.mode?.is_live;
+  const rawCounts = Object.entries(parity?.parity?.entities ?? {}).filter(([name]) => name !== 'catalog_products');
 
   // Run a DRY-RUN (or, if the gates are armed, the real) push for one entity via
   // the shared engine. It is SIMULATED whenever the backend reports DARK, so this
@@ -551,16 +553,21 @@ export default function OnlineShopifySyncPage() {
       // the day-1 locations run.stock.ok is false on EVERY run.
       const withheld = Number(run?.publish_withheld ?? 0);
       const stockBad = run?.stock?.ok === false;
+      // Live, so neither is in `failed` -- but neither is a clean success.
+      const photosPending = Number(run?.photos_not_synced ?? 0);
+      const photosFailed = Number(run?.photos_failed ?? 0);
       const line =
         `Live sync (${where}): ${run?.pushed_ok ?? 0} updated, ${run?.first_published ?? 0} ` +
         `${run?.mode === 'LIVE' ? 'first published' : 'would be first published'}, ${run?.failed ?? 0} failed, ` +
         `${run?.awaiting_first_publish ?? 0} awaiting first publish` +
         (run?.first_publish_not_checked ? ` (${run.first_publish_not_checked} not yet checked this run)` : '') +
         (withheld ? `, ${withheld} NOT made visible` : '') +
+        (photosPending ? `, ${photosPending} photos still attaching` : '') +
+        (photosFailed ? `, ${photosFailed} with photos FAILED` : '') +
         (stockBad
           ? ` · stock pass NOT ok${run?.stock?.code ? ` [${run.stock.code}]` : ''}${run?.stock?.error ? ` — ${run.stock.error}` : ''}`
           : '');
-      if (run?.failed || withheld || stockBad) toast.warning(line);
+      if (run?.failed || withheld || stockBad || photosPending || photosFailed) toast.warning(line);
       else toast.success(line);
       if (run?.limit_reached) {
         toast.info(`Stopped at the per-run cap (${run.limit ?? '?'} products) — run again to continue.`);
@@ -610,6 +617,8 @@ export default function OnlineShopifySyncPage() {
 
   const mode = status?.mode;
   const liveSync = status?.live_sync ?? null;
+  // An old run ledger's first-pass photo rows are split into photo_warnings
+  // by the backend (live_sync.last_run) -- the one reader of that rule.
   const lastRun = liveSync?.last_run ?? null;
   const stockPayload = (stockResult?.payload ?? null) as Record<string, any> | null;
   // The plan's inner keys are store_ids (Pune's is a UUID); the owner reads
@@ -650,10 +659,10 @@ export default function OnlineShopifySyncPage() {
         <button
           type="button"
           onClick={refreshAll}
-          disabled={loading || diagLoading}
+          disabled={loading || diagLoading.health || diagLoading.parity}
           className="inline-flex items-center gap-1.5 text-sm text-gray-600 hover:bg-gray-100 rounded-lg px-3 py-1.5 disabled:opacity-60"
         >
-          <RefreshCw className={'w-4 h-4 ' + (loading || diagLoading ? 'animate-spin' : '')} /> Refresh
+          <RefreshCw className={'w-4 h-4 ' + (loading || diagLoading.health || diagLoading.parity ? 'animate-spin' : '')} /> Refresh
         </button>
       </div>
       <p className="text-sm text-gray-500 mb-4 max-w-3xl">
@@ -1000,11 +1009,35 @@ export default function OnlineShopifySyncPage() {
               {(lastRun.publish_withheld ?? 0) > 0 && <> · {fmt(lastRun.publish_withheld)} withheld</>}
               {(lastRun.price_not_synced ?? 0) > 0 && <> · {fmt(lastRun.price_not_synced)} at the OLD price</>}
               {(lastRun.photos_not_synced ?? 0) > 0 && (
-                <> · {fmt(lastRun.photos_not_synced)} with photos NOT as IMS has them</>
+                <> · <span className="text-amber-700">{fmt(lastRun.photos_not_synced)} photos still attaching</span></>
               )}
+              {(lastRun.photos_failed ?? 0) > 0 && <span className="text-red-700"> · {fmt(lastRun.photos_failed)} with photos FAILED</span>}
               {lastRun.limit_reached && <> · stopped at the {lastRun.limit ?? '?'}-product cap</>}
             </p>
+            {(lastRun.photo_warnings?.length ?? 0) > 0 && (
+              <ul className="mt-2 space-y-1 text-amber-700" aria-label="Live sync photo warnings">
+                {lastRun.photo_warnings!.map((warning, i) => (
+                  <li key={warning.product_id ?? i}>
+                    <span className="font-medium">{warning.sku || warning.product_id || '?'}</span>
+                    {' · PHOTOS_NOT_SYNCED · '}
+                    {warning.error || 'photos still attaching — will finish on the next sync'}
+                  </li>
+                ))}
+              </ul>
+            )}
             {lastRun.stock && <StockPassLine stock={lastRun.stock} testId="live-sync-stock-line" />}
+            {(lastRun.variant_warnings?.length ?? 0) > 0 && (
+              <ul className="mt-2 space-y-1 text-amber-700" aria-label="Live sync variant warnings">
+                {lastRun.variant_warnings!.map((warning, i) => (
+                  <li key={`${warning.sku}-${i}`}>
+                    {warning.error || `${warning.sku || '?'} left off website page: ${warning.reason || 'incomplete options'}`}
+                    {lastRun.mode === 'LIVE'
+                      ? ' — complete variants were sent; filling it in queues the page again.'
+                      : ' — dry run: complete variants would be sent.'}
+                  </li>
+                ))}
+              </ul>
+            )}
             {(lastRun.failures?.length ?? 0) > 0 && (() => {
               // Hundreds of identical "no photo" refusals collapse into ONE
               // count line with the SKUs behind a native expander.
@@ -1183,6 +1216,15 @@ export default function OnlineShopifySyncPage() {
                         ) : null;
                       })()}
                       {(() => {
+                        const variantsHeld = Number(sweep.summary?.[ent.token]?.variants_held ?? 0);
+                        return variantsHeld > 0 ? (
+                          <span className="inline-flex items-center gap-1 text-amber-700">
+                            <AlertTriangle className="w-3 h-3" /> {fmt(variantsHeld)} colours/sizes left
+                            off (incomplete options)
+                          </span>
+                        ) : null;
+                      })()}
+                      {(() => {
                         const oldPrice = Number(
                           (sweep.summary?.[ent.token]?.price_not_synced ?? 0) as number,
                         );
@@ -1201,11 +1243,23 @@ export default function OnlineShopifySyncPage() {
                         );
                         return oldPhotos > 0 ? (
                           <span
-                            className="inline-flex items-center gap-1 text-red-700"
-                            title="Live on the website, but a photo change did not reach Shopify, so the website's photos or their order are not what IMS shows. They are still queued - press again, or the next scheduled sync retries them."
+                            className="inline-flex items-center gap-1 text-amber-700"
+                            title="Photos still attaching — will finish on the next sync."
                           >
-                            <AlertTriangle className="w-3 h-3" /> {fmt(oldPhotos)} with photos NOT as IMS
-                            has them
+                            <AlertTriangle className="w-3 h-3" /> {fmt(oldPhotos)} photos still attaching
+                          </span>
+                        ) : null;
+                      })()}
+                      {(() => {
+                        const photosFailed = Number(
+                          (sweep.summary?.[ent.token]?.photos_failed ?? 0) as number,
+                        );
+                        return photosFailed > 0 ? (
+                          <span
+                            className="inline-flex items-center gap-1 text-red-700"
+                            title="Live on the website, but Shopify refused the photos or they did not finish over several runs. Check the photographs; the product line says why."
+                          >
+                            <AlertTriangle className="w-3 h-3" /> {fmt(photosFailed)} with photos FAILED
                           </span>
                         ) : null;
                       })()}
@@ -1319,7 +1373,7 @@ export default function OnlineShopifySyncPage() {
                             {pushToastLevel(r) === 'success' ? (
                               <CheckCircle2 className="w-3 h-3 text-green-600 shrink-0" />
                             ) : (
-                              <XCircle className="w-3 h-3 text-amber-600 shrink-0" />
+                              <XCircle className={`w-3 h-3 shrink-0 ${pushToastLevel(r) === 'error' ? 'text-red-700' : 'text-amber-600'}`} />
                             )}
                             <span className="truncate">{formatPushResult(r.entity + ' ' + (r.target_id ?? ''), r)}</span>
                           </li>
@@ -1351,7 +1405,7 @@ export default function OnlineShopifySyncPage() {
         </h2>
         <div className="grid gap-4 sm:grid-cols-3">
           {/* Sync health */}
-          <DiagTile title="Sync health" loading={diagLoading} unavailable={health?.unavailable}>
+          <DiagTile title="Sync health" loading={diagLoading.health} unavailable={health?.unavailable}>
             <DiagRow
               label="Last sync (orders/stock)"
               value={health?.last_successful_shopify_sync_at ? new Date(health.last_successful_shopify_sync_at).toLocaleString('en-IN') : '—'}
@@ -1382,18 +1436,38 @@ export default function OnlineShopifySyncPage() {
           </DiagTile>
 
           {/* Parity */}
-          <DiagTile title="Parity (IMS vs Shopify)" loading={diagLoading} unavailable={parity?.unavailable}>
-            {parity?.parity?.entities ? (
-              Object.entries(parity.parity.entities).map(([name, v]) => (
-                <DiagRow
-                  key={name}
-                  label={name.replace(/_/g, ' ')}
-                  value={`${fmt(v?.pushed)} / ${fmt(v?.total)}`}
-                  warn={!!v?.missing}
-                />
-              ))
+          <DiagTile title="Parity (IMS vs Shopify)" loading={diagLoading.parity} unavailable={parity?.unavailable}>
+            {parity?.parity?.colours_sizes?.checked ? (
+              <>
+                <p className="text-sm font-semibold text-gray-900">
+                  {fmt(parity.parity.colours_sizes.online)} of {fmt(parity.parity.colours_sizes.total)} colours/sizes online
+                  {' '}({fmt(parity.parity.colours_sizes.website_pages)} website pages)
+                </p>
+                <p className="mt-1 text-[11px] text-gray-500">Matched by SKU to a Shopify variant. Stock and storefront visibility are checked separately.</p>
+                {!!parity.parity.colours_sizes.missing && (
+                  <details className="mt-2 text-[11px]">
+                    <summary className="cursor-pointer text-amber-700">{fmt(parity.parity.colours_sizes.missing)} colours/sizes not online</summary>
+                    <ul className="mt-1 max-h-60 overflow-y-auto space-y-1">
+                      {parity.parity.colours_sizes.missing_items?.map((item, i) => (
+                        <li key={`${item.sku || item.product_id}-${i}`} className="text-gray-700 break-words">
+                          <span className="font-medium">{item.sku || item.product_id || 'Missing SKU'}</span>: {item.reason || 'Reason unavailable'}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+              </>
             ) : (
-              <p className="text-[11px] text-gray-500">No parity data.</p>
+              <p className="text-[11px] text-gray-500">{parity?.parity?.colours_sizes?.reason || 'Colour/size parity unavailable.'}</p>
+            )}
+            {/* Variant rows, collections and images; product pages are the headline's "website pages". */}
+            {rawCounts.length > 0 && (
+              <details className="mt-2 text-[11px]">
+                <summary className="cursor-pointer text-gray-500">Raw counts (pushed / total)</summary>
+                {rawCounts.map(([name, c]) => (
+                  <DiagRow key={name} label={name.replace(/_/g, ' ')} value={`${fmt(c?.pushed)} / ${fmt(c?.total)}`} />
+                ))}
+              </details>
             )}
             {parity?.uploads_audit?.checked && (
               <DiagRow
@@ -1405,16 +1479,33 @@ export default function OnlineShopifySyncPage() {
           </DiagTile>
 
           {/* Drift */}
-          <DiagTile title="Dual-writer drift" loading={diagLoading} unavailable={drift?.unavailable}>
+          <DiagTile title="Content drift" loading={diagLoading.drift} unavailable={drift?.unavailable}>
             {drift?.checked ? (
               <>
-                <DiagRow label="Scanned" value={fmt(drift.counts?.scanned)} />
-                <DiagRow label="Drifted gids" value={fmt(drift.counts?.drifted)} warn={!!drift.counts?.drifted} />
+                <DiagRow
+                  label="Compared (newest pushed)"
+                  value={`${fmt(drift.counts?.scanned)} of ${fmt(drift.counts?.candidates ?? drift.counts?.scanned)} pages`}
+                />
+                <DiagRow label="Products with differences" value={fmt(drift.counts?.drifted)} warn={!!drift.counts?.drifted} />
+                <p className="mt-1 text-[11px] text-gray-500">IMS-owned product fields only; collections are not compared. Pending IMS edits can also differ; timestamps alone do not trigger an alarm.</p>
+                {!!drift.counts?.unknown && <DiagRow label="Could not compare" value={fmt(drift.counts.unknown)} warn />}
+                {Array.isArray(drift.unknown) && drift.unknown.length > 0 && (
+                  <details className="mt-1 text-[11px]">
+                    <summary className="cursor-pointer text-amber-700">Why not compared</summary>
+                    <ul className="mt-1 max-h-60 overflow-y-auto space-y-0.5">
+                      {drift.unknown.map((u, i) => (
+                        <li key={(u.gid ?? '') + i} className="text-gray-700 break-words">
+                          <span className="font-medium">{u.sku || u.gid}</span>: {u.reason || 'Reason unavailable'}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
                 {Array.isArray(drift.drifted) && drift.drifted.length > 0 && (
                   <ul className="mt-1 space-y-0.5">
-                    {drift.drifted.slice(0, 5).map((d, i) => (
-                      <li key={(d.gid ?? '') + i} className="text-[11px] text-amber-700 truncate">
-                        {d.sku || d.gid}
+                    {drift.drifted.map((d, i) => (
+                      <li key={(d.gid ?? '') + i} className="text-[11px] text-amber-700 break-words">
+                        {d.sku || d.gid}: {d.fields?.join(', ') || 'Fields unavailable'}
                       </li>
                     ))}
                   </ul>

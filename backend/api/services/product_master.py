@@ -1366,6 +1366,54 @@ def normalise_identity_component(value: Any) -> str:
     return re.sub(r"^0+(?=[a-z])", "", s)
 
 
+_SEPARATOR = r"[^a-z0-9]"
+
+
+def model_without_brand(brand: Any, model: Any) -> str:
+    """THE model part of every identity comparison: the model normalised
+    (normalise_identity_component) with the BRAND typed in front of it folded
+    away -- 'CARRERA 3001/S', 'Carrera3001/S', 'CARRERA CARRERA 3001/S' and
+    '3001/S' under Carrera are one model (prod 10-24: the first spelling hid
+    duplicate pairs from the unique identity_key index). The brand folds when
+    a separator or a digit follows it, as often as it is repeated (so the
+    fold is idempotent); never before a letter ('TITANIUM12' under Titan,
+    'RAYBANRB2140' under Ray-Ban stay whole: a glued word is never cut) and
+    never when the model IS the brand. The brand only, never the sub-brand:
+    an optional field must not move the key ('BOSS ORANGE 0123' and
+    'BOSS 0123' stay two). The duplicate key (compute_identity_key), the model
+    scan (model_family_query), the model families (family_key), the
+    variant_of check, the variant model-field guard and the Add-product
+    "brand in the model number" hint (brand_in_model) all read it. The SKU
+    is never minted from it."""
+    b = normalise_identity_component(brand)
+    raw = str(model or "").strip().lower()
+    if b:
+        head = re.compile("^" + _SEPARATOR + "*" + (_SEPARATOR + "*").join(map(re.escape, b)))
+        while True:
+            hit = head.match(raw)
+            tail = raw[hit.end():] if hit else ""
+            if not hit or not re.match(_SEPARATOR + r"|\d", tail):
+                break
+            rest = re.sub("^" + _SEPARATOR + "+", "", tail)
+            if not normalise_identity_component(rest):
+                break  # the model IS the brand
+            raw = rest
+    # Normalised last: 'RAY-BAN 0RB4350' drops the Luxottica 0 too.
+    return normalise_identity_component(raw)
+
+
+def brand_in_model(attributes: Dict[str, Any], category: Any = None) -> bool:
+    """The model number as typed carries the brand in front of it -- the
+    Add-product form's amber hint (GET /products/similar). The same rule as
+    the key (model_without_brand), so the hint fires exactly when the fold
+    does. Stored values are kept as typed; this never blocks."""
+    try:
+        brand, model, _, _ = identity_parts(attributes or {}, category)
+    except ProductMasterError:
+        return False
+    return bool(brand and model) and model_without_brand(brand, model) != normalise_identity_component(model)
+
+
 def compute_identity_key(
     brand: Any, model: Any, colour: Any = None, size: Any = None
 ) -> Optional[str]:
@@ -1387,7 +1435,9 @@ def compute_identity_key(
     (backward-compatible).
     """
     _norm = normalise_identity_component
-    b, m = _norm(brand), _norm(model)
+    # The model reads without the brand typed in front of it
+    # (model_without_brand): 'CARRERA 3001/S' is the 3001/S under Carrera.
+    b, m = _norm(brand), model_without_brand(brand, model)
     if not b or not m:
         return None
     parts = [b, m, _norm(colour)]
@@ -1519,6 +1569,23 @@ def _identity_attributes(doc: Dict[str, Any]) -> Dict[str, Any]:
     return attrs
 
 
+def identity_spine(doc: Dict[str, Any]) -> Dict[str, Any]:
+    """A stored row as identity_conflict reads a new one: its category and
+    identity parts, and the key the create rule gives it (identity_key_of).
+    The edit door's re-key and Restore both ask "we already have this?"
+    through it. Raises ProductMasterError when a stored value cannot be read."""
+    doc = doc or {}
+    brand, model, colour, size = identity_parts(_identity_attributes(doc), doc.get("category"))
+    return {
+        "category": resolve_category(doc.get("category")),
+        "brand": brand,
+        "model": model,
+        "color": colour,
+        "size": size,
+        "identity_key": identity_key_of(doc),
+    }
+
+
 def identity_key_of(doc: Dict[str, Any]) -> Optional[str]:
     """THE duplicate key a stored product has, by the create rule: identity_parts
     over its attributes, a legacy row's flat columns filling only an empty
@@ -1605,8 +1672,9 @@ def rekey_on_edit(
     merged = {**current, **patch}
     try:
         old = identity_key_of(current)
+        typed_before = identity_parts(_identity_attributes(current), merged.get("category"))
     except ProductMasterError:
-        old = None  # a stored value that is not a number: the edit's key decides
+        old = typed_before = None  # a stored value that is not a number: the edit's key decides
     try:
         new = identity_key_of(merged)
     except ProductMasterError:
@@ -1616,24 +1684,19 @@ def rekey_on_edit(
         # ponytail: the bad value is the stored one, untouched, so the key
         # cannot be read; key and name stay as stored until it is fixed.
         return
-    if new is None or new == old:
+    if new is None:
         return
+    if new == old:
+        # Same product by the rule. A row still on a key an older rule made
+        # (a brand typed in its model, #1271) is re-keyed -- and checked by
+        # identity_conflict -- when the edit TYPES a different identity value
+        # ('CARRERA 3001/S' -> '3001/S'); an Edit-form save that re-sends the
+        # same values (a price change) leaves the stored key alone.
+        typed_after = identity_parts(_identity_attributes(merged), merged.get("category"))
+        if new == current.get("identity_key") or typed_after == typed_before:
+            return
     if product_repo is not None:
-        brand, model, colour, size = identity_parts(
-            _identity_attributes(merged), merged.get("category")
-        )
-        err = identity_conflict(
-            {
-                "category": resolve_category(merged.get("category")),
-                "brand": brand,
-                "model": model,
-                "color": colour,
-                "size": size,
-                "identity_key": new,
-            },
-            product_repo,
-            self_id=current.get("product_id"),
-        )
+        err = identity_conflict(identity_spine(merged), product_repo, self_id=current.get("product_id"))
         if err is not None:
             raise err
     patch["identity_key"] = new
@@ -1661,7 +1724,7 @@ def model_family_query(category: Any, brand: Any, model: Any) -> Optional[Dict[s
     if canonical is None:
         return None
     b = normalise_identity_component(brand)
-    m = normalise_identity_component(model)
+    m = model_without_brand(brand, model)
     if not b or not m:
         return None
     return {
@@ -1722,6 +1785,12 @@ def find_similar_products(
         "siblings": [],
         "model_colour_count": 0,
     }
+    # The form's "brand in the model number" hint: the key's own fold, read
+    # off the typed values alone, so it answers even when the catalogue does not.
+    try:
+        empty["brand_in_model"] = brand_in_model(attributes or {}, resolve_category(category))
+    except Exception:  # noqa: BLE001 - a hint, never a 5xx
+        empty["brand_in_model"] = False
     try:
         if products_collection is None:
             return empty
@@ -1786,6 +1855,7 @@ def find_similar_products(
             )
 
         return {
+            "brand_in_model": empty["brand_in_model"],
             "exact_match": exact,
             # Typed without the eye size it is catalogued by: Save asks for it.
             "eye_size_needed": list(answer.sizes) if code == "EYE_SIZE_NEEDED" else [],
@@ -3914,11 +3984,13 @@ def _model_identity(doc: Dict[str, Any]) -> Tuple[Any, str, str]:
     """(category, brand, model) as the identity key reads them -- the rule an
     explicit variant_of (the size-variant runbook's door) is checked by."""
     category = resolve_category((doc or {}).get("category"))
-    ids = _derive_brand_model_color_size((doc or {}).get("attributes") or {}, category)
+    attrs = (doc or {}).get("attributes") or {}
+    ids = _derive_brand_model_color_size(attrs, category)
+    brand = ids["brand"] or doc.get("brand")
     return (
         category,
-        normalise_identity_component(ids["brand"] or doc.get("brand")),
-        normalise_identity_component(ids["model"] or doc.get("model")),
+        normalise_identity_component(brand),
+        model_without_brand(brand, ids["model"] or doc.get("model")),
     )
 
 
@@ -3934,31 +4006,8 @@ def family_key(doc: Dict[str, Any]) -> Optional[Tuple[str, str, str]]:
         return None
     attrs = _shown_attributes((doc or {}).get("attributes") or {}, category)
     brand = normalise_identity_component(attrs.get("brand_name") or attrs.get("brand") or doc.get("brand"))
-    model = _without_brand(brand, attrs.get("model_no"))
+    model = model_without_brand(brand, attrs.get("model_no"))
     return (category, brand, model) if brand and model else None
-
-
-_SEPARATOR = r"[^a-z0-9]"
-# What a model number looks like right after a brand typed without a gap:
-# a digit, or one or two letters then a digit ('CARRERA1001/S' -> 1001S,
-# 'RAYBANRB2140' -> RB2140). ponytail: 'TITANIUM12' under Titan stays
-# 'TITANIUM12' (three letters); widen only for a real model the rule misses.
-_MODEL_AFTER_BRAND = re.compile(r"^(?:\d|[a-z]{1,2}\d)")
-
-
-def _without_brand(brand: str, raw_model: Any) -> str:
-    """The normalised model number with a leading copy of the brand folded
-    away: always when a separator follows the brand ('CARRERA 1001/S'),
-    without one only before a model-number shape (_MODEL_AFTER_BRAND)."""
-    model = normalise_identity_component(raw_model)
-    if not brand or not model.startswith(brand) or len(model) == len(brand):
-        return model
-    rest = model[len(brand):]
-    typed_apart = re.match(
-        r"^\W*" + (_SEPARATOR + "*").join(map(re.escape, brand)) + _SEPARATOR + "+",
-        str(raw_model or "").strip().lower(),
-    )
-    return rest if typed_apart or _MODEL_AFTER_BRAND.match(rest) else model
 
 
 def _brand_rows_query(category: Any, brand: Any) -> Optional[Dict[str, Any]]:
@@ -4913,12 +4962,22 @@ def model_field_changes(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[s
     `before` (a key `after` does not carry is not a change: a partial
     attributes patch, a barcode alone, never reads as clearing the model)."""
     b, a = before or {}, after or {}
+
+    def canon(attrs: Dict[str, Any], k: str, brand: Any) -> str:
+        # The model number reads as the identity does (model_without_brand):
+        # 'CARRERA 3001/S' -> '3001/S' under Carrera is no model change.
+        if k == "model_no":
+            return model_without_brand(brand, attrs.get(k))
+        return normalise_identity_component(attrs.get(k))
+
+    brand_b = b.get("brand_name")
+    brand_a = a.get("brand_name") or brand_b
     return {
         k: a.get(k)
         for k in MODEL_LEVEL_FIELDS
         # Canonical (the identity normaliser): 'rb4165' / 'RB 4165' and
         # 'RAY-BAN' / 'Ray-Ban' are the same value, never an edit.
-        if k in a and normalise_identity_component(b.get(k)) != normalise_identity_component(a.get(k))
+        if k in a and canon(b, k, brand_b) != canon(a, k, brand_a)
     }
 
 
@@ -4942,7 +5001,11 @@ def assert_variant_model_fields(
     canon = normalise_identity_component
     if brand is not None and canon(brand) != canon(stored.get("brand_name") or existing.get("brand")):
         changed["brand_name"] = brand
-    if model is not None and canon(model) not in (canon(existing.get("model")), canon(stored.get("model_no"))):
+    brand_was = stored.get("brand_name") or existing.get("brand")
+    if model is not None and model_without_brand(brand if brand is not None else brand_was, model) not in (
+        model_without_brand(brand_was, existing.get("model")),
+        model_without_brand(brand_was, stored.get("model_no")),
+    ):
         changed["model_no"] = model
     if category is not None and resolve_category(category) != resolve_category(existing.get("category")):
         changed["category"] = category

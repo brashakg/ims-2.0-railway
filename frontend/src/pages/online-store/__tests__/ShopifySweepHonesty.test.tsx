@@ -135,6 +135,16 @@ beforeEach(() => {
 });
 
 describe('the bulk press reports what it refused', () => {
+  it('reports omitted sibling options as an amber catalogue warning', async () => {
+    (pushApi.pushAllPending as any).mockResolvedValue(
+      sweep({ pushed: 1, failed: 0, noop: 0, variants_held: 1 }, 1),
+    );
+    await pressProducts();
+    expect(await screen.findByText(/1 colours\/sizes left off \(incomplete options\)/)).toBeTruthy();
+    expect(screen.queryByText(/NO stock written/)).toBeNull();
+    expect(toastCalls.some((t) => t.kind === 'warning' && /incomplete options/.test(t.msg))).toBe(true);
+  });
+
   it('shows the photo refusals and does not fold them into "processed"', async () => {
     // 25 went to Shopify; 10 were refused for having no photograph.
     (pushApi.pushAllPending as any).mockResolvedValue(
@@ -257,11 +267,26 @@ describe('the bulk press reports what it refused', () => {
 
     await pressProducts();
 
-    expect(await screen.findByText(/2 with photos NOT as IMS\s+has them/)).toBeTruthy();
+    expect(await screen.findByText(/2 photos still attaching/)).toHaveClass('text-amber-700');
     expect(toastCalls.some((t) => t.kind === 'success')).toBe(false);
     const msg = toastCalls.map((t) => t.msg).join(' | ');
-    expect(msg).toMatch(/2 live with their photos NOT as IMS has them \(still queued\)/);
+    expect(msg).toMatch(/2 photos still attaching — will finish on the next sync/);
     expect(msg).not.toMatch(/stock/i);
+  });
+
+  // Review of #1277: a live product whose photos FAILED is in `pushed`, not
+  // `failed` -- so it needs its own red line or the press reads clean.
+  it('names the listings whose photos FAILED in red, and does not call it green', async () => {
+    (pushApi.pushAllPending as any).mockResolvedValue(
+      sweep({ pushed: 1, failed: 0, noop: 0, photos_failed: 1 }, 1),
+    );
+
+    await pressProducts();
+
+    expect(await screen.findByText(/1 with photos FAILED/)).toHaveClass('text-red-700');
+    expect(toastCalls.some((t) => t.kind === 'success')).toBe(false);
+    const msg = toastCalls.map((t) => t.msg).join(' | ');
+    expect(msg).toMatch(/1 live with photos FAILED \(check the photographs\)/);
   });
 
   // RECHECK ROUND 1: the products press ends with its OWN whole-catalogue stock

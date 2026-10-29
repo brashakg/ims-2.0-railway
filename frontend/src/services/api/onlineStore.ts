@@ -1479,6 +1479,12 @@ export interface PushResult {
   reason?: string | null;
   /** Stable machine code for an actionable failure (e.g. PUBLISH_SCOPE_MISSING). */
   code?: string | null;
+  /** Photo retry state, independent of any simultaneous price/stock code. */
+  photos?: {
+    sync_state?: 'pending' | 'failed' | 'synced';
+    consecutive_incomplete?: number;
+    message?: string | null;
+  } | null;
   /** The per-shop stock sub-result (backend PushResult.stock) -- only what the
    *  toast reads: `quantities` is {sku: {store_id: qty}} as ACCEPTED by
    *  Shopify, and `sold_out` is the WRITER's verdict that every accepted
@@ -1550,6 +1556,10 @@ export interface LiveSyncRun {
   price_not_synced?: number | null;
   /** Live, but a photo step failed (PHOTOS_NOT_SYNCED): the website's photos are not IMS's, in IMS's order. Still queued. */
   photos_not_synced?: number | null;
+  /** Live, but the photos failed: Shopify refused them, or they were still
+   *  incomplete on a later run. Counted in pushed_ok, never in `failed`. */
+  photos_failed?: number | null;
+  photo_warnings?: LiveSyncFailure[] | null;
   /** First-published by this run (owner ruling 2026-10-20; SIMULATED in a dry-run). */
   first_published?: number | null;
   /** Never-published products the product gate refused this run (named in failures). */
@@ -1563,6 +1573,8 @@ export interface LiveSyncRun {
   limit?: number | null;
   limit_reached?: boolean | null;
   failures?: LiveSyncFailure[] | null;
+  /** Incomplete family siblings omitted while the complete variants were sent. */
+  variant_warnings?: LiveSyncFailure[] | null;
   /** The stock pass the run ends with (sync_stock_levels -- per-shop
    *  quantities at each shop's Shopify location). `ok=false` with a code
    *  (STORE_UNMAPPED / STOCK_ONHAND_UNKNOWN / ...) is the only trace a
@@ -1629,10 +1641,13 @@ export interface PushSweepResult {
            *  the press failed (PRICE_NOT_SYNCED). Counted in `pushed` too (a
            *  shopper can find them); they stay queued for the retry. */
           price_not_synced?: number;
+          /** Incomplete sibling options omitted while complete family members went live. */
+          variants_held?: number;
           /** Products that are live but whose photos did not all reach
            *  Shopify in IMS order (PHOTOS_NOT_SYNCED). Counted in `pushed`
            *  too; they stay queued for the retry. */
           photos_not_synced?: number;
+          photos_failed?: number;
           /** Products that published but whose QUANTITIES reached no Shopify
            *  location at all (no shop mapped, two SKUs on one inventory
            *  item...). Counted in `pushed` too -- the listing is live -- but
@@ -1986,6 +2001,15 @@ export const pushApi = {
  *  which also carries an uploads_audit block). All fields optional + nullable. */
 export interface SyncParity {
   parity?: {
+    colours_sizes?: {
+      checked?: boolean;
+      reason?: string;
+      total?: number;
+      online?: number;
+      website_pages?: number;
+      missing?: number;
+      missing_items?: Array<{ sku?: string; product_id?: string; reason?: string; code?: string | null }>;
+    } | null;
     entities?: Record<
       string,
       { total?: number; pushed?: number; missing?: number } | null
@@ -2041,8 +2065,9 @@ export interface SyncHealth {
 export interface SyncDrift {
   checked?: boolean | null;
   reason?: string | null;
-  drifted?: Array<{ gid?: string; sku?: string }> | null;
-  counts?: { scanned?: number; drifted?: number; no_timestamp?: number } | null;
+  drifted?: Array<{ gid?: string; sku?: string; fields?: string[] }> | null;
+  unknown?: Array<{ gid?: string; sku?: string; reason?: string }> | null;
+  counts?: { scanned?: number; candidates?: number; drifted?: number; no_timestamp?: number; unknown?: number } | null;
   unavailable?: boolean;
 }
 
@@ -2069,8 +2094,9 @@ export const syncHealthApi = {
     }
   },
 
-  /** Run the LIVE dual-writer drift check (a real Shopify READ — no writes; needs
-   *  creds, else it degrades to {checked:false}). Fail-soft -> {unavailable:true}. */
+  /** Run the owned-content drift check over the newest pushed listings (a real
+   *  Shopify READ — no writes; needs creds, else {checked:false}). Fail-soft ->
+   *  {unavailable:true}. */
   getDrift: async (limit = 50): Promise<SyncDrift> => {
     try {
       const res = await api.get(`${ADMIN_ONLINE_BASE}/drift`, { params: { limit } });

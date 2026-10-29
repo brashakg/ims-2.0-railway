@@ -51,6 +51,9 @@ export interface SimilarProductsHintProps {
   /** G1: every fresh answer's model (null: none / not armed) -> the form
    *  joins it (handleFamilyFound). */
   onFamily?: (family: FamilyHint | null) => void;
+  /** Every fresh answer's brand_in_model (false: none / not armed /
+   *  unmounted) -> the form's "brand in the model number" hint. */
+  onBrandInModel?: (repeats: boolean) => void;
 }
 
 function chipLabel(s: SimilarProductSummary): string {
@@ -68,6 +71,7 @@ export function SimilarProductsHint({
   onOpenExisting,
   selfId = null,
   onFamily,
+  onBrandInModel,
 }: SimilarProductsHintProps) {
   const { data, armed } = useSimilarProducts({ category, attributes });
   const onFamilyRef = useRef(onFamily);
@@ -76,6 +80,13 @@ export function SimilarProductsHint({
     if (!armed) onFamilyRef.current?.(null);
     else if (data) onFamilyRef.current?.(data.family ?? null);
   }, [armed, data]);
+  const onBrandRef = useRef(onBrandInModel);
+  onBrandRef.current = onBrandInModel;
+  useEffect(() => {
+    if (!armed) onBrandRef.current?.(false);
+    else if (data) onBrandRef.current?.(Boolean(data.brand_in_model));
+  }, [armed, data]);
+  useEffect(() => () => onBrandRef.current?.(false), []);
 
   // Render NOTHING unless armed with a completed response (null covers idle,
   // debouncing, in-flight and error states — the hook's contract).

@@ -360,6 +360,6 @@ export function formatPhotoPublish(label: string, r: PushResult): string {
 // catalogue read as a clean success.
 // ----------------------------------------------------------------------------
 export function pushToastLevel(r: PushResult): 'success' | 'warning' | 'error' {
-  if (!r.ok) return 'error';
+  if (!r.ok || r.code === 'PHOTOS_SYNC_FAILED' || r.photos?.sync_state === 'failed') return 'error';
   return r.code ? 'warning' : 'success';
 }
