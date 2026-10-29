@@ -34,7 +34,7 @@ Design rules (unchanged from the old bridge contract):
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -562,6 +562,50 @@ def inventory_items_for_skus(db, skus: List[str]) -> Dict[str, str]:
             if inv:
                 out[key] = inv
     return out
+
+
+def skus_on_shopify(db, skus: List[str]) -> Set[str]:
+    """THE "is this colour / size online" rule: the SKUs that have a Shopify
+    variant mapped to them. The sync screen's colour/size parity and Store
+    Health's "No Shopify mapping" both read this, so they cannot disagree.
+
+      1. the SKU's own catalog_variants row carries a variant or
+         inventory-item gid; else
+      2. its own catalog_products twin's ``ecom`` carries the variant gid --
+         the product-level pseudo-variant a product with no (or an unmapped)
+         variant row is pushed through (shopify_push.variants ->
+         writeback._writeback_product) -- and no OTHER SKU's row owns that
+         gid (listing._ecom_ids_are_the_leads, the push's own adoption test).
+
+    Matched on the SKU itself only (never a barcode that equals it).
+    STRICT: a read failure raises -- a dead read is never "not online"."""
+    keys = _clean_keys(skus)
+    if not keys or db is None:
+        return set()
+    from .shopify_push.listing import _ID_FIELDS, _ecom_ids_are_the_leads
+
+    out = {
+        k for k, v in _variants_by_key(db, keys, strict=True).items()
+        if normalize_sku(v.get("sku")) == k and any(normalize_sku(v.get(f)) for f in _ID_FIELDS)
+    }
+    rest = [k for k in keys if k not in out]
+    for key, doc in (_products_by_key(db, rest, strict=True) if rest else {}).items():
+        if normalize_sku(doc.get("sku")) == key and _ecom_ids_are_the_leads(db, doc.get("ecom") or {}, key):
+            out.add(key)
+    return out
+
+
+def is_archived_row(*docs: Any) -> bool:
+    """THE archived test the online diagnostics share (sync parity, Store
+    Health): any of the given docs -- a catalog twin, its spine, its ecom
+    sub-doc -- soft-deleted (``deleted_at``, product_master's archive mark),
+    flagged ``is_archived`` or carrying status ARCHIVED."""
+    return any(
+        isinstance(d, dict) and (
+            d.get("deleted_at") or d.get("is_archived") or str(d.get("status") or "").upper() == "ARCHIVED"
+        )
+        for d in docs
+    )
 
 
 def _delisted_live(ecom: Dict[str, Any]) -> bool:

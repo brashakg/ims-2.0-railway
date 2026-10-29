@@ -53,15 +53,17 @@ def test_new_timestamp_and_unmanaged_tag_are_not_drift(monkeypatch):
     assert result["drifted"] == [] and result["counts"]["unknown"] == 0
 
 
+# Tags: the writer's own rule (tags.plan_product_tags) -- see the review-fix
+# tests below; a ledger tag staff deleted is not drift.
 @pytest.mark.parametrize("field,label", [("title", "title"), ("status", "status"),
-    ("tags", "tags"), ("price", "price: A"), ("compareAtPrice", "compare-at price: A"),
+    ("price", "price: A"), ("compareAtPrice", "compare-at price: A"),
     ("sku", "variant SKUs"), ("selectedOptions", "variant options: A")])
 def test_real_owned_changes_name_the_field_even_with_old_timestamp(monkeypatch, field, label):
     node = remote()
     node["updatedAt"] = "2020-01-01T00:00:00Z"
-    changes = {"title": "Changed", "status": "DRAFT", "tags": ["human tag"], "price": "90.0",
+    changes = {"title": "Changed", "status": "DRAFT", "price": "90.0",
                "compareAtPrice": None, "sku": "wrong-SKU", "selectedOptions": [{"name": "Size", "value": "99"}]}
-    target = node if field in ("title", "status", "tags") else node["variants"]["nodes"][0]
+    target = node if field in ("title", "status") else node["variants"]["nodes"][0]
     target[field] = changes[field]
     result = detect(monkeypatch, timestamp_probe_catalog(), node)
     assert result["counts"]["drifted"] == 1
@@ -116,9 +118,12 @@ def test_mapped_colours_count_per_catalog_sku_and_keep_legacy_counts():
     assert result["entities"]["catalog_products"] == {"total": 4, "pushed": 1, "missing": 3}
     colours = result["colours_sizes"]
     assert (colours["total"], colours["online"], colours["website_pages"], colours["missing"]) == (4, 2, 1, 2)
-    assert {r["sku"]: r["reason"] for r in colours["missing_items"]} == {"C": "archived", "D": "not queued"}
+    # D has no brand: the writer's own gate refuses it (never "not queued").
+    assert {r["sku"]: (r["reason"], r["code"]) for r in colours["missing_items"]} == {
+        "C": ("archived", None), "D": ("not for the website - the product has no brand", "NOT_FOR_WEBSITE")}
 
 
+@pytest.mark.usefixtures("brand_is_for_the_website")
 def test_family_refusal_reason_is_current_and_shared_by_missing_colours():
     from test_shopify_model_listings import _world, _family, _twin
     db = _world()
@@ -217,3 +222,200 @@ def test_family_diagnostics_do_not_mutate_catalogue():
     before = {name: list(db[name].find({})) for name in names}
     assert health.parity_summary(db)["colours_sizes"]["missing"] == 2
     assert {name: list(db[name].find({})) for name in names} == before
+
+
+# ---------------------------------------------------------------------------
+# Review fixes (independent review of #1275)
+# ---------------------------------------------------------------------------
+
+
+def _missing(db):
+    return {r["sku"]: r for r in health.parity_summary(db)["colours_sizes"]["missing_items"]}
+
+
+@pytest.mark.usefixtures("brand_is_for_the_website")
+@pytest.mark.parametrize("row", ["no_row", "row_without_ids"])
+def test_a_live_product_mapped_only_on_its_ecom_counts_online(row):
+    """BLOCK 1: the product-level pseudo-variant path (no variant row, or a
+    self-row with no ids next to the ecom ids) is online -- THE rule
+    online_catalog.skus_on_shopify, the same one Store Health reads."""
+    from test_shopify_model_listings import _world, _live_single, FakeShopify
+    db = _world()
+    lead, _p, _var = _live_single(db, FakeShopify())
+    sku = db["products"].find_one({"product_id": lead})["sku"]
+    if row == "no_row":
+        db["catalog_variants"].delete_one({"sku": sku})
+    else:
+        db["catalog_variants"].update_one({"sku": sku}, {"$unset": {"shopify_variant_id": "", "shopify_inventory_item_id": ""}})
+    colours = health.parity_summary(db)["colours_sizes"]
+    assert (colours["total"], colours["online"], colours["missing"], colours["website_pages"]) == (1, 1, 0, 1)
+
+
+def test_an_ecom_variant_id_another_sku_owns_is_not_this_skus_mapping():
+    from api.services.online_catalog import skus_on_shopify
+    db = StrictDB()
+    db.seed("catalog_products", [{"id": "p1", "sku": "A", "ecom": {"shopify_variant_id": "gid://shopify/ProductVariant/9"}}])
+    db.seed("catalog_variants", [{"sku": "B", "shopify_variant_id": "gid://shopify/ProductVariant/9"}])
+    assert skus_on_shopify(db, ["A", "B"]) == {"B"}
+
+
+def test_the_online_rule_raises_on_a_dead_read_and_parity_says_unknown():
+    from api.services.online_catalog import skus_on_shopify
+    db = catalog()
+
+    def dead(*_a, **_k):
+        raise RuntimeError("blip")
+    db["catalog_variants"].find = dead
+    with pytest.raises(RuntimeError):
+        skus_on_shopify(db, ["A"])
+    assert health.parity_summary(db)["colours_sizes"]["checked"] is False
+
+
+def test_a_dirty_product_with_no_photo_is_never_called_queued(monkeypatch):
+    """SHOULD-FIX 2 (probe 1): the push refuses no_photo, so the reason says so."""
+    from test_shopify_model_listings import _world, _item
+    from api.services import catalog_dictionary
+    monkeypatch.setattr(catalog_dictionary, "brand_website_refusal", lambda db, brand: None)
+    db = _world()
+    _item(db, 1, "Gold", "001", photos=0)
+    (row,) = _missing(db).values()
+    assert row["code"] == "no_photo" and row["reason"].startswith("no photo"), row
+
+
+def test_a_brand_off_the_website_is_never_called_queued():
+    """SHOULD-FIX 2 (probe 2): no Brand Master row -> the gate refuses."""
+    from test_shopify_model_listings import _world, _item
+    db = _world()
+    _item(db, 1, "Gold", "001")
+    (row,) = _missing(db).values()
+    assert row["code"] == "NOT_FOR_WEBSITE" and row["reason"].startswith("not for the website"), row
+
+
+@pytest.mark.usefixtures("brand_is_for_the_website")
+def test_an_unpriced_first_publish_is_never_called_queued():
+    from test_shopify_model_listings import _world, _item
+    db = _world()
+    _item(db, 1, "Gold", "001", mrp=0.0)
+    (row,) = _missing(db).values()
+    assert row["code"] == "UNPRICED_SIZE", row
+
+
+@pytest.mark.usefixtures("brand_is_for_the_website")
+def test_a_product_in_a_blocked_collection_is_never_called_queued(monkeypatch):
+    from test_shopify_model_listings import _world, _item
+    from api.services import online_block
+    db = _world()
+    _item(db, 1, "Gold", "001")
+    monkeypatch.setattr(online_block, "is_blocked_from_online_strict", lambda product, db: True)
+    (row,) = _missing(db).values()
+    assert row["code"] == "online_sync_blocked", row
+
+
+@pytest.mark.usefixtures("brand_is_for_the_website")
+def test_a_held_colour_on_a_live_listing_says_held():
+    """SHOULD-FIX 5 (M10): a new unpriced colour of a live listing is held."""
+    from test_shopify_model_listings import _world, _live_single, _item, FakeShopify
+    from api.services import product_master as pm
+    db = _world()
+    lead, _p, _var = _live_single(db, FakeShopify())
+    black = _item(db, 2, "Black", "002/58", mrp=0.0)
+    pm.link_to_family(db, black, lead, actor="u-admin")
+    sku = db["products"].find_one({"product_id": black})["sku"]
+    row = _missing(db)[sku]
+    assert row["code"] == "UNPRICED_SIZE" and row["reason"].startswith("colour/size held - UNPRICED_SIZE"), row
+
+
+@pytest.mark.usefixtures("brand_is_for_the_website")
+def test_a_switched_off_colour_of_a_live_listing_says_not_ready():
+    """SHOULD-FIX 5 (M9)."""
+    from test_shopify_model_listings import _world, _live_single, _item, FakeShopify
+    from api.services import product_master as pm
+    db = _world()
+    lead, _p, _var = _live_single(db, FakeShopify())
+    black = _item(db, 2, "Black", "002/58")
+    db["products"].update_one({"product_id": black}, {"$set": {"is_active": False}})
+    pm.link_to_family(db, black, lead, actor="u-admin")
+    sku = db["products"].find_one({"product_id": black})["sku"]
+    assert _missing(db)[sku]["reason"].startswith("not ready - "), _missing(db)[sku]
+
+
+def test_colours_of_a_taken_down_lead_say_taken_down():
+    """SHOULD-FIX 5 (M8), with the lead found only through ecom.variant_of.twin_id (M12)."""
+    db = StrictDB()
+    db.seed("catalog_products", [
+        {"id": "lead", "sku": "L", "ecom": {"taken_down_at": "2026-10-01"}},
+        {"id": "kid", "sku": "K", "ecom": {"variant_of": {"twin_id": "lead"}}}])
+    rows = _missing(db)
+    assert {sku: r["reason"] for sku, r in rows.items()} == {
+        "L": "taken down - not queued for automatic publish",
+        "K": "taken down - not queued for automatic publish"}
+
+
+def test_a_tag_ims_sent_and_staff_deleted_is_not_drift_the_writer_cannot_clear(monkeypatch):
+    """SHOULD-FIX 3: tags.plan_product_tags decides; the writer never re-adds a
+    ledger tag, so the diagnostic must not alarm on it either."""
+    node = remote()
+    node["tags"] = ["human tag"]
+    assert detect(monkeypatch, timestamp_probe_catalog(), node)["drifted"] == []
+
+
+def test_a_wanted_tag_ims_never_sent_is_drift(monkeypatch):
+    db = catalog()
+    db["catalog_products"].update_one({"id": "p1"}, {"$set": {"ecom.seo.tags": ["owned", "new"]}})
+    assert detect(monkeypatch, db, remote())["drifted"][0]["fields"] == ["tags"]
+
+
+def _many(n):
+    db = StrictDB()
+    db.seed("catalog_products", [{"id": f"p{i}", "sku": f"S{i}", "title": "Frame", "mrp": 100, "offer_price": 80,
+        "ecom": {"shopify_product_id": f"gid://shopify/Product/{i}", "last_pushed_at": f"2026-10-{1 + i % 28:02d}T00:00:00Z"}}
+        for i in range(n)])
+    return db
+
+
+def test_fifty_listings_are_read_in_five_calls_newest_push_first(monkeypatch):
+    """SHOULD-FIX 4 + nit 1: ten listings a read (variants first:25), the sample is
+    the most recently pushed, and the denominator is reported."""
+    calls = []
+    monkeypatch.setattr(shopify_push, "_has_shopify_creds", lambda *_: True)
+
+    async def read(_db, query, variables):
+        assert "variants(first: 25" in query
+        calls.append(list(variables["ids"]))
+        return {"data": {"nodes": []}}
+    monkeypatch.setattr(shopify_push, "_graphql", read)
+    result = asyncio.run(health.detect_drift(_many(60), limit=50))
+    assert len(calls) == 5 and all(len(c) == 10 for c in calls)
+    assert result["counts"]["candidates"] == 60 and result["counts"]["unknown"] == 50
+    newest = {"gid://shopify/Product/%d" % i for i in (27, 55)}  # pushed 2026-10-28
+    assert newest <= set(calls[0])
+
+
+def test_a_stray_colour_listing_is_named_never_a_generic_read_failure(monkeypatch):
+    """nit 2 + M19: a colour twin carrying its own page id is unknown, with why."""
+    db = catalog()
+    db["catalog_products"].insert_one({"id": "p2", "sku": "B", "ecom": {
+        "shopify_product_id": "gid://shopify/Product/2", "variant_of": {"twin_id": "p1"}}})
+    node = remote()
+    node["id"] = "gid://shopify/Product/2"
+    result = detect(monkeypatch, db, body={"data": {"nodes": [remote(), node]}})
+    (row,) = result["unknown"]
+    assert row["sku"] == "B" and "belongs to another lead" in row["reason"], row
+
+
+def test_two_twins_on_one_page_are_flagged_not_collapsed(monkeypatch):
+    db = catalog()
+    db["catalog_products"].insert_one({"id": "p9", "sku": "Z", "ecom": {"shopify_product_id": "1"}})
+    result = detect(monkeypatch, db, remote())
+    (flag,) = [u for u in result["unknown"] if "same Shopify page as" in u["reason"]]
+    other = flag["reason"].split("same Shopify page as ")[1].split(" ")[0]
+    assert {flag["sku"], other} == {"A", "Z"}, result
+
+
+def test_drift_never_raises_on_a_broken_gate(monkeypatch):
+    """nit 3: the documented never-raises contract."""
+    def boom(*_):
+        raise RuntimeError("creds store offline")
+    monkeypatch.setattr(shopify_push, "_has_shopify_creds", boom)
+    result = asyncio.run(health.detect_drift(catalog()))
+    assert result["checked"] is False and "creds store offline" in result["reason"]

@@ -145,4 +145,28 @@ describe('sync diagnostics use matching units and real fields', () => {
     expect(screen.queryByText('469 / 633')).toBeNull();
     expect(screen.queryByText('Could not compare')).toBeNull();
   });
+
+  // Review of #1275: the slow Shopify drift read must not hold the other tiles.
+  it('shows parity while the drift read is still running', async () => {
+    vi.mocked(syncHealthApi.getDrift).mockReturnValue(new Promise(() => {}));
+    vi.mocked(syncHealthApi.getParity).mockResolvedValue({ parity: {
+      colours_sizes: { checked: true, total: 5, online: 5, website_pages: 3, missing: 0, missing_items: [] },
+    } });
+    render(<OnlineShopifySyncPage />);
+    expect(await screen.findByText(/5 of 5 colours.sizes online/)).toBeTruthy();
+  });
+
+  it('keeps the raw counts, the denominator and why a page was not compared', async () => {
+    vi.mocked(syncHealthApi.getParity).mockResolvedValue({ parity: {
+      entities: { ecom_collections: { total: 12, pushed: 9, missing: 3 } },
+      colours_sizes: { checked: true, total: 5, online: 5, website_pages: 3, missing: 0, missing_items: [] },
+    } });
+    vi.mocked(syncHealthApi.getDrift).mockResolvedValue({ checked: true,
+      counts: { scanned: 49, candidates: 469, drifted: 0, unknown: 1 }, drifted: [],
+      unknown: [{ sku: 'RB-BLK', reason: 'separate listing for a colour/size of RB-GLD' }] });
+    render(<OnlineShopifySyncPage />);
+    expect(await screen.findByText('49 of 469 pages')).toBeTruthy();
+    expect(screen.getByText('9 / 12')).toBeTruthy();
+    expect(screen.getByText(/separate listing for a colour\/size of RB-GLD/)).toBeTruthy();
+  });
 });

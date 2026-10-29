@@ -2059,7 +2059,7 @@ export interface SyncDrift {
   reason?: string | null;
   drifted?: Array<{ gid?: string; sku?: string; fields?: string[] }> | null;
   unknown?: Array<{ gid?: string; sku?: string; reason?: string }> | null;
-  counts?: { scanned?: number; drifted?: number; no_timestamp?: number; unknown?: number } | null;
+  counts?: { scanned?: number; candidates?: number; drifted?: number; no_timestamp?: number; unknown?: number } | null;
   unavailable?: boolean;
 }
 
@@ -2086,8 +2086,9 @@ export const syncHealthApi = {
     }
   },
 
-  /** Run the LIVE dual-writer drift check (a real Shopify READ — no writes; needs
-   *  creds, else it degrades to {checked:false}). Fail-soft -> {unavailable:true}. */
+  /** Run the owned-content drift check over the newest pushed listings (a real
+   *  Shopify READ — no writes; needs creds, else {checked:false}). Fail-soft ->
+   *  {unavailable:true}. */
   getDrift: async (limit = 50): Promise<SyncDrift> => {
     try {
       const res = await api.get(`${ADMIN_ONLINE_BASE}/drift`, { params: { limit } });

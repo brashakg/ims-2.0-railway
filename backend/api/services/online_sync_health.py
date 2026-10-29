@@ -918,43 +918,66 @@ def online_stock_miss_summary(db) -> Dict[str, Any]:
 
 _DRIFT_FIELDS = """
   id updatedAt title status tags
-  variants(first: 100, after: $after) {
+  variants(first: 25, after: $after) {
     pageInfo { hasNextPage endCursor }
     nodes { id sku price compareAtPrice selectedOptions { name value } }
   }
 """
 _DRIFT_QUERY = "query imsDriftCheck($ids: [ID!]!, $after: String) { nodes(ids: $ids) { ... on Product { " + _DRIFT_FIELDS + " } } }"
 _DRIFT_SCAN_LIMIT = 50
+# Ten listings a read at variants(first: 25) keeps the requested query cost
+# near 550 points, under Shopify's 1000 cap; a listing with more variants
+# pages on. 50 listings = 5 sequential reads.
+_DRIFT_BATCH = 10
 
 
 async def detect_drift(db, limit: int = _DRIFT_SCAN_LIMIT) -> Dict[str, Any]:
     """Compare IMS-owned product content. Timestamps are context, never evidence.
 
-    Product scope only. Up to three listings per read keeps the requested query
-    cost bounded; every variant page is read. Any incomplete local/remote read
-    is reported as unknown, never a clean result or fabricated drift.
+    Product scope only (collections are not compared). The sample is the
+    ``limit`` most recently pushed listings; ``counts.candidates`` is how many
+    pushed listings exist. Every variant page is read. Any incomplete
+    local/remote read is reported as unknown with its reason, never a clean
+    result or fabricated drift. Never raises.
     """
+    empty = {"checked": False, "reason": None, "drifted": [], "unknown": [], "scope": "products",
+             "counts": {"scanned": 0, "candidates": 0, "drifted": 0, "no_timestamp": 0, "unknown": 0}}
+    try:
+        return await _detect_drift(db, limit, empty)
+    except Exception as exc:  # noqa: BLE001 -- the documented never-raises contract
+        logger.warning("[DRIFT] check failed: %s", exc)
+        return {**empty, "reason": "Drift check failed: %s" % exc}
+
+
+async def _detect_drift(db, limit: int, empty: Dict[str, Any]) -> Dict[str, Any]:
     from agents.nexus_providers import _as_shopify_gid
     from .shopify_push import _has_shopify_creds, _graphql
     from .online_content_diagnostics import expected_content, content_differences
 
-    empty = {"checked": False, "reason": None, "drifted": [], "unknown": [],
-             "scope": "products", "counts": {"scanned": 0, "drifted": 0, "no_timestamp": 0, "unknown": 0}}
     if not _has_shopify_creds(db):
         return {**empty, "reason": "shopify creds not configured -- drift check skipped"}
+    query = {"ecom.shopify_product_id": {"$exists": True, "$nin": [None, ""]}}
     try:
-        candidates = list(_coll(db, "catalog_products").find(
-            {"ecom.shopify_product_id": {"$exists": True, "$nin": [None, ""]}}, {"_id": 0}
-        ).limit(max(1, min(int(limit), 250))))
-    except Exception:  # noqa: BLE001
-        return {**empty, "reason": "Product content could not be read"}
+        prods = _coll(db, "catalog_products")
+        total = int(prods.count_documents(query))
+        candidates = list(prods.find(query, {"_id": 0}).sort("ecom.last_pushed_at", -1)
+                          .limit(max(1, min(int(limit), 250))))
+    except Exception as exc:  # noqa: BLE001
+        return {**empty, "reason": "Product content could not be read: %s" % exc}
     if not candidates:
         return {**empty, "checked": True, "reason": "no pushed gids found"}
-    by_gid = {_as_shopify_gid(p["ecom"]["shopify_product_id"], "Product"): p for p in candidates}
+    by_gid: Dict[str, Dict[str, Any]] = {}
+    unknown: List[Dict[str, Any]] = []
+    for p in candidates:
+        gid = _as_shopify_gid(p["ecom"]["shopify_product_id"], "Product")
+        first = by_gid.setdefault(gid, p)
+        if first is not p:  # never collapse two twins claiming one page
+            unknown.append({"gid": gid, "sku": p.get("sku", ""),
+                            "reason": "same Shopify page as %s -- two IMS rows claim one listing" % first.get("sku", "")})
     nodes = {}
     gids = list(by_gid)
-    for offset in range(0, len(gids), 3):
-        batch = gids[offset:offset + 3]
+    for offset in range(0, len(gids), _DRIFT_BATCH):
+        batch = gids[offset:offset + _DRIFT_BATCH]
         try:
             body = await _graphql(db, _DRIFT_QUERY, {"ids": batch, "after": None})
             if body.get("errors") or not isinstance((body.get("data") or {}).get("nodes"), list):
@@ -964,7 +987,7 @@ async def detect_drift(db, limit: int = _DRIFT_SCAN_LIMIT) -> Dict[str, Any]:
                     nodes[node["id"]] = node
         except Exception:  # noqa: BLE001 -- reported per product below
             continue
-    drifted, unknown = [], []
+    drifted = []
     scanned = 0
     for gid, product in by_gid.items():
         node = nodes.get(gid)
@@ -999,13 +1022,13 @@ async def detect_drift(db, limit: int = _DRIFT_SCAN_LIMIT) -> Dict[str, Any]:
                 drifted.append({"gid": gid, "sku": product.get("sku", ""), "fields": fields,
                                 "shopify_updated_at": node.get("updatedAt"),
                                 "our_last_pushed_at": str(product["ecom"].get("last_pushed_at") or "")})
-        except Exception:  # noqa: BLE001 -- cannot establish content, no alarm
+        except Exception as exc:  # noqa: BLE001 -- cannot establish content, no alarm
             unknown.append({"gid": gid, "sku": product.get("sku", ""),
-                            "reason": "Owned product content could not be fully compared"})
+                            "reason": "Owned product content could not be fully compared: %s" % exc})
     return {"checked": True, "reason": "Some product content could not be compared" if unknown else None,
             "scope": "products", "drifted": drifted, "unknown": unknown,
-            "counts": {"scanned": scanned, "drifted": len(drifted), "unknown": len(unknown),
-                       "no_timestamp": sum(not p["ecom"].get("last_pushed_at") for p in by_gid.values())}}
+            "counts": {"scanned": scanned, "candidates": total, "drifted": len(drifted), "unknown": len(unknown),
+                       "no_timestamp": sum(not p["ecom"].get("last_pushed_at") for p in candidates)}}
 
 
 def _drift_sync_shim(db, limit: int = _DRIFT_SCAN_LIMIT) -> Dict[str, Any]:

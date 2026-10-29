@@ -7,9 +7,13 @@ second family, price or tag rule. No writer or live push is called here.
 from collections import Counter
 from decimal import Decimal
 
-from .online_catalog import variant_rows_for_product
-from .shopify_push.listing import model_listing, listing_view
-from .shopify_push.product_input import build_product_input, ims_product_tags
+from . import online_block
+from .online_catalog import is_archived_row, product_online_state, skus_on_shopify, variant_rows_for_product
+from .shopify_push._shared import is_variant_of, product_push_refusal
+from .shopify_push.listing import UNPRICED_SIZE, model_listing, listing_view
+from .shopify_push.media import product_photo_urls
+from .shopify_push.product_input import build_product_input, ims_product_tags, unpriced_size_names
+from .shopify_push.tags import plan_product_tags
 from .shopify_push.variants import build_variant_seed_rows
 
 
@@ -20,7 +24,8 @@ def listing_plan(db, product):
 
 
 def colour_size_parity(db):
-    """A catalog SKU is online iff its variant mapping exists (not its page id).
+    """A catalog SKU is online iff a Shopify variant is mapped to it --
+    online_catalog.skus_on_shopify, the one rule Store Health reads too.
 
     Counts include archived catalog rows, as the legacy denominator does.
     'Online' means mapped, not storefront visibility or sellable stock.
@@ -31,17 +36,16 @@ def colour_size_parity(db):
         return unknown
     try:
         products = list(db["catalog_products"].find({}, {"_id": 0}))
-        variants = list(db["catalog_variants"].find({}, {"_id": 0, "sku": 1, "shopify_variant_id": 1}))
         spines = list(db["products"].find({}, {"_id": 0, "sku": 1, "product_id": 1, "variant_of": 1,
                                                    "deleted_at": 1, "is_archived": 1, "is_active": 1, "status": 1}))
+        online = skus_on_shopify(db, [p.get("sku") for p in products])
     except Exception:  # fail soft, never present an unreadable join as zero online
         return unknown
-    online = {str(v.get("sku") or "").strip() for v in variants if v.get("shopify_variant_id")}
     twins_by_id = {str(p.get("id") or p.get("product_id")): p for p in products}
     twins_by_sku = {str(p.get("sku") or "").strip(): p for p in products}
     spine_by_sku = {str(p.get("sku") or "").strip(): p for p in spines}
     spine_by_id = {str(p.get("product_id")): p for p in spines}
-    plans = {}
+    verdicts = {}
     missing = []
     for product in products:
         sku = str(product.get("sku") or "").strip()
@@ -56,11 +60,9 @@ def colour_size_parity(db):
         if lead is None:
             lead = (twins_by_id.get(str(parent_id)) or twins_by_sku.get(str(parent_spine.get("sku") or ""))) if parent_id else product
         code, reason = None, "not queued"
-        archived = any(p.get("deleted_at") or p.get("is_archived") or str(p.get("status") or "").upper() == "ARCHIVED"
-                       for p in (product, spine, ecom))
         if not sku:
             reason = "SKU missing - cannot match a website colour/size"
-        elif archived:
+        elif is_archived_row(product, spine, ecom):
             reason = "archived"
         elif lead is None:
             reason = "family lead could not be found"
@@ -69,13 +71,10 @@ def colour_size_parity(db):
         else:
             key = str(lead.get("id") or lead.get("sku"))
             try:
-                if key not in plans:
-                    plans[key] = listing_plan(db, lead)[1]
-                plan = plans[key]
-                if plan and plan.get("refusal"):
-                    code = plan["refusal"][0]
-                    reason = "family push refused - " + code
-                else:
+                if key not in verdicts:
+                    verdicts[key] = _press_verdict(db, lead)
+                code, reason, plan = verdicts[key]
+                if code is None:
                     held = next((h for h in (plan or {}).get("held", []) if h.get("sku") == sku), None)
                     waiting = next((h for h in (plan or {}).get("waiting", []) if h.get("sku") == sku), None)
                     if held:
@@ -83,10 +82,8 @@ def colour_size_parity(db):
                         reason = "colour/size held - " + (code or "") + ": " + held.get("reason", "")
                     elif waiting:
                         reason = "not ready - " + waiting.get("reason", "")
-                    elif (lead.get("ecom") or {}).get("locally_modified"):
-                        reason = "queued - awaiting publish; no current family refusal found"
             except Exception:
-                reason = "family readiness could not be read"
+                code, reason = None, "family readiness could not be read"
         missing.append({"sku": sku, "product_id": product.get("id") or product.get("product_id"),
                         "reason": reason, "code": code})
     pages = {str((p.get("ecom") or {}).get("shopify_product_id")) for p in products
@@ -95,12 +92,49 @@ def colour_size_parity(db):
             "website_pages": len(pages), "missing": len(missing), "missing_items": missing}
 
 
+def _press_verdict(db, lead):
+    """(code, reason, plan) for a press of this listing, asked of the writer's
+    OWN gates in push_product's order -- never a re-derived queue rule. A
+    refusal code means nothing on the listing ships; code None means the
+    press goes through and the reason says whether it is queued
+    (online_catalog.product_online_state: the sweep's own queue test).
+    Raises on a read failure."""
+    refusal = product_push_refusal(db, lead)
+    if refusal:
+        return "NOT_FOR_WEBSITE", "not for the website - " + refusal, None
+    blocked = online_block.is_blocked_from_online_strict(lead, db)
+    if blocked is None:
+        return "block_status_unverifiable", "block status could not be read - the push skips it", None
+    if blocked:
+        return "online_sync_blocked", "blocked from online - in an online_sync_blocked collection", None
+    rows, plan = listing_plan(db, lead)
+    if plan and plan.get("refusal"):
+        return plan["refusal"][0], "family push refused - " + plan["refusal"][0], plan
+    view = listing_view(lead, plan) if plan else lead
+    if not product_photo_urls(view):
+        return "no_photo", "no photo - the push refuses a product with no photograph", plan
+    live = (lead.get("ecom") or {}).get("shopify_product_id")
+    unpriced = [] if live else unpriced_size_names(view, plan["rows"] if plan else rows)
+    if unpriced:
+        return UNPRICED_SIZE, "no selling price on " + ", ".join(unpriced) + " - the first publish is refused", plan
+    if product_online_state(lead, None)["queued"]:
+        return None, "queued - awaiting publish; no current refusal found", plan
+    return None, "not queued", plan
+
+
 def expected_content(db, product):
-    """Expected content uses exactly the push's family view and price builder."""
+    """Expected content uses exactly the push's family view and price builder.
+    Raises (-> unknown, with this reason) where the writer would refuse."""
+    if is_variant_of(product):  # push_product's own variant_of refusal
+        link = (product.get("ecom") or {}).get("variant_of")
+        lead = (link.get("sku") or link.get("twin_id")) if isinstance(link, dict) else link
+        raise ValueError("separate listing for a colour/size of %s -- it belongs to another lead" % lead)
     rows, plan = listing_plan(db, product)
     if plan:
-        if plan.get("variant_of") or plan.get("refusal"):
-            raise ValueError("family plan is refused or belongs to another lead")
+        if plan.get("variant_of"):
+            raise ValueError("this listing belongs to another lead (%s)" % plan["variant_of"])
+        if plan.get("refusal"):
+            raise ValueError("family push refused - " + plan["refusal"][0])
         product = listing_view(product, plan)
         rows = plan["rows"]
     payload = build_product_input(product, rows)
@@ -131,10 +165,10 @@ def content_differences(expected, node):
     for key in ("title", "status"):
         if expected[key] != node[key]:
             fields.append(key)
-    wanted = {str(t).strip().lower() for t in expected["tags"]}
-    owned = {str(t).strip().lower() for t in ((expected["product"].get("ecom") or {}).get("shopify_tags_sent") or [])}
-    actual = {str(t).strip().lower() for t in node["tags"]}
-    if wanted - actual or (owned - wanted) & actual:
+    # THE tag-ownership rule is the writer's: drift only when its next press
+    # would add or remove a tag (a ledger tag staff deleted is never re-added).
+    tags = plan_product_tags(expected["product"], expected["tags"], node["tags"])
+    if tags["add"] or tags["remove"]:
         fields.append("tags")
     connection = node["variants"]
     if (not isinstance(connection.get("nodes"), list)

@@ -271,7 +271,8 @@ export default function OnlineShopifySyncPage() {
   const [health, setHealth] = useState<SyncHealth | null>(null);
   const [parity, setParity] = useState<SyncParity | null>(null);
   const [drift, setDrift] = useState<SyncDrift | null>(null);
-  const [diagLoading, setDiagLoading] = useState(true);
+  // One flag per tile: the slow Shopify drift read never holds up the others.
+  const [diagLoading, setDiagLoading] = useState({ health: true, parity: true, drift: true });
 
   // Per-entity dry-run state: which entity is running + its last sweep result.
   const [running, setRunning] = useState<EntityKey | null>(null);
@@ -339,20 +340,13 @@ export default function OnlineShopifySyncPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [historyFilter]);
 
-  const loadDiagnostics = useCallback(async () => {
-    setDiagLoading(true);
-    try {
-      const [h, p, d] = await Promise.all([
-        syncHealthApi.getSyncHealth(),
-        syncHealthApi.getParity(),
-        syncHealthApi.getDrift(),
-      ]);
-      setHealth(h);
-      setParity(p);
-      setDrift(d);
-    } finally {
-      setDiagLoading(false);
-    }
+  const loadDiagnostics = useCallback(() => {
+    setDiagLoading({ health: true, parity: true, drift: true });
+    const done = (tile: 'health' | 'parity' | 'drift') => () => setDiagLoading((s) => ({ ...s, [tile]: false }));
+    // Each tile sets its own state as its read lands (the api calls are fail-soft).
+    void syncHealthApi.getSyncHealth().then(setHealth).finally(done('health'));
+    void syncHealthApi.getParity().then(setParity).finally(done('parity'));
+    void syncHealthApi.getDrift().then(setDrift).finally(done('drift'));
   }, []);
 
   useEffect(() => {
@@ -371,6 +365,7 @@ export default function OnlineShopifySyncPage() {
   };
 
   const isLive = !!status?.mode?.is_live;
+  const rawCounts = Object.entries(parity?.parity?.entities ?? {}).filter(([name]) => name !== 'catalog_products');
 
   // Run a DRY-RUN (or, if the gates are armed, the real) push for one entity via
   // the shared engine. It is SIMULATED whenever the backend reports DARK, so this
@@ -649,10 +644,10 @@ export default function OnlineShopifySyncPage() {
         <button
           type="button"
           onClick={refreshAll}
-          disabled={loading || diagLoading}
+          disabled={loading || diagLoading.health || diagLoading.parity}
           className="inline-flex items-center gap-1.5 text-sm text-gray-600 hover:bg-gray-100 rounded-lg px-3 py-1.5 disabled:opacity-60"
         >
-          <RefreshCw className={'w-4 h-4 ' + (loading || diagLoading ? 'animate-spin' : '')} /> Refresh
+          <RefreshCw className={'w-4 h-4 ' + (loading || diagLoading.health || diagLoading.parity ? 'animate-spin' : '')} /> Refresh
         </button>
       </div>
       <p className="text-sm text-gray-500 mb-4 max-w-3xl">
@@ -1350,7 +1345,7 @@ export default function OnlineShopifySyncPage() {
         </h2>
         <div className="grid gap-4 sm:grid-cols-3">
           {/* Sync health */}
-          <DiagTile title="Sync health" loading={diagLoading} unavailable={health?.unavailable}>
+          <DiagTile title="Sync health" loading={diagLoading.health} unavailable={health?.unavailable}>
             <DiagRow
               label="Last sync (orders/stock)"
               value={health?.last_successful_shopify_sync_at ? new Date(health.last_successful_shopify_sync_at).toLocaleString('en-IN') : '—'}
@@ -1381,7 +1376,7 @@ export default function OnlineShopifySyncPage() {
           </DiagTile>
 
           {/* Parity */}
-          <DiagTile title="Parity (IMS vs Shopify)" loading={diagLoading} unavailable={parity?.unavailable}>
+          <DiagTile title="Parity (IMS vs Shopify)" loading={diagLoading.parity} unavailable={parity?.unavailable}>
             {parity?.parity?.colours_sizes?.checked ? (
               <>
                 <p className="text-sm font-semibold text-gray-900">
@@ -1405,6 +1400,15 @@ export default function OnlineShopifySyncPage() {
             ) : (
               <p className="text-[11px] text-gray-500">{parity?.parity?.colours_sizes?.reason || 'Colour/size parity unavailable.'}</p>
             )}
+            {/* Variant rows, collections and images; product pages are the headline's "website pages". */}
+            {rawCounts.length > 0 && (
+              <details className="mt-2 text-[11px]">
+                <summary className="cursor-pointer text-gray-500">Raw counts (pushed / total)</summary>
+                {rawCounts.map(([name, c]) => (
+                  <DiagRow key={name} label={name.replace(/_/g, ' ')} value={`${fmt(c?.pushed)} / ${fmt(c?.total)}`} />
+                ))}
+              </details>
+            )}
             {parity?.uploads_audit?.checked && (
               <DiagRow
                 label="Local /uploads/ images"
@@ -1415,13 +1419,28 @@ export default function OnlineShopifySyncPage() {
           </DiagTile>
 
           {/* Drift */}
-          <DiagTile title="Content drift" loading={diagLoading} unavailable={drift?.unavailable}>
+          <DiagTile title="Content drift" loading={diagLoading.drift} unavailable={drift?.unavailable}>
             {drift?.checked ? (
               <>
-                <DiagRow label="Compared (sample)" value={fmt(drift.counts?.scanned)} />
+                <DiagRow
+                  label="Compared (newest pushed)"
+                  value={`${fmt(drift.counts?.scanned)} of ${fmt(drift.counts?.candidates ?? drift.counts?.scanned)} pages`}
+                />
                 <DiagRow label="Products with differences" value={fmt(drift.counts?.drifted)} warn={!!drift.counts?.drifted} />
-                <p className="mt-1 text-[11px] text-gray-500">IMS-owned product fields only. Pending IMS edits can also differ; timestamps alone do not trigger an alarm.</p>
+                <p className="mt-1 text-[11px] text-gray-500">IMS-owned product fields only; collections are not compared. Pending IMS edits can also differ; timestamps alone do not trigger an alarm.</p>
                 {!!drift.counts?.unknown && <DiagRow label="Could not compare" value={fmt(drift.counts.unknown)} warn />}
+                {Array.isArray(drift.unknown) && drift.unknown.length > 0 && (
+                  <details className="mt-1 text-[11px]">
+                    <summary className="cursor-pointer text-amber-700">Why not compared</summary>
+                    <ul className="mt-1 max-h-60 overflow-y-auto space-y-0.5">
+                      {drift.unknown.map((u, i) => (
+                        <li key={(u.gid ?? '') + i} className="text-gray-700 break-words">
+                          <span className="font-medium">{u.sku || u.gid}</span>: {u.reason || 'Reason unavailable'}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
                 {Array.isArray(drift.drifted) && drift.drifted.length > 0 && (
                   <ul className="mt-1 space-y-0.5">
                     {drift.drifted.map((d, i) => (
