@@ -604,15 +604,16 @@ def test_the_identity_migration_calls_an_archived_twin_expected_not_a_collision(
 # ---------------------------------------------------------------------------
 
 
-def _bulk(door, monkeypatch, ids, apply):
+def _bulk(door, monkeypatch, ids, apply, twins=None):
     import asyncio
 
     from api.routers import catalog as cat
 
+    twins = twins or {}
     monkeypatch.setattr(deps, "get_product_repository", lambda: door.repo)
     monkeypatch.setattr(cat, "_live_skus", lambda skus: set())
     monkeypatch.setattr(cat, "_twins_or_503", lambda repo, spines: [None for _ in spines])
-    monkeypatch.setattr(cat, "_get_catalog_product", lambda pid: None)
+    monkeypatch.setattr(cat, "_get_catalog_product", lambda pid: dict(twins[pid]) if pid in twins else None)
     body = cat.BulkProductIds(product_ids=ids, apply=apply)
     return asyncio.run(cat.bulk_restore_products(body, _ADMIN))["results"]
 
@@ -735,8 +736,9 @@ def test_restore_barcode_check_reads_twins_live_only_and_never_its_own(door):
     from api.routers import catalog as cat
 
     arch = _arch(door, "P-OWN", "SGOWN", "5003", barcode=_CODE)
-    # Its own twin (keyed on its id) holds the code: no clash.
-    _with_twins(door, [{"id": "P-OWN", "sku": "SGOWN", "attributes": {"gtin": _CODE}, "deleted_at": "x"}])
+    # Its own twin (keyed on its id) holds the code -- LIVE, so only the
+    # own-twin rule can let it pass: no clash.
+    _with_twins(door, [{"id": "P-OWN", "sku": "SGOWN", "attributes": {"gtin": _CODE}}])
     assert cat._restore_refusal(door.repo, arch) is None
     # Another product's ARCHIVED twin: no clash; a LIVE one: refused.
     _with_twins(door, [{"id": "T-OLD", "sku": "SGOLD", "attributes": {"gtin": _CODE}, "deleted_at": "x"}])
@@ -795,3 +797,28 @@ def test_restore_checks_the_barcode_of_keyless_rows_and_spineless_twins(door):
     assert live["sku"] in cat._restore_refusal(door.repo, door.repo.find_by_id("P-KL"))
     twin = {"id": "T-ONLY", "sku": "BVI-9", "deleted_at": "x", "attributes": {"gtin": _CODE}}
     assert live["sku"] in cat._restore_refusal(door.repo, None, twin)
+
+
+
+def test_bulk_restore_refuses_a_spineless_twin_whose_gtin_a_live_product_has(door, monkeypatch):
+    """The endpoint hands the twin to the rule: an archived import with no
+    billing row, carrying a code a live product holds, stays archived."""
+    live = door("3001/S")
+    door.repo.collection.update_one({"product_id": live["product_id"]}, {"$set": {"barcode": _CODE}})
+    twin = {"id": "T-SPINELESS", "sku": "BVI-7", "deleted_at": "x", "attributes": {"gtin": _CODE}}
+    for apply in (False, True):
+        [row] = _bulk(door, monkeypatch, ["T-SPINELESS"], apply, twins={"T-SPINELESS": twin})
+        assert row["status"] == "refused" and live["sku"] in row["reason"], (apply, row)
+
+
+def test_restore_checks_the_codes_of_the_spine_and_its_twin_alike(door):
+    """The union of every code the row and its twin carry; a stored value that
+    is not text (a list) is skipped, never a 500."""
+    from api.routers import catalog as cat
+
+    live = door("3001/S")
+    door.repo.collection.update_one({"product_id": live["product_id"]}, {"$set": {"barcode": _CODE}})
+    spine = _arch(door, "P-UN", "SGUN", "5006", barcode=["not", "a", "code"])
+    twin = {"id": "P-UN", "sku": "SGUN", "deleted_at": "x", "gtin": _CODE}
+    assert live["sku"] in cat._restore_refusal(door.repo, spine, twin)
+    assert cat._restore_refusal(door.repo, spine, None) is None

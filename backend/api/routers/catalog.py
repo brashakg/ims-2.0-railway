@@ -3813,23 +3813,28 @@ def _restore_identity_refusal(repo, spine: Dict) -> Optional[str]:
 
 def _restore_barcode_refusal(repo, spine: Optional[Dict], twin: Optional[Dict]) -> Optional[str]:
     """Add product's own barcode rule (assert_gtin_free) over EVERY barcode
-    the row carries (products.barcode and attributes.gtin; a spineless twin's
-    gtin / barcode), each distinct value. Only a LIVE product or twin holds a
-    code (live_only), so two archived copies sharing an EAN never block each
-    other: once one is back, the other is refused here. A read failure is a
-    plain refusal, never a guess."""
-    doc = spine or twin or {}
-    attrs = doc.get("attributes") if isinstance(doc.get("attributes"), dict) else {}
-    codes = [c for c in dict.fromkeys((doc.get("barcode"), attrs.get("gtin"), doc.get("gtin"))) if c]
+    the row and its catalogue twin carry (barcode, gtin, attributes.gtin on
+    either), each distinct value; a stored value that is not text or a number
+    is no code. Only a LIVE product or twin holds a code (live_only), so two
+    archived copies sharing an EAN never block each other: once one is back,
+    the other is refused here. A read failure is a plain refusal, never a
+    guess."""
     own = (spine or {}).get("product_id") or (twin or {}).get("id")
-    for code in codes:
-        try:
+    try:
+        codes: List[str] = []
+        for doc in (spine or {}, twin or {}):
+            attrs = doc.get("attributes") if isinstance(doc.get("attributes"), dict) else {}
+            for value in (doc.get("barcode"), attrs.get("gtin"), doc.get("gtin")):
+                if isinstance(value, (str, int)) and not isinstance(value, bool) and str(value).strip():
+                    if str(value).strip() not in codes:
+                        codes.append(str(value).strip())
+        for code in codes:
             _pm.assert_gtin_free(code, repo, own, live_only=True)
-        except _pm.ProductMasterError as clash:
-            return f"Not restored: {clash.message}"
-        except Exception:  # noqa: BLE001 - unread is never "free"
-            logger.warning("[CATALOG] restore barcode check could not read", exc_info=True)
-            return "Not restored: could not check the barcode right now, try again."
+    except _pm.ProductMasterError as clash:
+        return f"Not restored: {clash.message}"
+    except Exception:  # noqa: BLE001 - unread is never "free"
+        logger.warning("[CATALOG] restore barcode check could not read", exc_info=True)
+        return "Not restored: could not check the barcode right now, try again."
     return None
 
 

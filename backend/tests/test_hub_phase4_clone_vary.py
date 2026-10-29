@@ -44,7 +44,7 @@ class _FakeRepo:
             return None
         return next((dict(r) for r in self.rows if r.get("identity_key") == key), None)
 
-    def find_by_barcode(self, bc, exclude_product_id=None):
+    def find_by_barcode(self, bc, exclude_product_id=None, **_kw):
         return next(
             (
                 dict(r)
