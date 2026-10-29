@@ -904,7 +904,7 @@ async def test_no_handover_of_an_order_whose_advance_was_refunded(till):
     from api.routers.orders import deliver_order, deliver_with_payment
     from api.routers.orders.delivery import DeliverWithPaymentRequest
 
-    _advance_order(till, advance_refund_id="RET-ADV-1", status="READY")
+    _advance_order(till, advance_refund_id="RET-ADV-1", advance_refund_record="RET-ADV-1", status="READY")
     with pytest.raises(HTTPException) as exc:
         await deliver_order("ORD-1", None, _user("STORE_MANAGER"))
     assert exc.value.status_code == 409
@@ -1127,7 +1127,8 @@ def _refunded_ready(till):
     alone still reads PAID, which is how it slipped past the handover gate."""
     till["db"].get_collection("orders").insert_one(_order(
         status="READY", payment_status="PAID", amount_paid=5000.0, balance_due=0.0, grand_total=5000.0,
-        payments=[{"payment_id": "p1", "method": "CASH", "amount": 5000.0}], advance_refund_id="RET-ADV-1"))
+        payments=[{"payment_id": "p1", "method": "CASH", "amount": 5000.0}], advance_refund_id="RET-ADV-1",
+        advance_refund_record="RET-ADV-1"))
 
 
 @pytest.mark.parametrize("status,extra", [("READY", {"advance_refund_id": "RET-ADV-1"}),
@@ -1497,9 +1498,9 @@ def test_crosscheck_books_carry_invoices_cancelled_behind_a_whole_credit_note(ti
 
 def test_a_crash_after_the_balance_moved_never_moves_it_twice(till):
     # Died after the $inc but before the row was marked applied: the guard on
-    # the customer doc (advance_credit_refs) stops a second $inc.
+    # the customer doc (store_credit_refs) stops a second $inc.
     till["db"].get_collection("customers").insert_one(
-        {"customer_id": "CUST-1", "store_credit": 1050.0, "advance_credit_refs": ["RET-Z:credit"]})
+        {"customer_id": "CUST-1", "store_credit": 1050.0, "store_credit_refs": ["RET-Z:credit"]})
     _ledger(till).insert_one({"_id": "RET-Z:credit", "entry_id": "RET-Z:credit", "customer_id": "CUST-1",
                               "type": "ADJUSTED", "amount": 1000.0, "delta": 1000.0, "ref": "RET-Z",
                               "applied": False})

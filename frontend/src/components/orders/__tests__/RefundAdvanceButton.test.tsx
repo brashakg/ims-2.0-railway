@@ -112,10 +112,27 @@ describe('RefundAdvanceButton - round 8 review', () => {
     const btn = await screen.findByRole('button', { name: /Finish refund and cancel/ });
     await waitFor(() => expect((btn as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(btn);
-    expect(screen.getByText('Cash')).toBeTruthy();
+    expect(screen.getByText(/Cash - from this shop's drawer/)).toBeTruthy();
     expect(screen.queryByText(/The cash is paid back from/)).toBeNull(); // chosen on the first press
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'customer cancelled the order' } });
     fireEvent.click(screen.getByRole('button', { name: /Refund ₹1,000.00 and cancel/ }));
     await waitFor(() => expect(post).toHaveBeenCalledWith('ORD-1', 'customer cancelled the order', undefined));
+  });
+});
+
+describe('RefundAdvanceButton - round 9 review', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('names who pays the cash of an unfinished refund', async () => {
+    preview.mockResolvedValue({
+      ok: true, action: 'finish_refund', total: 1000, has_cash: true,
+      refund_tenders: [{ method: 'UPI', amount: 400 }, { method: 'CASH', amount: 600, paid_from: 'HQ' }],
+      reason: 'A refund was started but not finished.',
+    } as any);
+    render(<RefundAdvanceButton orderId="ORD-1" onDone={() => {}} />);
+    const btn = await screen.findByRole('button', { name: /Finish refund and cancel/ });
+    await waitFor(() => expect((btn as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(btn);
+    expect(screen.getByText(/Cash - paid by HQ/)).toBeTruthy();
   });
 });

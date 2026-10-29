@@ -1,5 +1,6 @@
 """GSTR-3B (summary return): credit notes, RCM, computation, endpoints."""
 
+from ...services import store_credit_ledger as scl  # THE credit-note type rule
 from fastapi import Depends, HTTPException, Query
 from typing import Optional
 from ...utils.event_time import parse_event_utc_naive
@@ -115,7 +116,7 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
     # edge case. Attribution follows the ledger row, which IS the credit note.
     seen_returns = set()
     for _row in db.get_collection("credit_note_ledger").find(
-        {"store_id": active_store, "type": "ISSUED"}, {"ref": 1, "reason": 1}
+        {"store_id": active_store, "type": scl.CREDIT_NOTE_TYPE}, {"ref": 1, "reason": 1}
     ):
         for _f in ("ref", "reason"):
             for _tok in str(_row.get(_f) or "").replace(",", " ").split():
@@ -137,7 +138,7 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
         for row in ledger.find(
             {
                 "store_id": active_store,
-                "type": "ISSUED",
+                "type": scl.CREDIT_NOTE_TYPE,
                 # Half-open [from_dt, to_dt): the month's last microsecond
                 # is IN, next month's first is OUT (audit R03). Rows are
                 # ISO strings (naive-UTC legacy or '+00:00') or BSON dates.

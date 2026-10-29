@@ -632,6 +632,19 @@ async def generate_irn(db, order: Dict[str, Any]) -> Dict[str, Any]:
             "einvoice_json": None,
         }
 
+    # An order the refund-advance door holds is being refunded and cancelled
+    # behind a credit note IMS cannot report to the IRP: never e-invoice it.
+    if order.get("advance_refund_id"):
+        return {
+            "status": STATUS_SKIPPED,
+            "irn": None,
+            "ack_no": None,
+            "ack_date": None,
+            "signed_qr": None,
+            "reason": "This order's advance is being refunded -- no e-invoice",
+            "einvoice_json": None,
+        }
+
     # ── Gate check ───────────────────────────────────────────────────────
     if not _env_enabled():
         return {

@@ -800,13 +800,16 @@ async def redeem_referral(
         }
 
     # We hold the claim — credit the referrer exactly once, with a ledger row
-    # (the audit trail every other credit has). A refused credit gives the
-    # claim back so the reward can be pressed again.
-    from .customers import _current_credit_balance
+    # (the audit trail every other credit has). ADJUSTED, never ISSUED: a
+    # reward is money given, not a supply reversed, and the GST returns file
+    # every ISSUED row as a credit note. The row id is fixed per referral, so
+    # a refused or unclear credit gives the claim back and the next press
+    # resumes the SAME row (THE posting door's guard: never credited twice).
+    from .customers import POSTED, _current_credit_balance
 
     entry = scl.make_entry(
         customer_id=referrer_id,
-        entry_type=scl.ISSUED,
+        entry_type=scl.ADJUSTED,
         amount=float(reward),
         current_balance=_current_credit_balance(referrer_id, cust_repo.find_by_id(referrer_id)),
         reason=f"Referral reward {referral_id}",
@@ -814,8 +817,8 @@ async def redeem_referral(
         store_id=referral.get("store_id") or current_user.get("active_store_id"),
         user_id=current_user.get("user_id"),
     )
-    entry["source"] = "REFERRAL_REWARD"
-    if not post_ledger_credit(cust_repo, entry):
+    entry.update(source="REFERRAL_REWARD", entry_id=f"REFERRAL:{referral_id}")
+    if post_ledger_credit(cust_repo, entry) != POSTED:
         coll.update_one({"referral_id": referral_id, "status": "REWARD_CREDITED"},
                         {"$set": {"status": referral.get("status")}})
         raise HTTPException(status_code=503, detail="The reward could not be credited just now - try again.")

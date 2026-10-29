@@ -98,7 +98,7 @@ export function RefundApprovalModal({
         },
         // Dedupe an identical live request so a double-click / re-open reuses
         // the same pending approval instead of stacking duplicates.
-        dedupe_key: orderId ? `refund:${orderId}:${Math.round(amount * 100)}` : undefined,
+        dedupe_key: orderId ? `refundp:${orderId}:${Math.round(amount * 100)}` : undefined,
       });
       setRequestId(res.request_id);
       setTier(res.required_tier || requiredTier);

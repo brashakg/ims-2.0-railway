@@ -1,5 +1,6 @@
 """GSTR-1 (outward supplies): computation plus the two endpoints."""
 
+from ...services import store_credit_ledger as scl  # THE credit-note type rule
 from fastapi import Depends, HTTPException, Query
 from typing import Optional
 from ...utils.event_time import parse_event_utc_naive
@@ -534,7 +535,7 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
             # Half-open [from_dt, to_dt), the same match GSTR-3B uses.
             ledger_query = {
                 "store_id": active_store,
-                "type": "ISSUED",
+                "type": scl.CREDIT_NOTE_TYPE,
                 **instant_in_window_query("created_at", from_dt, to_dt),
             }
             # Allow for date stored as datetime or ISO string
@@ -682,7 +683,7 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                     if _v:
                         seen_returns.add(_v)
             for _row in ledger_col.find(
-                {"store_id": active_store, "type": "ISSUED"},
+                {"store_id": active_store, "type": scl.CREDIT_NOTE_TYPE},
                 {"ref": 1, "reason": 1},
             ) if ledger_col is not None else []:
                 for _f in ("ref", "reason"):

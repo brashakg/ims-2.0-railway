@@ -28,7 +28,7 @@ from api.utils.event_time import utc_now_iso
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
@@ -169,6 +169,24 @@ def _resolve_order(order_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+# A BOOKING row older than this was never confirmed: the courier call takes
+# seconds. ponytail: a fixed timeout, not a Shiprocket lookup -- a booking
+# whose press died AFTER the courier accepted it expires too; staff then see
+# the parcel in Shiprocket. Ask Shiprocket by channel order id if that bites.
+_BOOKING_TIMEOUT_SECONDS = 15 * 60
+
+
+def _booking_expired(row: Optional[Dict[str, Any]]) -> bool:
+    if not row or row.get("status") != "BOOKING":
+        return False
+    from api.utils.event_time import parse_event_utc_naive
+
+    at = parse_event_utc_naive(row.get("created_at"))
+    if at is None:
+        return True
+    return (datetime.now(timezone.utc).replace(tzinfo=None) - at).total_seconds() > _BOOKING_TIMEOUT_SECONDS
+
+
 def _live_shipment_for_order(order_id: str, strict: bool = False) -> Optional[Dict[str, Any]]:
     """The shipment already out for this order, if any - the guard against
     booking a SECOND collection of the same balance. Fail-soft (no DB / a
@@ -181,12 +199,18 @@ def _live_shipment_for_order(order_id: str, strict: bool = False) -> Optional[Di
             raise RuntimeError("shipments collection unavailable")
         return None
     try:
-        return coll.find_one(
-            {
-                "order_id": order_id,
-                "status": {"$nin": list(_DEAD_SHIPMENT_STATUSES)},
-            }
-        )
+        flt = {"order_id": order_id, "status": {"$nin": list(_DEAD_SHIPMENT_STATUSES)}}
+        for _ in range(3):
+            row = coll.find_one(flt)
+            if not _booking_expired(row):
+                return row
+            # A BOOKING the door never confirmed (its press died, or its last
+            # write failed) expires: marked FAILED, never a live parcel forever.
+            coll.update_one({"shipment_id": row.get("shipment_id"), "status": "BOOKING"},
+                            {"$set": {"status": "FAILED", "updated_at": utc_now_iso(),
+                                      "error": "booking never confirmed (expired)"}})
+            logger.warning("[SHIPROCKET] booking %s for %s expired unconfirmed", row.get("shipment_id"), order_id)
+        return coll.find_one(flt)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SHIPROCKET] duplicate-booking lookup failed: %s", exc)
         if strict:
@@ -472,6 +496,12 @@ async def book_shipment(
             logger.error("[SHIPROCKET] booking not recorded, courier not called: %s", exc)
             raise HTTPException(status_code=503, detail="Could not record the booking - please retry.")
         fresh = _resolve_order(order.get("order_id") or body.order_id) if order.get("status") else None
+        if fresh is None and order.get("status"):
+            # The re-read failed: fail CLOSED -- never call the courier blind.
+            coll.update_one({"shipment_id": shipment_id},
+                            {"$set": {"status": "FAILED", "updated_at": utc_now_iso(),
+                                      "error": "order could not be re-read before the courier call"}})
+            raise HTTPException(status_code=503, detail="Could not re-check the order - nothing was booked. Retry.")
         if fresh is not None:
             from ..services.delivery_gate import refuse_handover_of_refunded
 
@@ -535,11 +565,23 @@ async def book_shipment(
     }
 
     if coll is not None:
-        try:
-            doc.pop("created_at", None)
-            coll.update_one({"shipment_id": shipment_id}, {"$set": dict(doc)})
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[SHIPROCKET] persist failed: %s", exc)
+        doc.pop("created_at", None)
+        saved = False
+        for _ in range(3):
+            try:
+                coll.update_one({"shipment_id": shipment_id}, {"$set": dict(doc)})
+                saved = True
+                break
+            except Exception as exc:  # noqa: BLE001
+                logger.error("[SHIPROCKET] persist of %s failed: %s", shipment_id, exc)
+        if not saved:
+            # Never a 201 over a booking the shipments store cannot show: the
+            # BOOKING row expires on its own (_booking_expired).
+            raise HTTPException(
+                status_code=503,
+                detail=(f"The courier answered {result.status} but the booking could not be saved. "
+                        "Check Shiprocket before booking again."),
+            )
 
     # Close the order loop: an ONLINE (Shopify) order just dispatched via
     # Shiprocket must be told to Shopify (fulfilment + tracking) so the buyer

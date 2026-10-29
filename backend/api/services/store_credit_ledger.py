@@ -22,6 +22,11 @@ ISSUED = "ISSUED"
 REDEEMED = "REDEEMED"
 ADJUSTED = "ADJUSTED"
 ENTRY_TYPES = {ISSUED, REDEEMED, ADJUSTED}
+# THE rule for which ledger rows are GST credit notes: only ISSUED. GSTR-1 /
+# GSTR-3B read exactly this type. ADJUSTED is money given or taken back with no
+# supply reversed (an advance paid back as credit, a referral reward), and the
+# posting door's in-flight ISSUING and dead VOID rows are never notes.
+CREDIT_NOTE_TYPE = ISSUED
 
 _EPS = 1e-9
 

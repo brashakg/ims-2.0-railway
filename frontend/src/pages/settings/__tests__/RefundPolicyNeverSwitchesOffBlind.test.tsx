@@ -37,7 +37,17 @@ describe('Refund policy save', () => {
     await waitFor(() => expect((save as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(save);
     await waitFor(() => expect(set).toHaveBeenCalled());
-    const matrixCall = set.mock.calls.find((c) => c[0] === 'refund.matrix_enabled');
-    expect(matrixCall?.[1]).toBe(true);
+    // Round 9: the switch is the owner's (Superadmin-only) -- an unchanged
+    // switch is never written, so an Admin's save can never touch it.
+    expect(set.mock.calls.find((c) => c[0] === 'refund.matrix_enabled')).toBeUndefined();
+  });
+
+  it('shows the real rule: Rs 2,000 per bill, ON, no dead amount bands', async () => {
+    getAll.mockResolvedValue({ policies: {} } as any);
+    render(<RefundPolicySection />);
+    await screen.findByText(/Refund Approval Rule/);
+    expect(screen.getByText(/2,000 in total/)).toBeTruthy();
+    expect(screen.queryByText(/Needs SUPERADMIN above/)).toBeNull();
+    expect(screen.queryByText(/When OFF \(default\)/)).toBeNull();
   });
 });

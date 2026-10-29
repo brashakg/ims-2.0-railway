@@ -574,7 +574,8 @@ class ApprovalEngine:
         if dedupe_key:
             try:
                 existing = coll.find_one(
-                    {"dedupe_key": dedupe_key, "status": ApprovalStatus.REQUESTED.value},
+                    {"dedupe_key": dedupe_key, "status": ApprovalStatus.REQUESTED.value,
+                     "expires_at": {"$gt": _now()}},
                     {"_id": 0},
                 )
                 if existing:

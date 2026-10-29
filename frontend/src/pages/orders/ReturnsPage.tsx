@@ -568,7 +568,8 @@ export default function ReturnsPage() {
       const detail = e?.response?.data?.detail;
       if (e?.response?.status === 403 && detail?.reason === 'REFUND_APPROVAL_REQUIRED') {
         setApprovalGate({
-          amount: netRefund,
+          // The server's own figure for this refund (never the screen's quote).
+          amount: Number(detail?.this_refund) || netRefund,
           reason: dominantMatrixReason(),
           requiredTier: detail?.required_tier,
           priorRefunds: Number(detail?.prior_refunds) || 0,

@@ -103,8 +103,11 @@ export function RefundAdvanceButton({ orderId, onDone }: { orderId: string; onDo
             {!finishOnly && (
             <div className="rounded-md bg-gray-50 border border-gray-200 px-3 py-2 text-sm space-y-1">
               {(plan?.refund_tenders || []).map((t) => (
-                <div key={t.method} className="flex justify-between">
-                  <span className="text-gray-600">{METHOD_LABEL[t.method] || t.method}</span>
+                <div key={`${t.method}-${t.paid_from || ''}`} className="flex justify-between">
+                  <span className="text-gray-600">
+                    {METHOD_LABEL[t.method] || t.method}
+                    {t.method === 'CASH' && finishRefund && (t.paid_from === 'HQ' ? ' - paid by HQ' : " - from this shop's drawer")}
+                  </span>
                   <span className="font-mono">{rs(t.amount)}</span>
                 </div>
               ))}
